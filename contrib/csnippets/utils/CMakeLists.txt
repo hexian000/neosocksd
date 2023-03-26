@@ -1,0 +1,13 @@
+target_sources(csnippets
+    PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/buffer.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/formats.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/slog.c"
+    PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/arraysize.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/minmax.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/check.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/buffer.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/formats.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/slog.h"
+)
