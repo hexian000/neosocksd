@@ -2,34 +2,32 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "http.h"
-#include "dialer.h"
+#include "net/http.h"
 #include "net/url.h"
+#include "utils/buffer.h"
+#include "utils/formats.h"
+#include "utils/slog.h"
+#include "utils/check.h"
+#include "dialer.h"
 #include "ruleset.h"
 #include "transfer.h"
 #include "socks.h"
 #include "forward.h"
-#include "utils/buffer.h"
-#include "utils/formats.h"
-#include "utils/slog.h"
-#include "net/http.h"
 #include "util.h"
 #include "server.h"
 
-#include <assert.h>
 #include <ev.h>
 
-#include <math.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <strings.h>
 #include <sys/socket.h>
 
+#include <assert.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <inttypes.h>
-#include <stdio.h>
-#include <string.h>
 
 static void
 http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);

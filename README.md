@@ -5,10 +5,12 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ## Features
 
 - Plain old protocols with no built-in support for authentication or encryption.
+- Suitable for being a network building block.
+- High throughput.
 - Lua scripts powered rule set.
-- RESTful API for monitoring and hot reloading of rulesets.
+- RESTful API for monitoring and hot reloading.
 - IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
-- Almost minimal resource usage, embedded system friendly.
+- Almost minimal resource usage, embedded systems friendly.
 - Compliant with: ISO C11, POSIX.1-2008.
 
 ## Basic Usage
@@ -18,6 +20,8 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ./neosocksd --http -l 0.0.0.0:8080  # HTTP CONNECT server
 ./neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080  # Non-forking TCP port forwarder
 ```
+
+See ```./neosocksd -h``` for details.
 
 ## Scripting Usage
 

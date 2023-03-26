@@ -3,18 +3,18 @@
 
 #include "forward.h"
 #include "net/addr.h"
+#include "utils/check.h"
 #include "resolver.h"
 #include "transfer.h"
 #include "util.h"
 
-#include <ev.h>
-
-#include <stddef.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <ev.h>
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 

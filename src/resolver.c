@@ -1,11 +1,10 @@
 #include "resolver.h"
+#include "utils/slog.h"
 #include "sockutil.h"
 #include "util.h"
 
-#include "utils/slog.h"
 #include <sys/socket.h>
 #include <netdb.h>
-
 #include <ev.h>
 
 #include <stdint.h>

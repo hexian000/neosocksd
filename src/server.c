@@ -2,17 +2,17 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "server.h"
+#include "utils/slog.h"
+#include "utils/check.h"
 #include "conf.h"
 #include "sockutil.h"
 #include "util.h"
-#include "utils/slog.h"
-
-#include <ev.h>
 
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <ev.h>
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -65,7 +65,11 @@ struct server *server_new(
 		return NULL;
 	}
 	socket_set_nonblock(fd);
+#if WITH_REUSEPORT
 	socket_set_reuseport(fd, conf->reuseport);
+#else
+	socket_set_reuseport(fd, false);
+#endif
 #if WITH_TPROXY
 	if (conf->transparent) {
 		if (setsockopt(

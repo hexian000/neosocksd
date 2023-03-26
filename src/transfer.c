@@ -1,14 +1,12 @@
 #include "transfer.h"
-#include "util.h"
-
 #include "utils/buffer.h"
 #include "utils/slog.h"
-
-#include <ev.h>
+#include "util.h"
 
 #include <sys/socket.h>
 #include <unistd.h>
 #include <errno.h>
+#include <ev.h>
 
 #include <stddef.h>
 #include <stdbool.h>

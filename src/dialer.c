@@ -1,18 +1,19 @@
 #include "dialer.h"
-#include "resolver.h"
-#include "sockutil.h"
-#include "util.h"
-#include "proto/socks.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
+#include "utils/check.h"
 #include "net/addr.h"
+#include "proto/socks.h"
+#include "conf.h"
+#include "resolver.h"
+#include "sockutil.h"
+#include "util.h"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <errno.h>
-
 #include <ev.h>
 
 #include <assert.h>
@@ -384,6 +385,12 @@ static bool connect_sa(
 		return false;
 	}
 	socket_set_tcp(fd, true, false);
+#if WITH_NETDEVICE
+	const char *netdev = d->conf->netdev;
+	if (netdev != NULL) {
+		socket_bind_netdev(fd, netdev);
+	}
+#endif
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
 		const int err = errno;
 		if (err != EINPROGRESS) {

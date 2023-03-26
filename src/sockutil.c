@@ -2,10 +2,10 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "sockutil.h"
+#include "net/addr.h"
+#include "utils/slog.h"
 #include "resolver.h"
 #include "util.h"
-#include "utils/slog.h"
-#include "net/addr.h"
 
 #include <fcntl.h>
 #include <sys/types.h>
@@ -45,7 +45,6 @@ void socket_set_reuseport(const int fd, const bool reuseport)
 		LOGW_F("SO_REUSEPORT: %s", strerror(err));
 	}
 #else
-	UNUSED(fd);
 	if (reuseport) {
 		LOGW("reuseport: not supported in current build");
 	}
@@ -117,6 +116,7 @@ void socket_set_tproxy(int fd, bool tproxy)
 		exit(EXIT_FAILURE);
 	}
 #else
+	/* this is a fatal error */
 	CHECKMSG(tproxy, "tproxy: not supported in current build");
 #endif
 }

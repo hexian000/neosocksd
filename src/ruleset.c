@@ -1,19 +1,17 @@
 #include "ruleset.h"
+#include "utils/slog.h"
 #include "dialer.h"
 #include "sockutil.h"
-#include "utils/slog.h"
+#include "lua.h"
+#include "lualib.h"
+#include "lauxlib.h"
+
+#include <arpa/inet.h>
 
 #include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#include <arpa/inet.h>
-
-#include "lua.h"
-#include "lualib.h"
-#include "lauxlib.h"
-
 #include <string.h>
 
 struct ruleset {

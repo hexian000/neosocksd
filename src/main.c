@@ -1,17 +1,18 @@
+#include "net/addr.h"
+#include "utils/slog.h"
+#include "utils/check.h"
+#include "utils/minmax.h"
 #include "forward.h"
 #include "http.h"
-#include "net/addr.h"
 #include "socks.h"
-#include "utils/slog.h"
 #include "ruleset.h"
 #include "conf.h"
 #include "server.h"
 #include "sockutil.h"
 #include "util.h"
 
-#include <ev.h>
-
 #include <sys/socket.h>
+#include <ev.h>
 
 #include <stddef.h>
 #include <stdio.h>
@@ -24,8 +25,16 @@ static struct {
 	const char *forward;
 	const char *restapi;
 	const char *ruleset;
-	bool http, tproxy;
-	bool reuseport;
+#if WITH_NETDEVICE
+	const char *netdev;
+#endif
+	bool http : 1;
+#if WITH_REUSEPORT
+	bool reuseport : 1;
+#endif
+#if WITH_TPROXY
+	bool tproxy : 1;
+#endif
 	int verbosity;
 	int resolve_pf;
 	const char *user_name;
@@ -33,12 +42,8 @@ static struct {
 	struct ev_signal w_sighup;
 	struct ev_signal w_sigint;
 	struct ev_signal w_sigterm;
-} app = {
-	.listen = NULL,
-	.forward = NULL,
-	.restapi = NULL,
-	.http = false,
-	.verbosity = 0,
+} args = {
+	.verbosity = LOG_LEVEL_INFO,
 	.resolve_pf = PF_UNSPEC,
 };
 
@@ -56,9 +61,13 @@ static void print_usage(const char *argv0)
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
-		"  --reuseport                enable SO_REUSEPORT if possible\n"
-		"  -f, --forward [bind_address:]port,host:hostport\n"
-		"                             TCP port forwarding\n"
+		"  -f, --forward <address>    run simple TCP port forwarding instead of SOCKS\n"
+#if WITH_NETDEVICE
+		"  -i, --netdev <name>        restrict network device used by outgoing connections\n"
+#endif
+#if WITH_REUSEPORT
+		"  --reuseport                allow multiple instances to listen on the same address\n"
+#endif
 #if WITH_TPROXY
 		"  --tproxy                   operate as a transparent proxy\n"
 #endif
@@ -93,64 +102,73 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			exit(EXIT_FAILURE);
 		}
 		if (strcmp(argv[i], "-4") == 0) {
-			app.resolve_pf = PF_INET;
+			args.resolve_pf = PF_INET;
 			continue;
 		}
 		if (strcmp(argv[i], "-6") == 0) {
-			app.resolve_pf = PF_INET6;
+			args.resolve_pf = PF_INET6;
 			continue;
 		}
 		if (strcmp(argv[i], "-l") == 0 ||
 		    strcmp(argv[i], "--listen") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			app.listen = argv[++i];
+			args.listen = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "-f") == 0 ||
 		    strcmp(argv[i], "--forward") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			app.forward = argv[++i];
+			args.forward = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "--http") == 0) {
-			app.http = true;
+			args.http = true;
 			continue;
 		}
 #if WITH_TPROXY
 		if (strcmp(argv[i], "--tproxy") == 0) {
-			app.tproxy = true;
+			args.tproxy = true;
 			continue;
 		}
 #endif
-		if (strcmp(argv[i], "--reuseport") == 0) {
-			app.reuseport = true;
+#if WITH_NETDEVICE
+		if (strcmp(argv[i], "-i") == 0 ||
+		    strcmp(argv[i], "--netdev") == 0) {
+			args.tproxy = true;
 			continue;
 		}
+#endif
+#if WITH_REUSEPORT
+		if (strcmp(argv[i], "--reuseport") == 0) {
+			args.reuseport = true;
+			continue;
+		}
+#endif
 		if (strcmp(argv[i], "--api") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			app.restapi = argv[++i];
+			args.restapi = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "-r") == 0 ||
 		    strcmp(argv[i], "--ruleset") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			app.ruleset = argv[++i];
+			args.ruleset = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "-u") == 0 ||
 		    strcmp(argv[i], "--user") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			app.user_name = argv[++i];
+			args.user_name = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "-v") == 0 ||
 		    strcmp(argv[i], "--verbose") == 0) {
-			app.verbosity++;
+			args.verbosity++;
 			continue;
 		}
 		if (strcmp(argv[i], "-s") == 0 ||
 		    strcmp(argv[i], "--silence") == 0) {
-			app.verbosity--;
+			args.verbosity--;
 			continue;
 		}
 		if (strcmp(argv[i], "--") == 0) {
@@ -166,10 +184,9 @@ int main(int argc, char **argv)
 {
 	parse_args(argc, argv);
 	slog_level =
-		CLAMP(LOG_LEVEL_INFO + app.verbosity, LOG_LEVEL_SILENCE,
-		      LOG_LEVEL_VERBOSE);
-	if (app.listen == NULL) {
-		app.listen = "0.0.0.0:1080";
+		CLAMP(args.verbosity, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
+	if (args.listen == NULL) {
+		FAILMSG("listen address not specified");
 	}
 
 	struct ev_loop *loop = ev_default_loop(0);
@@ -187,42 +204,49 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 	{
-		struct ev_signal *restrict w_sighup = &app.w_sighup;
+		struct ev_signal *restrict w_sighup = &args.w_sighup;
 		ev_signal_init(w_sighup, signal_cb, SIGHUP);
 		ev_signal_start(loop, w_sighup);
-		struct ev_signal *restrict w_sigint = &app.w_sigint;
+		struct ev_signal *restrict w_sigint = &args.w_sigint;
 		ev_signal_init(w_sigint, signal_cb, SIGINT);
 		ev_signal_start(loop, w_sigint);
-		struct ev_signal *restrict w_sigterm = &app.w_sigterm;
+		struct ev_signal *restrict w_sigterm = &args.w_sigterm;
 		ev_signal_init(w_sigterm, signal_cb, SIGTERM);
 		ev_signal_start(loop, w_sigterm);
 	}
 
 	struct config conf = {
-		.resolve_pf = app.resolve_pf,
-		.forward = app.forward,
-		.reuseport = app.reuseport,
-		.transparent = app.tproxy,
+		.forward = args.forward,
+		.resolve_pf = args.resolve_pf,
+#if WITH_NETDEVICE
+		.netdev = args.netdev,
+#endif
+#if WITH_REUSEPORT
+		.reuseport = args.reuseport,
+#endif
+#if WITH_TPROXY
+		.transparent = args.tproxy,
+#endif
 		.timeout = 60.0,
 	};
 	struct ruleset *ruleset = NULL;
-	if (app.ruleset != NULL) {
+	if (args.ruleset != NULL) {
 		ruleset = ruleset_new(&conf);
 		CHECKOOM(ruleset);
-		if (!ruleset_loadfile(ruleset, app.ruleset)) {
-			FAILMSGF("unable to load ruleset: %s", app.ruleset);
+		if (!ruleset_loadfile(ruleset, args.ruleset)) {
+			FAILMSGF("unable to load ruleset: %s", args.ruleset);
 		}
 	}
 
 	sockaddr_max_t bindaddr;
-	if (!parse_bindaddr(&bindaddr, app.listen)) {
-		FAILMSGF("unable to parse address: %s", app.listen);
+	if (!parse_bindaddr(&bindaddr, args.listen)) {
+		FAILMSGF("unable to parse address: %s", args.listen);
 	}
 
 	serve_fn serve_cb = socks_serve;
-	if (app.forward != NULL || app.tproxy) {
+	if (args.forward != NULL || args.tproxy) {
 		serve_cb = forward_serve;
-	} else if (app.http) {
+	} else if (args.http) {
 		serve_cb = http_proxy_serve;
 	}
 
@@ -233,10 +257,10 @@ int main(int argc, char **argv)
 	server_start(s, loop);
 
 	struct server *apiserver = NULL;
-	if (app.restapi != NULL) {
+	if (args.restapi != NULL) {
 		sockaddr_max_t apiaddr;
-		if (!parse_bindaddr(&apiaddr, app.restapi)) {
-			FAILMSGF("unable to parse address: %s", app.restapi);
+		if (!parse_bindaddr(&apiaddr, args.restapi)) {
+			FAILMSGF("unable to parse address: %s", args.restapi);
 		}
 		apiserver =
 			server_new(&apiaddr.sa, &conf, ruleset, http_api_serve);
@@ -246,7 +270,7 @@ int main(int argc, char **argv)
 		server_start(apiserver, loop);
 	}
 
-	drop_privileges(app.user_name);
+	drop_privileges(args.user_name);
 	/* start event loop */
 	LOGI("server start");
 	ev_run(loop, 0);
@@ -261,9 +285,9 @@ int main(int argc, char **argv)
 		ruleset_free(ruleset);
 	}
 
-	ev_signal_stop(loop, &app.w_sighup);
-	ev_signal_stop(loop, &app.w_sigint);
-	ev_signal_stop(loop, &app.w_sigterm);
+	ev_signal_stop(loop, &args.w_sighup);
+	ev_signal_stop(loop, &args.w_sigint);
+	ev_signal_stop(loop, &args.w_sigterm);
 
 	LOGI("program terminated normally.");
 	return EXIT_SUCCESS;

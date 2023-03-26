@@ -2,22 +2,21 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "socks.h"
+#include "utils/buffer.h"
+#include "utils/serialize.h"
+#include "utils/slog.h"
+#include "utils/check.h"
+#include "proto/socks.h"
 #include "dialer.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "transfer.h"
 #include "sockutil.h"
 #include "util.h"
-#include "proto/socks.h"
-
-#include "utils/buffer.h"
-#include "utils/serialize.h"
-#include "utils/slog.h"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
 #include <ev.h>
 
 #include <stdbool.h>

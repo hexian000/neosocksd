@@ -31,6 +31,8 @@ endif()
 
 include(CheckSymbolExists)
 check_symbol_exists(IP_TRANSPARENT "netinet/in.h" HAVE_IP_TRANSPARENT)
+check_symbol_exists(SO_BINDTODEVICE "sys/socket.h" HAVE_SO_BINDTODEVICE)
+check_symbol_exists(SO_REUSEPORT "sys/socket.h" HAVE_SO_REUSEPORT)
 
 target_compile_options(neosocksd PRIVATE -include "${CMAKE_CURRENT_BINARY_DIR}/config.h")
 
