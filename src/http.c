@@ -235,7 +235,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 				ev_io_start(loop, w_write);
 				return;
 			}
-			if (ctx->content_length > HTTP_MAX_ENTITY) {
+			if (ctx->content_length > ctx->rbuf.cap) {
 				ev_io_stop(loop, watcher);
 				http_write_error(ctx, HTTP_ENTITY_TOO_LARGE);
 				ev_io_start(loop, w_write);
@@ -246,7 +246,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	if ((char *)(ctx->rbuf.data + ctx->rbuf.len) <
 	    ctx->http_nxt + ctx->content_length) {
-		if ((char *)(ctx->rbuf.data + HTTP_MAX_ENTITY) <
+		if ((char *)(ctx->rbuf.data + ctx->rbuf.cap) <
 		    ctx->http_nxt + ctx->content_length + 1) {
 			ev_io_stop(loop, watcher);
 			http_write_error(ctx, HTTP_ENTITY_TOO_LARGE);
@@ -495,8 +495,7 @@ static void http_handle_stats(
 		(void)buf_appendf(
 			&ctx->wbuf,
 			""
-			"Ruleset Memory  : %s\n"
-			"\n",
+			"Ruleset Memory  : %s\n",
 			heap_total);
 	}
 
