@@ -8,7 +8,6 @@
 #include "sockutil.h"
 #include "util.h"
 
-#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -72,14 +71,7 @@ struct server *server_new(
 #endif
 #if WITH_TPROXY
 	if (conf->transparent) {
-		if (setsockopt(
-			    fd, IPPROTO_IP, IP_TRANSPARENT, &(int){ 1 },
-			    sizeof(int))) {
-			const int err = errno;
-			LOGE_F("IP_TRANSPARENT: %s", strerror(err));
-			(void)close(fd);
-			return NULL;
-		}
+		socket_set_tproxy(fd, conf->transparent);
 	}
 #endif
 	if (bind(fd, bindaddr, getsocklen(bindaddr)) != 0) {

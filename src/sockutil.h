@@ -24,9 +24,6 @@ void socket_bind_netdev(int fd, const char *netdev);
 void socket_set_tproxy(int fd, bool tproxy);
 
 socklen_t getsocklen(const struct sockaddr *sa);
-bool sa_equals(const struct sockaddr *a, const struct sockaddr *b);
-bool sa_matches(const struct sockaddr *bind, const struct sockaddr *dest);
-struct sockaddr *sa_clone(const struct sockaddr *src);
 int format_sa(const struct sockaddr *sa, char *s, size_t buf_size);
 
 bool parse_bindaddr(sockaddr_max_t *sa, const char *s);

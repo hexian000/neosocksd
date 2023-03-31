@@ -23,8 +23,6 @@
 #include <strings.h>
 #include <sys/socket.h>
 
-#include <assert.h>
-#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -261,7 +259,6 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	ctx->handler(loop, ctx);
 
 	if (ctx->wbuf.len > 0) {
-		struct ev_io *restrict w_write = &ctx->w_write;
 		ev_io_start(loop, w_write);
 	}
 }

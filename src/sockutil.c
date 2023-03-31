@@ -4,8 +4,8 @@
 #include "sockutil.h"
 #include "net/addr.h"
 #include "utils/slog.h"
+#include "utils/check.h"
 #include "resolver.h"
-#include "util.h"
 
 #include <fcntl.h>
 #include <sys/types.h>
@@ -112,12 +112,12 @@ void socket_set_tproxy(int fd, bool tproxy)
 		    fd, SOL_IP, IP_TRANSPARENT, &(int){ tproxy ? 1 : 0 },
 		    sizeof(int))) {
 		const int err = errno;
-		LOGF_F("IP_TRANSPARENT: %s", strerror(err));
-		exit(EXIT_FAILURE);
+		/* this is a fatal error */
+		FAILMSGF("IP_TRANSPARENT: %s", strerror(err));
 	}
 #else
-	/* this is a fatal error */
-	CHECKMSG(tproxy, "tproxy: not supported in current build");
+	UNUSED(fd);
+	CHECKMSG(!tproxy, "tproxy: not supported in current build");
 #endif
 }
 
@@ -133,73 +133,6 @@ socklen_t getsocklen(const struct sockaddr *sa)
 	}
 	LOGF("only IPv4/IPv6 addresses are supported");
 	abort();
-}
-
-bool sa_equals(const struct sockaddr *a, const struct sockaddr *b)
-{
-	const socklen_t na = getsocklen(a);
-	const socklen_t nb = getsocklen(b);
-	return na == nb && memcmp(a, b, na) == 0;
-}
-
-static bool sa_matches_inet(
-	const struct sockaddr_in *restrict bind,
-	const struct sockaddr_in *restrict dest)
-{
-	if (bind->sin_port != dest->sin_port) {
-		return false;
-	}
-	if (bind->sin_addr.s_addr != INADDR_ANY &&
-	    bind->sin_addr.s_addr != dest->sin_addr.s_addr) {
-		return false;
-	}
-	return true;
-}
-
-static bool sa_matches_inet6(
-	const struct sockaddr_in6 *restrict bind,
-	const struct sockaddr_in6 *restrict dest)
-{
-	if (bind->sin6_port != dest->sin6_port) {
-		return false;
-	}
-	if (!IN6_IS_ADDR_UNSPECIFIED(&bind->sin6_addr) &&
-	    memcmp(&bind->sin6_addr, &dest->sin6_addr,
-		   sizeof(struct in6_addr)) != 0) {
-		return false;
-	}
-	return true;
-}
-
-bool sa_matches(const struct sockaddr *bind, const struct sockaddr *dest)
-{
-	const int domain = bind->sa_family;
-	if (domain != dest->sa_family) {
-		return false;
-	}
-	switch (domain) {
-	case AF_INET:
-		return sa_matches_inet(
-			(const struct sockaddr_in *)bind,
-			(const struct sockaddr_in *)dest);
-	case AF_INET6:
-		return sa_matches_inet6(
-			(const struct sockaddr_in6 *)bind,
-			(const struct sockaddr_in6 *)dest);
-	default:
-		break;
-	}
-	return false;
-}
-
-struct sockaddr *sa_clone(const struct sockaddr *src)
-{
-	const socklen_t len = getsocklen(src);
-	struct sockaddr *dst = malloc(len);
-	if (dst != NULL) {
-		memcpy(dst, src, len);
-	}
-	return dst;
 }
 
 static int

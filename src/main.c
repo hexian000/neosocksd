@@ -186,7 +186,8 @@ int main(int argc, char **argv)
 	slog_level =
 		CLAMP(args.verbosity, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
 	if (args.listen == NULL) {
-		FAILMSG("listen address not specified");
+		LOGF("listen address not specified");
+		exit(EXIT_FAILURE);
 	}
 
 	struct ev_loop *loop = ev_default_loop(0);
@@ -201,7 +202,7 @@ int main(int argc, char **argv)
 		    NULL) != 0) {
 		const int err = errno;
 		LOGF(strerror(err));
-		return EXIT_FAILURE;
+		exit(EXIT_FAILURE);
 	}
 	{
 		struct ev_signal *restrict w_sighup = &args.w_sighup;
@@ -260,7 +261,8 @@ int main(int argc, char **argv)
 	if (args.restapi != NULL) {
 		sockaddr_max_t apiaddr;
 		if (!parse_bindaddr(&apiaddr, args.restapi)) {
-			FAILMSGF("unable to parse address: %s", args.restapi);
+			LOGF_F("unable to parse address: %s", args.restapi);
+			exit(EXIT_FAILURE);
 		}
 		apiserver =
 			server_new(&apiaddr.sa, &conf, ruleset, http_api_serve);

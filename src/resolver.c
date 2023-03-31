@@ -7,7 +7,6 @@
 #include <netdb.h>
 #include <ev.h>
 
-#include <stdint.h>
 #include <string.h>
 
 enum resolver_state {
@@ -54,16 +53,6 @@ resolver_cb(struct ev_loop *loop, struct ev_watcher *watcher, const int revents)
 	CHECK_EV_ERROR(revents);
 	struct resolver *restrict r = watcher->data;
 	r->done_cb.cb(loop, r->done_cb.ctx);
-}
-
-bool domain_fromstr(struct domain_name *name, const char *s, const size_t len)
-{
-	if (len > FQDN_MAX_LENGTH) {
-		return false;
-	}
-	name->len = (uint8_t)len;
-	memcpy(name->name, s, len);
-	return true;
 }
 
 void resolver_init(

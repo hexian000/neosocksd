@@ -8,38 +8,8 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <inttypes.h>
 #include <string.h>
 #include <time.h>
-
-void print_bin(const void *data, const size_t n)
-{
-	const uint8_t *restrict b = data;
-	for (size_t i = 0; i < n; i += 16) {
-		fprintf(stderr, "%p: ", (void *)(b + i));
-		for (size_t j = 0; j < 16; j++) {
-			if ((i + j) < n) {
-				fprintf(stderr, "%02" PRIX8 " ", b[i + j]);
-			} else {
-				fprintf(stderr, "   ");
-			}
-		}
-		fprintf(stderr, " ");
-		for (size_t j = 0; j < 16; j++) {
-			if ((i + j) < n) {
-				if (b[i + j] >= 32 && b[i + j] <= 127) {
-					fprintf(stderr, "%c", (char)b[i + j]);
-				} else {
-					fprintf(stderr, ".");
-				}
-			} else {
-				fprintf(stderr, " ");
-			}
-		}
-		fprintf(stderr, "\n");
-	}
-	fflush(stderr);
-}
 
 void drop_privileges(const char *user)
 {

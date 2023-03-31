@@ -64,7 +64,7 @@ extern FILE *slog_file;
 	LOG_WRITE(level, __FILE__, __LINE__, format, __VA_ARGS__);
 #define LOG(level, message) LOG_F(level, "%s", message)
 
-/* LOGF: Log an fatal message. */
+/* LOGF: Log a fatal message. */
 #define LOGF_F(format, ...)                                                    \
 	do {                                                                   \
 		if (LOGLEVEL(LOG_LEVEL_FATAL)) {                               \

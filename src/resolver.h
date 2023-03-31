@@ -29,8 +29,6 @@ struct resolver {
 	sockaddr_max_t addr;
 };
 
-bool domain_fromstr(struct domain_name *name, const char *s, size_t len);
-
 void resolver_init(
 	struct resolver *r, int resolve_pf, const struct event_cb *cb);
 

@@ -28,8 +28,6 @@ struct event_cb {
 		}                                                              \
 	} while (0)
 
-void print_bin(const void *data, const size_t n);
-
 void drop_privileges(const char *user);
 
 #endif /* UTIL_H */
