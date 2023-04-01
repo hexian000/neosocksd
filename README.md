@@ -5,8 +5,7 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ## Features
 
 - Plain old protocols with no built-in support for authentication or encryption.
-- Suitable for being a network building block.
-- High throughput.
+- Top class processor/memory/storage/bandwidth efficiency.
 - Lua scripts powered rule set.
 - RESTful API for monitoring and hot reloading.
 - IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
@@ -34,6 +33,8 @@ Start the server with a Lua script named "ruleset.lua":
 The following code snippets show how to use rulesets to manipulate server behavior.
 
 Full code example at [ruleset.lua](ruleset.lua)
+
+Syntax and standard libraries: [Lua 5.4 Reference Manual](https://www.lua.org/manual/5.4/manual.html)
 
 ```Lua
 local hosts = {
@@ -132,3 +133,30 @@ curl -X POST -vx socks5h://127.0.0.1:1080 \
     http://neosocksd.lan/ruleset?update \
     --data-binary @ruleset.lua
 ```
+
+## Build from source
+### Dependencies
+
+```sh
+# Debian & Ubuntu
+sudo apt install -y libev-dev liblua5.4-dev
+```
+
+### Build with CMake
+
+```sh
+git clone https://github.com/hexian000/neosocksd.git
+mkdir "neosocksd-build"
+cmake -DCMAKE_BUILD_TYPE="Release" \
+    -S "neosocksd" \
+    -B "neosocksd-build"
+cmake --build "neosocksd-build" --parallel
+```
+
+See [m.sh](m.sh) for more information about cross compiling support.
+
+## Credits
+
+Thanks to:
+- [libev](http://software.schmorp.de/pkg/libev.html)
+- [lua](https://www.lua.org/)
