@@ -462,8 +462,10 @@ static int socks_parse(struct socks_ctx *restrict ctx)
 			break;
 		}
 		break;
+	default:
+		break;
 	}
-	FAIL();
+	return -1;
 }
 
 static int socks_read(struct socks_ctx *restrict ctx, const int fd)
@@ -547,21 +549,18 @@ socks_recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 
-	dialer_init(
-		&ctx->dialer, ctx->conf,
-		&(struct event_cb){
-			.cb = dialer_cb,
-			.ctx = ctx,
-		});
-
 	if (LOGLEVEL(LOG_LEVEL_INFO)) {
 		char raddr[FQDN_MAX_LENGTH + 1 + 5 + 1];
 		(void)dialaddr_format(&req->addr, raddr, sizeof(raddr));
 		LOG_F(LOG_LEVEL_INFO, "socks: CONNECT %s", raddr);
 	}
 
-	dialer_start(&ctx->dialer, loop, req);
 	ctx->state = STATE_CONNECT;
+	if (!dialer_start(&ctx->dialer, loop, req)) {
+		socks_stop(loop, ctx);
+		socks_free(ctx);
+		return;
+	}
 }
 
 static struct socks_ctx *socks_new(
@@ -584,6 +583,12 @@ static struct socks_ctx *socks_new(
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
 	w_timeout->data = ctx;
+	dialer_init(
+		&ctx->dialer, ctx->conf,
+		&(struct event_cb){
+			.cb = dialer_cb,
+			.ctx = ctx,
+		});
 	return ctx;
 }
 

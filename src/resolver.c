@@ -15,36 +15,13 @@ enum resolver_state {
 	STATE_DONE,
 };
 
-static int
+static bool
 resolve(sockaddr_max_t *sa, const struct domain_name *name, const int family)
 {
 	char host[FQDN_MAX_LENGTH + 1];
 	memcpy(host, name->name, name->len);
 	host[name->len] = '\0';
-	struct addrinfo hints = {
-		.ai_family = family,
-		.ai_socktype = SOCK_STREAM,
-		.ai_protocol = IPPROTO_TCP,
-		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG,
-	};
-	struct addrinfo *result = NULL;
-	if (getaddrinfo(host, NULL, &hints, &result) != 0) {
-		const int err = errno;
-		LOGE_F("resolve: \"%s\" %s", host, strerror(err));
-		return err;
-	}
-	for (const struct addrinfo *it = result; it; it = it->ai_next) {
-		switch (it->ai_family) {
-		case AF_INET:
-			sa->in = *(struct sockaddr_in *)it->ai_addr;
-			break;
-		case AF_INET6:
-			sa->in6 = *(struct sockaddr_in6 *)it->ai_addr;
-			break;
-		}
-	}
-	freeaddrinfo(result);
-	return 0;
+	return resolve_hostname(sa, host, family);
 }
 
 static void
@@ -71,8 +48,7 @@ bool resolver_start(
 	struct resolver *restrict r, struct ev_loop *loop,
 	const struct domain_name *name)
 {
-	r->err = resolve(&r->addr, name, r->resolve_pf);
-	if (r->err != 0) {
+	if (!resolve(&r->addr, name, r->resolve_pf)) {
 		return false;
 	}
 	r->state = STATE_DONE;

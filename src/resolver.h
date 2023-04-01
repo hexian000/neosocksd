@@ -25,7 +25,6 @@ struct resolver {
 	struct ev_watcher watcher;
 	int resolve_pf;
 	int state;
-	int err;
 	sockaddr_max_t addr;
 };
 

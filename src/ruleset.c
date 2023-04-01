@@ -1,4 +1,5 @@
 #include "ruleset.h"
+#include "utils/check.h"
 #include "utils/slog.h"
 #include "dialer.h"
 #include "sockutil.h"
@@ -18,6 +19,48 @@ struct ruleset {
 	const struct config *conf;
 	lua_State *L;
 };
+
+static int resolve(lua_State *L)
+{
+	if (lua_gettop(L) != 1) {
+		luaL_error(L, "resolve requires 1 argument");
+	}
+	lua_getfield(L, LUA_REGISTRYINDEX, "ruleset");
+	struct ruleset *restrict r = (struct ruleset *)lua_topointer(L, -1);
+	lua_pop(L, 1);
+	const char *s = lua_tostring(L, -1);
+	sockaddr_max_t addr;
+	if (!resolve_hostname(&addr, s, r->conf->resolve_pf)) {
+		return 0;
+	}
+	const int af = addr.sa.sa_family;
+	switch (af) {
+	case AF_INET: {
+		char buf[INET_ADDRSTRLEN];
+		const char *addr_str =
+			inet_ntop(af, &addr.in.sin_addr, buf, sizeof(buf));
+		if (addr_str == NULL) {
+			const int err = errno;
+			luaL_error(L, strerror(err));
+		}
+		lua_pushstring(L, addr_str);
+	} break;
+	case AF_INET6: {
+		char buf[INET6_ADDRSTRLEN];
+		const char *addr_str =
+			inet_ntop(af, &addr.in6.sin6_addr, buf, sizeof(buf));
+		if (addr_str == NULL) {
+			const int err = errno;
+			luaL_error(L, strerror(err));
+		}
+		lua_pushstring(L, addr_str);
+	} break;
+	default:
+		lua_pushnil(L);
+		break;
+	}
+	return 1;
+}
 
 static int parse_ipv4(lua_State *L)
 {
@@ -53,6 +96,8 @@ static int parse_ipv6(lua_State *L)
 static int luaopen_neosocksd(lua_State *L)
 {
 	lua_newtable(L);
+	lua_pushcfunction(L, resolve);
+	lua_setfield(L, -2, "resolve");
 	lua_pushcfunction(L, parse_ipv4);
 	lua_setfield(L, -2, "parse_ipv4");
 	lua_pushcfunction(L, parse_ipv6);
@@ -73,6 +118,9 @@ struct ruleset *ruleset_new(const struct config *conf)
 	}
 	r->L = L;
 	r->conf = conf;
+
+	lua_pushlightuserdata(L, r);
+	lua_setfield(L, LUA_REGISTRYINDEX, "ruleset");
 
 	luaL_requiref(L, "_G", luaopen_base, 1);
 	lua_pop(L, 1);

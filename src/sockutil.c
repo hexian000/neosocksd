@@ -3,6 +3,7 @@
 
 #include "sockutil.h"
 #include "net/addr.h"
+#include "utils/minmax.h"
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "resolver.h"
@@ -71,16 +72,14 @@ void socket_set_buffer(int fd, size_t send, size_t recv)
 {
 	int val;
 	if (send > 0) {
-		assert(send <= INT_MAX);
-		val = (int)send;
+		val = (int)MIN(send, INT_MAX);
 		if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val))) {
 			const int err = errno;
 			LOGW_F("SO_SNDBUF: %s", strerror(err));
 		}
 	}
 	if (recv > 0) {
-		assert(send <= INT_MAX);
-		val = (int)recv;
+		val = (int)MIN(recv, INT_MAX);
 		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val))) {
 			const int err = errno;
 			LOGW_F("SO_RCVBUF: %s", strerror(err));
@@ -237,23 +236,35 @@ bool parse_bindaddr(sockaddr_max_t *sa, const char *s)
 	return resolve_inet(sa, &len, hoststr, portstr, PF_UNSPEC, AI_PASSIVE);
 }
 
-bool resolve_addr(sockaddr_max_t *sa, const char *s, const int family)
+bool resolve_hostname(sockaddr_max_t *sa, const char *host, const int family)
 {
-	const size_t addrlen = strlen(s);
-	char buf[FQDN_MAX_LENGTH + 1 + 5 + 1];
-	if (addrlen >= sizeof(buf)) {
+	struct addrinfo hints = {
+		.ai_family = family,
+		.ai_socktype = SOCK_STREAM,
+		.ai_protocol = IPPROTO_TCP,
+		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG,
+	};
+	struct addrinfo *result = NULL;
+	if (getaddrinfo(host, NULL, &hints, &result) != 0) {
+		const int err = errno;
+		LOGE_F("resolve: \"%s\" %s", host, strerror(err));
 		return false;
 	}
-	memcpy(buf, s, addrlen);
-	buf[addrlen] = '\0';
-	char *hoststr = NULL;
-	char *portstr = NULL;
-	if (!splithostport(buf, &hoststr, &portstr)) {
-		return false;
+	bool ok = false;
+	for (const struct addrinfo *it = result; it; it = it->ai_next) {
+		switch (it->ai_family) {
+		case AF_INET:
+			sa->in = *(struct sockaddr_in *)it->ai_addr;
+			break;
+		case AF_INET6:
+			sa->in6 = *(struct sockaddr_in6 *)it->ai_addr;
+			break;
+		default:
+			continue;
+		}
+		ok = true;
+		break;
 	}
-	if (hoststr[0] == '\0') {
-		hoststr = "0.0.0.0";
-	}
-	socklen_t len = sizeof(sockaddr_max_t);
-	return resolve_inet(sa, &len, hoststr, portstr, family, 0);
+	freeaddrinfo(result);
+	return ok;
 }

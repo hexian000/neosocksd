@@ -134,7 +134,8 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #if WITH_NETDEVICE
 		if (strcmp(argv[i], "-i") == 0 ||
 		    strcmp(argv[i], "--netdev") == 0) {
-			args.tproxy = true;
+			OPT_REQUIRE_ARG(argc, argv, i);
+			args.netdev = argv[++i];
 			continue;
 		}
 #endif

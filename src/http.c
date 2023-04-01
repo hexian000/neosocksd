@@ -85,6 +85,7 @@ static void http_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		transfer_stop(loop, &ctx->downlink);
 		return;
 	}
+	dialer_stop(&ctx->dialer, loop);
 	struct ev_io *restrict w_read = &ctx->w_read;
 	ev_io_stop(loop, w_read);
 	struct ev_io *restrict w_write = &ctx->w_write;
@@ -372,6 +373,12 @@ http_new(const int fd, struct server *restrict s, http_handler handler)
 	struct ev_io *restrict w_write = &ctx->w_write;
 	ev_io_init(w_write, http_write_cb, fd, EV_WRITE);
 	w_write->data = ctx;
+	dialer_init(
+		&ctx->dialer, s->conf,
+		&(struct event_cb){
+			.cb = dialer_cb,
+			.ctx = ctx,
+		});
 	return ctx;
 }
 
@@ -405,13 +412,9 @@ static bool proxy_dial(
 	if (req == NULL) {
 		return false;
 	}
-	dialer_init(
-		&ctx->dialer, s->conf,
-		&(struct event_cb){
-			.cb = dialer_cb,
-			.ctx = ctx,
-		});
-	dialer_start(&ctx->dialer, loop, req);
+	if (!dialer_start(&ctx->dialer, loop, req)) {
+		return false;
+	}
 	return true;
 }
 
@@ -423,6 +426,7 @@ http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_write_error(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
+	LOGI_F("http: CONNECT %s", hdr->req.url);
 
 	if (!proxy_dial(ctx, loop, hdr->req.url)) {
 		http_write_error(ctx, HTTP_BAD_GATEWAY);

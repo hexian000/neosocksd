@@ -403,7 +403,7 @@ static bool connect_sa(
 	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
 		char addr_str[64];
 		format_sa(sa, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_DEBUG, "dialer: CONNECT \"%s\"", addr_str);
+		LOG_F(LOG_LEVEL_VERBOSE, "dialer: CONNECT \"%s\"", addr_str);
 	}
 	d->fd = fd;
 
@@ -424,6 +424,11 @@ static void resolve_cb(struct ev_loop *loop, void *data)
 		LOGD("dialer resolve failed");
 		dialer_stop(d, loop);
 		return;
+	}
+	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
+		char addr_str[64];
+		format_sa(sa, addr_str, sizeof(addr_str));
+		LOG_F(LOG_LEVEL_VERBOSE, "dialer: resolve \"%s\"", addr_str);
 	}
 
 	const uint16_t port = d->req->addr.port;
@@ -461,6 +466,12 @@ void dialer_init(
 	buf_init(&d->buf, DIALER_BUF_SIZE);
 	d->req = NULL;
 	d->state = STATE_INIT;
+	resolver_init(
+		&d->resolver, d->conf->resolve_pf,
+		&(struct event_cb){
+			.cb = resolve_cb,
+			.ctx = d,
+		});
 }
 
 bool dialer_start(
@@ -492,12 +503,6 @@ bool dialer_start(
 		FAIL();
 	}
 
-	resolver_init(
-		&d->resolver, d->conf->resolve_pf,
-		&(struct event_cb){
-			.cb = resolve_cb,
-			.ctx = d,
-		});
 	if (!resolver_start(&d->resolver, loop, &req->addr.domain)) {
 		return false;
 	}

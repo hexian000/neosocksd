@@ -27,6 +27,6 @@ socklen_t getsocklen(const struct sockaddr *sa);
 int format_sa(const struct sockaddr *sa, char *s, size_t buf_size);
 
 bool parse_bindaddr(sockaddr_max_t *sa, const char *s);
-bool resolve_addr(sockaddr_max_t *sa, const char *s, int family);
+bool resolve_hostname(sockaddr_max_t *sa, const char *host, int family);
 
 #endif /* SOCKUTIL_H */
