@@ -1,9 +1,10 @@
 #include "ruleset.h"
-#include "util.h"
-#include "utils/check.h"
+#include "utils/serialize.h"
 #include "utils/slog.h"
+#include "utils/check.h"
 #include "dialer.h"
 #include "sockutil.h"
+#include "util.h"
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
@@ -14,6 +15,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,7 +82,8 @@ static int parse_ipv4(lua_State *L)
 	if (inet_pton(AF_INET, s, &in) != 1) {
 		return 0;
 	}
-	lua_pushinteger(L, ntohl(in.sin_addr.s_addr));
+	const unsigned char *addr = (void *)&in.sin_addr;
+	lua_pushinteger(L, read_uint32(addr));
 	return 1;
 }
 
@@ -94,10 +97,11 @@ static int parse_ipv6(lua_State *L)
 	if (inet_pton(AF_INET6, s, &in6) != 1) {
 		return 0;
 	}
-	lua_pushinteger(L, ntohl(in6.sin6_addr.s6_addr32[0]));
-	lua_pushinteger(L, ntohl(in6.sin6_addr.s6_addr32[1]));
-	lua_pushinteger(L, ntohl(in6.sin6_addr.s6_addr32[2]));
-	lua_pushinteger(L, ntohl(in6.sin6_addr.s6_addr32[3]));
+	const unsigned char *addr = (void *)&in6.sin6_addr;
+	lua_pushinteger(L, read_uint32(addr + sizeof(uint32_t) * 0u));
+	lua_pushinteger(L, read_uint32(addr + sizeof(uint32_t) * 1u));
+	lua_pushinteger(L, read_uint32(addr + sizeof(uint32_t) * 2u));
+	lua_pushinteger(L, read_uint32(addr + sizeof(uint32_t) * 3u));
 	return 4;
 }
 

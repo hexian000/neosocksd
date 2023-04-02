@@ -14,7 +14,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         ..
     cmake --build . --parallel
-    ls -lh src/neosocksd	
+    ls -lh src/neosocksd
     ;;
 "xs")
     # cross compiling, environment vars need to be set
@@ -65,29 +65,43 @@ case "$1" in
     objdump -drwS neosocksd >neosocksd.S
     ls -lh neosocksd
     ;;
-"clang")
+"posix")
+    # force POSIX APIs
     rm -rf build
     mkdir -p build && cd build
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+        -DPOSIX=1 \
+        ..
+    cmake --build . --parallel
+    ls -lh src/neosocksd
+    ;;
+"clang")
+    # rebuild with Linux clang/lld
+    rm -rf build
+    mkdir -p build && cd build
+    cmake -G "${GENERATOR}" \
+        -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_C_COMPILER="clang" \
         -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         ..
     cmake --build . --parallel
-    # cd src/tests && ctest
-    ls -lh src/neosocksd
+    cd src
+    llvm-objdump -drwS neosocksd >neosocksd.S
+    ls -lh neosocksd
     ;;
 "c")
     rm -rf build xbuild
     ;;
 *)
-    # ln -sf build/compile_commands.json compile_commands.json
     mkdir -p build && cd build
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Debug" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         ..
+    ln -sf build/compile_commands.json compile_commands.json
     cmake --build . --parallel
     # cd src/tests && ctest
     ls -lh src/neosocksd
