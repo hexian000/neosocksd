@@ -122,7 +122,7 @@ function ruleset.route(addr)
         return addr, "192.168.33.1:1080", "192.168.32.1:1080"
     end
     -- direct lan access
-    if startswith(host, "192.168.") then
+    if host:startswith("192.168.") then
         return addr
     end
     -- accept
