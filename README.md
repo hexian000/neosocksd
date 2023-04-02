@@ -12,6 +12,7 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 - Top class processor/memory/storage/bandwidth efficiency.
 - Lua scripts powered rule set.
 - Routing connections by rule and even building an autonomous proxy mesh.
+- Horizontally scalable.
 - RESTful API for monitoring and updating rules online.
 - IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
 - Minimized resource usage, embedded systems friendly.
