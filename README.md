@@ -11,9 +11,10 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 - Plain old protocols with no built-in support for authentication or encryption.
 - Top class processor/memory/storage/bandwidth efficiency.
 - Lua scripts powered rule set.
-- RESTful API for monitoring and hot reloading.
+- Routing connections by rule and even building an autonomous proxy mesh.
+- RESTful API for monitoring and updating rules online.
 - IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
-- Almost minimal resource usage, embedded systems friendly.
+- Minimized resource usage, embedded systems friendly.
 - Compliant with: ISO C11, POSIX.1-2008.
 
 ## Basic Usage
@@ -48,11 +49,15 @@ local hosts = {
     ["host123.region2.lan"] = "192.168.33.123"
 }
 
-local routes = {
-    ["192.168.32."] = {"192.168.32.1:1080"},
-    -- reach region2 via region1 gateway
-    ["192.168.33."] = {"192.168.33.1:1080", "192.168.32.1:1080"}
+local static_route = {
+    -- bypass default gateway
+    ["203.0.113.1"] = {}
 }
+
+local function route_default(addr)
+    -- default gateway
+    return addr, "192.168.1.1:1080"
+end
 
 --[[
     ruleset.resolve(domain) process a host name request
@@ -64,6 +69,9 @@ local routes = {
     return nil: reject the request
 ]]
 function ruleset.resolve(domain)
+    if not _G.is_enabled() then
+        return nil
+    end
     printf("ruleset.resolve: %q", domain)
     local host, port = splithostport(domain)
     host = string.lower(host)
@@ -76,12 +84,12 @@ function ruleset.resolve(domain)
     if entry then
         return ruleset.route(string.format("%s:%s", entry, port))
     end
-    -- reject other localnet
-    if endswith(host, ".lan") or endswith(host, ".local") then
-        return nil
+    -- direct lan access
+    if host:endswith(".lan") or host:endswith(".local") then
+        return domain
     end
     -- accept
-    return domain
+    return route_default(domain)
 end
 
 --[[
@@ -91,24 +99,34 @@ end
     returns: same as ruleset.resolve(addr)
 ]]
 function ruleset.route(addr)
-    printf("ruleset.route: %q", addr)
-    local host, port = splithostport(addr)
-    -- reject loopback or link-local
-    if startswith(host, "127.") or startswith(host, "169.254.") then
+    if not _G.is_enabled() then
         return nil
     end
-    -- lookup in route table
-    for prefix, route in pairs(routes) do
-        if startswith(host, prefix) then
-            return addr, table.unpack(route)
-        end
+    printf("ruleset.route: %q", addr)
+    local host, port = splithostport(addr)
+    -- static rule
+    local exact_match = static_route[host]
+    if exact_match then
+        return addr, table.unpack(exact_match)
+    end
+    -- reject loopback or link-local
+    if host:startswith("127.") or host:startswith("169.254.") then
+        return nil
+    end
+    -- region1 gateway
+    if addr:startswith("192.168.32.") then
+        return addr, "192.168.32.1:1080"
+    end
+    -- jump to region2 via region1 gateway
+    if addr:startswith("192.168.33.") then
+        return addr, "192.168.33.1:1080", "192.168.32.1:1080"
     end
     -- direct lan access
     if startswith(host, "192.168.") then
         return addr
     end
-    -- default gateway
-    return addr, "192.168.1.1:1080"
+    -- accept
+    return route_default(addr)
 end
 
 --[[
@@ -118,9 +136,12 @@ end
     returns: same as ruleset.resolve(addr)
 ]]
 function ruleset.route6(addr)
+    if not _G.is_enabled() then
+        return nil
+    end
     printf("ruleset.route6: %q", addr)
-    -- reject any ipv6
-    return nil
+    -- access any ipv6 directly
+    return addr
 end
 ```
 

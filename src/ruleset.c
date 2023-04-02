@@ -205,9 +205,11 @@ bool ruleset_loadfile(struct ruleset *r, const char *filename)
 		lua_settop(L, 0);
 		return false;
 	}
-	if (lua_istable(L, -1)) {
-		lua_setglobal(L, "ruleset");
+	if (!lua_istable(L, -1)) {
+		lua_settop(L, 0);
+		return false;
 	}
+	lua_setglobal(L, "ruleset");
 	lua_settop(L, 0);
 	return true;
 }
