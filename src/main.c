@@ -233,7 +233,7 @@ int main(int argc, char **argv)
 	};
 	struct ruleset *ruleset = NULL;
 	if (args.ruleset != NULL) {
-		ruleset = ruleset_new(&conf);
+		ruleset = ruleset_new(loop, &conf);
 		CHECKOOM(ruleset);
 		if (!ruleset_loadfile(ruleset, args.ruleset)) {
 			FAILMSGF("unable to load ruleset: %s", args.ruleset);

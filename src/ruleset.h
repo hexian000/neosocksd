@@ -7,9 +7,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct ev_loop;
 struct ruleset;
 
-struct ruleset *ruleset_new(const struct config *conf);
+struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf);
 bool ruleset_load(struct ruleset *r, const char *rulestr);
 bool ruleset_loadfile(struct ruleset *r, const char *filename);
 void ruleset_gc(struct ruleset *r);

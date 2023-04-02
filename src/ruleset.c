@@ -1,4 +1,5 @@
 #include "ruleset.h"
+#include "util.h"
 #include "utils/check.h"
 #include "utils/slog.h"
 #include "dialer.h"
@@ -7,9 +8,11 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include <ev.h>
 #include <arpa/inet.h>
 
 #include <assert.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +21,8 @@
 struct ruleset {
 	const struct config *conf;
 	lua_State *L;
+	struct ev_loop *loop;
+	struct ev_timer ticker;
 };
 
 static int resolve(lua_State *L)
@@ -25,7 +30,10 @@ static int resolve(lua_State *L)
 	if (lua_gettop(L) != 1) {
 		luaL_error(L, "resolve requires 1 argument");
 	}
-	lua_getfield(L, LUA_REGISTRYINDEX, "ruleset");
+	if (lua_getfield(L, LUA_REGISTRYINDEX, "ruleset") !=
+	    LUA_TLIGHTUSERDATA) {
+		luaL_error(L, "lua registry is corrupted");
+	}
 	struct ruleset *restrict r = (struct ruleset *)lua_topointer(L, -1);
 	lua_pop(L, 1);
 	const char *s = lua_tostring(L, -1);
@@ -93,6 +101,55 @@ static int parse_ipv6(lua_State *L)
 	return 4;
 }
 
+static void
+ruleset_tick(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+{
+	UNUSED(revents);
+	struct ruleset *restrict r = watcher->data;
+	lua_State *restrict L = r->L;
+	if (lua_getglobal(L, "ruleset") != LUA_TTABLE) {
+		lua_settop(L, 0);
+		return;
+	}
+	if (lua_getfield(L, -1, "tick") != LUA_TFUNCTION) {
+		lua_settop(L, 0);
+		return;
+	}
+	lua_remove(L, -2);
+	lua_pushnumber(L, ev_now(loop));
+	if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+		LOGE_F("ruleset.tick: %s", lua_tostring(L, -1));
+		lua_settop(L, 0);
+		return;
+	}
+	lua_settop(L, 0);
+}
+
+static int setinterval(lua_State *L)
+{
+	if (lua_gettop(L) != 1) {
+		luaL_error(L, "setinterval requires 1 argument");
+	}
+	const double interval = lua_tonumber(L, -1);
+	lua_pop(L, 1);
+	if (lua_getfield(L, LUA_REGISTRYINDEX, "ruleset") !=
+	    LUA_TLIGHTUSERDATA) {
+		luaL_error(L, "lua registry is corrupted");
+	}
+	struct ruleset *restrict r = (struct ruleset *)lua_topointer(L, -1);
+	lua_pop(L, 1);
+
+	struct ev_timer *restrict w_timer = &r->ticker;
+	ev_timer_stop(r->loop, w_timer);
+	if (isfinite(interval) && interval > 0.0) {
+		ev_timer_init(w_timer, ruleset_tick, interval, interval);
+		w_timer->data = r;
+		ev_timer_start(r->loop, w_timer);
+	}
+
+	return 0;
+}
+
 static int luaopen_neosocksd(lua_State *L)
 {
 	lua_newtable(L);
@@ -102,10 +159,12 @@ static int luaopen_neosocksd(lua_State *L)
 	lua_setfield(L, -2, "parse_ipv4");
 	lua_pushcfunction(L, parse_ipv6);
 	lua_setfield(L, -2, "parse_ipv6");
+	lua_pushcfunction(L, setinterval);
+	lua_setfield(L, -2, "setinterval");
 	return 1;
 }
 
-struct ruleset *ruleset_new(const struct config *conf)
+struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf)
 {
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
 	if (r == NULL) {
@@ -113,11 +172,19 @@ struct ruleset *ruleset_new(const struct config *conf)
 	}
 	lua_State *restrict L = luaL_newstate();
 	if (L == NULL) {
+		LOGOOM();
 		ruleset_free(r);
 		return NULL;
 	}
-	r->L = L;
 	r->conf = conf;
+	r->L = L;
+	r->loop = loop;
+	{
+		/* initialize in advance to prevent undefined behavior */
+		struct ev_timer *restrict w_timer = &r->ticker;
+		ev_timer_init(w_timer, ruleset_tick, 1.0, 1.0);
+		w_timer->data = r;
+	}
 
 	lua_pushlightuserdata(L, r);
 	lua_setfield(L, LUA_REGISTRYINDEX, "ruleset");
@@ -164,9 +231,12 @@ struct ruleset *ruleset_new(const struct config *conf)
 
 void ruleset_free(struct ruleset *restrict r)
 {
-	if (r != NULL && r->L != NULL) {
-		lua_close(r->L);
+	if (r == NULL) {
+		return;
 	}
+	struct ev_timer *restrict w_timer = &r->ticker;
+	ev_timer_stop(r->loop, w_timer);
+	lua_close(r->L);
 	free(r);
 }
 

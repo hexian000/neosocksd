@@ -143,6 +143,16 @@ function ruleset.route6(addr)
     -- access any ipv6 directly
     return addr
 end
+
+--[[
+    ruleset.tick(now)
+    <now>: current timestamp in seconds
+    returns: ignored
+]]
+function ruleset.tick(now)
+    printf("ruleset.tick: %.03f", now)
+end
+-- neosocksd.setinterval(1.0)
 ```
 
 Access RESTful API through the proxy (as defined in the ruleset above):
