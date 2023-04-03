@@ -101,7 +101,7 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="Debug" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         ..
-    ln -sf build/compile_commands.json compile_commands.json
+    ln -sf compile_commands.json ../compile_commands.json
     cmake --build . --parallel
     # cd src/tests && ctest
     ls -lh src/neosocksd

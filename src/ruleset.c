@@ -14,6 +14,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -27,22 +28,30 @@ struct ruleset {
 	struct ev_timer ticker;
 };
 
-static int resolve(lua_State *L)
+static struct ruleset *find_ruleset(lua_State *L)
 {
-	if (lua_gettop(L) != 1) {
-		luaL_error(L, "resolve requires 1 argument");
-	}
 	if (lua_getfield(L, LUA_REGISTRYINDEX, "ruleset") !=
 	    LUA_TLIGHTUSERDATA) {
 		luaL_error(L, "lua registry is corrupted");
 	}
-	struct ruleset *restrict r = (struct ruleset *)lua_topointer(L, -1);
+	struct ruleset *r = (struct ruleset *)lua_topointer(L, -1);
 	lua_pop(L, 1);
+	return r;
+}
+
+static int resolve(lua_State *L)
+{
+	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
+		luaL_error(L, "resolve requires 1 string argument");
+	}
 	const char *s = lua_tostring(L, -1);
+	struct ruleset *restrict r = find_ruleset(L);
 	sockaddr_max_t addr;
 	if (!resolve_hostname(&addr, s, r->conf->resolve_pf)) {
+		lua_settop(L, 0);
 		return 0;
 	}
+	lua_settop(L, 0);
 	const int af = addr.sa.sa_family;
 	switch (af) {
 	case AF_INET: {
@@ -74,34 +83,38 @@ static int resolve(lua_State *L)
 
 static int parse_ipv4(lua_State *L)
 {
-	if (lua_gettop(L) != 1) {
-		luaL_error(L, "parse_ipv4 requires 1 argument");
+	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
+		luaL_error(L, "parse_ipv4 requires 1 string argument");
 	}
 	const char *s = lua_tostring(L, -1);
-	struct sockaddr_in in;
+	struct in_addr in;
 	if (inet_pton(AF_INET, s, &in) != 1) {
+		lua_settop(L, 0);
 		return 0;
 	}
-	const unsigned char *addr = (void *)&in.sin_addr;
-	lua_pushinteger(L, read_uint32(addr));
+	lua_settop(L, 0);
+	const uint32_t *addr = (void *)&in;
+	lua_pushinteger(L, read_uint32((const void *)&addr[0]));
 	return 1;
 }
 
 static int parse_ipv6(lua_State *L)
 {
-	if (lua_gettop(L) != 1) {
-		luaL_error(L, "parse_ipv6 requires 1 argument");
+	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
+		luaL_error(L, "parse_ipv6 requires 1 string argument");
 	}
 	const char *s = lua_tostring(L, -1);
-	struct sockaddr_in6 in6;
+	struct in6_addr in6;
 	if (inet_pton(AF_INET6, s, &in6) != 1) {
+		lua_settop(L, 0);
 		return 0;
 	}
-	const unsigned char *addr = (void *)&in6.sin6_addr;
-	lua_pushinteger(L, read_uint32(addr + sizeof(uint32_t) * 0u));
-	lua_pushinteger(L, read_uint32(addr + sizeof(uint32_t) * 1u));
-	lua_pushinteger(L, read_uint32(addr + sizeof(uint32_t) * 2u));
-	lua_pushinteger(L, read_uint32(addr + sizeof(uint32_t) * 3u));
+	lua_settop(L, 0);
+	const uint32_t *addr = (void *)&in6;
+	lua_pushinteger(L, read_uint32((const void *)&addr[0]));
+	lua_pushinteger(L, read_uint32((const void *)&addr[1]));
+	lua_pushinteger(L, read_uint32((const void *)&addr[2]));
+	lua_pushinteger(L, read_uint32((const void *)&addr[3]));
 	return 4;
 }
 
@@ -136,12 +149,7 @@ static int setinterval(lua_State *L)
 	}
 	const double interval = lua_tonumber(L, -1);
 	lua_pop(L, 1);
-	if (lua_getfield(L, LUA_REGISTRYINDEX, "ruleset") !=
-	    LUA_TLIGHTUSERDATA) {
-		luaL_error(L, "lua registry is corrupted");
-	}
-	struct ruleset *restrict r = (struct ruleset *)lua_topointer(L, -1);
-	lua_pop(L, 1);
+	struct ruleset *restrict r = find_ruleset(L);
 
 	struct ev_timer *restrict w_timer = &r->ticker;
 	ev_timer_stop(r->loop, w_timer);

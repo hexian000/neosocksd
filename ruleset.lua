@@ -1,13 +1,4 @@
-local ruleset = {}
-
--- global options
-_G.NDEBUG = _G.NDEBUG or false
-
-function _G.is_enabled()
-    return true
-end
-
-local function printf(s, ...)
+function _G.printf(s, ...)
     if _G.NDEBUG then
         return
     end
@@ -32,26 +23,42 @@ function string:endswith(sub)
     return string.sub(self, -n) == sub
 end
 
-local function splithostport(s)
-    local i = string.find(s, ":[^:]*$")
-    return string.sub(s, 1, i - 1), string.sub(s, i + 1)
+--[[ global configs ]]
+_G.NDEBUG = _G.NDEBUG or false
+
+function _G.is_enabled()
+    return true
 end
 
-local hosts = {
+_G.hosts = {
     ["gateway.region1.lan"] = "192.168.32.1",
     ["host123.region1.lan"] = "192.168.32.123",
     ["gateway.region2.lan"] = "192.168.33.1",
     ["host123.region2.lan"] = "192.168.33.123"
 }
 
-local static_route = {
-    -- bypass default gateway
-    ["203.0.113.1"] = {}
+_G.redirect = {
+    -- reject loopback or link-local
+    [1] = {"^127%.", {nil}},
+    [2] = {"^169%.254%.", {nil}}
 }
 
-local function route_default(addr)
-    -- default gateway
-    return addr, "192.168.1.1:1080"
+_G.route = {
+    -- region1 gateway
+    [1] = {"^192%.168%.32%.", {"192.168.32.1:1080"}},
+    -- jump to region2 via region1 gateway
+    [2] = {"^192%.168%.33%.", {"192.168.33.1:1080", "192.168.32.1:1080"}},
+    -- other lan address
+    [3] = {"^192%.168%.", {"192.168.1.1:1080"}}
+}
+_G.route_default = {"192.168.1.1:1080"}
+
+--[[ ruleset functions ]]
+local ruleset = {}
+
+local function splithostport(s)
+    local i = string.find(s, ":[^:]*$")
+    return string.sub(s, 1, i - 1), string.sub(s, i + 1)
 end
 
 --[[
@@ -65,6 +72,7 @@ end
 ]]
 function ruleset.resolve(domain)
     if not _G.is_enabled() then
+        printf("ruleset.resolve: ruleset disabled, reject %q", domain)
         return nil
     end
     printf("ruleset.resolve: %q", domain)
@@ -84,7 +92,7 @@ function ruleset.resolve(domain)
         return domain
     end
     -- accept
-    return route_default(domain)
+    return domain, table.unpack(route_default)
 end
 
 --[[
@@ -95,33 +103,27 @@ end
 ]]
 function ruleset.route(addr)
     if not _G.is_enabled() then
+        printf("ruleset.route: ruleset disabled, reject %q", addr)
         return nil
     end
     printf("ruleset.route: %q", addr)
+    -- redirect
+    for _, rule in ipairs(redirect) do
+        local pattern, target = table.unpack(rule)
+        if addr:find(pattern) then
+            return table.unpack(target)
+        end
+    end
     local host, port = splithostport(addr)
-    -- static rule
-    local exact_match = static_route[host]
-    if exact_match then
-        return addr, table.unpack(exact_match)
-    end
-    -- reject loopback or link-local
-    if host:startswith("127.") or host:startswith("169.254.") then
-        return nil
-    end
-    -- region1 gateway
-    if addr:startswith("192.168.32.") then
-        return addr, "192.168.32.1:1080"
-    end
-    -- jump to region2 via region1 gateway
-    if addr:startswith("192.168.33.") then
-        return addr, "192.168.33.1:1080", "192.168.32.1:1080"
-    end
-    -- direct lan access
-    if host:startswith("192.168.") then
-        return addr
+    -- check route table
+    for _, rule in ipairs(route) do
+        local pattern, route = table.unpack(rule)
+        if host:find(pattern) then
+            return addr, table.unpack(route)
+        end
     end
     -- accept
-    return route_default(addr)
+    return addr, table.unpack(route_default)
 end
 
 --[[
@@ -132,11 +134,11 @@ end
 ]]
 function ruleset.route6(addr)
     if not _G.is_enabled() then
+        printf("ruleset.route6: ruleset disabled, reject %q", addr)
         return nil
     end
     printf("ruleset.route6: %q", addr)
-    -- access any ipv6 directly
-    return addr
+    return addr, table.unpack(route_default)
 end
 
 --[[
