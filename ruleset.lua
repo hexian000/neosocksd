@@ -23,8 +23,13 @@ function string:endswith(sub)
     return string.sub(self, -n) == sub
 end
 
+local function splithostport(s)
+    local i = string.find(s, ":[^:]*$")
+    return string.sub(s, 1, i - 1), string.sub(s, i + 1)
+end
+
 --[[ global configs ]]
-_G.NDEBUG = _G.NDEBUG or false
+_G.NDEBUG = _G.NDEBUG or true
 
 function _G.is_enabled()
     return true
@@ -56,14 +61,9 @@ _G.route_default = {"192.168.1.1:1080"}
 --[[ ruleset functions ]]
 local ruleset = {}
 
-local function splithostport(s)
-    local i = string.find(s, ":[^:]*$")
-    return string.sub(s, 1, i - 1), string.sub(s, i + 1)
-end
-
 --[[
     ruleset.resolve(domain) process a host name request
-    	i.e. HTTP CONNECT / SOCKS5 with host name ("socks5h" in cURL) / SOCKS4A
+        i.e. HTTP CONNECT / SOCKS5 with host name ("socks5h" in cURL) / SOCKS4A
     <domain>: full qualified domain name and port, like "www.example.org:80"
     return <addr>: replace the request
     return <addr>, <proxy>: forward the request through another neosocksd
@@ -79,7 +79,7 @@ function ruleset.resolve(domain)
     local host, port = splithostport(domain)
     host = string.lower(host)
     -- redirect API domain
-    if host == "neosocksd.lan" then
+    if host == "neosocksd.lan:80" then
         return "127.0.0.1:9080"
     end
     -- lookup in hosts table
@@ -87,9 +87,10 @@ function ruleset.resolve(domain)
     if entry then
         return ruleset.route(string.format("%s:%s", entry, port))
     end
-    -- direct lan access
+    -- resolve lan address locally
     if host:endswith(".lan") or host:endswith(".local") then
-        return domain
+        local addr = neosocksd.resolve(host)
+        return ruleset.route(string.format("%s:%s", addr, port))
     end
     -- accept
     return domain, table.unpack(route_default)

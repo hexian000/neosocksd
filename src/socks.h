@@ -5,6 +5,7 @@
 #define SOCKS_H
 
 #include "server.h"
+#include "stats.h"
 
 #include <ev.h>
 
@@ -15,6 +16,6 @@ void socks_serve(
 	struct ev_loop *loop, struct server *s, int accepted_fd,
 	const struct sockaddr *accepted_sa);
 
-size_t socks_get_halfopen(void);
+void socks_read_stats(struct stats *out_stats);
 
 #endif /* SOCKS_H */

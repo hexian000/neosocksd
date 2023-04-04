@@ -9,7 +9,6 @@
 #include "resolver.h"
 
 #include <fcntl.h>
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -17,9 +16,7 @@
 #include <netinet/tcp.h>
 #include <net/if.h>
 
-#include <assert.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -189,9 +186,9 @@ static bool resolve_inet(
 		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG | flags,
 	};
 	struct addrinfo *result = NULL;
-	if (getaddrinfo(hostname, service, &hints, &result) != 0) {
-		const int err = errno;
-		LOGE_F("resolve: %s", strerror(err));
+	const int err = getaddrinfo(hostname, service, &hints, &result);
+	if (err != 0) {
+		LOGE_F("resolve: %s", gai_strerror(err));
 		return NULL;
 	}
 	for (const struct addrinfo *restrict it = result; it != NULL;
@@ -245,9 +242,9 @@ bool resolve_hostname(sockaddr_max_t *sa, const char *host, const int family)
 		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG,
 	};
 	struct addrinfo *result = NULL;
-	if (getaddrinfo(host, NULL, &hints, &result) != 0) {
-		const int err = errno;
-		LOGE_F("resolve: \"%s\" %s", host, strerror(err));
+	const int err = getaddrinfo(host, NULL, &hints, &result);
+	if (err != 0) {
+		LOGE_F("resolve: %s", gai_strerror(err));
 		return false;
 	}
 	bool ok = false;

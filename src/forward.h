@@ -6,6 +6,7 @@
 
 #include "server.h"
 #include "sockutil.h"
+#include "stats.h"
 
 #include <ev.h>
 
@@ -14,6 +15,6 @@ void forward_serve(
 	struct ev_loop *loop, struct server *s, int accepted_fd,
 	const struct sockaddr *accepted_sa);
 
-size_t forward_get_halfopen(void);
+void forward_read_stats(struct stats *out_stats);
 
 #endif /* FORWARD_H */

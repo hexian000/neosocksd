@@ -16,7 +16,6 @@
 #include <math.h>
 #include <netinet/in.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,7 +47,8 @@ static int resolve(lua_State *L)
 	struct ruleset *restrict r = find_ruleset(L);
 	sockaddr_max_t addr;
 	if (!resolve_hostname(&addr, s, r->conf->resolve_pf)) {
-		lua_settop(L, 0);
+		const int err = errno;
+		luaL_error(L, "neosocksd.resolve: %s", strerror(err));
 		return 0;
 	}
 	lua_settop(L, 0);
@@ -303,9 +303,8 @@ void ruleset_gc(struct ruleset *restrict r)
 
 size_t ruleset_memused(struct ruleset *restrict r)
 {
-	size_t n = (size_t)lua_gc(r->L, LUA_GCCOUNT) << 10u;
-	n |= (size_t)lua_gc(r->L, LUA_GCCOUNTB);
-	return n;
+	return ((size_t)lua_gc(r->L, LUA_GCCOUNT) << 10u) |
+	       (size_t)lua_gc(r->L, LUA_GCCOUNTB);
 }
 
 static struct dialreq *pop_dialreq(lua_State *restrict L, int n)

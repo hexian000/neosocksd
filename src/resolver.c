@@ -3,10 +3,9 @@
 #include "sockutil.h"
 #include "util.h"
 
-#include <sys/socket.h>
-#include <netdb.h>
 #include <ev.h>
 
+#include <stdbool.h>
 #include <string.h>
 
 enum resolver_state {
@@ -21,7 +20,12 @@ resolve(sockaddr_max_t *sa, const struct domain_name *name, const int family)
 	char host[FQDN_MAX_LENGTH + 1];
 	memcpy(host, name->name, name->len);
 	host[name->len] = '\0';
-	return resolve_hostname(sa, host, family);
+	if (!resolve_hostname(sa, host, family)) {
+		const int err = errno;
+		LOGE_F("resolve: \"%s\" %s", host, strerror(err));
+		return false;
+	}
+	return true;
 }
 
 static void

@@ -2,6 +2,7 @@
 #define UTIL_H
 
 #include "utils/slog.h"
+#include "utils/minmax.h"
 
 #include <ev.h>
 

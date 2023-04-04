@@ -4,8 +4,8 @@
 #include "forward.h"
 #include "net/addr.h"
 #include "utils/check.h"
-#include "resolver.h"
 #include "transfer.h"
+#include "resolver.h"
 #include "util.h"
 
 #include <sys/socket.h>
@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static size_t forward_num_halfopen = 0;
+static struct stats stats = { 0 };
 
 struct forward_ctx {
 	int accepted_fd, dialed_fd;
@@ -41,7 +41,7 @@ static void forward_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	if (!ctx->is_connected) {
 		ev_timer_stop(loop, &ctx->w_timeout);
 		ev_io_stop(loop, &ctx->w_connect);
-		forward_num_halfopen--;
+		stats.num_halfopen--;
 	} else {
 		transfer_stop(loop, &ctx->uplink);
 		transfer_stop(loop, &ctx->downlink);
@@ -118,7 +118,7 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 
 	ctx->is_connected = true;
-	forward_num_halfopen--;
+	stats.num_halfopen--;
 	struct event_cb cb = {
 		.cb = forward_close_cb,
 		.ctx = ctx,
@@ -163,9 +163,9 @@ resolve(struct sockaddr *sa, socklen_t *len, const char *endpoint,
 		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG,
 	};
 	struct addrinfo *result = NULL;
-	if (getaddrinfo(hostname, service, &hints, &result) != 0) {
-		const int err = errno;
-		LOGE_F("resolve: %s", strerror(err));
+	const int err = getaddrinfo(hostname, service, &hints, &result);
+	if (err != 0) {
+		LOGE_F("resolve: %s", gai_strerror(err));
 		return false;
 	}
 	bool ok = false;
@@ -190,6 +190,8 @@ static void forward_start(
 	struct ev_loop *loop, struct forward_ctx *restrict ctx,
 	const struct config *restrict conf)
 {
+	stats.num_request++;
+
 	sockaddr_max_t addr;
 	socklen_t len = sizeof(addr);
 	if (conf->forward != NULL) {
@@ -248,7 +250,7 @@ static void forward_start(
 	w_timeout->data = ctx;
 	ev_timer_start(loop, w_timeout);
 
-	forward_num_halfopen++;
+	stats.num_halfopen++;
 }
 
 void forward_serve(
@@ -266,7 +268,7 @@ void forward_serve(
 	forward_start(loop, ctx, conf);
 }
 
-size_t forward_get_halfopen(void)
+void forward_read_stats(struct stats *restrict out_stats)
 {
-	return forward_num_halfopen;
+	*out_stats = stats;
 }

@@ -10,6 +10,7 @@ add_executable(neosocksd
     socks.c socks.h
     http.c http.h
     server.c server.h
+    stats.c stats.h
     main.c
 )
 

@@ -1,7 +1,9 @@
 #ifndef REST_H
 #define REST_H
 
+#include "server.h"
 #include "ruleset.h"
+#include "stats.h"
 
 struct ev_loop;
 struct server;
@@ -16,6 +18,6 @@ void http_api_serve(
 	struct ev_loop *loop, struct server *s, int accepted_fd,
 	const struct sockaddr *accepted_sa);
 
-size_t http_get_halfopen(void);
+void http_read_stats(struct stats *out_stats);
 
 #endif /* REST_H */

@@ -8,13 +8,11 @@
 #include "utils/formats.h"
 #include "utils/slog.h"
 #include "utils/check.h"
-#include "dialer.h"
 #include "ruleset.h"
 #include "transfer.h"
-#include "socks.h"
-#include "forward.h"
+#include "dialer.h"
+#include "stats.h"
 #include "util.h"
-#include "server.h"
 
 #include <ev.h>
 
@@ -24,7 +22,6 @@
 #include <sys/socket.h>
 
 #include <stddef.h>
-#include <stdint.h>
 #include <inttypes.h>
 
 static void
@@ -37,7 +34,7 @@ http_timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
 #define HTTP_MAX_HEADER_COUNT 256
 #define HTTP_MAX_ENTITY 8192
 
-static size_t http_num_halfopen = 0;
+static struct stats stats = { 0 };
 
 struct http_ctx;
 
@@ -92,7 +89,7 @@ static void http_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_stop(loop, w_write);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_stop(loop, w_timeout);
-	http_num_halfopen--;
+	stats.num_halfopen--;
 }
 
 static void http_free(struct http_ctx *restrict ctx)
@@ -257,6 +254,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	/* HTTP/1.0 only, stop reading */
 	ev_io_stop(loop, watcher);
+	stats.num_request++;
 	ctx->handler(loop, ctx);
 
 	if (ctx->wbuf.len > 0) {
@@ -388,7 +386,7 @@ static void http_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_start(loop, w_read);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_start(loop, w_timeout);
-	http_num_halfopen++;
+	stats.num_halfopen++;
 }
 
 static bool proxy_dial(
@@ -447,14 +445,21 @@ static void http_handle_stats(
 	http_write_rsphdr(ctx, HTTP_OK);
 
 	const ev_tstamp now = ev_now(loop);
-	static size_t last_xfer_bytes = 0;
-	static ev_tstamp last = TSTAMP_NIL;
-	const double dt = (last == TSTAMP_NIL) ? 1.0 : now - last;
+	static struct {
+		size_t num_request;
+		size_t num_halfopen;
+		size_t xfer_bytes;
+		ev_tstamp tstamp;
+	} last = { .tstamp = TSTAMP_NIL };
+	const double dt = (last.tstamp == TSTAMP_NIL) ? 1.0 : now - last.tstamp;
 	{
 		const time_t server_time = time(NULL);
-		const size_t num_halfopen = socks_get_halfopen() +
-					    http_get_halfopen() +
-					    forward_get_halfopen();
+		struct stats total;
+		stats_read(&total);
+		const size_t num_request = total.num_request;
+		const size_t num_halfopen = total.num_halfopen;
+		const double request_rate =
+			(double)(num_request - last.num_request) / dt;
 		const size_t num_active = transfer_get_active() / 2u;
 		const size_t xfer_bytes = transfer_get_bytes();
 		char timestamp[32];
@@ -467,7 +472,7 @@ static void http_handle_stats(
 		(void)format_iec(
 			xfer_rate, sizeof(xfer_rate),
 			(size_t)round(
-				(double)(xfer_bytes - last_xfer_bytes) / dt));
+				(double)(xfer_bytes - last.xfer_bytes) / dt));
 		char uptime[16];
 		(void)format_duration_seconds(
 			uptime, sizeof(uptime),
@@ -480,11 +485,15 @@ static void http_handle_stats(
 			"Uptime          : %s\n"
 			"Active          : %zu (+%zu)\n"
 			"Transferred     : %s\n"
-			"Traffic         : %s/s\n",
+			"Traffic         : %s/s\n"
+			"Requests        : %.1lf/s\n"
+			"Total Requests  : %zu\n",
 			timestamp, uptime, num_active, num_halfopen, xfer_total,
-			xfer_rate);
+			xfer_rate, request_rate, num_request);
 
-		last_xfer_bytes = xfer_bytes;
+		last.num_request = num_request;
+		last.num_halfopen = num_halfopen;
+		last.xfer_bytes = xfer_bytes;
 	}
 
 	struct server *restrict s = ctx->server;
@@ -500,7 +509,7 @@ static void http_handle_stats(
 			heap_total);
 	}
 
-	last = now;
+	last.tstamp = now;
 }
 
 static void http_handle_ruleset(
@@ -508,11 +517,6 @@ static void http_handle_ruleset(
 	struct url *restrict uri)
 {
 	UNUSED(loop);
-	const struct http_message *restrict hdr = &ctx->http_msg;
-	if (uri->query == NULL) {
-		http_write_error(ctx, HTTP_BAD_REQUEST);
-		return;
-	}
 	struct server *restrict s = ctx->server;
 	struct ruleset *ruleset = s->ruleset;
 	if (ruleset == NULL) {
@@ -523,7 +527,17 @@ static void http_handle_ruleset(
 		return;
 	}
 
-	if (strcmp(uri->query, "gc") == 0) {
+	const struct http_message *restrict hdr = &ctx->http_msg;
+	char *segment;
+	if (!url_path_segment(&uri->path, &segment)) {
+		http_write_error(ctx, HTTP_NOT_FOUND);
+		return;
+	}
+	if (strcmp(segment, "gc") == 0) {
+		if (uri->path != NULL) {
+			http_write_error(ctx, HTTP_NOT_FOUND);
+			return;
+		}
 		if (strcasecmp(hdr->req.method, "POST") != 0) {
 			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
 			return;
@@ -532,8 +546,11 @@ static void http_handle_ruleset(
 		http_write_rsphdr(ctx, HTTP_OK);
 		return;
 	}
-
-	if (strcmp(uri->query, "update") == 0) {
+	if (strcmp(segment, "update") == 0) {
+		if (uri->path != NULL) {
+			http_write_error(ctx, HTTP_NOT_FOUND);
+			return;
+		}
 		if (strcasecmp(hdr->req.method, "POST") != 0) {
 			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
 			return;
@@ -561,16 +578,29 @@ http_handle_restapi(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_write_error(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
-	if (strcmp(uri.path, "stats") == 0) {
+	char *segment;
+	if (!url_path_segment(&uri.path, &segment)) {
+		http_write_error(ctx, HTTP_BAD_REQUEST);
+		return;
+	}
+	if (strcmp(segment, "healthy") == 0) {
+		if (uri.path != NULL) {
+			http_write_error(ctx, HTTP_NOT_FOUND);
+			return;
+		}
+		http_write_rsphdr(ctx, HTTP_OK);
+		return;
+	}
+	if (strcmp(segment, "stats") == 0) {
+		if (uri.path != NULL) {
+			http_write_error(ctx, HTTP_NOT_FOUND);
+			return;
+		}
 		http_handle_stats(loop, ctx, &uri);
 		return;
 	}
-	if (strcmp(uri.path, "ruleset") == 0) {
+	if (strcmp(segment, "ruleset") == 0) {
 		http_handle_ruleset(loop, ctx, &uri);
-		return;
-	}
-	if (strcmp(uri.path, "healthy") == 0) {
-		http_write_rsphdr(ctx, HTTP_OK);
 		return;
 	}
 	http_write_error(ctx, HTTP_NOT_FOUND);
@@ -606,7 +636,7 @@ void http_api_serve(
 	http_start(loop, ctx);
 }
 
-size_t http_get_halfopen(void)
+void http_read_stats(struct stats *restrict out_stats)
 {
-	return http_num_halfopen;
+	*out_stats = stats;
 }

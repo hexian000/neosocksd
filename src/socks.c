@@ -12,6 +12,7 @@
 #include "ruleset.h"
 #include "transfer.h"
 #include "sockutil.h"
+#include "stats.h"
 #include "util.h"
 
 #include <netinet/in.h>
@@ -36,7 +37,7 @@ enum socks_state {
 	STATE_CONNECTED,
 };
 
-static size_t socks_num_halfopen = 0;
+static struct stats stats = { 0 };
 
 struct socks_ctx {
 	int accepted_fd, dialed_fd;
@@ -71,12 +72,12 @@ socks_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 	case STATE_HANDSHAKE2:
 		ev_timer_stop(loop, &ctx->w_timeout);
 		ev_io_stop(loop, &ctx->watcher);
-		socks_num_halfopen--;
+		stats.num_halfopen--;
 		return;
 	case STATE_CONNECT:
 		ev_timer_stop(loop, &ctx->w_timeout);
 		dialer_stop(&ctx->dialer, loop);
-		socks_num_halfopen--;
+		stats.num_halfopen--;
 		return;
 	case STATE_CONNECTED:
 		transfer_stop(loop, &ctx->uplink);
@@ -520,7 +521,8 @@ static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 	case ATYP_INET6:
 		return ruleset_route6(ctx->ruleset, request);
 	default:
-		FAIL();
+		LOGE_F("unsupported address type: %d", ctx->addr.type);
+		break;
 	}
 	return NULL;
 }
@@ -541,6 +543,7 @@ socks_recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 
 	ev_io_stop(loop, watcher);
+	stats.num_request++;
 
 	struct dialreq *req = make_dialreq(ctx);
 	if (req == NULL) {
@@ -598,7 +601,7 @@ static void socks_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ev_io_start(loop, w_read);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_start(loop, w_timeout);
-	socks_num_halfopen++;
+	stats.num_halfopen++;
 }
 
 void socks_serve(
@@ -616,7 +619,7 @@ void socks_serve(
 	socks_start(loop, ctx);
 }
 
-size_t socks_get_halfopen(void)
+void socks_read_stats(struct stats *restrict out_stats)
 {
-	return socks_num_halfopen;
+	*out_stats = stats;
 }
