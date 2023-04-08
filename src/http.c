@@ -16,12 +16,12 @@
 
 #include <ev.h>
 
-#include <stdlib.h>
 #include <unistd.h>
 #include <strings.h>
 #include <sys/socket.h>
 
 #include <stddef.h>
+#include <stdlib.h>
 #include <inttypes.h>
 
 static void
@@ -533,7 +533,7 @@ static void http_handle_ruleset(
 		http_write_error(ctx, HTTP_NOT_FOUND);
 		return;
 	}
-	if (strcmp(segment, "gc") == 0) {
+	if (strcmp(segment, "invoke") == 0) {
 		if (uri->path != NULL) {
 			http_write_error(ctx, HTTP_NOT_FOUND);
 			return;
@@ -542,7 +542,11 @@ static void http_handle_ruleset(
 			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
 			return;
 		}
-		ruleset_gc(ruleset);
+		LOGV_F("api: ruleset invoke\n%s", ctx->http_nxt);
+		if (!ruleset_invoke(ruleset, ctx->http_nxt)) {
+			http_write_error(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
 		http_write_rsphdr(ctx, HTTP_OK);
 		return;
 	}
@@ -560,6 +564,19 @@ static void http_handle_ruleset(
 			http_write_error(ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
+		http_write_rsphdr(ctx, HTTP_OK);
+		return;
+	}
+	if (strcmp(segment, "gc") == 0) {
+		if (uri->path != NULL) {
+			http_write_error(ctx, HTTP_NOT_FOUND);
+			return;
+		}
+		if (strcasecmp(hdr->req.method, "POST") != 0) {
+			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
+			return;
+		}
+		ruleset_gc(ruleset);
 		http_write_rsphdr(ctx, HTTP_OK);
 		return;
 	}

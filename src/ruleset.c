@@ -38,6 +38,63 @@ static struct ruleset *find_ruleset(lua_State *L)
 	return r;
 }
 
+static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
+{
+	assert(n > 0);
+	size_t len;
+	const char *direct = lua_tolstring(L, -1, &len);
+	struct dialaddr addr;
+	if (!dialaddr_set(&addr, direct, len)) {
+		LOGW("Lua script returned an invalid address");
+		return NULL;
+	}
+	lua_pop(L, 1);
+	n--;
+	struct dialreq *req = dialreq_new(&addr, (size_t)n);
+	if (req == NULL) {
+		return NULL;
+	}
+	for (int i = 0; i < n; i++) {
+		const char *s = lua_tolstring(L, -1, &len);
+		if (s == NULL) {
+			LOGE("ruleset function should return string");
+			dialreq_free(req);
+			lua_settop(L, 0);
+			return NULL;
+		}
+		if (!dialreq_proxy(req, PROTO_SOCKS4A, s, len)) {
+			dialreq_free(req);
+			lua_settop(L, 0);
+			return NULL;
+		}
+		lua_pop(L, 1);
+	}
+	return req;
+}
+
+/* invoke(code, dialreq...) */
+static int invoke(lua_State *L)
+{
+	if (lua_gettop(L) < 2) {
+		luaL_error(L, "invoke requires at least 2 arguments");
+	}
+	const char *code = lua_tostring(L, -1);
+	lua_pop(L, 1);
+	const int n = lua_gettop(L);
+	struct dialreq *req = pop_dialreq(L, n);
+	if (req == NULL) {
+		lua_settop(L, 0);
+		return 0;
+	}
+
+	struct ruleset *restrict r = find_ruleset(L);
+	UNUSED(r), UNUSED(code);
+	/* TODO: async invoke */
+
+	return 0;
+}
+
+/* resolve(host) */
 static int resolve(lua_State *L)
 {
 	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
@@ -81,6 +138,7 @@ static int resolve(lua_State *L)
 	return 1;
 }
 
+/* parse_ipv4(ipv4) */
 static int parse_ipv4(lua_State *L)
 {
 	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
@@ -98,6 +156,7 @@ static int parse_ipv4(lua_State *L)
 	return 1;
 }
 
+/* parse_ipv6(ipv6) */
 static int parse_ipv6(lua_State *L)
 {
 	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
@@ -142,6 +201,7 @@ ruleset_tick(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	lua_settop(L, 0);
 }
 
+/* setinterval(interval) */
 static int setinterval(lua_State *L)
 {
 	if (lua_gettop(L) != 1) {
@@ -165,6 +225,8 @@ static int setinterval(lua_State *L)
 static int luaopen_neosocksd(lua_State *L)
 {
 	lua_newtable(L);
+	lua_pushcfunction(L, invoke);
+	lua_setfield(L, -2, "invoke");
 	lua_pushcfunction(L, resolve);
 	lua_setfield(L, -2, "resolve");
 	lua_pushcfunction(L, parse_ipv4);
@@ -252,6 +314,24 @@ void ruleset_free(struct ruleset *restrict r)
 	free(r);
 }
 
+bool ruleset_invoke(struct ruleset *r, const char *code)
+{
+	LOGD_F("ruleset invoke: %zu bytes", strlen(code));
+	lua_State *restrict L = r->L;
+	if (luaL_loadstring(L, code) != LUA_OK) {
+		LOGE_F("ruleset load: %s", lua_tostring(L, -1));
+		lua_settop(L, 0);
+		return false;
+	}
+	if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+		LOGE_F("ruleset load: %s", lua_tostring(L, -1));
+		lua_settop(L, 0);
+		return false;
+	}
+	lua_settop(L, 0);
+	return true;
+}
+
 bool ruleset_load(struct ruleset *r, const char *rulestr)
 {
 	LOGD_F("ruleset load: %zu bytes", strlen(rulestr));
@@ -305,40 +385,6 @@ size_t ruleset_memused(struct ruleset *restrict r)
 {
 	return ((size_t)lua_gc(r->L, LUA_GCCOUNT) << 10u) |
 	       (size_t)lua_gc(r->L, LUA_GCCOUNTB);
-}
-
-static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
-{
-	assert(n > 0);
-	size_t len;
-	const char *direct = lua_tolstring(L, -1, &len);
-	struct dialaddr addr;
-	if (!dialaddr_set(&addr, direct, len)) {
-		LOGW("Lua script returned an invalid address");
-		return NULL;
-	}
-	lua_pop(L, 1);
-	n--;
-	struct dialreq *req = dialreq_new(&addr, (size_t)n);
-	if (req == NULL) {
-		return NULL;
-	}
-	for (int i = 0; i < n; i++) {
-		const char *s = lua_tolstring(L, -1, &len);
-		if (s == NULL) {
-			LOGE("ruleset function should return string");
-			dialreq_free(req);
-			lua_settop(L, 0);
-			return NULL;
-		}
-		if (!dialreq_proxy(req, PROTO_SOCKS4A, s, len)) {
-			dialreq_free(req);
-			lua_settop(L, 0);
-			return NULL;
-		}
-		lua_pop(L, 1);
-	}
-	return req;
 }
 
 static struct dialreq *rule_accept(const char *domain)
