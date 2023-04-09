@@ -277,40 +277,8 @@ struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf)
 	lua_pushlightuserdata(L, r);
 	lua_setfield(L, LUA_REGISTRYINDEX, "ruleset");
 
-	luaL_requiref(L, "_G", luaopen_base, 1);
-	lua_pop(L, 1);
-#ifdef LUA_MATHLIBNAME
-	luaL_requiref(L, LUA_MATHLIBNAME, luaopen_math, 1);
-	lua_pop(L, 1);
-#endif
-#ifdef LUA_STRLIBNAME
-	luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);
-	lua_pop(L, 1);
-#endif
-#ifdef LUA_TABLIBNAME
-	luaL_requiref(L, LUA_TABLIBNAME, luaopen_table, 1);
-	lua_pop(L, 1);
-#endif
-#ifdef LUA_DBLIBNAME
-	luaL_requiref(L, LUA_DBLIBNAME, luaopen_debug, 1);
-	lua_pop(L, 1);
-#endif
-#ifdef LUA_OSLIBNAME
-	luaL_requiref(L, LUA_OSLIBNAME, luaopen_os, 1);
-	lua_pop(L, 1);
-#endif
-#ifdef LUA_IOLIBNAME
-	luaL_requiref(L, LUA_IOLIBNAME, luaopen_io, 1);
-	lua_pop(L, 1);
-#endif
-#ifdef LUA_UTF8LIBNAME
-	luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8, 1);
-	lua_pop(L, 1);
-#endif
-#ifdef LUA_COMPAT_BITLIB
-	luaL_requiref(L, LUA_COMPAT_BITLIB, luaopen_bit32, 1);
-	lua_pop(L, 1);
-#endif
+	/* load all standard libraries */
+	luaL_openlibs(L);
 
 	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
 	lua_pop(L, 1);
