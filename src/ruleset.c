@@ -1,20 +1,22 @@
 #include "ruleset.h"
+#include "utils/minmax.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "dialer.h"
 #include "sockutil.h"
 #include "util.h"
+#include "luaconf.h"
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
 
 #include <ev.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include <assert.h>
 #include <math.h>
-#include <netinet/in.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -169,12 +171,21 @@ static int parse_ipv6(lua_State *L)
 		return 0;
 	}
 	lua_settop(L, 0);
-	const uint32_t *addr = (void *)&in6;
+
+	const lua_Unsigned *addr = (void *)&in6;
+#if LUA_MAXUNSIGNED == UINT64_MAX
+	lua_pushinteger(L, read_uint64((const void *)&addr[0]));
+	lua_pushinteger(L, read_uint64((const void *)&addr[1]));
+	return 2;
+#elif LUA_MAXUNSIGNED == UINT32_MAX
 	lua_pushinteger(L, read_uint32((const void *)&addr[0]));
 	lua_pushinteger(L, read_uint32((const void *)&addr[1]));
 	lua_pushinteger(L, read_uint32((const void *)&addr[2]));
 	lua_pushinteger(L, read_uint32((const void *)&addr[3]));
 	return 4;
+#else
+	_Static_assert(0, "bad luaconf");
+#endif
 }
 
 static void
@@ -207,17 +218,20 @@ static int setinterval(lua_State *L)
 	if (lua_gettop(L) != 1) {
 		luaL_error(L, "setinterval requires 1 argument");
 	}
-	const double interval = lua_tonumber(L, -1);
+	double interval = lua_tonumber(L, -1);
 	lua_pop(L, 1);
-	struct ruleset *restrict r = find_ruleset(L);
+	interval = CLAMP(interval, 1e-3, 1e+9);
 
+	struct ruleset *restrict r = find_ruleset(L);
 	struct ev_timer *restrict w_timer = &r->ticker;
 	ev_timer_stop(r->loop, w_timer);
-	if (isfinite(interval) && interval > 0.0) {
-		ev_timer_init(w_timer, ruleset_tick, interval, interval);
-		w_timer->data = r;
-		ev_timer_start(r->loop, w_timer);
+	if (!isnormal(interval)) {
+		return 0;
 	}
+
+	ev_timer_init(w_timer, ruleset_tick, interval, interval);
+	w_timer->data = r;
+	ev_timer_start(r->loop, w_timer);
 
 	return 0;
 }

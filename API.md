@@ -16,66 +16,58 @@ Version: dev
 
 Check server liveness.
 
-```
-Path: /healthy
-Method: Any
-Reply: HTTP 200
-```
+- **Path**: /healthy
+- **Method**: Any
+- **Status**: HTTP 200
 
 ### Server Statistics
 
 Calculate server statistics since the last call.
 
-```
-Path: /stats
-Method: GET
-Reply: HTTP 200
-```
+- **Path**: /stats
+- **Method**: GET
+- **Status**: HTTP 200
+- **Response**: Server statistics in plain text.
 
 ### Ruleset Invoke
 
 Run the posted script.
 
-```
-Path: /ruleset/invoke
-Method: POST
-Content: Lua script
-Reply: HTTP 200, HTTP 405, HTTP 500
-```
+- **Path**: /ruleset/invoke
+- **Method**: POST
+- **Content**: Lua script
+- **Status**: HTTP 200, HTTP 405, HTTP 500
 
 ### Ruleset Update
 
 Replace ruleset with the posted script.
 
-```
-Path: /ruleset/update
-Method: POST
-Content: Lua ruleset script
-Reply: HTTP 200, HTTP 405, HTTP 500
-```
+- **Path**: /ruleset/update
+- **Method**: POST
+- **Content**: Lua ruleset script
+- **Status**: HTTP 200, HTTP 405, HTTP 500
 
 ### Ruleset GC
 
 Trigger a full GC.
 
-```
-Path: /ruleset/gc
-Method: POST
-Content: None
-Reply: HTTP 200, HTTP 405
-```
+- **Path**: /ruleset/gc
+- **Method**: POST
+- **Content**: None
+- **Status**: HTTP 200, HTTP 405
 
 ## Ruleset Callbacks
-
 ### ruleset.resolve
 
-**Defination**
+**Synopsis**
 
 ```Lua
-ruleset.resolve(domain)
+function ruleset.resolve(domain)
+    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+end
 ```
 
-**Brief**
+**Description**
 
 Process a host name request. Specifically:
 - Any HTTP CONNECT
@@ -84,24 +76,27 @@ Process a host name request. Specifically:
 
 **Params**
 
-    domain: full qualified domain name and port, like "www.example.org:80"
+- `domain`: full qualified domain name and port, like `"www.example.org:80"`
 
 **Returns**
 
-    addr: replace the request
-    addr, proxy: forward the request through another neosocksd
-    addr, proxyN, ..., proxy1: forward the request through proxy chain
-    nil: reject the request
+- `addr`: replace the request
+- `addr, proxy`: forward the request through another neosocksd
+- `addr, proxyN, ..., proxy1`: forward the request through proxy chain
+- `nil`: reject the request
+
 
 ### ruleset.route
 
-**Defination**
+**Synopsis**
 
 ```Lua
-ruleset.route(addr)
+function ruleset.route(addr)
+    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+end
 ```
 
-**Brief**
+**Description**
 
 Process an IPv4 request. Specifically:
 - SOCKS5 with IPv4 address
@@ -109,21 +104,24 @@ Process an IPv4 request. Specifically:
 
 **Params**
 
-    addr: address and port, like "8.8.8.8:53"
+- `addr`: address and port, like `"203.0.113.1:80"`
 
 **Returns**
 
-    Same as ruleset.resolve
+See [ruleset.resolve](#rulesetresolve)
+
 
 ### ruleset.route6
 
-**Defination**
+**Synopsis**
 
 ```Lua
-ruleset.route6(addr)
+function ruleset.route6(addr)
+    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+end
 ```
 
-**Brief**
+**Description**
 
 Process an IPv6 request. Specifically:
 
@@ -131,41 +129,112 @@ Process an IPv6 request. Specifically:
 
 **Params**
 
-    addr: address and port, like "8.8.8.8:53"
+- `addr`: address and port, like `"[2001:DB8::1]:80"`
 
 **Returns**
 
-    Same as ruleset.resolve
+See [ruleset.resolve](#rulesetresolve)
+
 
 ### ruleset.tick
 
-**Defination**
+**Synopsis**
 
 ```Lua
-ruleset.tick(now)
+function ruleset.tick(now)
+    -- ......
+end
 ```
 
-**Brief**
+**Description**
 
 Periodic timer callback.
 
 **Params**
 
-    now: current timestamp in seconds
+- `now`: current timestamp in seconds
 
 **Returns**
 
-    Ignored
+Ignored
 
 
 ## Lua API
 
-### neosocksd.invoke
-
 ### neosocksd.resolve
+
+**Synopsis**
+
+```Lua
+local addr = neosocksd.resolve("www.example.com")
+-- got addr like "203.0.113.1" or "2001:DB8::1"
+```
+
+**Description**
+
+Resolves a host name locally and blocks until resolution succeeds or times out. IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
+
 
 ### neosocksd.parse_ipv4
 
+**Synopsis**
+
+```Lua
+local subnet = neosocksd.parse_ipv4("169.254.0.0")
+local mask = 0xFFFF0000 -- 169.254.0.0/16
+local ip = neosocksd.parse_ipv4("203.0.113.1")
+if (ip & mask) == subnet then
+    -- ......
+end
+```
+
+**Description**
+
+Parses an IPv4 address into integers.
+
+
 ### neosocksd.parse_ipv6
 
+**Synopsis**
+
+```Lua
+-- with 64-bit Lua integers
+local subnet1, subnet2 = neosocksd.parse_ipv6("FE80::")
+local mask1 = 0xFFC0000000000000 -- fe80::/10
+local ip1, ip2 = neosocksd.parse_ipv6("2001:DB8::1")
+if (ip1 & mask1) == subnet1 then
+    -- ......
+end
+```
+
+**Description**
+
+Parses an IPv6 address into integers.
+
+
 ### neosocksd.setinterval
+
+**Synopsis**
+
+```Lua
+neosocksd.setinterval(1.5)
+```
+
+**Description**
+
+Set tick interval in seconds, see also [ruleset.tick](#rulesettick).
+
+The valid interval range is `[1e-3, 1e+9]`, use `setinterval(0)` to stop the timer tick.
+
+
+### neosocksd.invoke
+
+**Synopsis**
+
+```Lua
+neosocksd.invoke("")
+```
+
+**Description**
+
+TODO
