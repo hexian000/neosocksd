@@ -53,7 +53,7 @@ _G.route = {
     [1] = {"^192%.168%.32%.", {"192.168.32.1:1080"}},
     -- jump to region2 via region1 gateway
     [2] = {"^192%.168%.33%.", {"192.168.33.1:1080", "192.168.32.1:1080"}},
-    -- other lan address
+    -- access other lan addresses directly
     [3] = {"^192%.168%.", {}}
 }
 _G.route_default = {"192.168.1.1:1080"}

@@ -17,7 +17,7 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 - RESTful API for monitoring and updating rules online.
 - IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
 - Minimized resource usage, embedded systems friendly.
-- Compliant with: ISO C11, POSIX.1-2008.
+- Conforming to: ISO C11, POSIX.1-2008.
 
 ## Basic Usage
 
@@ -37,139 +37,11 @@ Start the server with a Lua script named "ruleset.lua":
 ./neosocksd -4 -l 0.0.0.0:1080 --api 127.0.0.1:9080 -r ruleset.lua
 ```
 
-The following code snippets show how to use rulesets to manipulate server behavior.
+- Full code example at [ruleset.lua](ruleset.lua)
+- Lua syntax and standard libraries reference: [Lua 5.4 Reference Manual](https://www.lua.org/manual/5.4/manual.html)
+- API reference: [neosocksd API Reference](API.md)
 
-Full code example at [ruleset.lua](ruleset.lua)
-
-Syntax and standard libraries reference: [Lua 5.4 Reference Manual](https://www.lua.org/manual/5.4/manual.html)
-
-```Lua
---[[ global configs ]]
-_G.NDEBUG = _G.NDEBUG or true
-
-function _G.is_enabled()
-    return true
-end
-
-_G.hosts = {
-    ["gateway.region1.lan"] = "192.168.32.1",
-    ["host123.region1.lan"] = "192.168.32.123",
-    ["gateway.region2.lan"] = "192.168.33.1",
-    ["host123.region2.lan"] = "192.168.33.123"
-}
-
-_G.redirect = {
-    -- reject loopback or link-local
-    [1] = {"^127%.", {nil}},
-    [2] = {"^169%.254%.", {nil}}
-}
-
-_G.route = {
-    -- region1 gateway
-    [1] = {"^192%.168%.32%.", {"192.168.32.1:1080"}},
-    -- jump to region2 via region1 gateway
-    [2] = {"^192%.168%.33%.", {"192.168.33.1:1080", "192.168.32.1:1080"}},
-    -- other lan address
-    [3] = {"^192%.168%.", {}}
-}
-_G.route_default = {"192.168.1.1:1080"}
-
---[[ ruleset functions ]]
-local ruleset = {}
-
---[[
-    ruleset.resolve(domain) process a host name request
-        i.e. HTTP CONNECT / SOCKS5 with host name ("socks5h" in cURL) / SOCKS4A
-    <domain>: full qualified domain name and port, like "www.example.org:80"
-    return <addr>: replace the request
-    return <addr>, <proxy>: forward the request through another neosocksd
-    return <addr>, <proxyN>, ..., <proxy1>: forward the request through proxy chain
-    return nil: reject the request
-]]
-function ruleset.resolve(domain)
-    if not _G.is_enabled() then
-        printf("ruleset.resolve: ruleset disabled, reject %q", domain)
-        return nil
-    end
-    printf("ruleset.resolve: %q", domain)
-    local host, port = splithostport(domain)
-    host = string.lower(host)
-    -- redirect API domain
-    if host == "neosocksd.lan:80" then
-        return "127.0.0.1:9080"
-    end
-    -- lookup in hosts table
-    local entry = hosts[host]
-    if entry then
-        return ruleset.route(string.format("%s:%s", entry, port))
-    end
-    -- resolve lan address locally
-    if host:endswith(".lan") or host:endswith(".local") then
-        local addr = neosocksd.resolve(host)
-        return ruleset.route(string.format("%s:%s", addr, port))
-    end
-    -- accept
-    return domain, table.unpack(route_default)
-end
-
---[[
-    ruleset.route(addr) process an IPv4 request
-        i.e. SOCKS5 with IPv4 / SOCKS4
-    <addr>: address and port, like "8.8.8.8:53"
-    returns: same as ruleset.resolve(addr)
-]]
-function ruleset.route(addr)
-    if not _G.is_enabled() then
-        printf("ruleset.route: ruleset disabled, reject %q", addr)
-        return nil
-    end
-    printf("ruleset.route: %q", addr)
-    -- redirect
-    for _, rule in ipairs(redirect) do
-        local pattern, target = table.unpack(rule)
-        if addr:find(pattern) then
-            return table.unpack(target)
-        end
-    end
-    local host, port = splithostport(addr)
-    -- check route table
-    for _, rule in ipairs(route) do
-        local pattern, route = table.unpack(rule)
-        if host:find(pattern) then
-            return addr, table.unpack(route)
-        end
-    end
-    -- accept
-    return addr, table.unpack(route_default)
-end
-
---[[
-    ruleset.route6(addr) process an IPv6 request
-        i.e. SOCKS5 with IPv6
-    <addr>: address and port, like "[::1]:80"
-    returns: same as ruleset.resolve(addr)
-]]
-function ruleset.route6(addr)
-    if not _G.is_enabled() then
-        printf("ruleset.route6: ruleset disabled, reject %q", addr)
-        return nil
-    end
-    printf("ruleset.route6: %q", addr)
-    return addr, table.unpack(route_default)
-end
-
---[[
-    ruleset.tick(now)
-    <now>: current timestamp in seconds
-    returns: ignored
-]]
-function ruleset.tick(now)
-    printf("ruleset.tick: %.03f", now)
-end
--- neosocksd.setinterval(1.0)
-```
-
-Access RESTful API through the proxy (as defined in the ruleset above):
+Access RESTful API through the proxy as defined in [ruleset.lua](ruleset.lua):
 
 ```sh
 curl -x socks5h://127.0.0.1:1080 http://neosocksd.lan/stats

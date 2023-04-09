@@ -314,6 +314,10 @@ void ruleset_free(struct ruleset *restrict r)
 	free(r);
 }
 
+struct invoke_ctx {
+	struct dialer dialer;
+};
+
 bool ruleset_invoke(struct ruleset *r, const char *code)
 {
 	LOGD_F("ruleset invoke: %zu bytes", strlen(code));
