@@ -11,8 +11,8 @@
 #include "sockutil.h"
 #include "util.h"
 
-#include <sys/socket.h>
 #include <ev.h>
+#include <sys/socket.h>
 
 #include <stddef.h>
 #include <stdio.h>
@@ -38,6 +38,7 @@ static struct {
 	int verbosity;
 	int resolve_pf;
 	const char *user_name;
+	double timeout;
 
 	struct ev_signal w_sighup;
 	struct ev_signal w_sigint;
@@ -45,6 +46,7 @@ static struct {
 } args = {
 	.verbosity = LOG_LEVEL_INFO,
 	.resolve_pf = PF_UNSPEC,
+	.timeout = 60.0,
 };
 
 static void
@@ -73,6 +75,7 @@ static void print_usage(const char *argv0)
 #endif
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --api <bind_address>       RESTful API for monitoring\n"
+		"  -t, --timeout <seconds>    Maximum time in seconds that a whole request can take (default: 60.0)\n"
 		"  -u, --user <name>          switch to the specified limited user, e.g. nobody\n"
 		"  -v, --verbose              increase verbosity\n"
 		"  -s, --silence              decrease verbosity\n"
@@ -89,9 +92,9 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #define OPT_REQUIRE_ARG(argc, argv, i)                                         \
 	do {                                                                   \
 		if ((i) + 1 >= (argc)) {                                       \
-			FAILMSGF(                                              \
-				"option \"%s\" requires an argument\n",        \
-				(argv)[(i)]);                                  \
+			LOGF_F("option \"%s\" requires an argument\n",         \
+			       (argv)[(i)]);                                   \
+			exit(EXIT_FAILURE);                                    \
 		}                                                              \
 	} while (false)
 
@@ -162,6 +165,20 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			args.user_name = argv[++i];
 			continue;
 		}
+		if (strcmp(argv[i], "-t") == 0 ||
+		    strcmp(argv[i], "--timeout") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			if (sscanf(argv[i], "%lf", &args.timeout) != 1) {
+				LOGF_F("can't parse \"%s\"\n", argv[i]);
+				exit(EXIT_FAILURE);
+			}
+			if (!(1e-3 <= args.timeout && args.timeout <= 1e+9)) {
+				LOGF_F("invalid timeout \"%s\"\n", argv[i]);
+				exit(EXIT_FAILURE);
+			}
+			continue;
+		}
 		if (strcmp(argv[i], "-v") == 0 ||
 		    strcmp(argv[i], "--verbose") == 0) {
 			args.verbosity++;
@@ -175,7 +192,8 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		if (strcmp(argv[i], "--") == 0) {
 			continue;
 		}
-		FAILMSGF("unknown argument: \"%s\"", argv[i]);
+		LOGF_F("unknown argument: \"%s\"", argv[i]);
+		exit(EXIT_FAILURE);
 	}
 
 #undef OPT_REQUIRE_ARG
@@ -202,8 +220,7 @@ int main(int argc, char **argv)
 		    },
 		    NULL) != 0) {
 		const int err = errno;
-		LOGF(strerror(err));
-		exit(EXIT_FAILURE);
+		FAILMSG(strerror(err));
 	}
 	{
 		struct ev_signal *restrict w_sighup = &args.w_sighup;
@@ -229,20 +246,22 @@ int main(int argc, char **argv)
 #if WITH_TPROXY
 		.transparent = args.tproxy,
 #endif
-		.timeout = 60.0,
+		.timeout = args.timeout,
 	};
 	struct ruleset *ruleset = NULL;
 	if (args.ruleset != NULL) {
 		ruleset = ruleset_new(loop, &conf);
 		CHECKOOM(ruleset);
 		if (!ruleset_loadfile(ruleset, args.ruleset)) {
-			FAILMSGF("unable to load ruleset: %s", args.ruleset);
+			LOGF_F("unable to load ruleset: %s", args.ruleset);
+			exit(EXIT_FAILURE);
 		}
 	}
 
 	sockaddr_max_t bindaddr;
 	if (!parse_bindaddr(&bindaddr, args.listen)) {
-		FAILMSGF("unable to parse address: %s", args.listen);
+		LOGF_F("unable to parse address: %s", args.listen);
+		exit(EXIT_FAILURE);
 	}
 
 	serve_fn serve_cb = socks_serve;

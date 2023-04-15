@@ -1,9 +1,11 @@
 #include "ruleset.h"
+#include "utils/buffer.h"
 #include "utils/minmax.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "dialer.h"
+#include "http.h"
 #include "sockutil.h"
 #include "util.h"
 #include "luaconf.h"
@@ -17,6 +19,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,14 +43,32 @@ static struct ruleset *find_ruleset(lua_State *L)
 	return r;
 }
 
+static int find_callback(lua_State *restrict L, int idx)
+{
+	const char *func = lua_topointer(L, idx);
+	if (lua_getglobal(L, "ruleset") != LUA_TTABLE) {
+		lua_pop(L, 1);
+		return 0;
+	}
+	if (lua_getfield(L, -1, func) != LUA_TFUNCTION) {
+		lua_pop(L, 2);
+		return 0;
+	}
+	lua_remove(L, -2);
+	return 1;
+}
+
 static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 {
-	assert(n > 0);
+	if (n < 1 || !lua_isstring(L, -1)) {
+		LOGD("invalid dialreq");
+		return NULL;
+	}
 	size_t len;
 	const char *direct = lua_tolstring(L, -1, &len);
 	struct dialaddr addr;
 	if (!dialaddr_set(&addr, direct, len)) {
-		LOGW("Lua script returned an invalid address");
+		LOGD("invalid dialreq");
 		return NULL;
 	}
 	lua_pop(L, 1);
@@ -57,16 +78,19 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 		return NULL;
 	}
 	for (int i = 0; i < n; i++) {
+		if (!lua_isstring(L, -1)) {
+			LOGD("invalid dialreq");
+			dialreq_free(req);
+			return NULL;
+		}
 		const char *s = lua_tolstring(L, -1, &len);
 		if (s == NULL) {
-			LOGE("ruleset function should return string");
+			LOGD("invalid dialreq");
 			dialreq_free(req);
-			lua_settop(L, 0);
 			return NULL;
 		}
 		if (!dialreq_proxy(req, PROTO_SOCKS4A, s, len)) {
 			dialreq_free(req);
-			lua_settop(L, 0);
 			return NULL;
 		}
 		lua_pop(L, 1);
@@ -74,43 +98,51 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 	return req;
 }
 
-/* invoke(code, dialreq...) */
-static int invoke(lua_State *L)
+static int ruleset_pcall(
+	lua_State *restrict L, lua_CFunction func, int nargs, int nresults, ...)
 {
-	if (lua_gettop(L) < 2) {
-		luaL_error(L, "invoke requires at least 2 arguments");
+	lua_settop(L, 0);
+	lua_pushcfunction(L, func);
+	va_list args;
+	va_start(args, nresults);
+	for (int i = 0; i < nargs; i++) {
+		lua_pushlightuserdata(L, va_arg(args, void *));
 	}
-	const char *code = lua_tostring(L, -1);
-	lua_pop(L, 1);
+	va_end(args);
+	return lua_pcall(L, nargs, nresults, 0);
+}
+
+/* invoke(code, addr, proxyN, ..., proxy1) */
+static int invoke_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TSTRING);
+	luaL_checktype(L, 2, LUA_TSTRING);
 	const int n = lua_gettop(L);
-	struct dialreq *req = pop_dialreq(L, n);
-	if (req == NULL) {
-		lua_settop(L, 0);
-		return 0;
+	for (int i = 2; i < n; i++) {
+		luaL_checktype(L, i + 1, LUA_TSTRING);
 	}
-
+	struct dialreq *req = pop_dialreq(L, n - 1);
+	if (req == NULL) {
+		luaL_error(L, "invoke failed");
+	}
 	struct ruleset *restrict r = find_ruleset(L);
-	UNUSED(r), UNUSED(code);
-	/* TODO: async invoke */
-
+	size_t len;
+	const char *code = lua_tolstring(L, 1, &len);
+	(void)http_invoke(r->loop, r->conf, req, code, len);
 	return 0;
 }
 
 /* resolve(host) */
-static int resolve(lua_State *L)
+static int resolve_(lua_State *restrict L)
 {
-	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
-		luaL_error(L, "resolve requires 1 string argument");
-	}
-	const char *s = lua_tostring(L, -1);
+	luaL_checktype(L, 1, LUA_TSTRING);
+	const char *s = lua_tostring(L, 1);
 	struct ruleset *restrict r = find_ruleset(L);
 	sockaddr_max_t addr;
 	if (!resolve_hostname(&addr, s, r->conf->resolve_pf)) {
 		const int err = errno;
-		luaL_error(L, "neosocksd.resolve: %s", strerror(err));
-		return 0;
+		luaL_error(L, "%s", strerror(err));
 	}
-	lua_settop(L, 0);
 	const int af = addr.sa.sa_family;
 	switch (af) {
 	case AF_INET: {
@@ -119,7 +151,7 @@ static int resolve(lua_State *L)
 			inet_ntop(af, &addr.in.sin_addr, buf, sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
-			luaL_error(L, strerror(err));
+			luaL_error(L, "%s", strerror(err));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -129,7 +161,7 @@ static int resolve(lua_State *L)
 			inet_ntop(af, &addr.in6.sin6_addr, buf, sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
-			luaL_error(L, strerror(err));
+			luaL_error(L, "%s", strerror(err));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -141,86 +173,72 @@ static int resolve(lua_State *L)
 }
 
 /* parse_ipv4(ipv4) */
-static int parse_ipv4(lua_State *L)
+static int parse_ipv4_(lua_State *L)
 {
-	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
-		luaL_error(L, "parse_ipv4 requires 1 string argument");
-	}
-	const char *s = lua_tostring(L, -1);
+	luaL_checktype(L, 1, LUA_TSTRING);
+	const char *s = lua_tostring(L, 1);
 	struct in_addr in;
 	if (inet_pton(AF_INET, s, &in) != 1) {
-		lua_settop(L, 0);
 		return 0;
 	}
-	lua_settop(L, 0);
 	const uint32_t *addr = (void *)&in;
 	lua_pushinteger(L, read_uint32((const void *)&addr[0]));
 	return 1;
 }
 
 /* parse_ipv6(ipv6) */
-static int parse_ipv6(lua_State *L)
+static int parse_ipv6_(lua_State *L)
 {
-	if (lua_gettop(L) != 1 || lua_type(L, -1) != LUA_TSTRING) {
-		luaL_error(L, "parse_ipv6 requires 1 string argument");
-	}
-	const char *s = lua_tostring(L, -1);
+	luaL_checktype(L, 1, LUA_TSTRING);
+	const char *s = lua_tostring(L, 1);
 	struct in6_addr in6;
 	if (inet_pton(AF_INET6, s, &in6) != 1) {
-		lua_settop(L, 0);
 		return 0;
 	}
-	lua_settop(L, 0);
-
 	const lua_Unsigned *addr = (void *)&in6;
-#if LUA_MAXUNSIGNED == UINT64_MAX
+#if LUA_MAXUNSIGNED >= UINT64_MAX
 	lua_pushinteger(L, read_uint64((const void *)&addr[0]));
 	lua_pushinteger(L, read_uint64((const void *)&addr[1]));
 	return 2;
-#elif LUA_MAXUNSIGNED == UINT32_MAX
+#else
 	lua_pushinteger(L, read_uint32((const void *)&addr[0]));
 	lua_pushinteger(L, read_uint32((const void *)&addr[1]));
 	lua_pushinteger(L, read_uint32((const void *)&addr[2]));
 	lua_pushinteger(L, read_uint32((const void *)&addr[3]));
 	return 4;
-#else
-	_Static_assert(0, "bad luaconf");
 #endif
 }
 
-static void
-ruleset_tick(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+static int ruleset_tick_(lua_State *restrict L)
+{
+	if (find_callback(L, 1) != 1) {
+		return 0;
+	}
+	lua_replace(L, 1);
+	lua_pushnumber(L, *(ev_tstamp *)lua_topointer(L, 2));
+	lua_replace(L, 2);
+	lua_call(L, 1, 0);
+	return 0;
+}
+
+static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	UNUSED(revents);
 	struct ruleset *restrict r = watcher->data;
 	lua_State *restrict L = r->L;
-	if (lua_getglobal(L, "ruleset") != LUA_TTABLE) {
-		lua_settop(L, 0);
-		return;
-	}
-	if (lua_getfield(L, -1, "tick") != LUA_TFUNCTION) {
-		lua_settop(L, 0);
-		return;
-	}
-	lua_remove(L, -2);
-	lua_pushnumber(L, ev_now(loop));
-	if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+	ev_tstamp now = ev_now(loop);
+	const int ret = ruleset_pcall(L, ruleset_tick_, 2, 0, "tick", &now);
+	if (ret != LUA_OK) {
 		LOGE_F("ruleset.tick: %s", lua_tostring(L, -1));
-		lua_settop(L, 0);
 		return;
 	}
-	lua_settop(L, 0);
 }
 
 /* setinterval(interval) */
-static int setinterval(lua_State *L)
+static int setinterval_(lua_State *L)
 {
-	if (lua_gettop(L) != 1) {
-		luaL_error(L, "setinterval requires 1 argument");
-	}
-	double interval = lua_tonumber(L, -1);
-	lua_pop(L, 1);
-	interval = CLAMP(interval, 1e-3, 1e+9);
+	luaL_checktype(L, 1, LUA_TNUMBER);
+	double interval = lua_tonumber(L, 1);
 
 	struct ruleset *restrict r = find_ruleset(L);
 	struct ev_timer *restrict w_timer = &r->ticker;
@@ -229,27 +247,44 @@ static int setinterval(lua_State *L)
 		return 0;
 	}
 
-	ev_timer_init(w_timer, ruleset_tick, interval, interval);
+	interval = CLAMP(interval, 1e-3, 1e+9);
+	ev_timer_init(w_timer, tick_cb, interval, interval);
 	w_timer->data = r;
 	ev_timer_start(r->loop, w_timer);
-
 	return 0;
 }
 
 static int luaopen_neosocksd(lua_State *L)
 {
 	lua_newtable(L);
-	lua_pushcfunction(L, invoke);
+	lua_pushcfunction(L, invoke_);
 	lua_setfield(L, -2, "invoke");
-	lua_pushcfunction(L, resolve);
+	lua_pushcfunction(L, resolve_);
 	lua_setfield(L, -2, "resolve");
-	lua_pushcfunction(L, parse_ipv4);
+	lua_pushcfunction(L, parse_ipv4_);
 	lua_setfield(L, -2, "parse_ipv4");
-	lua_pushcfunction(L, parse_ipv6);
+	lua_pushcfunction(L, parse_ipv6_);
 	lua_setfield(L, -2, "parse_ipv6");
-	lua_pushcfunction(L, setinterval);
+	lua_pushcfunction(L, setinterval_);
 	lua_setfield(L, -2, "setinterval");
 	return 1;
+}
+
+static int ruleset_luainit_(lua_State *L)
+{
+	assert(lua_gettop(L) == 1);
+	lua_setfield(L, LUA_REGISTRYINDEX, "ruleset");
+	/* load all standard libraries */
+	luaL_openlibs(L);
+	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
+	lua_pop(L, 1);
+	lua_pushboolean(L, !LOGLEVEL(LOG_LEVEL_DEBUG));
+	lua_setglobal(L, "NDEBUG");
+	/* prefer generational GC on supported lua versions */
+#ifdef LUA_GCGEN
+	lua_gc(L, LUA_GCGEN, 0, 0);
+#endif
+	return 0;
 }
 
 struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf)
@@ -260,7 +295,6 @@ struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf)
 	}
 	lua_State *restrict L = luaL_newstate();
 	if (L == NULL) {
-		LOGOOM();
 		ruleset_free(r);
 		return NULL;
 	}
@@ -270,18 +304,19 @@ struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf)
 	{
 		/* initialize in advance to prevent undefined behavior */
 		struct ev_timer *restrict w_timer = &r->ticker;
-		ev_timer_init(w_timer, ruleset_tick, 1.0, 1.0);
+		ev_timer_init(w_timer, tick_cb, 1.0, 1.0);
 		w_timer->data = r;
 	}
 
-	lua_pushlightuserdata(L, r);
-	lua_setfield(L, LUA_REGISTRYINDEX, "ruleset");
-
-	/* load all standard libraries */
-	luaL_openlibs(L);
-
-	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
-	lua_pop(L, 1);
+	switch (ruleset_pcall(L, ruleset_luainit_, 1, 0, (void *)r)) {
+	case LUA_OK:
+		break;
+	case LUA_ERRMEM:
+		ruleset_free(r);
+		return NULL;
+	default:
+		FAIL();
+	}
 	return r;
 }
 
@@ -296,84 +331,93 @@ void ruleset_free(struct ruleset *restrict r)
 	free(r);
 }
 
-struct invoke_ctx {
-	struct dialer dialer;
-};
-
-bool ruleset_invoke(struct ruleset *r, const char *code)
+static int ruleset_invoke_(lua_State *restrict L)
 {
-	LOGD_F("ruleset invoke: %zu bytes", strlen(code));
-	lua_State *restrict L = r->L;
-	if (luaL_loadstring(L, code) != LUA_OK) {
-		LOGE_F("ruleset load: %s", lua_tostring(L, -1));
-		lua_settop(L, 0);
-		return false;
+	const char *code = lua_topointer(L, 1);
+	const size_t len = *(size_t *)lua_topointer(L, 2);
+	lua_pop(L, 2);
+	if (luaL_loadbuffer(L, code, len, "=rpc") != LUA_OK) {
+		lua_error(L);
 	}
-	if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-		LOGE_F("ruleset load: %s", lua_tostring(L, -1));
-		lua_settop(L, 0);
-		return false;
-	}
-	lua_settop(L, 0);
-	return true;
+	lua_call(L, 0, 0);
+	lua_pushboolean(L, 1);
+	return 1;
 }
 
-bool ruleset_load(struct ruleset *r, const char *rulestr)
+static int ruleset_load_(lua_State *restrict L)
 {
-	LOGD_F("ruleset load: %zu bytes", strlen(rulestr));
+	const char *code = lua_topointer(L, 1);
+	const size_t len = *(size_t *)lua_topointer(L, 2);
+	lua_pop(L, 2);
+	if (luaL_loadbuffer(L, code, len, "=ruleset") != LUA_OK) {
+		lua_error(L);
+	}
+	lua_call(L, 0, 1);
+	if (!lua_istable(L, -1)) {
+		lua_pushboolean(L, 0);
+		return 1;
+	}
+	lua_setglobal(L, "ruleset");
+	lua_pushboolean(L, 1);
+	return 1;
+}
+
+static int ruleset_loadfile_(lua_State *restrict L)
+{
+	const char *filename = lua_topointer(L, 1);
+	lua_pop(L, 2);
+	if (luaL_loadfile(L, filename) != LUA_OK) {
+		lua_error(L);
+	}
+	lua_call(L, 0, 1);
+	if (!lua_istable(L, -1)) {
+		lua_pushboolean(L, 0);
+		return 1;
+	}
+	lua_setglobal(L, "ruleset");
+	lua_pushboolean(L, 1);
+	return 1;
+}
+
+static bool dispatch_exec(
+	struct ruleset *restrict r, lua_CFunction func, const char *method,
+	const char *code, const size_t len)
+{
 	lua_State *restrict L = r->L;
-	if (luaL_loadstring(L, rulestr) != LUA_OK) {
-		LOGE_F("ruleset load: %s", lua_tostring(L, -1));
-		lua_settop(L, 0);
+	const int ret =
+		ruleset_pcall(L, func, 2, 1, (void *)code, (void *)&len);
+	if (ret != LUA_OK) {
+		LOGE_F("ruleset %s: %s", method, lua_tostring(L, -1));
 		return false;
 	}
-	if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-		LOGE_F("ruleset load: %s", lua_tostring(L, -1));
-		lua_settop(L, 0);
-		return false;
-	}
-	/* user may load a patch that don't need to replace the whole ruleset object */
-	if (lua_istable(L, -1)) {
-		lua_setglobal(L, "ruleset");
-	}
-	lua_settop(L, 0);
-	return true;
+	return lua_toboolean(L, -1);
+}
+
+bool ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
+{
+	LOGD_F("ruleset invoke: %zu bytes", len);
+	return dispatch_exec(r, ruleset_invoke_, "invoke", code, len);
+}
+
+bool ruleset_load(struct ruleset *r, const char *code, const size_t len)
+{
+	LOGD_F("ruleset load: %zu bytes", len);
+	return dispatch_exec(r, ruleset_load_, "load", code, len);
 }
 
 bool ruleset_loadfile(struct ruleset *r, const char *filename)
 {
-	lua_State *restrict L = r->L;
-	if (luaL_loadfile(L, filename) != LUA_OK) {
-		LOGE_F("ruleset load: %s", lua_tostring(L, -1));
-		lua_settop(L, 0);
-		return false;
-	}
-	if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-		LOGE_F("ruleset load: %s", lua_tostring(L, -1));
-		lua_settop(L, 0);
-		return false;
-	}
-	if (!lua_istable(L, -1)) {
-		lua_settop(L, 0);
-		return false;
-	}
-	lua_setglobal(L, "ruleset");
-	lua_settop(L, 0);
-	return true;
+	return dispatch_exec(r, ruleset_loadfile_, "loadfile", filename, 0);
 }
 
 void ruleset_gc(struct ruleset *restrict r)
 {
-	lua_gc(r->L, LUA_GCCOLLECT);
+	lua_State *restrict L = r->L;
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT);
 }
 
-size_t ruleset_memused(struct ruleset *restrict r)
-{
-	return ((size_t)lua_gc(r->L, LUA_GCCOUNT) << 10u) |
-	       (size_t)lua_gc(r->L, LUA_GCCOUNTB);
-}
-
-static struct dialreq *rule_accept(const char *domain)
+static struct dialreq *request_accept(const char *domain)
 {
 	struct dialaddr addr;
 	if (!dialaddr_set(&addr, domain, strlen(domain))) {
@@ -382,56 +426,99 @@ static struct dialreq *rule_accept(const char *domain)
 	return dialreq_new(&addr, 0);
 }
 
-static struct dialreq *
-ruleset_call(struct ruleset *restrict r, const char *func, const char *request)
+static int ruleset_request_(lua_State *restrict L)
 {
-	lua_State *restrict L = r->L;
-	if (lua_getglobal(L, "ruleset") != LUA_TTABLE) {
-		lua_settop(L, 0);
-		return rule_accept(request);
+	const char *func = lua_topointer(L, 1);
+	const char *request = lua_topointer(L, 2);
+	if (find_callback(L, 1) != 1) {
+		struct dialreq *req = request_accept(request);
+		lua_pushlightuserdata(L, req);
+		return 1;
 	}
-	if (lua_getfield(L, -1, func) != LUA_TFUNCTION) {
-		lua_settop(L, 0);
-		return rule_accept(request);
-	}
-	lua_remove(L, -2);
+	lua_replace(L, 1);
 	(void)lua_pushstring(L, request);
-	if (lua_pcall(L, 1, LUA_MULTRET, 0) != LUA_OK) {
-		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
-		lua_settop(L, 0);
-		return NULL;
-	}
+	lua_replace(L, 2);
+	lua_call(L, 1, LUA_MULTRET);
 	const int n = lua_gettop(L);
 	if (n < 1) {
-		return NULL;
+		return 0;
 	}
 	switch (lua_type(L, -1)) {
 	case LUA_TSTRING:
 		break;
 	case LUA_TNIL:
-		lua_settop(L, 0);
-		return NULL;
+		return 0;
 	default:
 		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
-		lua_settop(L, 0);
-		return NULL;
+		return 0;
 	}
 	struct dialreq *req = pop_dialreq(L, n);
-	lua_settop(L, 0);
-	return req;
+	if (req == NULL) {
+		LOGE("Lua script returned an invalid address");
+	}
+	lua_pushlightuserdata(L, req);
+	return 1;
 }
 
-struct dialreq *ruleset_resolve(struct ruleset *r, const char *addr_str)
+static struct dialreq *
+dispatch_req(struct ruleset *restrict r, const char *func, const char *request)
 {
-	return ruleset_call(r, "resolve", addr_str);
+	lua_State *restrict L = r->L;
+	const int ret = ruleset_pcall(
+		L, ruleset_request_, 2, 1, (void *)func, (void *)request);
+	if (ret != LUA_OK) {
+		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
+		return NULL;
+	}
+	return (struct dialreq *)lua_topointer(L, -1);
 }
 
-struct dialreq *ruleset_route(struct ruleset *r, const char *addr_str)
+struct dialreq *ruleset_resolve(struct ruleset *r, const char *request)
 {
-	return ruleset_call(r, "route", addr_str);
+	return dispatch_req(r, "resolve", request);
 }
 
-struct dialreq *ruleset_route6(struct ruleset *r, const char *addr_str)
+struct dialreq *ruleset_route(struct ruleset *r, const char *request)
 {
-	return ruleset_call(r, "route6", addr_str);
+	return dispatch_req(r, "route", request);
+}
+
+struct dialreq *ruleset_route6(struct ruleset *r, const char *request)
+{
+	return dispatch_req(r, "route6", request);
+}
+
+size_t ruleset_memused(struct ruleset *restrict r)
+{
+	lua_State *L = r->L;
+	return ((size_t)lua_gc(L, LUA_GCCOUNT) << 10u) |
+	       (size_t)lua_gc(L, LUA_GCCOUNTB);
+}
+
+static int ruleset_stats_(lua_State *restrict L)
+{
+	if (find_callback(L, 1) != 1) {
+		return 0;
+	}
+	lua_replace(L, 1);
+	lua_pushnumber(L, *(double *)lua_topointer(L, -1));
+	lua_replace(L, 2);
+	lua_call(L, 1, 1);
+	return 1;
+}
+
+const char *ruleset_stats(struct ruleset *restrict r, const double dt)
+{
+	lua_State *L = r->L;
+	const char *func = "stats";
+	const int ret = ruleset_pcall(
+		L, ruleset_stats_, 2, 1, (void *)func, (void *)&dt);
+	if (ret != LUA_OK) {
+		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
+		return NULL;
+	}
+	if (!lua_isstring(L, -1)) {
+		return NULL;
+	}
+	return lua_tostring(L, -1);
 }

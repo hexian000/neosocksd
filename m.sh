@@ -6,104 +6,93 @@ set -ex
 case "$1" in
 "x")
     # cross compiling, environment vars need to be set
-    rm -rf xbuild
-    mkdir -p "xbuild" && cd "xbuild"
+    rm -rf "xbuild" && mkdir -p "xbuild"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-        ..
-    cmake --build . --parallel
-    ls -lh src/neosocksd
+        -S . -B "xbuild"
+    cmake --build "xbuild" --parallel
+    ls -lh "xbuild/src/neosocksd"
     ;;
 "xs")
     # cross compiling, environment vars need to be set
-    rm -rf xbuild
-    mkdir -p "xbuild" && cd "xbuild"
+    rm -rf "xbuild" && mkdir -p "xbuild"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DLINK_STATIC_LIBS=TRUE \
-        ..
-    cmake --build . --parallel
-    ls -lh src/neosocksd
+        -S . -B "xbuild"
+    cmake --build "xbuild" --parallel
+    ls -lh "xbuild/src/neosocksd"
     ;;
 "r")
-    rm -rf build
-    mkdir -p build && cd build
+    rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-        ..
-    cmake --build . --parallel
-    ls -lh src/neosocksd
+        -S . -B "build"
+    cmake --build "build" --parallel
+    ls -lh "build/src/neosocksd"
     ;;
 "s")
-    rm -rf build
-    mkdir -p build && cd build
+    rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXE_LINKER_FLAGS="-static" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DLINK_STATIC_LIBS=TRUE \
-        ..
-    cmake --build . --parallel
-    # cd src/tests && ctest
-    ls -lh src/neosocksd
+        -S . -B "build"
+    cmake --build "build" --parallel
+    ls -lh "build/src/neosocksd"
     ;;
 "p")
-    rm -rf build
-    mkdir -p build && cd build
+    rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-        ..
-    cmake --build . --parallel
-    # cd src/tests && ctest
-    cd src
-    objdump -drwS neosocksd >neosocksd.S
-    ls -lh neosocksd
+        -S . -B "build"
+    cmake --build "build" --parallel
+    (cd "build/src" && objdump -drwS "neosocksd" >"neosocksd.S")
+    ls -lh "build/src/neosocksd"
     ;;
 "posix")
     # force POSIX APIs
-    rm -rf build
-    mkdir -p build && cd build
+    rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DPOSIX=1 \
-        ..
-    cmake --build . --parallel
-    ls -lh src/neosocksd
+        -S . -B "build"
+    cmake --build "build" --parallel
+    ls -lh "build/src/neosocksd"
     ;;
 "clang")
     # rebuild with Linux clang/lld
-    rm -rf build
-    mkdir -p build && cd build
+    rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_C_COMPILER="clang" \
         -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-        ..
-    cmake --build . --parallel
-    cd src
-    llvm-objdump -drwS neosocksd >neosocksd.S
-    ls -lh neosocksd
+        -S . -B "build"
+    cmake --build "build" --parallel
+    (cd "build/src" && llvm-objdump -drwS "neosocksd" >"neosocksd.S")
+    ls -lh "build/src/neosocksd"
     ;;
 "c")
-    rm -rf build xbuild
+    rm -rf "build" "xbuild" "compile_commands.json"
     ;;
 *)
-    mkdir -p build && cd build
+    mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Debug" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-        ..
-    ln -sf compile_commands.json ../compile_commands.json
-    cmake --build . --parallel
-    # cd src/tests && ctest
-    ls -lh src/neosocksd
+        -S . -B "build"
+    ln -sf build/compile_commands.json compile_commands.json
+    cmake --build "build" --parallel
+    # cd "build/src/tests" && ctest
+    ls -lh "build/src/neosocksd"
     ;;
 esac

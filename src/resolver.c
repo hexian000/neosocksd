@@ -21,8 +21,6 @@ resolve(sockaddr_max_t *sa, const struct domain_name *name, const int family)
 	memcpy(host, name->name, name->len);
 	host[name->len] = '\0';
 	if (!resolve_hostname(sa, host, family)) {
-		const int err = errno;
-		LOGE_F("resolve: \"%s\" %s", host, strerror(err));
 		return false;
 	}
 	return true;

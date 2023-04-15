@@ -101,8 +101,10 @@ struct vbuffer *vbuf_append(
 	size_t want = n;
 	if (vbuf != NULL) {
 		want += vbuf->len;
+		vbuf = vbuf_grow(vbuf, want);
+	} else {
+		vbuf = vbuf_reserve(vbuf, want);
 	}
-	vbuf = vbuf_grow(vbuf, want);
 	if (vbuf == NULL) {
 		return NULL;
 	}
@@ -139,8 +141,10 @@ vbuf_appendf(struct vbuffer *restrict vbuf, const char *format, ...)
 			vbuf->len += (size_t)ret;
 			return vbuf;
 		}
+		vbuf = vbuf_grow(vbuf, want);
+	} else {
+		vbuf = vbuf_reserve(vbuf, want);
 	}
-	vbuf = vbuf_reserve(vbuf, want);
 	if (vbuf == NULL) {
 		va_end(args);
 		return NULL;

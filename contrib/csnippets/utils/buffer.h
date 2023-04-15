@@ -67,9 +67,13 @@ static inline size_t buf_append(void *buf, const unsigned char *data, size_t n)
 
 int buf_appendf(void *buf, const char *format, ...);
 
-static inline void vbuf_consume(struct vbuffer *buf, const size_t n)
+static inline bool buf_equals(const void *buf_a, const void *buf_b)
 {
-	buf_consume(buf, n);
+	const struct vbuffer *restrict a = buf_a, *restrict b = buf_b;
+	if (a->len != b->len) {
+		return false;
+	}
+	return memcmp(a->data, b->data, a->len) == 0;
 }
 
 struct vbuffer *vbuf_alloc(struct vbuffer *vbuf, size_t cap);

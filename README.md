@@ -22,19 +22,22 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ## Basic Usage
 
 ```sh
-./neosocksd -4 -l 0.0.0.0:1080  # Just an IPv4 SOCKS server
-./neosocksd --http -l 0.0.0.0:8080  # HTTP CONNECT server
+./neosocksd -l 0.0.0.0:1080               # Just an SOCKS server
+./neosocksd -4 -l 0.0.0.0:1080            # Prefer IPv4 in name resolution
+./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # And restrict access to eth0 only
+
+./neosocksd --http -l 0.0.0.0:8080           # HTTP CONNECT server
 ./neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080  # Non-forking TCP port forwarder
 ```
 
-See ```./neosocksd -h``` for details.
+See `./neosocksd -h` for details.
 
 ## Scripting Usage
 
 Start the server with a Lua script named "ruleset.lua":
 
 ```sh
-./neosocksd -4 -l 0.0.0.0:1080 --api 127.0.0.1:9080 -r ruleset.lua
+./neosocksd -4 -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua
 ```
 
 - Full code example at [ruleset.lua](ruleset.lua)

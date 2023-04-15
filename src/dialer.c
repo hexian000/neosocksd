@@ -29,19 +29,23 @@ bool dialaddr_set(struct dialaddr *restrict addr, const char *s, size_t len)
 {
 	char buf[FQDN_MAX_LENGTH + 1 + 5 + 1]; /* FQDN + ':' + port + '\0' */
 	if (len >= sizeof(buf)) {
+		LOGD_F("address too long: %s", s);
 		return false;
 	}
 	memcpy(buf, s, len);
 	buf[len] = '\0';
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
+		LOGD_F("invalid address: %s", s);
 		return false;
 	}
 	const size_t hostlen = strlen(host);
 	if (hostlen > FQDN_MAX_LENGTH) {
+		LOGD_F("hostname too long: %s", host);
 		return false;
 	}
 	if (sscanf(port, "%" SCNu16, &addr->port) != 1) {
+		LOGD_F("unable to parse port number: %" PRIu16, addr->port);
 		return false;
 	}
 	struct domain_name *restrict domain = &addr->domain;
@@ -164,6 +168,16 @@ dialer_reset(struct dialer *restrict d, struct ev_loop *loop, const int state)
 		break;
 	}
 	d->state = state;
+}
+
+static void
+dialer_finish(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
+{
+	if (ok) {
+		d->state = STATE_DONE;
+	}
+	dialer_reset(d, loop, STATE_DONE);
+	d->done_cb.cb(loop, d->done_cb.ctx);
 }
 
 #define MAX_ADDRLEN ((size_t)(256 + 1 + 5))
@@ -304,8 +318,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	if (ret > 0) { /* want more */
 		return;
 	} else if (ret < 0) { /* fail */
-		dialer_reset(d, loop, STATE_DONE);
-		d->done_cb.cb(loop, d->done_cb.ctx);
+		dialer_finish(d, loop, false);
 		return;
 	}
 
@@ -314,16 +327,14 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	if (d->jump < d->req->num_proxy) {
 		d->state = STATE_HANDSHAKE2;
 		if (!send_proxy_req(d)) {
-			dialer_reset(d, loop, STATE_DONE);
-			d->done_cb.cb(loop, d->done_cb.ctx);
+			dialer_finish(d, loop, false);
 			return;
 		}
 		return;
 	}
 
 	ev_io_stop(loop, watcher);
-	d->state = STATE_DONE;
-	d->done_cb.cb(loop, d->done_cb.ctx);
+	dialer_finish(d, loop, true);
 }
 
 static void
@@ -340,8 +351,7 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		    &(socklen_t){ sizeof(sockerr) }) == 0) {
 		if (sockerr != 0) {
 			d->err = sockerr;
-			dialer_reset(d, loop, STATE_DONE);
-			d->done_cb.cb(loop, d->done_cb.ctx);
+			dialer_finish(d, loop, false);
 			return;
 		}
 	} else {
@@ -352,8 +362,7 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	if (d->jump < d->req->num_proxy) {
 		d->state = STATE_HANDSHAKE1;
 		if (!send_proxy_req(d)) {
-			dialer_reset(d, loop, STATE_DONE);
-			d->done_cb.cb(loop, d->done_cb.ctx);
+			dialer_finish(d, loop, false);
 			return;
 		}
 		ev_io_init(watcher, recv_cb, fd, EV_READ);
@@ -362,8 +371,7 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 
-	d->state = STATE_DONE;
-	d->done_cb.cb(loop, d->done_cb.ctx);
+	dialer_finish(d, loop, true);
 }
 
 static bool connect_sa(
@@ -443,15 +451,13 @@ static void resolve_cb(struct ev_loop *loop, void *data)
 	} break;
 	default:
 		LOGE_F("unsupport address family: %d", sa->sa_family);
-		dialer_reset(d, loop, STATE_DONE);
-		d->done_cb.cb(loop, d->done_cb.ctx);
+		dialer_finish(d, loop, false);
 		return;
 	}
 
 	if (!connect_sa(d, loop, sa)) {
 		LOGD("dialer connect failed");
-		dialer_reset(d, loop, STATE_DONE);
-		d->done_cb.cb(loop, d->done_cb.ctx);
+		dialer_finish(d, loop, false);
 	}
 }
 

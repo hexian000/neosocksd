@@ -4,6 +4,7 @@
 #include "http.h"
 #include "net/http.h"
 #include "net/url.h"
+#include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "utils/formats.h"
 #include "utils/slog.h"
@@ -16,6 +17,7 @@
 
 #include <ev.h>
 
+#include <string.h>
 #include <unistd.h>
 #include <strings.h>
 #include <sys/socket.h>
@@ -23,6 +25,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <limits.h>
 
 static void
 http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
@@ -63,6 +66,7 @@ struct http_ctx {
 			char *http_nxt;
 			struct http_hdr_item http_hdr[HTTP_MAX_HEADER_COUNT];
 			size_t http_hdr_num, content_length;
+			bool has_content_length;
 			struct dialer dialer;
 			struct {
 				BUFFER_HDR;
@@ -191,7 +195,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		       hdr->req.version);
 		ctx->http_nxt = next;
 		ctx->http_hdr_num = 0;
-		ctx->content_length = 0;
+		ctx->has_content_length = false;
 		ctx->http_state = HTTPSTATE_HEADER;
 	}
 	while (ctx->http_state == HTTPSTATE_HEADER) {
@@ -231,6 +235,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 				ev_io_start(loop, w_write);
 				return;
 			}
+			ctx->has_content_length = true;
 			if (ctx->content_length > ctx->rbuf.cap) {
 				ev_io_stop(loop, watcher);
 				http_write_error(ctx, HTTP_ENTITY_TOO_LARGE);
@@ -240,8 +245,9 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		}
 		LOGV_F("http: header %s: %s", key, value);
 	}
-	if ((char *)(ctx->rbuf.data + ctx->rbuf.len) <
-	    ctx->http_nxt + ctx->content_length) {
+	if (ctx->has_content_length &&
+	    (char *)(ctx->rbuf.data + ctx->rbuf.len) <
+		    ctx->http_nxt + ctx->content_length) {
 		if ((char *)(ctx->rbuf.data + ctx->rbuf.cap) <
 		    ctx->http_nxt + ctx->content_length + 1) {
 			ev_io_stop(loop, watcher);
@@ -293,8 +299,8 @@ http_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	struct http_ctx *restrict ctx = watcher->data;
 	unsigned char *buf = ctx->wbuf.data;
-	size_t nbsend = 0;
 	size_t len = ctx->wbuf.len;
+	size_t nbsend = 0;
 	while (len > 0) {
 		const ssize_t nsend = send(watcher->fd, buf, len, 0);
 		if (nsend < 0) {
@@ -445,22 +451,28 @@ static void http_handle_stats(
 	http_write_rsphdr(ctx, HTTP_OK);
 
 	const ev_tstamp now = ev_now(loop);
+	const double uptime = server_get_uptime(ctx->server, now);
 	static struct {
 		size_t num_request;
-		size_t num_halfopen;
 		size_t xfer_bytes;
 		ev_tstamp tstamp;
 	} last = { .tstamp = TSTAMP_NIL };
-	const double dt = (last.tstamp == TSTAMP_NIL) ? 1.0 : now - last.tstamp;
+	const double dt =
+		(last.tstamp == TSTAMP_NIL) ? uptime : now - last.tstamp;
+	last.tstamp = now;
 	{
 		const time_t server_time = time(NULL);
 		struct stats total;
 		stats_read(&total);
+
 		const size_t num_request = total.num_request;
-		const size_t num_halfopen = total.num_halfopen;
 		const double request_rate =
 			(double)(num_request - last.num_request) / dt;
+		last.num_request = num_request;
+
+		const size_t num_halfopen = total.num_halfopen;
 		const size_t num_active = transfer_get_active() / 2u;
+
 		const size_t xfer_bytes = transfer_get_bytes();
 		char timestamp[32];
 		(void)strftime(
@@ -473,10 +485,12 @@ static void http_handle_stats(
 			xfer_rate, sizeof(xfer_rate),
 			(size_t)round(
 				(double)(xfer_bytes - last.xfer_bytes) / dt));
-		char uptime[16];
+		last.xfer_bytes = xfer_bytes;
+
+		char str_uptime[16];
 		(void)format_duration_seconds(
-			uptime, sizeof(uptime),
-			make_duration(server_get_uptime(ctx->server, now)));
+			str_uptime, sizeof(str_uptime), make_duration(uptime));
+
 		(void)buf_appendf(
 			&ctx->wbuf,
 			"" PROJECT_NAME " " PROJECT_VER "\n"
@@ -488,17 +502,13 @@ static void http_handle_stats(
 			"Traffic         : %s/s\n"
 			"Requests        : %.1lf/s\n"
 			"Total Requests  : %zu\n",
-			timestamp, uptime, num_active, num_halfopen, xfer_total,
-			xfer_rate, request_rate, num_request);
-
-		last.num_request = num_request;
-		last.num_halfopen = num_halfopen;
-		last.xfer_bytes = xfer_bytes;
+			timestamp, str_uptime, num_active, num_halfopen,
+			xfer_total, xfer_rate, request_rate, num_request);
 	}
 
 	struct server *restrict s = ctx->server;
 	struct ruleset *ruleset = s->ruleset;
-	if (ruleset) {
+	if (ruleset != NULL) {
 		const size_t heap_bytes = ruleset_memused(ruleset);
 		char heap_total[16];
 		(void)format_iec(heap_total, sizeof(heap_total), heap_bytes);
@@ -507,9 +517,17 @@ static void http_handle_stats(
 			""
 			"Ruleset Memory  : %s\n",
 			heap_total);
+		const char *s = ruleset_stats(ruleset, dt);
+		if (s != NULL) {
+			(void)buf_appendf(
+				&ctx->wbuf,
+				"\n"
+				"Ruleset Stats\n"
+				"================\n"
+				"%s\n",
+				s);
+		}
 	}
-
-	last.tstamp = now;
 }
 
 static void http_handle_ruleset(
@@ -542,8 +560,14 @@ static void http_handle_ruleset(
 			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
 			return;
 		}
-		LOGV_F("api: ruleset invoke\n%s", ctx->http_nxt);
-		if (!ruleset_invoke(ruleset, ctx->http_nxt)) {
+		if (!ctx->has_content_length) {
+			http_write_error(ctx, HTTP_BAD_REQUEST);
+			return;
+		}
+		const char *code = ctx->http_nxt;
+		const size_t len = ctx->content_length;
+		LOGV_F("api: ruleset invoke\n%s", code);
+		if (!ruleset_invoke(ruleset, code, len)) {
 			http_write_error(ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
@@ -559,8 +583,14 @@ static void http_handle_ruleset(
 			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
 			return;
 		}
-		LOGV_F("api: ruleset update\n%s", ctx->http_nxt);
-		if (!ruleset_load(ruleset, ctx->http_nxt)) {
+		if (!ctx->has_content_length) {
+			http_write_error(ctx, HTTP_BAD_REQUEST);
+			return;
+		}
+		const char *code = ctx->http_nxt;
+		const size_t len = ctx->content_length;
+		LOGV_F("api: ruleset update\n%s", code);
+		if (!ruleset_load(ruleset, code, len)) {
 			http_write_error(ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
@@ -574,6 +604,10 @@ static void http_handle_ruleset(
 		}
 		if (strcasecmp(hdr->req.method, "POST") != 0) {
 			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
+			return;
+		}
+		if (!ctx->has_content_length) {
+			http_write_error(ctx, HTTP_BAD_REQUEST);
 			return;
 		}
 		ruleset_gc(ruleset);
@@ -656,4 +690,94 @@ void http_api_serve(
 void http_read_stats(struct stats *restrict out_stats)
 {
 	*out_stats = stats;
+}
+
+struct http_invoke_ctx {
+	struct dialer dialer;
+	struct ev_loop *loop;
+	struct ev_io w_write;
+	const struct config *conf;
+	struct vbuffer *wbuf;
+};
+
+static void
+request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+{
+	CHECK_EV_ERROR(revents);
+
+	struct http_invoke_ctx *restrict ctx = watcher->data;
+	unsigned char *buf = ctx->wbuf->data;
+	size_t len = ctx->wbuf->len;
+	size_t nbsend = 0;
+	while (len > 0) {
+		const ssize_t nsend = send(watcher->fd, buf, len, 0);
+		if (nsend < 0) {
+			const int err = errno;
+			if (err == EAGAIN || err == EWOULDBLOCK ||
+			    err == EINTR || err == ENOMEM) {
+				break;
+			}
+			LOGE_F("send: %s", strerror(err));
+			ev_io_stop(loop, watcher);
+			vbuf_free(ctx->wbuf);
+			free(ctx);
+			return;
+		}
+		buf += nsend;
+		len -= nsend;
+		nbsend += nsend;
+	}
+	buf_consume(ctx->wbuf, nbsend);
+	if (ctx->wbuf->len > 0) {
+		return;
+	}
+
+	ev_io_stop(loop, watcher);
+	vbuf_free(ctx->wbuf);
+	free(ctx);
+}
+
+static void invoke_cb(struct ev_loop *loop, void *data)
+{
+	struct http_invoke_ctx *restrict ctx = data;
+	struct ev_io *restrict w_write = &ctx->w_write;
+	const int fd = dialer_get(&ctx->dialer);
+	if (fd < 0) {
+		LOGD("dielr err");
+		return;
+	}
+	ev_io_init(w_write, request_write_cb, fd, EV_WRITE);
+	w_write->data = ctx;
+	ev_io_start(loop, w_write);
+}
+
+struct http_invoke_ctx *http_invoke(
+	struct ev_loop *loop, const struct config *conf, struct dialreq *req,
+	const char *code, const size_t len)
+{
+	CHECK(len <= INT_MAX);
+	struct http_invoke_ctx *restrict ctx =
+		malloc(sizeof(struct http_invoke_ctx));
+	dialer_init(
+		&ctx->dialer, conf,
+		&(struct event_cb){
+			.cb = invoke_cb,
+			.ctx = ctx,
+		});
+	ctx->wbuf = vbuf_appendf(
+		NULL,
+		"POST /ruleset/invoke HTTP/1.0\r\n"
+		"Content-Length: %zu\r\n"
+		"\r\n"
+		"%.*s",
+		len, (int)len, code);
+	if (ctx->wbuf == NULL) {
+		LOGOOM();
+		dialer_stop(&ctx->dialer, loop);
+		free(ctx);
+		return NULL;
+	}
+	LOGV_F("http_invoke:\n%.*s", (int)ctx->wbuf->len, ctx->wbuf->data);
+	dialer_start(&ctx->dialer, loop, req);
+	return ctx;
 }

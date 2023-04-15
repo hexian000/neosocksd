@@ -159,6 +159,31 @@ Periodic timer callback.
 Ignored
 
 
+### ruleset.stats
+
+**Synopsis**
+
+```Lua
+function ruleset.stats(dt)
+    local w = {}
+    table.insert(w, string.format("dt = %.03f", dt))
+    return table.concat(w, "\n")
+end
+```
+
+**Description**
+
+Generate custom information to be provided in the API `/stats`. See also [stats](#server-statistics).
+
+**Params**
+
+- `dt`: seconds elapsed since last call
+
+**Returns**
+
+Custom information in a string.
+
+
 ## Lua API
 
 ### neosocksd.resolve
