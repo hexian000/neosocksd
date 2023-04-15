@@ -257,9 +257,9 @@ The valid interval range is `[1e-3, 1e+9]`, use `setinterval(0)` to stop the tim
 **Synopsis**
 
 ```Lua
-neosocksd.invoke("")
+neosocksd.invoke([[printf("test rpc")]], "neosocksd.lan:80", "127.0.0.1:1080")
 ```
 
 **Description**
 
-TODO
+Run Lua code on another neosocksd. This function returns immediately. On failure, the invocation is lost.
