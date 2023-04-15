@@ -17,6 +17,7 @@
 
 #include <ev.h>
 
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <strings.h>
@@ -530,6 +531,26 @@ static void http_handle_stats(
 	}
 }
 
+static bool http_leafnode_check(
+	struct http_ctx *restrict ctx, struct url *restrict uri,
+	const char *method, const bool require_content_length)
+{
+	if (uri->path != NULL) {
+		http_write_error(ctx, HTTP_NOT_FOUND);
+		return false;
+	}
+	const struct http_message *restrict hdr = &ctx->http_msg;
+	if (method != NULL && strcasecmp(hdr->req.method, method) != 0) {
+		http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
+		return false;
+	}
+	if (require_content_length && !ctx->has_content_length) {
+		http_write_error(ctx, HTTP_BAD_REQUEST);
+		return false;
+	}
+	return true;
+}
+
 static void http_handle_ruleset(
 	struct ev_loop *loop, struct http_ctx *restrict ctx,
 	struct url *restrict uri)
@@ -545,23 +566,13 @@ static void http_handle_ruleset(
 		return;
 	}
 
-	const struct http_message *restrict hdr = &ctx->http_msg;
 	char *segment;
 	if (!url_path_segment(&uri->path, &segment)) {
 		http_write_error(ctx, HTTP_NOT_FOUND);
 		return;
 	}
 	if (strcmp(segment, "invoke") == 0) {
-		if (uri->path != NULL) {
-			http_write_error(ctx, HTTP_NOT_FOUND);
-			return;
-		}
-		if (strcasecmp(hdr->req.method, "POST") != 0) {
-			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
-			return;
-		}
-		if (!ctx->has_content_length) {
-			http_write_error(ctx, HTTP_BAD_REQUEST);
+		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
 		const char *code = ctx->http_nxt;
@@ -575,16 +586,7 @@ static void http_handle_ruleset(
 		return;
 	}
 	if (strcmp(segment, "update") == 0) {
-		if (uri->path != NULL) {
-			http_write_error(ctx, HTTP_NOT_FOUND);
-			return;
-		}
-		if (strcasecmp(hdr->req.method, "POST") != 0) {
-			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
-			return;
-		}
-		if (!ctx->has_content_length) {
-			http_write_error(ctx, HTTP_BAD_REQUEST);
+		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
 		const char *code = ctx->http_nxt;
@@ -598,16 +600,7 @@ static void http_handle_ruleset(
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {
-		if (uri->path != NULL) {
-			http_write_error(ctx, HTTP_NOT_FOUND);
-			return;
-		}
-		if (strcasecmp(hdr->req.method, "POST") != 0) {
-			http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
-			return;
-		}
-		if (!ctx->has_content_length) {
-			http_write_error(ctx, HTTP_BAD_REQUEST);
+		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
 		ruleset_gc(ruleset);
@@ -635,16 +628,14 @@ http_handle_restapi(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 	if (strcmp(segment, "healthy") == 0) {
-		if (uri.path != NULL) {
-			http_write_error(ctx, HTTP_NOT_FOUND);
+		if (!http_leafnode_check(ctx, &uri, NULL, false)) {
 			return;
 		}
 		http_write_rsphdr(ctx, HTTP_OK);
 		return;
 	}
 	if (strcmp(segment, "stats") == 0) {
-		if (uri.path != NULL) {
-			http_write_error(ctx, HTTP_NOT_FOUND);
+		if (!http_leafnode_check(ctx, &uri, "GET", false)) {
 			return;
 		}
 		http_handle_stats(loop, ctx, &uri);
