@@ -22,12 +22,13 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ## Basic Usage
 
 ```sh
-./neosocksd -l 0.0.0.0:1080               # Just an SOCKS server
+./neosocksd -l 0.0.0.0:1080               # Just a SOCKS server
 ./neosocksd -4 -l 0.0.0.0:1080            # Prefer IPv4 in name resolution
 ./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # And restrict access to eth0 only
+./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
-./neosocksd --http -l 0.0.0.0:8080           # HTTP CONNECT server
-./neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080  # Non-forking TCP port forwarder
+# Non-forking TCP port forwarder
+sudo ./neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080 -u nobody
 ```
 
 See `./neosocksd -h` for details.
