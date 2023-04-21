@@ -8,13 +8,13 @@
 #include "utils/check.h"
 #include "resolver.h"
 
-#include <fcntl.h>
-#include <sys/socket.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <net/if.h>
+#include <sys/socket.h>
 
 #include <stddef.h>
 #include <stdio.h>

@@ -4,17 +4,17 @@
 #include "forward.h"
 #include "net/addr.h"
 #include "utils/check.h"
+#include "utils/slog.h"
 #include "transfer.h"
 #include "resolver.h"
 #include "util.h"
 
-#include "utils/slog.h"
-#include <assert.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <unistd.h>
 #include <ev.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>

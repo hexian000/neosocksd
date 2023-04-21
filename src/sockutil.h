@@ -4,11 +4,11 @@
 #ifndef SOCKUTIL_H
 #define SOCKUTIL_H
 
-#include <stdbool.h>
-#include <stdint.h>
-
 #include <netinet/in.h>
 #include <sys/socket.h>
+
+#include <stdbool.h>
+#include <stdint.h>
 
 typedef union {
 	struct sockaddr sa;

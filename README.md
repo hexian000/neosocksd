@@ -7,6 +7,14 @@
 
 A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that only supports TCP CONNECT requests.
 
+## Index
+
+- [Features](#features)
+- [Usage](#usage)
+- [Building](#building-from-source)
+- [Runtime Dependencies](#runtime-dependencies)
+- [Credits](#credits)
+
 ## Features
 
 - Plain old protocols with no built-in support for authentication or encryption.
@@ -19,12 +27,13 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 - Minimized resource usage, embedded systems friendly.
 - Conforming to: ISO C11, POSIX.1-2008.
 
-## Basic Usage
+## Usage
+### Basic Usage
 
 ```sh
 ./neosocksd -l 0.0.0.0:1080               # Just a SOCKS server
 ./neosocksd -4 -l 0.0.0.0:1080            # Prefer IPv4 in name resolution
-./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # And restrict access to eth0 only
+./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # And restrict client access to eth0 only
 ./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
 # Non-forking TCP port forwarder
@@ -33,7 +42,7 @@ sudo ./neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080 -u nobody
 
 See `./neosocksd -h` for details.
 
-## Scripting Usage
+### Scripting Usage
 
 Start the server with a Lua script named "ruleset.lua":
 
@@ -41,14 +50,16 @@ Start the server with a Lua script named "ruleset.lua":
 ./neosocksd -4 -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua
 ```
 
-- Full code example at [ruleset.lua](ruleset.lua)
-- Lua syntax and standard libraries reference: [Lua 5.4 Reference Manual](https://www.lua.org/manual/5.4/manual.html)
-- API reference: [neosocksd API Reference](API.md)
+Depending on how complex your customizations are, check out:
+
+- Level 1: Rule set configuration example at [ruleset.lua](ruleset.lua)
+- Level 2: Full rule set logic in [simple_ruleset.lua](simple_ruleset.lua)
+- Level 3: Professional reference: [neosocksd API Reference](API.md), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
 Access RESTful API through the proxy as defined in [ruleset.lua](ruleset.lua):
 
 ```sh
-curl -x socks5h://127.0.0.1:1080 http://neosocksd.lan/stats
+curl -0sx socks5h://127.0.0.1:1080 http://neosocksd.lan/stats
 ```
 
 Update ruleset without restarting:
@@ -59,7 +70,22 @@ curl -0vx socks5h://127.0.0.1:1080 \
     --data-binary @ruleset.lua
 ```
 
-## Build from source
+See [neox.sh](neox.sh) for shell operating.
+
+## Runtime Dependencies
+
+For non-static builds, additional runtime dependencies are required.
+
+```sh
+# Debian & Ubuntu
+sudo apt install -y libev4
+# OpenWRT
+opkg install libev
+```
+
+*Lua is always statically linked.*
+
+## Building from Source
 ### Dependencies
 
 ```sh
@@ -67,7 +93,7 @@ curl -0vx socks5h://127.0.0.1:1080 \
 sudo apt install -y libev-dev liblua5.4-dev
 ```
 
-### Build with CMake
+### Building with CMake
 
 ```sh
 git clone https://github.com/hexian000/neosocksd.git

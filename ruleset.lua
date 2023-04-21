@@ -1,7 +1,6 @@
 local ruleset = require("simple_ruleset")
 
 -- [[ configurations ]] --
--- global schedule
 function _G.is_enabled()
     return true
 end

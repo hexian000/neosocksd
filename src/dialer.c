@@ -10,11 +10,11 @@
 #include "sockutil.h"
 #include "util.h"
 
+#include <ev.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <errno.h>
-#include <ev.h>
 
 #include <assert.h>
 #include <stdbool.h>

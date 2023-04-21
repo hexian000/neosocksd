@@ -3,10 +3,10 @@
 #include "utils/slog.h"
 #include "util.h"
 
+#include <ev.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <errno.h>
-#include <ev.h>
 
 #include <stddef.h>
 #include <stdbool.h>
