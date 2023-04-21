@@ -8,6 +8,8 @@
 #include "resolver.h"
 #include "util.h"
 
+#include "utils/slog.h"
+#include <assert.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -99,9 +101,9 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		char laddr[64], raddr[64];
 		sockaddr_max_t addr;
 		socklen_t salen = sizeof(addr);
-		if (getsockname(ctx->accepted_fd, &addr.sa, &salen) != 0) {
+		if (getpeername(ctx->accepted_fd, &addr.sa, &salen) != 0) {
 			const int err = errno;
-			LOGE_F("getsockname: %s", strerror(err));
+			LOGE_F("getpeername: %s", strerror(err));
 			(void)strcpy(laddr, "???");
 		} else {
 			format_sa(&addr.sa, laddr, sizeof(laddr));
@@ -202,7 +204,7 @@ static void forward_start(
 			forward_free(ctx);
 			return;
 		}
-	} else {
+	} else if (conf->transparent) {
 		if (getsockname(ctx->accepted_fd, &addr.sa, &len) != 0) {
 			const int err = errno;
 			LOGE_F("getsockname: %s", strerror(err));
@@ -210,9 +212,11 @@ static void forward_start(
 			forward_free(ctx);
 			return;
 		}
+	} else {
+		FAIL();
 	}
-	const int dialed_fd =
-		socket(addr.sa.sa_family, SOCK_STREAM, IPPROTO_TCP);
+	const int domain = addr.sa.sa_family;
+	const int dialed_fd = socket(domain, SOCK_STREAM, IPPROTO_TCP);
 	if (dialed_fd < 0) {
 		const int err = errno;
 		LOGE_F("socket: %s", strerror(err));
@@ -239,7 +243,12 @@ static void forward_start(
 			return;
 		}
 	}
-	LOGV_F("connect: fd=%d", dialed_fd);
+	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
+		char addr_str[64];
+		format_sa(&addr.sa, addr_str, sizeof(addr_str));
+		LOG_F(LOG_LEVEL_VERBOSE, "connect: fd=%d to \"%s\"", dialed_fd,
+		      addr_str);
+	}
 
 	struct ev_io *restrict w_connect = &ctx->w_connect;
 	ev_io_init(w_connect, connected_cb, dialed_fd, EV_WRITE);

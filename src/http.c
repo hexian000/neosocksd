@@ -16,15 +16,15 @@
 #include "util.h"
 
 #include <ev.h>
-
-#include <stdbool.h>
-#include <string.h>
-#include <unistd.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
+#include <assert.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 #include <inttypes.h>
 #include <limits.h>
 
@@ -67,7 +67,7 @@ struct http_ctx {
 			char *http_nxt;
 			struct http_hdr_item http_hdr[HTTP_MAX_HEADER_COUNT];
 			size_t http_hdr_num, content_length;
-			bool has_content_length;
+			unsigned char *content;
 			struct dialer dialer;
 			struct {
 				BUFFER_HDR;
@@ -196,7 +196,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		       hdr->req.version);
 		ctx->http_nxt = next;
 		ctx->http_hdr_num = 0;
-		ctx->has_content_length = false;
+		ctx->content = NULL;
 		ctx->http_state = HTTPSTATE_HEADER;
 	}
 	while (ctx->http_state == HTTPSTATE_HEADER) {
@@ -236,28 +236,31 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 				ev_io_start(loop, w_write);
 				return;
 			}
-			ctx->has_content_length = true;
-			if (ctx->content_length > ctx->rbuf.cap) {
-				ev_io_stop(loop, watcher);
-				http_write_error(ctx, HTTP_ENTITY_TOO_LARGE);
-				ev_io_start(loop, w_write);
-				return;
-			}
+			/* indicates that there is content */
+			ctx->content = ctx->rbuf.data;
 		}
 		LOGV_F("http: header %s: %s", key, value);
 	}
-	if (ctx->has_content_length &&
-	    (char *)(ctx->rbuf.data + ctx->rbuf.len) <
-		    ctx->http_nxt + ctx->content_length) {
-		if ((char *)(ctx->rbuf.data + ctx->rbuf.cap) <
-		    ctx->http_nxt + ctx->content_length + 1) {
+	if (ctx->content != NULL) {
+		/* use inline buffer */
+		ctx->content = (unsigned char *)ctx->http_nxt;
+		assert(ctx->content > ctx->rbuf.data);
+		const size_t offset = ctx->content - ctx->rbuf.data;
+		const size_t want = ctx->content_length + 1;
+		const size_t cap = ctx->rbuf.cap - offset;
+		if (want > cap) {
+			/* no enough buffer */
 			ev_io_stop(loop, watcher);
 			http_write_error(ctx, HTTP_ENTITY_TOO_LARGE);
 			ev_io_start(loop, w_write);
+			return;
 		}
-		return;
+		const size_t len = ctx->rbuf.len - offset;
+		if (len < ctx->content_length) {
+			return;
+		}
+		ctx->content[ctx->content_length] = '\0';
 	}
-	ctx->http_nxt[ctx->content_length] = '\0';
 
 	/* HTTP/1.0 only, stop reading */
 	ev_io_stop(loop, watcher);
@@ -533,7 +536,7 @@ static void http_handle_stats(
 
 static bool http_leafnode_check(
 	struct http_ctx *restrict ctx, struct url *restrict uri,
-	const char *method, const bool require_content_length)
+	const char *method, const bool require_content)
 {
 	if (uri->path != NULL) {
 		http_write_error(ctx, HTTP_NOT_FOUND);
@@ -544,7 +547,7 @@ static bool http_leafnode_check(
 		http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
-	if (require_content_length && !ctx->has_content_length) {
+	if (require_content && ctx->content == NULL) {
 		http_write_error(ctx, HTTP_BAD_REQUEST);
 		return false;
 	}
@@ -575,7 +578,7 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const char *code = ctx->http_nxt;
+		const char *code = (const char *)ctx->content;
 		const size_t len = ctx->content_length;
 		LOGV_F("api: ruleset invoke\n%s", code);
 		if (!ruleset_invoke(ruleset, code, len)) {
@@ -589,7 +592,7 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const char *code = ctx->http_nxt;
+		const char *code = (const char *)ctx->content;
 		const size_t len = ctx->content_length;
 		LOGV_F("api: ruleset update\n%s", code);
 		if (!ruleset_load(ruleset, code, len)) {
@@ -600,7 +603,7 @@ static void http_handle_ruleset(
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {
-		if (!http_leafnode_check(ctx, uri, "POST", true)) {
+		if (!http_leafnode_check(ctx, uri, "POST", false)) {
 			return;
 		}
 		ruleset_gc(ruleset);
