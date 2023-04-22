@@ -35,6 +35,7 @@ static struct {
 #if WITH_TPROXY
 	bool tproxy : 1;
 #endif
+	bool want_reset : 1;
 	int verbosity;
 	int resolve_pf;
 	const char *user_name;
@@ -297,6 +298,7 @@ int main(int argc, char **argv)
 	LOGI("server start");
 	ev_run(loop, 0);
 
+	LOGI("server stop");
 	if (apiserver != NULL) {
 		server_stop(apiserver, loop);
 		server_free(apiserver);
@@ -311,6 +313,11 @@ int main(int argc, char **argv)
 	ev_signal_stop(loop, &args.w_sigint);
 	ev_signal_stop(loop, &args.w_sigterm);
 
+	if (args.want_reset) {
+		LOGI("reloading binaries");
+		reset(argv);
+	}
+
 	LOGI("program terminated normally.");
 	return EXIT_SUCCESS;
 }
@@ -322,13 +329,15 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 
 	switch (watcher->signum) {
 	case SIGPIPE:
-	case SIGHUP: {
 		LOGV_F("signal %d ignored", watcher->signum);
-	} break;
+		break;
+	case SIGHUP:
+		args.want_reset = true;
+		/* fallthrough */
 	case SIGINT:
-	case SIGTERM: {
+	case SIGTERM:
 		LOGI_F("signal %d received, breaking", watcher->signum);
 		ev_break(loop, EVBREAK_ALL);
-	} break;
+		break;
 	}
 }

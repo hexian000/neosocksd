@@ -1,4 +1,5 @@
 #include "util.h"
+#include "utils/check.h"
 
 #include <unistd.h>
 #include <pwd.h>
@@ -48,4 +49,11 @@ void drop_privileges(const char *user)
 		const int err = errno;
 		LOGW_F("unable to drop user privileges: %s", strerror(err));
 	}
+}
+
+void reset(char **argv)
+{
+	(void)execv(argv[0], argv);
+	const int err = errno;
+	FAILMSGF("execv: %s", strerror(err));
 }

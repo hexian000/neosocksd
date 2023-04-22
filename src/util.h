@@ -31,4 +31,6 @@ struct event_cb {
 
 void drop_privileges(const char *user);
 
+void reset(char **argv);
+
 #endif /* UTIL_H */

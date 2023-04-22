@@ -247,8 +247,8 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		assert(ctx->content > ctx->rbuf.data);
 		const size_t offset = ctx->content - ctx->rbuf.data;
 		const size_t want = ctx->content_length + 1;
-		const size_t cap = ctx->rbuf.cap - offset;
-		if (want > cap) {
+		const size_t content_cap = ctx->rbuf.cap - offset;
+		if (want > content_cap) {
 			/* no enough buffer */
 			ev_io_stop(loop, watcher);
 			http_write_error(ctx, HTTP_ENTITY_TOO_LARGE);
@@ -521,15 +521,15 @@ static void http_handle_stats(
 			""
 			"Ruleset Memory  : %s\n",
 			heap_total);
-		const char *s = ruleset_stats(ruleset, dt);
-		if (s != NULL) {
+		const char *str = ruleset_stats(ruleset, dt);
+		if (str != NULL) {
 			(void)buf_appendf(
 				&ctx->wbuf,
 				"\n"
 				"Ruleset Stats\n"
 				"================\n"
 				"%s\n",
-				s);
+				str);
 		}
 	}
 }

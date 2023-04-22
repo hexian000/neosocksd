@@ -198,8 +198,8 @@ static int parse_ipv6_(lua_State *L)
 	}
 	const lua_Unsigned *addr = (void *)&in6;
 #if LUA_MAXUNSIGNED >= UINT64_MAX
-	lua_pushinteger(L, read_uint64((const void *)&addr[0]));
-	lua_pushinteger(L, read_uint64((const void *)&addr[1]));
+	lua_pushinteger(L, (lua_Integer)read_uint64((const void *)&addr[0]));
+	lua_pushinteger(L, (lua_Integer)read_uint64((const void *)&addr[1]));
 	return 2;
 #else
 	lua_pushinteger(L, read_uint32((const void *)&addr[0]));
