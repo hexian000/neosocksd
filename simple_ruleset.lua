@@ -9,6 +9,8 @@ function string:endswith(sub)
     return string.sub(self, -n) == sub
 end
 
+_G.MAX_RECENT_EVENTS = 10
+
 local function event_add(tstamp, msg)
     local p = _G.recent_events
     if p and p.msg == msg then
@@ -23,7 +25,7 @@ local function event_add(tstamp, msg)
         next = p
     }
     _G.recent_events = p
-    for i = 1, 10 do
+    for i = 1, MAX_RECENT_EVENTS do
         if not p then
             return
         end
@@ -101,8 +103,9 @@ end
 
 -- [[ simple route functions ]] --
 local function simple_route(addr)
-    -- redirect
-    for _, rule in ipairs(redirect) do
+    -- check redirect table
+    local redirtab = _G.redirect or {}
+    for _, rule in ipairs(redirtab) do
         local pattern, target = table.unpack(rule)
         if addr:find(pattern) then
             return table.unpack(target)
@@ -110,25 +113,46 @@ local function simple_route(addr)
     end
     local host, port = splithostport(addr)
     -- check route table
-    for _, rule in ipairs(route) do
-        local pattern, route = table.unpack(rule)
+    local routetab = _G.route or {}
+    for _, rule in ipairs(routetab) do
+        local pattern, dest = table.unpack(rule)
         if host:find(pattern) then
-            return addr, table.unpack(route)
+            return addr, table.unpack(dest)
         end
     end
     -- default route
-    return addr, table.unpack(route_default)
+    local default = route_default or {}
+    return addr, table.unpack(default)
 end
 
 local function simple_route6(addr)
+    -- check redirect table
+    local redirtab = _G.redirect6 or {}
+    for _, rule in ipairs(redirtab) do
+        local pattern, target = table.unpack(rule)
+        if addr:find(pattern) then
+            return table.unpack(target)
+        end
+    end
+    local host, port = splithostport(addr)
+    -- check route table
+    local routetab = _G.route6 or {}
+    for _, rule in ipairs(routetab) do
+        local pattern, dest = table.unpack(rule)
+        if host:find(pattern) then
+            return addr, table.unpack(dest)
+        end
+    end
     -- default route
-    return addr, table.unpack(route_default)
+    local default = route6_default or route_default or {}
+    return addr, table.unpack(default)
 end
 
 local function simple_resolve(addr)
     local host, port = splithostport(addr)
     host = string.lower(host)
     -- lookup in hosts table
+    local hosts = _G.hosts or {}
     local entry = hosts[host]
     if entry then
         return simple_route(string.format("%s:%s", entry, port))
@@ -145,8 +169,9 @@ end
 -- [[ ruleset callbacks, see API.md for details ]] --
 local ruleset = {}
 
-_G.stat_requests = _G.stat_requests or {}
 _G.num_requests = _G.num_requests or 0
+_G.stat_requests = _G.stat_requests or {}
+_G.MAX_STAT_REQUESTS = 60
 
 function ruleset.resolve(addr)
     num_requests = num_requests + 1
@@ -181,7 +206,7 @@ end
 function ruleset.tick(now)
     printf("ruleset.tick: %.03f", now)
     table.insert(stat_requests, num_requests)
-    if stat_requests[61] then
+    if stat_requests[MAX_STAT_REQUESTS + 1] then
         table.remove(stat_requests, 1)
     end
 end
@@ -206,7 +231,7 @@ local function render_stats()
     end
     for y = 4, 0, -1 do
         local line = {}
-        for x = 1, 60 do
+        for x = 1, MAX_STAT_REQUESTS do
             if requests[x] and requests[x] > y then
                 table.insert(line, "|")
             else
@@ -217,7 +242,7 @@ local function render_stats()
     end
     local card = #requests
     local line = {}
-    for x = 1, 60 do
+    for x = 1, MAX_STAT_REQUESTS do
         if x < card then
             table.insert(line, "-")
         elseif x == card then
@@ -237,7 +262,7 @@ function ruleset.stats(dt)
         table.insert(w, string.format(s, ...))
     end
     local p = recent_events
-    for i = 1, 10 do
+    for i = 1, MAX_RECENT_EVENTS do
         if not p then
             break
         end

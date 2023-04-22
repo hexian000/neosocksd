@@ -77,9 +77,10 @@ static void print_usage(const char *argv0)
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  -t, --timeout <seconds>    Maximum time in seconds that a whole request can take (default: 60.0)\n"
-		"  -u, --user <name>          switch to the specified limited user, e.g. nobody\n"
-		"  -v, --verbose              increase verbosity\n"
-		"  -s, --silence              decrease verbosity\n"
+		"  -u, --user <name>          switch to the specified limited user, e.g. \"nobody\"\n"
+		"  -v, --verbose              increase logging verbosity, can be specified more than once\n"
+		"                             e.g. \"-v -v\" prints verbose messages\n"
+		"  -s, --silence              decrease logging verbosity\n"
 		"\n"
 		"example:\n"
 		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
@@ -266,8 +267,12 @@ int main(int argc, char **argv)
 	}
 
 	serve_fn serve_cb = socks_serve;
-	if (args.forward != NULL || args.tproxy) {
+	if (args.forward != NULL) {
 		serve_cb = forward_serve;
+#if WITH_TPROXY
+	} else if (args.tproxy) {
+		serve_cb = forward_serve;
+#endif
 	} else if (args.http) {
 		serve_cb = http_proxy_serve;
 	}

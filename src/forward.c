@@ -204,6 +204,7 @@ static void forward_start(
 			forward_free(ctx);
 			return;
 		}
+#if WITH_TPROXY
 	} else if (conf->transparent) {
 		if (getsockname(ctx->accepted_fd, &addr.sa, &len) != 0) {
 			const int err = errno;
@@ -212,6 +213,7 @@ static void forward_start(
 			forward_free(ctx);
 			return;
 		}
+#endif
 	} else {
 		FAIL();
 	}
