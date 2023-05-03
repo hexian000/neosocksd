@@ -19,10 +19,10 @@ show_usage() {
     echo "  $0 -x 192.168.1.1:1080 -c neosocksd.lan -u @ruleset.lua --gc"
     echo
     echo "arguments:"
-    echo "  -c <api address>             connect to this address, default \"${ADDR}\""
-    echo "  -x <proxy>                   through this SOCKS4A proxy"
+    echo "  -c <api address>             address to connect, default \"${ADDR}\""
+    echo "  -x <proxy>                   socks5 proxy, see example"
     echo "  -u <script>                  update ruleset (/ruleset/update)"
-    echo "                               use @filename.lua to load local file (same below)"
+    echo "                               use @filename.lua to load a local file (same below)"
     echo "  -e <script>                  execute statement (/ruleset/invoke)"
     echo "  --gc                         perform full GC (/ruleset/gc)"
     echo
@@ -39,7 +39,7 @@ make_content() {
 make_call() {
     echo " >>> ${METHOD} ${URI} ${CONTENT}"
     if [ -n "${PROXY}" ]; then
-        make_content -0vX "${METHOD}" -x "socks4a://${PROXY}" "http://neosocksd.lan${URI}"
+        make_content -0vX "${METHOD}" -x "socks5h://${PROXY}" "http://neosocksd.lan${URI}"
     else
         make_content -0vX "${METHOD}" "http://${ADDR}${URI}"
     fi

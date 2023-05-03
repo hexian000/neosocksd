@@ -72,7 +72,9 @@ curl -0vx socks5h://127.0.0.1:1080 \
     --data-binary @ruleset.lua
 ```
 
-See [neox.sh](neox.sh) for shell operating.
+[neox.sh](neox.sh) is a curl wrapper script for simplified shell operating.
+
+*Note: Since the HTTP/1.0 API server has a fixed buffer size of 8 KiB, you will not be able to load large scripts with this command. Consider sharded updates for large script projects.*
 
 ## Runtime Dependencies
 

@@ -125,27 +125,23 @@ end
 
 -- [[ redirect table matchers ]] --
 _G.match = {}
-function match.exact(address)
+function match.exact(s)
+    local host, port = splithostport(s)
+    if not host then
+        errorf("exact matcher should contains host and port: %q", s)
+    end
     return function(addr)
-        return addr == address
+        return addr == s
     end
 end
 
-function match.startswith(pattern)
+function match.host(s)
     return function(addr)
-        return string.startswith(addr, pattern)
-    end
-end
-
-function match.endswith(pattern)
-    return function(addr)
-        return string.endswith(addr, pattern)
-    end
-end
-
-function match.pattern(pattern)
-    return function(addr)
-        return not not string.find(addr, pattern)
+        local host, port = splithostport(addr)
+        if not host then
+            return false
+        end
+        return host == s
     end
 end
 
@@ -155,10 +151,30 @@ function match.port(from, to)
     end
     return function(addr)
         local host, port = splithostport(addr)
+        if not port then
+            return false
+        end
+        port = tonumber(port)
+        return from <= port and port <= to
+    end
+end
+
+function match.domain(s)
+    if not s:startswith(".") then
+        errorf("domain matcher should starts with \".\": %q", s)
+    end
+    return function(addr)
+        local host, port = splithostport(addr)
         if not host then
             return false
         end
-        return from <= port and port <= to
+        return host:endswith(s)
+    end
+end
+
+function match.pattern(s)
+    return function(addr)
+        return not not addr:find(s)
     end
 end
 
@@ -167,6 +183,13 @@ _G.rule = {}
 function rule.direct()
     return function(addr)
         return addr
+    end
+end
+
+function rule.reject()
+    return function(addr)
+        printf("ruleset reject: %q", addr)
+        return nil
     end
 end
 
@@ -181,13 +204,6 @@ function rule.proxy(...)
     local chain = table.pack(...)
     return function(addr)
         return addr, table.unpack(chain)
-    end
-end
-
-function rule.reject()
-    return function(addr)
-        printf("reject: %q", addr)
-        return nil
     end
 end
 
@@ -208,10 +224,10 @@ _G.stat_requests = _G.stat_requests or {}
 _G.last_clock = _G.last_clock or 0.0
 _G.MAX_STAT_REQUESTS = 60
 
-local function run_match_(t, request)
+local function matchtab_(t, s)
     for i, rule in ipairs(t) do
         local match, action = table.unpack(rule)
-        if match(request) then
+        if match(s) then
             return action
         end
     end
@@ -222,7 +238,7 @@ local function route_(addr)
     -- check redirect table
     local redirtab = _G.redirect
     if redirtab then
-        local action = run_match_(redirtab, addr)
+        local action = matchtab_(redirtab, addr)
         if action then
             return action(addr)
         end
@@ -234,7 +250,7 @@ local function route_(addr)
     end
     local routetab = _G.route
     if routetab then
-        local action = run_match_(routetab, host)
+        local action = matchtab_(routetab, host)
         if action then
             return action(addr)
         end
@@ -251,7 +267,7 @@ local function route6_(addr)
     -- check redirect table
     local redirtab = _G.redirect6
     if redirtab then
-        local action = run_match_(redirtab, addr)
+        local action = matchtab_(redirtab, addr)
         if action then
             return action(addr)
         end
@@ -263,7 +279,7 @@ local function route6_(addr)
     end
     local routetab = _G.route6
     if routetab then
-        local action = run_match_(routetab, host)
+        local action = matchtab_(routetab, host)
         if action then
             return action(addr)
         end
@@ -280,9 +296,13 @@ local function resolve_(addr)
     -- check redirect table
     local redirtab = _G.redirect_name
     if redirtab then
-        local action = run_match_(redirtab, addr)
+        local action = matchtab_(redirtab, addr)
         if action then
-            return action(addr)
+            local ret = table.pack(action(addr))
+            if #ret ~= 1 then
+                return table.unpack(ret)
+            end
+            addr = ret[1]
         end
     end
     -- lookup in hosts table
