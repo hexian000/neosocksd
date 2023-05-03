@@ -1,13 +1,14 @@
-local ruleset = require("simple_ruleset")
+local ruleset = require("libruleset")
 
 -- [[ configurations ]] --
 function _G.is_enabled()
+    -- if false, new connections are rejected
     return true
 end
 
 -- unordered hosts map
 _G.hosts = {
-    ["neosocksd.lan"] = "127.0.1.1",
+    ["neosocksd.lan"] = "127.0.1.1", -- see _G.redirect
     ["gateway.region1.lan"] = "192.168.32.1",
     ["host123.region1.lan"] = "192.168.32.123",
     ["gateway.region2.lan"] = "192.168.33.1",
@@ -15,26 +16,50 @@ _G.hosts = {
 }
 
 -- ordered redirect rules
+_G.redirect_name = {
+    -- resolve lan addresses locally
+    [1] = {match.endswith(".lan"), rule.direct()},
+    [2] = {match.endswith(".local"), rule.direct()},
+    -- no default action
+    [0] = nil
+}
+
 _G.redirect = {
     -- redirect API domain
-    [1] = {"^127%.0%.1%.1:80$", {"127.0.1.1:9080"}},
-    [2] = {"^127%.0%.1%.1:", {nil}},
-    -- reject loopback or link-local
-    [3] = {"^127%.", {nil}},
-    [4] = {"^169%.254%.", {nil}}
+    [1] = {match.exact("127.0.1.1:80"), rule.redirect("127.0.1.1:9080")},
+    -- no default action, go to _G.route
+    [0] = nil
 }
+
+-- _G.redirect6 is not set
 
 -- ordered routes
 _G.route = {
-    -- region1 gateway
-    [1] = {"^192%.168%.32%.", {"192.168.32.1:1080"}},
-    -- jump to region2 via region1 gateway
-    [2] = {"^192%.168%.33%.", {"192.168.33.1:1080", "192.168.32.1:1080"}},
+    -- reject loopback or link-local
+    [1] = {inet.subnet("127.0.0.0/8"), rule.reject()},
+    [2] = {inet.subnet("169.254.0.0/16"), rule.reject()},
+    -- region1 proxy
+    [3] = {inet.subnet("192.168.32.0/24"), rule.proxy("192.168.32.1:1080")},
+    -- jump to region2 through region1 proxy
+    [4] = {inet.subnet("192.168.33.0/24"), rule.proxy("192.168.33.1:1080", "192.168.32.1:1080")},
     -- access other lan addresses directly
-    [3] = {"^192%.168%.", {}}
+    [5] = {inet.subnet("192.168.0.0/16"), rule.direct()},
+    -- no default action, go to _G.route_default
+    [0] = nil
 }
--- default gateway
-_G.route_default = {"192.168.1.1:1080"}
+
+_G.route6 = {
+    -- reject loopback or link-local
+    [1] = {inet6.subnet("::1/128"), rule.reject()},
+    [2] = {inet6.subnet("fe80::/10"), rule.reject()},
+    [3] = {inet6.subnet("::ffff:127.0.0.0/104"), rule.reject()},
+    [4] = {inet6.subnet("::ffff:169.254.0.0/112"), rule.reject()},
+    -- default action
+    [0] = rule.direct()
+}
+
+-- this global default applies to any unmatched requests
+_G.route_default = rule.proxy("192.168.1.1:1080")
 
 printf("ruleset loaded, interpreter: %s", _VERSION)
 return ruleset

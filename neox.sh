@@ -5,6 +5,29 @@ METHOD="POST"
 CONTENT=""
 PROXY=""
 
+show_usage() {
+    echo "neox.sh"
+    echo "  curl wrapper for neosocksd api"
+    echo
+    echo "usage:"
+    echo "  $0 [-x proxy] [-c api] <command sequence>"
+    echo
+    echo "example:"
+    echo "  $0 -e '_G.route_default = {\"192.168.2.1:1080\"}'"
+    echo "  $0 -e @ruleset_patch.lua"
+    echo "  $0 -c 192.168.1.1:9080 -e '_G.route_default = {\"192.168.2.1:1080\"}'"
+    echo "  $0 -x 192.168.1.1:1080 -c neosocksd.lan -u @ruleset.lua --gc"
+    echo
+    echo "arguments:"
+    echo "  -c <api address>             connect to this address, default \"${ADDR}\""
+    echo "  -x <proxy>                   through this SOCKS4A proxy"
+    echo "  -u <script>                  update ruleset (/ruleset/update)"
+    echo "                               use @filename.lua to load local file (same below)"
+    echo "  -e <script>                  execute statement (/ruleset/invoke)"
+    echo "  --gc                         perform full GC (/ruleset/gc)"
+    echo
+}
+
 make_content() {
     if [ -z "${CONTENT}" ]; then
         curl "$@"
@@ -23,7 +46,12 @@ make_call() {
     echo
 }
 
-while [ $# -gt 0 ]; do
+if [ -z "$1" ]; then
+    show_usage
+    exit 1
+fi
+
+while [ -n "$1" ]; do
     case "$1" in
     "-c" | "--connect")
         ADDR="$2"
@@ -52,9 +80,7 @@ while [ $# -gt 0 ]; do
         shift
         ;;
     *)
-        echo "usage:  $0 -e '_G.route_default = {\"127.0.6.22:1081\", \"127.0.6.2:1081\"}'"
-        echo "        $0 -u @ruleset.lua"
-        echo "        $0 -x 192.168.1.1:1080 -u @ruleset.lua --gc"
+        show_usage
         exit 1
         ;;
     esac

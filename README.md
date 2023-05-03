@@ -44,17 +44,19 @@ See `./neosocksd -h` for details.
 
 ### Scripting Usage
 
-Start the server with a Lua script named "ruleset.lua":
+First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
+
+Use the following command to start the server with the Lua scripts in current directory:
 
 ```sh
-./neosocksd -4 -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua
+./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua -v
 ```
 
 Depending on how complex your customizations are, check out:
 
 - Level 1: Rule set configuration example at [ruleset.lua](ruleset.lua)
-- Level 2: Full rule set logic in [simple_ruleset.lua](simple_ruleset.lua)
-- Level 3: Professional reference: [neosocksd API Reference](API.md), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
+- Level 2: Rule set logic in [libruleset.lua](libruleset.lua)
+- Level 3: Reference manual for enthusiasts and professionals: [neosocksd API Reference](API.md), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
 Access RESTful API through the proxy as defined in [ruleset.lua](ruleset.lua):
 
