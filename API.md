@@ -264,6 +264,8 @@ neosocksd.invoke([[printf("test rpc")]], "neosocksd.lan:80", "127.0.0.1:1080")
 
 Run Lua code on another neosocksd. This function returns immediately. On failure, the invocation is lost.
 
+The code length limit for a single invocation is guaranteed to be at least 4 KiB.
+
 
 ### _G.NDEBUG
 
