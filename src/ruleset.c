@@ -99,10 +99,20 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 	return req;
 }
 
+static int ruleset_traceback(lua_State *L)
+{
+	if (LOGLEVEL(LOG_LEVEL_DEBUG)) {
+		/* DEBUG ONLY: unprotected allocation calls may panic if OOM */
+		luaL_traceback(L, L, lua_tostring(L, -1), 1);
+	}
+	return 1;
+}
+
 static int ruleset_pcall(
 	lua_State *restrict L, lua_CFunction func, int nargs, int nresults, ...)
 {
 	lua_settop(L, 0);
+	lua_pushcfunction(L, ruleset_traceback);
 	lua_pushcfunction(L, func);
 	va_list args;
 	va_start(args, nresults);
@@ -110,7 +120,7 @@ static int ruleset_pcall(
 		lua_pushlightuserdata(L, va_arg(args, void *));
 	}
 	va_end(args);
-	return lua_pcall(L, nargs, nresults, 0);
+	return lua_pcall(L, nargs, nresults, 1);
 }
 
 /* invoke(code, addr, proxyN, ..., proxy1) */
