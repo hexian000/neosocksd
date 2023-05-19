@@ -8,11 +8,12 @@ end
 
 -- unordered hosts map
 _G.hosts = {
-    ["neosocksd.lan"] = "127.0.1.1", -- see _G.redirect
     ["gateway.region1.lan"] = "192.168.32.1",
     ["host123.region1.lan"] = "192.168.32.123",
     ["gateway.region2.lan"] = "192.168.33.1",
-    ["host123.region2.lan"] = "192.168.33.123"
+    ["host123.region2.lan"] = "192.168.33.123",
+    -- self-assignment
+    ["neosocksd.lan"] = "127.0.1.1" -- see _G.redirect
 }
 
 -- ordered redirect rules

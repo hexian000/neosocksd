@@ -83,11 +83,7 @@ function inet.subnet(s)
     end
     local mask = ~((1 << (32 - shift)) - 1)
     local subnet = neosocksd.parse_ipv4(host) & mask
-    return function(addr)
-        local ip = neosocksd.parse_ipv4(addr)
-        if not ip then
-            return false
-        end
+    return function(ip)
         return (ip & mask) == subnet
     end
 end
@@ -104,21 +100,13 @@ function inet6.subnet(s)
     if shift > 64 then
         local mask = ~((1 << (128 - shift)) - 1)
         subnet2 = subnet2 & mask
-        return function(addr)
-            local ip1, ip2 = neosocksd.parse_ipv6(addr)
-            if not ip1 then
-                return false
-            end
+        return function(ip1, ip2)
             return ip1 == subnet1 and (ip2 & mask) == subnet2
         end
     end
     local mask = ~((1 << (64 - shift)) - 1)
     subnet1 = subnet1 & mask
-    return function(addr)
-        local ip1, ip2 = neosocksd.parse_ipv6(addr)
-        if not ip1 then
-            return false
-        end
+    return function(ip1, ip2)
         return (ip1 & mask) == subnet1
     end
 end
@@ -224,10 +212,10 @@ _G.stat_requests = _G.stat_requests or {}
 _G.last_clock = _G.last_clock or 0.0
 _G.MAX_STAT_REQUESTS = 60
 
-local function matchtab_(t, s)
+local function matchtab_(t, ...)
     for i, rule in ipairs(t) do
         local match, action = table.unpack(rule)
-        if match(s) then
+        if match(...) then
             return action
         end
     end
@@ -250,7 +238,8 @@ local function route_(addr)
     end
     local routetab = _G.route
     if routetab then
-        local action = matchtab_(routetab, host)
+        local ip = neosocksd.parse_ipv4(host)
+        local action = matchtab_(routetab, ip)
         if action then
             return action(addr)
         end
@@ -279,7 +268,8 @@ local function route6_(addr)
     end
     local routetab = _G.route6
     if routetab then
-        local action = matchtab_(routetab, host)
+        local ip1, ip2 = neosocksd.parse_ipv6(host)
+        local action = matchtab_(routetab, ip1, ip2)
         if action then
             return action(addr)
         end
@@ -442,11 +432,7 @@ end
 neosocksd.setinterval(60.0)
 
 function ruleset.stats(dt)
-    local ok, ret = pcall(stats_, dt)
-    if not ok then
-        return tostring(ret)
-    end
-    return ret
+    return stats_(dt)
 end
 
 return ruleset
