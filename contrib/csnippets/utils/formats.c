@@ -5,6 +5,7 @@
 #include "utils/arraysize.h"
 #include "math/intlog2.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <math.h>
 
@@ -58,20 +59,20 @@ struct duration make_duration_nanos(int64_t value)
 	return d;
 }
 
-size_t format_iec(char *buf, const size_t bufsize, const size_t value)
-{
-	const char *iec_units[] = {
-		"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB",
-	};
+static const char *iec_units[] = {
+	"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB",
+};
 
-	int n = value >= 16 ? (intlog2(value) - 3) / 10 : 0;
-	if (n <= 0) {
-		return snprintf(buf, bufsize, "%zu %s", value, iec_units[0]);
+int format_iec(char *buf, const size_t bufsize, const uintmax_t value)
+{
+	if (value < UINTMAX_C(8192)) {
+		return snprintf(buf, bufsize, "%ju %s", value, iec_units[0]);
 	}
+	int n = (intlog2(value) - 3) / 10;
 	if (n >= (int)ARRAY_SIZE(iec_units)) {
 		n = (int)ARRAY_SIZE(iec_units) - 1;
 	}
-	const double v = (double)(value) / (double)((size_t)(1) << (n * 10));
+	const double v = ldexp(value, n * -10);
 	if (v < 10.0) {
 		return snprintf(buf, bufsize, "%.02lf %s", v, iec_units[n]);
 	}

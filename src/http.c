@@ -111,26 +111,40 @@ static void xfer_done_cb(struct ev_loop *loop, void *ctx)
 	http_free(ctx);
 }
 
-static void http_write_error(struct http_ctx *restrict ctx, const uint16_t code)
-{
-	LOGV_F("http: response HTTP %" PRIu16, code);
-	const size_t cap = ctx->wbuf.cap - ctx->wbuf.len;
-	char *buf = (char *)(ctx->wbuf.data + ctx->wbuf.len);
-	ctx->wbuf.len += http_error(buf, cap, code);
-}
-
 static void
-http_write_rsphdr(struct http_ctx *restrict ctx, const uint16_t code)
+http_resphdr_init(struct http_ctx *restrict ctx, const uint16_t code)
 {
 	char date_str[32];
 	const int date_len = (int)http_date(date_str, sizeof(date_str));
+	const char *status = http_status(code);
+	ctx->wbuf.len = 0;
 	(void)buf_appendf(
 		&ctx->wbuf,
 		"HTTP/1.0 %" PRIu16 " %s\r\n"
 		"Date: %.*s\r\n"
-		"Connection: close\r\n"
-		"Content-type: text/plain\r\n\r\n",
-		code, http_status(code), date_len, date_str);
+		"Connection: close\r\n",
+		code, status ? status : "", date_len, date_str);
+}
+
+#define RESPHDR_ADD(ctx, key, value)                                           \
+	BUF_APPENDCONST(&(ctx)->wbuf, key ": " value "\r\n")
+
+#define RESPHDR_END(ctx) BUF_APPENDCONST(&(ctx)->wbuf, "\r\n")
+
+static void
+http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
+{
+	const size_t cap = ctx->wbuf.cap - ctx->wbuf.len;
+	char *buf = (char *)(ctx->wbuf.data + ctx->wbuf.len);
+	const int len = http_error(buf, cap, code);
+	if (len <= 0) {
+		/* can't generate error page, reply with code only */
+		http_resphdr_init(ctx, code);
+		RESPHDR_END(ctx);
+		return;
+	}
+	ctx->wbuf.len += len;
+	LOGV_F("http: response error page %" PRIu16, code);
 }
 
 static void
@@ -179,7 +193,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		} else if (next == ctx->http_nxt) {
 			if (cap == 0) {
 				ev_io_stop(loop, watcher);
-				http_write_error(ctx, HTTP_ENTITY_TOO_LARGE);
+				http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
 				ev_io_start(loop, w_write);
 				return;
 			}
@@ -232,7 +246,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		if (strcasecmp(key, "Content-Length") == 0) {
 			if (sscanf(value, "%zu", &ctx->content_length) != 1) {
 				ev_io_stop(loop, watcher);
-				http_write_error(ctx, HTTP_BAD_REQUEST);
+				http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 				ev_io_start(loop, w_write);
 				return;
 			}
@@ -251,7 +265,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		if (want > content_cap) {
 			/* no enough buffer */
 			ev_io_stop(loop, watcher);
-			http_write_error(ctx, HTTP_ENTITY_TOO_LARGE);
+			http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
 			ev_io_start(loop, w_write);
 			return;
 		}
@@ -280,7 +294,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	if (fd < 0) {
 		const int err = ctx->dialer.err;
 		LOGD_F("dialer failed: %s", strerror(err));
-		http_write_error(ctx, HTTP_BAD_GATEWAY);
+		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
 		ev_io_start(loop, w_write);
 		return;
 	}
@@ -431,13 +445,13 @@ http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	struct http_message *restrict hdr = &ctx->http_msg;
 	if (strcasecmp(hdr->req.method, "CONNECT") != 0) {
-		http_write_error(ctx, HTTP_BAD_REQUEST);
+		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
 	LOGI_F("http: CONNECT %s", hdr->req.url);
 
 	if (!proxy_dial(ctx, loop, hdr->req.url)) {
-		http_write_error(ctx, HTTP_BAD_GATEWAY);
+		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
 		return;
 	}
 }
@@ -449,10 +463,14 @@ static void http_handle_stats(
 	UNUSED(uri);
 	const struct http_message *restrict hdr = &ctx->http_msg;
 	if (strcasecmp(hdr->req.method, "GET") != 0) {
-		http_write_error(ctx, HTTP_BAD_REQUEST);
+		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
-	http_write_rsphdr(ctx, HTTP_OK);
+	http_resphdr_init(ctx, HTTP_OK);
+	RESPHDR_ADD(ctx, "Cache-Control", "no-store");
+	RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
+	RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");
+	RESPHDR_END(ctx);
 
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = server_get_uptime(ctx->server, now);
@@ -469,7 +487,7 @@ static void http_handle_stats(
 		struct stats total;
 		stats_read(&total);
 
-		const size_t num_request = total.num_request;
+		const uintmax_t num_request = total.num_request;
 		const double request_rate =
 			(double)(num_request - last.num_request) / dt;
 		last.num_request = num_request;
@@ -477,7 +495,7 @@ static void http_handle_stats(
 		const size_t num_halfopen = total.num_halfopen;
 		const size_t num_active = transfer_get_active() / 2u;
 
-		const size_t xfer_bytes = transfer_get_bytes();
+		const uintmax_t xfer_bytes = transfer_get_bytes();
 		char timestamp[32];
 		(void)strftime(
 			timestamp, sizeof(timestamp), "%FT%T%z",
@@ -539,16 +557,16 @@ static bool http_leafnode_check(
 	const char *method, const bool require_content)
 {
 	if (uri->path != NULL) {
-		http_write_error(ctx, HTTP_NOT_FOUND);
+		http_resp_errpage(ctx, HTTP_NOT_FOUND);
 		return false;
 	}
 	const struct http_message *restrict hdr = &ctx->http_msg;
 	if (method != NULL && strcasecmp(hdr->req.method, method) != 0) {
-		http_write_error(ctx, HTTP_METHOD_NOT_ALLOWED);
+		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
 	if (require_content && ctx->content == NULL) {
-		http_write_error(ctx, HTTP_BAD_REQUEST);
+		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return false;
 	}
 	return true;
@@ -562,7 +580,10 @@ static void http_handle_ruleset(
 	struct server *restrict s = ctx->server;
 	struct ruleset *ruleset = s->ruleset;
 	if (ruleset == NULL) {
-		http_write_rsphdr(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		http_resphdr_init(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
+		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");
+		RESPHDR_END(ctx);
 		(void)buf_appendf(
 			&ctx->wbuf, "%s",
 			"ruleset not enabled, restart with -r\n");
@@ -571,7 +592,7 @@ static void http_handle_ruleset(
 
 	char *segment;
 	if (!url_path_segment(&uri->path, &segment)) {
-		http_write_error(ctx, HTTP_NOT_FOUND);
+		http_resp_errpage(ctx, HTTP_NOT_FOUND);
 		return;
 	}
 	if (strcmp(segment, "invoke") == 0) {
@@ -582,10 +603,11 @@ static void http_handle_ruleset(
 		const size_t len = ctx->content_length;
 		LOGV_F("api: ruleset invoke\n%s", code);
 		if (!ruleset_invoke(ruleset, code, len)) {
-			http_write_error(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
-		http_write_rsphdr(ctx, HTTP_OK);
+		http_resphdr_init(ctx, HTTP_OK);
+		RESPHDR_END(ctx);
 		return;
 	}
 	if (strcmp(segment, "update") == 0) {
@@ -596,10 +618,11 @@ static void http_handle_ruleset(
 		const size_t len = ctx->content_length;
 		LOGV_F("api: ruleset update\n%s", code);
 		if (!ruleset_load(ruleset, code, len)) {
-			http_write_error(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
-		http_write_rsphdr(ctx, HTTP_OK);
+		http_resphdr_init(ctx, HTTP_OK);
+		RESPHDR_END(ctx);
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {
@@ -607,11 +630,18 @@ static void http_handle_ruleset(
 			return;
 		}
 		ruleset_gc(ruleset);
-		http_write_rsphdr(ctx, HTTP_OK);
+		const size_t livemem = ruleset_memused(ruleset);
+		char buf[16];
+		format_iec(buf, sizeof(buf), livemem);
+		http_resphdr_init(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
+		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");
+		RESPHDR_END(ctx);
+		(void)buf_appendf(&ctx->wbuf, "Ruleset Live Memory: %s\n", buf);
 		return;
 	}
 
-	http_write_rsphdr(ctx, HTTP_NOT_FOUND);
+	http_resp_errpage(ctx, HTTP_NOT_FOUND);
 }
 
 static void
@@ -622,19 +652,20 @@ http_handle_restapi(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	LOGV_F("api: serve uri \"%s\"", hdr->req.url);
 	if (!url_parse(hdr->req.url, &uri)) {
 		LOGW("api: failed parsing url");
-		http_write_error(ctx, HTTP_BAD_REQUEST);
+		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
 	char *segment;
 	if (!url_path_segment(&uri.path, &segment)) {
-		http_write_error(ctx, HTTP_BAD_REQUEST);
+		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
 	if (strcmp(segment, "healthy") == 0) {
 		if (!http_leafnode_check(ctx, &uri, NULL, false)) {
 			return;
 		}
-		http_write_rsphdr(ctx, HTTP_OK);
+		http_resphdr_init(ctx, HTTP_OK);
+		RESPHDR_END(ctx);
 		return;
 	}
 	if (strcmp(segment, "stats") == 0) {
@@ -648,7 +679,7 @@ http_handle_restapi(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_handle_ruleset(loop, ctx, &uri);
 		return;
 	}
-	http_write_error(ctx, HTTP_NOT_FOUND);
+	http_resp_errpage(ctx, HTTP_NOT_FOUND);
 }
 
 void http_proxy_serve(

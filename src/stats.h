@@ -2,9 +2,10 @@
 #define STATS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 struct stats {
-	size_t num_request;
+	uintmax_t num_request;
 	size_t num_halfopen;
 };
 

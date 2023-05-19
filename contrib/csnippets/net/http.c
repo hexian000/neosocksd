@@ -5,6 +5,7 @@
 #include "utils/arraysize.h"
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -128,7 +129,7 @@ const char *http_status(const uint16_t code)
 	return NULL;
 }
 
-size_t http_error(char *buf, size_t buf_size, const uint16_t code)
+int http_error(char *buf, size_t buf_size, const uint16_t code)
 {
 	const char *name = NULL, *info = NULL;
 	for (size_t i = 0; i < ARRAY_SIZE(http_resp); i++) {
@@ -147,7 +148,7 @@ size_t http_error(char *buf, size_t buf_size, const uint16_t code)
 	}
 	char date_str[32];
 	const size_t date_len = http_date(date_str, sizeof(date_str));
-	const int ret = snprintf(
+	return snprintf(
 		buf, buf_size,
 		"HTTP/1.0 %" PRIu16 " %s\r\n"
 		"Date: %.*s\r\n"
@@ -159,5 +160,4 @@ size_t http_error(char *buf, size_t buf_size, const uint16_t code)
 		"</BODY></HTML>\n",
 		code, name, (int)date_len, date_str, code, name, code, name,
 		info);
-	return ret > 0 ? ret : 0;
 }

@@ -10,10 +10,11 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 
 static size_t xfer_num_active = 0;
-static size_t xfer_bytes = 0;
+static uintmax_t xfer_bytes = 0;
 
 static void ev_set_active(
 	struct ev_loop *loop, struct ev_io *restrict watcher, const bool active)
@@ -182,7 +183,7 @@ size_t transfer_get_active(void)
 	return xfer_num_active;
 }
 
-size_t transfer_get_bytes(void)
+uintmax_t transfer_get_bytes(void)
 {
 	return xfer_bytes;
 }

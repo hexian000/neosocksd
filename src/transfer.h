@@ -41,6 +41,6 @@ void transfer_stop(struct ev_loop *loop, struct transfer *t);
 
 size_t transfer_get_active(void);
 
-size_t transfer_get_bytes(void);
+uintmax_t transfer_get_bytes(void);
 
 #endif /* TRANSFER_H */

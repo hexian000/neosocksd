@@ -4,13 +4,13 @@
 #ifndef FORMATS_H
 #define FORMATS_H
 
-#include "stddef.h"
-#include "stdint.h"
+#include <stddef.h>
+#include <stdint.h>
 
-size_t format_iec(char *buf, size_t bufsize, size_t value);
+int format_iec(char *buf, size_t bufsize, uintmax_t value);
 
 struct duration {
-	signed int sign;
+	signed int sign; /* +1 or -1, 0 is null, otherwise undefined */
 	unsigned int days;
 	unsigned int hours;
 	unsigned int minutes;

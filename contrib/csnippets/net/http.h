@@ -91,9 +91,9 @@ size_t http_date(char *buf, size_t buf_size);
  * @param buf [OUT] string buffer
  * @param buf_size size of string buffer
  * @param code HTTP status code
- * @return Length of the generated response, or 0 if the code is unknown.
+ * @return snprintf result, or 0 if the code is unknown.
  * @see enum http_status_code
  */
-size_t http_error(char *buf, size_t buf_size, uint16_t code);
+int http_error(char *buf, size_t buf_size, uint16_t code);
 
 #endif /* HTTP_H */
