@@ -36,6 +36,7 @@ static struct {
 	bool tproxy : 1;
 #endif
 	bool want_reset : 1;
+	bool traceback : 1;
 	int verbosity;
 	int resolve_pf;
 	const char *user_name;
@@ -76,7 +77,8 @@ static void print_usage(const char *argv0)
 #endif
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --api <bind_address>       RESTful API for monitoring\n"
-		"  -t, --timeout <seconds>    Maximum time in seconds that a whole request can take (default: 60.0)\n"
+		"  --traceback                print ruleset error traceback (for debugging)\n"
+		"  -t, --timeout <seconds>    maximum time in seconds that a whole request can take (default: 60.0)\n"
 		"  -u, --user <name>          switch to the specified limited user, e.g. \"nobody\"\n"
 		"  -v, --verbose              increase logging verbosity, can be specified more than once\n"
 		"                             e.g. \"-v -v\" prints verbose messages\n"
@@ -191,8 +193,12 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			args.verbosity--;
 			continue;
 		}
-		if (strcmp(argv[i], "--") == 0) {
+		if (strcmp(argv[i], "--traceback") == 0) {
+			args.traceback = true;
 			continue;
+		}
+		if (strcmp(argv[i], "--") == 0) {
+			break;
 		}
 		LOGF_F("unknown argument: \"%s\"", argv[i]);
 		exit(EXIT_FAILURE);
@@ -248,6 +254,7 @@ int main(int argc, char **argv)
 #if WITH_TPROXY
 		.transparent = args.tproxy,
 #endif
+		.traceback = args.traceback,
 		.timeout = args.timeout,
 	};
 	struct ruleset *ruleset = NULL;

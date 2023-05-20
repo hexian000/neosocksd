@@ -66,9 +66,7 @@ end
 
 function _G.splithostport(s)
     local i = string.find(s, ":[^:]*$")
-    if not i then
-        return nil
-    end
+    assert(i, "invalid address format (configuration error?)")
     return string.sub(s, 1, i - 1), string.sub(s, i + 1)
 end
 
@@ -166,6 +164,19 @@ function match.pattern(s)
     end
 end
 
+-- [[ composite matchers ]] --
+_G.composite = {}
+function composite.anyof(t)
+    return function(q)
+        for i, match in ipairs(t) do
+            if match(q) then
+                return true
+            end
+        end
+        return false
+    end
+end
+
 -- [[ rule actions ]] --
 _G.rule = {}
 function rule.direct()
@@ -176,7 +187,6 @@ end
 
 function rule.reject()
     return function(addr)
-        printf("ruleset reject: %q", addr)
         return nil
     end
 end
@@ -209,25 +219,28 @@ end
 -- [[ internal route functions ]] --
 _G.num_requests = _G.num_requests or 0
 _G.stat_requests = _G.stat_requests or {}
-_G.last_clock = _G.last_clock or 0.0
+_G.last_clock = _G.last_clock or nil
 _G.MAX_STAT_REQUESTS = 60
 
 local function matchtab_(t, ...)
     for i, rule in ipairs(t) do
-        local match, action = table.unpack(rule)
+        local match, action, tag = table.unpack(rule)
         if match(...) then
-            return action
+            return action, tag
         end
     end
-    return t[0]
+    return t[0], "default"
 end
 
 local function route_(addr)
     -- check redirect table
     local redirtab = _G.redirect
     if redirtab then
-        local action = matchtab_(redirtab, addr)
+        local action, tag = matchtab_(redirtab, addr)
         if action then
+            if tag then
+                printf("redirect: [%s] %q", tag, addr)
+            end
             return action(addr)
         end
     end
@@ -239,12 +252,16 @@ local function route_(addr)
     local routetab = _G.route
     if routetab then
         local ip = neosocksd.parse_ipv4(host)
-        local action = matchtab_(routetab, ip)
+        local action, tag = matchtab_(routetab, ip)
         if action then
+            if tag then
+                printf("route: [%s] %q", tag, addr)
+            end
             return action(addr)
         end
     end
     -- global default
+    printf("route default: %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -256,8 +273,11 @@ local function route6_(addr)
     -- check redirect table
     local redirtab = _G.redirect6
     if redirtab then
-        local action = matchtab_(redirtab, addr)
+        local action, tag = matchtab_(redirtab, addr)
         if action then
+            if tag then
+                printf("redirect6: [%s] %q", tag, addr)
+            end
             return action(addr)
         end
     end
@@ -269,12 +289,16 @@ local function route6_(addr)
     local routetab = _G.route6
     if routetab then
         local ip1, ip2 = neosocksd.parse_ipv6(host)
-        local action = matchtab_(routetab, ip1, ip2)
+        local action, tag = matchtab_(routetab, ip1, ip2)
         if action then
+            if tag then
+                printf("route6: [%s] %q", tag, addr)
+            end
             return action(addr)
         end
     end
     -- global default
+    printf("route6 default: %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -286,8 +310,11 @@ local function resolve_(addr)
     -- check redirect table
     local redirtab = _G.redirect_name
     if redirtab then
-        local action = matchtab_(redirtab, addr)
+        local action, tag = matchtab_(redirtab, addr)
         if action then
+            if tag then
+                printf("redirect_name: [%s] %q", tag, addr)
+            end
             local ret = table.pack(action(addr))
             if #ret ~= 1 then
                 return table.unpack(ret)
@@ -311,6 +338,7 @@ local function resolve_(addr)
         return route6_(addr)
     end
     -- global default
+    printf("resolve default: %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -320,12 +348,13 @@ end
 
 local function render_(w)
     local requests = {}
+    local last_requests = 0
     for i, n in ipairs(stat_requests) do
         if i > 1 then
             table.insert(requests, n - stat_requests[i - 1])
         end
+        last_requests = n
     end
-    local last_requests = stat_requests[#stat_requests] or 0
     table.insert(requests, num_requests - last_requests)
     local max = math.max(table.unpack(requests))
     if max < 1 then
@@ -347,18 +376,10 @@ local function render_(w)
         table.insert(w, table.concat(line))
     end
     local card = #requests
-    local line = {}
-    for x = 1, MAX_STAT_REQUESTS do
-        if x < card then
-            table.insert(line, "-")
-        elseif x == card then
-            table.insert(line, "*")
-        else -- x > card
-            break
-        end
+    if card > 0 then
+        card = card - 1
     end
-    table.insert(line, string.format(" (max=%d)", max))
-    table.insert(w, table.concat(line))
+    table.insert(w, string.format("%s* (max=%d)", string.rep("-", card), max))
 end
 
 local function stats_(dt)
@@ -368,7 +389,9 @@ local function stats_(dt)
     end
     local clock = os.clock()
     if clock > 0.0 then
-        appendf(w, "%-16s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
+        if last_clock then
+            appendf(w, "%-16s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
+        end
         last_clock = clock
     end
     table.insert(w, "> Recent Events")
@@ -398,7 +421,6 @@ function ruleset.resolve(addr)
         printf("ruleset.resolve: service not enabled, reject %q", addr)
         return nil
     end
-    printf("ruleset.resolve: %q", addr)
     return resolve_(addr)
 end
 
@@ -408,7 +430,6 @@ function ruleset.route(addr)
         printf("ruleset.route: service not enabled, reject %q", addr)
         return nil
     end
-    printf("ruleset.route: %q", addr)
     return route_(addr)
 end
 
@@ -418,12 +439,10 @@ function ruleset.route6(addr)
         printf("ruleset.route6: service not enabled, reject %q", addr)
         return nil
     end
-    printf("ruleset.route6: %q", addr)
     return route6_(addr)
 end
 
 function ruleset.tick(now)
-    printf("ruleset.tick: %.03f", now)
     table.insert(stat_requests, num_requests)
     if stat_requests[MAX_STAT_REQUESTS + 1] then
         table.remove(stat_requests, 1)

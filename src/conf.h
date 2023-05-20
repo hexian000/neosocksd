@@ -15,6 +15,7 @@ struct config {
 #if WITH_TPROXY
 	bool transparent : 1;
 #endif
+	bool traceback : 1;
 	double timeout;
 };
 

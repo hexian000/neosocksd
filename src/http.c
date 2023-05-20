@@ -633,7 +633,7 @@ static void http_handle_ruleset(
 		const size_t livemem = ruleset_memused(ruleset);
 		char buf[16];
 		format_iec(buf, sizeof(buf), livemem);
-		http_resphdr_init(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		http_resphdr_init(ctx, HTTP_OK);
 		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
 		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");
 		RESPHDR_END(ctx);

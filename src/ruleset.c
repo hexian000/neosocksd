@@ -33,7 +33,7 @@ struct ruleset {
 	struct ev_timer ticker;
 };
 
-static struct ruleset *find_ruleset(lua_State *L)
+static struct ruleset *find_ruleset(lua_State *restrict L)
 {
 	if (lua_getfield(L, LUA_REGISTRYINDEX, "ruleset") !=
 	    LUA_TLIGHTUSERDATA) {
@@ -99,20 +99,23 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 	return req;
 }
 
-static int ruleset_traceback(lua_State *L)
+static int ruleset_traceback(lua_State *restrict L)
 {
-	if (LOGLEVEL(LOG_LEVEL_DEBUG)) {
-		/* DEBUG ONLY: unprotected allocation calls may panic if OOM */
-		luaL_traceback(L, L, lua_tostring(L, -1), 1);
-	}
+	/* DEBUG ONLY: unprotected allocation calls may panic if OOM */
+	luaL_traceback(L, L, lua_tostring(L, -1), 1);
 	return 1;
 }
 
 static int ruleset_pcall(
-	lua_State *restrict L, lua_CFunction func, int nargs, int nresults, ...)
+	struct ruleset *restrict r, lua_CFunction func, int nargs, int nresults,
+	...)
 {
+	const bool traceback = r->conf->traceback;
+	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
-	lua_pushcfunction(L, ruleset_traceback);
+	if (traceback) {
+		lua_pushcfunction(L, ruleset_traceback);
+	}
 	lua_pushcfunction(L, func);
 	va_list args;
 	va_start(args, nresults);
@@ -120,7 +123,7 @@ static int ruleset_pcall(
 		lua_pushlightuserdata(L, va_arg(args, void *));
 	}
 	va_end(args);
-	return lua_pcall(L, nargs, nresults, 1);
+	return lua_pcall(L, nargs, nresults, traceback ? 1 : 0);
 }
 
 /* invoke(code, addr, proxyN, ..., proxy1) */
@@ -184,7 +187,7 @@ static int resolve_(lua_State *restrict L)
 }
 
 /* parse_ipv4(ipv4) */
-static int parse_ipv4_(lua_State *L)
+static int parse_ipv4_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *s = lua_tostring(L, 1);
@@ -198,7 +201,7 @@ static int parse_ipv4_(lua_State *L)
 }
 
 /* parse_ipv6(ipv6) */
-static int parse_ipv6_(lua_State *L)
+static int parse_ipv6_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *s = lua_tostring(L, 1);
@@ -236,17 +239,17 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	UNUSED(revents);
 	struct ruleset *restrict r = watcher->data;
-	lua_State *restrict L = r->L;
 	ev_tstamp now = ev_now(loop);
-	const int ret = ruleset_pcall(L, ruleset_tick_, 2, 0, "tick", &now);
+	const int ret = ruleset_pcall(r, ruleset_tick_, 2, 0, "tick", &now);
 	if (ret != LUA_OK) {
+		lua_State *restrict L = r->L;
 		LOGE_F("ruleset.tick: %s", lua_tostring(L, -1));
 		return;
 	}
 }
 
 /* setinterval(interval) */
-static int setinterval_(lua_State *L)
+static int setinterval_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TNUMBER);
 	double interval = lua_tonumber(L, 1);
@@ -265,7 +268,7 @@ static int setinterval_(lua_State *L)
 	return 0;
 }
 
-static int luaopen_neosocksd(lua_State *L)
+static int luaopen_neosocksd(lua_State *restrict L)
 {
 	lua_newtable(L);
 	lua_pushcfunction(L, invoke_);
@@ -281,7 +284,7 @@ static int luaopen_neosocksd(lua_State *L)
 	return 1;
 }
 
-static int ruleset_luainit_(lua_State *L)
+static int ruleset_luainit_(lua_State *restrict L)
 {
 	assert(lua_gettop(L) == 1);
 	lua_setfield(L, LUA_REGISTRYINDEX, "ruleset");
@@ -319,7 +322,8 @@ struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf)
 		w_timer->data = r;
 	}
 
-	switch (ruleset_pcall(L, ruleset_luainit_, 1, 0, (void *)r)) {
+	void *ptr = (void *)r;
+	switch (ruleset_pcall(r, ruleset_luainit_, 1, 0, ptr)) {
 	case LUA_OK:
 		break;
 	case LUA_ERRMEM:
@@ -396,7 +400,7 @@ static bool dispatch_exec(
 {
 	lua_State *restrict L = r->L;
 	const int ret =
-		ruleset_pcall(L, func, 2, 1, (void *)code, (void *)&len);
+		ruleset_pcall(r, func, 2, 1, (void *)code, (void *)&len);
 	if (ret != LUA_OK) {
 		LOGE_F("ruleset %s: %s", method, lua_tostring(L, -1));
 		return false;
@@ -476,7 +480,7 @@ dispatch_req(struct ruleset *restrict r, const char *func, const char *request)
 {
 	lua_State *restrict L = r->L;
 	const int ret = ruleset_pcall(
-		L, ruleset_request_, 2, 1, (void *)func, (void *)request);
+		r, ruleset_request_, 2, 1, (void *)func, (void *)request);
 	if (ret != LUA_OK) {
 		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
 		return NULL;
@@ -501,7 +505,7 @@ struct dialreq *ruleset_route6(struct ruleset *r, const char *request)
 
 size_t ruleset_memused(struct ruleset *restrict r)
 {
-	lua_State *L = r->L;
+	lua_State *restrict L = r->L;
 	return ((size_t)lua_gc(L, LUA_GCCOUNT) << 10u) |
 	       (size_t)lua_gc(L, LUA_GCCOUNTB);
 }
@@ -520,10 +524,10 @@ static int ruleset_stats_(lua_State *restrict L)
 
 const char *ruleset_stats(struct ruleset *restrict r, const double dt)
 {
-	lua_State *L = r->L;
+	lua_State *restrict L = r->L;
 	const char *func = "stats";
 	const int ret = ruleset_pcall(
-		L, ruleset_stats_, 2, 1, (void *)func, (void *)&dt);
+		r, ruleset_stats_, 2, 1, (void *)func, (void *)&dt);
 	if (ret != LUA_OK) {
 		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
 		return NULL;
