@@ -19,7 +19,7 @@ _G.hosts = {
 -- ordered redirect rules
 _G.redirect_name = {
     -- resolve mDNS names locally
-    [1] = {match.domain(".local"), rule.direct()},
+    [1] = {match.domain(".local"), rule.direct(), "local"},
     -- no default action
     [0] = nil
 }
@@ -39,11 +39,11 @@ _G.route = {
     [1] = {inet.subnet("127.0.0.0/8"), rule.reject()},
     [2] = {inet.subnet("169.254.0.0/16"), rule.reject()},
     -- region1 proxy
-    [3] = {inet.subnet("192.168.32.0/24"), rule.proxy("192.168.32.1:1080")},
+    [3] = {inet.subnet("192.168.32.0/24"), rule.proxy("192.168.32.1:1080"), "region1"},
     -- jump to region2 through region1 proxy
-    [4] = {inet.subnet("192.168.33.0/24"), rule.proxy("192.168.33.1:1080", "192.168.32.1:1080")},
+    [4] = {inet.subnet("192.168.33.0/24"), rule.proxy("192.168.33.1:1080", "192.168.32.1:1080"), "region2"},
     -- access other lan addresses directly
-    [5] = {inet.subnet("192.168.0.0/16"), rule.direct()},
+    [5] = {inet.subnet("192.168.0.0/16"), rule.direct(), "lan"},
     -- no default action, go to _G.route_default
     [0] = nil
 }

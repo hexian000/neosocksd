@@ -9,6 +9,36 @@ function string:endswith(sub)
     return string.sub(self, -n) == sub
 end
 
+_G.list = {}
+function list.new()
+    return setmetatable({}, {
+        __index = list
+    })
+end
+
+function list:append(t)
+    table.move(self, 1, #t, #self + 1, t)
+end
+
+function list:invoke()
+    local s = table.concat(self)
+    local f, err = load(s, "=rpc")
+    if not f then
+        printf("list load: %s", err)
+    end
+    local ok, err = pcall(f)
+    if not ok then
+        printf("list invoke: %s", err)
+    end
+end
+
+function list:map(f)
+    for i, v in ipairs(self) do
+        self[i] = f(v)
+    end
+    return self
+end
+
 _G.MAX_RECENT_EVENTS = 10
 local function addevent_(tstamp, msg)
     local p = _G.recent_events
@@ -70,24 +100,18 @@ function _G.splithostport(s)
     return string.sub(s, 1, i - 1), string.sub(s, i + 1)
 end
 
--- [[ route table matchers ]] --
-_G.inet = {}
-function inet.subnet(s)
+function _G.parse_cidr(s)
     local i = string.find(s, "/%d+$")
     local host = string.sub(s, 1, i - 1)
     local shift = tonumber(string.sub(s, i + 1))
     if shift < 0 or shift > 32 then
         error("invalid subnet")
     end
-    local mask = ~((1 << (32 - shift)) - 1)
-    local subnet = neosocksd.parse_ipv4(host) & mask
-    return function(ip)
-        return (ip & mask) == subnet
-    end
+    local subnet = neosocksd.parse_ipv4(host)
+    return subnet, shift
 end
 
-_G.inet6 = {}
-function inet6.subnet(s)
+function _G.parse_cidr6(s)
     local i = string.find(s, "/%d+$")
     local host = string.sub(s, 1, i - 1)
     local shift = tonumber(string.sub(s, i + 1))
@@ -95,6 +119,23 @@ function inet6.subnet(s)
         error("invalid subnet")
     end
     local subnet1, subnet2 = neosocksd.parse_ipv6(host)
+    return subnet1, subnet2, shift
+end
+
+-- [[ route table matchers ]] --
+_G.inet = {}
+function inet.subnet(s)
+    local subnet, shift = parse_cidr(s)
+    local mask = ~((1 << (32 - shift)) - 1)
+    subnet = subnet & mask
+    return function(ip)
+        return (ip & mask) == subnet
+    end
+end
+
+_G.inet6 = {}
+function inet6.subnet(s)
+    local subnet1, subnet2, shift = parse_cidr6(s)
     if shift > 64 then
         local mask = ~((1 << (128 - shift)) - 1)
         subnet2 = subnet2 & mask
@@ -167,11 +208,21 @@ end
 -- [[ composite matchers ]] --
 _G.composite = {}
 function composite.anyof(t)
-    return function(q)
+    return function(...)
         for i, match in ipairs(t) do
-            if match(q) then
+            if match(...) then
                 return true
             end
+        end
+        return false
+    end
+end
+
+function composite.maybe(t, k)
+    return function(...)
+        local match = t[k]
+        if match then
+            return match(...)
         end
         return false
     end
