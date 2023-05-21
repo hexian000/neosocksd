@@ -17,7 +17,7 @@ function list.new()
 end
 
 function list:append(t)
-    table.move(self, 1, #t, #self + 1, t)
+    table.move(t, 1, #t, #self + 1, self)
 end
 
 function list:invoke()
