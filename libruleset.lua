@@ -9,19 +9,35 @@ function string:endswith(sub)
     return string.sub(self, -n) == sub
 end
 
-_G.list = {}
+_G.list = {
+    insert = table.insert,
+    remove = table.remove,
+    sort = table.sort,
+    concat = table.concat
+}
 function list.new()
     return setmetatable({}, {
         __index = list
     })
 end
 
+function list:insertf(s, ...)
+    table.insert(self, string.format(s, ...))
+end
+
 function list:append(t)
     table.move(t, 1, #t, #self + 1, self)
 end
 
+function list:map(f)
+    for i, v in ipairs(self) do
+        self[i] = f(v)
+    end
+    return self
+end
+
 function list:invoke()
-    local s = table.concat(self)
+    local s = self:concat()
     local f, err = load(s, "=rpc")
     if not f then
         printf("list load: %s", err)
@@ -32,37 +48,22 @@ function list:invoke()
     end
 end
 
-function list:map(f)
-    for i, v in ipairs(self) do
-        self[i] = f(v)
-    end
-    return self
-end
-
 _G.MAX_RECENT_EVENTS = 10
+_G.recent_events = _G.recent_events or {}
 local function addevent_(tstamp, msg)
-    local p = _G.recent_events
-    if p and p.msg == msg then
-        p.count = p.count + 1
-        p.tstamp = tstamp
+    local entry = recent_events[1]
+    if entry and entry.msg == msg then
+        entry.count = entry.count + 1
+        entry.tstamp = tstamp
         return
     end
-    p = {
+    entry = {
         msg = msg,
         count = 1,
-        tstamp = tstamp,
-        next = p
+        tstamp = tstamp
     }
-    _G.recent_events = p
-    for i = 1, MAX_RECENT_EVENTS do
-        if not p then
-            return
-        end
-        p = p.next
-    end
-    if p then
-        p.next = nil
-    end
+    table.insert(recent_events, 1, entry)
+    recent_events[MAX_RECENT_EVENTS + 1] = nil
 end
 
 function _G.printf(s, ...)
@@ -270,7 +271,6 @@ end
 -- [[ internal route functions ]] --
 _G.num_requests = _G.num_requests or 0
 _G.stat_requests = _G.stat_requests or {}
-_G.last_clock = _G.last_clock or nil
 _G.MAX_STAT_REQUESTS = 60
 
 local function matchtab_(t, ...)
@@ -398,69 +398,62 @@ local function resolve_(addr)
 end
 
 local function render_(w)
-    local requests = {}
+    local requests, n = {}, 0
     local last_requests = 0
-    for i, n in ipairs(stat_requests) do
+    for i, v in ipairs(stat_requests) do
         if i > 1 then
-            table.insert(requests, n - stat_requests[i - 1])
+            local delta = v - stat_requests[i - 1]
+            table.insert(requests, delta)
+            n = n + 1
         end
-        last_requests = n
+        last_requests = v
     end
     table.insert(requests, num_requests - last_requests)
     local max = math.max(table.unpack(requests))
-    if max < 1 then
-        table.insert(w, "(graph not available)")
-        return
-    end
-    for i, n in ipairs(requests) do
-        requests[i] = math.floor(requests[i] / max * 5.0 + 0.5)
+    local q = math.max(max, 1)
+    for i, v in ipairs(requests) do
+        requests[i] = math.floor(v / q * 5.0 + 0.5)
     end
     for y = 4, 0, -1 do
         local line = {}
-        for x = 1, MAX_STAT_REQUESTS do
+        for x = 1, n + 1 do
             if requests[x] and requests[x] > y then
                 table.insert(line, "|")
             else
                 table.insert(line, " ")
             end
         end
-        table.insert(w, table.concat(line))
+        w:insert(table.concat(line))
     end
-    local card = #requests
-    if card > 0 then
-        card = card - 1
-    end
-    table.insert(w, string.format("%s* (max=%d)", string.rep("-", card), max))
+    w:insertf("%s* (max=%d)", string.rep("-", n), max)
 end
 
 local function stats_(dt)
-    local w = {}
-    local appendf = function(w, s, ...)
-        table.insert(w, string.format(s, ...))
-    end
+    local w = list.new()
     local clock = os.clock()
     if clock > 0.0 then
-        if last_clock then
-            appendf(w, "%-16s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
+        if last_clock and clock >= last_clock then
+            w:insertf("%-16s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
+        else
+            w:insertf("%-16s: (unknown)", "Server Load")
         end
         last_clock = clock
     end
-    table.insert(w, "> Recent Events")
-    local p = recent_events
-    for i = 1, MAX_RECENT_EVENTS do
-        if not p then
+    w:insert("> Recent Events")
+    for i, entry in ipairs(recent_events) do
+        if not entry then
             break
         end
-        if p.count == 1 then
-            appendf(w, "%s %s", os.date("%Y-%m-%dT%T%z", p.tstamp), p.msg)
+        local tstamp = os.date("%Y-%m-%dT%T%z", entry.tstamp)
+        if entry.count == 1 then
+            w:insertf("%s %s", tstamp, entry.msg)
         else
-            appendf(w, "%s %s (x%d)", os.date("%Y-%m-%dT%T%z", p.tstamp), p.msg, p.count)
+            w:insertf("%s %s (x%d)", tstamp, entry.msg, entry.count)
         end
-        p = p.next
     end
-    table.insert(w, "> Request Stats")
+    w:insert("> Request Stats")
     render_(w)
-    return table.concat(w, "\n")
+    return w:concat("\n")
 end
 
 -- [[ ruleset callbacks, see API.md for details ]] --
