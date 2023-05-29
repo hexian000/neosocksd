@@ -72,7 +72,7 @@ int format_iec(char *buf, const size_t bufsize, const uintmax_t value)
 	if (n >= (int)ARRAY_SIZE(iec_units)) {
 		n = (int)ARRAY_SIZE(iec_units) - 1;
 	}
-	const double v = ldexp(value, n * -10);
+	const double v = ldexp((double)value, n * -10);
 	if (v < 10.0) {
 		return snprintf(buf, bufsize, "%.02lf %s", v, iec_units[n]);
 	}
