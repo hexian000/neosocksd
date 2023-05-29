@@ -16,6 +16,7 @@
 #include "util.h"
 
 #include <ev.h>
+#include <stdint.h>
 #include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -475,8 +476,8 @@ static void http_handle_stats(
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = server_get_uptime(ctx->server, now);
 	static struct {
-		size_t num_request;
-		size_t xfer_bytes;
+		uintmax_t num_request;
+		uintmax_t xfer_bytes;
 		ev_tstamp tstamp;
 	} last = { .tstamp = TSTAMP_NIL };
 	const double dt =
@@ -505,7 +506,7 @@ static void http_handle_stats(
 		char xfer_rate[16];
 		(void)format_iec(
 			xfer_rate, sizeof(xfer_rate),
-			(size_t)round(
+			(uintmax_t)round(
 				(double)(xfer_bytes - last.xfer_bytes) / dt));
 		last.xfer_bytes = xfer_bytes;
 
