@@ -9,10 +9,15 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 
 ## Index
 
+- [Index](#index)
 - [Features](#features)
 - [Usage](#usage)
-- [Building](#building-from-source)
+	- [Basic Usage](#basic-usage)
+	- [Scripting Usage](#scripting-usage)
 - [Runtime Dependencies](#runtime-dependencies)
+- [Building from Source](#building-from-source)
+	- [Dependencies](#dependencies)
+	- [Building with CMake](#building-with-cmake)
 - [Credits](#credits)
 
 ## Features
@@ -55,7 +60,7 @@ Use the following command to start the server with the Lua scripts in current di
 Depending on how complex your customizations are, check out:
 
 - Level 1: Rule set configuration example at [ruleset.lua](ruleset.lua)
-- Level 2: Rule set logic in [libruleset.lua](libruleset.lua)
+- Level 2: Rule set library code in [libruleset.lua](libruleset.lua)
 - Level 3: Reference manual for enthusiasts and professionals: [neosocksd API Reference](API.md), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
 Access RESTful API through the proxy as defined in [ruleset.lua](ruleset.lua):
