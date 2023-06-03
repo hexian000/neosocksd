@@ -15,8 +15,9 @@ _G.list = {
     sort = table.sort,
     concat = table.concat
 }
-function list.new()
-    return setmetatable({}, {
+function list.new(t)
+    t = t or {}
+    return setmetatable(t, {
         __index = list
     })
 end
@@ -32,6 +33,15 @@ end
 function list:map(f)
     for i, v in ipairs(self) do
         self[i] = f(v)
+    end
+    return self
+end
+
+function list:reverse()
+    local n = #self
+    for i = 1, n / 2 do
+        local j = n - i + 1
+        self[i], self[j] = self[j], self[i]
     end
     return self
 end
@@ -244,14 +254,14 @@ function rule.reject()
 end
 
 function rule.redirect(...)
-    local chain = table.pack(...)
+    local chain = list.new(table.pack(...)):reverse()
     return function(addr)
         return table.unpack(chain)
     end
 end
 
 function rule.proxy(...)
-    local chain = table.pack(...)
+    local chain = list.new(table.pack(...)):reverse()
     return function(addr)
         return addr, table.unpack(chain)
     end
