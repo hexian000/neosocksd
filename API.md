@@ -1,6 +1,6 @@
 # neosocksd API Reference
 
-Version: 1.0-rc
+Version: v1.0
 
 ## Index
 
