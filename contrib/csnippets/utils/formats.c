@@ -3,7 +3,7 @@
 
 #include "formats.h"
 #include "utils/arraysize.h"
-#include "math/intlog2.h"
+#include "utils/minmax.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -63,23 +63,22 @@ static const char *iec_units[] = {
 	"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB",
 };
 
-int format_iec(char *buf, const size_t bufsize, const uintmax_t value)
+int format_iec_bytes(char *buf, const size_t bufsize, const double value)
 {
-	if (value < UINTMAX_C(8192)) {
-		return snprintf(buf, bufsize, "%ju %s", value, iec_units[0]);
+	if (!isfinite(value) || (value < 8192.0)) {
+		return snprintf(buf, bufsize, "%.0lf %s", value, iec_units[0]);
 	}
-	int n = (intlog2(value) - 3) / 10;
-	if (n >= (int)ARRAY_SIZE(iec_units)) {
-		n = (int)ARRAY_SIZE(iec_units) - 1;
-	}
-	const double v = ldexp((double)value, n * -10);
+	const int x = ((int)log2(value) - 3) / 10;
+	const int n = (int)ARRAY_SIZE(iec_units) - 1;
+	const int i = CLAMP(x, 0, n);
+	const double v = ldexp(value, i * -10);
 	if (v < 10.0) {
-		return snprintf(buf, bufsize, "%.02lf %s", v, iec_units[n]);
+		return snprintf(buf, bufsize, "%.02lf %s", v, iec_units[i]);
 	}
 	if (v < 100.0) {
-		return snprintf(buf, bufsize, "%.01lf %s", v, iec_units[n]);
+		return snprintf(buf, bufsize, "%.01lf %s", v, iec_units[i]);
 	}
-	return snprintf(buf, bufsize, "%.0lf %s", v, iec_units[n]);
+	return snprintf(buf, bufsize, "%.0lf %s", v, iec_units[i]);
 }
 
 int format_duration_seconds(char *b, const size_t size, const struct duration d)

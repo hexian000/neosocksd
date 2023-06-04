@@ -502,12 +502,12 @@ static void http_handle_stats(
 			timestamp, sizeof(timestamp), "%FT%T%z",
 			localtime(&server_time));
 		char xfer_total[16];
-		(void)format_iec(xfer_total, sizeof(xfer_total), xfer_bytes);
+		(void)format_iec_bytes(
+			xfer_total, sizeof(xfer_total), xfer_bytes);
 		char xfer_rate[16];
-		(void)format_iec(
+		(void)format_iec_bytes(
 			xfer_rate, sizeof(xfer_rate),
-			(uintmax_t)round(
-				(double)(xfer_bytes - last.xfer_bytes) / dt));
+			(xfer_bytes - last.xfer_bytes) / dt);
 		last.xfer_bytes = xfer_bytes;
 
 		char str_uptime[16];
@@ -534,7 +534,8 @@ static void http_handle_stats(
 	if (ruleset != NULL) {
 		const size_t heap_bytes = ruleset_memused(ruleset);
 		char heap_total[16];
-		(void)format_iec(heap_total, sizeof(heap_total), heap_bytes);
+		(void)format_iec_bytes(
+			heap_total, sizeof(heap_total), heap_bytes);
 		(void)buf_appendf(
 			&ctx->wbuf,
 			""
@@ -633,7 +634,7 @@ static void http_handle_ruleset(
 		ruleset_gc(ruleset);
 		const size_t livemem = ruleset_memused(ruleset);
 		char buf[16];
-		format_iec(buf, sizeof(buf), livemem);
+		(void)format_iec_bytes(buf, sizeof(buf), livemem);
 		http_resphdr_init(ctx, HTTP_OK);
 		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
 		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");

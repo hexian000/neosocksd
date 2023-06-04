@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-int format_iec(char *buf, size_t bufsize, uintmax_t value);
+int format_iec_bytes(char *buf, size_t bufsize, double value);
 
 struct duration {
 	signed int sign; /* +1 or -1, 0 is null, otherwise undefined */
