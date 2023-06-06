@@ -17,6 +17,7 @@ _G.hosts = {
 }
 
 -- ordered redirect rules
+-- in {matcher, action, optional log tag}
 _G.redirect_name = {
     -- resolve mDNS names locally
     [1] = {match.domain(".local"), rule.direct(), "local"},
