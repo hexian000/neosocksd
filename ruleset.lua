@@ -62,5 +62,5 @@ _G.route6 = {
 -- this global default applies to any unmatched requests
 _G.route_default = rule.proxy("192.168.1.1:1080")
 
-printf("ruleset loaded, interpreter: %s", _VERSION)
+logf("ruleset loaded, interpreter: %s", _VERSION)
 return ruleset

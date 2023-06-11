@@ -1,4 +1,16 @@
 -- [[ useful library routines ]] --
+function _G.printf(...)
+    print(string.format(...))
+end
+
+function _G.errorf(s, ...)
+    error(string.format(s, ...), 2)
+end
+
+function _G.eval(s, ...)
+    return assert(load(s, "=eval"))(...)
+end
+
 function string:startswith(sub)
     local n = string.len(sub)
     return string.sub(self, 1, n) == sub
@@ -9,25 +21,39 @@ function string:endswith(sub)
     return string.sub(self, -n) == sub
 end
 
-_G.list = {
+local list = {
+    iter = ipairs,
     insert = table.insert,
     remove = table.remove,
-    sort = table.sort,
+    unpack = table.unpack,
     concat = table.concat
 }
-function list.new(t)
-    t = t or {}
-    return setmetatable(t, {
+function list:new(t)
+    return setmetatable(t or {}, {
         __index = list
     })
 end
 
+function list:pack(...)
+    return setmetatable({...}, {
+        __index = list
+    })
+end
+
+function list:totable()
+    return setmetatable(self, nil)
+end
+
 function list:insertf(s, ...)
-    table.insert(self, string.format(s, ...))
+    self:insert(string.format(s, ...))
 end
 
 function list:append(t)
-    table.move(t, 1, #t, #self + 1, self)
+    return table.move(t, 1, #t, #self + 1, self)
+end
+
+function list:clone()
+    return list:new():append(self)
 end
 
 function list:map(f)
@@ -45,18 +71,7 @@ function list:reverse()
     end
     return self
 end
-
-function list:invoke()
-    local s = self:concat()
-    local f, err = load(s, "=rpc")
-    if not f then
-        printf("list load: %s", err)
-    end
-    local ok, err = pcall(f)
-    if not ok then
-        printf("list invoke: %s", err)
-    end
-end
+_G.list = list
 
 _G.MAX_RECENT_EVENTS = 10
 _G.recent_events = _G.recent_events or {}
@@ -76,7 +91,7 @@ local function addevent_(tstamp, msg)
     recent_events[MAX_RECENT_EVENTS + 1] = nil
 end
 
-function _G.printf(s, ...)
+function _G.logf(s, ...)
     local now = os.time()
     local msg = string.format(s, ...)
     addevent_(now, msg)
@@ -87,22 +102,14 @@ function _G.printf(s, ...)
     local info = debug.getinfo(2, "Sl")
     local source = info.source
     if source:startswith("@") then
-        source = string.sub(source, 2)
-        local i = string.find(source, "/.+$")
-        if i then
-            source = string.sub(source, i + 1)
-        end
+        source = source:sub(2):gsub("/([^/]+)$", "%1")
     elseif source:startswith("=") then
-        source = "<" .. string.sub(source, 2) .. ">"
+        source = "<" .. source:sub(2) .. ">"
     else
         source = info.short_src
     end
     local line = info.currentline
-    print(string.format("D %s %s:%d ", timestamp, source, line) .. msg)
-end
-
-function _G.errorf(s, ...)
-    error(string.format(s, ...), 2)
+    printf("D %s %s:%d %s", timestamp, source, line, msg)
 end
 
 function _G.splithostport(s)
@@ -134,7 +141,7 @@ function _G.parse_cidr6(s)
 end
 
 -- [[ route table matchers ]] --
-_G.inet = {}
+local inet = {}
 function inet.subnet(s)
     local subnet, shift = parse_cidr(s)
     local mask = ~((1 << (32 - shift)) - 1)
@@ -143,8 +150,9 @@ function inet.subnet(s)
         return (ip & mask) == subnet
     end
 end
+_G.inet = inet
 
-_G.inet6 = {}
+local inet6 = {}
 function inet6.subnet(s)
     local subnet1, subnet2, shift = parse_cidr6(s)
     if shift > 64 then
@@ -160,9 +168,10 @@ function inet6.subnet(s)
         return (ip1 & mask) == subnet1
     end
 end
+_G.inet6 = inet6
 
 -- [[ redirect table matchers ]] --
-_G.match = {}
+local match = {}
 function match.exact(s)
     local host, port = splithostport(s)
     if not host then
@@ -215,9 +224,10 @@ function match.pattern(s)
         return not not addr:find(s)
     end
 end
+_G.match = match
 
 -- [[ composite matchers ]] --
-_G.composite = {}
+local composite = {}
 function composite.anyof(t)
     return function(...)
         for i, match in ipairs(t) do
@@ -238,9 +248,10 @@ function composite.maybe(t, k)
         return false
     end
 end
+_G.composite = composite
 
 -- [[ rule actions ]] --
-_G.rule = {}
+local rule = {}
 function rule.direct()
     return function(addr)
         return addr
@@ -254,16 +265,16 @@ function rule.reject()
 end
 
 function rule.redirect(...)
-    local chain = list.new(table.pack(...)):reverse()
+    local chain = list:pack(...):reverse()
     return function(addr)
-        return table.unpack(chain)
+        return chain:unpack()
     end
 end
 
 function rule.proxy(...)
-    local chain = list.new(table.pack(...)):reverse()
+    local chain = list:pack(...):reverse()
     return function(addr)
-        return addr, table.unpack(chain)
+        return addr, chain:unpack()
     end
 end
 
@@ -277,10 +288,11 @@ function rule.resolve()
         return string.format("%s:%s", addr, port)
     end
 end
+_G.rule = rule
 
 -- [[ internal route functions ]] --
 _G.num_requests = _G.num_requests or 0
-_G.stat_requests = _G.stat_requests or {}
+_G.stat_requests = _G.stat_requests or list:new({0})
 _G.MAX_STAT_REQUESTS = 60
 
 local function matchtab_(t, ...)
@@ -300,7 +312,7 @@ local function route_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                printf("redirect: [%s] %q", tag, addr)
+                logf("redirect: [%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -316,13 +328,13 @@ local function route_(addr)
         local action, tag = matchtab_(routetab, ip)
         if action then
             if tag then
-                printf("route: [%s] %q", tag, addr)
+                logf("route: [%s] %q", tag, addr)
             end
             return action(addr)
         end
     end
     -- global default
-    printf("route default: %q", addr)
+    logf("route default: %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -337,7 +349,7 @@ local function route6_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                printf("redirect6: [%s] %q", tag, addr)
+                logf("redirect6: [%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -353,13 +365,13 @@ local function route6_(addr)
         local action, tag = matchtab_(routetab, ip1, ip2)
         if action then
             if tag then
-                printf("route6: [%s] %q", tag, addr)
+                logf("route6: [%s] %q", tag, addr)
             end
             return action(addr)
         end
     end
     -- global default
-    printf("route6 default: %q", addr)
+    logf("route6 default: %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -374,7 +386,7 @@ local function resolve_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                printf("redirect_name: [%s] %q", tag, addr)
+                logf("redirect_name: [%s] %q", tag, addr)
             end
             local ret = table.pack(action(addr))
             if #ret ~= 1 then
@@ -399,7 +411,7 @@ local function resolve_(addr)
         return route6_(addr)
     end
     -- global default
-    printf("resolve default: %q", addr)
+    logf("resolve default: %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -408,46 +420,47 @@ local function resolve_(addr)
 end
 
 local function render_(w)
-    local requests, n = {}, 0
-    local last_requests = 0
-    for i, v in ipairs(stat_requests) do
-        if i > 1 then
-            local delta = v - stat_requests[i - 1]
-            table.insert(requests, delta)
+    local requests, n = list:new(), 0
+    local last_requests
+    for i, v in stat_requests:iter() do
+        if last_requests then
+            local delta = v - last_requests
+            requests:insert(delta)
             n = n + 1
         end
         last_requests = v
     end
-    table.insert(requests, num_requests - last_requests)
-    local max = math.max(table.unpack(requests))
-    local q = math.max(max, 1)
+    requests:insert(num_requests - last_requests)
+    local peak = math.max(requests:unpack())
+    local q = math.max(peak, 1)
     for i, v in ipairs(requests) do
         requests[i] = math.floor(v / q * 5.0 + 0.5)
     end
     for y = 4, 0, -1 do
-        local line = {}
+        local line = list:new()
         for x = 1, n + 1 do
             if requests[x] and requests[x] > y then
-                table.insert(line, "|")
+                line:insert("|")
             else
-                table.insert(line, " ")
+                line:insert(" ")
             end
         end
         w:insert(table.concat(line))
     end
-    w:insertf("%s* (max=%d)", string.rep("-", n), max)
+    w:insertf("%s* (peak=%d)", string.rep("-", n), peak)
 end
 
 local function stats_(dt)
-    local w = list.new()
+    local w = list:new()
     local clock = os.clock()
     if clock > 0.0 then
+        local last_clock = _G.last_clock or 0
         if last_clock and clock >= last_clock then
             w:insertf("%-16s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
         else
             w:insertf("%-16s: (unknown)", "Server Load")
         end
-        last_clock = clock
+        _G.last_clock = clock
     end
     w:insert("> Recent Events")
     for i, entry in ipairs(recent_events) do
@@ -469,10 +482,14 @@ end
 -- [[ ruleset callbacks, see API.md for details ]] --
 local ruleset = {}
 
+function _G.is_enabled()
+    return true -- enabled by default
+end
+
 function ruleset.resolve(addr)
     num_requests = num_requests + 1
     if not _G.is_enabled() then
-        printf("ruleset.resolve: service not enabled, reject %q", addr)
+        logf("ruleset.resolve: service not enabled, reject %q", addr)
         return nil
     end
     return resolve_(addr)
@@ -481,7 +498,7 @@ end
 function ruleset.route(addr)
     num_requests = num_requests + 1
     if not _G.is_enabled() then
-        printf("ruleset.route: service not enabled, reject %q", addr)
+        logf("ruleset.route: service not enabled, reject %q", addr)
         return nil
     end
     return route_(addr)
@@ -490,16 +507,16 @@ end
 function ruleset.route6(addr)
     num_requests = num_requests + 1
     if not _G.is_enabled() then
-        printf("ruleset.route6: service not enabled, reject %q", addr)
+        logf("ruleset.route6: service not enabled, reject %q", addr)
         return nil
     end
     return route6_(addr)
 end
 
 function ruleset.tick(now)
-    table.insert(stat_requests, num_requests)
+    stat_requests:insert(num_requests)
     if stat_requests[MAX_STAT_REQUESTS + 1] then
-        table.remove(stat_requests, 1)
+        stat_requests:remove(1)
     end
 end
 neosocksd.setinterval(60.0)
