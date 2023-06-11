@@ -74,7 +74,7 @@ end
 _G.list = list
 
 _G.MAX_RECENT_EVENTS = 10
-_G.recent_events = _G.recent_events or {}
+_G.recent_events = _G.recent_events or list:new()
 local function addevent_(tstamp, msg)
     local entry = recent_events[1]
     if entry and entry.msg == msg then
@@ -87,8 +87,8 @@ local function addevent_(tstamp, msg)
         count = 1,
         tstamp = tstamp
     }
-    table.insert(recent_events, 1, entry)
-    recent_events[MAX_RECENT_EVENTS + 1] = nil
+    recent_events[MAX_RECENT_EVENTS] = nil
+    recent_events:insert(1, entry)
 end
 
 function _G.logf(s, ...)
@@ -445,7 +445,7 @@ local function render_(w)
                 line:insert(" ")
             end
         end
-        w:insert(table.concat(line))
+        w:insert(line:concat())
     end
     w:insertf("%s* (peak=%d)", string.rep("-", n), peak)
 end
@@ -463,7 +463,7 @@ local function stats_(dt)
         _G.last_clock = clock
     end
     w:insert("> Recent Events")
-    for i, entry in ipairs(recent_events) do
+    for i, entry in recent_events:iter() do
         if not entry then
             break
         end
