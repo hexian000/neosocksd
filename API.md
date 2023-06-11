@@ -1,6 +1,6 @@
 # neosocksd API Reference
 
-Version: v1.0
+Version: dev
 
 ## Index
 
@@ -272,11 +272,11 @@ NOTE: The code length limit for a single invocation is guaranteed to be at least
 **Synopsis**
 
 ```Lua
-printf("some debug log")
+logf("some debug log")
 ```
 
 **Description**
 
-Controls whether the default implementation of `printf` in `libruleset.lua` writes to standard output.
+Controls whether the default implementation of `logf` in `libruleset.lua` writes to standard output.
 
 Defaults to false if the log level allows printing debug logs. The log level depends on command line argument `-s`/`-v`.
