@@ -199,6 +199,7 @@ local addr = neosocksd.resolve("www.example.com")
 
 Resolves a host name locally and blocks until resolution succeeds or times out. IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 
+Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
 
 ### neosocksd.parse_ipv4
 

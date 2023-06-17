@@ -132,6 +132,23 @@ http_resphdr_init(struct http_ctx *restrict ctx, const uint16_t code)
 
 #define RESPHDR_END(ctx) BUF_APPENDCONST(&(ctx)->wbuf, "\r\n")
 
+#define RESPHDR_GET_TXT(ctx, code)                                             \
+	do {                                                                   \
+		http_resphdr_init((ctx), (code));                              \
+		RESPHDR_ADD(ctx, "Cache-Control", "no-store");                 \
+		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8"); \
+		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");         \
+		RESPHDR_END(ctx);                                              \
+	} while (0)
+
+#define RESPHDR_POST_TXT(ctx, code)                                            \
+	do {                                                                   \
+		http_resphdr_init((ctx), (code));                              \
+		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8"); \
+		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");         \
+		RESPHDR_END(ctx);                                              \
+	} while (0)
+
 static void
 http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
 {
@@ -467,11 +484,7 @@ static void http_handle_stats(
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
-	http_resphdr_init(ctx, HTTP_OK);
-	RESPHDR_ADD(ctx, "Cache-Control", "no-store");
-	RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
-	RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");
-	RESPHDR_END(ctx);
+	RESPHDR_GET_TXT(ctx, HTTP_OK);
 
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = server_get_uptime(ctx->server, now);
@@ -582,10 +595,7 @@ static void http_handle_ruleset(
 	struct server *restrict s = ctx->server;
 	struct ruleset *ruleset = s->ruleset;
 	if (ruleset == NULL) {
-		http_resphdr_init(ctx, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
-		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");
-		RESPHDR_END(ctx);
+		RESPHDR_POST_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
 		(void)buf_appendf(
 			&ctx->wbuf, "%s",
 			"ruleset not enabled, restart with -r\n");
@@ -604,8 +614,10 @@ static void http_handle_ruleset(
 		const char *code = (const char *)ctx->content;
 		const size_t len = ctx->content_length;
 		LOGV_F("api: ruleset invoke\n%s", code);
-		if (!ruleset_invoke(ruleset, code, len)) {
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		const char *err = ruleset_invoke(ruleset, code, len);
+		if (err != NULL) {
+			RESPHDR_POST_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			BUF_APPENDSTR(&ctx->wbuf, err);
 			return;
 		}
 		http_resphdr_init(ctx, HTTP_OK);
@@ -619,8 +631,10 @@ static void http_handle_ruleset(
 		const char *code = (const char *)ctx->content;
 		const size_t len = ctx->content_length;
 		LOGV_F("api: ruleset update\n%s", code);
-		if (!ruleset_load(ruleset, code, len)) {
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		const char *err = ruleset_load(ruleset, code, len);
+		if (err != NULL) {
+			RESPHDR_POST_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			BUF_APPENDSTR(&ctx->wbuf, err);
 			return;
 		}
 		http_resphdr_init(ctx, HTTP_OK);
@@ -635,10 +649,7 @@ static void http_handle_ruleset(
 		const size_t livemem = ruleset_memused(ruleset);
 		char buf[16];
 		(void)format_iec_bytes(buf, sizeof(buf), livemem);
-		http_resphdr_init(ctx, HTTP_OK);
-		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
-		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");
-		RESPHDR_END(ctx);
+		RESPHDR_POST_TXT(ctx, HTTP_OK);
 		(void)buf_appendf(&ctx->wbuf, "Ruleset Live Memory: %s\n", buf);
 		return;
 	}

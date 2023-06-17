@@ -62,8 +62,8 @@ static inline size_t buf_append(void *buf, const unsigned char *data, size_t n)
 #define BUF_APPENDCONST(buf, str)                                              \
 	buf_append((buf), (const unsigned char *)(str), sizeof(str) - 1u)
 
-#define BUF_APPENDSTR(vbuf, str)                                               \
-	buf_append((vbuf), (const unsigned char *)(str), strlen(str))
+#define BUF_APPENDSTR(buf, str)                                                \
+	buf_append((buf), (const unsigned char *)(str), strlen(str))
 
 int buf_appendf(void *buf, const char *format, ...);
 

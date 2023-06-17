@@ -11,9 +11,9 @@ struct ev_loop;
 struct ruleset;
 
 struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf);
-bool ruleset_invoke(struct ruleset *r, const char *code, size_t len);
-bool ruleset_load(struct ruleset *r, const char *code, size_t len);
-bool ruleset_loadfile(struct ruleset *r, const char *filename);
+const char *ruleset_invoke(struct ruleset *r, const char *code, size_t len);
+const char *ruleset_load(struct ruleset *r, const char *code, size_t len);
+const char *ruleset_loadfile(struct ruleset *r, const char *filename);
 void ruleset_gc(struct ruleset *r);
 void ruleset_free(struct ruleset *r);
 

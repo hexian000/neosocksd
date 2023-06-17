@@ -261,7 +261,8 @@ int main(int argc, char **argv)
 	if (args.ruleset != NULL) {
 		ruleset = ruleset_new(loop, &conf);
 		CHECKOOM(ruleset);
-		if (!ruleset_loadfile(ruleset, args.ruleset)) {
+		const char *err = ruleset_loadfile(ruleset, args.ruleset);
+		if (err != NULL) {
 			LOGF_F("unable to load ruleset: %s", args.ruleset);
 			exit(EXIT_FAILURE);
 		}

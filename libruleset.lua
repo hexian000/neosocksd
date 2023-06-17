@@ -1,6 +1,6 @@
 -- [[ useful library routines ]] --
 function _G.printf(...)
-    print(string.format(...))
+    return print(string.format(...))
 end
 
 function _G.errorf(s, ...)
@@ -9,6 +9,16 @@ end
 
 function _G.eval(s, ...)
     return assert(load(s, "=eval"))(...)
+end
+
+function package.replace(name, chunk)
+    local loaded = package.loaded[name]
+    local mod = chunk()
+    if loaded and _G[name] == loaded then
+        _G[name] = mod
+    end
+    package.loaded[name] = mod
+    return mod
 end
 
 function string:startswith(sub)
@@ -45,7 +55,7 @@ function list:totable()
 end
 
 function list:insertf(s, ...)
-    self:insert(string.format(s, ...))
+    return self:insert(string.format(s, ...))
 end
 
 function list:append(t)
@@ -88,7 +98,7 @@ local function addevent_(tstamp, msg)
         tstamp = tstamp
     }
     recent_events[MAX_RECENT_EVENTS] = nil
-    recent_events:insert(1, entry)
+    return recent_events:insert(1, entry)
 end
 
 function _G.logf(s, ...)
@@ -109,7 +119,7 @@ function _G.logf(s, ...)
         source = info.short_src
     end
     local line = info.currentline
-    printf("D %s %s:%d %s", timestamp, source, line, msg)
+    return printf("D %s %s:%d %s", timestamp, source, line, msg)
 end
 
 function _G.splithostport(s)
@@ -454,7 +464,7 @@ local function stats_(dt)
     local w = list:new()
     local clock = os.clock()
     if clock > 0.0 then
-        local last_clock = _G.last_clock or 0
+        local last_clock = _G.last_clock
         if last_clock and clock >= last_clock then
             w:insertf("%-16s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
         else

@@ -394,7 +394,7 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	return 1;
 }
 
-static bool dispatch_exec(
+static const char *dispatch_exec(
 	struct ruleset *restrict r, lua_CFunction func, const char *method,
 	const char *code, const size_t len)
 {
@@ -402,25 +402,27 @@ static bool dispatch_exec(
 	const int ret =
 		ruleset_pcall(r, func, 2, 1, (void *)code, (void *)&len);
 	if (ret != LUA_OK) {
-		LOGE_F("ruleset %s: %s", method, lua_tostring(L, -1));
-		return false;
+		const char *err = lua_tostring(L, -1);
+		LOGE_F("ruleset %s: %s", method, err);
+		return err;
 	}
-	return lua_toboolean(L, -1);
+	return NULL;
 }
 
-bool ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
+const char *
+ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
 {
 	LOGD_F("ruleset invoke: %zu bytes", len);
 	return dispatch_exec(r, ruleset_invoke_, "invoke", code, len);
 }
 
-bool ruleset_load(struct ruleset *r, const char *code, const size_t len)
+const char *ruleset_load(struct ruleset *r, const char *code, const size_t len)
 {
 	LOGD_F("ruleset load: %zu bytes", len);
 	return dispatch_exec(r, ruleset_load_, "load", code, len);
 }
 
-bool ruleset_loadfile(struct ruleset *r, const char *filename)
+const char *ruleset_loadfile(struct ruleset *r, const char *filename)
 {
 	return dispatch_exec(r, ruleset_loadfile_, "loadfile", filename, 0);
 }

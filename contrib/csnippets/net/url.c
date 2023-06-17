@@ -178,7 +178,7 @@ static bool unescape(char *str, const bool space)
 	char *w = str;
 	for (char *r = str; *r != '\0'; r++) {
 		char ch = *r;
-		switch (r[0]) {
+		switch (ch) {
 		case '%':
 			switch (r[1]) {
 			case '\0':
