@@ -21,9 +21,9 @@ show_usage() {
     echo "  --gc                         perform full GC (/ruleset/gc)"
     echo
     echo "example:"
-    echo "  $0 -e '_G.route_default = {\"192.168.2.1:1080\"}'"
+    echo "  $0 -e '_G.route_default = rule.proxy(\"192.168.2.1:1080\")'"
     echo "  $0 -e @ruleset_patch.lua"
-    echo "  $0 -c 192.168.1.1:9080 -e '_G.route_default = {\"192.168.2.1:1080\"}'"
+    echo "  $0 -c 192.168.1.1:9080 -e '_G.route_default = rule.proxy(\"192.168.2.1:1080\")'"
     echo "  $0 -x 192.168.1.1:1080 -c neosocksd.lan -u @ruleset.lua --gc"
     echo
 }
