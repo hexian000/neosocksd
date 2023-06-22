@@ -7,9 +7,6 @@
 
 A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that only supports TCP CONNECT requests.
 
-## Index
-
-- [Index](#index)
 - [Features](#features)
 - [Usage](#usage)
 	- [Basic Usage](#basic-usage)
