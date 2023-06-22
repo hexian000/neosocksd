@@ -37,6 +37,7 @@ static struct {
 #endif
 	bool want_reset : 1;
 	bool traceback : 1;
+	bool daemonize : 1;
 	int verbosity;
 	int resolve_pf;
 	const char *user_name;
@@ -79,6 +80,7 @@ static void print_usage(const char *argv0)
 		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  --traceback                print ruleset error traceback (for debugging)\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a whole request can take (default: 60.0)\n"
+		"  -d, --daemonize            run in background and discard all logs\n"
 		"  -u, --user <name>          switch to the specified limited user, e.g. \"nobody\"\n"
 		"  -v, --verbose              increase logging verbosity, can be specified more than once\n"
 		"                             e.g. \"-v -v\" prints verbose messages\n"
@@ -193,6 +195,11 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			args.verbosity--;
 			continue;
 		}
+		if (strcmp(argv[i], "-d") == 0 ||
+		    strcmp(argv[i], "--daemonize") == 0) {
+			args.daemonize = true;
+			continue;
+		}
 		if (strcmp(argv[i], "--traceback") == 0) {
 			args.traceback = true;
 			continue;
@@ -215,6 +222,10 @@ int main(int argc, char **argv)
 	if (args.listen == NULL) {
 		LOGF("listen address not specified");
 		exit(EXIT_FAILURE);
+	}
+
+	if (args.daemonize) {
+		daemonize();
 	}
 
 	struct ev_loop *loop = ev_default_loop(0);
