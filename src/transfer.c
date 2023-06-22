@@ -42,8 +42,7 @@ static size_t transfer_recv(struct transfer *restrict t)
 		const ssize_t nrecv = recv(fd, data, cap, 0);
 		if (nrecv < 0) {
 			const int err = errno;
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == EINTR || err == ENOMEM) {
+			if (IS_TEMPORARY_ERROR(err)) {
 				break;
 			}
 			LOGD_F("recv: fd=%d %s", fd, strerror(err));
@@ -72,8 +71,7 @@ static size_t transfer_send(struct transfer *restrict t)
 		const ssize_t nsend = write(fd, data, len);
 		if (nsend < 0) {
 			const int err = errno;
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == EINTR || err == ENOMEM) {
+			if (IS_TEMPORARY_ERROR(err)) {
 				break;
 			}
 			LOGD_F("recv: fd=%d %s", fd, strerror(err));

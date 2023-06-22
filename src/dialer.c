@@ -280,8 +280,7 @@ static int dialer_recv(
 		const ssize_t nrecv = recv(fd, data, cap, 0);
 		if (nrecv < 0) {
 			const int err = errno;
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == EINTR || err == ENOMEM) {
+			if (IS_TEMPORARY_ERROR(err)) {
 				break;
 			}
 			d->err = err;

@@ -30,8 +30,7 @@ void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const int fd = accept(watcher->fd, &m_sa.sa, &sa_len);
 		if (fd < 0) {
 			const int err = errno;
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == EINTR || err == ENOMEM) {
+			if (IS_TEMPORARY_ERROR(err)) {
 				break;
 			}
 			LOGE_F("accept: %s", strerror(err));

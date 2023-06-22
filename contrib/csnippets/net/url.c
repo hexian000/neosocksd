@@ -206,6 +206,8 @@ static bool unescape(char *str, const bool space)
 				ch = ' ';
 			}
 			break;
+		default:
+			break;
 		}
 		*w++ = ch;
 	}

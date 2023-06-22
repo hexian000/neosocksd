@@ -29,6 +29,11 @@ struct event_cb {
 		}                                                              \
 	} while (0)
 
+/* these errors do not fail the connection */
+#define IS_TEMPORARY_ERROR(err)                                                \
+	((err) == EAGAIN || (err) == EWOULDBLOCK || (err) == EINTR ||          \
+	 (err) == ENOMEM)
+
 void daemonize(void);
 void drop_privileges(const char *user);
 

@@ -177,8 +177,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	const ssize_t nrecv = recv(watcher->fd, buf, cap, 0);
 	if (nrecv < 0) {
 		const int err = errno;
-		if (err == EAGAIN || err == EWOULDBLOCK || err == EINTR ||
-		    err == ENOMEM) {
+		if (IS_TEMPORARY_ERROR(err)) {
 			return;
 		}
 		LOGE_F("recv: %s", strerror(err));
@@ -341,8 +340,7 @@ http_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const ssize_t nsend = send(watcher->fd, buf, len, 0);
 		if (nsend < 0) {
 			const int err = errno;
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == EINTR || err == ENOMEM) {
+			if (IS_TEMPORARY_ERROR(err)) {
 				break;
 			}
 			LOGE_F("send: %s", strerror(err));
@@ -516,11 +514,11 @@ static void http_handle_stats(
 			localtime(&server_time));
 		char xfer_total[16];
 		(void)format_iec_bytes(
-			xfer_total, sizeof(xfer_total), xfer_bytes);
+			xfer_total, sizeof(xfer_total), (double)xfer_bytes);
 		char xfer_rate[16];
 		(void)format_iec_bytes(
 			xfer_rate, sizeof(xfer_rate),
-			(xfer_bytes - last.xfer_bytes) / dt);
+			(double)(xfer_bytes - last.xfer_bytes) / dt);
 		last.xfer_bytes = xfer_bytes;
 
 		char str_uptime[16];
@@ -548,7 +546,7 @@ static void http_handle_stats(
 		const size_t heap_bytes = ruleset_memused(ruleset);
 		char heap_total[16];
 		(void)format_iec_bytes(
-			heap_total, sizeof(heap_total), heap_bytes);
+			heap_total, sizeof(heap_total), (double)heap_bytes);
 		(void)buf_appendf(
 			&ctx->wbuf,
 			""
@@ -648,7 +646,7 @@ static void http_handle_ruleset(
 		ruleset_gc(ruleset);
 		const size_t livemem = ruleset_memused(ruleset);
 		char buf[16];
-		(void)format_iec_bytes(buf, sizeof(buf), livemem);
+		(void)format_iec_bytes(buf, sizeof(buf), (double)livemem);
 		RESPHDR_POST_TXT(ctx, HTTP_OK);
 		(void)buf_appendf(&ctx->wbuf, "Ruleset Live Memory: %s\n", buf);
 		return;
@@ -751,8 +749,7 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const ssize_t nsend = send(watcher->fd, buf, len, 0);
 		if (nsend < 0) {
 			const int err = errno;
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == EINTR || err == ENOMEM) {
+			if (IS_TEMPORARY_ERROR(err)) {
 				break;
 			}
 			LOGE_F("send: %s", strerror(err));
