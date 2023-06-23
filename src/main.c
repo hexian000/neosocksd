@@ -35,22 +35,25 @@ static struct {
 #if WITH_TPROXY
 	bool tproxy : 1;
 #endif
-	bool want_reset : 1;
 	bool traceback : 1;
 	bool daemonize : 1;
 	int verbosity;
 	int resolve_pf;
 	const char *user_name;
 	double timeout;
-
-	struct ev_signal w_sighup;
-	struct ev_signal w_sigint;
-	struct ev_signal w_sigterm;
 } args = {
 	.verbosity = LOG_LEVEL_INFO,
 	.resolve_pf = PF_UNSPEC,
 	.timeout = 60.0,
 };
+
+static struct {
+	struct ev_signal w_sighup;
+	struct ev_signal w_sigint;
+	struct ev_signal w_sigterm;
+
+	struct ruleset *ruleset;
+} app;
 
 static void
 signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents);
@@ -216,6 +219,9 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 int main(int argc, char **argv)
 {
+	init();
+	atexit(uninit);
+
 	parse_args(argc, argv);
 	slog_level =
 		CLAMP(args.verbosity, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
@@ -232,23 +238,14 @@ int main(int argc, char **argv)
 	CHECK(loop != NULL);
 
 	/* signal watchers */
-	if (sigaction(
-		    SIGPIPE,
-		    &(struct sigaction){
-			    .sa_handler = SIG_IGN,
-		    },
-		    NULL) != 0) {
-		const int err = errno;
-		FAILMSG(strerror(err));
-	}
 	{
-		struct ev_signal *restrict w_sighup = &args.w_sighup;
+		struct ev_signal *restrict w_sighup = &app.w_sighup;
 		ev_signal_init(w_sighup, signal_cb, SIGHUP);
 		ev_signal_start(loop, w_sighup);
-		struct ev_signal *restrict w_sigint = &args.w_sigint;
+		struct ev_signal *restrict w_sigint = &app.w_sigint;
 		ev_signal_init(w_sigint, signal_cb, SIGINT);
 		ev_signal_start(loop, w_sigint);
-		struct ev_signal *restrict w_sigterm = &args.w_sigterm;
+		struct ev_signal *restrict w_sigterm = &app.w_sigterm;
 		ev_signal_init(w_sigterm, signal_cb, SIGTERM);
 		ev_signal_start(loop, w_sigterm);
 	}
@@ -333,14 +330,9 @@ int main(int argc, char **argv)
 		ruleset_free(ruleset);
 	}
 
-	ev_signal_stop(loop, &args.w_sighup);
-	ev_signal_stop(loop, &args.w_sigint);
-	ev_signal_stop(loop, &args.w_sigterm);
-
-	if (args.want_reset) {
-		LOGI("reloading binaries");
-		reset(argv);
-	}
+	ev_signal_stop(loop, &app.w_sighup);
+	ev_signal_stop(loop, &app.w_sigint);
+	ev_signal_stop(loop, &app.w_sigterm);
 
 	LOGI("program terminated normally.");
 	return EXIT_SUCCESS;
@@ -352,12 +344,19 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 	UNUSED(revents);
 
 	switch (watcher->signum) {
-	case SIGPIPE:
-		LOGV_F("signal %d ignored", watcher->signum);
-		break;
-	case SIGHUP:
-		args.want_reset = true;
-		/* fallthrough */
+	case SIGHUP: {
+		if (args.ruleset == NULL || app.ruleset == NULL) {
+			LOGE_F("signal %d received, but ruleset not loaded",
+			       watcher->signum);
+			break;
+		}
+		const char *err = ruleset_loadfile(app.ruleset, args.ruleset);
+		if (err != NULL) {
+			LOGE_F("failed to reload ruleset: %s", err);
+			break;
+		}
+		LOGI("ruleset successfully reloaded");
+	} break;
 	case SIGINT:
 	case SIGTERM:
 		LOGI_F("signal %d received, breaking", watcher->signum);

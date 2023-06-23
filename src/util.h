@@ -34,9 +34,10 @@ struct event_cb {
 	((err) == EAGAIN || (err) == EWOULDBLOCK || (err) == EINTR ||          \
 	 (err) == ENOMEM)
 
+void init(void);
+void uninit(void);
+
 void daemonize(void);
 void drop_privileges(const char *user);
-
-void reset(char **argv);
 
 #endif /* UTIL_H */

@@ -522,7 +522,7 @@ static void http_handle_stats(
 		last.xfer_bytes = xfer_bytes;
 
 		char str_uptime[16];
-		(void)format_duration_seconds(
+		(void)format_duration(
 			str_uptime, sizeof(str_uptime), make_duration(uptime));
 
 		(void)buf_appendf(
