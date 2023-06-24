@@ -35,7 +35,6 @@ struct event_cb {
 	 (err) == ENOMEM)
 
 void init(void);
-void uninit(void);
 
 void daemonize(void);
 void drop_privileges(const char *user);

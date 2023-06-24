@@ -220,7 +220,6 @@ static void parse_args(const int argc, char *const *const restrict argv)
 int main(int argc, char **argv)
 {
 	init();
-	atexit(uninit);
 
 	parse_args(argc, argv);
 	slog_level =

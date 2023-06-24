@@ -17,6 +17,8 @@
 #include <string.h>
 #include <time.h>
 
+static void uninit(void);
+
 void init(void)
 {
 	(void)setlocale(LC_ALL, "");
@@ -28,9 +30,16 @@ void init(void)
 		const int err = errno;
 		FAILMSGF("sigaction: %s", strerror(err));
 	}
+
+	{
+		const int ret = atexit(uninit);
+		if (ret != 0) {
+			FAILMSGF("atexit: %d", ret);
+		}
+	}
 }
 
-void uninit(void)
+static void uninit(void)
 {
 }
 
