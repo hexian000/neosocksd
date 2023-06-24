@@ -52,6 +52,7 @@ static struct {
 	struct ev_signal w_sigint;
 	struct ev_signal w_sigterm;
 
+	/* ruleset is a singleton */
 	struct ruleset *ruleset;
 } app;
 
@@ -264,11 +265,10 @@ int main(int argc, char **argv)
 		.traceback = args.traceback,
 		.timeout = args.timeout,
 	};
-	struct ruleset *ruleset = NULL;
 	if (args.ruleset != NULL) {
-		ruleset = ruleset_new(loop, &conf);
-		CHECKOOM(ruleset);
-		const char *err = ruleset_loadfile(ruleset, args.ruleset);
+		app.ruleset = ruleset_new(loop, &conf);
+		CHECKOOM(app.ruleset);
+		const char *err = ruleset_loadfile(app.ruleset, args.ruleset);
 		if (err != NULL) {
 			LOGF_F("unable to load ruleset: %s", args.ruleset);
 			exit(EXIT_FAILURE);
@@ -292,7 +292,8 @@ int main(int argc, char **argv)
 		serve_cb = http_proxy_serve;
 	}
 
-	struct server *s = server_new(&bindaddr.sa, &conf, ruleset, serve_cb);
+	struct server *s =
+		server_new(&bindaddr.sa, &conf, app.ruleset, serve_cb);
 	if (s == NULL) {
 		FAILMSG("server initializing failed");
 	}
@@ -305,8 +306,8 @@ int main(int argc, char **argv)
 			LOGF_F("unable to parse address: %s", args.restapi);
 			exit(EXIT_FAILURE);
 		}
-		apiserver =
-			server_new(&apiaddr.sa, &conf, ruleset, http_api_serve);
+		apiserver = server_new(
+			&apiaddr.sa, &conf, app.ruleset, http_api_serve);
 		if (apiserver == NULL) {
 			FAILMSG("api server initializing failed");
 		}
@@ -325,8 +326,9 @@ int main(int argc, char **argv)
 	}
 	server_stop(s, loop);
 	server_free(s);
-	if (ruleset != NULL) {
-		ruleset_free(ruleset);
+	if (app.ruleset != NULL) {
+		ruleset_free(app.ruleset);
+		app.ruleset = NULL;
 	}
 
 	ev_signal_stop(loop, &app.w_sighup);
