@@ -6,26 +6,26 @@ set -ex
 case "$1" in
 "x")
     # cross compiling, environment vars need to be set
-    rm -rf "xbuild" && mkdir -p "xbuild"
+    rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-        -S . -B "xbuild"
-    nice cmake --build "xbuild" --parallel
-    ls -lh "xbuild/src/neosocksd"
+        -S . -B "build"
+    nice cmake --build "build" --parallel
+    ls -lh "build/src/neosocksd"
     ;;
 "xs")
     # cross compiling, environment vars need to be set
-    rm -rf "xbuild" && mkdir -p "xbuild"
+    rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DLINK_STATIC_LIBS=TRUE \
-        -S . -B "xbuild"
-    nice cmake --build "xbuild" --parallel
-    ls -lh "xbuild/src/neosocksd"
+        -S . -B "build"
+    nice cmake --build "build" --parallel
+    ls -lh "build/src/neosocksd"
     ;;
 "r")
     rm -rf "build" && mkdir -p "build"
@@ -82,7 +82,7 @@ case "$1" in
     ls -lh "build/src/neosocksd"
     ;;
 "c")
-    rm -rf "build" "xbuild" "compile_commands.json"
+    rm -rf "build" "compile_commands.json"
     ;;
 *)
     mkdir -p "build"
