@@ -1,8 +1,8 @@
 /* csnippets (c) 2019-2023 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#ifndef BUFFER_H
-#define BUFFER_H
+#ifndef UTILS_BUFFER_H
+#define UTILS_BUFFER_H
 
 #include "minmax.h"
 
@@ -96,4 +96,4 @@ vbuf_append(struct vbuffer *vbuf, const unsigned char *data, size_t n);
 
 struct vbuffer *vbuf_appendf(struct vbuffer *vbuf, const char *format, ...);
 
-#endif /* BUFFER_H */
+#endif /* UTILS_BUFFER_H */

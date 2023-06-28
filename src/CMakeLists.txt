@@ -40,18 +40,14 @@ target_compile_options(neosocksd PRIVATE -include "${CMAKE_CURRENT_BINARY_DIR}/c
 # be strict with original sources
 target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra -Werror)
 
-if(LINK_STATIC_LIBS)
-    find_library(LIBM NAMES libm.a)
-else()
-    find_library(LIBM NAMES m)
-endif()
+find_library(LIBM NAMES m)
 if(LIBM)
     target_link_libraries(neosocksd PRIVATE ${LIBM})
 endif()
 
 # find libev
 find_path(LIBEV_INCLUDE_DIR NAMES ev.h)
-if(LINK_STATIC_LIBS)
+if(BUILD_STATIC OR LINK_STATIC_LIBS)
     find_library(LIBEV_LIBRARY NAMES libev.a)
 else()
     find_library(LIBEV_LIBRARY NAMES ev)
@@ -70,7 +66,7 @@ find_path(LUA_INCLUDE_DIR
     PATH_SUFFIXES
     include/lua54 include/lua5.4 include/lua-5.4 include/lua include
 )
-if(LINK_STATIC_LIBS)
+if(BUILD_STATIC OR LINK_STATIC_LIBS)
     find_library(LUA_LIBRARY
         NAMES liblua54.a liblua5.4.a liblua-5.4.a liblua.a
         PATH_SUFFIXES

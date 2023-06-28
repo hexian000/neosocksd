@@ -1,8 +1,8 @@
 /* csnippets (c) 2019-2023 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#ifndef URL_H
-#define URL_H
+#ifndef NET_URL_H
+#define NET_URL_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -88,4 +88,4 @@ bool url_unescape_path(char *path);
  */
 bool url_unescape_query(char *query);
 
-#endif /* URL_H */
+#endif /* NET_URL_H */
