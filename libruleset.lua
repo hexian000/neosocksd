@@ -38,16 +38,17 @@ local list = {
     unpack = table.unpack,
     concat = table.concat
 }
+
+local list_mt = {
+    __index = list
+}
+
 function list:new(t)
-    return setmetatable(t or {}, {
-        __index = list
-    })
+    return setmetatable(t or {}, list_mt)
 end
 
 function list:pack(...)
-    return setmetatable({...}, {
-        __index = list
-    })
+    return setmetatable({...}, list_mt)
 end
 
 function list:totable()
@@ -101,9 +102,9 @@ local function addevent_(tstamp, msg)
     return recent_events:insert(1, entry)
 end
 
-function _G.logf(s, ...)
+function _G.log(...)
+    local msg = table.concat({...}, "\t")
     local now = os.time()
-    local msg = string.format(s, ...)
     addevent_(now, msg)
     if _G.NDEBUG then
         return
@@ -112,14 +113,18 @@ function _G.logf(s, ...)
     local info = debug.getinfo(2, "Sl")
     local source = info.source
     if source:startswith("@") then
-        source = source:sub(2):gsub("/([^/]+)$", "%1")
+        source = source:sub(2):gsub("^.*/([^/]+)$", "%1")
     elseif source:startswith("=") then
         source = "<" .. source:sub(2) .. ">"
     else
         source = info.short_src
     end
     local line = info.currentline
-    return printf("D %s %s:%d %s", timestamp, source, line, msg)
+    return _G.printf("D %s %s:%d %s", timestamp, source, line, msg)
+end
+
+function _G.logf(s, ...)
+    return _G.log(string.format(s, ...))
 end
 
 function _G.splithostport(s)
