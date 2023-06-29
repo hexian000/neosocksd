@@ -60,19 +60,19 @@ Depending on how complex your customizations are, check out:
 - Level 2: Rule set library code in [libruleset.lua](libruleset.lua)
 - Level 3: Reference manual for enthusiasts and professionals: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
-Access RESTful API through the proxy as defined in [ruleset.lua](ruleset.lua):
-
 ```sh
-curl -0sx socks5h://127.0.0.1:1080 http://neosocksd.lan/stats
+curl -0sX POST http://127.0.1.1:9080/stats
 ```
 
-Update ruleset without restarting:
+Update ruleset on remote instance without restarting:
 
 ```sh
-curl -0vx socks5h://127.0.0.1:1080 \
+curl -0vx socks5h://192.168.1.1:1080 \
     http://neosocksd.lan/ruleset/update \
     --data-binary @ruleset.lua
 ```
+
+The host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua):
 
 [neox.sh](neox.sh) is a curl wrapper script for simplified shell operating.
 
@@ -80,16 +80,11 @@ curl -0vx socks5h://127.0.0.1:1080 \
 
 ## Runtime Dependencies
 
-For non-static builds, additional runtime dependencies are required.
+By default, neosocksd link against libraries statically.
 
-```sh
-# Debian & Ubuntu
-sudo apt install -y libev4
-# OpenWRT
-opkg install libev
-```
+For `*-linux-gnu` builds, only a recent version of glibc required.
 
-*Lua is always statically linked.*
+For `*-linux-static` builds, no runtime library required.
 
 ## Building from Source
 ### Dependencies

@@ -25,8 +25,8 @@ Check server liveness.
 Calculate server statistics since the last call.
 
 - **Path**: /stats
-- **Method**: GET
-- **Status**: HTTP 200
+- **Method**: POST
+- **Status**: HTTP 200, HTTP 405
 - **Response**: Server statistics in plain text.
 
 ### Ruleset Invoke
