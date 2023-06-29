@@ -116,4 +116,4 @@ See [m.sh](m.sh) for more information about cross compiling support.
 
 Thanks to:
 - [libev](http://software.schmorp.de/pkg/libev.html)
-- [lua](https://www.lua.org/)
+- [Lua](https://www.lua.org/)

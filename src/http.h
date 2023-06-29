@@ -1,5 +1,5 @@
-#ifndef REST_H
-#define REST_H
+#ifndef HTTP_H
+#define HTTP_H
 
 #include "server.h"
 #include "ruleset.h"
@@ -29,4 +29,4 @@ struct http_invoke_ctx *http_invoke(
 	struct ev_loop *loop, const struct config *conf, struct dialreq *req,
 	const char *code, size_t len);
 
-#endif /* REST_H */
+#endif /* HTTP_H */

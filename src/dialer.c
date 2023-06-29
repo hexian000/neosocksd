@@ -280,7 +280,7 @@ static int dialer_recv(
 		const ssize_t nrecv = recv(fd, data, cap, 0);
 		if (nrecv < 0) {
 			const int err = errno;
-			if (IS_TEMPORARY_ERROR(err)) {
+			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
 			d->err = err;
@@ -400,7 +400,7 @@ static bool connect_sa(
 #endif
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
 		const int err = errno;
-		if (err != EINPROGRESS) {
+		if (err != EINTR && err != EINPROGRESS) {
 			LOGE_F("connect: %s", strerror(err));
 			(void)close(fd);
 			d->err = err;

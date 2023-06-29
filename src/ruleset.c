@@ -239,11 +239,12 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	UNUSED(revents);
 	struct ruleset *restrict r = watcher->data;
+	const char *func = "tick";
 	ev_tstamp now = ev_now(loop);
-	const int ret = ruleset_pcall(r, ruleset_tick_, 2, 0, "tick", &now);
+	const int ret = ruleset_pcall(r, ruleset_tick_, 2, 0, func, &now);
 	if (ret != LUA_OK) {
 		lua_State *restrict L = r->L;
-		LOGE_F("ruleset.tick: %s", lua_tostring(L, -1));
+		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
 		return;
 	}
 }

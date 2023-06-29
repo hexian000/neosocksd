@@ -132,16 +132,7 @@ http_resphdr_init(struct http_ctx *restrict ctx, const uint16_t code)
 
 #define RESPHDR_END(ctx) BUF_APPENDCONST(&(ctx)->wbuf, "\r\n")
 
-#define RESPHDR_GET_TXT(ctx, code)                                             \
-	do {                                                                   \
-		http_resphdr_init((ctx), (code));                              \
-		RESPHDR_ADD(ctx, "Cache-Control", "no-store");                 \
-		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8"); \
-		RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");         \
-		RESPHDR_END(ctx);                                              \
-	} while (0)
-
-#define RESPHDR_POST_TXT(ctx, code)                                            \
+#define RESPHDR_TXT(ctx, code)                                                 \
 	do {                                                                   \
 		http_resphdr_init((ctx), (code));                              \
 		RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8"); \
@@ -177,7 +168,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	const ssize_t nrecv = recv(watcher->fd, buf, cap, 0);
 	if (nrecv < 0) {
 		const int err = errno;
-		if (IS_TEMPORARY_ERROR(err)) {
+		if (IS_TRANSIENT_ERROR(err)) {
 			return;
 		}
 		LOGE_F("recv: %s", strerror(err));
@@ -340,7 +331,7 @@ http_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const ssize_t nsend = send(watcher->fd, buf, len, 0);
 		if (nsend < 0) {
 			const int err = errno;
-			if (IS_TEMPORARY_ERROR(err)) {
+			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
 			LOGE_F("send: %s", strerror(err));
@@ -472,17 +463,10 @@ http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 }
 
-static void http_handle_stats(
-	struct ev_loop *loop, struct http_ctx *restrict ctx,
-	struct url *restrict uri)
+static void
+http_handle_stats(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	UNUSED(uri);
-	const struct http_message *restrict hdr = &ctx->http_msg;
-	if (strcasecmp(hdr->req.method, "GET") != 0) {
-		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
-		return;
-	}
-	RESPHDR_GET_TXT(ctx, HTTP_OK);
+	RESPHDR_TXT(ctx, HTTP_OK);
 
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = server_get_uptime(ctx->server, now);
@@ -593,7 +577,7 @@ static void http_handle_ruleset(
 	struct server *restrict s = ctx->server;
 	struct ruleset *ruleset = s->ruleset;
 	if (ruleset == NULL) {
-		RESPHDR_POST_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
 		(void)buf_appendf(
 			&ctx->wbuf, "%s",
 			"ruleset not enabled, restart with -r\n");
@@ -614,7 +598,7 @@ static void http_handle_ruleset(
 		LOGV_F("api: ruleset invoke\n%s", code);
 		const char *err = ruleset_invoke(ruleset, code, len);
 		if (err != NULL) {
-			RESPHDR_POST_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			RESPHDR_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
 			BUF_APPENDSTR(&ctx->wbuf, err);
 			return;
 		}
@@ -631,7 +615,7 @@ static void http_handle_ruleset(
 		LOGV_F("api: ruleset update\n%s", code);
 		const char *err = ruleset_load(ruleset, code, len);
 		if (err != NULL) {
-			RESPHDR_POST_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			RESPHDR_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
 			BUF_APPENDSTR(&ctx->wbuf, err);
 			return;
 		}
@@ -647,7 +631,7 @@ static void http_handle_ruleset(
 		const size_t livemem = ruleset_memused(ruleset);
 		char buf[16];
 		(void)format_iec_bytes(buf, sizeof(buf), (double)livemem);
-		RESPHDR_POST_TXT(ctx, HTTP_OK);
+		RESPHDR_TXT(ctx, HTTP_OK);
 		(void)buf_appendf(&ctx->wbuf, "Ruleset Live Memory: %s\n", buf);
 		return;
 	}
@@ -680,10 +664,10 @@ http_handle_restapi(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 	if (strcmp(segment, "stats") == 0) {
-		if (!http_leafnode_check(ctx, &uri, "GET", false)) {
+		if (!http_leafnode_check(ctx, &uri, "POST", false)) {
 			return;
 		}
-		http_handle_stats(loop, ctx, &uri);
+		http_handle_stats(loop, ctx);
 		return;
 	}
 	if (strcmp(segment, "ruleset") == 0) {
@@ -749,7 +733,7 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const ssize_t nsend = send(watcher->fd, buf, len, 0);
 		if (nsend < 0) {
 			const int err = errno;
-			if (IS_TEMPORARY_ERROR(err)) {
+			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
 			LOGE_F("send: %s", strerror(err));

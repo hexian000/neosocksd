@@ -238,7 +238,7 @@ static void forward_start(
 
 	if (connect(dialed_fd, &addr.sa, getsocklen(&addr.sa)) != 0) {
 		const int err = errno;
-		if (err != EINPROGRESS) {
+		if (err != EINTR && err != EINPROGRESS) {
 			LOGE_F("connect: %s", strerror(err));
 			forward_stop(loop, ctx);
 			forward_free(ctx);

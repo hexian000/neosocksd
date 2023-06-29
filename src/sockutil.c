@@ -127,8 +127,7 @@ socklen_t getsocklen(const struct sockaddr *sa)
 	default:
 		break;
 	}
-	LOGF("only IPv4/IPv6 addresses are supported");
-	abort();
+	FAIL();
 }
 
 static int

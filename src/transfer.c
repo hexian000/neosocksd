@@ -42,7 +42,7 @@ static size_t transfer_recv(struct transfer *restrict t)
 		const ssize_t nrecv = recv(fd, data, cap, 0);
 		if (nrecv < 0) {
 			const int err = errno;
-			if (IS_TEMPORARY_ERROR(err)) {
+			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
 			LOGD_F("recv: fd=%d %s", fd, strerror(err));
@@ -68,10 +68,10 @@ static size_t transfer_send(struct transfer *restrict t)
 	while (t->buf.len > 0) {
 		const unsigned char *data = t->buf.data + nbsend;
 		const size_t len = t->buf.len - nbsend;
-		const ssize_t nsend = write(fd, data, len);
+		const ssize_t nsend = send(fd, data, len, 0);
 		if (nsend < 0) {
 			const int err = errno;
-			if (IS_TEMPORARY_ERROR(err)) {
+			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
 			LOGD_F("recv: fd=%d %s", fd, strerror(err));

@@ -227,6 +227,7 @@ int main(int argc, char **argv)
 		CLAMP(args.verbosity, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
 	if (args.listen == NULL) {
 		LOGF("listen address not specified");
+		print_usage(argv[0]);
 		exit(EXIT_FAILURE);
 	}
 

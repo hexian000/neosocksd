@@ -479,7 +479,7 @@ static int socks_read(struct socks_ctx *restrict ctx, const int fd)
 			     cap - ctx->rbuf.len, 0);
 		if (nrecv < 0) {
 			const int err = errno;
-			if (IS_TEMPORARY_ERROR(err)) {
+			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
 			LOGE_F("recv: fd=%d %s", fd, strerror(err));
