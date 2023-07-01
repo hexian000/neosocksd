@@ -21,6 +21,13 @@ static void uninit(void);
 
 void init(void)
 {
+	{
+		const int ret = atexit(uninit);
+		if (ret != 0) {
+			FAILMSGF("atexit: %d", ret);
+		}
+	}
+
 	(void)setlocale(LC_ALL, "");
 
 	struct sigaction ignore = {
@@ -29,13 +36,6 @@ void init(void)
 	if (sigaction(SIGPIPE, &ignore, NULL) != 0) {
 		const int err = errno;
 		FAILMSGF("sigaction: %s", strerror(err));
-	}
-
-	{
-		const int ret = atexit(uninit);
-		if (ret != 0) {
-			FAILMSGF("atexit: %d", ret);
-		}
 	}
 }
 

@@ -17,11 +17,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 
-	struct server *s = (struct server *)watcher->data;
+	struct server *restrict s = (struct server *)watcher->data;
 
 	for (;;) {
 		sockaddr_max_t m_sa;
@@ -36,6 +36,8 @@ void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			LOGE_F("accept: %s", strerror(err));
 			/* sleep until next timer, see timer_cb */
 			ev_io_stop(loop, watcher);
+			struct ev_timer *restrict w_timer = &s->w_timer;
+			ev_timer_start(loop, w_timer);
 			return;
 		}
 		LOGV_F("accept: fd=%d", fd);
@@ -49,6 +51,16 @@ void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 		s->serve_cb(loop, s, fd, &m_sa.sa);
 	}
+}
+
+static void
+timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+{
+	CHECK_EV_ERROR(revents);
+	ev_timer_stop(loop, watcher);
+	struct server *restrict s = (struct server *)watcher->data;
+	struct ev_io *restrict w_accept = &s->w_accept;
+	ev_io_start(loop, w_accept);
 }
 
 struct server *server_new(
@@ -101,6 +113,8 @@ struct server *server_new(
 	s->serve_cb = serve_cb;
 	struct ev_io *restrict w_accept = &s->w_accept;
 	ev_io_init(w_accept, accept_cb, fd, EV_READ);
+	struct ev_timer *restrict w_timer = &s->w_timer;
+	ev_timer_init(w_timer, timer_cb, 5.0, 0.0);
 	s->w_accept.data = s;
 	s->uptime = TSTAMP_NIL;
 	return s;

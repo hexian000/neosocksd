@@ -18,6 +18,7 @@ struct server {
 	struct ruleset *ruleset;
 	serve_fn serve_cb;
 	struct ev_io w_accept;
+	struct ev_timer w_timer;
 	ev_tstamp uptime;
 };
 
