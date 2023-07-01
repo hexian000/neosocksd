@@ -263,7 +263,7 @@ static int setinterval_(lua_State *restrict L)
 	}
 
 	interval = CLAMP(interval, 1e-3, 1e+9);
-	ev_timer_init(w_timer, tick_cb, interval, interval);
+	ev_timer_set(w_timer, interval, interval);
 	w_timer->data = r;
 	ev_timer_start(r->loop, w_timer);
 	return 0;
