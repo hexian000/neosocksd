@@ -296,7 +296,16 @@ end
 function rule.resolve()
     return function(s)
         local host, port = splithostport(s)
-        local addr = neosocksd.resolve(host)
+        host = string.lower(host)
+        local addr
+        local hosts = _G.hosts
+        if hosts then
+            addr = hosts[host]
+            if addr then
+                return string.format("%s:%s", addr, port)
+            end
+        end
+        addr = neosocksd.resolve(host)
         if not addr then
             errorf("unable to resolve host name: %q", host)
         end
@@ -413,11 +422,13 @@ local function resolve_(addr)
     -- lookup in hosts table
     local host, port = splithostport(addr)
     host = string.lower(host)
-    local hosts = _G.hosts or {}
-    local entry = hosts[host]
-    if entry then
-        host = entry
-        addr = string.format("%s:%s", host, port)
+    local hosts = _G.hosts
+    if hosts then
+        local entry = hosts[host]
+        if entry then
+            host = entry
+            addr = string.format("%s:%s", host, port)
+        end
     end
     -- check if addr is a raw address
     if neosocksd.parse_ipv4(host) then
