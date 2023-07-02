@@ -451,7 +451,7 @@ static void
 http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	struct http_message *restrict hdr = &ctx->http_msg;
-	if (strcasecmp(hdr->req.method, "CONNECT") != 0) {
+	if (strcmp(hdr->req.method, "CONNECT") != 0) {
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
@@ -497,9 +497,9 @@ static void http_handle_stats(
 {
 	struct http_message *restrict hdr = &ctx->http_msg;
 	bool stateless;
-	if (strcasecmp(hdr->req.method, "GET") == 0) {
+	if (strcmp(hdr->req.method, "GET") == 0) {
 		stateless = true;
-	} else if (strcasecmp(hdr->req.method, "POST") == 0) {
+	} else if (strcmp(hdr->req.method, "POST") == 0) {
 		stateless = false;
 	} else {
 		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
@@ -609,7 +609,7 @@ static bool http_leafnode_check(
 		return false;
 	}
 	const struct http_message *restrict hdr = &ctx->http_msg;
-	if (method != NULL && strcasecmp(hdr->req.method, method) != 0) {
+	if (method != NULL && strcmp(hdr->req.method, method) != 0) {
 		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
