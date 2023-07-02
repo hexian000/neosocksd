@@ -62,19 +62,26 @@ target_link_libraries(neosocksd PRIVATE ${LIBEV_LIBRARY})
 
 # find lua
 find_path(LUA_INCLUDE_DIR
-    NAMES lua.h
+    NAMES luaconf.h lua.h lualib.h lauxlib.h
     PATH_SUFFIXES
-    include/lua54 include/lua5.4 include/lua-5.4 include/lua include
+    include/lua54 include/lua5.4 include/lua-5.4
+    include/lua53 include/lua5.3 include/lua-5.3
+    include/lua include
 )
 find_library(LUA_LIBRARY
-    NAMES liblua54.a liblua5.4.a liblua-5.4.a liblua.a
+    NAMES
+    liblua54.a liblua5.4.a liblua-5.4.a
+    liblua53.a liblua5.3.a liblua-5.3.a
+    liblua.a
     PATH_SUFFIXES
-    lib/lua54 lib/lua5.4 lib/lua-5.4 lib/lua lib
+    lib/lua54 lib/lua5.4 lib/lua-5.4
+    lib/lua53 lib/lua5.3 lib/lua-5.3
+    lib/lua lib
 )
 if((EXISTS ${LUA_INCLUDE_DIR}) AND (EXISTS ${LUA_LIBRARY}))
     message(STATUS "Lua: ${LUA_LIBRARY}")
 else()
-    message(FATAL_ERROR "lua not found")
+    message(FATAL_ERROR "Lua not found")
 endif()
 target_include_directories(neosocksd PRIVATE ${LUA_INCLUDE_DIR})
 target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY})

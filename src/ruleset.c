@@ -432,7 +432,7 @@ void ruleset_gc(struct ruleset *restrict r)
 {
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
-	lua_gc(L, LUA_GCCOLLECT);
+	lua_gc(L, LUA_GCCOLLECT, 0);
 }
 
 static struct dialreq *request_accept(const char *domain)
@@ -509,8 +509,8 @@ struct dialreq *ruleset_route6(struct ruleset *r, const char *request)
 size_t ruleset_memused(struct ruleset *restrict r)
 {
 	lua_State *restrict L = r->L;
-	return ((size_t)lua_gc(L, LUA_GCCOUNT) << 10u) |
-	       (size_t)lua_gc(L, LUA_GCCOUNTB);
+	return ((size_t)lua_gc(L, LUA_GCCOUNT, 0) << 10u) |
+	       (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
 }
 
 static int ruleset_stats_(lua_State *restrict L)
