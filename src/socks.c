@@ -135,32 +135,15 @@ static void socks4_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 	(void)send_rsp(ctx->accepted_fd, &hdr, sizeof(hdr));
 }
 
-static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp, int err)
+static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp)
 {
-	switch (err) {
-	case 0:
-		break;
-	case ENETUNREACH:
-		rsp = SOCKS5RSP_NETUNREACH;
-		break;
-	case EHOSTUNREACH:
-		rsp = SOCKS5RSP_HOSTUNREACH;
-		break;
-	case ECONNREFUSED:
-		rsp = SOCKS5RSP_CONNREFUSED;
-		break;
-	default:
-		rsp = SOCKS5RSP_FAIL;
-		break;
-	}
-
 	sockaddr_max_t addr = {
 		.sa.sa_family = AF_INET,
 	};
 	socklen_t addrlen = sizeof(addr);
 	if (ctx->dialed_fd != -1) {
 		if (getsockname(ctx->dialed_fd, &addr.sa, &addrlen) != 0) {
-			err = errno;
+			const int err = errno;
 			LOGE_F("getsockname: %s", strerror(err));
 		}
 	}
@@ -209,7 +192,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	case STATE_CONNECT: {
 		const uint8_t version = read_uint8(ctx->rbuf.data);
 		if (version == SOCKS5) {
-			socks5_sendrsp(ctx, SOCKS5RSP_TTLEXPIRED, 0);
+			socks5_sendrsp(ctx, SOCKS5RSP_TTLEXPIRED);
 		}
 	} break;
 	case STATE_CONNECTED:
@@ -222,16 +205,55 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	socks_free(ctx);
 }
 
-static void socks_send_rsp(struct socks_ctx *restrict ctx, const int err)
+static void socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 {
 	const uint8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
 	case SOCKS4:
 		socks4_sendrsp(
-			ctx, err == 0 ? SOCKS4RSP_GRANTED : SOCKS4RSP_REJECTED);
+			ctx, ok ? SOCKS4RSP_GRANTED : SOCKS4RSP_REJECTED);
 		return;
 	case SOCKS5:
-		socks5_sendrsp(ctx, err == 0 ? SOCKS5RSP_SUCCEEDED : 0, err);
+		socks5_sendrsp(
+			ctx, ok ? SOCKS5RSP_SUCCEEDED : SOCKS5RSP_NOALLOWED);
+		return;
+	default:
+		break;
+	}
+	FAIL();
+}
+
+static uint8_t socks4_err2rsp(const int err)
+{
+	return err == 0 ? SOCKS4RSP_GRANTED : SOCKS4RSP_REJECTED;
+}
+
+static uint8_t socks5_err2rsp(const int err)
+{
+	switch (err) {
+	case 0:
+		return SOCKS5RSP_SUCCEEDED;
+	case ENETUNREACH:
+		return SOCKS5RSP_NETUNREACH;
+	case EHOSTUNREACH:
+		return SOCKS5RSP_HOSTUNREACH;
+	case ECONNREFUSED:
+		return SOCKS5RSP_CONNREFUSED;
+	default:
+		break;
+	}
+	return SOCKS5RSP_FAIL;
+}
+
+static void socks_senderr(struct socks_ctx *restrict ctx, const int err)
+{
+	const uint8_t version = read_uint8(ctx->rbuf.data);
+	switch (version) {
+	case SOCKS4:
+		socks4_sendrsp(ctx, socks4_err2rsp(err));
+		return;
+	case SOCKS5:
+		socks5_sendrsp(ctx, socks5_err2rsp(err));
 		return;
 	default:
 		break;
@@ -247,14 +269,14 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		const int err = ctx->dialer.err;
 		LOGD_F("dialer failed: %s",
 		       err != 0 ? strerror(err) : "unknown");
-		socks_send_rsp(ctx, err);
+		socks_senderr(ctx, err);
 		socks_stop(loop, ctx);
 		socks_free(ctx);
 		return;
 	}
 	LOGV_F("dialer: connected fd=%d", fd);
 	ctx->dialed_fd = fd;
-	socks_send_rsp(ctx, 0);
+	socks_sendrsp(ctx, true);
 	socks_stop(loop, ctx);
 	ctx->state = STATE_CONNECTED;
 	struct event_cb cb = {
@@ -345,7 +367,7 @@ static int socks5_parse(struct socks_ctx *restrict ctx)
 	}
 	const uint8_t command = hdr[offsetof(struct socks5_hdr, command)];
 	if (command != SOCKS5CMD_CONNECT) {
-		(void)socks5_sendrsp(ctx, SOCKS5RSP_CMDNOSUPPORT, 0);
+		(void)socks5_sendrsp(ctx, SOCKS5RSP_CMDNOSUPPORT);
 		return -1;
 	}
 	const uint8_t addrtype = hdr[offsetof(struct socks5_hdr, addrtype)];
@@ -364,7 +386,7 @@ static int socks5_parse(struct socks_ctx *restrict ctx)
 		want += read_uint8(hdr + sizeof(struct socks5_hdr));
 		break;
 	default:
-		(void)socks5_sendrsp(ctx, SOCKS5RSP_ATYPNOSUPPORT, 0);
+		(void)socks5_sendrsp(ctx, SOCKS5RSP_ATYPNOSUPPORT);
 		return -1;
 	}
 	if (len < want) {
@@ -546,6 +568,7 @@ socks_recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	struct dialreq *req = make_dialreq(ctx);
 	if (req == NULL) {
+		socks_sendrsp(ctx, false);
 		socks_stop(loop, ctx);
 		socks_free(ctx);
 		return;

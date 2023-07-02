@@ -11,7 +11,9 @@ _G.hosts = {
     ["gateway.region1.lan"] = "192.168.32.1",
     ["host123.region1.lan"] = "192.168.32.123",
     ["gateway.region2.lan"] = "192.168.33.1",
-    ["host123.region2.lan"] = "192.168.33.123"
+    ["host123.region2.lan"] = "192.168.33.123",
+    -- self-assignment
+    ["neosocksd.lan"] = "127.0.1.1" -- see _G.redirect
 }
 
 -- 2. ordered redirect rules
@@ -19,24 +21,22 @@ _G.hosts = {
 -- _G.redirect_name: continue matching after a match is found, unless the rule specifies a proxy
 -- Therefore, rule.resolve() is different with rule.direct() only in _G.redirect_name
 _G.redirect_name = {
-    -- redirect API domain
-    [1] = {match.exact("neosocksd.lan:80"), rule.redirect("127.0.1.1:9080")},
     -- pass to region1 proxy
-    [2] = {match.exact("region1.neosocksd.lan:80"), rule.redirect("192.168.32.1:1080", "neosocksd.lan:80")},
+    [1] = {match.exact("region1.neosocksd.lan:80"), rule.redirect("192.168.32.1:1080", "neosocksd.lan:80")},
     -- jump to region2 through region1 proxy
-    [3] = {match.exact("region2.neosocksd.lan:80"),
+    [2] = {match.exact("region2.neosocksd.lan:80"),
            rule.redirect("192.168.32.1:1080", "192.168.33.1:1080", "neosocksd.lan:80")},
     -- access mDNS sites directly, _G.route/_G.route6 are skipped
-    [4] = {match.domain(".local"), rule.direct(), "local"},
+    [3] = {match.domain(".local"), rule.direct(), "local"},
     -- resolve LAN names locally, _G.route/_G.route6 are still applied
-    [5] = {match.domain(".lan"), rule.resolve(), "lan"},
+    [4] = {match.domain(".lan"), rule.resolve(), "lan"},
     -- no default action
     [0] = nil
 }
 
 _G.redirect = {
-    -- just an example
-    [1] = {match.exact("203.0.113.1:80"), rule.redirect("203.0.113.2:8080")},
+    -- redirect API address, or loopback will be rejected
+    [1] = {match.exact("127.0.1.1:80"), rule.redirect("127.0.1.1:9080")},
     -- no default action, go to _G.route
     [0] = nil
 }
