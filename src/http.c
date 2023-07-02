@@ -463,13 +463,114 @@ http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 }
 
-static void
-http_handle_stats(struct ev_loop *loop, struct http_ctx *restrict ctx)
+static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
 {
-	RESPHDR_TXT(ctx, HTTP_OK);
+	struct ruleset *restrict ruleset = ctx->server->ruleset;
+	if (ruleset == NULL) {
+		return;
+	}
+	const size_t heap_bytes = ruleset_memused(ruleset);
+	char heap_total[16];
+	(void)format_iec_bytes(
+		heap_total, sizeof(heap_total), (double)heap_bytes);
+	(void)buf_appendf(
+		&ctx->wbuf,
+		""
+		"Ruleset Memory  : %s\n",
+		heap_total);
+	const char *str = ruleset_stats(ruleset, dt);
+	if (str == NULL) {
+		return;
+	}
+	(void)buf_appendf(
+		&ctx->wbuf,
+		"\n"
+		"Ruleset Stats\n"
+		"================\n"
+		"%s\n",
+		str);
+}
+
+static void http_handle_stats(
+	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct url *restrict uri)
+{
+	struct http_message *restrict hdr = &ctx->http_msg;
+	bool stateless;
+	if (strcasecmp(hdr->req.method, "GET") == 0) {
+		stateless = true;
+	} else if (strcasecmp(hdr->req.method, "POST") == 0) {
+		stateless = false;
+	} else {
+		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
+		return;
+	}
+	bool banner = true;
+	while (uri->query != NULL) {
+		char *key, *value;
+		if (!url_query_component(&uri->query, &key, &value)) {
+			http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+			return;
+		}
+		if (strcmp(key, "banner") == 0) {
+			if (strcmp(value, "no") == 0) {
+				banner = false;
+			}
+		}
+	}
+
+	http_resphdr_init(ctx, HTTP_OK);
+	RESPHDR_ADD(ctx, "Content-Type", "text/plain; charset=utf-8");
+	RESPHDR_ADD(ctx, "X-Content-Type-Options", "nosniff");
+	if (stateless) {
+		RESPHDR_ADD(ctx, "Cache-Control", "no-store");
+	}
+	RESPHDR_END(ctx);
+	if (banner) {
+		BUF_APPENDCONST(
+			&ctx->wbuf, "" PROJECT_NAME " " PROJECT_VER "\n"
+				    "  " PROJECT_HOMEPAGE "\n\n");
+	}
 
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = server_get_uptime(ctx->server, now);
+	const time_t server_time = time(NULL);
+	struct stats total;
+	stats_read(&total);
+
+	const uintmax_t num_request = total.num_request;
+
+	const size_t num_halfopen = total.num_halfopen;
+	const size_t num_active = transfer_get_active() / 2u;
+
+	const uintmax_t xfer_bytes = transfer_get_bytes();
+	char timestamp[32];
+	(void)strftime(
+		timestamp, sizeof(timestamp), "%FT%T%z",
+		localtime(&server_time));
+	char xfer_total[16];
+	(void)format_iec_bytes(
+		xfer_total, sizeof(xfer_total), (double)xfer_bytes);
+
+	char str_uptime[16];
+	(void)format_duration(
+		str_uptime, sizeof(str_uptime), make_duration(uptime));
+
+	(void)buf_appendf(
+		&ctx->wbuf,
+		""
+		"Server Time     : %s\n"
+		"Uptime          : %s\n"
+		"Active          : %zu (+%zu)\n"
+		"Transferred     : %s\n"
+		"Total Requests  : %ju\n",
+		timestamp, str_uptime, num_active, num_halfopen, xfer_total,
+		num_request);
+
+	if (stateless) {
+		return;
+	}
+
 	static struct {
 		uintmax_t num_request;
 		uintmax_t xfer_bytes;
@@ -478,75 +579,25 @@ http_handle_stats(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	const double dt =
 		(last.tstamp == TSTAMP_NIL) ? uptime : now - last.tstamp;
 	last.tstamp = now;
-	{
-		const time_t server_time = time(NULL);
-		struct stats total;
-		stats_read(&total);
 
-		const uintmax_t num_request = total.num_request;
-		const double request_rate =
-			(double)(num_request - last.num_request) / dt;
-		last.num_request = num_request;
+	char xfer_rate[16];
+	(void)format_iec_bytes(
+		xfer_rate, sizeof(xfer_rate),
+		(double)(xfer_bytes - last.xfer_bytes) / dt);
+	last.xfer_bytes = xfer_bytes;
 
-		const size_t num_halfopen = total.num_halfopen;
-		const size_t num_active = transfer_get_active() / 2u;
+	const double request_rate =
+		(double)(num_request - last.num_request) / dt;
+	last.num_request = num_request;
 
-		const uintmax_t xfer_bytes = transfer_get_bytes();
-		char timestamp[32];
-		(void)strftime(
-			timestamp, sizeof(timestamp), "%FT%T%z",
-			localtime(&server_time));
-		char xfer_total[16];
-		(void)format_iec_bytes(
-			xfer_total, sizeof(xfer_total), (double)xfer_bytes);
-		char xfer_rate[16];
-		(void)format_iec_bytes(
-			xfer_rate, sizeof(xfer_rate),
-			(double)(xfer_bytes - last.xfer_bytes) / dt);
-		last.xfer_bytes = xfer_bytes;
+	(void)buf_appendf(
+		&ctx->wbuf,
+		""
+		"Traffic         : %s/s\n"
+		"Requests        : %.1lf/s\n",
+		xfer_rate, request_rate);
 
-		char str_uptime[16];
-		(void)format_duration(
-			str_uptime, sizeof(str_uptime), make_duration(uptime));
-
-		(void)buf_appendf(
-			&ctx->wbuf,
-			"" PROJECT_NAME " " PROJECT_VER "\n"
-			"  " PROJECT_HOMEPAGE "\n\n"
-			"Server Time     : %s\n"
-			"Uptime          : %s\n"
-			"Active          : %zu (+%zu)\n"
-			"Transferred     : %s\n"
-			"Traffic         : %s/s\n"
-			"Requests        : %.1lf/s\n"
-			"Total Requests  : %zu\n",
-			timestamp, str_uptime, num_active, num_halfopen,
-			xfer_total, xfer_rate, request_rate, num_request);
-	}
-
-	struct server *restrict s = ctx->server;
-	struct ruleset *ruleset = s->ruleset;
-	if (ruleset != NULL) {
-		const size_t heap_bytes = ruleset_memused(ruleset);
-		char heap_total[16];
-		(void)format_iec_bytes(
-			heap_total, sizeof(heap_total), (double)heap_bytes);
-		(void)buf_appendf(
-			&ctx->wbuf,
-			""
-			"Ruleset Memory  : %s\n",
-			heap_total);
-		const char *str = ruleset_stats(ruleset, dt);
-		if (str != NULL) {
-			(void)buf_appendf(
-				&ctx->wbuf,
-				"\n"
-				"Ruleset Stats\n"
-				"================\n"
-				"%s\n",
-				str);
-		}
-	}
+	handle_ruleset_stats(ctx, dt);
 }
 
 static bool http_leafnode_check(
@@ -664,10 +715,10 @@ http_handle_restapi(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 	if (strcmp(segment, "stats") == 0) {
-		if (!http_leafnode_check(ctx, &uri, "POST", false)) {
+		if (!http_leafnode_check(ctx, &uri, NULL, false)) {
 			return;
 		}
-		http_handle_stats(loop, ctx);
+		http_handle_stats(loop, ctx, &uri);
 		return;
 	}
 	if (strcmp(segment, "ruleset") == 0) {

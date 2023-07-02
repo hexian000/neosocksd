@@ -6,37 +6,45 @@ function _G.is_enabled()
     return true
 end
 
--- unordered hosts map
+-- 1. unordered hosts map
 _G.hosts = {
     ["gateway.region1.lan"] = "192.168.32.1",
     ["host123.region1.lan"] = "192.168.32.123",
     ["gateway.region2.lan"] = "192.168.33.1",
-    ["host123.region2.lan"] = "192.168.33.123",
-    -- self-assignment
-    ["neosocksd.lan"] = "127.0.1.1" -- see _G.redirect
+    ["host123.region2.lan"] = "192.168.33.123"
 }
 
--- ordered redirect rules
+-- 2. ordered redirect rules
 -- in {matcher, action, optional log tag}
+-- _G.redirect_name: continue matching after a match is found, unless the rule specifies a proxy
+-- Therefore, rule.resolve() is different with rule.direct() only in _G.redirect_name
 _G.redirect_name = {
-    -- access mDNS sites directly
-    [1] = {match.domain(".local"), rule.direct(), "local"},
-    -- resolve LAN names locally
-    [2] = {match.domain(".lan"), rule.resolve(), "lan"},
+    -- redirect API domain
+    [1] = {match.exact("neosocksd.lan:80"), rule.redirect("127.0.1.1:9080")},
+    -- pass to region1 proxy
+    [2] = {match.exact("region1.neosocksd.lan:80"), rule.redirect("192.168.32.1:1080", "neosocksd.lan:80")},
+    -- jump to region2 through region1 proxy
+    [3] = {match.exact("region2.neosocksd.lan:80"),
+           rule.redirect("192.168.32.1:1080", "192.168.33.1:1080", "neosocksd.lan:80")},
+    -- access mDNS sites directly, _G.route/_G.route6 are skipped
+    [4] = {match.domain(".local"), rule.direct(), "local"},
+    -- resolve LAN names locally, _G.route/_G.route6 are still applied
+    [5] = {match.domain(".lan"), rule.resolve(), "lan"},
     -- no default action
     [0] = nil
 }
 
 _G.redirect = {
-    -- redirect API domain
-    [1] = {match.exact("127.0.1.1:80"), rule.redirect("127.0.1.1:9080")},
+    -- just an example
+    [1] = {match.exact("203.0.113.1:80"), rule.redirect("203.0.113.2:8080")},
     -- no default action, go to _G.route
     [0] = nil
 }
 
 -- _G.redirect6 is not set
 
--- ordered routes
+-- 3. ordered routes
+-- matching stops after a match is found
 _G.route = {
     -- reject loopback or link-local
     [1] = {inet.subnet("127.0.0.0/8"), rule.reject()},
@@ -61,8 +69,8 @@ _G.route6 = {
     [0] = rule.direct()
 }
 
--- this global default applies to any unmatched requests
-_G.route_default = rule.proxy("192.168.1.1:1080")
+-- 4. the global default applies to any unmatched requests
+_G.route_default = rule.proxy("127.0.0.1:1081")
 
 logf("ruleset loaded, interpreter: %s", _VERSION)
 return ruleset

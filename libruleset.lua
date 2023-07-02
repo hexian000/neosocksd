@@ -404,7 +404,7 @@ local function resolve_(addr)
                 logf("redirect_name: [%s] %q", tag, addr)
             end
             local ret = table.pack(action(addr))
-            if #ret ~= 1 then
+            if ret[2] ~= nil then
                 return table.unpack(ret)
             end
             addr = ret[1]

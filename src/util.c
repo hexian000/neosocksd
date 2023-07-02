@@ -39,7 +39,7 @@ void init(void)
 	}
 }
 
-static void uninit(void)
+void uninit(void)
 {
 }
 
