@@ -80,11 +80,16 @@ The host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua):
 
 ## Runtime Dependencies
 
-By default, neosocksd link against libraries statically.
+If you downloaded a *-static build in the [Releases](https://github.com/hexian000/neosocksd/releases) section, you don't have to install the dependencies below.
 
-For `*-linux-gnu` builds, only a recent version of glibc required.
+```sh
+# Debian & Ubuntu
+sudo apt install -y libev4
+# OpenWRT
+opkg install libev
+```
 
-For `*-linux-static` builds, no runtime library required.
+*Lua is always statically linked.*
 
 ## Building from Source
 ### Dependencies
