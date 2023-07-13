@@ -2,10 +2,11 @@
 #define DIALER_H
 
 #include "conf.h"
+#include "utils/buffer.h"
+#include "net/url.h"
 #include "resolver.h"
 #include "sockutil.h"
 #include "util.h"
-#include "utils/buffer.h"
 
 #include <ev.h>
 
@@ -16,7 +17,9 @@
 #include <stdint.h>
 
 enum proxy_protocol {
-	PROTO_SOCKS4A = 4,
+	PROTO_HTTP,
+	PROTO_SOCKS4A,
+	PROTO_SOCKS5,
 };
 
 enum dialaddr_type {
@@ -40,8 +43,7 @@ int dialaddr_format(const struct dialaddr *addr, char *buf, size_t bufsize);
 
 struct proxy_req {
 	enum proxy_protocol proto;
-	char *addr;
-	size_t addrlen;
+	struct dialaddr addr;
 };
 
 struct dialreq {
@@ -51,14 +53,19 @@ struct dialreq {
 };
 
 struct dialreq *dialreq_new(const struct dialaddr *addr, size_t num_proxy);
-bool dialreq_proxy(
-	struct dialreq *r, enum proxy_protocol protocol, const char *addr,
-	size_t addrlen);
+bool dialreq_proxy(struct dialreq *r, const char *addr, size_t addrlen);
 void dialreq_free(struct dialreq *r);
 
 struct sockaddr;
 
 #define DIALER_BUF_SIZE 1024
+
+enum dialer_error {
+	DIALER_SUCCESS,
+	DIALER_SYSERR,
+	DIALER_TIMEOUT,
+	DIALER_PROXYERR,
+};
 
 struct dialer {
 	struct resolver resolver;
@@ -67,8 +74,11 @@ struct dialer {
 	struct dialreq *req;
 	size_t jump;
 	int state;
-	int fd, err;
-	struct ev_io watcher;
+	enum dialer_error err;
+	int fd, syserr;
+	struct ev_io w_recv;
+	struct ev_timer w_ticker;
+	struct ev_timer w_timeout;
 	struct {
 		BUFFER_HDR;
 		unsigned char data[DIALER_BUF_SIZE];
@@ -83,5 +93,7 @@ bool dialer_start(struct dialer *d, struct ev_loop *loop, struct dialreq *req);
 void dialer_stop(struct dialer *d, struct ev_loop *loop);
 
 int dialer_get(struct dialer *d);
+
+const char *dialer_strerror(struct dialer *d);
 
 #endif /* DIALER_H */

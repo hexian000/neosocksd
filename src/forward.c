@@ -2,34 +2,45 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "forward.h"
-#include "net/addr.h"
+#include "conf.h"
+#include "server.h"
+#include "dialer.h"
+#include "sockutil.h"
+#include "transfer.h"
+#include "util.h"
 #include "utils/check.h"
 #include "utils/slog.h"
-#include "transfer.h"
-#include "resolver.h"
-#include "util.h"
 
 #include <ev.h>
-#include <netdb.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static struct stats stats = { 0 };
+enum forward_state {
+	STATE_INIT,
+	STATE_CONNECT,
+	STATE_CONNECTED,
+	STATE_ESTABLISHED,
+};
 
 struct forward_ctx {
+	struct server *s;
 	int accepted_fd, dialed_fd;
-	bool is_connected;
+	enum forward_state state;
+	sockaddr_max_t accepted_sa;
+	struct ev_timer w_timeout;
 	union {
 		/* connecting */
 		struct {
-			struct ev_timer w_timeout;
-			struct ev_io w_connect;
+			struct dialer dialer;
 		};
 		/* connected */
 		struct {
@@ -38,19 +49,51 @@ struct forward_ctx {
 	};
 };
 
-static void forward_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
+#define FW_CTX_LOG_F(level, ctx, format, ...)                                  \
+	do {                                                                   \
+		if (!LOGLEVEL(level)) {                                        \
+			break;                                                 \
+		}                                                              \
+		char laddr[64], raddr[64];                                     \
+		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
+		(void)snprintf(                                                \
+			raddr, sizeof(raddr), "%s", (ctx)->s->conf->forward);  \
+		LOG_F(level, "\"%s\" <-> \"%s\": " format, laddr, raddr,       \
+		      __VA_ARGS__);                                            \
+	} while (0)
+#define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
+
+static void
+forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
-	if (!ctx->is_connected) {
-		ev_timer_stop(loop, &ctx->w_timeout);
-		ev_io_stop(loop, &ctx->w_connect);
-		stats.num_halfopen--;
-	} else {
+	ev_timer_stop(loop, &ctx->w_timeout);
+
+	struct server_stats *restrict stats = ctx->s->stats;
+	switch (ctx->state) {
+	case STATE_INIT:
+		return;
+	case STATE_CONNECT:
+		dialer_stop(&ctx->dialer, loop);
+		stats->num_halfopen--;
+		return;
+	case STATE_CONNECTED:
 		transfer_stop(loop, &ctx->uplink);
 		transfer_stop(loop, &ctx->downlink);
+		stats->num_halfopen--;
+		break;
+	case STATE_ESTABLISHED:
+		transfer_stop(loop, &ctx->uplink);
+		transfer_stop(loop, &ctx->downlink);
+		stats->num_sessions--;
+		break;
+	default:
+		FAIL();
 	}
+	FW_CTX_LOG_F(
+		LOG_LEVEL_INFO, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void forward_free(struct forward_ctx *restrict ctx)
+static void forward_ctx_free(struct forward_ctx *restrict ctx)
 {
 	if (ctx == NULL) {
 		return;
@@ -66,63 +109,85 @@ static void forward_free(struct forward_ctx *restrict ctx)
 	free(ctx);
 }
 
-static void forward_close_cb(struct ev_loop *loop, void *ctx)
+static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
-	forward_stop(loop, ctx);
-	forward_free(ctx);
+	struct forward_ctx *restrict ctx = data;
+	if (ctx->uplink.state == XFER_CLOSED ||
+	    ctx->downlink.state == XFER_CLOSED) {
+		forward_ctx_stop(loop, ctx);
+		forward_ctx_free(ctx);
+		return;
+	}
+	if (ctx->state == STATE_CONNECTED &&
+	    ctx->uplink.state == XFER_CONNECTED &&
+	    ctx->downlink.state == XFER_CONNECTED) {
+		ctx->state = STATE_ESTABLISHED;
+		struct server_stats *restrict stats = ctx->s->stats;
+		stats->num_halfopen--;
+		stats->num_sessions++;
+		FW_CTX_LOG_F(
+			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			stats->num_sessions);
+		ev_timer_stop(loop, &ctx->w_timeout);
+		return;
+	}
 }
 
 static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
-	ev_timer_stop(loop, watcher);
 
 	struct forward_ctx *restrict ctx = watcher->data;
-	if (ctx->uplink.state < XFER_CONNECTED ||
-	    ctx->downlink.state < XFER_CONNECTED) {
-		LOGW("connection timeout");
-		forward_stop(loop, ctx);
-		forward_free(ctx);
+	switch (ctx->state) {
+	case STATE_INIT:
+	case STATE_CONNECT:
+		FW_CTX_LOG(LOG_LEVEL_WARNING, ctx, "connection timeout");
+		break;
+	case STATE_CONNECTED:
+		FW_CTX_LOG(LOG_LEVEL_WARNING, ctx, "handshake timeout");
+		break;
+	case STATE_ESTABLISHED:
 		return;
+	default:
+		FAIL();
 	}
+	forward_ctx_stop(loop, ctx);
+	forward_ctx_free(ctx);
 }
 
-static void
-connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void connected_cb(struct ev_loop *loop, void *data)
 {
-	CHECK_EV_ERROR(revents);
-	ev_io_stop(loop, watcher);
+	struct forward_ctx *restrict ctx = data;
+	const int fd = dialer_get(&ctx->dialer);
+	if (fd < 0) {
+		FW_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "dialer: %s",
+			dialer_strerror(&ctx->dialer));
+		forward_ctx_free(ctx);
+		return;
+	}
+	ctx->dialed_fd = fd;
 
-	struct forward_ctx *restrict ctx = watcher->data;
-	ev_timer_stop(loop, &ctx->w_timeout);
+	FW_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
 
-	if (LOGLEVEL(LOG_LEVEL_INFO)) {
-		char laddr[64], raddr[64];
-		sockaddr_max_t addr;
-		socklen_t salen = sizeof(addr);
-		if (getpeername(ctx->accepted_fd, &addr.sa, &salen) != 0) {
-			const int err = errno;
-			LOGE_F("getpeername: %s", strerror(err));
-			(void)strcpy(laddr, "???");
-		} else {
-			format_sa(&addr.sa, laddr, sizeof(laddr));
-		}
-		salen = sizeof(addr);
-		if (getpeername(ctx->dialed_fd, &addr.sa, &salen) != 0) {
-			const int err = errno;
-			LOGE_F("getpeername: %s", strerror(err));
-			(void)strcpy(raddr, "???");
-		} else {
-			format_sa(&addr.sa, raddr, sizeof(raddr));
-		}
-		LOGI_F("forward: %s <-> %s", laddr, raddr);
+	const struct config *restrict conf = ctx->s->conf;
+	struct server_stats *restrict stats = ctx->s->stats;
+	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
+	if (conf->proto_timeout) {
+		ctx->state = STATE_CONNECTED;
+		ev_timer_start(loop, w_timeout);
+	} else {
+		ctx->state = STATE_ESTABLISHED;
+		stats->num_halfopen--;
+		stats->num_sessions++;
+		FW_CTX_LOG_F(
+			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			stats->num_sessions);
 	}
 
-	ctx->is_connected = true;
-	stats.num_halfopen--;
 	struct event_cb cb = {
-		.cb = forward_close_cb,
+		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};
 	transfer_init(&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd);
@@ -131,155 +196,115 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	transfer_start(loop, &ctx->downlink);
 }
 
-static struct forward_ctx *forward_new(const int accepted_fd)
+static struct forward_ctx *
+forward_ctx_new(struct server *restrict s, const int accepted_fd)
 {
 	struct forward_ctx *restrict ctx = malloc(sizeof(struct forward_ctx));
 	if (ctx == NULL) {
 		return NULL;
 	}
-	ctx->is_connected = false;
+	ctx->s = s;
+	ctx->state = STATE_INIT;
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
+
+	const struct config *restrict conf = s->conf;
+
+	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
+	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
+	w_timeout->data = ctx;
+
+	dialer_init(
+		&ctx->dialer, conf,
+		&(struct event_cb){
+			.ctx = ctx,
+			.cb = connected_cb,
+		});
 	return ctx;
 }
 
-static bool
-resolve(struct sockaddr *sa, socklen_t *len, const char *endpoint,
-	const int family)
-{
-	const size_t addrlen = strlen(endpoint);
-	char buf[FQDN_MAX_LENGTH + 1 + 5 + 1];
-	if (addrlen >= sizeof(buf)) {
-		return false;
-	}
-	memcpy(buf, endpoint, addrlen);
-	buf[addrlen] = '\0';
-	char *hostname, *service;
-	if (!splithostport(buf, &hostname, &service)) {
-		return false;
-	}
-	struct addrinfo hints = {
-		.ai_family = family,
-		.ai_socktype = SOCK_STREAM,
-		.ai_protocol = IPPROTO_TCP,
-		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG,
-	};
-	struct addrinfo *result = NULL;
-	const int err = getaddrinfo(hostname, service, &hints, &result);
-	if (err != 0) {
-		LOGE_F("resolve: %s", gai_strerror(err));
-		return false;
-	}
-	bool ok = false;
-	for (const struct addrinfo *it = result; it; it = it->ai_next) {
-		switch (it->ai_family) {
-		case AF_INET:
-		case AF_INET6:
-			break;
-		default:
-			continue;
-		}
-		memcpy(sa, it->ai_addr, it->ai_addrlen);
-		*len = it->ai_addrlen;
-		ok = true;
-		break;
-	}
-	freeaddrinfo(result);
-	return ok;
-}
-
-static void forward_start(
+static void forward_ctx_start(
 	struct ev_loop *loop, struct forward_ctx *restrict ctx,
 	const struct config *restrict conf)
 {
-	stats.num_request++;
-
-	sockaddr_max_t addr;
-	socklen_t len = sizeof(addr);
+	struct dialaddr addr;
 	if (conf->forward != NULL) {
-		if (!resolve(&addr.sa, &len, conf->forward, conf->resolve_pf)) {
-			LOGE_F("failed resolving address: \"%s\"",
-			       conf->forward);
-			forward_stop(loop, ctx);
-			forward_free(ctx);
+		if (!dialaddr_set(&addr, conf->forward, strlen(conf->forward))) {
+			forward_ctx_stop(loop, ctx);
+			forward_ctx_free(ctx);
 			return;
 		}
 #if WITH_TPROXY
 	} else if (conf->transparent) {
-		if (getsockname(ctx->accepted_fd, &addr.sa, &len) != 0) {
+		sockaddr_max_t dest;
+		socklen_t len = sizeof(dest);
+		if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
 			const int err = errno;
 			LOGE_F("getsockname: %s", strerror(err));
-			forward_stop(loop, ctx);
-			forward_free(ctx);
+			forward_ctx_stop(loop, ctx);
+			forward_ctx_free(ctx);
+			return;
+		}
+		switch (dest.sa.sa_family) {
+		case AF_INET:
+			assert(len == sizeof(struct sockaddr_in));
+			addr = (struct dialaddr){
+				.type = ATYP_INET,
+				.in = dest.in.sin_addr,
+				.port = ntohs(dest.in.sin_port),
+			};
+			break;
+		case AF_INET6:
+			assert(len == sizeof(struct sockaddr_in6));
+			addr = (struct dialaddr){
+				.type = ATYP_INET6,
+				.in6 = dest.in6.sin6_addr,
+				.port = ntohs(dest.in6.sin6_port),
+			};
+			break;
+		default:
+			LOGE_F("getsockname: unknown af %jd",
+			       (intmax_t)dest.sa.sa_family);
+			forward_ctx_stop(loop, ctx);
+			forward_ctx_free(ctx);
 			return;
 		}
 #endif
 	} else {
 		FAIL();
 	}
-	const int domain = addr.sa.sa_family;
-	const int dialed_fd = socket(domain, SOCK_STREAM, IPPROTO_TCP);
-	if (dialed_fd < 0) {
-		const int err = errno;
-		LOGE_F("socket: %s", strerror(err));
-		forward_stop(loop, ctx);
-		forward_free(ctx);
+
+	struct dialreq *req = dialreq_new(&addr, 0);
+	if (req == NULL) {
+		LOGOOM();
+		forward_ctx_stop(loop, ctx);
+		forward_ctx_free(ctx);
 		return;
 	}
-	ctx->dialed_fd = dialed_fd;
-	if (!socket_set_nonblock(dialed_fd)) {
-		const int err = errno;
-		LOGE_F("fcntl: %s", strerror(err));
-		forward_stop(loop, ctx);
-		forward_free(ctx);
+
+	if (!dialer_start(&ctx->dialer, loop, req)) {
+		forward_ctx_stop(loop, ctx);
+		forward_ctx_free(ctx);
 		return;
 	}
-	socket_set_tcp(dialed_fd, true, false);
 
-	if (connect(dialed_fd, &addr.sa, getsocklen(&addr.sa)) != 0) {
-		const int err = errno;
-		if (err != EINTR && err != EINPROGRESS) {
-			LOGE_F("connect: %s", strerror(err));
-			forward_stop(loop, ctx);
-			forward_free(ctx);
-			return;
-		}
-	}
-	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
-		char addr_str[64];
-		format_sa(&addr.sa, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_VERBOSE, "connect: fd=%d to \"%s\"", dialed_fd,
-		      addr_str);
-	}
-
-	struct ev_io *restrict w_connect = &ctx->w_connect;
-	ev_io_init(w_connect, connected_cb, dialed_fd, EV_WRITE);
-	w_connect->data = ctx;
-	ev_io_start(loop, w_connect);
-	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
-	w_timeout->data = ctx;
-	ev_timer_start(loop, w_timeout);
-
-	stats.num_halfopen++;
+	ctx->state = STATE_CONNECT;
+	struct server_stats *restrict stats = ctx->s->stats;
+	stats->num_request++;
+	stats->num_halfopen++;
 }
 
 void forward_serve(
-	struct ev_loop *loop, struct server *s, const int accepted_fd,
+	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa)
 {
-	UNUSED(accepted_sa);
-	const struct config *restrict conf = s->conf;
-	struct forward_ctx *restrict ctx = forward_new(accepted_fd);
+	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
 		(void)close(accepted_fd);
 		return;
 	}
-	forward_start(loop, ctx, conf);
-}
-
-void forward_read_stats(struct stats *restrict out_stats)
-{
-	*out_stats = stats;
+	(void)memcpy(
+		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
+	forward_ctx_start(loop, ctx, s->conf);
 }

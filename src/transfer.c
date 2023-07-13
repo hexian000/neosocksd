@@ -1,5 +1,6 @@
 #include "transfer.h"
 #include "utils/buffer.h"
+#include "utils/check.h"
 #include "utils/slog.h"
 #include "util.h"
 
@@ -29,10 +30,11 @@ static void ev_set_active(
 	}
 }
 
-static size_t transfer_recv(struct transfer *restrict t)
+static bool transfer_recv(struct transfer *restrict t)
 {
+	bool ok = true;
 	if (t->state != XFER_CONNECTED) {
-		return 0;
+		return ok;
 	}
 	size_t nbrecv = 0;
 	const int fd = t->w_recv.fd;
@@ -46,11 +48,11 @@ static size_t transfer_recv(struct transfer *restrict t)
 				break;
 			}
 			LOGD_F("recv: fd=%d %s", fd, strerror(err));
-			t->state = XFER_LINGER;
+			ok = false;
 			break;
 		} else if (nrecv == 0) {
 			LOGV_F("recv: fd=%d EOF", fd);
-			t->state = XFER_LINGER;
+			ok = false;
 			break;
 		}
 		data += nrecv;
@@ -58,10 +60,11 @@ static size_t transfer_recv(struct transfer *restrict t)
 		nbrecv += nrecv;
 	}
 	t->buf.len += nbrecv;
-	return nbrecv;
+	t->rx += nbrecv;
+	return ok;
 }
 
-static size_t transfer_send(struct transfer *restrict t)
+static bool transfer_send(struct transfer *restrict t)
 {
 	size_t nbsend = 0;
 	const int fd = t->w_send.fd;
@@ -75,24 +78,24 @@ static size_t transfer_send(struct transfer *restrict t)
 				break;
 			}
 			LOGD_F("recv: fd=%d %s", fd, strerror(err));
-			t->state = XFER_CLOSED;
-			return 0;
+			return false;
 		} else if (nsend == 0) {
 			break;
 		}
 		nbsend += nsend;
 	}
-	buf_consume(&t->buf, nbsend);
+	BUF_CONSUME(t->buf, nbsend);
+	t->tx += nbsend;
 	xfer_bytes += nbsend;
-	return nbsend;
+	return true;
 }
 
-static void transfer_done_cb(
+static void transfer_state_cb(
 	struct ev_loop *loop, struct ev_watcher *watcher, const int revents)
 {
 	UNUSED(revents);
 	struct transfer *restrict t = watcher->data;
-	t->done_cb.cb(loop, t->done_cb.ctx);
+	t->state_cb.cb(loop, t->state_cb.ctx);
 }
 
 static void
@@ -105,16 +108,21 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 
 	struct transfer *restrict t = (struct transfer *)watcher->data;
-	if (t->state < XFER_LINGER) {
-		(void)transfer_recv(t);
+	enum transfer_state state = t->state;
+	if (state < XFER_LINGER) {
+		if (!transfer_recv(t)) {
+			state = XFER_LINGER;
+		}
 	}
-	if (t->state < XFER_CLOSED) {
-		(void)transfer_send(t);
+	if (state < XFER_CLOSED) {
+		if (!transfer_send(t)) {
+			state = XFER_CLOSED;
+		}
 	}
 
-	switch (t->state) {
+	switch (state) {
 	case XFER_INIT:
-		t->state = XFER_CONNECTED;
+		state = XFER_CONNECTED;
 		/* fallthrough */
 	case XFER_CONNECTED: {
 		const bool has_data = t->buf.len > 0;
@@ -127,12 +135,17 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			ev_set_active(loop, &t->w_send, true);
 			break;
 		}
-		t->state = XFER_CLOSED;
+		state = XFER_CLOSED;
 		/* fallthrough */
 	case XFER_CLOSED:
 		transfer_stop(loop, t);
-		ev_feed_event(loop, &t->w_done, EV_CUSTOM);
-		return;
+		break;
+	default:
+		FAIL();
+	}
+	if (t->state != state) {
+		t->state = state;
+		ev_feed_event(loop, &t->w_state, EV_CUSTOM);
 	}
 }
 
@@ -147,11 +160,12 @@ void transfer_init(
 	struct ev_io *restrict w_send = &t->w_send;
 	ev_io_init(w_send, transfer_cb, dst_fd, EV_WRITE);
 	w_send->data = t;
-	struct ev_watcher *restrict w_done = &t->w_done;
-	ev_init(w_done, transfer_done_cb);
-	w_done->data = t;
-	t->done_cb = cb;
-	buf_init(&t->buf, XFER_BUFSIZE);
+	struct ev_watcher *restrict w_state = &t->w_state;
+	ev_init(w_state, transfer_state_cb);
+	w_state->data = t;
+	t->state_cb = cb;
+	t->rx = t->tx = 0;
+	BUF_INIT(t->buf, XFER_BUFSIZE);
 }
 
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
@@ -162,7 +176,7 @@ void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 		xfer_num_active++;
 		LOGD_F("transfer: fd=%d -> fd=%d", w_recv->fd, w_send->fd);
 	}
-	ev_io_start(loop, w_send);
+	ev_io_start(loop, w_recv);
 }
 
 void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)

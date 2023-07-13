@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "socks.h"
+#include "server.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
@@ -12,7 +13,6 @@
 #include "ruleset.h"
 #include "transfer.h"
 #include "sockutil.h"
-#include "stats.h"
 #include "util.h"
 
 #include <ev.h>
@@ -31,22 +31,23 @@
 #define SOCKS_BUF_SIZE 1024
 
 enum socks_state {
+	STATE_INIT,
 	STATE_HANDSHAKE1,
 	STATE_HANDSHAKE2,
 	STATE_CONNECT,
 	STATE_CONNECTED,
+	STATE_ESTABLISHED,
 };
 
-static struct stats stats = { 0 };
-
 struct socks_ctx {
+	struct server *s;
 	int accepted_fd, dialed_fd;
 	enum socks_state state;
+	sockaddr_max_t accepted_sa;
+	struct ev_timer w_timeout;
 	union {
 		/* during handshake */
 		struct {
-			const struct config *conf;
-			struct ev_timer w_timeout;
 			struct ev_io watcher;
 			struct dialaddr addr;
 			unsigned char *next;
@@ -54,7 +55,6 @@ struct socks_ctx {
 				BUFFER_HDR;
 				unsigned char data[SOCKS_BUF_SIZE];
 			} rbuf;
-			struct ruleset *ruleset;
 			struct dialer dialer;
 		};
 		/* connected */
@@ -64,32 +64,62 @@ struct socks_ctx {
 	};
 };
 
+#define SOCKS_CTX_LOG_F(level, ctx, format, ...)                               \
+	do {                                                                   \
+		if (!LOGLEVEL(level)) {                                        \
+			break;                                                 \
+		}                                                              \
+		char laddr[64];                                                \
+		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
+		if ((ctx)->state == STATE_CONNECT) {                           \
+			char raddr[64];                                        \
+			(void)dialaddr_format(                                 \
+				&(ctx)->addr, raddr, sizeof(raddr));           \
+			LOG_F(level, "\"%s\" -> \"%s\": " format, laddr,       \
+			      raddr, __VA_ARGS__);                             \
+		} else {                                                       \
+			LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);   \
+		}                                                              \
+	} while (0)
+#define SOCKS_CTX_LOG(level, ctx, message)                                     \
+	SOCKS_CTX_LOG_F(level, ctx, "%s", message)
+
 static void
-socks_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
+socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 {
+	ev_timer_stop(loop, &ctx->w_timeout);
+
+	struct server_stats *restrict stats = ctx->s->stats;
 	switch (ctx->state) {
+	case STATE_INIT:
+		return;
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2:
-		ev_timer_stop(loop, &ctx->w_timeout);
 		ev_io_stop(loop, &ctx->watcher);
-		stats.num_halfopen--;
+		stats->num_halfopen--;
 		return;
 	case STATE_CONNECT:
-		ev_timer_stop(loop, &ctx->w_timeout);
 		dialer_stop(&ctx->dialer, loop);
-		stats.num_halfopen--;
+		stats->num_halfopen--;
 		return;
 	case STATE_CONNECTED:
 		transfer_stop(loop, &ctx->uplink);
 		transfer_stop(loop, &ctx->downlink);
-		return;
-	default:
+		stats->num_halfopen--;
 		break;
+	case STATE_ESTABLISHED:
+		transfer_stop(loop, &ctx->uplink);
+		transfer_stop(loop, &ctx->downlink);
+		stats->num_sessions--;
+		break;
+	default:
+		FAIL();
 	}
-	FAIL();
+	SOCKS_CTX_LOG_F(
+		LOG_LEVEL_INFO, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void socks_free(struct socks_ctx *restrict ctx)
+static void socks_ctx_free(struct socks_ctx *restrict ctx)
 {
 	if (ctx == NULL) {
 		return;
@@ -105,22 +135,42 @@ static void socks_free(struct socks_ctx *restrict ctx)
 	free(ctx);
 }
 
-static void xfer_done_cb(struct ev_loop *loop, void *ctx)
+static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
-	socks_stop(loop, ctx);
-	socks_free(ctx);
+	struct socks_ctx *restrict ctx = data;
+	if (ctx->uplink.state == XFER_CLOSED ||
+	    ctx->downlink.state == XFER_CLOSED) {
+		socks_ctx_stop(loop, ctx);
+		socks_ctx_free(ctx);
+		return;
+	}
+	if (ctx->state == STATE_CONNECTED &&
+	    ctx->uplink.state == XFER_CONNECTED &&
+	    ctx->downlink.state == XFER_CONNECTED) {
+		ctx->state = STATE_ESTABLISHED;
+		struct server_stats *restrict stats = ctx->s->stats;
+		stats->num_halfopen--;
+		stats->num_sessions++;
+		SOCKS_CTX_LOG_F(
+			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			stats->num_sessions);
+		ev_timer_stop(loop, &ctx->w_timeout);
+		return;
+	}
 }
 
-static bool send_rsp(const int fd, const void *buf, const size_t len)
+static bool
+send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 {
-	const ssize_t nsend = send(fd, buf, len, 0);
+	const ssize_t nsend = send(ctx->accepted_fd, buf, len, 0);
 	if (nsend < 0) {
 		/* TODO: review this */
 		const int err = errno;
-		LOGE_F("send: fd=%d %s", fd, strerror(err));
+		SOCKS_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "send: %s", strerror(err));
 		return false;
 	} else if ((size_t)nsend != len) {
-		LOGE_F("send: fd=%d short send", fd);
+		SOCKS_CTX_LOG(LOG_LEVEL_ERROR, ctx, "send: short send");
 		return false;
 	}
 	return true;
@@ -132,7 +182,7 @@ static void socks4_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 		.version = 0,
 		.command = rsp,
 	};
-	(void)send_rsp(ctx->accepted_fd, &hdr, sizeof(hdr));
+	(void)send_rsp(ctx, &hdr, sizeof(hdr));
 }
 
 static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp)
@@ -175,7 +225,7 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp)
 	default:
 		FAIL();
 	}
-	(void)send_rsp(ctx->accepted_fd, &buf, len);
+	(void)send_rsp(ctx, &buf, len);
 }
 
 static void
@@ -187,7 +237,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	switch (ctx->state) {
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2:
-		LOGW("handshake timeout");
+		SOCKS_CTX_LOG(LOG_LEVEL_WARNING, ctx, "handshake timeout");
 		break;
 	case STATE_CONNECT: {
 		const uint8_t version = read_uint8(ctx->rbuf.data);
@@ -196,13 +246,15 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 		}
 	} break;
 	case STATE_CONNECTED:
-		ev_timer_stop(loop, watcher);
+		SOCKS_CTX_LOG(LOG_LEVEL_WARNING, ctx, "protocol timeout");
+		break;
+	case STATE_ESTABLISHED:
 		return;
 	default:
 		FAIL();
 	}
-	socks_stop(loop, ctx);
-	socks_free(ctx);
+	socks_ctx_stop(loop, ctx);
+	socks_ctx_free(ctx);
 }
 
 static void socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
@@ -223,16 +275,9 @@ static void socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 	FAIL();
 }
 
-static uint8_t socks4_err2rsp(const int err)
-{
-	return err == 0 ? SOCKS4RSP_GRANTED : SOCKS4RSP_REJECTED;
-}
-
 static uint8_t socks5_err2rsp(const int err)
 {
 	switch (err) {
-	case 0:
-		return SOCKS5RSP_SUCCEEDED;
 	case ENETUNREACH:
 		return SOCKS5RSP_NETUNREACH;
 	case EHOSTUNREACH:
@@ -250,7 +295,7 @@ static void socks_senderr(struct socks_ctx *restrict ctx, const int err)
 	const uint8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
 	case SOCKS4:
-		socks4_sendrsp(ctx, socks4_err2rsp(err));
+		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return;
 	case SOCKS5:
 		socks5_sendrsp(ctx, socks5_err2rsp(err));
@@ -266,21 +311,37 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	struct socks_ctx *restrict ctx = data;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		const int err = ctx->dialer.err;
-		LOGD_F("dialer failed: %s",
-		       err != 0 ? strerror(err) : "unknown");
-		socks_senderr(ctx, err);
-		socks_stop(loop, ctx);
-		socks_free(ctx);
+		SOCKS_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "dialer: %s",
+			dialer_strerror(&ctx->dialer));
+		socks_senderr(ctx, ctx->dialer.syserr);
+		socks_ctx_stop(loop, ctx);
+		socks_ctx_free(ctx);
 		return;
 	}
-	LOGV_F("dialer: connected fd=%d", fd);
 	ctx->dialed_fd = fd;
 	socks_sendrsp(ctx, true);
-	socks_stop(loop, ctx);
-	ctx->state = STATE_CONNECTED;
+	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
+	ev_timer_stop(loop, w_timeout);
+
+	SOCKS_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
+
+	const struct config *restrict conf = ctx->s->conf;
+	struct server_stats *restrict stats = ctx->s->stats;
+	if (conf->proto_timeout) {
+		ctx->state = STATE_CONNECTED;
+		ev_timer_start(loop, w_timeout);
+	} else {
+		ctx->state = STATE_ESTABLISHED;
+		stats->num_halfopen--;
+		stats->num_sessions++;
+		SOCKS_CTX_LOG_F(
+			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			stats->num_sessions);
+	}
+
 	struct event_cb cb = {
-		.cb = xfer_done_cb,
+		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};
 	transfer_init(&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd);
@@ -448,7 +509,7 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	write_uint8(
 		wbuf + offsetof(struct socks5_auth_rsp, method),
 		found ? SOCKS5AUTH_NOAUTH : SOCKS5AUTH_NOACCEPTABLE);
-	if (!send_rsp(ctx->accepted_fd, wbuf, sizeof(wbuf))) {
+	if (!send_rsp(ctx, wbuf, sizeof(wbuf))) {
 		return -1;
 	}
 	if (!found) {
@@ -504,10 +565,12 @@ static int socks_read(struct socks_ctx *restrict ctx, const int fd)
 			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
-			LOGE_F("recv: fd=%d %s", fd, strerror(err));
+			SOCKS_CTX_LOG_F(
+				LOG_LEVEL_ERROR, ctx, "recv: %s",
+				strerror(err));
 			return -1;
 		} else if (nrecv == 0) {
-			LOGE_F("recv: fd=%d early EOF", fd);
+			SOCKS_CTX_LOG(LOG_LEVEL_ERROR, ctx, "recv: early EOF");
 			return -1;
 		}
 		ctx->rbuf.len += nrecv;
@@ -520,7 +583,7 @@ static int socks_read(struct socks_ctx *restrict ctx, const int fd)
 	if (want <= 0) {
 		return want;
 	} else if (ctx->rbuf.len + (size_t)want > cap) {
-		LOGE_F("recv: fd=%d header too long", fd);
+		SOCKS_CTX_LOG(LOG_LEVEL_ERROR, ctx, "recv: header too long");
 		return -1;
 	}
 	return 1;
@@ -528,21 +591,29 @@ static int socks_read(struct socks_ctx *restrict ctx, const int fd)
 
 static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 {
-	if (ctx->ruleset == NULL) {
-		return dialreq_new(&ctx->addr, 0);
+	struct ruleset *restrict ruleset = ctx->s->ruleset;
+	if (ruleset == NULL) {
+		struct dialreq *req = dialreq_new(&ctx->addr, 0);
+		if (req == NULL) {
+			LOGOOM();
+			return NULL;
+		}
+		return req;
 	}
 
 	char request[FQDN_MAX_LENGTH + 1 + 5 + 1];
 	(void)dialaddr_format(&ctx->addr, request, sizeof(request));
 	switch (ctx->addr.type) {
 	case ATYP_DOMAIN:
-		return ruleset_resolve(ctx->ruleset, request);
+		return ruleset_resolve(ruleset, request);
 	case ATYP_INET:
-		return ruleset_route(ctx->ruleset, request);
+		return ruleset_route(ruleset, request);
 	case ATYP_INET6:
-		return ruleset_route6(ctx->ruleset, request);
+		return ruleset_route6(ruleset, request);
 	default:
-		LOGE_F("unsupported address type: %d", ctx->addr.type);
+		SOCKS_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "unsupported address type: %d",
+			ctx->addr.type);
 		break;
 	}
 	return NULL;
@@ -556,60 +627,59 @@ socks_recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct socks_ctx *restrict ctx = watcher->data;
 	const int ret = socks_read(ctx, watcher->fd);
 	if (ret < 0) {
-		socks_stop(loop, ctx);
-		socks_free(ctx);
+		socks_ctx_stop(loop, ctx);
+		socks_ctx_free(ctx);
 		return;
 	} else if (ret > 0) {
 		return;
 	}
 
 	ev_io_stop(loop, watcher);
-	stats.num_request++;
+	struct server_stats *restrict stats = ctx->s->stats;
+	stats->num_request++;
 
 	struct dialreq *req = make_dialreq(ctx);
 	if (req == NULL) {
 		socks_sendrsp(ctx, false);
-		socks_stop(loop, ctx);
-		socks_free(ctx);
+		socks_ctx_stop(loop, ctx);
+		socks_ctx_free(ctx);
 		return;
-	}
-
-	if (LOGLEVEL(LOG_LEVEL_INFO)) {
-		char raddr[FQDN_MAX_LENGTH + 1 + 5 + 1];
-		(void)dialaddr_format(&req->addr, raddr, sizeof(raddr));
-		LOG_F(LOG_LEVEL_INFO, "socks: CONNECT %s", raddr);
 	}
 
 	ctx->state = STATE_CONNECT;
 	if (!dialer_start(&ctx->dialer, loop, req)) {
-		socks_stop(loop, ctx);
-		socks_free(ctx);
+		socks_ctx_stop(loop, ctx);
+		socks_ctx_free(ctx);
 		return;
 	}
+
+	SOCKS_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connecting");
 }
 
-static struct socks_ctx *socks_new(
-	const int accepted_fd, struct ruleset *ruleset,
-	const struct config *conf)
+static struct socks_ctx *
+socks_ctx_new(struct server *restrict s, const int accepted_fd)
 {
 	struct socks_ctx *restrict ctx = malloc(sizeof(struct socks_ctx));
 	if (ctx == NULL) {
 		return NULL;
 	}
+	ctx->s = s;
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
-	ctx->state = STATE_HANDSHAKE1;
-	ctx->conf = conf;
-	ctx->ruleset = ruleset;
-	buf_init(&ctx->rbuf, SOCKS_BUF_SIZE);
+	ctx->state = STATE_INIT;
+	BUF_INIT(ctx->rbuf, SOCKS_BUF_SIZE);
+
+	const struct config *restrict conf = s->conf;
+
 	struct ev_io *restrict w_read = &ctx->watcher;
 	ev_io_init(w_read, socks_recv_cb, accepted_fd, EV_READ);
 	w_read->data = ctx;
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
 	w_timeout->data = ctx;
+
 	dialer_init(
-		&ctx->dialer, ctx->conf,
+		&ctx->dialer, conf,
 		&(struct event_cb){
 			.cb = dialer_cb,
 			.ctx = ctx,
@@ -617,31 +687,30 @@ static struct socks_ctx *socks_new(
 	return ctx;
 }
 
-static void socks_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
+static void
+socks_ctx_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
 	struct ev_io *restrict w_read = &ctx->watcher;
 	ev_io_start(loop, w_read);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_start(loop, w_timeout);
-	stats.num_halfopen++;
+
+	ctx->state = STATE_HANDSHAKE1;
+	struct server_stats *restrict stats = ctx->s->stats;
+	stats->num_halfopen++;
 }
 
 void socks_serve(
-	struct ev_loop *loop, struct server *s, const int accepted_fd,
+	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa)
 {
-	UNUSED(accepted_sa);
-	struct socks_ctx *restrict ctx =
-		socks_new(accepted_fd, s->ruleset, s->conf);
+	struct socks_ctx *restrict ctx = socks_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
 		(void)close(accepted_fd);
 		return;
 	}
-	socks_start(loop, ctx);
-}
-
-void socks_read_stats(struct stats *restrict out_stats)
-{
-	*out_stats = stats;
+	(void)memcpy(
+		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
+	socks_ctx_start(loop, ctx);
 }

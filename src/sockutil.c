@@ -18,6 +18,7 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -65,6 +66,22 @@ void socket_set_tcp(const int fd, const bool nodelay, const bool keepalive)
 	}
 }
 
+void socket_set_fastopen(const int fd, const int backlog)
+{
+#ifdef TCP_FASTOPEN
+	if (setsockopt(
+		    fd, IPPROTO_TCP, TCP_FASTOPEN, &backlog, sizeof(backlog))) {
+		const int err = errno;
+		LOGW_F("TCP_FASTOPEN: %s", strerror(err));
+	}
+#else
+	UNUSED(fd);
+	if (backlog > 0) {
+		LOGW("fastopen: not supported in current build");
+	}
+#endif
+}
+
 void socket_set_buffer(int fd, size_t send, size_t recv)
 {
 	int val;
@@ -89,6 +106,7 @@ void socket_bind_netdev(const int fd, const char *netdev)
 #ifdef SO_BINDTODEVICE
 	char ifname[IFNAMSIZ];
 	(void)strncpy(ifname, netdev, sizeof(ifname) - 1);
+	ifname[sizeof(ifname) - 1] = '\0';
 	if (setsockopt(
 		    fd, SOL_SOCKET, SO_BINDTODEVICE, ifname, sizeof(ifname))) {
 		const int err = errno;
@@ -101,7 +119,7 @@ void socket_bind_netdev(const int fd, const char *netdev)
 #endif
 }
 
-void socket_set_tproxy(int fd, bool tproxy)
+void socket_set_transparent(int fd, bool tproxy)
 {
 #ifdef IP_TRANSPARENT
 	if (setsockopt(
@@ -159,19 +177,18 @@ static int format_sa_inet6(
 
 int format_sa(const struct sockaddr *sa, char *buf, const size_t buf_size)
 {
-	int ret = -1;
 	switch (sa->sa_family) {
 	case AF_INET:
-		ret = format_sa_inet((struct sockaddr_in *)sa, buf, buf_size);
-		break;
+		return format_sa_inet((struct sockaddr_in *)sa, buf, buf_size);
 	case AF_INET6:
-		ret = format_sa_inet6((struct sockaddr_in6 *)sa, buf, buf_size);
-		break;
+		return format_sa_inet6(
+			(struct sockaddr_in6 *)sa, buf, buf_size);
+
+	default:
+		return snprintf(
+			buf, buf_size, "<af:%jd>", (intmax_t)sa->sa_family);
 	}
-	if (ret < 0) {
-		ret = snprintf(buf, buf_size, "%s", "???");
-	}
-	return ret;
+	FAIL();
 }
 
 static bool resolve_inet(

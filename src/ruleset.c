@@ -61,41 +61,41 @@ static int find_callback(lua_State *restrict L, int idx)
 
 static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 {
-	if (n < 1 || !lua_isstring(L, -1)) {
-		LOGD("invalid dialreq");
+	if (n < 1) {
 		return NULL;
 	}
 	size_t len;
-	const char *direct = lua_tolstring(L, -1, &len);
+	const char *direct = lua_tolstring(L, -n, &len);
+	if (direct == NULL) {
+		LOGE_F("ruleset: returned address #%d is not a string", 1);
+		return NULL;
+	}
 	struct dialaddr addr;
 	if (!dialaddr_set(&addr, direct, len)) {
-		LOGD("invalid dialreq");
+		LOGE_F("ruleset: returned address #%d is not valid", 1);
 		return NULL;
 	}
-	lua_pop(L, 1);
-	n--;
 	struct dialreq *req = dialreq_new(&addr, (size_t)n);
 	if (req == NULL) {
+		LOGOOM();
 		return NULL;
 	}
-	for (int i = 0; i < n; i++) {
-		if (!lua_isstring(L, -1)) {
-			LOGD("invalid dialreq");
-			dialreq_free(req);
-			return NULL;
-		}
-		const char *s = lua_tolstring(L, -1, &len);
+	for (int i = 1; i < n; i++) {
+		const char *s = lua_tolstring(L, -i, &len);
 		if (s == NULL) {
-			LOGD("invalid dialreq");
+			LOGE_F("ruleset: returned address #%d is not a string",
+			       n - i);
 			dialreq_free(req);
 			return NULL;
 		}
-		if (!dialreq_proxy(req, PROTO_SOCKS4A, s, len)) {
+		if (!dialreq_proxy(req, s, len)) {
+			LOGE_F("ruleset: returned address #%d is not valid",
+			       n - i);
 			dialreq_free(req);
 			return NULL;
 		}
-		lua_pop(L, 1);
 	}
+	lua_pop(L, n);
 	return req;
 }
 
@@ -441,7 +441,12 @@ static struct dialreq *request_accept(const char *domain)
 	if (!dialaddr_set(&addr, domain, strlen(domain))) {
 		return NULL;
 	}
-	return dialreq_new(&addr, 0);
+	struct dialreq *req = dialreq_new(&addr, 0);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	return req;
 }
 
 static int ruleset_request_(lua_State *restrict L)

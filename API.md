@@ -22,10 +22,11 @@ Check server liveness.
 
 ### Server Statistics
 
-Calculate server statistics since the last call.
+GET: Get the stateless server statistics.
+POST: Calculate server statistics since the last call.
 
 - **Path**: /stats
-- **Method**: POST
+- **Method**: GET, POST
 - **Status**: HTTP 200, HTTP 405
 - **Response**: Server statistics in plain text.
 

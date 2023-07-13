@@ -38,8 +38,8 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # And restrict client access to eth0 only
 ./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
-# Start a non-forking TCP port forwarder in the background
-sudo ./neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080 -u nobody -d
+# Start a hardened non-forking TCP port forwarder in the background
+sudo ./neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 --proto-timeout -u nobody -d
 ```
 
 See `./neosocksd -h` for details.

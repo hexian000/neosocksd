@@ -4,6 +4,7 @@
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "net/addr.h"
+#include "net/url.h"
 #include "proto/socks.h"
 #include "conf.h"
 #include "resolver.h"
@@ -12,6 +13,7 @@
 
 #include <ev.h>
 #include <errno.h>
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -29,23 +31,31 @@ bool dialaddr_set(struct dialaddr *restrict addr, const char *s, size_t len)
 {
 	char buf[FQDN_MAX_LENGTH + 1 + 5 + 1]; /* FQDN + ':' + port + '\0' */
 	if (len >= sizeof(buf)) {
-		LOGD_F("address too long: %s", s);
+		LOGE_F("address too long: \"%s\"", s);
 		return false;
 	}
 	memcpy(buf, s, len);
 	buf[len] = '\0';
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
-		LOGD_F("invalid address: %s", s);
-		return false;
-	}
-	const size_t hostlen = strlen(host);
-	if (hostlen > FQDN_MAX_LENGTH) {
-		LOGD_F("hostname too long: %s", host);
+		LOGE_F("invalid address: \"%s\"", s);
 		return false;
 	}
 	if (sscanf(port, "%" SCNu16, &addr->port) != 1) {
-		LOGD_F("unable to parse port number: %" PRIu16, addr->port);
+		LOGE_F("unable to parse port number: \"%s\"", port);
+		return false;
+	}
+	if (inet_pton(AF_INET, host, &addr->in) == 1) {
+		addr->type = ATYP_INET;
+		return true;
+	}
+	if (inet_pton(AF_INET6, host, &addr->in6) == 1) {
+		addr->type = ATYP_INET6;
+		return true;
+	}
+	const size_t hostlen = strlen(host);
+	if (hostlen > FQDN_MAX_LENGTH) {
+		LOGE_F("hostname too long: \"%s\"", host);
 		return false;
 	}
 	struct domain_name *restrict domain = &addr->domain;
@@ -97,7 +107,6 @@ dialreq_new(const struct dialaddr *restrict addr, const size_t num_proxy)
 	struct dialreq *restrict req = malloc(
 		sizeof(struct dialreq) + sizeof(struct proxy_req) * num_proxy);
 	if (req == NULL) {
-		LOGOOM();
 		return NULL;
 	}
 	req->addr = *addr;
@@ -106,29 +115,50 @@ dialreq_new(const struct dialaddr *restrict addr, const size_t num_proxy)
 }
 
 bool dialreq_proxy(
-	struct dialreq *restrict req, enum proxy_protocol protocol,
-	const char *addr, size_t addrlen)
+	struct dialreq *restrict req, const char *addr, size_t addrlen)
 {
-	char *s = malloc(addrlen + 1);
-	if (s == NULL) {
-		LOGOOM();
+	char buf[1024]; /* should be more than enough */
+	if (addrlen >= sizeof(buf)) {
+		LOGE_F("proxy too long: \"%s\"", addr);
+		return false;
+	}
+	memcpy(buf, addr, addrlen + 1);
+	struct url uri;
+	if (!url_parse(buf, &uri)) {
+		LOGE_F("unable to parse proxy: \"%s\"", addr);
+		return false;
+	}
+	enum proxy_protocol protocol;
+	if (uri.defacto != NULL) {
+		protocol = PROTO_SOCKS4A;
+		uri.host = uri.defacto;
+	} else if (strcmp(uri.scheme, "http") == 0) {
+		protocol = PROTO_HTTP;
+	} else if (
+		strcmp(uri.scheme, "socks4") == 0 ||
+		strcmp(uri.scheme, "socks4a") == 0) {
+		protocol = PROTO_SOCKS4A;
+	} else if (
+		strcmp(uri.scheme, "socks5") == 0 ||
+		strcmp(uri.scheme, "socks5h") == 0) {
+		protocol = PROTO_SOCKS5;
+	} else {
+		LOGE_F("dialer: unknown scheme \"%s\"", uri.scheme);
 		return false;
 	}
 	const size_t n = req->num_proxy;
-	req->proxy[n] = (struct proxy_req){
-		.proto = protocol,
-		.addr = strncpy(s, addr, addrlen + 1),
-		.addrlen = addrlen,
-	};
+	struct proxy_req *restrict proxy = &req->proxy[n];
+	proxy->proto = protocol;
+	const size_t hostlen = strlen(uri.host);
+	if (!dialaddr_set(&proxy->addr, uri.host, hostlen)) {
+		return false;
+	}
 	req->num_proxy = n + 1;
 	return true;
 }
 
 void dialreq_free(struct dialreq *restrict req)
 {
-	for (size_t i = 0; i < req->num_proxy; i++) {
-		free(req->proxy[i].addr);
-	}
 	free(req);
 }
 
@@ -153,12 +183,14 @@ dialer_reset(struct dialer *restrict d, struct ev_loop *loop, const int state)
 		break;
 	case STATE_RESOLVE:
 		resolver_stop(&d->resolver, loop);
+		ev_timer_stop(loop, &d->w_timeout);
 		break;
 	case STATE_CONNECT:
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2: {
-		struct ev_io *restrict watcher = &d->watcher;
-		ev_io_stop(loop, watcher);
+		ev_io_stop(loop, &d->w_recv);
+		ev_timer_stop(loop, &d->w_timeout);
+		ev_timer_stop(loop, &d->w_ticker);
 		if (d->fd > 0) {
 			(void)close(d->fd);
 			d->fd = -1;
@@ -170,53 +202,73 @@ dialer_reset(struct dialer *restrict d, struct ev_loop *loop, const int state)
 	d->state = state;
 }
 
-static void
-dialer_finish(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
+static void dialer_finish(struct dialer *restrict d, struct ev_loop *loop)
 {
-	if (ok) {
-		d->state = STATE_DONE;
-	}
 	dialer_reset(d, loop, STATE_DONE);
 	d->done_cb.cb(loop, d->done_cb.ctx);
 }
 
-#define MAX_ADDRLEN ((size_t)(256 + 1 + 5))
-
-static bool send_socks4a_req(struct dialer *restrict d)
+static bool format_host(
+	char *buf, const size_t bufsize, const struct dialaddr *restrict addr)
 {
-	const struct proxy_req *restrict req = &d->req->proxy[d->jump];
-	const int fd = d->watcher.fd;
-	uint16_t port;
-	char addr[MAX_ADDRLEN + 1];
-	(void)memcpy(addr, req->addr, req->addrlen);
-	addr[req->addrlen] = '\0';
-	char *host, *service;
-	if (!splithostport(addr, &host, &service)) {
-		LOGD_F("failed parsing address: %s", addr);
-		return false;
+	switch (addr->type) {
+	case ATYP_INET:
+		if (inet_ntop(AF_INET, &addr->in, buf, bufsize) == NULL) {
+			const int err = errno;
+			LOGE_F("inet_ntop: %s", strerror(err));
+			return false;
+		}
+		break;
+	case ATYP_INET6:
+		if (inet_ntop(AF_INET6, &addr->in6, buf, bufsize) == NULL) {
+			const int err = errno;
+			LOGE_F("inet_ntop: %s", strerror(err));
+			return false;
+		}
+		break;
+	case ATYP_DOMAIN: {
+		const size_t n = addr->domain.len;
+		if (bufsize < n + 1) {
+			LOGE("buffer not enough");
+			return false;
+		}
+		memcpy(buf, addr->domain.name, n);
+		buf[n] = '\0';
+	} break;
+	default:
+		FAIL();
 	}
-	if (sscanf(service, "%" SCNu16, &port) != 1) {
-		LOGD_F("failed parsing address: %s", addr);
-		return false;
-	}
+	return true;
+}
 
-	unsigned char buf[sizeof(struct socks4_hdr) + 1 + MAX_ADDRLEN + 1];
+static bool send_socks4a_req(
+	struct dialer *restrict d, const struct dialaddr *restrict addr)
+{
+	const int fd = d->w_recv.fd;
+	unsigned char buf[sizeof(struct socks4_hdr) + 1 + FQDN_MAX_LENGTH + 1];
 	write_uint8(buf + offsetof(struct socks4_hdr, version), SOCKS4);
 	write_uint8(
 		buf + offsetof(struct socks4_hdr, command), SOCKS4CMD_CONNECT);
-	write_uint16(buf + offsetof(struct socks4_hdr, port), port);
+	write_uint16(buf + offsetof(struct socks4_hdr, port), addr->port);
 	write_uint32(
 		buf + offsetof(struct socks4_hdr, address),
 		UINT32_C(0x000000FF));
 	buf[sizeof(struct socks4_hdr)] = 0; /* ident = "" */
-	(void)strcpy((char *)(buf + sizeof(struct socks4_hdr) + 1), host);
-	const size_t len = sizeof(struct socks4_hdr) + 1 + req->addrlen + 1;
+	/* including the null-terminator */
+	char *host = (char *)(buf + sizeof(struct socks4_hdr) + 1);
+	if (!format_host(host, FQDN_MAX_LENGTH + 1, addr)) {
+		LOGE("unable to format hostname");
+		return false;
+	}
+	const size_t len = sizeof(struct socks4_hdr) + 1 + strlen(host) + 1;
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
-		d->err = errno;
+		d->syserr = errno;
+		d->err = DIALER_SYSERR;
 		return false;
 	} else if ((size_t)nsend != len) {
-		LOGD_F("short send: %zu < %zu", (size_t)nsend, len);
+		LOGE_F("short send: %zu < %zu", (size_t)nsend, len);
+		d->err = DIALER_PROXYERR;
 		return false;
 	}
 	return true;
@@ -224,30 +276,48 @@ static bool send_socks4a_req(struct dialer *restrict d)
 
 static bool send_proxy_req(struct dialer *restrict d)
 {
-	const struct proxy_req *restrict req = &d->req->proxy[d->jump];
-	LOGD_F("dialer: CONNECT %zu/%zu: \"%s\", protocol=%d", d->jump + 1,
-	       d->req->num_proxy, req->addr, req->proto);
-	switch (req->proto) {
+	const struct dialreq *restrict req = d->req;
+	const size_t jump = d->jump;
+	const size_t next = jump + 1;
+	const enum proxy_protocol proto = req->proxy[jump].proto;
+	const struct dialaddr *addr =
+		next < req->num_proxy ? &req->proxy[next].addr : &req->addr;
+	switch (proto) {
+	case PROTO_HTTP:
+		FAIL();
 	case PROTO_SOCKS4A:
-		return send_socks4a_req(d);
+		return send_socks4a_req(d, addr);
+	case PROTO_SOCKS5:
+		FAIL();
+	default:
+		break;
 	}
-	return false;
+	FAIL();
 }
 
 static int recv_socks4a_rsp(struct dialer *restrict d)
 {
-	const size_t len = sizeof(struct socks4_hdr);
-	if (d->buf.len < len) {
+	if (d->buf.len < sizeof(struct socks4_hdr)) {
 		return 1;
 	}
-	const uint8_t version =
+	struct socks4_hdr hdr;
+	hdr.version =
 		read_uint8(d->buf.data + offsetof(struct socks4_hdr, version));
-	if (version != UINT8_C(0)) {
+	if (hdr.version != UINT8_C(0)) {
+		d->err = DIALER_PROXYERR;
 		return -1;
 	}
-	const uint8_t command =
+	hdr.command =
 		read_uint8(d->buf.data + offsetof(struct socks4_hdr, command));
-	if (command != SOCKS4RSP_GRANTED) {
+	if (hdr.command != SOCKS4RSP_GRANTED) {
+		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	/* consume the header */
+	const ssize_t nrecv =
+		recv(d->fd, (void *)&hdr, sizeof(struct socks4_hdr), 0);
+	if (nrecv != (ssize_t)sizeof(struct socks4_hdr)) {
+		d->err = DIALER_PROXYERR;
 		return -1;
 	}
 	return 0;
@@ -256,53 +326,45 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 static int
 recv_proxy_rsp(struct dialer *restrict d, const struct proxy_req *restrict req)
 {
-	int ret = -1;
 	switch (req->proto) {
+	case PROTO_HTTP:
+		d->err = DIALER_PROXYERR;
+		return -1;
 	case PROTO_SOCKS4A:
-		ret = recv_socks4a_rsp(d);
-		if (ret < 0) {
-			LOGE_F("dialer: SOCKS4A protocol error \"%s\"",
-			       req->addr);
-		}
+		return recv_socks4a_rsp(d);
+	case PROTO_SOCKS5:
+		d->err = DIALER_PROXYERR;
+		return -1;
+	default:
 		break;
 	}
-	return ret;
+	FAIL();
 }
 
 static int dialer_recv(
 	struct dialer *restrict d, const int fd,
 	const struct proxy_req *restrict req)
 {
-	size_t nbrecv = 0;
-	unsigned char *data = d->buf.data + d->buf.len;
-	size_t cap = d->buf.cap - d->buf.len;
-	while (cap > 0) {
-		const ssize_t nrecv = recv(fd, data, cap, 0);
-		if (nrecv < 0) {
-			const int err = errno;
-			if (IS_TRANSIENT_ERROR(err)) {
-				break;
-			}
-			d->err = err;
-			return -1;
-		} else if (nrecv == 0) {
-			LOGD_F("dialer_recv: fd=%d early EOF", fd);
-			return -1;
+	unsigned char *data = d->buf.data;
+	const size_t cap = d->buf.cap;
+	const ssize_t nrecv = recv(fd, data, cap, MSG_PEEK);
+	if (nrecv < 0) {
+		const int err = errno;
+		if (IS_TRANSIENT_ERROR(err)) {
+			return 1;
 		}
-		data += nrecv;
-		cap -= nrecv;
-		nbrecv += nrecv;
+		d->syserr = err;
+		d->err = DIALER_SYSERR;
+		return -1;
+	} else if (nrecv == 0) {
+		LOGE_F("dialer_recv: fd=%d early EOF", fd);
+		d->err = DIALER_PROXYERR;
+		return -1;
 	}
-	if (nbrecv == 0) {
-		return 1;
-	}
-	d->buf.len += nbrecv;
+	d->buf.len = (size_t)nrecv;
 	const int want = recv_proxy_rsp(d, req);
 	if (want <= 0) {
 		return want;
-	} else if (d->buf.len + (size_t)want > cap) {
-		LOGD_F("dialer_recv: fd=%d header too long", fd);
-		return -1;
 	}
 	return 1;
 }
@@ -312,28 +374,36 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	CHECK_EV_ERROR(revents);
 	struct dialer *restrict d = watcher->data;
 	const int fd = watcher->fd;
+	struct ev_timer *restrict w_ticker = &d->w_ticker;
 
 	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
-	if (ret > 0) { /* want more */
+	if (ret > 0) { /* wait for more */
+		ev_io_stop(loop, watcher);
+		if (!ev_is_active(w_ticker)) {
+			ev_timer_start(loop, w_ticker);
+		}
 		return;
 	} else if (ret < 0) { /* fail */
-		dialer_finish(d, loop, false);
+		dialer_finish(d, loop);
 		return;
 	}
 
-	d->jump++;
 	d->buf.len = 0;
+	d->jump++;
 	if (d->jump < d->req->num_proxy) {
 		d->state = STATE_HANDSHAKE2;
 		if (!send_proxy_req(d)) {
-			dialer_finish(d, loop, false);
+			dialer_finish(d, loop);
 			return;
 		}
 		return;
 	}
 
-	ev_io_stop(loop, watcher);
-	dialer_finish(d, loop, true);
+	ev_io_stop(loop, &d->w_recv);
+	ev_timer_stop(loop, &d->w_timeout);
+	ev_timer_stop(loop, &d->w_ticker);
+	d->state = STATE_DONE;
+	dialer_finish(d, loop);
 }
 
 static void
@@ -342,6 +412,7 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	CHECK_EV_ERROR(revents);
 	ev_io_stop(loop, watcher);
 	struct dialer *restrict d = watcher->data;
+	const struct dialreq *restrict req = d->req;
 	const int fd = watcher->fd;
 
 	int sockerr = 0;
@@ -349,8 +420,9 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		    fd, SOL_SOCKET, SO_ERROR, &sockerr,
 		    &(socklen_t){ sizeof(sockerr) }) == 0) {
 		if (sockerr != 0) {
-			d->err = sockerr;
-			dialer_finish(d, loop, false);
+			d->syserr = sockerr;
+			d->err = DIALER_SYSERR;
+			dialer_finish(d, loop);
 			return;
 		}
 	} else {
@@ -358,19 +430,21 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		LOGD_F("SO_ERROR: %s", strerror(err));
 	}
 
-	if (d->jump < d->req->num_proxy) {
-		d->state = STATE_HANDSHAKE1;
-		if (!send_proxy_req(d)) {
-			dialer_finish(d, loop, false);
-			return;
-		}
-		ev_io_init(watcher, recv_cb, fd, EV_READ);
-		watcher->data = d;
-		ev_io_start(loop, watcher);
+	if (d->jump >= req->num_proxy) {
+		d->state = STATE_DONE;
+		ev_timer_stop(loop, &d->w_timeout);
+		dialer_finish(d, loop);
 		return;
 	}
 
-	dialer_finish(d, loop, true);
+	d->state = STATE_HANDSHAKE1;
+	if (!send_proxy_req(d)) {
+		dialer_finish(d, loop);
+		return;
+	}
+	ev_io_init(watcher, recv_cb, fd, EV_READ);
+	watcher->data = d;
+	ev_io_start(loop, watcher);
 }
 
 static bool connect_sa(
@@ -380,18 +454,20 @@ static bool connect_sa(
 	const int fd = socket(sa->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
-		LOGD_F("socket: %s", strerror(err));
-		d->err = err;
+		LOGE_F("socket: %s", strerror(err));
+		d->syserr = err;
+		d->err = DIALER_SYSERR;
 		return false;
 	}
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
-		LOGD_F("fcntl: %s", strerror(err));
+		LOGE_F("fcntl: %s", strerror(err));
 		(void)close(fd);
-		d->err = err;
+		d->syserr = err;
+		d->err = DIALER_SYSERR;
 		return false;
 	}
-	socket_set_tcp(fd, true, false);
+	socket_set_tcp(fd, true, true);
 #if WITH_NETDEVICE
 	const char *netdev = d->conf->netdev;
 	if (netdev != NULL) {
@@ -403,7 +479,8 @@ static bool connect_sa(
 		if (err != EINTR && err != EINPROGRESS) {
 			LOGE_F("connect: %s", strerror(err));
 			(void)close(fd);
-			d->err = err;
+			d->syserr = err;
+			d->err = DIALER_SYSERR;
 			return false;
 		}
 	}
@@ -414,7 +491,7 @@ static bool connect_sa(
 	}
 	d->fd = fd;
 
-	struct ev_io *restrict w_connect = &d->watcher;
+	struct ev_io *restrict w_connect = &d->w_recv;
 	ev_io_init(w_connect, connected_cb, fd, EV_WRITE);
 	w_connect->data = d;
 	ev_io_start(loop, w_connect);
@@ -449,14 +526,34 @@ static void resolve_cb(struct ev_loop *loop, void *data)
 		in6->sin6_port = htons(port);
 	} break;
 	default:
-		LOGE_F("unsupport address family: %d", sa->sa_family);
-		dialer_finish(d, loop, false);
+		LOGE_F("unsupported address family: %d", sa->sa_family);
+		dialer_finish(d, loop);
 		return;
 	}
 
 	if (!connect_sa(d, loop, sa)) {
 		LOGD("dialer connect failed");
-		dialer_finish(d, loop, false);
+		dialer_finish(d, loop);
+	}
+}
+
+static void
+timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+{
+	CHECK_EV_ERROR(revents);
+	struct dialer *restrict d = watcher->data;
+	d->err = DIALER_TIMEOUT;
+	dialer_finish(d, loop);
+}
+
+static void
+ticker_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+{
+	CHECK_EV_ERROR(revents);
+	struct dialer *restrict d = watcher->data;
+	struct ev_io *restrict w_recv = &d->w_recv;
+	if (!ev_is_active(w_recv)) {
+		ev_io_start(loop, w_recv);
 	}
 }
 
@@ -468,15 +565,24 @@ void dialer_init(
 	d->done_cb = *cb;
 	d->fd = -1;
 	d->jump = 0;
-	buf_init(&d->buf, DIALER_BUF_SIZE);
+	BUF_INIT(d->buf, sizeof(d->buf.data));
 	d->req = NULL;
 	d->state = STATE_INIT;
 	resolver_init(
-		&d->resolver, d->conf->resolve_pf,
+		&d->resolver, conf->resolve_pf,
 		&(struct event_cb){
 			.cb = resolve_cb,
 			.ctx = d,
 		});
+	{
+		struct ev_timer *restrict w_timeout = &d->w_timeout;
+		ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
+		w_timeout->data = d;
+
+		struct ev_timer *restrict w_ticker = &d->w_ticker;
+		ev_timer_init(w_ticker, ticker_cb, 0.1, 0.1);
+		w_ticker->data = d;
+	}
 }
 
 bool dialer_start(
@@ -484,34 +590,41 @@ bool dialer_start(
 	struct dialreq *restrict req)
 {
 	d->req = req;
-	d->err = 0;
-	switch (req->addr.type) {
+	d->syserr = 0;
+	d->err = DIALER_SUCCESS;
+	const struct dialaddr *restrict addr =
+		req->num_proxy > 0 ? &req->proxy[0].addr : &req->addr;
+	switch (addr->type) {
 	case ATYP_INET: {
 		struct sockaddr_in in = {
 			.sin_family = AF_INET,
-			.sin_addr = req->addr.in,
-			.sin_port = htons(req->addr.port),
+			.sin_addr = addr->in,
+			.sin_port = htons(addr->port),
 		};
-		return connect_sa(d, loop, (struct sockaddr *)&in);
-	}
+		if (!connect_sa(d, loop, (struct sockaddr *)&in)) {
+			return false;
+		}
+	} break;
 	case ATYP_INET6: {
 		struct sockaddr_in6 in6 = {
 			.sin6_family = AF_INET,
-			.sin6_addr = req->addr.in6,
-			.sin6_port = htons(req->addr.port),
+			.sin6_addr = addr->in6,
+			.sin6_port = htons(addr->port),
 		};
-		return connect_sa(d, loop, (struct sockaddr *)&in6);
-	}
-	case ATYP_DOMAIN:
-		break;
+		if (!connect_sa(d, loop, (struct sockaddr *)&in6)) {
+			return false;
+		}
+	} break;
+	case ATYP_DOMAIN: {
+		if (!resolver_start(&d->resolver, loop, &addr->domain)) {
+			return false;
+		}
+		d->state = STATE_RESOLVE;
+	} break;
 	default:
 		FAIL();
 	}
-
-	if (!resolver_start(&d->resolver, loop, &req->addr.domain)) {
-		return false;
-	}
-	d->state = STATE_RESOLVE;
+	ev_timer_start(loop, &d->w_timeout);
 	return true;
 }
 
@@ -519,6 +632,23 @@ int dialer_get(struct dialer *d)
 {
 	assert(d->state == STATE_DONE);
 	return d->fd;
+}
+
+const char *dialer_strerror(struct dialer *d)
+{
+	switch (d->err) {
+	case DIALER_SUCCESS:
+		return NULL;
+	case DIALER_SYSERR:
+		return strerror(d->syserr);
+	case DIALER_TIMEOUT:
+		return "connection timeout";
+	case DIALER_PROXYERR:
+		return "protocol error";
+	default:
+		break;
+	}
+	FAIL();
 }
 
 void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)

@@ -4,6 +4,7 @@
 #include "http.h"
 #include "net/http.h"
 #include "net/url.h"
+#include "server.h"
 #include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "utils/formats.h"
@@ -12,7 +13,6 @@
 #include "ruleset.h"
 #include "transfer.h"
 #include "dialer.h"
-#include "stats.h"
 #include "util.h"
 
 #include <ev.h>
@@ -39,31 +39,34 @@ http_timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
 #define HTTP_MAX_HEADER_COUNT 256
 #define HTTP_MAX_ENTITY 8192
 
-static struct stats stats = { 0 };
-
 struct http_ctx;
 
-typedef void (*http_handler)(struct ev_loop *loop, struct http_ctx *ctx);
+typedef void (*http_handler_fn)(struct ev_loop *loop, struct http_ctx *ctx);
 
 struct http_hdr_item {
 	const char *key, *value;
 };
 
+enum http_state {
+	STATE_INIT,
+	STATE_REQUEST,
+	STATE_HEADER,
+	STATE_CONTENT,
+	STATE_CONNECT,
+	STATE_CONNECTED,
+	STATE_ESTABLISHED,
+};
+
 struct http_ctx {
+	struct server *s;
+	http_handler_fn on_request;
 	int accepted_fd, dialed_fd;
-	http_handler handler;
-	bool is_connected;
+	enum http_state state;
+	sockaddr_max_t accepted_sa;
+	struct ev_timer w_timeout;
 	union {
 		struct {
-			struct server *server;
 			struct ev_io w_read, w_write;
-			struct ev_timer w_timeout;
-			enum {
-				HTTPSTATE_REQUEST,
-				HTTPSTATE_HEADER,
-				HTTPSTATE_CONTENT,
-				HTTPSTATE_GATEWAY,
-			} http_state;
 			struct http_message http_msg;
 			char *http_nxt;
 			struct http_hdr_item http_hdr[HTTP_MAX_HEADER_COUNT];
@@ -81,35 +84,90 @@ struct http_ctx {
 	};
 };
 
-static void http_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
+#define HTTP_CTX_LOG_F(level, ctx, format, ...)                                \
+	do {                                                                   \
+		if (!LOGLEVEL(level)) {                                        \
+			break;                                                 \
+		}                                                              \
+		char laddr[64];                                                \
+		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
+		LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);           \
+	} while (0)
+#define HTTP_CTX_LOG(level, ctx, message)                                      \
+	HTTP_CTX_LOG_F(level, ctx, "%s", message)
+
+static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	if (ctx->is_connected) {
-		transfer_stop(loop, &ctx->uplink);
-		transfer_stop(loop, &ctx->downlink);
-		return;
-	}
-	dialer_stop(&ctx->dialer, loop);
-	struct ev_io *restrict w_read = &ctx->w_read;
-	ev_io_stop(loop, w_read);
-	struct ev_io *restrict w_write = &ctx->w_write;
-	ev_io_stop(loop, w_write);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_stop(loop, w_timeout);
-	stats.num_halfopen--;
+
+	struct server_stats *restrict stats = ctx->s->stats;
+	switch (ctx->state) {
+	case STATE_INIT:
+		return;
+	case STATE_REQUEST:
+	case STATE_HEADER:
+	case STATE_CONTENT:
+		ev_io_stop(loop, &ctx->w_read);
+		ev_io_stop(loop, &ctx->w_write);
+		stats->num_halfopen--;
+		/* fallthrough */
+	case STATE_CONNECT:
+		dialer_stop(&ctx->dialer, loop);
+		return;
+	case STATE_CONNECTED:
+		transfer_stop(loop, &ctx->uplink);
+		transfer_stop(loop, &ctx->downlink);
+		stats->num_halfopen--;
+		break;
+	case STATE_ESTABLISHED:
+		transfer_stop(loop, &ctx->uplink);
+		transfer_stop(loop, &ctx->downlink);
+		stats->num_sessions--;
+		break;
+	}
+	HTTP_CTX_LOG_F(
+		LOG_LEVEL_INFO, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void http_free(struct http_ctx *restrict ctx)
+static void http_ctx_free(struct http_ctx *restrict ctx)
 {
 	if (ctx != NULL) {
 		(void)close(ctx->w_read.fd);
 	}
+	if (ctx->accepted_fd != -1) {
+		(void)close(ctx->accepted_fd);
+		ctx->accepted_fd = -1;
+	}
+	if (ctx->dialed_fd != -1) {
+		(void)close(ctx->dialed_fd);
+		ctx->dialed_fd = -1;
+	}
 	free(ctx);
 }
 
-static void xfer_done_cb(struct ev_loop *loop, void *ctx)
+static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
-	http_stop(loop, ctx);
-	http_free(ctx);
+	struct http_ctx *restrict ctx = data;
+	if (ctx->uplink.state == XFER_CLOSED ||
+	    ctx->downlink.state == XFER_CLOSED) {
+		http_ctx_stop(loop, ctx);
+		http_ctx_free(ctx);
+		return;
+	}
+	if (ctx->state == STATE_CONNECTED &&
+	    ctx->uplink.state == XFER_CONNECTED &&
+	    ctx->downlink.state == XFER_CONNECTED) {
+		ctx->state = STATE_ESTABLISHED;
+		struct server_stats *restrict stats = ctx->s->stats;
+		stats->num_halfopen--;
+		stats->num_sessions++;
+		HTTP_CTX_LOG_F(
+			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			stats->num_sessions);
+		ev_timer_stop(loop, &ctx->w_timeout);
+		return;
+	}
 }
 
 static void
@@ -119,8 +177,8 @@ http_resphdr_init(struct http_ctx *restrict ctx, const uint16_t code)
 	const int date_len = (int)http_date(date_str, sizeof(date_str));
 	const char *status = http_status(code);
 	ctx->wbuf.len = 0;
-	(void)buf_appendf(
-		&ctx->wbuf,
+	BUF_APPENDF(
+		ctx->wbuf,
 		"HTTP/1.0 %" PRIu16 " %s\r\n"
 		"Date: %.*s\r\n"
 		"Connection: close\r\n",
@@ -128,9 +186,9 @@ http_resphdr_init(struct http_ctx *restrict ctx, const uint16_t code)
 }
 
 #define RESPHDR_ADD(ctx, key, value)                                           \
-	BUF_APPENDCONST(&(ctx)->wbuf, key ": " value "\r\n")
+	BUF_APPENDCONST((ctx)->wbuf, key ": " value "\r\n")
 
-#define RESPHDR_END(ctx) BUF_APPENDCONST(&(ctx)->wbuf, "\r\n")
+#define RESPHDR_END(ctx) BUF_APPENDCONST((ctx)->wbuf, "\r\n")
 
 #define RESPHDR_TXT(ctx, code)                                                 \
 	do {                                                                   \
@@ -172,12 +230,12 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			return;
 		}
 		LOGE_F("recv: %s", strerror(err));
-		http_stop(loop, ctx);
-		http_free(ctx);
+		http_ctx_stop(loop, ctx);
+		http_ctx_free(ctx);
 		return;
 	} else if (nrecv == 0) {
-		http_stop(loop, ctx);
-		http_free(ctx);
+		http_ctx_stop(loop, ctx);
+		http_ctx_free(ctx);
 		return;
 	}
 	ctx->rbuf.len += nrecv;
@@ -191,12 +249,12 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	struct ev_io *restrict w_write = &ctx->w_write;
 	struct http_message *restrict hdr = &ctx->http_msg;
-	if (ctx->http_state == HTTPSTATE_REQUEST) {
+	if (ctx->state == STATE_REQUEST) {
 		next = http_parse(next, hdr);
 		if (next == NULL) {
 			LOGE("http: invalid request");
-			http_stop(loop, ctx);
-			http_free(ctx);
+			http_ctx_stop(loop, ctx);
+			http_ctx_free(ctx);
 			return;
 		} else if (next == ctx->http_nxt) {
 			if (cap == 0) {
@@ -210,8 +268,8 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		if (strncmp(hdr->req.version, "HTTP/1.", 7) != 0) {
 			LOGE_F("http: unsupported protocol %s",
 			       hdr->req.version);
-			http_stop(loop, ctx);
-			http_free(ctx);
+			http_ctx_stop(loop, ctx);
+			http_ctx_free(ctx);
 			return;
 		}
 		LOGV_F("http: request %s %s %s", hdr->req.method, hdr->req.url,
@@ -219,22 +277,22 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		ctx->http_nxt = next;
 		ctx->http_hdr_num = 0;
 		ctx->content = NULL;
-		ctx->http_state = HTTPSTATE_HEADER;
+		ctx->state = STATE_HEADER;
 	}
-	while (ctx->http_state == HTTPSTATE_HEADER) {
+	while (ctx->state == STATE_HEADER) {
 		char *key, *value;
 		next = http_parsehdr(next, &key, &value);
 		if (next == NULL) {
 			LOGE("http: invalid header");
-			http_stop(loop, ctx);
-			http_free(ctx);
+			http_ctx_stop(loop, ctx);
+			http_ctx_free(ctx);
 			return;
 		} else if (next == ctx->http_nxt) {
 			return;
 		}
 		ctx->http_nxt = next;
 		if (key == NULL) {
-			ctx->http_state = HTTPSTATE_CONTENT;
+			ctx->state = STATE_CONTENT;
 			break;
 		}
 
@@ -242,8 +300,8 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const size_t num = ctx->http_hdr_num;
 		if (num >= HTTP_MAX_HEADER_COUNT) {
 			LOGE("http: too many headers");
-			http_stop(loop, ctx);
-			http_free(ctx);
+			http_ctx_stop(loop, ctx);
+			http_ctx_free(ctx);
 			return;
 		}
 		ctx->http_hdr[num] = (struct http_hdr_item){
@@ -286,8 +344,9 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	/* HTTP/1.0 only, stop reading */
 	ev_io_stop(loop, watcher);
-	stats.num_request++;
-	ctx->handler(loop, ctx);
+	struct server_stats *restrict stats = ctx->s->stats;
+	stats->num_request++;
+	ctx->on_request(loop, ctx);
 
 	if (ctx->wbuf.len > 0) {
 		ev_io_start(loop, w_write);
@@ -300,8 +359,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	struct ev_io *restrict w_write = &ctx->w_write;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		const int err = ctx->dialer.err;
-		LOGD_F("dialer failed: %s", strerror(err));
+		LOGE_F("dialer: %s", dialer_strerror(&ctx->dialer));
 		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
 		ev_io_start(loop, w_write);
 		return;
@@ -309,13 +367,43 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	ev_timer_stop(loop, &ctx->w_timeout);
 	ctx->dialed_fd = fd;
 
-	ctx->http_state = HTTPSTATE_GATEWAY;
-	(void)buf_appendf(
-		&ctx->wbuf, "HTTP/1.0 %" PRIu16 " %s\r\n\r\n", HTTP_OK,
+	ctx->state = STATE_CONNECTED;
+	BUF_APPENDF(
+		ctx->wbuf, "HTTP/1.0 %" PRIu16 " %s\r\n\r\n", HTTP_OK,
 		http_status(HTTP_OK));
 	ev_io_init(w_write, http_write_cb, ctx->accepted_fd, EV_WRITE);
 	w_write->data = ctx;
 	ev_io_start(loop, w_write);
+}
+
+static void http_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	ev_io_stop(loop, &ctx->w_read);
+	ev_io_stop(loop, &ctx->w_write);
+	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
+	ev_timer_stop(loop, w_timeout);
+
+	const struct config *restrict conf = ctx->s->conf;
+	struct server_stats *restrict stats = ctx->s->stats;
+	if (conf->proto_timeout) {
+		ev_timer_start(loop, w_timeout);
+	} else {
+		ctx->state = STATE_ESTABLISHED;
+		stats->num_halfopen--;
+		stats->num_sessions++;
+		HTTP_CTX_LOG_F(
+			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			stats->num_sessions);
+	}
+
+	struct event_cb cb = {
+		.cb = xfer_state_cb,
+		.ctx = ctx,
+	};
+	transfer_init(&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd);
+	transfer_init(&ctx->downlink, cb, ctx->dialed_fd, ctx->accepted_fd);
+	transfer_start(loop, &ctx->uplink);
+	transfer_start(loop, &ctx->downlink);
 }
 
 static void
@@ -335,37 +423,26 @@ http_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 				break;
 			}
 			LOGE_F("send: %s", strerror(err));
-			http_stop(loop, ctx);
-			http_free(ctx);
+			http_ctx_stop(loop, ctx);
+			http_ctx_free(ctx);
 			return;
 		}
 		buf += nsend;
 		len -= nsend;
 		nbsend += nsend;
 	}
-	buf_consume(&ctx->wbuf, nbsend);
+	BUF_CONSUME(ctx->wbuf, nbsend);
 	if (ctx->wbuf.len > 0) {
 		return;
 	}
 
-	if (ctx->http_state == HTTPSTATE_GATEWAY) {
-		http_stop(loop, ctx);
-		ctx->is_connected = true;
-		struct event_cb cb = {
-			.cb = xfer_done_cb,
-			.ctx = ctx,
-		};
-		transfer_init(
-			&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd);
-		transfer_init(
-			&ctx->downlink, cb, ctx->dialed_fd, ctx->accepted_fd);
-		transfer_start(loop, &ctx->uplink);
-		transfer_start(loop, &ctx->downlink);
+	if (ctx->state == STATE_CONNECTED) {
+		http_hijack(loop, ctx);
 		return;
 	}
 	/* HTTP/1.0 only, close after serve */
-	http_stop(loop, ctx);
-	http_free(ctx);
+	http_ctx_stop(loop, ctx);
+	http_ctx_free(ctx);
 }
 
 static void
@@ -373,28 +450,30 @@ http_timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct http_ctx *restrict ctx = watcher->data;
-	http_stop(loop, ctx);
-	http_free(ctx);
+	http_ctx_stop(loop, ctx);
+	http_ctx_free(ctx);
 }
 
 static struct http_ctx *
-http_new(const int fd, struct server *restrict s, http_handler handler)
+http_ctx_new(struct server *restrict h, const int fd, http_handler_fn handler)
 {
 	struct http_ctx *restrict ctx = malloc(sizeof(struct http_ctx));
 	if (ctx == NULL) {
 		return NULL;
 	}
+	ctx->s = h;
 	ctx->accepted_fd = fd;
 	ctx->dialed_fd = -1;
-	ctx->handler = handler;
-	ctx->is_connected = false;
-	ctx->server = s;
-	buf_init(&ctx->rbuf, HTTP_MAX_ENTITY);
-	buf_init(&ctx->wbuf, HTTP_MAX_ENTITY);
-	ctx->http_state = HTTPSTATE_REQUEST;
+	ctx->on_request = handler;
+	ctx->state = STATE_INIT;
+	BUF_INIT(ctx->rbuf, HTTP_MAX_ENTITY);
+	BUF_INIT(ctx->wbuf, HTTP_MAX_ENTITY);
 	ctx->http_nxt = NULL;
+
+	const struct config *restrict conf = h->conf;
+
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	ev_timer_init(w_timeout, http_timeout_cb, s->conf->timeout, 0.0);
+	ev_timer_init(w_timeout, http_timeout_cb, conf->timeout, 0.0);
 	w_timeout->data = ctx;
 	struct ev_io *restrict w_read = &ctx->w_read;
 	ev_io_init(w_read, http_read_cb, fd, EV_READ);
@@ -402,8 +481,9 @@ http_new(const int fd, struct server *restrict s, http_handler handler)
 	struct ev_io *restrict w_write = &ctx->w_write;
 	ev_io_init(w_write, http_write_cb, fd, EV_WRITE);
 	w_write->data = ctx;
+
 	dialer_init(
-		&ctx->dialer, s->conf,
+		&ctx->dialer, conf,
 		&(struct event_cb){
 			.cb = dialer_cb,
 			.ctx = ctx,
@@ -417,15 +497,18 @@ static void http_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_start(loop, w_read);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_start(loop, w_timeout);
-	stats.num_halfopen++;
+
+	ctx->state = STATE_REQUEST;
+	struct server_stats *restrict stats = ctx->s->stats;
+	stats->num_halfopen++;
 }
 
 static bool proxy_dial(
 	struct http_ctx *restrict ctx, struct ev_loop *loop,
 	const char *addr_str)
 {
-	struct server *restrict s = ctx->server;
-	struct ruleset *ruleset = s->ruleset;
+	struct server *restrict h = ctx->s;
+	struct ruleset *ruleset = h->ruleset;
 
 	struct dialreq *req = NULL;
 	if (ruleset == NULL) {
@@ -444,6 +527,7 @@ static bool proxy_dial(
 	if (!dialer_start(&ctx->dialer, loop, req)) {
 		return false;
 	}
+	ctx->state = STATE_CONNECT;
 	return true;
 }
 
@@ -455,7 +539,8 @@ http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
-	LOGI_F("http: CONNECT %s", hdr->req.url);
+	HTTP_CTX_LOG_F(
+		LOG_LEVEL_DEBUG, ctx, "http: CONNECT \"%s\"", hdr->req.url);
 
 	if (!proxy_dial(ctx, loop, hdr->req.url)) {
 		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
@@ -465,7 +550,7 @@ http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
 {
-	struct ruleset *restrict ruleset = ctx->server->ruleset;
+	struct ruleset *restrict ruleset = ctx->s->ruleset;
 	if (ruleset == NULL) {
 		return;
 	}
@@ -473,8 +558,8 @@ static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
 	char heap_total[16];
 	(void)format_iec_bytes(
 		heap_total, sizeof(heap_total), (double)heap_bytes);
-	(void)buf_appendf(
-		&ctx->wbuf,
+	BUF_APPENDF(
+		ctx->wbuf,
 		""
 		"Ruleset Memory  : %s\n",
 		heap_total);
@@ -482,8 +567,8 @@ static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
 	if (str == NULL) {
 		return;
 	}
-	(void)buf_appendf(
-		&ctx->wbuf,
+	BUF_APPENDF(
+		ctx->wbuf,
 		"\n"
 		"Ruleset Stats\n"
 		"================\n"
@@ -528,22 +613,18 @@ static void http_handle_stats(
 	RESPHDR_END(ctx);
 	if (banner) {
 		BUF_APPENDCONST(
-			&ctx->wbuf, "" PROJECT_NAME " " PROJECT_VER "\n"
-				    "  " PROJECT_HOMEPAGE "\n\n");
+			ctx->wbuf, PROJECT_NAME " " PROJECT_VER "\n"
+						"  " PROJECT_HOMEPAGE "\n\n");
 	}
 
+	const struct server_stats *restrict stats = ctx->s->stats;
 	const ev_tstamp now = ev_now(loop);
-	const double uptime = server_get_uptime(ctx->server, now);
+	const double uptime = now - stats->started;
 	const time_t server_time = time(NULL);
-	struct stats total;
-	stats_read(&total);
 
-	const uintmax_t num_request = total.num_request;
-
-	const size_t num_halfopen = total.num_halfopen;
-	const size_t num_active = transfer_get_active() / 2u;
-
+	const size_t num_transfer = transfer_get_active();
 	const uintmax_t xfer_bytes = transfer_get_bytes();
+
 	char timestamp[32];
 	(void)strftime(
 		timestamp, sizeof(timestamp), "%FT%T%z",
@@ -556,16 +637,18 @@ static void http_handle_stats(
 	(void)format_duration(
 		str_uptime, sizeof(str_uptime), make_duration(uptime));
 
-	(void)buf_appendf(
-		&ctx->wbuf,
+	BUF_APPENDF(
+		ctx->wbuf,
 		""
 		"Server Time     : %s\n"
 		"Uptime          : %s\n"
-		"Active          : %zu (+%zu)\n"
+		"Num Sessions    : %zu (+%zu)\n"
+		"Num Transfers   : %zu\n"
 		"Transferred     : %s\n"
-		"Total Requests  : %ju\n",
-		timestamp, str_uptime, num_active, num_halfopen, xfer_total,
-		num_request);
+		"Total Requests  : %ju (%ju rejected)\n",
+		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
+		num_transfer, xfer_total, stats->num_request,
+		stats->num_rejected);
 
 	if (stateless) {
 		return;
@@ -573,6 +656,7 @@ static void http_handle_stats(
 
 	static struct {
 		uintmax_t num_request;
+		uintmax_t num_rejected;
 		uintmax_t xfer_bytes;
 		ev_tstamp tstamp;
 	} last = { .tstamp = TSTAMP_NIL };
@@ -587,15 +671,19 @@ static void http_handle_stats(
 	last.xfer_bytes = xfer_bytes;
 
 	const double request_rate =
-		(double)(num_request - last.num_request) / dt;
-	last.num_request = num_request;
+		(double)(stats->num_request - last.num_request) / dt;
+	last.num_request = stats->num_request;
 
-	(void)buf_appendf(
-		&ctx->wbuf,
+	const double reject_rate =
+		(double)(stats->num_rejected - last.num_rejected) / dt;
+	last.num_rejected = stats->num_rejected;
+
+	BUF_APPENDF(
+		ctx->wbuf,
 		""
 		"Traffic         : %s/s\n"
-		"Requests        : %.1lf/s\n",
-		xfer_rate, request_rate);
+		"Requests        : %.1lf/s (%.1lf/s rejected)\n",
+		xfer_rate, request_rate, reject_rate);
 
 	handle_ruleset_stats(ctx, dt);
 }
@@ -625,12 +713,11 @@ static void http_handle_ruleset(
 	struct url *restrict uri)
 {
 	UNUSED(loop);
-	struct server *restrict s = ctx->server;
-	struct ruleset *ruleset = s->ruleset;
+	struct ruleset *ruleset = ctx->s->ruleset;
 	if (ruleset == NULL) {
 		RESPHDR_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
-		(void)buf_appendf(
-			&ctx->wbuf, "%s",
+		BUF_APPENDF(
+			ctx->wbuf, "%s",
 			"ruleset not enabled, restart with -r\n");
 		return;
 	}
@@ -650,7 +737,7 @@ static void http_handle_ruleset(
 		const char *err = ruleset_invoke(ruleset, code, len);
 		if (err != NULL) {
 			RESPHDR_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
-			BUF_APPENDSTR(&ctx->wbuf, err);
+			BUF_APPENDSTR(ctx->wbuf, err);
 			return;
 		}
 		http_resphdr_init(ctx, HTTP_OK);
@@ -667,7 +754,7 @@ static void http_handle_ruleset(
 		const char *err = ruleset_load(ruleset, code, len);
 		if (err != NULL) {
 			RESPHDR_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
-			BUF_APPENDSTR(&ctx->wbuf, err);
+			BUF_APPENDSTR(ctx->wbuf, err);
 			return;
 		}
 		http_resphdr_init(ctx, HTTP_OK);
@@ -683,15 +770,14 @@ static void http_handle_ruleset(
 		char buf[16];
 		(void)format_iec_bytes(buf, sizeof(buf), (double)livemem);
 		RESPHDR_TXT(ctx, HTTP_OK);
-		(void)buf_appendf(&ctx->wbuf, "Ruleset Live Memory: %s\n", buf);
+		BUF_APPENDF(ctx->wbuf, "Ruleset Live Memory: %s\n", buf);
 		return;
 	}
 
 	http_resp_errpage(ctx, HTTP_NOT_FOUND);
 }
 
-static void
-http_handle_restapi(struct ev_loop *loop, struct http_ctx *restrict ctx)
+static void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	const struct http_message *restrict hdr = &ctx->http_msg;
 	struct url uri;
@@ -728,39 +814,33 @@ http_handle_restapi(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	http_resp_errpage(ctx, HTTP_NOT_FOUND);
 }
 
-void http_proxy_serve(
-	struct ev_loop *loop, struct server *s, const int accepted_fd,
-	const struct sockaddr *accepted_sa)
+static void http_serve(
+	struct server *s, struct ev_loop *loop, const int accepted_fd,
+	const struct sockaddr *accepted_sa, http_handler_fn handler)
 {
-	UNUSED(accepted_sa);
-	struct http_ctx *restrict ctx =
-		http_new(accepted_fd, s, http_handle_proxy);
+	struct http_ctx *restrict ctx = http_ctx_new(s, accepted_fd, handler);
 	if (ctx == NULL) {
 		LOGOOM();
 		(void)close(accepted_fd);
 		return;
 	}
+	(void)memcpy(
+		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
 	http_start(loop, ctx);
+}
+
+void http_proxy_serve(
+	struct server *s, struct ev_loop *loop, const int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	http_serve(s, loop, accepted_fd, accepted_sa, http_handle_proxy);
 }
 
 void http_api_serve(
-	struct ev_loop *loop, struct server *s, const int accepted_fd,
+	struct server *s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa)
 {
-	UNUSED(accepted_sa);
-	struct http_ctx *restrict ctx =
-		http_new(accepted_fd, s, http_handle_restapi);
-	if (ctx == NULL) {
-		LOGOOM();
-		(void)close(accepted_fd);
-		return;
-	}
-	http_start(loop, ctx);
-}
-
-void http_read_stats(struct stats *restrict out_stats)
-{
-	*out_stats = stats;
+	http_serve(s, loop, accepted_fd, accepted_sa, http_handle_api);
 }
 
 struct http_invoke_ctx {
@@ -789,7 +869,7 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			}
 			LOGE_F("send: %s", strerror(err));
 			ev_io_stop(loop, watcher);
-			vbuf_free(ctx->wbuf);
+			VBUF_FREE(ctx->wbuf);
 			free(ctx);
 			return;
 		}
@@ -797,13 +877,13 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		len -= nsend;
 		nbsend += nsend;
 	}
-	buf_consume(ctx->wbuf, nbsend);
+	VBUF_CONSUME(ctx->wbuf, nbsend);
 	if (ctx->wbuf->len > 0) {
 		return;
 	}
 
 	ev_io_stop(loop, watcher);
-	vbuf_free(ctx->wbuf);
+	VBUF_FREE(ctx->wbuf);
 	free(ctx);
 }
 
@@ -813,7 +893,8 @@ static void invoke_cb(struct ev_loop *loop, void *data)
 	struct ev_io *restrict w_write = &ctx->w_write;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		LOGD("dielr err");
+		LOGE_F("invoke: %s", dialer_strerror(&ctx->dialer));
+		ev_io_start(loop, w_write);
 		return;
 	}
 	ev_io_init(w_write, request_write_cb, fd, EV_WRITE);
@@ -828,13 +909,11 @@ struct http_invoke_ctx *http_invoke(
 	CHECK(len <= INT_MAX);
 	struct http_invoke_ctx *restrict ctx =
 		malloc(sizeof(struct http_invoke_ctx));
-	dialer_init(
-		&ctx->dialer, conf,
-		&(struct event_cb){
-			.cb = invoke_cb,
-			.ctx = ctx,
-		});
-	ctx->wbuf = vbuf_appendf(
+	if (ctx == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	ctx->wbuf = VBUF_APPENDF(
 		NULL,
 		"POST /ruleset/invoke HTTP/1.0\r\n"
 		"Content-Length: %zu\r\n"
@@ -843,11 +922,16 @@ struct http_invoke_ctx *http_invoke(
 		len, (int)len, code);
 	if (ctx->wbuf == NULL) {
 		LOGOOM();
-		dialer_stop(&ctx->dialer, loop);
 		free(ctx);
 		return NULL;
 	}
 	LOGV_F("http_invoke:\n%.*s", (int)ctx->wbuf->len, ctx->wbuf->data);
+	dialer_init(
+		&ctx->dialer, conf,
+		&(struct event_cb){
+			.cb = invoke_cb,
+			.ctx = ctx,
+		});
 	dialer_start(&ctx->dialer, loop, req);
 	return ctx;
 }

@@ -1,4 +1,3 @@
-#include "net/addr.h"
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "utils/minmax.h"
@@ -14,6 +13,7 @@
 #include <ev.h>
 #include <sys/socket.h>
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,8 +29,12 @@ static struct {
 	const char *netdev;
 #endif
 	bool http : 1;
+	bool proto_timeout : 1;
 #if WITH_REUSEPORT
 	bool reuseport : 1;
+#endif
+#if WITH_FASTOPEN
+	bool fastopen : 1;
 #endif
 #if WITH_TPROXY
 	bool tproxy : 1;
@@ -41,10 +45,20 @@ static struct {
 	int resolve_pf;
 	const char *user_name;
 	double timeout;
+
+	size_t max_sessions;
+	size_t startup_limit_start;
+	size_t startup_limit_rate;
+	size_t startup_limit_full;
 } args = {
 	.verbosity = LOG_LEVEL_INFO,
 	.resolve_pf = PF_UNSPEC,
 	.timeout = 60.0,
+
+	.max_sessions = 4096,
+	.startup_limit_start = 10,
+	.startup_limit_rate = 30,
+	.startup_limit_full = 100,
 };
 
 static struct {
@@ -52,9 +66,23 @@ static struct {
 	struct ev_signal w_sigint;
 	struct ev_signal w_sigterm;
 
+	struct config conf;
+	struct listener listener;
+	struct server server;
+	struct server_stats stats;
+
+	struct {
+		bool running : 1;
+		struct listener listener;
+		struct server server;
+	} api;
+
 	/* ruleset is a singleton */
 	struct ruleset *ruleset;
-} app;
+} app = {
+	.api.running = false,
+	.ruleset = NULL,
+};
 
 static void
 signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents);
@@ -77,18 +105,29 @@ static void print_usage(const char *argv0)
 #if WITH_REUSEPORT
 		"  --reuseport                allow multiple instances to listen on the same address\n"
 #endif
+#if WITH_FASTOPEN
+		"  --fastopen                 enable server-side TCP fast open (RFC 7413)\n"
+#endif
 #if WITH_TPROXY
 		"  --tproxy                   operate as a transparent proxy\n"
 #endif
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  --traceback                print ruleset error traceback (for debugging)\n"
-		"  -t, --timeout <seconds>    maximum time in seconds that a whole request can take (default: 60.0)\n"
+		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
+		"                             can take (default: 60.0)\n"
 		"  -d, --daemonize            run in background and discard all logs\n"
-		"  -u, --user <name>          switch to the specified limited user, e.g. \"nobody\"\n"
-		"  -v, --verbose              increase logging verbosity, can be specified more than once\n"
-		"                             e.g. \"-v -v\" prints verbose messages\n"
+		"  -u, --user <name>          run as the specified limited user\n"
+		"  -v, --verbose              increase logging verbosity, can be specified more\n"
+		"                             than once. e.g. \"-v -v\" prints verbose messages\n"
 		"  -s, --silence              decrease logging verbosity\n"
+		"  -m, --max-sessions <n>     maximum number of concurrent connections\n"
+		"                             (default: 4096, 0: unlimited)\n"
+		"  --max-startups <start:rate:full>\n"
+		"                             maximum number of concurrent halfopen connections\n"
+		"                             (default: 10:30:100)\n"
+		"  --proto-timeout            keep the session in halfopen state until there is\n"
+		"                             bidirectional traffic\n"
 		"\n"
 		"example:\n"
 		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
@@ -138,26 +177,42 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			args.http = true;
 			continue;
 		}
-#if WITH_TPROXY
 		if (strcmp(argv[i], "--tproxy") == 0) {
+#if WITH_TPROXY
 			args.tproxy = true;
+#else
+			LOGF_F("unsupported argument: \"%s\"", argv[i]);
+			exit(EXIT_FAILURE);
+#endif
 			continue;
 		}
-#endif
-#if WITH_NETDEVICE
 		if (strcmp(argv[i], "-i") == 0 ||
 		    strcmp(argv[i], "--netdev") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
+#if WITH_NETDEVICE
 			args.netdev = argv[++i];
+#else
+			LOGW_F("unsupported argument: %s", argv[i]);
+			i++;
+#endif
 			continue;
 		}
-#endif
-#if WITH_REUSEPORT
 		if (strcmp(argv[i], "--reuseport") == 0) {
+#if WITH_REUSEPORT
 			args.reuseport = true;
+#else
+			LOGW_F("unsupported argument: %s", argv[i]);
+#endif
 			continue;
 		}
+		if (strcmp(argv[i], "--fastopen") == 0) {
+#if WITH_FASTOPEN
+			args.fastopen = true;
+#else
+			LOGW_F("unsupported argument: %s", argv[i]);
 #endif
+			continue;
+		}
 		if (strcmp(argv[i], "--api") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			args.restapi = argv[++i];
@@ -208,6 +263,32 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			args.traceback = true;
 			continue;
 		}
+		if (strcmp(argv[i], "-m") == 0 ||
+		    strcmp(argv[i], "--max-sessions") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			if (sscanf(argv[i], "%zu", &args.max_sessions) != 1) {
+				LOGF_F("can't parse \"%s\"\n", argv[i]);
+				exit(EXIT_FAILURE);
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--max-startups") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			if (sscanf(argv[i], "%zu:%zu:%zu",
+				   &args.startup_limit_start,
+				   &args.startup_limit_rate,
+				   &args.startup_limit_full) != 3) {
+				LOGF_F("can't parse \"%s\"\n", argv[i]);
+				exit(EXIT_FAILURE);
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--proto-timeout") == 0) {
+			args.proto_timeout = true;
+			continue;
+		}
 		if (strcmp(argv[i], "--") == 0) {
 			break;
 		}
@@ -251,23 +332,31 @@ int main(int argc, char **argv)
 		ev_signal_start(loop, w_sigterm);
 	}
 
-	struct config conf = {
-		.forward = args.forward,
-		.resolve_pf = args.resolve_pf,
+	app.conf = (struct config)
+	{
+		.forward = args.forward, .resolve_pf = args.resolve_pf,
 #if WITH_NETDEVICE
 		.netdev = args.netdev,
 #endif
+		.proto_timeout = args.proto_timeout,
 #if WITH_REUSEPORT
 		.reuseport = args.reuseport,
+#endif
+#if WITH_FASTOPEN
+		.fastopen = args.fastopen,
 #endif
 #if WITH_TPROXY
 		.transparent = args.tproxy,
 #endif
-		.traceback = args.traceback,
-		.timeout = args.timeout,
+		.traceback = args.traceback, .timeout = args.timeout,
+
+		.max_sessions = args.max_sessions,
+		.startup_limit_start = args.startup_limit_start,
+		.startup_limit_rate = args.startup_limit_rate,
+		.startup_limit_full = args.startup_limit_full,
 	};
 	if (args.ruleset != NULL) {
-		app.ruleset = ruleset_new(loop, &conf);
+		app.ruleset = ruleset_new(loop, &app.conf);
 		CHECKOOM(app.ruleset);
 		const char *err = ruleset_loadfile(app.ruleset, args.ruleset);
 		if (err != NULL) {
@@ -282,37 +371,47 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-	serve_fn serve_cb = socks_serve;
-	if (args.forward != NULL) {
-		serve_cb = forward_serve;
+	app.stats = (struct server_stats){ 0 };
+	app.server = (struct server){
+		.conf = &app.conf,
+		.ruleset = app.ruleset,
+		.stats = &app.stats,
+	};
+	if (args.forward != NULL
 #if WITH_TPROXY
-	} else if (args.tproxy) {
-		serve_cb = forward_serve;
+	    || args.tproxy
 #endif
+	) {
+		app.server.serve = forward_serve;
 	} else if (args.http) {
-		serve_cb = http_proxy_serve;
+		app.server.serve = http_proxy_serve;
+	} else {
+		/* default to SOCKS server */
+		app.server.serve = socks_serve;
 	}
 
-	struct server *s =
-		server_new(&bindaddr.sa, &conf, app.ruleset, serve_cb);
-	if (s == NULL) {
-		FAILMSG("server initializing failed");
+	listener_init(&app.listener, &app.server);
+	if (!listener_start(&app.listener, loop, &bindaddr.sa)) {
+		FAILMSG("failed to start listener");
 	}
-	server_start(s, loop);
 
-	struct server *apiserver = NULL;
 	if (args.restapi != NULL) {
 		sockaddr_max_t apiaddr;
 		if (!parse_bindaddr(&apiaddr, args.restapi)) {
 			LOGF_F("unable to parse address: %s", args.restapi);
 			exit(EXIT_FAILURE);
 		}
-		apiserver = server_new(
-			&apiaddr.sa, &conf, app.ruleset, http_api_serve);
-		if (apiserver == NULL) {
-			FAILMSG("api server initializing failed");
+		app.api.server = (struct server){
+			.conf = &app.conf,
+			.ruleset = app.ruleset,
+			.serve = http_api_serve,
+			.stats = &app.stats,
+		};
+		listener_init(&app.api.listener, &app.api.server);
+		if (!listener_start(&app.api.listener, loop, &apiaddr.sa)) {
+			FAILMSG("failed to start api listener");
 		}
-		server_start(apiserver, loop);
+		app.api.running = true;
 	}
 
 	drop_privileges(args.user_name);
@@ -321,12 +420,11 @@ int main(int argc, char **argv)
 	ev_run(loop, 0);
 
 	LOGI("server stop");
-	if (apiserver != NULL) {
-		server_stop(apiserver, loop);
-		server_free(apiserver);
+	if (app.api.running) {
+		listener_stop(&app.api.listener, loop);
+		app.api.running = false;
 	}
-	server_stop(s, loop);
-	server_free(s);
+	listener_stop(&app.listener, loop);
 	if (app.ruleset != NULL) {
 		ruleset_free(app.ruleset);
 		app.ruleset = NULL;

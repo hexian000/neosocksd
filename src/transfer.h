@@ -11,6 +11,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #define XFER_BUFSIZE ((size_t)16384)
 
@@ -24,8 +25,9 @@ enum transfer_state {
 struct transfer {
 	enum transfer_state state;
 	struct ev_io w_recv, w_send;
-	struct ev_watcher w_done;
-	struct event_cb done_cb;
+	struct ev_watcher w_state;
+	struct event_cb state_cb;
+	uintmax_t rx, tx;
 	struct {
 		BUFFER_HDR;
 		unsigned char data[XFER_BUFSIZE];

@@ -10,7 +10,6 @@ add_executable(neosocksd
     socks.c socks.h
     http.c http.h
     server.c server.h
-    stats.c stats.h
     main.c
 )
 
@@ -34,6 +33,7 @@ include(CheckSymbolExists)
 check_symbol_exists(IP_TRANSPARENT "netinet/in.h" HAVE_IP_TRANSPARENT)
 check_symbol_exists(SO_BINDTODEVICE "sys/socket.h" HAVE_SO_BINDTODEVICE)
 check_symbol_exists(SO_REUSEPORT "sys/socket.h" HAVE_SO_REUSEPORT)
+check_symbol_exists(TCP_FASTOPEN "netinet/tcp.h" HAVE_TCP_FASTOPEN)
 
 target_compile_options(neosocksd PRIVATE -include "${CMAKE_CURRENT_BINARY_DIR}/config.h")
 
@@ -84,7 +84,7 @@ else()
     message(FATAL_ERROR "Lua not found")
 endif()
 target_include_directories(neosocksd PRIVATE ${LUA_INCLUDE_DIR})
-target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY})
+target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
 
 install(TARGETS neosocksd DESTINATION bin)
 

@@ -5,30 +5,43 @@
 
 #include <ev.h>
 
-struct ruleset;
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdint.h>
+
+struct server_stats {
+	size_t num_halfopen;
+	size_t num_sessions;
+	uintmax_t num_request;
+	uintmax_t num_rejected;
+	ev_tstamp started;
+};
+
 struct server;
 
 typedef void (*serve_fn)(
-	struct ev_loop *loop, struct server *s, const int accepted_fd,
+	struct server *h, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa);
 
-/* the server binds to an address and serves any incoming request with serve_cb */
 struct server {
 	const struct config *conf;
 	struct ruleset *ruleset;
-	serve_fn serve_cb;
-	struct ev_io w_accept;
-	struct ev_timer w_timer;
-	ev_tstamp uptime;
+	struct server_stats *stats;
+
+	serve_fn serve;
 };
 
-struct server *server_new(
-	const struct sockaddr *bindaddr, const struct config *conf,
-	struct ruleset *ruleset, serve_fn serve_cb);
-void server_start(struct server *s, struct ev_loop *loop);
-void server_stop(struct server *s, struct ev_loop *loop);
-void server_free(struct server *s);
+/* the listener binds to an address and accepts incoming connections */
+struct listener {
+	struct server *s;
+	struct ev_io w_accept;
+	struct ev_timer w_timer;
+};
 
-double server_get_uptime(struct server *s, ev_tstamp now);
+void listener_init(struct listener *l, struct server *s);
+bool listener_start(
+	struct listener *l, struct ev_loop *loop,
+	const struct sockaddr *bindaddr);
+void listener_stop(struct listener *l, struct ev_loop *loop);
 
 #endif /* SERVER_H */
