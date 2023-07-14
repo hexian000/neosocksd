@@ -450,6 +450,7 @@ http_timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct http_ctx *restrict ctx = watcher->data;
+	ctx->s->stats->num_timeout++;
 	http_ctx_stop(loop, ctx);
 	http_ctx_free(ctx);
 }
@@ -645,10 +646,10 @@ static void http_handle_stats(
 		"Num Sessions    : %zu (+%zu)\n"
 		"Num Transfers   : %zu\n"
 		"Transferred     : %s\n"
-		"Total Requests  : %ju (%ju rejected)\n",
+		"Total Requests  : %ju (%ju timeout)\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
 		num_transfer, xfer_total, stats->num_request,
-		stats->num_rejected);
+		stats->num_timeout);
 
 	if (stateless) {
 		return;
@@ -675,8 +676,8 @@ static void http_handle_stats(
 	last.num_request = stats->num_request;
 
 	const double reject_rate =
-		(double)(stats->num_rejected - last.num_rejected) / dt;
-	last.num_rejected = stats->num_rejected;
+		(double)(stats->num_reject - last.num_rejected) / dt;
+	last.num_rejected = stats->num_reject;
 
 	BUF_APPENDF(
 		ctx->wbuf,

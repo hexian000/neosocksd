@@ -13,7 +13,8 @@ struct server_stats {
 	size_t num_halfopen;
 	size_t num_sessions;
 	uintmax_t num_request;
-	uintmax_t num_rejected;
+	uintmax_t num_reject;
+	uintmax_t num_timeout;
 	ev_tstamp started;
 };
 

@@ -66,7 +66,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		}
 		LOGV_F("accept: fd=%d", fd);
 		if (is_startup_limited(l)) {
-			stats->num_rejected++;
+			stats->num_reject++;
 			if (close(fd) != 0) {
 				const int err = errno;
 				LOGW_F("close: %s", strerror(err));

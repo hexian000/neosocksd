@@ -253,6 +253,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	default:
 		FAIL();
 	}
+	ctx->s->stats->num_timeout++;
 	socks_ctx_stop(loop, ctx);
 	socks_ctx_free(ctx);
 }
