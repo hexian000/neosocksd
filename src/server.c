@@ -48,10 +48,10 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct server_stats *restrict stats = s->stats;
 
 	for (;;) {
-		sockaddr_max_t m_sa;
-		socklen_t sa_len = sizeof(m_sa);
+		sockaddr_max_t addr;
+		socklen_t addrlen = sizeof(addr);
 		/* accept client request */
-		const int fd = accept(watcher->fd, &m_sa.sa, &sa_len);
+		const int fd = accept(watcher->fd, &addr.sa, &addrlen);
 		if (fd < 0) {
 			const int err = errno;
 			if (IS_TRANSIENT_ERROR(err)) {
@@ -81,7 +81,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		}
 		socket_set_tcp(fd, true, true);
 
-		s->serve(s, loop, fd, &m_sa.sa);
+		s->serve(s, loop, fd, &addr.sa);
 	}
 }
 
