@@ -29,7 +29,7 @@ enum {
 
 extern int slog_level;
 extern FILE *slog_file;
-void slog_write_bin(const void *data, const size_t n);
+void slog_write_bin(const void *data, size_t n);
 
 #if defined(_MSC_VER)
 #define PATH_SEPARATOR '\\'
