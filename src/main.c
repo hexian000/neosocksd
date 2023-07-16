@@ -97,7 +97,7 @@ static void print_usage(const char *argv0)
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
 		"  -f, --forward <address>    run simple TCP port forwarding instead of SOCKS\n"
 #if WITH_NETDEVICE
-		"  -i, --netdev <name>        restrict network device used by outgoing connections\n"
+		"  -i, --netdev <name>        bind outgoing connections to network device\n"
 #endif
 #if WITH_REUSEPORT
 		"  --reuseport                allow multiple instances to listen on the same address\n"
@@ -174,15 +174,12 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			args.http = true;
 			continue;
 		}
-		if (strcmp(argv[i], "--tproxy") == 0) {
 #if WITH_TPROXY
+		if (strcmp(argv[i], "--tproxy") == 0) {
 			args.tproxy = true;
-#else
-			LOGF_F("unsupported argument: \"%s\"", argv[i]);
-			exit(EXIT_FAILURE);
-#endif
 			continue;
 		}
+#endif
 		if (strcmp(argv[i], "-i") == 0 ||
 		    strcmp(argv[i], "--netdev") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);

@@ -177,11 +177,10 @@ send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 
 static void socks4_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 {
-	struct socks4_hdr hdr = (struct socks4_hdr){
-		.version = 0,
-		.command = rsp,
-	};
-	(void)send_rsp(ctx, &hdr, sizeof(hdr));
+	unsigned char buf[sizeof(struct socks4_hdr)] = { 0 };
+	write_uint8(buf + offsetof(struct socks4_hdr, version), 0);
+	write_uint8(buf + offsetof(struct socks4_hdr, command), rsp);
+	(void)send_rsp(ctx, buf, sizeof(buf));
 }
 
 static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp)
@@ -196,31 +195,39 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp)
 			LOGE_F("getsockname: %s", strerror(err));
 		}
 	}
-	struct {
-		struct socks5_hdr hdr;
-		unsigned char addr[sizeof(struct in6_addr) + sizeof(in_port_t)];
-	} buf;
-	buf.hdr = (struct socks5_hdr){
-		.version = SOCKS5,
-		.command = rsp,
-	};
+	unsigned char
+		buf[sizeof(struct socks5_hdr) + sizeof(struct in6_addr) +
+		    sizeof(in_port_t)];
+	unsigned char *const hdr = buf;
+
+	write_uint8(hdr + offsetof(struct socks5_hdr, version), SOCKS5);
+	write_uint8(hdr + offsetof(struct socks5_hdr, command), rsp);
+
 	size_t len = sizeof(struct socks5_hdr);
+	unsigned char *const addrbuf = buf + len;
 	switch (addr.sa.sa_family) {
-	case AF_INET:
-		buf.hdr.addrtype = SOCKS5ADDR_IPV4;
-		memcpy(buf.addr, &addr.in.sin_addr, sizeof(addr.in.sin_addr));
-		memcpy(buf.addr + sizeof(addr.in.sin_addr), &addr.in.sin_port,
-		       sizeof(addr.in.sin_port));
-		len += sizeof(addr.in.sin_addr) + sizeof(addr.in.sin_port);
-		break;
-	case AF_INET6:
-		buf.hdr.addrtype = SOCKS5ADDR_IPV6;
-		memcpy(buf.addr, &addr.in6.sin6_addr,
+	case AF_INET: {
+		write_uint8(
+			hdr + offsetof(struct socks5_hdr, addrtype),
+			SOCKS5ADDR_IPV4);
+		memcpy(addrbuf, &addr.in.sin_addr, sizeof(addr.in.sin_addr));
+		len += sizeof(addr.in.sin_addr);
+		unsigned char *const portbuf = buf + len;
+		memcpy(portbuf, &addr.in.sin_port, sizeof(addr.in.sin_port));
+		len += sizeof(addr.in.sin_port);
+	} break;
+	case AF_INET6: {
+		write_uint8(
+			hdr + offsetof(struct socks5_hdr, addrtype),
+			SOCKS5ADDR_IPV6);
+		memcpy(addrbuf, &addr.in6.sin6_addr,
 		       sizeof(addr.in6.sin6_addr));
-		memcpy(buf.addr + sizeof(addr.in6.sin6_addr),
-		       &addr.in6.sin6_port, sizeof(addr.in6.sin6_port));
-		len += sizeof(addr.in6.sin6_addr) + sizeof(addr.in6.sin6_port);
-		break;
+		len += sizeof(addr.in6.sin6_addr);
+		unsigned char *const portbuf = buf + len;
+		memcpy(portbuf, &addr.in6.sin6_port,
+		       sizeof(addr.in6.sin6_port));
+		len += sizeof(addr.in6.sin6_port);
+	} break;
 	default:
 		FAIL();
 	}

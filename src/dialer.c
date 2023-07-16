@@ -169,7 +169,7 @@ enum dialer_state {
 	STATE_DONE,
 };
 
-static void dialer_break(struct dialer *restrict d, struct ev_loop *loop)
+static void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 {
 	if (d->req != NULL) {
 		dialreq_free(d->req);
@@ -189,9 +189,20 @@ static void dialer_break(struct dialer *restrict d, struct ev_loop *loop)
 	}
 }
 
+static void dialer_fail(struct dialer *restrict d, struct ev_loop *loop)
+{
+	dialer_cancel(d, loop);
+	if (d->fd != -1) {
+		(void)close(d->fd);
+		d->fd = -1;
+	}
+	d->state = STATE_INIT;
+	d->done_cb.cb(loop, d->done_cb.ctx);
+}
+
 static void dialer_finish(struct dialer *restrict d, struct ev_loop *loop)
 {
-	dialer_break(d, loop);
+	dialer_cancel(d, loop);
 	d->state = STATE_DONE;
 	d->done_cb.cb(loop, d->done_cb.ctx);
 }
@@ -249,6 +260,7 @@ static bool send_socks4a_req(
 		return false;
 	}
 	const size_t len = sizeof(struct socks4_hdr) + 1 + strlen(host) + 1;
+	LOG_BIN_F(LOG_LEVEL_VERBOSE, buf, len, "send: %zu bytes", len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
 		d->syserr = errno;
@@ -303,16 +315,16 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 	if (d->buf.len < sizeof(struct socks4_hdr)) {
 		return sizeof(struct socks4_hdr) - d->buf.len;
 	}
-	struct socks4_hdr hdr;
-	hdr.version =
-		read_uint8(d->buf.data + offsetof(struct socks4_hdr, version));
-	if (hdr.version != UINT8_C(0)) {
+	const unsigned char *hdr = d->buf.data;
+	const uint8_t version =
+		read_uint8(hdr + offsetof(struct socks4_hdr, version));
+	if (version != UINT8_C(0)) {
 		d->err = DIALER_PROXYERR;
 		return -1;
 	}
-	hdr.command =
-		read_uint8(d->buf.data + offsetof(struct socks4_hdr, command));
-	if (hdr.command != SOCKS4RSP_GRANTED) {
+	const uint8_t command =
+		read_uint8(hdr + offsetof(struct socks4_hdr, command));
+	if (command != SOCKS4RSP_GRANTED) {
 		d->err = DIALER_PROXYERR;
 		return -1;
 	}
@@ -389,7 +401,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
 	if (ret < 0) { /* fail */
-		dialer_finish(d, loop);
+		dialer_fail(d, loop);
 		return;
 	} else if (ret > 0) {
 		ev_io_start(loop, watcher);
@@ -401,15 +413,13 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	if (d->jump < d->req->num_proxy) {
 		d->state = STATE_HANDSHAKE2;
 		if (!send_proxy_req(d)) {
-			dialer_finish(d, loop);
+			dialer_fail(d, loop);
 			return;
 		}
 		ev_io_start(loop, watcher);
 		return;
 	}
 
-	ev_timer_stop(loop, &d->w_timeout);
-	d->state = STATE_DONE;
 	dialer_finish(d, loop);
 }
 
@@ -429,7 +439,7 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		if (sockerr != 0) {
 			d->syserr = sockerr;
 			d->err = DIALER_SYSERR;
-			dialer_finish(d, loop);
+			dialer_fail(d, loop);
 			return;
 		}
 	} else {
@@ -438,15 +448,13 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 
 	if (d->jump >= req->num_proxy) {
-		d->state = STATE_DONE;
-		ev_timer_stop(loop, &d->w_timeout);
 		dialer_finish(d, loop);
 		return;
 	}
 
 	d->state = STATE_HANDSHAKE1;
 	if (!send_proxy_req(d)) {
-		dialer_finish(d, loop);
+		dialer_fail(d, loop);
 		return;
 	}
 	ev_io_init(watcher, recv_cb, fd, EV_READ);
@@ -551,7 +559,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	CHECK_EV_ERROR(revents);
 	struct dialer *restrict d = watcher->data;
 	d->err = DIALER_TIMEOUT;
-	dialer_finish(d, loop);
+	dialer_fail(d, loop);
 }
 
 void dialer_init(
@@ -639,7 +647,7 @@ const char *dialer_strerror(struct dialer *d)
 
 void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 {
-	dialer_break(d, loop);
+	dialer_cancel(d, loop);
 	if (d->fd != -1) {
 		(void)close(d->fd);
 		d->fd = -1;
