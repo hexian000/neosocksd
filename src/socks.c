@@ -9,7 +9,6 @@
 #include "utils/check.h"
 #include "proto/socks.h"
 #include "dialer.h"
-#include "resolver.h"
 #include "ruleset.h"
 #include "transfer.h"
 #include "sockutil.h"
@@ -28,15 +27,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-
-#define SOCKS_BUF_SIZE                                                         \
-	(MAX(sizeof(struct socks4_hdr) + (255 + 1) /* ident */ +               \
-		     (FQDN_MAX_LENGTH + 1),                                    \
-	     sizeof(struct socks5_auth_req) + 255 /* methods */ +              \
-		     sizeof(struct socks5_hdr) +                               \
-		     MAX(MAX(sizeof(struct in_addr) + sizeof(in_port_t),       \
-			     sizeof(struct in6_addr) + sizeof(in_port_t)),     \
-			 1 + FQDN_MAX_LENGTH + sizeof(in_port_t))))
 
 enum socks_state {
 	STATE_INIT,
@@ -61,7 +51,7 @@ struct socks_ctx {
 			unsigned char *next;
 			struct {
 				BUFFER_HDR;
-				unsigned char data[SOCKS_BUF_SIZE];
+				unsigned char data[SOCKS_MAX_LENGTH];
 			} rbuf;
 			struct dialer dialer;
 		};
@@ -721,7 +711,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
 	ctx->state = STATE_INIT;
-	BUF_INIT(ctx->rbuf, SOCKS_BUF_SIZE);
+	BUF_INIT(ctx->rbuf, sizeof(ctx->rbuf.data));
 
 	const struct config *restrict conf = s->conf;
 

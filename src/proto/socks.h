@@ -4,6 +4,8 @@
 #ifndef PROTO_SOCKS_H
 #define PROTO_SOCKS_H
 
+#include "domain.h"
+
 #include <stdint.h>
 
 enum socks_version {
@@ -86,5 +88,14 @@ struct socks5_hdr {
 	uint8_t reserved;
 	uint8_t addrtype;
 };
+
+#define SOCKS_MAX_LENGTH                                                       \
+	(MAX(sizeof(struct socks4_hdr) + (255 + 1) /* ident */ +               \
+		     (FQDN_MAX_LENGTH + 1),                                    \
+	     sizeof(struct socks5_auth_req) + 255 /* methods */ +              \
+		     sizeof(struct socks5_hdr) +                               \
+		     MAX(MAX(sizeof(struct in_addr) + sizeof(in_port_t),       \
+			     sizeof(struct in6_addr) + sizeof(in_port_t)),     \
+			 1 + FQDN_MAX_LENGTH + sizeof(in_port_t))))
 
 #endif /* PROTO_SOCKS_H */

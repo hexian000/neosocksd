@@ -113,7 +113,8 @@ function _G.log(...)
     local info = debug.getinfo(2, "Sl")
     local source = info.source
     if source:startswith("@") then
-        source = source:sub(2):gsub("^.*/([^/]+)$", "%1")
+        source = source:sub(2)
+        source = source:match("^.*/([^/]+)$") or source
     elseif source:startswith("=") then
         source = "<" .. source:sub(2) .. ">"
     else
@@ -482,9 +483,9 @@ local function stats_(dt)
     if clock > 0.0 then
         local last_clock = _G.last_clock
         if last_clock and clock >= last_clock then
-            w:insertf("%-16s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
+            w:insertf("%-20s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
         else
-            w:insertf("%-16s: (unknown)", "Server Load")
+            w:insertf("%-20s: (unknown)", "Server Load")
         end
         _G.last_clock = clock
     end

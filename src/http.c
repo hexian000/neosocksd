@@ -649,7 +649,7 @@ static void http_handle_stats(
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu)\n"
 		"Listener Accepts    : %ju (%ju rejected)\n"
-		"Requests            : %ju (+%ju)\n"
+		"Successful Requests : %ju (+%ju)\n"
 		"Traffic (up/down)   : %s / %s\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
 		lstats->num_serve, num_reject, stats->num_success,
@@ -660,7 +660,6 @@ static void http_handle_stats(
 	}
 
 	static struct {
-		uintmax_t num_request;
 		uintmax_t num_success;
 		uintmax_t xfer_up, xfer_down;
 		uintmax_t num_accept;
@@ -680,21 +679,17 @@ static void http_handle_stats(
 		(double)(lstats->num_accept - last.num_accept) / dt;
 	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
 
-	const double successful_rate =
+	const double success_rate =
 		(double)(stats->num_success - last.num_success) / dt;
-	const double unsuccessful_rate =
-		(double)((stats->num_request - last.num_request) - (stats->num_success - last.num_success)) /
-		dt;
 
 	BUF_APPENDF(
 		ctx->wbuf,
 		"Listener Accepts    : %.1f/s (%.1f reject/s)\n"
-		"Requests            : %.1f/s (%+.1f/s)\n"
+		"Successful Requests : %.1f/s\n"
 		"Traffic (up/down)   : %s/s / %s/s\n",
-		accept_rate, reject_rate, successful_rate, unsuccessful_rate,
-		xfer_rate_up, xfer_rate_down);
+		accept_rate, reject_rate, success_rate, xfer_rate_up,
+		xfer_rate_down);
 
-	last.num_request = stats->num_request;
 	last.num_success = stats->num_success;
 	last.xfer_up = stats->byt_up;
 	last.xfer_down = stats->byt_down;

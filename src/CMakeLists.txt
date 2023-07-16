@@ -2,7 +2,6 @@ add_executable(neosocksd
     util.c util.h
     conf.c conf.h
     sockutil.c sockutil.h
-    resolver.c resolver.h
     dialer.c dialer.h
     ruleset.c ruleset.h
     transfer.c transfer.h

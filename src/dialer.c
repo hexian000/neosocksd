@@ -7,7 +7,6 @@
 #include "net/url.h"
 #include "proto/socks.h"
 #include "conf.h"
-#include "resolver.h"
 #include "sockutil.h"
 #include "util.h"
 
@@ -164,7 +163,6 @@ void dialreq_free(struct dialreq *restrict req)
 
 enum dialer_state {
 	STATE_INIT,
-	STATE_RESOLVE,
 	STATE_CONNECT,
 	STATE_HANDSHAKE1,
 	STATE_HANDSHAKE2,
@@ -180,10 +178,6 @@ dialer_reset(struct dialer *restrict d, struct ev_loop *loop, const int state)
 	}
 	switch (d->state) {
 	case STATE_INIT:
-		break;
-	case STATE_RESOLVE:
-		resolver_stop(&d->resolver, loop);
-		ev_timer_stop(loop, &d->w_timeout);
 		break;
 	case STATE_CONNECT:
 	case STATE_HANDSHAKE1:
@@ -511,19 +505,25 @@ static bool connect_sa(
 	return true;
 }
 
-static void resolve_cb(struct ev_loop *loop, void *data)
+static bool connect_domain(
+	struct dialer *restrict d, struct ev_loop *loop,
+	const struct domain_name *domain)
 {
-	struct dialer *restrict d = data;
-	const struct sockaddr *sa = resolver_get(&d->resolver);
-	if (sa == NULL) {
-		LOGD("dialer resolve failed");
-		dialer_stop(d, loop);
-		return;
+	sockaddr_max_t addr;
+
+	char host[FQDN_MAX_LENGTH + 1];
+	memcpy(host, domain->name, domain->len);
+	host[domain->len] = '\0';
+	if (!resolve_hostname(&addr, host, d->conf->resolve_pf)) {
+		return false;
 	}
-	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
+
+	const struct sockaddr *sa = &addr.sa;
+	if (LOGLEVEL(LOG_LEVEL_DEBUG)) {
 		char addr_str[64];
 		format_sa(sa, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_VERBOSE, "dialer: resolve \"%s\"", addr_str);
+		LOG_F(LOG_LEVEL_DEBUG, "resolve: \"%.*s\" is \"%s\"",
+		      (int)domain->len, domain->name, addr_str);
 	}
 
 	const uint16_t port = d->req->addr.port;
@@ -537,15 +537,10 @@ static void resolve_cb(struct ev_loop *loop, void *data)
 		in6->sin6_port = htons(port);
 	} break;
 	default:
-		LOGE_F("unsupported address family: %d", sa->sa_family);
-		dialer_finish(d, loop);
-		return;
+		FAIL();
 	}
 
-	if (!connect_sa(d, loop, sa)) {
-		LOGD("dialer connect failed");
-		dialer_finish(d, loop);
-	}
+	return connect_sa(d, loop, sa);
 }
 
 static void
@@ -568,12 +563,6 @@ void dialer_init(
 	BUF_INIT(d->buf, sizeof(d->buf.data));
 	d->req = NULL;
 	d->state = STATE_INIT;
-	resolver_init(
-		&d->resolver, conf->resolve_pf,
-		&(struct event_cb){
-			.cb = resolve_cb,
-			.ctx = d,
-		});
 	{
 		struct ev_timer *restrict w_timeout = &d->w_timeout;
 		ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
@@ -612,10 +601,9 @@ bool dialer_start(
 		}
 	} break;
 	case ATYP_DOMAIN: {
-		if (!resolver_start(&d->resolver, loop, &addr->domain)) {
+		if (!connect_domain(d, loop, &addr->domain)) {
 			return false;
 		}
-		d->state = STATE_RESOLVE;
 	} break;
 	default:
 		FAIL();

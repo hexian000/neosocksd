@@ -2,14 +2,14 @@
 #define DIALER_H
 
 #include "conf.h"
+#include "proto/socks.h"
+#include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "net/url.h"
-#include "resolver.h"
 #include "sockutil.h"
 #include "util.h"
 
 #include <ev.h>
-
 #include <netinet/in.h>
 
 #include <stdbool.h>
@@ -58,7 +58,10 @@ void dialreq_free(struct dialreq *r);
 
 struct sockaddr;
 
-#define DIALER_BUF_SIZE 1024
+#define DIALER_BUF_SIZE                                                        \
+	MAX(sizeof("CONNECT") + (FQDN_MAX_LENGTH + sizeof(":65535")) +         \
+		    sizeof("HTTP/1.1\r\n"),                                    \
+	    SOCKS_MAX_LENGTH)
 
 enum dialer_error {
 	DIALER_SUCCESS,
@@ -68,7 +71,6 @@ enum dialer_error {
 };
 
 struct dialer {
-	struct resolver resolver;
 	const struct config *conf;
 	struct event_cb done_cb;
 	struct dialreq *req;
