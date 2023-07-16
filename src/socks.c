@@ -669,6 +669,7 @@ static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
+	ev_io_stop(loop, watcher);
 
 	struct socks_ctx *restrict ctx = watcher->data;
 	const int ret = socks_recv(ctx, watcher->fd);
@@ -677,12 +678,10 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		socks_ctx_free(ctx);
 		return;
 	} else if (ret > 0) {
-		/* notify SO_RCVLOWAT may changed */
 		ev_io_start(loop, watcher);
 		return;
 	}
 
-	ev_io_stop(loop, watcher);
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
 

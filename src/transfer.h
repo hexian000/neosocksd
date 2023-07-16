@@ -25,7 +25,6 @@ enum transfer_state {
 struct transfer {
 	enum transfer_state state;
 	struct ev_io w_recv, w_send;
-	struct ev_watcher w_state;
 	struct event_cb state_cb;
 	uintmax_t *byt_transferred;
 	struct {

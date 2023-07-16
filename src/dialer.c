@@ -169,8 +169,7 @@ enum dialer_state {
 	STATE_DONE,
 };
 
-static void
-dialer_reset(struct dialer *restrict d, struct ev_loop *loop, const int state)
+static void dialer_break(struct dialer *restrict d, struct ev_loop *loop)
 {
 	if (d->req != NULL) {
 		dialreq_free(d->req);
@@ -184,20 +183,16 @@ dialer_reset(struct dialer *restrict d, struct ev_loop *loop, const int state)
 	case STATE_HANDSHAKE2: {
 		ev_io_stop(loop, &d->w_socket);
 		ev_timer_stop(loop, &d->w_timeout);
-		if (d->fd > 0) {
-			(void)close(d->fd);
-			d->fd = -1;
-		}
 	} break;
 	case STATE_DONE:
 		break;
 	}
-	d->state = state;
 }
 
 static void dialer_finish(struct dialer *restrict d, struct ev_loop *loop)
 {
-	dialer_reset(d, loop, STATE_DONE);
+	dialer_break(d, loop);
+	d->state = STATE_DONE;
 	d->done_cb.cb(loop, d->done_cb.ctx);
 }
 
@@ -387,6 +382,8 @@ static int dialer_recv(
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
+	ev_io_stop(loop, watcher);
+
 	struct dialer *restrict d = watcher->data;
 	const int fd = watcher->fd;
 
@@ -395,7 +392,6 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		dialer_finish(d, loop);
 		return;
 	} else if (ret > 0) {
-		/* notify SO_RCVLOWAT may changed */
 		ev_io_start(loop, watcher);
 		return;
 	}
@@ -408,10 +404,10 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			dialer_finish(d, loop);
 			return;
 		}
+		ev_io_start(loop, watcher);
 		return;
 	}
 
-	ev_io_stop(loop, &d->w_socket);
 	ev_timer_stop(loop, &d->w_timeout);
 	d->state = STATE_DONE;
 	dialer_finish(d, loop);
@@ -643,5 +639,10 @@ const char *dialer_strerror(struct dialer *d)
 
 void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 {
-	dialer_reset(d, loop, STATE_INIT);
+	dialer_break(d, loop);
+	if (d->fd != -1) {
+		(void)close(d->fd);
+		d->fd = -1;
+	}
+	d->state = STATE_INIT;
 }

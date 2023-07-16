@@ -85,14 +85,6 @@ static bool transfer_send(struct transfer *restrict t)
 	return true;
 }
 
-static void transfer_state_cb(
-	struct ev_loop *loop, struct ev_watcher *watcher, const int revents)
-{
-	UNUSED(revents);
-	struct transfer *restrict t = watcher->data;
-	t->state_cb.cb(loop, t->state_cb.ctx);
-}
-
 static void
 transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
@@ -140,7 +132,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	if (t->state != state) {
 		t->state = state;
-		ev_feed_event(loop, &t->w_state, EV_CUSTOM);
+		t->state_cb.cb(loop, t->state_cb.ctx);
 	}
 }
 
@@ -155,9 +147,6 @@ void transfer_init(
 	struct ev_io *restrict w_send = &t->w_send;
 	ev_io_init(w_send, transfer_cb, dst_fd, EV_WRITE);
 	w_send->data = t;
-	struct ev_watcher *restrict w_state = &t->w_state;
-	ev_init(w_state, transfer_state_cb);
-	w_state->data = t;
 	t->state_cb = cb;
 	t->byt_transferred = byt_transferred;
 	BUF_INIT(t->buf, XFER_BUFSIZE);
