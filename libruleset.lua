@@ -293,26 +293,6 @@ function rule.proxy(...)
         return addr, chain:unpack()
     end
 end
-
-function rule.resolve()
-    return function(s)
-        local host, port = splithostport(s)
-        host = string.lower(host)
-        local addr
-        local hosts = _G.hosts
-        if hosts then
-            addr = hosts[host]
-            if addr then
-                return string.format("%s:%s", addr, port)
-            end
-        end
-        addr = neosocksd.resolve(host)
-        if not addr then
-            errorf("unable to resolve host name: %q", host)
-        end
-        return string.format("%s:%s", addr, port)
-    end
-end
 _G.rule = rule
 
 -- [[ internal route functions ]] --
@@ -413,11 +393,7 @@ local function resolve_(addr)
             if tag then
                 logf("redirect_name: [%s] %q", tag, addr)
             end
-            local ret = table.pack(action(addr))
-            if ret[2] ~= nil then
-                return table.unpack(ret)
-            end
-            addr = ret[1]
+            return action(addr)
         end
     end
     -- lookup in hosts table

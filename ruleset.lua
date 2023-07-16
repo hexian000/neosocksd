@@ -18,8 +18,7 @@ _G.hosts = {
 
 -- 2. ordered redirect rules
 -- in {matcher, action, optional log tag}
--- _G.redirect_name: continue matching after a match is found, unless the rule specifies a proxy
--- Therefore, rule.resolve() is different with rule.direct() only in _G.redirect_name
+-- matching stops after a match is found
 _G.redirect_name = {
     -- pass to region1 proxy
     [1] = {match.exact("region1.neosocksd.lan:80"), rule.redirect("192.168.32.1:1080", "neosocksd.lan:80")},
@@ -28,8 +27,6 @@ _G.redirect_name = {
            rule.redirect("192.168.32.1:1080", "192.168.33.1:1080", "neosocksd.lan:80")},
     -- access mDNS sites directly, _G.route/_G.route6 are skipped
     [3] = {match.domain(".local"), rule.direct(), "local"},
-    -- resolve LAN names locally, _G.route/_G.route6 are still applied
-    [4] = {match.domain(".lan"), rule.resolve(), "lan"},
     -- no default action
     [0] = nil
 }
@@ -44,7 +41,6 @@ _G.redirect = {
 -- _G.redirect6 is not set
 
 -- 3. ordered routes
--- matching stops after a match is found
 _G.route = {
     -- reject loopback or link-local
     [1] = {inet.subnet("127.0.0.0/8"), rule.reject()},
@@ -55,6 +51,8 @@ _G.route = {
     [4] = {inet.subnet("192.168.33.0/24"), rule.proxy("192.168.32.1:1080", "192.168.33.1:1080"), "region2"},
     -- access other lan addresses directly
     [5] = {inet.subnet("192.168.0.0/16"), rule.direct(), "lan"},
+    -- dynamically loaded big IP ranges list
+    [6] = {composite.maybe(_G, "countryip"), rule.proxy("proxy.lan:1080"), "countryip"},
     -- no default action, go to _G.route_default
     [0] = nil
 }
@@ -65,6 +63,8 @@ _G.route6 = {
     [2] = {inet6.subnet("fe80::/10"), rule.reject()},
     [3] = {inet6.subnet("::ffff:127.0.0.0/104"), rule.reject()},
     [4] = {inet6.subnet("::ffff:169.254.0.0/112"), rule.reject()},
+    -- dynamically loaded big IP ranges list
+    [5] = {composite.maybe(_G, "countryip6"), rule.proxy("proxy.lan:1080"), "countryip"},
     -- default action
     [0] = rule.direct()
 }
