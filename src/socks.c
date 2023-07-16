@@ -354,9 +354,9 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	transfer_start(loop, &ctx->downlink);
 }
 
-static bool consume_hdr(struct socks_ctx *restrict ctx, const size_t n)
+static bool consume_rcvbuf(struct socks_ctx *restrict ctx, const size_t n)
 {
-	LOGV_F("consume_hdr: %zu bytes", n);
+	LOGV_F("consume_rcvbuf: %zu bytes", n);
 	const int fd = ctx->accepted_fd;
 	const ssize_t nrecv = recv(fd, ctx->rbuf.data, n, 0);
 	if (nrecv < 0) {
@@ -400,7 +400,7 @@ static int socks4a_recv(struct socks_ctx *restrict ctx)
 		read_uint16(ctx->rbuf.data + offsetof(struct socks4_hdr, port));
 
 	/* protocol finished, remove header */
-	if (!consume_hdr(ctx, (size_t)(terminator + 1 - ctx->rbuf.data))) {
+	if (!consume_rcvbuf(ctx, (size_t)(terminator + 1 - ctx->rbuf.data))) {
 		return -1;
 	}
 	return 0;
@@ -441,7 +441,7 @@ static int socks4_recv(struct socks_ctx *restrict ctx)
 		read_uint16(ctx->rbuf.data + offsetof(struct socks4_hdr, port));
 
 	/* protocol finished, remove header */
-	if (!consume_hdr(ctx, (size_t)(terminator + 1 - ctx->rbuf.data))) {
+	if (!consume_rcvbuf(ctx, (size_t)(terminator + 1 - ctx->rbuf.data))) {
 		return -1;
 	}
 	return 0;
@@ -523,7 +523,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	}
 
 	/* protocol finished, remove header */
-	if (!consume_hdr(ctx, authlen + expected)) {
+	if (!consume_rcvbuf(ctx, authlen + expected)) {
 		return -1;
 	}
 	return 0;
@@ -618,7 +618,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 	ctx->rbuf.len = (size_t)nrecv;
 	LOG_BIN_F(
 		LOG_LEVEL_VERBOSE, ctx->rbuf.data, ctx->rbuf.len,
-		"recv: %zu bytes", ctx->rbuf.len);
+		"recv: fd=%d %zu bytes", fd, ctx->rbuf.len);
 	const int want = socks_dispatch(ctx);
 	if (want < 0) {
 		return want;
@@ -630,6 +630,8 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 		SOCKS_CTX_LOG(LOG_LEVEL_ERROR, ctx, "recv: header too long");
 		return -1;
 	}
+	LOGV_F("socks_recv: fd=%d state=%d nrecv=%zd want=%d", fd, ctx->state,
+	       nrecv, want);
 	socket_rcvlowat(fd, (size_t)nrecv + (size_t)want);
 	return 1;
 }
@@ -675,6 +677,8 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		socks_ctx_free(ctx);
 		return;
 	} else if (ret > 0) {
+		/* notify SO_RCVLOWAT may changed */
+		ev_io_start(loop, watcher);
 		return;
 	}
 

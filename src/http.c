@@ -649,8 +649,8 @@ static void http_handle_stats(
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu)\n"
 		"Listener Accepts    : %ju (%ju rejected)\n"
-		"Successful Requests : %ju (+%ju)\n"
-		"Traffic (up/down)   : %s / %s\n",
+		"Requests            : %ju (+%ju)\n"
+		"Traffic (U/D)       : %s / %s\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
 		lstats->num_serve, num_reject, stats->num_success,
 		stats->num_request - stats->num_success, xfer_up, xfer_down);
@@ -684,9 +684,9 @@ static void http_handle_stats(
 
 	BUF_APPENDF(
 		ctx->wbuf,
-		"Listener Accepts    : %.1f/s (%.1f reject/s)\n"
-		"Successful Requests : %.1f/s\n"
-		"Traffic (up/down)   : %s/s / %s/s\n",
+		"Incoming Conns      : %.1f/s (%.1f reject/s)\n"
+		"Request Success     : %.1f/s\n"
+		"Bandwidth (U/D)     : %s/s / %s/s\n",
 		accept_rate, reject_rate, success_rate, xfer_rate_up,
 		xfer_rate_down);
 
@@ -747,7 +747,7 @@ static void http_handle_ruleset(
 		}
 		const char *code = (const char *)ctx->content;
 		const size_t len = ctx->content_length;
-		LOGV_F("api: ruleset invoke\n%s", code);
+		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset invoke");
 		const char *err = ruleset_invoke(ruleset, code, len);
 		if (err != NULL) {
 			RESPHDR_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -764,7 +764,7 @@ static void http_handle_ruleset(
 		}
 		const char *code = (const char *)ctx->content;
 		const size_t len = ctx->content_length;
-		LOGV_F("api: ruleset update\n%s", code);
+		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset update");
 		const char *err = ruleset_load(ruleset, code, len);
 		if (err != NULL) {
 			RESPHDR_TXT(ctx, HTTP_INTERNAL_SERVER_ERROR);

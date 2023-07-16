@@ -56,7 +56,7 @@ if((EXISTS ${LIBEV_INCLUDE_DIR}) AND (EXISTS ${LIBEV_LIBRARY}))
 else()
     message(FATAL_ERROR "libev not found")
 endif()
-target_include_directories(neosocksd PRIVATE ${LIBEV_INCLUDE_DIR})
+target_include_directories(neosocksd SYSTEM PRIVATE ${LIBEV_INCLUDE_DIR})
 target_link_libraries(neosocksd PRIVATE ${LIBEV_LIBRARY})
 
 # find lua
@@ -82,7 +82,7 @@ if((EXISTS ${LUA_INCLUDE_DIR}) AND (EXISTS ${LUA_LIBRARY}))
 else()
     message(FATAL_ERROR "Lua not found")
 endif()
-target_include_directories(neosocksd PRIVATE ${LUA_INCLUDE_DIR})
+target_include_directories(neosocksd SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
 target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
 
 install(TARGETS neosocksd DESTINATION bin)

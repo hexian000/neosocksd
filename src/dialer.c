@@ -290,8 +290,14 @@ static bool send_proxy_req(struct dialer *restrict d)
 
 static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 {
+	LOGV_F("consume_rcvbuf: %zu bytes", n);
 	const ssize_t nrecv = recv(d->fd, d->buf.data, n, 0);
-	if (nrecv != (ssize_t)n) {
+	if (nrecv < 0) {
+		const int err = errno;
+		LOGE_F("recv: %s", strerror(err));
+		return false;
+	} else if (nrecv != (ssize_t)n) {
+		LOGE_F("recv: short read %zd/%zu", nrecv, n);
 		return false;
 	}
 	return true;
@@ -345,9 +351,7 @@ static int dialer_recv(
 	struct dialer *restrict d, const int fd,
 	const struct proxy_req *restrict req)
 {
-	unsigned char *data = d->buf.data;
-	const size_t cap = d->buf.cap;
-	const ssize_t nrecv = recv(fd, data, cap, MSG_PEEK);
+	const ssize_t nrecv = recv(fd, d->buf.data, d->buf.cap, MSG_PEEK);
 	if (nrecv < 0) {
 		const int err = errno;
 		if (IS_TRANSIENT_ERROR(err)) {
@@ -372,7 +376,7 @@ static int dialer_recv(
 		socket_rcvlowat(d->fd, 1);
 		return 0;
 	}
-	if (d->buf.len + (size_t)want > cap) {
+	if (d->buf.len + (size_t)want > d->buf.cap) {
 		LOGE("recv: header too long");
 		return -1;
 	}
@@ -387,10 +391,12 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	const int fd = watcher->fd;
 
 	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
-	if (ret > 0) { /* wait for more */
-		return;
-	} else if (ret < 0) { /* fail */
+	if (ret < 0) { /* fail */
 		dialer_finish(d, loop);
+		return;
+	} else if (ret > 0) {
+		/* notify SO_RCVLOWAT may changed */
+		ev_io_start(loop, watcher);
 		return;
 	}
 
