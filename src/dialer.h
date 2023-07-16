@@ -76,8 +76,7 @@ struct dialer {
 	int state;
 	enum dialer_error err;
 	int fd, syserr;
-	struct ev_io w_recv;
-	struct ev_timer w_ticker;
+	struct ev_io w_socket;
 	struct ev_timer w_timeout;
 	struct {
 		BUFFER_HDR;

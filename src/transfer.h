@@ -27,7 +27,7 @@ struct transfer {
 	struct ev_io w_recv, w_send;
 	struct ev_watcher w_state;
 	struct event_cb state_cb;
-	uintmax_t rx, tx;
+	uintmax_t *byt_transferred;
 	struct {
 		BUFFER_HDR;
 		unsigned char data[XFER_BUFSIZE];
@@ -35,14 +35,11 @@ struct transfer {
 };
 
 void transfer_init(
-	struct transfer *t, struct event_cb cb, int src_fd, int dst_fd);
+	struct transfer *t, struct event_cb cb, int src_fd, int dst_fd,
+	uintmax_t *byt_transferred);
 
 void transfer_start(struct ev_loop *loop, struct transfer *t);
 
 void transfer_stop(struct ev_loop *loop, struct transfer *t);
-
-size_t transfer_get_active(void);
-
-uintmax_t transfer_get_bytes(void);
 
 #endif /* TRANSFER_H */

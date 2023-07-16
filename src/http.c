@@ -101,7 +101,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_stop(loop, w_timeout);
 
-	struct server_stats *restrict stats = ctx->s->stats;
+	struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
 	case STATE_INIT:
 		return;
@@ -159,9 +159,10 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 	    ctx->uplink.state == XFER_CONNECTED &&
 	    ctx->downlink.state == XFER_CONNECTED) {
 		ctx->state = STATE_ESTABLISHED;
-		struct server_stats *restrict stats = ctx->s->stats;
+		struct server_stats *restrict stats = &ctx->s->stats;
 		stats->num_halfopen--;
 		stats->num_sessions++;
+		stats->num_success++;
 		HTTP_CTX_LOG_F(
 			LOG_LEVEL_INFO, ctx, "established, %zu active",
 			stats->num_sessions);
@@ -344,7 +345,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	/* HTTP/1.0 only, stop reading */
 	ev_io_stop(loop, watcher);
-	struct server_stats *restrict stats = ctx->s->stats;
+	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
 	ctx->on_request(loop, ctx);
 
@@ -384,13 +385,14 @@ static void http_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_timer_stop(loop, w_timeout);
 
 	const struct config *restrict conf = ctx->s->conf;
-	struct server_stats *restrict stats = ctx->s->stats;
+	struct server_stats *restrict stats = &ctx->s->stats;
 	if (conf->proto_timeout) {
 		ev_timer_start(loop, w_timeout);
 	} else {
 		ctx->state = STATE_ESTABLISHED;
 		stats->num_halfopen--;
 		stats->num_sessions++;
+		stats->num_success++;
 		HTTP_CTX_LOG_F(
 			LOG_LEVEL_INFO, ctx, "established, %zu active",
 			stats->num_sessions);
@@ -400,8 +402,12 @@ static void http_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};
-	transfer_init(&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd);
-	transfer_init(&ctx->downlink, cb, ctx->dialed_fd, ctx->accepted_fd);
+	transfer_init(
+		&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd,
+		&stats->byt_up);
+	transfer_init(
+		&ctx->downlink, cb, ctx->dialed_fd, ctx->accepted_fd,
+		&stats->byt_down);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
 }
@@ -450,7 +456,6 @@ http_timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct http_ctx *restrict ctx = watcher->data;
-	ctx->s->stats->num_timeout++;
 	http_ctx_stop(loop, ctx);
 	http_ctx_free(ctx);
 }
@@ -500,7 +505,7 @@ static void http_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_timer_start(loop, w_timeout);
 
 	ctx->state = STATE_REQUEST;
-	struct server_stats *restrict stats = ctx->s->stats;
+	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen++;
 }
 
@@ -559,11 +564,7 @@ static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
 	char heap_total[16];
 	(void)format_iec_bytes(
 		heap_total, sizeof(heap_total), (double)heap_bytes);
-	BUF_APPENDF(
-		ctx->wbuf,
-		""
-		"Ruleset Memory  : %s\n",
-		heap_total);
+	BUF_APPENDF(ctx->wbuf, "Ruleset Memory      : %s\n", heap_total);
 	const char *str = ruleset_stats(ruleset, dt);
 	if (str == NULL) {
 		return;
@@ -618,38 +619,41 @@ static void http_handle_stats(
 						"  " PROJECT_HOMEPAGE "\n\n");
 	}
 
-	const struct server_stats *restrict stats = ctx->s->stats;
+	const struct server *restrict s_ = ctx->s->data;
+	const struct server_stats *restrict stats = &s_->stats;
+	const struct listener_stats *restrict lstats = &s_->l.stats;
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = now - stats->started;
 	const time_t server_time = time(NULL);
-
-	const size_t num_transfer = transfer_get_active();
-	const uintmax_t xfer_bytes = transfer_get_bytes();
 
 	char timestamp[32];
 	(void)strftime(
 		timestamp, sizeof(timestamp), "%FT%T%z",
 		localtime(&server_time));
-	char xfer_total[16];
-	(void)format_iec_bytes(
-		xfer_total, sizeof(xfer_total), (double)xfer_bytes);
-
 	char str_uptime[16];
 	(void)format_duration(
 		str_uptime, sizeof(str_uptime), make_duration(uptime));
 
+	const uintmax_t num_reject = lstats->num_accept - lstats->num_serve;
+
+#define FORMAT_BYTES(name, value)                                              \
+	char name[16];                                                         \
+	(void)format_iec_bytes(name, sizeof(name), (value))
+
+	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
+	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
+
 	BUF_APPENDF(
 		ctx->wbuf,
-		""
-		"Server Time     : %s\n"
-		"Uptime          : %s\n"
-		"Num Sessions    : %zu (+%zu)\n"
-		"Num Transfers   : %zu\n"
-		"Transferred     : %s\n"
-		"Total Requests  : %ju (%ju timeout)\n",
+		"Server Time         : %s\n"
+		"Uptime              : %s\n"
+		"Num Sessions        : %zu (+%zu)\n"
+		"Listener Accepts    : %ju (%ju rejected)\n"
+		"Requests            : %ju (+%ju)\n"
+		"Traffic (up/down)   : %s / %s\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
-		num_transfer, xfer_total, stats->num_request,
-		stats->num_timeout);
+		lstats->num_serve, num_reject, stats->num_success,
+		stats->num_request - stats->num_success, xfer_up, xfer_down);
 
 	if (stateless) {
 		return;
@@ -657,34 +661,48 @@ static void http_handle_stats(
 
 	static struct {
 		uintmax_t num_request;
-		uintmax_t num_rejected;
-		uintmax_t xfer_bytes;
+		uintmax_t num_success;
+		uintmax_t xfer_up, xfer_down;
+		uintmax_t num_accept;
+		uintmax_t num_reject;
 		ev_tstamp tstamp;
 	} last = { .tstamp = TSTAMP_NIL };
+
 	const double dt =
 		(last.tstamp == TSTAMP_NIL) ? uptime : now - last.tstamp;
-	last.tstamp = now;
 
-	char xfer_rate[16];
-	(void)format_iec_bytes(
-		xfer_rate, sizeof(xfer_rate),
-		(double)(xfer_bytes - last.xfer_bytes) / dt);
-	last.xfer_bytes = xfer_bytes;
+	FORMAT_BYTES(xfer_rate_up, (double)(stats->byt_up - last.xfer_up) / dt);
+	FORMAT_BYTES(
+		xfer_rate_down,
+		(double)(stats->byt_down - last.xfer_down) / dt);
 
-	const double request_rate =
-		(double)(stats->num_request - last.num_request) / dt;
-	last.num_request = stats->num_request;
+	const double accept_rate =
+		(double)(lstats->num_accept - last.num_accept) / dt;
+	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
 
-	const double reject_rate =
-		(double)(stats->num_reject - last.num_rejected) / dt;
-	last.num_rejected = stats->num_reject;
+	const double successful_rate =
+		(double)(stats->num_success - last.num_success) / dt;
+	const double unsuccessful_rate =
+		(double)((stats->num_request - last.num_request) - (stats->num_success - last.num_success)) /
+		dt;
 
 	BUF_APPENDF(
 		ctx->wbuf,
-		""
-		"Traffic         : %s/s\n"
-		"Requests        : %.1lf/s (%.1lf/s rejected)\n",
-		xfer_rate, request_rate, reject_rate);
+		"Listener Accepts    : %.1f/s (%.1f reject/s)\n"
+		"Requests            : %.1f/s (%+.1f/s)\n"
+		"Traffic (up/down)   : %s/s / %s/s\n",
+		accept_rate, reject_rate, successful_rate, unsuccessful_rate,
+		xfer_rate_up, xfer_rate_down);
+
+	last.num_request = stats->num_request;
+	last.num_success = stats->num_success;
+	last.xfer_up = stats->byt_up;
+	last.xfer_down = stats->byt_down;
+	last.num_accept = lstats->num_accept;
+	last.num_reject = num_reject;
+	last.tstamp = now;
+
+#undef FORMAT_BYTES
 
 	handle_ruleset_stats(ctx, dt);
 }

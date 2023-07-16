@@ -16,10 +16,10 @@
 #include <stddef.h>
 #include <string.h>
 
-static bool is_startup_limited(struct listener *restrict l)
+static bool is_startup_limited(struct server *restrict s)
 {
-	const struct config *restrict conf = l->s->conf;
-	const struct server_stats *restrict stats = l->s->stats;
+	const struct config *restrict conf = s->conf;
+	const struct server_stats *restrict stats = &s->stats;
 	if (conf->max_sessions > 0 &&
 	    stats->num_sessions >= conf->max_sessions) {
 		LOGV("session limit exceeded, rejecting new connection");
@@ -43,9 +43,8 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 
-	struct listener *restrict l = (struct listener *)watcher->data;
-	struct server *restrict s = l->s;
-	struct server_stats *restrict stats = s->stats;
+	struct server *restrict s = (struct server *)watcher->data;
+	struct listener_stats *restrict lstats = &s->l.stats;
 
 	for (;;) {
 		sockaddr_max_t addr;
@@ -60,13 +59,13 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			LOGE_F("accept: %s", strerror(err));
 			/* sleep until next timer, see timer_cb */
 			ev_io_stop(loop, watcher);
-			struct ev_timer *restrict w_timer = &l->w_timer;
+			struct ev_timer *restrict w_timer = &s->l.w_timer;
 			ev_timer_start(loop, w_timer);
 			return;
 		}
+		lstats->num_accept++;
 		LOGV_F("accept: fd=%d", fd);
-		if (is_startup_limited(l)) {
-			stats->num_reject++;
+		if (is_startup_limited(s)) {
 			if (close(fd) != 0) {
 				const int err = errno;
 				LOGW_F("close: %s", strerror(err));
@@ -81,6 +80,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		}
 		socket_set_tcp(fd, true, true);
 
+		lstats->num_serve++;
 		s->serve(s, loop, fd, &addr.sa);
 	}
 }
@@ -95,17 +95,23 @@ timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	ev_io_start(loop, w_accept);
 }
 
-void listener_init(struct listener *l, struct server *s)
+void server_init(
+	struct server *restrict s, struct ev_loop *loop,
+	const struct config *conf, struct ruleset *ruleset, serve_fn serve,
+	void *data)
 {
-	l->s = s;
+	*s = (struct server){
+		.loop = loop,
+		.conf = conf,
+		.ruleset = ruleset,
+		.serve = serve,
+		.data = data,
+		.stats = { .started = TSTAMP_NIL },
+	};
 }
 
-bool listener_start(
-	struct listener *restrict l, struct ev_loop *loop,
-	const struct sockaddr *bindaddr)
+bool server_start(struct server *s, const struct sockaddr *bindaddr)
 {
-	struct server *restrict s = l->s;
-
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
@@ -147,21 +153,29 @@ bool listener_start(
 		LOG_F(LOG_LEVEL_INFO, "listen: %s", addr_str);
 	}
 
-	struct ev_io *restrict w_accept = &l->w_accept;
+	struct ev_io *restrict w_accept = &s->l.w_accept;
 	ev_io_init(w_accept, accept_cb, fd, EV_READ);
-	w_accept->data = l;
-	struct ev_timer *restrict w_timer = &l->w_timer;
+	w_accept->data = s;
+	struct ev_timer *restrict w_timer = &s->l.w_timer;
 	ev_timer_init(w_timer, timer_cb, 0.5, 0.0);
-	w_timer->data = l;
+	w_timer->data = s;
 
-	s->stats->started = ev_now(loop);
-	ev_io_start(loop, &l->w_accept);
+	struct ev_loop *loop = s->loop;
+	s->stats.started = ev_now(loop);
+	ev_io_start(loop, w_accept);
 	return true;
 }
 
-void listener_stop(struct listener *restrict l, struct ev_loop *loop)
+void server_stop(struct server *restrict s)
 {
-	ev_io_stop(loop, &l->w_accept);
-	ev_timer_stop(loop, &l->w_timer);
-	(void)close(l->w_accept.fd);
+	if (s->stats.started == TSTAMP_NIL) {
+		return;
+	}
+	struct ev_loop *loop = s->loop;
+	struct ev_io *restrict w_accept = &s->l.w_accept;
+	ev_io_stop(loop, w_accept);
+	(void)close(w_accept->fd);
+	struct ev_timer *restrict w_timer = &s->l.w_timer;
+	ev_timer_stop(loop, w_timer);
+	s->stats.started = TSTAMP_NIL;
 }

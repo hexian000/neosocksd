@@ -68,7 +68,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
 
-	struct server_stats *restrict stats = ctx->s->stats;
+	struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
 	case STATE_INIT:
 		return;
@@ -122,9 +122,10 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 	    ctx->uplink.state == XFER_CONNECTED &&
 	    ctx->downlink.state == XFER_CONNECTED) {
 		ctx->state = STATE_ESTABLISHED;
-		struct server_stats *restrict stats = ctx->s->stats;
+		struct server_stats *restrict stats = &ctx->s->stats;
 		stats->num_halfopen--;
 		stats->num_sessions++;
+		stats->num_success++;
 		FW_CTX_LOG_F(
 			LOG_LEVEL_INFO, ctx, "established, %zu active",
 			stats->num_sessions);
@@ -152,7 +153,6 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	default:
 		FAIL();
 	}
-	ctx->s->stats->num_timeout++;
 	forward_ctx_stop(loop, ctx);
 	forward_ctx_free(ctx);
 }
@@ -173,7 +173,7 @@ static void connected_cb(struct ev_loop *loop, void *data)
 	FW_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
 
 	const struct config *restrict conf = ctx->s->conf;
-	struct server_stats *restrict stats = ctx->s->stats;
+	struct server_stats *restrict stats = &ctx->s->stats;
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	if (conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
@@ -182,6 +182,7 @@ static void connected_cb(struct ev_loop *loop, void *data)
 		ctx->state = STATE_ESTABLISHED;
 		stats->num_halfopen--;
 		stats->num_sessions++;
+		stats->num_success++;
 		FW_CTX_LOG_F(
 			LOG_LEVEL_INFO, ctx, "established, %zu active",
 			stats->num_sessions);
@@ -191,8 +192,12 @@ static void connected_cb(struct ev_loop *loop, void *data)
 		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};
-	transfer_init(&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd);
-	transfer_init(&ctx->downlink, cb, ctx->dialed_fd, ctx->accepted_fd);
+	transfer_init(
+		&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd,
+		&stats->byt_up);
+	transfer_init(
+		&ctx->downlink, cb, ctx->dialed_fd, ctx->accepted_fd,
+		&stats->byt_down);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
 }
@@ -290,7 +295,7 @@ static void forward_ctx_start(
 	}
 
 	ctx->state = STATE_CONNECT;
-	struct server_stats *restrict stats = ctx->s->stats;
+	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
 	stats->num_halfopen++;
 }

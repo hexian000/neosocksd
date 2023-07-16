@@ -67,13 +67,10 @@ static struct {
 	struct ev_signal w_sigterm;
 
 	struct config conf;
-	struct listener listener;
 	struct server server;
-	struct server_stats stats;
 
 	struct {
 		bool running : 1;
-		struct listener listener;
 		struct server server;
 	} api;
 
@@ -192,7 +189,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #if WITH_NETDEVICE
 			args.netdev = argv[++i];
 #else
-			LOGW_F("unsupported argument: %s", argv[i]);
+			LOGW_F("unsupported argument: \"%s\"", argv[i]);
 			i++;
 #endif
 			continue;
@@ -201,7 +198,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #if WITH_REUSEPORT
 			args.reuseport = true;
 #else
-			LOGW_F("unsupported argument: %s", argv[i]);
+			LOGW_F("unsupported argument: \"%s\"", argv[i]);
 #endif
 			continue;
 		}
@@ -209,7 +206,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #if WITH_FASTOPEN
 			args.fastopen = true;
 #else
-			LOGW_F("unsupported argument: %s", argv[i]);
+			LOGW_F("unsupported argument: \"%s\"", argv[i]);
 #endif
 			continue;
 		}
@@ -371,12 +368,7 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-	app.stats = (struct server_stats){ 0 };
-	app.server = (struct server){
-		.conf = &app.conf,
-		.ruleset = app.ruleset,
-		.stats = &app.stats,
-	};
+	server_init(&app.server, loop, &app.conf, app.ruleset, NULL, NULL);
 	if (args.forward != NULL
 #if WITH_TPROXY
 	    || args.tproxy
@@ -390,9 +382,8 @@ int main(int argc, char **argv)
 		app.server.serve = socks_serve;
 	}
 
-	listener_init(&app.listener, &app.server);
-	if (!listener_start(&app.listener, loop, &bindaddr.sa)) {
-		FAILMSG("failed to start listener");
+	if (!server_start(&app.server, &bindaddr.sa)) {
+		FAILMSG("failed to start server");
 	}
 
 	if (args.restapi != NULL) {
@@ -401,15 +392,11 @@ int main(int argc, char **argv)
 			LOGF_F("unable to parse address: %s", args.restapi);
 			exit(EXIT_FAILURE);
 		}
-		app.api.server = (struct server){
-			.conf = &app.conf,
-			.ruleset = app.ruleset,
-			.serve = http_api_serve,
-			.stats = &app.stats,
-		};
-		listener_init(&app.api.listener, &app.api.server);
-		if (!listener_start(&app.api.listener, loop, &apiaddr.sa)) {
-			FAILMSG("failed to start api listener");
+		server_init(
+			&app.api.server, loop, &app.conf, app.ruleset,
+			http_api_serve, &app.server);
+		if (!server_start(&app.api.server, &apiaddr.sa)) {
+			FAILMSG("failed to start api server");
 		}
 		app.api.running = true;
 	}
@@ -421,10 +408,10 @@ int main(int argc, char **argv)
 
 	LOGI("server stop");
 	if (app.api.running) {
-		listener_stop(&app.api.listener, loop);
+		server_stop(&app.api.server);
 		app.api.running = false;
 	}
-	listener_stop(&app.listener, loop);
+	server_stop(&app.server);
 	if (app.ruleset != NULL) {
 		ruleset_free(app.ruleset);
 		app.ruleset = NULL;

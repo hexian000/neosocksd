@@ -16,6 +16,7 @@
 #include <net/if.h>
 #include <sys/socket.h>
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -82,18 +83,20 @@ void socket_set_fastopen(const int fd, const int backlog)
 #endif
 }
 
-void socket_set_buffer(int fd, size_t send, size_t recv)
+void socket_set_buffer(const int fd, const size_t send, const size_t recv)
 {
+	CHECKMSGF(send <= INT_MAX, "invalid send buffer size: %zu", send);
+	CHECKMSGF(recv <= INT_MAX, "invalid recv buffer size: %zu", recv);
 	int val;
 	if (send > 0) {
-		val = (int)MIN(send, INT_MAX);
+		val = (int)send;
 		if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val))) {
 			const int err = errno;
 			LOGW_F("SO_SNDBUF: %s", strerror(err));
 		}
 	}
 	if (recv > 0) {
-		val = (int)MIN(recv, INT_MAX);
+		val = (int)recv;
 		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val))) {
 			const int err = errno;
 			LOGW_F("SO_RCVBUF: %s", strerror(err));
@@ -133,6 +136,17 @@ void socket_set_transparent(int fd, bool tproxy)
 	UNUSED(fd);
 	CHECKMSG(!tproxy, "tproxy: not supported in current build");
 #endif
+}
+
+void socket_rcvlowat(const int fd, const size_t bytes)
+{
+	CHECK(0 < bytes && bytes <= INT_MAX);
+	const int value = (int)bytes;
+	socklen_t len = sizeof(value);
+	if (setsockopt(fd, SOL_SOCKET, SO_RCVLOWAT, &value, len)) {
+		const int err = errno;
+		LOGW_F("SO_RCVLOWAT: %s", strerror(err));
+	}
 }
 
 socklen_t getsocklen(const struct sockaddr *sa)

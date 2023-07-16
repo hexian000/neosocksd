@@ -14,9 +14,6 @@
 #include <stdint.h>
 #include <string.h>
 
-static size_t xfer_num_active = 0;
-static uintmax_t xfer_bytes = 0;
-
 static void ev_set_active(
 	struct ev_loop *loop, struct ev_io *restrict watcher, const bool active)
 {
@@ -60,7 +57,6 @@ static bool transfer_recv(struct transfer *restrict t)
 		nbrecv += nrecv;
 	}
 	t->buf.len += nbrecv;
-	t->rx += nbrecv;
 	return ok;
 }
 
@@ -85,8 +81,7 @@ static bool transfer_send(struct transfer *restrict t)
 		nbsend += nsend;
 	}
 	BUF_CONSUME(t->buf, nbsend);
-	t->tx += nbsend;
-	xfer_bytes += nbsend;
+	(*t->byt_transferred) += nbsend;
 	return true;
 }
 
@@ -151,7 +146,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 void transfer_init(
 	struct transfer *restrict t, const struct event_cb cb, const int src_fd,
-	const int dst_fd)
+	const int dst_fd, uintmax_t *byt_transferred)
 {
 	t->state = XFER_INIT;
 	struct ev_io *restrict w_recv = &t->w_recv;
@@ -164,38 +159,17 @@ void transfer_init(
 	ev_init(w_state, transfer_state_cb);
 	w_state->data = t;
 	t->state_cb = cb;
-	t->rx = t->tx = 0;
+	t->byt_transferred = byt_transferred;
 	BUF_INIT(t->buf, XFER_BUFSIZE);
 }
 
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 {
-	struct ev_io *restrict w_recv = &t->w_recv;
-	struct ev_io *restrict w_send = &t->w_send;
-	if (!ev_is_active(w_recv) && !ev_is_active(w_send)) {
-		xfer_num_active++;
-		LOGD_F("transfer: fd=%d -> fd=%d", w_recv->fd, w_send->fd);
-	}
-	ev_io_start(loop, w_recv);
+	ev_io_start(loop, &t->w_recv);
 }
 
 void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
 {
-	struct ev_io *restrict w_recv = &t->w_recv;
-	struct ev_io *restrict w_send = &t->w_send;
-	if (ev_is_active(w_recv) || ev_is_active(w_send)) {
-		xfer_num_active--;
-	}
-	ev_io_stop(loop, w_recv);
-	ev_io_stop(loop, w_send);
-}
-
-size_t transfer_get_active(void)
-{
-	return xfer_num_active;
-}
-
-uintmax_t transfer_get_bytes(void)
-{
-	return xfer_bytes;
+	ev_io_stop(loop, &t->w_recv);
+	ev_io_stop(loop, &t->w_send);
 }

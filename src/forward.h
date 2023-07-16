@@ -8,7 +8,7 @@
 
 /* forward_serve: implements serve_fn */
 void forward_serve(
-	struct server *restrict h, struct ev_loop *loop, int accepted_fd,
+	struct server *restrict s, struct ev_loop *loop, int accepted_fd,
 	const struct sockaddr *accepted_sa);
 
 #endif /* FORWARD_H */

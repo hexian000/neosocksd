@@ -23,6 +23,7 @@ void socket_set_fastopen(int fd, int backlog);
 void socket_set_buffer(int fd, size_t send, size_t recv);
 void socket_bind_netdev(int fd, const char *netdev);
 void socket_set_transparent(int fd, bool tproxy);
+void socket_rcvlowat(int fd, size_t bytes);
 
 socklen_t getsocklen(const struct sockaddr *sa);
 int format_sa(const struct sockaddr *sa, char *s, size_t buf_size);

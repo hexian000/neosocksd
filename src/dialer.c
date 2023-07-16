@@ -188,9 +188,8 @@ dialer_reset(struct dialer *restrict d, struct ev_loop *loop, const int state)
 	case STATE_CONNECT:
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2: {
-		ev_io_stop(loop, &d->w_recv);
+		ev_io_stop(loop, &d->w_socket);
 		ev_timer_stop(loop, &d->w_timeout);
-		ev_timer_stop(loop, &d->w_ticker);
 		if (d->fd > 0) {
 			(void)close(d->fd);
 			d->fd = -1;
@@ -244,7 +243,7 @@ static bool format_host(
 static bool send_socks4a_req(
 	struct dialer *restrict d, const struct dialaddr *restrict addr)
 {
-	const int fd = d->w_recv.fd;
+	const int fd = d->w_socket.fd;
 	unsigned char buf[sizeof(struct socks4_hdr) + 1 + FQDN_MAX_LENGTH + 1];
 	write_uint8(buf + offsetof(struct socks4_hdr, version), SOCKS4);
 	write_uint8(
@@ -295,10 +294,19 @@ static bool send_proxy_req(struct dialer *restrict d)
 	FAIL();
 }
 
+static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
+{
+	const ssize_t nrecv = recv(d->fd, d->buf.data, n, 0);
+	if (nrecv != (ssize_t)n) {
+		return false;
+	}
+	return true;
+}
+
 static int recv_socks4a_rsp(struct dialer *restrict d)
 {
 	if (d->buf.len < sizeof(struct socks4_hdr)) {
-		return 1;
+		return sizeof(struct socks4_hdr) - d->buf.len;
 	}
 	struct socks4_hdr hdr;
 	hdr.version =
@@ -313,10 +321,8 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 		d->err = DIALER_PROXYERR;
 		return -1;
 	}
-	/* consume the header */
-	const ssize_t nrecv =
-		recv(d->fd, (void *)&hdr, sizeof(struct socks4_hdr), 0);
-	if (nrecv != (ssize_t)sizeof(struct socks4_hdr)) {
+	/* protocol finished, remove header */
+	if (!consume_rcvbuf(d, sizeof(struct socks4_hdr))) {
 		d->err = DIALER_PROXYERR;
 		return -1;
 	}
@@ -362,10 +368,21 @@ static int dialer_recv(
 		return -1;
 	}
 	d->buf.len = (size_t)nrecv;
+	LOG_BIN_F(
+		LOG_LEVEL_VERBOSE, d->buf.data, d->buf.len, "recv: %zu bytes",
+		d->buf.len);
 	const int want = recv_proxy_rsp(d, req);
-	if (want <= 0) {
+	if (want < 0) {
 		return want;
+	} else if (want == 0) {
+		socket_rcvlowat(d->fd, 1);
+		return 0;
 	}
+	if (d->buf.len + (size_t)want > cap) {
+		LOGE("recv: header too long");
+		return -1;
+	}
+	socket_rcvlowat(fd, (size_t)nrecv + (size_t)want);
 	return 1;
 }
 
@@ -374,14 +391,9 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	CHECK_EV_ERROR(revents);
 	struct dialer *restrict d = watcher->data;
 	const int fd = watcher->fd;
-	struct ev_timer *restrict w_ticker = &d->w_ticker;
 
 	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
 	if (ret > 0) { /* wait for more */
-		ev_io_stop(loop, watcher);
-		if (!ev_is_active(w_ticker)) {
-			ev_timer_start(loop, w_ticker);
-		}
 		return;
 	} else if (ret < 0) { /* fail */
 		dialer_finish(d, loop);
@@ -399,9 +411,8 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 
-	ev_io_stop(loop, &d->w_recv);
+	ev_io_stop(loop, &d->w_socket);
 	ev_timer_stop(loop, &d->w_timeout);
-	ev_timer_stop(loop, &d->w_ticker);
 	d->state = STATE_DONE;
 	dialer_finish(d, loop);
 }
@@ -491,7 +502,7 @@ static bool connect_sa(
 	}
 	d->fd = fd;
 
-	struct ev_io *restrict w_connect = &d->w_recv;
+	struct ev_io *restrict w_connect = &d->w_socket;
 	ev_io_init(w_connect, connected_cb, fd, EV_WRITE);
 	w_connect->data = d;
 	ev_io_start(loop, w_connect);
@@ -546,17 +557,6 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	dialer_finish(d, loop);
 }
 
-static void
-ticker_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
-{
-	CHECK_EV_ERROR(revents);
-	struct dialer *restrict d = watcher->data;
-	struct ev_io *restrict w_recv = &d->w_recv;
-	if (!ev_is_active(w_recv)) {
-		ev_io_start(loop, w_recv);
-	}
-}
-
 void dialer_init(
 	struct dialer *restrict d, const struct config *conf,
 	const struct event_cb *cb)
@@ -578,10 +578,6 @@ void dialer_init(
 		struct ev_timer *restrict w_timeout = &d->w_timeout;
 		ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
 		w_timeout->data = d;
-
-		struct ev_timer *restrict w_ticker = &d->w_ticker;
-		ev_timer_init(w_ticker, ticker_cb, 0.1, 0.1);
-		w_ticker->data = d;
 	}
 }
 
