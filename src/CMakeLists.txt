@@ -7,7 +7,7 @@ add_executable(neosocksd
     transfer.c transfer.h
     forward.c forward.h
     socks.c socks.h
-    http.c http.h
+    http_proxy.c http_api.c http_invoke.c http_impl.h http.c http.h
     server.c server.h
     main.c
 )

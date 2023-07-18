@@ -112,6 +112,9 @@ static void forward_ctx_free(struct forward_ctx *restrict ctx)
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
 	struct forward_ctx *restrict ctx = data;
+	assert(ctx->state == STATE_CONNECTED ||
+	       ctx->state == STATE_ESTABLISHED);
+
 	if (ctx->uplink.state == XFER_CLOSED ||
 	    ctx->downlink.state == XFER_CLOSED) {
 		forward_ctx_stop(loop, ctx);
@@ -138,8 +141,8 @@ static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
-
 	struct forward_ctx *restrict ctx = watcher->data;
+
 	switch (ctx->state) {
 	case STATE_INIT:
 	case STATE_CONNECT:
@@ -160,6 +163,8 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 static void connected_cb(struct ev_loop *loop, void *data)
 {
 	struct forward_ctx *restrict ctx = data;
+	assert(ctx->state == STATE_CONNECT);
+
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		FW_CTX_LOG_F(

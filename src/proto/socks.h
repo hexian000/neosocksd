@@ -21,14 +21,14 @@ struct socks4_hdr {
 };
 
 enum socks4_command {
-	SOCKS4CMD_CONNECT = 1,
+	SOCKS4CMD_CONNECT = 1, /* 0x01 */
 };
 
 enum socks4_response {
 	/* request granted */
-	SOCKS4RSP_GRANTED = 90,
+	SOCKS4RSP_GRANTED = 90, /* 0x05A */
 	/* request rejected or failed */
-	SOCKS4RSP_REJECTED = 91,
+	SOCKS4RSP_REJECTED = 91, /* 0x05B */
 };
 
 enum socks5_address_type {
@@ -67,8 +67,6 @@ enum socks5_response {
 	SOCKS5RSP_CMDNOSUPPORT = UINT8_C(0x07),
 	/* Address type not supported */
 	SOCKS5RSP_ATYPNOSUPPORT = UINT8_C(0x08),
-
-	SOCKS5RSP_MAX = UINT8_C(0x09),
 };
 
 struct socks5_auth_req {
@@ -89,13 +87,17 @@ struct socks5_hdr {
 	uint8_t addrtype;
 };
 
-#define SOCKS_MAX_LENGTH                                                       \
-	(MAX(sizeof(struct socks4_hdr) + (255 + 1) /* ident */ +               \
-		     (FQDN_MAX_LENGTH + 1),                                    \
-	     sizeof(struct socks5_auth_req) + 255 /* methods */ +              \
-		     sizeof(struct socks5_hdr) +                               \
+#define SOCKS4_MAX_LENGTH                                                      \
+	(sizeof(struct socks4_hdr) + (255 + 1) /* ident */ +                   \
+	 (FQDN_MAX_LENGTH + 1))
+
+#define SOCKS5_MAX_LENGTH                                                      \
+	(MAX(sizeof(struct socks5_auth_req) + 255 /* methods */,               \
+	     sizeof(struct socks5_hdr) +                                       \
 		     MAX(MAX(sizeof(struct in_addr) + sizeof(in_port_t),       \
 			     sizeof(struct in6_addr) + sizeof(in_port_t)),     \
 			 1 + FQDN_MAX_LENGTH + sizeof(in_port_t))))
+
+#define SOCKS_MAX_LENGTH (MAX(SOCKS4_MAX_LENGTH, SOCKS5_MAX_LENGTH))
 
 #endif /* PROTO_SOCKS_H */

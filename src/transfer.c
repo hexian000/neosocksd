@@ -14,6 +14,16 @@
 #include <stdint.h>
 #include <string.h>
 
+#define XFER_CTX_LOG_F(level, t, format, ...)                                  \
+	do {                                                                   \
+		if (!LOGLEVEL(level)) {                                        \
+			break;                                                 \
+		}                                                              \
+		LOG_F(level, "%d -> %d: " format, t->w_recv.fd, t->w_send.fd,  \
+		      __VA_ARGS__);                                            \
+	} while (0)
+#define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
+
 static void ev_set_active(
 	struct ev_loop *loop, struct ev_io *restrict watcher, const bool active)
 {
@@ -125,12 +135,15 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		state = XFER_CLOSED;
 		/* fallthrough */
 	case XFER_CLOSED:
-		transfer_stop(loop, t);
+		ev_io_stop(loop, &t->w_recv);
+		ev_io_stop(loop, &t->w_send);
 		break;
 	default:
 		FAIL();
 	}
 	if (t->state != state) {
+		XFER_CTX_LOG_F(
+			LOG_LEVEL_DEBUG, t, "state %d -> %d", t->state, state);
 		t->state = state;
 		t->state_cb.cb(loop, t->state_cb.ctx);
 	}
@@ -154,6 +167,7 @@ void transfer_init(
 
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 {
+	XFER_CTX_LOG(LOG_LEVEL_DEBUG, t, "start");
 	ev_io_start(loop, &t->w_recv);
 }
 
@@ -161,4 +175,6 @@ void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
 {
 	ev_io_stop(loop, &t->w_recv);
 	ev_io_stop(loop, &t->w_send);
+	t->state = XFER_CLOSED;
+	XFER_CTX_LOG(LOG_LEVEL_DEBUG, t, "stop");
 }

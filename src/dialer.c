@@ -1,7 +1,6 @@
 #include "dialer.h"
 #include "net/http.h"
 #include "proto/domain.h"
-#include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
@@ -170,10 +169,6 @@ enum dialer_state {
 
 static void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 {
-	if (d->req != NULL) {
-		dialreq_free(d->req);
-		d->req = NULL;
-	}
 	switch (d->state) {
 	case STATE_INIT:
 		break;
@@ -185,6 +180,11 @@ static void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 	} break;
 	case STATE_DONE:
 		break;
+	}
+	assert(!ev_is_active(&d->w_socket) && !ev_is_active(&d->w_timeout));
+	if (d->req != NULL) {
+		dialreq_free(d->req);
+		d->req = NULL;
 	}
 }
 
@@ -641,10 +641,10 @@ static int dialer_recv(
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
-
 	struct dialer *restrict d = watcher->data;
-	const int fd = watcher->fd;
+	assert(d->state == STATE_HANDSHAKE1 || d->state == STATE_HANDSHAKE2);
 
+	const int fd = watcher->fd;
 	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
 	if (ret < 0) {
 		dialer_fail(d, loop);
@@ -672,8 +672,10 @@ static void
 connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
-	ev_io_stop(loop, watcher);
 	struct dialer *restrict d = watcher->data;
+	assert(d->state == STATE_CONNECT);
+
+	ev_io_stop(loop, watcher);
 	const struct dialreq *restrict req = d->req;
 	const int fd = watcher->fd;
 

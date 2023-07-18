@@ -64,7 +64,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			return;
 		}
 		lstats->num_accept++;
-		LOGV_F("accept: fd=%d", fd);
+		LOGV_F("accept: fd=%d listener=%d", fd, watcher->fd);
 		if (is_startup_limited(s)) {
 			if (close(fd) != 0) {
 				const int err = errno;

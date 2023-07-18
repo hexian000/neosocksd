@@ -14,12 +14,12 @@
 #include "sockutil.h"
 #include "util.h"
 
-#include <assert.h>
 #include <ev.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -121,6 +121,7 @@ static void socks_ctx_free(struct socks_ctx *restrict ctx)
 	if (ctx == NULL) {
 		return;
 	}
+	assert(!ev_is_active(&ctx->w_timeout));
 	if (ctx->accepted_fd != -1) {
 		(void)close(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -132,13 +133,22 @@ static void socks_ctx_free(struct socks_ctx *restrict ctx)
 	free(ctx);
 }
 
+static void
+socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
+{
+	socks_ctx_stop(loop, ctx);
+	socks_ctx_free(ctx);
+}
+
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
 	struct socks_ctx *restrict ctx = data;
+	assert(ctx->state == STATE_CONNECTED ||
+	       ctx->state == STATE_ESTABLISHED);
+
 	if (ctx->uplink.state == XFER_CLOSED ||
 	    ctx->downlink.state == XFER_CLOSED) {
-		socks_ctx_stop(loop, ctx);
-		socks_ctx_free(ctx);
+		socks_ctx_close(loop, ctx);
 		return;
 	}
 	if (ctx->state == STATE_CONNECTED &&
@@ -259,8 +269,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	default:
 		FAIL();
 	}
-	socks_ctx_stop(loop, ctx);
-	socks_ctx_free(ctx);
+	socks_ctx_close(loop, ctx);
 }
 
 static void socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
@@ -315,20 +324,19 @@ static void socks_senderr(struct socks_ctx *restrict ctx, const int err)
 static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct socks_ctx *restrict ctx = data;
+	assert(ctx->state == STATE_CONNECT);
+
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		SOCKS_CTX_LOG_F(
 			LOG_LEVEL_ERROR, ctx, "dialer: %s",
 			dialer_strerror(&ctx->dialer));
 		socks_senderr(ctx, ctx->dialer.syserr);
-		socks_ctx_stop(loop, ctx);
-		socks_ctx_free(ctx);
+		socks_ctx_close(loop, ctx);
 		return;
 	}
 	ctx->dialed_fd = fd;
 	socks_sendrsp(ctx, true);
-	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	ev_timer_stop(loop, w_timeout);
 
 	SOCKS_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
 
@@ -336,8 +344,8 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	if (conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
-		ev_timer_start(loop, w_timeout);
 	} else {
+		ev_timer_stop(loop, &ctx->w_timeout);
 		ctx->state = STATE_ESTABLISHED;
 		stats->num_halfopen--;
 		stats->num_sessions++;
@@ -397,7 +405,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 {
 	assert(ctx->state == STATE_HANDSHAKE1);
 	if (ctx->rbuf.len <= sizeof(struct socks4_hdr)) {
-		return sizeof(struct socks4_hdr) - ctx->rbuf.len + 1;
+		return (int)(sizeof(struct socks4_hdr) - ctx->rbuf.len) + 1;
 	}
 	const uint8_t command = read_uint8(
 		ctx->rbuf.data + offsetof(struct socks4_hdr, command));
@@ -437,7 +445,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	const size_t len = ctx->rbuf.len;
 	size_t expected = sizeof(struct socks5_hdr);
 	if (len < expected) {
-		return (expected - len) + 1;
+		return (int)(expected - len) + 1;
 	}
 
 	const uint8_t command =
@@ -461,7 +469,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	case SOCKS5ADDR_DOMAIN: {
 		expected += 1;
 		if (len < expected) {
-			return expected - len;
+			return (int)(expected - len);
 		}
 		const uint8_t addrlen =
 			read_uint8(hdr + sizeof(struct socks5_hdr));
@@ -475,7 +483,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		return -1;
 	}
 	if (len < expected) {
-		return expected - len;
+		return (int)(expected - len);
 	}
 	const unsigned char *rawaddr = hdr + sizeof(struct socks5_hdr);
 	switch (addrtype) {
@@ -516,13 +524,13 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	const size_t len = ctx->rbuf.len;
 	size_t want = sizeof(struct socks5_auth_req);
 	if (len < want) {
-		return want - len;
+		return (int)(want - len);
 	}
 	const uint8_t n =
 		read_uint8(req + offsetof(struct socks5_auth_req, nmethods));
 	want += n;
 	if (len < want) {
-		return want - len;
+		return (int)(want - len);
 	}
 	bool found = false;
 	const uint8_t *methods = req + sizeof(struct socks5_auth_req);
@@ -649,13 +657,14 @@ static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
-
 	struct socks_ctx *restrict ctx = watcher->data;
+	assert(ctx->state == STATE_HANDSHAKE1 ||
+	       ctx->state == STATE_HANDSHAKE2);
+
 	const int ret = socks_recv(ctx, watcher->fd);
 	if (ret < 0) {
 		/* error */
-		socks_ctx_stop(loop, ctx);
-		socks_ctx_free(ctx);
+		socks_ctx_close(loop, ctx);
 		return;
 	} else if (ret > 0) {
 		/* want more data */
@@ -669,15 +678,13 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct dialreq *req = make_dialreq(ctx);
 	if (req == NULL) {
 		socks_sendrsp(ctx, false);
-		socks_ctx_stop(loop, ctx);
-		socks_ctx_free(ctx);
+		socks_ctx_close(loop, ctx);
 		return;
 	}
 
 	ctx->state = STATE_CONNECT;
 	if (!dialer_start(&ctx->dialer, loop, req)) {
-		socks_ctx_stop(loop, ctx);
-		socks_ctx_free(ctx);
+		socks_ctx_close(loop, ctx);
 		return;
 	}
 
@@ -699,9 +706,9 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 
 	const struct config *restrict conf = s->conf;
 
-	struct ev_io *restrict w_read = &ctx->watcher;
-	ev_io_init(w_read, recv_cb, accepted_fd, EV_READ);
-	w_read->data = ctx;
+	struct ev_io *restrict watcher = &ctx->watcher;
+	ev_io_init(watcher, recv_cb, accepted_fd, EV_READ);
+	watcher->data = ctx;
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
 	w_timeout->data = ctx;
@@ -718,10 +725,8 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 static void
 socks_ctx_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
-	struct ev_io *restrict w_read = &ctx->watcher;
-	ev_io_start(loop, w_read);
-	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	ev_timer_start(loop, w_timeout);
+	ev_io_start(loop, &ctx->watcher);
+	ev_timer_start(loop, &ctx->w_timeout);
 
 	ctx->state = STATE_HANDSHAKE1;
 	struct server_stats *restrict stats = &ctx->s->stats;
