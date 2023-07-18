@@ -10,7 +10,7 @@ Version: dev
 
 ## RESTful API
 
-*The RESTful API server runs HTTP/1.0*
+*The RESTful API server runs HTTP/1.1*
 
 ### Healthy Check
 

@@ -2,7 +2,7 @@
 #include "utils/buffer.h"
 #include "utils/check.h"
 #include "utils/slog.h"
-#include "util.h"
+#include "sockutil.h"
 
 #include <ev.h>
 #include <errno.h>

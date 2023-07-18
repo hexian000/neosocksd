@@ -30,9 +30,9 @@
 #include <limits.h>
 
 static void
-http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
+http_recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
 static void
-http_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
+http_send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
 static void
 http_timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
 
@@ -66,7 +66,7 @@ struct http_ctx {
 	struct ev_timer w_timeout;
 	union {
 		struct {
-			struct ev_io w_read, w_write;
+			struct ev_io w_recv, w_send;
 			struct http_message http_msg;
 			char *http_nxt;
 			struct http_hdr_item http_hdr[HTTP_MAX_HEADER_COUNT];
@@ -108,8 +108,8 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	case STATE_REQUEST:
 	case STATE_HEADER:
 	case STATE_CONTENT:
-		ev_io_stop(loop, &ctx->w_read);
-		ev_io_stop(loop, &ctx->w_write);
+		ev_io_stop(loop, &ctx->w_recv);
+		ev_io_stop(loop, &ctx->w_send);
 		stats->num_halfopen--;
 		/* fallthrough */
 	case STATE_CONNECT:
@@ -133,7 +133,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void http_ctx_free(struct http_ctx *restrict ctx)
 {
 	if (ctx != NULL) {
-		(void)close(ctx->w_read.fd);
+		(void)close(ctx->w_recv.fd);
 	}
 	if (ctx->accepted_fd != -1) {
 		(void)close(ctx->accepted_fd);
@@ -180,7 +180,7 @@ http_resphdr_init(struct http_ctx *restrict ctx, const uint16_t code)
 	ctx->wbuf.len = 0;
 	BUF_APPENDF(
 		ctx->wbuf,
-		"HTTP/1.0 %" PRIu16 " %s\r\n"
+		"HTTP/1.1 %" PRIu16 " %s\r\n"
 		"Date: %.*s\r\n"
 		"Connection: close\r\n",
 		code, status ? status : "", date_len, date_str);
@@ -216,7 +216,7 @@ http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
 }
 
 static void
-http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+http_recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 
@@ -248,7 +248,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		next = (char *)ctx->rbuf.data;
 		ctx->http_nxt = next;
 	}
-	struct ev_io *restrict w_write = &ctx->w_write;
+	struct ev_io *restrict w_write = &ctx->w_send;
 	struct http_message *restrict hdr = &ctx->http_msg;
 	if (ctx->state == STATE_REQUEST) {
 		next = http_parse(next, hdr);
@@ -312,9 +312,9 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		ctx->http_hdr_num = num + 1;
 		if (strcasecmp(key, "Content-Length") == 0) {
 			if (sscanf(value, "%zu", &ctx->content_length) != 1) {
-				ev_io_stop(loop, watcher);
 				http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 				ev_io_start(loop, w_write);
+				ev_io_stop(loop, watcher);
 				return;
 			}
 			/* indicates that there is content */
@@ -331,9 +331,9 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const size_t content_cap = ctx->rbuf.cap - offset;
 		if (want > content_cap) {
 			/* no enough buffer */
-			ev_io_stop(loop, watcher);
 			http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
 			ev_io_start(loop, w_write);
+			ev_io_stop(loop, watcher);
 			return;
 		}
 		const size_t len = ctx->rbuf.len - offset;
@@ -343,7 +343,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		ctx->content[ctx->content_length] = '\0';
 	}
 
-	/* HTTP/1.0 only, stop reading */
+	/* Connection: close */
 	ev_io_stop(loop, watcher);
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
@@ -357,7 +357,7 @@ http_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct http_ctx *restrict ctx = data;
-	struct ev_io *restrict w_write = &ctx->w_write;
+	struct ev_io *restrict w_write = &ctx->w_send;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		LOGE_F("dialer: %s", dialer_strerror(&ctx->dialer));
@@ -369,18 +369,17 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	ctx->dialed_fd = fd;
 
 	ctx->state = STATE_CONNECTED;
-	BUF_APPENDF(
-		ctx->wbuf, "HTTP/1.0 %" PRIu16 " %s\r\n\r\n", HTTP_OK,
-		http_status(HTTP_OK));
-	ev_io_init(w_write, http_write_cb, ctx->accepted_fd, EV_WRITE);
+	BUF_APPENDCONST(
+		ctx->wbuf, "HTTP/1.1 200 Connection established\r\n\r\n");
+	ev_io_init(w_write, http_send_cb, ctx->accepted_fd, EV_WRITE);
 	w_write->data = ctx;
 	ev_io_start(loop, w_write);
 }
 
 static void http_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	ev_io_stop(loop, &ctx->w_read);
-	ev_io_stop(loop, &ctx->w_write);
+	ev_io_stop(loop, &ctx->w_recv);
+	ev_io_stop(loop, &ctx->w_send);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_stop(loop, w_timeout);
 
@@ -413,7 +412,7 @@ static void http_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 }
 
 static void
-http_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+http_send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 
@@ -446,7 +445,7 @@ http_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		http_hijack(loop, ctx);
 		return;
 	}
-	/* HTTP/1.0 only, close after serve */
+	/* Connection: close */
 	http_ctx_stop(loop, ctx);
 	http_ctx_free(ctx);
 }
@@ -481,12 +480,12 @@ http_ctx_new(struct server *restrict h, const int fd, http_handler_fn handler)
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_init(w_timeout, http_timeout_cb, conf->timeout, 0.0);
 	w_timeout->data = ctx;
-	struct ev_io *restrict w_read = &ctx->w_read;
-	ev_io_init(w_read, http_read_cb, fd, EV_READ);
-	w_read->data = ctx;
-	struct ev_io *restrict w_write = &ctx->w_write;
-	ev_io_init(w_write, http_write_cb, fd, EV_WRITE);
-	w_write->data = ctx;
+	struct ev_io *restrict w_recv = &ctx->w_recv;
+	ev_io_init(w_recv, http_recv_cb, fd, EV_READ);
+	w_recv->data = ctx;
+	struct ev_io *restrict w_send = &ctx->w_send;
+	ev_io_init(w_send, http_send_cb, fd, EV_WRITE);
+	w_send->data = ctx;
 
 	dialer_init(
 		&ctx->dialer, conf,
@@ -499,7 +498,7 @@ http_ctx_new(struct server *restrict h, const int fd, http_handler_fn handler)
 
 static void http_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	struct ev_io *restrict w_read = &ctx->w_read;
+	struct ev_io *restrict w_read = &ctx->w_recv;
 	ev_io_start(loop, w_read);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_start(loop, w_timeout);
@@ -929,7 +928,7 @@ struct http_invoke_ctx *http_invoke(
 	}
 	ctx->wbuf = VBUF_APPENDF(
 		NULL,
-		"POST /ruleset/invoke HTTP/1.0\r\n"
+		"POST /ruleset/invoke HTTP/1.1\r\n"
 		"Content-Length: %zu\r\n"
 		"\r\n"
 		"%.*s",

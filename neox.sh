@@ -39,9 +39,9 @@ make_content() {
 make_call() {
     echo " >>> ${METHOD} ${URI} ${CONTENT}"
     if [ -n "${PROXY}" ]; then
-        make_content -0vX "${METHOD}" -x "socks5h://${PROXY}" "http://neosocksd.lan${URI}"
+        make_content -vX "${METHOD}" -x "socks5h://${PROXY}" "http://neosocksd.lan${URI}"
     else
-        make_content -0vX "${METHOD}" "http://${ADDR}${URI}"
+        make_content -vX "${METHOD}" "http://${ADDR}${URI}"
     fi
     echo
 }

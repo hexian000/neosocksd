@@ -48,7 +48,6 @@ struct socks_ctx {
 		struct {
 			struct ev_io watcher;
 			struct dialaddr addr;
-			unsigned char *next;
 			struct {
 				BUFFER_HDR;
 				unsigned char data[SOCKS_MAX_LENGTH];
@@ -195,13 +194,14 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp)
 			LOGE_F("getsockname: %s", strerror(err));
 		}
 	}
-	unsigned char
-		buf[sizeof(struct socks5_hdr) + sizeof(struct in6_addr) +
-		    sizeof(in_port_t)];
+	const size_t rsplen = sizeof(struct socks5_hdr) +
+			      sizeof(struct in6_addr) + sizeof(in_port_t);
+	unsigned char buf[rsplen];
 	unsigned char *const hdr = buf;
 
 	write_uint8(hdr + offsetof(struct socks5_hdr, version), SOCKS5);
 	write_uint8(hdr + offsetof(struct socks5_hdr, command), rsp);
+	write_uint8(hdr + offsetof(struct socks5_hdr, reserved), 0);
 
 	size_t len = sizeof(struct socks5_hdr);
 	unsigned char *const addrbuf = buf + len;
@@ -361,22 +361,6 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	transfer_start(loop, &ctx->downlink);
 }
 
-static bool consume_rcvbuf(struct socks_ctx *restrict ctx, const size_t n)
-{
-	LOGV_F("consume_rcvbuf: %zu bytes", n);
-	const int fd = ctx->accepted_fd;
-	const ssize_t nrecv = recv(fd, ctx->rbuf.data, n, 0);
-	if (nrecv < 0) {
-		const int err = errno;
-		LOGE_F("recv: %s", strerror(err));
-		return false;
-	} else if (nrecv != (ssize_t)n) {
-		LOGE_F("recv: short read %zd/%zu", nrecv, n);
-		return false;
-	}
-	return true;
-}
-
 static unsigned char *find_zero(unsigned char *s, const size_t len)
 {
 	for (size_t i = 0; i < len; i++) {
@@ -387,33 +371,29 @@ static unsigned char *find_zero(unsigned char *s, const size_t len)
 	return NULL;
 }
 
-static int socks4a_recv(struct socks_ctx *restrict ctx)
+static int socks4a_recv(struct socks_ctx *restrict ctx, unsigned char *next)
 {
-	assert(ctx->state == STATE_HANDSHAKE2);
-	unsigned char *terminator = find_zero(ctx->next, ctx->rbuf.len);
+	unsigned char *terminator = find_zero(next, ctx->rbuf.len);
 	if (terminator == NULL) {
 		return 1;
 	}
-	const size_t namelen = (size_t)(terminator - ctx->next);
+	const size_t namelen = (size_t)(terminator - next);
 	if (namelen > FQDN_MAX_LENGTH) {
-		return 1;
+		return -1;
 	}
 
 	ctx->addr.type = ATYP_DOMAIN;
 	struct domain_name *restrict domain = &ctx->addr.domain;
 	domain->len = (uint8_t)namelen;
-	memcpy(domain->name, ctx->next, namelen);
+	memcpy(domain->name, next, namelen);
 	ctx->addr.port =
 		read_uint16(ctx->rbuf.data + offsetof(struct socks4_hdr, port));
 
-	/* protocol finished, remove header */
-	if (!consume_rcvbuf(ctx, (size_t)(terminator + 1 - ctx->rbuf.data))) {
-		return -1;
-	}
+	/* protocol finished */
 	return 0;
 }
 
-static int socks4_recv(struct socks_ctx *restrict ctx)
+static int socks4_req(struct socks_ctx *restrict ctx)
 {
 	assert(ctx->state == STATE_HANDSHAKE1);
 	if (ctx->rbuf.len <= sizeof(struct socks4_hdr)) {
@@ -423,7 +403,7 @@ static int socks4_recv(struct socks_ctx *restrict ctx)
 		ctx->rbuf.data + offsetof(struct socks4_hdr, command));
 	if (command != SOCKS4CMD_CONNECT) {
 		LOGE_F("unsupported SOCKS4 command: %" PRIu8, command);
-		(void)socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
+		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
 	}
 	unsigned char *terminator = find_zero(
@@ -435,9 +415,8 @@ static int socks4_recv(struct socks_ctx *restrict ctx)
 		ctx->rbuf.data + offsetof(struct socks4_hdr, address));
 	const uint32_t mask = UINT32_C(0xFFFFFF00);
 	if (!(ip & mask) && (ip & ~mask)) {
-		ctx->state = STATE_HANDSHAKE2;
-		ctx->next = terminator + 1;
-		return socks4a_recv(ctx);
+		/* SOCKS 4A */
+		return socks4a_recv(ctx, terminator + 1);
 	}
 
 	ctx->addr.type = ATYP_INET;
@@ -447,23 +426,20 @@ static int socks4_recv(struct socks_ctx *restrict ctx)
 	ctx->addr.port =
 		read_uint16(ctx->rbuf.data + offsetof(struct socks4_hdr, port));
 
-	/* protocol finished, remove header */
-	if (!consume_rcvbuf(ctx, (size_t)(terminator + 1 - ctx->rbuf.data))) {
-		return -1;
-	}
+	/* protocol finished */
 	return 0;
 }
 
 static int socks5_req(struct socks_ctx *restrict ctx)
 {
 	assert(ctx->state == STATE_HANDSHAKE2);
-	const unsigned char *hdr = ctx->next;
-	const size_t authlen = (size_t)(ctx->next - ctx->rbuf.data);
-	const size_t len = ctx->rbuf.len - authlen;
+	const unsigned char *hdr = ctx->rbuf.data;
+	const size_t len = ctx->rbuf.len;
 	size_t expected = sizeof(struct socks5_hdr);
 	if (len < expected) {
 		return (expected - len) + 1;
 	}
+
 	const uint8_t command =
 		read_uint8(hdr + offsetof(struct socks5_hdr, command));
 	if (command != SOCKS5CMD_CONNECT) {
@@ -529,10 +505,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		return -1;
 	}
 
-	/* protocol finished, remove header */
-	if (!consume_rcvbuf(ctx, authlen + expected)) {
-		return -1;
-	}
+	/* protocol finished */
 	return 0;
 }
 
@@ -571,22 +544,11 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 		LOGE("SOCKS5: no authentication method supported");
 		return -1;
 	}
-	ctx->next = ctx->rbuf.data + sizeof(struct socks5_auth_req) + n;
+
+	/* remove the auth request */
+	BUF_CONSUME(ctx->rbuf, sizeof(struct socks5_auth_req) + n);
 	ctx->state = STATE_HANDSHAKE2;
 	return socks5_req(ctx);
-}
-
-static int socks5_recv(struct socks_ctx *restrict ctx)
-{
-	switch (ctx->state) {
-	case STATE_HANDSHAKE1:
-		return socks5_auth(ctx);
-	case STATE_HANDSHAKE2:
-		return socks5_req(ctx);
-	default:
-		break;
-	}
-	FAIL();
 }
 
 static int socks_dispatch(struct socks_ctx *restrict ctx)
@@ -597,9 +559,16 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 	const uint8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
 	case SOCKS4:
-		return socks4_recv(ctx);
+		return socks4_req(ctx);
 	case SOCKS5:
-		return socks5_recv(ctx);
+		switch (ctx->state) {
+		case STATE_HANDSHAKE1:
+			return socks5_auth(ctx);
+		case STATE_HANDSHAKE2:
+			return socks5_req(ctx);
+		default:
+			FAIL();
+		}
 	default:
 		LOGE_F("unknown SOCKS version: %" PRIu8, version);
 		break;
@@ -609,20 +578,28 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 
 static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 {
-	const ssize_t nrecv = recv(fd, ctx->rbuf.data, ctx->rbuf.cap, MSG_PEEK);
-	if (nrecv < 0) {
-		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
-			return 1;
+	while (ctx->rbuf.len < ctx->rbuf.cap) {
+		unsigned char *buf = ctx->rbuf.data + ctx->rbuf.len;
+		const size_t n = ctx->rbuf.cap - ctx->rbuf.len;
+		const ssize_t nrecv = recv(fd, buf, n, 0);
+		if (nrecv < 0) {
+			const int err = errno;
+			if (IS_TRANSIENT_ERROR(err)) {
+				break;
+			}
+			SOCKS_CTX_LOG_F(
+				LOG_LEVEL_ERROR, ctx, "recv: fd=%d %s", fd,
+				strerror(err));
+			return -1;
+		} else if (nrecv == 0) {
+			/* connection is not established yet, we do not expect EOF here */
+			SOCKS_CTX_LOG_F(
+				LOG_LEVEL_ERROR, ctx, "recv: fd=%d early EOF",
+				fd);
+			return -1;
 		}
-		SOCKS_CTX_LOG_F(
-			LOG_LEVEL_ERROR, ctx, "recv: %s", strerror(err));
-		return -1;
-	} else if (nrecv == 0) {
-		SOCKS_CTX_LOG(LOG_LEVEL_ERROR, ctx, "recv: early EOF");
-		return -1;
+		ctx->rbuf.len += (size_t)nrecv;
 	}
-	ctx->rbuf.len = (size_t)nrecv;
 	LOG_BIN_F(
 		LOG_LEVEL_VERBOSE, ctx->rbuf.data, ctx->rbuf.len,
 		"recv: fd=%d %zu bytes", fd, ctx->rbuf.len);
@@ -630,16 +607,12 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 	if (want < 0) {
 		return want;
 	} else if (want == 0) {
-		socket_rcvlowat(fd, 1);
 		return 0;
 	}
 	if (ctx->rbuf.len + (size_t)want > ctx->rbuf.cap) {
 		SOCKS_CTX_LOG(LOG_LEVEL_ERROR, ctx, "recv: header too long");
 		return -1;
 	}
-	LOGV_F("socks_recv: fd=%d state=%d nrecv=%zd want=%d", fd, ctx->state,
-	       nrecv, want);
-	socket_rcvlowat(fd, (size_t)nrecv + (size_t)want);
 	return 1;
 }
 
@@ -676,18 +649,19 @@ static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
-	ev_io_stop(loop, watcher);
 
 	struct socks_ctx *restrict ctx = watcher->data;
 	const int ret = socks_recv(ctx, watcher->fd);
 	if (ret < 0) {
+		/* error */
 		socks_ctx_stop(loop, ctx);
 		socks_ctx_free(ctx);
 		return;
 	} else if (ret > 0) {
-		ev_io_start(loop, watcher);
+		/* want more data */
 		return;
 	}
+	ev_io_stop(loop, watcher);
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;

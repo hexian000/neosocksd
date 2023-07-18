@@ -10,6 +10,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Check if the error is generally "transient":
+ *   In accept()/send()/recv()/sendmsg()/recvmsg()/sendmmsg()/recvmmsg(),
+ * transient errors should not cause the socket to fail. The operation should
+ * be retried later if the corresponding event is still available.
+ */
+#define IS_TRANSIENT_ERROR(err)                                                \
+	((err) == EINTR || (err) == EAGAIN || (err) == EWOULDBLOCK ||          \
+	 (err) == ENOBUFS || (err) == ENOMEM)
+
 typedef union {
 	struct sockaddr sa;
 	struct sockaddr_in in;
@@ -24,6 +33,7 @@ void socket_set_buffer(int fd, size_t send, size_t recv);
 void socket_bind_netdev(int fd, const char *netdev);
 void socket_set_transparent(int fd, bool tproxy);
 void socket_rcvlowat(int fd, size_t bytes);
+int socket_get_error(int fd);
 
 socklen_t getsocklen(const struct sockaddr *sa);
 int format_sa(const struct sockaddr *sa, char *s, size_t buf_size);

@@ -1,4 +1,7 @@
 #include "dialer.h"
+#include "net/http.h"
+#include "proto/domain.h"
+#include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
@@ -26,9 +29,12 @@
 #include <string.h>
 #include <inttypes.h>
 
-bool dialaddr_set(struct dialaddr *restrict addr, const char *s, size_t len)
+bool dialaddr_set(
+	struct dialaddr *restrict addr, const char *s, const size_t len)
 {
-	char buf[FQDN_MAX_LENGTH + 1 + 5 + 1]; /* FQDN + ':' + port + '\0' */
+	/* FQDN + ':' + port */
+	assert(len < FQDN_MAX_LENGTH + 1 + 5);
+	char buf[len + 1];
 	if (len >= sizeof(buf)) {
 		LOGE_F("address too long: \"%s\"", s);
 		return false;
@@ -65,34 +71,26 @@ bool dialaddr_set(struct dialaddr *restrict addr, const char *s, size_t len)
 }
 
 int dialaddr_format(
-	const struct dialaddr *restrict addr, char *buf, size_t bufsize)
+	const struct dialaddr *restrict addr, char *buf, const size_t maxlen)
 {
-	if (addr->type == ATYP_DOMAIN) {
-		return snprintf(
-			buf, bufsize, "%.*s:%" PRIu16, (int)addr->domain.len,
-			addr->domain.name, addr->port);
-	}
-
 	switch (addr->type) {
 	case ATYP_INET: {
-		const struct sockaddr_in in = {
-			.sin_family = AF_INET,
-			.sin_addr = addr->in,
-			.sin_port = htons(addr->port),
-		};
-		return format_sa((const struct sockaddr *)&in, buf, bufsize);
+		char s[INET_ADDRSTRLEN];
+		if (inet_ntop(AF_INET, &addr->in, s, sizeof(s)) == NULL) {
+			return -1;
+		}
+		return snprintf(buf, maxlen, "%s:%" PRIu16, s, addr->port);
 	}
 	case ATYP_INET6: {
-		const struct sockaddr_in6 in6 = {
-			.sin6_family = AF_INET6,
-			.sin6_addr = addr->in6,
-			.sin6_port = htons(addr->port),
-		};
-		return format_sa((const struct sockaddr *)&in6, buf, bufsize);
+		char s[INET6_ADDRSTRLEN];
+		if (inet_ntop(AF_INET6, &addr->in6, s, sizeof(s)) == NULL) {
+			return -1;
+		}
+		return snprintf(buf, maxlen, "%s:%" PRIu16, s, addr->port);
 	}
 	case ATYP_DOMAIN:
 		return snprintf(
-			buf, bufsize, "%.*s%" PRIu16, (int)addr->domain.len,
+			buf, maxlen, "%.*s:%" PRIu16, (int)addr->domain.len,
 			addr->domain.name, addr->port);
 	default:
 		break;
@@ -116,12 +114,15 @@ dialreq_new(const struct dialaddr *restrict addr, const size_t num_proxy)
 bool dialreq_proxy(
 	struct dialreq *restrict req, const char *addr, size_t addrlen)
 {
-	char buf[1024]; /* should be more than enough */
+	/* should be more than enough */
+	assert(addrlen < 1024);
+	char buf[addrlen + 1];
 	if (addrlen >= sizeof(buf)) {
 		LOGE_F("proxy too long: \"%s\"", addr);
 		return false;
 	}
-	memcpy(buf, addr, addrlen + 1);
+	memcpy(buf, addr, addrlen);
+	buf[addrlen] = '\0';
 	struct url uri;
 	if (!url_parse(buf, &uri)) {
 		LOGE_F("unable to parse proxy: \"%s\"", addr);
@@ -137,9 +138,7 @@ bool dialreq_proxy(
 		strcmp(uri.scheme, "socks4") == 0 ||
 		strcmp(uri.scheme, "socks4a") == 0) {
 		protocol = PROTO_SOCKS4A;
-	} else if (
-		strcmp(uri.scheme, "socks5") == 0 ||
-		strcmp(uri.scheme, "socks5h") == 0) {
+	} else if (strcmp(uri.scheme, "socks5") == 0) {
 		protocol = PROTO_SOCKS5;
 	} else {
 		LOGE_F("dialer: unknown scheme \"%s\"", uri.scheme);
@@ -196,7 +195,7 @@ static void dialer_fail(struct dialer *restrict d, struct ev_loop *loop)
 		(void)close(d->fd);
 		d->fd = -1;
 	}
-	d->state = STATE_INIT;
+	d->state = STATE_DONE;
 	d->done_cb.cb(loop, d->done_cb.ctx);
 }
 
@@ -207,63 +206,15 @@ static void dialer_finish(struct dialer *restrict d, struct ev_loop *loop)
 	d->done_cb.cb(loop, d->done_cb.ctx);
 }
 
-static bool format_host(
-	char *buf, const size_t bufsize, const struct dialaddr *restrict addr)
+static bool
+send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 {
-	switch (addr->type) {
-	case ATYP_INET:
-		if (inet_ntop(AF_INET, &addr->in, buf, bufsize) == NULL) {
-			const int err = errno;
-			LOGE_F("inet_ntop: %s", strerror(err));
-			return false;
-		}
-		break;
-	case ATYP_INET6:
-		if (inet_ntop(AF_INET6, &addr->in6, buf, bufsize) == NULL) {
-			const int err = errno;
-			LOGE_F("inet_ntop: %s", strerror(err));
-			return false;
-		}
-		break;
-	case ATYP_DOMAIN: {
-		const size_t n = addr->domain.len;
-		if (bufsize < n + 1) {
-			LOGE("buffer not enough");
-			return false;
-		}
-		memcpy(buf, addr->domain.name, n);
-		buf[n] = '\0';
-	} break;
-	default:
-		FAIL();
-	}
-	return true;
-}
-
-static bool send_socks4a_req(
-	struct dialer *restrict d, const struct dialaddr *restrict addr)
-{
-	const int fd = d->w_socket.fd;
-	unsigned char buf[sizeof(struct socks4_hdr) + 1 + FQDN_MAX_LENGTH + 1];
-	write_uint8(buf + offsetof(struct socks4_hdr, version), SOCKS4);
-	write_uint8(
-		buf + offsetof(struct socks4_hdr, command), SOCKS4CMD_CONNECT);
-	write_uint16(buf + offsetof(struct socks4_hdr, port), addr->port);
-	write_uint32(
-		buf + offsetof(struct socks4_hdr, address),
-		UINT32_C(0x000000FF));
-	buf[sizeof(struct socks4_hdr)] = 0; /* ident = "" */
-	/* including the null-terminator */
-	char *host = (char *)(buf + sizeof(struct socks4_hdr) + 1);
-	if (!format_host(host, FQDN_MAX_LENGTH + 1, addr)) {
-		LOGE("unable to format hostname");
-		return false;
-	}
-	const size_t len = sizeof(struct socks4_hdr) + 1 + strlen(host) + 1;
 	LOG_BIN_F(LOG_LEVEL_VERBOSE, buf, len, "send: %zu bytes", len);
-	const ssize_t nsend = send(fd, buf, len, 0);
+	const ssize_t nsend = send(d->fd, buf, len, 0);
 	if (nsend < 0) {
-		d->syserr = errno;
+		const int err = errno;
+		LOGE_F("send: %s", strerror(err));
+		d->syserr = err;
 		d->err = DIALER_SYSERR;
 		return false;
 	} else if ((size_t)nsend != len) {
@@ -272,6 +223,171 @@ static bool send_socks4a_req(
 		return false;
 	}
 	return true;
+}
+
+/* RFC 7231: 4.3.6.  CONNECT */
+static bool
+send_http_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
+{
+	size_t addrlen;
+	switch (addr->type) {
+	case ATYP_INET:
+		addrlen = INET_ADDRSTRLEN;
+		break;
+	case ATYP_INET6:
+		addrlen = INET6_ADDRSTRLEN;
+		break;
+	case ATYP_DOMAIN:
+		addrlen = addr->domain.len + 1 /* '\0' */;
+		break;
+	default:
+		FAIL();
+	}
+
+#define STRLEN(s) (sizeof(s) - 1)
+#define APPEND(b, s)                                                           \
+	do {                                                                   \
+		memcpy((b), (s), STRLEN(s));                                   \
+		b += STRLEN(s);                                                \
+	} while (0)
+	/* "CONNECT example.org:80 HTTP/1.1\r\n\r\n" */
+	size_t cap = STRLEN("CONNECT ") + addrlen +
+		     STRLEN(" :65535 HTTP/1.1\r\n\r\n");
+	char buf[cap];
+	char *b = buf;
+	APPEND(b, "CONNECT ");
+	const int n = dialaddr_format(addr, b, cap - (size_t)(b - buf));
+	if (n <= 0) {
+		return false;
+	}
+	b += n;
+	APPEND(b, " HTTP/1.1\r\n\r\n");
+#undef APPEND
+#undef STRLEN
+
+	return send_req(d, (unsigned char *)buf, (size_t)(b - buf));
+}
+
+static bool send_socks4a_req(
+	struct dialer *restrict d, const struct dialaddr *restrict addr)
+{
+	size_t cap = sizeof(struct socks4_hdr) + 1;
+	switch (addr->type) {
+	case ATYP_INET:
+		break;
+	case ATYP_INET6:
+		cap += INET6_ADDRSTRLEN;
+		break;
+	case ATYP_DOMAIN:
+		cap += addr->domain.len + 1;
+		break;
+	default:
+		FAIL();
+	}
+	unsigned char buf[cap];
+	write_uint8(buf + offsetof(struct socks4_hdr, version), SOCKS4);
+	write_uint8(
+		buf + offsetof(struct socks4_hdr, command), SOCKS4CMD_CONNECT);
+	write_uint16(buf + offsetof(struct socks4_hdr, port), addr->port);
+	unsigned char *const address =
+		buf + offsetof(struct socks4_hdr, address);
+	buf[sizeof(struct socks4_hdr)] = 0; /* ident = "" */
+	size_t len = sizeof(struct socks4_hdr) + 1;
+	switch (addr->type) {
+	case ATYP_INET:
+		memcpy(address, &addr->in, sizeof(addr->in));
+		break;
+	case ATYP_INET6: {
+		write_uint32(address, UINT32_C(0x000000FF));
+		char *const b = (char *)buf + len;
+		if (inet_ntop(AF_INET6, &addr->in6, b, INET6_ADDRSTRLEN) ==
+		    NULL) {
+			const int err = errno;
+			LOGE_F("inet_ntop: %s", strerror(err));
+			return false;
+		}
+		len += strlen(b) + 1;
+	} break;
+	case ATYP_DOMAIN: {
+		write_uint32(address, UINT32_C(0x000000FF));
+		unsigned char *const b = buf + len;
+		const size_t n = addr->domain.len;
+		memcpy(b, addr->domain.name, n);
+		b[n] = '\0';
+		len += n + 1;
+	} break;
+	}
+	return send_req(d, buf, len);
+}
+
+static bool send_socks5_auth(
+	struct dialer *restrict d, const struct dialaddr *restrict addr)
+{
+	UNUSED(addr);
+	unsigned char buf[3] = { SOCKS5, 0x01, 0x00 };
+	return send_req(d, buf, sizeof(buf));
+}
+
+static bool
+send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
+{
+	size_t cap = sizeof(struct socks5_hdr);
+	switch (addr->type) {
+	case ATYP_INET:
+		cap += sizeof(struct in_addr) + sizeof(in_port_t);
+		break;
+	case ATYP_INET6:
+		cap += sizeof(struct in6_addr) + sizeof(in_port_t);
+		break;
+	case ATYP_DOMAIN:
+		cap += 1 + addr->domain.len;
+		break;
+	default:
+		FAIL();
+	}
+	unsigned char buf[cap];
+	write_uint8(buf + offsetof(struct socks5_hdr, version), SOCKS5);
+	write_uint8(
+		buf + offsetof(struct socks5_hdr, command), SOCKS5CMD_CONNECT);
+	write_uint8(buf + offsetof(struct socks5_hdr, reserved), 0);
+	unsigned char *const addrtype =
+		buf + offsetof(struct socks5_hdr, addrtype);
+	size_t len = sizeof(struct socks5_hdr);
+	switch (addr->type) {
+	case ATYP_INET: {
+		write_uint8(addrtype, SOCKS5ADDR_IPV4);
+		unsigned char *const addrbuf = buf + len;
+		memcpy(addrbuf, &addr->in, sizeof(addr->in));
+		len += sizeof(addr->in);
+		unsigned char *const portbuf = buf + len;
+		write_uint16(portbuf, addr->port);
+		len += sizeof(uint16_t);
+	} break;
+	case ATYP_INET6: {
+		write_uint8(addrtype, SOCKS5ADDR_IPV6);
+		unsigned char *const addrbuf = buf + len;
+		memcpy(addrbuf, &addr->in6, sizeof(addr->in6));
+		len += sizeof(addr->in6);
+		unsigned char *const portbuf = buf + len;
+		write_uint16(portbuf, addr->port);
+		len += sizeof(uint16_t);
+	} break;
+	case ATYP_DOMAIN: {
+		write_uint8(addrtype, SOCKS5ADDR_DOMAIN);
+		unsigned char *const lenbuf = buf + len;
+		write_uint8(lenbuf, addr->domain.len);
+		len += sizeof(uint8_t);
+		unsigned char *const addrbuf = buf + len;
+		memcpy(addrbuf, &addr->domain.name, addr->domain.len);
+		len += addr->domain.len;
+		unsigned char *const portbuf = buf + len;
+		write_uint16(portbuf, addr->port);
+		len += sizeof(uint16_t);
+	} break;
+	default:
+		FAIL();
+	}
+	return send_req(d, buf, len);
 }
 
 static bool send_proxy_req(struct dialer *restrict d)
@@ -284,11 +400,19 @@ static bool send_proxy_req(struct dialer *restrict d)
 		next < req->num_proxy ? &req->proxy[next].addr : &req->addr;
 	switch (proto) {
 	case PROTO_HTTP:
-		FAIL();
+		return send_http_req(d, addr);
 	case PROTO_SOCKS4A:
 		return send_socks4a_req(d, addr);
 	case PROTO_SOCKS5:
-		FAIL();
+		switch (d->state) {
+		case STATE_HANDSHAKE1:
+			return send_socks5_auth(d, addr);
+		case STATE_HANDSHAKE2:
+			return send_socks5_req(d, addr);
+		default:
+			FAIL();
+		}
+		return false;
 	default:
 		break;
 	}
@@ -308,6 +432,55 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 		return false;
 	}
 	return true;
+}
+
+static int recv_http_rsp(struct dialer *restrict d)
+{
+	if (d->buf.len == d->buf.cap) {
+		return -1;
+	}
+	d->buf.data[d->buf.len] = 0;
+	struct http_message msg;
+	char *buf = (char *)d->buf.data;
+	char *next = http_parse(buf, &msg);
+	if (next == NULL) {
+		LOGE("http_parse: fail");
+		return -1;
+	} else if (next == buf) {
+		return 1;
+	}
+
+	if (strncmp(msg.rsp.version, "HTTP/1.", 7) != 0) {
+		LOGE_F("http: unsupported protocol %s", msg.rsp.version);
+		return -1;
+	}
+	if (strcmp(msg.rsp.code, "200") != 0) {
+		LOGE_F("http: server response %s", msg.rsp.code);
+		return -1;
+	}
+
+	char *key, *value;
+	char *last = next;
+	for (;;) {
+		next = http_parsehdr(last, &key, &value);
+		if (next == NULL) {
+			LOGE("http_parsehdr: fail");
+		} else if (next == last) {
+			return 1;
+		}
+		if (key == NULL) {
+			break;
+		}
+		LOGV_F("http: \"%s: %s\"", key, value);
+		last = next;
+	}
+
+	/* protocol finished, remove header */
+	if (!consume_rcvbuf(d, (size_t)(next - buf))) {
+		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	return 0;
 }
 
 static int recv_socks4a_rsp(struct dialer *restrict d)
@@ -336,16 +509,81 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 	return 0;
 }
 
+static int recv_socks5_rsp(struct dialer *restrict d)
+{
+	assert(d->state == STATE_HANDSHAKE2);
+	const size_t rsplen = sizeof(struct socks5_hdr) +
+			      sizeof(struct in6_addr) + sizeof(in_port_t);
+	if (d->buf.len < rsplen) {
+		return rsplen - d->buf.len;
+	}
+	const unsigned char *hdr = d->buf.data;
+	const uint8_t version =
+		read_uint8(hdr + offsetof(struct socks5_hdr, version));
+	if (version != SOCKS5) {
+		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	const uint8_t command =
+		read_uint8(hdr + offsetof(struct socks5_hdr, command));
+	if (command != SOCKS5RSP_SUCCEEDED) {
+		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	/* protocol finished, remove header */
+	if (!consume_rcvbuf(d, rsplen)) {
+		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	return 0;
+}
+
+static int recv_socks5_auth(struct dialer *restrict d)
+{
+	assert(d->state == STATE_HANDSHAKE1);
+	const size_t rsplen = sizeof(struct socks5_auth_rsp);
+	if (d->buf.len < rsplen) {
+		return rsplen - d->buf.len;
+	}
+	const unsigned char *hdr = d->buf.data;
+	const uint8_t version =
+		read_uint8(hdr + offsetof(struct socks5_auth_rsp, version));
+	if (version != SOCKS5) {
+		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	const uint8_t method =
+		read_uint8(hdr + offsetof(struct socks5_auth_rsp, method));
+	if (method != SOCKS5AUTH_NOAUTH) {
+		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	/* protocol finished, remove header */
+	if (!consume_rcvbuf(d, rsplen)) {
+		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	d->state = STATE_HANDSHAKE2;
+	return recv_socks5_rsp(d);
+}
+
 static int
-recv_proxy_rsp(struct dialer *restrict d, const struct proxy_req *restrict req)
+recv_dispatch(struct dialer *restrict d, const struct proxy_req *restrict req)
 {
 	switch (req->proto) {
 	case PROTO_HTTP:
-		d->err = DIALER_PROXYERR;
-		return -1;
+		return recv_http_rsp(d);
 	case PROTO_SOCKS4A:
 		return recv_socks4a_rsp(d);
 	case PROTO_SOCKS5:
+		switch (d->state) {
+		case STATE_HANDSHAKE1:
+			return recv_socks5_auth(d);
+		case STATE_HANDSHAKE2:
+			return recv_socks5_rsp(d);
+		default:
+			FAIL();
+		}
 		d->err = DIALER_PROXYERR;
 		return -1;
 	default:
@@ -364,19 +602,28 @@ static int dialer_recv(
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 1;
 		}
+		LOGE_F("recv: %s", strerror(err));
 		d->syserr = err;
 		d->err = DIALER_SYSERR;
 		return -1;
 	} else if (nrecv == 0) {
-		LOGE_F("dialer_recv: fd=%d early EOF", fd);
+		LOGE_F("recv: fd=%d early EOF", fd);
 		d->err = DIALER_PROXYERR;
+		return -1;
+	}
+	const int sockerr = socket_get_error(fd);
+	if (sockerr != 0) {
+		if (IS_TRANSIENT_ERROR(sockerr)) {
+			return 1;
+		}
+		LOGE_F("recv: %s", strerror(sockerr));
 		return -1;
 	}
 	d->buf.len = (size_t)nrecv;
 	LOG_BIN_F(
 		LOG_LEVEL_VERBOSE, d->buf.data, d->buf.len, "recv: %zu bytes",
 		d->buf.len);
-	const int want = recv_proxy_rsp(d, req);
+	const int want = recv_dispatch(d, req);
 	if (want < 0) {
 		return want;
 	} else if (want == 0) {
@@ -394,33 +641,31 @@ static int dialer_recv(
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
-	ev_io_stop(loop, watcher);
 
 	struct dialer *restrict d = watcher->data;
 	const int fd = watcher->fd;
 
 	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
-	if (ret < 0) { /* fail */
+	if (ret < 0) {
 		dialer_fail(d, loop);
 		return;
 	} else if (ret > 0) {
-		ev_io_start(loop, watcher);
+		/* want more data */
 		return;
 	}
 
 	d->buf.len = 0;
 	d->jump++;
-	if (d->jump < d->req->num_proxy) {
-		d->state = STATE_HANDSHAKE2;
-		if (!send_proxy_req(d)) {
-			dialer_fail(d, loop);
-			return;
-		}
-		ev_io_start(loop, watcher);
+	if (d->jump >= d->req->num_proxy) {
+		dialer_finish(d, loop);
 		return;
 	}
 
-	dialer_finish(d, loop);
+	d->state = STATE_HANDSHAKE1;
+	if (!send_proxy_req(d)) {
+		dialer_fail(d, loop);
+		return;
+	}
 }
 
 static void
@@ -432,19 +677,13 @@ connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	const struct dialreq *restrict req = d->req;
 	const int fd = watcher->fd;
 
-	int sockerr = 0;
-	if (getsockopt(
-		    fd, SOL_SOCKET, SO_ERROR, &sockerr,
-		    &(socklen_t){ sizeof(sockerr) }) == 0) {
-		if (sockerr != 0) {
-			d->syserr = sockerr;
-			d->err = DIALER_SYSERR;
-			dialer_fail(d, loop);
-			return;
-		}
-	} else {
-		const int err = errno;
-		LOGD_F("SO_ERROR: %s", strerror(err));
+	const int sockerr = socket_get_error(fd);
+	if (sockerr != 0) {
+		LOGE_F("connect: %s", strerror(sockerr));
+		d->syserr = sockerr;
+		d->err = DIALER_SYSERR;
+		dialer_fail(d, loop);
+		return;
 	}
 
 	if (d->jump >= req->num_proxy) {

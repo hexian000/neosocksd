@@ -61,13 +61,13 @@ Depending on how complex your customizations are, check out:
 - Level 3: Reference manual for enthusiasts and professionals: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
 ```sh
-curl -0sX POST http://127.0.1.1:9080/stats
+curl -sX POST http://127.0.1.1:9080/stats
 ```
 
 Update ruleset on remote instance without restarting:
 
 ```sh
-curl -0vx socks5h://192.168.1.1:1080 \
+curl -vx socks5h://192.168.1.1:1080 \
     http://neosocksd.lan/ruleset/update \
     --data-binary @ruleset.lua
 ```
@@ -76,7 +76,7 @@ The host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua):
 
 [neox.sh](neox.sh) is a curl wrapper script for simplified shell operating.
 
-*Note: Since the HTTP/1.0 API server has a fixed buffer size of 8 KiB, you will not be able to load large scripts with this command. Consider sharded updates for large script projects.*
+*Note: Since the HTTP/1.1 API server has a fixed buffer size of 8 KiB, you will not be able to load large scripts with this command. Consider sharded updates for large script projects.*
 
 ## Runtime Dependencies
 
