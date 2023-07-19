@@ -81,10 +81,10 @@ static void http_ctx_free(struct http_ctx *restrict ctx)
 	free(ctx);
 }
 
-void http_ctx_close(struct ev_loop *loop, struct http_ctx *ctx)
+void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	HTTP_CTX_LOG_F(
-		LOG_LEVEL_DEBUG, ctx, "close: fd=%d state=%d", ctx->accepted_fd,
+		LOG_LEVEL_DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
 		ctx->state);
 	http_ctx_stop(loop, ctx);
 	http_ctx_free(ctx);
@@ -115,7 +115,9 @@ static int http_request(struct http_ctx *restrict ctx)
 	if (ctx->state == STATE_REQUEST) {
 		next = http_parse(next, hdr);
 		if (next == NULL) {
-			LOGE("http: invalid request");
+			HTTP_CTX_LOG(
+				LOG_LEVEL_ERROR, ctx,
+				"http: failed parsing request");
 			return -1;
 		} else if (next == ctx->http_nxt) {
 			if (ctx->rbuf.len + 1 >= ctx->rbuf.cap) {
@@ -125,12 +127,15 @@ static int http_request(struct http_ctx *restrict ctx)
 			return 1;
 		}
 		if (strncmp(hdr->req.version, "HTTP/1.", 7) != 0) {
-			LOGE_F("http: unsupported protocol %s",
-			       hdr->req.version);
+			HTTP_CTX_LOG_F(
+				LOG_LEVEL_ERROR, ctx,
+				"http: unsupported protocol %s",
+				hdr->req.version);
 			return -1;
 		}
-		LOGV_F("http: request %s %s %s", hdr->req.method, hdr->req.url,
-		       hdr->req.version);
+		HTTP_CTX_LOG_F(
+			LOG_LEVEL_VERBOSE, ctx, "request \"%s\" \"%s\" \"%s\"",
+			hdr->req.method, hdr->req.url, hdr->req.version);
 		ctx->http_nxt = next;
 		ctx->http_hdr_num = 0;
 		ctx->content = NULL;
@@ -140,7 +145,9 @@ static int http_request(struct http_ctx *restrict ctx)
 		char *key, *value;
 		next = http_parsehdr(next, &key, &value);
 		if (next == NULL) {
-			LOGE("http: invalid header");
+			HTTP_CTX_LOG(
+				LOG_LEVEL_ERROR, ctx,
+				"http: failed parsing header");
 			return -1;
 		} else if (next == ctx->http_nxt) {
 			return 1;
@@ -154,7 +161,8 @@ static int http_request(struct http_ctx *restrict ctx)
 		/* save the header */
 		const size_t num = ctx->http_hdr_num;
 		if (num >= HTTP_MAX_HEADER_COUNT) {
-			LOGE("http: too many headers");
+			HTTP_CTX_LOG(
+				LOG_LEVEL_ERROR, ctx, "http: too many headers");
 			return -1;
 		}
 		ctx->http_hdr[num] = (struct http_hdr_item){
@@ -170,7 +178,9 @@ static int http_request(struct http_ctx *restrict ctx)
 			/* indicates that there is content */
 			ctx->content = ctx->rbuf.data;
 		}
-		LOGV_F("http: header %s: %s", key, value);
+		HTTP_CTX_LOG_F(
+			LOG_LEVEL_VERBOSE, ctx, "header \"%s: %s\"", key,
+			value);
 	}
 	if (ctx->content != NULL) {
 		/* use inline buffer */
@@ -266,7 +276,9 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
-			LOGE_F("send: %s", strerror(err));
+			HTTP_CTX_LOG_F(
+				LOG_LEVEL_ERROR, ctx, "send: %s",
+				strerror(err));
 			http_ctx_close(loop, ctx);
 			return;
 		} else if (nsend == 0) {
@@ -297,7 +309,9 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		LOGE_F("dialer: %s", dialer_strerror(&ctx->dialer));
+		HTTP_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "dialer: %s",
+			dialer_strerror(&ctx->dialer));
 		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
 		ev_io_start(loop, &ctx->w_send);
 		return;

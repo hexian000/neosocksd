@@ -2,6 +2,7 @@
 #include "net/url.h"
 #include "utils/formats.h"
 #include "ruleset.h"
+#include "utils/slog.h"
 
 static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
 {
@@ -238,9 +239,8 @@ void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	const struct http_message *restrict hdr = &ctx->http_msg;
 	struct url uri;
-	LOGV_F("api: serve uri \"%s\"", hdr->req.url);
 	if (!url_parse(hdr->req.url, &uri)) {
-		LOGW("api: failed parsing url");
+		HTTP_CTX_LOG(LOG_LEVEL_WARNING, ctx, "failed parsing url");
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}

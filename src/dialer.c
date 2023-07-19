@@ -32,12 +32,13 @@ bool dialaddr_set(
 	struct dialaddr *restrict addr, const char *s, const size_t len)
 {
 	/* FQDN + ':' + port */
-	assert(len < FQDN_MAX_LENGTH + 1 + 5);
-	char buf[len + 1];
-	if (len >= sizeof(buf)) {
-		LOGE_F("address too long: \"%s\"", s);
+	if (len > FQDN_MAX_LENGTH + 1 + 5) {
+		LOG_TXT_F(
+			LOG_LEVEL_ERROR, s, len, "address too long: %zu bytes",
+			len);
 		return false;
 	}
+	char buf[len + 1];
 	memcpy(buf, s, len);
 	buf[len] = '\0';
 	char *host, *port;

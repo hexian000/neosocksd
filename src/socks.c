@@ -136,6 +136,9 @@ static void socks_ctx_free(struct socks_ctx *restrict ctx)
 static void
 socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 {
+	SOCKS_CTX_LOG_F(
+		LOG_LEVEL_DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		ctx->state);
 	socks_ctx_stop(loop, ctx);
 	socks_ctx_free(ctx);
 }
@@ -201,7 +204,9 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp)
 	if (ctx->dialed_fd != -1) {
 		if (getsockname(ctx->dialed_fd, &addr.sa, &addrlen) != 0) {
 			const int err = errno;
-			LOGE_F("getsockname: %s", strerror(err));
+			SOCKS_CTX_LOG_F(
+				LOG_LEVEL_ERROR, ctx, "getsockname: %s",
+				strerror(err));
 		}
 	}
 	const size_t rsplen = sizeof(struct socks5_hdr) +
@@ -410,7 +415,9 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 	const uint8_t command = read_uint8(
 		ctx->rbuf.data + offsetof(struct socks4_hdr, command));
 	if (command != SOCKS4CMD_CONNECT) {
-		LOGE_F("unsupported SOCKS4 command: %" PRIu8, command);
+		SOCKS_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx,
+			"SOCKS4 command not supported: %" PRIu8, command);
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
 	}
@@ -549,7 +556,9 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 		return -1;
 	}
 	if (!found) {
-		LOGE("SOCKS5: no authentication method supported");
+		SOCKS_CTX_LOG(
+			LOG_LEVEL_ERROR, ctx,
+			"SOCKS5: no acceptable authentication method");
 		return -1;
 	}
 
@@ -578,7 +587,9 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 			FAIL();
 		}
 	default:
-		LOGE_F("unknown SOCKS version: %" PRIu8, version);
+		SOCKS_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "SOCKS: unknown version: %" PRIu8,
+			version);
 		break;
 	}
 	return -1;

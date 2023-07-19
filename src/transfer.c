@@ -143,7 +143,8 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	if (t->state != state) {
 		XFER_CTX_LOG_F(
-			LOG_LEVEL_DEBUG, t, "state %d -> %d", t->state, state);
+			LOG_LEVEL_DEBUG, t, "state changed %d to %d", t->state,
+			state);
 		t->state = state;
 		t->state_cb.cb(loop, t->state_cb.ctx);
 	}

@@ -2,7 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "server.h"
-#include "algo/rand.h"
+#include "math/rand.h"
 #include "utils/slog.h"
 #include "conf.h"
 #include "sockutil.h"

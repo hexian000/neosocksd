@@ -70,15 +70,13 @@ static bool proxy_dial(
 
 	struct dialreq *req = NULL;
 	if (ruleset == NULL) {
-		struct dialaddr addr;
-		if (!dialaddr_set(&addr, addr_str, strlen(addr_str))) {
+		if (!dialaddr_set(&ctx->addr, addr_str, strlen(addr_str))) {
 			return false;
 		}
-		req = dialreq_new(&addr, 0);
+		req = dialreq_new(&ctx->addr, 0);
 	} else {
 		req = ruleset_resolve(ruleset, addr_str);
 	}
-
 	if (req == NULL) {
 		return false;
 	}

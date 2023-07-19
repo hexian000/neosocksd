@@ -54,12 +54,9 @@ struct forward_ctx {
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		char laddr[64], raddr[64];                                     \
+		char laddr[64];                                                \
 		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
-		(void)snprintf(                                                \
-			raddr, sizeof(raddr), "%s", (ctx)->s->conf->forward);  \
-		LOG_F(level, "\"%s\" <-> \"%s\": " format, laddr, raddr,       \
-		      __VA_ARGS__);                                            \
+		LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);           \
 	} while (0)
 #define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
 
@@ -109,6 +106,16 @@ static void forward_ctx_free(struct forward_ctx *restrict ctx)
 	free(ctx);
 }
 
+static void
+forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
+{
+	FW_CTX_LOG_F(
+		LOG_LEVEL_DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		ctx->state);
+	forward_ctx_stop(loop, ctx);
+	forward_ctx_free(ctx);
+}
+
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
 	struct forward_ctx *restrict ctx = data;
@@ -117,8 +124,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 
 	if (ctx->uplink.state == XFER_CLOSED ||
 	    ctx->downlink.state == XFER_CLOSED) {
-		forward_ctx_stop(loop, ctx);
-		forward_ctx_free(ctx);
+		forward_ctx_close(loop, ctx);
 		return;
 	}
 	if (ctx->state == STATE_CONNECTED &&
@@ -156,8 +162,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	default:
 		FAIL();
 	}
-	forward_ctx_stop(loop, ctx);
-	forward_ctx_free(ctx);
+	forward_ctx_close(loop, ctx);
 }
 
 static void connected_cb(struct ev_loop *loop, void *data)
@@ -241,8 +246,7 @@ static void forward_ctx_start(
 	struct dialaddr addr;
 	if (conf->forward != NULL) {
 		if (!dialaddr_set(&addr, conf->forward, strlen(conf->forward))) {
-			forward_ctx_stop(loop, ctx);
-			forward_ctx_free(ctx);
+			forward_ctx_close(loop, ctx);
 			return;
 		}
 #if WITH_TPROXY
@@ -251,9 +255,10 @@ static void forward_ctx_start(
 		socklen_t len = sizeof(dest);
 		if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
 			const int err = errno;
-			LOGE_F("getsockname: %s", strerror(err));
-			forward_ctx_stop(loop, ctx);
-			forward_ctx_free(ctx);
+			FW_CTX_LOG_F(
+				LOG_LEVEL_ERROR, ctx, "getsockname: %s",
+				strerror(err));
+			forward_ctx_close(loop, ctx);
 			return;
 		}
 		switch (dest.sa.sa_family) {
@@ -274,10 +279,11 @@ static void forward_ctx_start(
 			};
 			break;
 		default:
-			LOGE_F("getsockname: unknown af %jd",
-			       (intmax_t)dest.sa.sa_family);
-			forward_ctx_stop(loop, ctx);
-			forward_ctx_free(ctx);
+			FW_CTX_LOG_F(
+				LOG_LEVEL_ERROR, ctx,
+				"getsockname: unknown af %jd",
+				(intmax_t)dest.sa.sa_family);
+			forward_ctx_close(loop, ctx);
 			return;
 		}
 #endif
@@ -288,14 +294,12 @@ static void forward_ctx_start(
 	struct dialreq *req = dialreq_new(&addr, 0);
 	if (req == NULL) {
 		LOGOOM();
-		forward_ctx_stop(loop, ctx);
-		forward_ctx_free(ctx);
+		forward_ctx_close(loop, ctx);
 		return;
 	}
 
 	if (!dialer_start(&ctx->dialer, loop, req)) {
-		forward_ctx_stop(loop, ctx);
-		forward_ctx_free(ctx);
+		forward_ctx_close(loop, ctx);
 		return;
 	}
 
