@@ -1,6 +1,7 @@
 #include "http_impl.h"
-
 #include "utils/buffer.h"
+#include "dialer.h"
+
 #include <limits.h>
 
 struct http_invoke_ctx {
@@ -86,13 +87,17 @@ struct http_invoke_ctx *http_invoke(
 		free(ctx);
 		return NULL;
 	}
-	LOGV_F("http_invoke:\n%.*s", (int)ctx->wbuf->len, ctx->wbuf->data);
 	dialer_init(
 		&ctx->dialer, conf,
 		&(struct event_cb){
 			.cb = invoke_cb,
 			.ctx = ctx,
 		});
-	dialer_start(&ctx->dialer, loop, req);
+	if (!dialer_start(&ctx->dialer, loop, req)) {
+		ctx->wbuf = VBUF_FREE(ctx->wbuf);
+		free(ctx);
+		return NULL;
+	}
+	LOGV_F("http_invoke:\n%.*s", (int)ctx->wbuf->len, ctx->wbuf->data);
 	return ctx;
 }

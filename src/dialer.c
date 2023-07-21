@@ -639,13 +639,50 @@ static int dialer_recv(
 	return 1;
 }
 
-static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static int on_connected(struct dialer *restrict d, const int fd)
+{
+	assert(d->state == STATE_CONNECT);
+	const struct dialreq *restrict req = d->req;
+	const int sockerr = socket_get_error(fd);
+	if (sockerr != 0) {
+		LOGE_F("connect: %s", strerror(sockerr));
+		d->syserr = sockerr;
+		d->err = DIALER_SYSERR;
+		return -1;
+	}
+
+	if (d->jump >= req->num_proxy) {
+		return 0;
+	}
+
+	d->state = STATE_HANDSHAKE1;
+	if (!send_proxy_req(d)) {
+		return -1;
+	}
+	return 1;
+}
+
+static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct dialer *restrict d = watcher->data;
-	assert(d->state == STATE_HANDSHAKE1 || d->state == STATE_HANDSHAKE2);
-
 	const int fd = watcher->fd;
+	if (revents & EV_WRITE) {
+		ev_io_stop(loop, watcher);
+		const int ret = on_connected(d, fd);
+		if (ret < 0) {
+			dialer_fail(d, loop);
+			return;
+		} else if (ret == 0) {
+			dialer_finish(d, loop);
+			return;
+		}
+		ev_io_set(watcher, fd, EV_READ);
+		ev_io_start(loop, watcher);
+		return;
+	}
+
+	assert(d->state == STATE_HANDSHAKE1 || d->state == STATE_HANDSHAKE2);
 	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
 	if (ret < 0) {
 		dialer_fail(d, loop);
@@ -667,41 +704,6 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		dialer_fail(d, loop);
 		return;
 	}
-}
-
-static void
-connected_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
-{
-	CHECK_EV_ERROR(revents);
-	struct dialer *restrict d = watcher->data;
-	assert(d->state == STATE_CONNECT);
-
-	ev_io_stop(loop, watcher);
-	const struct dialreq *restrict req = d->req;
-	const int fd = watcher->fd;
-
-	const int sockerr = socket_get_error(fd);
-	if (sockerr != 0) {
-		LOGE_F("connect: %s", strerror(sockerr));
-		d->syserr = sockerr;
-		d->err = DIALER_SYSERR;
-		dialer_fail(d, loop);
-		return;
-	}
-
-	if (d->jump >= req->num_proxy) {
-		dialer_finish(d, loop);
-		return;
-	}
-
-	d->state = STATE_HANDSHAKE1;
-	if (!send_proxy_req(d)) {
-		dialer_fail(d, loop);
-		return;
-	}
-	ev_io_init(watcher, recv_cb, fd, EV_READ);
-	watcher->data = d;
-	ev_io_start(loop, watcher);
 }
 
 static bool connect_sa(
@@ -748,10 +750,9 @@ static bool connect_sa(
 	}
 	d->fd = fd;
 
-	struct ev_io *restrict w_connect = &d->w_socket;
-	ev_io_init(w_connect, connected_cb, fd, EV_WRITE);
-	w_connect->data = d;
-	ev_io_start(loop, w_connect);
+	struct ev_io *restrict w_socket = &d->w_socket;
+	ev_io_set(w_socket, fd, EV_WRITE);
+	ev_io_start(loop, w_socket);
 
 	d->state = STATE_CONNECT;
 	return true;
@@ -816,6 +817,9 @@ void dialer_init(
 	d->req = NULL;
 	d->state = STATE_INIT;
 	{
+		struct ev_io *restrict w_socket = &d->w_socket;
+		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
+		w_socket->data = d;
 		struct ev_timer *restrict w_timeout = &d->w_timeout;
 		ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
 		w_timeout->data = d;
