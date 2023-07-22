@@ -195,7 +195,7 @@ static void socks4_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 	(void)send_rsp(ctx, buf, sizeof(buf));
 }
 
-static void socks5_sendrsp(struct socks_ctx *restrict ctx, uint8_t rsp)
+static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 {
 	sockaddr_max_t addr = {
 		.sa.sa_family = AF_INET,
