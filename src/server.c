@@ -155,9 +155,11 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 
 	struct ev_io *restrict w_accept = &s->l.w_accept;
 	ev_io_init(w_accept, accept_cb, fd, EV_READ);
+	ev_set_priority(w_accept, EV_MINPRI);
 	w_accept->data = s;
 	struct ev_timer *restrict w_timer = &s->l.w_timer;
 	ev_timer_init(w_timer, timer_cb, 0.5, 0.0);
+	ev_set_priority(w_timer, EV_MINPRI);
 	w_timer->data = s;
 
 	struct ev_loop *loop = s->loop;

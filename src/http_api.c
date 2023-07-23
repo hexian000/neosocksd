@@ -1,8 +1,8 @@
 #include "http_impl.h"
 #include "net/url.h"
 #include "utils/formats.h"
-#include "ruleset.h"
 #include "utils/slog.h"
+#include "ruleset.h"
 
 static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
 {
