@@ -20,7 +20,7 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ## Features
 
 - Plain old protocols with no built-in support for authentication or encryption.
-- Top class processor/memory/storage/bandwidth efficiency.
+- Highly efficient, written in C.
 - Lua scripts powered rule set.
 - Routing connections by rule and even building an autonomous proxy mesh.
 - Horizontally scalable.
@@ -35,11 +35,12 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ```sh
 ./neosocksd -l 0.0.0.0:1080               # Just a SOCKS server
 ./neosocksd -4 -l 0.0.0.0:1080            # Prefer IPv4 in name resolution
-./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # And restrict client access to eth0 only
+./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # And bind outbound connections to eth0
 ./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
 # Start a hardened non-forking TCP port forwarder in the background
-sudo ./neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 --proto-timeout -u nobody -d
+sudo ./neosocksd -d -u nobody -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
+    --fastopen --proto-timeout --max-startups 20:50:100 --max-sessions 10000
 ```
 
 See `./neosocksd -h` for details.
@@ -48,23 +49,25 @@ See `./neosocksd -h` for details.
 
 First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
 
-Use the following command to start the server with the Lua scripts in current directory:
-
-```sh
-./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua -v
-```
-
 Depending on how complex your customizations are, check out:
 
 - Level 1: Rule set configuration example at [ruleset.lua](ruleset.lua)
 - Level 2: Rule set library code in [libruleset.lua](libruleset.lua)
 - Level 3: Reference manual for enthusiasts and professionals: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
+Use the following command to start the server with the Lua scripts in current directory:
+
+```sh
+./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua -v
+```
+
+Check server stats:
+
 ```sh
 curl -sX POST http://127.0.1.1:9080/stats
 ```
 
-Update ruleset on remote instance without restarting:
+Load ruleset on remote instance without restarting:
 
 ```sh
 curl -vx socks5h://192.168.1.1:1080 \
