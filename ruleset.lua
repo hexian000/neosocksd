@@ -1,4 +1,4 @@
-local ruleset = require("libruleset")
+local libruleset = require("libruleset")
 
 -- [[ configurations ]] --
 function _G.is_enabled()
@@ -70,7 +70,41 @@ _G.route6 = {
 }
 
 -- 4. the global default applies to any unmatched requests
-_G.route_default = rule.proxy("127.0.0.1:1081")
+_G.server_list = {"127.0.0.1:1081", "127.0.0.2:1081"}
+_G.server_index = 1
+_G.route_default = rule.proxy(server_list[server_index])
+
+function _G.change_route()
+    server_index = server_index % #server_list + 1
+    _G.route_default = rule.proxy(server_list[server_index])
+    logf("change route: [%d] %q", server_index, server_list[server_index])
+end
+
+local function portal_test()
+    -- if failed, change default route
+    os.execute([[(
+        if ! curl -m 15 -sx "socks5h://127.0.0.1:1080" "https://cp.cloudflare.com/generate_204"; then
+            curl -sx "socks5h://127.0.0.1:1080" "http://neosocksd.lan/ruleset/invoke" \
+                -d "change_route()"
+        fi
+    ) &]])
+end
+
+local ruleset = setmetatable({}, {
+    __index = libruleset
+})
+
+function ruleset.tick(now)
+    portal_test()
+    return libruleset.tick(now)
+end
+
+function ruleset.stats(dt)
+    local w = list:new()
+    w:insertf("%-20s: [%d] %q", "Default Route", server_index, server_list[server_index])
+    w:insert(libruleset.stats(dt))
+    return w:concat("\n")
+end
 
 logf("ruleset loaded, interpreter: %s", _VERSION)
 return ruleset

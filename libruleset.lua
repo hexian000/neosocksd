@@ -453,7 +453,53 @@ local function render_(w)
     w:insertf("%s* (peak=%d)", string.rep("-", n), peak)
 end
 
-local function stats_(dt)
+-- [[ ruleset callbacks, see API.md for details ]] --
+local ruleset = {}
+
+local function is_enabled()
+    local s = _G.is_enabled
+    if s == nil then
+        return true -- enabled by default
+    end
+    return s()
+end
+
+function ruleset.resolve(addr)
+    num_requests = num_requests + 1
+    if not is_enabled() then
+        logf("ruleset.resolve: service not enabled, reject %q", addr)
+        return nil
+    end
+    return resolve_(addr)
+end
+
+function ruleset.route(addr)
+    num_requests = num_requests + 1
+    if not is_enabled() then
+        logf("ruleset.route: service not enabled, reject %q", addr)
+        return nil
+    end
+    return route_(addr)
+end
+
+function ruleset.route6(addr)
+    num_requests = num_requests + 1
+    if not is_enabled() then
+        logf("ruleset.route6: service not enabled, reject %q", addr)
+        return nil
+    end
+    return route6_(addr)
+end
+
+function ruleset.tick(now)
+    stat_requests:insert(num_requests)
+    if stat_requests[MAX_STAT_REQUESTS + 1] then
+        stat_requests:remove(1)
+    end
+end
+neosocksd.setinterval(60.0)
+
+function ruleset.stats(dt)
     local w = list:new()
     local clock = os.clock()
     if clock > 0.0 then
@@ -480,52 +526,6 @@ local function stats_(dt)
     w:insert("> Request Stats")
     render_(w)
     return w:concat("\n")
-end
-
--- [[ ruleset callbacks, see API.md for details ]] --
-local ruleset = {}
-
-function _G.is_enabled()
-    return true -- enabled by default
-end
-
-function ruleset.resolve(addr)
-    num_requests = num_requests + 1
-    if not _G.is_enabled() then
-        logf("ruleset.resolve: service not enabled, reject %q", addr)
-        return nil
-    end
-    return resolve_(addr)
-end
-
-function ruleset.route(addr)
-    num_requests = num_requests + 1
-    if not _G.is_enabled() then
-        logf("ruleset.route: service not enabled, reject %q", addr)
-        return nil
-    end
-    return route_(addr)
-end
-
-function ruleset.route6(addr)
-    num_requests = num_requests + 1
-    if not _G.is_enabled() then
-        logf("ruleset.route6: service not enabled, reject %q", addr)
-        return nil
-    end
-    return route6_(addr)
-end
-
-function ruleset.tick(now)
-    stat_requests:insert(num_requests)
-    if stat_requests[MAX_STAT_REQUESTS + 1] then
-        stat_requests:remove(1)
-    end
-end
-neosocksd.setinterval(60.0)
-
-function ruleset.stats(dt)
-    return stats_(dt)
 end
 
 return ruleset
