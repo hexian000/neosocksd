@@ -342,8 +342,8 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 	ctx->dialed_fd = -1;
 	ctx->handle = handler;
 	ctx->state = STATE_INIT;
-	BUF_INIT(ctx->rbuf, HTTP_MAX_ENTITY);
-	BUF_INIT(ctx->wbuf, HTTP_MAX_ENTITY);
+	BUF_INIT(ctx->rbuf, 0);
+	BUF_INIT(ctx->wbuf, 0);
 	ctx->http_nxt = NULL;
 
 	const struct config *restrict conf = s->conf;

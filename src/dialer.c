@@ -249,7 +249,7 @@ send_http_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 #define APPEND(b, s)                                                           \
 	do {                                                                   \
 		memcpy((b), (s), STRLEN(s));                                   \
-		b += STRLEN(s);                                                \
+		(b) += STRLEN(s);                                              \
 	} while (0)
 	/* "CONNECT example.org:80 HTTP/1.1\r\n\r\n" */
 	size_t cap = STRLEN("CONNECT ") + addrlen +
@@ -411,9 +411,9 @@ static bool send_proxy_req(struct dialer *restrict d)
 		case STATE_HANDSHAKE2:
 			return send_socks5_req(d, addr);
 		default:
-			FAIL();
+			break;
 		}
-		return false;
+		break;
 	default:
 		break;
 	}
@@ -487,7 +487,7 @@ static int recv_http_rsp(struct dialer *restrict d)
 static int recv_socks4a_rsp(struct dialer *restrict d)
 {
 	if (d->buf.len < sizeof(struct socks4_hdr)) {
-		return sizeof(struct socks4_hdr) - d->buf.len;
+		return (int)(sizeof(struct socks4_hdr) - d->buf.len);
 	}
 	const unsigned char *hdr = d->buf.data;
 	const uint8_t version =
@@ -516,7 +516,7 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 	const size_t rsplen = sizeof(struct socks5_hdr) +
 			      sizeof(struct in6_addr) + sizeof(in_port_t);
 	if (d->buf.len < rsplen) {
-		return rsplen - d->buf.len;
+		return (int)(rsplen - d->buf.len);
 	}
 	const unsigned char *hdr = d->buf.data;
 	const uint8_t version =
@@ -544,7 +544,7 @@ static int recv_socks5_auth(struct dialer *restrict d)
 	assert(d->state == STATE_HANDSHAKE1);
 	const size_t rsplen = sizeof(struct socks5_auth_rsp);
 	if (d->buf.len < rsplen) {
-		return rsplen - d->buf.len;
+		return (int)(rsplen - d->buf.len);
 	}
 	const unsigned char *hdr = d->buf.data;
 	const uint8_t version =
@@ -583,10 +583,9 @@ recv_dispatch(struct dialer *restrict d, const struct proxy_req *restrict req)
 		case STATE_HANDSHAKE2:
 			return recv_socks5_rsp(d);
 		default:
-			FAIL();
+			break;
 		}
-		d->err = DIALER_PROXYERR;
-		return -1;
+		break;
 	default:
 		break;
 	}
@@ -726,13 +725,14 @@ static bool connect_sa(
 		d->err = DIALER_SYSERR;
 		return false;
 	}
-	socket_set_tcp(fd, true, true);
+	const struct config *restrict conf = d->conf;
 #if WITH_NETDEVICE
-	const char *netdev = d->conf->netdev;
-	if (netdev != NULL) {
-		socket_bind_netdev(fd, netdev);
+	if (conf->netdev != NULL) {
+		socket_bind_netdev(fd, conf->netdev);
 	}
 #endif
+	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
+	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
 		const int err = errno;
 		if (err != EINTR && err != EINPROGRESS) {
@@ -813,7 +813,7 @@ void dialer_init(
 	d->done_cb = *cb;
 	d->fd = -1;
 	d->jump = 0;
-	BUF_INIT(d->buf, sizeof(d->buf.data));
+	BUF_INIT(d->buf, 0);
 	d->req = NULL;
 	d->state = STATE_INIT;
 	{

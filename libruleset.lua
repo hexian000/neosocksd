@@ -456,17 +456,13 @@ end
 -- [[ ruleset callbacks, see API.md for details ]] --
 local ruleset = {}
 
-local function is_enabled()
-    local s = _G.is_enabled
-    if s == nil then
-        return true -- enabled by default
-    end
-    return s()
+_G.is_enabled = _G.is_enabled or function()
+    return true
 end
 
 function ruleset.resolve(addr)
     num_requests = num_requests + 1
-    if not is_enabled() then
+    if not _G.is_enabled() then
         logf("ruleset.resolve: service not enabled, reject %q", addr)
         return nil
     end
@@ -475,7 +471,7 @@ end
 
 function ruleset.route(addr)
     num_requests = num_requests + 1
-    if not is_enabled() then
+    if not _G.is_enabled() then
         logf("ruleset.route: service not enabled, reject %q", addr)
         return nil
     end
@@ -484,7 +480,7 @@ end
 
 function ruleset.route6(addr)
     num_requests = num_requests + 1
-    if not is_enabled() then
+    if not _G.is_enabled() then
         logf("ruleset.route6: service not enabled, reject %q", addr)
         return nil
     end

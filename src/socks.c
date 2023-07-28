@@ -713,7 +713,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
 	ctx->state = STATE_INIT;
-	BUF_INIT(ctx->rbuf, sizeof(ctx->rbuf.data));
+	BUF_INIT(ctx->rbuf, 0);
 
 	const struct config *restrict conf = s->conf;
 

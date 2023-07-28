@@ -1,6 +1,8 @@
 #include "util.h"
+#include "math/rand.h"
 #include "utils/check.h"
 #include "utils/slog.h"
+#include "utils/posixtime.h"
 
 #include <unistd.h>
 #include <pwd.h>
@@ -37,6 +39,8 @@ void init(void)
 		const int err = errno;
 		FAILMSGF("sigaction: %s", strerror(err));
 	}
+
+	srand64((uint64_t)clock_monotonic());
 }
 
 void uninit(void)

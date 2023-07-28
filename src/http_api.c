@@ -94,9 +94,9 @@ static void http_handle_stats(
 		"Server Time         : %s\n"
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu)\n"
-		"Listener Accepts    : %ju (%ju rejected)\n"
+		"Listener Accepts    : %ju (+%ju rejected)\n"
 		"Requests            : %ju (+%ju)\n"
-		"Traffic (U/D)       : %s / %s\n",
+		"Traffic             : Up %s, Down %s\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
 		lstats->num_serve, num_reject, stats->num_success,
 		stats->num_request - stats->num_success, xfer_up, xfer_down);
@@ -130,9 +130,9 @@ static void http_handle_stats(
 
 	BUF_APPENDF(
 		ctx->wbuf,
-		"Incoming Conns      : %.1f/s (%.1f reject/s)\n"
+		"Incoming Conns      : %.1f/s (%+.1f/s rejected)\n"
 		"Request Success     : %.1f/s\n"
-		"Bandwidth (U/D)     : %s/s / %s/s\n",
+		"Bandwidth           : Up %s/s, Down %s/s\n",
 		accept_rate, reject_rate, success_rate, xfer_rate_up,
 		xfer_rate_down);
 

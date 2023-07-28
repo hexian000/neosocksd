@@ -44,6 +44,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	CHECK_EV_ERROR(revents);
 
 	struct server *restrict s = (struct server *)watcher->data;
+	const struct config *restrict conf = s->conf;
 	struct listener_stats *restrict lstats = &s->l.stats;
 
 	for (;;) {
@@ -78,7 +79,8 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			(void)close(fd);
 			return;
 		}
-		socket_set_tcp(fd, true, true);
+		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
+		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 
 		lstats->num_serve++;
 		s->serve(s, loop, fd, &addr.sa);
@@ -118,23 +120,31 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		LOGE_F("socket: %s", strerror(err));
 		return false;
 	}
-	socket_set_nonblock(fd);
+	if (!socket_set_nonblock(fd)) {
+		const int err = errno;
+		LOGE_F("fcntl: %s", strerror(err));
+		(void)close(fd);
+		return false;
+	}
 
+	const struct config *restrict conf = s->conf;
 #if WITH_REUSEPORT
-	socket_set_reuseport(fd, s->conf->reuseport);
+	socket_set_reuseport(fd, conf->reuseport);
 #else
 	socket_set_reuseport(fd, false);
 #endif
-#if WITH_FASTOPEN
-	if (s->conf->fastopen) {
-		socket_set_fastopen(fd, 256);
-	}
-#endif
 #if WITH_TPROXY
-	if (s->conf->transparent) {
+	if (conf->transparent) {
 		socket_set_transparent(fd, true);
 	}
 #endif
+#if WITH_TCP_FASTOPEN
+	if (conf->tcp_fastopen) {
+		socket_set_fastopen(fd, 256);
+	}
+#endif
+	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
+	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 	if (bind(fd, bindaddr, getsocklen(bindaddr)) != 0) {
 		const int err = errno;
 		LOGE_F("bind error: %s", strerror(err));

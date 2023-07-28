@@ -163,7 +163,7 @@ void transfer_init(
 	w_send->data = t;
 	t->state_cb = cb;
 	t->byt_transferred = byt_transferred;
-	BUF_INIT(t->buf, XFER_BUFSIZE);
+	BUF_INIT(t->buf, 0);
 }
 
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
