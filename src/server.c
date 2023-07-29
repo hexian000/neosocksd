@@ -43,7 +43,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 
-	struct server *restrict s = (struct server *)watcher->data;
+	struct server *restrict s = watcher->data;
 	const struct config *restrict conf = s->conf;
 	struct listener_stats *restrict lstats = &s->l.stats;
 
@@ -92,8 +92,8 @@ timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	ev_timer_stop(loop, watcher);
-	struct listener *restrict s = (struct listener *)watcher->data;
-	struct ev_io *restrict w_accept = &s->w_accept;
+	struct listener *restrict l = watcher->data;
+	struct ev_io *restrict w_accept = &l->w_accept;
 	ev_io_start(loop, w_accept);
 }
 

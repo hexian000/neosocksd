@@ -104,7 +104,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 
-	struct transfer *restrict t = (struct transfer *)watcher->data;
+	struct transfer *restrict t = watcher->data;
 	enum transfer_state state = t->state;
 	if (state < XFER_LINGER) {
 		if (!transfer_recv(t)) {
