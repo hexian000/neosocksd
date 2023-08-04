@@ -7,12 +7,11 @@
 
 struct config conf_default(void)
 {
-	return (struct config){
+	struct config conf = {
 		.log_level = LOG_LEVEL_INFO,
 		.resolve_pf = PF_UNSPEC,
 		.timeout = 60.0,
 
-		.tcp_nodelay = true,
 		.tcp_keepalive = true,
 		.tcp_sndbuf = 0,
 		.tcp_rcvbuf = 0,
@@ -22,6 +21,10 @@ struct config conf_default(void)
 		.startup_limit_rate = 30,
 		.startup_limit_full = 100,
 	};
+#if HAVE_TCP_NODELAY
+	conf.tcp_nodelay = true;
+#endif
+	return conf;
 }
 
 static bool conf_check_range(
