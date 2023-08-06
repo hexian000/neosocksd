@@ -24,7 +24,7 @@
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
 
-static void ev_set_active(
+static void ev_io_set_active(
 	struct ev_loop *loop, struct ev_io *restrict watcher, const bool active)
 {
 	if (!!ev_is_active(watcher) == active) {
@@ -123,13 +123,13 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		/* fallthrough */
 	case XFER_CONNECTED: {
 		const bool has_data = t->buf.len > 0;
-		ev_set_active(loop, &t->w_recv, !has_data);
-		ev_set_active(loop, &t->w_send, has_data);
+		ev_io_set_active(loop, &t->w_recv, !has_data);
+		ev_io_set_active(loop, &t->w_send, has_data);
 	} break;
 	case XFER_LINGER:
 		if (t->buf.len > 0) {
-			ev_set_active(loop, &t->w_recv, false);
-			ev_set_active(loop, &t->w_send, true);
+			ev_io_set_active(loop, &t->w_recv, false);
+			ev_io_set_active(loop, &t->w_send, true);
 			break;
 		}
 		state = XFER_CLOSED;
