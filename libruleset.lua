@@ -280,10 +280,23 @@ function rule.reject()
     end
 end
 
-function rule.redirect(...)
+function rule.redirect(dst, ...)
     local chain = list:pack(...):reverse()
+    local host, port = splithostport(dst)
+    if host == "" then
+        return function(addr)
+            local host, _ = splithostport(addr)
+            return string.format("%s:%s", host, port), chain:unpack()
+        end
+    end
+    if port == "" then
+        return function(addr)
+            local _, port = splithostport(addr)
+            return string.format("%s:%s", host, port), chain:unpack()
+        end
+    end
     return function(addr)
-        return chain:unpack()
+        return dst, chain:unpack()
     end
 end
 
