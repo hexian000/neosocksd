@@ -89,6 +89,11 @@ static void http_handle_stats(
 	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
 	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
 
+	const double uptime_hrs = uptime / 3600.0;
+	const double avgreq_hrs = (double)(stats->num_request) / uptime_hrs;
+	FORMAT_BYTES(avgbw_up, ((double)stats->byt_up) / uptime_hrs);
+	FORMAT_BYTES(avgbw_down, ((double)stats->byt_down) / uptime_hrs);
+
 	BUF_APPENDF(
 		ctx->wbuf,
 		"Server Time         : %s\n"
@@ -96,10 +101,13 @@ static void http_handle_stats(
 		"Num Sessions        : %zu (+%zu)\n"
 		"Listener Accepts    : %ju (+%ju rejected)\n"
 		"Requests            : %ju (+%ju)\n"
-		"Traffic             : Up %s, Down %s\n",
+		"Avg Requests        : %.1f/hrs\n"
+		"Traffic             : Up %s, Down %s\n"
+		"Avg Bandwidth       : Up %s/hrs, Down %s/hrs\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
 		lstats->num_serve, num_reject, stats->num_success,
-		stats->num_request - stats->num_success, xfer_up, xfer_down);
+		stats->num_request - stats->num_success, avgreq_hrs, xfer_up,
+		xfer_down, avgbw_up, avgbw_down);
 
 	if (stateless) {
 		return;

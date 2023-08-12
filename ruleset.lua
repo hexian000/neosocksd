@@ -2,7 +2,7 @@ local libruleset = require("libruleset")
 
 -- [[ configurations ]] --
 function _G.is_enabled()
-    -- if false, new connections are rejected
+    -- if false, new requests are rejected
     return true
 end
 

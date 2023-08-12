@@ -48,6 +48,7 @@ struct socks_ctx {
 		struct {
 			struct ev_io watcher;
 			struct dialaddr addr;
+			uint8_t auth_method;
 			struct {
 				BUFFER_HDR;
 				unsigned char data[SOCKS_MAX_LENGTH];
@@ -539,28 +540,32 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	if (len < want) {
 		return (int)(want - len);
 	}
-	bool found = false;
+	uint8_t method = SOCKS5AUTH_NOACCEPTABLE;
 	const uint8_t *methods = req + sizeof(struct socks5_auth_req);
 	for (size_t i = 0; i < n; i++) {
-		if (methods[i] == SOCKS5AUTH_NOAUTH) {
-			found = true;
+		switch (methods[i]) {
+		case SOCKS5AUTH_NOAUTH:
+			/* accept */
 			break;
+		default:
+			continue;
 		}
+		method = methods[i];
+		break;
 	}
 	unsigned char wbuf[sizeof(struct socks5_auth_rsp)];
 	write_uint8(wbuf + offsetof(struct socks5_auth_rsp, version), SOCKS5);
-	write_uint8(
-		wbuf + offsetof(struct socks5_auth_rsp, method),
-		found ? SOCKS5AUTH_NOAUTH : SOCKS5AUTH_NOACCEPTABLE);
+	write_uint8(wbuf + offsetof(struct socks5_auth_rsp, method), method);
 	if (!send_rsp(ctx, wbuf, sizeof(wbuf))) {
 		return -1;
 	}
-	if (!found) {
+	if (method == SOCKS5AUTH_NOACCEPTABLE) {
 		SOCKS_CTX_LOG(
 			LOG_LEVEL_ERROR, ctx,
 			"SOCKS5: no acceptable authentication method");
 		return -1;
 	}
+	ctx->auth_method = method;
 
 	/* remove the auth request */
 	BUF_CONSUME(ctx->rbuf, sizeof(struct socks5_auth_req) + n);

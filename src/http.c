@@ -101,7 +101,7 @@ void http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
 		return;
 	}
 	ctx->wbuf.len += len;
-	LOGV_F("http: response error page %" PRIu16, code);
+	LOGD_F("http: response error page %" PRIu16, code);
 }
 
 static int http_request(struct http_ctx *restrict ctx)
