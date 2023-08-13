@@ -55,17 +55,11 @@ void socket_set_reuseport(const int fd, const bool reuseport)
 void socket_set_tcp(const int fd, const bool nodelay, const bool keepalive)
 {
 	int val;
-#if HAVE_TCP_NODELAY
 	val = nodelay ? 1 : 0;
 	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val))) {
 		const int err = errno;
 		LOGW_F("TCP_NODELAY: %s", strerror(err));
 	}
-#else
-	if (nodelay) {
-		LOGW_F("TCP_NODELAY: %s", "not supported in current build");
-	}
-#endif
 	val = keepalive ? 1 : 0;
 	if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val))) {
 		const int err = errno;

@@ -49,7 +49,7 @@ static void print_usage(const char *argv0)
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
-		"  -f, --forward <address>    run simple TCP port forwarding instead of SOCKS\n"
+		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
 #if WITH_NETDEVICE
 		"  -i, --netdev <name>        bind outgoing connections to network device\n"
 #endif
@@ -57,7 +57,7 @@ static void print_usage(const char *argv0)
 		"  --reuseport                allow multiple instances to listen on the same address\n"
 #endif
 #if WITH_TCP_FASTOPEN
-		"  --fastopen                 enable server-side TCP fast open (RFC 7413)\n"
+		"  --no-fastopen              disable server-side TCP fast open (RFC 7413)\n"
 #endif
 #if WITH_TPROXY
 		"  --tproxy                   operate as a transparent proxy\n"
@@ -155,9 +155,9 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #endif
 			continue;
 		}
-		if (strcmp(argv[i], "--fastopen") == 0) {
+		if (strcmp(argv[i], "--no-fastopen") == 0) {
 #if WITH_TCP_FASTOPEN
-			conf->tcp_fastopen = true;
+			conf->tcp_fastopen = false;
 #else
 			LOGW_F("unsupported argument: \"%s\"", argv[i]);
 #endif

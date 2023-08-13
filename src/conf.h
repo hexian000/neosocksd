@@ -27,9 +27,7 @@ struct config {
 #if WITH_TCP_FASTOPEN
 	bool tcp_fastopen : 1;
 #endif
-#if HAVE_TCP_NODELAY
 	bool tcp_nodelay : 1;
-#endif
 	bool tcp_keepalive : 1;
 #if WITH_TPROXY
 	bool transparent : 1;

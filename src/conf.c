@@ -12,6 +12,7 @@ struct config conf_default(void)
 		.resolve_pf = PF_UNSPEC,
 		.timeout = 60.0,
 
+		.tcp_nodelay = true,
 		.tcp_keepalive = true,
 		.tcp_sndbuf = 0,
 		.tcp_rcvbuf = 0,
@@ -21,8 +22,8 @@ struct config conf_default(void)
 		.startup_limit_rate = 30,
 		.startup_limit_full = 100,
 	};
-#if HAVE_TCP_NODELAY
-	conf.tcp_nodelay = true;
+#if WITH_TCP_FASTOPEN
+	conf.tcp_fastopen = true;
 #endif
 	return conf;
 }
