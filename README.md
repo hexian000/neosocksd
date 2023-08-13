@@ -7,16 +7,15 @@
 
 A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that only supports TCP CONNECT requests.
 
-- [neosocksd](#neosocksd)
-	- [Features](#features)
-	- [Usage](#usage)
-		- [Basic Usage](#basic-usage)
-		- [Scripting Usage](#scripting-usage)
-	- [Runtime Dependencies](#runtime-dependencies)
-	- [Building from Source](#building-from-source)
-		- [Dependencies](#dependencies)
-		- [Building with CMake](#building-with-cmake)
-	- [Credits](#credits)
+- [Features](#features)
+- [Usage](#usage)
+	- [Basic Usage](#basic-usage)
+	- [Scripting Usage](#scripting-usage)
+- [Runtime Dependencies](#runtime-dependencies)
+- [Building from Source](#building-from-source)
+	- [Dependencies](#dependencies)
+	- [Building with CMake](#building-with-cmake)
+- [Credits](#credits)
 
 ## Features
 
@@ -41,7 +40,7 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 
 # Start a hardened non-forking TCP port forwarder in the background
 sudo ./neosocksd -d -u nobody -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
-    --fastopen --proto-timeout --max-startups 20:50:100 --max-sessions 10000
+    --proto-timeout --max-startups 50:50:100 --max-sessions 10000
 ```
 
 See `./neosocksd -h` for details.
