@@ -4,6 +4,7 @@
 #include "forward.h"
 #include "http.h"
 #include "socks.h"
+#include "resolver.h"
 #include "ruleset.h"
 #include "conf.h"
 #include "server.h"
@@ -50,9 +51,7 @@ static void print_usage(const char *argv0)
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
 		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
-		// "  -x, --proxy [proxy1,[...,[proxyN,]]]<address>\n"
-		// "                             run proxy forwarding instead of SOCKS\n"
-		// "  --nameserver <address>     ignore resolv.conf\n"
+		"  --nameserver <address>     use specified nameserver instead of resolv.conf\n"
 #if WITH_NETDEVICE
 		"  -i, --netdev <name>        bind outgoing connections to network device\n"
 #endif
@@ -127,6 +126,11 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		    strcmp(argv[i], "--forward") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			conf->forward = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "--nameserver") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->nameserver = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "--http") == 0) {
@@ -267,6 +271,12 @@ int main(int argc, char **argv)
 		LOGF("listen address not specified");
 		print_usage(argv[0]);
 		exit(EXIT_FAILURE);
+	}
+	if (conf->nameserver != NULL) {
+		if (!resolver_set_server(conf->nameserver)) {
+			LOGW_F("failed using name server \"%s\"",
+			       conf->nameserver);
+		}
 	}
 
 	if (conf->daemonize) {
