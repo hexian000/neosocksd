@@ -7,15 +7,16 @@
 
 A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that only supports TCP CONNECT requests.
 
-- [Features](#features)
-- [Usage](#usage)
-	- [Basic Usage](#basic-usage)
-	- [Scripting Usage](#scripting-usage)
-- [Runtime Dependencies](#runtime-dependencies)
-- [Building from Source](#building-from-source)
-	- [Dependencies](#dependencies)
-	- [Building with CMake](#building-with-cmake)
-- [Credits](#credits)
+- [neosocksd](#neosocksd)
+	- [Features](#features)
+	- [Usage](#usage)
+		- [Basic Usage](#basic-usage)
+		- [Scripting Usage](#scripting-usage)
+	- [Runtime Dependencies](#runtime-dependencies)
+	- [Building from Source](#building-from-source)
+		- [Dependencies](#dependencies)
+		- [Building with CMake](#building-with-cmake)
+	- [Credits](#credits)
 
 ## Features
 
@@ -120,3 +121,4 @@ See [m.sh](m.sh) for more information about cross compiling support.
 Thanks to:
 - [libev](http://software.schmorp.de/pkg/libev.html)
 - [Lua](https://www.lua.org/)
+- [c-ares](https://c-ares.org/)

@@ -1,6 +1,7 @@
 #include "dialer.h"
 #include "net/http.h"
 #include "proto/domain.h"
+#include "resolver.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
@@ -162,6 +163,7 @@ void dialreq_free(struct dialreq *restrict req)
 
 enum dialer_state {
 	STATE_INIT,
+	STATE_RESOLVE,
 	STATE_CONNECT,
 	STATE_HANDSHAKE1,
 	STATE_HANDSHAKE2,
@@ -758,25 +760,17 @@ static bool connect_sa(
 	return true;
 }
 
-static bool connect_domain(
-	struct dialer *restrict d, struct ev_loop *loop,
-	const struct domain_name *domain)
+static void
+resolve_cb(struct ev_loop *loop, const struct sockaddr *sa, void *data)
 {
-	sockaddr_max_t addr;
-
-	char host[FQDN_MAX_LENGTH + 1];
-	memcpy(host, domain->name, domain->len);
-	host[domain->len] = '\0';
-	if (!resolve_hostname(&addr, host, d->conf->resolve_pf)) {
-		return false;
-	}
-
-	const struct sockaddr *sa = &addr.sa;
-	if (LOGLEVEL(LOG_LEVEL_DEBUG)) {
-		char addr_str[64];
-		format_sa(sa, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_DEBUG, "resolve: \"%.*s\" is \"%s\"",
-		      (int)domain->len, domain->name, addr_str);
+	struct dialer *restrict d = data;
+	const struct domain_name *restrict domain =
+		d->req->num_proxy > 0 ? &d->req->proxy[0].addr.domain :
+					&d->req->addr.domain;
+	if (sa == NULL) {
+		LOGE_F("name resolution failed: \"%.*s\"", (int)domain->len,
+		       domain->name);
+		return;
 	}
 
 	const uint16_t port = d->req->addr.port;
@@ -793,7 +787,16 @@ static bool connect_domain(
 		FAIL();
 	}
 
-	return connect_sa(d, loop, sa);
+	if (LOGLEVEL(LOG_LEVEL_DEBUG)) {
+		char addr_str[64];
+		format_sa(sa, addr_str, sizeof(addr_str));
+		LOG_F(LOG_LEVEL_DEBUG, "resolve: \"%.*s\" is \"%s\"",
+		      (int)domain->len, domain->name, addr_str);
+	}
+
+	if (!connect_sa(d, loop, sa)) {
+		dialer_fail(d, loop);
+	}
 }
 
 static void
@@ -857,9 +860,11 @@ bool dialer_start(
 		}
 	} break;
 	case ATYP_DOMAIN: {
-		if (!connect_domain(d, loop, &addr->domain)) {
-			return false;
-		}
+		char host[FQDN_MAX_LENGTH + 1];
+		memcpy(host, addr->domain.name, addr->domain.len);
+		host[addr->domain.len] = '\0';
+		d->state = STATE_RESOLVE;
+		resolver_do(loop, host, d->conf->resolve_pf, resolve_cb, d);
 	} break;
 	default:
 		FAIL();

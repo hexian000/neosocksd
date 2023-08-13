@@ -1,4 +1,5 @@
 #include "util.h"
+#include "resolver.h"
 #include "math/rand.h"
 #include "utils/check.h"
 #include "utils/slog.h"
@@ -41,10 +42,12 @@ void init(void)
 	}
 
 	srand64((uint64_t)clock_monotonic());
+	resolver_init();
 }
 
 void uninit(void)
 {
+	resolver_uninit();
 }
 
 void daemonize(void)

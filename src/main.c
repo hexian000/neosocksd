@@ -50,6 +50,9 @@ static void print_usage(const char *argv0)
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
 		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
+		// "  -x, --proxy [proxy1,[...,[proxyN,]]]<address>\n"
+		// "                             run proxy forwarding instead of SOCKS\n"
+		// "  --nameserver <address>     ignore resolv.conf\n"
 #if WITH_NETDEVICE
 		"  -i, --netdev <name>        bind outgoing connections to network device\n"
 #endif

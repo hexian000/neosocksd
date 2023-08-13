@@ -1,6 +1,7 @@
 #include "conf.h"
 #include "utils/slog.h"
 #include "utils/minmax.h"
+
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -28,26 +29,31 @@ struct config conf_default(void)
 	return conf;
 }
 
-static bool conf_check_range(
-	const char *key, const size_t value, const size_t min, const size_t max)
-{
-	if (value < min || value > max) {
-		LOGE_F("config: %s is out of range (%zu - %zu)", key, min, max);
-		return false;
-	}
-	return true;
-}
-
 #define RANGE_CHECK(conf, key, min, max)                                       \
-	conf_check_range(#key, (conf)->key, min, max)
+	do {                                                                   \
+		if ((intmax_t)((conf)->key) < (intmax_t)(min) ||               \
+		    (intmax_t)((conf)->key) > (intmax_t)(max)) {               \
+			LOGE_F("config: %s is out of range (%s - %s)", #key,   \
+			       #min, #max);                                    \
+			return false;                                          \
+		}                                                              \
+	} while (0)
+
+#define RANGE_CHECK_FLOAT(conf, key, min, max)                                 \
+	do {                                                                   \
+		if (!(((conf)->key) >= (min) && ((conf)->key) <= (max))) {     \
+			LOGE_F("config: %s is out of range (%s - %s)", #key,   \
+			       #min, #max);                                    \
+			return false;                                          \
+		}                                                              \
+	} while (0)
 
 bool conf_check(const struct config *restrict conf)
 {
-	const bool range_ok =
-		RANGE_CHECK(conf, startup_limit_start, 1, SIZE_MAX) &&
-		RANGE_CHECK(conf, startup_limit_rate, 0, 100) &&
-		RANGE_CHECK(conf, startup_limit_full, 1, SIZE_MAX) &&
-		RANGE_CHECK(
-			conf, log_level, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
-	return range_ok;
+	RANGE_CHECK_FLOAT(conf, timeout, 5.0, 86400.0);
+	RANGE_CHECK(conf, startup_limit_start, 1, INT_MAX);
+	RANGE_CHECK(conf, startup_limit_rate, 0, 100);
+	RANGE_CHECK(conf, startup_limit_full, 1, INT_MAX);
+	RANGE_CHECK(conf, log_level, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
+	return true;
 }

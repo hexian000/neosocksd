@@ -3,6 +3,7 @@ add_executable(neosocksd
     conf.c conf.h
     sockutil.c sockutil.h
     dialer.c dialer.h
+    resolver.c resolver.h
     ruleset.c ruleset.h
     transfer.c transfer.h
     forward.c forward.h
@@ -67,6 +68,22 @@ else()
 endif()
 target_include_directories(neosocksd SYSTEM PRIVATE ${LIBEV_INCLUDE_DIR})
 target_link_libraries(neosocksd PRIVATE ${LIBEV_LIBRARY})
+
+# find c-ares
+find_path(LIBCARES_INCLUDE_DIR NAMES ares.h)
+if(BUILD_STATIC OR LINK_STATIC_LIBS)
+    find_library(LIBCARES_LIBRARY NAMES libcares.a)
+else()
+    find_library(LIBCARES_LIBRARY NAMES cares)
+endif()
+if((EXISTS ${LIBCARES_INCLUDE_DIR}) AND (EXISTS ${LIBCARES_LIBRARY}))
+    message(STATUS "c-ares: ${LIBCARES_LIBRARY}")
+    set(WITH_CARES ON)
+else()
+    message(FATAL_ERROR "c-ares not found")
+endif()
+target_include_directories(neosocksd SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
+target_link_libraries(neosocksd PRIVATE ${LIBCARES_LIBRARY})
 
 # find lua
 find_path(LUA_INCLUDE_DIR
