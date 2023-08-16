@@ -5,6 +5,7 @@
 #include <limits.h>
 
 struct http_invoke_ctx {
+	struct dialreq *dialreq;
 	struct dialer dialer;
 	struct ev_loop *loop;
 	struct ev_io w_write;
@@ -52,6 +53,7 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 static void invoke_cb(struct ev_loop *loop, void *data)
 {
 	struct http_invoke_ctx *restrict ctx = data;
+	free(ctx->dialreq);
 	struct ev_io *restrict w_write = &ctx->w_write;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
@@ -65,8 +67,8 @@ static void invoke_cb(struct ev_loop *loop, void *data)
 }
 
 struct http_invoke_ctx *http_invoke(
-	struct ev_loop *loop, const struct config *conf, struct dialreq *req,
-	const char *code, const size_t len)
+	struct ev_loop *loop, struct dialreq *req, const char *code,
+	const size_t len)
 {
 	CHECK(len <= INT_MAX);
 	struct http_invoke_ctx *restrict ctx =
@@ -87,17 +89,17 @@ struct http_invoke_ctx *http_invoke(
 		free(ctx);
 		return NULL;
 	}
-	dialer_init(
-		&ctx->dialer, conf,
-		&(struct event_cb){
-			.cb = invoke_cb,
-			.ctx = ctx,
-		});
+	struct event_cb cb = (struct event_cb){
+		.cb = invoke_cb,
+		.ctx = ctx,
+	};
+	dialer_init(&ctx->dialer, cb);
 	if (!dialer_start(&ctx->dialer, loop, req)) {
 		ctx->wbuf = VBUF_FREE(ctx->wbuf);
 		free(ctx);
 		return NULL;
 	}
+	ctx->dialreq = req;
 	LOGV_F("http_invoke:\n%.*s", (int)ctx->wbuf->len, ctx->wbuf->data);
 	return ctx;
 }

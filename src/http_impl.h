@@ -51,6 +51,7 @@ struct http_ctx {
 			size_t http_hdr_num, content_length;
 			unsigned char *content;
 			struct dialaddr addr;
+			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct {
 				BUFFER_HDR;

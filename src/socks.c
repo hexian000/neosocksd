@@ -8,6 +8,7 @@
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "proto/socks.h"
+#include "conf.h"
 #include "dialer.h"
 #include "ruleset.h"
 #include "transfer.h"
@@ -53,6 +54,7 @@ struct socks_ctx {
 				BUFFER_HDR;
 				unsigned char data[SOCKS_MAX_LENGTH];
 			} rbuf;
+			struct dialreq *dialreq;
 			struct dialer dialer;
 		};
 		/* connected */
@@ -98,6 +100,8 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		return;
 	case STATE_CONNECT:
 		dialer_stop(&ctx->dialer, loop);
+		free(ctx->dialreq);
+		ctx->dialreq = NULL;
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECTED:
@@ -331,6 +335,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct socks_ctx *restrict ctx = data;
 	assert(ctx->state == STATE_CONNECT);
+	free(ctx->dialreq);
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
@@ -346,7 +351,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	SOCKS_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
 
-	const struct config *restrict conf = ctx->s->conf;
+	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	if (conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
@@ -696,6 +701,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		socks_ctx_close(loop, ctx);
 		return;
 	}
+	ctx->dialreq = req;
 
 	ctx->state = STATE_CONNECT;
 	if (!dialer_start(&ctx->dialer, loop, req)) {
@@ -719,21 +725,21 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->state = STATE_INIT;
 	BUF_INIT(ctx->rbuf, 0);
 
-	const struct config *restrict conf = s->conf;
+	const struct config *restrict conf = G.conf;
 
 	struct ev_io *restrict watcher = &ctx->watcher;
 	ev_io_init(watcher, recv_cb, accepted_fd, EV_READ);
 	watcher->data = ctx;
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
+	ev_set_priority(w_timeout, EV_MINPRI);
 	w_timeout->data = ctx;
 
-	dialer_init(
-		&ctx->dialer, conf,
-		&(struct event_cb){
-			.cb = dialer_cb,
-			.ctx = ctx,
-		});
+	struct event_cb cb = (struct event_cb){
+		.cb = dialer_cb,
+		.ctx = ctx,
+	};
+	dialer_init(&ctx->dialer, cb);
 	return ctx;
 }
 

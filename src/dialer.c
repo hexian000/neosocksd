@@ -188,10 +188,6 @@ static void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 		break;
 	}
 	assert(!ev_is_active(&d->w_socket) && !ev_is_active(&d->w_timeout));
-	if (d->req != NULL) {
-		dialreq_free(d->req);
-		d->req = NULL;
-	}
 }
 
 static void dialer_fail(struct dialer *restrict d, struct ev_loop *loop)
@@ -730,7 +726,7 @@ static bool connect_sa(
 		d->err = DIALER_SYSERR;
 		return false;
 	}
-	const struct config *restrict conf = d->conf;
+	const struct config *restrict conf = G.conf;
 #if WITH_NETDEVICE
 	if (conf->netdev != NULL) {
 		socket_bind_netdev(fd, conf->netdev);
@@ -812,12 +808,9 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	dialer_fail(d, loop);
 }
 
-void dialer_init(
-	struct dialer *restrict d, const struct config *conf,
-	const struct event_cb *cb)
+void dialer_init(struct dialer *restrict d, const struct event_cb cb)
 {
-	d->conf = conf;
-	d->done_cb = *cb;
+	d->done_cb = cb;
 	d->fd = -1;
 	d->jump = 0;
 	BUF_INIT(d->buf, 0);
@@ -828,14 +821,15 @@ void dialer_init(
 		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
 		w_socket->data = d;
 		struct ev_timer *restrict w_timeout = &d->w_timeout;
-		ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
+		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
+		ev_set_priority(w_timeout, EV_MINPRI);
 		w_timeout->data = d;
 	}
 }
 
 bool dialer_start(
 	struct dialer *restrict d, struct ev_loop *restrict loop,
-	struct dialreq *restrict req)
+	const struct dialreq *restrict req)
 {
 	d->req = req;
 	d->syserr = 0;
@@ -875,7 +869,7 @@ bool dialer_start(
 				.cb = resolve_cb,
 				.ctx = d,
 			});
-		const int family = d->conf->resolve_pf;
+		const int family = G.conf->resolve_pf;
 		if (!resolve_start(q, host, NULL, family)) {
 			return false;
 		}

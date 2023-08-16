@@ -1,4 +1,5 @@
 #include "http_impl.h"
+#include "conf.h"
 #include "ruleset.h"
 
 #include <ev.h>
@@ -32,7 +33,7 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_stop(loop, &ctx->w_recv);
 	ev_io_stop(loop, &ctx->w_send);
 
-	const struct config *restrict conf = ctx->s->conf;
+	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	if (conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
@@ -79,6 +80,7 @@ static bool proxy_dial(
 	if (req == NULL) {
 		return false;
 	}
+	ctx->dialreq = req;
 
 	if (!dialer_start(&ctx->dialer, loop, req)) {
 		return false;

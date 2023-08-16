@@ -264,6 +264,7 @@ int main(int argc, char **argv)
 	if (!conf_check(conf)) {
 		exit(EXIT_FAILURE);
 	}
+	G.conf = conf;
 	slog_level =
 		CLAMP(conf->log_level, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
 	if (conf->listen == NULL) {
@@ -299,7 +300,7 @@ int main(int argc, char **argv)
 	CHECKOOM(G.resolver);
 
 	if (conf->ruleset != NULL) {
-		G.ruleset = ruleset_new(loop, &app.conf);
+		G.ruleset = ruleset_new(loop);
 		CHECKOOM(G.ruleset);
 		const char *err = ruleset_loadfile(G.ruleset, conf->ruleset);
 		if (err != NULL) {
@@ -309,7 +310,7 @@ int main(int argc, char **argv)
 	}
 
 	struct server *restrict s = &app.server;
-	server_init(s, loop, conf, NULL, NULL);
+	server_init(s, loop, NULL, NULL);
 	if (conf->forward != NULL
 #if WITH_TPROXY
 	    || conf->transparent
@@ -342,7 +343,7 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 		api = &app.apiserver;
-		server_init(api, loop, conf, http_api_serve, s);
+		server_init(api, loop, http_api_serve, s);
 		if (!server_start(api, &apiaddr.sa)) {
 			FAILMSG("failed to start api server");
 		}
@@ -383,7 +384,7 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 
 	switch (watcher->signum) {
 	case SIGHUP: {
-		const struct config *restrict conf = &app.conf;
+		const struct config *restrict conf = G.conf;
 		if (conf->ruleset == NULL || G.ruleset == NULL) {
 			LOGE_F("signal %d received, but ruleset not loaded",
 			       watcher->signum);

@@ -1,8 +1,6 @@
 #ifndef SERVER_H
 #define SERVER_H
 
-#include "conf.h"
-
 #include <ev.h>
 
 #include <stddef.h>
@@ -30,6 +28,7 @@ struct server_stats {
 	ev_tstamp started;
 };
 
+struct sockaddr;
 struct server;
 
 typedef void (*serve_fn)(
@@ -38,7 +37,6 @@ typedef void (*serve_fn)(
 
 struct server {
 	struct ev_loop *loop;
-	const struct config *conf;
 	struct listener l;
 	struct server_stats stats;
 	void *data;
@@ -47,8 +45,7 @@ struct server {
 };
 
 void server_init(
-	struct server *s, struct ev_loop *loop, const struct config *conf,
-	serve_fn serve, void *data);
+	struct server *s, struct ev_loop *loop, serve_fn serve, void *data);
 
 bool server_start(struct server *s, const struct sockaddr *bindaddr);
 

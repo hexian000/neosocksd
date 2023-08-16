@@ -1,7 +1,6 @@
 #ifndef RULESET_H
 #define RULESET_H
 
-#include "conf.h"
 #include "sockutil.h"
 
 #include <stdbool.h>
@@ -10,7 +9,7 @@
 struct ev_loop;
 struct ruleset;
 
-struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf);
+struct ruleset *ruleset_new(struct ev_loop *loop);
 const char *ruleset_invoke(struct ruleset *r, const char *code, size_t len);
 const char *ruleset_load(struct ruleset *r, const char *code, size_t len);
 const char *ruleset_loadfile(struct ruleset *r, const char *filename);

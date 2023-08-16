@@ -1,7 +1,6 @@
 #ifndef DIALER_H
 #define DIALER_H
 
-#include "conf.h"
 #include "proto/socks.h"
 #include "utils/minmax.h"
 #include "utils/buffer.h"
@@ -71,9 +70,8 @@ enum dialer_error {
 };
 
 struct dialer {
-	const struct config *conf;
 	struct event_cb done_cb;
-	struct dialreq *req;
+	const struct dialreq *req;
 	struct resolve_query resolve_query;
 	size_t jump;
 	int state;
@@ -87,10 +85,10 @@ struct dialer {
 	} buf;
 };
 
-void dialer_init(
-	struct dialer *d, const struct config *conf, const struct event_cb *cb);
+void dialer_init(struct dialer *d, const struct event_cb cb);
 
-bool dialer_start(struct dialer *d, struct ev_loop *loop, struct dialreq *req);
+bool dialer_start(
+	struct dialer *d, struct ev_loop *loop, const struct dialreq *req);
 
 void dialer_stop(struct dialer *d, struct ev_loop *loop);
 

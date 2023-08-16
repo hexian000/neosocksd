@@ -18,7 +18,7 @@
 
 static bool is_startup_limited(struct server *restrict s)
 {
-	const struct config *restrict conf = s->conf;
+	const struct config *restrict conf = G.conf;
 	const struct server_stats *restrict stats = &s->stats;
 	if (conf->max_sessions > 0 &&
 	    stats->num_sessions >= conf->max_sessions) {
@@ -44,7 +44,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	CHECK_EV_ERROR(revents);
 
 	struct server *restrict s = watcher->data;
-	const struct config *restrict conf = s->conf;
+	const struct config *restrict conf = G.conf;
 	struct listener_stats *restrict lstats = &s->l.stats;
 
 	for (;;) {
@@ -98,12 +98,11 @@ timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 }
 
 void server_init(
-	struct server *restrict s, struct ev_loop *loop,
-	const struct config *conf, serve_fn serve, void *data)
+	struct server *restrict s, struct ev_loop *loop, serve_fn serve,
+	void *data)
 {
 	*s = (struct server){
 		.loop = loop,
-		.conf = conf,
 		.serve = serve,
 		.data = data,
 		.stats = { .started = TSTAMP_NIL },
@@ -125,7 +124,7 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		return false;
 	}
 
-	const struct config *restrict conf = s->conf;
+	const struct config *restrict conf = G.conf;
 #if WITH_REUSEPORT
 	socket_set_reuseport(fd, conf->reuseport);
 #else

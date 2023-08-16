@@ -39,6 +39,7 @@ struct forward_ctx {
 	union {
 		/* connecting */
 		struct {
+			struct dialreq *dialreq;
 			struct dialer dialer;
 		};
 		/* connected */
@@ -70,6 +71,8 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		return;
 	case STATE_CONNECT:
 		dialer_stop(&ctx->dialer, loop);
+		free(ctx->dialreq);
+		ctx->dialreq = NULL;
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECTED:
@@ -168,6 +171,7 @@ static void connected_cb(struct ev_loop *loop, void *data)
 {
 	struct forward_ctx *restrict ctx = data;
 	assert(ctx->state == STATE_CONNECT);
+	free(ctx->dialreq);
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
@@ -181,7 +185,7 @@ static void connected_cb(struct ev_loop *loop, void *data)
 
 	FW_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
 
-	const struct config *restrict conf = ctx->s->conf;
+	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	if (conf->proto_timeout) {
@@ -223,25 +227,25 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
 
-	const struct config *restrict conf = s->conf;
+	const struct config *restrict conf = G.conf;
 
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
+	ev_set_priority(w_timeout, EV_MINPRI);
 	w_timeout->data = ctx;
 
-	dialer_init(
-		&ctx->dialer, conf,
-		&(struct event_cb){
-			.ctx = ctx,
-			.cb = connected_cb,
-		});
+	struct event_cb cb = (struct event_cb){
+		.cb = connected_cb,
+		.ctx = ctx,
+	};
+	dialer_init(&ctx->dialer, cb);
 	return ctx;
 }
 
-static void forward_ctx_start(
-	struct ev_loop *loop, struct forward_ctx *restrict ctx,
-	const struct config *restrict conf)
+static void
+forward_ctx_start(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
+	const struct config *restrict conf = G.conf;
 	struct dialaddr addr;
 	if (conf->forward != NULL) {
 		if (!dialaddr_set(&addr, conf->forward, strlen(conf->forward))) {
@@ -296,6 +300,7 @@ static void forward_ctx_start(
 		forward_ctx_close(loop, ctx);
 		return;
 	}
+	ctx->dialreq = req;
 
 	if (!dialer_start(&ctx->dialer, loop, req)) {
 		forward_ctx_close(loop, ctx);
@@ -320,5 +325,5 @@ void forward_serve(
 	}
 	(void)memcpy(
 		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
-	forward_ctx_start(loop, ctx, s->conf);
+	forward_ctx_start(loop, ctx);
 }

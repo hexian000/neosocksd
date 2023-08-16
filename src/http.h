@@ -17,7 +17,7 @@ void http_api_serve(
 
 struct http_invoke_ctx;
 struct http_invoke_ctx *http_invoke(
-	struct ev_loop *loop, const struct config *conf, struct dialreq *req,
-	const char *code, size_t len);
+	struct ev_loop *loop, struct dialreq *req, const char *code,
+	size_t len);
 
 #endif /* HTTP_H */

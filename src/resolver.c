@@ -243,6 +243,7 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 		return false;
 	}
 	ev_timer_init(&r->w_timeout, update_cb, timeout, timeout);
+	ev_set_priority(&r->w_timeout, EV_MINPRI);
 	r->w_timeout.data = r;
 
 	const char *nameserver = conf->nameserver;

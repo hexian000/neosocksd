@@ -4,6 +4,7 @@
 #include "utils/serialize.h"
 #include "utils/slog.h"
 #include "utils/check.h"
+#include "conf.h"
 #include "dialer.h"
 #include "http.h"
 #include "sockutil.h"
@@ -27,7 +28,6 @@
 #include <string.h>
 
 struct ruleset {
-	const struct config *conf;
 	lua_State *L;
 	struct ev_loop *loop;
 	struct ev_timer ticker;
@@ -110,7 +110,7 @@ static int ruleset_pcall(
 	struct ruleset *restrict r, lua_CFunction func, int nargs, int nresults,
 	...)
 {
-	const bool traceback = r->conf->traceback;
+	const bool traceback = G.conf->traceback;
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	if (traceback) {
@@ -142,7 +142,9 @@ static int invoke_(lua_State *restrict L)
 	struct ruleset *restrict r = find_ruleset(L);
 	size_t len;
 	const char *code = lua_tolstring(L, 1, &len);
-	(void)http_invoke(r->loop, r->conf, req, code, len);
+	if (http_invoke(r->loop, req, code, len) == NULL) {
+		free(req);
+	}
 	return 0;
 }
 
@@ -151,9 +153,8 @@ static int resolve_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *s = lua_tostring(L, 1);
-	struct ruleset *restrict r = find_ruleset(L);
 	sockaddr_max_t addr;
-	if (!resolve_addr(&addr, s, NULL, r->conf->resolve_pf)) {
+	if (!resolve_addr(&addr, s, NULL, G.conf->resolve_pf)) {
 		const int err = errno;
 		luaL_error(L, "%s", strerror(err));
 	}
@@ -302,7 +303,7 @@ static int ruleset_luainit_(lua_State *restrict L)
 	return 0;
 }
 
-struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf)
+struct ruleset *ruleset_new(struct ev_loop *loop)
 {
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
 	if (r == NULL) {
@@ -313,7 +314,6 @@ struct ruleset *ruleset_new(struct ev_loop *loop, const struct config *conf)
 		ruleset_free(r);
 		return NULL;
 	}
-	r->conf = conf;
 	r->L = L;
 	r->loop = loop;
 	{

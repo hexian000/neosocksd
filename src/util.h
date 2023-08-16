@@ -15,6 +15,7 @@ struct resolver;
 struct ruleset;
 
 extern struct globals {
+	const struct config *conf;
 	struct resolver *resolver;
 	struct ruleset *ruleset;
 } G;
