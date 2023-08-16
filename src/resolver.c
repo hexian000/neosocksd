@@ -7,6 +7,7 @@
 #include "util.h"
 #include "sockutil.h"
 
+#include <assert.h>
 #include <ev.h>
 #if WITH_CARES
 #include <ares.h>
@@ -81,14 +82,8 @@ sched_update(struct ev_loop *loop, struct ev_timer *restrict watcher)
 	ev_timer_again(loop, watcher);
 }
 
-static void
-update_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+static size_t purge_watchers(struct resolver *restrict r)
 {
-	UNUSED(revents);
-	struct resolver *restrict r = watcher->data;
-	ares_process_fd(r->channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
-
-	/* purge inactive watchers */
 	size_t num_purged = 0;
 	struct ev_io **pw_socket = (struct ev_io **)&r->w_socket.next;
 	for (struct ev_io *w_socket = *pw_socket; w_socket != NULL;
@@ -101,6 +96,18 @@ update_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 		free(w_socket);
 		num_purged++;
 	}
+	return num_purged;
+}
+
+static void
+update_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+{
+	UNUSED(revents);
+	struct resolver *restrict r = watcher->data;
+	ares_process_fd(r->channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
+
+	/* purge inactive watchers */
+	size_t num_purged = purge_watchers(r);
 	if (num_purged > 0) {
 		LOGD_F("resolve: %zu inactive watchers purged", num_purged);
 	}
@@ -213,6 +220,7 @@ void resolver_free(struct resolver *restrict r)
 	if (r->async_enabled) {
 #if WITH_CARES
 		ares_destroy(r->channel);
+		(void)purge_watchers(r);
 #endif
 	}
 	free(r);
