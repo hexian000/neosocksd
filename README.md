@@ -20,13 +20,13 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 ## Features
 
 - Plain old protocols with no built-in support for authentication or encryption.
-- Highly efficient, written in C.
+- Top class processor efficiency, minimal memory usage and code size.
 - Lua scripts powered rule set.
 - Routing connections by rule and even building an autonomous proxy mesh.
 - Horizontally scalable.
 - RESTful API for monitoring and updating rules online.
 - IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
-- Minimized resource usage, embedded systems friendly.
+- Embedded systems friendly.
 - Conforming to: ISO C11, POSIX.1-2008.
 
 ## Usage
