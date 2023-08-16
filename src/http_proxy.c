@@ -2,7 +2,6 @@
 #include "conf.h"
 #include "ruleset.h"
 
-#include "utils/check.h"
 #include <ev.h>
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
