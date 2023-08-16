@@ -57,8 +57,9 @@ static void invoke_cb(struct ev_loop *loop, void *data)
 	struct ev_io *restrict w_write = &ctx->w_write;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		LOGE_F("invoke: %s", dialer_strerror(&ctx->dialer));
-		ev_io_start(loop, w_write);
+		LOGE("invoke: dialer failed");
+		ctx->wbuf = VBUF_FREE(ctx->wbuf);
+		free(ctx);
 		return;
 	}
 	ev_io_init(w_write, request_write_cb, fd, EV_WRITE);

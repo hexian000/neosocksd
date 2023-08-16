@@ -171,16 +171,14 @@ static void connected_cb(struct ev_loop *loop, void *data)
 {
 	struct forward_ctx *restrict ctx = data;
 	assert(ctx->state == STATE_CONNECT);
-	free(ctx->dialreq);
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		FW_CTX_LOG_F(
-			LOG_LEVEL_ERROR, ctx, "dialer: %s",
-			dialer_strerror(&ctx->dialer));
-		forward_ctx_free(ctx);
+		FW_CTX_LOG(LOG_LEVEL_ERROR, ctx, "dialer failed");
+		forward_ctx_close(loop, ctx);
 		return;
 	}
+	free(ctx->dialreq);
 	ctx->dialed_fd = fd;
 
 	FW_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");

@@ -62,23 +62,14 @@ struct sockaddr;
 		    sizeof("HTTP/1.1\r\n"),                                    \
 	    SOCKS_MAX_LENGTH)
 
-enum dialer_error {
-	DIALER_SUCCESS,
-	DIALER_SYSERR,
-	DIALER_TIMEOUT,
-	DIALER_PROXYERR,
-};
-
 struct dialer {
 	struct event_cb done_cb;
 	const struct dialreq *req;
 	struct resolve_query resolve_query;
 	size_t jump;
 	int state;
-	enum dialer_error err;
 	int fd, syserr;
 	struct ev_io w_socket;
-	struct ev_timer w_timeout;
 	struct {
 		BUFFER_HDR;
 		unsigned char data[DIALER_BUF_SIZE];
@@ -93,7 +84,5 @@ bool dialer_start(
 void dialer_stop(struct dialer *d, struct ev_loop *loop);
 
 int dialer_get(struct dialer *d);
-
-const char *dialer_strerror(struct dialer *d);
 
 #endif /* DIALER_H */

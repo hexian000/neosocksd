@@ -335,17 +335,15 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct socks_ctx *restrict ctx = data;
 	assert(ctx->state == STATE_CONNECT);
-	free(ctx->dialreq);
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		SOCKS_CTX_LOG_F(
-			LOG_LEVEL_ERROR, ctx, "dialer: %s",
-			dialer_strerror(&ctx->dialer));
+		SOCKS_CTX_LOG(LOG_LEVEL_ERROR, ctx, "dialer failed");
 		socks_senderr(ctx, ctx->dialer.syserr);
 		socks_ctx_close(loop, ctx);
 		return;
 	}
+	free(ctx->dialreq);
 	ctx->dialed_fd = fd;
 	socks_sendrsp(ctx, true);
 
