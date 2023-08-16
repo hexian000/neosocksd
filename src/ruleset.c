@@ -453,6 +453,7 @@ static int ruleset_request_(lua_State *restrict L)
 {
 	const char *func = lua_topointer(L, 1);
 	const char *request = lua_topointer(L, 2);
+	const struct sockaddr *sa = lua_topointer(L, 3);
 	if (find_callback(L, 1) != 1) {
 		struct dialreq *req = request_accept(request);
 		lua_pushlightuserdata(L, req);
@@ -461,6 +462,16 @@ static int ruleset_request_(lua_State *restrict L)
 	lua_replace(L, 1);
 	(void)lua_pushstring(L, request);
 	lua_replace(L, 2);
+	{
+		char addr_buf[64];
+		if (sa != NULL &&
+		    format_sa(sa, addr_buf, sizeof(addr_buf)) > 0) {
+			lua_pushstring(L, addr_buf);
+		} else {
+			lua_pushnil(L);
+		}
+	}
+	lua_replace(L, 3);
 	lua_call(L, 1, LUA_MULTRET);
 	const int n = lua_gettop(L);
 	if (n < 1) {
@@ -483,12 +494,14 @@ static int ruleset_request_(lua_State *restrict L)
 	return 1;
 }
 
-static struct dialreq *
-dispatch_req(struct ruleset *restrict r, const char *func, const char *request)
+static struct dialreq *dispatch_req(
+	struct ruleset *restrict r, const char *func, const char *request,
+	const struct sockaddr *src)
 {
 	lua_State *restrict L = r->L;
 	const int ret = ruleset_pcall(
-		r, ruleset_request_, 2, 1, (void *)func, (void *)request);
+		r, ruleset_request_, 2, 1, (void *)func, (void *)request,
+		(void *)src);
 	if (ret != LUA_OK) {
 		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
 		return NULL;
@@ -496,19 +509,22 @@ dispatch_req(struct ruleset *restrict r, const char *func, const char *request)
 	return (struct dialreq *)lua_topointer(L, -1);
 }
 
-struct dialreq *ruleset_resolve(struct ruleset *r, const char *request)
+struct dialreq *ruleset_resolve(
+	struct ruleset *r, const char *request, const struct sockaddr *src)
 {
-	return dispatch_req(r, "resolve", request);
+	return dispatch_req(r, "resolve", request, src);
 }
 
-struct dialreq *ruleset_route(struct ruleset *r, const char *request)
+struct dialreq *ruleset_route(
+	struct ruleset *r, const char *request, const struct sockaddr *src)
 {
-	return dispatch_req(r, "route", request);
+	return dispatch_req(r, "route", request, src);
 }
 
-struct dialreq *ruleset_route6(struct ruleset *r, const char *request)
+struct dialreq *ruleset_route6(
+	struct ruleset *r, const char *request, const struct sockaddr *src)
 {
-	return dispatch_req(r, "route6", request);
+	return dispatch_req(r, "route6", request, src);
 }
 
 size_t ruleset_memused(struct ruleset *restrict r)

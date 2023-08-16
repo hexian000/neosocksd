@@ -63,8 +63,8 @@ Trigger a full GC.
 **Synopsis**
 
 ```Lua
-function ruleset.resolve(domain)
-    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+function ruleset.resolve(domain, source)
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
 end
 ```
 
@@ -78,6 +78,7 @@ Process a host name request. Specifically:
 **Params**
 
 - `domain`: full qualified domain name and port, like `"www.example.org:80"`
+- `source`: the address and port of the client making this request, like `"203.0.113.1:54321"`
 
 **Returns**
 
@@ -86,14 +87,20 @@ Process a host name request. Specifically:
 - `addr, proxyN, ..., proxy1`: forward the request through proxy chain
 - `nil`: reject the request
 
+Proxy protocols can be specified in URI scheme:
+
+- `203.0.113.1:1080`: SOCKS4A is the default
+- `socks4a://203.0.113.1:1080`: if making IPv4 request, this protocol is compatible with standard SOCKS4
+- `socks5://203.0.113.1:1080`: name resolution is performed remotely
+- `http://203.0.113.1:1080`: HTTP CONNECT proxy
 
 ### ruleset.route
 
 **Synopsis**
 
 ```Lua
-function ruleset.route(addr)
-    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+function ruleset.route(addr, source)
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
 end
 ```
 
@@ -106,6 +113,7 @@ Process an IPv4 request. Specifically:
 **Params**
 
 - `addr`: address and port, like `"203.0.113.1:80"`
+- `source`: the address and port of the client making this request, like `"203.0.113.1:54321"`
 
 **Returns**
 
@@ -117,8 +125,8 @@ See [ruleset.resolve](#rulesetresolve)
 **Synopsis**
 
 ```Lua
-function ruleset.route6(addr)
-    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+function ruleset.route6(addr, source)
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
 end
 ```
 
@@ -131,6 +139,7 @@ Process an IPv6 request. Specifically:
 **Params**
 
 - `addr`: address and port, like `"[2001:DB8::1]:80"`
+- `source`: the address and port of the client making this request, like `"203.0.113.1:54321"`
 
 **Returns**
 

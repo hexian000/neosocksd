@@ -135,9 +135,7 @@ bool dialreq_proxy(
 		uri.host = uri.defacto;
 	} else if (strcmp(uri.scheme, "http") == 0) {
 		protocol = PROTO_HTTP;
-	} else if (
-		strcmp(uri.scheme, "socks4") == 0 ||
-		strcmp(uri.scheme, "socks4a") == 0) {
+	} else if (strcmp(uri.scheme, "socks4a") == 0) {
 		protocol = PROTO_SOCKS4A;
 	} else if (strcmp(uri.scheme, "socks5") == 0) {
 		protocol = PROTO_SOCKS5;
