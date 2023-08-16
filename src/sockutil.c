@@ -17,7 +17,6 @@
 #include <net/if.h>
 #include <sys/socket.h>
 
-#include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -271,7 +270,9 @@ bool parse_bindaddr(sockaddr_max_t *sa, const char *s)
 	return ok;
 }
 
-bool resolve_hostname(sockaddr_max_t *sa, const char *host, const int family)
+bool resolve_addr(
+	sockaddr_max_t *sa, const char *name, const char *service,
+	const int family)
 {
 	struct addrinfo hints = {
 		.ai_family = family,
@@ -280,7 +281,7 @@ bool resolve_hostname(sockaddr_max_t *sa, const char *host, const int family)
 		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG,
 	};
 	struct addrinfo *result = NULL;
-	const int err = getaddrinfo(host, NULL, &hints, &result);
+	const int err = getaddrinfo(name, service, &hints, &result);
 	if (err != 0) {
 		LOGE_F("resolve: %s", gai_strerror(err));
 		return false;

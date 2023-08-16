@@ -29,12 +29,7 @@ static struct {
 	struct config conf;
 	struct server server;
 	struct server apiserver;
-
-	/* ruleset is a singleton */
-	struct ruleset *ruleset;
-} app = {
-	.ruleset = NULL,
-};
+} app = { 0 };
 
 static void
 signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents);
@@ -51,7 +46,9 @@ static void print_usage(const char *argv0)
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
 		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
+#if WITH_CARES
 		"  --nameserver <address>     use specified nameserver instead of resolv.conf\n"
+#endif
 #if WITH_NETDEVICE
 		"  -i, --netdev <name>        bind outgoing connections to network device\n"
 #endif
@@ -128,11 +125,13 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			conf->forward = argv[++i];
 			continue;
 		}
+#if WITH_CARES
 		if (strcmp(argv[i], "--nameserver") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			conf->nameserver = argv[++i];
 			continue;
 		}
+#endif
 		if (strcmp(argv[i], "--http") == 0) {
 			conf->http = true;
 			continue;
@@ -272,12 +271,6 @@ int main(int argc, char **argv)
 		print_usage(argv[0]);
 		exit(EXIT_FAILURE);
 	}
-	if (conf->nameserver != NULL) {
-		if (!resolver_set_server(conf->nameserver)) {
-			LOGW_F("failed using name server \"%s\"",
-			       conf->nameserver);
-		}
-	}
 
 	if (conf->daemonize) {
 		daemonize();
@@ -302,10 +295,13 @@ int main(int argc, char **argv)
 		ev_signal_start(loop, w_sigterm);
 	}
 
+	G.resolver = resolver_new(loop, conf);
+	CHECKOOM(G.resolver);
+
 	if (conf->ruleset != NULL) {
-		app.ruleset = ruleset_new(loop, &app.conf);
-		CHECKOOM(app.ruleset);
-		const char *err = ruleset_loadfile(app.ruleset, conf->ruleset);
+		G.ruleset = ruleset_new(loop, &app.conf);
+		CHECKOOM(G.ruleset);
+		const char *err = ruleset_loadfile(G.ruleset, conf->ruleset);
 		if (err != NULL) {
 			LOGF_F("unable to load ruleset: %s", conf->ruleset);
 			exit(EXIT_FAILURE);
@@ -313,7 +309,7 @@ int main(int argc, char **argv)
 	}
 
 	struct server *restrict s = &app.server;
-	server_init(s, loop, conf, app.ruleset, NULL, NULL);
+	server_init(s, loop, conf, NULL, NULL);
 	if (conf->forward != NULL
 #if WITH_TPROXY
 	    || conf->transparent
@@ -346,7 +342,7 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 		api = &app.apiserver;
-		server_init(api, loop, conf, app.ruleset, http_api_serve, s);
+		server_init(api, loop, conf, http_api_serve, s);
 		if (!server_start(api, &apiaddr.sa)) {
 			FAILMSG("failed to start api server");
 		}
@@ -363,9 +359,13 @@ int main(int argc, char **argv)
 		api = NULL;
 	}
 	server_stop(s);
-	if (app.ruleset != NULL) {
-		ruleset_free(app.ruleset);
-		app.ruleset = NULL;
+	if (G.ruleset != NULL) {
+		ruleset_free(G.ruleset);
+		G.ruleset = NULL;
+	}
+	if (G.resolver != NULL) {
+		resolver_free(G.resolver);
+		G.resolver = NULL;
 	}
 
 	ev_signal_stop(loop, &app.w_sighup);
@@ -384,12 +384,12 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 	switch (watcher->signum) {
 	case SIGHUP: {
 		const struct config *restrict conf = &app.conf;
-		if (conf->ruleset == NULL || app.ruleset == NULL) {
+		if (conf->ruleset == NULL || G.ruleset == NULL) {
 			LOGE_F("signal %d received, but ruleset not loaded",
 			       watcher->signum);
 			break;
 		}
-		const char *err = ruleset_loadfile(app.ruleset, conf->ruleset);
+		const char *err = ruleset_loadfile(G.ruleset, conf->ruleset);
 		if (err != NULL) {
 			LOGE_F("failed to reload ruleset: %s", err);
 			break;

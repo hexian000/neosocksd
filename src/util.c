@@ -20,6 +20,8 @@
 #include <string.h>
 #include <time.h>
 
+struct globals G = { 0 };
+
 static void uninit(void);
 
 void init(void)
@@ -42,12 +44,11 @@ void init(void)
 	}
 
 	srand64((uint64_t)clock_monotonic());
-	resolver_init();
 }
 
 void uninit(void)
 {
-	resolver_uninit();
+	resolver_atexit_cb();
 }
 
 void daemonize(void)

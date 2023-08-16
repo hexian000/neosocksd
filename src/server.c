@@ -99,13 +99,11 @@ timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 
 void server_init(
 	struct server *restrict s, struct ev_loop *loop,
-	const struct config *conf, struct ruleset *ruleset, serve_fn serve,
-	void *data)
+	const struct config *conf, serve_fn serve, void *data)
 {
 	*s = (struct server){
 		.loop = loop,
 		.conf = conf,
-		.ruleset = ruleset,
 		.serve = serve,
 		.data = data,
 		.stats = { .started = TSTAMP_NIL },

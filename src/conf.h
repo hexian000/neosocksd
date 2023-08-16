@@ -9,10 +9,12 @@
 struct config {
 	const char *listen;
 	const char *forward;
-	const char *nameserver;
 	const char *restapi;
 	const char *ruleset;
 	const char *user_name;
+#if WITH_CARES
+	const char *nameserver;
+#endif
 #if WITH_NETDEVICE
 	const char *netdev;
 #endif

@@ -5,7 +5,7 @@
 #include "proto/socks.h"
 #include "utils/minmax.h"
 #include "utils/buffer.h"
-#include "net/url.h"
+#include "resolver.h"
 #include "sockutil.h"
 #include "util.h"
 
@@ -74,6 +74,7 @@ struct dialer {
 	const struct config *conf;
 	struct event_cb done_cb;
 	struct dialreq *req;
+	struct resolve_query resolve_query;
 	size_t jump;
 	int state;
 	enum dialer_error err;

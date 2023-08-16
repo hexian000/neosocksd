@@ -11,6 +11,14 @@
 #include <stdlib.h>
 #include <math.h>
 
+struct resolver;
+struct ruleset;
+
+extern struct globals {
+	struct resolver *resolver;
+	struct ruleset *ruleset;
+} G;
+
 #define UNUSED(x) (void)(x)
 
 #define TSTAMP_NIL (-1.0)

@@ -65,8 +65,7 @@ static bool proxy_dial(
 	struct http_ctx *restrict ctx, struct ev_loop *loop,
 	const char *addr_str)
 {
-	struct server *restrict s = ctx->s;
-	struct ruleset *ruleset = s->ruleset;
+	struct ruleset *ruleset = G.ruleset;
 
 	struct dialreq *req = NULL;
 	if (ruleset == NULL) {

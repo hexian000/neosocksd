@@ -153,7 +153,7 @@ static int resolve_(lua_State *restrict L)
 	const char *s = lua_tostring(L, 1);
 	struct ruleset *restrict r = find_ruleset(L);
 	sockaddr_max_t addr;
-	if (!resolve_hostname(&addr, s, r->conf->resolve_pf)) {
+	if (!resolve_addr(&addr, s, NULL, r->conf->resolve_pf)) {
 		const int err = errno;
 		luaL_error(L, "%s", strerror(err));
 	}

@@ -40,7 +40,6 @@ struct server {
 	struct ev_loop *loop;
 	const struct config *conf;
 	struct listener l;
-	struct ruleset *ruleset;
 	struct server_stats stats;
 	void *data;
 
@@ -49,7 +48,7 @@ struct server {
 
 void server_init(
 	struct server *s, struct ev_loop *loop, const struct config *conf,
-	struct ruleset *ruleset, serve_fn serve, void *data);
+	serve_fn serve, void *data);
 
 bool server_start(struct server *s, const struct sockaddr *bindaddr);
 

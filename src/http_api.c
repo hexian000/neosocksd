@@ -2,11 +2,14 @@
 #include "net/url.h"
 #include "utils/formats.h"
 #include "utils/slog.h"
+#include "resolver.h"
 #include "ruleset.h"
+
+#include <stdint.h>
 
 static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
 {
-	struct ruleset *restrict ruleset = ctx->s->ruleset;
+	struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset == NULL) {
 		return;
 	}
@@ -68,6 +71,8 @@ static void http_handle_stats(
 	const struct server *restrict s_ = ctx->s->data;
 	const struct server_stats *restrict stats = &s_->stats;
 	const struct listener_stats *restrict lstats = &s_->l.stats;
+	const struct resolver_stats *restrict resolv_stats =
+		resolver_stats(G.resolver);
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = now - stats->started;
 	const time_t server_time = time(NULL);
@@ -91,6 +96,8 @@ static void http_handle_stats(
 
 	const double uptime_hrs = uptime / 3600.0;
 	const double avgreq_hrs = (double)(stats->num_request) / uptime_hrs;
+	const double avgresolv_hrs =
+		(double)(resolv_stats->num_query) / uptime_hrs;
 	FORMAT_BYTES(avgbw_up, ((double)stats->byt_up) / uptime_hrs);
 	FORMAT_BYTES(avgbw_down, ((double)stats->byt_down) / uptime_hrs);
 
@@ -99,15 +106,17 @@ static void http_handle_stats(
 		"Server Time         : %s\n"
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu)\n"
-		"Listener Accepts    : %ju (+%ju rejected)\n"
-		"Requests            : %ju (+%ju)\n"
-		"Avg Requests        : %.1f/hrs\n"
+		"Conn Accepts        : %ju (+%ju)\n"
+		"Requests            : %ju (+%ju), %.1f/hrs\n"
+		"Name Resolves       : %ju (+%ju), %.1f/hrs\n"
 		"Traffic             : Up %s, Down %s\n"
 		"Avg Bandwidth       : Up %s/hrs, Down %s/hrs\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
 		lstats->num_serve, num_reject, stats->num_success,
-		stats->num_request - stats->num_success, avgreq_hrs, xfer_up,
-		xfer_down, avgbw_up, avgbw_down);
+		stats->num_request - stats->num_success, avgreq_hrs,
+		resolv_stats->num_success,
+		resolv_stats->num_query - resolv_stats->num_success,
+		avgresolv_hrs, xfer_up, xfer_down, avgbw_up, avgbw_down);
 
 	if (stateless) {
 		return;
@@ -115,6 +124,7 @@ static void http_handle_stats(
 
 	static struct {
 		uintmax_t num_success;
+		uintmax_t num_failure;
 		uintmax_t xfer_up, xfer_down;
 		uintmax_t num_accept;
 		uintmax_t num_reject;
@@ -133,18 +143,22 @@ static void http_handle_stats(
 		(double)(lstats->num_accept - last.num_accept) / dt;
 	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
 
+	const uintmax_t num_failure = stats->num_request - stats->num_success;
 	const double success_rate =
 		(double)(stats->num_success - last.num_success) / dt;
+	const double failure_rate =
+		(double)(num_failure - last.num_failure) / dt;
 
 	BUF_APPENDF(
 		ctx->wbuf,
-		"Incoming Conns      : %.1f/s (%+.1f/s rejected)\n"
-		"Request Success     : %.1f/s\n"
+		"Accept Rate         : %.1f/s (%+.1f/s)\n"
+		"Request Rate        : %.1f/s (%+.1f/s)\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n",
-		accept_rate, reject_rate, success_rate, xfer_rate_up,
-		xfer_rate_down);
+		accept_rate, reject_rate, success_rate, failure_rate,
+		xfer_rate_up, xfer_rate_down);
 
 	last.num_success = stats->num_success;
+	last.num_failure = num_failure;
 	last.xfer_up = stats->byt_up;
 	last.xfer_down = stats->byt_down;
 	last.num_accept = lstats->num_accept;
@@ -181,7 +195,7 @@ static void http_handle_ruleset(
 	struct url *restrict uri)
 {
 	UNUSED(loop);
-	struct ruleset *ruleset = ctx->s->ruleset;
+	struct ruleset *ruleset = G.ruleset;
 	if (ruleset == NULL) {
 		RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		BUF_APPENDF(

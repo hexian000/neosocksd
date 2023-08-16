@@ -87,9 +87,9 @@ If you downloaded a *-static build in the [Releases](https://github.com/hexian00
 
 ```sh
 # Debian & Ubuntu
-sudo apt install -y libev4
+sudo apt install libev4 libc-ares2
 # OpenWRT
-opkg install libev
+opkg install libev libcares
 ```
 
 *Lua is always statically linked.*
@@ -99,7 +99,9 @@ opkg install libev
 
 ```sh
 # Debian & Ubuntu
-sudo apt install -y libev-dev liblua5.4-dev
+sudo apt install libev-dev liblua5.4-dev libc-ares-dev
+# Alpine Linux
+apk add libev-dev lua5.4-dev c-ares-dev
 ```
 
 ### Building with CMake

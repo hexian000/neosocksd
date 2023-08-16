@@ -2,14 +2,14 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "forward.h"
+#include "utils/check.h"
+#include "utils/slog.h"
 #include "conf.h"
+#include "util.h"
 #include "server.h"
 #include "dialer.h"
 #include "sockutil.h"
 #include "transfer.h"
-#include "util.h"
-#include "utils/check.h"
-#include "utils/slog.h"
 
 #include <ev.h>
 #include <netinet/in.h>
@@ -17,7 +17,6 @@
 #include <unistd.h>
 
 #include <assert.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>

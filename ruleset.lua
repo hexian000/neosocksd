@@ -34,6 +34,8 @@ _G.redirect_name = {
 _G.redirect = {
     -- redirect API address, or loopback will be rejected
     [1] = {match.exact("127.0.1.1:80"), rule.redirect("127.0.1.1:9080")},
+    -- redirect TCP DNS to local cache
+    [2] = {match.exact("1.1.1.1:53"), rule.redirect("127.0.0.53:53")},
     -- no default action, go to _G.route
     [0] = nil
 }

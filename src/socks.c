@@ -518,7 +518,6 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	} break;
 	default:
 		FAIL();
-		return -1;
 	}
 
 	/* protocol finished */
@@ -642,7 +641,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 
 static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 {
-	struct ruleset *restrict ruleset = ctx->s->ruleset;
+	struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset == NULL) {
 		struct dialreq *req = dialreq_new(&ctx->addr, 0);
 		if (req == NULL) {

@@ -1,17 +1,17 @@
 #include "dialer.h"
-#include "net/http.h"
-#include "proto/domain.h"
-#include "resolver.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "net/addr.h"
 #include "net/url.h"
+#include "net/http.h"
+#include "proto/domain.h"
 #include "proto/socks.h"
 #include "conf.h"
 #include "sockutil.h"
 #include "util.h"
+#include "resolver.h"
 
 #include <ev.h>
 #include <errno.h>
@@ -175,6 +175,9 @@ static void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 	switch (d->state) {
 	case STATE_INIT:
 		break;
+	case STATE_RESOLVE:
+		resolve_cancel(&d->resolve_query);
+		/* fallthrough */
 	case STATE_CONNECT:
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2: {
@@ -760,16 +763,15 @@ static bool connect_sa(
 	return true;
 }
 
-static void
-resolve_cb(struct ev_loop *loop, const struct sockaddr *sa, void *data)
+static void resolve_cb(struct ev_loop *loop, void *data)
 {
 	struct dialer *restrict d = data;
-	const struct domain_name *restrict domain =
-		d->req->num_proxy > 0 ? &d->req->proxy[0].addr.domain :
-					&d->req->addr.domain;
+	const struct dialaddr *restrict addr =
+		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
+	const struct sockaddr *sa = resolve_get(&d->resolve_query);
 	if (sa == NULL) {
-		LOGE_F("name resolution failed: \"%.*s\"", (int)domain->len,
-		       domain->name);
+		LOGE_F("name resolution failed: \"%.*s\"",
+		       (int)addr->domain.len, addr->domain.name);
 		return;
 	}
 
@@ -787,11 +789,13 @@ resolve_cb(struct ev_loop *loop, const struct sockaddr *sa, void *data)
 		FAIL();
 	}
 
-	if (LOGLEVEL(LOG_LEVEL_DEBUG)) {
+	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
+		char node_str[addr->domain.len + 1 + 5 + 1];
+		dialaddr_format(addr, node_str, sizeof(node_str));
 		char addr_str[64];
 		format_sa(sa, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_DEBUG, "resolve: \"%.*s\" is \"%s\"",
-		      (int)domain->len, domain->name, addr_str);
+		LOG_F(LOG_LEVEL_VERBOSE, "resolve: \"%s\" is %s", node_str,
+		      addr_str);
 	}
 
 	if (!connect_sa(d, loop, sa)) {
@@ -864,7 +868,17 @@ bool dialer_start(
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
-		resolver_do(loop, host, d->conf->resolve_pf, resolve_cb, d);
+		struct resolve_query *q = &d->resolve_query;
+		resolve_init(
+			G.resolver, q,
+			(struct event_cb){
+				.cb = resolve_cb,
+				.ctx = d,
+			});
+		const int family = d->conf->resolve_pf;
+		if (!resolve_start(q, host, NULL, family)) {
+			return false;
+		}
 	} break;
 	default:
 		FAIL();
