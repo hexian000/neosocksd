@@ -656,26 +656,15 @@ static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 		return req;
 	}
 
-	sockaddr_max_t peer_addr;
-	socklen_t len = sizeof(peer_addr);
-	struct sockaddr *peer = &peer_addr.sa;
-	if (getpeername(ctx->accepted_fd, peer, &len) != 0) {
-		const int err = errno;
-		SOCKS_CTX_LOG_F(
-			LOG_LEVEL_WARNING, ctx, "getpeername: %s",
-			strerror(err));
-		peer = NULL;
-	}
-
 	char request[FQDN_MAX_LENGTH + 1 + 5 + 1];
 	(void)dialaddr_format(&ctx->addr, request, sizeof(request));
 	switch (ctx->addr.type) {
 	case ATYP_DOMAIN:
-		return ruleset_resolve(ruleset, request, peer);
+		return ruleset_resolve(ruleset, request);
 	case ATYP_INET:
-		return ruleset_route(ruleset, request, peer);
+		return ruleset_route(ruleset, request);
 	case ATYP_INET6:
-		return ruleset_route6(ruleset, request, peer);
+		return ruleset_route6(ruleset, request);
 	default:
 		SOCKS_CTX_LOG_F(
 			LOG_LEVEL_ERROR, ctx, "unsupported address type: %d",

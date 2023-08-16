@@ -75,17 +75,7 @@ static bool proxy_dial(
 		}
 		req = dialreq_new(&ctx->addr, 0);
 	} else {
-		sockaddr_max_t peer_addr;
-		socklen_t len = sizeof(peer_addr);
-		struct sockaddr *peer = &peer_addr.sa;
-		if (getpeername(ctx->accepted_fd, peer, &len) != 0) {
-			const int err = errno;
-			HTTP_CTX_LOG_F(
-				LOG_LEVEL_WARNING, ctx, "getpeername: %s",
-				strerror(err));
-			peer = NULL;
-		}
-		req = ruleset_resolve(ruleset, addr_str, peer);
+		req = ruleset_resolve(ruleset, addr_str);
 	}
 	if (req == NULL) {
 		return false;

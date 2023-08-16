@@ -16,12 +16,9 @@ const char *ruleset_loadfile(struct ruleset *r, const char *filename);
 void ruleset_gc(struct ruleset *r);
 void ruleset_free(struct ruleset *r);
 
-struct dialreq *ruleset_resolve(
-	struct ruleset *r, const char *request, const struct sockaddr *src);
-struct dialreq *ruleset_route(
-	struct ruleset *r, const char *request, const struct sockaddr *src);
-struct dialreq *ruleset_route6(
-	struct ruleset *r, const char *request, const struct sockaddr *src);
+struct dialreq *ruleset_resolve(struct ruleset *r, const char *request);
+struct dialreq *ruleset_route(struct ruleset *r, const char *request);
+struct dialreq *ruleset_route6(struct ruleset *r, const char *request);
 
 size_t ruleset_memused(struct ruleset *r);
 const char *ruleset_stats(struct ruleset *r, double dt);
