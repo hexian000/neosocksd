@@ -7,6 +7,7 @@
 #include "util.h"
 #include "sockutil.h"
 
+#include <assert.h>
 #include <ev.h>
 #if WITH_CARES
 #include <ares.h>
@@ -32,20 +33,29 @@ struct resolver {
 #if WITH_CARES
 	ares_channel channel;
 	struct ev_timer w_timeout;
-	size_t num_socket;
-	struct ev_io w_socket;
+	size_t num_watcher;
+	struct ev_io w_socket; /* linked list */
 #endif
 };
 
-#define RESOLVE_RETURN(q, loop)                                               \
+struct resolve_query {
+	struct resolver *resolver;
+	struct event_cb done_cb;
+	bool ok : 1;
+	sockaddr_max_t addr;
+};
+
+#define RESOLVE_RETURN(q, loop)                                                \
 	do {                                                                   \
 		LOGV_F("resolve: [%p] finished ok=%d", (void *)q, q->ok);      \
 		if (q->done_cb.cb == NULL) {                                   \
 			/* cancelled */                                        \
+			free(q);                                               \
 			return;                                                \
 		}                                                              \
 		q->resolver->stats.num_success++;                              \
 		q->done_cb.cb(loop, q->done_cb.ctx);                           \
+		free(q);                                                       \
 		return;                                                        \
 	} while (0)
 
@@ -118,8 +128,8 @@ static void sock_state_cb(
 {
 	struct resolver *restrict r = data;
 	const int events = (readable ? EV_READ : 0) | (writable ? EV_WRITE : 0);
-	LOGV_F("io: fd=%d events=0x%x", fd, events);
 
+	/* find an active watcher on same fd or an inactive watcher to reuse */
 	struct ev_io *w_socket = NULL;
 	for (struct ev_io *it = &r->w_socket; it != NULL;
 	     it = (struct ev_io *)it->next) {
@@ -132,10 +142,20 @@ static void sock_state_cb(
 			break;
 		}
 	}
+	if (events == EV_NONE) {
+		if (w_socket == NULL || !ev_is_active(w_socket)) {
+			/* currently not watching, nothing to do */
+			return;
+		}
+		LOGV_F("io: stop fd=%d num_watcher=%zu", fd, --r->num_watcher);
+		ev_io_stop(r->loop, w_socket);
+		return;
+	}
 	if (w_socket == NULL) {
+		/* if no suitable watcher exists, create one */
 		w_socket = malloc(sizeof(struct ev_io));
 		if (w_socket == NULL) {
-			LOGE_F("io: attach fd=%d failed", fd);
+			LOGOOM();
 			return;
 		}
 		ev_io_init(w_socket, socket_cb, fd, events);
@@ -143,15 +163,17 @@ static void sock_state_cb(
 		w_socket->next = r->w_socket.next;
 		r->w_socket.next = (struct ev_watcher_list *)w_socket;
 	} else {
+		/* or modify the existing watcher */
 		ev_io_set(w_socket, fd, events);
 	}
-	if (events == EV_NONE) {
-		ev_io_stop(r->loop, w_socket);
-		LOGV_F("io: detach fd=%d num_socket=%zu", fd, --r->num_socket);
-	} else {
-		ev_io_start(r->loop, w_socket);
-		LOGV_F("io: attach fd=%d num_socket=%zu", fd, ++r->num_socket);
+
+	/* start the watcher */
+	if (ev_is_active(w_socket)) {
+		return;
 	}
+	LOGV_F("io: fd=%d events=0x%x num_watcher=%zu", fd, events,
+	       ++r->num_watcher);
+	ev_io_start(r->loop, w_socket);
 }
 
 static bool
@@ -217,6 +239,7 @@ void resolver_free(struct resolver *restrict r)
 #if WITH_CARES
 		ares_destroy(r->channel);
 		(void)purge_watchers(r);
+		assert(!ev_is_active(&r->w_socket) && r->w_socket.next == NULL);
 #endif
 	}
 	free(r);
@@ -234,19 +257,15 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 		}
 	}
 
-	const double timeout = MIN(conf->timeout, 30.0);
 	struct ares_options options;
-	options.timeout = timeout * 1e+3;
 	options.sock_state_cb = sock_state_cb;
 	options.sock_state_cb_data = r;
-	ret = ares_init_options(
-		&r->channel, &options,
-		ARES_OPT_TIMEOUTMS | ARES_OPT_SOCK_STATE_CB);
+	ret = ares_init_options(&r->channel, &options, ARES_OPT_SOCK_STATE_CB);
 	if (ret != ARES_SUCCESS) {
 		LOGE_F("ares: %s", ares_strerror(ret));
 		return false;
 	}
-	ev_timer_init(&r->w_timeout, timeout_cb, timeout, timeout);
+	ev_timer_init(&r->w_timeout, timeout_cb, 5.0, 0.0);
 	ev_set_priority(&r->w_timeout, EV_MINPRI);
 	r->w_timeout.data = r;
 
@@ -254,16 +273,7 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 	if (nameserver == NULL) {
 		return true;
 	}
-	struct ares_addr_node svr = { .next = NULL };
-	if (inet_pton(AF_INET, nameserver, &svr.addr.addr4) == 1) {
-		svr.family = AF_INET;
-	} else if (inet_pton(AF_INET6, nameserver, &svr.addr.addr6) == 1) {
-		svr.family = AF_INET6;
-	} else {
-		LOGE_F("failed parsing address: \"%s\"", nameserver);
-		return false;
-	}
-	ret = ares_set_servers(r->channel, &svr);
+	ret = ares_set_servers_ports_csv(r->channel, nameserver);
 	if (ret != ARES_SUCCESS) {
 		LOGE_F("failed using nameserver \"%s\": %s", nameserver,
 		       ares_strerror(ret));
@@ -299,8 +309,8 @@ const struct resolver_stats *resolver_stats(struct resolver *r)
 	return &r->stats;
 }
 
-void resolve_init(
-	struct resolver *r, struct resolve_query *restrict q,
+void resolve_dp(
+	struct resolve_query *restrict q, struct resolver *r,
 	const struct event_cb cb)
 {
 	q->resolver = r;
@@ -308,9 +318,22 @@ void resolve_init(
 	q->ok = false;
 }
 
+struct resolve_query *resolve_new(struct resolver *r, struct event_cb cb)
+{
+	struct resolve_query *restrict q = malloc(sizeof(struct resolve_query));
+	if (q == NULL) {
+		return NULL;
+	}
+	*q = (struct resolve_query){
+		.resolver = r,
+		.done_cb = cb,
+	};
+	return q;
+}
+
 void resolve_start(
 	struct resolve_query *restrict q, const char *name, const char *service,
-	const int family)
+	int family)
 {
 	LOGV_F("resolve: [%p] start name=\"%s\" service=%s pf=%d", (void *)q,
 	       name, service, family);
@@ -337,9 +360,10 @@ void resolve_start(
 	RESOLVE_RETURN(q, r->loop);
 }
 
-void resolve_cancel(struct resolve_query *ctx)
+void resolve_cancel(struct resolve_query *restrict q)
 {
-	ctx->done_cb = (struct event_cb){
+	LOGV_F("resolve: [%p] cancel", (void *)q);
+	q->done_cb = (struct event_cb){
 		.cb = NULL,
 		.ctx = NULL,
 	};

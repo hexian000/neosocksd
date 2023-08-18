@@ -107,41 +107,67 @@ void http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
 	LOGD_F("http: response error page %" PRIu16, code);
 }
 
-static int http_request(struct http_ctx *restrict ctx)
+static bool
+on_header(struct http_ctx *restrict ctx, const char *key, const char *value)
 {
-	char *next = ctx->http_nxt;
+	const size_t num = ctx->http.num_hdr;
+	if (num >= HTTP_MAX_HEADER_COUNT) {
+		HTTP_CTX_LOG(LOG_LEVEL_ERROR, ctx, "http: too many headers");
+		return -1;
+	}
+	ctx->http.hdr[num] = (struct http_hdr_item){
+		.key = key,
+		.value = value,
+	};
+	ctx->http.num_hdr = num + 1;
+	HTTP_CTX_LOG_F(LOG_LEVEL_VERBOSE, ctx, "header \"%s: %s\"", key, value);
+	if (strcasecmp(key, "Content-Length") == 0) {
+		size_t *content_length = &ctx->http.content_length;
+		if (sscanf(value, "%zu", content_length) != 1) {
+			http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+			return false;
+		}
+		/* indicates that there is content */
+		ctx->http.content = ctx->rbuf.data;
+	}
+	return true;
+}
+
+static int parse_request(struct http_ctx *restrict ctx)
+{
+	char *next = ctx->http.nxt;
 	if (next == NULL) {
 		next = (char *)ctx->rbuf.data;
-		ctx->http_nxt = next;
+		ctx->http.nxt = next;
 	}
-	struct http_message *restrict hdr = &ctx->http_msg;
+	struct http_message *restrict msg = &ctx->http.msg;
 	if (ctx->state == STATE_REQUEST) {
-		next = http_parse(next, hdr);
+		next = http_parse(next, msg);
 		if (next == NULL) {
 			HTTP_CTX_LOG(
 				LOG_LEVEL_ERROR, ctx,
 				"http: failed parsing request");
 			return -1;
-		} else if (next == ctx->http_nxt) {
+		} else if (next == ctx->http.nxt) {
 			if (ctx->rbuf.len + 1 >= ctx->rbuf.cap) {
 				http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
 				return 0;
 			}
 			return 1;
 		}
-		if (strncmp(hdr->req.version, "HTTP/1.", 7) != 0) {
+		if (strncmp(msg->req.version, "HTTP/1.", 7) != 0) {
 			HTTP_CTX_LOG_F(
 				LOG_LEVEL_ERROR, ctx,
 				"http: unsupported protocol %s",
-				hdr->req.version);
+				msg->req.version);
 			return -1;
 		}
 		HTTP_CTX_LOG_F(
 			LOG_LEVEL_VERBOSE, ctx, "request \"%s\" \"%s\" \"%s\"",
-			hdr->req.method, hdr->req.url, hdr->req.version);
-		ctx->http_nxt = next;
-		ctx->http_hdr_num = 0;
-		ctx->content = NULL;
+			msg->req.method, msg->req.url, msg->req.version);
+		ctx->http.nxt = next;
+		ctx->http.num_hdr = 0;
+		ctx->http.content = NULL;
 		ctx->state = STATE_HEADER;
 	}
 	while (ctx->state == STATE_HEADER) {
@@ -152,45 +178,26 @@ static int http_request(struct http_ctx *restrict ctx)
 				LOG_LEVEL_ERROR, ctx,
 				"http: failed parsing header");
 			return -1;
-		} else if (next == ctx->http_nxt) {
+		} else if (next == ctx->http.nxt) {
 			return 1;
 		}
-		ctx->http_nxt = next;
+		ctx->http.nxt = next;
 		if (key == NULL) {
 			ctx->state = STATE_CONTENT;
 			break;
 		}
 
 		/* save the header */
-		const size_t num = ctx->http_hdr_num;
-		if (num >= HTTP_MAX_HEADER_COUNT) {
-			HTTP_CTX_LOG(
-				LOG_LEVEL_ERROR, ctx, "http: too many headers");
-			return -1;
+		if (!on_header(ctx, key, value)) {
+			return 0;
 		}
-		ctx->http_hdr[num] = (struct http_hdr_item){
-			.key = key,
-			.value = value,
-		};
-		ctx->http_hdr_num = num + 1;
-		if (strcasecmp(key, "Content-Length") == 0) {
-			if (sscanf(value, "%zu", &ctx->content_length) != 1) {
-				http_resp_errpage(ctx, HTTP_BAD_REQUEST);
-				return 0;
-			}
-			/* indicates that there is content */
-			ctx->content = ctx->rbuf.data;
-		}
-		HTTP_CTX_LOG_F(
-			LOG_LEVEL_VERBOSE, ctx, "header \"%s: %s\"", key,
-			value);
 	}
-	if (ctx->content != NULL) {
+	if (ctx->http.content != NULL) {
 		/* use inline buffer */
-		ctx->content = (unsigned char *)ctx->http_nxt;
-		assert(ctx->content > ctx->rbuf.data);
-		const size_t offset = ctx->content - ctx->rbuf.data;
-		const size_t want = ctx->content_length + 1;
+		ctx->http.content = (unsigned char *)ctx->http.nxt;
+		assert(ctx->http.content > ctx->rbuf.data);
+		const size_t offset = ctx->http.content - ctx->rbuf.data;
+		const size_t want = ctx->http.content_length + 1;
 		const size_t content_cap = ctx->rbuf.cap - offset;
 		if (want > content_cap) {
 			/* no enough buffer */
@@ -198,10 +205,10 @@ static int http_request(struct http_ctx *restrict ctx)
 			return 0;
 		}
 		const size_t len = ctx->rbuf.len - offset;
-		if (len < ctx->content_length) {
+		if (len < ctx->http.content_length) {
 			return 1;
 		}
-		ctx->content[ctx->content_length] = '\0';
+		ctx->http.content[ctx->http.content_length] = '\0';
 	}
 	return 0;
 }
@@ -235,7 +242,7 @@ static int http_recv(struct http_ctx *restrict ctx)
 	LOG_TXT_F(
 		LOG_LEVEL_VERBOSE, ctx->rbuf.data, ctx->rbuf.len,
 		"recv: fd=%d %zu bytes", fd, ctx->rbuf.len);
-	return http_request(ctx);
+	return parse_request(ctx);
 }
 
 void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -339,30 +346,39 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 		return NULL;
 	}
 	ctx->s = s;
+	ctx->state = STATE_INIT;
+	ctx->handle = handler;
 	ctx->accepted_fd = fd;
 	ctx->dialed_fd = -1;
-	ctx->handle = handler;
-	ctx->state = STATE_INIT;
-	BUF_INIT(ctx->rbuf, 0);
-	BUF_INIT(ctx->wbuf, 0);
-	ctx->http_nxt = NULL;
 
+	{
+		struct ev_timer *restrict w_timeout = &ctx->w_timeout;
+		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
+		ev_set_priority(w_timeout, EV_MINPRI);
+		w_timeout->data = ctx;
+	}
+	{
+		struct ev_io *restrict w_recv = &ctx->w_recv;
+		ev_io_init(w_recv, recv_cb, fd, EV_READ);
+		w_recv->data = ctx;
+	}
+	{
+		struct ev_io *restrict w_send = &ctx->w_send;
+		ev_io_init(w_send, send_cb, fd, EV_WRITE);
+		w_send->data = ctx;
+	}
+	ctx->http.nxt = NULL;
+	ctx->http.num_hdr = 0;
+	ctx->http.content_length = 0;
+	ctx->http.content = NULL;
 	ctx->dialreq = NULL;
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
-	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
-	ev_set_priority(w_timeout, EV_MINPRI);
-	w_timeout->data = ctx;
-	struct ev_io *restrict w_recv = &ctx->w_recv;
-	ev_io_init(w_recv, recv_cb, fd, EV_READ);
-	w_recv->data = ctx;
-	struct ev_io *restrict w_send = &ctx->w_send;
-	ev_io_init(w_send, send_cb, fd, EV_WRITE);
-	w_send->data = ctx;
+	BUF_INIT(ctx->rbuf, 0);
+	BUF_INIT(ctx->wbuf, 0);
 	return ctx;
 }
 

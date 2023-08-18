@@ -38,6 +38,7 @@ struct dialaddr {
 };
 
 bool dialaddr_set(struct dialaddr *addr, const char *s, size_t len);
+void dialaddr_copy(struct dialaddr *dst, const struct dialaddr *src);
 int dialaddr_format(const struct dialaddr *addr, char *buf, size_t bufsize);
 
 struct proxy_req {
@@ -51,8 +52,8 @@ struct dialreq {
 	struct proxy_req proxy[];
 };
 
-struct dialreq *dialreq_new(const struct dialaddr *addr, size_t num_proxy);
-bool dialreq_proxy(struct dialreq *r, const char *addr, size_t addrlen);
+struct dialreq *dialreq_new(size_t max_proxy);
+bool dialreq_proxy(struct dialreq *r, const char *proxy_uri, size_t len);
 void dialreq_free(struct dialreq *r);
 
 struct sockaddr;
@@ -65,7 +66,7 @@ struct sockaddr;
 struct dialer {
 	struct event_cb done_cb;
 	const struct dialreq *req;
-	struct resolve_query resolve_query;
+	struct resolve_query *resolve_query;
 	size_t jump;
 	int state;
 	int fd, syserr;

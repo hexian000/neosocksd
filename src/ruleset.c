@@ -70,14 +70,14 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 		LOGE_F("ruleset: returned address #%d is not a string", 1);
 		return NULL;
 	}
-	struct dialaddr addr;
-	if (!dialaddr_set(&addr, direct, len)) {
-		LOGE_F("ruleset: returned address #%d is not valid", 1);
-		return NULL;
-	}
-	struct dialreq *req = dialreq_new(&addr, (size_t)n);
+	struct dialreq *req = dialreq_new((size_t)n);
 	if (req == NULL) {
 		LOGOOM();
+		return NULL;
+	}
+	if (!dialaddr_set(&req->addr, direct, len)) {
+		LOGE_F("ruleset: returned address #%d is not valid", 1);
+		dialreq_free(req);
 		return NULL;
 	}
 	for (int i = 1; i < n; i++) {
@@ -435,13 +435,13 @@ void ruleset_gc(struct ruleset *restrict r)
 
 static struct dialreq *request_accept(const char *domain)
 {
-	struct dialaddr addr;
-	if (!dialaddr_set(&addr, domain, strlen(domain))) {
-		return NULL;
-	}
-	struct dialreq *req = dialreq_new(&addr, 0);
+	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {
 		LOGOOM();
+		return NULL;
+	}
+	if (!dialaddr_set(&req->addr, domain, strlen(domain))) {
+		dialreq_free(req);
 		return NULL;
 	}
 	return req;

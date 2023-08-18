@@ -24,6 +24,14 @@ struct http_hdr_item {
 	const char *key, *value;
 };
 
+struct httpreq {
+	struct http_message msg;
+	char *nxt;
+	struct http_hdr_item hdr[HTTP_MAX_HEADER_COUNT];
+	size_t num_hdr, content_length;
+	unsigned char *content;
+};
+
 /* never rollback */
 enum http_state {
 	STATE_INIT,
@@ -46,11 +54,7 @@ struct http_ctx {
 	union {
 		struct {
 			struct ev_io w_recv, w_send;
-			struct http_message http_msg;
-			char *http_nxt;
-			struct http_hdr_item http_hdr[HTTP_MAX_HEADER_COUNT];
-			size_t http_hdr_num, content_length;
-			unsigned char *content;
+			struct httpreq http;
 			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct {

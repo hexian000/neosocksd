@@ -35,7 +35,7 @@ static void http_handle_stats(
 	struct ev_loop *loop, struct http_ctx *restrict ctx,
 	struct url *restrict uri)
 {
-	struct http_message *restrict hdr = &ctx->http_msg;
+	const struct http_message *restrict msg = &ctx->http.msg;
 	bool banner = true;
 	while (uri->query != NULL) {
 		char *key, *value;
@@ -51,10 +51,10 @@ static void http_handle_stats(
 	}
 
 	bool stateless;
-	if (strcmp(hdr->req.method, "GET") == 0) {
+	if (strcmp(msg->req.method, "GET") == 0) {
 		RESPHDR_GET(ctx->wbuf, HTTP_OK);
 		stateless = true;
-	} else if (strcmp(hdr->req.method, "POST") == 0) {
+	} else if (strcmp(msg->req.method, "POST") == 0) {
 		RESPHDR_POST(ctx->wbuf, HTTP_OK);
 		stateless = false;
 	} else {
@@ -173,12 +173,12 @@ static bool http_leafnode_check(
 		http_resp_errpage(ctx, HTTP_NOT_FOUND);
 		return false;
 	}
-	const struct http_message *restrict hdr = &ctx->http_msg;
-	if (method != NULL && strcmp(hdr->req.method, method) != 0) {
+	const struct http_message *restrict msg = &ctx->http.msg;
+	if (method != NULL && strcmp(msg->req.method, method) != 0) {
 		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
-	if (require_content && ctx->content == NULL) {
+	if (require_content && ctx->http.content == NULL) {
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return false;
 	}
@@ -208,8 +208,8 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const char *code = (const char *)ctx->content;
-		const size_t len = ctx->content_length;
+		const char *code = (const char *)ctx->http.content;
+		const size_t len = ctx->http.content_length;
 		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset invoke");
 		const char *err = ruleset_invoke(ruleset, code, len);
 		if (err != NULL) {
@@ -224,8 +224,8 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const char *code = (const char *)ctx->content;
-		const size_t len = ctx->content_length;
+		const char *code = (const char *)ctx->http.content;
+		const size_t len = ctx->http.content_length;
 		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset update");
 		const char *err = ruleset_load(ruleset, code, len);
 		if (err != NULL) {
@@ -254,9 +254,9 @@ static void http_handle_ruleset(
 
 void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	const struct http_message *restrict hdr = &ctx->http_msg;
+	const struct http_message *restrict msg = &ctx->http.msg;
 	struct url uri;
-	if (!url_parse(hdr->req.url, &uri)) {
+	if (!url_parse(msg->req.url, &uri)) {
 		HTTP_CTX_LOG(LOG_LEVEL_WARNING, ctx, "failed parsing url");
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;

@@ -33,8 +33,8 @@ enum forward_state {
 
 struct forward_ctx {
 	struct server *s;
-	int accepted_fd, dialed_fd;
 	enum forward_state state;
+	int accepted_fd, dialed_fd;
 	sockaddr_max_t accepted_sa;
 	struct ev_timer w_timeout;
 	union {
@@ -185,10 +185,9 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	/* cleanup before state change */
 	free(ctx->dialreq);
 
-	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	if (conf->proto_timeout) {
+	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
 		ev_timer_start(loop, w_timeout);
 	} else {
@@ -227,82 +226,124 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
 
-	const struct config *restrict conf = G.conf;
-
-	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
-	ev_set_priority(w_timeout, EV_MINPRI);
-	w_timeout->data = ctx;
+	{
+		struct ev_timer *restrict w_timeout = &ctx->w_timeout;
+		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
+		ev_set_priority(w_timeout, EV_MINPRI);
+		w_timeout->data = ctx;
+	}
 
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};
+	ctx->dialreq = NULL;
 	dialer_init(&ctx->dialer, cb);
 	return ctx;
 }
+
+static struct dialreq *make_forward(const char *csv)
+{
+	const size_t len = strlen(csv);
+	char buf[len + 1];
+	memcpy(buf, csv, len + 1);
+	size_t n = 1;
+	for (size_t i = 0; i < len; i++) {
+		if (buf[i] == ',') {
+			n++;
+		}
+	}
+	struct dialreq *req = dialreq_new(n);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	bool direct = true;
+	for (char *tok = strtok(buf, ","); tok != NULL;
+	     tok = strtok(NULL, ",")) {
+		if (direct) {
+			if (!dialaddr_set(&req->addr, tok, strlen(tok))) {
+				dialreq_free(req);
+				return NULL;
+			}
+			direct = false;
+			continue;
+		}
+		if (!dialreq_proxy(req, tok, strlen(tok))) {
+			dialreq_free(req);
+			return NULL;
+		}
+	}
+	return req;
+}
+
+#if WITH_TPROXY
+static struct dialreq *
+make_tproxy(struct forward_ctx *restrict ctx, struct ev_loop *loop)
+{
+	sockaddr_max_t dest;
+	socklen_t len = sizeof(dest);
+	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
+		const int err = errno;
+		FW_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "getsockname: %s", strerror(err));
+		forward_ctx_close(loop, ctx);
+		return NULL;
+	}
+	struct dialreq *req = dialreq_new(0);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	switch (dest.sa.sa_family) {
+	case AF_INET:
+		assert(len == sizeof(struct sockaddr_in));
+		req->addr = (struct dialaddr){
+			.type = ATYP_INET,
+			.in = dest.in.sin_addr,
+			.port = ntohs(dest.in.sin_port),
+		};
+		break;
+	case AF_INET6:
+		assert(len == sizeof(struct sockaddr_in6));
+		req->addr = (struct dialaddr){
+			.type = ATYP_INET6,
+			.in6 = dest.in6.sin6_addr,
+			.port = ntohs(dest.in6.sin6_port),
+		};
+		break;
+	default:
+		FW_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "getsockname: unknown af %jd",
+			(intmax_t)dest.sa.sa_family);
+		dialreq_free(req);
+		return NULL;
+	}
+	return req;
+}
+#endif
 
 static void
 forward_ctx_start(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
 	const struct config *restrict conf = G.conf;
-	struct dialaddr addr;
 	if (conf->forward != NULL) {
-		if (!dialaddr_set(&addr, conf->forward, strlen(conf->forward))) {
-			forward_ctx_close(loop, ctx);
-			return;
-		}
+		ctx->dialreq = make_forward(conf->forward);
+	}
 #if WITH_TPROXY
-	} else if (conf->transparent) {
-		sockaddr_max_t dest;
-		socklen_t len = sizeof(dest);
-		if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
-			const int err = errno;
-			FW_CTX_LOG_F(
-				LOG_LEVEL_ERROR, ctx, "getsockname: %s",
-				strerror(err));
-			forward_ctx_close(loop, ctx);
-			return;
-		}
-		switch (dest.sa.sa_family) {
-		case AF_INET:
-			assert(len == sizeof(struct sockaddr_in));
-			addr = (struct dialaddr){
-				.type = ATYP_INET,
-				.in = dest.in.sin_addr,
-				.port = ntohs(dest.in.sin_port),
-			};
-			break;
-		case AF_INET6:
-			assert(len == sizeof(struct sockaddr_in6));
-			addr = (struct dialaddr){
-				.type = ATYP_INET6,
-				.in6 = dest.in6.sin6_addr,
-				.port = ntohs(dest.in6.sin6_port),
-			};
-			break;
-		default:
-			FW_CTX_LOG_F(
-				LOG_LEVEL_ERROR, ctx,
-				"getsockname: unknown af %jd",
-				(intmax_t)dest.sa.sa_family);
-			forward_ctx_close(loop, ctx);
-			return;
-		}
+	else if (conf->transparent) {
+		ctx->dialreq = make_tproxy(ctx, loop);
+	}
 #endif
-	} else {
+	else {
 		FAIL();
 	}
 
-	struct dialreq *req = dialreq_new(&addr, 0);
-	if (req == NULL) {
-		LOGOOM();
+	if (ctx->dialreq == NULL) {
 		forward_ctx_close(loop, ctx);
 		return;
 	}
-	ctx->dialreq = req;
-
-	dialer_start(&ctx->dialer, loop, req);
+	dialer_start(&ctx->dialer, loop, ctx->dialreq);
 
 	ctx->state = STATE_CONNECT;
 	struct server_stats *restrict stats = &ctx->s->stats;

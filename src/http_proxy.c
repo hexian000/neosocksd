@@ -1,8 +1,8 @@
 #include "http_impl.h"
+#include "utils/check.h"
 #include "conf.h"
 #include "ruleset.h"
 
-#include "utils/check.h"
 #include <ev.h>
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -38,9 +38,8 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	/* cleanup before state change */
 	free(ctx->dialreq);
 
-	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
-	if (conf->proto_timeout) {
+	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
 	} else {
 		ev_timer_stop(loop, &ctx->w_timeout);
@@ -73,29 +72,29 @@ static struct dialreq *make_dialreq(const char *addr_str)
 	if (ruleset != NULL) {
 		return ruleset_resolve(ruleset, addr_str);
 	}
-
-	struct dialaddr addr;
-	if (!dialaddr_set(&addr, addr_str, strlen(addr_str))) {
-		return NULL;
-	}
-	struct dialreq *req = dialreq_new(&addr, 0);
+	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {
 		LOGOOM();
+		return NULL;
+	}
+	if (!dialaddr_set(&req->addr, addr_str, strlen(addr_str))) {
+		dialreq_free(req);
+		return NULL;
 	}
 	return req;
 }
 
 void http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	struct http_message *restrict hdr = &ctx->http_msg;
-	if (strcmp(hdr->req.method, "CONNECT") != 0) {
+	struct http_message *restrict msg = &ctx->http.msg;
+	if (strcmp(msg->req.method, "CONNECT") != 0) {
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
 	HTTP_CTX_LOG_F(
-		LOG_LEVEL_DEBUG, ctx, "http: CONNECT \"%s\"", hdr->req.url);
+		LOG_LEVEL_DEBUG, ctx, "http: CONNECT \"%s\"", msg->req.url);
 
-	struct dialreq *req = make_dialreq(hdr->req.url);
+	struct dialreq *req = make_dialreq(msg->req.url);
 	if (req == NULL) {
 		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
 		return;

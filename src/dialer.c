@@ -71,6 +71,27 @@ bool dialaddr_set(
 	return true;
 }
 
+void dialaddr_copy(
+	struct dialaddr *restrict dst, const struct dialaddr *restrict src)
+{
+	dst->type = src->type;
+	switch (src->type) {
+	case ATYP_INET:
+		dst->in = src->in;
+		return;
+	case ATYP_INET6:
+		dst->in6 = src->in6;
+		return;
+	case ATYP_DOMAIN:
+		dst->domain.len = src->domain.len;
+		memcpy(dst->domain.name, src->domain.name, src->domain.len);
+		return;
+	default:
+		break;
+	}
+	FAIL();
+}
+
 int dialaddr_format(
 	const struct dialaddr *restrict addr, char *buf, const size_t maxlen)
 {
@@ -99,34 +120,31 @@ int dialaddr_format(
 	FAIL();
 }
 
-struct dialreq *
-dialreq_new(const struct dialaddr *restrict addr, const size_t num_proxy)
+struct dialreq *dialreq_new(const size_t max_proxy)
 {
 	struct dialreq *restrict req = malloc(
-		sizeof(struct dialreq) + sizeof(struct proxy_req) * num_proxy);
+		sizeof(struct dialreq) + sizeof(struct proxy_req) * max_proxy);
 	if (req == NULL) {
 		return NULL;
 	}
-	req->addr = *addr;
 	req->num_proxy = 0;
 	return req;
 }
 
 bool dialreq_proxy(
-	struct dialreq *restrict req, const char *addr, size_t addrlen)
+	struct dialreq *restrict req, const char *proxy_uri, size_t len)
 {
 	/* should be more than enough */
-	assert(addrlen < 1024);
-	char buf[addrlen + 1];
-	if (addrlen >= sizeof(buf)) {
-		LOGE_F("proxy too long: \"%s\"", addr);
+	if (len >= 1024) {
+		LOGE_F("proxy uri is too long: \"%s\"", proxy_uri);
 		return false;
 	}
-	memcpy(buf, addr, addrlen);
-	buf[addrlen] = '\0';
+	char buf[len + 1];
+	memcpy(buf, proxy_uri, len);
+	buf[len] = '\0';
 	struct url uri;
 	if (!url_parse(buf, &uri)) {
-		LOGE_F("unable to parse proxy: \"%s\"", addr);
+		LOGE_F("unable to parse uri: \"%s\"", proxy_uri);
 		return false;
 	}
 	enum proxy_protocol protocol;
@@ -178,7 +196,10 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 	case STATE_INIT:
 		break;
 	case STATE_RESOLVE:
-		resolve_cancel(&d->resolve_query);
+		if (d->resolve_query != NULL) {
+			resolve_cancel(d->resolve_query);
+			d->resolve_query = NULL;
+		}
 		/* fallthrough */
 	case STATE_CONNECT:
 	case STATE_HANDSHAKE1:
@@ -198,6 +219,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 
 #define DIALER_RETURN(d, loop, ok)                                             \
 	do {                                                                   \
+		LOGV_F("dialer: [%p] finished ok=%d", (void *)d, (ok));        \
 		dialer_stop((d), (loop), (ok));                                \
 		(d)->done_cb.cb((loop), (d)->done_cb.ctx);                     \
 		return;                                                        \
@@ -742,7 +764,7 @@ static void resolve_cb(struct ev_loop *loop, void *data)
 	struct dialer *restrict d = data;
 	const struct dialaddr *restrict addr =
 		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
-	const struct sockaddr *sa = resolve_get(&d->resolve_query);
+	const struct sockaddr *sa = resolve_get(d->resolve_query);
 	if (sa == NULL) {
 		LOGE_F("name resolution failed: \"%.*s\"",
 		       (int)addr->domain.len, addr->domain.name);
@@ -780,20 +802,25 @@ static void resolve_cb(struct ev_loop *loop, void *data)
 void dialer_init(struct dialer *restrict d, const struct event_cb cb)
 {
 	d->done_cb = cb;
-	d->fd = -1;
-	d->jump = 0;
-	BUF_INIT(d->buf, 0);
 	d->req = NULL;
+	d->resolve_query = NULL;
+	d->jump = 0;
 	d->state = STATE_INIT;
-	struct ev_io *restrict w_socket = &d->w_socket;
-	ev_io_init(w_socket, socket_cb, -1, EV_NONE);
-	w_socket->data = d;
+	d->fd = -1;
+	d->syserr = 0;
+	{
+		struct ev_io *restrict w_socket = &d->w_socket;
+		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
+		w_socket->data = d;
+	}
+	BUF_INIT(d->buf, 0);
 }
 
 void dialer_start(
 	struct dialer *restrict d, struct ev_loop *restrict loop,
 	const struct dialreq *restrict req)
 {
+	LOGV_F("dialer: [%p] start", (void *)d);
 	d->req = req;
 	d->syserr = 0;
 	const struct dialaddr *restrict addr =
@@ -824,13 +851,16 @@ void dialer_start(
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
-		struct resolve_query *q = &d->resolve_query;
-		resolve_init(
-			G.resolver, q,
-			(struct event_cb){
-				.cb = resolve_cb,
-				.ctx = d,
-			});
+		struct resolve_query *q = resolve_new(
+			G.resolver, (struct event_cb){
+					    .cb = resolve_cb,
+					    .ctx = d,
+				    });
+		if (q == NULL) {
+			LOGOOM();
+			DIALER_RETURN(d, loop, false);
+		}
+		d->resolve_query = q;
 		resolve_start(q, host, NULL, G.conf->resolve_pf);
 	} break;
 	default:
@@ -846,5 +876,6 @@ int dialer_get(struct dialer *d)
 
 void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 {
+	LOGV_F("dialer: [%p] cancel", (void *)d);
 	dialer_stop(d, loop, false);
 }

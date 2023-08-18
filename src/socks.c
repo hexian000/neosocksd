@@ -41,14 +41,14 @@ enum socks_state {
 
 struct socks_ctx {
 	struct server *s;
-	int accepted_fd, dialed_fd;
 	enum socks_state state;
+	int accepted_fd, dialed_fd;
 	sockaddr_max_t accepted_sa;
 	struct ev_timer w_timeout;
 	union {
 		/* during handshake */
 		struct {
-			struct ev_io watcher;
+			struct ev_io w_socket;
 			struct dialaddr addr;
 			uint8_t auth_method;
 			struct {
@@ -88,7 +88,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		return;
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2:
-		ev_io_stop(loop, &ctx->watcher);
+		ev_io_stop(loop, &ctx->w_socket);
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECT:
@@ -343,9 +343,8 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	/* cleanup before state change */
 	free(ctx->dialreq);
 
-	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
-	if (conf->proto_timeout) {
+	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
 	} else {
 		ev_timer_stop(loop, &ctx->w_timeout);
@@ -640,11 +639,12 @@ static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 {
 	struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset == NULL) {
-		struct dialreq *req = dialreq_new(addr, 0);
+		struct dialreq *req = dialreq_new(0);
 		if (req == NULL) {
 			LOGOOM();
 			return NULL;
 		}
+		dialaddr_copy(&req->addr, addr);
 		return req;
 	}
 
@@ -706,21 +706,25 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 		return NULL;
 	}
 	ctx->s = s;
+	ctx->state = STATE_INIT;
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
-	ctx->state = STATE_INIT;
-	BUF_INIT(ctx->rbuf, 0);
 
-	const struct config *restrict conf = G.conf;
+	{
+		struct ev_timer *restrict w_timeout = &ctx->w_timeout;
+		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
+		ev_set_priority(w_timeout, EV_MINPRI);
+		w_timeout->data = ctx;
+	}
+	{
+		struct ev_io *restrict w_socket = &ctx->w_socket;
+		ev_io_init(w_socket, recv_cb, accepted_fd, EV_READ);
+		w_socket->data = ctx;
+		BUF_INIT(ctx->rbuf, 0);
+	}
 
-	struct ev_io *restrict watcher = &ctx->watcher;
-	ev_io_init(watcher, recv_cb, accepted_fd, EV_READ);
-	watcher->data = ctx;
-	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
-	ev_set_priority(w_timeout, EV_MINPRI);
-	w_timeout->data = ctx;
-
+	ctx->auth_method = SOCKS5AUTH_NOACCEPTABLE;
+	ctx->dialreq = NULL;
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,
 		.ctx = ctx,
@@ -732,7 +736,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 static void
 socks_ctx_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
-	ev_io_start(loop, &ctx->watcher);
+	ev_io_start(loop, &ctx->w_socket);
 	ev_timer_start(loop, &ctx->w_timeout);
 
 	ctx->state = STATE_HANDSHAKE1;
