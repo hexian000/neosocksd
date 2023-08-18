@@ -24,6 +24,7 @@ struct http_hdr_item {
 	const char *key, *value;
 };
 
+/* never rollback */
 enum http_state {
 	STATE_INIT,
 	STATE_REQUEST,
@@ -50,7 +51,6 @@ struct http_ctx {
 			struct http_hdr_item http_hdr[HTTP_MAX_HEADER_COUNT];
 			size_t http_hdr_num, content_length;
 			unsigned char *content;
-			struct dialaddr addr;
 			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct {
@@ -74,15 +74,7 @@ void http_ctx_close(struct ev_loop *loop, struct http_ctx *ctx);
 		}                                                              \
 		char laddr[64];                                                \
 		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
-		if ((ctx)->state == STATE_CONNECT) {                           \
-			char raddr[64];                                        \
-			(void)dialaddr_format(                                 \
-				&(ctx)->addr, raddr, sizeof(raddr));           \
-			LOG_F(level, "\"%s\" -> \"%s\": " format, laddr,       \
-			      raddr, __VA_ARGS__);                             \
-		} else {                                                       \
-			LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);   \
-		}                                                              \
+		LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);           \
 	} while (0)
 #define HTTP_CTX_LOG(level, ctx, message)                                      \
 	HTTP_CTX_LOG_F(level, ctx, "%s", message)

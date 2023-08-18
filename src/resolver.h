@@ -19,7 +19,6 @@ struct resolver_stats {
 
 struct resolve_query {
 	struct resolver *resolver;
-	struct ev_watcher w_done;
 	struct event_cb done_cb;
 	bool ok : 1;
 	sockaddr_max_t addr;
@@ -33,7 +32,7 @@ void resolver_free(struct resolver *r);
 
 void resolve_init(
 	struct resolver *r, struct resolve_query *q, struct event_cb cb);
-bool resolve_start(
+void resolve_start(
 	struct resolve_query *q, const char *name, const char *service,
 	int family);
 void resolve_cancel(struct resolve_query *q);

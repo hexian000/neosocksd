@@ -2,6 +2,7 @@
 #include "conf.h"
 #include "ruleset.h"
 
+#include "utils/check.h"
 #include <ev.h>
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -33,6 +34,10 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_stop(loop, &ctx->w_recv);
 	ev_io_stop(loop, &ctx->w_send);
 
+	HTTP_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
+	/* cleanup before state change */
+	free(ctx->dialreq);
+
 	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	if (conf->proto_timeout) {
@@ -62,30 +67,22 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	transfer_start(loop, &ctx->downlink);
 }
 
-static bool proxy_dial(
-	struct http_ctx *restrict ctx, struct ev_loop *loop,
-	const char *addr_str)
+static struct dialreq *make_dialreq(const char *addr_str)
 {
 	struct ruleset *ruleset = G.ruleset;
-
-	struct dialreq *req = NULL;
-	if (ruleset == NULL) {
-		if (!dialaddr_set(&ctx->addr, addr_str, strlen(addr_str))) {
-			return false;
-		}
-		req = dialreq_new(&ctx->addr, 0);
-	} else {
-		req = ruleset_resolve(ruleset, addr_str);
+	if (ruleset != NULL) {
+		return ruleset_resolve(ruleset, addr_str);
 	}
+
+	struct dialaddr addr;
+	if (!dialaddr_set(&addr, addr_str, strlen(addr_str))) {
+		return NULL;
+	}
+	struct dialreq *req = dialreq_new(&addr, 0);
 	if (req == NULL) {
-		return false;
+		LOGOOM();
 	}
-	ctx->dialreq = req;
-
-	if (!dialer_start(&ctx->dialer, loop, req)) {
-		return false;
-	}
-	return true;
+	return req;
 }
 
 void http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
@@ -98,9 +95,12 @@ void http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	HTTP_CTX_LOG_F(
 		LOG_LEVEL_DEBUG, ctx, "http: CONNECT \"%s\"", hdr->req.url);
 
-	if (!proxy_dial(ctx, loop, hdr->req.url)) {
+	struct dialreq *req = make_dialreq(hdr->req.url);
+	if (req == NULL) {
 		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
 		return;
 	}
+	ctx->dialreq = req;
 	ctx->state = STATE_CONNECT;
+	dialer_start(&ctx->dialer, loop, req);
 }

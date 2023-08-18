@@ -161,6 +161,7 @@ void dialreq_free(struct dialreq *restrict req)
 	free(req);
 }
 
+/* never rollback */
 enum dialer_state {
 	STATE_INIT,
 	STATE_RESOLVE,
@@ -170,7 +171,8 @@ enum dialer_state {
 	STATE_DONE,
 };
 
-static void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
+static void
+dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 {
 	switch (d->state) {
 	case STATE_INIT:
@@ -186,26 +188,20 @@ static void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 	case STATE_DONE:
 		break;
 	}
-	assert(!ev_is_active(&d->w_socket));
-}
-
-static void dialer_fail(struct dialer *restrict d, struct ev_loop *loop)
-{
-	dialer_cancel(d, loop);
-	if (d->fd != -1) {
+	if (!ok && d->fd != -1) {
 		(void)close(d->fd);
 		d->fd = -1;
 	}
+	assert(!ev_is_active(&d->w_socket));
 	d->state = STATE_DONE;
-	d->done_cb.cb(loop, d->done_cb.ctx);
 }
 
-static void dialer_finish(struct dialer *restrict d, struct ev_loop *loop)
-{
-	dialer_cancel(d, loop);
-	d->state = STATE_DONE;
-	d->done_cb.cb(loop, d->done_cb.ctx);
-}
+#define DIALER_RETURN(d, loop, ok)                                             \
+	do {                                                                   \
+		dialer_stop((d), (loop), (ok));                                \
+		(d)->done_cb.cb((loop), (d)->done_cb.ctx);                     \
+		return;                                                        \
+	} while (0)
 
 static bool
 send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
@@ -661,11 +657,9 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		ev_io_stop(loop, watcher);
 		const int ret = on_connected(d, fd);
 		if (ret < 0) {
-			dialer_fail(d, loop);
-			return;
+			DIALER_RETURN(d, loop, false);
 		} else if (ret == 0) {
-			dialer_finish(d, loop);
-			return;
+			DIALER_RETURN(d, loop, true);
 		}
 		ev_io_set(watcher, fd, EV_READ);
 		ev_io_start(loop, watcher);
@@ -675,8 +669,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	assert(d->state == STATE_HANDSHAKE1 || d->state == STATE_HANDSHAKE2);
 	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
 	if (ret < 0) {
-		dialer_fail(d, loop);
-		return;
+		DIALER_RETURN(d, loop, false);
 	} else if (ret > 0) {
 		/* want more data */
 		return;
@@ -685,14 +678,12 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	d->buf.len = 0;
 	d->jump++;
 	if (d->jump >= d->req->num_proxy) {
-		dialer_finish(d, loop);
-		return;
+		DIALER_RETURN(d, loop, true);
 	}
 
 	d->state = STATE_HANDSHAKE1;
 	if (!send_proxy_req(d)) {
-		dialer_fail(d, loop);
-		return;
+		DIALER_RETURN(d, loop, false);
 	}
 }
 
@@ -782,7 +773,7 @@ static void resolve_cb(struct ev_loop *loop, void *data)
 	}
 
 	if (!connect_sa(d, loop, sa)) {
-		dialer_fail(d, loop);
+		DIALER_RETURN(d, loop, false);
 	}
 }
 
@@ -799,7 +790,7 @@ void dialer_init(struct dialer *restrict d, const struct event_cb cb)
 	w_socket->data = d;
 }
 
-bool dialer_start(
+void dialer_start(
 	struct dialer *restrict d, struct ev_loop *restrict loop,
 	const struct dialreq *restrict req)
 {
@@ -815,7 +806,7 @@ bool dialer_start(
 			.sin_port = htons(addr->port),
 		};
 		if (!connect_sa(d, loop, (struct sockaddr *)&in)) {
-			return false;
+			DIALER_RETURN(d, loop, false);
 		}
 	} break;
 	case ATYP_INET6: {
@@ -825,7 +816,7 @@ bool dialer_start(
 			.sin6_port = htons(addr->port),
 		};
 		if (!connect_sa(d, loop, (struct sockaddr *)&in6)) {
-			return false;
+			DIALER_RETURN(d, loop, false);
 		}
 	} break;
 	case ATYP_DOMAIN: {
@@ -840,15 +831,11 @@ bool dialer_start(
 				.cb = resolve_cb,
 				.ctx = d,
 			});
-		const int family = G.conf->resolve_pf;
-		if (!resolve_start(q, host, NULL, family)) {
-			return false;
-		}
+		resolve_start(q, host, NULL, G.conf->resolve_pf);
 	} break;
 	default:
 		FAIL();
 	}
-	return true;
 }
 
 int dialer_get(struct dialer *d)
@@ -857,12 +844,7 @@ int dialer_get(struct dialer *d)
 	return d->fd;
 }
 
-void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
+void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 {
-	dialer_cancel(d, loop);
-	if (d->fd != -1) {
-		(void)close(d->fd);
-		d->fd = -1;
-	}
-	d->state = STATE_INIT;
+	dialer_stop(d, loop, false);
 }

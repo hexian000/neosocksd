@@ -29,6 +29,7 @@
 #include <string.h>
 #include <inttypes.h>
 
+/* never rollback */
 enum socks_state {
 	STATE_INIT,
 	STATE_HANDSHAKE1,
@@ -71,15 +72,7 @@ struct socks_ctx {
 		}                                                              \
 		char laddr[64];                                                \
 		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
-		if ((ctx)->state == STATE_CONNECT) {                           \
-			char raddr[64];                                        \
-			(void)dialaddr_format(                                 \
-				&(ctx)->addr, raddr, sizeof(raddr));           \
-			LOG_F(level, "\"%s\" -> \"%s\": " format, laddr,       \
-			      raddr, __VA_ARGS__);                             \
-		} else {                                                       \
-			LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);   \
-		}                                                              \
+		LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);           \
 	} while (0)
 #define SOCKS_CTX_LOG(level, ctx, message)                                     \
 	SOCKS_CTX_LOG_F(level, ctx, "%s", message)
@@ -99,7 +92,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECT:
-		dialer_stop(&ctx->dialer, loop);
+		dialer_cancel(&ctx->dialer, loop);
 		free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		stats->num_halfopen--;
@@ -343,11 +336,12 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		socks_ctx_close(loop, ctx);
 		return;
 	}
-	free(ctx->dialreq);
 	ctx->dialed_fd = fd;
 	socks_sendrsp(ctx, true);
 
 	SOCKS_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
+	/* cleanup before state change */
+	free(ctx->dialreq);
 
 	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
@@ -642,11 +636,11 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 	return 1;
 }
 
-static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
+static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 {
 	struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset == NULL) {
-		struct dialreq *req = dialreq_new(&ctx->addr, 0);
+		struct dialreq *req = dialreq_new(addr, 0);
 		if (req == NULL) {
 			LOGOOM();
 			return NULL;
@@ -654,9 +648,11 @@ static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 		return req;
 	}
 
-	char request[FQDN_MAX_LENGTH + 1 + 5 + 1];
-	(void)dialaddr_format(&ctx->addr, request, sizeof(request));
-	switch (ctx->addr.type) {
+	const int len = dialaddr_format(addr, NULL, 0);
+	CHECK(len > 0);
+	char request[len + 1];
+	(void)dialaddr_format(addr, request, sizeof(request));
+	switch (addr->type) {
 	case ATYP_DOMAIN:
 		return ruleset_resolve(ruleset, request);
 	case ATYP_INET:
@@ -664,12 +660,9 @@ static struct dialreq *make_dialreq(struct socks_ctx *restrict ctx)
 	case ATYP_INET6:
 		return ruleset_route6(ruleset, request);
 	default:
-		SOCKS_CTX_LOG_F(
-			LOG_LEVEL_ERROR, ctx, "unsupported address type: %d",
-			ctx->addr.type);
 		break;
 	}
-	return NULL;
+	FAIL();
 }
 
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -693,7 +686,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
 
-	struct dialreq *req = make_dialreq(ctx);
+	struct dialreq *req = make_dialreq(&ctx->addr);
 	if (req == NULL) {
 		socks_sendrsp(ctx, false);
 		socks_ctx_close(loop, ctx);
@@ -702,12 +695,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	ctx->dialreq = req;
 
 	ctx->state = STATE_CONNECT;
-	if (!dialer_start(&ctx->dialer, loop, req)) {
-		socks_ctx_close(loop, ctx);
-		return;
-	}
-
-	SOCKS_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connecting");
+	dialer_start(&ctx->dialer, loop, req);
 }
 
 static struct socks_ctx *

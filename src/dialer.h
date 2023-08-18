@@ -78,10 +78,10 @@ struct dialer {
 
 void dialer_init(struct dialer *d, const struct event_cb cb);
 
-bool dialer_start(
+void dialer_start(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req);
 
-void dialer_stop(struct dialer *d, struct ev_loop *loop);
+void dialer_cancel(struct dialer *d, struct ev_loop *loop);
 
 int dialer_get(struct dialer *d);
 

@@ -7,7 +7,6 @@
 #include "util.h"
 #include "sockutil.h"
 
-#include <assert.h>
 #include <ev.h>
 #if WITH_CARES
 #include <ares.h>
@@ -38,18 +37,17 @@ struct resolver {
 #endif
 };
 
-static void
-done_cb(struct ev_loop *loop, struct ev_watcher *watcher, const int revents)
-{
-	UNUSED(revents);
-	struct resolve_query *restrict q = watcher->data;
-	if (q->done_cb.cb == NULL) {
-		/* cancelled */
-		return;
-	}
-	q->resolver->stats.num_success++;
-	q->done_cb.cb(loop, q->done_cb.ctx);
-}
+#define RESOLVE_RETURN(q, loop)                                               \
+	do {                                                                   \
+		LOGV_F("resolve: [%p] finished ok=%d", (void *)q, q->ok);      \
+		if (q->done_cb.cb == NULL) {                                   \
+			/* cancelled */                                        \
+			return;                                                \
+		}                                                              \
+		q->resolver->stats.num_success++;                              \
+		q->done_cb.cb(loop, q->done_cb.ctx);                           \
+		return;                                                        \
+	} while (0)
 
 #if WITH_CARES
 static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -72,12 +70,11 @@ sched_update(struct ev_loop *loop, struct ev_timer *restrict watcher)
 	struct resolver *restrict r = watcher->data;
 	struct timeval tv;
 	if (ares_timeout(r->channel, NULL, &tv) == NULL) {
-		LOGD("timeout: no active query, stopped");
 		ev_timer_stop(loop, watcher);
 		return;
 	}
 	const double next = tv.tv_sec * 1.0 + tv.tv_usec * 1e-6;
-	LOGD_F("timeout: next update after %.3fs", next);
+	LOGD_F("timeout: next check after %.3fs", next);
 	watcher->repeat = next;
 	ev_timer_again(loop, watcher);
 }
@@ -100,7 +97,7 @@ static size_t purge_watchers(struct resolver *restrict r)
 }
 
 static void
-update_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	UNUSED(revents);
 	struct resolver *restrict r = watcher->data;
@@ -197,8 +194,7 @@ addrinfo_cb(void *arg, int status, int timeouts, struct ares_addrinfo *info)
 		LOGW_F("ares: %s", ares_strerror(status));
 		break;
 	}
-	ev_feed_event(r->loop, &q->w_done, EV_CUSTOM);
-	LOGV_F("resolve: [%p] finished ok=%d", (void *)q, q->ok);
+	RESOLVE_RETURN(q, r->loop);
 }
 #endif
 
@@ -250,7 +246,7 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 		LOGE_F("ares: %s", ares_strerror(ret));
 		return false;
 	}
-	ev_timer_init(&r->w_timeout, update_cb, timeout, timeout);
+	ev_timer_init(&r->w_timeout, timeout_cb, timeout, timeout);
 	ev_set_priority(&r->w_timeout, EV_MINPRI);
 	r->w_timeout.data = r;
 
@@ -308,14 +304,12 @@ void resolve_init(
 	const struct event_cb cb)
 {
 	q->resolver = r;
-	ev_init(&q->w_done, done_cb);
-	q->w_done.data = q;
 	q->done_cb = cb;
 	q->ok = false;
 }
 
-bool resolve_start(
-	struct resolve_query *q, const char *name, const char *service,
+void resolve_start(
+	struct resolve_query *restrict q, const char *name, const char *service,
 	const int family)
 {
 	LOGV_F("resolve: [%p] start name=\"%s\" service=%s pf=%d", (void *)q,
@@ -336,13 +330,11 @@ bool resolve_start(
 		if (!ev_is_active(w_timeout)) {
 			sched_update(r->loop, w_timeout);
 		}
-		return true;
+		return;
 	}
 #endif
 	q->ok = resolve_addr(&q->addr, name, service, family);
-	ev_feed_event(r->loop, &q->w_done, EV_CUSTOM);
-	LOGV_F("resolve: [%p] finished ok=%d", (void *)q, q->ok);
-	return true;
+	RESOLVE_RETURN(q, r->loop);
 }
 
 void resolve_cancel(struct resolve_query *ctx)

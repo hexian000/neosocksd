@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* never rollback */
 enum forward_state {
 	STATE_INIT,
 	STATE_CONNECT,
@@ -70,7 +71,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	case STATE_INIT:
 		return;
 	case STATE_CONNECT:
-		dialer_stop(&ctx->dialer, loop);
+		dialer_cancel(&ctx->dialer, loop);
 		free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		stats->num_halfopen--;
@@ -167,7 +168,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	forward_ctx_close(loop, ctx);
 }
 
-static void connected_cb(struct ev_loop *loop, void *data)
+static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct forward_ctx *restrict ctx = data;
 	assert(ctx->state == STATE_CONNECT);
@@ -178,10 +179,11 @@ static void connected_cb(struct ev_loop *loop, void *data)
 		forward_ctx_close(loop, ctx);
 		return;
 	}
-	free(ctx->dialreq);
 	ctx->dialed_fd = fd;
 
 	FW_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
+	/* cleanup before state change */
+	free(ctx->dialreq);
 
 	const struct config *restrict conf = G.conf;
 	struct server_stats *restrict stats = &ctx->s->stats;
@@ -233,7 +235,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	w_timeout->data = ctx;
 
 	struct event_cb cb = (struct event_cb){
-		.cb = connected_cb,
+		.cb = dialer_cb,
 		.ctx = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
@@ -300,10 +302,7 @@ forward_ctx_start(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	}
 	ctx->dialreq = req;
 
-	if (!dialer_start(&ctx->dialer, loop, req)) {
-		forward_ctx_close(loop, ctx);
-		return;
-	}
+	dialer_start(&ctx->dialer, loop, req);
 
 	ctx->state = STATE_CONNECT;
 	struct server_stats *restrict stats = &ctx->s->stats;

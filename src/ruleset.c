@@ -142,9 +142,7 @@ static int invoke_(lua_State *restrict L)
 	struct ruleset *restrict r = find_ruleset(L);
 	size_t len;
 	const char *code = lua_tolstring(L, 1, &len);
-	if (http_invoke(r->loop, req, code, len) == NULL) {
-		free(req);
-	}
+	http_invoke(r->loop, req, code, len);
 	return 0;
 }
 

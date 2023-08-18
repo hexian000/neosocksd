@@ -123,8 +123,7 @@ static void http_handle_stats(
 	}
 
 	static struct {
-		uintmax_t num_success;
-		uintmax_t num_failure;
+		uintmax_t num_request;
 		uintmax_t xfer_up, xfer_down;
 		uintmax_t num_accept;
 		uintmax_t num_reject;
@@ -143,22 +142,18 @@ static void http_handle_stats(
 		(double)(lstats->num_accept - last.num_accept) / dt;
 	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
 
-	const uintmax_t num_failure = stats->num_request - stats->num_success;
-	const double success_rate =
-		(double)(stats->num_success - last.num_success) / dt;
-	const double failure_rate =
-		(double)(num_failure - last.num_failure) / dt;
+	const double request_rate =
+		(double)(stats->num_request - last.num_request) / dt;
 
 	BUF_APPENDF(
 		ctx->wbuf,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
-		"Request Rate        : %.1f/s (%+.1f/s)\n"
+		"Request Rate        : %.1f/s\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n",
-		accept_rate, reject_rate, success_rate, failure_rate,
-		xfer_rate_up, xfer_rate_down);
+		accept_rate, reject_rate, request_rate, xfer_rate_up,
+		xfer_rate_down);
 
-	last.num_success = stats->num_success;
-	last.num_failure = num_failure;
+	last.num_request = stats->num_request;
 	last.xfer_up = stats->byt_up;
 	last.xfer_down = stats->byt_down;
 	last.num_accept = lstats->num_accept;

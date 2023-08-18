@@ -48,7 +48,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		stats->num_halfopen--;
 		/* fallthrough */
 	case STATE_CONNECT:
-		dialer_stop(&ctx->dialer, loop);
+		dialer_cancel(&ctx->dialer, loop);
 		free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		return;
@@ -309,8 +309,6 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct http_ctx *restrict ctx = data;
 	assert(ctx->state == STATE_CONNECT);
-	free(ctx->dialreq);
-	ctx->dialreq = NULL;
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
@@ -349,14 +347,14 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 	BUF_INIT(ctx->wbuf, 0);
 	ctx->http_nxt = NULL;
 
-	const struct config *restrict conf = G.conf;
+	ctx->dialreq = NULL;
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
 	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-	ev_timer_init(w_timeout, timeout_cb, conf->timeout, 0.0);
+	ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ev_set_priority(w_timeout, EV_MINPRI);
 	w_timeout->data = ctx;
 	struct ev_io *restrict w_recv = &ctx->w_recv;

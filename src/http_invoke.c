@@ -3,13 +3,19 @@
 #include "dialer.h"
 
 #include <limits.h>
+#include <stdlib.h>
 
 struct http_invoke_ctx {
-	struct dialreq *dialreq;
-	struct dialer dialer;
 	struct ev_loop *loop;
-	struct ev_io w_write;
-	const struct config *conf;
+	union {
+		struct {
+			struct dialreq *dialreq;
+			struct dialer dialer;
+		};
+		struct {
+			struct ev_io w_write;
+		};
+	};
 	struct vbuffer *wbuf;
 };
 
@@ -50,11 +56,9 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	free(ctx);
 }
 
-static void invoke_cb(struct ev_loop *loop, void *data)
+static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct http_invoke_ctx *restrict ctx = data;
-	free(ctx->dialreq);
-	struct ev_io *restrict w_write = &ctx->w_write;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		LOGE("invoke: dialer failed");
@@ -62,12 +66,14 @@ static void invoke_cb(struct ev_loop *loop, void *data)
 		free(ctx);
 		return;
 	}
+	free(ctx->dialreq);
+	struct ev_io *restrict w_write = &ctx->w_write;
 	ev_io_init(w_write, request_write_cb, fd, EV_WRITE);
 	w_write->data = ctx;
 	ev_io_start(loop, w_write);
 }
 
-struct http_invoke_ctx *http_invoke(
+void http_invoke(
 	struct ev_loop *loop, struct dialreq *req, const char *code,
 	const size_t len)
 {
@@ -76,7 +82,8 @@ struct http_invoke_ctx *http_invoke(
 		malloc(sizeof(struct http_invoke_ctx));
 	if (ctx == NULL) {
 		LOGOOM();
-		return NULL;
+		free(req);
+		return;
 	}
 	ctx->wbuf = VBUF_APPENDF(
 		NULL,
@@ -87,20 +94,16 @@ struct http_invoke_ctx *http_invoke(
 		len, (int)len, code);
 	if (ctx->wbuf == NULL) {
 		LOGOOM();
+		free(req);
 		free(ctx);
-		return NULL;
+		return;
 	}
 	struct event_cb cb = (struct event_cb){
-		.cb = invoke_cb,
+		.cb = dialer_cb,
 		.ctx = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
-	if (!dialer_start(&ctx->dialer, loop, req)) {
-		ctx->wbuf = VBUF_FREE(ctx->wbuf);
-		free(ctx);
-		return NULL;
-	}
 	ctx->dialreq = req;
 	LOGV_F("http_invoke:\n%.*s", (int)ctx->wbuf->len, ctx->wbuf->data);
-	return ctx;
+	dialer_start(&ctx->dialer, loop, req);
 }

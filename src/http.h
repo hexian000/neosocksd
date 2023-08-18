@@ -15,8 +15,7 @@ void http_api_serve(
 	struct server *s, struct ev_loop *loop, int accepted_fd,
 	const struct sockaddr *accepted_sa);
 
-struct http_invoke_ctx;
-struct http_invoke_ctx *http_invoke(
+void http_invoke(
 	struct ev_loop *loop, struct dialreq *req, const char *code,
 	size_t len);
 
