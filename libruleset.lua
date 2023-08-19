@@ -224,7 +224,7 @@ end
 
 function match.domain(s)
     if not s:startswith(".") then
-        return match.exact(s)
+        return match.host(s)
     end
     return function(addr)
         local host, port = splithostport(addr)
@@ -232,6 +232,29 @@ function match.domain(s)
             return false
         end
         return host:endswith(s)
+    end
+end
+
+function match.tree(tree)
+    return function(addr)
+        local host, port = splithostport(addr)
+        if not host then
+            return false
+        end
+        local path = {}
+        for s in host:gmatch("[^.]+") do
+            table.insert(path, s)
+        end
+        local t = tree
+        for i = #path, 1, -1 do
+            t = t[path[i]]
+            if not t then
+                return false
+            elseif t == true then
+                return true
+            end
+        end
+        return false
     end
 end
 
