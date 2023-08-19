@@ -242,39 +242,31 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	return ctx;
 }
 
-static struct dialreq *make_forward(const char *csv)
+static void
+forward_ctx_start(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
-	const size_t len = strlen(csv);
-	char buf[len + 1];
-	memcpy(buf, csv, len + 1);
-	size_t n = 1;
-	for (size_t i = 0; i < len; i++) {
-		if (buf[i] == ',') {
-			n++;
-		}
-	}
-	struct dialreq *req = dialreq_new(n);
-	if (req == NULL) {
+	dialer_start(&ctx->dialer, loop, ctx->dialreq);
+
+	ctx->state = STATE_CONNECT;
+	struct server_stats *restrict stats = &ctx->s->stats;
+	stats->num_request++;
+	stats->num_halfopen++;
+}
+
+void forward_serve(
+	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
+	if (ctx == NULL) {
 		LOGOOM();
-		return NULL;
+		(void)close(accepted_fd);
+		return;
 	}
-	bool direct = true;
-	for (char *tok = strtok(buf, ","); tok != NULL;
-	     tok = strtok(NULL, ",")) {
-		if (direct) {
-			if (!dialaddr_set(&req->addr, tok, strlen(tok))) {
-				dialreq_free(req);
-				return NULL;
-			}
-			direct = false;
-			continue;
-		}
-		if (!dialreq_proxy(req, tok, strlen(tok))) {
-			dialreq_free(req);
-			return NULL;
-		}
-	}
-	return req;
+	(void)memcpy(
+		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
+	ctx->dialreq = s->data;
+	forward_ctx_start(loop, ctx);
 }
 
 #if WITH_TPROXY
@@ -320,37 +312,8 @@ static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 	}
 	return req;
 }
-#endif
 
-static void
-forward_ctx_start(struct ev_loop *loop, struct forward_ctx *restrict ctx)
-{
-	const struct config *restrict conf = G.conf;
-	if (conf->forward != NULL) {
-		ctx->dialreq = make_forward(conf->forward);
-	}
-#if WITH_TPROXY
-	else if (conf->transparent) {
-		ctx->dialreq = make_tproxy(ctx);
-	}
-#endif
-	else {
-		FAIL();
-	}
-
-	if (ctx->dialreq == NULL) {
-		forward_ctx_close(loop, ctx);
-		return;
-	}
-	dialer_start(&ctx->dialer, loop, ctx->dialreq);
-
-	ctx->state = STATE_CONNECT;
-	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->num_request++;
-	stats->num_halfopen++;
-}
-
-void forward_serve(
+void tproxy_serve(
 	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa)
 {
@@ -362,5 +325,12 @@ void forward_serve(
 	}
 	(void)memcpy(
 		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
+	struct dialreq *req = make_tproxy(ctx);
+	if (req == NULL) {
+		forward_ctx_close(loop, ctx);
+		return;
+	}
+	ctx->dialreq = req;
 	forward_ctx_start(loop, ctx);
 }
+#endif /* WITH_TPROXY */

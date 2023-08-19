@@ -1,3 +1,4 @@
+#include "dialer.h"
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "utils/minmax.h"
@@ -291,13 +292,22 @@ int main(int argc, char **argv)
 
 	struct server *restrict s = &app.server;
 	server_init(s, loop, NULL, NULL);
-	if (conf->forward != NULL
-#if WITH_TPROXY
-	    || conf->transparent
-#endif
-	) {
+	if (conf->forward != NULL) {
+		struct dialreq *req = dialreq_parse(conf->forward);
+		if (req == NULL) {
+			LOGF_F("unable to parse forward: \"%s\"",
+			       conf->forward);
+			exit(EXIT_FAILURE);
+		}
 		s->serve = forward_serve;
-	} else if (conf->http) {
+		s->data = req;
+	}
+#if WITH_TPROXY
+	else if (conf->transparent) {
+		s->serve = tproxy_serve;
+	}
+#endif
+	else if (conf->http) {
 		s->serve = http_proxy_serve;
 	} else {
 		/* default to SOCKS server */
@@ -361,6 +371,11 @@ int main(int argc, char **argv)
 		api = NULL;
 	}
 	server_stop(s);
+	if (s->serve == forward_serve) {
+		dialreq_free(s->data);
+		s->data = NULL;
+	}
+
 	if (G.ruleset != NULL) {
 		ruleset_free(G.ruleset);
 		G.ruleset = NULL;

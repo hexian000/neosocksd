@@ -223,7 +223,7 @@ addrinfo_cb(void *arg, int status, int timeouts, struct ares_addrinfo *info)
 	}
 	RESOLVE_RETURN(q, r->loop);
 }
-#endif
+#endif /* WITH_CARES */
 
 void resolver_atexit_cb(void)
 {
@@ -290,7 +290,7 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 	UNUSED(r);
 	UNUSED(conf);
 	return false;
-#endif
+#endif /* WITH_CARES */
 }
 
 struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf)
@@ -355,7 +355,7 @@ void resolve_start(
 		}
 		return;
 	}
-#endif
+#endif /* WITH_CARES */
 	q->ok = resolve_addr(&q->addr, name, service, family);
 	RESOLVE_RETURN(q, r->loop);
 }

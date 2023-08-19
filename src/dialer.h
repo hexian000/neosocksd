@@ -54,6 +54,7 @@ struct dialreq {
 
 struct dialreq *dialreq_new(size_t max_proxy);
 bool dialreq_proxy(struct dialreq *r, const char *proxy_uri, size_t len);
+struct dialreq *dialreq_parse(const char *csv);
 void dialreq_free(struct dialreq *r);
 
 #define DIALER_BUF_SIZE                                                        \

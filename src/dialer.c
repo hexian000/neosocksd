@@ -174,6 +174,41 @@ bool dialreq_proxy(
 	return true;
 }
 
+struct dialreq *dialreq_parse(const char *csv)
+{
+	const size_t len = strlen(csv);
+	char buf[len + 1];
+	memcpy(buf, csv, len + 1);
+	size_t n = 1;
+	for (size_t i = 0; i < len; i++) {
+		if (buf[i] == ',') {
+			n++;
+		}
+	}
+	struct dialreq *req = dialreq_new(n);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	bool direct = true;
+	for (char *tok = strtok(buf, ","); tok != NULL;
+	     tok = strtok(NULL, ",")) {
+		if (direct) {
+			if (!dialaddr_set(&req->addr, tok, strlen(tok))) {
+				dialreq_free(req);
+				return NULL;
+			}
+			direct = false;
+			continue;
+		}
+		if (!dialreq_proxy(req, tok, strlen(tok))) {
+			dialreq_free(req);
+			return NULL;
+		}
+	}
+	return req;
+}
+
 void dialreq_free(struct dialreq *restrict req)
 {
 	free(req);
