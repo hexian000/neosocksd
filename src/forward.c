@@ -278,8 +278,7 @@ static struct dialreq *make_forward(const char *csv)
 }
 
 #if WITH_TPROXY
-static struct dialreq *
-make_tproxy(struct forward_ctx *restrict ctx, struct ev_loop *loop)
+static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 {
 	sockaddr_max_t dest;
 	socklen_t len = sizeof(dest);
@@ -287,7 +286,19 @@ make_tproxy(struct forward_ctx *restrict ctx, struct ev_loop *loop)
 		const int err = errno;
 		FW_CTX_LOG_F(
 			LOG_LEVEL_ERROR, ctx, "getsockname: %s", strerror(err));
-		forward_ctx_close(loop, ctx);
+		return NULL;
+	}
+	switch (dest.sa.sa_family) {
+	case AF_INET:
+		CHECK(len >= sizeof(struct sockaddr_in));
+		break;
+	case AF_INET6:
+		CHECK(len >= sizeof(struct sockaddr_in6));
+		break;
+	default:
+		FW_CTX_LOG_F(
+			LOG_LEVEL_ERROR, ctx, "tproxy: unsupported af:%jd",
+			(intmax_t)dest.sa.sa_family);
 		return NULL;
 	}
 	struct dialreq *req = dialreq_new(0);
@@ -297,27 +308,15 @@ make_tproxy(struct forward_ctx *restrict ctx, struct ev_loop *loop)
 	}
 	switch (dest.sa.sa_family) {
 	case AF_INET:
-		assert(len == sizeof(struct sockaddr_in));
-		req->addr = (struct dialaddr){
-			.type = ATYP_INET,
-			.in = dest.in.sin_addr,
-			.port = ntohs(dest.in.sin_port),
-		};
+		req->addr.type = ATYP_INET;
+		req->addr.in = dest.in.sin_addr;
+		req->addr.port = ntohs(dest.in.sin_port);
 		break;
 	case AF_INET6:
-		assert(len == sizeof(struct sockaddr_in6));
-		req->addr = (struct dialaddr){
-			.type = ATYP_INET6,
-			.in6 = dest.in6.sin6_addr,
-			.port = ntohs(dest.in6.sin6_port),
-		};
+		req->addr.type = ATYP_INET6;
+		req->addr.in6 = dest.in6.sin6_addr;
+		req->addr.port = ntohs(dest.in6.sin6_port);
 		break;
-	default:
-		FW_CTX_LOG_F(
-			LOG_LEVEL_ERROR, ctx, "getsockname: unknown af %jd",
-			(intmax_t)dest.sa.sa_family);
-		dialreq_free(req);
-		return NULL;
 	}
 	return req;
 }
@@ -332,7 +331,7 @@ forward_ctx_start(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	}
 #if WITH_TPROXY
 	else if (conf->transparent) {
-		ctx->dialreq = make_tproxy(ctx, loop);
+		ctx->dialreq = make_tproxy(ctx);
 	}
 #endif
 	else {

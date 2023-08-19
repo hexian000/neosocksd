@@ -26,6 +26,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+struct io_node {
+	struct ev_io watcher;
+	struct io_node *next;
+};
+
 struct resolver {
 	struct ev_loop *loop;
 	struct resolver_stats stats;
@@ -33,8 +38,8 @@ struct resolver {
 #if WITH_CARES
 	ares_channel channel;
 	struct ev_timer w_timeout;
-	size_t num_watcher;
-	struct ev_io w_socket; /* linked list */
+	size_t num_socket;
+	struct io_node sockets; /* linked list with the 1st element inlined */
 #endif
 };
 
@@ -83,7 +88,7 @@ sched_update(struct ev_loop *loop, struct ev_timer *restrict watcher)
 		ev_timer_stop(loop, watcher);
 		return;
 	}
-	const double next = tv.tv_sec * 1.0 + tv.tv_usec * 1e-6;
+	const double next = (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
 	LOGD_F("timeout: next check after %.3fs", next);
 	watcher->repeat = next;
 	ev_timer_again(loop, watcher);
@@ -92,15 +97,14 @@ sched_update(struct ev_loop *loop, struct ev_timer *restrict watcher)
 static size_t purge_watchers(struct resolver *restrict r)
 {
 	size_t num_purged = 0;
-	struct ev_io **pw_socket = (struct ev_io **)&r->w_socket.next;
-	for (struct ev_io *w_socket = *pw_socket; w_socket != NULL;
-	     w_socket = *pw_socket) {
-		if (ev_is_active(w_socket)) {
-			pw_socket = (struct ev_io **)&w_socket->next;
+	struct io_node *prev = &r->sockets;
+	for (struct io_node *it = prev->next; it != NULL; it = prev->next) {
+		if (ev_is_active(&it->watcher)) {
+			prev = it;
 			continue;
 		}
-		*pw_socket = (struct ev_io *)w_socket->next;
-		free(w_socket);
+		prev->next = it->next;
+		free(it);
 		num_purged++;
 	}
 	return num_purged;
@@ -130,50 +134,51 @@ static void sock_state_cb(
 	const int events = (readable ? EV_READ : 0) | (writable ? EV_WRITE : 0);
 
 	/* find an active watcher on same fd or an inactive watcher to reuse */
-	struct ev_io *w_socket = NULL;
-	for (struct ev_io *it = &r->w_socket; it != NULL;
-	     it = (struct ev_io *)it->next) {
+	struct io_node *node = NULL;
+	for (struct io_node *it = &r->sockets; it != NULL; it = it->next) {
 		if (!ev_is_active(it)) {
-			w_socket = it;
+			node = it;
 			continue;
 		}
-		if (it->fd == fd) {
-			w_socket = it;
+		if (it->watcher.fd == fd) {
+			node = it;
 			break;
 		}
 	}
 	if (events == EV_NONE) {
-		if (w_socket == NULL || !ev_is_active(w_socket)) {
+		if (node == NULL || !ev_is_active(&node->watcher)) {
 			/* currently not watching, nothing to do */
 			return;
 		}
-		LOGV_F("io: stop fd=%d num_watcher=%zu", fd, --r->num_watcher);
-		ev_io_stop(r->loop, w_socket);
+		LOGV_F("io: stop fd=%d num_socket=%zu", fd, --r->num_socket);
+		ev_io_stop(r->loop, &node->watcher);
 		return;
 	}
-	if (w_socket == NULL) {
-		/* if no suitable watcher exists, create one */
-		w_socket = malloc(sizeof(struct ev_io));
-		if (w_socket == NULL) {
+	if (node == NULL) {
+		/* if no suitable node exists, create one */
+		node = malloc(sizeof(struct io_node));
+		if (node == NULL) {
 			LOGOOM();
 			return;
 		}
+		struct ev_io *restrict w_socket = &node->watcher;
 		ev_io_init(w_socket, socket_cb, fd, events);
 		w_socket->data = r;
-		w_socket->next = r->w_socket.next;
-		r->w_socket.next = (struct ev_watcher_list *)w_socket;
+		/* insert */
+		node->next = r->sockets.next;
+		r->sockets.next = node;
 	} else {
 		/* or modify the existing watcher */
-		ev_io_set(w_socket, fd, events);
+		ev_io_set(&node->watcher, fd, events);
 	}
 
 	/* start the watcher */
-	if (ev_is_active(w_socket)) {
+	if (ev_is_active(&node->watcher)) {
 		return;
 	}
-	LOGV_F("io: fd=%d events=0x%x num_watcher=%zu", fd, events,
-	       ++r->num_watcher);
-	ev_io_start(r->loop, w_socket);
+	LOGV_F("io: fd=%d events=0x%x num_socket=%zu", fd, events,
+	       ++r->num_socket);
+	ev_io_start(r->loop, &node->watcher);
 }
 
 static bool
@@ -239,7 +244,8 @@ void resolver_free(struct resolver *restrict r)
 #if WITH_CARES
 		ares_destroy(r->channel);
 		(void)purge_watchers(r);
-		assert(!ev_is_active(&r->w_socket) && r->w_socket.next == NULL);
+		assert(!ev_is_active(&r->sockets.watcher) &&
+		       r->sockets.next == NULL);
 #endif
 	}
 	free(r);
@@ -265,7 +271,7 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 		LOGE_F("ares: %s", ares_strerror(ret));
 		return false;
 	}
-	ev_timer_init(&r->w_timeout, timeout_cb, 5.0, 0.0);
+	ev_timer_init(&r->w_timeout, timeout_cb, 0.0, 0.0);
 	ev_set_priority(&r->w_timeout, EV_MINPRI);
 	r->w_timeout.data = r;
 
@@ -297,8 +303,11 @@ struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf)
 		.loop = loop,
 	};
 #if WITH_CARES
-	ev_io_init(&r->w_socket, socket_cb, -1, EV_NONE);
-	r->w_socket.data = r;
+	{
+		struct ev_io *restrict w_socket = &r->sockets.watcher;
+		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
+		w_socket->data = r;
+	}
 #endif
 	r->async_enabled = resolver_async_init(r, conf);
 	return r;
@@ -307,15 +316,6 @@ struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf)
 const struct resolver_stats *resolver_stats(struct resolver *r)
 {
 	return &r->stats;
-}
-
-void resolve_dp(
-	struct resolve_query *restrict q, struct resolver *r,
-	const struct event_cb cb)
-{
-	q->resolver = r;
-	q->done_cb = cb;
-	q->ok = false;
 }
 
 struct resolve_query *resolve_new(struct resolver *r, struct event_cb cb)

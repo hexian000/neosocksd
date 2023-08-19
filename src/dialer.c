@@ -401,8 +401,6 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		write_uint16(portbuf, addr->port);
 		len += sizeof(uint16_t);
 	} break;
-	default:
-		FAIL();
 	}
 	return send_req(d, buf, len);
 }

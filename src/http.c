@@ -46,11 +46,14 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		stats->num_halfopen--;
-		/* fallthrough */
+		return;
 	case STATE_CONNECT:
+		ev_io_stop(loop, &ctx->w_recv);
+		ev_io_stop(loop, &ctx->w_send);
 		dialer_cancel(&ctx->dialer, loop);
 		free(ctx->dialreq);
 		ctx->dialreq = NULL;
+		stats->num_halfopen--;
 		return;
 	case STATE_CONNECTED:
 		transfer_stop(loop, &ctx->uplink);
@@ -135,6 +138,16 @@ on_header(struct http_ctx *restrict ctx, const char *key, const char *value)
 
 static int parse_request(struct http_ctx *restrict ctx)
 {
+	switch (ctx->state) {
+	case STATE_REQUEST:
+	case STATE_HEADER:
+	case STATE_CONTENT:
+		break;
+	case STATE_CONNECT:
+		return -1;
+	default:
+		FAIL();
+	}
 	char *next = ctx->http.nxt;
 	if (next == NULL) {
 		next = (char *)ctx->rbuf.data;
@@ -249,8 +262,6 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct http_ctx *restrict ctx = watcher->data;
-	assert(ctx->state == STATE_REQUEST || ctx->state == STATE_HEADER ||
-	       ctx->state == STATE_CONTENT);
 
 	const int want = http_recv(ctx);
 	if (want < 0) {

@@ -273,28 +273,8 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-	if (conf->daemonize) {
-		daemonize();
-	}
-
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);
-
-	/* signal watchers */
-	{
-		struct ev_signal *restrict w_sighup = &app.w_sighup;
-		ev_signal_init(w_sighup, signal_cb, SIGHUP);
-		ev_set_priority(w_sighup, EV_MAXPRI);
-		ev_signal_start(loop, w_sighup);
-		struct ev_signal *restrict w_sigint = &app.w_sigint;
-		ev_signal_init(w_sigint, signal_cb, SIGINT);
-		ev_set_priority(w_sigint, EV_MAXPRI);
-		ev_signal_start(loop, w_sigint);
-		struct ev_signal *restrict w_sigterm = &app.w_sigterm;
-		ev_signal_init(w_sigterm, signal_cb, SIGTERM);
-		ev_set_priority(w_sigterm, EV_MAXPRI);
-		ev_signal_start(loop, w_sigterm);
-	}
 
 	G.resolver = resolver_new(loop, conf);
 	CHECKOOM(G.resolver);
@@ -349,7 +329,28 @@ int main(int argc, char **argv)
 		}
 	}
 
-	drop_privileges(conf->user_name);
+	if (conf->daemonize) {
+		daemonize(conf->user_name);
+	} else if (conf->user_name != NULL) {
+		drop_privileges(conf->user_name);
+	}
+
+	/* signal watchers */
+	{
+		struct ev_signal *restrict w_sighup = &app.w_sighup;
+		ev_signal_init(w_sighup, signal_cb, SIGHUP);
+		ev_set_priority(w_sighup, EV_MAXPRI);
+		ev_signal_start(loop, w_sighup);
+		struct ev_signal *restrict w_sigint = &app.w_sigint;
+		ev_signal_init(w_sigint, signal_cb, SIGINT);
+		ev_set_priority(w_sigint, EV_MAXPRI);
+		ev_signal_start(loop, w_sigint);
+		struct ev_signal *restrict w_sigterm = &app.w_sigterm;
+		ev_signal_init(w_sigterm, signal_cb, SIGTERM);
+		ev_set_priority(w_sigterm, EV_MAXPRI);
+		ev_signal_start(loop, w_sigterm);
+	}
+
 	/* start event loop */
 	LOGI("server start");
 	ev_run(loop, 0);
@@ -368,10 +369,7 @@ int main(int argc, char **argv)
 		resolver_free(G.resolver);
 		G.resolver = NULL;
 	}
-
-	ev_signal_stop(loop, &app.w_sighup);
-	ev_signal_stop(loop, &app.w_sigint);
-	ev_signal_stop(loop, &app.w_sigterm);
+	ev_loop_destroy(loop);
 
 	LOGI("program terminated normally.");
 	return EXIT_SUCCESS;

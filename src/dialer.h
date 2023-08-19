@@ -15,12 +15,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum proxy_protocol {
-	PROTO_HTTP,
-	PROTO_SOCKS4A,
-	PROTO_SOCKS5,
-};
-
 enum dialaddr_type {
 	ATYP_INET,
 	ATYP_INET6,
@@ -41,6 +35,12 @@ bool dialaddr_set(struct dialaddr *addr, const char *s, size_t len);
 void dialaddr_copy(struct dialaddr *dst, const struct dialaddr *src);
 int dialaddr_format(const struct dialaddr *addr, char *buf, size_t bufsize);
 
+enum proxy_protocol {
+	PROTO_HTTP,
+	PROTO_SOCKS4A,
+	PROTO_SOCKS5,
+};
+
 struct proxy_req {
 	enum proxy_protocol proto;
 	struct dialaddr addr;
@@ -55,8 +55,6 @@ struct dialreq {
 struct dialreq *dialreq_new(size_t max_proxy);
 bool dialreq_proxy(struct dialreq *r, const char *proxy_uri, size_t len);
 void dialreq_free(struct dialreq *r);
-
-struct sockaddr;
 
 #define DIALER_BUF_SIZE                                                        \
 	MAX(sizeof("CONNECT") + (FQDN_MAX_LENGTH + sizeof(":65535")) +         \

@@ -92,6 +92,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECT:
+		ev_io_stop(loop, &ctx->w_socket);
 		dialer_cancel(&ctx->dialer, loop);
 		free(ctx->dialreq);
 		ctx->dialreq = NULL;
@@ -341,6 +342,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	SOCKS_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
 	/* cleanup before state change */
+	ev_io_stop(loop, &ctx->w_socket);
 	free(ctx->dialreq);
 
 	struct server_stats *restrict stats = &ctx->s->stats;
@@ -576,23 +578,38 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 	const uint8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
 	case SOCKS4:
-		return socks4_req(ctx);
 	case SOCKS5:
-		switch (ctx->state) {
-		case STATE_HANDSHAKE1:
-			return socks5_auth(ctx);
-		case STATE_HANDSHAKE2:
-			return socks5_req(ctx);
-		default:
-			FAIL();
-		}
+		break;
 	default:
 		SOCKS_CTX_LOG_F(
 			LOG_LEVEL_ERROR, ctx, "SOCKS: unknown version: %" PRIu8,
 			version);
+		return -1;
+	}
+	switch (ctx->state) {
+	case STATE_HANDSHAKE1:
+		switch (version) {
+		case SOCKS4:
+			return socks4_req(ctx);
+		case SOCKS5:
+			return socks5_auth(ctx);
+		}
+		break;
+	case STATE_HANDSHAKE2:
+		switch (version) {
+		case SOCKS4:
+			FAIL();
+		case SOCKS5:
+			return socks5_req(ctx);
+		}
+		break;
+	case STATE_CONNECT:
+		/* unexpected bytes after the protocol message */
+		return -1;
+	default:
 		break;
 	}
-	return -1;
+	FAIL();
 }
 
 static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
@@ -669,8 +686,6 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct socks_ctx *restrict ctx = watcher->data;
-	assert(ctx->state == STATE_HANDSHAKE1 ||
-	       ctx->state == STATE_HANDSHAKE2);
 
 	const int ret = socks_recv(ctx, watcher->fd);
 	if (ret < 0) {
@@ -681,7 +696,6 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		/* want more data */
 		return;
 	}
-	ev_io_stop(loop, watcher);
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
