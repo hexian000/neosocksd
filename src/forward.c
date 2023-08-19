@@ -242,10 +242,11 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	return ctx;
 }
 
-static void
-forward_ctx_start(struct ev_loop *loop, struct forward_ctx *restrict ctx)
+static void forward_ctx_start(
+	struct ev_loop *loop, struct forward_ctx *restrict ctx,
+	struct dialreq *req)
 {
-	dialer_start(&ctx->dialer, loop, ctx->dialreq);
+	dialer_start(&ctx->dialer, loop, req);
 
 	ctx->state = STATE_CONNECT;
 	struct server_stats *restrict stats = &ctx->s->stats;
@@ -265,8 +266,7 @@ void forward_serve(
 	}
 	(void)memcpy(
 		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
-	ctx->dialreq = s->data;
-	forward_ctx_start(loop, ctx);
+	forward_ctx_start(loop, ctx, s->data);
 }
 
 #if WITH_TPROXY
@@ -331,6 +331,6 @@ void tproxy_serve(
 		return;
 	}
 	ctx->dialreq = req;
-	forward_ctx_start(loop, ctx);
+	forward_ctx_start(loop, ctx, req);
 }
 #endif /* WITH_TPROXY */
