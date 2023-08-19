@@ -224,7 +224,7 @@ end
 
 function match.domain(s)
     if not s:startswith(".") then
-        errorf("domain matcher should starts with \".\": %q", s)
+        return match.exact(s)
     end
     return function(addr)
         local host, port = splithostport(addr)
