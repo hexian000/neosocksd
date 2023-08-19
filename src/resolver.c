@@ -369,7 +369,12 @@ void resolve_cancel(struct resolve_query *restrict q)
 	};
 }
 
-const struct sockaddr *resolve_get(const struct resolve_query *restrict ctx)
+bool resolve_get(
+	sockaddr_max_t *restrict addr, const struct resolve_query *restrict q)
 {
-	return ctx->ok ? &ctx->addr.sa : NULL;
+	if (!q->ok) {
+		return false;
+	}
+	memcpy(&addr->sa, &q->addr.sa, getsocklen(&q->addr.sa));
+	return true;
 }

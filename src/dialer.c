@@ -75,21 +75,21 @@ void dialaddr_copy(
 	struct dialaddr *restrict dst, const struct dialaddr *restrict src)
 {
 	dst->type = src->type;
+	dst->port = src->port;
 	switch (src->type) {
 	case ATYP_INET:
 		dst->in = src->in;
-		return;
+		break;
 	case ATYP_INET6:
 		dst->in6 = src->in6;
-		return;
+		break;
 	case ATYP_DOMAIN:
 		dst->domain.len = src->domain.len;
 		memcpy(dst->domain.name, src->domain.name, src->domain.len);
-		return;
-	default:
 		break;
+	default:
+		FAIL();
 	}
-	FAIL();
 }
 
 int dialaddr_format(
@@ -760,39 +760,37 @@ static bool connect_sa(
 static void resolve_cb(struct ev_loop *loop, void *data)
 {
 	struct dialer *restrict d = data;
-	const struct dialaddr *restrict addr =
+	const struct dialaddr *restrict dialaddr =
 		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
-	const struct sockaddr *sa = resolve_get(d->resolve_query);
-	if (sa == NULL) {
+
+	sockaddr_max_t addr;
+	if (!resolve_get(&addr, d->resolve_query)) {
 		LOGE_F("name resolution failed: \"%.*s\"",
-		       (int)addr->domain.len, addr->domain.name);
+		       (int)dialaddr->domain.len, dialaddr->domain.name);
 		return;
 	}
 
-	const uint16_t port = d->req->addr.port;
-	switch (sa->sa_family) {
-	case AF_INET: {
-		struct sockaddr_in *restrict in = (struct sockaddr_in *)sa;
-		in->sin_port = htons(port);
-	} break;
-	case AF_INET6: {
-		struct sockaddr_in6 *restrict in6 = (struct sockaddr_in6 *)sa;
-		in6->sin6_port = htons(port);
-	} break;
+	switch (addr.sa.sa_family) {
+	case AF_INET:
+		addr.in.sin_port = htons(dialaddr->port);
+		break;
+	case AF_INET6:
+		addr.in6.sin6_port = htons(dialaddr->port);
+		break;
 	default:
 		FAIL();
 	}
 
 	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
-		char node_str[addr->domain.len + 1 + 5 + 1];
-		dialaddr_format(addr, node_str, sizeof(node_str));
+		char node_str[dialaddr->domain.len + 1 + 5 + 1];
+		dialaddr_format(dialaddr, node_str, sizeof(node_str));
 		char addr_str[64];
-		format_sa(sa, addr_str, sizeof(addr_str));
+		format_sa(&addr.sa, addr_str, sizeof(addr_str));
 		LOG_F(LOG_LEVEL_VERBOSE, "resolve: \"%s\" is %s", node_str,
 		      addr_str);
 	}
 
-	if (!connect_sa(d, loop, sa)) {
+	if (!connect_sa(d, loop, &addr.sa)) {
 		DIALER_RETURN(d, loop, false);
 	}
 }

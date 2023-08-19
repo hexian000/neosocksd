@@ -30,6 +30,6 @@ void resolve_start(
 	struct resolve_query *restrict q, const char *name, const char *service,
 	int family);
 void resolve_cancel(struct resolve_query *q);
-const struct sockaddr *resolve_get(const struct resolve_query *q);
+bool resolve_get(sockaddr_max_t *addr, const struct resolve_query *q);
 
 #endif /* RESOLVER_H */

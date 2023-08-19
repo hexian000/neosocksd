@@ -23,12 +23,12 @@ enum dialaddr_type {
 
 struct dialaddr {
 	enum dialaddr_type type;
+	uint16_t port;
 	union {
 		struct in_addr in;
 		struct in6_addr in6;
 		struct domain_name domain;
 	};
-	uint16_t port;
 };
 
 bool dialaddr_set(struct dialaddr *addr, const char *s, size_t len);
