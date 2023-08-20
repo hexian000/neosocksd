@@ -199,6 +199,15 @@ function match.exact(s)
 end
 
 function match.host(s)
+    if type(s) == "table" then
+        return function(addr)
+            local host, port = splithostport(addr)
+            if not host then
+                return false
+            end
+            return not not s[host]
+        end
+    end
     return function(addr)
         local host, port = splithostport(addr)
         if not host then
@@ -248,9 +257,10 @@ function match.tree(tree)
         local t = tree
         for i = #path, 1, -1 do
             t = t[path[i]]
-            if not t then
+            if t == nil then
                 return false
-            elseif t == true then
+            elseif type(t) ~= "table" then
+                -- leaf node
                 return true
             end
         end

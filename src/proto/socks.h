@@ -26,9 +26,9 @@ enum socks4_command {
 
 enum socks4_response {
 	/* request granted */
-	SOCKS4RSP_GRANTED = 90, /* 0x05A */
+	SOCKS4RSP_GRANTED = 90, /* 0x5A */
 	/* request rejected or failed */
-	SOCKS4RSP_REJECTED = 91, /* 0x05B */
+	SOCKS4RSP_REJECTED = 91, /* 0x5B */
 };
 
 enum socks5_address_type {
