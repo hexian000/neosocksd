@@ -108,7 +108,7 @@ int dialaddr_format(
 		if (inet_ntop(AF_INET6, &addr->in6, s, sizeof(s)) == NULL) {
 			return -1;
 		}
-		return snprintf(buf, maxlen, "%s:%" PRIu16, s, addr->port);
+		return snprintf(buf, maxlen, "[%s]:%" PRIu16, s, addr->port);
 	}
 	case ATYP_DOMAIN:
 		return snprintf(

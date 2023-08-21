@@ -129,9 +129,8 @@ function _G.logf(s, ...)
 end
 
 function _G.splithostport(s)
-    local i = string.find(s, ":[^:]*$")
-    assert(i, "invalid address format (configuration error?)")
-    return string.sub(s, 1, i - 1), string.sub(s, i + 1)
+    local host, port = s:match("^(.*):([^:]*)$")
+    return (host:match("^%[(.*)%]$") or host), port
 end
 
 function _G.parse_cidr(s)
@@ -191,7 +190,7 @@ local match = {}
 function match.exact(s)
     local host, port = splithostport(s)
     if not host then
-        errorf("exact matcher should contains host and port: %q", s)
+        errorf("exact matcher should contain host and port: %q", s)
     end
     return function(addr)
         return addr == s
@@ -453,7 +452,7 @@ local function resolve_(addr)
             addr = string.format("%s:%s", host, port)
         end
     end
-    -- check if addr is a raw address
+    -- check if the addr is a raw address
     if neosocksd.parse_ipv4(host) then
         return route_(addr)
     elseif neosocksd.parse_ipv6(host) then

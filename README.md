@@ -5,7 +5,7 @@
 [![Lint](https://github.com/hexian000/neosocksd/actions/workflows/lint.yml/badge.svg)](https://github.com/hexian000/neosocksd/actions/workflows/lint.yml)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that only supports TCP CONNECT requests.
+A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua script as ruleset.
 
 - [Features](#features)
 - [Usage](#usage)
@@ -19,6 +19,7 @@ A lightweight programmable SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that on
 
 ## Features
 
+- Only TCP CONNECT requests are supported.
 - Plain old protocols with no built-in support for authentication or encryption.
 - Top class processor efficiency, minimal memory usage and code size.
 - Lua scripts powered rule set.
@@ -79,7 +80,7 @@ The host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua):
 
 [neox.sh](neox.sh) is a curl wrapper script for simplified shell operating.
 
-*Note: Since the HTTP/1.1 API server has a fixed buffer size of 8 KiB, you will not be able to load large scripts with this command. Consider sharded updates for large script projects.*
+*Note: Since the HTTP/1.1 API server has a limited request size, user should consider sharded updates for large ruleset projects. The content length limit for a single HTTP request is guaranteed to be at least 4 KiB.*
 
 ## Runtime Dependencies
 

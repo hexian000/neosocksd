@@ -188,8 +188,10 @@ static int resolve_(lua_State *restrict L)
 /* parse_ipv4(ipv4) */
 static int parse_ipv4_(lua_State *restrict L)
 {
-	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *s = lua_tostring(L, 1);
+	if (s == NULL) {
+		return 0;
+	}
 	struct in_addr in;
 	if (inet_pton(AF_INET, s, &in) != 1) {
 		return 0;
@@ -202,8 +204,10 @@ static int parse_ipv4_(lua_State *restrict L)
 /* parse_ipv6(ipv6) */
 static int parse_ipv6_(lua_State *restrict L)
 {
-	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *s = lua_tostring(L, 1);
+	if (s == NULL) {
+		return 0;
+	}
 	struct in6_addr in6;
 	if (inet_pton(AF_INET6, s, &in6) != 1) {
 		return 0;
