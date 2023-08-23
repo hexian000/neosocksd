@@ -198,9 +198,10 @@ local addr = neosocksd.resolve("www.example.com")
 
 **Description**
 
-Resolves a host name locally and blocks until resolution succeeds or times out. IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
+Resolves a host name locally and blocks the whole server until resolution succeeds or times out. IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 
 Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
+
 
 ### neosocksd.parse_ipv4
 
@@ -237,6 +238,27 @@ end
 **Description**
 
 Parses an IPv6 address into integers.
+
+
+### regex.\*
+
+**Synopsis**
+
+```Lua
+local reg = regex.compile([[\.example\.(com|org)$]])
+local s, e = reg:find(host)
+if s then
+    -- ......
+end
+local m = reg:match(host)
+if m then
+    -- ......
+end
+```
+
+**Description**
+
+Lua interface for [POSIX Extended Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html#tag_09_04).
 
 
 ### neosocksd.setinterval

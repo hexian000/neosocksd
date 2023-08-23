@@ -18,6 +18,7 @@
 #include <ev.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <regex.h>
 
 #include <assert.h>
 #include <math.h>
@@ -38,6 +39,7 @@ static struct ruleset *find_ruleset(lua_State *restrict L)
 	if (lua_getfield(L, LUA_REGISTRYINDEX, "ruleset") !=
 	    LUA_TLIGHTUSERDATA) {
 		luaL_error(L, "lua registry is corrupted");
+		FAIL();
 	}
 	struct ruleset *r = (struct ruleset *)lua_topointer(L, -1);
 	lua_pop(L, 1);
@@ -126,8 +128,100 @@ static int ruleset_pcall(
 	return lua_pcall(L, nargs, nresults, traceback ? 1 : 0);
 }
 
+static int regex_gc_(lua_State *restrict L)
+{
+	regex_t *preg = lua_touserdata(L, 1);
+	regfree(preg);
+	return 0;
+}
+
+/* regex.compile(pat) */
+static int regex_compile_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TSTRING);
+	const char *pat = lua_tostring(L, 1);
+	regex_t *preg = lua_newuserdata(L, sizeof(regex_t));
+	const int err = regcomp(preg, pat, REG_EXTENDED);
+	if (err != 0) {
+		char errbuf[256];
+		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
+		lua_pushlstring(L, errbuf, n);
+		lua_error(L);
+		FAIL();
+	}
+	lua_pushvalue(L, lua_upvalueindex(1));
+	lua_setmetatable(L, -2);
+	return 1;
+}
+
+/* regex.find(pat, s) */
+static int regex_find_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TUSERDATA);
+	regex_t *preg = lua_touserdata(L, 1);
+	luaL_checktype(L, 2, LUA_TSTRING);
+	const char *s = lua_tostring(L, 2);
+	regmatch_t match;
+	const int err = regexec(preg, s, 1, &match, 0);
+	if (err == REG_NOMATCH) {
+		lua_pushnil(L);
+		return 1;
+	} else if (err != 0) {
+		char errbuf[256];
+		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
+		lua_pushlstring(L, errbuf, n);
+		lua_error(L);
+		FAIL();
+	}
+	lua_pushinteger(L, match.rm_so + 1);
+	lua_pushinteger(L, match.rm_eo + 1);
+	return 2;
+}
+
+/* regex.match(pat, s) */
+static int regex_match_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TUSERDATA);
+	regex_t *preg = lua_touserdata(L, 1);
+	luaL_checktype(L, 2, LUA_TSTRING);
+	const char *s = lua_tostring(L, 2);
+	regmatch_t match;
+	const int err = regexec(preg, s, 1, &match, 0);
+	if (err == REG_NOMATCH) {
+		lua_pushnil(L);
+		return 1;
+	} else if (err != 0) {
+		char errbuf[256];
+		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
+		lua_pushlstring(L, errbuf, n);
+		lua_error(L);
+		FAIL();
+	}
+	lua_pushlstring(L, s + match.rm_so, match.rm_eo - match.rm_so);
+	return 1;
+}
+
+static int luaopen_regex(lua_State *restrict L)
+{
+	lua_newtable(L);
+	lua_pushcfunction(L, regex_find_);
+	lua_setfield(L, -2, "find");
+	lua_pushcfunction(L, regex_match_);
+	lua_setfield(L, -2, "match");
+
+	lua_newtable(L);
+	lua_pushvalue(L, -2);
+	lua_setfield(L, -2, "__index");
+	lua_pushcfunction(L, regex_gc_);
+	lua_setfield(L, -2, "__gc");
+
+	lua_pushcclosure(L, regex_compile_, 1);
+	lua_setfield(L, -2, "compile");
+	return 1;
+}
+
 /* invoke(code, addr, proxyN, ..., proxy1) */
-static int invoke_(lua_State *restrict L)
+static int api_invoke_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TSTRING);
 	luaL_checktype(L, 2, LUA_TSTRING);
@@ -137,7 +231,8 @@ static int invoke_(lua_State *restrict L)
 	}
 	struct dialreq *req = pop_dialreq(L, n - 1);
 	if (req == NULL) {
-		luaL_error(L, "invoke failed");
+		luaL_error(L, "invalid connect request");
+		FAIL();
 	}
 	struct ruleset *restrict r = find_ruleset(L);
 	size_t len;
@@ -147,7 +242,7 @@ static int invoke_(lua_State *restrict L)
 }
 
 /* resolve(host) */
-static int resolve_(lua_State *restrict L)
+static int api_resolve_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *s = lua_tostring(L, 1);
@@ -155,6 +250,7 @@ static int resolve_(lua_State *restrict L)
 	if (!resolve_addr(&addr, s, NULL, G.conf->resolve_pf)) {
 		const int err = errno;
 		luaL_error(L, "%s", strerror(err));
+		FAIL();
 	}
 	const int af = addr.sa.sa_family;
 	switch (af) {
@@ -165,6 +261,7 @@ static int resolve_(lua_State *restrict L)
 		if (addr_str == NULL) {
 			const int err = errno;
 			luaL_error(L, "%s", strerror(err));
+			FAIL();
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -175,6 +272,7 @@ static int resolve_(lua_State *restrict L)
 		if (addr_str == NULL) {
 			const int err = errno;
 			luaL_error(L, "%s", strerror(err));
+			FAIL();
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -186,7 +284,7 @@ static int resolve_(lua_State *restrict L)
 }
 
 /* parse_ipv4(ipv4) */
-static int parse_ipv4_(lua_State *restrict L)
+static int api_parse_ipv4_(lua_State *restrict L)
 {
 	const char *s = lua_tostring(L, 1);
 	if (s == NULL) {
@@ -202,7 +300,7 @@ static int parse_ipv4_(lua_State *restrict L)
 }
 
 /* parse_ipv6(ipv6) */
-static int parse_ipv6_(lua_State *restrict L)
+static int api_parse_ipv6_(lua_State *restrict L)
 {
 	const char *s = lua_tostring(L, 1);
 	if (s == NULL) {
@@ -253,7 +351,7 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 }
 
 /* setinterval(interval) */
-static int setinterval_(lua_State *restrict L)
+static int api_setinterval_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TNUMBER);
 	double interval = lua_tonumber(L, 1);
@@ -272,19 +370,15 @@ static int setinterval_(lua_State *restrict L)
 	return 0;
 }
 
+static const luaL_Reg apilib[] = {
+	{ "invoke", api_invoke_ },	     { "resolve", api_resolve_ },
+	{ "setinterval", api_setinterval_ }, { "parse_ipv4", api_parse_ipv4_ },
+	{ "parse_ipv6", api_parse_ipv6_ },   { NULL, NULL },
+};
+
 static int luaopen_neosocksd(lua_State *restrict L)
 {
-	lua_newtable(L);
-	lua_pushcfunction(L, invoke_);
-	lua_setfield(L, -2, "invoke");
-	lua_pushcfunction(L, resolve_);
-	lua_setfield(L, -2, "resolve");
-	lua_pushcfunction(L, parse_ipv4_);
-	lua_setfield(L, -2, "parse_ipv4");
-	lua_pushcfunction(L, parse_ipv6_);
-	lua_setfield(L, -2, "parse_ipv6");
-	lua_pushcfunction(L, setinterval_);
-	lua_setfield(L, -2, "setinterval");
+	luaL_newlib(L, apilib);
 	return 1;
 }
 
@@ -292,10 +386,11 @@ static int ruleset_luainit_(lua_State *restrict L)
 {
 	assert(lua_gettop(L) == 1);
 	lua_setfield(L, LUA_REGISTRYINDEX, "ruleset");
-	/* load all standard libraries */
+	/* load all libraries */
 	luaL_openlibs(L);
 	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
-	lua_pop(L, 1);
+	luaL_requiref(L, "regex", luaopen_regex, 1);
+	lua_pop(L, 2);
 	lua_pushboolean(L, !LOGLEVEL(LOG_LEVEL_DEBUG));
 	lua_setglobal(L, "NDEBUG");
 	/* prefer generational GC on supported lua versions */
@@ -356,6 +451,7 @@ static int ruleset_invoke_(lua_State *restrict L)
 	lua_pop(L, 2);
 	if (luaL_loadbuffer(L, code, len, "=rpc") != LUA_OK) {
 		lua_error(L);
+		FAIL();
 	}
 	lua_call(L, 0, 0);
 	lua_pushboolean(L, 1);
@@ -369,6 +465,7 @@ static int ruleset_load_(lua_State *restrict L)
 	lua_pop(L, 2);
 	if (luaL_loadbuffer(L, code, len, "=ruleset") != LUA_OK) {
 		lua_error(L);
+		FAIL();
 	}
 	lua_call(L, 0, 1);
 	if (!lua_istable(L, -1)) {
@@ -386,6 +483,7 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	lua_pop(L, 2);
 	if (luaL_loadfile(L, filename) != LUA_OK) {
 		lua_error(L);
+		FAIL();
 	}
 	lua_call(L, 0, 1);
 	if (!lua_istable(L, -1)) {

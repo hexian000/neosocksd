@@ -134,53 +134,110 @@ function _G.splithostport(s)
 end
 
 function _G.parse_cidr(s)
-    local i = string.find(s, "/%d+$")
-    local host = string.sub(s, 1, i - 1)
-    local shift = tonumber(string.sub(s, i + 1))
-    if shift < 0 or shift > 32 then
-        error("invalid subnet")
+    local addr, shift = s:match("^(.+)/(%d+)$")
+    local shift = tonumber(shift)
+    if not shift or shift < 0 or shift > 32 then
+        errorf("invalid prefix size %q", s)
     end
-    local subnet = neosocksd.parse_ipv4(host)
+    local mask = ~((1 << (32 - shift)) - 1)
+    local subnet = neosocksd.parse_ipv4(addr)
+    if not subnet or (subnet & mask ~= subnet) then
+        errorf("invalid subnet %q", s)
+    end
     return subnet, shift
 end
 
 function _G.parse_cidr6(s)
-    local i = string.find(s, "/%d+$")
-    local host = string.sub(s, 1, i - 1)
-    local shift = tonumber(string.sub(s, i + 1))
-    if shift < 0 or shift > 128 then
-        error("invalid subnet")
+    local addr, shift = s:match("^(.+)/(%d+)$")
+    local shift = tonumber(shift)
+    if not shift or shift < 0 or shift > 128 then
+        errorf("invalid prefix size %q", s)
     end
-    local subnet1, subnet2 = neosocksd.parse_ipv6(host)
+    local subnet1, subnet2 = neosocksd.parse_ipv6(addr)
+    if shift > 64 then
+        local mask = ~((1 << (128 - shift)) - 1)
+        if not subnet1 or (subnet2 & mask ~= subnet2) then
+            errorf("invalid subnet %q", s)
+        end
+    else
+        local mask = ~((1 << (64 - shift)) - 1)
+        if not subnet1 or (subnet1 & mask ~= subnet1) or subnet2 ~= 0 then
+            errorf("invalid subnet %q", s)
+        end
+    end
     return subnet1, subnet2, shift
 end
 
 -- [[ route table matchers ]] --
 local inet = {}
 function inet.subnet(s)
-    local subnet, shift = parse_cidr(s)
-    local mask = ~((1 << (32 - shift)) - 1)
-    subnet = subnet & mask
+    if type(s) ~= "table" then
+        local subnet, shift = parse_cidr(s)
+        local mask = ~((1 << (32 - shift)) - 1)
+        subnet = subnet & mask
+        return function(ip)
+            return (ip & mask) == subnet
+        end
+    end
+    local prefix = {}
+    for _, v in pairs(s) do
+        local subnet, shift = parse_cidr(v)
+        local mask = ~((1 << (32 - shift)) - 1)
+        local t = prefix[shift] or {}
+        t[tostring(subnet & mask)] = true
+        prefix[shift] = t
+    end
     return function(ip)
-        return (ip & mask) == subnet
+        for shift, t in pairs(prefix) do
+            local mask = ~((1 << (32 - shift)) - 1)
+            if t[tostring(ip & mask)] then
+                return true
+            end
+        end
+        return false
     end
 end
 _G.inet = inet
 
 local inet6 = {}
 function inet6.subnet(s)
-    local subnet1, subnet2, shift = parse_cidr6(s)
-    if shift > 64 then
-        local mask = ~((1 << (128 - shift)) - 1)
-        subnet2 = subnet2 & mask
+    if type(s) ~= "table" then
+        local subnet1, subnet2, shift = parse_cidr6(s)
+        if shift > 64 then
+            local mask = ~((1 << (128 - shift)) - 1)
+            subnet2 = subnet2 & mask
+            return function(ip1, ip2)
+                return ip1 == subnet1 and (ip2 & mask) == subnet2
+            end
+        end
+        local mask = ~((1 << (64 - shift)) - 1)
+        subnet1 = subnet1 & mask
         return function(ip1, ip2)
-            return ip1 == subnet1 and (ip2 & mask) == subnet2
+            return (ip1 & mask) == subnet1
         end
     end
-    local mask = ~((1 << (64 - shift)) - 1)
-    subnet1 = subnet1 & mask
+    local prefix = {}
+    for _, v in pairs(s) do
+        local subnet1, subnet2, shift = parse_cidr6(v)
+        local t = prefix[shift] or {}
+        t[subnet1 .. "," .. subnet2] = true
+        prefix[shift] = t
+    end
     return function(ip1, ip2)
-        return (ip1 & mask) == subnet1
+        for shift, t in pairs(prefix) do
+            local subnet1, subnet2
+            if shift > 64 then
+                local mask = ~((1 << (128 - shift)) - 1)
+                subnet1, subnet2 = ip1, ip2 & mask
+            else
+                local mask = ~((1 << (64 - shift)) - 1)
+                subnet1, subnet2 = ip1 & mask, 0
+            end
+            if t[subnet1 .. "," .. subnet2] then
+                return true
+            end
+        end
+        return false
     end
 end
 _G.inet6 = inet6
@@ -188,31 +245,48 @@ _G.inet6 = inet6
 -- [[ redirect table matchers ]] --
 local match = {}
 function match.exact(s)
-    local host, port = splithostport(s)
-    if not host then
-        errorf("exact matcher should contain host and port: %q", s)
+    if type(s) ~= "table" then
+        local host, port = splithostport(s)
+        if not host then
+            errorf("exact matcher should contain host and port: %q", s)
+        end
+        return function(addr)
+            return addr == s
+        end
+    end
+    local t = {}
+    for _, v in pairs(s) do
+        local host, port = splithostport(v)
+        if not host then
+            errorf("exact matcher should contain host and port: %q", s)
+        end
+        t[v] = true
     end
     return function(addr)
-        return addr == s
+        return not not t[addr]
     end
 end
 
 function match.host(s)
-    if type(s) == "table" then
+    if type(s) ~= "table" then
         return function(addr)
             local host, port = splithostport(addr)
             if not host then
                 return false
             end
-            return not not s[host]
+            return host == s
         end
+    end
+    local t = {}
+    for _, v in pairs(s) do
+        t[v] = true
     end
     return function(addr)
         local host, port = splithostport(addr)
         if not host then
             return false
         end
-        return host == s
+        return not not t[host]
     end
 end
 
@@ -231,35 +305,52 @@ function match.port(from, to)
 end
 
 function match.domain(s)
-    if not s:startswith(".") then
-        return match.host(s)
-    end
-    return function(addr)
-        local host, port = splithostport(addr)
-        if not host then
-            return false
+    if type(s) ~= "table" then
+        if not s:startswith(".") then
+            errorf([[domain matcher should start with ".": %q]], s)
         end
-        return host:endswith(s)
-    end
-end
-
-function match.tree(tree)
-    return function(addr)
-        local host, port = splithostport(addr)
-        if not host then
-            return false
+        return function(addr)
+            local host, port = splithostport(addr)
+            if not host then
+                return false
+            end
+            return host:endswith(s)
         end
-        local path = {}
-        for s in host:gmatch("[^.]+") do
-            table.insert(path, s)
+    end
+    local tree = {}
+    for _, v in pairs(s) do
+        if not v:startswith(".") then
+            errorf([[domain matcher should start with ".": %q]], v)
+        end
+        local path, n = {}, 0
+        for seg in v:gmatch("[^.]+") do
+            table.insert(path, seg)
+            n = n + 1
         end
         local t = tree
-        for i = #path, 1, -1 do
+        for i = n, 2, -1 do
+            local seg = path[i]
+            t[seg] = t[seg] or {}
+            t = t[seg]
+        end
+        t[path[1]] = true
+    end
+    return function(addr)
+        local host, port = splithostport(addr)
+        if not host then
+            return false
+        end
+        local path, n = {}, 0
+        for seg in host:gmatch("[^.]+") do
+            table.insert(path, seg)
+            n = n + 1
+        end
+        local t = tree
+        for i = n, 1, -1 do
             t = t[path[i]]
-            if t == nil then
-                return false
-            elseif type(t) ~= "table" then
-                -- leaf node
+            if not t then
+                break
+            elseif t == true then
                 return true
             end
         end
@@ -268,8 +359,36 @@ function match.tree(tree)
 end
 
 function match.pattern(s)
+    if type(s) ~= "table" then
+        return function(addr)
+            return not not addr:find(s)
+        end
+    end
     return function(addr)
-        return not not addr:find(s)
+        for _, pat in pairs(s) do
+            if addr:find(pat) then
+                return true
+            end
+        end
+        return false
+    end
+end
+
+function match.regex(s)
+    if type(s) ~= "table" then
+        local reg = regex.compile(s)
+        return function(addr)
+            return not not reg:find(addr)
+        end
+    end
+    local regs = list:new(s):map(regex.compile):totable()
+    return function(addr)
+        for _, reg in pairs(regs) do
+            if reg:find(addr) then
+                return true
+            end
+        end
+        return false
     end
 end
 _G.match = match
