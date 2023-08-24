@@ -65,6 +65,7 @@ static void print_usage(const char *argv0)
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  --traceback                print ruleset error traceback (for debugging)\n"
+		"  --memlimit <limit>         sets a soft limit on the Lua heap size in MiB\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
 		"  -d, --daemonize            run in background and discard all logs\n"
@@ -96,6 +97,13 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			       (argv)[(i)]);                                   \
 			exit(EXIT_FAILURE);                                    \
 		}                                                              \
+	} while (false)
+
+#define OPT_ARG_ERROR(argv, i)                                                 \
+	do {                                                                   \
+		LOGF_F("argument error: %s \"%s\"\n", (argv)[(i)-1],           \
+		       (argv)[(i)]);                                           \
+		exit(EXIT_FAILURE);                                            \
 	} while (false)
 
 	struct config *restrict conf = &app.conf;
@@ -143,33 +151,27 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			continue;
 		}
 #endif
+#if WITH_NETDEVICE
 		if (strcmp(argv[i], "-i") == 0 ||
 		    strcmp(argv[i], "--netdev") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-#if WITH_NETDEVICE
-			conf->netdev = argv[++i];
-#else
-			LOGW_F("unsupported argument: \"%s\"", argv[i]);
-			i++;
-#endif
+			++i;
+			conf->netdev = argv[i];
 			continue;
 		}
-		if (strcmp(argv[i], "--reuseport") == 0) {
+#endif
 #if WITH_REUSEPORT
+		if (strcmp(argv[i], "--reuseport") == 0) {
 			conf->reuseport = true;
-#else
-			LOGW_F("unsupported argument: \"%s\"", argv[i]);
-#endif
 			continue;
 		}
-		if (strcmp(argv[i], "--no-fastopen") == 0) {
+#endif
 #if WITH_TCP_FASTOPEN
+		if (strcmp(argv[i], "--no-fastopen") == 0) {
 			conf->tcp_fastopen = false;
-#else
-			LOGW_F("unsupported argument: \"%s\"", argv[i]);
-#endif
 			continue;
 		}
+#endif
 		if (strcmp(argv[i], "--api") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			conf->restapi = argv[++i];
@@ -179,6 +181,18 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		    strcmp(argv[i], "--ruleset") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			conf->ruleset = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "--traceback") == 0) {
+			conf->traceback = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--memlimit") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			if (sscanf(argv[i], "%zu", &conf->memlimit) != 1) {
+				OPT_ARG_ERROR(argv, i);
+			}
 			continue;
 		}
 		if (strcmp(argv[i], "-u") == 0 ||
@@ -192,12 +206,10 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
 			if (sscanf(argv[i], "%lf", &conf->timeout) != 1) {
-				LOGF_F("can't parse \"%s\"\n", argv[i]);
-				exit(EXIT_FAILURE);
+				OPT_ARG_ERROR(argv, i);
 			}
 			if (!(1e-3 <= conf->timeout && conf->timeout <= 1e+9)) {
-				LOGF_F("invalid timeout \"%s\"\n", argv[i]);
-				exit(EXIT_FAILURE);
+				OPT_ARG_ERROR(argv, i);
 			}
 			continue;
 		}
@@ -216,17 +228,12 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			conf->daemonize = true;
 			continue;
 		}
-		if (strcmp(argv[i], "--traceback") == 0) {
-			conf->traceback = true;
-			continue;
-		}
 		if (strcmp(argv[i], "-m") == 0 ||
 		    strcmp(argv[i], "--max-sessions") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
 			if (sscanf(argv[i], "%zu", &conf->max_sessions) != 1) {
-				LOGF_F("can't parse \"%s\"\n", argv[i]);
-				exit(EXIT_FAILURE);
+				OPT_ARG_ERROR(argv, i);
 			}
 			continue;
 		}
@@ -237,8 +244,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 				   &conf->startup_limit_start,
 				   &conf->startup_limit_rate,
 				   &conf->startup_limit_full) != 3) {
-				LOGF_F("can't parse \"%s\"\n", argv[i]);
-				exit(EXIT_FAILURE);
+				OPT_ARG_ERROR(argv, i);
 			}
 			continue;
 		}
@@ -254,6 +260,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 	}
 
 #undef OPT_REQUIRE_ARG
+#undef OPT_ARG_ERROR
 }
 
 int main(int argc, char **argv)

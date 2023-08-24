@@ -3,8 +3,14 @@ function _G.printf(...)
     return print(string.format(...))
 end
 
-function _G.errorf(s, ...)
-    error(string.format(s, ...), 2)
+function _G.errorf(level, s, ...)
+    error(string.format(s, ...), level + 1)
+end
+
+function _G.assertf(v, level, s, ...)
+    if not v then
+        error(string.format(s, ...), level + 1)
+    end
 end
 
 function _G.eval(s, ...)
@@ -137,12 +143,12 @@ function _G.parse_cidr(s)
     local addr, shift = s:match("^(.+)/(%d+)$")
     local shift = tonumber(shift)
     if not shift or shift < 0 or shift > 32 then
-        errorf("invalid prefix size %q", s)
+        errorf(2, "invalid prefix size %q", s)
     end
     local mask = ~((1 << (32 - shift)) - 1)
     local subnet = neosocksd.parse_ipv4(addr)
     if not subnet or (subnet & mask ~= subnet) then
-        errorf("invalid subnet %q", s)
+        errorf(2, "invalid subnet %q", s)
     end
     return subnet, shift
 end
@@ -151,18 +157,18 @@ function _G.parse_cidr6(s)
     local addr, shift = s:match("^(.+)/(%d+)$")
     local shift = tonumber(shift)
     if not shift or shift < 0 or shift > 128 then
-        errorf("invalid prefix size %q", s)
+        errorf(2, "invalid prefix size %q", s)
     end
     local subnet1, subnet2 = neosocksd.parse_ipv6(addr)
     if shift > 64 then
         local mask = ~((1 << (128 - shift)) - 1)
         if not subnet1 or (subnet2 & mask ~= subnet2) then
-            errorf("invalid subnet %q", s)
+            errorf(2, "invalid subnet %q", s)
         end
     else
         local mask = ~((1 << (64 - shift)) - 1)
         if not subnet1 or (subnet1 & mask ~= subnet1) or subnet2 ~= 0 then
-            errorf("invalid subnet %q", s)
+            errorf(2, "invalid subnet %q", s)
         end
     end
     return subnet1, subnet2, shift
@@ -247,9 +253,7 @@ local match = {}
 function match.exact(s)
     if type(s) ~= "table" then
         local host, port = splithostport(s)
-        if not host then
-            errorf("exact matcher should contain host and port: %q", s)
-        end
+        assertf(host and port, 2, "exact matcher should contain host and port: %q", s)
         return function(addr)
             return addr == s
         end
@@ -257,9 +261,7 @@ function match.exact(s)
     local t = {}
     for _, v in pairs(s) do
         local host, port = splithostport(v)
-        if not host then
-            errorf("exact matcher should contain host and port: %q", s)
-        end
+        assertf(host and port, 2, "exact matcher should contain host and port: %q", v)
         t[v] = true
     end
     return function(addr)
@@ -306,9 +308,7 @@ end
 
 function match.domain(s)
     if type(s) ~= "table" then
-        if not s:startswith(".") then
-            errorf([[domain matcher should start with ".": %q]], s)
-        end
+        assertf(s:startswith("."), 2, [[domain matcher should start with ".": %q]], s)
         return function(addr)
             local host, port = splithostport(addr)
             if not host then
@@ -319,9 +319,7 @@ function match.domain(s)
     end
     local tree = {}
     for _, v in pairs(s) do
-        if not v:startswith(".") then
-            errorf([[domain matcher should start with ".": %q]], v)
-        end
+        assertf(v:startswith("."), 2, [[domain matcher should start with ".": %q]], v)
         local path, n = {}, 0
         for seg in v:gmatch("[^.]+") do
             table.insert(path, seg)
@@ -335,6 +333,11 @@ function match.domain(s)
         end
         t[path[1]] = true
     end
+    return match.domaintree(tree)
+end
+
+function match.domaintree(tree)
+    assertf(type(tree) == "table", 2, "domain tree should be a table")
     return function(addr)
         local host, port = splithostport(addr)
         if not host then
@@ -489,7 +492,8 @@ local function route_(addr)
     -- check route table
     local host, port = splithostport(addr)
     if not host then
-        errorf("invalid address: %q", addr)
+        logf("route: invalid address %q", addr)
+        return nil
     end
     local routetab = _G.route
     if routetab then
@@ -526,7 +530,8 @@ local function route6_(addr)
     -- check route table
     local host, port = splithostport(addr)
     if not host then
-        errorf("invalid address: %q", addr)
+        logf("route6: invalid address %q", addr)
+        return nil
     end
     local routetab = _G.route6
     if routetab then

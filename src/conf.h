@@ -21,6 +21,7 @@ struct config {
 	int log_level;
 	int resolve_pf;
 	double timeout;
+	size_t memlimit;
 
 	bool http : 1;
 	bool proto_timeout : 1;

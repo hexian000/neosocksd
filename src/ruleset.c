@@ -108,13 +108,24 @@ static int ruleset_traceback(lua_State *restrict L)
 	return 1;
 }
 
+static void check_memlimit(lua_State *restrict L)
+{
+	const size_t heapsize = (size_t)lua_gc(L, LUA_GCCOUNT, 0) >> 10u;
+	const size_t memlimit = G.conf->memlimit;
+	if (memlimit == 0 || heapsize < memlimit) {
+		return;
+	}
+	lua_gc(L, LUA_GCCOLLECT, 0);
+}
+
 static int ruleset_pcall(
 	struct ruleset *restrict r, lua_CFunction func, int nargs, int nresults,
 	...)
 {
-	const bool traceback = G.conf->traceback;
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
+	check_memlimit(L);
+	const bool traceback = G.conf->traceback;
 	if (traceback) {
 		lua_pushcfunction(L, ruleset_traceback);
 	}
@@ -154,7 +165,7 @@ static int regex_compile_(lua_State *restrict L)
 	return 1;
 }
 
-/* regex.find(pat, s) */
+/* regex.find(reg, s) */
 static int regex_find_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TUSERDATA);
@@ -174,11 +185,11 @@ static int regex_find_(lua_State *restrict L)
 		FAIL();
 	}
 	lua_pushinteger(L, match.rm_so + 1);
-	lua_pushinteger(L, match.rm_eo + 1);
+	lua_pushinteger(L, match.rm_eo);
 	return 2;
 }
 
-/* regex.match(pat, s) */
+/* regex.match(reg, s) */
 static int regex_match_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TUSERDATA);
@@ -214,7 +225,7 @@ static int luaopen_regex(lua_State *restrict L)
 	lua_setfield(L, -2, "__index");
 	lua_pushcfunction(L, regex_gc_);
 	lua_setfield(L, -2, "__gc");
-
+	/* capture the metatable as an upvalue */
 	lua_pushcclosure(L, regex_compile_, 1);
 	lua_setfield(L, -2, "compile");
 	return 1;
