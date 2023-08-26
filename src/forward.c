@@ -10,6 +10,7 @@
 #include "dialer.h"
 #include "sockutil.h"
 #include "transfer.h"
+#include "ruleset.h"
 
 #include <ev.h>
 #include <netinet/in.h>
@@ -293,6 +294,19 @@ static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 			(intmax_t)dest.sa.sa_family);
 		return NULL;
 	}
+
+	if (G.ruleset != NULL) {
+		char addr_str[64];
+		format_sa(&dest.sa, addr_str, sizeof(addr_str));
+		switch (dest.sa.sa_family) {
+		case AF_INET:
+			return ruleset_route(G.ruleset, addr_str);
+		case AF_INET6:
+			return ruleset_route6(G.ruleset, addr_str);
+		}
+		return NULL;
+	}
+
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {
 		LOGOOM();
