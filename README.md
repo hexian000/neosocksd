@@ -19,9 +19,9 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 
 ## Features
 
-- Only TCP CONNECT requests are supported.
 - Plain old protocols with no built-in support for authentication or encryption.
-- Top class processor efficiency, minimal memory usage and code size.
+- Only TCP CONNECT requests are supported.
+- Top class processor efficiency, minimized memory usage and code size.
 - Lua scripts powered rule set.
 - Routing connections by rule and even building an autonomous proxy mesh.
 - Horizontally scalable.
@@ -59,7 +59,15 @@ Depending on how complex your customizations are, check out:
 Use the following command to start the server with the Lua scripts in current directory:
 
 ```sh
-./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua -v
+# Start a ruleset powered SOCKS4 / SOCKS4A / SOCKS5 server
+./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua
+
+# For debugging ruleset script
+./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua --traceback -v
+
+# Start a transparent proxy to route TCP traffic by ruleset
+./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
+    --max-startups 100:30:200 --max-sessions 0
 ```
 
 Check server stats:

@@ -29,8 +29,6 @@ static void server_stats(
 	(void)format_duration(
 		str_uptime, sizeof(str_uptime), make_duration(uptime));
 
-	const uintmax_t num_reject = lstats->num_accept - lstats->num_serve;
-
 	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
 	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
 
@@ -52,9 +50,9 @@ static void server_stats(
 		"Traffic             : Up %s, Down %s\n"
 		"Avg Bandwidth       : Up %s/hrs, Down %s/hrs\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
-		lstats->num_serve, num_reject, stats->num_success,
-		stats->num_request - stats->num_success, avgreq_hrs,
-		resolv_stats->num_success,
+		lstats->num_serve, lstats->num_accept - lstats->num_serve,
+		stats->num_success, stats->num_request - stats->num_success,
+		avgreq_hrs, resolv_stats->num_success,
 		resolv_stats->num_query - resolv_stats->num_success,
 		avgresolv_hrs, xfer_up, xfer_down, avgbw_up, avgbw_down);
 
@@ -74,7 +72,6 @@ static void server_stats_stateful(
 {
 	const struct server_stats *restrict stats = &s->stats;
 	const struct listener_stats *restrict lstats = &s->l.stats;
-	const uintmax_t num_reject = lstats->num_accept - lstats->num_serve;
 
 	static struct {
 		uintmax_t num_request;
@@ -88,6 +85,7 @@ static void server_stats_stateful(
 		xfer_rate_down,
 		(double)(stats->byt_down - last.xfer_down) / dt);
 
+	const uintmax_t num_reject = lstats->num_accept - lstats->num_serve;
 	const double accept_rate =
 		(double)(lstats->num_accept - last.num_accept) / dt;
 	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
