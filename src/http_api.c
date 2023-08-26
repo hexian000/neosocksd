@@ -7,29 +7,109 @@
 
 #include <stdint.h>
 
-static void handle_ruleset_stats(struct http_ctx *restrict ctx, const double dt)
+#define FORMAT_BYTES(name, value)                                              \
+	char name[16];                                                         \
+	(void)format_iec_bytes(name, sizeof(name), (value))
+
+static void server_stats(
+	struct http_ctx *restrict ctx, const struct server *restrict s,
+	const double uptime)
 {
-	struct ruleset *restrict ruleset = G.ruleset;
-	if (ruleset == NULL) {
-		return;
-	}
-	const size_t heap_bytes = ruleset_memused(ruleset);
-	char heap_total[16];
-	(void)format_iec_bytes(
-		heap_total, sizeof(heap_total), (double)heap_bytes);
-	BUF_APPENDF(ctx->wbuf, "Ruleset Memory      : %s\n", heap_total);
-	const char *str = ruleset_stats(ruleset, dt);
-	if (str == NULL) {
-		return;
-	}
+	const struct server_stats *restrict stats = &s->stats;
+	const struct listener_stats *restrict lstats = &s->l.stats;
+	const struct resolver_stats *restrict resolv_stats =
+		resolver_stats(G.resolver);
+	const time_t server_time = time(NULL);
+
+	char timestamp[32];
+	(void)strftime(
+		timestamp, sizeof(timestamp), "%FT%T%z",
+		localtime(&server_time));
+	char str_uptime[16];
+	(void)format_duration(
+		str_uptime, sizeof(str_uptime), make_duration(uptime));
+
+	const uintmax_t num_reject = lstats->num_accept - lstats->num_serve;
+
+	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
+	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
+
+	const double uptime_hrs = uptime / 3600.0;
+	const double avgreq_hrs = (double)(stats->num_request) / uptime_hrs;
+	const double avgresolv_hrs =
+		(double)(resolv_stats->num_query) / uptime_hrs;
+	FORMAT_BYTES(avgbw_up, ((double)stats->byt_up) / uptime_hrs);
+	FORMAT_BYTES(avgbw_down, ((double)stats->byt_down) / uptime_hrs);
+
 	BUF_APPENDF(
 		ctx->wbuf,
-		"\n"
-		"Ruleset Stats\n"
-		"================\n"
-		"%s\n",
-		str);
+		"Server Time         : %s\n"
+		"Uptime              : %s\n"
+		"Num Sessions        : %zu (+%zu)\n"
+		"Conn Accepts        : %ju (+%ju)\n"
+		"Requests            : %ju (+%ju), %.1f/hrs\n"
+		"Name Resolves       : %ju (+%ju), %.1f/hrs\n"
+		"Traffic             : Up %s, Down %s\n"
+		"Avg Bandwidth       : Up %s/hrs, Down %s/hrs\n",
+		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
+		lstats->num_serve, num_reject, stats->num_success,
+		stats->num_request - stats->num_success, avgreq_hrs,
+		resolv_stats->num_success,
+		resolv_stats->num_query - resolv_stats->num_success,
+		avgresolv_hrs, xfer_up, xfer_down, avgbw_up, avgbw_down);
+
+	if (G.ruleset != NULL) {
+		const size_t heap_bytes = ruleset_memused(G.ruleset);
+		char heap_total[16];
+		(void)format_iec_bytes(
+			heap_total, sizeof(heap_total), (double)heap_bytes);
+		BUF_APPENDF(
+			ctx->wbuf, "Ruleset Memory      : %s\n", heap_total);
+	}
 }
+
+static void server_stats_stateful(
+	struct http_ctx *restrict ctx, const struct server *restrict s,
+	const double dt)
+{
+	const struct server_stats *restrict stats = &s->stats;
+	const struct listener_stats *restrict lstats = &s->l.stats;
+	const uintmax_t num_reject = lstats->num_accept - lstats->num_serve;
+
+	static struct {
+		uintmax_t num_request;
+		uintmax_t xfer_up, xfer_down;
+		uintmax_t num_accept;
+		uintmax_t num_reject;
+	} last = { 0 };
+
+	FORMAT_BYTES(xfer_rate_up, (double)(stats->byt_up - last.xfer_up) / dt);
+	FORMAT_BYTES(
+		xfer_rate_down,
+		(double)(stats->byt_down - last.xfer_down) / dt);
+
+	const double accept_rate =
+		(double)(lstats->num_accept - last.num_accept) / dt;
+	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
+
+	const double request_rate =
+		(double)(stats->num_request - last.num_request) / dt;
+
+	BUF_APPENDF(
+		ctx->wbuf,
+		"Accept Rate         : %.1f/s (%+.1f/s)\n"
+		"Request Rate        : %.1f/s\n"
+		"Bandwidth           : Up %s/s, Down %s/s\n",
+		accept_rate, reject_rate, request_rate, xfer_rate_up,
+		xfer_rate_down);
+
+	last.num_request = stats->num_request;
+	last.xfer_up = stats->byt_up;
+	last.xfer_down = stats->byt_down;
+	last.num_accept = lstats->num_accept;
+	last.num_reject = num_reject;
+}
+#undef FORMAT_BYTES
 
 static void http_handle_stats(
 	struct ev_loop *loop, struct http_ctx *restrict ctx,
@@ -68,101 +148,30 @@ static void http_handle_stats(
 						"  " PROJECT_HOMEPAGE "\n\n");
 	}
 
-	const struct server *restrict s_ = ctx->s->data;
-	const struct server_stats *restrict stats = &s_->stats;
-	const struct listener_stats *restrict lstats = &s_->l.stats;
-	const struct resolver_stats *restrict resolv_stats =
-		resolver_stats(G.resolver);
 	const ev_tstamp now = ev_now(loop);
-	const double uptime = now - stats->started;
-	const time_t server_time = time(NULL);
-
-	char timestamp[32];
-	(void)strftime(
-		timestamp, sizeof(timestamp), "%FT%T%z",
-		localtime(&server_time));
-	char str_uptime[16];
-	(void)format_duration(
-		str_uptime, sizeof(str_uptime), make_duration(uptime));
-
-	const uintmax_t num_reject = lstats->num_accept - lstats->num_serve;
-
-#define FORMAT_BYTES(name, value)                                              \
-	char name[16];                                                         \
-	(void)format_iec_bytes(name, sizeof(name), (value))
-
-	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
-	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
-
-	const double uptime_hrs = uptime / 3600.0;
-	const double avgreq_hrs = (double)(stats->num_request) / uptime_hrs;
-	const double avgresolv_hrs =
-		(double)(resolv_stats->num_query) / uptime_hrs;
-	FORMAT_BYTES(avgbw_up, ((double)stats->byt_up) / uptime_hrs);
-	FORMAT_BYTES(avgbw_down, ((double)stats->byt_down) / uptime_hrs);
-
-	BUF_APPENDF(
-		ctx->wbuf,
-		"Server Time         : %s\n"
-		"Uptime              : %s\n"
-		"Num Sessions        : %zu (+%zu)\n"
-		"Conn Accepts        : %ju (+%ju)\n"
-		"Requests            : %ju (+%ju), %.1f/hrs\n"
-		"Name Resolves       : %ju (+%ju), %.1f/hrs\n"
-		"Traffic             : Up %s, Down %s\n"
-		"Avg Bandwidth       : Up %s/hrs, Down %s/hrs\n",
-		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
-		lstats->num_serve, num_reject, stats->num_success,
-		stats->num_request - stats->num_success, avgreq_hrs,
-		resolv_stats->num_success,
-		resolv_stats->num_query - resolv_stats->num_success,
-		avgresolv_hrs, xfer_up, xfer_down, avgbw_up, avgbw_down);
+	const double uptime = ev_now(loop) - ctx->s->stats.started;
+	server_stats(ctx, ctx->s->data, uptime);
 
 	if (stateless) {
 		return;
 	}
+	static ev_tstamp last = TSTAMP_NIL;
+	const double dt = (last == TSTAMP_NIL) ? uptime : now - last;
+	last = now;
 
-	static struct {
-		uintmax_t num_request;
-		uintmax_t xfer_up, xfer_down;
-		uintmax_t num_accept;
-		uintmax_t num_reject;
-		ev_tstamp tstamp;
-	} last = { .tstamp = TSTAMP_NIL };
-
-	const double dt =
-		(last.tstamp == TSTAMP_NIL) ? uptime : now - last.tstamp;
-
-	FORMAT_BYTES(xfer_rate_up, (double)(stats->byt_up - last.xfer_up) / dt);
-	FORMAT_BYTES(
-		xfer_rate_down,
-		(double)(stats->byt_down - last.xfer_down) / dt);
-
-	const double accept_rate =
-		(double)(lstats->num_accept - last.num_accept) / dt;
-	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
-
-	const double request_rate =
-		(double)(stats->num_request - last.num_request) / dt;
-
-	BUF_APPENDF(
-		ctx->wbuf,
-		"Accept Rate         : %.1f/s (%+.1f/s)\n"
-		"Request Rate        : %.1f/s\n"
-		"Bandwidth           : Up %s/s, Down %s/s\n",
-		accept_rate, reject_rate, request_rate, xfer_rate_up,
-		xfer_rate_down);
-
-	last.num_request = stats->num_request;
-	last.xfer_up = stats->byt_up;
-	last.xfer_down = stats->byt_down;
-	last.num_accept = lstats->num_accept;
-	last.num_reject = num_reject;
-	last.tstamp = now;
-
-#undef FORMAT_BYTES
-
-	handle_ruleset_stats(ctx, dt);
+	server_stats_stateful(ctx, ctx->s->data, dt);
+	if (G.ruleset != NULL) {
+		const char *str = ruleset_stats(G.ruleset, dt);
+		if (str != NULL) {
+			BUF_APPENDF(
+				ctx->wbuf,
+				"\n"
+				"Ruleset Stats\n"
+				"================\n"
+				"%s\n",
+				str);
+		}
+	}
 }
 
 static bool http_leafnode_check(
