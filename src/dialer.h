@@ -52,8 +52,9 @@ struct dialreq {
 	struct proxy_req proxy[];
 };
 
-struct dialreq *dialreq_new(size_t max_proxy);
-bool dialreq_proxy(struct dialreq *r, const char *proxy_uri, size_t len);
+struct dialreq *dialreq_new(size_t num_proxy);
+bool dialreq_setproxy(
+	struct dialreq *r, size_t i, const char *proxy_uri, size_t urilen);
 struct dialreq *dialreq_parse(const char *csv);
 void dialreq_free(struct dialreq *r);
 

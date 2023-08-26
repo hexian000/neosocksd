@@ -72,7 +72,7 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 		LOGE_F("ruleset: returned address #%d is not a string", 1);
 		return NULL;
 	}
-	struct dialreq *req = dialreq_new((size_t)n);
+	struct dialreq *req = dialreq_new((size_t)(n - 1));
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
@@ -90,7 +90,7 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
 			dialreq_free(req);
 			return NULL;
 		}
-		if (!dialreq_proxy(req, s, len)) {
+		if (!dialreq_setproxy(req, i - 1, s, len)) {
 			LOGE_F("ruleset: returned address #%d is not valid",
 			       n - i);
 			dialreq_free(req);
