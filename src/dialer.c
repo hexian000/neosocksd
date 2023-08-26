@@ -192,7 +192,6 @@ struct dialreq *dialreq_parse(const char *csv)
 	bool direct = true;
 	for (char *tok = strtok(buf, ","); tok != NULL;
 	     tok = strtok(NULL, ",")) {
-		LOGE_F("tok: %s", tok);
 		if (direct) {
 			if (!dialaddr_set(&req->addr, tok, strlen(tok))) {
 				dialreq_free(req);
