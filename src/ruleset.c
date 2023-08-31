@@ -61,43 +61,37 @@ static int find_callback(lua_State *restrict L, int idx)
 	return 1;
 }
 
-static struct dialreq *pop_dialreq(lua_State *restrict L, int n)
+static struct dialreq *pop_dialreq(lua_State *restrict L, const int n)
 {
 	if (n < 1) {
 		return NULL;
 	}
-	size_t len;
-	const char *direct = lua_tolstring(L, -n, &len);
-	if (direct == NULL) {
-		LOGE_F("ruleset: returned address #%d is not a string", 1);
-		return NULL;
-	}
-	struct dialreq *req = dialreq_new((size_t)(n - 1));
+	const size_t nproxy = (size_t)(n - 1);
+	struct dialreq *req = dialreq_new(nproxy);
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
 	}
-	if (!dialaddr_set(&req->addr, direct, len)) {
-		LOGE_F("ruleset: returned address #%d is not valid", 1);
-		dialreq_free(req);
-		return NULL;
-	}
-	for (int i = 1; i < n; i++) {
-		const char *s = lua_tolstring(L, -i, &len);
+	size_t len;
+	for (size_t i = 0; i <= nproxy; i++) {
+		const char *s = lua_tolstring(L, -1, &len);
 		if (s == NULL) {
-			LOGE_F("ruleset: returned address #%d is not a string",
-			       n - i);
 			dialreq_free(req);
 			return NULL;
 		}
-		if (!dialreq_setproxy(req, i - 1, s, len)) {
-			LOGE_F("ruleset: returned address #%d is not valid",
-			       n - i);
-			dialreq_free(req);
-			return NULL;
+		if (i < nproxy) {
+			if (!dialreq_setproxy(req, i, s, len)) {
+				dialreq_free(req);
+				return NULL;
+			}
+		} else {
+			if (!dialaddr_set(&req->addr, s, len)) {
+				dialreq_free(req);
+				return NULL;
+			}
 		}
+		lua_pop(L, 1);
 	}
-	lua_pop(L, n);
 	return req;
 }
 
@@ -234,11 +228,9 @@ static int luaopen_regex(lua_State *restrict L)
 /* invoke(code, addr, proxyN, ..., proxy1) */
 static int api_invoke_(lua_State *restrict L)
 {
-	luaL_checktype(L, 1, LUA_TSTRING);
-	luaL_checktype(L, 2, LUA_TSTRING);
 	const int n = lua_gettop(L);
-	for (int i = 2; i < n; i++) {
-		luaL_checktype(L, i + 1, LUA_TSTRING);
+	for (int i = 1; i <= MAX(2, n); i++) {
+		luaL_checktype(L, i, LUA_TSTRING);
 	}
 	struct dialreq *req = pop_dialreq(L, n - 1);
 	if (req == NULL) {
