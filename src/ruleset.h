@@ -20,7 +20,7 @@ struct dialreq *ruleset_resolve(struct ruleset *r, const char *request);
 struct dialreq *ruleset_route(struct ruleset *r, const char *request);
 struct dialreq *ruleset_route6(struct ruleset *r, const char *request);
 
-size_t ruleset_memused(struct ruleset *r);
+size_t ruleset_memused(const struct ruleset *r);
 const char *ruleset_stats(struct ruleset *r, double dt);
 
 #endif /* RULESET_H */

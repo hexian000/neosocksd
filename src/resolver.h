@@ -4,7 +4,6 @@
 #include "sockutil.h"
 #include "util.h"
 
-#include <ev.h>
 #include <stdbool.h>
 
 struct ev_loop;

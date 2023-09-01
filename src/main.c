@@ -46,7 +46,8 @@ static void print_usage(const char *argv0)
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
-		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
+		"  -f, --forward <address>[[[,proxyN],...],proxy1]\n"
+		"                             run TCP port forwarding instead of SOCKS\n"
 #if WITH_CARES
 		"  --nameserver <address>     use specified nameserver instead of resolv.conf\n"
 #endif
@@ -65,7 +66,7 @@ static void print_usage(const char *argv0)
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  --traceback                print ruleset error traceback (for debugging)\n"
-		"  --memlimit <limit>         sets a soft limit on the Lua heap size in MiB\n"
+		"  --memlimit <limit>         set a soft limit on the Lua heap size in MiB\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
 		"  -d, --daemonize            run in background and discard all logs\n"
@@ -93,7 +94,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #define OPT_REQUIRE_ARG(argc, argv, i)                                         \
 	do {                                                                   \
 		if ((i) + 1 >= (argc)) {                                       \
-			LOGF_F("option \"%s\" requires an argument\n",         \
+			LOGF_F("option \"%s\" requires an argument",           \
 			       (argv)[(i)]);                                   \
 			exit(EXIT_FAILURE);                                    \
 		}                                                              \
@@ -101,7 +102,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 #define OPT_ARG_ERROR(argv, i)                                                 \
 	do {                                                                   \
-		LOGF_F("argument error: %s \"%s\"\n", (argv)[(i)-1],           \
+		LOGF_F("argument error: %s \"%s\"", (argv)[(i)-1],             \
 		       (argv)[(i)]);                                           \
 		exit(EXIT_FAILURE);                                            \
 	} while (false)
@@ -205,10 +206,10 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		    strcmp(argv[i], "--timeout") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			if (sscanf(argv[i], "%lf", &conf->timeout) != 1) {
-				OPT_ARG_ERROR(argv, i);
-			}
-			if (!(1e-3 <= conf->timeout && conf->timeout <= 1e+9)) {
+			const size_t n = strlen(argv[i]);
+			char *endptr = NULL;
+			conf->timeout = strtod(argv[i], &endptr);
+			if (argv[i] + n != endptr) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			continue;
@@ -270,16 +271,12 @@ int main(int argc, char **argv)
 	parse_args(argc, argv);
 	const struct config *restrict conf = &app.conf;
 	if (!conf_check(conf)) {
+		LOGF_F("configuration check failed, try \"%s --help\" for more information",
+		       argv[0]);
 		exit(EXIT_FAILURE);
 	}
 	G.conf = conf;
-	slog_level =
-		CLAMP(conf->log_level, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
-	if (conf->listen == NULL) {
-		LOGF("listen address not specified");
-		print_usage(argv[0]);
-		exit(EXIT_FAILURE);
-	}
+	slog_level = conf->log_level;
 
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);

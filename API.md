@@ -1,7 +1,5 @@
 # neosocksd API Reference
 
-Version: dev
-
 ## Index
 
 - [RESTful API](#restful-api)
@@ -64,7 +62,7 @@ Trigger a full GC.
 
 ```Lua
 function ruleset.resolve(domain)
-    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
 end
 ```
 
@@ -82,9 +80,16 @@ Process a host name request. Specifically:
 **Returns**
 
 - `addr`: replace the request
-- `addr, proxy`: forward the request through another neosocksd
+- `addr, proxy`: forward the request through another proxy
 - `addr, proxyN, ..., proxy1`: forward the request through proxy chain
 - `nil`: reject the request
+
+The proxy address can be specified in URI format, supported scheme:
+- `socks4a://example.org:1080`: SOCKS4A is the default proxy protocol if not specified. The implementation is SOCKS4 compatible when requesting IPv4 address.
+- `socks5://example.org:1080`: SOCKS5 server.
+- `http://example.org:8080`: HTTP/1.1 CONNECT server.
+
+*Notice: The port number can not be omitted.*
 
 
 ### ruleset.route
@@ -93,7 +98,7 @@ Process a host name request. Specifically:
 
 ```Lua
 function ruleset.route(addr)
-    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
 end
 ```
 
@@ -118,7 +123,7 @@ See [ruleset.resolve](#rulesetresolve)
 
 ```Lua
 function ruleset.route6(addr)
-    return "www.example.org:80", "203.0.113.1:1080", ..., "[2001:DB8::1]:1080"
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
 end
 ```
 

@@ -7,17 +7,17 @@
 #include "util.h"
 #include "sockutil.h"
 
-#include <assert.h>
-#include <ev.h>
 #if WITH_CARES
 #include <ares.h>
 #endif
+#include <ev.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

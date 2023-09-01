@@ -55,5 +55,24 @@ bool conf_check(const struct config *restrict conf)
 	RANGE_CHECK(conf, startup_limit_rate, 0, 100);
 	RANGE_CHECK(conf, startup_limit_full, 1, INT_MAX);
 	RANGE_CHECK(conf, log_level, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
+
+	if (conf->listen == NULL) {
+		LOGE("conf: listen address is not specified");
+		return false;
+	}
+	if (conf->ruleset != NULL && conf->forward != NULL) {
+		LOGE("conf: specifing ruleset and forward at the same time is ambiguous");
+		return false;
+	}
+#if WITH_TPROXY
+	if (conf->transparent && conf->http) {
+		LOGE("tproxy and http cannot be specified at the same time");
+		return false;
+	}
+#endif
+	if ((conf->tcp_sndbuf != 0 && conf->tcp_sndbuf < 4096) ||
+	    (conf->tcp_rcvbuf != 0 && conf->tcp_rcvbuf < 4096)) {
+		LOGW("conf: probably too small tcp buffer");
+	}
 	return true;
 }

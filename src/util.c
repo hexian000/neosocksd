@@ -6,6 +6,8 @@
 #include "utils/posixtime.h"
 
 #include <unistd.h>
+#include <signal.h>
+#include <sys/stat.h>
 #include <pwd.h>
 #if _BSD_SOURCE || _GNU_SOURCE
 #include <grp.h>

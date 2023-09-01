@@ -9,7 +9,6 @@
 #include "util.h"
 
 #include <ev.h>
-#include <netinet/in.h>
 
 #include <stdbool.h>
 #include <stddef.h>

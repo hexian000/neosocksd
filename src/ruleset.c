@@ -30,6 +30,7 @@
 
 struct ruleset {
 	lua_State *L;
+	size_t alloc_size;
 	struct ev_loop *loop;
 	struct ev_timer ticker;
 };
@@ -102,14 +103,13 @@ static int ruleset_traceback(lua_State *restrict L)
 	return 1;
 }
 
-static void check_memlimit(lua_State *restrict L)
+static void check_memlimit(const struct ruleset *restrict r)
 {
-	const size_t heapsize = (size_t)lua_gc(L, LUA_GCCOUNT, 0) >> 10u;
 	const size_t memlimit = G.conf->memlimit;
-	if (memlimit == 0 || heapsize < memlimit) {
+	if (memlimit == 0 || (r->alloc_size >> 20u) < memlimit) {
 		return;
 	}
-	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(r->L, LUA_GCCOLLECT, 0);
 }
 
 static int ruleset_pcall(
@@ -118,7 +118,7 @@ static int ruleset_pcall(
 {
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
-	check_memlimit(L);
+	check_memlimit(r);
 	const bool traceback = G.conf->traceback;
 	if (traceback) {
 		lua_pushcfunction(L, ruleset_traceback);
@@ -403,17 +403,39 @@ static int ruleset_luainit_(lua_State *restrict L)
 	return 0;
 }
 
+static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+{
+	struct ruleset *restrict r = ud;
+	r->alloc_size = r->alloc_size + nsize - osize;
+	if (nsize == 0) {
+		free(ptr);
+		return NULL;
+	}
+	return realloc(ptr, nsize);
+}
+
+static int l_panic(lua_State *L)
+{
+	const char *msg = lua_tostring(L, -1);
+	if (msg == NULL) {
+		msg = "(error object is not a string)";
+	}
+	LOGF_F("panic: %s", msg);
+	return 0; /* return to Lua to abort */
+}
+
 struct ruleset *ruleset_new(struct ev_loop *loop)
 {
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
 	if (r == NULL) {
 		return NULL;
 	}
-	lua_State *restrict L = luaL_newstate();
+	lua_State *restrict L = lua_newstate(l_alloc, r);
 	if (L == NULL) {
 		ruleset_free(r);
 		return NULL;
 	}
+	lua_atpanic(L, l_panic);
 	r->L = L;
 	r->loop = loop;
 	{
@@ -614,11 +636,9 @@ struct dialreq *ruleset_route6(struct ruleset *r, const char *request)
 	return dispatch_req(r, "route6", request);
 }
 
-size_t ruleset_memused(struct ruleset *restrict r)
+size_t ruleset_memused(const struct ruleset *restrict r)
 {
-	lua_State *restrict L = r->L;
-	return ((size_t)lua_gc(L, LUA_GCCOUNT, 0) << 10u) |
-	       (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
+	return r->alloc_size;
 }
 
 static int ruleset_stats_(lua_State *restrict L)

@@ -4,8 +4,6 @@
 #include "utils/slog.h"
 #include "utils/minmax.h"
 
-#include <ev.h>
-
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -23,6 +21,8 @@ extern struct globals {
 #define UNUSED(x) (void)(x)
 
 #define TSTAMP_NIL (-1.0)
+
+struct ev_loop;
 
 struct event_cb {
 	void (*cb)(struct ev_loop *loop, void *ctx);
