@@ -1,11 +1,13 @@
 #include "http_impl.h"
 #include "net/url.h"
 #include "utils/formats.h"
+#include "utils/posixtime.h"
 #include "utils/slog.h"
 #include "resolver.h"
 #include "ruleset.h"
 
 #include <stdint.h>
+#include <sys/types.h>
 
 #define FORMAT_BYTES(name, value)                                              \
 	char name[16];                                                         \
@@ -57,12 +59,15 @@ static void server_stats(
 		avgresolv_hrs, xfer_up, xfer_down, avgbw_up, avgbw_down);
 
 	if (G.ruleset != NULL) {
-		const size_t heap_bytes = ruleset_memused(G.ruleset);
+		struct ruleset_memstats mem;
+		ruleset_memstats(G.ruleset, &mem);
 		char heap_total[16];
 		(void)format_iec_bytes(
-			heap_total, sizeof(heap_total), (double)heap_bytes);
+			heap_total, sizeof(heap_total),
+			(double)mem.byt_allocated);
 		BUF_APPENDF(
-			ctx->wbuf, "Ruleset Memory      : %s\n", heap_total);
+			ctx->wbuf, "Ruleset Memory      : %s (%zu objects)\n",
+			heap_total, mem.num_object);
 	}
 }
 
@@ -247,12 +252,24 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", false)) {
 			return;
 		}
+		const int64_t start = clock_monotonic();
 		ruleset_gc(ruleset);
-		const size_t livemem = ruleset_memused(ruleset);
-		char buf[16];
-		(void)format_iec_bytes(buf, sizeof(buf), (double)livemem);
+		struct ruleset_memstats mem;
+		ruleset_memstats(ruleset, &mem);
+		char livemem[16];
+		(void)format_iec_bytes(
+			livemem, sizeof(livemem), (double)mem.byt_allocated);
+		char timecost[16];
+		(void)format_duration(
+			timecost, sizeof(timecost),
+			make_duration_nanos(clock_monotonic() - start));
 		RESPHDR_POST(ctx->wbuf, HTTP_OK);
-		BUF_APPENDF(ctx->wbuf, "Ruleset Live Memory: %s\n", buf);
+		BUF_APPENDF(
+			ctx->wbuf,
+			"Num Live Object     : %zu\n"
+			"Ruleset Live Memory : %s\n"
+			"Time Cost           : %s\n",
+			mem.num_object, livemem, timecost);
 		return;
 	}
 

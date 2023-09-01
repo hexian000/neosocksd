@@ -29,9 +29,9 @@
 #include <string.h>
 
 struct ruleset {
-	lua_State *L;
-	size_t alloc_size;
 	struct ev_loop *loop;
+	struct ruleset_memstats heap;
+	lua_State *L;
 	struct ev_timer ticker;
 };
 
@@ -106,7 +106,7 @@ static int ruleset_traceback(lua_State *restrict L)
 static void check_memlimit(const struct ruleset *restrict r)
 {
 	const size_t memlimit = G.conf->memlimit;
-	if (memlimit == 0 || (r->alloc_size >> 20u) < memlimit) {
+	if (memlimit == 0 || (r->heap.byt_allocated >> 20u) < memlimit) {
 		return;
 	}
 	lua_gc(r->L, LUA_GCCOLLECT, 0);
@@ -406,12 +406,30 @@ static int ruleset_luainit_(lua_State *restrict L)
 static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
 	struct ruleset *restrict r = ud;
-	r->alloc_size = r->alloc_size + nsize - osize;
 	if (nsize == 0) {
+		/* free */
 		free(ptr);
+		if (ptr != NULL) {
+			r->heap.byt_allocated -= osize;
+			r->heap.num_object--;
+		}
 		return NULL;
 	}
-	return realloc(ptr, nsize);
+	if (ptr == NULL) {
+		/* malloc */
+		void *ret = malloc(nsize);
+		if (ret != NULL) {
+			r->heap.num_object++;
+			r->heap.byt_allocated += nsize;
+		}
+		return ret;
+	}
+	/* realloc */
+	void *ret = realloc(ptr, nsize);
+	if (ret != NULL) {
+		r->heap.byt_allocated = r->heap.byt_allocated - osize + nsize;
+	}
+	return ret;
 }
 
 static int l_panic(lua_State *L)
@@ -430,14 +448,15 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	if (r == NULL) {
 		return NULL;
 	}
+	r->loop = loop;
+	r->heap = (struct ruleset_memstats){ 0 };
 	lua_State *restrict L = lua_newstate(l_alloc, r);
 	if (L == NULL) {
 		ruleset_free(r);
 		return NULL;
 	}
-	lua_atpanic(L, l_panic);
+	(void)lua_atpanic(L, l_panic);
 	r->L = L;
-	r->loop = loop;
 	{
 		/* initialize in advance to prevent undefined behavior */
 		struct ev_timer *restrict w_timer = &r->ticker;
@@ -636,9 +655,10 @@ struct dialreq *ruleset_route6(struct ruleset *r, const char *request)
 	return dispatch_req(r, "route6", request);
 }
 
-size_t ruleset_memused(const struct ruleset *restrict r)
+void ruleset_memstats(
+	const struct ruleset *restrict r, struct ruleset_memstats *restrict s)
 {
-	return r->alloc_size;
+	*s = r->heap;
 }
 
 static int ruleset_stats_(lua_State *restrict L)
