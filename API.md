@@ -62,7 +62,7 @@ Trigger a full GC.
 
 ```Lua
 function ruleset.resolve(domain)
-    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4://[2001:DB8::1]:1080"
 end
 ```
 
@@ -98,7 +98,7 @@ The proxy address can be specified in URI format, supported scheme:
 
 ```Lua
 function ruleset.route(addr)
-    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4://[2001:DB8::1]:1080"
 end
 ```
 

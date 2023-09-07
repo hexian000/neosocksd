@@ -144,30 +144,32 @@ bool dialreq_setproxy(
 	memcpy(buf, proxy_uri, urilen);
 	buf[urilen] = '\0';
 	struct url uri;
-	if (!url_parse(buf, &uri)) {
+	if (!url_parse(buf, &uri) || uri.scheme == NULL) {
 		LOGE_F("unable to parse uri: \"%s\"", proxy_uri);
 		return false;
 	}
 	enum proxy_protocol protocol;
-	if (uri.defacto != NULL) {
-		protocol = PROTO_SOCKS4A;
-		uri.host = uri.defacto;
-	} else if (strcmp(uri.scheme, "http") == 0) {
+	const char *addr = NULL;
+	if (strcmp(uri.scheme, "http") == 0) {
 		protocol = PROTO_HTTP;
+		addr = uri.host;
 	} else if (
 		strcmp(uri.scheme, "socks4") == 0 ||
 		strcmp(uri.scheme, "socks4a") == 0) {
 		protocol = PROTO_SOCKS4A;
+		addr = uri.host;
 	} else if (strcmp(uri.scheme, "socks5") == 0) {
 		protocol = PROTO_SOCKS5;
-	} else {
-		LOGE_F("dialer: unknown scheme \"%s\"", uri.scheme);
+		addr = uri.host;
+	}
+	if (addr == NULL) {
+		LOGE_F("dialer: invalid proxy \"%s\"", proxy_uri);
 		return false;
 	}
 	struct proxy_req *restrict proxy = &req->proxy[i];
 	proxy->proto = protocol;
-	const size_t hostlen = strlen(uri.host);
-	if (!dialaddr_set(&proxy->addr, uri.host, hostlen)) {
+	const size_t addrlen = strlen(addr);
+	if (!dialaddr_set(&proxy->addr, addr, addrlen)) {
 		return false;
 	}
 	return true;
