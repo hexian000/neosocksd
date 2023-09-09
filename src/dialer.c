@@ -246,7 +246,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 		break;
 	}
 	if (!ok && d->fd != -1) {
-		(void)close(d->fd);
+		CLOSE_FD(d->fd);
 		d->fd = -1;
 	}
 	assert(!ev_is_active(&d->w_socket));
@@ -779,7 +779,7 @@ static bool connect_sa(
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
 		LOGE_F("fcntl: %s", strerror(err));
-		(void)close(fd);
+		CLOSE_FD(fd);
 		d->syserr = err;
 		return false;
 	}
@@ -795,7 +795,7 @@ static bool connect_sa(
 		const int err = errno;
 		if (err != EINTR && err != EINPROGRESS) {
 			LOGE_F("connect: %s", strerror(err));
-			(void)close(fd);
+			CLOSE_FD(fd);
 			d->syserr = err;
 			return false;
 		}

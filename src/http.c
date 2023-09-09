@@ -77,11 +77,11 @@ static void http_ctx_free(struct http_ctx *restrict ctx)
 	}
 	assert(!ev_is_active(&ctx->w_timeout));
 	if (ctx->accepted_fd != -1) {
-		(void)close(ctx->accepted_fd);
+		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
 	}
 	if (ctx->dialed_fd != -1) {
-		(void)close(ctx->dialed_fd);
+		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
 	free(ctx);
@@ -410,7 +410,7 @@ static void http_serve(
 	struct http_ctx *restrict ctx = http_ctx_new(s, accepted_fd, handler);
 	if (ctx == NULL) {
 		LOGOOM();
-		(void)close(accepted_fd);
+		CLOSE_FD(accepted_fd);
 		return;
 	}
 	(void)memcpy(

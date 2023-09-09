@@ -22,6 +22,14 @@ extern struct globals {
 
 #define TSTAMP_NIL (-1.0)
 
+#define CLOSE_FD(fd)                                                           \
+	do {                                                                   \
+		if (close(fd) != 0) {                                          \
+			const int err = errno;                                 \
+			LOGW_F("close: %s", strerror(err));                    \
+		}                                                              \
+	} while (0)
+
 struct ev_loop;
 
 struct event_cb {

@@ -100,11 +100,11 @@ static void forward_ctx_free(struct forward_ctx *restrict ctx)
 		return;
 	}
 	if (ctx->accepted_fd != -1) {
-		(void)close(ctx->accepted_fd);
+		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
 	}
 	if (ctx->dialed_fd != -1) {
-		(void)close(ctx->dialed_fd);
+		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
 	free(ctx);
@@ -262,7 +262,7 @@ void forward_serve(
 	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		(void)close(accepted_fd);
+		CLOSE_FD(accepted_fd);
 		return;
 	}
 	(void)memcpy(
@@ -334,7 +334,7 @@ void tproxy_serve(
 	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		(void)close(accepted_fd);
+		CLOSE_FD(accepted_fd);
 		return;
 	}
 	(void)memcpy(

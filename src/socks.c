@@ -122,11 +122,11 @@ static void socks_ctx_free(struct socks_ctx *restrict ctx)
 	}
 	assert(!ev_is_active(&ctx->w_timeout));
 	if (ctx->accepted_fd != -1) {
-		(void)close(ctx->accepted_fd);
+		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
 	}
 	if (ctx->dialed_fd != -1) {
-		(void)close(ctx->dialed_fd);
+		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
 	free(ctx);
@@ -767,7 +767,7 @@ void socks_serve(
 	struct socks_ctx *restrict ctx = socks_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		(void)close(accepted_fd);
+		CLOSE_FD(accepted_fd);
 		return;
 	}
 	(void)memcpy(

@@ -73,16 +73,13 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			      watcher->fd);
 		}
 		if (is_startup_limited(s)) {
-			if (close(fd) != 0) {
-				const int err = errno;
-				LOGW_F("close: %s", strerror(err));
-			}
+			CLOSE_FD(fd);
 			return;
 		}
 		if (!socket_set_nonblock(fd)) {
 			const int err = errno;
 			LOGE_F("fcntl: %s", strerror(err));
-			(void)close(fd);
+			CLOSE_FD(fd);
 			return;
 		}
 		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
@@ -126,7 +123,7 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
 		LOGE_F("fcntl: %s", strerror(err));
-		(void)close(fd);
+		CLOSE_FD(fd);
 		return false;
 	}
 
@@ -151,13 +148,13 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 	if (bind(fd, bindaddr, getsocklen(bindaddr)) != 0) {
 		const int err = errno;
 		LOGE_F("bind error: %s", strerror(err));
-		(void)close(fd);
+		CLOSE_FD(fd);
 		return false;
 	}
 	if (listen(fd, 16)) {
 		const int err = errno;
 		LOGE_F("listen error: %s", strerror(err));
-		(void)close(fd);
+		CLOSE_FD(fd);
 		return false;
 	}
 	if (LOGLEVEL(LOG_LEVEL_INFO)) {
@@ -189,7 +186,7 @@ void server_stop(struct server *restrict s)
 	struct ev_loop *loop = s->loop;
 	struct ev_io *restrict w_accept = &s->l.w_accept;
 	ev_io_stop(loop, w_accept);
-	(void)close(w_accept->fd);
+	CLOSE_FD(w_accept->fd);
 	struct ev_timer *restrict w_timer = &s->l.w_timer;
 	ev_timer_stop(loop, w_timer);
 	s->stats.started = TSTAMP_NIL;
