@@ -322,6 +322,7 @@ struct resolve_query *resolve_new(struct resolver *r, struct event_cb cb)
 {
 	struct resolve_query *restrict q = malloc(sizeof(struct resolve_query));
 	if (q == NULL) {
+		LOGOOM();
 		return NULL;
 	}
 	*q = (struct resolve_query){

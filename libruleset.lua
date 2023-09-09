@@ -434,6 +434,16 @@ function rule.reject()
     end
 end
 
+function rule.default()
+    return function(addr)
+        local action = _G.route_default
+        if action then
+            return action(addr)
+        end
+        return addr
+    end
+end
+
 function rule.redirect(dst, ...)
     local chain = list:pack(...):reverse()
     local host, port = splithostport(dst)

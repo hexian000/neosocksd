@@ -32,7 +32,8 @@ struct ruleset {
 	struct ev_loop *loop;
 	struct ruleset_memstats heap;
 	lua_State *L;
-	struct ev_timer ticker;
+	struct ev_timer w_ticker;
+	struct ev_idle w_idle;
 };
 
 static struct ruleset *find_ruleset(lua_State *restrict L)
@@ -360,23 +361,58 @@ static int api_setinterval_(lua_State *restrict L)
 	double interval = lua_tonumber(L, 1);
 
 	struct ruleset *restrict r = find_ruleset(L);
-	struct ev_timer *restrict w_timer = &r->ticker;
-	ev_timer_stop(r->loop, w_timer);
+	struct ev_timer *restrict w_ticker = &r->w_ticker;
+	ev_timer_stop(r->loop, w_ticker);
 	if (!isnormal(interval)) {
 		return 0;
 	}
 
 	interval = CLAMP(interval, 1e-3, 1e+9);
-	ev_timer_set(w_timer, interval, interval);
-	w_timer->data = r;
-	ev_timer_start(r->loop, w_timer);
+	ev_timer_set(w_ticker, interval, interval);
+	w_ticker->data = r;
+	ev_timer_start(r->loop, w_ticker);
+	return 0;
+}
+
+static int ruleset_idle_(lua_State *restrict L)
+{
+	if (find_callback(L, 1) != 1) {
+		return 0;
+	}
+	lua_replace(L, 1);
+	lua_call(L, 0, 0);
+	return 0;
+}
+
+static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+{
+	UNUSED(revents);
+	ev_idle_stop(loop, watcher);
+	struct ruleset *restrict r = watcher->data;
+	const char *func = "idle";
+	const int ret = ruleset_pcall(r, ruleset_idle_, 1, 0, func);
+	if (ret != LUA_OK) {
+		LOGE_F("ruleset.%s: %s", func, lua_tostring(r->L, -1));
+		return;
+	}
+}
+
+/* setidle() */
+static int api_setidle_(lua_State *restrict L)
+{
+	struct ruleset *restrict r = find_ruleset(L);
+	ev_idle_start(r->loop, &r->w_idle);
 	return 0;
 }
 
 static const luaL_Reg apilib[] = {
-	{ "invoke", api_invoke_ },	     { "resolve", api_resolve_ },
-	{ "setinterval", api_setinterval_ }, { "parse_ipv4", api_parse_ipv4_ },
-	{ "parse_ipv6", api_parse_ipv6_ },   { NULL, NULL },
+	{ "invoke", api_invoke_ },
+	{ "resolve", api_resolve_ },
+	{ "setinterval", api_setinterval_ },
+	{ "setidle", api_setidle_ },
+	{ "parse_ipv4", api_parse_ipv4_ },
+	{ "parse_ipv6", api_parse_ipv6_ },
+	{ NULL, NULL },
 };
 
 static int luaopen_neosocksd(lua_State *restrict L)
@@ -459,9 +495,13 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	r->L = L;
 	{
 		/* initialize in advance to prevent undefined behavior */
-		struct ev_timer *restrict w_timer = &r->ticker;
-		ev_timer_init(w_timer, tick_cb, 1.0, 1.0);
-		w_timer->data = r;
+		struct ev_timer *restrict w_ticker = &r->w_ticker;
+		ev_timer_init(w_ticker, tick_cb, 1.0, 1.0);
+		w_ticker->data = r;
+		struct ev_idle *restrict w_idle = &r->w_idle;
+		ev_idle_init(w_idle, idle_cb);
+		ev_set_priority(w_idle, EV_MINPRI);
+		w_idle->data = r;
 	}
 
 	void *ptr = (void *)r;
@@ -482,8 +522,8 @@ void ruleset_free(struct ruleset *restrict r)
 	if (r == NULL) {
 		return;
 	}
-	struct ev_timer *restrict w_timer = &r->ticker;
-	ev_timer_stop(r->loop, w_timer);
+	ev_timer_stop(r->loop, &r->w_ticker);
+	ev_idle_stop(r->loop, &r->w_idle);
 	lua_close(r->L);
 	free(r);
 }

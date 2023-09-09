@@ -172,7 +172,9 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 static bool
 send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 {
-	LOG_BIN_F(LOG_LEVEL_VERBOSE, buf, len, "send_rsp: %zu bytes", len);
+	LOG_BIN_F(
+		LOG_LEVEL_VERBOSE, buf, len, "send_rsp: fd=%d %zu bytes",
+		ctx->accepted_fd, len);
 	const ssize_t nsend = send(ctx->accepted_fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;

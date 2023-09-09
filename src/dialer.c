@@ -911,7 +911,6 @@ void dialer_start(
 					    .ctx = d,
 				    });
 		if (q == NULL) {
-			LOGOOM();
 			DIALER_RETURN(d, loop, false);
 		}
 		d->resolve_query = q;
