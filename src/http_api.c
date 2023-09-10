@@ -230,14 +230,12 @@ static void http_handle_ruleset(
 			BUF_APPENDCONST(ctx->wbuf, "\n");
 			return;
 		}
-		RESPHDR_WRITE(ctx->wbuf, HTTP_OK, "");
+		RESPHDR_CODE(ctx->wbuf, HTTP_OK);
 		return;
-	}
-	if (strcmp(segment, "update") == 0) {
+	} else if (strcmp(segment, "update") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const int64_t start = clock_monotonic();
 		const char *module = NULL;
 		while (uri->query != NULL) {
 			char *key, *value;
@@ -259,15 +257,9 @@ static void http_handle_ruleset(
 			BUF_APPENDCONST(ctx->wbuf, "\n");
 			return;
 		}
-		char timecost[16];
-		(void)format_duration(
-			timecost, sizeof(timecost),
-			make_duration_nanos(clock_monotonic() - start));
-		RESPHDR_POST(ctx->wbuf, HTTP_OK);
-		BUF_APPENDF(ctx->wbuf, "Time Cost           : %s\n", timecost);
+		RESPHDR_CODE(ctx->wbuf, HTTP_OK);
 		return;
-	}
-	if (strcmp(segment, "gc") == 0) {
+	} else if (strcmp(segment, "gc") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", false)) {
 			return;
 		}
