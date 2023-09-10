@@ -1,4 +1,4 @@
-local libruleset = require("libruleset")
+_G.libruleset = require("libruleset")
 
 -- [[ configurations ]] --
 function _G.is_enabled()

@@ -13,24 +13,12 @@
 
 #include <inttypes.h>
 
-#define HTTP_MAX_HEADER_COUNT 256
 #define HTTP_MAX_ENTITY 8192
+#define HTTP_MAX_CONTENT 4194304
 
 struct http_ctx;
 
 typedef void (*http_handler_fn)(struct ev_loop *loop, struct http_ctx *ctx);
-
-struct http_hdr_item {
-	const char *key, *value;
-};
-
-struct httpreq {
-	struct http_message msg;
-	char *nxt;
-	struct http_hdr_item hdr[HTTP_MAX_HEADER_COUNT];
-	size_t num_hdr, content_length;
-	unsigned char *content;
-};
 
 /* never rollback */
 enum http_state {
@@ -42,6 +30,13 @@ enum http_state {
 	STATE_CONNECT,
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
+};
+
+struct httpreq {
+	struct http_message msg;
+	char *nxt;
+	size_t content_length;
+	bool expect_continue;
 };
 
 struct http_ctx {
@@ -57,6 +52,7 @@ struct http_ctx {
 			struct httpreq http;
 			struct dialreq *dialreq;
 			struct dialer dialer;
+			struct vbuffer *cbuf; /* content buffer */
 			struct {
 				BUFFER_HDR;
 				unsigned char data[HTTP_MAX_ENTITY];

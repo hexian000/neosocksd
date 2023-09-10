@@ -40,7 +40,8 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 ./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
 # Forward connection over proxy chain
-./neosocksd -l 192.168.1.2:12345 -f "192.168.2.2:12345,192.168.2.1:1080,http://192.168.1.1:8080"
+# Tip: forwarding to SOCKS5 costs 1 more RTT than SOCKS4A/HTTP, so is generally not a good idea.
+./neosocksd -l 192.168.1.2:12345 -f "192.168.2.2:12345,socks4a://192.168.2.1:1080,http://192.168.1.1:8080"
 
 # Start a hardened non-forking TCP port forwarder in the background
 sudo ./neosocksd -d -u nobody -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
@@ -63,8 +64,7 @@ Use the following command to start the server with the Lua scripts in current di
 
 ```sh
 # Start a ruleset powered SOCKS4 / SOCKS4A / SOCKS5 server
-./neosocksd -l [::]:1080 --api 127.0.1.1:9080 -r ruleset.lua \
-    --max-startups 60:30:100 -d
+./neosocksd -l [::]:1080 --api 127.0.1.1:9080 -r ruleset.lua -d
 
 # For debugging ruleset script
 ./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua --traceback -v
@@ -74,7 +74,7 @@ sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
     --max-startups 60:30:100 --max-sessions 0 -u nobody -d
 ```
 
-Check server stats:
+Check server statistics via RESTful API:
 
 ```sh
 curl -sX POST http://127.0.1.1:9080/stats
@@ -90,7 +90,6 @@ curl -vx socks5h://192.168.1.1:1080 \
 
 The host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua):
 
-*Note: Since the HTTP/1.1 API server has a limited request size, user should consider sharded updates for large ruleset projects. The content length limit for a single HTTP request is guaranteed to be at least 4 KiB.*
 
 ## Runtime Dependencies
 
@@ -131,6 +130,6 @@ See [m.sh](m.sh) for more information about cross compiling support.
 ## Credits
 
 Thanks to:
+- [c-ares](https://c-ares.org/)
 - [libev](http://software.schmorp.de/pkg/libev.html)
 - [Lua](https://www.lua.org/)
-- [c-ares](https://c-ares.org/)

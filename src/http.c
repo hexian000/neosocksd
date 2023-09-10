@@ -15,12 +15,13 @@
 #include "util.h"
 
 #include <ev.h>
-#include <stdint.h>
 #include <strings.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +85,7 @@ static void http_ctx_free(struct http_ctx *restrict ctx)
 		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
+	ctx->cbuf = VBUF_FREE(ctx->cbuf);
 	free(ctx);
 }
 
@@ -110,28 +112,50 @@ void http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
 	LOGD_F("http: response error page %" PRIu16, code);
 }
 
+static bool reply_short(struct http_ctx *restrict ctx, const char *s)
+{
+	const size_t n = strlen(s);
+	assert(n < 256);
+	LOG_BIN_F(
+		LOG_LEVEL_VERBOSE, s, n, "reply_short: fd=%d %zu bytes",
+		ctx->accepted_fd, n);
+	const ssize_t nsend = send(ctx->accepted_fd, s, n, 0);
+	if (nsend < 0) {
+		const int err = errno;
+		HTTP_CTX_LOG_F(LOG_LEVEL_ERROR, ctx, "send: %s", strerror(err));
+		return false;
+	} else if ((size_t)nsend != n) {
+		HTTP_CTX_LOG(LOG_LEVEL_ERROR, ctx, "send: short send");
+		return false;
+	}
+	return true;
+}
+
 static bool
 on_header(struct http_ctx *restrict ctx, const char *key, const char *value)
 {
-	const size_t num = ctx->http.num_hdr;
-	if (num >= HTTP_MAX_HEADER_COUNT) {
-		HTTP_CTX_LOG(LOG_LEVEL_ERROR, ctx, "http: too many headers");
-		return -1;
-	}
-	ctx->http.hdr[num] = (struct http_hdr_item){
-		.key = key,
-		.value = value,
-	};
-	ctx->http.num_hdr = num + 1;
 	HTTP_CTX_LOG_F(LOG_LEVEL_VERBOSE, ctx, "header \"%s: %s\"", key, value);
 	if (strcasecmp(key, "Content-Length") == 0) {
-		size_t *content_length = &ctx->http.content_length;
-		if (sscanf(value, "%zu", content_length) != 1) {
+		size_t content_length;
+		if (sscanf(value, "%zu", &content_length) != 1) {
 			http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 			return false;
 		}
-		/* indicates that there is content */
-		ctx->http.content = ctx->rbuf.data;
+		if (strcmp(ctx->http.msg.req.method, "CONNECT") == 0) {
+			http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+			return false;
+		}
+		if (content_length > HTTP_MAX_CONTENT) {
+			http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
+			return false;
+		}
+		ctx->http.content_length = content_length;
+	} else if (strcasecmp(key, "Expect") == 0) {
+		if (strcasecmp(value, "100-continue") != 0) {
+			http_resp_errpage(ctx, HTTP_EXPECTATION_FAILED);
+			return false;
+		}
+		ctx->http.expect_continue = true;
 	}
 	return true;
 }
@@ -179,8 +203,7 @@ static int parse_request(struct http_ctx *restrict ctx)
 			LOG_LEVEL_VERBOSE, ctx, "request \"%s\" \"%s\" \"%s\"",
 			msg->req.method, msg->req.url, msg->req.version);
 		ctx->http.nxt = next;
-		ctx->http.num_hdr = 0;
-		ctx->http.content = NULL;
+		ctx->cbuf = NULL;
 		ctx->state = STATE_HEADER;
 	}
 	while (ctx->state == STATE_HEADER) {
@@ -205,23 +228,35 @@ static int parse_request(struct http_ctx *restrict ctx)
 			return 0;
 		}
 	}
-	if (ctx->http.content != NULL) {
-		/* use inline buffer */
-		ctx->http.content = (unsigned char *)ctx->http.nxt;
-		assert(ctx->http.content > ctx->rbuf.data);
-		const size_t offset = ctx->http.content - ctx->rbuf.data;
-		const size_t want = ctx->http.content_length + 1;
-		const size_t content_cap = ctx->rbuf.cap - offset;
-		if (want > content_cap) {
-			/* no enough buffer */
-			http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
+	if (ctx->state == STATE_CONTENT && ctx->http.content_length > 0) {
+		if (ctx->cbuf != NULL) {
+			const size_t len = ctx->cbuf->len;
+			if (len < ctx->http.content_length) {
+				return 1;
+			}
+			ctx->cbuf->data[len] = '\0';
 			return 0;
 		}
+		/* null terminated */
+		ctx->cbuf = VBUF_NEW(ctx->http.content_length + 1);
+		if (ctx->cbuf == NULL) {
+			LOGOOM();
+			return -1;
+		}
+		if (ctx->http.expect_continue) {
+			if (!reply_short(ctx, "HTTP/1.1 100 Continue\r\n\r\n")) {
+				return -1;
+			}
+		}
+		const size_t offset =
+			(unsigned char *)ctx->http.nxt - ctx->rbuf.data;
 		const size_t len = ctx->rbuf.len - offset;
+		memcpy(ctx->cbuf->data, ctx->http.nxt, len);
+		ctx->cbuf->len = len;
 		if (len < ctx->http.content_length) {
 			return 1;
 		}
-		ctx->http.content[ctx->http.content_length] = '\0';
+		ctx->cbuf->data[len] = '\0';
 	}
 	return 0;
 }
@@ -229,9 +264,13 @@ static int parse_request(struct http_ctx *restrict ctx)
 static int http_recv(struct http_ctx *restrict ctx)
 {
 	const int fd = ctx->accepted_fd;
-	while (ctx->rbuf.len + 1 < ctx->rbuf.cap) {
-		unsigned char *buf = ctx->rbuf.data + ctx->rbuf.len;
-		const size_t n = ctx->rbuf.cap - ctx->rbuf.len - 1;
+	struct vbuffer *restrict rbuf = (struct vbuffer *)&ctx->rbuf;
+	if (ctx->state == STATE_CONTENT) {
+		rbuf = ctx->cbuf;
+	}
+	while (rbuf->len + 1 < rbuf->cap) {
+		unsigned char *buf = rbuf->data + rbuf->len;
+		const size_t n = rbuf->cap - rbuf->len - 1;
 		const ssize_t nrecv = recv(fd, buf, n, 0);
 		if (nrecv < 0) {
 			const int err = errno;
@@ -249,12 +288,12 @@ static int http_recv(struct http_ctx *restrict ctx)
 				fd);
 			return -1;
 		}
-		ctx->rbuf.len += (size_t)nrecv;
+		rbuf->len += (size_t)nrecv;
 	}
-	ctx->rbuf.data[ctx->rbuf.len] = '\0';
+	rbuf->data[rbuf->len] = '\0';
 	LOG_TXT_F(
-		LOG_LEVEL_VERBOSE, ctx->rbuf.data, ctx->rbuf.len,
-		"recv: fd=%d %zu bytes", fd, ctx->rbuf.len);
+		LOG_LEVEL_VERBOSE, rbuf->data, rbuf->len,
+		"recv: fd=%d %zu bytes", fd, rbuf->len);
 	return parse_request(ctx);
 }
 
@@ -379,15 +418,15 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 		w_send->data = ctx;
 	}
 	ctx->http.nxt = NULL;
-	ctx->http.num_hdr = 0;
 	ctx->http.content_length = 0;
-	ctx->http.content = NULL;
+	ctx->http.expect_continue = false;
 	ctx->dialreq = NULL;
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
+	ctx->cbuf = NULL;
 	BUF_INIT(ctx->rbuf, 0);
 	BUF_INIT(ctx->wbuf, 0);
 	return ctx;

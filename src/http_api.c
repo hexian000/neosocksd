@@ -190,7 +190,7 @@ static bool http_leafnode_check(
 		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
-	if (require_content && ctx->http.content == NULL) {
+	if (require_content && ctx->cbuf == NULL) {
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return false;
 	}
@@ -220,13 +220,14 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const char *code = (const char *)ctx->http.content;
+		const char *code = (const char *)ctx->cbuf->data;
 		const size_t len = ctx->http.content_length;
 		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset invoke");
 		const char *err = ruleset_invoke(ruleset, code, len);
 		if (err != NULL) {
 			RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
 			BUF_APPENDSTR(ctx->wbuf, err);
+			BUF_APPENDCONST(ctx->wbuf, "\n");
 			return;
 		}
 		RESPHDR_WRITE(ctx->wbuf, HTTP_OK, "");
@@ -236,16 +237,34 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const char *code = (const char *)ctx->http.content;
+		const int64_t start = clock_monotonic();
+		const char *module = NULL;
+		while (uri->query != NULL) {
+			char *key, *value;
+			if (!url_query_component(&uri->query, &key, &value)) {
+				http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+				return;
+			}
+			if (strcmp(key, "module") == 0) {
+				module = value;
+			}
+		}
+		const char *code = (const char *)ctx->cbuf->data;
 		const size_t len = ctx->http.content_length;
 		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset update");
-		const char *err = ruleset_load(ruleset, code, len);
+		const char *err = ruleset_update(ruleset, module, code, len);
 		if (err != NULL) {
 			RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
 			BUF_APPENDSTR(ctx->wbuf, err);
+			BUF_APPENDCONST(ctx->wbuf, "\n");
 			return;
 		}
-		RESPHDR_WRITE(ctx->wbuf, HTTP_OK, "");
+		char timecost[16];
+		(void)format_duration(
+			timecost, sizeof(timecost),
+			make_duration_nanos(clock_monotonic() - start));
+		RESPHDR_POST(ctx->wbuf, HTTP_OK);
+		BUF_APPENDF(ctx->wbuf, "Time Cost           : %s\n", timecost);
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {

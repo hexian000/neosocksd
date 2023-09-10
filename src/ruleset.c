@@ -152,8 +152,7 @@ static int regex_compile_(lua_State *restrict L)
 		char errbuf[256];
 		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
 		lua_pushlstring(L, errbuf, n);
-		lua_error(L);
-		FAIL();
+		return lua_error(L);
 	}
 	lua_pushvalue(L, lua_upvalueindex(1));
 	lua_setmetatable(L, -2);
@@ -176,8 +175,7 @@ static int regex_find_(lua_State *restrict L)
 		char errbuf[256];
 		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
 		lua_pushlstring(L, errbuf, n);
-		lua_error(L);
-		FAIL();
+		return lua_error(L);
 	}
 	lua_pushinteger(L, match.rm_so + 1);
 	lua_pushinteger(L, match.rm_eo);
@@ -200,8 +198,7 @@ static int regex_match_(lua_State *restrict L)
 		char errbuf[256];
 		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
 		lua_pushlstring(L, errbuf, n);
-		lua_error(L);
-		FAIL();
+		return lua_error(L);
 	}
 	lua_pushlstring(L, s + match.rm_so, match.rm_eo - match.rm_so);
 	return 1;
@@ -235,8 +232,7 @@ static int api_invoke_(lua_State *restrict L)
 	}
 	struct dialreq *req = pop_dialreq(L, n - 1);
 	if (req == NULL) {
-		luaL_error(L, "invalid connect request");
-		FAIL();
+		return luaL_error(L, "invalid connect request");
 	}
 	struct ruleset *restrict r = find_ruleset(L);
 	size_t len;
@@ -253,8 +249,7 @@ static int api_resolve_(lua_State *restrict L)
 	sockaddr_max_t addr;
 	if (!resolve_addr(&addr, s, NULL, G.conf->resolve_pf)) {
 		const int err = errno;
-		luaL_error(L, "%s", strerror(err));
-		FAIL();
+		return luaL_error(L, "%s", strerror(err));
 	}
 	const int af = addr.sa.sa_family;
 	switch (af) {
@@ -264,8 +259,7 @@ static int api_resolve_(lua_State *restrict L)
 			inet_ntop(af, &addr.in.sin_addr, buf, sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
-			luaL_error(L, "%s", strerror(err));
-			FAIL();
+			return luaL_error(L, "%s", strerror(err));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -275,8 +269,7 @@ static int api_resolve_(lua_State *restrict L)
 			inet_ntop(af, &addr.in6.sin6_addr, buf, sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
-			luaL_error(L, "%s", strerror(err));
-			FAIL();
+			return luaL_error(L, "%s", strerror(err));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -532,84 +525,154 @@ static int ruleset_invoke_(lua_State *restrict L)
 {
 	const char *code = lua_topointer(L, 1);
 	const size_t len = *(size_t *)lua_topointer(L, 2);
-	lua_pop(L, 2);
+	lua_settop(L, 0);
 	if (luaL_loadbuffer(L, code, len, "=rpc") != LUA_OK) {
-		lua_error(L);
-		FAIL();
+		return luaL_error(
+			L, "error loading rpc:\n\t%s", lua_tostring(L, -1));
 	}
 	lua_call(L, 0, 0);
-	lua_pushboolean(L, 1);
+	return 0;
+}
+
+/* always reload and replace existing module */
+static int ruleset_require_(lua_State *restrict L)
+{
+	const int idx_modname = 1;
+	luaL_checktype(L, idx_modname, LUA_TSTRING);
+	const int idx_openf = 2;
+	luaL_checktype(L, idx_openf, LUA_TFUNCTION);
+	lua_settop(L, 2);
+	const int idx_loaded = 3;
+	luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+	const int idx_glb = 4;
+	lua_geti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+
+	int glb = 0;
+	/* LOADED[modname] */
+	lua_pushvalue(L, idx_modname);
+	if (lua_gettable(L, idx_loaded) != LUA_TNIL) {
+		lua_pushvalue(L, idx_modname);
+		lua_gettable(L, idx_glb); /* _G[modname] */
+		glb = lua_compare(L, -2, -1, LUA_OPEQ);
+		lua_pop(L, 2);
+	} else {
+		lua_pop(L, 1);
+	}
+	lua_pushvalue(L, idx_openf); /* open function */
+	lua_pushvalue(L, idx_modname); /* argument to open function */
+	lua_call(L, 1, 1); /* call open function */
+	lua_pushvalue(L, idx_modname); /* modname */
+	if (!lua_isnil(L, -2)) {
+		lua_pushvalue(L, -2); /* make copy of module (call result) */
+	} else {
+		lua_pushboolean(L, 1); /* no value, use true as result */
+	}
+	lua_settable(L, idx_loaded); /* LOADED[modname] = module */
+	if (glb) {
+		lua_pushvalue(L, idx_modname); /* modname */
+		lua_pushvalue(L, -2); /* copy of module */
+		lua_settable(L, idx_glb); /* _G[modname] = module */
+	}
 	return 1;
 }
 
-static int ruleset_load_(lua_State *restrict L)
+static int ruleset_update_(lua_State *restrict L)
 {
-	const char *code = lua_topointer(L, 1);
-	const size_t len = *(size_t *)lua_topointer(L, 2);
-	lua_pop(L, 2);
-	if (luaL_loadbuffer(L, code, len, "=ruleset") != LUA_OK) {
-		lua_error(L);
-		FAIL();
+	const char *modname = lua_topointer(L, 1);
+	const char *code = lua_topointer(L, 2);
+	const size_t len = *(size_t *)lua_topointer(L, 3);
+	lua_pop(L, 3);
+	if (modname == NULL) {
+		if (luaL_loadbuffer(L, code, len, "=ruleset") != LUA_OK) {
+			return luaL_error(
+				L, "error loading ruleset:\n\t%s",
+				lua_tostring(L, -1));
+		}
+		lua_pushstring(L, "ruleset");
+		lua_call(L, 1, 1);
+		if (!lua_istable(L, -1)) {
+			lua_pushstring(L, "ruleset does not return a table");
+			return lua_error(L);
+		}
+		lua_setglobal(L, "ruleset");
+		return 0;
 	}
-	lua_call(L, 0, 1);
-	if (!lua_istable(L, -1)) {
-		lua_pushboolean(L, 0);
-		return 1;
+	lua_pushcfunction(L, ruleset_require_);
+	lua_pushstring(L, modname);
+	{
+		const size_t namelen = strlen(modname);
+		char name[1 + namelen + 1];
+		name[0] = '=';
+		memcpy(name + 1, modname, namelen);
+		name[1 + namelen] = '\0';
+		if (luaL_loadbuffer(L, code, len, name) != LUA_OK) {
+			return luaL_error(
+				L, "error loading module '%s':\n\t%s", modname,
+				lua_tostring(L, -1));
+		}
 	}
-	lua_setglobal(L, "ruleset");
-	lua_pushboolean(L, 1);
-	return 1;
+	lua_call(L, 2, 0);
+	return 0;
 }
 
 static int ruleset_loadfile_(lua_State *restrict L)
 {
 	const char *filename = lua_topointer(L, 1);
-	lua_pop(L, 2);
+	lua_pop(L, 1);
 	if (luaL_loadfile(L, filename) != LUA_OK) {
-		lua_error(L);
-		FAIL();
+		return luaL_error(
+			L, "error loading file '%s':\n\t%s", filename,
+			lua_tostring(L, -1));
 	}
-	lua_call(L, 0, 1);
+	lua_pushstring(L, "ruleset");
+	lua_call(L, 1, 1);
 	if (!lua_istable(L, -1)) {
-		lua_pushboolean(L, 0);
-		return 1;
+		lua_pushstring(L, "ruleset does not return a table");
+		return lua_error(L);
 	}
 	lua_setglobal(L, "ruleset");
-	lua_pushboolean(L, 1);
-	return 1;
-}
-
-static const char *dispatch_exec(
-	struct ruleset *restrict r, lua_CFunction func, const char *method,
-	const char *code, const size_t len)
-{
-	lua_State *restrict L = r->L;
-	const int ret =
-		ruleset_pcall(r, func, 2, 1, (void *)code, (void *)&len);
-	if (ret != LUA_OK) {
-		const char *err = lua_tostring(L, -1);
-		LOGE_F("ruleset %s: %s", method, err);
-		return err;
-	}
-	return NULL;
+	return 0;
 }
 
 const char *
 ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
 {
-	LOGD_F("ruleset invoke: %zu bytes", len);
-	return dispatch_exec(r, ruleset_invoke_, "invoke", code, len);
+	lua_State *restrict L = r->L;
+	const int ret = ruleset_pcall(
+		r, ruleset_invoke_, 2, 0, (void *)code, (void *)&len);
+	if (ret != LUA_OK) {
+		const char *err = lua_tostring(L, -1);
+		LOGE_F("ruleset invoke: %s", err);
+		return err;
+	}
+	return NULL;
 }
 
-const char *ruleset_load(struct ruleset *r, const char *code, const size_t len)
+const char *ruleset_update(
+	struct ruleset *r, const char *modname, const char *code,
+	const size_t len)
 {
-	LOGD_F("ruleset load: %zu bytes", len);
-	return dispatch_exec(r, ruleset_load_, "load", code, len);
+	lua_State *restrict L = r->L;
+	const int ret =
+		ruleset_pcall(r, ruleset_update_, 3, 0, modname, code, &len);
+	if (ret != LUA_OK) {
+		const char *err = lua_tostring(L, -1);
+		LOGE_F("ruleset update: %s", err);
+		return err;
+	}
+	return NULL;
 }
 
 const char *ruleset_loadfile(struct ruleset *r, const char *filename)
 {
-	return dispatch_exec(r, ruleset_loadfile_, "loadfile", filename, 0);
+	lua_State *restrict L = r->L;
+	const int ret = ruleset_pcall(r, ruleset_loadfile_, 1, 0, filename);
+	if (ret != LUA_OK) {
+		const char *err = lua_tostring(L, -1);
+		LOGE_F("ruleset loadfile: %s", err);
+		return err;
+	}
+	return NULL;
 }
 
 void ruleset_gc(struct ruleset *restrict r)
