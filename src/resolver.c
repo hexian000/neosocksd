@@ -45,22 +45,25 @@ struct resolver {
 
 struct resolve_query {
 	struct resolver *resolver;
-	struct event_cb done_cb;
+	struct resolve_cb done_cb;
 	bool ok : 1;
 	sockaddr_max_t addr;
 };
 
 #define RESOLVE_RETURN(q, loop)                                                \
 	do {                                                                   \
-		LOGV_F("resolve: [%p] finished ok=%d", (void *)q, q->ok);      \
-		if (q->done_cb.cb == NULL) {                                   \
-			/* cancelled */                                        \
-			free(q);                                               \
+		LOGV_F("resolve: [%p] finished ok=%d", (void *)(q), (q)->ok);  \
+		const struct resolve_query query = *(q);                       \
+		free((q));                                                     \
+		if (query.done_cb.cb == NULL) { /* cancelled */                \
 			return;                                                \
 		}                                                              \
-		q->resolver->stats.num_success++;                              \
-		q->done_cb.cb(loop, q->done_cb.ctx);                           \
-		free(q);                                                       \
+		if (!query.ok) {                                               \
+			query.done_cb.cb((loop), query.done_cb.ctx, NULL);     \
+			return;                                                \
+		}                                                              \
+		query.resolver->stats.num_success++;                           \
+		query.done_cb.cb((loop), query.done_cb.ctx, &query.addr.sa);   \
 		return;                                                        \
 	} while (0)
 
@@ -318,7 +321,8 @@ const struct resolver_stats *resolver_stats(struct resolver *r)
 	return &r->stats;
 }
 
-struct resolve_query *resolve_new(struct resolver *r, struct event_cb cb)
+static struct resolve_query *
+resolve_new(struct resolver *r, struct resolve_cb cb)
 {
 	struct resolve_query *restrict q = malloc(sizeof(struct resolve_query));
 	if (q == NULL) {
@@ -332,7 +336,7 @@ struct resolve_query *resolve_new(struct resolver *r, struct event_cb cb)
 	return q;
 }
 
-void resolve_start(
+static void resolve_start(
 	struct resolve_query *restrict q, const char *name, const char *service,
 	int family)
 {
@@ -361,21 +365,23 @@ void resolve_start(
 	RESOLVE_RETURN(q, r->loop);
 }
 
+struct resolve_query *resolve_do(
+	struct resolver *r, struct resolve_cb cb, const char *name,
+	const char *service, int family)
+{
+	struct resolve_query *q = resolve_new(r, cb);
+	if (q == NULL) {
+		return NULL;
+	}
+	resolve_start(q, name, service, family);
+	return q;
+}
+
 void resolve_cancel(struct resolve_query *restrict q)
 {
 	LOGV_F("resolve: [%p] cancel", (void *)q);
-	q->done_cb = (struct event_cb){
+	q->done_cb = (struct resolve_cb){
 		.cb = NULL,
 		.ctx = NULL,
 	};
-}
-
-bool resolve_get(
-	sockaddr_max_t *restrict addr, const struct resolve_query *restrict q)
-{
-	if (!q->ok) {
-		return false;
-	}
-	memcpy(&addr->sa, &q->addr.sa, getsocklen(&q->addr.sa));
-	return true;
 }

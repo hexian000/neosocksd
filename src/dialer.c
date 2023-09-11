@@ -815,20 +815,23 @@ static bool connect_sa(
 	return true;
 }
 
-static void resolve_cb(struct ev_loop *loop, void *data)
+static void
+resolve_cb(struct ev_loop *loop, void *data, const struct sockaddr *restrict sa)
 {
 	struct dialer *restrict d = data;
+	d->resolve_query = NULL;
+
 	const struct dialaddr *restrict dialaddr =
 		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
-
-	sockaddr_max_t addr;
-	if (!resolve_get(&addr, d->resolve_query)) {
+	if (sa == NULL) {
 		LOGE_F("name resolution failed: \"%.*s\"",
 		       (int)dialaddr->domain.len, dialaddr->domain.name);
 		return;
 	}
 
-	switch (addr.sa.sa_family) {
+	sockaddr_max_t addr;
+	memcpy(&addr.sa, sa, getsocklen(sa));
+	switch (sa->sa_family) {
 	case AF_INET:
 		addr.in.sin_port = htons(dialaddr->port);
 		break;
@@ -905,16 +908,17 @@ void dialer_start(
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
-		struct resolve_query *q = resolve_new(
-			G.resolver, (struct event_cb){
-					    .cb = resolve_cb,
-					    .ctx = d,
-				    });
+		struct resolve_query *q = resolve_do(
+			G.resolver,
+			(struct resolve_cb){
+				.cb = resolve_cb,
+				.ctx = d,
+			},
+			host, NULL, G.conf->resolve_pf);
 		if (q == NULL) {
 			DIALER_RETURN(d, loop, false);
 		}
 		d->resolve_query = q;
-		resolve_start(q, host, NULL, G.conf->resolve_pf);
 	} break;
 	default:
 		FAIL();

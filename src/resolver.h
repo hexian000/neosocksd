@@ -24,11 +24,15 @@ struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf);
 const struct resolver_stats *resolver_stats(struct resolver *r);
 void resolver_free(struct resolver *r);
 
-struct resolve_query *resolve_new(struct resolver *r, struct event_cb cb);
-void resolve_start(
-	struct resolve_query *restrict q, const char *name, const char *service,
-	int family);
+struct resolve_cb {
+	void (*cb)(struct ev_loop *loop, void *ctx, const struct sockaddr *sa);
+	void *ctx;
+};
+
+/* the returned handle is only for resolve_cancel() and becomes invalid just before callback is invoked */
+struct resolve_query *resolve_do(
+	struct resolver *r, struct resolve_cb cb, const char *name,
+	const char *service, int family);
 void resolve_cancel(struct resolve_query *q);
-bool resolve_get(sockaddr_max_t *addr, const struct resolve_query *q);
 
 #endif /* RESOLVER_H */
