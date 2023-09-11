@@ -88,7 +88,9 @@ function _G.set_route(i, s)
 end
 
 local ruleset = setmetatable({}, {
-    __index = libruleset
+    __index = function(t, k)
+        return _G.libruleset[k]
+    end
 })
 
 function ruleset.stats(dt)

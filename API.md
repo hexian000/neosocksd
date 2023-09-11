@@ -14,7 +14,7 @@
 
 Check server liveness.
 
-- **Path**: /healthy
+- **Path**: `/healthy`
 - **Method**: Any
 - **Status**: HTTP 200
 
@@ -23,7 +23,7 @@ Check server liveness.
 GET: Get the stateless server statistics.
 POST: Calculate server statistics since the last call.
 
-- **Path**: /stats
+- **Path**: `/stats`
 - **Method**: GET, POST
 - **Status**: HTTP 200, HTTP 405
 - **Response**: Server statistics in plain text.
@@ -32,25 +32,30 @@ POST: Calculate server statistics since the last call.
 
 Run the posted script.
 
-- **Path**: /ruleset/invoke
+- **Path**: `/ruleset/invoke`
 - **Method**: POST
 - **Content**: Lua script
 - **Status**: HTTP 200, HTTP 405, HTTP 500
 
 ### Ruleset Update
 
-Replace ruleset with the posted script.
+Update ruleset with the uploaded script.
 
-- **Path**: /ruleset/update
+If module name is specified, replace the Lua module with the uploaded script.
+
+If module is loaded like `_G.name = require("name")`, the reference `_G.name` will be updated too.
+
+- **Path**: `/ruleset/update`
+- **Query**: `?module=name` (optional)
 - **Method**: POST
-- **Content**: Lua ruleset script
+- **Content**: Lua ruleset script or Lua module script
 - **Status**: HTTP 200, HTTP 405, HTTP 500
 
 ### Ruleset GC
 
 Trigger a full GC.
 
-- **Path**: /ruleset/gc
+- **Path**: `/ruleset/gc`
 - **Method**: POST
 - **Content**: None
 - **Status**: HTTP 200, HTTP 405

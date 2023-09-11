@@ -36,31 +36,21 @@ struct ruleset {
 	struct ev_idle w_idle;
 };
 
-static struct ruleset *find_ruleset(lua_State *restrict L)
+static struct ruleset *find_ruleset(lua_State *L)
 {
-	if (lua_getfield(L, LUA_REGISTRYINDEX, "ruleset") !=
-	    LUA_TLIGHTUSERDATA) {
-		luaL_error(L, "lua registry is corrupted");
-		FAIL();
-	}
-	struct ruleset *r = (struct ruleset *)lua_topointer(L, -1);
-	lua_pop(L, 1);
-	return r;
+	void *ud;
+	CHECK(lua_getallocf(L, &ud) != NULL);
+	return ud;
 }
 
-static int find_callback(lua_State *restrict L, int idx)
+static void find_callback(lua_State *restrict L, const int idx)
 {
+	assert(idx > 0);
 	const char *func = lua_topointer(L, idx);
-	if (lua_getglobal(L, "ruleset") != LUA_TTABLE) {
-		lua_pop(L, 1);
-		return 0;
-	}
-	if (lua_getfield(L, -1, func) != LUA_TFUNCTION) {
-		lua_pop(L, 2);
-		return 0;
-	}
-	lua_remove(L, -2);
-	return 1;
+	(void)lua_getglobal(L, "ruleset");
+	(void)lua_getfield(L, -1, func);
+	lua_replace(L, idx);
+	lua_pop(L, 1);
 }
 
 static struct dialreq *pop_dialreq(lua_State *restrict L, const int n)
@@ -323,10 +313,7 @@ static int api_parse_ipv6_(lua_State *restrict L)
 
 static int ruleset_tick_(lua_State *restrict L)
 {
-	if (find_callback(L, 1) != 1) {
-		return 0;
-	}
-	lua_replace(L, 1);
+	find_callback(L, 1);
 	lua_pushnumber(L, *(ev_tstamp *)lua_topointer(L, 2));
 	lua_replace(L, 2);
 	lua_call(L, 1, 0);
@@ -369,10 +356,7 @@ static int api_setinterval_(lua_State *restrict L)
 
 static int ruleset_idle_(lua_State *restrict L)
 {
-	if (find_callback(L, 1) != 1) {
-		return 0;
-	}
-	lua_replace(L, 1);
+	find_callback(L, 1);
 	lua_call(L, 0, 0);
 	return 0;
 }
@@ -398,26 +382,23 @@ static int api_setidle_(lua_State *restrict L)
 	return 0;
 }
 
-static const luaL_Reg apilib[] = {
-	{ "invoke", api_invoke_ },
-	{ "resolve", api_resolve_ },
-	{ "setinterval", api_setinterval_ },
-	{ "setidle", api_setidle_ },
-	{ "parse_ipv4", api_parse_ipv4_ },
-	{ "parse_ipv6", api_parse_ipv6_ },
-	{ NULL, NULL },
-};
-
 static int luaopen_neosocksd(lua_State *restrict L)
 {
+	const luaL_Reg apilib[] = {
+		{ "invoke", api_invoke_ },
+		{ "resolve", api_resolve_ },
+		{ "setinterval", api_setinterval_ },
+		{ "setidle", api_setidle_ },
+		{ "parse_ipv4", api_parse_ipv4_ },
+		{ "parse_ipv6", api_parse_ipv6_ },
+		{ NULL, NULL },
+	};
 	luaL_newlib(L, apilib);
 	return 1;
 }
 
 static int ruleset_luainit_(lua_State *restrict L)
 {
-	assert(lua_gettop(L) == 1);
-	lua_setfield(L, LUA_REGISTRYINDEX, "ruleset");
 	/* load all libraries */
 	luaL_openlibs(L);
 	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
@@ -497,8 +478,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 		w_idle->data = r;
 	}
 
-	void *ptr = (void *)r;
-	switch (ruleset_pcall(r, ruleset_luainit_, 1, 0, ptr)) {
+	switch (ruleset_pcall(r, ruleset_luainit_, 0, 0)) {
 	case LUA_OK:
 		break;
 	case LUA_ERRMEM:
@@ -682,49 +662,32 @@ void ruleset_gc(struct ruleset *restrict r)
 	lua_gc(L, LUA_GCCOLLECT, 0);
 }
 
-static struct dialreq *request_accept(const char *domain)
-{
-	struct dialreq *req = dialreq_new(0);
-	if (req == NULL) {
-		LOGOOM();
-		return NULL;
-	}
-	if (!dialaddr_set(&req->addr, domain, strlen(domain))) {
-		dialreq_free(req);
-		return NULL;
-	}
-	return req;
-}
-
 static int ruleset_request_(lua_State *restrict L)
 {
-	const char *func = lua_topointer(L, 1);
+	find_callback(L, 1);
 	const char *request = lua_topointer(L, 2);
-	if (find_callback(L, 1) != 1) {
-		struct dialreq *req = request_accept(request);
-		lua_pushlightuserdata(L, req);
-		return 1;
-	}
-	lua_replace(L, 1);
 	(void)lua_pushstring(L, request);
 	lua_replace(L, 2);
+
 	lua_call(L, 1, LUA_MULTRET);
 	const int n = lua_gettop(L);
 	if (n < 1) {
 		return 0;
 	}
-	switch (lua_type(L, -1)) {
+	const int type = lua_type(L, -1);
+	switch (type) {
 	case LUA_TSTRING:
 		break;
 	case LUA_TNIL:
 		return 0;
 	default:
-		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
+		LOGE_F("request \"%s\": invalid return type %s", request,
+		       lua_typename(L, type));
 		return 0;
 	}
 	struct dialreq *req = pop_dialreq(L, n);
 	if (req == NULL) {
-		LOGE("Lua script returned an invalid address");
+		LOGE_F("request \"%s\": invalid return", request);
 	}
 	lua_pushlightuserdata(L, req);
 	return 1;
@@ -766,10 +729,7 @@ void ruleset_memstats(
 
 static int ruleset_stats_(lua_State *restrict L)
 {
-	if (find_callback(L, 1) != 1) {
-		return 0;
-	}
-	lua_replace(L, 1);
+	find_callback(L, 1);
 	lua_pushnumber(L, *(double *)lua_topointer(L, -1));
 	lua_replace(L, 2);
 	lua_call(L, 1, 1);

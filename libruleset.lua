@@ -17,16 +17,6 @@ function _G.eval(s, ...)
     return assert(load(s, "=eval"))(...)
 end
 
-function package.replace(name, chunk)
-    local loaded = package.loaded[name]
-    local mod = chunk()
-    if loaded and _G[name] == loaded then
-        _G[name] = mod
-    end
-    package.loaded[name] = mod
-    return mod
-end
-
 function string:startswith(sub)
     local n = string.len(sub)
     return string.sub(self, 1, n) == sub
