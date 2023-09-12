@@ -92,16 +92,29 @@ find_path(LUA_INCLUDE_DIR
     include/lua53 include/lua5.3 include/lua-5.3
     include/lua include
 )
-find_library(LUA_LIBRARY
-    NAMES
-    liblua54.a liblua5.4.a liblua-5.4.a
-    liblua53.a liblua5.3.a liblua-5.3.a
-    liblua.a
-    PATH_SUFFIXES
-    lib/lua54 lib/lua5.4 lib/lua-5.4
-    lib/lua53 lib/lua5.3 lib/lua-5.3
-    lib/lua lib
-)
+if(BUILD_STATIC OR LINK_STATIC_LUA)
+    find_library(LUA_LIBRARY
+        NAMES
+        liblua54.a liblua5.4.a liblua-5.4.a
+        liblua53.a liblua5.3.a liblua-5.3.a
+        liblua.a
+        PATH_SUFFIXES
+        lib/lua54 lib/lua5.4 lib/lua-5.4
+        lib/lua53 lib/lua5.3 lib/lua-5.3
+        lib/lua lib
+    )
+else()
+    find_library(LUA_LIBRARY
+        NAMES
+        lua54 lua5.4 lua-5.4
+        lua53 lua5.3 lua-5.3
+        lua
+        PATH_SUFFIXES
+        lib/lua54 lib/lua5.4 lib/lua-5.4
+        lib/lua53 lib/lua5.3 lib/lua-5.3
+        lib/lua lib
+    )
+endif()
 if((NOT EXISTS ${LUA_INCLUDE_DIR}) OR (NOT EXISTS ${LUA_LIBRARY}))
     message(FATAL_ERROR "Lua not found")
 endif()

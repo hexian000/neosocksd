@@ -47,8 +47,9 @@ message(STATUS "Project version: ${PROJECT_VERSION_STRING}")
 include(CTest)
 
 option(TARGET_POSIX "Use POSIX API only" OFF)
-option(LINK_STATIC_LIBS "Link against static libraries" OFF)
 option(BUILD_STATIC "Build static executables" OFF)
+option(LINK_STATIC_LIBS "Link against static libraries" OFF)
+option(LINK_STATIC_LUA "Link against static liblua" ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
