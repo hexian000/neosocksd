@@ -40,7 +40,7 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 ./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
 # Forward connection over proxy chain
-# Tip: forwarding to SOCKS5 costs 1 more RTT than SOCKS4A/HTTP, so is generally not a good idea.
+# Tip: forwarding in SOCKS5 requires 1 more roundtrip than SOCKS4A/HTTP, so is generally not a good idea.
 ./neosocksd -l 192.168.1.2:12345 -f "192.168.2.2:12345,socks4a://192.168.2.1:1080,http://192.168.1.1:8080"
 
 # Start a hardened non-forking TCP port forwarder in the background

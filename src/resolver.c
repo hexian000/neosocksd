@@ -139,13 +139,13 @@ static void sock_state_cb(
 	/* find an active watcher on same fd or an inactive watcher to reuse */
 	struct io_node *node = NULL;
 	for (struct io_node *it = &r->sockets; it != NULL; it = it->next) {
-		if (!ev_is_active(it)) {
-			node = it;
-			continue;
-		}
 		if (it->watcher.fd == fd) {
 			node = it;
 			break;
+		}
+		if (!ev_is_active(it)) {
+			node = it;
+			continue;
 		}
 	}
 	if (events == EV_NONE) {
@@ -172,13 +172,11 @@ static void sock_state_cb(
 		r->sockets.next = node;
 	} else {
 		/* or modify the existing watcher */
+		ev_io_stop(r->loop, &node->watcher);
 		ev_io_set(&node->watcher, fd, events);
 	}
 
 	/* start the watcher */
-	if (ev_is_active(&node->watcher)) {
-		return;
-	}
 	LOGV_F("io: fd=%d events=0x%x num_socket=%zu", fd, events,
 	       ++r->num_socket);
 	ev_io_start(r->loop, &node->watcher);
