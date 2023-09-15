@@ -63,10 +63,12 @@ static void print_usage(const char *argv0)
 #if WITH_TPROXY
 		"  --tproxy                   operate as a transparent proxy\n"
 #endif
+#if WITH_RULESET
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
-		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  --traceback                print ruleset error traceback (for debugging)\n"
 		"  --memlimit <limit>         set a soft limit on the Lua heap size in MiB\n"
+#endif
+		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
 		"  -d, --daemonize            run in background and discard all logs\n"
@@ -178,6 +180,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			conf->restapi = argv[++i];
 			continue;
 		}
+#if WITH_RULESET
 		if (strcmp(argv[i], "-r") == 0 ||
 		    strcmp(argv[i], "--ruleset") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
@@ -196,6 +199,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			}
 			continue;
 		}
+#endif
 		if (strcmp(argv[i], "-u") == 0 ||
 		    strcmp(argv[i], "--user") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
@@ -284,6 +288,7 @@ int main(int argc, char **argv)
 	G.resolver = resolver_new(loop, conf);
 	CHECKOOM(G.resolver);
 
+#if WITH_RULESET
 	if (conf->ruleset != NULL) {
 		G.ruleset = ruleset_new(loop);
 		CHECKOOM(G.ruleset);
@@ -293,6 +298,7 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 	}
+#endif
 
 	struct server *restrict s = &app.server;
 	server_init(s, loop, NULL, NULL);
@@ -380,10 +386,12 @@ int main(int argc, char **argv)
 		s->data = NULL;
 	}
 
+#if WITH_RULESET
 	if (G.ruleset != NULL) {
 		ruleset_free(G.ruleset);
 		G.ruleset = NULL;
 	}
+#endif
 	if (G.resolver != NULL) {
 		resolver_free(G.resolver);
 		G.resolver = NULL;
@@ -401,6 +409,7 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 
 	switch (watcher->signum) {
 	case SIGHUP: {
+#if WITH_RULESET
 		const struct config *restrict conf = G.conf;
 		if (conf->ruleset == NULL || G.ruleset == NULL) {
 			LOGE_F("signal %d received, but ruleset not loaded",
@@ -413,6 +422,7 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 			break;
 		}
 		LOGI("ruleset successfully reloaded");
+#endif
 	} break;
 	case SIGINT:
 	case SIGTERM:

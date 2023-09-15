@@ -656,32 +656,33 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 
 static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 {
+#if WITH_RULESET
 	struct ruleset *restrict ruleset = G.ruleset;
-	if (ruleset == NULL) {
-		struct dialreq *req = dialreq_new(0);
-		if (req == NULL) {
-			LOGOOM();
-			return NULL;
+	if (ruleset != NULL) {
+		const int len = dialaddr_format(addr, NULL, 0);
+		CHECK(len > 0);
+		char request[len + 1];
+		(void)dialaddr_format(addr, request, sizeof(request));
+		switch (addr->type) {
+		case ATYP_DOMAIN:
+			return ruleset_resolve(ruleset, request);
+		case ATYP_INET:
+			return ruleset_route(ruleset, request);
+		case ATYP_INET6:
+			return ruleset_route6(ruleset, request);
+		default:
+			break;
 		}
-		dialaddr_copy(&req->addr, addr);
-		return req;
+		FAIL();
 	}
-
-	const int len = dialaddr_format(addr, NULL, 0);
-	CHECK(len > 0);
-	char request[len + 1];
-	(void)dialaddr_format(addr, request, sizeof(request));
-	switch (addr->type) {
-	case ATYP_DOMAIN:
-		return ruleset_resolve(ruleset, request);
-	case ATYP_INET:
-		return ruleset_route(ruleset, request);
-	case ATYP_INET6:
-		return ruleset_route6(ruleset, request);
-	default:
-		break;
+#endif
+	struct dialreq *req = dialreq_new(0);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
 	}
-	FAIL();
+	dialaddr_copy(&req->addr, addr);
+	return req;
 }
 
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)

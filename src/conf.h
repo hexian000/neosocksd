@@ -10,7 +10,9 @@ struct config {
 	const char *listen;
 	const char *forward;
 	const char *restapi;
+#if WITH_RULESET
 	const char *ruleset;
+#endif
 	const char *user_name;
 #if WITH_CARES
 	const char *nameserver;
@@ -21,7 +23,9 @@ struct config {
 	int log_level;
 	int resolve_pf;
 	double timeout;
+#if WITH_RULESET
 	size_t memlimit;
+#endif
 
 	bool http : 1;
 	bool proto_timeout : 1;
@@ -36,7 +40,9 @@ struct config {
 #if WITH_TPROXY
 	bool transparent : 1;
 #endif
+#if WITH_RULESET
 	bool traceback : 1;
+#endif
 	bool daemonize : 1;
 
 	size_t tcp_sndbuf, tcp_rcvbuf;

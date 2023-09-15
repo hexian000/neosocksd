@@ -60,10 +60,12 @@ bool conf_check(const struct config *restrict conf)
 		LOGE("conf: listen address is not specified");
 		return false;
 	}
+#if WITH_RULESET
 	if (conf->ruleset != NULL && conf->forward != NULL) {
 		LOGE("conf: specifing ruleset and forward at the same time is ambiguous");
 		return false;
 	}
+#endif
 #if WITH_TPROXY
 	if (conf->transparent && conf->http) {
 		LOGE("tproxy and http cannot be specified at the same time");

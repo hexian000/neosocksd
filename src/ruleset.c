@@ -1,4 +1,8 @@
 #include "ruleset.h"
+#include "resolver.h"
+
+#if WITH_RULESET
+
 #include "utils/buffer.h"
 #include "utils/minmax.h"
 #include "utils/serialize.h"
@@ -35,6 +39,8 @@ struct ruleset {
 	struct ev_timer w_ticker;
 	struct ev_idle w_idle;
 };
+
+#define ASYNC_CALLBACK_TABLE "async"
 
 static struct ruleset *find_ruleset(lua_State *L)
 {
@@ -231,43 +237,120 @@ static int api_invoke_(lua_State *restrict L)
 	return 0;
 }
 
-/* resolve(host) */
-static int api_resolve_(lua_State *restrict L)
+static int format_addr_(lua_State *restrict L)
 {
-	luaL_checktype(L, 1, LUA_TSTRING);
-	const char *s = lua_tostring(L, 1);
-	sockaddr_max_t addr;
-	if (!resolve_addr(&addr, s, NULL, G.conf->resolve_pf)) {
-		const int err = errno;
-		return luaL_error(L, "%s", strerror(err));
+	const struct sockaddr *sa = lua_topointer(L, -1);
+	if (sa == NULL) {
+		lua_pop(L, 1);
+		lua_pushnil(L);
+		return 1;
 	}
-	const int af = addr.sa.sa_family;
+	const int af = sa->sa_family;
 	switch (af) {
 	case AF_INET: {
 		char buf[INET_ADDRSTRLEN];
-		const char *addr_str =
-			inet_ntop(af, &addr.in.sin_addr, buf, sizeof(buf));
+		const char *addr_str = inet_ntop(
+			af, &((const struct sockaddr_in *)sa)->sin_addr, buf,
+			sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
 			return luaL_error(L, "%s", strerror(err));
 		}
+		lua_pop(L, 1);
 		lua_pushstring(L, addr_str);
 	} break;
 	case AF_INET6: {
 		char buf[INET6_ADDRSTRLEN];
-		const char *addr_str =
-			inet_ntop(af, &addr.in6.sin6_addr, buf, sizeof(buf));
+		const char *addr_str = inet_ntop(
+			af, &((const struct sockaddr_in6 *)sa)->sin6_addr, buf,
+			sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
 			return luaL_error(L, "%s", strerror(err));
 		}
+		lua_pop(L, 1);
 		lua_pushstring(L, addr_str);
 	} break;
 	default:
-		lua_pushnil(L);
-		break;
+		return luaL_error(L, "unknown af:%jd", af);
 	}
 	return 1;
+}
+
+static int api_resolve_cb_(lua_State *restrict L)
+{
+	lua_pushvalue(L, lua_upvalueindex(2)); /* cb */
+	lua_pushvalue(L, lua_upvalueindex(1)); /* host */
+	lua_pushvalue(L, 1); /* addr */
+	lua_call(L, 2, 0);
+	return 0;
+}
+
+static int resolve_cb_(lua_State *restrict L)
+{
+	struct resolve_query *q = (void *)lua_topointer(L, 1);
+	format_addr_(L);
+	luaL_getsubtable(L, LUA_REGISTRYINDEX, ASYNC_CALLBACK_TABLE);
+	lua_rawgetp(L, -1, q);
+	lua_pushnil(L); /* t, cb, nil */
+	lua_rawsetp(L, -3, q);
+	lua_pushvalue(L, 2);
+	lua_call(L, 1, 0); /* api_resolve_cb_ */
+	return 0;
+}
+
+static void resolve_cb(
+	handle_t h, struct ev_loop *loop, void *ctx, const struct sockaddr *sa)
+{
+	UNUSED(loop);
+	struct ruleset *restrict r = ctx;
+	const int ret = ruleset_pcall(r, resolve_cb_, 2, 0, FROM_HANDLE(h), sa);
+	if (ret != LUA_OK) {
+		lua_State *restrict L = r->L;
+		LOGE_F("resolve callback: %s", lua_tostring(L, -1));
+		return;
+	}
+}
+
+/* resolve(host, cb) */
+static int api_resolve_async_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TSTRING);
+	const char *name = luaL_checkstring(L, 1);
+	luaL_checkany(L, 2);
+	const handle_t h = resolve_do(
+		G.resolver,
+		(struct resolve_cb){
+			.cb = resolve_cb,
+			.ctx = find_ruleset(L),
+		},
+		name, NULL, G.conf->resolve_pf);
+	if (h == INVALID_HANDLE) {
+		return luaL_error(
+			L, "resolve \"%s\" failed: out of memory", name);
+	}
+	luaL_getsubtable(L, LUA_REGISTRYINDEX, ASYNC_CALLBACK_TABLE);
+	lua_pushvalue(L, 1); /* host */
+	lua_pushvalue(L, 2); /* cb */
+	lua_pushcclosure(L, api_resolve_cb_, 2);
+	lua_rawsetp(L, -2, FROM_HANDLE(h));
+	return 0;
+}
+
+/* resolve(host) */
+static int api_resolve_(lua_State *restrict L)
+{
+	const int n = lua_gettop(L);
+	if (n > 1) {
+		return api_resolve_async_(L);
+	}
+	const char *name = luaL_checkstring(L, 1);
+	sockaddr_max_t addr;
+	if (!resolve_addr(&addr, name, NULL, G.conf->resolve_pf)) {
+		return luaL_error(L, "resolve failed");
+	}
+	lua_pushlightuserdata(L, &addr.sa);
+	return format_addr_(L);
 }
 
 /* parse_ipv4(ipv4) */
@@ -751,3 +834,5 @@ const char *ruleset_stats(struct ruleset *restrict r, const double dt)
 	}
 	return lua_tostring(L, -1);
 }
+
+#endif /* WITH_RULESET */

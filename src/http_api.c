@@ -58,6 +58,7 @@ static void server_stats(
 		resolv_stats->num_query - resolv_stats->num_success,
 		avgresolv_hrs, xfer_up, xfer_down, avgbw_up, avgbw_down);
 
+#if WITH_RULESET
 	if (G.ruleset != NULL) {
 		struct ruleset_memstats mem;
 		ruleset_memstats(G.ruleset, &mem);
@@ -69,6 +70,7 @@ static void server_stats(
 			ctx->wbuf, "Ruleset Memory      : %s (%zu objects)\n",
 			heap_total, mem.num_object);
 	}
+#endif
 }
 
 static void server_stats_stateful(
@@ -163,6 +165,7 @@ static void http_handle_stats(
 	last = now;
 
 	server_stats_stateful(ctx, ctx->s->data, dt);
+#if WITH_RULESET
 	if (G.ruleset != NULL) {
 		const char *str = ruleset_stats(G.ruleset, dt);
 		if (str != NULL) {
@@ -175,6 +178,7 @@ static void http_handle_stats(
 				str);
 		}
 	}
+#endif
 }
 
 static bool http_leafnode_check(
@@ -197,6 +201,7 @@ static bool http_leafnode_check(
 	return true;
 }
 
+#if WITH_RULESET
 static void http_handle_ruleset(
 	struct ev_loop *loop, struct http_ctx *restrict ctx,
 	struct url *restrict uri)
@@ -286,6 +291,7 @@ static void http_handle_ruleset(
 
 	http_resp_errpage(ctx, HTTP_NOT_FOUND);
 }
+#endif
 
 void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
@@ -315,9 +321,11 @@ void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_handle_stats(loop, ctx, &uri);
 		return;
 	}
+#if WITH_RULESET
 	if (strcmp(segment, "ruleset") == 0) {
 		http_handle_ruleset(loop, ctx, &uri);
 		return;
 	}
+#endif
 	http_resp_errpage(ctx, HTTP_NOT_FOUND);
 }

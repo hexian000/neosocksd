@@ -15,12 +15,19 @@ struct ruleset;
 extern struct globals {
 	const struct config *conf;
 	struct resolver *resolver;
+#if WITH_RULESET
 	struct ruleset *ruleset;
+#endif
 } G;
 
 #define UNUSED(x) (void)(x)
 
 #define TSTAMP_NIL (-1.0)
+
+typedef uintptr_t handle_t;
+#define INVALID_HANDLE ((uintptr_t)NULL)
+#define TO_HANDLE(p) ((handle_t)(p))
+#define FROM_HANDLE(h) ((void *)(h))
 
 #define CLOSE_FD(fd)                                                           \
 	do {                                                                   \

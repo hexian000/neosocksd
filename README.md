@@ -107,6 +107,12 @@ opkg install libev libcares
 ## Building from Source
 ### Dependencies
 
+| Name   | Version   | Required | Feature                    |
+| ------ | --------- | -------- | -------------------------- |
+| c-ares | >= 1.16.0 | no       | asynchronous name resolves |
+| libev  | >= 4.31   | yes      |                            |
+| Lua    | >= 5.3    | yes      | ruleset                    |
+
 ```sh
 # Debian & Ubuntu
 sudo apt install libev-dev liblua5.4-dev libc-ares-dev

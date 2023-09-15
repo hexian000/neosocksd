@@ -229,13 +229,22 @@ Custom information in a string.
 **Synopsis**
 
 ```Lua
+-- (1)
 local addr = neosocksd.resolve("www.example.com")
--- got addr like "203.0.113.1" or "2001:DB8::1"
+
+-- (2)
+neosocksd.resolve("www.example.com", function (host, addr)
+    -- got addr like "203.0.113.1" or "2001:DB8::1"
+    -- or nil when failed
+end)
 ```
 
 **Description**
 
-Resolves a host name locally and blocks the whole server until resolution succeeds or times out. IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
+1. Resolves a host name locally and blocks the whole server until resolution is finished or times out. 
+2. Resolves a host name locally and invoke the callback function when resolution is finished or times out.
+
+IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 
 Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
 

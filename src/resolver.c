@@ -54,16 +54,18 @@ struct resolve_query {
 	do {                                                                   \
 		LOGV_F("resolve: [%p] finished ok=%d", (void *)(q), (q)->ok);  \
 		const struct resolve_query query = *(q);                       \
+		const handle_t h = (handle_t)(q);                              \
 		free((q));                                                     \
 		if (query.done_cb.cb == NULL) { /* cancelled */                \
 			return;                                                \
 		}                                                              \
 		if (!query.ok) {                                               \
-			query.done_cb.cb((loop), query.done_cb.ctx, NULL);     \
+			query.done_cb.cb(h, (loop), query.done_cb.ctx, NULL);  \
 			return;                                                \
 		}                                                              \
 		query.resolver->stats.num_success++;                           \
-		query.done_cb.cb((loop), query.done_cb.ctx, &query.addr.sa);   \
+		query.done_cb.cb(                                              \
+			h, (loop), query.done_cb.ctx, &query.addr.sa);         \
 		return;                                                        \
 	} while (0)
 
@@ -363,20 +365,21 @@ static void resolve_start(
 	RESOLVE_RETURN(q, r->loop);
 }
 
-struct resolve_query *resolve_do(
+handle_t resolve_do(
 	struct resolver *r, struct resolve_cb cb, const char *name,
 	const char *service, int family)
 {
 	struct resolve_query *q = resolve_new(r, cb);
 	if (q == NULL) {
-		return NULL;
+		return INVALID_HANDLE;
 	}
 	resolve_start(q, name, service, family);
-	return q;
+	return TO_HANDLE(q);
 }
 
-void resolve_cancel(struct resolve_query *restrict q)
+void resolve_cancel(handle_t h)
 {
+	struct resolve_query *q = (void *)h;
 	LOGV_F("resolve: [%p] cancel", (void *)q);
 	q->done_cb = (struct resolve_cb){
 		.cb = NULL,

@@ -295,6 +295,7 @@ static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 		return NULL;
 	}
 
+#if WITH_RULESET
 	if (G.ruleset != NULL) {
 		char addr_str[64];
 		format_sa(&dest.sa, addr_str, sizeof(addr_str));
@@ -306,6 +307,7 @@ static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 		}
 		return NULL;
 	}
+	#endif
 
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {

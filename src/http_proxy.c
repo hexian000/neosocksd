@@ -68,10 +68,12 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 static struct dialreq *make_dialreq(const char *addr_str)
 {
+#if WITH_RULESET
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
 		return ruleset_resolve(ruleset, addr_str);
 	}
+#endif
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {
 		LOGOOM();
