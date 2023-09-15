@@ -6,9 +6,6 @@
 #include "resolver.h"
 #include "ruleset.h"
 
-#include <stdint.h>
-#include <sys/types.h>
-
 #define FORMAT_BYTES(name, value)                                              \
 	char name[16];                                                         \
 	(void)format_iec_bytes(name, sizeof(name), (value))
@@ -182,7 +179,7 @@ static void http_handle_stats(
 }
 
 static bool http_leafnode_check(
-	struct http_ctx *restrict ctx, struct url *restrict uri,
+	struct http_ctx *restrict ctx, const struct url *restrict uri,
 	const char *method, const bool require_content)
 {
 	if (uri->path != NULL) {

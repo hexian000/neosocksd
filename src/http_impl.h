@@ -11,6 +11,7 @@
 
 #include <ev.h>
 
+#include <stdint.h>
 #include <inttypes.h>
 
 #define HTTP_MAX_ENTITY 8192

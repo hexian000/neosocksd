@@ -32,8 +32,8 @@ typedef uintptr_t handle_t;
 #define CLOSE_FD(fd)                                                           \
 	do {                                                                   \
 		if (close(fd) != 0) {                                          \
-			const int err = errno;                                 \
-			LOGW_F("close: %s", strerror(err));                    \
+			const int close_err = errno;                           \
+			LOGW_F("close: %s", strerror(close_err));              \
 		}                                                              \
 	} while (0)
 
