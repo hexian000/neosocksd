@@ -178,7 +178,7 @@ Ignored
 function ruleset.idle()
     -- ......
     if not finished then
-        -- requests are processed before next idle
+        -- pending requests get processed before next idle
         neosocksd.setidle()
     end
 end
@@ -286,7 +286,7 @@ end
 Parses an IPv6 address into integers.
 
 
-### regex.\*
+### regex.compile
 
 **Synopsis**
 
@@ -342,7 +342,7 @@ See [ruleset.idle](#rulesetidle).
 **Synopsis**
 
 ```Lua
-neosocksd.invoke([[printf("test rpc")]], "neosocksd.lan:80", "127.0.0.1:1080")
+neosocksd.invoke([[log("test rpc")]], "neosocksd.lan:80", "127.0.0.1:1080")
 ```
 
 **Description**
@@ -357,11 +357,11 @@ NOTE: The code length limit for a single invocation is guaranteed to be at least
 **Synopsis**
 
 ```Lua
-logf("some debug log")
+logf("some debug log: %d", 123)
 ```
 
 **Description**
 
-Controls whether the default implementation of `logf` in `libruleset.lua` writes to standard output.
+True if the log level doesn't allow printing debug logs. The log level depends on command line argument `-s`/`-v`.
 
-Defaults to false if the log level allows printing debug logs. The log level depends on command line argument `-s`/`-v`.
+In the default implementation of `libruleset.lua`, this value controls whether `log`/`logf` writes to standard output.

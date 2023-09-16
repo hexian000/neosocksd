@@ -347,7 +347,8 @@ static int api_resolve_(lua_State *restrict L)
 	const char *name = luaL_checkstring(L, 1);
 	sockaddr_max_t addr;
 	if (!resolve_addr(&addr, name, NULL, G.conf->resolve_pf)) {
-		return luaL_error(L, "resolve failed");
+		lua_pushnil(L);
+		return 1;
 	}
 	lua_pushlightuserdata(L, &addr.sa);
 	return format_addr_(L);
