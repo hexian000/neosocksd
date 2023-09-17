@@ -1,8 +1,12 @@
+/* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
+ * This code is licensed under MIT license (see LICENSE for details) */
+
 #ifndef HTTP_IMPL_H
 #define HTTP_IMPL_H
 
 #include "http.h"
 #include "net/http.h"
+#include "session.h"
 #include "utils/buffer.h"
 #include "utils/slog.h"
 #include "utils/check.h"
@@ -41,6 +45,7 @@ struct httpreq {
 };
 
 struct http_ctx {
+	struct session ss;
 	struct server *s;
 	enum http_state state;
 	http_handler_fn handle;

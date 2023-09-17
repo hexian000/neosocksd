@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "forward.h"
+#include "session.h"
 #include "utils/check.h"
 #include "utils/slog.h"
 #include "conf.h"
@@ -33,6 +34,7 @@ enum forward_state {
 };
 
 struct forward_ctx {
+	struct session ss;
 	struct server *s;
 	enum forward_state state;
 	int accepted_fd, dialed_fd;
@@ -107,6 +109,7 @@ static void forward_ctx_free(struct forward_ctx *restrict ctx)
 		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
+	session_del(&ctx->ss);
 	free(ctx);
 }
 
@@ -118,6 +121,12 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		ctx->state);
 	forward_ctx_stop(loop, ctx);
 	forward_ctx_free(ctx);
+}
+
+static void
+forward_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+{
+	forward_ctx_close(loop, (struct forward_ctx *)ss);
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -240,6 +249,8 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	};
 	ctx->dialreq = NULL;
 	dialer_init(&ctx->dialer, cb);
+	ctx->ss.close = forward_ss_close;
+	session_add(&ctx->ss);
 	return ctx;
 }
 
@@ -307,7 +318,7 @@ static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 		}
 		return NULL;
 	}
-	#endif
+#endif
 
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {

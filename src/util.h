@@ -1,3 +1,6 @@
+/* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
+ * This code is licensed under MIT license (see LICENSE for details) */
+
 #ifndef UTIL_H
 #define UTIL_H
 
@@ -11,6 +14,7 @@
 
 struct resolver;
 struct ruleset;
+struct session;
 
 extern struct globals {
 	const struct config *conf;
@@ -18,6 +22,7 @@ extern struct globals {
 #if WITH_RULESET
 	struct ruleset *ruleset;
 #endif
+	struct session *sessions;
 } G;
 
 #define UNUSED(x) (void)(x)

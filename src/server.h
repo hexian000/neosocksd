@@ -1,3 +1,6 @@
+/* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
+ * This code is licensed under MIT license (see LICENSE for details) */
+
 #ifndef SERVER_H
 #define SERVER_H
 

@@ -1,3 +1,6 @@
+/* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
+ * This code is licensed under MIT license (see LICENSE for details) */
+
 #include "dialer.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"

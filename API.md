@@ -37,6 +37,8 @@ Run the posted script.
 - **Content**: Lua script
 - **Status**: HTTP 200, HTTP 405, HTTP 500
 
+NOTE: The code length limit for a single invocation is guaranteed to be at least 4 MiB.
+
 ### Ruleset Update
 
 Update ruleset with the uploaded script.
@@ -348,8 +350,6 @@ neosocksd.invoke([[log("test rpc")]], "neosocksd.lan:80", "127.0.0.1:1080")
 **Description**
 
 Run Lua code on another neosocksd. This function returns immediately. On failure, the invocation is lost.
-
-NOTE: The code length limit for a single invocation is guaranteed to be at least 4 MiB.
 
 
 ### _G.NDEBUG

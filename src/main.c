@@ -1,7 +1,11 @@
-#include "dialer.h"
+/* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
+ * This code is licensed under MIT license (see LICENSE for details) */
+
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "utils/minmax.h"
+#include "dialer.h"
+#include "session.h"
 #include "forward.h"
 #include "http.h"
 #include "socks.h"
@@ -422,11 +426,14 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 			break;
 		}
 		LOGI("ruleset successfully reloaded");
+#else
+		LOGW("reload is not supported in current build");
 #endif
 	} break;
 	case SIGINT:
 	case SIGTERM:
 		LOGI_F("signal %d received, breaking", watcher->signum);
+		session_closeall(loop);
 		ev_break(loop, EVBREAK_ALL);
 		break;
 	}

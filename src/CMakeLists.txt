@@ -6,6 +6,7 @@ add_executable(neosocksd
     resolver.c resolver.h
     ruleset.c ruleset.h
     transfer.c transfer.h
+    session.c session.h
     forward.c forward.h
     socks.c socks.h
     http_proxy.c http_api.c http_invoke.c http_impl.h http.c http.h

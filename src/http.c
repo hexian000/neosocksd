@@ -4,6 +4,7 @@
 #include "http.h"
 #include "http_impl.h"
 #include "net/http.h"
+#include "session.h"
 #include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "utils/slog.h"
@@ -86,6 +87,7 @@ static void http_ctx_free(struct http_ctx *restrict ctx)
 		ctx->dialed_fd = -1;
 	}
 	ctx->cbuf = VBUF_FREE(ctx->cbuf);
+	session_del(&ctx->ss);
 	free(ctx);
 }
 
@@ -96,6 +98,12 @@ void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ctx->state);
 	http_ctx_stop(loop, ctx);
 	http_ctx_free(ctx);
+}
+
+static void
+http_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+{
+	http_ctx_close(loop, (struct http_ctx *)ss);
 }
 
 void http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
@@ -429,6 +437,8 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 	ctx->cbuf = NULL;
 	BUF_INIT(ctx->rbuf, 0);
 	BUF_INIT(ctx->wbuf, 0);
+	ctx->ss.close = http_ss_close;
+	session_add(&ctx->ss);
 	return ctx;
 }
 

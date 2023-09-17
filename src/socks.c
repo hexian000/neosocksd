@@ -3,6 +3,7 @@
 
 #include "socks.h"
 #include "server.h"
+#include "session.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
@@ -40,6 +41,7 @@ enum socks_state {
 };
 
 struct socks_ctx {
+	struct session ss;
 	struct server *s;
 	enum socks_state state;
 	int accepted_fd, dialed_fd;
@@ -129,6 +131,7 @@ static void socks_ctx_free(struct socks_ctx *restrict ctx)
 		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
+	session_del(&ctx->ss);
 	free(ctx);
 }
 
@@ -140,6 +143,12 @@ socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		ctx->state);
 	socks_ctx_stop(loop, ctx);
 	socks_ctx_free(ctx);
+}
+
+static void
+socks_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+{
+	socks_ctx_close(loop, (struct socks_ctx *)ss);
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -747,6 +756,8 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 		.ctx = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
+	ctx->ss.close = socks_ss_close;
+	session_add(&ctx->ss);
 	return ctx;
 }
 
