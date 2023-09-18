@@ -274,8 +274,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 int main(int argc, char **argv)
 {
-	init();
-
+	setup(argc, argv);
 	parse_args(argc, argv);
 	const struct config *restrict conf = &app.conf;
 	if (!conf_check(conf)) {
@@ -285,6 +284,7 @@ int main(int argc, char **argv)
 	}
 	G.conf = conf;
 	slog_level = conf->log_level;
+	init();
 
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);

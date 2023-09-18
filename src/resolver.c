@@ -231,12 +231,20 @@ addrinfo_cb(void *arg, int status, int timeouts, struct ares_addrinfo *info)
 }
 #endif /* WITH_CARES */
 
-void resolver_atexit_cb(void)
+void resolver_init_cb(void)
 {
 #if WITH_CARES
-	if (ares_library_initialized() == ARES_ENOTINITIALIZED) {
-		return;
-	}
+	LOGD_F("c-ares: %s", ares_version(NULL));
+#if CARES_HAVE_ARES_LIBRARY_INIT
+	const int ret = ares_library_init(ARES_LIB_INIT_ALL);
+	CHECKMSGF(ret == ARES_SUCCESS, "c-ares: %s", ares_strerror(ret));
+#endif
+#endif
+}
+
+void resolver_atexit_cb(void)
+{
+#if WITH_CARES && CARES_HAVE_ARES_LIBRARY_CLEANUP
 	ares_library_cleanup();
 #endif
 }
@@ -260,15 +268,7 @@ void resolver_free(struct resolver *restrict r)
 bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 {
 #if WITH_CARES
-	int ret = ares_library_initialized();
-	if (ret == ARES_ENOTINITIALIZED) {
-		ret = ares_library_init(ARES_LIB_INIT_ALL);
-		if (ret != ARES_SUCCESS) {
-			LOGE_F("ares: %s", ares_strerror(ret));
-			return false;
-		}
-	}
-
+	int ret;
 	struct ares_options options;
 	options.sock_state_cb = sock_state_cb;
 	options.sock_state_cb_data = r;

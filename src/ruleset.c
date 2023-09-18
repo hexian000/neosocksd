@@ -43,6 +43,9 @@ struct ruleset {
 	struct ev_idle w_idle;
 };
 
+#ifndef LUA_LOADED_TABLE
+#define LUA_LOADED_TABLE "_LOADED"
+#endif
 #define ASYNC_CALLBACK_TABLE "async"
 
 static struct ruleset *find_ruleset(lua_State *L)

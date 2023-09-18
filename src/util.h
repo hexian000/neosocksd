@@ -59,6 +59,7 @@ struct event_cb {
 		}                                                              \
 	} while (0)
 
+void setup(int argc, char **argv);
 void init(void);
 
 void drop_privileges(const char *user);

@@ -8,6 +8,7 @@
 #include "utils/slog.h"
 #include "utils/posixtime.h"
 
+#include <ev.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -27,16 +28,10 @@
 
 struct globals G = { 0 };
 
-static void uninit(void);
-
-void init(void)
+void setup(int argc, char **argv)
 {
-	{
-		const int ret = atexit(uninit);
-		if (ret != 0) {
-			FAILMSGF("atexit: %d", ret);
-		}
-	}
+	UNUSED(argc);
+	UNUSED(argv);
 
 	(void)setlocale(LC_ALL, "");
 
@@ -47,8 +42,22 @@ void init(void)
 		const int err = errno;
 		FAILMSGF("sigaction: %s", strerror(err));
 	}
+}
 
+static void uninit(void);
+
+void init(void)
+{
+	{
+		const int ret = atexit(uninit);
+		if (ret != 0) {
+			FAILMSGF("atexit: %d", ret);
+		}
+	}
 	srand64((uint64_t)clock_monotonic());
+
+	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
+	resolver_init_cb();
 }
 
 void uninit(void)
