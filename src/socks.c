@@ -55,7 +55,7 @@ struct socks_ctx {
 			uint8_t auth_method;
 			struct {
 				BUFFER_HDR;
-				unsigned char data[SOCKS_MAX_LENGTH];
+				unsigned char data[SOCKS_REQ_MAXLEN];
 			} rbuf;
 			struct dialreq *dialreq;
 			struct dialer dialer;

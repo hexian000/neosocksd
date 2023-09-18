@@ -87,17 +87,22 @@ struct socks5_hdr {
 	uint8_t addrtype;
 };
 
-#define SOCKS4_MAX_LENGTH                                                      \
+#define SOCKS4A_REQ_MAXLEN                                                     \
 	(sizeof(struct socks4_hdr) + (255 + 1) /* ident */ +                   \
 	 (FQDN_MAX_LENGTH + 1))
 
-#define SOCKS5_MAX_LENGTH                                                      \
+#define SOCKS4_RSP_MINLEN (sizeof(struct socks4_hdr))
+
+#define SOCKS5_REQ_MAXLEN                                                      \
 	(MAX(sizeof(struct socks5_auth_req) + 255 /* methods */,               \
 	     sizeof(struct socks5_hdr) +                                       \
 		     MAX(MAX(sizeof(struct in_addr) + sizeof(in_port_t),       \
 			     sizeof(struct in6_addr) + sizeof(in_port_t)),     \
 			 1 + FQDN_MAX_LENGTH + sizeof(in_port_t))))
 
-#define SOCKS_MAX_LENGTH (MAX(SOCKS4_MAX_LENGTH, SOCKS5_MAX_LENGTH))
+#define SOCKS5_RSP_MINLEN                                                      \
+	(sizeof(struct socks5_hdr) + sizeof(struct in_addr) + sizeof(in_port_t))
+
+#define SOCKS_REQ_MAXLEN (MAX(SOCKS4A_REQ_MAXLEN, SOCKS5_REQ_MAXLEN))
 
 #endif /* PROTO_SOCKS_H */

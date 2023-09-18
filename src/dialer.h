@@ -5,6 +5,7 @@
 #define DIALER_H
 
 #include "proto/socks.h"
+#include "utils/arraysize.h"
 #include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "resolver.h"
@@ -61,9 +62,9 @@ struct dialreq *dialreq_parse(const char *csv);
 void dialreq_free(struct dialreq *r);
 
 #define DIALER_BUF_SIZE                                                        \
-	MAX(sizeof("CONNECT") + (FQDN_MAX_LENGTH + sizeof(":65535")) +         \
-		    sizeof("HTTP/1.1\r\n"),                                    \
-	    SOCKS_MAX_LENGTH)
+	MAX(ARRAY_SIZE("CONNECT") + (FQDN_MAX_LENGTH + ARRAY_SIZE(":65535")) + \
+		    ARRAY_SIZE("HTTP/1.1\r\n"),                                \
+	    SOCKS_REQ_MAXLEN)
 
 struct dialer {
 	struct event_cb done_cb;

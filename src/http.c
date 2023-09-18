@@ -3,12 +3,12 @@
 
 #include "http.h"
 #include "http_impl.h"
-#include "net/http.h"
-#include "session.h"
 #include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "utils/slog.h"
 #include "utils/check.h"
+#include "net/http.h"
+#include "session.h"
 #include "server.h"
 #include "transfer.h"
 #include "conf.h"
@@ -442,7 +442,7 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 	return ctx;
 }
 
-static void http_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
+static void http_ctx_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	ev_io_start(loop, &ctx->w_recv);
 	ev_timer_start(loop, &ctx->w_timeout);
@@ -464,7 +464,7 @@ static void http_serve(
 	}
 	(void)memcpy(
 		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
-	http_start(loop, ctx);
+	http_ctx_start(loop, ctx);
 }
 
 void http_proxy_serve(

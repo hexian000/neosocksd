@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "dialer.h"
+#include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
@@ -300,27 +301,30 @@ send_http_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		FAIL();
 	}
 
-#define STRLEN(s) (sizeof(s) - 1)
+#define STRLEN(s) (ARRAY_SIZE(s) - 1)
+#define STRLENB(s) (STRLEN(s) * sizeof(s[0]))
 #define APPEND(b, s)                                                           \
 	do {                                                                   \
-		memcpy((b), (s), STRLEN(s));                                   \
+		memcpy((b), (s), STRLENB(s));                                  \
 		(b) += STRLEN(s);                                              \
 	} while (0)
 	/* "CONNECT example.org:80 HTTP/1.1\r\n\r\n" */
-	size_t cap = STRLEN("CONNECT ") + addrlen +
-		     STRLEN(" :65535 HTTP/1.1\r\n\r\n");
+	const size_t addrcap = addrlen + STRLEN(":65535");
+	const size_t cap =
+		STRLEN("CONNECT ") + addrcap + STRLEN(" HTTP/1.1\r\n\r\n");
 	char buf[cap];
 	char *b = buf;
 	APPEND(b, "CONNECT ");
-	const int n = dialaddr_format(addr, b, cap - (size_t)(b - buf));
-	if (n <= 0) {
+	const int n = dialaddr_format(addr, b, addrcap + 1);
+	if (n <= 0 || (size_t)n > addrcap) {
 		return false;
 	}
 	b += n;
 	APPEND(b, " HTTP/1.1\r\n\r\n");
+
+	socket_rcvlowat(d->fd, STRLENB("HTTP/1.1 200 \r\n\r\n"));
 #undef APPEND
 #undef STRLEN
-
 	return send_req(d, (unsigned char *)buf, (size_t)(b - buf));
 }
 
@@ -373,6 +377,7 @@ static bool send_socks4a_req(
 		len += n + 1;
 	} break;
 	}
+	socket_rcvlowat(d->fd, SOCKS4_RSP_MINLEN);
 	return send_req(d, buf, len);
 }
 
@@ -441,6 +446,7 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		len += sizeof(uint16_t);
 	} break;
 	}
+	socket_rcvlowat(d->fd, SOCKS5_RSP_MINLEN);
 	return send_req(d, buf, len);
 }
 
