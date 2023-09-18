@@ -322,10 +322,9 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	stats->num_request++;
 	ctx->state = STATE_RESPONSE;
 	ctx->handle(loop, ctx);
-	if (ctx->state != STATE_RESPONSE) {
-		return;
+	if (ctx->state == STATE_RESPONSE) {
+		ev_io_start(loop, &ctx->w_send);
 	}
-	ev_io_start(loop, &ctx->w_send);
 }
 
 void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)

@@ -196,11 +196,10 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	free(ctx->dialreq);
 
 	struct server_stats *restrict stats = &ctx->s->stats;
-	struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
-		ev_timer_start(loop, w_timeout);
 	} else {
+		ev_timer_stop(loop, &ctx->w_timeout);
 		ctx->state = STATE_ESTABLISHED;
 		stats->num_halfopen--;
 		stats->num_sessions++;
@@ -259,6 +258,7 @@ static void forward_ctx_start(
 	struct dialreq *req)
 {
 	dialer_start(&ctx->dialer, loop, req);
+	ev_timer_start(loop, &ctx->w_timeout);
 
 	ctx->state = STATE_CONNECT;
 	struct server_stats *restrict stats = &ctx->s->stats;
