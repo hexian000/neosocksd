@@ -102,16 +102,16 @@ sudo apt install libev4 libc-ares2
 opkg install libev libcares
 ```
 
-*Lua is always statically linked.*
+*Lua is statically linked by default.*
 
 ## Building from Source
 ### Dependencies
 
 | Name   | Version   | Required | Feature                    |
 | ------ | --------- | -------- | -------------------------- |
-| c-ares | >= 1.16.0 | no       | asynchronous name resolves |
 | libev  | >= 4.31   | yes      |                            |
-| Lua    | >= 5.3    | yes      | ruleset                    |
+| Lua    | >= 5.3    | no       | ruleset                    |
+| c-ares | >= 1.16.0 | no       | asynchronous name resolves |
 
 ```sh
 # Debian & Ubuntu
@@ -136,6 +136,6 @@ See [m.sh](m.sh) for more information about cross compiling support.
 ## Credits
 
 Thanks to:
-- [c-ares](https://c-ares.org/)
 - [libev](http://software.schmorp.de/pkg/libev.html)
 - [Lua](https://www.lua.org/)
+- [c-ares](https://c-ares.org/)
