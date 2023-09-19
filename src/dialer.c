@@ -286,16 +286,16 @@ send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 static bool
 send_http_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 {
-	size_t addrlen;
+	size_t addrcap;
 	switch (addr->type) {
 	case ATYP_INET:
-		addrlen = INET_ADDRSTRLEN;
+		addrcap = INET_ADDRSTRLEN;
 		break;
 	case ATYP_INET6:
-		addrlen = INET6_ADDRSTRLEN;
+		addrcap = INET6_ADDRSTRLEN;
 		break;
 	case ATYP_DOMAIN:
-		addrlen = addr->domain.len + 1 /* '\0' */;
+		addrcap = addr->domain.len + 1;
 		break;
 	default:
 		FAIL();
@@ -309,21 +309,22 @@ send_http_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		(b) += STRLEN(s);                                              \
 	} while (0)
 	/* "CONNECT example.org:80 HTTP/1.1\r\n\r\n" */
-	const size_t addrcap = addrlen + STRLEN(":65535");
+	addrcap += STRLEN(":65535");
 	const size_t cap =
 		STRLEN("CONNECT ") + addrcap + STRLEN(" HTTP/1.1\r\n\r\n");
 	char buf[cap];
 	char *b = buf;
 	APPEND(b, "CONNECT ");
-	const int n = dialaddr_format(addr, b, addrcap + 1);
-	if (n <= 0 || (size_t)n > addrcap) {
+	const int n = dialaddr_format(addr, b, addrcap);
+	if (n < 0 || (size_t)n >= addrcap) {
 		return false;
 	}
 	b += n;
 	APPEND(b, " HTTP/1.1\r\n\r\n");
 
-	socket_rcvlowat(d->fd, STRLENB("HTTP/1.1 200 \r\n\r\n"));
+	socket_rcvlowat(d->fd, STRLENB("HTTP/2 200 \r\n\r\n"));
 #undef APPEND
+#undef STRLENB
 #undef STRLEN
 	return send_req(d, (unsigned char *)buf, (size_t)(b - buf));
 }

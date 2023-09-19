@@ -2,8 +2,6 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "socks.h"
-#include "server.h"
-#include "session.h"
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
@@ -13,6 +11,8 @@
 #include "dialer.h"
 #include "ruleset.h"
 #include "transfer.h"
+#include "server.h"
+#include "session.h"
 #include "sockutil.h"
 #include "util.h"
 
@@ -668,10 +668,15 @@ static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 #if WITH_RULESET
 	struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		const int len = dialaddr_format(addr, NULL, 0);
-		CHECK(len > 0);
-		char request[len + 1];
-		(void)dialaddr_format(addr, request, sizeof(request));
+		size_t cap = 64;
+	make_request:;
+		char request[cap];
+		const int len = dialaddr_format(addr, request, cap);
+		assert(len >= 0);
+		if ((size_t)len >= cap) {
+			cap = (size_t)len + 1;
+			goto make_request;
+		}
 		switch (addr->type) {
 		case ATYP_DOMAIN:
 			return ruleset_resolve(ruleset, request);
