@@ -8,7 +8,8 @@
 
 ## RESTful API
 
-*The RESTful API server runs HTTP/1.1*
+1. The RESTful API server runs `HTTP/1.1`.
+2. The content length limit for a single request is at least 4 MiB.
 
 ### Healthy Check
 
@@ -21,7 +22,8 @@ Check server liveness.
 ### Server Statistics
 
 GET: Get the stateless server statistics.
-POST: Calculate server statistics since the last call.
+
+POST: Calculate server statistics since the last request.
 
 - **Path**: `/stats`
 - **Method**: GET, POST
@@ -37,15 +39,13 @@ Run the posted script.
 - **Content**: Lua script
 - **Status**: HTTP 200, HTTP 405, HTTP 500
 
-NOTE: The code length limit for a single invocation is guaranteed to be at least 4 MiB.
-
 ### Ruleset Update
 
-Update ruleset with the uploaded script.
+Load the posted script and use it as follows:
 
-If module name is specified, replace the Lua module with the uploaded script.
-
-If module is loaded like `_G.name = require("name")`, the reference `_G.name` will be updated too.
+1. If module name is not specified, replace the ruleset.
+2. If module name is specified, replace the named Lua module.
+3. If the field `_G.name` refers to the named module, it will be updated too.
 
 - **Path**: `/ruleset/update`
 - **Query**: `?module=name` (optional)
@@ -61,6 +61,7 @@ Trigger a full GC.
 - **Method**: POST
 - **Content**: None
 - **Status**: HTTP 200, HTTP 405
+
 
 ## Ruleset Callbacks
 ### ruleset.resolve
@@ -91,7 +92,7 @@ Process a host name request. Specifically:
 - `addr, proxyN, ..., proxy1`: forward the request through proxy chain
 - `nil`: reject the request
 
-The proxy address can be specified in URI format, supported scheme:
+The proxy addresses are specified in URI format, supported scheme:
 - `socks4a://example.org:1080`: SOCKS4A is the default proxy protocol if not specified. The implementation is SOCKS4 compatible when requesting IPv4 address.
 - `socks5://example.org:1080`: SOCKS5 server.
 - `http://example.org:8080`: HTTP/1.1 CONNECT server.
@@ -349,7 +350,7 @@ neosocksd.invoke([[log("test rpc")]], "neosocksd.lan:80", "127.0.0.1:1080")
 
 **Description**
 
-Run Lua code on another neosocksd. This function returns immediately. On failure, the invocation is lost.
+Run Lua code on another neosocksd. This function returns immediately. In case of failure, the invocation is lost.
 
 
 ### _G.NDEBUG
