@@ -310,7 +310,7 @@ static void resolve_cb(
 {
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
-	const int ret = ruleset_pcall(r, resolve_cb_, 2, 0, FROM_HANDLE(h), sa);
+	const int ret = ruleset_pcall(r, resolve_cb_, 2, 0, TO_POINTER(h), sa);
 	if (ret != LUA_OK) {
 		lua_State *restrict L = r->L;
 		LOGE_F("resolve callback: %s", lua_tostring(L, -1));
@@ -324,13 +324,11 @@ static int api_resolve_async_(lua_State *restrict L)
 	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *name = luaL_checkstring(L, 1);
 	luaL_checkany(L, 2);
-	const handle_t h = resolve_do(
-		G.resolver,
-		(struct resolve_cb){
-			.cb = resolve_cb,
-			.ctx = find_ruleset(L),
-		},
-		name, NULL, G.conf->resolve_pf);
+	const handle_t h = resolve_new(
+		G.resolver, (struct resolve_cb){
+				    .cb = resolve_cb,
+				    .ctx = find_ruleset(L),
+			    });
 	if (h == INVALID_HANDLE) {
 		return luaL_error(
 			L, "resolve \"%s\" failed: out of memory", name);
@@ -339,7 +337,8 @@ static int api_resolve_async_(lua_State *restrict L)
 	lua_pushvalue(L, 1); /* host */
 	lua_pushvalue(L, 2); /* cb */
 	lua_pushcclosure(L, api_resolve_cb_, 2);
-	lua_rawsetp(L, -2, FROM_HANDLE(h));
+	lua_rawsetp(L, -2, TO_POINTER(h));
+	resolve_start(h, name, NULL, G.conf->resolve_pf);
 	return 0;
 }
 

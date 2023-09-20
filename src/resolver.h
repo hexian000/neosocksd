@@ -34,10 +34,9 @@ struct resolve_cb {
 	void *ctx;
 };
 
-/* the returned handle is only for resolve_cancel() and becomes invalid just before callback is invoked */
-handle_t resolve_do(
-	struct resolver *r, struct resolve_cb cb, const char *name,
-	const char *service, int family);
+handle_t resolve_new(struct resolver *r, struct resolve_cb cb);
+void resolve_start(
+	handle_t h, const char *name, const char *service, int family);
 void resolve_cancel(handle_t h);
 
 #endif /* RESOLVER_H */

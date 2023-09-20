@@ -921,17 +921,16 @@ void dialer_start(
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
-		const handle_t h = resolve_do(
-			G.resolver,
-			(struct resolve_cb){
-				.cb = resolve_cb,
-				.ctx = d,
-			},
-			host, NULL, G.conf->resolve_pf);
+		const handle_t h = resolve_new(
+			G.resolver, (struct resolve_cb){
+					    .cb = resolve_cb,
+					    .ctx = d,
+				    });
 		if (h == INVALID_HANDLE) {
 			DIALER_RETURN(d, loop, false);
 		}
 		d->resolve_handle = h;
+		resolve_start(h, host, NULL, G.conf->resolve_pf);
 	} break;
 	default:
 		FAIL();

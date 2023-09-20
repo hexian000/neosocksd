@@ -32,7 +32,7 @@ extern struct globals {
 typedef uintptr_t handle_t;
 #define INVALID_HANDLE ((uintptr_t)NULL)
 #define TO_HANDLE(p) ((handle_t)(p))
-#define FROM_HANDLE(h) ((void *)(h))
+#define TO_POINTER(x) ((void *)(x))
 
 #define CLOSE_FD(fd)                                                           \
 	do {                                                                   \

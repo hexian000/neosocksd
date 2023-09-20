@@ -57,7 +57,7 @@ struct resolve_query {
 	do {                                                                   \
 		LOGV_F("resolve: [%p] finished ok=%d", (void *)(q), (q)->ok);  \
 		const struct resolve_query query = *(q);                       \
-		const handle_t h = (handle_t)(q);                              \
+		const handle_t h = TO_HANDLE(q);                               \
 		free((q));                                                     \
 		if (query.done_cb.cb == NULL) { /* cancelled */                \
 			return;                                                \
@@ -324,25 +324,24 @@ const struct resolver_stats *resolver_stats(struct resolver *r)
 	return &r->stats;
 }
 
-static struct resolve_query *
-resolve_new(struct resolver *r, struct resolve_cb cb)
+handle_t resolve_new(struct resolver *r, struct resolve_cb cb)
 {
 	struct resolve_query *restrict q = malloc(sizeof(struct resolve_query));
 	if (q == NULL) {
 		LOGOOM();
-		return NULL;
+		return INVALID_HANDLE;
 	}
 	*q = (struct resolve_query){
 		.resolver = r,
 		.done_cb = cb,
 	};
-	return q;
+	return TO_HANDLE(q);
 }
 
-static void resolve_start(
-	struct resolve_query *restrict q, const char *name, const char *service,
-	int family)
+void resolve_start(
+	const handle_t h, const char *name, const char *service, int family)
 {
+	struct resolve_query *restrict q = TO_POINTER(h);
 	LOGV_F("resolve: [%p] start name=\"%s\" service=%s pf=%d", (void *)q,
 	       name, service, family);
 	struct resolver *restrict r = q->resolver;
@@ -366,18 +365,6 @@ static void resolve_start(
 #endif /* WITH_CARES */
 	q->ok = resolve_addr(&q->addr, name, service, family);
 	RESOLVE_RETURN(q, r->loop);
-}
-
-handle_t resolve_do(
-	struct resolver *r, struct resolve_cb cb, const char *name,
-	const char *service, int family)
-{
-	struct resolve_query *q = resolve_new(r, cb);
-	if (q == NULL) {
-		return INVALID_HANDLE;
-	}
-	resolve_start(q, name, service, family);
-	return TO_HANDLE(q);
 }
 
 void resolve_cancel(handle_t h)
