@@ -1,6 +1,6 @@
 add_library(csnippets STATIC)
 target_include_directories(csnippets BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(csnippets PRIVATE -pedantic -Wall -Wextra -Werror)
+target_compile_options(csnippets PRIVATE -pedantic -Wall -Wextra)
 add_subdirectory(math)
 add_subdirectory(net)
 add_subdirectory(utils)
