@@ -148,7 +148,7 @@ socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 static void
 socks_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 {
-	socks_ctx_close(loop, (struct socks_ctx *)ss);
+	socks_ctx_close(loop, CAST(struct socks_ctx, ss, ss));
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -604,6 +604,8 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 			return socks4_req(ctx);
 		case SOCKS5:
 			return socks5_auth(ctx);
+		default:
+			break;
 		}
 		break;
 	case STATE_HANDSHAKE2:
@@ -612,6 +614,8 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 			FAIL();
 		case SOCKS5:
 			return socks5_req(ctx);
+		default:
+			break;
 		}
 		break;
 	case STATE_CONNECT:

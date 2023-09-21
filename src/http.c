@@ -103,7 +103,7 @@ void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void
 http_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 {
-	http_ctx_close(loop, (struct http_ctx *)ss);
+	http_ctx_close(loop, CAST(struct http_ctx, ss, ss));
 }
 
 void http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)

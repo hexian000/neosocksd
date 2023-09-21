@@ -34,6 +34,9 @@ typedef uintptr_t handle_t;
 #define TO_HANDLE(p) ((handle_t)(p))
 #define TO_POINTER(x) ((void *)(x))
 
+#define CAST(type, member, ptr)                                                \
+	((type *)(((unsigned char *)(ptr)) - offsetof(type, member)))
+
 #define CLOSE_FD(fd)                                                           \
 	do {                                                                   \
 		if (close(fd) != 0) {                                          \

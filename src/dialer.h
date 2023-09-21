@@ -80,7 +80,7 @@ struct dialer {
 	} buf;
 };
 
-void dialer_init(struct dialer *d, const struct event_cb cb);
+void dialer_init(struct dialer *d, struct event_cb cb);
 
 void dialer_start(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req);

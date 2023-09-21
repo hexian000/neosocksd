@@ -507,8 +507,8 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 	struct ruleset *restrict r = ud;
 	if (nsize == 0) {
 		/* free */
-		free(ptr);
 		if (ptr != NULL) {
+			free(ptr);
 			r->heap.byt_allocated -= osize;
 			r->heap.num_object--;
 		}

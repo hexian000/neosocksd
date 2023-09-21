@@ -259,7 +259,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 
 #define DIALER_RETURN(d, loop, ok)                                             \
 	do {                                                                   \
-		LOGV_F("dialer: [%p] finished ok=%d", (void *)d, (ok));        \
+		LOGV_F("dialer: [%p] finished ok=%d", (void *)(d), (ok));      \
 		dialer_stop((d), (loop), (ok));                                \
 		(d)->done_cb.cb((loop), (d)->done_cb.ctx);                     \
 		return;                                                        \
@@ -302,7 +302,7 @@ send_http_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 	}
 
 #define STRLEN(s) (ARRAY_SIZE(s) - 1)
-#define STRLENB(s) (STRLEN(s) * sizeof(s[0]))
+#define STRLENB(s) (STRLEN(s) * sizeof((s)[0]))
 #define APPEND(b, s)                                                           \
 	do {                                                                   \
 		memcpy((b), (s), STRLENB(s));                                  \

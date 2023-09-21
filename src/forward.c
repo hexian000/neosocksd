@@ -126,7 +126,7 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 static void
 forward_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 {
-	forward_ctx_close(loop, (struct forward_ctx *)ss);
+	forward_ctx_close(loop, CAST(struct forward_ctx, ss, ss));
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
