@@ -18,12 +18,15 @@ struct ruleset_memstats {
 };
 
 struct ruleset *ruleset_new(struct ev_loop *loop);
-const char *ruleset_invoke(struct ruleset *r, const char *code, size_t len);
-const char *ruleset_update(
-	struct ruleset *r, const char *modname, const char *code, size_t len);
-const char *ruleset_loadfile(struct ruleset *r, const char *filename);
 void ruleset_gc(struct ruleset *r);
 void ruleset_free(struct ruleset *r);
+
+const char *ruleset_error(struct ruleset *r);
+
+bool ruleset_invoke(struct ruleset *r, const char *code, size_t len);
+bool ruleset_update(
+	struct ruleset *r, const char *modname, const char *code, size_t len);
+bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
 struct dialreq *ruleset_resolve(struct ruleset *r, const char *request);
 struct dialreq *ruleset_route(struct ruleset *r, const char *request);

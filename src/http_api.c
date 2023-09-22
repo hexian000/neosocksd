@@ -228,8 +228,10 @@ static void http_handle_ruleset(
 		const char *code = (const char *)ctx->cbuf->data;
 		const size_t len = ctx->http.content_length;
 		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset invoke");
-		const char *err = ruleset_invoke(ruleset, code, len);
-		if (err != NULL) {
+		const bool ok = ruleset_invoke(ruleset, code, len);
+		if (!ok) {
+			const char *err = ruleset_error(ruleset);
+			LOGW_F("ruleset invoke: %s", err);
 			RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
 			BUF_APPENDSTR(ctx->wbuf, err);
 			BUF_APPENDCONST(ctx->wbuf, "\n");
@@ -255,8 +257,10 @@ static void http_handle_ruleset(
 		const char *code = (const char *)ctx->cbuf->data;
 		const size_t len = ctx->http.content_length;
 		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset update");
-		const char *err = ruleset_update(ruleset, module, code, len);
-		if (err != NULL) {
+		const bool ok = ruleset_update(ruleset, module, code, len);
+		if (!ok) {
+			const char *err = ruleset_error(ruleset);
+			LOGW_F("ruleset update: %s", err);
 			RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
 			BUF_APPENDSTR(ctx->wbuf, err);
 			BUF_APPENDCONST(ctx->wbuf, "\n");

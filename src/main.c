@@ -296,8 +296,9 @@ int main(int argc, char **argv)
 	if (conf->ruleset != NULL) {
 		G.ruleset = ruleset_new(loop);
 		CHECKOOM(G.ruleset);
-		const char *err = ruleset_loadfile(G.ruleset, conf->ruleset);
-		if (err != NULL) {
+		const bool ok = ruleset_loadfile(G.ruleset, conf->ruleset);
+		if (!ok) {
+			LOGE_F("ruleset load: %s", ruleset_error(G.ruleset));
 			LOGF_F("unable to load ruleset: %s", conf->ruleset);
 			exit(EXIT_FAILURE);
 		}
@@ -420,9 +421,10 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 			       watcher->signum);
 			break;
 		}
-		const char *err = ruleset_loadfile(G.ruleset, conf->ruleset);
-		if (err != NULL) {
-			LOGE_F("failed to reload ruleset: %s", err);
+		const bool ok = ruleset_loadfile(G.ruleset, conf->ruleset);
+		if (!ok) {
+			LOGW_F("failed to reload ruleset: %s",
+			       ruleset_error(G.ruleset));
 			break;
 		}
 		LOGI("ruleset successfully reloaded");

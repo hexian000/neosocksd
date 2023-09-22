@@ -15,6 +15,7 @@
 
 #include <ev.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <inttypes.h>
 

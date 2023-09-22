@@ -41,6 +41,7 @@ struct ruleset {
 	lua_State *L;
 	struct ev_timer w_ticker;
 	struct ev_idle w_idle;
+	char errmsg[64];
 };
 
 #ifndef LUA_LOADED_TABLE
@@ -312,8 +313,7 @@ static void resolve_cb(
 	struct ruleset *restrict r = ctx;
 	const int ret = ruleset_pcall(r, resolve_cb_, 2, 0, TO_POINTER(h), sa);
 	if (ret != LUA_OK) {
-		lua_State *restrict L = r->L;
-		LOGE_F("resolve callback: %s", lua_tostring(L, -1));
+		LOGE_F("resolve callback: %s", ruleset_error(r));
 		return;
 	}
 }
@@ -417,8 +417,7 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	ev_tstamp now = ev_now(loop);
 	const int ret = ruleset_pcall(r, ruleset_tick_, 2, 0, func, &now);
 	if (ret != LUA_OK) {
-		lua_State *restrict L = r->L;
-		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
+		LOGE_F("ruleset.%s: %s", func, ruleset_error(r));
 		return;
 	}
 }
@@ -458,7 +457,7 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	const char *func = "idle";
 	const int ret = ruleset_pcall(r, ruleset_idle_, 1, 0, func);
 	if (ret != LUA_OK) {
-		LOGE_F("ruleset.%s: %s", func, lua_tostring(r->L, -1));
+		LOGE_F("ruleset.%s: %s", func, ruleset_error(r));
 		return;
 	}
 }
@@ -534,10 +533,11 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 static int l_panic(lua_State *L)
 {
 	const char *msg = lua_tostring(L, -1);
-	if (msg == NULL) {
-		msg = "(error object is not a string)";
+	if (msg != NULL) {
+		LOGF_F("panic: %s", msg);
+	} else {
+		LOGF_F("panic: (%s)", lua_typename(L, lua_type(L, -1)));
 	}
-	LOGF_F("panic: %s", msg);
 	return 0; /* return to Lua to abort */
 }
 
@@ -574,7 +574,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 		ruleset_free(r);
 		return NULL;
 	default:
-		FAIL();
+		FAILMSGF("ruleset init: %s", ruleset_error(r));
 	}
 	return r;
 }
@@ -596,8 +596,7 @@ static int ruleset_invoke_(lua_State *restrict L)
 	const size_t len = *(size_t *)lua_topointer(L, 2);
 	lua_settop(L, 0);
 	if (luaL_loadbuffer(L, code, len, "=rpc") != LUA_OK) {
-		return luaL_error(
-			L, "error loading rpc:\n\t%s", lua_tostring(L, -1));
+		return lua_error(L);
 	}
 	lua_call(L, 0, 0);
 	return 0;
@@ -653,9 +652,7 @@ static int ruleset_update_(lua_State *restrict L)
 	lua_pop(L, 3);
 	if (modname == NULL) {
 		if (luaL_loadbuffer(L, code, len, "=ruleset") != LUA_OK) {
-			return luaL_error(
-				L, "error loading ruleset:\n\t%s",
-				lua_tostring(L, -1));
+			return lua_error(L);
 		}
 		lua_pushstring(L, "ruleset");
 		lua_call(L, 1, 1);
@@ -675,9 +672,7 @@ static int ruleset_update_(lua_State *restrict L)
 		memcpy(name + 1, modname, namelen);
 		name[1 + namelen] = '\0';
 		if (luaL_loadbuffer(L, code, len, name) != LUA_OK) {
-			return luaL_error(
-				L, "error loading module '%s':\n\t%s", modname,
-				lua_tostring(L, -1));
+			return lua_error(L);
 		}
 	}
 	lua_call(L, 2, 0);
@@ -689,9 +684,7 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	const char *filename = lua_topointer(L, 1);
 	lua_pop(L, 1);
 	if (luaL_loadfile(L, filename) != LUA_OK) {
-		return luaL_error(
-			L, "error loading file '%s':\n\t%s", filename,
-			lua_tostring(L, -1));
+		return lua_error(L);
 	}
 	lua_pushstring(L, "ruleset");
 	lua_call(L, 1, 1);
@@ -703,45 +696,39 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	return 0;
 }
 
-const char *
-ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
+const char *ruleset_error(struct ruleset *restrict r)
 {
 	lua_State *restrict L = r->L;
-	const int ret = ruleset_pcall(
-		r, ruleset_invoke_, 2, 0, (void *)code, (void *)&len);
-	if (ret != LUA_OK) {
-		const char *err = lua_tostring(L, -1);
-		LOGE_F("ruleset invoke: %s", err);
-		return err;
+	const char *s = lua_tostring(L, -1);
+	if (s == NULL) {
+		(void)snprintf(
+			r->errmsg, sizeof(r->errmsg), "(%s: %p)",
+			lua_typename(L, lua_type(L, -1)), lua_topointer(L, -1));
+		return r->errmsg;
 	}
-	return NULL;
+	return s;
 }
 
-const char *ruleset_update(
+bool ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
+{
+	const int ret = ruleset_pcall(
+		r, ruleset_invoke_, 2, 0, (void *)code, (void *)&len);
+	return ret == LUA_OK;
+}
+
+bool ruleset_update(
 	struct ruleset *r, const char *modname, const char *code,
 	const size_t len)
 {
-	lua_State *restrict L = r->L;
 	const int ret =
 		ruleset_pcall(r, ruleset_update_, 3, 0, modname, code, &len);
-	if (ret != LUA_OK) {
-		const char *err = lua_tostring(L, -1);
-		LOGE_F("ruleset update: %s", err);
-		return err;
-	}
-	return NULL;
+	return ret == LUA_OK;
 }
 
-const char *ruleset_loadfile(struct ruleset *r, const char *filename)
+bool ruleset_loadfile(struct ruleset *r, const char *filename)
 {
-	lua_State *restrict L = r->L;
 	const int ret = ruleset_pcall(r, ruleset_loadfile_, 1, 0, filename);
-	if (ret != LUA_OK) {
-		const char *err = lua_tostring(L, -1);
-		LOGE_F("ruleset loadfile: %s", err);
-		return err;
-	}
-	return NULL;
+	return ret == LUA_OK;
 }
 
 void ruleset_gc(struct ruleset *restrict r)
@@ -789,7 +776,7 @@ dispatch_req(struct ruleset *restrict r, const char *func, const char *request)
 	const int ret = ruleset_pcall(
 		r, ruleset_request_, 2, 1, (void *)func, (void *)request);
 	if (ret != LUA_OK) {
-		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
+		LOGE_F("ruleset.%s: %s", func, ruleset_error(r));
 		return NULL;
 	}
 	return (struct dialreq *)lua_topointer(L, -1);
@@ -832,7 +819,7 @@ const char *ruleset_stats(struct ruleset *restrict r, const double dt)
 	const int ret = ruleset_pcall(
 		r, ruleset_stats_, 2, 1, (void *)func, (void *)&dt);
 	if (ret != LUA_OK) {
-		LOGE_F("ruleset.%s: %s", func, lua_tostring(L, -1));
+		LOGE_F("ruleset.%s: %s", func, ruleset_error(r));
 		return NULL;
 	}
 	if (!lua_isstring(L, -1)) {
