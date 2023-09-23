@@ -44,10 +44,7 @@ struct ruleset {
 	char errmsg[64];
 };
 
-#ifndef LUA_LOADED_TABLE
-#define LUA_LOADED_TABLE "_LOADED"
-#endif
-#define ASYNC_CALLBACK_TABLE "async"
+#define RIDX_ASYNC_CALLBACKS (LUA_RIDX_LAST + 1)
 
 static struct ruleset *find_ruleset(lua_State *L)
 {
@@ -297,7 +294,7 @@ static int resolve_cb_(lua_State *restrict L)
 {
 	struct resolve_query *q = (void *)lua_topointer(L, 1);
 	format_addr_(L);
-	luaL_getsubtable(L, LUA_REGISTRYINDEX, ASYNC_CALLBACK_TABLE);
+	lua_geti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS);
 	lua_rawgetp(L, -1, q);
 	lua_pushnil(L); /* t, cb, nil */
 	lua_rawsetp(L, -3, q);
@@ -333,7 +330,7 @@ static int api_resolve_async_(lua_State *restrict L)
 		return luaL_error(
 			L, "resolve \"%s\" failed: out of memory", name);
 	}
-	luaL_getsubtable(L, LUA_REGISTRYINDEX, ASYNC_CALLBACK_TABLE);
+	lua_geti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS);
 	lua_pushvalue(L, 1); /* host */
 	lua_pushvalue(L, 2); /* cb */
 	lua_pushcclosure(L, api_resolve_cb_, 2);
