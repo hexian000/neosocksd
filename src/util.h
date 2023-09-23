@@ -47,6 +47,9 @@ typedef uintptr_t handle_t;
 	} while (0)
 
 struct ev_loop;
+struct ev_io;
+
+void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
 
 struct event_cb {
 	void (*cb)(struct ev_loop *loop, void *ctx);

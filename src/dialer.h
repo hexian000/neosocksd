@@ -72,7 +72,7 @@ struct dialer {
 	handle_t resolve_handle;
 	size_t jump;
 	int state;
-	int fd, syserr;
+	int syserr;
 	struct ev_io w_socket;
 	struct {
 		BUFFER_HDR;

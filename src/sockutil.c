@@ -82,6 +82,24 @@ void socket_set_fastopen(const int fd, const int backlog)
 #endif
 }
 
+void socket_set_fastopen_connect(const int fd, const bool enabled)
+{
+#ifdef TCP_FASTOPEN_CONNECT
+	int val = enabled ? 1 : 0;
+	if (setsockopt(
+		    fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &val, sizeof(val))) {
+		const int err = errno;
+		LOGW_F("TCP_FASTOPEN_CONNECT: %s", strerror(err));
+	}
+#else
+	UNUSED(fd);
+	if (enabled) {
+		LOGW_F("TCP_FASTOPEN_CONNECT: %s",
+		       "not supported in current build");
+	}
+#endif
+}
+
 void socket_set_buffer(const int fd, const size_t send, const size_t recv)
 {
 	int val;

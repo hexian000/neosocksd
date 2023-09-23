@@ -249,9 +249,9 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 	case STATE_DONE:
 		break;
 	}
-	if (!ok && d->fd != -1) {
-		CLOSE_FD(d->fd);
-		d->fd = -1;
+	if (!ok && d->w_socket.fd != -1) {
+		CLOSE_FD(d->w_socket.fd);
+		ev_io_set(&d->w_socket, -1, EV_NONE);
 	}
 	assert(!ev_is_active(&d->w_socket));
 	d->state = STATE_DONE;
@@ -269,7 +269,7 @@ static bool
 send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 {
 	LOG_BIN_F(LOG_LEVEL_VERBOSE, buf, len, "send: %zu bytes", len);
-	const ssize_t nsend = send(d->fd, buf, len, 0);
+	const ssize_t nsend = send(d->w_socket.fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
 		LOGE_F("send: %s", strerror(err));
@@ -322,11 +322,14 @@ send_http_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 	b += n;
 	APPEND(b, " HTTP/1.1\r\n\r\n");
 
-	socket_rcvlowat(d->fd, STRLENB("HTTP/2 200 \r\n\r\n"));
+	if (!send_req(d, (unsigned char *)buf, (size_t)(b - buf))) {
+		return false;
+	}
+	socket_rcvlowat(d->w_socket.fd, STRLENB("HTTP/2 200 \r\n\r\n"));
 #undef APPEND
 #undef STRLENB
 #undef STRLEN
-	return send_req(d, (unsigned char *)buf, (size_t)(b - buf));
+	return true;
 }
 
 static bool send_socks4a_req(
@@ -378,8 +381,11 @@ static bool send_socks4a_req(
 		len += n + 1;
 	} break;
 	}
-	socket_rcvlowat(d->fd, SOCKS4_RSP_MINLEN);
-	return send_req(d, buf, len);
+	if (!send_req(d, buf, len)) {
+		return false;
+	}
+	socket_rcvlowat(d->w_socket.fd, SOCKS4_RSP_MINLEN);
+	return true;
 }
 
 static bool send_socks5_auth(
@@ -447,8 +453,11 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		len += sizeof(uint16_t);
 	} break;
 	}
-	socket_rcvlowat(d->fd, SOCKS5_RSP_MINLEN);
-	return send_req(d, buf, len);
+	if (!send_req(d, buf, len)) {
+		return false;
+	}
+	socket_rcvlowat(d->w_socket.fd, SOCKS5_RSP_MINLEN);
+	return true;
 }
 
 static bool send_proxy_req(struct dialer *restrict d)
@@ -483,7 +492,7 @@ static bool send_proxy_req(struct dialer *restrict d)
 static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 {
 	LOGV_F("consume_rcvbuf: %zu bytes", n);
-	const ssize_t nrecv = recv(d->fd, d->buf.data, n, 0);
+	const ssize_t nrecv = recv(d->w_socket.fd, d->buf.data, n, 0);
 	if (nrecv < 0) {
 		const int err = errno;
 		LOGE_F("recv: %s", strerror(err));
@@ -669,10 +678,9 @@ recv_dispatch(struct dialer *restrict d, const struct proxy_req *restrict req)
 	FAIL();
 }
 
-static int dialer_recv(
-	struct dialer *restrict d, const int fd,
-	const struct proxy_req *restrict req)
+static int dialer_recv(struct dialer *restrict d)
 {
+	const int fd = d->w_socket.fd;
 	const ssize_t nrecv = recv(fd, d->buf.data, d->buf.cap, MSG_PEEK);
 	if (nrecv < 0) {
 		const int err = errno;
@@ -698,11 +706,12 @@ static int dialer_recv(
 	LOG_BIN_F(
 		LOG_LEVEL_VERBOSE, d->buf.data, d->buf.len, "recv: %zu bytes",
 		d->buf.len);
-	const int ret = recv_dispatch(d, req);
+
+	const int ret = recv_dispatch(d, &d->req->proxy[d->jump]);
 	if (ret < 0) {
 		return ret;
 	} else if (ret == 0) {
-		socket_rcvlowat(d->fd, 1);
+		socket_rcvlowat(d->w_socket.fd, 1);
 		return 0;
 	}
 	const size_t want = d->buf.len + (size_t)ret;
@@ -714,64 +723,50 @@ static int dialer_recv(
 	return 1;
 }
 
-static int on_connected(struct dialer *restrict d, const int fd)
-{
-	assert(d->state == STATE_CONNECT);
-	const struct dialreq *restrict req = d->req;
-	const int sockerr = socket_get_error(fd);
-	if (sockerr != 0) {
-		LOGE_F("connect: %s", strerror(sockerr));
-		d->syserr = sockerr;
-		return -1;
-	}
-
-	if (d->jump >= req->num_proxy) {
-		return 0;
-	}
-
-	d->state = STATE_HANDSHAKE1;
-	if (!send_proxy_req(d)) {
-		return -1;
-	}
-	return 1;
-}
-
 static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct dialer *restrict d = watcher->data;
-	const int fd = watcher->fd;
+
 	if (revents & EV_WRITE) {
-		ev_io_stop(loop, watcher);
-		const int ret = on_connected(d, fd);
-		if (ret < 0) {
+		assert(d->state == STATE_CONNECT);
+		const int sockerr = socket_get_error(d->w_socket.fd);
+		if (sockerr != 0) {
+			LOGE_F("connect: %s", strerror(sockerr));
+			d->syserr = sockerr;
 			DIALER_RETURN(d, loop, false);
-		} else if (ret == 0) {
+		}
+		if (d->req->num_proxy == 0) {
 			DIALER_RETURN(d, loop, true);
 		}
-		ev_io_set(watcher, fd, EV_READ);
-		ev_io_start(loop, watcher);
-		return;
+		d->state = STATE_HANDSHAKE1;
+		if (!send_proxy_req(d)) {
+			DIALER_RETURN(d, loop, false);
+		}
+		modify_io_events(loop, watcher, EV_READ);
 	}
 
-	assert(d->state == STATE_HANDSHAKE1 || d->state == STATE_HANDSHAKE2);
-	const int ret = dialer_recv(d, fd, &d->req->proxy[d->jump]);
-	if (ret < 0) {
-		DIALER_RETURN(d, loop, false);
-	} else if (ret > 0) {
-		/* want more data */
-		return;
-	}
+	if (revents & EV_READ) {
+		assert(d->state == STATE_HANDSHAKE1 ||
+		       d->state == STATE_HANDSHAKE2);
+		const int ret = dialer_recv(d);
+		if (ret < 0) {
+			DIALER_RETURN(d, loop, false);
+		} else if (ret > 0) {
+			/* want more data */
+			return;
+		}
 
-	d->buf.len = 0;
-	d->jump++;
-	if (d->jump >= d->req->num_proxy) {
-		DIALER_RETURN(d, loop, true);
-	}
+		d->buf.len = 0;
+		d->jump++;
+		if (d->jump >= d->req->num_proxy) {
+			DIALER_RETURN(d, loop, true);
+		}
 
-	d->state = STATE_HANDSHAKE1;
-	if (!send_proxy_req(d)) {
-		DIALER_RETURN(d, loop, false);
+		d->state = STATE_HANDSHAKE1;
+		if (!send_proxy_req(d)) {
+			DIALER_RETURN(d, loop, false);
+		}
 	}
 }
 
@@ -801,27 +796,41 @@ static bool connect_sa(
 #endif
 	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
 	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
+#if WITH_TCP_FASTOPEN
+	if (conf->tcp_fastopen) {
+		socket_set_fastopen_connect(fd, true);
+	}
+#endif
+	ev_io_set(&d->w_socket, fd, EV_NONE);
+	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
+		char addr_str[64];
+		format_sa(sa, addr_str, sizeof(addr_str));
+		LOG_F(LOG_LEVEL_VERBOSE, "dialer: connect \"%s\"", addr_str);
+	}
+	d->state = STATE_CONNECT;
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
 		const int err = errno;
 		if (err != EINTR && err != EINPROGRESS) {
 			LOGE_F("connect: %s", strerror(err));
-			CLOSE_FD(fd);
 			d->syserr = err;
+			CLOSE_FD(fd);
 			return false;
 		}
+		modify_io_events(loop, &d->w_socket, EV_WRITE);
+		return true;
 	}
-	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
-		char addr_str[64];
-		format_sa(sa, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_VERBOSE, "dialer: CONNECT \"%s\"", addr_str);
+
+	if (d->req->num_proxy == 0) {
+		modify_io_events(loop, &d->w_socket, EV_WRITE);
+		return true;
 	}
-	d->fd = fd;
 
-	struct ev_io *restrict w_socket = &d->w_socket;
-	ev_io_set(w_socket, fd, EV_WRITE);
-	ev_io_start(loop, w_socket);
-
-	d->state = STATE_CONNECT;
+	d->state = STATE_HANDSHAKE1;
+	if (!send_proxy_req(d)) {
+		CLOSE_FD(fd);
+		return false;
+	}
+	modify_io_events(loop, &d->w_socket, EV_READ);
 	return true;
 }
 
@@ -876,7 +885,6 @@ void dialer_init(struct dialer *restrict d, const struct event_cb cb)
 	d->resolve_handle = INVALID_HANDLE;
 	d->jump = 0;
 	d->state = STATE_INIT;
-	d->fd = -1;
 	d->syserr = 0;
 	{
 		struct ev_io *restrict w_socket = &d->w_socket;
@@ -940,7 +948,7 @@ void dialer_start(
 int dialer_get(struct dialer *d)
 {
 	assert(d->state == STATE_DONE);
-	return d->fd;
+	return d->w_socket.fd;
 }
 
 void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)

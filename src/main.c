@@ -62,7 +62,7 @@ static void print_usage(const char *argv0)
 		"  --reuseport                allow multiple instances to listen on the same address\n"
 #endif
 #if WITH_TCP_FASTOPEN
-		"  --no-fastopen              disable server-side TCP fast open (RFC 7413)\n"
+		"  --no-fastopen              disable TCP fast open (RFC 7413)\n"
 #endif
 #if WITH_TPROXY
 		"  --tproxy                   operate as a transparent proxy\n"
