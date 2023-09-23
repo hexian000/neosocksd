@@ -355,7 +355,7 @@ int main(int argc, char **argv)
 	}
 
 	if (conf->daemonize) {
-		daemonize(conf->user_name);
+		daemonize(conf->user_name, true, false);
 	} else if (conf->user_name != NULL) {
 		drop_privileges(conf->user_name);
 	}

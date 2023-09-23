@@ -7,6 +7,7 @@
 #include "utils/slog.h"
 #include "utils/minmax.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -66,6 +67,6 @@ void setup(int argc, char **argv);
 void init(void);
 
 void drop_privileges(const char *user);
-void daemonize(const char *user);
+void daemonize(const char *user, bool nochdir, bool noclose);
 
 #endif /* UTIL_H */
