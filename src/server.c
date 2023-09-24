@@ -140,7 +140,7 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 #endif
 #if WITH_TCP_FASTOPEN
 	if (conf->tcp_fastopen) {
-		socket_set_fastopen(fd, 256);
+		socket_set_fastopen(fd, conf->startup_limit_full);
 	}
 #endif
 	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
@@ -151,7 +151,7 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		CLOSE_FD(fd);
 		return false;
 	}
-	if (listen(fd, 16)) {
+	if (listen(fd, conf->startup_limit_full)) {
 		const int err = errno;
 		LOGE_F("listen error: %s", strerror(err));
 		CLOSE_FD(fd);
