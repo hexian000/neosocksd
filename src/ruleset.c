@@ -469,8 +469,6 @@ static int api_setidle_(lua_State *restrict L)
 
 static int luaopen_neosocksd(lua_State *restrict L)
 {
-	lua_newtable(L);
-	lua_seti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS);
 	const luaL_Reg apilib[] = {
 		{ "invoke", api_invoke_ },
 		{ "resolve", api_resolve_ },
@@ -486,6 +484,9 @@ static int luaopen_neosocksd(lua_State *restrict L)
 
 static int ruleset_luainit_(lua_State *restrict L)
 {
+	/* init registry */
+	lua_newtable(L);
+	lua_seti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS);
 	/* load all libraries */
 	luaL_openlibs(L);
 	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
