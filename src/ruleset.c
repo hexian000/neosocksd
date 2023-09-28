@@ -649,7 +649,7 @@ static int ruleset_update_(lua_State *restrict L)
 	const char *modname = lua_topointer(L, 1);
 	const char *code = lua_topointer(L, 2);
 	const size_t len = *(size_t *)lua_topointer(L, 3);
-	lua_pop(L, 3);
+	lua_settop(L, 0);
 	if (modname == NULL) {
 		if (luaL_loadbuffer(L, code, len, "=ruleset") != LUA_OK) {
 			return lua_error(L);
@@ -664,9 +664,9 @@ static int ruleset_update_(lua_State *restrict L)
 		return 0;
 	}
 	lua_pushcfunction(L, ruleset_require_);
-	lua_pushstring(L, modname);
 	{
 		const size_t namelen = strlen(modname);
+		lua_pushlstring(L, modname, namelen);
 		char name[1 + namelen + 1];
 		name[0] = '=';
 		memcpy(name + 1, modname, namelen);
@@ -711,8 +711,7 @@ const char *ruleset_error(struct ruleset *restrict r)
 
 bool ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
 {
-	const int ret = ruleset_pcall(
-		r, ruleset_invoke_, 2, 0, (void *)code, (void *)&len);
+	const int ret = ruleset_pcall(r, ruleset_invoke_, 2, 0, code, &len);
 	return ret == LUA_OK;
 }
 
