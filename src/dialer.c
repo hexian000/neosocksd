@@ -408,7 +408,7 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		cap += sizeof(struct in6_addr) + sizeof(in_port_t);
 		break;
 	case ATYP_DOMAIN:
-		cap += 1 + addr->domain.len;
+		cap += 1 + addr->domain.len + sizeof(in_port_t);
 		break;
 	default:
 		FAIL();
