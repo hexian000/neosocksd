@@ -611,7 +611,7 @@ static int ruleset_require_(lua_State *restrict L)
 	luaL_checktype(L, idx_openf, LUA_TFUNCTION);
 	lua_settop(L, 2);
 	const int idx_loaded = 3;
-	luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+	luaL_getsubtable(L, LUA_REGISTRYINDEX, "_LOADED");
 	const int idx_glb = 4;
 	lua_geti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
 
