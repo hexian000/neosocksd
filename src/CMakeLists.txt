@@ -50,11 +50,6 @@ target_compile_options(neosocksd PRIVATE -include "${CMAKE_CURRENT_BINARY_DIR}/c
 # be strict with original sources
 target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra -Werror)
 
-find_library(LIBM NAMES m)
-if(LIBM)
-    target_link_libraries(neosocksd PRIVATE ${LIBM})
-endif()
-
 # find libev
 find_path(LIBEV_INCLUDE_DIR NAMES ev.h)
 if(BUILD_STATIC OR LINK_STATIC_LIBS)
@@ -130,6 +125,11 @@ else()
     set(WITH_RULESET 1)
     target_include_directories(neosocksd SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
     target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
+endif()
+
+find_library(LIBM NAMES m)
+if(LIBM)
+    target_link_libraries(neosocksd PRIVATE ${LIBM})
 endif()
 
 install(TARGETS neosocksd DESTINATION bin)
