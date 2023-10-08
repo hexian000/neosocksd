@@ -75,16 +75,19 @@ _G.route6 = {
 }
 
 -- 4. the global default applies to any unmatched requests
-_G.server_list = {"socks4a://127.0.0.1:1081", "socks4a://127.0.0.2:1081"}
+_G.server_list = {
+    [1] = rule.proxy("socks4a://127.0.0.1:1081"),
+    [2] = rule.proxy("socks4a://127.0.0.2:1081")
+}
 _G.server_index = 1
-_G.route_default = rule.proxy(server_list[server_index])
+_G.route_default = server_list[server_index]
 
 function _G.set_route(i, s)
     _G.server_index = i
     if s then
-        _G.server_list[server_index] = s
+        _G.server_list[server_index] = rule.proxy(s)
     end
-    _G.route_default = rule.proxy(server_list[server_index])
+    _G.route_default = server_list[server_index]
 end
 
 local ruleset = setmetatable({}, {
@@ -93,9 +96,28 @@ local ruleset = setmetatable({}, {
     end
 })
 
+function _G.is_rush_hours()
+    local now = os.date("*t")
+    return now.hour >= 22 or now.hour < 4
+end
+
+function ruleset.idle()
+    if is_rush_hours() then
+        set_route(2)
+    else
+        set_route(1)
+    end
+    collectgarbage("collect")
+end
+
+function ruleset.tick(now)
+    neosocksd.setidle()
+    return libruleset.tick(now)
+end
+
 function ruleset.stats(dt)
     local w = list:new()
-    w:insertf("%-20s: [%d] %q", "Default Route", server_index, server_list[server_index])
+    w:insertf("%-20s: %d", "Default Route", server_index)
     w:insert(libruleset.stats(dt))
     return w:concat("\n")
 end
