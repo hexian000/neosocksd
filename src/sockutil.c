@@ -275,7 +275,7 @@ bool parse_bindaddr(sockaddr_max_t *sa, const char *s)
 		.ai_family = PF_UNSPEC,
 		.ai_socktype = SOCK_STREAM,
 		.ai_protocol = IPPROTO_TCP,
-		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG | AI_PASSIVE,
+		.ai_flags = AI_ADDRCONFIG | AI_PASSIVE,
 	};
 	struct addrinfo *result = NULL;
 	const int err = getaddrinfo(hoststr, portstr, &hints, &result);
@@ -296,7 +296,7 @@ bool resolve_addr(
 		.ai_family = family,
 		.ai_socktype = SOCK_STREAM,
 		.ai_protocol = IPPROTO_TCP,
-		.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG,
+		.ai_flags = AI_ADDRCONFIG,
 	};
 	struct addrinfo *result = NULL;
 	const int err = getaddrinfo(name, service, &hints, &result);

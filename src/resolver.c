@@ -352,7 +352,7 @@ void resolve_start(
 			.ai_family = family,
 			.ai_socktype = SOCK_STREAM,
 			.ai_protocol = IPPROTO_TCP,
-			.ai_flags = ARES_AI_V4MAPPED | ARES_AI_ADDRCONFIG,
+			.ai_flags = ARES_AI_ADDRCONFIG,
 		};
 		ares_getaddrinfo(
 			r->channel, name, service, &hints, addrinfo_cb, q);
