@@ -75,19 +75,19 @@ _G.route6 = {
 }
 
 -- 4. the global default applies to any unmatched requests
-_G.server_list = {
+_G.route_list = {
     [1] = rule.proxy("socks4a://127.0.0.1:1081"),
     [2] = rule.proxy("socks4a://127.0.0.2:1081")
 }
-_G.server_index = 1
-_G.route_default = server_list[server_index]
+_G.route_index = 1
+_G.route_default = route_list[route_index]
 
-function _G.set_route(i, s)
-    _G.server_index = i
+function _G.set_route(i, s, ...)
+    _G.route_index = i
     if s then
-        _G.server_list[server_index] = rule.proxy(s)
+        _G.route_list[route_index] = rule.proxy(s, ...)
     end
-    _G.route_default = server_list[server_index]
+    _G.route_default = route_list[route_index]
 end
 
 local ruleset = setmetatable({}, {
@@ -117,7 +117,7 @@ end
 
 function ruleset.stats(dt)
     local w = list:new()
-    w:insertf("%-20s: %d", "Default Route", server_index)
+    w:insertf("%-20s: %d", "Default Route", route_index)
     w:insert(libruleset.stats(dt))
     return w:concat("\n")
 end

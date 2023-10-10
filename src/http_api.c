@@ -168,15 +168,13 @@ static void http_handle_stats(
 #if WITH_RULESET
 	if (G.ruleset != NULL) {
 		const char *str = ruleset_stats(G.ruleset, dt);
-		if (str != NULL) {
-			BUF_APPENDF(
-				ctx->wbuf,
-				"\n"
-				"Ruleset Stats\n"
-				"================\n"
-				"%s\n",
-				str);
-		}
+		BUF_APPENDF(
+			ctx->wbuf,
+			"\n"
+			"Ruleset Stats\n"
+			"================\n"
+			"%s\n",
+			str != NULL ? str : ruleset_error(G.ruleset));
 	}
 #endif
 }

@@ -41,7 +41,6 @@ struct ruleset {
 	lua_State *L;
 	struct ev_timer w_ticker;
 	struct ev_idle w_idle;
-	char errmsg[64];
 };
 
 #define RIDX_ASYNC_CALLBACKS (LUA_RIDX_LAST + 1)
@@ -696,17 +695,31 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	return 0;
 }
 
+static int format_object_(lua_State *restrict L)
+{
+	if (lua_isstring(L, 1)) {
+		return 1;
+	}
+	const char *s = lua_tostring(L, 1);
+	if (s != NULL) {
+		(void)lua_pushstring(L, s);
+		lua_replace(L, 1);
+		return 1;
+	}
+	(void)lua_pushfstring(
+		L, "(%s: %p)", lua_typename(L, lua_type(L, 1)),
+		lua_topointer(L, 1));
+	lua_replace(L, 1);
+	return 1;
+}
+
 const char *ruleset_error(struct ruleset *restrict r)
 {
 	lua_State *restrict L = r->L;
-	const char *s = lua_tostring(L, -1);
-	if (s == NULL) {
-		(void)snprintf(
-			r->errmsg, sizeof(r->errmsg), "(%s: %p)",
-			lua_typename(L, lua_type(L, -1)), lua_topointer(L, -1));
-		return r->errmsg;
-	}
-	return s;
+	lua_pushcfunction(L, format_object_);
+	lua_rotate(L, -2, 1);
+	lua_pcall(r->L, 1, 1, -2);
+	return lua_tostring(L, -1);
 }
 
 bool ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
@@ -819,9 +832,6 @@ const char *ruleset_stats(struct ruleset *restrict r, const double dt)
 		r, ruleset_stats_, 2, 1, (void *)func, (void *)&dt);
 	if (ret != LUA_OK) {
 		LOGE_F("ruleset.%s: %s", func, ruleset_error(r));
-		return NULL;
-	}
-	if (!lua_isstring(L, -1)) {
 		return NULL;
 	}
 	return lua_tostring(L, -1);
