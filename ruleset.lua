@@ -82,10 +82,10 @@ _G.route_list = {
 _G.route_index = 1
 _G.route_default = route_list[route_index]
 
-function _G.set_route(i, s, ...)
+function _G.set_route(i, ...)
     _G.route_index = i
-    if s then
-        _G.route_list[route_index] = rule.proxy(s, ...)
+    if select("#", ...) > 0 then
+        _G.route_list[route_index] = rule.proxy(...)
     end
     _G.route_default = route_list[route_index]
 end
