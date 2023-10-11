@@ -101,17 +101,12 @@ function _G.is_rush_hours()
     return now.hour >= 22 or now.hour < 4
 end
 
-function ruleset.idle()
+function ruleset.tick(now)
     if is_rush_hours() then
         set_route(2)
     else
         set_route(1)
     end
-    collectgarbage("collect")
-end
-
-function ruleset.tick(now)
-    neosocksd.setidle()
     return libruleset.tick(now)
 end
 

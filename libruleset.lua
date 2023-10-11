@@ -656,6 +656,22 @@ function ruleset.route6(addr)
     return route6_(addr)
 end
 
+_G.idle_callbacks = list:new()
+function ruleset.idle()
+    local f = idle_callbacks[1]
+    if not f then
+        return
+    end
+    idle_callbacks:remove(1)
+    neosocksd.setidle()
+    f()
+end
+
+function _G.on_idle(f)
+    idle_callbacks:insert(f)
+    neosocksd.setidle()
+end
+
 function ruleset.tick(now)
     stat_requests:insert(num_requests)
     if stat_requests[MAX_STAT_REQUESTS + 1] then
