@@ -9,6 +9,7 @@ case "$1" in
     rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
+        -DCMAKE_SYSTEM_NAME="Linux" \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -S . -B "build"
@@ -20,6 +21,7 @@ case "$1" in
     rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
+        -DCMAKE_SYSTEM_NAME="Linux" \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DBUILD_STATIC=ON \
