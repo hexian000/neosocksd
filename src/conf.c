@@ -57,7 +57,6 @@ bool conf_check(const struct config *restrict conf)
 	RANGE_CHECK(conf, startup_limit_start, 1, INT_MAX);
 	RANGE_CHECK(conf, startup_limit_rate, 0, 100);
 	RANGE_CHECK(conf, startup_limit_full, 1, INT_MAX);
-	RANGE_CHECK(conf, log_level, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
 
 	if (conf->listen == NULL) {
 		LOGE("conf: listen address is not specified");

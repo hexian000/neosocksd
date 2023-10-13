@@ -270,6 +270,8 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 #undef OPT_REQUIRE_ARG
 #undef OPT_ARG_ERROR
+	slog_level =
+		CLAMP(conf->log_level, LOG_LEVEL_SILENCE, LOG_LEVEL_VERBOSE);
 }
 
 int main(int argc, char **argv)
@@ -283,7 +285,6 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 	G.conf = conf;
-	slog_level = conf->log_level;
 	init();
 
 	struct ev_loop *loop = ev_default_loop(0);
