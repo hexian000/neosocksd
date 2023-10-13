@@ -9,12 +9,12 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 
 - [Features](#features)
 - [Usage](#usage)
-	- [Basic Usage](#basic-usage)
-	- [Scripting Usage](#scripting-usage)
+  - [Basic Usage](#basic-usage)
+  - [Scripting Usage](#scripting-usage)
 - [Runtime Dependencies](#runtime-dependencies)
 - [Building from Source](#building-from-source)
-	- [Dependencies](#dependencies)
-	- [Building with CMake](#building-with-cmake)
+  - [Dependencies](#dependencies)
+  - [Building with CMake](#building-with-cmake)
 - [Credits](#credits)
 
 ## Features
@@ -29,6 +29,8 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 - IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
 - Embedded systems friendly.
 - Conforming to: ISO C11, POSIX.1-2008.
+
+Ruleset example: [ruleset.lua](ruleset.lua)
 
 ## Usage
 ### Basic Usage
