@@ -678,7 +678,6 @@ function ruleset.tick(now)
         stat_requests:remove(1)
     end
 end
-neosocksd.setinterval(60.0)
 
 function ruleset.stats(dt)
     local w = list:new()

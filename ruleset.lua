@@ -110,6 +110,7 @@ function ruleset.tick(now)
     end
     return libruleset.tick(now)
 end
+neosocksd.setinterval(60.0)
 
 function ruleset.stats(dt)
     local w = list:new()
