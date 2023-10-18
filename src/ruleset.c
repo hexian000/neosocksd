@@ -383,13 +383,13 @@ static int luaopen_callbacks(lua_State *restrict L)
 	return 1;
 }
 
-static void check_memlimit(const struct ruleset *restrict r)
+static void check_memlimit(struct ruleset *restrict r)
 {
 	const size_t memlimit = G.conf->memlimit;
 	if (memlimit == 0 || (r->heap.byt_allocated >> 20u) < memlimit) {
 		return;
 	}
-	lua_gc(r->L, LUA_GCCOLLECT, 0);
+	ruleset_gc(r);
 }
 
 static bool ruleset_pcall(
@@ -844,8 +844,9 @@ bool ruleset_loadfile(struct ruleset *r, const char *filename)
 void ruleset_gc(struct ruleset *restrict r)
 {
 	lua_State *restrict L = r->L;
-	lua_settop(L, 0);
-	lua_gc(L, LUA_GCCOLLECT, 0);
+	if (!lua_gc(L, LUA_GCSTEP, 0)) {
+		lua_gc(L, LUA_GCCOLLECT, 0);
+	}
 }
 
 static struct dialreq *
