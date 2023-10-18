@@ -484,7 +484,7 @@ local function route_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                logf("redirect: [%s] %q", tag, addr)
+                logf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -501,13 +501,13 @@ local function route_(addr)
         local action, tag = matchtab_(routetab, ip)
         if action then
             if tag then
-                logf("route: [%s] %q", tag, addr)
+                logf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
     end
     -- global default
-    logf("route default: %q", addr)
+    logf("[default] %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -522,7 +522,7 @@ local function route6_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                logf("redirect6: [%s] %q", tag, addr)
+                logf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -539,13 +539,13 @@ local function route6_(addr)
         local action, tag = matchtab_(routetab, ip1, ip2)
         if action then
             if tag then
-                logf("route6: [%s] %q", tag, addr)
+                logf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
     end
     -- global default
-    logf("route6 default: %q", addr)
+    logf("[default] %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -560,7 +560,7 @@ local function resolve_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                logf("redirect_name: [%s] %q", tag, addr)
+                logf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -583,7 +583,7 @@ local function resolve_(addr)
         return route6_(addr)
     end
     -- global default
-    logf("resolve default: %q", addr)
+    logf("[default] %q", addr)
     local action = _G.route_default
     if action then
         return action(addr)
@@ -632,7 +632,7 @@ end
 function ruleset.resolve(addr)
     num_requests = num_requests + 1
     if not _G.is_enabled() then
-        logf("ruleset.resolve: service not enabled, reject %q", addr)
+        logf("service not enabled, reject %q", addr)
         return nil
     end
     return resolve_(addr)
@@ -641,7 +641,7 @@ end
 function ruleset.route(addr)
     num_requests = num_requests + 1
     if not _G.is_enabled() then
-        logf("ruleset.route: service not enabled, reject %q", addr)
+        logf("service not enabled, reject %q", addr)
         return nil
     end
     return route_(addr)
@@ -650,7 +650,7 @@ end
 function ruleset.route6(addr)
     num_requests = num_requests + 1
     if not _G.is_enabled() then
-        logf("ruleset.route6: service not enabled, reject %q", addr)
+        logf("service not enabled, reject %q", addr)
         return nil
     end
     return route6_(addr)
