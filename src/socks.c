@@ -586,44 +586,23 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 	if (ctx->rbuf.len < 1) {
 		return 1;
 	}
-	const uint8_t version = read_uint8(ctx->rbuf.data);
-	switch (version) {
-	case SOCKS4:
-	case SOCKS5:
-		break;
+	const int version = read_uint8(ctx->rbuf.data);
+#define DISPATCH_TUPLE(version, state) ((state) << 8 | (version))
+	switch (DISPATCH_TUPLE(version, ctx->state)) {
+	case DISPATCH_TUPLE(SOCKS4, STATE_HANDSHAKE1):
+		return socks4_req(ctx);
+	case DISPATCH_TUPLE(SOCKS5, STATE_HANDSHAKE1):
+		return socks5_auth(ctx);
+	case DISPATCH_TUPLE(SOCKS5, STATE_HANDSHAKE2):
+		return socks5_req(ctx);
 	default:
 		SOCKS_CTX_LOG_F(
-			LOG_LEVEL_ERROR, ctx, "SOCKS: unknown version: %" PRIu8,
-			version);
+			LOG_LEVEL_ERROR, ctx,
+			"invalid SOCKS message: version=0x%02x state=%d",
+			version, ctx->state);
 		return -1;
 	}
-	switch (ctx->state) {
-	case STATE_HANDSHAKE1:
-		switch (version) {
-		case SOCKS4:
-			return socks4_req(ctx);
-		case SOCKS5:
-			return socks5_auth(ctx);
-		default:
-			break;
-		}
-		break;
-	case STATE_HANDSHAKE2:
-		switch (version) {
-		case SOCKS4:
-			FAIL();
-		case SOCKS5:
-			return socks5_req(ctx);
-		default:
-			break;
-		}
-		break;
-	case STATE_CONNECT:
-		/* unexpected bytes after the protocol message */
-		return -1;
-	default:
-		break;
-	}
+#undef DISPATCH_TUPLE
 	FAIL();
 }
 
