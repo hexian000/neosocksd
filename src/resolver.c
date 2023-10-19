@@ -339,9 +339,10 @@ handle_t resolve_new(struct resolver *r, struct resolve_cb cb)
 }
 
 void resolve_start(
-	const handle_t h, const char *name, const char *service, int family)
+	const handle_t handle, const char *name, const char *service,
+	int family)
 {
-	struct resolve_query *restrict q = TO_POINTER(h);
+	struct resolve_query *restrict q = TO_POINTER(handle);
 	LOGV_F("resolve: [%p] start name=\"%s\" service=%s pf=%d", (void *)q,
 	       name, service, family);
 	struct resolver *restrict r = q->resolver;

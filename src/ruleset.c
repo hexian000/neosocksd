@@ -2,10 +2,10 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "ruleset.h"
-#include "resolver.h"
 
 #if WITH_RULESET
 
+#include "net/addr.h"
 #include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/minmax.h"
@@ -13,6 +13,7 @@
 #include "utils/slog.h"
 #include "utils/check.h"
 #include "conf.h"
+#include "resolver.h"
 #include "dialer.h"
 #include "http.h"
 #include "sockutil.h"
@@ -504,7 +505,7 @@ static int luaopen_regex(lua_State *restrict L)
 	return 1;
 }
 
-/* invoke(code, addr, proxyN, ..., proxy1) */
+/* neosocksd.invoke(code, addr, proxyN, ..., proxy1) */
 static int api_invoke_(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
@@ -544,7 +545,7 @@ static void resolve_cb(
 	}
 }
 
-/* resolve(host, cb) */
+/* neosocksd.resolve(host, cb) */
 static int api_resolve_async_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TSTRING);
@@ -569,7 +570,7 @@ static int api_resolve_async_(lua_State *restrict L)
 	return 0;
 }
 
-/* resolve(host) */
+/* neosocksd.resolve(host) */
 static int api_resolve_(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
@@ -587,7 +588,7 @@ static int api_resolve_(lua_State *restrict L)
 	return 1;
 }
 
-/* parse_ipv4(ipv4) */
+/* neosocksd.parse_ipv4(ipv4) */
 static int api_parse_ipv4_(lua_State *restrict L)
 {
 	const char *s = lua_tostring(L, 1);
@@ -603,7 +604,7 @@ static int api_parse_ipv4_(lua_State *restrict L)
 	return 1;
 }
 
-/* parse_ipv6(ipv6) */
+/* neosocksd.parse_ipv6(ipv6) */
 static int api_parse_ipv6_(lua_State *restrict L)
 {
 	const char *s = lua_tostring(L, 1);
@@ -641,7 +642,7 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	}
 }
 
-/* setinterval(interval) */
+/* neosocksd.setinterval(interval) */
 static int api_setinterval_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TNUMBER);
@@ -674,12 +675,34 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	}
 }
 
-/* setidle() */
+/* neosocksd.setidle() */
 static int api_setidle_(lua_State *restrict L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
 	ev_idle_start(r->loop, &r->w_idle);
 	return 0;
+}
+
+/* neosocksd.splithostport() */
+static int api_splithostport_(lua_State *restrict L)
+{
+	size_t len;
+	const char *s = luaL_checklstring(L, 1, &len);
+	/* FQDN + ':' + port */
+	if (len > FQDN_MAX_LENGTH + 1 + 5) {
+		return luaL_error(L, "address too long: %zu bytes", len);
+	}
+	char buf[len + 1];
+	memcpy(buf, s, len);
+	buf[len] = '\0';
+	char *host, *port;
+	if (!splithostport(buf, &host, &port)) {
+		return luaL_error(L, "invalid address: \"%s\"", s);
+	}
+	lua_settop(L, 0);
+	lua_pushstring(L, host);
+	lua_pushstring(L, port);
+	return 2;
 }
 
 static int luaopen_neosocksd(lua_State *restrict L)
@@ -689,6 +712,7 @@ static int luaopen_neosocksd(lua_State *restrict L)
 		{ "resolve", api_resolve_ },
 		{ "setinterval", api_setinterval_ },
 		{ "setidle", api_setidle_ },
+		{ "splithostport", api_splithostport_ },
 		{ "parse_ipv4", api_parse_ipv4_ },
 		{ "parse_ipv6", api_parse_ipv6_ },
 		{ NULL, NULL },
@@ -700,17 +724,17 @@ static int luaopen_neosocksd(lua_State *restrict L)
 static int ruleset_luainit_(lua_State *restrict L)
 {
 	/* init registry */
-	luaopen_callbacks(L);
+	CHECK(luaopen_callbacks(L) == 1);
 	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CALLBACKS);
 	lua_newtable(L);
 	lua_seti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS);
+	lua_pushboolean(L, !LOGLEVEL(LOG_LEVEL_DEBUG));
+	lua_setglobal(L, "NDEBUG");
 	/* load all libraries */
 	luaL_openlibs(L);
 	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
 	luaL_requiref(L, "regex", luaopen_regex, 1);
 	lua_pop(L, 2);
-	lua_pushboolean(L, !LOGLEVEL(LOG_LEVEL_DEBUG));
-	lua_setglobal(L, "NDEBUG");
 	/* prefer generational GC on supported lua versions */
 #ifdef LUA_GCGEN
 	lua_gc(L, LUA_GCGEN, 0, 0);
@@ -732,6 +756,7 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 	}
 	if (ptr == NULL) {
 		/* malloc */
+		assert(osize == 0);
 		void *ret = malloc(nsize);
 		if (ret != NULL) {
 			r->heap.num_object++;

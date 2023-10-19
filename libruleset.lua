@@ -124,10 +124,9 @@ function _G.logf(s, ...)
     return _G.log(string.format(s, ...))
 end
 
-function _G.splithostport(s)
-    local host, port = s:match("^(.*):([^:]*)$")
-    return (host:match("^%[(.*)%]$") or host), port
-end
+local splithostport = neosocksd.splithostport
+local parse_ipv4 = neosocksd.parse_ipv4
+local parse_ipv6 = neosocksd.parse_ipv6
 
 function _G.parse_cidr(s)
     local addr, shift = s:match("^(.+)/(%d+)$")
@@ -136,7 +135,7 @@ function _G.parse_cidr(s)
         errorf(2, "invalid prefix size %q", s)
     end
     local mask = ~((1 << (32 - shift)) - 1)
-    local subnet = neosocksd.parse_ipv4(addr)
+    local subnet = parse_ipv4(addr)
     if not subnet or (subnet & mask ~= subnet) then
         errorf(2, "invalid subnet %q", s)
     end
@@ -149,7 +148,7 @@ function _G.parse_cidr6(s)
     if not shift or shift < 0 or shift > 128 then
         errorf(2, "invalid prefix size %q", s)
     end
-    local subnet1, subnet2 = neosocksd.parse_ipv6(addr)
+    local subnet1, subnet2 = parse_ipv6(addr)
     if shift > 64 then
         local mask = ~((1 << (128 - shift)) - 1)
         if not subnet1 or (subnet2 & mask ~= subnet2) then
@@ -497,7 +496,7 @@ local function route_(addr)
     end
     local routetab = _G.route
     if routetab then
-        local ip = neosocksd.parse_ipv4(host)
+        local ip = parse_ipv4(host)
         local action, tag = matchtab_(routetab, ip)
         if action then
             if tag then
@@ -535,7 +534,7 @@ local function route6_(addr)
     end
     local routetab = _G.route6
     if routetab then
-        local ip1, ip2 = neosocksd.parse_ipv6(host)
+        local ip1, ip2 = parse_ipv6(host)
         local action, tag = matchtab_(routetab, ip1, ip2)
         if action then
             if tag then
@@ -577,9 +576,9 @@ local function resolve_(addr)
         end
     end
     -- check if the addr is a raw address
-    if neosocksd.parse_ipv4(host) then
+    if parse_ipv4(host) then
         return route_(addr)
-    elseif neosocksd.parse_ipv6(host) then
+    elseif parse_ipv6(host) then
         return route6_(addr)
     end
     -- global default
