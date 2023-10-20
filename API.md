@@ -55,7 +55,7 @@ Load the posted script and use it as follows:
 
 ### Ruleset GC
 
-Trigger a full GC.
+Trigger the garbage collector to free some memory.
 
 - **Path**: `/ruleset/gc`
 - **Method**: POST

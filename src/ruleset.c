@@ -305,12 +305,8 @@ static int ruleset_idle_(lua_State *restrict L)
 
 static int ruleset_traceback_(lua_State *restrict L)
 {
-	const char *msg = lua_tostring(L, -1);
-	if (msg == NULL) {
-		msg = lua_pushfstring(
-			L, "(%s: %p)", lua_typename(L, lua_type(L, -1)),
-			lua_topointer(L, -1));
-	}
+	size_t len;
+	const char *msg = luaL_tolstring(L, -1, &len);
 	luaL_traceback(L, L, msg, 1);
 	return 1;
 }
@@ -333,19 +329,6 @@ static int ruleset_resolve_cb_(lua_State *restrict L)
 	return 0;
 }
 
-static int ruleset_format_error_(lua_State *restrict L)
-{
-	const char *s = lua_tostring(L, 1);
-	if (s != NULL) {
-		(void)lua_pushstring(L, s);
-		return 1;
-	}
-	(void)lua_pushfstring(
-		L, "(%s: %p)", lua_typename(L, lua_type(L, 1)),
-		lua_topointer(L, 1));
-	return 1;
-}
-
 enum ruleset_callback {
 	FUNC_REQUEST = 1,
 	FUNC_LOADFILE,
@@ -356,7 +339,6 @@ enum ruleset_callback {
 	FUNC_IDLE,
 	FUNC_TRACEBACK,
 	FUNC_RESOLVE_CB,
-	FUNC_FORMAT_ERROR,
 };
 
 static int luaopen_callbacks(lua_State *restrict L)
@@ -374,7 +356,6 @@ static int luaopen_callbacks(lua_State *restrict L)
 		{ FUNC_IDLE, ruleset_idle_ },
 		{ FUNC_TRACEBACK, ruleset_traceback_ },
 		{ FUNC_RESOLVE_CB, ruleset_resolve_cb_ },
-		{ FUNC_FORMAT_ERROR, ruleset_format_error_ },
 	};
 	lua_createtable(L, ARRAY_SIZE(reg), 0);
 	for (size_t i = 0; i < ARRAY_SIZE(reg); i++) {
@@ -778,7 +759,8 @@ static int l_panic(lua_State *L)
 	if (msg != NULL) {
 		LOGF_F("panic: %s", msg);
 	} else {
-		LOGF_F("panic: (%s)", lua_typename(L, lua_type(L, -1)));
+		LOGF_F("panic: (%s: %p)", lua_typename(L, lua_type(L, -1)),
+		       lua_topointer(L, -1));
 	}
 	return 0; /* return to Lua to abort */
 }
@@ -836,15 +818,11 @@ void ruleset_free(struct ruleset *restrict r)
 const char *ruleset_error(struct ruleset *restrict r)
 {
 	lua_State *restrict L = r->L;
+	if (lua_gettop(L) < 1) {
+		return "(no error)";
+	}
 	if (!lua_isstring(L, -1)) {
-		CHECK(lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CALLBACKS) ==
-		      LUA_TTABLE);
-		CHECK(lua_rawgeti(L, 1, FUNC_FORMAT_ERROR) == LUA_TFUNCTION);
-		lua_remove(L, -2);
-		lua_rotate(L, -2, 1);
-		if (lua_pcall(r->L, 1, 1, 0) != LUA_OK) {
-			return "error in error handling";
-		}
+		return "(error object is not a string)";
 	}
 	return lua_tostring(L, -1);
 }
