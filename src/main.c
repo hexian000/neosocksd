@@ -264,7 +264,8 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		if (strcmp(argv[i], "--") == 0) {
 			break;
 		}
-		LOGF_F("unknown argument: \"%s\"", argv[i]);
+		LOGF_F("unknown argument: \"%s\", try \"%s --help\" for more information",
+		       argv[i], argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
