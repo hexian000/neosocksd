@@ -116,11 +116,12 @@ static void format_addr(lua_State *restrict L)
 			sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
-			(void)luaL_error(L, "%s", strerror(err));
+			(void)lua_pushstring(L, strerror(err));
+			(void)lua_error(L);
 			return;
 		}
 		lua_pop(L, 1);
-		lua_pushstring(L, addr_str);
+		(void)lua_pushstring(L, addr_str);
 	} break;
 	case AF_INET6: {
 		char buf[INET6_ADDRSTRLEN];
@@ -129,14 +130,16 @@ static void format_addr(lua_State *restrict L)
 			sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
-			(void)luaL_error(L, "%s", strerror(err));
+			(void)lua_pushstring(L, strerror(err));
+			(void)lua_error(L);
 			return;
 		}
 		lua_pop(L, 1);
-		lua_pushstring(L, addr_str);
+		(void)lua_pushstring(L, addr_str);
 	} break;
 	default:
-		(void)luaL_error(L, "unknown af:%jd", af);
+		(void)lua_pushfstring(L, "unknown af: %jd", af);
+		(void)lua_error(L);
 	}
 	return;
 }
@@ -179,10 +182,10 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	if (luaL_loadfile(L, filename) != LUA_OK) {
 		return lua_error(L);
 	}
-	lua_pushstring(L, "ruleset");
+	lua_pushliteral(L, "ruleset");
 	lua_call(L, 1, 1);
 	if (!lua_istable(L, -1)) {
-		lua_pushstring(L, "ruleset does not return a table");
+		lua_pushliteral(L, "ruleset does not return a table");
 		return lua_error(L);
 	}
 	lua_setglobal(L, "ruleset");
@@ -254,10 +257,10 @@ static int ruleset_update_(lua_State *restrict L)
 		if (luaL_loadbuffer(L, code, len, "=ruleset") != LUA_OK) {
 			return lua_error(L);
 		}
-		lua_pushstring(L, "ruleset");
+		lua_pushliteral(L, "ruleset");
 		lua_call(L, 1, 1);
 		if (!lua_istable(L, -1)) {
-			lua_pushstring(L, "ruleset does not return a table");
+			lua_pushliteral(L, "ruleset does not return a table");
 			return lua_error(L);
 		}
 		lua_setglobal(L, "ruleset");
@@ -495,7 +498,8 @@ static int api_invoke_(lua_State *restrict L)
 	}
 	struct dialreq *req = pop_dialreq(L, n - 1);
 	if (req == NULL) {
-		return luaL_error(L, "invalid connect request");
+		lua_pushliteral(L, "invalid invocation target");
+		return lua_error(L);
 	}
 	struct ruleset *restrict r = find_ruleset(L);
 	size_t len;
@@ -538,8 +542,8 @@ static int api_resolve_async_(lua_State *restrict L)
 				    .ctx = find_ruleset(L),
 			    });
 	if (h == INVALID_HANDLE) {
-		return luaL_error(
-			L, "resolve \"%s\" failed: out of memory", name);
+		lua_pushliteral(L, "out of memory");
+		return lua_error(L);
 	}
 	CHECK(lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS) ==
 	      LUA_TTABLE);
@@ -671,18 +675,20 @@ static int api_splithostport_(lua_State *restrict L)
 	const char *s = luaL_checklstring(L, 1, &len);
 	/* FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + 1 + 5) {
-		return luaL_error(L, "address too long: %zu bytes", len);
+		(void)lua_pushfstring(L, "address too long: %zu bytes", len);
+		return lua_error(L);
 	}
 	char buf[len + 1];
-	memcpy(buf, s, len);
+	(void)memcpy(buf, s, len);
 	buf[len] = '\0';
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
-		return luaL_error(L, "invalid address: \"%s\"", s);
+		(void)lua_pushfstring(L, "invalid address: \"%s\"", s);
+		return lua_error(L);
 	}
 	lua_settop(L, 0);
-	lua_pushstring(L, host);
-	lua_pushstring(L, port);
+	(void)lua_pushstring(L, host);
+	(void)lua_pushstring(L, port);
 	return 2;
 }
 
