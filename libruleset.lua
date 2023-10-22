@@ -655,20 +655,24 @@ function ruleset.route6(addr)
     return route6_(addr)
 end
 
-_G.idle_callbacks = list:new()
-function ruleset.idle()
-    local f = idle_callbacks[1]
+_G.task_queue = list:new()
+local function run_task_()
+    local f = task_queue[1]
     if not f then
         return
     end
-    idle_callbacks:remove(1)
+    task_queue:remove(1)
     neosocksd.setidle()
     f()
 end
 
-function _G.on_idle(f)
-    idle_callbacks:insert(f)
+function _G.queue_task(f)
+    task_queue:insert(f)
     neosocksd.setidle()
+end
+
+function ruleset.idle()
+    run_task_()
 end
 
 function ruleset.tick(now)
@@ -676,6 +680,7 @@ function ruleset.tick(now)
     if stat_requests[MAX_STAT_REQUESTS + 1] then
         stat_requests:remove(1)
     end
+    run_task_()
 end
 
 function ruleset.stats(dt)
