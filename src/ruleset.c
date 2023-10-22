@@ -743,7 +743,6 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 	}
 	if (ptr == NULL) {
 		/* malloc */
-		assert(osize == 0);
 		void *ret = malloc(nsize);
 		if (ret != NULL) {
 			r->heap.num_object++;
