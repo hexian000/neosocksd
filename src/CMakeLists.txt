@@ -147,6 +147,18 @@ if(WITH_LUA)
     set(WITH_RULESET TRUE)
 endif()
 
+# find systemd
+if(NOT BUILD_STATIC)
+    find_path(SYSTEMD_INCLUDE_DIR NAMES systemd/sd-daemon.h)
+    find_library(SYSTEMD_LIBRARY NAMES systemd)
+    if((EXISTS ${SYSTEMD_INCLUDE_DIR}) AND (EXISTS ${SYSTEMD_LIBRARY}))
+        message(STATUS "systemd: ${SYSTEMD_LIBRARY}")
+        set(WITH_SYSTEMD TRUE)
+        target_include_directories(neosocksd SYSTEM PRIVATE ${SYSTEMD_INCLUDE_DIR})
+        target_link_libraries(neosocksd PRIVATE ${SYSTEMD_LIBRARY})
+    endif()
+endif()
+
 include(CheckLibraryExists)
 check_library_exists(m ldexp "" LIBM)
 if(LIBM)

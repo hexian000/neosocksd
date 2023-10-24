@@ -18,6 +18,9 @@
 
 #include <ev.h>
 #include <sys/socket.h>
+#if WITH_SYSTEMD
+#include <systemd/sd-daemon.h>
+#endif
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -380,6 +383,9 @@ int main(int argc, char **argv)
 
 	/* start event loop */
 	LOGI("server start");
+#if WITH_SYSTEMD
+	(void)sd_notify(0, "READY=1");
+#endif
 	ev_run(loop, 0);
 
 	LOGI("server stop");
@@ -417,6 +423,9 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 	switch (watcher->signum) {
 	case SIGHUP: {
 #if WITH_RULESET
+#if WITH_SYSTEMD
+		(void)sd_notify(0, "RELOADING=1");
+#endif
 		const struct config *restrict conf = G.conf;
 		if (conf->ruleset == NULL || G.ruleset == NULL) {
 			LOGE_F("signal %d received, but ruleset not loaded",
@@ -430,6 +439,9 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 			break;
 		}
 		LOGI("ruleset successfully reloaded");
+#if WITH_SYSTEMD
+		(void)sd_notify(0, "READY=1");
+#endif
 #else
 		LOGW("reload is not supported in current build");
 #endif
@@ -437,6 +449,9 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 	case SIGINT:
 	case SIGTERM:
 		LOGI_F("signal %d received, breaking", watcher->signum);
+#if WITH_SYSTEMD
+		(void)sd_notify(0, "STOPPING=1");
+#endif
 		session_closeall(loop);
 		ev_break(loop, EVBREAK_ALL);
 		break;

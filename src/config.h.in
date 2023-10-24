@@ -14,5 +14,6 @@
 #cmakedefine01 WITH_TCP_FASTOPEN
 #cmakedefine01 WITH_CARES
 #cmakedefine01 WITH_RULESET
+#cmakedefine01 WITH_SYSTEMD
 
 #endif /* CONFIG_H */
