@@ -3,14 +3,23 @@ function _G.printf(...)
     return print(string.format(...))
 end
 
-function _G.errorf(level, s, ...)
-    error(string.format(s, ...), level + 1)
+function _G.errorf(s, ...)
+    local level = tonumber(s)
+    if level then
+        return error(string.format(...), level + 1)
+    end
+    return error(string.format(s, ...), 2)
 end
 
-function _G.assertf(v, level, s, ...)
-    if not v then
-        error(string.format(s, ...), level + 1)
+function _G.assertf(v, s, ...)
+    if v then
+        return
     end
+    local level = tonumber(s)
+    if level then
+        return error(string.format(...), level + 1)
+    end
+    return error(string.format(s, ...), 2)
 end
 
 function _G.eval(s, ...)
