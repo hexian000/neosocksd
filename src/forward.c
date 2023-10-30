@@ -278,7 +278,7 @@ void forward_serve(
 	}
 	(void)memcpy(
 		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
-	forward_ctx_start(loop, ctx, s->data);
+	forward_ctx_start(loop, ctx, G.basereq);
 }
 
 #if WITH_TPROXY

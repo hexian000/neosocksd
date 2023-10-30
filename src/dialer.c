@@ -88,8 +88,8 @@ void dialaddr_copy(
 		dst->in6 = src->in6;
 		break;
 	case ATYP_DOMAIN:
-		dst->domain.len = src->domain.len;
-		memcpy(dst->domain.name, src->domain.name, src->domain.len);
+		memcpy(dst->domain.name, src->domain.name,
+		       dst->domain.len = src->domain.len);
 		break;
 	default:
 		FAIL();
@@ -124,19 +124,8 @@ int dialaddr_format(
 	FAIL();
 }
 
-struct dialreq *dialreq_new(const size_t num_proxy)
-{
-	struct dialreq *restrict req = malloc(
-		sizeof(struct dialreq) + sizeof(struct proxy_req) * num_proxy);
-	if (req == NULL) {
-		return NULL;
-	}
-	req->num_proxy = num_proxy;
-	return req;
-}
-
-bool dialreq_setproxy(
-	struct dialreq *restrict req, const size_t i, const char *proxy_uri,
+bool dialreq_addproxy(
+	struct dialreq *restrict req, const char *proxy_uri,
 	const size_t urilen)
 {
 	/* should be more than enough */
@@ -170,45 +159,81 @@ bool dialreq_setproxy(
 		LOGE_F("dialer: invalid proxy \"%s\"", proxy_uri);
 		return false;
 	}
-	struct proxy_req *restrict proxy = &req->proxy[i];
+	struct proxy_req *restrict proxy = &req->proxy[req->num_proxy];
 	proxy->proto = protocol;
 	const size_t addrlen = strlen(addr);
 	if (!dialaddr_set(&proxy->addr, addr, addrlen)) {
 		return false;
 	}
+	req->num_proxy++;
 	return true;
 }
 
-struct dialreq *dialreq_parse(const char *csv)
+#define DIALREQ_NEW(n)                                                         \
+	(malloc(sizeof(struct dialreq) + sizeof(struct proxy_req) * (n)))
+
+struct dialreq *dialreq_parse(const char *addr, const char *csv)
 {
-	const size_t len = strlen(csv);
-	char buf[len + 1];
-	memcpy(buf, csv, len + 1);
-	size_t n = 0;
-	for (size_t i = 0; i < len; i++) {
-		if (buf[i] == ',') {
-			++n;
+	size_t len = 0, n = 0;
+	if (csv != NULL) {
+		len = strlen(csv);
+		if (len > 0) {
+			n = 1;
+		}
+		for (size_t i = 0; i < len; i++) {
+			if (csv[i] == ',') {
+				++n;
+			}
 		}
 	}
-	struct dialreq *req = dialreq_new(n);
+	struct dialreq *req = DIALREQ_NEW(n);
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
 	}
-	bool direct = true;
-	for (char *tok = strtok(buf, ","); tok != NULL;
-	     tok = strtok(NULL, ",")) {
-		if (direct) {
-			if (!dialaddr_set(&req->addr, tok, strlen(tok))) {
+	if (addr != NULL) {
+		if (!dialaddr_set(&req->addr, addr, strlen(addr))) {
+			dialreq_free(req);
+			return NULL;
+		}
+	} else {
+		req->addr = (struct dialaddr){
+			.type = ATYP_INET,
+			.port = UINT16_C(0),
+			.in = { INADDR_ANY },
+		};
+	}
+	req->num_proxy = 0;
+	if (n > 0) {
+		char buf[len + 1];
+		(void)memcpy(buf, csv, len + 1);
+		for (char *tok = strtok(buf, ","); tok != NULL;
+		     tok = strtok(NULL, ",")) {
+			if (!dialreq_addproxy(req, tok, strlen(tok))) {
 				dialreq_free(req);
 				return NULL;
 			}
-			direct = false;
-			continue;
 		}
-		if (!dialreq_setproxy(req, --n, tok, strlen(tok))) {
-			dialreq_free(req);
-			return NULL;
+	}
+	return req;
+}
+
+struct dialreq *dialreq_new(const size_t num_proxy)
+{
+	struct dialreq *restrict base = G.basereq;
+	const size_t num_base_proxy = (base != NULL) ? base->num_proxy : 0;
+	struct dialreq *restrict req = DIALREQ_NEW(num_base_proxy + num_proxy);
+	req->num_proxy = num_base_proxy;
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	if (base != NULL) {
+		dialaddr_copy(&req->addr, &base->addr);
+		for (size_t i = 0; i < num_base_proxy; i++) {
+			req->proxy[i].proto = base->proxy[i].proto;
+			dialaddr_copy(
+				&req->proxy[i].addr, &base->proxy[i].addr);
 		}
 	}
 	return req;

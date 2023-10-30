@@ -12,6 +12,7 @@
 struct config {
 	const char *listen;
 	const char *forward;
+	const char *proxy;
 	const char *restapi;
 #if WITH_RULESET
 	const char *ruleset;

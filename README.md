@@ -43,7 +43,7 @@ Ruleset example: [ruleset.lua](ruleset.lua)
 
 # Forward connection over proxy chain
 # Tip: forwarding in SOCKS5 requires 1 more roundtrip than SOCKS4A/HTTP, so is generally not a good idea.
-./neosocksd -l 192.168.1.2:12345 -f "192.168.2.2:12345,socks4a://192.168.2.1:1080,http://192.168.1.1:8080"
+./neosocksd -l 0.0.0.0:12345 -f 192.168.2.2:12345 -x "socks4a://192.168.1.1:1080,http://192.168.2.1:8118"
 
 # Start a hardened non-forking TCP port forwarder in the background
 sudo ./neosocksd -d -u nobody -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \

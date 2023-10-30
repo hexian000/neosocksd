@@ -53,8 +53,10 @@ static void print_usage(const char *argv0)
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
-		"  -f, --forward <address>[[[,proxyN],...],proxy1]\n"
+		"  -f, --forward <address>\n"
 		"                             run TCP port forwarding instead of SOCKS\n"
+		"  -x, --proxy proxy1[,...[,proxyN]]\n"
+		"                             forward outbound connection over proxy chain\n"
 #if WITH_CARES
 		"  --nameserver <address>     use specified nameserver instead of resolv.conf\n"
 #endif
@@ -142,6 +144,12 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		    strcmp(argv[i], "--forward") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			conf->forward = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "-x") == 0 ||
+		    strcmp(argv[i], "--proxy") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->proxy = argv[++i];
 			continue;
 		}
 #if WITH_CARES
@@ -312,15 +320,14 @@ int main(int argc, char **argv)
 
 	struct server *restrict s = &app.server;
 	server_init(s, loop, NULL, NULL);
+	G.basereq = dialreq_parse(conf->forward, conf->proxy);
+	if (G.basereq == NULL) {
+		LOGF_F("unable to parse forward: %s, proxy: %s", conf->forward,
+		       conf->proxy);
+		exit(EXIT_FAILURE);
+	}
 	if (conf->forward != NULL) {
-		struct dialreq *req = dialreq_parse(conf->forward);
-		if (req == NULL) {
-			LOGF_F("unable to parse forward: \"%s\"",
-			       conf->forward);
-			exit(EXIT_FAILURE);
-		}
 		s->serve = forward_serve;
-		s->data = req;
 	}
 #if WITH_TPROXY
 	else if (conf->transparent) {
@@ -408,6 +415,10 @@ int main(int argc, char **argv)
 	if (G.resolver != NULL) {
 		resolver_free(G.resolver);
 		G.resolver = NULL;
+	}
+	if (G.basereq != NULL) {
+		dialreq_free(G.basereq);
+		G.basereq = NULL;
 	}
 	ev_loop_destroy(loop);
 

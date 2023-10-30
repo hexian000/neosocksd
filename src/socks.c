@@ -651,7 +651,8 @@ static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 #if WITH_RULESET
 	struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		size_t cap = 64;
+		size_t cap =
+			addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
 	make_request:;
 		char request[cap];
 		const int len = dialaddr_format(addr, request, cap);

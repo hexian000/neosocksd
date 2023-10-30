@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+struct dialreq;
 struct resolver;
 struct ruleset;
 struct session;
@@ -23,6 +24,7 @@ extern struct globals {
 	struct ruleset *ruleset;
 #endif
 	struct session *sessions;
+	struct dialreq *basereq;
 } G;
 
 #define UNUSED(x) (void)(x)

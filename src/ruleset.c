@@ -84,7 +84,7 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, const int n)
 			return NULL;
 		}
 		if (i < nproxy) {
-			if (!dialreq_setproxy(req, i, s, len)) {
+			if (!dialreq_addproxy(req, s, len)) {
 				dialreq_free(req);
 				return NULL;
 			}
