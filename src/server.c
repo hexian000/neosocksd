@@ -138,9 +138,10 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		socket_set_transparent(fd, true);
 	}
 #endif
+	const int backlog = MIN(conf->startup_limit_full, SOMAXCONN);
 #if WITH_TCP_FASTOPEN
 	if (conf->tcp_fastopen) {
-		socket_set_fastopen(fd, conf->startup_limit_full);
+		socket_set_fastopen(fd, backlog);
 	}
 #endif
 	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
@@ -151,7 +152,7 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		CLOSE_FD(fd);
 		return false;
 	}
-	if (listen(fd, conf->startup_limit_full)) {
+	if (listen(fd, backlog)) {
 		const int err = errno;
 		LOGE_F("listen error: %s", strerror(err));
 		CLOSE_FD(fd);
