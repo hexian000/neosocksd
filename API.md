@@ -70,7 +70,7 @@ Trigger the garbage collector to free some memory.
 
 ```Lua
 function ruleset.resolve(domain)
-    return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4://[2001:DB8::1]:1080"
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4a://[2001:DB8::1]:1080"
 end
 ```
 
@@ -106,7 +106,7 @@ The proxy addresses are specified in URI format, supported scheme:
 
 ```Lua
 function ruleset.route(addr)
-    return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4://[2001:DB8::1]:1080"
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4a://[2001:DB8::1]:1080"
 end
 ```
 
@@ -131,7 +131,7 @@ See [ruleset.resolve](#rulesetresolve)
 
 ```Lua
 function ruleset.route6(addr)
-    return "www.example.org:80", "http://203.0.113.1:8080", ..., "[2001:DB8::1]:1080"
+    return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4a://[2001:DB8::1]:1080"
 end
 ```
 
@@ -345,7 +345,8 @@ See [ruleset.idle](#rulesetidle).
 **Synopsis**
 
 ```Lua
-neosocksd.invoke([[log("test rpc")]], "neosocksd.lan:80", "127.0.0.1:1080")
+-- neosocksd.invoke(code, host, proxyN, ..., proxy1)
+neosocksd.invoke([[log("test rpc")]], "neosocksd.lan:80", "socks4a://127.0.0.1:1080")
 ```
 
 **Description**

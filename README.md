@@ -11,6 +11,7 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 - [Usage](#usage)
 	- [Basic Usage](#basic-usage)
 	- [Scripting Usage](#scripting-usage)
+- [Observability](#observability)
 - [Runtime Dependencies](#runtime-dependencies)
 - [Building from Source](#building-from-source)
 	- [Dependencies](#dependencies)
@@ -80,13 +81,7 @@ sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
     --max-startups 60:30:100 --max-sessions 0 -u nobody -d
 ```
 
-Check server statistics via RESTful API:
-
-```sh
-curl -sX POST http://127.0.1.1:9080/stats
-```
-
-Load ruleset on remote instance without restarting:
+Update ruleset on remote instance without restarting:
 
 ```sh
 curl -vx socks5h://192.168.1.1:1080 \
@@ -94,7 +89,21 @@ curl -vx socks5h://192.168.1.1:1080 \
     --data-binary @ruleset.lua
 ```
 
-The host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua):
+The example host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua):
+
+
+## Observability
+
+The builtin RESTful API server can be used for monitoring service status.
+
+```sh
+# stateless
+watch curl -s http://127.0.1.1:9080/stats
+# stateful, will call ruleset stats function if available
+watch curl -sX POST http://127.0.1.1:9080/stats
+```
+
+See [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference#restful-api) for more details.
 
 
 ## Runtime Dependencies
