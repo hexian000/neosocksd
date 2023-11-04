@@ -22,13 +22,13 @@ target_include_directories(neosocksd BEFORE
 target_link_libraries(neosocksd PRIVATE csnippets)
 
 if(NOT TARGET_POSIX AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(STATUS "GNU/Linux System: ${CMAKE_SYSTEM_VERSION}")
+    message(STATUS "GNU/Linux: ${CMAKE_SYSTEM_VERSION}")
     set(TARGET_GNU_LINUX ON)
 elseif(NOT TARGET_POSIX AND CMAKE_SYSTEM_NAME STREQUAL "Android")
     message(STATUS "Android: ${CMAKE_SYSTEM_VERSION}")
     set(TARGET_ANDROID ON)
 else()
-    message(STATUS "POSIX-compliant System: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_VERSION}")
+    message(STATUS "POSIX-compliant system: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_VERSION}")
 endif()
 
 if(TARGET_GNU_LINUX OR TARGET_ANDROID)

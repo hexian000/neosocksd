@@ -82,8 +82,8 @@ case "$1" in
     (cd "build/src" && llvm-objdump -drwS "neosocksd" >"neosocksd.S")
     ls -lh "build/src/neosocksd"
     ;;
-"san")
-    # rebuild with sanitizers
+"asan")
+    # rebuild with asan
     rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Debug" \
@@ -92,6 +92,18 @@ case "$1" in
         -S . -B "build"
     ln -sf build/compile_commands.json compile_commands.json
     nice cmake --build "build" --parallel
+    ls -lh "build/src/neosocksd"
+    ;;
+"clang-asan")
+    # rebuild with clang & asan
+    rm -rf "build" && mkdir -p "build"
+    cmake -G "${GENERATOR}" \
+        -DCMAKE_BUILD_TYPE="Debug" \
+        -DENABLE_SANITIZERS=ON \
+        -DCMAKE_C_COMPILER="clang" \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+        -S . -B "build"
+    nice cmake --build "build"
     ls -lh "build/src/neosocksd"
     ;;
 "c")
