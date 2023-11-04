@@ -66,6 +66,7 @@ Depending on how complex your customizations are, check out:
 - Level 1: Rule set configuration example at [ruleset.lua](ruleset.lua)
 - Level 2: Rule set library code in [libruleset.lua](libruleset.lua)
 - Level 3: Reference manual for enthusiasts and professionals: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
+- Level 4: If you want to operate a larger system, the idea in [stub.lua](stub.lua) may be helpful.
 
 Use the following command to start the server with the Lua scripts in current directory:
 
@@ -89,7 +90,7 @@ curl -vx socks5h://192.168.1.1:1080 \
     --data-binary @ruleset.lua
 ```
 
-The example host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua):
+The example host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua).
 
 
 ## Observability
