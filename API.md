@@ -93,7 +93,7 @@ Process a host name request. Specifically:
 - `nil`: reject the request
 
 The proxy addresses are specified in URI format, supported scheme:
-- `socks4a://example.org:1080`: SOCKS4A is the default proxy protocol if not specified. The implementation is SOCKS4 compatible when requesting IPv4 address.
+- `socks4a://example.org:1080`: SOCKS4A server. The implementation is SOCKS4 compatible when requesting IPv4 address.
 - `socks5://example.org:1080`: SOCKS5 server.
 - `http://example.org:8080`: HTTP/1.1 CONNECT server.
 
