@@ -16,7 +16,7 @@ _G.hosts = {
     ["neosocksd.lan"] = "127.0.1.1" -- see _G.redirect
 }
 
--- 2. ordered redirect rules
+-- 2. ordered redirect rules (matched as string)
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
 _G.redirect_name = {
@@ -45,7 +45,7 @@ _G.redirect = {
 
 -- _G.redirect6 is not set
 
--- 3. ordered routes
+-- 3. ordered routes (matched as address)
 _G.route = {
     -- reject loopback or link-local
     [1] = {inet.subnet("127.0.0.0/8"), rule.reject()},
