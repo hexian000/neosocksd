@@ -34,6 +34,8 @@ void setup(int argc, char **argv)
 	UNUSED(argv);
 
 	(void)setlocale(LC_ALL, "");
+	(void)setvbuf(stdout, NULL, _IONBF, 0);
+	slog_file = stdout;
 
 	struct sigaction ignore = {
 		.sa_handler = SIG_IGN,
@@ -54,7 +56,7 @@ void init(void)
 			FAILMSGF("atexit: %d", ret);
 		}
 	}
-	srand64((uint64_t)clock_monotonic());
+	srand64((uint64_t)clock_realtime());
 
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
 	resolver_init_cb();
@@ -209,6 +211,6 @@ void daemonize(const char *user, const bool nochdir, const bool noclose)
 	/* Close the anonymous pipe. */
 	(void)close(fd[1]);
 
-	/* Disable logging to avoid unnecessary string formatting. */
-	slog_level = LOG_LEVEL_SILENCE;
+	/* Set logging output to syslog. */
+	slog_file = NULL;
 }

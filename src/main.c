@@ -79,7 +79,7 @@ static void print_usage(const char *argv0)
 		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
-		"  -d, --daemonize            run in background and discard all logs\n"
+		"  -d, --daemonize            run in background and write logs to syslog\n"
 		"  -u, --user <name>          run as the specified limited user\n"
 		"  -v, --verbose              increase logging verbosity, can be specified more\n"
 		"                             than once. e.g. \"-v -v\" prints verbose messages\n"

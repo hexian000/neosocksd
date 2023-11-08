@@ -12,7 +12,7 @@
 struct config conf_default(void)
 {
 	struct config conf = {
-		.log_level = LOG_LEVEL_INFO,
+		.log_level = LOG_LEVEL_WARNING,
 		.resolve_pf = PF_UNSPEC,
 		.timeout = 60.0,
 
