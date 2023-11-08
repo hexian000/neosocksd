@@ -53,8 +53,7 @@ static void print_usage(const char *argv0)
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
-		"  -f, --forward <address>\n"
-		"                             run TCP port forwarding instead of SOCKS\n"
+		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
 		"  -x, --proxy proxy1[,...[,proxyN]]\n"
 		"                             forward outbound connection over proxy chain\n"
 #if WITH_CARES
