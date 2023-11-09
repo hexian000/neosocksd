@@ -68,8 +68,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		stats->num_sessions--;
 		break;
 	}
-	HTTP_CTX_LOG_F(
-		LOG_LEVEL_INFO, ctx, "closed, %zu active", stats->num_sessions);
+	HTTP_CTX_LOG_F(INFO, ctx, "closed, %zu active", stats->num_sessions);
 }
 
 static void http_ctx_free(struct http_ctx *restrict ctx)
@@ -94,7 +93,7 @@ static void http_ctx_free(struct http_ctx *restrict ctx)
 void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	HTTP_CTX_LOG_F(
-		LOG_LEVEL_DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
 		ctx->state);
 	http_ctx_stop(loop, ctx);
 	http_ctx_free(ctx);
@@ -125,15 +124,15 @@ static bool reply_short(struct http_ctx *restrict ctx, const char *s)
 	const size_t n = strlen(s);
 	assert(n < 256);
 	LOG_BIN_F(
-		LOG_LEVEL_VERBOSE, s, n, "reply_short: fd=%d %zu bytes",
-		ctx->accepted_fd, n);
+		VERBOSE, s, n, "reply_short: fd=%d %zu bytes", ctx->accepted_fd,
+		n);
 	const ssize_t nsend = send(ctx->accepted_fd, s, n, 0);
 	if (nsend < 0) {
 		const int err = errno;
-		HTTP_CTX_LOG_F(LOG_LEVEL_ERROR, ctx, "send: %s", strerror(err));
+		HTTP_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
 		return false;
 	} else if ((size_t)nsend != n) {
-		HTTP_CTX_LOG(LOG_LEVEL_ERROR, ctx, "send: short send");
+		HTTP_CTX_LOG(ERROR, ctx, "send: short send");
 		return false;
 	}
 	return true;
@@ -142,7 +141,7 @@ static bool reply_short(struct http_ctx *restrict ctx, const char *s)
 static bool
 on_header(struct http_ctx *restrict ctx, const char *key, const char *value)
 {
-	HTTP_CTX_LOG_F(LOG_LEVEL_VERBOSE, ctx, "header \"%s: %s\"", key, value);
+	HTTP_CTX_LOG_F(VERBOSE, ctx, "header \"%s: %s\"", key, value);
 	if (strcasecmp(key, "Content-Length") == 0) {
 		size_t content_length;
 		if (sscanf(value, "%zu", &content_length) != 1) {
@@ -190,8 +189,7 @@ static int parse_request(struct http_ctx *restrict ctx)
 		next = http_parse(next, msg);
 		if (next == NULL) {
 			HTTP_CTX_LOG(
-				LOG_LEVEL_ERROR, ctx,
-				"http: failed parsing request");
+				ERROR, ctx, "http: failed parsing request");
 			return -1;
 		} else if (next == ctx->http.nxt) {
 			if (ctx->rbuf.len + 1 >= ctx->rbuf.cap) {
@@ -202,13 +200,12 @@ static int parse_request(struct http_ctx *restrict ctx)
 		}
 		if (strncmp(msg->req.version, "HTTP/1.", 7) != 0) {
 			HTTP_CTX_LOG_F(
-				LOG_LEVEL_ERROR, ctx,
-				"http: unsupported protocol %s",
+				ERROR, ctx, "http: unsupported protocol %s",
 				msg->req.version);
 			return -1;
 		}
 		HTTP_CTX_LOG_F(
-			LOG_LEVEL_VERBOSE, ctx, "request \"%s\" \"%s\" \"%s\"",
+			VERBOSE, ctx, "request \"%s\" \"%s\" \"%s\"",
 			msg->req.method, msg->req.url, msg->req.version);
 		ctx->http.nxt = next;
 		ctx->cbuf = NULL;
@@ -218,9 +215,7 @@ static int parse_request(struct http_ctx *restrict ctx)
 		char *key, *value;
 		next = http_parsehdr(next, &key, &value);
 		if (next == NULL) {
-			HTTP_CTX_LOG(
-				LOG_LEVEL_ERROR, ctx,
-				"http: failed parsing header");
+			HTTP_CTX_LOG(ERROR, ctx, "http: failed parsing header");
 			return -1;
 		} else if (next == ctx->http.nxt) {
 			return 1;
@@ -286,22 +281,20 @@ static int http_recv(struct http_ctx *restrict ctx)
 				break;
 			}
 			HTTP_CTX_LOG_F(
-				LOG_LEVEL_ERROR, ctx, "recv: fd=%d %s", fd,
+				ERROR, ctx, "recv: fd=%d %s", fd,
 				strerror(err));
 			return -1;
 		} else if (nrecv == 0) {
 			/* connection is not established yet, we do not expect EOF here */
-			HTTP_CTX_LOG_F(
-				LOG_LEVEL_ERROR, ctx, "recv: fd=%d early EOF",
-				fd);
+			HTTP_CTX_LOG_F(ERROR, ctx, "recv: fd=%d early EOF", fd);
 			return -1;
 		}
 		rbuf->len += (size_t)nrecv;
 	}
 	rbuf->data[rbuf->len] = '\0';
 	LOG_TXT_F(
-		LOG_LEVEL_VERBOSE, rbuf->data, rbuf->len,
-		"recv: fd=%d %zu bytes", fd, rbuf->len);
+		VERBOSE, rbuf->data, rbuf->len, "recv: fd=%d %zu bytes", fd,
+		rbuf->len);
 	return parse_request(ctx);
 }
 
@@ -343,9 +336,7 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
-			HTTP_CTX_LOG_F(
-				LOG_LEVEL_ERROR, ctx, "send: %s",
-				strerror(err));
+			HTTP_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
 			http_ctx_close(loop, ctx);
 			return;
 		} else if (nsend == 0) {
@@ -376,7 +367,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		HTTP_CTX_LOG(LOG_LEVEL_ERROR, ctx, "dialer failed");
+		HTTP_CTX_LOG(ERROR, ctx, "dialer failed");
 		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
 		ev_io_start(loop, &ctx->w_send);
 		return;

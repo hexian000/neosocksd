@@ -287,7 +287,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 int main(int argc, char **argv)
 {
-	setup(argc, argv);
+	init(argc, argv);
 	parse_args(argc, argv);
 	const struct config *restrict conf = &app.conf;
 	if (!conf_check(conf)) {
@@ -296,7 +296,7 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 	G.conf = conf;
-	init();
+	loadlibs();
 
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);
@@ -388,22 +388,18 @@ int main(int argc, char **argv)
 	}
 
 	/* start event loop */
-	LOGI("server start");
+	LOGN("server start");
 #if WITH_SYSTEMD
 	(void)sd_notify(0, "READY=1");
 #endif
 	ev_run(loop, 0);
 
-	LOGI("server stop");
+	LOGN("server stop");
 	if (api != NULL) {
 		server_stop(api);
 		api = NULL;
 	}
 	server_stop(s);
-	if (s->serve == forward_serve) {
-		dialreq_free(s->data);
-		s->data = NULL;
-	}
 
 #if WITH_RULESET
 	if (G.ruleset != NULL) {
@@ -448,7 +444,7 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 			       ruleset_error(G.ruleset));
 			break;
 		}
-		LOGI("ruleset successfully reloaded");
+		LOGN("ruleset successfully reloaded");
 #if WITH_SYSTEMD
 		(void)sd_notify(0, "READY=1");
 #endif
@@ -458,7 +454,7 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 	} break;
 	case SIGINT:
 	case SIGTERM:
-		LOGI_F("signal %d received, breaking", watcher->signum);
+		LOGN_F("signal %d received, breaking", watcher->signum);
 #if WITH_SYSTEMD
 		(void)sd_notify(0, "STOPPING=1");
 #endif

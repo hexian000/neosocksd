@@ -146,8 +146,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	if (t->state != state) {
 		XFER_CTX_LOG_F(
-			LOG_LEVEL_VERBOSE, t, "state changed %d to %d",
-			t->state, state);
+			VERBOSE, t, "state changed %d to %d", t->state, state);
 		t->state = state;
 		t->state_cb.cb(loop, t->state_cb.ctx);
 	}
@@ -171,7 +170,7 @@ void transfer_init(
 
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 {
-	XFER_CTX_LOG(LOG_LEVEL_DEBUG, t, "start");
+	XFER_CTX_LOG(DEBUG, t, "start");
 	ev_io_start(loop, &t->w_recv);
 }
 
@@ -180,5 +179,5 @@ void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
 	ev_io_stop(loop, &t->w_recv);
 	ev_io_stop(loop, &t->w_send);
 	t->state = XFER_CLOSED;
-	XFER_CTX_LOG(LOG_LEVEL_DEBUG, t, "stop");
+	XFER_CTX_LOG(DEBUG, t, "stop");
 }

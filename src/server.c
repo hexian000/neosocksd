@@ -65,12 +65,11 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			return;
 		}
 		lstats->num_accept++;
-		if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
+		if (LOGLEVEL(VERBOSE)) {
 			char addr_str[64];
 			format_sa(&addr.sa, addr_str, sizeof(addr_str));
-			LOG_F(LOG_LEVEL_VERBOSE,
-			      "accept \"%s\": fd=%d listener=%d", addr_str, fd,
-			      watcher->fd);
+			LOG_F(VERBOSE, "accept \"%s\": fd=%d listener=%d",
+			      addr_str, fd, watcher->fd);
 		}
 		if (is_startup_limited(s)) {
 			CLOSE_FD(fd);
@@ -158,10 +157,10 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		CLOSE_FD(fd);
 		return false;
 	}
-	if (LOGLEVEL(LOG_LEVEL_INFO)) {
+	if (LOGLEVEL(INFO)) {
 		char addr_str[64];
 		format_sa(bindaddr, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_INFO, "listen: %s", addr_str);
+		LOG_F(INFO, "listen: %s", addr_str);
 	}
 
 	struct ev_io *restrict w_accept = &s->l.w_accept;

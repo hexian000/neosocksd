@@ -92,8 +92,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	default:
 		FAIL();
 	}
-	FW_CTX_LOG_F(
-		LOG_LEVEL_INFO, ctx, "closed, %zu active", stats->num_sessions);
+	FW_CTX_LOG_F(INFO, ctx, "closed, %zu active", stats->num_sessions);
 }
 
 static void forward_ctx_free(struct forward_ctx *restrict ctx)
@@ -117,7 +116,7 @@ static void
 forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
 	FW_CTX_LOG_F(
-		LOG_LEVEL_DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
 		ctx->state);
 	forward_ctx_stop(loop, ctx);
 	forward_ctx_free(ctx);
@@ -149,7 +148,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 		stats->num_sessions++;
 		stats->num_success++;
 		FW_CTX_LOG_F(
-			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			INFO, ctx, "established, %zu active",
 			stats->num_sessions);
 		ev_timer_stop(loop, &ctx->w_timeout);
 		return;
@@ -165,10 +164,10 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	switch (ctx->state) {
 	case STATE_INIT:
 	case STATE_CONNECT:
-		FW_CTX_LOG(LOG_LEVEL_WARNING, ctx, "connection timeout");
+		FW_CTX_LOG(WARNING, ctx, "connection timeout");
 		break;
 	case STATE_CONNECTED:
-		FW_CTX_LOG(LOG_LEVEL_WARNING, ctx, "handshake timeout");
+		FW_CTX_LOG(WARNING, ctx, "handshake timeout");
 		break;
 	case STATE_ESTABLISHED:
 		return;
@@ -185,13 +184,13 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		FW_CTX_LOG(LOG_LEVEL_ERROR, ctx, "dialer failed");
+		FW_CTX_LOG(ERROR, ctx, "dialer failed");
 		forward_ctx_close(loop, ctx);
 		return;
 	}
 	ctx->dialed_fd = fd;
 
-	FW_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
+	FW_CTX_LOG(DEBUG, ctx, "connected");
 	/* cleanup before state change */
 	free(ctx->dialreq);
 
@@ -205,7 +204,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		stats->num_sessions++;
 		stats->num_success++;
 		FW_CTX_LOG_F(
-			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			INFO, ctx, "established, %zu active",
 			stats->num_sessions);
 	}
 
@@ -288,8 +287,7 @@ static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 	socklen_t len = sizeof(dest);
 	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
 		const int err = errno;
-		FW_CTX_LOG_F(
-			LOG_LEVEL_ERROR, ctx, "getsockname: %s", strerror(err));
+		FW_CTX_LOG_F(ERROR, ctx, "getsockname: %s", strerror(err));
 		return NULL;
 	}
 	switch (dest.sa.sa_family) {
@@ -301,7 +299,7 @@ static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 		break;
 	default:
 		FW_CTX_LOG_F(
-			LOG_LEVEL_ERROR, ctx, "tproxy: unsupported af:%jd",
+			ERROR, ctx, "tproxy: unsupported af:%jd",
 			(intmax_t)dest.sa.sa_family);
 		return NULL;
 	}

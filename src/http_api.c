@@ -225,7 +225,7 @@ static void http_handle_ruleset(
 		}
 		const char *code = (const char *)ctx->cbuf->data;
 		const size_t len = ctx->http.content_length;
-		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset invoke");
+		LOG_TXT(VERBOSE, code, len, "api: ruleset invoke");
 		const bool ok = ruleset_invoke(ruleset, code, len);
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
@@ -254,7 +254,7 @@ static void http_handle_ruleset(
 		}
 		const char *code = (const char *)ctx->cbuf->data;
 		const size_t len = ctx->http.content_length;
-		LOG_TXT(LOG_LEVEL_VERBOSE, code, len, "api: ruleset update");
+		LOG_TXT(VERBOSE, code, len, "api: ruleset update");
 		const bool ok = ruleset_update(ruleset, module, code, len);
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
@@ -300,7 +300,7 @@ void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	const struct http_message *restrict msg = &ctx->http.msg;
 	struct url uri;
 	if (!url_parse(msg->req.url, &uri)) {
-		HTTP_CTX_LOG(LOG_LEVEL_WARNING, ctx, "failed parsing url");
+		HTTP_CTX_LOG(WARNING, ctx, "failed parsing url");
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}

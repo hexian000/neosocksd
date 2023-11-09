@@ -715,7 +715,7 @@ static int ruleset_luainit_(lua_State *restrict L)
 	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CALLBACKS);
 	lua_newtable(L);
 	lua_seti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS);
-	lua_pushboolean(L, !LOGLEVEL(LOG_LEVEL_DEBUG));
+	lua_pushboolean(L, !LOGLEVEL(DEBUG));
 	lua_setglobal(L, "NDEBUG");
 	/* load all libraries */
 	luaL_openlibs(L);

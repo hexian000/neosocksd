@@ -231,7 +231,7 @@ addrinfo_cb(void *arg, int status, int timeouts, struct ares_addrinfo *info)
 }
 #endif /* WITH_CARES */
 
-void resolver_init_cb(void)
+void resolver_init(void)
 {
 #if WITH_CARES
 	LOGD_F("c-ares: %s", ares_version(NULL));
@@ -242,7 +242,7 @@ void resolver_init_cb(void)
 #endif
 }
 
-void resolver_atexit_cb(void)
+void resolver_cleanup(void)
 {
 #if WITH_CARES && CARES_HAVE_ARES_LIBRARY_CLEANUP
 	ares_library_cleanup();

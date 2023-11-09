@@ -23,7 +23,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 		stats->num_sessions++;
 		stats->num_success++;
 		HTTP_CTX_LOG_F(
-			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			INFO, ctx, "established, %zu active",
 			stats->num_sessions);
 		ev_timer_stop(loop, &ctx->w_timeout);
 		return;
@@ -35,7 +35,7 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_stop(loop, &ctx->w_recv);
 	ev_io_stop(loop, &ctx->w_send);
 
-	HTTP_CTX_LOG(LOG_LEVEL_DEBUG, ctx, "connected");
+	HTTP_CTX_LOG(DEBUG, ctx, "connected");
 	/* cleanup before state change */
 	free(ctx->dialreq);
 
@@ -49,7 +49,7 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		stats->num_sessions++;
 		stats->num_success++;
 		HTTP_CTX_LOG_F(
-			LOG_LEVEL_INFO, ctx, "established, %zu active",
+			INFO, ctx, "established, %zu active",
 			stats->num_sessions);
 	}
 
@@ -94,8 +94,7 @@ void http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 		return;
 	}
-	HTTP_CTX_LOG_F(
-		LOG_LEVEL_DEBUG, ctx, "http: CONNECT \"%s\"", msg->req.url);
+	HTTP_CTX_LOG_F(DEBUG, ctx, "http: CONNECT \"%s\"", msg->req.url);
 
 	struct dialreq *req = make_dialreq(msg->req.url);
 	if (req == NULL) {

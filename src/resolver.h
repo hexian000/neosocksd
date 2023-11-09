@@ -20,8 +20,8 @@ struct resolver_stats {
 	uintmax_t num_success;
 };
 
-void resolver_init_cb(void);
-void resolver_atexit_cb(void);
+void resolver_init(void);
+void resolver_cleanup(void);
 
 struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf);
 const struct resolver_stats *resolver_stats(struct resolver *r);

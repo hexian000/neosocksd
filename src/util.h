@@ -98,8 +98,8 @@ struct event_cb {
 		}                                                              \
 	} while (0)
 
-void setup(int argc, char **argv);
-void init(void);
+void init(int argc, char **argv);
+void loadlibs(void);
 
 void drop_privileges(const char *user);
 void daemonize(const char *user, bool nochdir, bool noclose);

@@ -38,9 +38,7 @@ bool dialaddr_set(
 {
 	/* FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + 1 + 5) {
-		LOG_TXT_F(
-			LOG_LEVEL_ERROR, s, len, "address too long: %zu bytes",
-			len);
+		LOG_TXT_F(ERROR, s, len, "address too long: %zu bytes", len);
 		return false;
 	}
 	char buf[len + 1];
@@ -293,7 +291,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 static bool
 send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 {
-	LOG_BIN_F(LOG_LEVEL_VERBOSE, buf, len, "send: %zu bytes", len);
+	LOG_BIN_F(VERBOSE, buf, len, "send: %zu bytes", len);
 	const ssize_t nsend = send(d->w_socket.fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
@@ -729,7 +727,7 @@ static int dialer_recv(struct dialer *restrict d)
 	}
 	d->buf.len = (size_t)nrecv;
 	LOG_BIN_F(
-		LOG_LEVEL_VERBOSE, d->buf.data, d->buf.len, "recv: %zu bytes",
+		VERBOSE, d->buf.data, d->buf.len, "recv: %zu bytes",
 		d->buf.len);
 
 	const int ret = recv_dispatch(d, &d->req->proxy[d->jump]);
@@ -827,10 +825,10 @@ static bool connect_sa(
 	}
 #endif
 	ev_io_set(&d->w_socket, fd, EV_NONE);
-	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
+	if (LOGLEVEL(VERBOSE)) {
 		char addr_str[64];
 		format_sa(sa, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_VERBOSE, "dialer: connect \"%s\"", addr_str);
+		LOG_F(VERBOSE, "dialer: connect \"%s\"", addr_str);
 	}
 	d->state = STATE_CONNECT;
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
@@ -889,13 +887,12 @@ static void resolve_cb(
 		FAIL();
 	}
 
-	if (LOGLEVEL(LOG_LEVEL_VERBOSE)) {
+	if (LOGLEVEL(VERBOSE)) {
 		char node_str[dialaddr->domain.len + 1 + 5 + 1];
 		dialaddr_format(dialaddr, node_str, sizeof(node_str));
 		char addr_str[64];
 		format_sa(&addr.sa, addr_str, sizeof(addr_str));
-		LOG_F(LOG_LEVEL_VERBOSE, "resolve: \"%s\" is %s", node_str,
-		      addr_str);
+		LOG_F(VERBOSE, "resolve: \"%s\" is %s", node_str, addr_str);
 	}
 
 	if (!connect_sa(d, loop, &addr.sa)) {

@@ -28,14 +28,13 @@
 
 struct globals G = { 0 };
 
-void setup(int argc, char **argv)
+void init(int argc, char **argv)
 {
 	UNUSED(argc);
 	UNUSED(argv);
 
 	(void)setlocale(LC_ALL, "");
-	(void)setvbuf(stdout, NULL, _IONBF, 0);
-	slog_file = stdout;
+	slog_setoutput(SLOG_OUTPUT_FILE, stdout);
 
 	struct sigaction ignore = {
 		.sa_handler = SIG_IGN,
@@ -46,12 +45,12 @@ void setup(int argc, char **argv)
 	}
 }
 
-static void uninit(void);
+static void unloadlibs(void);
 
-void init(void)
+void loadlibs(void)
 {
 	{
-		const int ret = atexit(uninit);
+		const int ret = atexit(unloadlibs);
 		if (ret != 0) {
 			FAILMSGF("atexit: %d", ret);
 		}
@@ -59,12 +58,12 @@ void init(void)
 	srand64((uint64_t)clock_realtime());
 
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
-	resolver_init_cb();
+	resolver_init();
 }
 
-void uninit(void)
+void unloadlibs(void)
 {
-	resolver_atexit_cb();
+	resolver_cleanup();
 }
 
 void modify_io_events(
@@ -212,5 +211,5 @@ void daemonize(const char *user, const bool nochdir, const bool noclose)
 	(void)close(fd[1]);
 
 	/* Set logging output to syslog. */
-	slog_file = NULL;
+	slog_setoutput(SLOG_OUTPUT_SYSLOG, "neosocksd");
 }
