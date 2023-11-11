@@ -615,13 +615,13 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 				break;
 			}
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "recv: fd=%d %s", fd,
+				DEBUG, ctx, "recv: fd=%d %s", fd,
 				strerror(err));
 			return -1;
 		} else if (nrecv == 0) {
 			/* connection is not established yet, we do not expect EOF here */
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "recv: fd=%d early EOF", fd);
+				DEBUG, ctx, "recv: fd=%d early EOF", fd);
 			return -1;
 		}
 		ctx->rbuf.len += (size_t)nrecv;

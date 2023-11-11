@@ -63,7 +63,7 @@ static void print_usage(const char *argv0)
 		"  -i, --netdev <name>        bind outgoing connections to network device\n"
 #endif
 #if WITH_REUSEPORT
-		"  --reuseport                allow multiple instances to listen on the same address\n"
+		"  --reuseport                allow multiple instances to listen on the same port\n"
 #endif
 #if WITH_TCP_FASTOPEN
 		"  --no-fastopen              disable TCP fast open (RFC 7413)\n"
@@ -81,9 +81,8 @@ static void print_usage(const char *argv0)
 		"                             can take (default: 60.0)\n"
 		"  -d, --daemonize            run in background and write logs to syslog\n"
 		"  -u, --user <name>          run as the specified limited user\n"
-		"  -v, --verbose              increase logging verbosity, can be specified more\n"
-		"                             than once. e.g. \"-v -v\" prints verbose messages\n"
-		"  -s, --silence              decrease logging verbosity\n"
+		"  --loglevel <level>         0-7 are Silence, Fatal, Error, Warning, Notice,\n"
+		"                             Info, Debug, Verbose respectively (default: 4)\n"
 		"  -m, --max-sessions <n>     maximum number of concurrent connections\n"
 		"                             (default: 4096, 0: unlimited)\n"
 		"  --max-startups <start:rate:full>\n"
@@ -232,14 +231,12 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			}
 			continue;
 		}
-		if (strcmp(argv[i], "-v") == 0 ||
-		    strcmp(argv[i], "--verbose") == 0) {
-			conf->log_level++;
-			continue;
-		}
-		if (strcmp(argv[i], "-s") == 0 ||
-		    strcmp(argv[i], "--silence") == 0) {
-			conf->log_level--;
+		if (strcmp(argv[i], "--loglevel") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			if (sscanf(argv[i], "%d", &conf->log_level) != 1) {
+				OPT_ARG_ERROR(argv, i);
+			}
 			continue;
 		}
 		if (strcmp(argv[i], "-d") == 0 ||
@@ -454,7 +451,7 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 	} break;
 	case SIGINT:
 	case SIGTERM:
-		LOGN_F("signal %d received, breaking", watcher->signum);
+		LOGD_F("signal %d received, breaking", watcher->signum);
 #if WITH_SYSTEMD
 		(void)sd_notify(0, "STOPPING=1");
 #endif

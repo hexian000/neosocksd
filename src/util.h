@@ -57,6 +57,9 @@ typedef uintptr_t handle_t;
 		}                                                              \
 		struct vbuffer *vbuf =                                         \
 			print_txt(NULL, "  ", (txt), (txtsize));               \
+		if (vbuf->len > 0 && vbuf->data[vbuf->len - 1] == '\n') {      \
+			vbuf->len--;                                           \
+		}                                                              \
 		LOG_F(level, format "\n%.*s", __VA_ARGS__, (int)vbuf->len,     \
 		      vbuf->data);                                             \
 		VBUF_FREE(vbuf);                                               \
@@ -71,6 +74,9 @@ typedef uintptr_t handle_t;
 		}                                                              \
 		struct vbuffer *vbuf =                                         \
 			print_bin(NULL, "  ", (bin), (binsize));               \
+		if (vbuf->len > 0 && vbuf->data[vbuf->len - 1] == '\n') {      \
+			vbuf->len--;                                           \
+		}                                                              \
 		LOG_F(level, format "\n%.*s", __VA_ARGS__, (int)vbuf->len,     \
 		      vbuf->data);                                             \
 		VBUF_FREE(vbuf);                                               \

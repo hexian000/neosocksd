@@ -189,7 +189,7 @@ static int parse_request(struct http_ctx *restrict ctx)
 		next = http_parse(next, msg);
 		if (next == NULL) {
 			HTTP_CTX_LOG(
-				ERROR, ctx, "http: failed parsing request");
+				DEBUG, ctx, "http: failed parsing request");
 			return -1;
 		} else if (next == ctx->http.nxt) {
 			if (ctx->rbuf.len + 1 >= ctx->rbuf.cap) {
@@ -200,7 +200,7 @@ static int parse_request(struct http_ctx *restrict ctx)
 		}
 		if (strncmp(msg->req.version, "HTTP/1.", 7) != 0) {
 			HTTP_CTX_LOG_F(
-				ERROR, ctx, "http: unsupported protocol %s",
+				DEBUG, ctx, "http: unsupported protocol %s",
 				msg->req.version);
 			return -1;
 		}
@@ -215,7 +215,7 @@ static int parse_request(struct http_ctx *restrict ctx)
 		char *key, *value;
 		next = http_parsehdr(next, &key, &value);
 		if (next == NULL) {
-			HTTP_CTX_LOG(ERROR, ctx, "http: failed parsing header");
+			HTTP_CTX_LOG(DEBUG, ctx, "http: failed parsing header");
 			return -1;
 		} else if (next == ctx->http.nxt) {
 			return 1;

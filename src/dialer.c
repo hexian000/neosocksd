@@ -288,6 +288,24 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 		return;                                                        \
 	} while (0)
 
+#define DIALER_LOG_F(level, d, format, ...)                                    \
+	do {                                                                   \
+		if (!LOGLEVEL(level)) {                                        \
+			break;                                                 \
+		}                                                              \
+		const struct dialreq *restrict req = (d)->req;                 \
+		assert((d)->jump < req->num_proxy);                            \
+		char raddr[64];                                                \
+		const struct dialaddr *addr =                                  \
+			(d)->jump + 1 < req->num_proxy ?                       \
+				&req->proxy[(d)->jump + 1].addr :              \
+				&req->addr;                                    \
+		dialaddr_format(addr, raddr, sizeof(raddr));                   \
+		LOG_F(level, "proxy connect \"%s\": " format, raddr,           \
+		      __VA_ARGS__);                                            \
+	} while (0)
+#define DIALER_LOG(level, d, message) DIALER_LOG_F(level, d, "%s", message)
+
 static bool
 send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 {
@@ -295,11 +313,12 @@ send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 	const ssize_t nsend = send(d->w_socket.fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
-		LOGE_F("send: %s", strerror(err));
+		DIALER_LOG_F(ERROR, d, "send: %s", strerror(err));
 		d->syserr = err;
 		return false;
 	} else if ((size_t)nsend != len) {
-		LOGE_F("short send: %zu < %zu", (size_t)nsend, len);
+		DIALER_LOG_F(
+			ERROR, d, "short send: %zu < %zu", (size_t)nsend, len);
 		return false;
 	}
 	return true;
@@ -518,10 +537,10 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 	const ssize_t nrecv = recv(d->w_socket.fd, d->buf.data, n, 0);
 	if (nrecv < 0) {
 		const int err = errno;
-		LOGE_F("recv: %s", strerror(err));
+		DIALER_LOG_F(ERROR, d, "recv: %s", strerror(err));
 		return false;
 	} else if (nrecv != (ssize_t)n) {
-		LOGE_F("recv: short read %zd/%zu", nrecv, n);
+		DIALER_LOG_F(ERROR, d, "recv: short read %zd/%zu", nrecv, n);
 		return false;
 	}
 	return true;
@@ -537,18 +556,21 @@ static int recv_http_rsp(struct dialer *restrict d)
 	char *buf = (char *)d->buf.data;
 	char *next = http_parse(buf, &msg);
 	if (next == NULL) {
-		LOGE("http_parse: fail");
+		DIALER_LOG(ERROR, d, "http_parse: failed");
 		return -1;
 	} else if (next == buf) {
 		return 1;
 	}
 
 	if (strncmp(msg.rsp.version, "HTTP/1.", 7) != 0) {
-		LOGE_F("http: unsupported protocol %s", msg.rsp.version);
+		DIALER_LOG_F(
+			ERROR, d, "unsupported HTTP version: %s",
+			msg.rsp.version);
 		return -1;
 	}
 	if (strcmp(msg.rsp.code, "200") != 0) {
-		LOGE_F("http: server response %s", msg.rsp.code);
+		DIALER_LOG_F(
+			ERROR, d, "HTTP: %s %s", msg.rsp.code, msg.rsp.status);
 		return -1;
 	}
 
@@ -557,7 +579,7 @@ static int recv_http_rsp(struct dialer *restrict d)
 	for (;;) {
 		next = http_parsehdr(last, &key, &value);
 		if (next == NULL) {
-			LOGE("http_parsehdr: fail");
+			DIALER_LOG(ERROR, d, "http_parsehdr: failed");
 		} else if (next == last) {
 			return 1;
 		}
@@ -584,13 +606,23 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 	const uint8_t version =
 		read_uint8(hdr + offsetof(struct socks4_hdr, version));
 	if (version != UINT8_C(0)) {
-		LOGE_F("unsupported SOCKS version: %" PRIu8, version);
+		DIALER_LOG_F(
+			ERROR, d, "unsupported SOCKS version: %" PRIu8,
+			version);
 		return -1;
 	}
 	const uint8_t command =
 		read_uint8(hdr + offsetof(struct socks4_hdr, command));
 	if (command != SOCKS4RSP_GRANTED) {
-		LOGE_F("SOCKS4 failure: %" PRIu8, command);
+		DIALER_LOG_F(ERROR, d, "SOCKS4 failure: %" PRIu8, command);
+		if (command == SOCKS4RSP_REJECTED) {
+			DIALER_LOG(
+				ERROR, d, "SOCKS4 request rejected or failed");
+		} else {
+			DIALER_LOG_F(
+				ERROR, d, "unsupported SOCKS4 command: %" PRIu8,
+				command);
+		}
 		return -1;
 	}
 	/* protocol finished, remove header */
@@ -599,6 +631,18 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 	}
 	return 0;
 }
+
+static const char *socks5_errors[] = {
+	[SOCKS5RSP_SUCCEEDED] = "Succeeded",
+	[SOCKS5RSP_FAIL] = "General SOCKS server failure",
+	[SOCKS5RSP_NOALLOWED] = "Connection not allowed by ruleset",
+	[SOCKS5RSP_NETUNREACH] = "Network unreachable",
+	[SOCKS5RSP_HOSTUNREACH] = "Host unreachable",
+	[SOCKS5RSP_CONNREFUSED] = "Connection refused",
+	[SOCKS5RSP_TTLEXPIRED] = "TTL expired",
+	[SOCKS5RSP_CMDNOSUPPORT] = "Command not supported",
+	[SOCKS5RSP_ATYPNOSUPPORT] = "Address type not supported",
+};
 
 static int recv_socks5_rsp(struct dialer *restrict d)
 {
@@ -613,13 +657,22 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 	const uint8_t version =
 		read_uint8(hdr + offsetof(struct socks5_hdr, version));
 	if (version != SOCKS5) {
-		LOGE_F("unsupported SOCKS version: %" PRIu8, version);
+		DIALER_LOG_F(
+			ERROR, d, "unsupported SOCKS version: %" PRIu8,
+			version);
 		return -1;
 	}
 	const uint8_t command =
 		read_uint8(hdr + offsetof(struct socks5_hdr, command));
 	if (command != SOCKS5RSP_SUCCEEDED) {
-		LOGE_F("SOCKS5 failure: %" PRIu8, command);
+		if (command < ARRAY_SIZE(socks5_errors)) {
+			DIALER_LOG_F(
+				ERROR, d, "SOCKS5: %s", socks5_errors[command]);
+		} else {
+			DIALER_LOG_F(
+				ERROR, d, "unsupported SOCKS5 command: %" PRIu8,
+				command);
+		}
 		return -1;
 	}
 	const uint8_t addrtype =
@@ -632,7 +685,9 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		expected += sizeof(struct in6_addr) + sizeof(in_port_t);
 		break;
 	default:
-		LOGE_F("SOCKS5 invalid addrtype: %" PRIu8, addrtype);
+		DIALER_LOG_F(
+			ERROR, d, "unsupported SOCKS5 addrtype: %" PRIu8,
+			addrtype);
 		return -1;
 	}
 	if (len < expected) {
@@ -656,13 +711,17 @@ static int recv_socks5_auth(struct dialer *restrict d)
 	const uint8_t version =
 		read_uint8(hdr + offsetof(struct socks5_auth_rsp, version));
 	if (version != SOCKS5) {
-		LOGE_F("unsupported SOCKS version: %" PRIu8, version);
+		DIALER_LOG_F(
+			ERROR, d, "unsupported SOCKS version: %" PRIu8,
+			version);
 		return -1;
 	}
 	const uint8_t method =
 		read_uint8(hdr + offsetof(struct socks5_auth_rsp, method));
 	if (method != SOCKS5AUTH_NOAUTH) {
-		LOGE_F("SOCKS5 unsupported auth method: %" PRIu8, method);
+		DIALER_LOG_F(
+			ERROR, d, "SOCKS5 unsupported auth method: %" PRIu8,
+			method);
 		return -1;
 	}
 	/* protocol finished, remove header */
@@ -710,11 +769,11 @@ static int dialer_recv(struct dialer *restrict d)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 1;
 		}
-		LOGE_F("recv: %s", strerror(err));
+		DIALER_LOG_F(ERROR, d, "%s", strerror(err));
 		d->syserr = err;
 		return -1;
 	} else if (nrecv == 0) {
-		LOGE_F("recv: fd=%d early EOF", fd);
+		DIALER_LOG(ERROR, d, "early EOF");
 		return -1;
 	}
 	const int sockerr = socket_get_error(fd);
@@ -722,7 +781,7 @@ static int dialer_recv(struct dialer *restrict d)
 		if (IS_TRANSIENT_ERROR(sockerr)) {
 			return 1;
 		}
-		LOGE_F("recv: %s", strerror(sockerr));
+		DIALER_LOG_F(ERROR, d, "%s", strerror(sockerr));
 		return -1;
 	}
 	d->buf.len = (size_t)nrecv;
@@ -739,7 +798,7 @@ static int dialer_recv(struct dialer *restrict d)
 	}
 	const size_t want = d->buf.len + (size_t)ret;
 	if (want > d->buf.cap) {
-		LOGE("recv: header too long");
+		DIALER_LOG(ERROR, d, "recv: header too long");
 		return -1;
 	}
 	socket_rcvlowat(fd, want);
@@ -755,7 +814,18 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		assert(d->state == STATE_CONNECT);
 		const int sockerr = socket_get_error(d->w_socket.fd);
 		if (sockerr != 0) {
-			LOGE_F("connect: %s", strerror(sockerr));
+			if (LOGLEVEL(ERROR)) {
+				const struct dialreq *restrict req = (d)->req;
+				const struct dialaddr *restrict addr =
+					req->num_proxy > 0 ?
+						&req->proxy[0].addr :
+						&req->addr;
+				char addr_str[64];
+				dialaddr_format(
+					addr, addr_str, sizeof(addr_str));
+				LOG_F(ERROR, "connect \"%s\": %s", addr_str,
+				      strerror(sockerr));
+			}
 			d->syserr = sockerr;
 			DIALER_RETURN(d, loop, false);
 		}
@@ -834,7 +904,12 @@ static bool connect_sa(
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
 		const int err = errno;
 		if (err != EINTR && err != EINPROGRESS) {
-			LOGE_F("connect: %s", strerror(err));
+			if (LOGLEVEL(ERROR)) {
+				char addr_str[64];
+				format_sa(sa, addr_str, sizeof(addr_str));
+				LOG_F(ERROR, "connect \"%s\": %s", addr_str,
+				      strerror(err));
+			}
 			d->syserr = err;
 			CLOSE_FD(fd);
 			return false;
