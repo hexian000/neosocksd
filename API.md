@@ -364,6 +364,6 @@ logf("some debug log: %d", 123)
 
 **Description**
 
-True if the log level doesn't allow printing debug logs. The log level depends on command line argument `-s`/`-v`.
+True if the log level doesn't allow printing debug logs. The log level depends on command line argument `--loglevel`.
 
 In the default implementation of `libruleset.lua`, this value controls whether `log`/`logf` writes to standard output.
