@@ -83,6 +83,9 @@ static void print_usage(const char *argv0)
 		"  -u, --user <name>          run as the specified limited user\n"
 		"  --loglevel <level>         0-7 are Silence, Fatal, Error, Warning, Notice,\n"
 		"                             Info, Debug, Verbose respectively (default: 4)\n"
+		"  -v, --verbose              increase logging verbosity, can be specified more than once\n"
+		"                             e.g. \"-v -v\" prints debug messages\n"
+		"  -s, --silence              decrease logging verbosity\n"
 		"  -m, --max-sessions <n>     maximum number of concurrent connections\n"
 		"                             (default: 4096, 0: unlimited)\n"
 		"  --max-startups <start:rate:full>\n"
@@ -237,6 +240,16 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			if (sscanf(argv[i], "%d", &conf->log_level) != 1) {
 				OPT_ARG_ERROR(argv, i);
 			}
+			continue;
+		}
+		if (strcmp(argv[i], "-v") == 0 ||
+		    strcmp(argv[i], "--verbose") == 0) {
+			conf->log_level++;
+			continue;
+		}
+		if (strcmp(argv[i], "-s") == 0 ||
+		    strcmp(argv[i], "--silence") == 0) {
+			conf->log_level--;
 			continue;
 		}
 		if (strcmp(argv[i], "-d") == 0 ||
