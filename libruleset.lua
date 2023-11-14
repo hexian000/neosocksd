@@ -470,6 +470,23 @@ function rule.proxy(...)
 end
 _G.rule = rule
 
+local lb = {}
+function lb.random(t)
+    local n = #t
+    return function(...)
+        return t[math.random(n)]
+    end
+end
+
+function lb.roundrobin(t)
+    local i, n = 0, #t
+    return function(...)
+        i = i % n + 1
+        return t[i]
+    end
+end
+_G.lb = lb
+
 -- [[ internal route functions ]] --
 _G.num_requests = _G.num_requests or 0
 _G.stat_requests = _G.stat_requests or list:new({0})
