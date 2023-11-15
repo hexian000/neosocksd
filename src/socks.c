@@ -74,7 +74,14 @@ struct socks_ctx {
 		}                                                              \
 		char laddr[64];                                                \
 		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
-		LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);           \
+		if ((ctx)->state != STATE_CONNECT) {                           \
+			LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);   \
+			break;                                                 \
+		}                                                              \
+		char raddr[64];                                                \
+		dialaddr_format(&(ctx)->addr, raddr, sizeof(raddr));           \
+		LOG_F(level, "\"%s\" -> \"%s\": " format, laddr, raddr,        \
+		      __VA_ARGS__);                                            \
 	} while (0)
 #define SOCKS_CTX_LOG(level, ctx, message)                                     \
 	SOCKS_CTX_LOG_F(level, ctx, "%s", message)

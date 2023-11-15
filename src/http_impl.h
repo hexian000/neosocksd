@@ -81,7 +81,12 @@ void http_ctx_close(struct ev_loop *loop, struct http_ctx *ctx);
 		}                                                              \
 		char laddr[64];                                                \
 		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
-		LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);           \
+		if ((ctx)->state != STATE_CONNECT) {                           \
+			LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);   \
+			break;                                                 \
+		}                                                              \
+		LOG_F(level, "\"%s\" -> \"%s\": " format, laddr,               \
+		      (ctx)->http.msg.req.url, __VA_ARGS__);                   \
 	} while (0)
 #define HTTP_CTX_LOG(level, ctx, message)                                      \
 	HTTP_CTX_LOG_F(level, ctx, "%s", message)
