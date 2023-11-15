@@ -83,20 +83,18 @@ case "$1" in
     ls -lh "build/src/neosocksd"
     ;;
 "msys2")
-    # set SYSROOT for finding dependencies
     rm -rf "build" && mkdir "build"
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" \
-        -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
         -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
     nice cmake --build "build"
-    zip -9j "build/neosocksd.x86_64-pc-msys.zip" \
-        "build/src/neosocksd" \
-        "/usr/bin/msys-2.0.dll"
-    ls -lh "build/neosocksd.x86_64-pc-msys.zip"
+    zip -9j "build/neosocksd-win32.x86_64-pc-msys.zip" \
+        "/usr/bin/msys-2.0.dll" \
+        "build/src/neosocksd.exe"
+    ls -lh "build/neosocksd-win32.x86_64-pc-msys.zip"
     ;;
 "asan")
     # rebuild with asan
