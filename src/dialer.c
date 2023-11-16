@@ -607,22 +607,22 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 		read_uint8(hdr + offsetof(struct socks4_hdr, version));
 	if (version != UINT8_C(0)) {
 		DIALER_LOG_F(
-			ERROR, d, "unsupported SOCKS version: %" PRIu8,
+			ERROR, d, "unexpected SOCKS4 response version: %" PRIu8,
 			version);
 		return -1;
 	}
 	const uint8_t command =
 		read_uint8(hdr + offsetof(struct socks4_hdr, command));
-	if (command != SOCKS4RSP_GRANTED) {
-		DIALER_LOG_F(ERROR, d, "SOCKS4 failure: %" PRIu8, command);
-		if (command == SOCKS4RSP_REJECTED) {
-			DIALER_LOG(
-				ERROR, d, "SOCKS4 request rejected or failed");
-		} else {
-			DIALER_LOG_F(
-				ERROR, d, "unsupported SOCKS4 command: %" PRIu8,
-				command);
-		}
+	switch (command) {
+	case SOCKS4RSP_GRANTED:
+		break;
+	case SOCKS4RSP_REJECTED:
+		DIALER_LOG(ERROR, d, "SOCKS4 request rejected or failed");
+		return -1;
+	default:
+		DIALER_LOG_F(
+			ERROR, d, "unsupported SOCKS4 command: %" PRIu8,
+			command);
 		return -1;
 	}
 	/* protocol finished, remove header */
@@ -658,7 +658,7 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		read_uint8(hdr + offsetof(struct socks5_hdr, version));
 	if (version != SOCKS5) {
 		DIALER_LOG_F(
-			ERROR, d, "unsupported SOCKS version: %" PRIu8,
+			ERROR, d, "unexpected SOCKS5 response version: %" PRIu8,
 			version);
 		return -1;
 	}
@@ -668,11 +668,11 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		if (command < ARRAY_SIZE(socks5_errors)) {
 			DIALER_LOG_F(
 				ERROR, d, "SOCKS5: %s", socks5_errors[command]);
-		} else {
-			DIALER_LOG_F(
-				ERROR, d, "unsupported SOCKS5 command: %" PRIu8,
-				command);
+			return -1;
 		}
+		DIALER_LOG_F(
+			ERROR, d, "unsupported SOCKS5 command: %" PRIu8,
+			command);
 		return -1;
 	}
 	const uint8_t addrtype =
@@ -686,9 +686,8 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		break;
 	default:
 		DIALER_LOG_F(
-			ERROR, d, "unsupported SOCKS5 addrtype: %" PRIu8,
+			WARNING, d, "unexpected SOCKS5 addrtype: %" PRIu8,
 			addrtype);
-		return -1;
 	}
 	if (len < expected) {
 		return (int)(expected - len);
@@ -712,7 +711,7 @@ static int recv_socks5_auth(struct dialer *restrict d)
 		read_uint8(hdr + offsetof(struct socks5_auth_rsp, version));
 	if (version != SOCKS5) {
 		DIALER_LOG_F(
-			ERROR, d, "unsupported SOCKS version: %" PRIu8,
+			ERROR, d, "unsupported SOCKS5 version: %" PRIu8,
 			version);
 		return -1;
 	}
@@ -720,7 +719,7 @@ static int recv_socks5_auth(struct dialer *restrict d)
 		read_uint8(hdr + offsetof(struct socks5_auth_rsp, method));
 	if (method != SOCKS5AUTH_NOAUTH) {
 		DIALER_LOG_F(
-			ERROR, d, "SOCKS5 unsupported auth method: %" PRIu8,
+			ERROR, d, "unsupported SOCKS5 auth method: %" PRIu8,
 			method);
 		return -1;
 	}
