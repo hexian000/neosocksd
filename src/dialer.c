@@ -686,8 +686,9 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		break;
 	default:
 		DIALER_LOG_F(
-			WARNING, d, "unexpected SOCKS5 addrtype: %" PRIu8,
+			ERROR, d, "unexpected SOCKS5 addrtype: %" PRIu8,
 			addrtype);
+		return -1;
 	}
 	if (len < expected) {
 		return (int)(expected - len);
