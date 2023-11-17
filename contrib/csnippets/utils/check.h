@@ -35,7 +35,7 @@
 	} while (0)
 #define CHECKOOM(ptr)                                                          \
 	do {                                                                   \
-		if (!(cond)) {                                                 \
+		if ((ptr) == NULL) {                                           \
 			FAILOOM();                                             \
 		}                                                              \
 	} while (0)

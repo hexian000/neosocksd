@@ -357,7 +357,8 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 		if (!server_start(s, &bindaddr.sa)) {
-			FAILMSG("failed to start server");
+			LOGF("failed to start server");
+			exit(EXIT_FAILURE);
 		}
 	}
 
@@ -371,7 +372,8 @@ int main(int argc, char **argv)
 		api = &app.apiserver;
 		server_init(api, loop, http_api_serve, s);
 		if (!server_start(api, &apiaddr.sa)) {
-			FAILMSG("failed to start api server");
+			LOGF("failed to start api server");
+			exit(EXIT_FAILURE);
 		}
 	}
 
