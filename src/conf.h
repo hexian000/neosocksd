@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct config {
 	const char *listen;
@@ -51,10 +52,10 @@ struct config {
 
 	size_t tcp_sndbuf, tcp_rcvbuf;
 
-	size_t max_sessions;
-	size_t startup_limit_start;
-	size_t startup_limit_rate;
-	size_t startup_limit_full;
+	uint32_t max_sessions;
+	uint32_t startup_limit_start;
+	double startup_limit_rate;
+	uint32_t startup_limit_full;
 };
 
 struct config conf_default(void);

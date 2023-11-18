@@ -24,10 +24,12 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
+#include <inttypes.h>
 
 static struct {
 	struct ev_signal w_sighup;
@@ -90,7 +92,7 @@ static void print_usage(const char *argv0)
 		"                             (default: 4096, 0: unlimited)\n"
 		"  --max-startups <start:rate:full>\n"
 		"                             maximum number of concurrent halfopen connections\n"
-		"                             (default: 10:30:100)\n"
+		"                             (default: unlimited)\n"
 		"  --proto-timeout            keep the session in halfopen state until there is\n"
 		"                             bidirectional traffic\n"
 		"\n"
@@ -261,20 +263,24 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		    strcmp(argv[i], "--max-sessions") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			if (sscanf(argv[i], "%zu", &conf->max_sessions) != 1) {
+			uint32_t num;
+			if (sscanf(argv[i], "%" SCNu32, &num) != 1) {
 				OPT_ARG_ERROR(argv, i);
 			}
+			conf->max_sessions = num;
 			continue;
 		}
 		if (strcmp(argv[i], "--max-startups") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			if (sscanf(argv[i], "%zu:%zu:%zu",
-				   &conf->startup_limit_start,
-				   &conf->startup_limit_rate,
-				   &conf->startup_limit_full) != 3) {
+			uint32_t start, rate, full;
+			if (sscanf(argv[i], "%" SCNu32 ":%" SCNu32 ":%" SCNu32,
+				   &start, &rate, &full) != 3) {
 				OPT_ARG_ERROR(argv, i);
 			}
+			conf->startup_limit_start = start;
+			conf->startup_limit_rate = (double)rate / 100.0;
+			conf->startup_limit_full = full;
 			continue;
 		}
 		if (strcmp(argv[i], "--proto-timeout") == 0) {

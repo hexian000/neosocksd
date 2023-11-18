@@ -22,14 +22,25 @@ struct config conf_default(void)
 		.tcp_rcvbuf = 0,
 
 		.max_sessions = 16384,
-		.startup_limit_start = 10,
+		.startup_limit_start = 0,
 		.startup_limit_rate = 30,
-		.startup_limit_full = 100,
+		.startup_limit_full = 0,
 	};
 #if WITH_TCP_FASTOPEN
 	conf.tcp_fastopen = true;
 #endif
 	return conf;
+}
+
+static bool range_check_uint32(
+	const char *key, const uint32_t value, const uint32_t lbound,
+	const uint32_t ubound)
+{
+	if (!(lbound <= value && value <= ubound)) {
+		LOGE_F("%s is out of range (%zu - %zu)", key, lbound, ubound);
+		return false;
+	}
+	return true;
 }
 
 static bool range_check_size(
@@ -55,7 +66,8 @@ static bool range_check_double(
 }
 
 #define RANGE_CHECK(key, value, lbound, ubound)                                \
-	_Generic(value, size_t                                                 \
+	_Generic(value, uint32_t                                               \
+		 : range_check_uint32, size_t                                  \
 		 : range_check_size, double                                    \
 		 : range_check_double)(key, value, lbound, ubound)
 
@@ -101,5 +113,6 @@ bool conf_check(const struct config *restrict conf)
 	       RANGE_CHECK(
 		       "startup_limit_full", conf->startup_limit_full,
 		       conf->startup_limit_start,
-		       conf->max_sessions > 0 ? conf->max_sessions : SIZE_MAX);
+		       conf->max_sessions > 0 ? conf->max_sessions :
+						UINT32_MAX);
 }
