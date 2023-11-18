@@ -6,8 +6,6 @@
 #include "utils/minmax.h"
 
 #include <limits.h>
-#include <stddef.h>
-#include <stdint.h>
 
 struct config conf_default(void)
 {
@@ -32,23 +30,11 @@ struct config conf_default(void)
 	return conf;
 }
 
-static bool range_check_uint32(
-	const char *key, const uint32_t value, const uint32_t lbound,
-	const uint32_t ubound)
+static bool range_check_int(
+	const char *key, const int value, const int lbound, const int ubound)
 {
 	if (!(lbound <= value && value <= ubound)) {
-		LOGE_F("%s is out of range (%zu - %zu)", key, lbound, ubound);
-		return false;
-	}
-	return true;
-}
-
-static bool range_check_size(
-	const char *key, const size_t value, const size_t lbound,
-	const size_t ubound)
-{
-	if (!(lbound <= value && value <= ubound)) {
-		LOGE_F("%s is out of range (%zu - %zu)", key, lbound, ubound);
+		LOGE_F("%s is out of range (%d - %d)", key, lbound, ubound);
 		return false;
 	}
 	return true;
@@ -66,9 +52,8 @@ static bool range_check_double(
 }
 
 #define RANGE_CHECK(key, value, lbound, ubound)                                \
-	_Generic(value, uint32_t                                               \
-		 : range_check_uint32, size_t                                  \
-		 : range_check_size, double                                    \
+	_Generic(value, int                                                    \
+		 : range_check_int, double                                     \
 		 : range_check_double)(key, value, lbound, ubound)
 
 bool conf_check(const struct config *restrict conf)
@@ -98,14 +83,14 @@ bool conf_check(const struct config *restrict conf)
 		LOGW("ruleset will not work in forwarding mode");
 	}
 #endif
-	if ((conf->tcp_sndbuf != 0 && conf->tcp_sndbuf < 4096) ||
-	    (conf->tcp_rcvbuf != 0 && conf->tcp_rcvbuf < 4096)) {
+	if ((conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 4096) ||
+	    (conf->tcp_rcvbuf > 0 && conf->tcp_rcvbuf < 4096)) {
 		LOGW("probably too small tcp buffer");
 	}
 
 	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
 	       RANGE_CHECK(
-		       "startup_limit_start", conf->startup_limit_start, 1,
+		       "startup_limit_start", conf->startup_limit_start, 0,
 		       conf->startup_limit_full) &&
 	       RANGE_CHECK(
 		       "startup_limit_rate", conf->startup_limit_rate, 0,
@@ -113,6 +98,5 @@ bool conf_check(const struct config *restrict conf)
 	       RANGE_CHECK(
 		       "startup_limit_full", conf->startup_limit_full,
 		       conf->startup_limit_start,
-		       conf->max_sessions > 0 ? conf->max_sessions :
-						UINT32_MAX);
+		       conf->max_sessions > 0 ? conf->max_sessions : INT_MAX);
 }

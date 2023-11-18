@@ -7,7 +7,6 @@
 #include "sockutil.h"
 
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 struct config {
@@ -29,7 +28,7 @@ struct config {
 	int resolve_pf;
 	double timeout;
 #if WITH_RULESET
-	size_t memlimit;
+	int memlimit;
 #endif
 
 	bool http : 1;
@@ -50,12 +49,12 @@ struct config {
 #endif
 	bool daemonize : 1;
 
-	size_t tcp_sndbuf, tcp_rcvbuf;
+	int tcp_sndbuf, tcp_rcvbuf;
 
-	uint32_t max_sessions;
-	uint32_t startup_limit_start;
+	int max_sessions;
+	int startup_limit_start;
 	double startup_limit_rate;
-	uint32_t startup_limit_full;
+	int startup_limit_full;
 };
 
 struct config conf_default(void);

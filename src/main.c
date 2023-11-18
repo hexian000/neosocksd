@@ -24,12 +24,10 @@
 
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
-#include <inttypes.h>
 
 static struct {
 	struct ev_signal w_sighup;
@@ -212,7 +210,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		if (strcmp(argv[i], "--memlimit") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			if (sscanf(argv[i], "%zu", &conf->memlimit) != 1) {
+			if (sscanf(argv[i], "%d", &conf->memlimit) != 1) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			continue;
@@ -263,8 +261,8 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		    strcmp(argv[i], "--max-sessions") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			uint32_t num;
-			if (sscanf(argv[i], "%" SCNu32, &num) != 1) {
+			int num;
+			if (sscanf(argv[i], "%d", &num) != 1) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			conf->max_sessions = num;
@@ -273,9 +271,9 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		if (strcmp(argv[i], "--max-startups") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			uint32_t start, rate, full;
-			if (sscanf(argv[i], "%" SCNu32 ":%" SCNu32 ":%" SCNu32,
-				   &start, &rate, &full) != 3) {
+			int start, rate, full;
+			if (sscanf(argv[i], "%d:%d:%d", &start, &rate, &full) !=
+			    3) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			conf->startup_limit_start = start;

@@ -21,17 +21,17 @@ static bool is_startup_limited(struct server *restrict s)
 	const struct config *restrict conf = G.conf;
 	const struct server_stats *restrict stats = &s->stats;
 	if (conf->max_sessions > 0 &&
-	    stats->num_sessions > conf->max_sessions) {
+	    stats->num_sessions > (size_t)conf->max_sessions) {
 		LOGV("session limit exceeded, rejecting new connection");
 		return true;
 	}
 	if (conf->startup_limit_full > 0 &&
-	    stats->num_halfopen > conf->startup_limit_full) {
+	    stats->num_halfopen > (size_t)conf->startup_limit_full) {
 		LOGV("full startup limit exceeded, rejecting new connection");
 		return true;
 	}
 	if (conf->startup_limit_start > 0 &&
-	    stats->num_halfopen > conf->startup_limit_start) {
+	    stats->num_halfopen > (size_t)conf->startup_limit_start) {
 		if (frand() < conf->startup_limit_rate) {
 			LOGV("startup limit reached, rejecting new connection");
 			return true;

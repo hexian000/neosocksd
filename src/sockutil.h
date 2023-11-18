@@ -31,7 +31,7 @@ void socket_set_reuseport(int fd, bool reuseport);
 void socket_set_tcp(int fd, bool nodelay, bool keepalive);
 void socket_set_fastopen(int fd, int backlog);
 void socket_set_fastopen_connect(int fd, bool enabled);
-void socket_set_buffer(int fd, size_t send, size_t recv);
+void socket_set_buffer(int fd, int send, int recv);
 void socket_bind_netdev(int fd, const char *netdev);
 void socket_set_transparent(int fd, bool tproxy);
 void socket_rcvlowat(int fd, size_t bytes);
