@@ -2,7 +2,10 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "session.h"
+#include "utils/slog.h"
 #include "util.h"
+
+#include <stddef.h>
 
 void session_add(struct session *restrict ss)
 {
@@ -30,7 +33,10 @@ void session_del(struct session *restrict ss)
 
 void session_closeall(struct ev_loop *loop)
 {
+	size_t num = 0;
 	for (struct session *ss = G.sessions; ss != NULL; ss = G.sessions) {
 		ss->close(loop, ss);
+		num++;
 	}
+	LOGD_F("%zu sessions closed", num);
 }
