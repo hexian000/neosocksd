@@ -104,8 +104,6 @@ void socket_set_buffer(const int fd, const int send, const int recv)
 {
 	int val;
 	if (send > 0) {
-		CHECKMSGF(
-			send <= INT_MAX, "SO_SNDBUF: %s", "value out of range");
 		val = (int)send;
 		if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val))) {
 			const int err = errno;
@@ -113,8 +111,6 @@ void socket_set_buffer(const int fd, const int send, const int recv)
 		}
 	}
 	if (recv > 0) {
-		CHECKMSGF(
-			recv <= INT_MAX, "SO_RCVBUF: %s", "value out of range");
 		val = (int)recv;
 		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val))) {
 			const int err = errno;
