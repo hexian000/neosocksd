@@ -11,7 +11,7 @@
 #include "utils/minmax.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "conf.h"
 #include "resolver.h"
 #include "dialer.h"

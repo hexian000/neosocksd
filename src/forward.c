@@ -3,7 +3,7 @@
 
 #include "forward.h"
 #include "session.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "utils/slog.h"
 #include "conf.h"
 #include "util.h"

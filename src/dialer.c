@@ -6,7 +6,7 @@
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "net/addr.h"
 #include "net/url.h"
 #include "net/http.h"

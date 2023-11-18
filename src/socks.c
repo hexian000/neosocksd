@@ -5,7 +5,7 @@
 #include "utils/buffer.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "proto/socks.h"
 #include "conf.h"
 #include "dialer.h"

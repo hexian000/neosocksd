@@ -17,5 +17,6 @@
 #cmakedefine01 WITH_CARES
 #cmakedefine01 WITH_RULESET
 #cmakedefine01 WITH_SYSTEMD
+#cmakedefine01 WITH_LIBUNWIND
 
 #endif /* CONFIG_H */

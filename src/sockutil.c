@@ -6,7 +6,7 @@
 #include "net/addr.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "util.h"
 
 #include <arpa/inet.h>

@@ -6,7 +6,7 @@
 #include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "utils/slog.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "net/http.h"
 #include "session.h"
 #include "server.h"

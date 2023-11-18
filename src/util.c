@@ -4,7 +4,7 @@
 #include "util.h"
 #include "resolver.h"
 #include "math/rand.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "utils/slog.h"
 #include "utils/posixtime.h"
 
@@ -15,6 +15,11 @@
 #include <pwd.h>
 #if _BSD_SOURCE || _GNU_SOURCE
 #include <grp.h>
+#endif
+
+#if WITH_LIBUNWIND
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
 #endif
 
 #include <assert.h>

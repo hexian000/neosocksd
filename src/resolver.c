@@ -2,7 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "resolver.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "utils/slog.h"
 #include "utils/posixtime.h"
 #include "utils/minmax.h"

@@ -2,7 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "http_impl.h"
-#include "utils/check.h"
+#include "utils/debug.h"
 #include "conf.h"
 #include "ruleset.h"
 

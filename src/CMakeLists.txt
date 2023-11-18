@@ -151,6 +151,18 @@ if(NOT BUILD_STATIC)
     endif()
 endif()
 
+# find libunwind
+if(NOT BUILD_STATIC AND (CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
+    find_path(LIBUNWIND_INCLUDE_DIR NAMES libunwind.h)
+    find_library(LIBUNWIND_LIBRARY NAMES unwind)
+    if((EXISTS ${LIBUNWIND_INCLUDE_DIR}) AND (EXISTS ${LIBUNWIND_LIBRARY}))
+        message(STATUS "libunwind: ${LIBUNWIND_LIBRARY}")
+        set(WITH_LIBUNWIND TRUE)
+        target_include_directories(neosocksd SYSTEM PRIVATE ${LIBUNWIND_INCLUDE_DIR})
+        target_link_libraries(neosocksd PRIVATE ${LIBUNWIND_LIBRARY})
+    endif()
+endif()
+
 include(CheckLibraryExists)
 check_library_exists(m ldexp "" LIBM)
 if(LIBM)
