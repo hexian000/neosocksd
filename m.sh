@@ -91,10 +91,10 @@ case "$1" in
         -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
     nice cmake --build "build"
-    zip -9j "build/neosocksd-win32.x86_64-pc-msys.zip" \
+    zip -9j "build/neosocksd-win32.$(cc -dumpmachine).zip" \
         "/usr/bin/msys-2.0.dll" \
         "build/src/neosocksd.exe"
-    ls -lh "build/neosocksd-win32.x86_64-pc-msys.zip"
+    ls -lh "build/neosocksd-win32.$(cc -dumpmachine).zip"
     ;;
 "asan")
     # rebuild with asan
