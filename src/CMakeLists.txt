@@ -14,11 +14,6 @@ add_executable(neosocksd
     main.c
 )
 
-target_include_directories(neosocksd BEFORE
-    PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${PROJECT_SOURCE_DIR}/contrib/csnippets"
-)
 target_link_libraries(neosocksd PRIVATE csnippets)
 
 if(TARGET_GNU_LINUX OR TARGET_ANDROID)
@@ -30,10 +25,6 @@ else()
 endif()
 
 include(CheckSymbolExists)
-check_symbol_exists(clock_gettime "time.h" HAVE_CLOCK_GETTIME)
-check_symbol_exists(gettimeofday "sys/time.h" HAVE_GETTIMEOFDAY)
-check_symbol_exists(syslog "syslog.h" HAVE_SYSLOG)
-check_symbol_exists(localtime_r "time.h" HAVE_LOCALTIME_R)
 check_symbol_exists(IP_TRANSPARENT "netinet/in.h" HAVE_IP_TRANSPARENT)
 check_symbol_exists(SO_BINDTODEVICE "sys/socket.h" HAVE_SO_BINDTODEVICE)
 check_symbol_exists(SO_REUSEPORT "sys/socket.h" HAVE_SO_REUSEPORT)
@@ -52,8 +43,7 @@ if(NOT TARGET_POSIX AND HAVE_TCP_FASTOPEN)
     set(WITH_TCP_FASTOPEN TRUE)
 endif()
 
-target_compile_options(neosocksd PRIVATE -include "${CMAKE_CURRENT_BINARY_DIR}/config.h")
-
+target_compile_options(neosocksd PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 # be strict with original sources
 target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra -Werror)
 
@@ -149,23 +139,6 @@ if(NOT BUILD_STATIC)
         target_include_directories(neosocksd SYSTEM PRIVATE ${SYSTEMD_INCLUDE_DIR})
         target_link_libraries(neosocksd PRIVATE ${SYSTEMD_LIBRARY})
     endif()
-endif()
-
-# find libunwind
-if(NOT BUILD_STATIC AND (CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"))
-    check_symbol_exists(backtrace "execinfo.h" HAVE_BACKTRACE)
-    find_path(LIBUNWIND_INCLUDE_DIR NAMES libunwind.h)
-    find_library(LIBUNWIND_LIBRARY NAMES unwind)
-    if((EXISTS ${LIBUNWIND_INCLUDE_DIR}) AND (EXISTS ${LIBUNWIND_LIBRARY}))
-        message(STATUS "libunwind: ${LIBUNWIND_LIBRARY}")
-        set(WITH_LIBUNWIND TRUE)
-        target_include_directories(neosocksd SYSTEM PRIVATE ${LIBUNWIND_INCLUDE_DIR})
-        target_link_libraries(neosocksd PRIVATE ${LIBUNWIND_LIBRARY})
-    endif()
-endif()
-
-if(HAVE_BACKTRACE OR WITH_LIBUNWIND)
-    set(WITH_STACKTRACE TRUE)
 endif()
 
 include(CheckLibraryExists)
