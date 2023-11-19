@@ -10,7 +10,7 @@ case "$1" in
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_SYSTEM_NAME="Linux" \
-        -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
+        -DCMAKE_FIND_ROOT_PATH="${SYSROOT};${LIBROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -S . -B "build"
     nice cmake --build "build"
@@ -22,7 +22,7 @@ case "$1" in
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_SYSTEM_NAME="Linux" \
-        -DCMAKE_FIND_ROOT_PATH="${SYSROOT}" \
+        -DCMAKE_FIND_ROOT_PATH="${SYSROOT};${LIBROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DBUILD_STATIC=ON \
         -S . -B "build"
@@ -91,10 +91,26 @@ case "$1" in
         -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
     nice cmake --build "build"
-    zip -9j "build/neosocksd-win32.$(cc -dumpmachine).zip" \
+    TARGET="$(cc -dumpmachine)"
+    zip -9j "build/neosocksd-win32.${TARGET}.zip" \
         "/usr/bin/msys-2.0.dll" \
         "build/src/neosocksd.exe"
-    ls -lh "build/neosocksd-win32.$(cc -dumpmachine).zip"
+    ls -lh "build/neosocksd-win32.${TARGET}.zip"
+    ;;
+"ndk")
+    # cross compiling, environment vars need to be set
+    rm -rf "build" && mkdir "build"
+    cmake -G "${GENERATOR}" \
+        -DCMAKE_BUILD_TYPE="Release" \
+        -DCMAKE_ANDROID_NDK="${NDK}" \
+        -DCMAKE_SYSTEM_NAME="Android" \
+        -DCMAKE_SYSTEM_VERSION="${API}" \
+        -DCMAKE_ANDROID_ARCH_ABI="${ABI}" \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+        -DCMAKE_FIND_ROOT_PATH="${SYSROOT};${LIBROOT}" \
+        -S "." -B "build"
+    nice cmake --build "build"
+    ls -lh "build/src/kcptun-libev"
     ;;
 "asan")
     # rebuild with asan

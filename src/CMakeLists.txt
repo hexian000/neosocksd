@@ -16,7 +16,7 @@ add_executable(neosocksd
 
 target_link_libraries(neosocksd PRIVATE csnippets)
 
-if(TARGET_GNU_LINUX OR TARGET_ANDROID)
+if(NOT TARGET_POSIX AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
     target_compile_definitions(neosocksd PRIVATE _GNU_SOURCE)
 else()
     target_compile_definitions(neosocksd PRIVATE _POSIX_C_SOURCE=200809L)
