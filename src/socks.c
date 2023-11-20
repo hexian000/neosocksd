@@ -103,7 +103,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 	case STATE_CONNECT:
 		ev_io_stop(loop, &ctx->w_socket);
 		dialer_cancel(&ctx->dialer, loop);
-		free(ctx->dialreq);
+		dialreq_free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		stats->num_halfopen--;
 		return;
@@ -358,7 +358,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	SOCKS_CTX_LOG(DEBUG, ctx, "connected");
 	/* cleanup before state change */
 	ev_io_stop(loop, &ctx->w_socket);
-	free(ctx->dialreq);
+	dialreq_free(ctx->dialreq);
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	if (G.conf->proto_timeout) {

@@ -75,7 +75,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		return;
 	case STATE_CONNECT:
 		dialer_cancel(&ctx->dialer, loop);
-		free(ctx->dialreq);
+		dialreq_free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		stats->num_halfopen--;
 		return;
@@ -192,7 +192,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	FW_CTX_LOG(DEBUG, ctx, "connected");
 	/* cleanup before state change */
-	free(ctx->dialreq);
+	dialreq_free(ctx->dialreq);
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	if (G.conf->proto_timeout) {

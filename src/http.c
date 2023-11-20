@@ -53,7 +53,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		dialer_cancel(&ctx->dialer, loop);
-		free(ctx->dialreq);
+		dialreq_free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		stats->num_halfopen--;
 		return;

@@ -37,7 +37,7 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 	HTTP_CTX_LOG(DEBUG, ctx, "connected");
 	/* cleanup before state change */
-	free(ctx->dialreq);
+	dialreq_free(ctx->dialreq);
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	if (G.conf->proto_timeout) {

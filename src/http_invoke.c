@@ -69,7 +69,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		free(ctx);
 		return;
 	}
-	free(ctx->dialreq);
+	dialreq_free(ctx->dialreq);
 	struct ev_io *restrict w_write = &ctx->w_write;
 	ev_io_init(w_write, request_write_cb, fd, EV_WRITE);
 	w_write->data = ctx;
