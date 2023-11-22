@@ -17,11 +17,6 @@
 #include <grp.h>
 #endif
 
-#if WITH_LIBUNWIND
-#define UNW_LOCAL_ONLY
-#include <libunwind.h>
-#endif
-
 #include <assert.h>
 #include <locale.h>
 #include <stddef.h>

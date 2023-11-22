@@ -310,7 +310,7 @@ static int ruleset_traceback_(lua_State *restrict L)
 {
 	size_t len;
 	const char *msg = luaL_tolstring(L, -1, &len);
-	LOG_STACK_F(DEBUG, "ruleset traceback: %s", msg);
+	LOG_STACK_F(DEBUG, 0, "ruleset traceback: %s", msg);
 	luaL_traceback(L, L, msg, 1);
 	return 1;
 }
