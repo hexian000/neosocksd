@@ -367,7 +367,8 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		HTTP_CTX_LOG(ERROR, ctx, "dialer failed");
+		HTTP_CTX_LOG(
+			DEBUG, ctx, "unable to establish client connection");
 		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
 		ev_io_start(loop, &ctx->w_send);
 		return;

@@ -184,7 +184,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		FW_CTX_LOG(ERROR, ctx, "dialer failed");
+		FW_CTX_LOG(DEBUG, ctx, "unable to establish client connection");
 		forward_ctx_close(loop, ctx);
 		return;
 	}

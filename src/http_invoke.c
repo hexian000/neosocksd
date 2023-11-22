@@ -64,7 +64,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	struct http_invoke_ctx *restrict ctx = data;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		LOGE("invoke: dialer failed");
+		LOGD("invoke: unable to establish client connection");
 		ctx->wbuf = VBUF_FREE(ctx->wbuf);
 		free(ctx);
 		return;
