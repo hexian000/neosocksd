@@ -22,7 +22,7 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 
 - Plain old protocols with no built-in support for authentication or encryption.
 - Only TCP CONNECT requests are supported.
-- Top class processor efficiency, minimized memory usage and code size.
+- Flexible and multi-purpose.
 - Lua scripts powered rule set.
 - Routing connections by rule and even building an autonomous proxy mesh.
 - Horizontally scalable.
