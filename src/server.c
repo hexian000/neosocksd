@@ -138,9 +138,7 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		socket_set_transparent(fd, true);
 	}
 #endif
-	const int backlog = (conf->startup_limit_full > 0) ?
-				    conf->startup_limit_full :
-				    SOMAXCONN;
+	const int backlog = SOMAXCONN;
 #if WITH_TCP_FASTOPEN
 	if (conf->tcp_fastopen) {
 		socket_set_fastopen(fd, backlog);
