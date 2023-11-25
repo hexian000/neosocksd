@@ -596,8 +596,11 @@ static void await_unpin(lua_State *restrict L, const void *p)
 	lua_pop(L, 1);
 }
 
-static lua_State *find_context(lua_State *restrict L, const void *p)
+static bool
+await_resume(struct ruleset *restrict r, const void *p, const int nargs, ...)
 {
+	check_memlimit(r);
+	lua_State *restrict L = r->L;
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
 		LOGE(ERR_BAD_REGISTRY);
 		return NULL;
@@ -607,9 +610,21 @@ static lua_State *find_context(lua_State *restrict L, const void *p)
 	lua_pop(L, 2);
 	if (co == NULL) {
 		LOGE_F("async context lost: %p", p);
-		return NULL;
+		return false;
 	}
-	return co;
+	va_list args;
+	va_start(args, nargs);
+	for (int i = 0; i < nargs; i++) {
+		lua_pushlightuserdata(co, va_arg(args, void *));
+	}
+	va_end(args);
+	int nres = 0;
+	const int status = lua_resume(co, L, nargs, &nres);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_xmove(co, L, 1);
+		return false;
+	}
+	return true;
 }
 
 /* await.call(code, addr, proxyN, ..., proxy1) */
@@ -628,16 +643,8 @@ static void resolve_cb(
 {
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
-	lua_State *restrict L = r->L;
-	lua_State *restrict co = find_context(L, TO_POINTER(h));
-	if (co == NULL) {
-		return;
-	}
-	lua_pushlightuserdata(co, (void *)sa);
-	int nres = 0;
-	const int status = lua_resume(co, L, 1, &nres);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_xmove(co, L, 1);
+	const void *p = TO_POINTER(h);
+	if (!await_resume(r, p, 1, (void *)sa)) {
 		LOGE_F("resolve_cb: %s", ruleset_error(r));
 	}
 }
@@ -839,21 +846,25 @@ static int api_stats_(lua_State *restrict L)
 	return 1;
 }
 
-static void luainit_async(lua_State *restrict L)
+static int luaopen_await(lua_State *restrict L)
 {
-	lua_newtable(L);
-	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
-
-	lua_pushcfunction(L, api_async_);
-	lua_setglobal(L, "async");
-
-	const luaL_Reg apilib[] = {
+	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },
 		{ "call", await_call_ },
 		{ NULL, NULL },
 	};
-	luaL_newlib(L, apilib);
-	lua_setglobal(L, "await");
+	luaL_newlib(L, awaitlib);
+	return 1;
+}
+
+static void luainit_async(lua_State *restrict L)
+{
+	lua_newtable(L);
+	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
+	lua_pushcfunction(L, api_async_);
+	lua_setglobal(L, "async");
+	luaL_requiref(L, "await", luaopen_await, 1);
+	lua_pop(L, 1);
 	return;
 }
 
@@ -878,15 +889,15 @@ static int ruleset_luainit_(lua_State *restrict L)
 {
 	/* init registry */
 	luainit_functions(L);
-	luainit_async(L);
-
-	lua_pushboolean(L, !LOGLEVEL(DEBUG));
-	lua_setglobal(L, "NDEBUG");
 	/* load all libraries */
 	luaL_openlibs(L);
 	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
 	luaL_requiref(L, "regex", luaopen_regex, 1);
 	lua_pop(L, 2);
+	luainit_async(L);
+	/* set flags */
+	lua_pushboolean(L, !LOGLEVEL(DEBUG));
+	lua_setglobal(L, "NDEBUG");
 	/* prefer generational GC on supported lua versions */
 #ifdef LUA_GCGEN
 	lua_gc(L, LUA_GCGEN, 0, 0);
