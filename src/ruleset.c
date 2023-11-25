@@ -15,6 +15,7 @@
 #include "conf.h"
 #include "resolver.h"
 #include "dialer.h"
+#include "server.h"
 #include "http.h"
 #include "sockutil.h"
 #include "util.h"
@@ -693,6 +694,30 @@ static int api_splithostport_(lua_State *restrict L)
 	return 2;
 }
 
+/* neosocksd.stats() */
+static int api_stats_(lua_State *restrict L)
+{
+	struct server *restrict s = G.server;
+	if (s == NULL) {
+		lua_pushnil(L);
+		return 1;
+	}
+	struct ruleset *restrict r = find_ruleset(L);
+	const struct server_stats *restrict stats = &s->stats;
+	lua_newtable(L);
+	lua_pushinteger(L, (lua_Integer)stats->num_halfopen);
+	lua_setfield(L, -2, "num_halfopen");
+	lua_pushinteger(L, (lua_Integer)stats->num_sessions);
+	lua_setfield(L, -2, "num_sessions");
+	lua_pushinteger(L, (lua_Integer)stats->byt_up);
+	lua_setfield(L, -2, "byt_up");
+	lua_pushinteger(L, (lua_Integer)stats->byt_down);
+	lua_setfield(L, -2, "byt_down");
+	lua_pushnumber(L, (lua_Number)(ev_now(r->loop) - stats->started));
+	lua_setfield(L, -2, "uptime");
+	return 1;
+}
+
 static int luaopen_neosocksd(lua_State *restrict L)
 {
 	const luaL_Reg apilib[] = {
@@ -703,6 +728,7 @@ static int luaopen_neosocksd(lua_State *restrict L)
 		{ "splithostport", api_splithostport_ },
 		{ "parse_ipv4", api_parse_ipv4_ },
 		{ "parse_ipv6", api_parse_ipv6_ },
+		{ "stats", api_stats_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, apilib);

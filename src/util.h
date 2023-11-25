@@ -18,6 +18,7 @@
 struct dialreq;
 struct resolver;
 struct ruleset;
+struct server;
 struct session;
 
 extern struct globals {
@@ -26,6 +27,7 @@ extern struct globals {
 #if WITH_RULESET
 	struct ruleset *ruleset;
 #endif
+	struct server *server;
 	struct session *sessions;
 	struct dialreq *basereq;
 } G;

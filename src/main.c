@@ -79,20 +79,20 @@ static void print_usage(const char *argv0)
 		"  --api <bind_address>       RESTful API for monitoring\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
-		"  -d, --daemonize            run in background and write logs to syslog\n"
-		"  -u, --user <name>          run as the specified limited user\n"
+		"  --proto-timeout            keep the session in halfopen state until there is\n"
+		"                             bidirectional traffic\n"
 		"  --loglevel <level>         0-7 are Silence, Fatal, Error, Warning, Notice,\n"
 		"                             Info, Debug, Verbose respectively (default: 4)\n"
 		"  -v, --verbose              increase logging verbosity, can be specified more than once\n"
 		"                             e.g. \"-v -v\" prints debug messages\n"
 		"  -s, --silence              decrease logging verbosity\n"
+		"  -d, --daemonize            run in background and write logs to syslog\n"
+		"  -u, --user <name>          run as the specified user\n"
 		"  -m, --max-sessions <n>     maximum number of concurrent connections\n"
 		"                             (default: 4096, 0: unlimited)\n"
 		"  --max-startups <start:rate:full>\n"
 		"                             maximum number of concurrent halfopen connections\n"
 		"                             (default: unlimited)\n"
-		"  --proto-timeout            keep the session in halfopen state until there is\n"
-		"                             bidirectional traffic\n"
 		"\n"
 		"example:\n"
 		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
@@ -335,8 +335,7 @@ int main(int argc, char **argv)
 	server_init(s, loop, NULL, NULL);
 	G.basereq = dialreq_parse(conf->forward, conf->proxy);
 	if (G.basereq == NULL) {
-		LOGF_F("unable to parse forward: %s, proxy: %s", conf->forward,
-		       conf->proxy);
+		LOGF("unable to parse outbound configuration");
 		exit(EXIT_FAILURE);
 	}
 	if (conf->forward != NULL) {
@@ -364,6 +363,7 @@ int main(int argc, char **argv)
 			LOGF("failed to start server");
 			exit(EXIT_FAILURE);
 		}
+		G.server = s;
 	}
 
 	struct server *api = NULL;
@@ -416,6 +416,7 @@ int main(int argc, char **argv)
 		api = NULL;
 	}
 	server_stop(s);
+	G.server = NULL;
 
 #if WITH_RULESET
 	if (G.ruleset != NULL) {
