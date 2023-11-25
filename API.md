@@ -232,24 +232,14 @@ Custom information in a string.
 **Synopsis**
 
 ```Lua
--- (1)
 local addr = neosocksd.resolve("www.example.com")
-
--- (2)
-neosocksd.resolve("www.example.com", function (host, addr)
-    -- got addr like "203.0.113.1" or "2001:DB8::1"
-    -- or nil when failed
-end)
 ```
 
 **Description**
 
-1. Resolves a host name locally and blocks the whole server until resolution is finished or times out. 
-2. Resolves a host name locally and invoke the callback function when resolution is finished or times out.
+(Deprecated) consider using [await.resolve](#awaitresolve) instead.
 
-IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
-
-Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
+Resolves a host name locally and blocks the whole server until resolution is finished or times out.
 
 
 ### neosocksd.parse_ipv4
@@ -287,27 +277,6 @@ end
 **Description**
 
 Parses an IPv6 address into integers.
-
-
-### regex.compile
-
-**Synopsis**
-
-```Lua
-local reg = regex.compile([[\.example\.(com|org)$]])
-local s, e = reg:find(host)
-if s then
-    -- ......
-end
-local m = reg:match(host)
-if m then
-    -- ......
-end
-```
-
-**Description**
-
-Lua interface for [POSIX Extended Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html#tag_09_04).
 
 
 ### neosocksd.setinterval
@@ -354,6 +323,27 @@ neosocksd.invoke([[log("test rpc")]], "neosocksd.lan:80", "socks4a://127.0.0.1:1
 Run Lua code on another neosocksd. This function returns immediately. In case of failure, the invocation is lost.
 
 
+### regex.compile
+
+**Synopsis**
+
+```Lua
+local reg = regex.compile([[\.example\.(com|org)$]])
+local s, e = reg:find(host)
+if s then
+    -- ......
+end
+local m = reg:match(host)
+if m then
+    -- ......
+end
+```
+
+**Description**
+
+Lua interface for [POSIX Extended Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html#tag_09_04).
+
+
 ### _G.NDEBUG
 
 **Synopsis**
@@ -367,3 +357,42 @@ logf("some debug log: %d", 123)
 True if the log level doesn't allow printing debug logs. The log level depends on command line argument `--loglevel`.
 
 In the default implementation of `libruleset.lua`, this value controls whether `log`/`logf` writes to standard output.
+
+
+### _G.async
+
+**Synopsis**
+
+```Lua
+async(function()
+    -- routine
+end)
+```
+
+**Description**
+
+Start an asynchronous routine. See [await.resolve](#awaitresolve) for full example.
+
+*Notice: The await.\* functions should be called in asynchronous routines.*
+
+
+### await.resolve
+
+**Synopsis**
+
+```Lua
+async(function()
+    local addr = await.resolve("www.example.com")
+    if addr then
+        -- ......
+    end
+end)
+```
+
+**Description**
+
+Resolves a host name locally.
+
+IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
+
+Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.

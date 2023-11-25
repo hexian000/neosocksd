@@ -33,6 +33,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,13 +47,18 @@ struct ruleset {
 	struct ev_idle w_idle;
 };
 
-#define RIDX_CALLBACKS (LUA_RIDX_LAST + 1)
-#define RIDX_ASYNC_CALLBACKS (LUA_RIDX_LAST + 2)
+#define RIDX_FUNCTIONS (LUA_RIDX_LAST + 1)
+#define RIDX_CONTEXTS (LUA_RIDX_LAST + 2)
+
+#define ERR_BAD_REGISTRY "Lua registry is corrupted"
+#define ERR_NOT_YIELDABLE "await cannot be used in a non-yieldable context"
 
 static struct ruleset *find_ruleset(lua_State *L)
 {
 	void *ud;
-	CHECK(lua_getallocf(L, &ud) != NULL);
+	lua_Alloc allocf = lua_getallocf(L, &ud);
+	(void)allocf;
+	assert(allocf != NULL);
 	return ud;
 }
 
@@ -139,7 +145,7 @@ static void format_addr(lua_State *restrict L)
 		(void)lua_pushstring(L, addr_str);
 	} break;
 	default:
-		(void)lua_pushfstring(L, "unknown af: %jd", af);
+		(void)lua_pushfstring(L, "unknown af: %d", af);
 		(void)lua_error(L);
 	}
 	return;
@@ -216,8 +222,10 @@ static int ruleset_require_(lua_State *restrict L)
 	const int idx_loaded = 3;
 	luaL_getsubtable(L, LUA_REGISTRYINDEX, "_LOADED");
 	const int idx_glb = 4;
-	CHECK(lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) ==
-	      LUA_TTABLE);
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
 
 	int glb = 0;
 	/* LOADED[modname] */
@@ -316,25 +324,7 @@ static int ruleset_traceback_(lua_State *restrict L)
 	return 1;
 }
 
-static int ruleset_resolve_cb_(lua_State *restrict L)
-{
-	struct resolve_query *q = (void *)lua_topointer(L, 1);
-	CHECK(lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS) ==
-	      LUA_TTABLE);
-	lua_rawgetp(L, -1, q);
-	lua_replace(L, 1);
-	/* t[q] = nil */
-	lua_pushnil(L);
-	lua_rawsetp(L, -2, q);
-	lua_pop(L, 1);
-
-	lua_settop(L, 2);
-	format_addr(L);
-	lua_call(L, 1, 0); /* api_resolve_cb_ */
-	return 0;
-}
-
-enum ruleset_callback {
+enum ruleset_function {
 	FUNC_REQUEST = 1,
 	FUNC_LOADFILE,
 	FUNC_INVOKE,
@@ -343,10 +333,9 @@ enum ruleset_callback {
 	FUNC_TICK,
 	FUNC_IDLE,
 	FUNC_TRACEBACK,
-	FUNC_RESOLVE_CB,
 };
 
-static int luaopen_callbacks(lua_State *restrict L)
+static void luainit_functions(lua_State *restrict L)
 {
 	const struct {
 		lua_Integer idx;
@@ -360,14 +349,14 @@ static int luaopen_callbacks(lua_State *restrict L)
 		{ FUNC_TICK, ruleset_tick_ },
 		{ FUNC_IDLE, ruleset_idle_ },
 		{ FUNC_TRACEBACK, ruleset_traceback_ },
-		{ FUNC_RESOLVE_CB, ruleset_resolve_cb_ },
 	};
 	lua_createtable(L, ARRAY_SIZE(reg), 0);
 	for (size_t i = 0; i < ARRAY_SIZE(reg); i++) {
 		lua_pushcfunction(L, reg[i].func);
 		lua_seti(L, -2, reg[i].idx);
 	}
-	return 1;
+	lua_seti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS);
+	return;
 }
 
 static void check_memlimit(struct ruleset *restrict r)
@@ -380,18 +369,27 @@ static void check_memlimit(struct ruleset *restrict r)
 }
 
 static bool ruleset_pcall(
-	struct ruleset *restrict r, enum ruleset_callback func, int nargs,
+	struct ruleset *restrict r, enum ruleset_function func, int nargs,
 	int nresults, ...)
 {
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	check_memlimit(r);
-	CHECK(lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CALLBACKS) == LUA_TTABLE);
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return false;
+	}
 	const bool traceback = G.conf->traceback;
 	if (traceback) {
-		CHECK(lua_rawgeti(L, 1, FUNC_TRACEBACK) == LUA_TFUNCTION);
+		if (lua_rawgeti(L, 1, FUNC_TRACEBACK) != LUA_TFUNCTION) {
+			lua_pushliteral(L, ERR_BAD_REGISTRY);
+			return false;
+		}
 	}
-	CHECK(lua_rawgeti(L, 1, func) == LUA_TFUNCTION);
+	if (lua_rawgeti(L, 1, func) != LUA_TFUNCTION) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return false;
+	}
 	lua_remove(L, 1);
 	va_list args;
 	va_start(args, nresults);
@@ -491,6 +489,70 @@ static int luaopen_regex(lua_State *restrict L)
 	return 1;
 }
 
+static int
+async_pcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+{
+	UNUSED(ctx);
+	switch (status) {
+	case LUA_OK:
+		return lua_gettop(L) - 1;
+	case LUA_YIELD:
+		return 0;
+	default:
+		break;
+	}
+	return lua_error(L);
+}
+
+static int async_pcall_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	const int n = lua_gettop(L) - 1;
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	if (lua_rawgeti(L, -1, FUNC_TRACEBACK) != LUA_TFUNCTION) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	lua_insert(L, 1); /* FUNC_TRACEBACK */
+	lua_pop(L, 1); /* RIDX_FUNCTIONS */
+	const int status = lua_pcallk(L, n, LUA_MULTRET, 1, 0, async_pcall_k_);
+	return async_pcall_k_(L, status, 0);
+}
+
+/* async(f, ...) */
+static int api_async_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	int n = lua_gettop(L);
+	lua_State *restrict co = lua_newthread(L);
+	lua_pop(L, 1);
+	if (G.conf->traceback) {
+		lua_pushcfunction(co, async_pcall_);
+		lua_xmove(L, co, n);
+	} else {
+		lua_xmove(L, co, n);
+		n--;
+	}
+	const int status = lua_resume(co, L, n, &n);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_pushboolean(L, 0);
+		lua_xmove(co, L, 1);
+		return 2;
+	}
+	lua_settop(L, 0);
+	if (!lua_checkstack(L, n + 1)) {
+		lua_pushboolean(L, 0);
+		lua_pushliteral(L, "too many results");
+		return 2;
+	}
+	lua_pushboolean(L, 1);
+	lua_xmove(co, L, n);
+	return 1 + n;
+}
+
 /* neosocksd.invoke(code, addr, proxyN, ..., proxy1) */
 static int api_invoke_(lua_State *restrict L)
 {
@@ -510,13 +572,55 @@ static int api_invoke_(lua_State *restrict L)
 	return 0;
 }
 
-static int api_resolve_cb_(lua_State *restrict L)
+static void await_pin(lua_State *restrict L, const void *p)
 {
-	lua_pushvalue(L, lua_upvalueindex(2)); /* cb */
-	lua_pushvalue(L, lua_upvalueindex(1)); /* host */
-	lua_pushvalue(L, 1); /* addr */
-	lua_call(L, 2, 0);
-	return 0;
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		(void)lua_error(L);
+		FAIL();
+	}
+	CHECK(lua_pushthread(L) == 0);
+	lua_rawsetp(L, -2, p);
+	lua_pop(L, 1);
+}
+
+static void await_unpin(lua_State *restrict L, const void *p)
+{
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		(void)lua_error(L);
+		FAIL();
+	}
+	lua_pushnil(L);
+	lua_rawsetp(L, -2, p);
+	lua_pop(L, 1);
+}
+
+static lua_State *find_context(lua_State *restrict L, const void *p)
+{
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+		LOGE(ERR_BAD_REGISTRY);
+		return NULL;
+	}
+	lua_rawgetp(L, -1, p);
+	lua_State *restrict co = lua_tothread(L, -1);
+	lua_pop(L, 2);
+	if (co == NULL) {
+		LOGE_F("async context lost: %p", p);
+		return NULL;
+	}
+	return co;
+}
+
+/* await.call(code, addr, proxyN, ..., proxy1) */
+static int await_call_(lua_State *restrict L)
+{
+	if (!lua_isyieldable(L)) {
+		lua_pushliteral(L, ERR_NOT_YIELDABLE);
+		return lua_error(L);
+	}
+	lua_pushliteral(L, "not implemented");
+	return lua_error(L);
 }
 
 static void resolve_cb(
@@ -524,20 +628,45 @@ static void resolve_cb(
 {
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
-	const bool ok = ruleset_pcall(
-		r, FUNC_RESOLVE_CB, 2, 0, TO_POINTER(h), (void *)sa);
-	if (!ok) {
-		LOGE_F("resolve callback: %s", ruleset_error(r));
+	lua_State *restrict L = r->L;
+	lua_State *restrict co = find_context(L, TO_POINTER(h));
+	if (co == NULL) {
 		return;
+	}
+	lua_pushlightuserdata(co, (void *)sa);
+	int nres = 0;
+	const int status = lua_resume(co, L, 1, &nres);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_xmove(co, L, 1);
+		LOGE_F("resolve_cb: %s", ruleset_error(r));
 	}
 }
 
-/* neosocksd.resolve(host, cb) */
-static int api_resolve_async_(lua_State *restrict L)
+static int
+await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
+	switch (status) {
+	case LUA_OK:
+	case LUA_YIELD:
+		break;
+	default:
+		return lua_error(L);
+	}
+	const void *p = (void *)ctx;
+	await_unpin(L, p);
+	format_addr(L);
+	return 1;
+}
+
+/* await.resolve(host) */
+static int await_resolve_(lua_State *restrict L)
+{
+	if (!lua_isyieldable(L)) {
+		lua_pushliteral(L, ERR_NOT_YIELDABLE);
+		return lua_error(L);
+	}
 	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *name = luaL_checkstring(L, 1);
-	luaL_checkany(L, 2);
 	const handle_t h = resolve_new(
 		G.resolver, (struct resolve_cb){
 				    .cb = resolve_cb,
@@ -547,23 +676,15 @@ static int api_resolve_async_(lua_State *restrict L)
 		lua_pushliteral(L, "out of memory");
 		return lua_error(L);
 	}
-	CHECK(lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS) ==
-	      LUA_TTABLE);
-	lua_pushvalue(L, 1); /* host */
-	lua_pushvalue(L, 2); /* cb */
-	lua_pushcclosure(L, api_resolve_cb_, 2);
-	lua_rawsetp(L, -2, TO_POINTER(h));
 	resolve_start(h, name, NULL, G.conf->resolve_pf);
-	return 0;
+	const void *p = TO_POINTER(h);
+	await_pin(L, p);
+	return lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
 }
 
 /* neosocksd.resolve(host) */
 static int api_resolve_(lua_State *restrict L)
 {
-	const int n = lua_gettop(L);
-	if (n > 1) {
-		return api_resolve_async_(L);
-	}
 	const char *name = luaL_checkstring(L, 1);
 	sockaddr_max_t addr;
 	if (!resolve_addr(&addr, name, NULL, G.conf->resolve_pf)) {
@@ -718,6 +839,24 @@ static int api_stats_(lua_State *restrict L)
 	return 1;
 }
 
+static void luainit_async(lua_State *restrict L)
+{
+	lua_newtable(L);
+	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
+
+	lua_pushcfunction(L, api_async_);
+	lua_setglobal(L, "async");
+
+	const luaL_Reg apilib[] = {
+		{ "resolve", await_resolve_ },
+		{ "call", await_call_ },
+		{ NULL, NULL },
+	};
+	luaL_newlib(L, apilib);
+	lua_setglobal(L, "await");
+	return;
+}
+
 static int luaopen_neosocksd(lua_State *restrict L)
 {
 	const luaL_Reg apilib[] = {
@@ -738,10 +877,9 @@ static int luaopen_neosocksd(lua_State *restrict L)
 static int ruleset_luainit_(lua_State *restrict L)
 {
 	/* init registry */
-	CHECK(luaopen_callbacks(L) == 1);
-	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CALLBACKS);
-	lua_newtable(L);
-	lua_seti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_CALLBACKS);
+	luainit_functions(L);
+	luainit_async(L);
+
 	lua_pushboolean(L, !LOGLEVEL(DEBUG));
 	lua_setglobal(L, "NDEBUG");
 	/* load all libraries */
