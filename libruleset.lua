@@ -108,7 +108,7 @@ local function addevent_(tstamp, msg)
 end
 
 function _G.log(...)
-    local msg = table.concat({...}, "\t")
+    local msg = list.pack(...):map(tostring):concat("\t")
     local now = os.time()
     addevent_(now, msg)
     if _G.NDEBUG then
