@@ -29,7 +29,7 @@ void resolver_free(struct resolver *r);
 
 struct resolve_cb {
 	void (*cb)(
-		handle_t h, struct ev_loop *loop, void *data,
+		handle_t h, struct ev_loop *loop, void *ctx,
 		const struct sockaddr *sa);
 	void *ctx;
 };

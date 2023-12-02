@@ -933,11 +933,11 @@ static bool connect_sa(
 }
 
 static void resolve_cb(
-	const handle_t h, struct ev_loop *loop, void *data,
+	const handle_t h, struct ev_loop *loop, void *ctx,
 	const struct sockaddr *restrict sa)
 {
 	UNUSED(h);
-	struct dialer *restrict d = data;
+	struct dialer *restrict d = ctx;
 	assert(h == d->resolve_handle);
 	d->resolve_handle = INVALID_HANDLE;
 

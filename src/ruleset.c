@@ -148,8 +148,19 @@ static void format_addr(lua_State *restrict L)
 		(void)lua_pushfstring(L, "unknown af: %d", af);
 		(void)lua_error(L);
 	}
-	return;
 }
+
+enum ruleset_function {
+	FUNC_REQUEST = 1,
+	FUNC_LOADFILE,
+	FUNC_INVOKE,
+	FUNC_UPDATE,
+	FUNC_STATS,
+	FUNC_TICK,
+	FUNC_IDLE,
+	FUNC_TRACEBACK,
+	FUNC_XPCALL,
+};
 
 static int ruleset_request_(lua_State *restrict L)
 {
@@ -207,8 +218,8 @@ static int ruleset_invoke_(lua_State *restrict L)
 	if (luaL_loadbuffer(L, code, len, "=rpc") != LUA_OK) {
 		return lua_error(L);
 	}
-	lua_call(L, 0, 0);
-	return 0;
+	lua_call(L, 0, 1);
+	return 1;
 }
 
 /* always reload and replace existing module */
@@ -324,16 +335,40 @@ static int ruleset_traceback_(lua_State *restrict L)
 	return 1;
 }
 
-enum ruleset_function {
-	FUNC_REQUEST = 1,
-	FUNC_LOADFILE,
-	FUNC_INVOKE,
-	FUNC_UPDATE,
-	FUNC_STATS,
-	FUNC_TICK,
-	FUNC_IDLE,
-	FUNC_TRACEBACK,
-};
+static int
+ruleset_xpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+{
+	UNUSED(ctx);
+	/* stack: FUNC_TRACEBACK, true, ... */
+	const int nresults = lua_gettop(L) - 1;
+	if (status == LUA_OK) {
+		return nresults;
+	}
+	lua_pushboolean(L, 0);
+	lua_pushvalue(L, -2);
+	return 2;
+}
+
+static int ruleset_xpcall_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	const int n = lua_gettop(L) - 1;
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	if (lua_rawgeti(L, -1, FUNC_TRACEBACK) != LUA_TFUNCTION) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	lua_pushboolean(L, 1);
+	lua_rotate(L, 1, 2);
+	/* FUNC_TRACEBACK, true, f, ..., RIDX_FUNCTIONS */
+	lua_pop(L, 1);
+	const int status =
+		lua_pcallk(L, n, LUA_MULTRET, 1, 0, ruleset_xpcall_k_);
+	return ruleset_xpcall_k_(L, status, 0);
+}
 
 static void luainit_functions(lua_State *restrict L)
 {
@@ -349,6 +384,7 @@ static void luainit_functions(lua_State *restrict L)
 		{ FUNC_TICK, ruleset_tick_ },
 		{ FUNC_IDLE, ruleset_idle_ },
 		{ FUNC_TRACEBACK, ruleset_traceback_ },
+		{ FUNC_XPCALL, ruleset_xpcall_ },
 	};
 	lua_createtable(L, ARRAY_SIZE(reg), 0);
 	for (size_t i = 0; i < ARRAY_SIZE(reg); i++) {
@@ -356,7 +392,6 @@ static void luainit_functions(lua_State *restrict L)
 		lua_seti(L, -2, reg[i].idx);
 	}
 	lua_seti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS);
-	return;
 }
 
 static void check_memlimit(struct ruleset *restrict r)
@@ -489,40 +524,7 @@ static int luaopen_regex(lua_State *restrict L)
 	return 1;
 }
 
-static int
-async_pcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
-{
-	UNUSED(ctx);
-	switch (status) {
-	case LUA_OK:
-		return lua_gettop(L) - 1;
-	case LUA_YIELD:
-		return 0;
-	default:
-		break;
-	}
-	return lua_error(L);
-}
-
-static int async_pcall_(lua_State *restrict L)
-{
-	luaL_checktype(L, 1, LUA_TFUNCTION);
-	const int n = lua_gettop(L) - 1;
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
-	if (lua_rawgeti(L, -1, FUNC_TRACEBACK) != LUA_TFUNCTION) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
-	lua_insert(L, 1); /* FUNC_TRACEBACK */
-	lua_pop(L, 1); /* RIDX_FUNCTIONS */
-	const int status = lua_pcallk(L, n, LUA_MULTRET, 1, 0, async_pcall_k_);
-	return async_pcall_k_(L, status, 0);
-}
-
-/* async(f, ...) */
+/* ok, ... = async(f, ...) */
 static int api_async_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TFUNCTION);
@@ -530,11 +532,22 @@ static int api_async_(lua_State *restrict L)
 	lua_State *restrict co = lua_newthread(L);
 	lua_pop(L, 1);
 	if (G.conf->traceback) {
-		lua_pushcfunction(co, async_pcall_);
+		if (lua_rawgeti(co, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) !=
+		    LUA_TTABLE) {
+			lua_pushliteral(L, ERR_BAD_REGISTRY);
+			return lua_error(L);
+		}
+		if (lua_rawgeti(co, -1, FUNC_XPCALL) != LUA_TFUNCTION) {
+			lua_pushliteral(L, ERR_BAD_REGISTRY);
+			return lua_error(L);
+		}
+		lua_remove(co, -2); /* RIDX_FUNCTIONS */
 		lua_xmove(L, co, n);
+		/* co stack: FUNC_XPCALL, f, ... */
 	} else {
 		lua_xmove(L, co, n);
 		n--;
+		/* co stack: f, ... */
 	}
 	const int status = lua_resume(co, L, n, &n);
 	if (status != LUA_OK && status != LUA_YIELD) {
@@ -543,7 +556,7 @@ static int api_async_(lua_State *restrict L)
 		return 2;
 	}
 	lua_settop(L, 0);
-	if (!lua_checkstack(L, n + 1)) {
+	if (!lua_checkstack(L, 1 + n)) {
 		lua_pushboolean(L, 0);
 		lua_pushliteral(L, "too many results");
 		return 2;
@@ -562,13 +575,14 @@ static int api_invoke_(lua_State *restrict L)
 	}
 	struct dialreq *req = pop_dialreq(L, n - 1);
 	if (req == NULL) {
-		lua_pushliteral(L, "invalid invocation target");
+		lua_pushliteral(L, "unable to get invocation target");
 		return lua_error(L);
 	}
 	struct ruleset *restrict r = find_ruleset(L);
 	size_t len;
 	const char *code = lua_tolstring(L, 1, &len);
-	http_invoke(r->loop, req, code, len);
+	struct http_invoke_cb cb = { NULL, NULL };
+	http_invoke(r->loop, req, code, len, cb);
 	return 0;
 }
 
@@ -627,15 +641,70 @@ await_resume(struct ruleset *restrict r, const void *p, const int nargs, ...)
 	return true;
 }
 
-/* await.call(code, addr, proxyN, ..., proxy1) */
-static int await_call_(lua_State *restrict L)
+static void http_invoke_cb(
+	handle_t h, struct ev_loop *loop, void *ctx, bool ok,
+	const char *result)
+{
+	UNUSED(loop);
+	struct ruleset *restrict r = ctx;
+	const void *p = TO_POINTER(h);
+	int i = ok ? 1 : 0;
+	if (!await_resume(r, p, 2, (void *)&i, (void *)result)) {
+		LOGE_F("resolve_cb: %s", ruleset_error(r));
+	}
+}
+
+static int
+await_pcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+{
+	const void *p = (void *)ctx;
+	await_unpin(L, p);
+	switch (status) {
+	case LUA_OK:
+	case LUA_YIELD:
+		break;
+	default:
+		return lua_error(L);
+	}
+	const int ok = *(int *)lua_topointer(L, 1);
+	const char *msg = lua_topointer(L, 2);
+	lua_pushboolean(L, ok);
+	lua_pushstring(L, msg);
+	return 2;
+}
+
+/* ok, ret = await.pcall(code, addr, proxyN, ..., proxy1) */
+static int await_pcall_(lua_State *restrict L)
 {
 	if (!lua_isyieldable(L)) {
 		lua_pushliteral(L, ERR_NOT_YIELDABLE);
 		return lua_error(L);
 	}
-	lua_pushliteral(L, "not implemented");
-	return lua_error(L);
+	const int n = lua_gettop(L);
+	for (int i = 1; i <= MAX(2, n); i++) {
+		luaL_checktype(L, i, LUA_TSTRING);
+	}
+	struct dialreq *req = pop_dialreq(L, n - 1);
+	if (req == NULL) {
+		lua_pushliteral(L, "unable to get invocation target");
+		return lua_error(L);
+	}
+	size_t len;
+	const char *code = lua_tolstring(L, 1, &len);
+	struct ruleset *restrict r = find_ruleset(L);
+	struct http_invoke_cb cb = {
+		.func = http_invoke_cb,
+		.ctx = r,
+	};
+	handle_t h = http_invoke(r->loop, req, code, len, cb);
+	if (h == INVALID_HANDLE) {
+		lua_pushliteral(L, "out of memory");
+		return lua_error(L);
+	}
+	const void *p = TO_POINTER(h);
+	await_pin(L, p);
+	lua_settop(L, 0);
+	return lua_yieldk(L, 0, (lua_KContext)p, await_pcall_k_);
 }
 
 static void resolve_cb(
@@ -652,6 +721,8 @@ static void resolve_cb(
 static int
 await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
+	const void *p = (void *)ctx;
+	await_unpin(L, p);
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -659,8 +730,6 @@ await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	default:
 		return lua_error(L);
 	}
-	const void *p = (void *)ctx;
-	await_unpin(L, p);
 	format_addr(L);
 	return 1;
 }
@@ -686,6 +755,7 @@ static int await_resolve_(lua_State *restrict L)
 	resolve_start(h, name, NULL, G.conf->resolve_pf);
 	const void *p = TO_POINTER(h);
 	await_pin(L, p);
+	lua_settop(L, 0);
 	return lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
 }
 
@@ -850,7 +920,7 @@ static int luaopen_await(lua_State *restrict L)
 {
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },
-		{ "call", await_call_ },
+		{ "pcall", await_pcall_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, awaitlib);
@@ -865,7 +935,6 @@ static void luainit_async(lua_State *restrict L)
 	lua_setglobal(L, "async");
 	luaL_requiref(L, "await", luaopen_await, 1);
 	lua_pop(L, 1);
-	return;
 }
 
 static int luaopen_neosocksd(lua_State *restrict L)
@@ -1008,9 +1077,15 @@ const char *ruleset_error(struct ruleset *restrict r)
 	return lua_tostring(L, -1);
 }
 
-bool ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
+bool ruleset_invoke(
+	struct ruleset *r, const char *code, const size_t len,
+	const char **result)
 {
-	return ruleset_pcall(r, FUNC_INVOKE, 2, 0, code, &len);
+	const bool ok = ruleset_pcall(r, FUNC_INVOKE, 2, 1, code, &len);
+	if (ok) {
+		*result = lua_tostring(r->L, -1);
+	}
+	return ok;
 }
 
 bool ruleset_update(

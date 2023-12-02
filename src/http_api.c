@@ -9,6 +9,11 @@
 #include "resolver.h"
 #include "ruleset.h"
 
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #define FORMAT_BYTES(name, value)                                              \
 	char name[16];                                                         \
 	(void)format_iec_bytes(name, sizeof(name), (value))
@@ -223,10 +228,28 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
+		bool want_result = false;
+		while (uri->query != NULL) {
+			char *key, *value;
+			if (!url_query_component(&uri->query, &key, &value)) {
+				http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+				return;
+			}
+			if (strcmp(key, "result") == 0) {
+				int optval;
+				if (sscanf(value, "%d", &optval) == 1) {
+					want_result = !!optval;
+				}
+			}
+		}
+
 		const char *code = (const char *)ctx->cbuf->data;
 		const size_t len = ctx->http.content_length;
-		LOG_TXT(VERBOSE, code, len, "api: ruleset invoke");
-		const bool ok = ruleset_invoke(ruleset, code, len);
+		LOG_TXT_F(
+			VERBOSE, code, len, "api: ruleset invoke %zu bytes",
+			len);
+		const char *result;
+		const bool ok = ruleset_invoke(ruleset, code, len, &result);
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset invoke: %s", err);
@@ -236,6 +259,14 @@ static void http_handle_ruleset(
 			return;
 		}
 		RESPHDR_CODE(ctx->wbuf, HTTP_OK);
+		if (want_result) {
+			const size_t len = strlen(result);
+			LOG_TXT_F(
+				VERBOSE, result, len,
+				"api: ruleset invoke result %zu bytes", len);
+			BUF_APPENDSTR(ctx->wbuf, result);
+			BUF_APPENDCONST(ctx->wbuf, "\n");
+		}
 		return;
 	} else if (strcmp(segment, "update") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {

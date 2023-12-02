@@ -23,7 +23,8 @@ void ruleset_free(struct ruleset *r);
 
 const char *ruleset_error(struct ruleset *r);
 
-bool ruleset_invoke(struct ruleset *r, const char *code, size_t len);
+bool ruleset_invoke(
+	struct ruleset *r, const char *code, size_t len, const char **result);
 bool ruleset_update(
 	struct ruleset *r, const char *modname, const char *code, size_t len);
 bool ruleset_loadfile(struct ruleset *r, const char *filename);

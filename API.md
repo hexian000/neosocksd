@@ -396,3 +396,24 @@ Resolves a host name locally.
 IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 
 Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
+
+
+### await.pcall
+
+**Synopsis**
+
+```Lua
+async(function()
+    local ok, ret = await.pcall([[return 123]], "127.0.1.1:9080")
+    if ok then
+        -- ret: the string result "123"
+        -- ......
+    else
+        -- ret: error message
+    end
+end)
+```
+
+**Description**
+
+Run Lua code on another neosocksd and take one string back.
