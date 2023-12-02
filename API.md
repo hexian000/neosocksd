@@ -323,6 +323,32 @@ neosocksd.invoke([[log("test rpc")]], "neosocksd.lan:80", "socks4a://127.0.0.1:1
 Run Lua code on another neosocksd. This function returns immediately. In case of failure, the invocation is lost.
 
 
+### neosocksd.stats
+
+**Synopsis**
+
+```Lua
+local t = neosocksd.stats()
+```
+
+**Description**
+
+Return a table of raw statistics.
+
+
+### neosocksd.now
+
+**Synopsis**
+
+```Lua
+local now = neosocksd.now()
+```
+
+**Description**
+
+Get timestamp of the latest event in seconds.
+
+
 ### regex.compile
 
 **Synopsis**
@@ -403,15 +429,15 @@ Tip: To reduce delays caused by name resolution. It's recommended to set up a lo
 **Synopsis**
 
 ```Lua
-async(function()
-    local ok, ret = await.pcall([[return 123]], "127.0.1.1:9080")
-    if ok then
-        -- ret: the string result "123"
-        -- ......
-    else
-        -- ret: error message
+async(function(addr)
+    local begin = neosocksd.now()
+    local ok, ret = await.pcall([[return "echo"]], addr)
+    if not ok or ret ~= "echo" then
+        error("await.pcall: " .. ret)
     end
-end)
+    local rtt = neosocksd.now() - begin
+    logf("ping %s: %dms", addr, math.ceil(rtt * 1e+3))
+end, "127.0.1.1:9080")
 ```
 
 **Description**

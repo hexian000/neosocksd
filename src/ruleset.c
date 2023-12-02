@@ -916,6 +916,15 @@ static int api_stats_(lua_State *restrict L)
 	return 1;
 }
 
+/* neosocksd.now() */
+static int api_now_(lua_State *restrict L)
+{
+	struct ruleset *restrict r = find_ruleset(L);
+	const ev_tstamp now = ev_now(r->loop);
+	lua_pushnumber(L, (lua_Number)now);
+	return 1;
+}
+
 static int luaopen_await(lua_State *restrict L)
 {
 	const luaL_Reg awaitlib[] = {
@@ -948,6 +957,7 @@ static int luaopen_neosocksd(lua_State *restrict L)
 		{ "parse_ipv4", api_parse_ipv4_ },
 		{ "parse_ipv6", api_parse_ipv6_ },
 		{ "stats", api_stats_ },
+		{ "now", api_now_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, apilib);
