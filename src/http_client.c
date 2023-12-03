@@ -63,20 +63,19 @@ static void http_client_close(
 	struct ev_loop *restrict loop, struct http_client_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
-	if (ctx->state > STATE_CONNECT) {
+	if (ctx->state == STATE_CONNECT) {
+		dialer_cancel(&ctx->dialer, loop);
+	}
+	if (ctx->state >= STATE_REQUEST) {
 		ev_io_stop(loop, &ctx->w_socket);
 		CLOSE_FD(ctx->w_socket.fd);
 	}
 	session_del(&ctx->ss);
-	ctx->rbuf = VBUF_FREE(ctx->rbuf);
 	ctx->wbuf = VBUF_FREE(ctx->wbuf);
+	if (ctx->state >= STATE_RESPONSE) {
+		ctx->rbuf = VBUF_FREE(ctx->rbuf);
+	}
 	free(ctx);
-}
-
-static void
-http_client_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
-{
-	http_client_close(loop, CAST(struct http_client_ctx, ss, ss));
 }
 
 static void http_client_finish(
@@ -88,6 +87,14 @@ static void http_client_finish(
 			TO_HANDLE(ctx), loop, ctx->invoke_cb.ctx, ok, data);
 	}
 	http_client_close(loop, ctx);
+}
+
+static void
+http_client_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+{
+	http_client_finish(
+		loop, CAST(struct http_client_ctx, ss, ss), false,
+		"server shutdown");
 }
 
 static void
@@ -372,6 +379,8 @@ handle_t http_client_do(
 		return INVALID_HANDLE;
 	}
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ev_set_priority(&ctx->w_timeout, EV_MINPRI);
+	ev_timer_start(loop, &ctx->w_timeout);
 	ctx->state = STATE_CONNECT;
 	ctx->ss.close = http_client_ss_close;
 	session_add(&ctx->ss);
@@ -387,4 +396,9 @@ handle_t http_client_do(
 		uri);
 	dialer_start(&ctx->dialer, loop, req);
 	return TO_HANDLE(ctx);
+}
+
+void http_client_cancel(struct ev_loop *loop, const handle_t h)
+{
+	http_client_close(loop, TO_POINTER(h));
 }

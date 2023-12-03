@@ -183,33 +183,6 @@ Periodic timer callback.
 Ignored
 
 
-### ruleset.idle
-
-**Synopsis**
-
-```Lua
-function ruleset.idle()
-    -- ......
-    if not finished then
-        -- pending requests get processed before next idle
-        neosocksd.setidle()
-    end
-end
-```
-
-**Description**
-
-`ruleset.idle()` is invoked when there is nothing better to do. This can be used to do some non-urgent cleanups in the background, for example.
-
-**Params**
-
-None
-
-**Returns**
-
-None
-
-
 ### ruleset.stats
 
 **Synopsis**
@@ -302,21 +275,6 @@ neosocksd.setinterval(1.5)
 Set tick interval in seconds, see also [ruleset.tick](#rulesettick).
 
 The valid interval range is `[1e-3, 1e+9]`, use `setinterval(0)` to stop the timer tick.
-
-
-### neosocksd.setidle
-
-**Synopsis**
-
-```Lua
-neosocksd.setidle()
-```
-
-**Description**
-
-Invoke the idle callback the next time the server is idle.
-
-See [ruleset.idle](#rulesetidle).
 
 
 ### neosocksd.invoke
@@ -468,3 +426,18 @@ end)
 **Description**
 
 Pause an asynchronous routine for at least specified time in seconds.
+
+
+### await.idle
+
+**Synopsis**
+
+```Lua
+async(function()
+    await.idle()
+end)
+```
+
+**Description**
+
+Pause an asynchronous routine until there is nothing better to do. This can be used to do some non-urgent cleanups in the background, for example.

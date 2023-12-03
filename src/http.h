@@ -30,6 +30,8 @@ handle_t http_client_do(
 	struct ev_loop *loop, struct dialreq *req, const char *uri,
 	const char *content, size_t len, struct http_client_cb cb);
 
+void http_client_cancel(struct ev_loop *loop, handle_t h);
+
 #define MIME_RPCALL "application/x-neosocksd-rpc"
 
 #endif /* HTTP_H */
