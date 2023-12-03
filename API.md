@@ -358,9 +358,9 @@ In the default implementation of `libruleset.lua`, this value controls whether `
 **Synopsis**
 
 ```Lua
-async(function()
+async(function(...)
     -- routine
-end)
+end, ...)
 ```
 
 **Description**
@@ -425,7 +425,9 @@ end)
 
 **Description**
 
-Pause an asynchronous routine for at least specified time in seconds.
+Pause an asynchronous routine for at least specified interval in seconds.
+
+The valid interval range is `[1e-3, 1e+9]`.
 
 
 ### await.idle

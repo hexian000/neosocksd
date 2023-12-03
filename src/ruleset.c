@@ -51,7 +51,7 @@ struct ruleset {
 #define RIDX_CONTEXTS (LUA_RIDX_LAST + 2)
 
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
-#define ERR_NOT_YIELDABLE "await cannot be used in a non-yieldable context"
+#define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
 
 static struct ruleset *find_ruleset(lua_State *L)
 {
@@ -600,6 +600,14 @@ static int api_invoke_(lua_State *restrict L)
 	return 0;
 }
 
+#define AWAIT_CHECK_YIELDABLE(L)                                               \
+	do {                                                                   \
+		if (!lua_isyieldable((L))) {                                   \
+			lua_pushliteral((L), ERR_NOT_YIELDABLE);               \
+			return lua_error((L));                                 \
+		}                                                              \
+	} while (0)
+
 #define AWAIT_PIN(r, L, p)                                                     \
 	do {                                                                   \
 		const int ismain = lua_pushthread((L));                        \
@@ -685,10 +693,7 @@ await_idle_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 /* await.idle() */
 static int await_idle_(lua_State *restrict L)
 {
-	if (!lua_isyieldable(L)) {
-		lua_pushliteral(L, ERR_NOT_YIELDABLE);
-		return lua_error(L);
-	}
+	AWAIT_CHECK_YIELDABLE(L);
 	struct ruleset *restrict r = find_ruleset(L);
 	struct ev_idle *restrict w = lua_newuserdata(L, sizeof(struct ev_idle));
 	ev_idle_init(w, idle_cb);
@@ -741,14 +746,13 @@ await_sleep_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 /* await.sleep(n) */
 static int await_sleep_(lua_State *restrict L)
 {
-	if (!lua_isyieldable(L)) {
-		lua_pushliteral(L, ERR_NOT_YIELDABLE);
-		return lua_error(L);
+	AWAIT_CHECK_YIELDABLE(L);
+	lua_Number n = luaL_checknumber(L, 1);
+	if (!isnormal(n)) {
+		return 0;
 	}
-	luaL_checktype(L, 1, LUA_TNUMBER);
+	n = CLAMP(n, 1e-3, 1e+9);
 	struct ruleset *restrict r = find_ruleset(L);
-	double n = lua_tonumber(L, 1);
-	n = isnormal(n) ? CLAMP(n, 0.0, 1e+9) : 0.0;
 	struct ev_timer *restrict w =
 		lua_newuserdata(L, sizeof(struct ev_timer));
 	ev_timer_init(w, sleep_cb, n, 0.0);
@@ -803,10 +807,7 @@ await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 /* await.resolve(host) */
 static int await_resolve_(lua_State *restrict L)
 {
-	if (!lua_isyieldable(L)) {
-		lua_pushliteral(L, ERR_NOT_YIELDABLE);
-		return lua_error(L);
-	}
+	AWAIT_CHECK_YIELDABLE(L);
 	luaL_checktype(L, 1, LUA_TSTRING);
 	struct ruleset *restrict r = find_ruleset(L);
 	const char *name = luaL_checkstring(L, 1);
@@ -876,10 +877,7 @@ await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 /* ok, ret = await.rpcall(code, addr, proxyN, ..., proxy1) */
 static int await_rpcall_(lua_State *restrict L)
 {
-	if (!lua_isyieldable(L)) {
-		lua_pushliteral(L, ERR_NOT_YIELDABLE);
-		return lua_error(L);
-	}
+	AWAIT_CHECK_YIELDABLE(L);
 	const int n = lua_gettop(L);
 	for (int i = 1; i <= MAX(2, n); i++) {
 		luaL_checktype(L, i, LUA_TSTRING);

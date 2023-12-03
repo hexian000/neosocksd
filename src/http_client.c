@@ -42,7 +42,6 @@ struct httprsp {
 };
 
 struct http_client_ctx {
-	struct session ss;
 	int state;
 	struct http_client_cb invoke_cb;
 	struct ev_timer w_timeout;
@@ -70,7 +69,6 @@ static void http_client_close(
 		ev_io_stop(loop, &ctx->w_socket);
 		CLOSE_FD(ctx->w_socket.fd);
 	}
-	session_del(&ctx->ss);
 	ctx->wbuf = VBUF_FREE(ctx->wbuf);
 	if (ctx->state >= STATE_RESPONSE) {
 		ctx->rbuf = VBUF_FREE(ctx->rbuf);
@@ -87,14 +85,6 @@ static void http_client_finish(
 			TO_HANDLE(ctx), loop, ctx->invoke_cb.ctx, ok, data);
 	}
 	http_client_close(loop, ctx);
-}
-
-static void
-http_client_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
-{
-	http_client_finish(
-		loop, CAST(struct http_client_ctx, ss, ss), false,
-		"server shutdown");
 }
 
 static void
@@ -382,8 +372,6 @@ handle_t http_client_do(
 	ev_set_priority(&ctx->w_timeout, EV_MINPRI);
 	ev_timer_start(loop, &ctx->w_timeout);
 	ctx->state = STATE_CONNECT;
-	ctx->ss.close = http_client_ss_close;
-	session_add(&ctx->ss);
 	ctx->invoke_cb = client_cb;
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,
