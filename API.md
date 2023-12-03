@@ -315,7 +315,7 @@ See [ruleset.idle](#rulesetidle).
 
 ```Lua
 -- neosocksd.invoke(code, host, proxyN, ..., proxy1)
-neosocksd.invoke([[log("test rpc")]], "neosocksd.lan:80", "socks4a://127.0.0.1:1080")
+neosocksd.invoke([[log("test rpc")]], "api.neosocksd.lan:80", "socks4a://127.0.0.1:1080")
 ```
 
 **Description**

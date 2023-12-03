@@ -7,13 +7,13 @@
 #include "util.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
+#include "utils/slog.h"
 #include "net/http.h"
 #include "dialer.h"
 
-#include "utils/slog.h"
-#include <assert.h>
 #include <ev.h>
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -209,7 +209,7 @@ static int parse_response(struct http_client_ctx *restrict ctx)
 		if (key == NULL) {
 			ctx->state = STATE_CONTENT;
 			if (ctx->http.content_length == 0) {
-				LOGD("http: response no content length");
+				LOGW("http: response no content length");
 				break;
 			}
 			const size_t n =

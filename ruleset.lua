@@ -13,7 +13,7 @@ _G.hosts = {
     ["gateway.region2.lan"] = "192.168.33.1",
     ["host123.region2.lan"] = "192.168.33.123",
     -- self-assignment
-    ["neosocksd.lan"] = "127.0.1.1" -- see _G.redirect
+    ["api.neosocksd.lan"] = "127.0.1.1" -- see _G.redirect
 }
 
 -- 2. ordered redirect rules (matched as string)
@@ -21,10 +21,10 @@ _G.hosts = {
 -- matching stops after a match is found
 _G.redirect_name = {
     -- pass to region1 proxy
-    [1] = {match.exact("region1.neosocksd.lan:80"), rule.redirect("neosocksd.lan:80", "socks4a://192.168.32.1:1080")},
+    [1] = {match.exact("service.region1.lan:80"), rule.redirect("service.lan:80", "socks4a://192.168.32.1:1080")},
     -- jump to region2 through region1 proxy
-    [2] = {match.exact("region2.neosocksd.lan:80"),
-           rule.redirect("neosocksd.lan:80", "socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080")},
+    [2] = {match.exact("service.region2.lan:80"),
+           rule.redirect("service.lan:80", "socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080")},
     -- access mDNS sites directly, _G.route/_G.route6 are skipped
     [3] = {match.domain(".local"), rule.direct(), "local"},
     -- dynamically loaded big domains list

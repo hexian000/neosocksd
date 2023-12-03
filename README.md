@@ -86,11 +86,11 @@ Update ruleset on remote instance without restarting:
 
 ```sh
 curl -vx socks5h://192.168.1.1:1080 \
-    http://neosocksd.lan/ruleset/update \
+    http://api.neosocksd.lan/ruleset/update \
     --data-binary @ruleset.lua
 ```
 
-The example host name `neosocksd.lan` is defined in [ruleset.lua](ruleset.lua).
+The example host name `api.neosocksd.lan` is defined in [ruleset.lua](ruleset.lua).
 
 
 ## Observability
