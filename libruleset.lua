@@ -306,18 +306,22 @@ end
 
 function match.domain(s)
     if type(s) ~= "table" then
-        assertf(s:startswith("."), 2, [[domain matcher should start with ".": %q]], s)
+        local suffix = s
+        if s:startswith(".") then
+            s = s:sub(2)
+        else
+            suffix = "." .. s
+        end
         return function(addr)
             local host, port = splithostport(addr)
             if not host then
                 return false
             end
-            return host:endswith(s)
+            return host == s or host:endswith(suffix)
         end
     end
     local tree = {}
     for _, v in pairs(s) do
-        assertf(v:startswith("."), 2, [[domain matcher should start with ".": %q]], v)
         local path, n = {}, 0
         for seg in v:gmatch("[^.]+") do
             table.insert(path, seg)
