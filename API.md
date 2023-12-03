@@ -453,3 +453,18 @@ end, "127.0.1.1:9080")
 **Description**
 
 Run Lua code on another neosocksd and take one string back.
+
+
+### await.sleep
+
+**Synopsis**
+
+```Lua
+async(function()
+    await.sleep(1.5)
+end)
+```
+
+**Description**
+
+Pause an asynchronous routine for at least sepecified time in seconds.

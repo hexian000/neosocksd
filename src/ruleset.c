@@ -656,73 +656,6 @@ await_resume(struct ruleset *restrict r, const void *p, const int nargs, ...)
 	return true;
 }
 
-static void http_invoke_cb(
-	handle_t h, struct ev_loop *loop, void *ctx, bool ok,
-	const char *result)
-{
-	UNUSED(loop);
-	struct ruleset *restrict r = ctx;
-	const void *p = TO_POINTER(h);
-	int i = ok ? 1 : 0;
-	if (!await_resume(r, p, 2, (void *)&i, (void *)result)) {
-		LOGE_F("resolve_cb: %s", ruleset_error(r));
-	}
-}
-
-static int
-await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
-{
-	const void *p = (void *)ctx;
-	await_unpin(L, p);
-	switch (status) {
-	case LUA_OK:
-	case LUA_YIELD:
-		break;
-	default:
-		return lua_error(L);
-	}
-	const int ok = *(int *)lua_topointer(L, 1);
-	const char *msg = lua_topointer(L, 2);
-	lua_pushboolean(L, ok);
-	lua_pushstring(L, msg);
-	return 2;
-}
-
-/* ok, ret = await.rpcall(code, addr, proxyN, ..., proxy1) */
-static int await_rpcall_(lua_State *restrict L)
-{
-	if (!lua_isyieldable(L)) {
-		lua_pushliteral(L, ERR_NOT_YIELDABLE);
-		return lua_error(L);
-	}
-	const int n = lua_gettop(L);
-	for (int i = 1; i <= MAX(2, n); i++) {
-		luaL_checktype(L, i, LUA_TSTRING);
-	}
-	struct dialreq *req = pop_dialreq(L, n - 1);
-	if (req == NULL) {
-		lua_pushliteral(L, "unable to get invocation target");
-		return lua_error(L);
-	}
-	size_t len;
-	const char *code = lua_tolstring(L, 1, &len);
-	struct ruleset *restrict r = find_ruleset(L);
-	struct http_client_cb cb = {
-		.func = http_invoke_cb,
-		.ctx = r,
-	};
-	handle_t h =
-		http_client_do(r->loop, req, "/ruleset/rpcall", code, len, cb);
-	if (h == INVALID_HANDLE) {
-		lua_pushliteral(L, "out of memory");
-		return lua_error(L);
-	}
-	const void *p = TO_POINTER(h);
-	await_pin(L, p);
-	lua_settop(L, 0);
-	return lua_yieldk(L, 0, (lua_KContext)p, await_rpcall_k_);
-}
-
 static void resolve_cb(
 	handle_t h, struct ev_loop *loop, void *ctx, const struct sockaddr *sa)
 {
@@ -772,7 +705,127 @@ static int await_resolve_(lua_State *restrict L)
 	const void *p = TO_POINTER(h);
 	await_pin(L, p);
 	lua_settop(L, 0);
-	return lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
+	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
+	return await_resolve_k_(L, status, (lua_KContext)p);
+}
+
+static void http_client_cb(
+	handle_t h, struct ev_loop *loop, void *ctx, bool ok,
+	const char *result)
+{
+	UNUSED(loop);
+	struct ruleset *restrict r = ctx;
+	const void *p = TO_POINTER(h);
+	int i = ok ? 1 : 0;
+	if (!await_resume(r, p, 2, (void *)&i, (void *)result)) {
+		LOGE_F("http_client_cb: %s", ruleset_error(r));
+	}
+}
+
+static int
+await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+{
+	const void *p = (void *)ctx;
+	await_unpin(L, p);
+	switch (status) {
+	case LUA_OK:
+	case LUA_YIELD:
+		break;
+	default:
+		return lua_error(L);
+	}
+	const int ok = *(int *)lua_topointer(L, 1);
+	const char *msg = lua_topointer(L, 2);
+	lua_pushboolean(L, ok);
+	lua_pushstring(L, msg);
+	return 2;
+}
+
+/* ok, ret = await.rpcall(code, addr, proxyN, ..., proxy1) */
+static int await_rpcall_(lua_State *restrict L)
+{
+	if (!lua_isyieldable(L)) {
+		lua_pushliteral(L, ERR_NOT_YIELDABLE);
+		return lua_error(L);
+	}
+	const int n = lua_gettop(L);
+	for (int i = 1; i <= MAX(2, n); i++) {
+		luaL_checktype(L, i, LUA_TSTRING);
+	}
+	struct dialreq *req = pop_dialreq(L, n - 1);
+	if (req == NULL) {
+		lua_pushliteral(L, "unable to get invocation target");
+		return lua_error(L);
+	}
+	size_t len;
+	const char *code = lua_tolstring(L, 1, &len);
+	struct ruleset *restrict r = find_ruleset(L);
+	struct http_client_cb cb = {
+		.func = http_client_cb,
+		.ctx = r,
+	};
+	handle_t h =
+		http_client_do(r->loop, req, "/ruleset/rpcall", code, len, cb);
+	if (h == INVALID_HANDLE) {
+		lua_pushliteral(L, "out of memory");
+		return lua_error(L);
+	}
+	const void *p = TO_POINTER(h);
+	await_pin(L, p);
+	lua_settop(L, 0);
+	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_rpcall_k_);
+	return await_rpcall_k_(L, status, (lua_KContext)p);
+}
+
+static void
+sleep_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+{
+	UNUSED(loop);
+	UNUSED(revents);
+	ev_timer_stop(loop, watcher);
+	struct ruleset *restrict r = watcher->data;
+	const void *p = watcher;
+	if (!await_resume(r, p, 0)) {
+		LOGE_F("sleep_cb: %s", ruleset_error(r));
+	}
+}
+
+static int
+await_sleep_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+{
+	void *p = (void *)ctx;
+	await_unpin(L, p);
+	free(p);
+	switch (status) {
+	case LUA_OK:
+	case LUA_YIELD:
+		break;
+	default:
+		return lua_error(L);
+	}
+	return 0;
+}
+
+/* await.sleep(n) */
+static int await_sleep_(lua_State *restrict L)
+{
+	if (!lua_isyieldable(L)) {
+		lua_pushliteral(L, ERR_NOT_YIELDABLE);
+		return lua_error(L);
+	}
+	luaL_checktype(L, 1, LUA_TNUMBER);
+	struct ruleset *restrict r = find_ruleset(L);
+	double n = lua_tonumber(L, 1);
+	n = isnormal(n) ? CLAMP(n, 0.0, 1e+9) : 0.0;
+	struct ev_timer *restrict watcher = malloc(sizeof(struct ev_timer));
+	ev_timer_init(watcher, sleep_cb, n, 0.0);
+	watcher->data = r;
+	ev_timer_start(r->loop, watcher);
+	const void *p = watcher;
+	await_pin(L, p);
+	lua_settop(L, 0);
+	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_sleep_k_);
+	return await_sleep_k_(L, status, (lua_KContext)p);
 }
 
 /* neosocksd.resolve(host) */
@@ -946,6 +999,7 @@ static int luaopen_await(lua_State *restrict L)
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },
 		{ "rpcall", await_rpcall_ },
+		{ "sleep", await_sleep_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, awaitlib);
