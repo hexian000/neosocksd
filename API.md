@@ -39,6 +39,16 @@ Run the posted script.
 - **Content**: Lua script
 - **Status**: HTTP 200, HTTP 405, HTTP 500
 
+### Ruleset RPCall
+
+Internal API reserved for `await.rpcall`.
+
+- **Path**: `/ruleset/rpcall`
+- **Method**: POST
+- **Content**: Lua script
+- **Status**: HTTP 200, HTTP 405, HTTP 500
+- **Response**: First string the Lua script returned.
+
 ### Ruleset Update
 
 Load the posted script and use it as follows:
@@ -424,16 +434,16 @@ IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
 
 
-### await.pcall
+### await.rpcall
 
 **Synopsis**
 
 ```Lua
 async(function(addr)
     local begin = neosocksd.now()
-    local ok, ret = await.pcall([[return "echo"]], addr)
+    local ok, ret = await.rpcall([[return "echo"]], addr)
     if not ok or ret ~= "echo" then
-        error("await.pcall: " .. ret)
+        error("await.rpcall: " .. ret)
     end
     local rtt = neosocksd.now() - begin
     logf("ping %s: %dms", addr, math.ceil(rtt * 1e+3))

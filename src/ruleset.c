@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "ruleset.h"
+#include "net/url.h"
 
 #if WITH_RULESET
 
@@ -160,6 +161,7 @@ enum ruleset_function {
 	FUNC_IDLE,
 	FUNC_TRACEBACK,
 	FUNC_XPCALL,
+	FUNC_RPCALL,
 };
 
 static int ruleset_request_(lua_State *restrict L)
@@ -211,6 +213,18 @@ static int ruleset_loadfile_(lua_State *restrict L)
 }
 
 static int ruleset_invoke_(lua_State *restrict L)
+{
+	const char *code = lua_topointer(L, 1);
+	const size_t len = *(size_t *)lua_topointer(L, 2);
+	lua_settop(L, 0);
+	if (luaL_loadbuffer(L, code, len, "=invoke") != LUA_OK) {
+		return lua_error(L);
+	}
+	lua_call(L, 0, 0);
+	return 0;
+}
+
+static int ruleset_rpcall_(lua_State *restrict L)
 {
 	const char *code = lua_topointer(L, 1);
 	const size_t len = *(size_t *)lua_topointer(L, 2);
@@ -379,6 +393,7 @@ static void luainit_functions(lua_State *restrict L)
 		{ FUNC_REQUEST, ruleset_request_ },
 		{ FUNC_LOADFILE, ruleset_loadfile_ },
 		{ FUNC_INVOKE, ruleset_invoke_ },
+		{ FUNC_RPCALL, ruleset_rpcall_ },
 		{ FUNC_UPDATE, ruleset_update_ },
 		{ FUNC_STATS, ruleset_stats_ },
 		{ FUNC_TICK, ruleset_tick_ },
@@ -581,8 +596,8 @@ static int api_invoke_(lua_State *restrict L)
 	struct ruleset *restrict r = find_ruleset(L);
 	size_t len;
 	const char *code = lua_tolstring(L, 1, &len);
-	struct http_invoke_cb cb = { NULL, NULL };
-	http_invoke(r->loop, req, code, len, cb);
+	struct http_client_cb cb = { NULL, NULL };
+	http_client_do(r->loop, req, "/ruleset/invoke", code, len, cb);
 	return 0;
 }
 
@@ -655,7 +670,7 @@ static void http_invoke_cb(
 }
 
 static int
-await_pcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	const void *p = (void *)ctx;
 	await_unpin(L, p);
@@ -673,8 +688,8 @@ await_pcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	return 2;
 }
 
-/* ok, ret = await.pcall(code, addr, proxyN, ..., proxy1) */
-static int await_pcall_(lua_State *restrict L)
+/* ok, ret = await.rpcall(code, addr, proxyN, ..., proxy1) */
+static int await_rpcall_(lua_State *restrict L)
 {
 	if (!lua_isyieldable(L)) {
 		lua_pushliteral(L, ERR_NOT_YIELDABLE);
@@ -692,11 +707,12 @@ static int await_pcall_(lua_State *restrict L)
 	size_t len;
 	const char *code = lua_tolstring(L, 1, &len);
 	struct ruleset *restrict r = find_ruleset(L);
-	struct http_invoke_cb cb = {
+	struct http_client_cb cb = {
 		.func = http_invoke_cb,
 		.ctx = r,
 	};
-	handle_t h = http_invoke(r->loop, req, code, len, cb);
+	handle_t h =
+		http_client_do(r->loop, req, "/ruleset/rpcall", code, len, cb);
 	if (h == INVALID_HANDLE) {
 		lua_pushliteral(L, "out of memory");
 		return lua_error(L);
@@ -704,7 +720,7 @@ static int await_pcall_(lua_State *restrict L)
 	const void *p = TO_POINTER(h);
 	await_pin(L, p);
 	lua_settop(L, 0);
-	return lua_yieldk(L, 0, (lua_KContext)p, await_pcall_k_);
+	return lua_yieldk(L, 0, (lua_KContext)p, await_rpcall_k_);
 }
 
 static void resolve_cb(
@@ -929,7 +945,7 @@ static int luaopen_await(lua_State *restrict L)
 {
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },
-		{ "pcall", await_pcall_ },
+		{ "rpcall", await_rpcall_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, awaitlib);
@@ -1087,13 +1103,18 @@ const char *ruleset_error(struct ruleset *restrict r)
 	return lua_tostring(L, -1);
 }
 
-bool ruleset_invoke(
-	struct ruleset *r, const char *code, const size_t len,
-	const char **result)
+bool ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
 {
-	const bool ok = ruleset_pcall(r, FUNC_INVOKE, 2, 1, code, &len);
+	return ruleset_pcall(r, FUNC_INVOKE, 2, 0, code, &len);
+}
+
+bool ruleset_rpcall(
+	struct ruleset *r, const char *code, size_t codelen,
+	const char **result, size_t *resultlen)
+{
+	const bool ok = ruleset_pcall(r, FUNC_RPCALL, 2, 1, code, &codelen);
 	if (ok) {
-		*result = lua_tostring(r->L, -1);
+		*result = lua_tolstring(r->L, -1, resultlen);
 	}
 	return ok;
 }

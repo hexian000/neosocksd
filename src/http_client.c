@@ -43,7 +43,7 @@ struct httprsp {
 struct http_client_ctx {
 	struct session ss;
 	int state;
-	struct http_invoke_cb invoke_cb;
+	struct http_client_cb invoke_cb;
 	struct ev_timer w_timeout;
 	union {
 		struct {
@@ -333,9 +333,9 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	http_client_finish(loop, ctx, false, "timeout");
 }
 
-handle_t http_invoke(
-	struct ev_loop *loop, struct dialreq *req, const char *code,
-	const size_t len, struct http_invoke_cb invoke_cb)
+handle_t http_client_do(
+	struct ev_loop *loop, struct dialreq *req, const char *uri,
+	const char *content, const size_t len, struct http_client_cb client_cb)
 {
 	CHECK(len <= INT_MAX);
 	struct http_client_ctx *restrict ctx =
@@ -345,14 +345,13 @@ handle_t http_invoke(
 		free(req);
 		return INVALID_HANDLE;
 	}
-	const int result = invoke_cb.func != NULL ? 1 : 0;
 	ctx->wbuf = VBUF_APPENDF(
 		NULL,
-		"POST /ruleset/invoke?result=%d HTTP/1.1\r\n"
+		"POST %s HTTP/1.1\r\n"
 		"Content-Length: %zu\r\n"
 		"\r\n"
 		"%.*s",
-		result, len, (int)len, code);
+		uri, len, (int)len, content);
 	if (ctx->wbuf == NULL) {
 		LOGOOM();
 		free(req);
@@ -363,7 +362,7 @@ handle_t http_invoke(
 	ctx->state = STATE_CONNECT;
 	ctx->ss.close = http_client_ss_close;
 	session_add(&ctx->ss);
-	ctx->invoke_cb = invoke_cb;
+	ctx->invoke_cb = client_cb;
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,
 		.ctx = ctx,
@@ -371,8 +370,8 @@ handle_t http_invoke(
 	dialer_init(&ctx->dialer, cb);
 	ctx->dialreq = req;
 	LOG_TXT_F(
-		VERBOSE, ctx->wbuf->data, ctx->wbuf->len,
-		"http_invoke: result=%d", result);
+		VERBOSE, ctx->wbuf->data, ctx->wbuf->len, "http_invoke: api=%s",
+		uri);
 	dialer_start(&ctx->dialer, loop, req);
 	return TO_HANDLE(ctx);
 }

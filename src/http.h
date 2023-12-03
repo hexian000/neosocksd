@@ -19,15 +19,15 @@ void http_api_serve(
 	struct server *s, struct ev_loop *loop, int accepted_fd,
 	const struct sockaddr *accepted_sa);
 
-struct http_invoke_cb {
+struct http_client_cb {
 	void (*func)(
 		handle_t h, struct ev_loop *loop, void *ctx, bool ok,
 		const char *result);
 	void *ctx;
 };
 
-handle_t http_invoke(
-	struct ev_loop *loop, struct dialreq *req, const char *code, size_t len,
-	struct http_invoke_cb cb);
+handle_t http_client_do(
+	struct ev_loop *loop, struct dialreq *req, const char *uri,
+	const char *content, size_t len, struct http_client_cb cb);
 
 #endif /* HTTP_H */
