@@ -112,7 +112,8 @@ void http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
 	const int len = http_error(buf, cap, code);
 	if (len <= 0) {
 		/* can't generate error page, reply with code only */
-		RESPHDR_WRITE(ctx->wbuf, code, "");
+		RESPHDR_BEGIN(ctx->wbuf, code);
+		RESPHDR_FINISH(ctx->wbuf);
 		return;
 	}
 	ctx->wbuf.len += len;
@@ -157,6 +158,10 @@ on_header(struct http_ctx *restrict ctx, const char *key, const char *value)
 			return false;
 		}
 		ctx->http.content_length = content_length;
+	} else if (strcasecmp(key, "Content-Type") == 0) {
+		ctx->http.content_type = value;
+	} else if (strcasecmp(key, "Content-Encoding") == 0) {
+		ctx->http.content_encoding = value;
 	} else if (strcasecmp(key, "Expect") == 0) {
 		if (strcasecmp(value, "100-continue") != 0) {
 			http_resp_errpage(ctx, HTTP_EXPECTATION_FAILED);
@@ -416,9 +421,7 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 		ev_io_init(w_send, send_cb, fd, EV_WRITE);
 		w_send->data = ctx;
 	}
-	ctx->http.nxt = NULL;
-	ctx->http.content_length = 0;
-	ctx->http.expect_continue = false;
+	ctx->http = (struct httpreq){ 0 };
 	ctx->dialreq = NULL;
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,

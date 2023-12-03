@@ -1,7 +1,9 @@
 /* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+#include "http.h"
 #include "http_impl.h"
+#include "net/http.h"
 #include "net/url.h"
 #include "utils/formats.h"
 #include "utils/posixtime.h"
@@ -13,6 +15,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define RESPHDR_CONTENTTEXT(buf)                                               \
+	BUF_APPENDCONST(                                                       \
+		(buf), "Content-Type: text/plain; charset=utf-8\r\n"           \
+		       "X-Content-Type-Options: nosniff\r\n")
+
+#define RESPHDR_CONTENTTYPE(buf, type)                                         \
+	BUF_APPENDF((buf), "Content-Type: %s\r\n", (type))
+
+#define RESPHDR_CONTENTLENGTH(buf, len)                                        \
+	BUF_APPENDF((buf), "Content-Length: %zu\r\n", (len))
+
+#define RESPHDR_NOCACHE(buf)                                                   \
+	BUF_APPENDCONST((buf), "Cache-Control: no-store\r\n")
 
 #define FORMAT_BYTES(name, value)                                              \
 	char name[16];                                                         \
@@ -142,10 +158,15 @@ static void http_handle_stats(
 
 	bool stateless;
 	if (strcmp(msg->req.method, "GET") == 0) {
-		RESPHDR_GET(ctx->wbuf, HTTP_OK);
+		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
+		RESPHDR_CONTENTTEXT(ctx->wbuf);
+		RESPHDR_NOCACHE(ctx->wbuf);
+		RESPHDR_FINISH(ctx->wbuf);
 		stateless = true;
 	} else if (strcmp(msg->req.method, "POST") == 0) {
-		RESPHDR_POST(ctx->wbuf, HTTP_OK);
+		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
+		RESPHDR_CONTENTTEXT(ctx->wbuf);
+		RESPHDR_FINISH(ctx->wbuf);
 		stateless = false;
 	} else {
 		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
@@ -212,7 +233,8 @@ static void http_handle_ruleset(
 	UNUSED(loop);
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset == NULL) {
-		RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_FINISH(ctx->wbuf);
 		BUF_APPENDF(
 			ctx->wbuf, "%s",
 			"ruleset not enabled, restart with -r\n");
@@ -237,12 +259,15 @@ static void http_handle_ruleset(
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset invoke: %s", err);
-			RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
+			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
+			RESPHDR_CONTENTTEXT(ctx->wbuf);
+			RESPHDR_FINISH(ctx->wbuf);
 			BUF_APPENDSTR(ctx->wbuf, err);
 			BUF_APPENDCONST(ctx->wbuf, "\n");
 			return;
 		}
-		RESPHDR_CODE(ctx->wbuf, HTTP_OK);
+		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
+		RESPHDR_FINISH(ctx->wbuf);
 		return;
 	} else if (strcmp(segment, "update") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
@@ -266,12 +291,15 @@ static void http_handle_ruleset(
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset update: %s", err);
-			RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
+			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
+			RESPHDR_CONTENTTEXT(ctx->wbuf);
+			RESPHDR_FINISH(ctx->wbuf);
 			BUF_APPENDSTR(ctx->wbuf, err);
 			BUF_APPENDCONST(ctx->wbuf, "\n");
 			return;
 		}
-		RESPHDR_CODE(ctx->wbuf, HTTP_OK);
+		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
+		RESPHDR_FINISH(ctx->wbuf);
 		return;
 	} else if (strcmp(segment, "gc") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", false)) {
@@ -288,7 +316,9 @@ static void http_handle_ruleset(
 		(void)format_duration(
 			timecost, sizeof(timecost),
 			make_duration_nanos(clock_monotonic() - start));
-		RESPHDR_POST(ctx->wbuf, HTTP_OK);
+		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
+		RESPHDR_CONTENTTEXT(ctx->wbuf);
+		RESPHDR_FINISH(ctx->wbuf);
 		BUF_APPENDF(
 			ctx->wbuf,
 			"Num Live Object     : %zu\n"
@@ -298,6 +328,23 @@ static void http_handle_ruleset(
 		return;
 	} else if (strcmp(segment, "rpcall") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
+			return;
+		}
+		if (ctx->http.content_type == NULL ||
+		    strcasecmp(ctx->http.content_type, MIME_RPCALL) != 0) {
+			LOGD_F("rpcall: invalid content type \"%s\"",
+			       ctx->http.content_type);
+			RESPHDR_BEGIN(ctx->wbuf, HTTP_BAD_REQUEST);
+			RESPHDR_CONTENTTEXT(ctx->wbuf);
+			RESPHDR_FINISH(ctx->wbuf);
+			return;
+		}
+		if (ctx->http.content_encoding != NULL) {
+			LOGD_F("rpcall: invalid content encoding \"%s\"",
+			       ctx->http.content_encoding);
+			RESPHDR_BEGIN(ctx->wbuf, HTTP_BAD_REQUEST);
+			RESPHDR_CONTENTTEXT(ctx->wbuf);
+			RESPHDR_FINISH(ctx->wbuf);
 			return;
 		}
 		const char *code = (const char *)ctx->cbuf->data;
@@ -311,13 +358,19 @@ static void http_handle_ruleset(
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset rpcall: %s", err);
-			RESPHDR_POST(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
-			BUF_APPENDSTR(ctx->wbuf, err);
-			BUF_APPENDCONST(ctx->wbuf, "\n");
+			len = strlen(err);
+			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
+			RESPHDR_CONTENTTYPE(ctx->wbuf, MIME_RPCALL);
+			RESPHDR_CONTENTLENGTH(ctx->wbuf, len);
+			RESPHDR_FINISH(ctx->wbuf);
+			BUF_APPEND(ctx->wbuf, err, len);
 			return;
 		}
-		RESPHDR_CODE(ctx->wbuf, HTTP_OK);
-		LOG_TXT_F(
+		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
+		RESPHDR_CONTENTTYPE(ctx->wbuf, MIME_RPCALL);
+		RESPHDR_CONTENTLENGTH(ctx->wbuf, len);
+		RESPHDR_FINISH(ctx->wbuf);
+		LOG_BIN_F(
 			VERBOSE, result, len,
 			"api: ruleset rpcall result %zu bytes", len);
 		BUF_APPENDSTR(ctx->wbuf, result);
@@ -348,7 +401,8 @@ void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		if (!http_leafnode_check(ctx, &uri, NULL, false)) {
 			return;
 		}
-		RESPHDR_WRITE(ctx->wbuf, HTTP_OK, "");
+		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
+		RESPHDR_FINISH(ctx->wbuf);
 		return;
 	}
 	if (strcmp(segment, "stats") == 0) {

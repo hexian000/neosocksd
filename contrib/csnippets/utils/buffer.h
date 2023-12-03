@@ -40,7 +40,7 @@ struct vbuffer {
 /* These internal functions should NOT be called directly, use macros */
 
 /** @internal */
-size_t buf_append(struct buffer *buf, const unsigned char *data, size_t n);
+size_t buf_append(struct buffer *buf, const void *data, size_t n);
 
 /** @internal */
 int buf_appendf(struct buffer *buf, const char *format, ...);
@@ -55,8 +55,7 @@ struct vbuffer *vbuf_alloc(struct vbuffer *vbuf, size_t cap);
 struct vbuffer *vbuf_grow(struct vbuffer *vbuf, size_t want);
 
 /** @internal */
-struct vbuffer *
-vbuf_append(struct vbuffer *vbuf, const unsigned char *data, size_t n);
+struct vbuffer *vbuf_append(struct vbuffer *vbuf, const void *data, size_t n);
 
 /** @internal */
 struct vbuffer *vbuf_appendf(struct vbuffer *vbuf, const char *format, ...);
@@ -188,21 +187,21 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
 /**
  * @brief Resize vbuffer allocation. Data maybe truncated.
  * @param vbuf If NULL, new buffer may be allocated.
- * @param want Expected vbuffer overall size in bytes.
+ * @param cap Expected vbuffer overall size in bytes.
  * @return If failed, the allocation remains unchanged.
  * @details usage: `vbuf = VBUF_RESIZE(vbuf, 100);`
  */
-#define VBUF_RESIZE(vbuf, size)  vbuf_alloc((vbuf), (size)) : (vbuf))
+#define VBUF_RESIZE(vbuf, cap)  vbuf_alloc((vbuf), (cap)) : (vbuf))
 
 /**
  * @brief Adjust vbuffer allocation only if data can be preserved.
  * @param vbuf If NULL, new buffer may be allocated.
- * @param want Expected vbuffer overall size in bytes.
+ * @param cap Expected vbuffer overall size in bytes.
  * @return If failed, the allocation remains unchanged.
  * @details usage: `vbuf = VBUF_RESERVE(vbuf, 0); // shrink the buffer to fit`
  */
-#define VBUF_RESERVE(vbuf, want)                                               \
-	vbuf_alloc((vbuf), (vbuf) != NULL ? MAX((vbuf)->len, (want)) : (want))
+#define VBUF_RESERVE(vbuf, cap)                                                \
+	vbuf_alloc((vbuf), (vbuf) != NULL ? MAX((vbuf)->len, (cap)) : (cap))
 
 /**
  * @brief Expand vbuffer allocation.

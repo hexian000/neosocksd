@@ -36,8 +36,9 @@ enum http_client_state {
 struct httprsp {
 	struct http_message msg;
 	char *nxt;
-	const char *content_encoding;
 	size_t content_length;
+	const char *content_type;
+	const char *content_encoding;
 };
 
 struct http_client_ctx {
@@ -151,6 +152,10 @@ static bool on_header(
 			return false;
 		}
 		ctx->http.content_length = content_length;
+	} else if (strcasecmp(key, "Content-Type") == 0) {
+		ctx->http.content_type = value;
+	} else if (strcasecmp(key, "Content-Encoding") == 0) {
+		ctx->http.content_encoding = value;
 	}
 	return true;
 }
@@ -207,20 +212,14 @@ static int parse_response(struct http_client_ctx *restrict ctx)
 		}
 		ctx->http.nxt = next;
 		if (key == NULL) {
-			ctx->state = STATE_CONTENT;
-			if (ctx->http.content_length == 0) {
-				LOGW("http: response no content length");
-				break;
-			}
-			const size_t n =
-				(size_t)((unsigned char *)next - rbuf->data) +
-				ctx->http.content_length + 1;
-			rbuf = VBUF_RESERVE(rbuf, n);
-			if (rbuf->len < n) {
-				LOGOOM();
+			if (ctx->http.content_type == NULL ||
+			    strcasecmp(ctx->http.content_type, MIME_RPCALL) !=
+				    0) {
+				LOGD_F("rpcall: invalid content type \"%s\"",
+				       ctx->http.content_type);
 				return -1;
 			}
-			ctx->rbuf = rbuf;
+			ctx->state = STATE_CONTENT;
 			break;
 		}
 		if (!on_header(ctx, key, value)) {
@@ -231,11 +230,24 @@ static int parse_response(struct http_client_ctx *restrict ctx)
 	if (ctx->state == STATE_CONTENT) {
 		const size_t offset =
 			(size_t)((unsigned char *)next - rbuf->data);
-		const size_t len = rbuf->len - offset;
-		if (ctx->http.content_length > 0 &&
-		    len < ctx->http.content_length) {
-			return 1;
+		size_t cap = HTTP_MAX_ENTITY + HTTP_MAX_CONTENT;
+		if (ctx->http.content_length > 0) {
+			if (rbuf->len >= offset + ctx->http.content_length) {
+				return 0;
+			}
+			cap = offset + ctx->http.content_length + 1;
+		} else {
+			LOGW("rpcall: no content length");
 		}
+		if (rbuf->len < cap) {
+			ctx->rbuf = rbuf = VBUF_RESERVE(rbuf, cap);
+		}
+		if (rbuf->cap <= rbuf->len) {
+			LOGE_F("http_client: buffer is full (%zu/%zu)",
+			       rbuf->len, rbuf->cap);
+			return -1;
+		}
+		return 1;
 	}
 	return 0;
 }
@@ -348,10 +360,11 @@ handle_t http_client_do(
 	ctx->wbuf = VBUF_APPENDF(
 		NULL,
 		"POST %s HTTP/1.1\r\n"
+		"Content-Type: %s\r\n"
 		"Content-Length: %zu\r\n"
 		"\r\n"
 		"%.*s",
-		uri, len, (int)len, content);
+		uri, MIME_RPCALL, len, (int)len, content);
 	if (ctx->wbuf == NULL) {
 		LOGOOM();
 		free(req);

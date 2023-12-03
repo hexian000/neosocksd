@@ -8,8 +8,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-size_t
-buf_append(struct buffer *restrict buf, const unsigned char *data, size_t n)
+size_t buf_append(struct buffer *restrict buf, const void *data, size_t n)
 {
 	unsigned char *b = buf->data + buf->len;
 	n = MIN(n, buf->cap - buf->len);
@@ -103,7 +102,7 @@ struct vbuffer *vbuf_grow(struct vbuffer *restrict vbuf, const size_t want)
 }
 
 struct vbuffer *
-vbuf_append(struct vbuffer *restrict vbuf, const unsigned char *data, size_t n)
+vbuf_append(struct vbuffer *restrict vbuf, const void *data, size_t n)
 {
 	if (n == 0) {
 		return vbuf;

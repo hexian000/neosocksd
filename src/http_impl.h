@@ -42,6 +42,8 @@ struct httpreq {
 	struct http_message msg;
 	char *nxt;
 	size_t content_length;
+	const char *content_type;
+	const char *content_encoding;
 	bool expect_continue;
 };
 
@@ -91,36 +93,24 @@ void http_ctx_close(struct ev_loop *loop, struct http_ctx *ctx);
 #define HTTP_CTX_LOG(level, ctx, message)                                      \
 	HTTP_CTX_LOG_F(level, ctx, "%s", message)
 
-#define RESPHDR_WRITE(buf, code, hdr)                                          \
+#define RESPHDR_BEGIN(buf, code)                                               \
 	do {                                                                   \
 		char date_str[32];                                             \
 		const size_t date_len = http_date(date_str, sizeof(date_str)); \
 		const char *status = http_status((code));                      \
 		(buf).len = 0;                                                 \
 		BUF_APPENDF(                                                   \
-			buf,                                                   \
+			(buf),                                                 \
 			"HTTP/1.1 %" PRIu16 " %s\r\n"                          \
 			"Date: %.*s\r\n"                                       \
-			"Connection: close\r\n"                                \
-			"%s\r\n",                                              \
-			code, status ? status : "", (int)date_len, date_str,   \
-			(hdr));                                                \
+			"Connection: close\r\n",                               \
+			(code), status ? status : "", (int)date_len,           \
+			date_str);                                             \
 	} while (0)
 
-#define RESPHDR_CODE(buf, code) RESPHDR_WRITE((buf), (code), "")
+#define RESPHDR_ADD(buf, format, ...) BUF_APPENDF((buf), (format), __VA_ARGS__)
 
-#define RESPHDR_POST(buf, code)                                                \
-	RESPHDR_WRITE(                                                         \
-		(buf), (code),                                                 \
-		"Content-Type: text/plain; charset=utf-8\r\n"                  \
-		"X-Content-Type-Options: nosniff\r\n")
-
-#define RESPHDR_GET(buf, code)                                                 \
-	RESPHDR_WRITE(                                                         \
-		(buf), (code),                                                 \
-		"Content-Type: text/plain; charset=utf-8\r\n"                  \
-		"X-Content-Type-Options: nosniff\r\n"                          \
-		"Cache-Control: no-store\r\n")
+#define RESPHDR_FINISH(buf) BUF_APPENDCONST(buf, "\r\n")
 
 void http_resp_errpage(struct http_ctx *ctx, uint16_t code);
 

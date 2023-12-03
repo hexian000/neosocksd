@@ -95,7 +95,7 @@ struct bt_syminfo {
 	uintptr_t symsize;
 };
 
-struct backtrace_ctx {
+struct bt_context {
 	struct backtrace_state *state;
 	FILE *f;
 	const char *indent;
@@ -134,7 +134,7 @@ static int pcinfo_cb(
 
 static int backtrace_cb(void *data, const uintptr_t pc)
 {
-	struct backtrace_ctx *restrict ctx = data;
+	struct bt_context *restrict ctx = data;
 	struct bt_pcinfo pcinfo = { 0 };
 	backtrace_pcinfo(ctx->state, pc, pcinfo_cb, error_cb, &pcinfo);
 	struct bt_syminfo syminfo = { 0 };
@@ -169,7 +169,7 @@ static int backtrace_cb(void *data, const uintptr_t pc)
 
 static void print_error_cb(void *data, const char *msg, int errnum)
 {
-	struct backtrace_ctx *restrict ctx = data;
+	struct bt_context *restrict ctx = data;
 	fprintf(ctx->f, "%sbacktrace error: (%d) %s\n", ctx->indent, errnum,
 		msg);
 	fflush(ctx->f);
@@ -181,7 +181,7 @@ void print_stacktrace(FILE *f, const char *indent, int skip)
 	skip++;
 #if WITH_LIBBACKTRACE
 	static _Thread_local struct backtrace_state *state = NULL;
-	struct backtrace_ctx ctx = {
+	struct bt_context ctx = {
 		.state = state,
 		.f = f,
 		.indent = indent,
