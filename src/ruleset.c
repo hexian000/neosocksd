@@ -811,11 +811,13 @@ static int await_resolve_(lua_State *restrict L)
 	luaL_checktype(L, 1, LUA_TSTRING);
 	struct ruleset *restrict r = find_ruleset(L);
 	const char *name = luaL_checkstring(L, 1);
-	const handle_t h = resolve_new(
-		G.resolver, (struct resolve_cb){
-				    .cb = resolve_cb,
-				    .ctx = find_ruleset(L),
-			    });
+	const handle_t h = resolve_do(
+		G.resolver,
+		(struct resolve_cb){
+			.cb = resolve_cb,
+			.ctx = find_ruleset(L),
+		},
+		name, NULL, G.conf->resolve_pf);
 	if (h == INVALID_HANDLE) {
 		lua_pushliteral(L, "out of memory");
 		return lua_error(L);
@@ -825,7 +827,6 @@ static int await_resolve_(lua_State *restrict L)
 	lua_pushvalue(L, lua_upvalueindex(2));
 	lua_setmetatable(L, -2);
 	AWAIT_PIN(r, L, TO_POINTER(h));
-	resolve_start(h, name, NULL, G.conf->resolve_pf);
 	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
 	return await_resolve_k_(L, status, (lua_KContext)p);
 }

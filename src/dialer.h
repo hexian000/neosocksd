@@ -72,6 +72,7 @@ struct dialer {
 	size_t jump;
 	int state;
 	int syserr;
+	struct ev_watcher w_start;
 	struct ev_io w_socket;
 	struct {
 		BUFFER_HDR;

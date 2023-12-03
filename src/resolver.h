@@ -34,9 +34,9 @@ struct resolve_cb {
 	void *ctx;
 };
 
-handle_t resolve_new(struct resolver *r, struct resolve_cb cb);
-void resolve_start(
-	handle_t handle, const char *name, const char *service, int family);
+handle_t resolve_do(
+	struct resolver *r, struct resolve_cb cb, const char *name,
+	const char *service, int family);
 void resolve_cancel(handle_t h);
 
 #endif /* RESOLVER_H */

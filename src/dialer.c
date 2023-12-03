@@ -975,29 +975,12 @@ static void resolve_cb(
 	}
 }
 
-void dialer_init(struct dialer *restrict d, const struct event_cb cb)
+static void
+start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	d->done_cb = cb;
-	d->req = NULL;
-	d->resolve_handle = INVALID_HANDLE;
-	d->jump = 0;
-	d->state = STATE_INIT;
-	d->syserr = 0;
-	{
-		struct ev_io *restrict w_socket = &d->w_socket;
-		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
-		w_socket->data = d;
-	}
-	BUF_INIT(d->buf, 0);
-}
-
-void dialer_start(
-	struct dialer *restrict d, struct ev_loop *restrict loop,
-	const struct dialreq *restrict req)
-{
-	LOGV_F("dialer: [%p] start", (void *)d);
-	d->req = req;
-	d->syserr = 0;
+	UNUSED(revents);
+	struct dialer *restrict d = watcher->data;
+	const struct dialreq *restrict req = d->req;
 	const struct dialaddr *restrict addr =
 		req->num_proxy > 0 ? &req->proxy[0].addr : &req->addr;
 	switch (addr->type) {
@@ -1026,20 +1009,50 @@ void dialer_start(
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
-		const handle_t h = resolve_new(
-			G.resolver, (struct resolve_cb){
-					    .cb = resolve_cb,
-					    .ctx = d,
-				    });
+		const handle_t h = resolve_do(
+			G.resolver,
+			(struct resolve_cb){
+				.cb = resolve_cb,
+				.ctx = d,
+			},
+			host, NULL, G.conf->resolve_pf);
 		if (h == INVALID_HANDLE) {
 			DIALER_RETURN(d, loop, false);
 		}
 		d->resolve_handle = h;
-		resolve_start(h, host, NULL, G.conf->resolve_pf);
 	} break;
 	default:
 		FAIL();
 	}
+}
+
+void dialer_init(struct dialer *restrict d, const struct event_cb cb)
+{
+	d->done_cb = cb;
+	d->req = NULL;
+	d->resolve_handle = INVALID_HANDLE;
+	d->jump = 0;
+	d->state = STATE_INIT;
+	d->syserr = 0;
+	{
+		struct ev_watcher *restrict w_start = &d->w_start;
+		ev_init(w_start, start_cb);
+		w_start->data = d;
+		struct ev_io *restrict w_socket = &d->w_socket;
+		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
+		w_socket->data = d;
+	}
+	BUF_INIT(d->buf, 0);
+}
+
+void dialer_start(
+	struct dialer *restrict d, struct ev_loop *restrict loop,
+	const struct dialreq *restrict req)
+{
+	LOGV_F("dialer: [%p] start", (void *)d);
+	d->req = req;
+	d->syserr = 0;
+	ev_feed_event(loop, &d->w_start, EV_CUSTOM);
 }
 
 int dialer_get(struct dialer *d)

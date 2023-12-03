@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "resolver.h"
+#include "proto/domain.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 #include "utils/posixtime.h"
@@ -49,8 +50,12 @@ struct resolver {
 struct resolve_query {
 	struct resolver *resolver;
 	struct resolve_cb done_cb;
+	struct ev_watcher w_start;
 	bool ok : 1;
 	sockaddr_max_t addr;
+	const char *name, *service;
+	int family;
+	char buf[];
 };
 
 #define RESOLVE_RETURN(q, loop)                                                \
@@ -324,39 +329,26 @@ const struct resolver_stats *resolver_stats(struct resolver *r)
 	return &r->stats;
 }
 
-handle_t resolve_new(struct resolver *r, struct resolve_cb cb)
+static void
+start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	struct resolve_query *restrict q = malloc(sizeof(struct resolve_query));
-	if (q == NULL) {
-		LOGOOM();
-		return INVALID_HANDLE;
-	}
-	*q = (struct resolve_query){
-		.resolver = r,
-		.done_cb = cb,
-	};
-	return TO_HANDLE(q);
-}
-
-void resolve_start(
-	const handle_t handle, const char *name, const char *service,
-	int family)
-{
-	struct resolve_query *restrict q = TO_POINTER(handle);
+	UNUSED(revents);
+	struct resolve_query *restrict q = watcher->data;
 	LOGV_F("resolve: [%p] start name=\"%s\" service=%s pf=%d", (void *)q,
-	       name, service, family);
+	       q->name, q->service, q->family);
 	struct resolver *restrict r = q->resolver;
 	r->stats.num_query++;
 #if WITH_CARES
 	if (r->async_enabled) {
 		const struct ares_addrinfo_hints hints = {
-			.ai_family = family,
+			.ai_family = q->family,
 			.ai_socktype = SOCK_STREAM,
 			.ai_protocol = IPPROTO_TCP,
 			.ai_flags = ARES_AI_ADDRCONFIG,
 		};
 		ares_getaddrinfo(
-			r->channel, name, service, &hints, addrinfo_cb, q);
+			r->channel, q->name, q->service, &hints, addrinfo_cb,
+			q);
 		struct ev_timer *restrict w_timeout = &r->w_timeout;
 		if (!ev_is_active(w_timeout)) {
 			sched_update(r->loop, w_timeout);
@@ -364,8 +356,39 @@ void resolve_start(
 		return;
 	}
 #endif /* WITH_CARES */
-	q->ok = resolve_addr(&q->addr, name, service, family);
-	RESOLVE_RETURN(q, r->loop);
+	q->ok = resolve_addr(&q->addr, q->name, q->service, q->family);
+	RESOLVE_RETURN(q, loop);
+}
+
+handle_t resolve_do(
+	struct resolver *r, struct resolve_cb cb, const char *name,
+	const char *service, const int family)
+{
+	const size_t namelen = name != NULL ? strlen(name) + 1 : 0;
+	const size_t servlen = service != NULL ? strlen(service) + 1 : 0;
+	struct resolve_query *restrict q =
+		malloc(sizeof(struct resolve_query) + namelen + servlen);
+	if (q == NULL) {
+		LOGOOM();
+		return INVALID_HANDLE;
+	}
+	q->resolver = r;
+	q->done_cb = cb;
+	if (name != NULL) {
+		q->name = memcpy(q->buf, name, namelen);
+	} else {
+		q->name = NULL;
+	}
+	if (service != NULL) {
+		q->service = memcpy(q->buf + namelen, service, servlen);
+	} else {
+		q->service = NULL;
+	}
+	q->family = family;
+	ev_init(&q->w_start, start_cb);
+	q->w_start.data = q;
+	ev_feed_event(r->loop, &q->w_start, EV_CUSTOM);
+	return TO_HANDLE(q);
 }
 
 void resolve_cancel(handle_t h)
