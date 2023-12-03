@@ -91,7 +91,7 @@ static void server_stats(
 			ctx->wbuf,
 			"Ruleset Memory      : %s (%zu objects)\n"
 			"Async Routines      : %zu\n",
-			heap_total, vmstats.num_object, vmstats.num_routines);
+			heap_total, vmstats.num_object, vmstats.num_routine);
 	}
 #endif
 }
@@ -309,11 +309,12 @@ static void http_handle_ruleset(
 		}
 		const int64_t start = clock_monotonic();
 		ruleset_gc(ruleset);
-		struct ruleset_vmstats mem;
-		ruleset_vmstats(ruleset, &mem);
+		struct ruleset_vmstats vmstats;
+		ruleset_vmstats(ruleset, &vmstats);
 		char livemem[16];
 		(void)format_iec_bytes(
-			livemem, sizeof(livemem), (double)mem.byt_allocated);
+			livemem, sizeof(livemem),
+			(double)vmstats.byt_allocated);
 		char timecost[16];
 		(void)format_duration(
 			timecost, sizeof(timecost),
@@ -323,10 +324,12 @@ static void http_handle_ruleset(
 		RESPHDR_FINISH(ctx->wbuf);
 		BUF_APPENDF(
 			ctx->wbuf,
-			"Num Live Object     : %zu\n"
+			"Num Live Objects    : %zu\n"
+			"Async Routines      : %zu\n"
 			"Ruleset Live Memory : %s\n"
 			"Time Cost           : %s\n",
-			mem.num_object, livemem, timecost);
+			vmstats.num_object, vmstats.num_routine, livemem,
+			timecost);
 		return;
 	} else if (strcmp(segment, "rpcall") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {

@@ -437,6 +437,7 @@ The valid interval range is `[1e-3, 1e+9]`.
 ```Lua
 async(function()
     await.idle()
+    -- ......
 end)
 ```
 

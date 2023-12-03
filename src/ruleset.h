@@ -15,7 +15,7 @@ struct ruleset;
 struct ruleset_vmstats {
 	size_t num_object;
 	size_t byt_allocated;
-	size_t num_routines;
+	size_t num_routine;
 };
 
 struct ruleset *ruleset_new(struct ev_loop *loop);

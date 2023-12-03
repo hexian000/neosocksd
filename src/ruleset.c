@@ -614,14 +614,14 @@ static int api_invoke_(lua_State *restrict L)
 		(void)ismain;                                                  \
 		assert(!ismain);                                               \
 		lua_rawsetp((L), lua_upvalueindex(1), (p));                    \
-		(r)->vmstats.num_routines++;                                   \
+		(r)->vmstats.num_routine++;                                    \
 	} while (0)
 
 #define AWAIT_UNPIN(r, L, p)                                                   \
 	do {                                                                   \
 		lua_pushnil(L);                                                \
 		lua_rawsetp(L, lua_upvalueindex(1), (p));                      \
-		(r)->vmstats.num_routines--;                                   \
+		(r)->vmstats.num_routine--;                                    \
 	} while (0)
 
 static bool
@@ -789,10 +789,10 @@ static void resolve_cb(
 static int
 await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	handle_t *p = (handle_t *)ctx;
-	*p = INVALID_HANDLE;
+	handle_t *restrict p = (handle_t *)ctx;
 	struct ruleset *restrict r = find_ruleset(L);
-	AWAIT_UNPIN(r, L, p);
+	AWAIT_UNPIN(r, L, TO_POINTER(*p));
+	*p = INVALID_HANDLE;
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -824,7 +824,7 @@ static int await_resolve_(lua_State *restrict L)
 	*p = h;
 	lua_pushvalue(L, lua_upvalueindex(2));
 	lua_setmetatable(L, -2);
-	AWAIT_PIN(r, L, (void *)h);
+	AWAIT_PIN(r, L, TO_POINTER(h));
 	resolve_start(h, name, NULL, G.conf->resolve_pf);
 	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
 	return await_resolve_k_(L, status, (lua_KContext)p);
@@ -856,10 +856,10 @@ static void rpcall_cb(
 static int
 await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	handle_t *p = (handle_t *)ctx;
-	*p = INVALID_HANDLE;
+	handle_t *restrict p = (handle_t *)ctx;
 	struct ruleset *restrict r = find_ruleset(L);
-	AWAIT_UNPIN(r, L, p);
+	AWAIT_UNPIN(r, L, TO_POINTER(*p));
+	*p = INVALID_HANDLE;
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -904,7 +904,7 @@ static int await_rpcall_(lua_State *restrict L)
 	*p = h;
 	lua_pushvalue(L, lua_upvalueindex(2));
 	lua_setmetatable(L, -2);
-	AWAIT_PIN(r, L, (void *)h);
+	AWAIT_PIN(r, L, TO_POINTER(h));
 	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_rpcall_k_);
 	return await_rpcall_k_(L, status, (lua_KContext)p);
 }
