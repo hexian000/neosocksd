@@ -467,4 +467,4 @@ end)
 
 **Description**
 
-Pause an asynchronous routine for at least sepecified time in seconds.
+Pause an asynchronous routine for at least specified time in seconds.

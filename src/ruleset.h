@@ -12,9 +12,10 @@
 struct ev_loop;
 struct ruleset;
 
-struct ruleset_memstats {
+struct ruleset_vmstats {
 	size_t num_object;
 	size_t byt_allocated;
+	size_t num_routines;
 };
 
 struct ruleset *ruleset_new(struct ev_loop *loop);
@@ -36,7 +37,7 @@ struct dialreq *ruleset_resolve(struct ruleset *r, const char *request);
 struct dialreq *ruleset_route(struct ruleset *r, const char *request);
 struct dialreq *ruleset_route6(struct ruleset *r, const char *request);
 
-void ruleset_memstats(const struct ruleset *r, struct ruleset_memstats *s);
+void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
 const char *ruleset_stats(struct ruleset *r, double dt);
 
 #endif /* RULESET_H */

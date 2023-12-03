@@ -81,15 +81,17 @@ static void server_stats(
 
 #if WITH_RULESET
 	if (G.ruleset != NULL) {
-		struct ruleset_memstats mem;
-		ruleset_memstats(G.ruleset, &mem);
+		struct ruleset_vmstats vmstats;
+		ruleset_vmstats(G.ruleset, &vmstats);
 		char heap_total[16];
 		(void)format_iec_bytes(
 			heap_total, sizeof(heap_total),
-			(double)mem.byt_allocated);
+			(double)vmstats.byt_allocated);
 		BUF_APPENDF(
-			ctx->wbuf, "Ruleset Memory      : %s (%zu objects)\n",
-			heap_total, mem.num_object);
+			ctx->wbuf,
+			"Ruleset Memory      : %s (%zu objects)\n"
+			"Async Routines      : %zu\n",
+			heap_total, vmstats.num_object, vmstats.num_routines);
 	}
 #endif
 }
@@ -307,8 +309,8 @@ static void http_handle_ruleset(
 		}
 		const int64_t start = clock_monotonic();
 		ruleset_gc(ruleset);
-		struct ruleset_memstats mem;
-		ruleset_memstats(ruleset, &mem);
+		struct ruleset_vmstats mem;
+		ruleset_vmstats(ruleset, &mem);
 		char livemem[16];
 		(void)format_iec_bytes(
 			livemem, sizeof(livemem), (double)mem.byt_allocated);

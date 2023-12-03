@@ -42,7 +42,7 @@
 
 struct ruleset {
 	struct ev_loop *loop;
-	struct ruleset_memstats heap;
+	struct ruleset_vmstats vmstats;
 	lua_State *L;
 	struct ev_timer w_ticker;
 	struct ev_idle w_idle;
@@ -412,7 +412,7 @@ static void luainit_functions(lua_State *restrict L)
 static void check_memlimit(struct ruleset *restrict r)
 {
 	const size_t memlimit = G.conf->memlimit;
-	if (memlimit == 0 || (r->heap.byt_allocated >> 20u) < memlimit) {
+	if (memlimit == 0 || (r->vmstats.byt_allocated >> 20u) < memlimit) {
 		return;
 	}
 	ruleset_gc(r);
@@ -611,6 +611,7 @@ static void await_pin(lua_State *restrict L, const void *p)
 	CHECK(lua_pushthread(L) == 0);
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
+	find_ruleset(L)->vmstats.num_routines++;
 }
 
 static void await_unpin(lua_State *restrict L, const void *p)
@@ -623,6 +624,7 @@ static void await_unpin(lua_State *restrict L, const void *p)
 	lua_pushnil(L);
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
+	find_ruleset(L)->vmstats.num_routines--;
 }
 
 static bool
@@ -818,6 +820,11 @@ static int await_sleep_(lua_State *restrict L)
 	double n = lua_tonumber(L, 1);
 	n = isnormal(n) ? CLAMP(n, 0.0, 1e+9) : 0.0;
 	struct ev_timer *restrict watcher = malloc(sizeof(struct ev_timer));
+	if (watcher == NULL) {
+		LOGOOM();
+		lua_pushliteral(L, "out of memory");
+		return lua_error(L);
+	}
 	ev_timer_init(watcher, sleep_cb, n, 0.0);
 	watcher->data = r;
 	ev_timer_start(r->loop, watcher);
@@ -1061,8 +1068,8 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 		/* free */
 		if (ptr != NULL) {
 			free(ptr);
-			r->heap.byt_allocated -= osize;
-			r->heap.num_object--;
+			r->vmstats.byt_allocated -= osize;
+			r->vmstats.num_object--;
 		}
 		return NULL;
 	}
@@ -1070,15 +1077,16 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 		/* malloc */
 		void *ret = malloc(nsize);
 		if (ret != NULL) {
-			r->heap.num_object++;
-			r->heap.byt_allocated += nsize;
+			r->vmstats.num_object++;
+			r->vmstats.byt_allocated += nsize;
 		}
 		return ret;
 	}
 	/* realloc */
 	void *ret = realloc(ptr, nsize);
 	if (ret != NULL) {
-		r->heap.byt_allocated = r->heap.byt_allocated - osize + nsize;
+		r->vmstats.byt_allocated =
+			r->vmstats.byt_allocated - osize + nsize;
 	}
 	return ret;
 }
@@ -1102,7 +1110,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 		return NULL;
 	}
 	r->loop = loop;
-	r->heap = (struct ruleset_memstats){ 0 };
+	r->vmstats = (struct ruleset_vmstats){ 0 };
 	lua_State *restrict L = lua_newstate(l_alloc, r);
 	if (L == NULL) {
 		ruleset_free(r);
@@ -1221,10 +1229,10 @@ struct dialreq *ruleset_route6(struct ruleset *r, const char *request)
 	return dispatch_req(r, "route6", request);
 }
 
-void ruleset_memstats(
-	const struct ruleset *restrict r, struct ruleset_memstats *restrict s)
+void ruleset_vmstats(
+	const struct ruleset *restrict r, struct ruleset_vmstats *restrict s)
 {
-	*s = r->heap;
+	*s = r->vmstats;
 }
 
 const char *ruleset_stats(struct ruleset *restrict r, const double dt)
