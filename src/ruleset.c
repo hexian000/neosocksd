@@ -567,7 +567,7 @@ struct stream_context {
 	unsigned char buf[IO_BUFSIZE];
 };
 
-static int stream_close_(struct lua_State *L)
+static int stream_context_close_(struct lua_State *L)
 {
 	struct stream_context *restrict s =
 		(struct stream_context *)lua_topointer(L, 1);
@@ -653,7 +653,7 @@ static int luaopen_zlib(lua_State *restrict L)
 {
 	lua_settop(L, 0);
 	lua_createtable(L, 0, 1);
-	lua_pushcfunction(L, stream_close_);
+	lua_pushcfunction(L, stream_context_close_);
 #if HAVE_LUA_TOCLOSE
 	lua_setfield(L, -2, "__close");
 #else
@@ -662,13 +662,11 @@ static int luaopen_zlib(lua_State *restrict L)
 
 	lua_newtable(L);
 	lua_pushvalue(L, 1);
-	lua_pushvalue(L, 2);
-	lua_pushcclosure(L, zlib_compress_, 2);
+	lua_pushcclosure(L, zlib_compress_, 1);
 	lua_setfield(L, -2, "compress");
 
 	lua_pushvalue(L, 1);
-	lua_pushvalue(L, 2);
-	lua_pushcclosure(L, zlib_uncompress_, 2);
+	lua_pushcclosure(L, zlib_uncompress_, 1);
 	lua_setfield(L, -2, "uncompress");
 	return 1;
 }
