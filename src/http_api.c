@@ -158,9 +158,8 @@ content_writer(struct http_ctx *restrict ctx, const size_t bufsize)
 		LOGOOM();
 		return NULL;
 	}
-	struct vbuffer *restrict buf = ctx->cbuf;
-	buf->len = 0;
-	struct stream *w = io_memwriter(buf->data, buf->cap, &buf->len);
+	ctx->cbuf->len = 0;
+	struct stream *w = io_heapwriter(&ctx->cbuf);
 	if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
 		return codec_zlib_writer(w);
 	}
@@ -194,7 +193,6 @@ static void http_handle_stats(
 			RESPHDR_CENCODING(ctx->wbuf, "deflate");
 		}
 		RESPHDR_NOCACHE(ctx->wbuf);
-		RESPHDR_FINISH(ctx->wbuf);
 		stateless = true;
 	} else if (strcmp(msg->req.method, "POST") == 0) {
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
@@ -202,7 +200,6 @@ static void http_handle_stats(
 		if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
 			RESPHDR_CENCODING(ctx->wbuf, "deflate");
 		}
-		RESPHDR_FINISH(ctx->wbuf);
 		stateless = false;
 	} else {
 		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
@@ -285,6 +282,8 @@ static void http_handle_stats(
 		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
+	RESPHDR_CLENGTH(ctx->wbuf, ctx->cbuf->len);
+	RESPHDR_FINISH(ctx->wbuf);
 }
 
 static bool http_leafnode_check(

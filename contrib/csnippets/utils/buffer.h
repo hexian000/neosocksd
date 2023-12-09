@@ -176,32 +176,65 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
  */
 #define VBUF_NEW(size) vbuf_alloc(NULL, (size))
 
+#define VBUF_ASSERT_BOUND(vbuf)                                                \
+	assert((vbuf) == NULL || ((struct vbuffer *)(vbuf))->len <=            \
+					 ((struct vbuffer *)(vbuf))->cap)
+
 /**
  * @brief Free vbuffer object.
  * @param vbuf If NULL, no operation is performed.
  * @return Always NULL.
  * @details usage: `vbuf = VBUF_FREE(vbuf);`
  */
-#define VBUF_FREE(vbuf) vbuf_alloc((vbuf), 0)
+#define VBUF_FREE(vbuf) (VBUF_ASSERT_BOUND(vbuf), vbuf_alloc((vbuf), 0))
 
 /**
- * @brief Resize vbuffer allocation. Data maybe truncated.
- * @param vbuf If NULL, new buffer may be allocated.
- * @param cap Expected vbuffer overall size in bytes.
- * @return If failed, the allocation remains unchanged.
- * @details usage: `vbuf = VBUF_RESIZE(vbuf, 100);`
+ * @brief Get vbuffer capacity.
+ * @param vbuf If NULL, returns 0.
+ * @return Capacity in bytes.
  */
-#define VBUF_RESIZE(vbuf, cap) vbuf_alloc((vbuf), (cap))
+#define VBUF_CAP(vbuf)                                                         \
+	(VBUF_ASSERT_BOUND(vbuf), (vbuf) != NULL ? (vbuf)->cap : 0)
 
 /**
- * @brief Adjust vbuffer allocation only if data can be preserved.
- * @param vbuf If NULL, new buffer may be allocated.
- * @param cap Expected vbuffer overall size in bytes.
- * @return If failed, the allocation remains unchanged.
- * @details usage: `vbuf = VBUF_RESERVE(vbuf, 0); // shrink the buffer to fit`
+ * @brief Get vbuffer length.
+ * @param vbuf If NULL, returns 0.
+ * @return Length in bytes.
  */
-#define VBUF_RESERVE(vbuf, cap)                                                \
-	vbuf_alloc((vbuf), (vbuf) != NULL ? MAX((vbuf)->len, (cap)) : (cap))
+#define VBUF_LEN(vbuf)                                                         \
+	(VBUF_ASSERT_BOUND(vbuf), (vbuf) != NULL ? (vbuf)->len : 0)
+
+/**
+ * @brief Clear vbuffer object, do not change the allocation.
+ * @param vbuf If NULL, no operation is performed.
+ * @return Passthrough.
+ * @details usage: `vbuf = VBUF_RESET(vbuf);`
+ */
+#define VBUF_RESET(vbuf)                                                       \
+	(VBUF_ASSERT_BOUND(vbuf),                                              \
+	 (vbuf) != NULL ? ((vbuf)->len = 0, (vbuf)) : NULL)
+
+/**
+ * @brief Adjust vbuffer allocation if data can be preserved.
+ * @param vbuf If NULL, new buffer may be allocated.
+ * @param want Expected vbuffer overall size in bytes.
+ * @return If failed, the allocation remains unchanged.
+ * @details usage: `vbuf = VBUF_RESIZE(vbuf, 0); // shrink the buffer to fit`
+ */
+#define VBUF_RESIZE(vbuf, want)                                                \
+	(VBUF_ASSERT_BOUND(vbuf),                                              \
+	 vbuf_alloc((vbuf), MAX(VBUF_LEN(vbuf), (want))))
+
+/**
+ * @brief Expand vbuffer allocation.
+ * @param vbuf If NULL, new buffer may be allocated.
+ * @param want Expected vbuffer overall size in bytes.
+ * @return If failed, the allocation remains unchanged.
+ * @details usage: `vbuf = VBUF_RESERVE(vbuf, 100);`
+ */
+#define VBUF_RESERVE(vbuf, want)                                               \
+	(VBUF_ASSERT_BOUND(vbuf),                                              \
+	 vbuf_alloc((vbuf), MAX(VBUF_CAP(vbuf), (want))))
 
 /**
  * @brief Expand vbuffer allocation.
@@ -210,17 +243,8 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
  * @return If failed, the allocation remains unchanged.
  * @details usage: `vbuf = VBUF_GROW(vbuf, 16384);`
  */
-#define VBUF_GROW(vbuf, want) vbuf_grow((vbuf), (want))
-
-#define VBUF_ASSERT_BOUND(vbuf)                                                \
-	assert((vbuf) == NULL || ((struct vbuffer *)(vbuf))->len <=            \
-					 ((struct vbuffer *)(vbuf))->cap)
-
-#define VBUF_CAP(vbuf)                                                         \
-	(VBUF_ASSERT_BOUND(vbuf), (vbuf) != NULL ? (vbuf)->cap : 0)
-
-#define VBUF_LEN(vbuf)                                                         \
-	(VBUF_ASSERT_BOUND(vbuf), (vbuf) != NULL ? (vbuf)->len : 0)
+#define VBUF_GROW(vbuf, want)                                                  \
+	(VBUF_ASSERT_BOUND(vbuf), vbuf_grow((vbuf), (want)))
 
 /**
  * @brief Append fixed-length data to vbuffer.
