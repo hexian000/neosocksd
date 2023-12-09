@@ -39,15 +39,15 @@ _G.neosocksd = neosocksd
 local regex = {}
 
 function regex.compile(pat)
-	return setmetatable({}, regex)
+    return setmetatable({}, regex)
 end
 
 function regex.find(s)
-	return 0, 0
+    return 0, 0
 end
 
 function regex.match(s)
-	return s
+    return s
 end
 
 _G.regex = regex

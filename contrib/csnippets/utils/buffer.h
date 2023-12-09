@@ -237,9 +237,9 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
 	 vbuf_alloc((vbuf), MAX(VBUF_CAP(vbuf), (want))))
 
 /**
- * @brief Expand vbuffer allocation.
+ * @brief Aggressively expand vbuffer allocation.
  * @param vbuf If NULL, new buffer may be allocated.
- * @param want Expected additional vbuffer space in bytes.
+ * @param want Expected vbuffer overall size in bytes.
  * @return If failed, the allocation remains unchanged.
  * @details usage: `vbuf = VBUF_GROW(vbuf, 16384);`
  */
