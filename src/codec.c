@@ -146,7 +146,7 @@ struct inflate_stream {
 	int flags;
 	tinfl_status status;
 	tinfl_decompressor inflator;
-	bool eof : 1;
+	bool srceof : 1;
 	size_t dstpos, dstlen;
 	unsigned char dstbuf[TINFL_LZ_DICT_SIZE];
 	size_t srcpos, srclen;
@@ -157,9 +157,9 @@ ASSERT_SUPER(struct stream, struct deflate_stream, s);
 static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 {
 	struct inflate_stream *restrict z = p;
-	while (z->status > TINFL_STATUS_DONE) {
+	do {
 		/* srcbuf is empty, input */
-		if (!z->eof && z->srcpos == z->srclen) {
+		if (!z->srceof && z->srcpos == z->srclen) {
 			size_t n = sizeof(z->srcbuf);
 			const int ret = stream_read(z->base, z->srcbuf, &n);
 			z->srcpos = 0;
@@ -168,19 +168,25 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 				return ret;
 			}
 			if (n == 0) {
-				z->eof = true;
+				z->srceof = true;
 			}
 		}
 
+		/* dstbuf is full, wrap */
+		if (z->dstpos == z->dstlen && z->dstlen == sizeof(z->dstbuf)) {
+			z->dstpos = z->dstlen = 0;
+		}
+
 		/* srcbuf is not empty && dstbuf is not full, inflate */
-		if (z->srcpos != z->srclen && z->dstlen < sizeof(z->dstbuf)) {
+		if (z->status > TINFL_STATUS_DONE && z->srcpos != z->srclen &&
+		    z->dstlen < sizeof(z->dstbuf)) {
 			const unsigned char *src = z->srcbuf + z->srcpos;
 			size_t srclen = z->srclen - z->srcpos;
 			unsigned char *dst = z->dstbuf + z->dstlen;
 			size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
 			const int flags =
 				z->flags |
-				(z->eof ? 0 : TINFL_FLAG_HAS_MORE_INPUT);
+				(z->srceof ? 0 : TINFL_FLAG_HAS_MORE_INPUT);
 			z->status = tinfl_decompress(
 				&z->inflator, src, &srclen, z->dstbuf, dst,
 				&dstlen, flags);
@@ -190,20 +196,17 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 
 		/* output available */
 		if (z->dstpos < z->dstlen) {
+			const size_t maxread = *len;
 			size_t n = z->dstlen - z->dstpos;
-			if (n > *len) {
-				n = *len;
+			if (n > maxread) {
+				n = maxread;
 			}
 			*buf = z->dstbuf + z->dstpos;
 			*len = n;
 			z->dstpos += n;
 			return 0;
 		}
-		/* dstbuf is full, flip */
-		if (z->dstlen == sizeof(z->dstbuf)) {
-			z->dstpos = z->dstlen = 0;
-		}
-	}
+	} while (z->status > TINFL_STATUS_DONE);
 	*len = 0;
 	if (z->status < TINFL_STATUS_DONE) {
 		return z->status;
@@ -233,7 +236,7 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 	z->flags = zlib ? TINFL_FLAG_PARSE_ZLIB_HEADER : 0;
 	z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
 	tinfl_init(&z->inflator);
-	z->eof = false;
+	z->srceof = false;
 	z->srcpos = z->srclen = 0;
 	z->dstpos = z->dstlen = 0;
 	static const struct stream_vftable vftable = {

@@ -191,7 +191,7 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
  * @return If failed, the allocation remains unchanged.
  * @details usage: `vbuf = VBUF_RESIZE(vbuf, 100);`
  */
-#define VBUF_RESIZE(vbuf, cap)  vbuf_alloc((vbuf), (cap)) : (vbuf))
+#define VBUF_RESIZE(vbuf, cap) vbuf_alloc((vbuf), (cap))
 
 /**
  * @brief Adjust vbuffer allocation only if data can be preserved.

@@ -69,6 +69,7 @@ struct http_ctx {
 			struct httpreq http;
 			struct dialreq *dialreq;
 			struct dialer dialer;
+			size_t wpos, cpos;
 			struct vbuffer *cbuf; /* content buffer */
 			struct {
 				BUFFER_HDR;

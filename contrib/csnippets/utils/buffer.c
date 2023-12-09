@@ -88,17 +88,16 @@ struct vbuffer *vbuf_grow(struct vbuffer *restrict vbuf, const size_t want)
 
 	struct vbuffer *restrict newbuf =
 		realloc(vbuf, sizeof(struct vbuffer) + cap);
-	if (newbuf != NULL) {
-		return newbuf;
-	}
-	if (want < cap) {
+	if (newbuf == NULL && want < cap) {
 		/* retry with minimal required capacity */
-		newbuf = realloc(vbuf, sizeof(struct vbuffer) + want);
-		if (newbuf != NULL) {
-			return newbuf;
+		cap = want;
+		newbuf = realloc(vbuf, sizeof(struct vbuffer) + cap);
+		if (newbuf == NULL) {
+			return vbuf;
 		}
 	}
-	return vbuf;
+	newbuf->cap = cap;
+	return newbuf;
 }
 
 struct vbuffer *

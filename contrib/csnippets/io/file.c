@@ -1,3 +1,6 @@
+/* csnippets (c) 2019-2023 He Xian <hexian000@outlook.com>
+ * This code is licensed under MIT license (see LICENSE for details) */
+
 #include "file.h"
 
 #include <stdio.h>

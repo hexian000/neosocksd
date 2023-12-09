@@ -111,6 +111,8 @@ http_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 
 void http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
 {
+	ctx->wbuf.len = 0;
+	ctx->cbuf = VBUF_FREE(ctx->cbuf);
 	const size_t cap = ctx->wbuf.cap - ctx->wbuf.len;
 	char *buf = (char *)(ctx->wbuf.data + ctx->wbuf.len);
 	const int len = http_error(buf, cap, code);
@@ -366,35 +368,64 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 }
 
+static int
+send_as_much(const int fd, const unsigned char *buf, size_t *restrict len)
+{
+	size_t nbsend = 0;
+	size_t n = *len;
+	while (n > 0) {
+		const ssize_t nsend = send(fd, buf, n, 0);
+		if (nsend < 0) {
+			const int err = errno;
+			if (IS_TRANSIENT_ERROR(err)) {
+				break;
+			}
+			*len = nbsend;
+			return err;
+		} else if (nsend == 0) {
+			break;
+		}
+		buf += nsend;
+		n -= nsend;
+		nbsend += nsend;
+	}
+	*len = nbsend;
+	return 0;
+}
+
 void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct http_ctx *restrict ctx = watcher->data;
 	assert(ctx->state == STATE_RESPONSE || ctx->state == STATE_CONNECT);
 
-	unsigned char *buf = ctx->wbuf.data;
-	size_t len = ctx->wbuf.len;
-	size_t nbsend = 0;
-	while (len > 0) {
-		const ssize_t nsend = send(watcher->fd, buf, len, 0);
-		if (nsend < 0) {
-			const int err = errno;
-			if (IS_TRANSIENT_ERROR(err)) {
-				break;
-			}
+	const unsigned char *buf = ctx->wbuf.data + ctx->wpos;
+	size_t len = ctx->wbuf.len - ctx->wpos;
+	const int err = send_as_much(watcher->fd, buf, &len);
+	if (err != 0) {
+		HTTP_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
+		http_ctx_close(loop, ctx);
+		return;
+	}
+	ctx->wpos += len;
+	if (ctx->wpos < ctx->wbuf.len) {
+		return;
+	}
+
+	if (ctx->cbuf != NULL) {
+		const struct vbuffer *restrict cbuf = ctx->cbuf;
+		buf = cbuf->data + ctx->cpos;
+		len = cbuf->len - ctx->cpos;
+		const int err = send_as_much(watcher->fd, buf, &len);
+		if (err != 0) {
 			HTTP_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
 			http_ctx_close(loop, ctx);
 			return;
-		} else if (nsend == 0) {
-			break;
 		}
-		buf += nsend;
-		len -= nsend;
-		nbsend += nsend;
-	}
-	BUF_CONSUME(ctx->wbuf, nbsend);
-	if (ctx->wbuf.len > 0) {
-		return;
+		ctx->cpos += len;
+		if (ctx->cpos < cbuf->len) {
+			return;
+		}
 	}
 
 	if (ctx->state == STATE_CONNECT) {
@@ -469,6 +500,7 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 		.ctx = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
+	ctx->wpos = ctx->cpos = 0;
 	ctx->cbuf = NULL;
 	BUF_INIT(ctx->rbuf, 0);
 	BUF_INIT(ctx->wbuf, 0);

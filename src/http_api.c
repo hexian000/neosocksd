@@ -4,6 +4,7 @@
 #include "codec.h"
 #include "http.h"
 #include "http_impl.h"
+#include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
@@ -149,11 +150,17 @@ static void server_stats_stateful(
 }
 #undef FORMAT_BYTES
 
-static struct stream *content_writer(struct http_ctx *restrict ctx)
+static struct stream *
+content_writer(struct http_ctx *restrict ctx, const size_t bufsize)
 {
-	struct stream *w = io_memwriter(
-		ctx->wbuf.data + ctx->wbuf.len, ctx->wbuf.cap - ctx->wbuf.len,
-		&ctx->wbuf.len);
+	ctx->cbuf = VBUF_RESERVE(ctx->cbuf, bufsize);
+	if (ctx->cbuf == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	struct vbuffer *restrict buf = ctx->cbuf;
+	buf->len = 0;
+	struct stream *w = io_memwriter(buf->data, buf->cap, &buf->len);
 	if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
 		return codec_zlib_writer(w);
 	}
@@ -201,10 +208,10 @@ static void http_handle_stats(
 		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
 		return;
 	}
-	struct stream *w = content_writer(ctx);
+	struct stream *w = content_writer(ctx, IO_BUFSIZE);
 	if (w == NULL) {
-		ctx->wbuf.len = 0;
 		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
 	}
 	/* borrow the read buffer */
 	struct buffer *restrict buf = (struct buffer *)&ctx->rbuf;
@@ -226,7 +233,6 @@ static void http_handle_stats(
 		const int cerr = stream_close(w);
 		if (werr != 0 || n < buf->len || cerr != 0) {
 			LOGE_F("stream error: %d, %zu, %d", werr, n, cerr);
-			ctx->wbuf.len = 0;
 			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
 		}
 		return;
@@ -236,28 +242,48 @@ static void http_handle_stats(
 	last = now;
 
 	server_stats_stateful(buf, ctx->s->data, dt);
+
+	size_t n = buf->len;
+	int err = stream_write(w, buf->data, &n);
+	if (n < buf->len || err != 0) {
+		LOGE_F("stream_write error: %d, %zu/%zu", err, n, buf->len);
+		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+
 #if WITH_RULESET
 	if (G.ruleset != NULL) {
-		const char *str = ruleset_stats(G.ruleset, dt);
-		BUF_APPENDCONST(
-			*buf, "\n"
-			      "Ruleset Stats\n"
-			      "================\n");
-		if (str != NULL) {
-			BUF_APPENDSTR(*buf, str);
-		} else {
-			BUF_APPENDSTR(*buf, ruleset_error(G.ruleset));
+		const char header[] = "\n"
+				      "Ruleset Stats\n"
+				      "================\n";
+		const char *s = ruleset_stats(G.ruleset, dt);
+		if (s == NULL) {
+			s = ruleset_error(G.ruleset);
 		}
-		BUF_APPENDCONST(*buf, "\n");
+		const size_t len = strlen(s);
+		n = sizeof(header) - 1;
+		err = stream_write(w, header, &n);
+		if (n < sizeof(header) - 1 || err != 0) {
+			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
+			       sizeof(header) - 1);
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+		n = len;
+		err = stream_write(w, s, &n);
+		if (n < len || err != 0) {
+			LOGE_F("stream_write error: %d, %zu/%zu", err, n, len);
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
 	}
 #endif
-	size_t n = buf->len;
-	const int werr = stream_write(w, buf->data, &n);
-	const int cerr = stream_close(w);
-	if (werr != 0 || n < buf->len || cerr != 0) {
-		LOGE_F("stream error: %d, %zu, %d", werr, n, cerr);
-		ctx->wbuf.len = 0;
+
+	err = stream_close(w);
+	if (err != 0) {
+		LOGE_F("stream_close error: %d", err);
 		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
 	}
 }
 
@@ -341,6 +367,7 @@ static void http_handle_ruleset(
 		}
 		const bool ok = ruleset_invoke(ruleset, reader);
 		stream_close(reader);
+		ctx->cbuf = VBUF_FREE(ctx->cbuf);
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset invoke: %s", err);
@@ -383,6 +410,7 @@ static void http_handle_ruleset(
 		}
 		const bool ok = ruleset_update(ruleset, module, reader);
 		stream_close(reader);
+		ctx->cbuf = VBUF_FREE(ctx->cbuf);
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset update: %s", err);
@@ -464,17 +492,24 @@ static void http_handle_ruleset(
 			BUF_APPEND(ctx->wbuf, err, len);
 			return;
 		}
+		struct stream *w = content_writer(ctx, resultlen);
+		size_t n = resultlen;
+		int err = stream_write(w, result, &n);
+		if (n != resultlen || err != 0) {
+			LOGW_F("stream_write: error %d", err);
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+		err = stream_close(w);
+		if (err != 0) {
+			LOGW_F("stream_close: error %d", err);
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
 		RESPHDR_CTYPE(ctx->wbuf, MIME_RPCALL);
-		RESPHDR_CLENGTH(ctx->wbuf, resultlen);
+		RESPHDR_CLENGTH(ctx->wbuf, n);
 		RESPHDR_FINISH(ctx->wbuf);
-		if (resultlen > 0) {
-			LOG_BIN_F(
-				VERBOSE, result, resultlen,
-				"api: ruleset rpcall result %zu bytes",
-				resultlen);
-			BUF_APPEND(ctx->wbuf, result, resultlen);
-		}
 		return;
 	}
 
