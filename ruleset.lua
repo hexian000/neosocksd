@@ -1,92 +1,104 @@
 _G.libruleset = require("libruleset")
 
 -- [[ configurations ]] --
-function _G.is_enabled()
-    -- if false, new requests are rejected
-    return true
+-- 1. ordered redirect rules (matched as string)
+-- in {matcher, action, optional log tag}
+-- matching stops after a match is found
+
+local function is_disabled(...)
+    local now = os.date("*t")
+    if not (2 <= now.wday and now.wday <= 6) then
+        return true
+    end
+    return not (9 <= now.hour and now.hour < 18)
 end
 
--- 1. unordered hosts map
+-- redirect_name: for requests with name string
+_G.redirect_name = {
+    -- access mDNS sites directly
+    { match.domain(".local"),                    rule.direct() },
+    -- self-assignment
+    { match.exact("api.neosocksd.lan:80"),       rule.redirect("127.0.1.1:9080") },
+    -- admin routes
+    { match.exact("localhost:22"),               rule.redirect("127.0.0.1:22"),                               "ssh" },
+    { match.exact("region1.lan:22"),             rule.redirect("localhost:22", "socks5://192.168.32.1:1080"), "region1" },
+    { match.exact("region2.lan:22"),             rule.redirect("localhost:22", "socks5://192.168.33.1:1080"), "region2" },
+    -- global condition
+    { is_disabled,                               rule.reject(),                                               "off" },
+    -- proxy routes
+    { match.exact("region1.neosocksd.lan:1080"), rule.redirect("socks4a://192.168.32.1:1080") },
+    { match.exact("region2.neosocksd.lan:1080"), rule.redirect("socks4a://192.168.33.1:1080") },
+    -- dynamically loaded big domains list
+    { composite.maybe(_G, "domains"),            rule.proxy("socks4a://proxy.lan:1080"),                      "biglist" },
+    -- if in _G.hosts, go to _G.route/_G.route6
+    -- otherwise, go to _G.route_default
+}
+
+-- redirect: for requests with IPv4 address
+_G.redirect = {
+    -- redirect TCP DNS to local cache
+    { match.exact("1.1.1.1:53"), rule.redirect("127.0.0.53:53") },
+    { match.exact("1.0.0.1:53"), rule.redirect("127.0.0.53:53") },
+    -- global condition
+    { is_disabled,               rule.reject(),                 "off" },
+    -- go to _G.route
+}
+
+-- redirect6: for requests with IPv6 address
+_G.redirect6 = {
+    -- global condition
+    { is_disabled, rule.reject(), "off" },
+    -- go to _G.route6
+}
+
+-- 2. unordered hosts map
 _G.hosts = {
     ["gateway.region1.lan"] = "192.168.32.1",
     ["host123.region1.lan"] = "192.168.32.123",
     ["gateway.region2.lan"] = "192.168.33.1",
-    ["host123.region2.lan"] = "192.168.33.123",
-    -- self-assignment
-    ["api.neosocksd.lan"] = "127.0.1.1" -- see _G.redirect
+    ["host123.region2.lan"] = "192.168.33.123"
 }
-
--- 2. ordered redirect rules (matched as string)
--- in {matcher, action, optional log tag}
--- matching stops after a match is found
-_G.redirect_name = {
-    -- pass to region1 proxy
-    [1] = {match.exact("service.region1.lan:80"), rule.redirect("service.lan:80", "socks4a://192.168.32.1:1080")},
-    -- jump to region2 through region1 proxy
-    [2] = {match.exact("service.region2.lan:80"),
-           rule.redirect("service.lan:80", "socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080")},
-    -- access mDNS sites directly, _G.route/_G.route6 are skipped
-    [3] = {match.domain(".local"), rule.direct(), "local"},
-    -- dynamically loaded big domains list
-    [4] = {composite.maybe(_G, "domains"), rule.proxy("socks4a://proxy.lan:1080"), "biglist"},
-    -- no default action
-    [0] = nil
-}
-
-_G.redirect = {
-    -- redirect API address, or loopback will be rejected
-    [1] = {match.exact("127.0.1.1:80"), rule.redirect("127.0.1.1:9080")},
-    -- redirect TCP DNS to local cache
-    [2] = {match.exact("1.1.1.1:53"), rule.redirect("127.0.0.53:53")},
-    [3] = {match.exact("1.0.0.1:53"), rule.redirect("127.0.0.53:53")},
-    -- no default action, go to _G.route
-    [0] = nil
-}
-
--- _G.redirect6 is not set
 
 -- 3. ordered routes (matched as address)
 _G.route = {
     -- reject loopback or link-local
-    [1] = {inet.subnet("127.0.0.0/8"), rule.reject()},
-    [2] = {inet.subnet("169.254.0.0/16"), rule.reject()},
+    { inet.subnet("127.0.0.0/8"),       rule.reject() },
+    { inet.subnet("169.254.0.0/16"),    rule.reject() },
     -- region1 proxy
-    [3] = {inet.subnet("192.168.32.0/24"), rule.proxy("socks4a://192.168.32.1:1080"), "region1"},
-    -- jump to region2 through region1 proxy
-    [4] = {inet.subnet("192.168.33.0/24"), rule.proxy("socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080"),
-           "region2"},
+    { inet.subnet("192.168.32.0/24"),   rule.proxy("socks4a://192.168.32.1:1080"),                                "region1" },
+    -- jump to region2 through region1 proxy (for a fancy demo)
+    { inet.subnet("192.168.33.0/24"),   rule.proxy("socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080"), "region2" },
     -- access other lan addresses directly
-    [5] = {inet.subnet("192.168.0.0/16"), rule.direct(), "lan"},
+    { inet.subnet("192.168.0.0/16"),    rule.direct(),                                                            "lan" },
     -- dynamically loaded big IP ranges list
-    [6] = {composite.maybe(_G, "countryip"), rule.proxy("socks4a://proxy.lan:1080"), "biglist"},
-    -- no default action, go to _G.route_default
-    [0] = nil
+    { composite.maybe(_G, "countryip"), rule.proxy("socks4a://proxy.lan:1080"),                                   "biglist" },
+    -- go to _G.route_default
 }
 
 _G.route6 = {
     -- reject loopback or link-local
-    [1] = {inet6.subnet("::1/128"), rule.reject()},
-    [2] = {inet6.subnet("fe80::/10"), rule.reject()},
-    [3] = {inet6.subnet("::ffff:127.0.0.0/104"), rule.reject()},
-    [4] = {inet6.subnet("::ffff:169.254.0.0/112"), rule.reject()},
+    { inet6.subnet("::1/128"),                rule.reject() },
+    { inet6.subnet("fe80::/10"),              rule.reject() },
+    { inet6.subnet("::ffff:127.0.0.0/104"),   rule.reject() },
+    { inet6.subnet("::ffff:169.254.0.0/112"), rule.reject() },
     -- dynamically loaded big IP ranges list
-    [5] = {composite.maybe(_G, "countryip6"), rule.proxy("socks4a://proxy.lan:1080"), "biglist"},
-    -- default action
-    [0] = rule.direct()
+    { composite.maybe(_G, "countryip6"),      rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
+    -- go to _G.route_default
 }
 
 -- 4. the global default applies to any unmatched requests
-_G.route_list = {
-    [1] = rule.proxy("socks4a://127.0.0.1:1081"),
-    [2] = rule.proxy("socks4a://127.0.0.2:1081")
-}
+-- in {action, optional log tag}
 _G.route_index = 1
-_G.route_default = route_list[route_index]
+_G.route_list = {
+    [1] = { rule.proxy("socks4a://127.0.0.1:1081"), "default1" },
+    [2] = { rule.proxy("socks4a://127.0.0.2:1081"), "default2" }
+}
+_G.route_default = route_index[1]
 
 function _G.set_route(i, ...)
     _G.route_index = i
     if select("#", ...) > 0 then
-        _G.route_list[route_index] = rule.proxy(...)
+        _G.route_list[route_index] = { rule.proxy(...) }
     end
     _G.route_default = route_list[route_index]
 end
@@ -96,25 +108,45 @@ local ruleset = setmetatable({}, {
         return _G.libruleset[k]
     end
 })
+neosocksd.setinterval(60.0)
 
-function _G.is_rush_hours()
-    local now = os.date("*t")
-    return now.hour >= 22 or now.hour < 4
+_G.server_rtt = {}
+local function ping(route, tag)
+    await.idle()
+    local begin = neosocksd.now()
+    local ok, ret = await.rpcall([[return "echo"]], route("api.neosocksd.lan:80"))
+    if ok and ret == "echo" then
+        local rtt = neosocksd.now() - begin
+        ret = string.format("%dms", math.ceil(rtt * 1e+3))
+    end
+    logf("ping %q: %s", tag, ret)
+    server_rtt[tag] = ret
 end
 
+_G.last_ping = nil
 function ruleset.tick(now)
-    if is_rush_hours() then
-        set_route(2)
-    else
-        set_route(1)
+    if not _G.last_ping or now - _G.last_ping > 3600 then
+        for i, route in pairs(route_list) do
+            async(ping, table.unpack(route))
+        end
+        _G.last_ping = now
     end
     return libruleset.tick(now)
 end
-neosocksd.setinterval(60.0)
+
+local function format_rtt()
+    local w = list:new()
+    for server, msg in pairs(server_rtt) do
+        w:insertf("[%s] %s", server, msg)
+    end
+    w:sort()
+    return w:concat(", ")
+end
 
 function ruleset.stats(dt)
     local w = list:new()
     w:insertf("%-20s: %d", "Default Route", route_index)
+    w:insertf("%-20s: %s", "Server RTT", format_rtt())
     w:insert(libruleset.stats(dt))
     return w:concat("\n")
 end

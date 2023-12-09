@@ -7,6 +7,7 @@ local ruleset = setmetatable({}, {
 })
 
 local function check_update()
+    await.idle()
     os.execute([[ (
     HOSTNAME="$(cat /etc/hostname)"
     if curl -sLo /tmp/libruleset.lua "http://central.lan/neosocksd/${HOSTNAME}/libruleset.lua"; then
@@ -21,11 +22,13 @@ local function check_update()
 end
 
 function ruleset.tick(now)
-    queue_task(check_update)
+    async(check_update)
     return libruleset.tick(now)
 end
+
 neosocksd.setinterval(60.0)
 
-queue_task(check_update)
+async(check_update)
+
 logf("ruleset stub loaded, interpreter: %s", _VERSION)
 return ruleset
