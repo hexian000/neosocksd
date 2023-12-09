@@ -206,9 +206,9 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 			z->dstpos += n;
 			return 0;
 		}
-	} while (z->status > TINFL_STATUS_DONE);
+	} while (z->status > TINFL_STATUS_DONE && !z->srceof);
 	*len = 0;
-	if (z->status < TINFL_STATUS_DONE) {
+	if (z->status != TINFL_STATUS_DONE) {
 		return z->status;
 	}
 	return 0;
