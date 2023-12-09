@@ -559,6 +559,127 @@ static int luaopen_regex(lua_State *restrict L)
 	return 1;
 }
 
+static int vbuffer_gc_(struct lua_State *L)
+{
+	struct vbuffer **vbuf = (struct vbuffer **)lua_topointer(L, -1);
+	*vbuf = VBUF_FREE(*vbuf);
+	return 0;
+}
+
+static int stream_gc_(struct lua_State *L)
+{
+	struct stream *s = *(struct stream **)lua_topointer(L, -1);
+	if (s != NULL) {
+		(void)stream_close(s);
+	}
+	return 0;
+}
+
+/* zlib.compress() */
+static int zlib_compress_(lua_State *restrict L)
+{
+	size_t len;
+	const char *src = luaL_checklstring(L, 1, &len);
+	void *buf = lua_newuserdata(L, IO_BUFSIZE);
+	struct vbuffer **restrict pvbuf =
+		lua_newuserdata((L), sizeof(struct vbuffer *));
+	lua_pushvalue(L, lua_upvalueindex(1));
+	lua_setmetatable(L, -2);
+	*pvbuf = VBUF_NEW(IO_BUFSIZE);
+	if (*pvbuf == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	struct stream **restrict pr =
+		lua_newuserdata((L), sizeof(struct stream *));
+	lua_pushvalue(L, lua_upvalueindex(2));
+	lua_setmetatable(L, -2);
+	struct stream *r = io_memreader(src, len);
+	if (r == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	*pr = r;
+	struct stream *w = codec_zlib_writer(io_heapwriter(pvbuf));
+	if (w == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	*pr = NULL;
+	const int err = stream_copy(w, r, buf, IO_BUFSIZE);
+	if (err != 0) {
+		return luaL_error(L, "compress error: %d", err);
+	}
+	const char *dst = (char *)(*pvbuf)->data;
+	lua_pushlstring(L, dst, (*pvbuf)->len);
+	return 1;
+}
+
+/* zlib.uncompress() */
+static int zlib_uncompress_(lua_State *restrict L)
+{
+	size_t len;
+	const char *src = luaL_checklstring(L, 1, &len);
+	void *buf = lua_newuserdata(L, IO_BUFSIZE);
+	struct vbuffer **restrict pvbuf =
+		lua_newuserdata((L), sizeof(struct vbuffer *));
+	lua_pushvalue(L, lua_upvalueindex(1));
+	lua_setmetatable(L, -2);
+	*pvbuf = VBUF_NEW(IO_BUFSIZE);
+	if (*pvbuf == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	struct stream **restrict pr =
+		lua_newuserdata((L), sizeof(struct stream *));
+	lua_pushvalue(L, lua_upvalueindex(2));
+	lua_setmetatable(L, -2);
+	struct stream *r = codec_zlib_reader(io_memreader(src, len));
+	if (*pr == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	*pr = r;
+	struct stream *w = io_heapwriter(pvbuf);
+	if (w == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	*pr = NULL;
+	const int err = stream_copy(w, r, buf, IO_BUFSIZE);
+	if (err != 0) {
+		return luaL_error(L, "uncompress error: %d", err);
+	}
+	const char *dst = (char *)(*pvbuf)->data;
+	lua_pushlstring(L, dst, (*pvbuf)->len);
+	return 1;
+}
+
+#undef PUSH_ZLIB_OBJECT
+
+static int luaopen_zlib(lua_State *restrict L)
+{
+	lua_settop(L, 0);
+	lua_createtable(L, 0, 1);
+	lua_pushcfunction(L, vbuffer_gc_);
+	lua_setfield(L, -2, "__gc");
+	lua_createtable(L, 0, 1);
+	lua_pushcfunction(L, stream_gc_);
+	lua_setfield(L, -2, "__gc");
+
+	lua_newtable(L);
+	lua_pushvalue(L, 1);
+	lua_pushvalue(L, 2);
+	lua_pushcclosure(L, zlib_compress_, 2);
+	lua_setfield(L, -2, "compress");
+
+	lua_pushvalue(L, 1);
+	lua_pushvalue(L, 2);
+	lua_pushcclosure(L, zlib_uncompress_, 2);
+	lua_setfield(L, -2, "uncompress");
+	return 1;
+}
+
 /* ok, ... = async(f, ...) */
 static int api_async_(lua_State *restrict L)
 {
@@ -1078,76 +1199,6 @@ static int api_now_(lua_State *restrict L)
 	return 1;
 }
 
-/* neosocksd.compress() */
-static int api_compress_(lua_State *restrict L)
-{
-	size_t len;
-	const char *src = luaL_checklstring(L, 1, &len);
-	void *buf = lua_newuserdata(L, IO_BUFSIZE);
-	struct stream *r = io_memreader(src, len);
-	if (r == NULL) {
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
-		return lua_error(L);
-	}
-	struct vbuffer *vbuf = VBUF_NEW(IO_BUFSIZE);
-	if (vbuf == NULL) {
-		stream_close(r);
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
-		return lua_error(L);
-	}
-	struct stream *w = codec_zlib_writer(io_heapwriter(&vbuf));
-	if (w == NULL) {
-		stream_close(r);
-		vbuf = VBUF_FREE(vbuf);
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
-		return lua_error(L);
-	}
-	const int err = stream_copy(w, r, buf, IO_BUFSIZE);
-	if (err != 0) {
-		vbuf = VBUF_FREE(vbuf);
-		return luaL_error(L, "compress error: %d", err);
-	}
-	const char *dst = (char *)vbuf->data;
-	lua_pushlstring(L, dst, vbuf->len);
-	vbuf = VBUF_FREE(vbuf);
-	return 1;
-}
-
-/* neosocksd.uncompress() */
-static int api_uncompress_(lua_State *restrict L)
-{
-	size_t len;
-	const char *src = luaL_checklstring(L, 1, &len);
-	void *buf = lua_newuserdata(L, IO_BUFSIZE);
-	struct stream *r = codec_zlib_reader(io_memreader(src, len));
-	if (r == NULL) {
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
-		return lua_error(L);
-	}
-	struct vbuffer *vbuf = VBUF_NEW(IO_BUFSIZE);
-	if (vbuf == NULL) {
-		stream_close(r);
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
-		return lua_error(L);
-	}
-	struct stream *w = io_heapwriter(&vbuf);
-	if (w == NULL) {
-		stream_close(r);
-		vbuf = VBUF_FREE(vbuf);
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
-		return lua_error(L);
-	}
-	const int err = stream_copy(w, r, buf, IO_BUFSIZE);
-	if (err != 0) {
-		vbuf = VBUF_FREE(vbuf);
-		return luaL_error(L, "uncompress error: %d", err);
-	}
-	const char *dst = (char *)vbuf->data;
-	lua_pushlstring(L, dst, vbuf->len);
-	vbuf = VBUF_FREE(vbuf);
-	return 1;
-}
-
 static int luaopen_await(lua_State *restrict L)
 {
 	lua_settop(L, 0);
@@ -1199,8 +1250,6 @@ static int luaopen_neosocksd(lua_State *restrict L)
 		{ "parse_ipv6", api_parse_ipv6_ },
 		{ "stats", api_stats_ },
 		{ "now", api_now_ },
-		{ "compress", api_compress_ },
-		{ "uncompress", api_uncompress_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, apilib);
@@ -1217,6 +1266,7 @@ static int ruleset_luainit_(lua_State *restrict L)
 	luaL_openlibs(L);
 	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
 	luaL_requiref(L, "regex", luaopen_regex, 1);
+	luaL_requiref(L, "zlib", luaopen_zlib, 1);
 	lua_pop(L, 2);
 	luainit_async(L);
 	/* set flags */

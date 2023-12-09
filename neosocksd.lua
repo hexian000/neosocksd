@@ -3,6 +3,7 @@
 _G.NDEBUG = true
 _G.neosocksd = {}
 _G.regex = {}
+_G.zlib = {}
 _G.async = pcall
 _G.await = {}
 
@@ -21,15 +22,20 @@ function neosocksd.stats() return {} end
 function neosocksd.now() return 0 end
 
 function regex.compile(pat)
-	return setmetatable({}, {
-		["find"] = function(s)
-			return 0, 0
-		end,
-		["match"] = function(s)
-			return s
-		end,
-	})
+	return setmetatable({}, regex)
 end
+
+function regex.find(s)
+	return 0, 0
+end
+
+function regex.match(s)
+	return s
+end
+
+function zlib.compress(s) return s end
+
+function zlib.uncompress(s) return s end
 
 function await.resolve(s) return s end
 
