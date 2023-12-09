@@ -7,6 +7,7 @@
 #include "utils/buffer.h"
 #include "utils/slog.h"
 #include "utils/debug.h"
+#include "utils/object.h"
 #include "net/http.h"
 #include "session.h"
 #include "server.h"
@@ -44,6 +45,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	case STATE_REQUEST:
 	case STATE_HEADER:
 	case STATE_CONTENT:
+	case STATE_HANDLE:
 	case STATE_RESPONSE:
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
@@ -102,7 +104,9 @@ void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void
 http_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 {
-	http_ctx_close(loop, CAST(struct http_ctx, ss, ss));
+	struct http_ctx *restrict ctx =
+		DOWNCAST(struct session, struct http_ctx, ss, ss);
+	http_ctx_close(loop, ctx);
 }
 
 void http_resp_errpage(struct http_ctx *restrict ctx, const uint16_t code)
@@ -139,8 +143,8 @@ static bool reply_short(struct http_ctx *restrict ctx, const char *s)
 	return true;
 }
 
-static bool
-on_header(struct http_ctx *restrict ctx, const char *key, const char *value)
+static int
+on_header(struct http_ctx *restrict ctx, const char *key, char *value)
 {
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "header \"%s: %s\"", key, value);
 	if (strcasecmp(key, "Content-Length") == 0) {
@@ -153,15 +157,35 @@ on_header(struct http_ctx *restrict ctx, const char *key, const char *value)
 			http_resp_errpage(ctx, HTTP_BAD_REQUEST);
 			return false;
 		}
-		if (content_length > HTTP_MAX_CONTENT) {
-			http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
-			return false;
-		}
 		ctx->http.content_length = content_length;
 	} else if (strcasecmp(key, "Content-Type") == 0) {
 		ctx->http.content_type = value;
 	} else if (strcasecmp(key, "Content-Encoding") == 0) {
-		ctx->http.content_encoding = value;
+		if (strcasecmp(value, "deflate") == 0) {
+			ctx->http.content_encoding = CENCODING_DEFLATE;
+			return true;
+		}
+		if (strcasecmp(value, "gzip") == 0) {
+			ctx->http.content_encoding = CENCODING_GZIP;
+			return true;
+		}
+		http_resp_errpage(ctx, HTTP_UNSUPPORTED_MEDIA_TYPE);
+		return false;
+	} else if (strcasecmp(key, "Accept-Encoding") == 0) {
+		if (strcmp(value, "*") == 0) {
+			ctx->http.accept_encoding = CENCODING_DEFLATE;
+			return true;
+		}
+		char *suffix = strchr(value, ';');
+		if (suffix != NULL) {
+			*suffix = '\0';
+		}
+		for (char *token = strtok(value, ", "); token != NULL;
+		     token = strtok(NULL, ", ")) {
+			if (strcasecmp(token, "deflate") != 0) {
+				ctx->http.accept_encoding = CENCODING_DEFLATE;
+			}
+		}
 	} else if (strcasecmp(key, "Expect") == 0) {
 		if (strcasecmp(value, "100-continue") != 0) {
 			http_resp_errpage(ctx, HTTP_EXPECTATION_FAILED);
@@ -174,49 +198,42 @@ on_header(struct http_ctx *restrict ctx, const char *key, const char *value)
 
 static int parse_request(struct http_ctx *restrict ctx)
 {
-	switch (ctx->state) {
-	case STATE_REQUEST:
-	case STATE_HEADER:
-	case STATE_CONTENT:
-		break;
-	case STATE_CONNECT:
-		return -1;
-	default:
-		FAIL();
-	}
 	char *next = ctx->http.nxt;
 	if (next == NULL) {
 		next = (char *)ctx->rbuf.data;
 		ctx->http.nxt = next;
 	}
 	struct http_message *restrict msg = &ctx->http.msg;
-	if (ctx->state == STATE_REQUEST) {
-		next = http_parse(next, msg);
-		if (next == NULL) {
-			HTTP_CTX_LOG(
-				DEBUG, ctx, "http: failed parsing request");
-			return -1;
-		} else if (next == ctx->http.nxt) {
-			if (ctx->rbuf.len + 1 >= ctx->rbuf.cap) {
-				http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
-				return 0;
-			}
-			return 1;
+	next = http_parse(next, msg);
+	if (next == NULL) {
+		HTTP_CTX_LOG(DEBUG, ctx, "http: failed parsing request");
+		return -1;
+	} else if (next == ctx->http.nxt) {
+		if (ctx->rbuf.len + 1 >= ctx->rbuf.cap) {
+			http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
+			ctx->state = STATE_RESPONSE;
+			return 0;
 		}
-		if (strncmp(msg->req.version, "HTTP/1.", 7) != 0) {
-			HTTP_CTX_LOG_F(
-				DEBUG, ctx, "http: unsupported protocol %s",
-				msg->req.version);
-			return -1;
-		}
-		HTTP_CTX_LOG_F(
-			VERBOSE, ctx, "request \"%s\" \"%s\" \"%s\"",
-			msg->req.method, msg->req.url, msg->req.version);
-		ctx->http.nxt = next;
-		ctx->cbuf = NULL;
-		ctx->state = STATE_HEADER;
+		return 1;
 	}
-	while (ctx->state == STATE_HEADER) {
+	if (strncmp(msg->req.version, "HTTP/1.", 7) != 0) {
+		HTTP_CTX_LOG_F(
+			DEBUG, ctx, "http: unsupported protocol %s",
+			msg->req.version);
+		return -1;
+	}
+	HTTP_CTX_LOG_F(
+		VERBOSE, ctx, "request \"%s\" \"%s\" \"%s\"", msg->req.method,
+		msg->req.url, msg->req.version);
+	ctx->http.nxt = next;
+	ctx->state = STATE_HEADER;
+	return 0;
+}
+
+static int parse_header(struct http_ctx *restrict ctx)
+{
+	char *next = ctx->http.nxt;
+	for (;;) {
 		char *key, *value;
 		next = http_parsehdr(next, &key, &value);
 		if (next == NULL) {
@@ -227,45 +244,48 @@ static int parse_request(struct http_ctx *restrict ctx)
 		}
 		ctx->http.nxt = next;
 		if (key == NULL) {
+			ctx->cbuf = NULL;
 			ctx->state = STATE_CONTENT;
 			break;
 		}
 
 		/* save the header */
 		if (!on_header(ctx, key, value)) {
+			ctx->state = STATE_RESPONSE;
 			return 0;
 		}
 	}
-	if (ctx->state == STATE_CONTENT && ctx->http.content_length > 0) {
-		if (ctx->cbuf != NULL) {
-			const size_t len = ctx->cbuf->len;
-			if (len < ctx->http.content_length) {
-				return 1;
-			}
-			ctx->cbuf->data[len] = '\0';
-			return 0;
-		}
-		/* null terminated */
+	return 0;
+}
+
+static int parse_content(struct http_ctx *restrict ctx)
+{
+	if (ctx->http.content_length > HTTP_MAX_CONTENT) {
+		http_resp_errpage(ctx, HTTP_ENTITY_TOO_LARGE);
+		ctx->state = STATE_RESPONSE;
+		return 0;
+	}
+	if (ctx->cbuf == NULL) {
 		ctx->cbuf = VBUF_NEW(ctx->http.content_length + 1);
 		if (ctx->cbuf == NULL) {
 			LOGOOM();
 			return -1;
 		}
+		const size_t pos =
+			(unsigned char *)ctx->http.nxt - ctx->rbuf.data;
+		const size_t len = ctx->rbuf.len - pos;
+		memcpy(ctx->cbuf->data, ctx->http.nxt, len);
+		ctx->cbuf->len = len;
 		if (ctx->http.expect_continue) {
 			if (!reply_short(ctx, "HTTP/1.1 100 Continue\r\n\r\n")) {
 				return -1;
 			}
 		}
-		const size_t offset =
-			(unsigned char *)ctx->http.nxt - ctx->rbuf.data;
-		const size_t len = ctx->rbuf.len - offset;
-		memcpy(ctx->cbuf->data, ctx->http.nxt, len);
-		ctx->cbuf->len = len;
-		if (len < ctx->http.content_length) {
-			return 1;
-		}
-		ctx->cbuf->data[len] = '\0';
 	}
+	if (ctx->cbuf->len < ctx->http.content_length) {
+		return 1;
+	}
+	ctx->state = STATE_HANDLE;
 	return 0;
 }
 
@@ -297,10 +317,29 @@ static int http_recv(struct http_ctx *restrict ctx)
 		rbuf->len += (size_t)nrecv;
 	}
 	rbuf->data[rbuf->len] = '\0';
-	LOG_TXT_F(
-		VERBOSE, rbuf->data, rbuf->len, "recv: fd=%d %zu bytes", fd,
-		rbuf->len);
-	return parse_request(ctx);
+	LOGV_F("recv: fd=%d total %zu bytes", fd, rbuf->len);
+
+	for (;;) {
+		int ret;
+		switch (ctx->state) {
+		case STATE_REQUEST:
+			ret = parse_request(ctx);
+			if (ret != 0) {
+				return ret;
+			}
+			break;
+		case STATE_HEADER:
+			ret = parse_header(ctx);
+			if (ret != 0) {
+				return ret;
+			}
+			break;
+		case STATE_CONTENT:
+			return parse_content(ctx);
+		default:
+			return 0;
+		}
+	}
 }
 
 void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -316,10 +355,12 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 	ev_io_stop(loop, watcher);
-	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->num_request++;
-	ctx->state = STATE_RESPONSE;
-	ctx->handle(loop, ctx);
+	if (ctx->state == STATE_HANDLE) {
+		struct server_stats *restrict stats = &ctx->s->stats;
+		stats->num_request++;
+		ctx->handle(loop, ctx);
+		ctx->state = STATE_RESPONSE;
+	}
 	if (ctx->state == STATE_RESPONSE) {
 		ev_io_start(loop, &ctx->w_send);
 	}

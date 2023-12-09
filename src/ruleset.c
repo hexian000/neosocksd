@@ -2,11 +2,12 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "ruleset.h"
-#include "net/url.h"
 
 #if WITH_RULESET
 
+#include "io/stream.h"
 #include "net/addr.h"
+#include "net/url.h"
 #include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/minmax.h"
@@ -37,6 +38,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -91,11 +93,13 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, const int n)
 			return NULL;
 		}
 		if (i < nproxy) {
+			LOGV_F("PROXY %s", s);
 			if (!dialreq_addproxy(req, s, len)) {
 				dialreq_free(req);
 				return NULL;
 			}
 		} else {
+			LOGV_F("CONNECT %s", s);
 			if (!dialaddr_set(&req->addr, s, len)) {
 				dialreq_free(req);
 				return NULL;
@@ -211,12 +215,25 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	return 0;
 }
 
+static const char *read_stream(lua_State *L, void *ud, size_t *restrict sz)
+{
+	UNUSED(L);
+	const void *buf;
+	*sz = SIZE_MAX; /* Lua allows arbitrary length */
+	const int err = stream_direct_read(ud, &buf, sz);
+	if (err != 0) {
+		LOGE_F("read_stream: error %d", err);
+	}
+	if (*sz == 0) {
+		return NULL;
+	}
+	return buf;
+}
+
 static int ruleset_invoke_(lua_State *restrict L)
 {
-	const char *code = lua_topointer(L, 1);
-	const size_t len = *(size_t *)lua_topointer(L, 2);
-	lua_settop(L, 0);
-	if (luaL_loadbuffer(L, code, len, "=invoke") != LUA_OK) {
+	struct stream *s = (struct stream *)lua_topointer(L, 1);
+	if (lua_load(L, read_stream, s, "=invoke", NULL) != LUA_OK) {
 		return lua_error(L);
 	}
 	lua_call(L, 0, 0);
@@ -225,13 +242,14 @@ static int ruleset_invoke_(lua_State *restrict L)
 
 static int ruleset_rpcall_(lua_State *restrict L)
 {
-	const char *code = lua_topointer(L, 1);
-	const size_t len = *(size_t *)lua_topointer(L, 2);
-	lua_settop(L, 0);
-	if (luaL_loadbuffer(L, code, len, "=rpc") != LUA_OK) {
+	struct stream *s = (struct stream *)lua_topointer(L, 1);
+	const void **result = (const void **)lua_topointer(L, 2);
+	size_t *resultlen = (size_t *)lua_topointer(L, 3);
+	if (lua_load(L, read_stream, s, "=rpc", NULL) != LUA_OK) {
 		return lua_error(L);
 	}
 	lua_call(L, 0, 1);
+	*result = lua_tolstring(L, -1, resultlen);
 	return 1;
 }
 
@@ -283,11 +301,10 @@ static int ruleset_require_(lua_State *restrict L)
 static int ruleset_update_(lua_State *restrict L)
 {
 	const char *modname = lua_topointer(L, 1);
-	const char *code = lua_topointer(L, 2);
-	const size_t len = *(size_t *)lua_topointer(L, 3);
+	struct stream *s = (struct stream *)lua_topointer(L, 2);
 	lua_settop(L, 0);
 	if (modname == NULL) {
-		if (luaL_loadbuffer(L, code, len, "=ruleset") != LUA_OK) {
+		if (lua_load(L, read_stream, s, "=ruleset", NULL) != LUA_OK) {
 			return lua_error(L);
 		}
 		lua_pushliteral(L, "ruleset");
@@ -306,7 +323,7 @@ static int ruleset_update_(lua_State *restrict L)
 		name[0] = '=';
 		memcpy(name + 1, modname, namelen);
 		name[1 + namelen] = '\0';
-		if (luaL_loadbuffer(L, code, len, name) != LUA_OK) {
+		if (lua_load(L, read_stream, s, name, NULL) != LUA_OK) {
 			return lua_error(L);
 		}
 	}
@@ -392,13 +409,13 @@ static void luainit_functions(lua_State *restrict L)
 		{ FUNC_REQUEST, ruleset_request_ },
 		{ FUNC_LOADFILE, ruleset_loadfile_ },
 		{ FUNC_INVOKE, ruleset_invoke_ },
-		{ FUNC_RPCALL, ruleset_rpcall_ },
 		{ FUNC_UPDATE, ruleset_update_ },
 		{ FUNC_STATS, ruleset_stats_ },
 		{ FUNC_TICK, ruleset_tick_ },
 		{ FUNC_IDLE, ruleset_idle_ },
 		{ FUNC_TRACEBACK, ruleset_traceback_ },
 		{ FUNC_XPCALL, ruleset_xpcall_ },
+		{ FUNC_RPCALL, ruleset_rpcall_ },
 	};
 	lua_createtable(L, ARRAY_SIZE(reg), 0);
 	for (size_t i = 0; i < ARRAY_SIZE(reg); i++) {
@@ -843,13 +860,14 @@ static int rpcall_gc_(struct lua_State *L)
 
 static void rpcall_cb(
 	handle_t h, struct ev_loop *loop, void *ctx, bool ok,
-	const char *result)
+	const char *result, const size_t resultlen)
 {
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
 	const void *p = TO_POINTER(h);
 	int i = ok ? 1 : 0;
-	if (!await_resume(r, p, 2, (void *)&i, (void *)result)) {
+	if (!await_resume(
+		    r, p, 3, (void *)&i, (void *)result, (void *)&resultlen)) {
 		LOGE_F("http_client_cb: %s", ruleset_error(r));
 	}
 }
@@ -868,10 +886,11 @@ await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	default:
 		return lua_error(L);
 	}
-	const int ok = *(int *)lua_topointer(L, -2);
-	const char *msg = lua_topointer(L, -1);
+	const int ok = *(int *)lua_topointer(L, -3);
+	const char *result = lua_topointer(L, -2);
+	const size_t len = *(size_t *)lua_topointer(L, -1);
 	lua_pushboolean(L, ok);
-	lua_pushstring(L, msg);
+	lua_pushlstring(L, result, len);
 	return 2;
 }
 
@@ -1231,27 +1250,21 @@ const char *ruleset_error(struct ruleset *restrict r)
 	return lua_tostring(L, -1);
 }
 
-bool ruleset_invoke(struct ruleset *r, const char *code, const size_t len)
+bool ruleset_invoke(struct ruleset *r, struct stream *code)
 {
-	return ruleset_pcall(r, FUNC_INVOKE, 2, 0, code, &len);
+	return ruleset_pcall(r, FUNC_INVOKE, 1, 0, code);
 }
 
 bool ruleset_rpcall(
-	struct ruleset *r, const char *code, size_t codelen,
-	const char **result, size_t *resultlen)
+	struct ruleset *r, struct stream *code, const void **result,
+	size_t *resultlen)
 {
-	const bool ok = ruleset_pcall(r, FUNC_RPCALL, 2, 1, code, &codelen);
-	if (ok) {
-		*result = lua_tolstring(r->L, -1, resultlen);
-	}
-	return ok;
+	return ruleset_pcall(r, FUNC_RPCALL, 3, 1, code, result, resultlen);
 }
 
-bool ruleset_update(
-	struct ruleset *r, const char *modname, const char *code,
-	const size_t len)
+bool ruleset_update(struct ruleset *r, const char *modname, struct stream *code)
 {
-	return ruleset_pcall(r, FUNC_UPDATE, 3, 0, modname, code, &len);
+	return ruleset_pcall(r, FUNC_UPDATE, 2, 0, modname, code);
 }
 
 bool ruleset_loadfile(struct ruleset *r, const char *filename)

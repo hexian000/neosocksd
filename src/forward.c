@@ -5,6 +5,7 @@
 #include "session.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
+#include "utils/object.h"
 #include "conf.h"
 #include "util.h"
 #include "server.h"
@@ -125,7 +126,9 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 static void
 forward_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 {
-	forward_ctx_close(loop, CAST(struct forward_ctx, ss, ss));
+	struct forward_ctx *restrict ctx =
+		DOWNCAST(struct session, struct forward_ctx, ss, ss);
+	forward_ctx_close(loop, ctx);
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)

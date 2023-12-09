@@ -6,6 +6,7 @@
 #include "utils/serialize.h"
 #include "utils/slog.h"
 #include "utils/debug.h"
+#include "utils/object.h"
 #include "proto/socks.h"
 #include "conf.h"
 #include "dialer.h"
@@ -154,7 +155,9 @@ socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 static void
 socks_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 {
-	socks_ctx_close(loop, CAST(struct socks_ctx, ss, ss));
+	struct socks_ctx *restrict ctx =
+		DOWNCAST(struct session, struct socks_ctx, ss, ss);
+	socks_ctx_close(loop, ctx);
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)

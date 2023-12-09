@@ -7,6 +7,8 @@
 #include "server.h"
 #include "util.h"
 
+#include <stddef.h>
+
 struct dialreq;
 
 /* http_proxy_serve: implements serve_fn */
@@ -22,7 +24,7 @@ void http_api_serve(
 struct http_client_cb {
 	void (*func)(
 		handle_t h, struct ev_loop *loop, void *ctx, bool ok,
-		const char *result);
+		const char *result, size_t resultlen);
 	void *ctx;
 };
 

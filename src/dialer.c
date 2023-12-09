@@ -257,6 +257,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 {
 	switch (d->state) {
 	case STATE_INIT:
+		ev_clear_pending(loop, &d->w_start);
 		break;
 	case STATE_RESOLVE:
 		if (d->resolve_handle != INVALID_HANDLE) {
@@ -293,16 +294,17 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
+		const size_t jump = (d)->jump;                                 \
 		const struct dialreq *restrict req = (d)->req;                 \
-		assert((d)->jump < req->num_proxy);                            \
+		assert(jump < req->num_proxy);                                 \
 		char raddr[64];                                                \
 		const struct dialaddr *addr =                                  \
-			(d)->jump + 1 < req->num_proxy ?                       \
-				&req->proxy[(d)->jump + 1].addr :              \
+			jump + 1 < req->num_proxy ?                            \
+				&req->proxy[jump + 1].addr :                   \
 				&req->addr;                                    \
 		dialaddr_format(addr, raddr, sizeof(raddr));                   \
-		LOG_F(level, "proxy connect \"%s\": " format, raddr,           \
-		      __VA_ARGS__);                                            \
+		LOG_F(level, "connect \"%s\" over proxy[%zu]: " format, raddr, \
+		      jump, __VA_ARGS__);                                      \
 	} while (0)
 #define DIALER_LOG(level, d, message) DIALER_LOG_F(level, d, "%s", message)
 

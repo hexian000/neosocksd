@@ -133,7 +133,7 @@ case "$1" in
         -DCMAKE_C_COMPILER="clang" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -S . -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel
     ls -lh "build/src/neosocksd"
     ;;
 "c")

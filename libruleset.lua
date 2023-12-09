@@ -26,6 +26,56 @@ function _G.eval(s, ...)
     return assert(load(s, "=eval"))(...)
 end
 
+function _G.marshal(...)
+    local open, closed = {}, {}
+    local marshal_table, marshal_value
+    local marshaler = {
+        ["table"] = function(v)
+            if closed[v] then
+                return closed[v]
+            elseif open[v] then
+                error("circular referenced table is not marshallable")
+            else
+                return marshal_table(v)
+            end
+        end,
+        ["string"] = function(v)
+            return string.format("%q", v)
+        end,
+        ["number"] = tostring,
+        ["boolean"] = tostring,
+        ["nil"] = tostring,
+    }
+    marshal_table = function(t)
+        open[t] = true
+        local w = {}
+        for k, v in pairs(t) do
+            local kstr = marshal_value(k)
+            local vstr = marshal_value(v)
+            table.insert(w, string.format("[%s]=%s", kstr, vstr))
+        end
+        local str = "{" .. table.concat(w, ",") .. "}"
+        closed[t] = str
+        return str
+    end
+    marshal_value = function(v)
+        local m = marshaler[type(v)]
+        if not m then
+            error(string.format("type %q is not marshallable", type(v)))
+        end
+        return m(v)
+    end
+    local t, w = { ... }, {}
+    for i, v in ipairs(t) do
+        table.insert(w, marshal_value(v))
+    end
+    return table.concat(w, ",")
+end
+
+function _G.unmarshal(s)
+    return assert(load("return " .. s, "=unmarshal"))()
+end
+
 function string:startswith(sub)
     local n = string.len(sub)
     return string.sub(self, 1, n) == sub
@@ -41,7 +91,8 @@ local list = {
     insert = table.insert,
     remove = table.remove,
     unpack = table.unpack,
-    concat = table.concat
+    concat = table.concat,
+    sort = table.sort
 }
 
 local list_mt = {
@@ -53,7 +104,7 @@ function list:new(t)
 end
 
 function list:pack(...)
-    return setmetatable({...}, list_mt)
+    return setmetatable({ ... }, list_mt)
 end
 
 function list:totable()
@@ -87,6 +138,7 @@ function list:reverse()
     end
     return self
 end
+
 _G.list = list
 
 _G.MAX_RECENT_EVENTS = 10
@@ -201,6 +253,7 @@ function inet.subnet(s)
         return false
     end
 end
+
 _G.inet = inet
 
 local inet6 = {}
@@ -244,10 +297,15 @@ function inet6.subnet(s)
         return false
     end
 end
+
 _G.inet6 = inet6
 
 -- [[ redirect table matchers ]] --
 local match = {}
+function match.any(...)
+    return true
+end
+
 function match.exact(s)
     if type(s) ~= "table" then
         local host, port = splithostport(s)
@@ -396,6 +454,7 @@ function match.regex(s)
         return false
     end
 end
+
 _G.match = match
 
 -- [[ composite matchers ]] --
@@ -420,6 +479,7 @@ function composite.maybe(t, k)
         return false
     end
 end
+
 _G.composite = composite
 
 -- [[ rule actions ]] --
@@ -472,6 +532,7 @@ function rule.proxy(...)
         return addr, chain:unpack()
     end
 end
+
 _G.rule = rule
 
 local lb = {}
@@ -489,11 +550,12 @@ function lb.roundrobin(t)
         return t[i]
     end
 end
+
 _G.lb = lb
 
 -- [[ internal route functions ]] --
 _G.num_requests = _G.num_requests or 0
-_G.stat_requests = _G.stat_requests or list:new({0})
+_G.stat_requests = _G.stat_requests or list:new({ 0 })
 _G.MAX_STAT_REQUESTS = 60
 
 local function matchtab_(t, ...)
@@ -503,7 +565,21 @@ local function matchtab_(t, ...)
             return action, tag
         end
     end
-    return t[0], "default"
+    return nil
+end
+
+local function default_(addr)
+    local route = _G.route_default
+    if route then
+        local action, tag = table.unpack(route)
+        if action then
+            if tag then
+                logf("[%s] %q", tag, addr)
+            end
+            return action(addr)
+        end
+    end
+    return addr
 end
 
 local function route_(addr)
@@ -536,12 +612,7 @@ local function route_(addr)
         end
     end
     -- global default
-    logf("[default] %q", addr)
-    local action = _G.route_default
-    if action then
-        return action(addr)
-    end
-    return addr
+    return default_(addr)
 end
 
 local function route6_(addr)
@@ -574,12 +645,7 @@ local function route6_(addr)
         end
     end
     -- global default
-    logf("[default] %q", addr)
-    local action = _G.route_default
-    if action then
-        return action(addr)
-    end
-    return addr
+    return default_(addr)
 end
 
 local function resolve_(addr)
@@ -612,12 +678,7 @@ local function resolve_(addr)
         return route6_(addr)
     end
     -- global default
-    logf("[default] %q", addr)
-    local action = _G.route_default
-    if action then
-        return action(addr)
-    end
-    return addr
+    return default_(addr)
 end
 
 local function render_(w)
@@ -654,34 +715,18 @@ end
 -- [[ ruleset callbacks, see API.md for details ]] --
 local ruleset = {}
 
-_G.is_enabled = _G.is_enabled or function()
-    return true
-end
-
 function ruleset.resolve(addr)
     num_requests = num_requests + 1
-    if not _G.is_enabled() then
-        logf("service not enabled, reject %q", addr)
-        return nil
-    end
     return resolve_(addr)
 end
 
 function ruleset.route(addr)
     num_requests = num_requests + 1
-    if not _G.is_enabled() then
-        logf("service not enabled, reject %q", addr)
-        return nil
-    end
     return route_(addr)
 end
 
 function ruleset.route6(addr)
     num_requests = num_requests + 1
-    if not _G.is_enabled() then
-        logf("service not enabled, reject %q", addr)
-        return nil
-    end
     return route6_(addr)
 end
 

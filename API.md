@@ -412,6 +412,8 @@ end, "127.0.1.1:9080")
 
 Run Lua code on another neosocksd and take one string back.
 
+Tip: the utility `marshal` and `unmarshal` in `libruleset.lua` is useful if you want to marshal multiple values / tables.
+
 
 ### await.sleep
 

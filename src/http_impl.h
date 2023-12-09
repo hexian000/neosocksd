@@ -32,10 +32,17 @@ enum http_state {
 	STATE_REQUEST,
 	STATE_HEADER,
 	STATE_CONTENT,
+	STATE_HANDLE,
 	STATE_RESPONSE,
 	STATE_CONNECT,
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
+};
+
+enum content_encodings {
+	CENCODING_NONE,
+	CENCODING_DEFLATE,
+	CENCODING_GZIP,
 };
 
 struct httpreq {
@@ -43,8 +50,9 @@ struct httpreq {
 	char *nxt;
 	size_t content_length;
 	const char *content_type;
-	const char *content_encoding;
-	bool expect_continue;
+	enum content_encodings content_encoding;
+	enum content_encodings accept_encoding;
+	bool expect_continue : 1;
 };
 
 struct http_ctx {

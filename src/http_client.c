@@ -12,6 +12,7 @@
 #include "dialer.h"
 
 #include <ev.h>
+#include <strings.h>
 
 #include <assert.h>
 #include <stddef.h>
@@ -78,14 +79,18 @@ static void http_client_close(
 
 static void http_client_finish(
 	struct ev_loop *loop, struct http_client_ctx *restrict ctx, bool ok,
-	const char *data)
+	const void *data, const size_t len)
 {
 	if (ctx->invoke_cb.func != NULL) {
 		ctx->invoke_cb.func(
-			TO_HANDLE(ctx), loop, ctx->invoke_cb.ctx, ok, data);
+			TO_HANDLE(ctx), loop, ctx->invoke_cb.ctx, ok, data,
+			len);
 	}
 	http_client_close(loop, ctx);
 }
+
+#define HTTP_CLIENT_ERROR(loop, ctx, msg)                                      \
+	http_client_finish((loop), (ctx), false, (msg ""), sizeof(msg) - 1)
 
 static void
 request_write_cb(struct ev_loop *loop, struct http_client_ctx *restrict ctx)
@@ -127,7 +132,7 @@ request_write_cb(struct ev_loop *loop, struct http_client_ctx *restrict ctx)
 	ctx->state = STATE_RESPONSE;
 	ctx->rbuf = VBUF_NEW(HTTP_MAX_ENTITY);
 	if (ctx->rbuf == NULL) {
-		http_client_finish(loop, ctx, false, "out of memory");
+		HTTP_CLIENT_ERROR(loop, ctx, "out of memory");
 		return;
 	}
 	ctx->http = (struct httprsp){ 0 };
@@ -264,7 +269,8 @@ response_read_cb(struct ev_loop *loop, struct http_client_ctx *restrict ctx)
 			if (IS_TRANSIENT_ERROR(err)) {
 				return;
 			}
-			http_client_finish(loop, ctx, false, strerror(err));
+			const char *s = strerror(err);
+			http_client_finish(loop, ctx, false, s, strlen(s));
 			return;
 		} else if (nrecv == 0) {
 			eof = true;
@@ -278,29 +284,33 @@ response_read_cb(struct ev_loop *loop, struct http_client_ctx *restrict ctx)
 
 	const int ret = parse_response(ctx);
 	if (ret < 0) {
-		http_client_finish(loop, ctx, false, "invalid response");
+		HTTP_CLIENT_ERROR(loop, ctx, "invalid response");
 		return;
 	} else if (ret > 0 && eof) {
-		http_client_finish(loop, ctx, false, "early EOF");
+		HTTP_CLIENT_ERROR(loop, ctx, "early EOF");
 		return;
 	}
 	const char *code = ctx->http.msg.rsp.code;
-	rbuf->data[rbuf->len - 1] = '\0';
-	const char *content = ctx->http.nxt;
-	LOGV_F("content: %zu \"%s\"", strlen(content), content);
+	const void *content = ctx->http.nxt;
+	size_t len = ctx->http.content_length;
+	if (len == 0) {
+		len = ctx->rbuf->len - ((unsigned char *)ctx->http.nxt -
+					(unsigned char *)ctx->rbuf->data);
+	}
+	LOG_BIN_F(VERBOSE, content, len, "content: %zu bytes", len);
 	if (strcmp(code, "200") == 0) {
-		http_client_finish(loop, ctx, true, content);
+		http_client_finish(loop, ctx, true, content, len);
 		return;
 	}
 	if (strcmp(code, "500") == 0) {
-		http_client_finish(loop, ctx, false, content);
+		http_client_finish(loop, ctx, false, content, len);
 		return;
 	}
 	char buf[64];
-	snprintf(
+	len = snprintf(
 		buf, sizeof(buf), "%s %s %s", ctx->http.msg.rsp.version, code,
 		ctx->http.msg.rsp.status);
-	http_client_finish(loop, ctx, false, buf);
+	http_client_finish(loop, ctx, false, buf, len);
 }
 
 static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -320,9 +330,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	struct http_client_ctx *restrict ctx = data;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		LOGD("invoke: unable to establish client connection");
-		ctx->wbuf = VBUF_FREE(ctx->wbuf);
-		free(ctx);
+		HTTP_CLIENT_ERROR(loop, ctx, "failed connecting to server");
 		return;
 	}
 	dialreq_free(ctx->dialreq);
@@ -339,7 +347,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct http_client_ctx *restrict ctx = watcher->data;
-	http_client_finish(loop, ctx, false, "timeout");
+	HTTP_CLIENT_ERROR(loop, ctx, "timeout");
 }
 
 handle_t http_client_do(
@@ -370,6 +378,7 @@ handle_t http_client_do(
 	}
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ev_set_priority(&ctx->w_timeout, EV_MINPRI);
+	ctx->w_timeout.data = ctx;
 	ev_timer_start(loop, &ctx->w_timeout);
 	ctx->state = STATE_CONNECT;
 	ctx->invoke_cb = client_cb;

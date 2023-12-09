@@ -4,6 +4,7 @@ add_executable(neosocksd
     sockutil.c sockutil.h
     dialer.c dialer.h
     resolver.c resolver.h
+    codec.c codec.h
     ruleset.c ruleset.h
     transfer.c transfer.h
     session.c session.h
@@ -13,8 +14,7 @@ add_executable(neosocksd
     server.c server.h
     main.c
 )
-
-target_link_libraries(neosocksd PRIVATE csnippets)
+target_link_libraries(neosocksd PRIVATE csnippets miniz)
 
 if(NOT TARGET_POSIX AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
     target_compile_definitions(neosocksd PRIVATE _GNU_SOURCE)

@@ -1,31 +1,41 @@
 /* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+#include "codec.h"
 #include "http.h"
 #include "http_impl.h"
+#include "io/memory.h"
+#include "io/stream.h"
 #include "net/http.h"
 #include "net/url.h"
+#include "utils/buffer.h"
+#include "utils/debug.h"
 #include "utils/formats.h"
 #include "utils/posixtime.h"
 #include "utils/slog.h"
 #include "resolver.h"
 #include "ruleset.h"
 
+#include <strings.h>
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define RESPHDR_CONTENTTEXT(buf)                                               \
+#define RESPHDR_CPLAINTEXT(buf)                                                \
 	BUF_APPENDCONST(                                                       \
 		(buf), "Content-Type: text/plain; charset=utf-8\r\n"           \
 		       "X-Content-Type-Options: nosniff\r\n")
 
-#define RESPHDR_CONTENTTYPE(buf, type)                                         \
+#define RESPHDR_CTYPE(buf, type)                                               \
 	BUF_APPENDF((buf), "Content-Type: %s\r\n", (type))
 
-#define RESPHDR_CONTENTLENGTH(buf, len)                                        \
+#define RESPHDR_CLENGTH(buf, len)                                              \
 	BUF_APPENDF((buf), "Content-Length: %zu\r\n", (len))
+
+#define RESPHDR_CENCODING(buf, encoding)                                       \
+	BUF_APPENDF((buf), "Content-Encoding: %s\r\n", (encoding))
 
 #define RESPHDR_NOCACHE(buf)                                                   \
 	BUF_APPENDCONST((buf), "Cache-Control: no-store\r\n")
@@ -35,7 +45,7 @@
 	(void)format_iec_bytes(name, sizeof(name), (value))
 
 static void server_stats(
-	struct http_ctx *restrict ctx, const struct server *restrict s,
+	struct buffer *restrict buf, const struct server *restrict s,
 	const double uptime)
 {
 	const struct server_stats *restrict stats = &s->stats;
@@ -63,7 +73,7 @@ static void server_stats(
 	FORMAT_BYTES(avgbw_down, ((double)stats->byt_down) / uptime_hrs);
 
 	BUF_APPENDF(
-		ctx->wbuf,
+		*buf,
 		"Server Time         : %s\n"
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu)\n"
@@ -88,7 +98,7 @@ static void server_stats(
 			heap_total, sizeof(heap_total),
 			(double)vmstats.byt_allocated);
 		BUF_APPENDF(
-			ctx->wbuf,
+			*buf,
 			"Ruleset Memory      : %s (%zu objects)\n"
 			"Async Routines      : %zu\n",
 			heap_total, vmstats.num_object, vmstats.num_routine);
@@ -97,7 +107,7 @@ static void server_stats(
 }
 
 static void server_stats_stateful(
-	struct http_ctx *restrict ctx, const struct server *restrict s,
+	struct buffer *restrict buf, const struct server *restrict s,
 	const double dt)
 {
 	const struct server_stats *restrict stats = &s->stats;
@@ -124,7 +134,7 @@ static void server_stats_stateful(
 		(double)(stats->num_request - last.num_request) / dt;
 
 	BUF_APPENDF(
-		ctx->wbuf,
+		*buf,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
 		"Request Rate        : %.1f/s\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n",
@@ -138,6 +148,17 @@ static void server_stats_stateful(
 	last.num_reject = num_reject;
 }
 #undef FORMAT_BYTES
+
+static struct stream *content_writer(struct http_ctx *restrict ctx)
+{
+	struct stream *w = io_memwriter(
+		ctx->wbuf.data + ctx->wbuf.len, ctx->wbuf.cap - ctx->wbuf.len,
+		&ctx->wbuf.len);
+	if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
+		return codec_zlib_writer(w);
+	}
+	return w;
+}
 
 static void http_handle_stats(
 	struct ev_loop *loop, struct http_ctx *restrict ctx,
@@ -161,50 +182,83 @@ static void http_handle_stats(
 	bool stateless;
 	if (strcmp(msg->req.method, "GET") == 0) {
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_CONTENTTEXT(ctx->wbuf);
+		RESPHDR_CPLAINTEXT(ctx->wbuf);
+		if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
+			RESPHDR_CENCODING(ctx->wbuf, "deflate");
+		}
 		RESPHDR_NOCACHE(ctx->wbuf);
 		RESPHDR_FINISH(ctx->wbuf);
 		stateless = true;
 	} else if (strcmp(msg->req.method, "POST") == 0) {
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_CONTENTTEXT(ctx->wbuf);
+		RESPHDR_CPLAINTEXT(ctx->wbuf);
+		if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
+			RESPHDR_CENCODING(ctx->wbuf, "deflate");
+		}
 		RESPHDR_FINISH(ctx->wbuf);
 		stateless = false;
 	} else {
 		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
 		return;
 	}
+	struct stream *w = content_writer(ctx);
+	if (w == NULL) {
+		ctx->wbuf.len = 0;
+		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+	}
+	/* borrow the read buffer */
+	struct buffer *restrict buf = (struct buffer *)&ctx->rbuf;
+	buf->len = 0;
 
 	if (banner) {
 		BUF_APPENDCONST(
-			ctx->wbuf, PROJECT_NAME " " PROJECT_VER "\n"
-						"  " PROJECT_HOMEPAGE "\n\n");
+			*buf, PROJECT_NAME " " PROJECT_VER "\n"
+					   "  " PROJECT_HOMEPAGE "\n\n");
 	}
 
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = ev_now(loop) - ctx->s->stats.started;
-	server_stats(ctx, ctx->s->data, uptime);
+	server_stats(buf, ctx->s->data, uptime);
 
 	if (stateless) {
+		size_t n = buf->len;
+		const int werr = stream_write(w, buf->data, &n);
+		const int cerr = stream_close(w);
+		if (werr != 0 || n < buf->len || cerr != 0) {
+			LOGE_F("stream error: %d, %zu, %d", werr, n, cerr);
+			ctx->wbuf.len = 0;
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		}
 		return;
 	}
 	static ev_tstamp last = TSTAMP_NIL;
 	const double dt = (last == TSTAMP_NIL) ? uptime : now - last;
 	last = now;
 
-	server_stats_stateful(ctx, ctx->s->data, dt);
+	server_stats_stateful(buf, ctx->s->data, dt);
 #if WITH_RULESET
 	if (G.ruleset != NULL) {
 		const char *str = ruleset_stats(G.ruleset, dt);
-		BUF_APPENDF(
-			ctx->wbuf,
-			"\n"
-			"Ruleset Stats\n"
-			"================\n"
-			"%s\n",
-			str != NULL ? str : ruleset_error(G.ruleset));
+		BUF_APPENDCONST(
+			*buf, "\n"
+			      "Ruleset Stats\n"
+			      "================\n");
+		if (str != NULL) {
+			BUF_APPENDSTR(*buf, str);
+		} else {
+			BUF_APPENDSTR(*buf, ruleset_error(G.ruleset));
+		}
+		BUF_APPENDCONST(*buf, "\n");
 	}
 #endif
+	size_t n = buf->len;
+	const int werr = stream_write(w, buf->data, &n);
+	const int cerr = stream_close(w);
+	if (werr != 0 || n < buf->len || cerr != 0) {
+		LOGE_F("stream error: %d, %zu, %d", werr, n, cerr);
+		ctx->wbuf.len = 0;
+		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+	}
 }
 
 static bool http_leafnode_check(
@@ -228,6 +282,33 @@ static bool http_leafnode_check(
 }
 
 #if WITH_RULESET
+static struct stream *content_reader(struct http_ctx *restrict ctx)
+{
+	struct stream *r = NULL;
+	switch (ctx->http.content_encoding) {
+	case CENCODING_NONE:
+		r = io_memreader(ctx->cbuf->data, ctx->http.content_length);
+		break;
+	case CENCODING_DEFLATE:
+		r = codec_zlib_reader(io_memreader(
+			ctx->cbuf->data, ctx->http.content_length));
+		break;
+	case CENCODING_GZIP: {
+		size_t len = ctx->http.content_length;
+		const void *buf = gzip_unbox(ctx->cbuf->data, &len);
+		r = codec_inflate_reader(io_memreader(buf, len));
+	} break;
+	}
+	if (r == NULL) {
+		return NULL;
+	}
+	/* lua reader requires direct_read */
+	if (r->vftable->direct_read == NULL) {
+		r = io_bufreader(r, 0);
+	}
+	return r;
+}
+
 static void http_handle_ruleset(
 	struct ev_loop *loop, struct http_ctx *restrict ctx,
 	struct url *restrict uri)
@@ -237,9 +318,8 @@ static void http_handle_ruleset(
 	if (ruleset == NULL) {
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_FINISH(ctx->wbuf);
-		BUF_APPENDF(
-			ctx->wbuf, "%s",
-			"ruleset not enabled, restart with -r\n");
+		BUF_APPENDCONST(
+			ctx->wbuf, "ruleset not enabled, restart with -r\n");
 		return;
 	}
 
@@ -252,17 +332,20 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const char *code = (const char *)ctx->cbuf->data;
-		const size_t len = ctx->http.content_length;
-		LOG_TXT_F(
-			VERBOSE, code, len, "api: ruleset invoke %zu bytes",
-			len);
-		const bool ok = ruleset_invoke(ruleset, code, len);
+		const int64_t start = clock_monotonic();
+		struct stream *reader = content_reader(ctx);
+		if (reader == NULL) {
+			LOGOOM();
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+		const bool ok = ruleset_invoke(ruleset, reader);
+		stream_close(reader);
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset invoke: %s", err);
 			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
-			RESPHDR_CONTENTTEXT(ctx->wbuf);
+			RESPHDR_CPLAINTEXT(ctx->wbuf);
 			RESPHDR_FINISH(ctx->wbuf);
 			BUF_APPENDSTR(ctx->wbuf, err);
 			BUF_APPENDCONST(ctx->wbuf, "\n");
@@ -270,6 +353,11 @@ static void http_handle_ruleset(
 		}
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
 		RESPHDR_FINISH(ctx->wbuf);
+		char timecost[16];
+		(void)format_duration(
+			timecost, sizeof(timecost),
+			make_duration_nanos(clock_monotonic() - start));
+		BUF_APPENDF(ctx->wbuf, "Time Cost           : %s\n", timecost);
 		return;
 	} else if (strcmp(segment, "update") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
@@ -286,15 +374,20 @@ static void http_handle_ruleset(
 				module = value;
 			}
 		}
-		const char *code = (const char *)ctx->cbuf->data;
-		const size_t len = ctx->http.content_length;
-		LOG_TXT(VERBOSE, code, len, "api: ruleset update");
-		const bool ok = ruleset_update(ruleset, module, code, len);
+		const int64_t start = clock_monotonic();
+		struct stream *reader = content_reader(ctx);
+		if (reader == NULL) {
+			LOGOOM();
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+		const bool ok = ruleset_update(ruleset, module, reader);
+		stream_close(reader);
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset update: %s", err);
 			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
-			RESPHDR_CONTENTTEXT(ctx->wbuf);
+			RESPHDR_CPLAINTEXT(ctx->wbuf);
 			RESPHDR_FINISH(ctx->wbuf);
 			BUF_APPENDSTR(ctx->wbuf, err);
 			BUF_APPENDCONST(ctx->wbuf, "\n");
@@ -302,6 +395,11 @@ static void http_handle_ruleset(
 		}
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
 		RESPHDR_FINISH(ctx->wbuf);
+		char timecost[16];
+		(void)format_duration(
+			timecost, sizeof(timecost),
+			make_duration_nanos(clock_monotonic() - start));
+		BUF_APPENDF(ctx->wbuf, "Time Cost           : %s\n", timecost);
 		return;
 	} else if (strcmp(segment, "gc") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", false)) {
@@ -320,7 +418,7 @@ static void http_handle_ruleset(
 			timecost, sizeof(timecost),
 			make_duration_nanos(clock_monotonic() - start));
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_CONTENTTEXT(ctx->wbuf);
+		RESPHDR_CPLAINTEXT(ctx->wbuf);
 		RESPHDR_FINISH(ctx->wbuf);
 		BUF_APPENDF(
 			ctx->wbuf,
@@ -340,46 +438,43 @@ static void http_handle_ruleset(
 			LOGD_F("rpcall: invalid content type \"%s\"",
 			       ctx->http.content_type);
 			RESPHDR_BEGIN(ctx->wbuf, HTTP_BAD_REQUEST);
-			RESPHDR_CONTENTTEXT(ctx->wbuf);
+			RESPHDR_CPLAINTEXT(ctx->wbuf);
 			RESPHDR_FINISH(ctx->wbuf);
 			return;
 		}
-		if (ctx->http.content_encoding != NULL) {
-			LOGD_F("rpcall: invalid content encoding \"%s\"",
-			       ctx->http.content_encoding);
-			RESPHDR_BEGIN(ctx->wbuf, HTTP_BAD_REQUEST);
-			RESPHDR_CONTENTTEXT(ctx->wbuf);
-			RESPHDR_FINISH(ctx->wbuf);
+		struct stream *reader = content_reader(ctx);
+		if (reader == NULL) {
+			LOGOOM();
+			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
-		const char *code = (const char *)ctx->cbuf->data;
-		size_t len = ctx->http.content_length;
-		LOG_TXT_F(
-			VERBOSE, code, len, "api: ruleset rpcall %zu bytes",
-			len);
-		const char *result;
+		const void *result;
+		size_t resultlen;
 		const bool ok =
-			ruleset_rpcall(ruleset, code, len, &result, &len);
+			ruleset_rpcall(ruleset, reader, &result, &resultlen);
+		stream_close(reader);
 		if (!ok) {
 			const char *err = ruleset_error(ruleset);
 			LOGW_F("ruleset rpcall: %s", err);
-			len = strlen(err);
+			const size_t len = strlen(err);
 			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
-			RESPHDR_CONTENTTYPE(ctx->wbuf, MIME_RPCALL);
-			RESPHDR_CONTENTLENGTH(ctx->wbuf, len);
+			RESPHDR_CTYPE(ctx->wbuf, MIME_RPCALL);
+			RESPHDR_CLENGTH(ctx->wbuf, len);
 			RESPHDR_FINISH(ctx->wbuf);
 			BUF_APPEND(ctx->wbuf, err, len);
 			return;
 		}
 		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_CONTENTTYPE(ctx->wbuf, MIME_RPCALL);
-		RESPHDR_CONTENTLENGTH(ctx->wbuf, len);
+		RESPHDR_CTYPE(ctx->wbuf, MIME_RPCALL);
+		RESPHDR_CLENGTH(ctx->wbuf, resultlen);
 		RESPHDR_FINISH(ctx->wbuf);
-		LOG_BIN_F(
-			VERBOSE, result, len,
-			"api: ruleset rpcall result %zu bytes", len);
-		BUF_APPENDSTR(ctx->wbuf, result);
-		BUF_APPENDCONST(ctx->wbuf, "\n");
+		if (resultlen > 0) {
+			LOG_BIN_F(
+				VERBOSE, result, resultlen,
+				"api: ruleset rpcall result %zu bytes",
+				resultlen);
+			BUF_APPEND(ctx->wbuf, result, resultlen);
+		}
 		return;
 	}
 
