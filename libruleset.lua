@@ -141,7 +141,7 @@ end
 
 _G.list = list
 
-_G.MAX_RECENT_EVENTS = 10
+_G.MAX_RECENT_EVENTS = 16
 _G.recent_events = _G.recent_events or list:new()
 local function addevent_(tstamp, msg)
     local entry = recent_events[1]
@@ -763,7 +763,7 @@ function ruleset.stats(dt)
     end
     w:insert("> Request Stats")
     render_(w)
-    return w:concat("\n")
+    return w:concat("\n") .. "\n"
 end
 
 return ruleset

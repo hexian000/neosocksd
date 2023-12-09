@@ -5,7 +5,9 @@
 
 #if WITH_RULESET
 
+#include "io/io.h"
 #include "io/stream.h"
+#include "io/memory.h"
 #include "net/addr.h"
 #include "net/url.h"
 #include "utils/arraysize.h"
@@ -14,6 +16,7 @@
 #include "utils/serialize.h"
 #include "utils/slog.h"
 #include "utils/debug.h"
+#include "codec.h"
 #include "conf.h"
 #include "resolver.h"
 #include "dialer.h"
@@ -49,8 +52,9 @@ struct ruleset {
 	struct ev_timer w_ticker;
 };
 
-#define RIDX_FUNCTIONS (LUA_RIDX_LAST + 1)
-#define RIDX_CONTEXTS (LUA_RIDX_LAST + 2)
+#define RIDX_OUTOFMEMORY (LUA_RIDX_LAST + 1)
+#define RIDX_FUNCTIONS (LUA_RIDX_LAST + 2)
+#define RIDX_CONTEXTS (LUA_RIDX_LAST + 3)
 
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
 #define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
@@ -836,7 +840,7 @@ static int await_resolve_(lua_State *restrict L)
 		},
 		name, NULL, G.conf->resolve_pf);
 	if (h == INVALID_HANDLE) {
-		lua_pushliteral(L, "out of memory");
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
 		return lua_error(L);
 	}
 	handle_t *restrict p = lua_newuserdata(L, sizeof(handle_t));
@@ -917,7 +921,7 @@ static int await_rpcall_(lua_State *restrict L)
 	handle_t h =
 		http_client_do(r->loop, req, "/ruleset/rpcall", code, len, cb);
 	if (h == INVALID_HANDLE) {
-		lua_pushliteral(L, "out of memory");
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
 		return lua_error(L);
 	}
 	handle_t *restrict p = lua_newuserdata(L, sizeof(handle_t));
@@ -1074,6 +1078,74 @@ static int api_now_(lua_State *restrict L)
 	return 1;
 }
 
+/* neosocksd.compress() */
+static int api_compress_(lua_State *restrict L)
+{
+	size_t len;
+	const char *src = luaL_checklstring(L, 1, &len);
+	void *buf = lua_newuserdata(L, IO_BUFSIZE);
+	struct stream *r = io_memreader(src, len);
+	if (r == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	struct vbuffer *vbuf = VBUF_NEW(IO_BUFSIZE);
+	if (vbuf == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	struct stream *w = codec_zlib_writer(io_heapwriter(&vbuf));
+	if (w == NULL) {
+		stream_close(r);
+		vbuf = VBUF_FREE(vbuf);
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	const int err = stream_copy(w, r, buf, IO_BUFSIZE);
+	if (err != 0) {
+		vbuf = VBUF_FREE(vbuf);
+		return luaL_error(L, "compress error: %d", err);
+	}
+	const char *dst = (char *)vbuf->data;
+	lua_pushlstring(L, dst, vbuf->len);
+	vbuf = VBUF_FREE(vbuf);
+	return 1;
+}
+
+/* neosocksd.uncompress() */
+static int api_uncompress_(lua_State *restrict L)
+{
+	size_t len;
+	const char *src = luaL_checklstring(L, 1, &len);
+	void *buf = lua_newuserdata(L, IO_BUFSIZE);
+	struct stream *r = codec_zlib_reader(io_memreader(src, len));
+	if (r == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	struct vbuffer *vbuf = VBUF_NEW(IO_BUFSIZE);
+	if (vbuf == NULL) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	struct stream *w = io_heapwriter(&vbuf);
+	if (w == NULL) {
+		stream_close(r);
+		vbuf = VBUF_FREE(vbuf);
+		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		return lua_error(L);
+	}
+	const int err = stream_copy(w, r, buf, IO_BUFSIZE);
+	if (err != 0) {
+		vbuf = VBUF_FREE(vbuf);
+		return luaL_error(L, "uncompress error: %d", err);
+	}
+	const char *dst = (char *)vbuf->data;
+	lua_pushlstring(L, dst, vbuf->len);
+	vbuf = VBUF_FREE(vbuf);
+	return 1;
+}
+
 static int luaopen_await(lua_State *restrict L)
 {
 	lua_settop(L, 0);
@@ -1125,6 +1197,8 @@ static int luaopen_neosocksd(lua_State *restrict L)
 		{ "parse_ipv6", api_parse_ipv6_ },
 		{ "stats", api_stats_ },
 		{ "now", api_now_ },
+		{ "compress", api_compress_ },
+		{ "uncompress", api_uncompress_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, apilib);
@@ -1134,6 +1208,8 @@ static int luaopen_neosocksd(lua_State *restrict L)
 static int ruleset_luainit_(lua_State *restrict L)
 {
 	/* init registry */
+	lua_pushliteral(L, "out of memory");
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
 	luainit_functions(L);
 	/* load all libraries */
 	luaL_openlibs(L);
