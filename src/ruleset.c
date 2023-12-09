@@ -59,6 +59,8 @@ struct ruleset {
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
 #define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
 
+#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM == 504)
+
 static struct ruleset *find_ruleset(lua_State *L)
 {
 	void *ud;
@@ -565,10 +567,10 @@ struct stream_context {
 	unsigned char buf[IO_BUFSIZE];
 };
 
-static int stream_gc_(struct lua_State *L)
+static int stream_close_(struct lua_State *L)
 {
 	struct stream_context *restrict s =
-		(struct stream_context *)lua_topointer(L, -1);
+		(struct stream_context *)lua_topointer(L, 1);
 	if (s->r != NULL) {
 		(void)stream_close(s->r);
 		s->r = NULL;
@@ -581,7 +583,7 @@ static int stream_gc_(struct lua_State *L)
 	return 0;
 }
 
-/* zlib.compress() */
+/* z = zlib.compress(s) */
 static int zlib_compress_(lua_State *restrict L)
 {
 	size_t len;
@@ -590,6 +592,9 @@ static int zlib_compress_(lua_State *restrict L)
 		lua_newuserdata((L), sizeof(struct stream_context));
 	lua_pushvalue(L, lua_upvalueindex(1));
 	lua_setmetatable(L, -2);
+#if HAVE_LUA_TOCLOSE
+	lua_toclose(L, -1);
+#endif
 	s->vbuf = NULL;
 	s->r = io_memreader(src, len);
 	s->w = codec_zlib_writer(io_heapwriter(&s->vbuf));
@@ -611,7 +616,7 @@ static int zlib_compress_(lua_State *restrict L)
 	return 1;
 }
 
-/* zlib.uncompress() */
+/* s = zlib.uncompress(z) */
 static int zlib_uncompress_(lua_State *restrict L)
 {
 	size_t len;
@@ -620,6 +625,9 @@ static int zlib_uncompress_(lua_State *restrict L)
 		lua_newuserdata((L), sizeof(struct stream_context));
 	lua_pushvalue(L, lua_upvalueindex(1));
 	lua_setmetatable(L, -2);
+#if HAVE_LUA_TOCLOSE
+	lua_toclose(L, -1);
+#endif
 	s->vbuf = NULL;
 	s->r = codec_zlib_reader(io_memreader(src, len));
 	s->w = io_heapwriter(&s->vbuf);
@@ -645,8 +653,12 @@ static int luaopen_zlib(lua_State *restrict L)
 {
 	lua_settop(L, 0);
 	lua_createtable(L, 0, 1);
-	lua_pushcfunction(L, stream_gc_);
+	lua_pushcfunction(L, stream_close_);
+#if HAVE_LUA_TOCLOSE
+	lua_setfield(L, -2, "__close");
+#else
 	lua_setfield(L, -2, "__gc");
+#endif
 
 	lua_newtable(L);
 	lua_pushvalue(L, 1);

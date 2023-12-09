@@ -18,8 +18,6 @@
 
 #include <ev.h>
 #include <strings.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <assert.h>
 #include <stdbool.h>

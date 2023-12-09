@@ -65,15 +65,15 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 	return 0;
 }
 
-static int deflate_close(void *p)
+static int
+deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 {
-	struct deflate_stream *restrict z = p;
 	int err = 0;
 	do {
 		unsigned char *buf = z->dstbuf + z->dstlen;
 		size_t n = sizeof(z->dstbuf) - z->dstlen;
 		z->status = tdefl_compress(
-			&z->deflator, NULL, NULL, buf, &n, TDEFL_FINISH);
+			&z->deflator, NULL, NULL, buf, &n, flush);
 		z->dstlen += n;
 
 		buf = z->dstbuf + z->dstpos;
@@ -93,6 +93,19 @@ static int deflate_close(void *p)
 			break;
 		}
 	} while (z->status != TDEFL_STATUS_DONE);
+	return err;
+}
+
+static int deflate_flush(void *p)
+{
+	struct deflate_stream *restrict z = p;
+	return deflate_flush_(z, TDEFL_SYNC_FLUSH);
+}
+
+static int deflate_close(void *p)
+{
+	struct deflate_stream *restrict z = p;
+	int err = deflate_flush_(z, TDEFL_FINISH);
 	const int ret = stream_close(z->base);
 	if (err == 0) {
 		err = ret;
@@ -124,6 +137,7 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 	z->dstpos = z->dstlen = 0;
 	static const struct stream_vftable vftable = {
 		.write = deflate_write,
+		.flush = deflate_flush,
 		.close = deflate_close,
 	};
 	z->s = (struct stream){ &vftable, NULL };

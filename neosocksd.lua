@@ -6,7 +6,7 @@ _G.async = pcall
 
 local await = {}
 
-function await.resolve(s) return s end
+function await.resolve(s) return "" end
 
 function await.rpcall(code, addr, ...) return false, "" end
 
@@ -19,7 +19,7 @@ _G.await = await
 
 local neosocksd = {}
 
-function neosocksd.resolve(s) return s end
+function neosocksd.resolve(s) return "" end
 
 function neosocksd.parse_ipv4(s) return 0 end
 
@@ -55,8 +55,8 @@ _G.regex = regex
 
 local zlib = {}
 
-function zlib.compress(s) return s end
+function zlib.compress(s) return "" end
 
-function zlib.uncompress(s) return s end
+function zlib.uncompress(z) return "" end
 
 _G.zlib = zlib

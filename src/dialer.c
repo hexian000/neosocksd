@@ -18,13 +18,11 @@
 #include "resolver.h"
 
 #include <ev.h>
-#include <errno.h>
 #include <arpa/inet.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
-#include <unistd.h>
 
 #include <assert.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
