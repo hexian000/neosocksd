@@ -1091,6 +1091,7 @@ static int api_compress_(lua_State *restrict L)
 	}
 	struct vbuffer *vbuf = VBUF_NEW(IO_BUFSIZE);
 	if (vbuf == NULL) {
+		stream_close(r);
 		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
 		return lua_error(L);
 	}
@@ -1125,6 +1126,7 @@ static int api_uncompress_(lua_State *restrict L)
 	}
 	struct vbuffer *vbuf = VBUF_NEW(IO_BUFSIZE);
 	if (vbuf == NULL) {
+		stream_close(r);
 		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
 		return lua_error(L);
 	}
