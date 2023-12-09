@@ -216,6 +216,12 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
 	assert((vbuf) == NULL || ((struct vbuffer *)(vbuf))->len <=            \
 					 ((struct vbuffer *)(vbuf))->cap)
 
+#define VBUF_CAP(vbuf)                                                         \
+	(VBUF_ASSERT_BOUND(vbuf), (vbuf) != NULL ? (vbuf)->cap : 0)
+
+#define VBUF_LEN(vbuf)                                                         \
+	(VBUF_ASSERT_BOUND(vbuf), (vbuf) != NULL ? (vbuf)->len : 0)
+
 /**
  * @brief Append fixed-length data to vbuffer.
  * @param vbuf If NULL, the minimum required size is allocated.
