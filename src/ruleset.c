@@ -655,8 +655,6 @@ static int zlib_uncompress_(lua_State *restrict L)
 	return 1;
 }
 
-#undef PUSH_ZLIB_OBJECT
-
 static int luaopen_zlib(lua_State *restrict L)
 {
 	lua_settop(L, 0);
