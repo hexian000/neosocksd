@@ -338,6 +338,21 @@ end
 Lua interface for [POSIX Extended Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html#tag_09_04).
 
 
+### zlib.compress
+
+**Synopsis**
+
+```Lua
+local z = zlib.compress(s)
+local s1 = zlib.uncompress(z)
+assert(s == s1)
+```
+
+**Description**
+
+Data compression interface for zlib format (as declared in RFC 1950 and RFC 1951).
+
+
 ### _G.NDEBUG
 
 **Synopsis**
@@ -410,7 +425,7 @@ end, "127.0.1.1:9080")
 
 **Description**
 
-Run Lua code on another neosocksd and take one string back.
+Run Lua code on another neosocksd and take one string back. Note that rpcall is not very fast as it is designed to work on the control plane.
 
 Tip: the utility `marshal` and `unmarshal` in `libruleset.lua` is useful if you want to marshal multiple values / tables.
 
