@@ -811,7 +811,7 @@ await_resume(struct ruleset *restrict r, const void *p, int narg, ...)
 	return true;
 }
 
-static int await_idle_close_(struct lua_State *L)
+static int await_idle_gc_(struct lua_State *L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
 	struct ev_idle *w = (struct ev_idle *)lua_topointer(L, 1);
@@ -856,20 +856,17 @@ static int await_idle_(lua_State *restrict L)
 	ev_set_priority(w, EV_MINPRI);
 	w->data = r;
 	if (luaL_newmetatable(L, MT_AWAIT_IDLE)) {
-		lua_pushcfunction(L, await_idle_close_);
-		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+		lua_pushcfunction(L, await_idle_gc_);
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-#if HAVE_LUA_TOCLOSE
-	lua_toclose(L, -1);
-#endif
 	await_pin(r, L, w);
 	ev_idle_start(r->loop, w);
 	const int status = lua_yieldk(L, 0, (lua_KContext)w, await_idle_k_);
 	return await_idle_k_(L, status, (lua_KContext)w);
 }
 
-static int await_sleep_close_(struct lua_State *L)
+static int await_sleep_gc_(struct lua_State *L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
 	struct ev_timer *w = (struct ev_timer *)lua_topointer(L, 1);
@@ -921,13 +918,10 @@ static int await_sleep_(lua_State *restrict L)
 	ev_set_priority(w, EV_MINPRI);
 	w->data = r;
 	if (luaL_newmetatable(L, MT_AWAIT_SLEEP)) {
-		lua_pushcfunction(L, await_sleep_close_);
-		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+		lua_pushcfunction(L, await_sleep_gc_);
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-#if HAVE_LUA_TOCLOSE
-	lua_toclose(L, -1);
-#endif
 	await_pin(r, L, w);
 	ev_timer_start(r->loop, w);
 	const int status = lua_yieldk(L, 0, (lua_KContext)w, await_sleep_k_);
@@ -936,9 +930,10 @@ static int await_sleep_(lua_State *restrict L)
 
 static int await_resolve_close_(struct lua_State *L)
 {
-	const handle_t h = *(handle_t *)lua_topointer(L, 1);
-	if (h != INVALID_HANDLE) {
-		resolve_cancel(h);
+	handle_t *restrict h = (handle_t *)lua_topointer(L, 1);
+	if (*h != INVALID_HANDLE) {
+		resolve_cancel(*h);
+		*h = INVALID_HANDLE;
 	}
 	return 0;
 }
@@ -997,7 +992,7 @@ static int await_resolve_(lua_State *restrict L)
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
-	//lua_toclose(L, -1);
+	lua_toclose(L, -1);
 #endif
 	await_pin(r, L, TO_POINTER(h));
 	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
@@ -1006,10 +1001,11 @@ static int await_resolve_(lua_State *restrict L)
 
 static int await_rpcall_close_(struct lua_State *L)
 {
-	const handle_t h = *(handle_t *)lua_topointer(L, 1);
-	if (h != INVALID_HANDLE) {
+	handle_t *h = (handle_t *)lua_topointer(L, 1);
+	if (*h != INVALID_HANDLE) {
 		struct ruleset *restrict r = find_ruleset(L);
-		http_client_cancel(r->loop, h);
+		http_client_cancel(r->loop, *h);
+		*h = INVALID_HANDLE;
 	}
 	return 0;
 }
