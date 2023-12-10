@@ -562,11 +562,13 @@ static int luaopen_regex(lua_State *restrict L)
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, regexlib);
-	luaL_newmetatable(L, MT_REGEX);
-	lua_pushvalue(L, -2);
-	lua_setfield(L, -2, "__index");
-	lua_pushcfunction(L, regex_gc_);
-	lua_setfield(L, -2, "__gc");
+	if (luaL_newmetatable(L, MT_REGEX)) {
+		lua_pushvalue(L, -2);
+		lua_setfield(L, -2, "__index");
+		lua_pushcfunction(L, regex_gc_);
+		lua_setfield(L, -2, "__gc");
+	}
+	lua_pop(L, 1);
 	return 1;
 }
 
