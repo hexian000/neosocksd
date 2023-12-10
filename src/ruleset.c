@@ -52,14 +52,22 @@ struct ruleset {
 	struct ev_timer w_ticker;
 };
 
-#define RIDX_OUTOFMEMORY (LUA_RIDX_LAST + 1)
+#define RIDX_ERRORS (LUA_RIDX_LAST + 1)
 #define RIDX_FUNCTIONS (LUA_RIDX_LAST + 2)
 #define RIDX_CONTEXTS (LUA_RIDX_LAST + 3)
 
+#define ERR_MEMORY "out of memory"
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
 #define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
 
 #define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM == 504)
+
+#define MT_AWAIT_IDLE "await.idle"
+#define MT_AWAIT_SLEEP "await.sleep"
+#define MT_AWAIT_RESOLVE "await.resolve"
+#define MT_AWAIT_RPCALL "await.rpcall"
+#define MT_REGEX "regex"
+#define MT_STREAM_CONTEXT "stream_context"
 
 static struct ruleset *find_ruleset(lua_State *L)
 {
@@ -116,13 +124,12 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, const int n)
 	return req;
 }
 
-static void format_addr(lua_State *restrict L)
+static int format_addr(lua_State *restrict L)
 {
 	const struct sockaddr *sa = lua_topointer(L, -1);
 	if (sa == NULL) {
-		lua_pop(L, 1);
 		lua_pushnil(L);
-		return;
+		return 1;
 	}
 	const int af = sa->sa_family;
 	switch (af) {
@@ -133,12 +140,10 @@ static void format_addr(lua_State *restrict L)
 			sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
-			(void)lua_pushstring(L, strerror(err));
-			(void)lua_error(L);
-			return;
+			lua_pushstring(L, strerror(err));
+			return lua_error(L);
 		}
-		lua_pop(L, 1);
-		(void)lua_pushstring(L, addr_str);
+		lua_pushstring(L, addr_str);
 	} break;
 	case AF_INET6: {
 		char buf[INET6_ADDRSTRLEN];
@@ -147,17 +152,15 @@ static void format_addr(lua_State *restrict L)
 			sizeof(buf));
 		if (addr_str == NULL) {
 			const int err = errno;
-			(void)lua_pushstring(L, strerror(err));
-			(void)lua_error(L);
-			return;
+			lua_pushstring(L, strerror(err));
+			return lua_error(L);
 		}
-		lua_pop(L, 1);
-		(void)lua_pushstring(L, addr_str);
+		lua_pushstring(L, addr_str);
 	} break;
 	default:
-		(void)lua_pushfstring(L, "unknown af: %d", af);
-		(void)lua_error(L);
+		return luaL_error(L, "unknown af: %d", af);
 	}
+	return 1;
 }
 
 enum ruleset_function {
@@ -406,8 +409,17 @@ static int ruleset_xpcall_(lua_State *restrict L)
 	return ruleset_xpcall_k_(L, status, 0);
 }
 
-static void luainit_functions(lua_State *restrict L)
+static void init_registry(lua_State *restrict L)
 {
+	lua_newtable(L);
+	lua_pushboolean(L, 1);
+	lua_setfield(L, -2, ERR_MEMORY);
+	lua_pushboolean(L, 1);
+	lua_setfield(L, -2, ERR_BAD_REGISTRY);
+	lua_pushboolean(L, 1);
+	lua_setfield(L, -2, ERR_NOT_YIELDABLE);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_ERRORS);
+
 	const struct {
 		lua_Integer idx;
 		lua_CFunction func;
@@ -492,8 +504,7 @@ static int regex_compile_(lua_State *restrict L)
 		lua_pushlstring(L, errbuf, n);
 		return lua_error(L);
 	}
-	lua_pushvalue(L, lua_upvalueindex(1));
-	lua_setmetatable(L, -2);
+	luaL_setmetatable(L, MT_REGEX);
 	return 1;
 }
 
@@ -544,20 +555,18 @@ static int regex_match_(lua_State *restrict L)
 
 static int luaopen_regex(lua_State *restrict L)
 {
-	lua_newtable(L);
-	lua_pushcfunction(L, regex_find_);
-	lua_setfield(L, -2, "find");
-	lua_pushcfunction(L, regex_match_);
-	lua_setfield(L, -2, "match");
-
-	lua_createtable(L, 0, 2);
+	const luaL_Reg regexlib[] = {
+		{ "compile", regex_compile_ },
+		{ "find", regex_find_ },
+		{ "match", regex_match_ },
+		{ NULL, NULL },
+	};
+	luaL_newlib(L, regexlib);
+	luaL_newmetatable(L, MT_REGEX);
 	lua_pushvalue(L, -2);
 	lua_setfield(L, -2, "__index");
 	lua_pushcfunction(L, regex_gc_);
 	lua_setfield(L, -2, "__gc");
-	/* capture the metatable as an upvalue */
-	lua_pushcclosure(L, regex_compile_, 1);
-	lua_setfield(L, -2, "compile");
 	return 1;
 }
 
@@ -590,7 +599,10 @@ static int zlib_compress_(lua_State *restrict L)
 	const char *src = luaL_checklstring(L, 1, &len);
 	struct stream_context *restrict s =
 		lua_newuserdata((L), sizeof(struct stream_context));
-	lua_pushvalue(L, lua_upvalueindex(1));
+	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
+		lua_pushcfunction(L, stream_context_close_);
+		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
@@ -599,7 +611,7 @@ static int zlib_compress_(lua_State *restrict L)
 	s->r = io_memreader(src, len);
 	s->w = codec_zlib_writer(io_heapwriter(&s->vbuf));
 	if (s->r == NULL || s->w == NULL) {
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
 	const int err = stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
@@ -623,7 +635,10 @@ static int zlib_uncompress_(lua_State *restrict L)
 	const char *src = luaL_checklstring(L, 1, &len);
 	struct stream_context *restrict s =
 		lua_newuserdata((L), sizeof(struct stream_context));
-	lua_pushvalue(L, lua_upvalueindex(1));
+	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
+		lua_pushcfunction(L, stream_context_close_);
+		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
@@ -632,7 +647,7 @@ static int zlib_uncompress_(lua_State *restrict L)
 	s->r = codec_zlib_reader(io_memreader(src, len));
 	s->w = io_heapwriter(&s->vbuf);
 	if (s->r == NULL || s->w == NULL) {
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
 	const int err = stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
@@ -651,28 +666,17 @@ static int zlib_uncompress_(lua_State *restrict L)
 
 static int luaopen_zlib(lua_State *restrict L)
 {
-	lua_settop(L, 0);
-	lua_createtable(L, 0, 1);
-	lua_pushcfunction(L, stream_context_close_);
-#if HAVE_LUA_TOCLOSE
-	lua_setfield(L, -2, "__close");
-#else
-	lua_setfield(L, -2, "__gc");
-#endif
-
-	lua_newtable(L);
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, zlib_compress_, 1);
-	lua_setfield(L, -2, "compress");
-
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, zlib_uncompress_, 1);
-	lua_setfield(L, -2, "uncompress");
+	const luaL_Reg zlib[] = {
+		{ "compress", zlib_compress_ },
+		{ "uncompress", zlib_uncompress_ },
+		{ NULL, NULL },
+	};
+	luaL_newlib(L, zlib);
 	return 1;
 }
 
 /* ok, ... = async(f, ...) */
-static int api_async_(lua_State *restrict L)
+static int ruleset_async_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TFUNCTION);
 	int n = lua_gettop(L);
@@ -741,24 +745,37 @@ static int api_invoke_(lua_State *restrict L)
 		}                                                              \
 	} while (0)
 
-#define AWAIT_PIN(r, L, p)                                                     \
-	do {                                                                   \
-		const int ismain = lua_pushthread((L));                        \
-		(void)ismain;                                                  \
-		assert(!ismain);                                               \
-		lua_rawsetp((L), lua_upvalueindex(1), (p));                    \
-		(r)->vmstats.num_routine++;                                    \
-	} while (0)
+static void
+await_pin(struct ruleset *restrict r, lua_State *restrict L, const void *p)
+{
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		lua_error(L);
+	}
+	if (lua_pushthread(L)) {
+		lua_pushliteral(L, ERR_NOT_YIELDABLE);
+		lua_error(L);
+	}
+	lua_rawsetp(L, -2, (p));
+	lua_pop(L, 1);
+	r->vmstats.num_routine++;
+}
 
-#define AWAIT_UNPIN(r, L, p)                                                   \
-	do {                                                                   \
-		lua_pushnil(L);                                                \
-		lua_rawsetp(L, lua_upvalueindex(1), (p));                      \
-		(r)->vmstats.num_routine--;                                    \
-	} while (0)
+static void
+await_unpin(struct ruleset *restrict r, lua_State *restrict L, const void *p)
+{
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		lua_error(L);
+	}
+	lua_pushnil(L);
+	lua_rawsetp(L, -2, (p));
+	lua_pop(L, 1);
+	r->vmstats.num_routine--;
+}
 
 static bool
-await_resume(struct ruleset *restrict r, const void *p, const int nargs, ...)
+await_resume(struct ruleset *restrict r, const void *p, int narg, ...)
 {
 	check_memlimit(r);
 	lua_State *restrict L = r->L;
@@ -774,13 +791,17 @@ await_resume(struct ruleset *restrict r, const void *p, const int nargs, ...)
 		return false;
 	}
 	va_list args;
-	va_start(args, nargs);
-	for (int i = 0; i < nargs; i++) {
+	va_start(args, narg);
+	for (int i = 0; i < narg; i++) {
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}
 	va_end(args);
+#if LUA_VERSION_NUM == 504
 	int nres = 0;
-	const int status = lua_resume(co, L, nargs, &nres);
+	const int status = lua_resume(co, L, narg, &nres);
+#else
+	const int status = lua_resume(co, L, narg);
+#endif
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_xmove(co, L, 1);
 		return false;
@@ -788,10 +809,10 @@ await_resume(struct ruleset *restrict r, const void *p, const int nargs, ...)
 	return true;
 }
 
-static int idle_gc_(struct lua_State *L)
+static int await_idle_close_(struct lua_State *L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	struct ev_idle *w = (struct ev_idle *)lua_topointer(L, -1);
+	struct ev_idle *w = (struct ev_idle *)lua_topointer(L, 1);
 	ev_idle_stop(r->loop, w);
 	return 0;
 }
@@ -812,7 +833,7 @@ static int
 await_idle_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	AWAIT_UNPIN(r, L, (void *)ctx);
+	await_unpin(r, L, (void *)ctx);
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -832,18 +853,24 @@ static int await_idle_(lua_State *restrict L)
 	ev_idle_init(w, idle_cb);
 	ev_set_priority(w, EV_MINPRI);
 	w->data = r;
-	lua_pushvalue(L, lua_upvalueindex(2));
+	if (luaL_newmetatable(L, MT_AWAIT_IDLE)) {
+		lua_pushcfunction(L, await_idle_close_);
+		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+	}
 	lua_setmetatable(L, -2);
-	AWAIT_PIN(r, L, w);
+#if HAVE_LUA_TOCLOSE
+	lua_toclose(L, -1);
+#endif
+	await_pin(r, L, w);
 	ev_idle_start(r->loop, w);
 	const int status = lua_yieldk(L, 0, (lua_KContext)w, await_idle_k_);
 	return await_idle_k_(L, status, (lua_KContext)w);
 }
 
-static int timer_gc_(struct lua_State *L)
+static int await_sleep_close_(struct lua_State *L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	struct ev_timer *w = (struct ev_timer *)lua_topointer(L, -1);
+	struct ev_timer *w = (struct ev_timer *)lua_topointer(L, 1);
 	ev_timer_stop(r->loop, w);
 	return 0;
 }
@@ -865,7 +892,7 @@ static int
 await_sleep_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	AWAIT_UNPIN(r, L, (void *)ctx);
+	await_unpin(r, L, (void *)ctx);
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -891,17 +918,23 @@ static int await_sleep_(lua_State *restrict L)
 	ev_timer_init(w, sleep_cb, n, 0.0);
 	ev_set_priority(w, EV_MINPRI);
 	w->data = r;
-	lua_pushvalue(L, lua_upvalueindex(2));
+	if (luaL_newmetatable(L, MT_AWAIT_SLEEP)) {
+		lua_pushcfunction(L, await_sleep_close_);
+		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+	}
 	lua_setmetatable(L, -2);
-	AWAIT_PIN(r, L, w);
+#if HAVE_LUA_TOCLOSE
+	lua_toclose(L, -1);
+#endif
+	await_pin(r, L, w);
 	ev_timer_start(r->loop, w);
 	const int status = lua_yieldk(L, 0, (lua_KContext)w, await_sleep_k_);
 	return await_sleep_k_(L, status, (lua_KContext)w);
 }
 
-static int resolve_gc_(struct lua_State *L)
+static int await_resolve_close_(struct lua_State *L)
 {
-	const handle_t h = *(handle_t *)lua_topointer(L, -1);
+	const handle_t h = *(handle_t *)lua_topointer(L, 1);
 	if (h != INVALID_HANDLE) {
 		resolve_cancel(h);
 	}
@@ -924,7 +957,7 @@ await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	handle_t *restrict p = (handle_t *)ctx;
 	struct ruleset *restrict r = find_ruleset(L);
-	AWAIT_UNPIN(r, L, TO_POINTER(*p));
+	await_unpin(r, L, TO_POINTER(*p));
 	*p = INVALID_HANDLE;
 	switch (status) {
 	case LUA_OK:
@@ -933,8 +966,7 @@ await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	default:
 		return lua_error(L);
 	}
-	format_addr(L);
-	return 1;
+	return format_addr(L);
 }
 
 /* await.resolve(host) */
@@ -952,21 +984,27 @@ static int await_resolve_(lua_State *restrict L)
 		},
 		name, NULL, G.conf->resolve_pf);
 	if (h == INVALID_HANDLE) {
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
 	handle_t *restrict p = lua_newuserdata(L, sizeof(handle_t));
 	*p = h;
-	lua_pushvalue(L, lua_upvalueindex(2));
+	if (luaL_newmetatable(L, MT_AWAIT_RESOLVE)) {
+		lua_pushcfunction(L, await_resolve_close_);
+		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+	}
 	lua_setmetatable(L, -2);
-	AWAIT_PIN(r, L, TO_POINTER(h));
+#if HAVE_LUA_TOCLOSE
+	//lua_toclose(L, -1);
+#endif
+	await_pin(r, L, TO_POINTER(h));
 	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
 	return await_resolve_k_(L, status, (lua_KContext)p);
 }
 
-static int rpcall_gc_(struct lua_State *L)
+static int await_rpcall_close_(struct lua_State *L)
 {
-	const handle_t h = *(handle_t *)lua_topointer(L, -1);
+	const handle_t h = *(handle_t *)lua_topointer(L, 1);
 	if (h != INVALID_HANDLE) {
 		struct ruleset *restrict r = find_ruleset(L);
 		http_client_cancel(r->loop, h);
@@ -993,7 +1031,7 @@ await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	handle_t *restrict p = (handle_t *)ctx;
 	struct ruleset *restrict r = find_ruleset(L);
-	AWAIT_UNPIN(r, L, TO_POINTER(*p));
+	await_unpin(r, L, TO_POINTER(*p));
 	*p = INVALID_HANDLE;
 	switch (status) {
 	case LUA_OK:
@@ -1033,14 +1071,20 @@ static int await_rpcall_(lua_State *restrict L)
 	handle_t h =
 		http_client_do(r->loop, req, "/ruleset/rpcall", code, len, cb);
 	if (h == INVALID_HANDLE) {
-		lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
+		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
 	handle_t *restrict p = lua_newuserdata(L, sizeof(handle_t));
 	*p = h;
-	lua_pushvalue(L, lua_upvalueindex(2));
+	if (luaL_newmetatable(L, MT_AWAIT_RPCALL)) {
+		lua_pushcfunction(L, await_rpcall_close_);
+		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+	}
 	lua_setmetatable(L, -2);
-	AWAIT_PIN(r, L, TO_POINTER(h));
+#if HAVE_LUA_TOCLOSE
+	lua_toclose(L, -1);
+#endif
+	await_pin(r, L, TO_POINTER(h));
 	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_rpcall_k_);
 	return await_rpcall_k_(L, status, (lua_KContext)p);
 }
@@ -1055,8 +1099,7 @@ static int api_resolve_(lua_State *restrict L)
 		return 1;
 	}
 	lua_pushlightuserdata(L, &addr.sa);
-	format_addr(L);
-	return 1;
+	return format_addr(L);
 }
 
 /* neosocksd.parse_ipv4(ipv4) */
@@ -1192,42 +1235,20 @@ static int api_now_(lua_State *restrict L)
 
 static int luaopen_await(lua_State *restrict L)
 {
-	lua_settop(L, 0);
-	lua_newtable(L);
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
-		FAILMSG(ERR_BAD_REGISTRY);
-	}
-	/* stack: [1] = await, [2] = RIDX_CONTEXTS */
-
-#define AWAITAPI(name, func, gc)                                               \
-	do {                                                                   \
-		lua_pushvalue(L, 2);                                           \
-		lua_createtable(L, 0, 1);                                      \
-		lua_pushcfunction(L, (gc));                                    \
-		lua_setfield(L, -2, "__gc");                                   \
-		/* RIDX_CONTEXTS, mt */                                        \
-		lua_pushcclosure(L, (func), 2);                                \
-		lua_setfield(L, 1, (name));                                    \
-	} while (0)
-
-	AWAITAPI("idle", await_idle_, idle_gc_);
-	AWAITAPI("sleep", await_sleep_, timer_gc_);
-	AWAITAPI("resolve", await_resolve_, resolve_gc_);
-	AWAITAPI("rpcall", await_rpcall_, rpcall_gc_);
-#undef AWAITAPI
-
-	lua_settop(L, 1);
-	return 1;
-}
-
-static void luainit_async(lua_State *restrict L)
-{
 	lua_newtable(L);
 	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
-	lua_pushcfunction(L, api_async_);
+	lua_pushcfunction(L, ruleset_async_);
 	lua_setglobal(L, "async");
-	luaL_requiref(L, "await", luaopen_await, 1);
-	lua_pop(L, 1);
+
+	const luaL_Reg awaitlib[] = {
+		{ "resolve", await_resolve_ },
+		{ "rpcall", await_rpcall_ },
+		{ "sleep", await_sleep_ },
+		{ "idle", await_idle_ },
+		{ NULL, NULL },
+	};
+	luaL_newlib(L, awaitlib);
+	return 1;
 }
 
 static int luaopen_neosocksd(lua_State *restrict L)
@@ -1249,17 +1270,20 @@ static int luaopen_neosocksd(lua_State *restrict L)
 
 static int ruleset_luainit_(lua_State *restrict L)
 {
-	/* init registry */
-	lua_pushliteral(L, "out of memory");
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_OUTOFMEMORY);
-	luainit_functions(L);
+	init_registry(L);
 	/* load all libraries */
 	luaL_openlibs(L);
-	luaL_requiref(L, "neosocksd", luaopen_neosocksd, 1);
-	luaL_requiref(L, "regex", luaopen_regex, 1);
-	luaL_requiref(L, "zlib", luaopen_zlib, 1);
-	lua_pop(L, 2);
-	luainit_async(L);
+	const luaL_Reg libs[] = {
+		{ "neosocksd", luaopen_neosocksd },
+		{ "regex", luaopen_regex },
+		{ "zlib", luaopen_zlib },
+		{ "await", luaopen_await },
+		{ NULL, NULL },
+	};
+	for (const luaL_Reg *lib = libs; lib->func; lib++) {
+		luaL_requiref(L, lib->name, lib->func, 1);
+		lua_pop(L, 1);
+	}
 	/* set flags */
 	lua_pushboolean(L, !LOGLEVEL(DEBUG));
 	lua_setglobal(L, "NDEBUG");
@@ -1302,9 +1326,8 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 
 static int l_panic(lua_State *L)
 {
-	const char *msg = lua_tostring(L, -1);
-	if (msg != NULL) {
-		LOGF_F("panic: %s", msg);
+	if (lua_isstring(L, -1)) {
+		LOGF_F("panic: %s", lua_tostring(L, -1));
 	} else {
 		LOGF_F("panic: (%s: %p)", lua_typename(L, lua_type(L, -1)),
 		       lua_topointer(L, -1));
