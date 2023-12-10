@@ -170,7 +170,6 @@ enum ruleset_function {
 	FUNC_UPDATE,
 	FUNC_STATS,
 	FUNC_TICK,
-	FUNC_IDLE,
 	FUNC_TRACEBACK,
 	FUNC_XPCALL,
 	FUNC_RPCALL,
@@ -358,13 +357,6 @@ static int ruleset_tick_(lua_State *restrict L)
 	return 0;
 }
 
-static int ruleset_idle_(lua_State *restrict L)
-{
-	find_callback(L, 1);
-	lua_call(L, 0, 0);
-	return 0;
-}
-
 static int ruleset_traceback_(lua_State *restrict L)
 {
 	size_t len;
@@ -430,7 +422,6 @@ static void init_registry(lua_State *restrict L)
 		{ FUNC_UPDATE, ruleset_update_ },
 		{ FUNC_STATS, ruleset_stats_ },
 		{ FUNC_TICK, ruleset_tick_ },
-		{ FUNC_IDLE, ruleset_idle_ },
 		{ FUNC_TRACEBACK, ruleset_traceback_ },
 		{ FUNC_XPCALL, ruleset_xpcall_ },
 		{ FUNC_RPCALL, ruleset_rpcall_ },
