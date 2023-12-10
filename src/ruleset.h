@@ -5,12 +5,12 @@
 #define RULESET_H
 
 #include "sockutil.h"
-#include "io/stream.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 
 struct ev_loop;
+struct stream;
 struct ruleset;
 
 struct ruleset_vmstats {

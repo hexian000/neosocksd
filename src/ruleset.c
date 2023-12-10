@@ -59,6 +59,7 @@ struct ruleset {
 #define ERR_MEMORY "out of memory"
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
 #define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
+#define ERR_INVALID_ROUTE "unable to parse route"
 
 #define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM == 504)
 
@@ -215,10 +216,6 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	}
 	lua_pushliteral(L, "ruleset");
 	lua_call(L, 1, 1);
-	if (!lua_istable(L, -1)) {
-		lua_pushliteral(L, "ruleset does not return a table");
-		return lua_error(L);
-	}
 	lua_setglobal(L, "ruleset");
 	return 0;
 }
@@ -270,7 +267,7 @@ static int ruleset_require_(lua_State *restrict L)
 	luaL_checktype(L, idx_openf, LUA_TFUNCTION);
 	lua_settop(L, 2);
 	const int idx_loaded = 3;
-	luaL_getsubtable(L, LUA_REGISTRYINDEX, "_LOADED");
+	luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
 	const int idx_glb = 4;
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) != LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
@@ -317,10 +314,6 @@ static int ruleset_update_(lua_State *restrict L)
 		}
 		lua_pushliteral(L, "ruleset");
 		lua_call(L, 1, 1);
-		if (!lua_istable(L, -1)) {
-			lua_pushliteral(L, "ruleset does not return a table");
-			return lua_error(L);
-		}
 		lua_setglobal(L, "ruleset");
 		return 0;
 	}
@@ -403,14 +396,18 @@ static int ruleset_xpcall_(lua_State *restrict L)
 
 static void init_registry(lua_State *restrict L)
 {
-	lua_newtable(L);
-	lua_pushboolean(L, 1);
-	lua_setfield(L, -2, ERR_MEMORY);
-	lua_pushboolean(L, 1);
-	lua_setfield(L, -2, ERR_BAD_REGISTRY);
-	lua_pushboolean(L, 1);
-	lua_setfield(L, -2, ERR_NOT_YIELDABLE);
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_ERRORS);
+	const char *errors[] = {
+		ERR_MEMORY,
+		ERR_BAD_REGISTRY,
+		ERR_NOT_YIELDABLE,
+		ERR_INVALID_ROUTE,
+	};
+	lua_createtable(L, ARRAY_SIZE(errors), 0);
+	for (size_t i = 0; i < ARRAY_SIZE(errors); i++) {
+		lua_pushstring(L, errors[i]);
+		lua_seti(L, -2, i + 1);
+	}
+	lua_seti(L, LUA_REGISTRYINDEX, RIDX_ERRORS);
 
 	const struct {
 		lua_Integer idx;
@@ -502,10 +499,8 @@ static int regex_compile_(lua_State *restrict L)
 /* regex.find(reg, s) */
 static int regex_find_(lua_State *restrict L)
 {
-	luaL_checktype(L, 1, LUA_TUSERDATA);
-	regex_t *preg = lua_touserdata(L, 1);
-	luaL_checktype(L, 2, LUA_TSTRING);
-	const char *s = lua_tostring(L, 2);
+	regex_t *preg = luaL_checkudata(L, 1, MT_REGEX);
+	const char *s = luaL_checkstring(L, 2);
 	regmatch_t match;
 	const int err = regexec(preg, s, 1, &match, 0);
 	if (err == REG_NOMATCH) {
@@ -525,10 +520,8 @@ static int regex_find_(lua_State *restrict L)
 /* regex.match(reg, s) */
 static int regex_match_(lua_State *restrict L)
 {
-	luaL_checktype(L, 1, LUA_TUSERDATA);
-	regex_t *preg = lua_touserdata(L, 1);
-	luaL_checktype(L, 2, LUA_TSTRING);
-	const char *s = lua_tostring(L, 2);
+	regex_t *preg = luaL_checkudata(L, 1, MT_REGEX);
+	const char *s = luaL_checkstring(L, 2);
 	regmatch_t match;
 	const int err = regexec(preg, s, 1, &match, 0);
 	if (err == REG_NOMATCH) {
@@ -719,7 +712,7 @@ static int api_invoke_(lua_State *restrict L)
 	}
 	struct dialreq *req = pop_dialreq(L, n - 1);
 	if (req == NULL) {
-		lua_pushliteral(L, "unable to get invocation target");
+		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
 	}
 	struct ruleset *restrict r = find_ruleset(L);
@@ -1047,7 +1040,7 @@ static int await_rpcall_(lua_State *restrict L)
 	}
 	struct dialreq *req = pop_dialreq(L, n - 1);
 	if (req == NULL) {
-		lua_pushliteral(L, "unable to get invocation target");
+		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
 	}
 	size_t len;
