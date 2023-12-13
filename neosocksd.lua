@@ -2,13 +2,16 @@
 
 _G.NDEBUG = true
 _G.async = pcall
+_G.marshal = function(...)
+    return ""
+end
 
 
 local await = {}
 
 function await.resolve(s) return "" end
 
-function await.rpcall(code, addr, ...) return false, "" end
+function await.invoke(code, addr, ...) return false, ... end
 
 function await.sleep(n) end
 
@@ -42,11 +45,11 @@ function regex.compile(pat)
     return setmetatable({}, regex)
 end
 
-function regex.find(s)
+function regex:find(s)
     return 0, 0
 end
 
-function regex.match(s)
+function regex:match(s)
     return s
 end
 

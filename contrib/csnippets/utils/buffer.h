@@ -218,7 +218,6 @@ vbuf_appendf(struct vbuffer *restrict vbuf, const char *format, ...);
 
 /**
  * @brief Get vbuffer capacity.
- * @param vbuf If NULL, returns 0.
  * @return Capacity in bytes.
  */
 #define VBUF_CAP(vbuf)                                                         \
@@ -226,11 +225,18 @@ vbuf_appendf(struct vbuffer *restrict vbuf, const char *format, ...);
 
 /**
  * @brief Get vbuffer length.
- * @param vbuf If NULL, returns 0.
  * @return Length in bytes.
  */
 #define VBUF_LEN(vbuf)                                                         \
 	(VBUF_ASSERT_BOUND(vbuf), (vbuf) != NULL ? (vbuf)->len : 0)
+
+/**
+ * @brief Get vbuffer data.
+ * @return Length in bytes.
+ */
+#define VBUF_DATA(vbuf)                                                        \
+	(VBUF_ASSERT_BOUND(vbuf),                                              \
+	 (vbuf) != NULL ? (void *)(vbuf)->data : (void *)"")
 
 /**
  * @brief Clear vbuffer object, do not change the allocation.

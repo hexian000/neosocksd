@@ -21,7 +21,7 @@
 #include "resolver.h"
 #include "dialer.h"
 #include "server.h"
-#include "http.h"
+#include "http_client.h"
 #include "sockutil.h"
 #include "util.h"
 
@@ -36,6 +36,7 @@
 #include <regex.h>
 
 #include <assert.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -66,7 +67,7 @@ struct ruleset {
 #define MT_AWAIT_IDLE "await.idle"
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"
-#define MT_AWAIT_RPCALL "await.rpcall"
+#define MT_AWAIT_RPCALL "await.invoke"
 #define MT_REGEX "regex"
 #define MT_STREAM_CONTEXT "stream_context"
 
@@ -164,7 +165,158 @@ static int format_addr(lua_State *restrict L)
 	return 1;
 }
 
-enum ruleset_function {
+static int marshal_value(lua_State *L, luaL_Buffer *B, int idx);
+static int marshal_table(lua_State *L, luaL_Buffer *B, int idx);
+
+static int
+marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
+{
+	size_t len;
+	const char *restrict s = lua_tolstring(L, idx, &len);
+	luaL_addchar(B, '"');
+	while (len--) {
+		const unsigned char ch = *s;
+		if (ch == '"' || ch == '\\' || ch == '\n') {
+			luaL_addchar(B, '\\');
+			luaL_addchar(B, ch);
+		} else if (iscntrl(ch)) {
+			char buff[10];
+			if (!isdigit(*(s + 1))) {
+				snprintf(buff, sizeof(buff), "\\%d", ch);
+			} else {
+				snprintf(buff, sizeof(buff), "\\%03d", ch);
+			}
+			luaL_addstring(B, buff);
+		} else {
+			luaL_addchar(B, ch);
+		}
+		s++;
+	}
+	luaL_addchar(B, '"');
+	return 0;
+}
+
+int marshal_table(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
+{
+	/* mark as open */
+	lua_pushvalue(L, idx);
+	lua_pushboolean(L, 1);
+	lua_rawset(L, 1);
+	/* marshal the table */
+	luaL_Buffer b;
+	luaL_buffinit(L, &b);
+	luaL_addchar(&b, '{');
+	bool first = true;
+	lua_pushnil(L); /* first key */
+	while (lua_next(L, idx) != 0) {
+		if (first) {
+			first = false;
+		} else {
+			luaL_addchar(&b, ',');
+		}
+		luaL_addchar(&b, '[');
+		marshal_value(L, &b, -2);
+		luaL_addchar(&b, ']');
+		luaL_addchar(&b, '=');
+		marshal_value(L, &b, -1);
+		lua_pop(L, 1);
+	}
+	lua_pop(L, 1);
+	luaL_addchar(&b, '}');
+	luaL_pushresult(&b);
+	/* save as closed */
+	lua_pushvalue(L, idx);
+	lua_pushvalue(L, -2);
+	lua_rawset(L, 2);
+	luaL_addvalue(B);
+	return 0;
+}
+
+int marshal_value(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
+{
+	const int type = lua_type(L, idx);
+	switch (type) {
+	case LUA_TTABLE:
+		break;
+	case LUA_TSTRING:
+		return marshal_string(L, B, idx);
+	case LUA_TNUMBER:
+		lua_pushvalue(L, idx);
+		luaL_addvalue(B);
+		return 0;
+	case LUA_TBOOLEAN:
+		luaL_addstring(B, lua_toboolean(L, idx) ? "true" : "false");
+		return 0;
+	case LUA_TNIL:
+		luaL_addstring(B, "nil");
+		return 0;
+	default:
+		return luaL_error(
+			L, "%s is not marshallable", lua_typename(L, type));
+	}
+	/* check closed */
+	lua_pushvalue(L, idx);
+	lua_rawget(L, 2);
+	if (!lua_isnil(L, -1)) {
+		luaL_addvalue(B);
+		return 0;
+	}
+	/* check open */
+	lua_pushvalue(L, idx);
+	lua_rawget(L, 1);
+	if (!lua_isnil(L, -1)) {
+		return luaL_error(
+			L, "circular referenced table is not marshallable");
+	}
+	lua_pop(L, 1);
+	return marshal_table(L, B, idx);
+}
+
+/* s = marshal(...) */
+static int marshal_(lua_State *restrict L)
+{
+	const int n = lua_gettop(L);
+	lua_newtable(L), lua_newtable(L);
+	lua_rotate(L, 1, 2);
+	const int start = 3;
+	const int end = start + n;
+	luaL_Buffer b;
+	luaL_buffinitsize(L, &b, IO_BUFSIZE);
+	for (int i = start; i < end; i++) {
+		if (i > start) {
+			luaL_addchar(&b, ',');
+		}
+		marshal_value(L, &b, i);
+	}
+	luaL_pushresult(&b);
+	return 1;
+}
+
+struct unmarshal_status {
+	struct stream *s;
+	const char *prefix;
+	size_t prefixlen;
+};
+
+static const char *unmarshal_stream(lua_State *L, void *ud, size_t *restrict sz)
+{
+	UNUSED(L);
+	struct unmarshal_status *restrict ctx = ud;
+	const void *buf = ctx->prefix;
+	if (buf != NULL) {
+		ctx->prefix = NULL;
+		*sz = ctx->prefixlen;
+		return buf;
+	}
+	*sz = SIZE_MAX; /* Lua allows arbitrary length */
+	const int err = stream_direct_read(ctx->s, &buf, sz);
+	if (err != 0) {
+		LOGE_F("read_stream: error %d", err);
+	}
+	return *sz > 0 ? buf : NULL;
+}
+
+enum ruleset_functions {
 	FUNC_REQUEST = 1,
 	FUNC_LOADFILE,
 	FUNC_INVOKE,
@@ -250,10 +402,13 @@ static int ruleset_rpcall_(lua_State *restrict L)
 	struct stream *s = (struct stream *)lua_topointer(L, 1);
 	const void **result = (const void **)lua_topointer(L, 2);
 	size_t *resultlen = (size_t *)lua_topointer(L, 3);
+	lua_settop(L, 0);
+	lua_pushcfunction(L, marshal_);
 	if (lua_load(L, read_stream, s, "=rpc", NULL) != LUA_OK) {
 		return lua_error(L);
 	}
-	lua_call(L, 0, 1);
+	lua_call(L, 0, LUA_MULTRET);
+	lua_call(L, lua_gettop(L) - 1, 1); /* marshal_ */
 	*result = lua_tolstring(L, -1, resultlen);
 	return 1;
 }
@@ -354,8 +509,10 @@ static int ruleset_traceback_(lua_State *restrict L)
 {
 	size_t len;
 	const char *msg = luaL_tolstring(L, -1, &len);
-	LOG_STACK_F(DEBUG, 0, "ruleset traceback: %s", msg);
 	luaL_traceback(L, L, msg, 1);
+	msg = lua_tolstring(L, -1, &len);
+	LOG_TXT(DEBUG, msg, len, "Lua traceback");
+	LOG_STACK(DEBUG, 0, "C traceback");
 	return 1;
 }
 
@@ -441,7 +598,7 @@ static void check_memlimit(struct ruleset *restrict r)
 }
 
 static bool ruleset_pcall(
-	struct ruleset *restrict r, enum ruleset_function func, int nargs,
+	struct ruleset *restrict r, enum ruleset_functions func, int nargs,
 	int nresults, ...)
 {
 	lua_State *restrict L = r->L;
@@ -587,7 +744,11 @@ static int zlib_compress_(lua_State *restrict L)
 		lua_newuserdata((L), sizeof(struct stream_context));
 	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
 		lua_pushcfunction(L, stream_context_close_);
-		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+#if HAVE_LUA_TOCLOSE
+		lua_pushvalue(L, -1);
+		lua_setfield(L, -3, "__close");
+#endif
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
@@ -623,7 +784,11 @@ static int zlib_uncompress_(lua_State *restrict L)
 		lua_newuserdata((L), sizeof(struct stream_context));
 	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
 		lua_pushcfunction(L, stream_context_close_);
-		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+#if HAVE_LUA_TOCLOSE
+		lua_pushvalue(L, -1);
+		lua_setfield(L, -3, "__close");
+#endif
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
@@ -972,7 +1137,11 @@ static int await_resolve_(lua_State *restrict L)
 	*p = h;
 	if (luaL_newmetatable(L, MT_AWAIT_RESOLVE)) {
 		lua_pushcfunction(L, await_resolve_close_);
-		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+#if HAVE_LUA_TOCLOSE
+		lua_pushvalue(L, -1);
+		lua_setfield(L, -3, "__close");
+#endif
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
@@ -983,7 +1152,7 @@ static int await_resolve_(lua_State *restrict L)
 	return await_resolve_k_(L, status, (lua_KContext)p);
 }
 
-static int await_rpcall_close_(struct lua_State *L)
+static int await_invoke_close_(struct lua_State *L)
 {
 	handle_t *h = (handle_t *)lua_topointer(L, 1);
 	if (*h != INVALID_HANDLE) {
@@ -994,22 +1163,20 @@ static int await_rpcall_close_(struct lua_State *L)
 	return 0;
 }
 
-static void rpcall_cb(
-	handle_t h, struct ev_loop *loop, void *ctx, bool ok,
-	const char *result, const size_t resultlen)
+static void invoke_cb(
+	handle_t h, struct ev_loop *loop, void *ctx, bool ok, const void *data,
+	size_t len)
 {
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
 	const void *p = TO_POINTER(h);
-	int i = ok ? 1 : 0;
-	if (!await_resume(
-		    r, p, 3, (void *)&i, (void *)result, (void *)&resultlen)) {
+	if (!await_resume(r, p, 3, (void *)&ok, (void *)data, (void *)&len)) {
 		LOGE_F("http_client_cb: %s", ruleset_error(r));
 	}
 }
 
 static int
-await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	handle_t *restrict p = (handle_t *)ctx;
 	struct ruleset *restrict r = find_ruleset(L);
@@ -1022,20 +1189,37 @@ await_rpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	default:
 		return lua_error(L);
 	}
-	const int ok = *(int *)lua_topointer(L, -3);
-	const char *result = lua_topointer(L, -2);
+	const bool ok = *(bool *)lua_topointer(L, -3);
+	const void *data = lua_topointer(L, -2);
 	const size_t len = *(size_t *)lua_topointer(L, -1);
+	lua_pop(L, 3);
 	lua_pushboolean(L, ok);
-	lua_pushlstring(L, result, len);
-	return 2;
+	if (!ok) {
+		lua_pushlstring(L, data, len);
+		return 2;
+	}
+	/* unmarshal */
+	const int base = lua_gettop(L);
+	struct unmarshal_status u = {
+		.prefix = "return ",
+		.prefixlen = 7,
+		.s = (struct stream *)data,
+	};
+	if (lua_load(L, unmarshal_stream, &u, "=unmarshal", NULL) != LUA_OK) {
+		return lua_error(L);
+	}
+	lua_call(L, 0, LUA_MULTRET);
+	return 1 + (lua_gettop(L) - base);
 }
 
-/* ok, ret = await.rpcall(code, addr, proxyN, ..., proxy1) */
-static int await_rpcall_(lua_State *restrict L)
+/* ok, ... = await.invoke(code, addr, proxyN, ..., proxy1) */
+static int await_invoke_(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
+	size_t len;
+	const char *code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L);
-	for (int i = 1; i <= MAX(2, n); i++) {
+	for (int i = 2; i <= MAX(2, n); i++) {
 		luaL_checktype(L, i, LUA_TSTRING);
 	}
 	struct dialreq *req = pop_dialreq(L, n - 1);
@@ -1043,11 +1227,9 @@ static int await_rpcall_(lua_State *restrict L)
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
 	}
-	size_t len;
-	const char *code = lua_tolstring(L, 1, &len);
 	struct ruleset *restrict r = find_ruleset(L);
 	struct http_client_cb cb = {
-		.func = rpcall_cb,
+		.func = invoke_cb,
 		.ctx = r,
 	};
 	handle_t h =
@@ -1056,19 +1238,24 @@ static int await_rpcall_(lua_State *restrict L)
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
+	lua_pop(L, 1); /* code */
 	handle_t *restrict p = lua_newuserdata(L, sizeof(handle_t));
 	*p = h;
 	if (luaL_newmetatable(L, MT_AWAIT_RPCALL)) {
-		lua_pushcfunction(L, await_rpcall_close_);
-		lua_setfield(L, -2, HAVE_LUA_TOCLOSE ? "__close" : "__gc");
+		lua_pushcfunction(L, await_invoke_close_);
+#if HAVE_LUA_TOCLOSE
+		lua_pushvalue(L, -1);
+		lua_setfield(L, -3, "__close");
+#endif
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
 	await_pin(r, L, TO_POINTER(h));
-	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_rpcall_k_);
-	return await_rpcall_k_(L, status, (lua_KContext)p);
+	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_invoke_k_);
+	return await_invoke_k_(L, status, (lua_KContext)p);
 }
 
 /* neosocksd.resolve(host) */
@@ -1221,10 +1408,9 @@ static int luaopen_await(lua_State *restrict L)
 	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
 	lua_pushcfunction(L, ruleset_async_);
 	lua_setglobal(L, "async");
-
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },
-		{ "rpcall", await_rpcall_ },
+		{ "invoke", await_invoke_ },
 		{ "sleep", await_sleep_ },
 		{ "idle", await_idle_ },
 		{ NULL, NULL },
@@ -1235,6 +1421,8 @@ static int luaopen_await(lua_State *restrict L)
 
 static int luaopen_neosocksd(lua_State *restrict L)
 {
+	lua_pushcfunction(L, marshal_);
+	lua_setglobal(L, "marshal");
 	const luaL_Reg apilib[] = {
 		{ "invoke", api_invoke_ },
 		{ "resolve", api_resolve_ },
@@ -1314,6 +1502,7 @@ static int l_panic(lua_State *L)
 		LOGF_F("panic: (%s: %p)", lua_typename(L, lua_type(L, -1)),
 		       lua_topointer(L, -1));
 	}
+	LOG_STACK(FATAL, 0, "stacktrace");
 	return 0; /* return to Lua to abort */
 }
 
@@ -1369,6 +1558,7 @@ const char *ruleset_error(struct ruleset *restrict r)
 		return "(no error)";
 	}
 	if (!lua_isstring(L, -1)) {
+		return lua_typename(L, lua_type(L, -1));
 		return "(error object is not a string)";
 	}
 	return lua_tostring(L, -1);

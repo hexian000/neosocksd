@@ -10,7 +10,9 @@ add_executable(neosocksd
     session.c session.h
     forward.c forward.h
     socks.c socks.h
-    http_proxy.c http_api.c http_client.c http_impl.h http.c http.h
+    http_parser.c http_parser.h
+    http_server.c http_server.h http_client.c http_client.h
+    http_proxy.c http_api.c http.h
     server.c server.h
     main.c
 )

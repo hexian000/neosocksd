@@ -1,9 +1,10 @@
 /* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "http_impl.h"
+#include "http_server.h"
 #include "utils/debug.h"
 #include "conf.h"
+#include "server.h"
 #include "ruleset.h"
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -89,16 +90,16 @@ static struct dialreq *make_dialreq(const char *addr_str)
 
 void http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	struct http_message *restrict msg = &ctx->http.msg;
+	const struct http_message *restrict msg = &ctx->parser.msg;
 	if (strcmp(msg->req.method, "CONNECT") != 0) {
-		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+		http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 		return;
 	}
 	HTTP_CTX_LOG_F(DEBUG, ctx, "http: CONNECT \"%s\"", msg->req.url);
 
 	struct dialreq *req = make_dialreq(msg->req.url);
 	if (req == NULL) {
-		http_resp_errpage(ctx, HTTP_BAD_GATEWAY);
+		http_resp_errpage(&ctx->parser, HTTP_BAD_GATEWAY);
 		return;
 	}
 	ctx->dialreq = req;

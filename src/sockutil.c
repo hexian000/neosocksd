@@ -304,3 +304,56 @@ bool resolve_addr(
 	freeaddrinfo(result);
 	return ok;
 }
+
+int socket_send(const int fd, const void *buf, size_t *len)
+{
+	const unsigned char *b = buf;
+	size_t nbsend = 0;
+	size_t n = *len;
+	while (n > 0) {
+		const ssize_t nsend = send(fd, b, n, 0);
+		if (nsend < 0) {
+			const int err = errno;
+			if (IS_TRANSIENT_ERROR(err)) {
+				break;
+			}
+			LOGE_F("send: fd=%d %s", fd, strerror(err));
+			*len = nbsend;
+			return err;
+		} else if (nsend == 0) {
+			break;
+		}
+		b += nsend;
+		n -= nsend;
+		nbsend += nsend;
+	}
+	*len = nbsend;
+	LOGV_F("send: fd=%d total %zu bytes", fd, nbsend);
+	return 0;
+}
+
+int socket_recv(const int fd, void *buf, size_t *len)
+{
+	unsigned char *b = buf;
+	size_t nbrecv = 0;
+	size_t n = *len;
+	while (n > 0) {
+		const ssize_t nrecv = recv(fd, b, n, 0);
+		if (nrecv < 0) {
+			const int err = errno;
+			if (IS_TRANSIENT_ERROR(err)) {
+				break;
+			}
+			LOGE_F("recv: fd=%d %s", fd, strerror(err));
+			return err;
+		} else if (nrecv == 0) {
+			break;
+		}
+		b += nrecv;
+		n -= nrecv;
+		nbrecv += nrecv;
+	}
+	*len = nbrecv;
+	LOGV_F("recv: fd=%d total %zu bytes", fd, nbrecv);
+	return 0;
+}

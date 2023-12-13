@@ -26,64 +26,14 @@ function _G.eval(s, ...)
     return assert(load(s, "=eval"))(...)
 end
 
-function _G.marshal(...)
-    local open, closed = {}, {}
-    local marshal_table, marshal_value
-    local marshaler = {
-        ["table"] = function(v)
-            if closed[v] then
-                return closed[v]
-            elseif open[v] then
-                error("circular referenced table is not marshallable")
-            else
-                return marshal_table(v)
-            end
-        end,
-        ["string"] = function(v)
-            return string.format("%q", v)
-        end,
-        ["number"] = tostring,
-        ["boolean"] = tostring,
-        ["nil"] = tostring,
-    }
-    marshal_table = function(t)
-        open[t] = true
-        local w = {}
-        for k, v in pairs(t) do
-            local kstr = marshal_value(k)
-            local vstr = marshal_value(v)
-            table.insert(w, string.format("[%s]=%s", kstr, vstr))
-        end
-        local str = "{" .. table.concat(w, ",") .. "}"
-        closed[t] = str
-        return str
-    end
-    marshal_value = function(v)
-        local m = marshaler[type(v)]
-        if not m then
-            error(string.format("type %q is not marshallable", type(v)))
-        end
-        return m(v)
-    end
-    local t, w = { ... }, {}
-    for i, v in ipairs(t) do
-        table.insert(w, marshal_value(v))
-    end
-    return table.concat(w, ",")
-end
-
-function _G.unmarshal(s)
-    return assert(load("return " .. s, "=unmarshal"))()
-end
-
-function string:startswith(sub)
+function string.startswith(s, sub)
     local n = string.len(sub)
-    return string.sub(self, 1, n) == sub
+    return string.sub(s, 1, n) == sub
 end
 
-function string:endswith(sub)
+function string.endswith(s, sub)
     local n = string.len(sub)
-    return string.sub(self, -n) == sub
+    return string.sub(s, -n) == sub
 end
 
 local list = {
@@ -222,6 +172,23 @@ function _G.parse_cidr6(s)
         end
     end
     return subnet1, subnet2, shift
+end
+
+function _G.unmarshal(s)
+    return assert(load("return " .. s, "=unmarshal"))()
+end
+
+local rpc = _G.rpc or {}
+
+function rpc.echo(...)
+    return ...
+end
+
+_G.rpc = rpc
+
+function await.rpcall(target, func, ...)
+    local code = string.format("return _G.rpc.%s(%s)", func, marshal(...))
+    return await.invoke(code, table.unpack(target))
 end
 
 -- [[ route table matchers ]] --

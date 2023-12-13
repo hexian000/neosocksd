@@ -9,7 +9,7 @@
 ## RESTful API
 
 1. The RESTful API server runs `HTTP/1.1`.
-2. The content length limit for a single request is at least 4 MiB.
+2. The content length limit for a single request is 4 MiB.
 
 ### Healthy Check
 
@@ -27,7 +27,7 @@ POST: Calculate server statistics since the last request.
 
 - **Path**: `/stats`
 - **Method**: GET, POST
-- **Status**: HTTP 200, HTTP 405
+- **Status**: HTTP 200
 - **Response**: Server statistics in plain text.
 
 ### Ruleset Invoke
@@ -37,17 +37,17 @@ Run the posted script.
 - **Path**: `/ruleset/invoke`
 - **Method**: POST
 - **Content**: Lua script
-- **Status**: HTTP 200, HTTP 405, HTTP 500
+- **Status**: HTTP 200, HTTP 500
 
 ### Ruleset RPCall
 
-Internal API reserved for `await.rpcall`.
+Internal API reserved for `await.invoke`.
 
 - **Path**: `/ruleset/rpcall`
 - **Method**: POST
 - **Content**: Lua script
-- **Status**: HTTP 200, HTTP 405, HTTP 500
-- **Response**: First string the Lua script returned.
+- **Status**: HTTP 200, HTTP 500
+- **Response**: Return values.
 
 ### Ruleset Update
 
@@ -61,7 +61,7 @@ Load the posted script and use it as follows:
 - **Query**: `?module=name` (optional)
 - **Method**: POST
 - **Content**: Lua ruleset script or Lua module script
-- **Status**: HTTP 200, HTTP 405, HTTP 500
+- **Status**: HTTP 200, HTTP 500
 
 ### Ruleset GC
 
@@ -70,7 +70,7 @@ Trigger the garbage collector to free some memory.
 - **Path**: `/ruleset/gc`
 - **Method**: POST
 - **Content**: None
-- **Status**: HTTP 200, HTTP 405
+- **Status**: HTTP 200
 
 
 ## Ruleset Callbacks
@@ -368,6 +368,22 @@ True if the log level doesn't allow printing debug logs. The log level depends o
 In the default implementation of `libruleset.lua`, this value controls whether `log`/`logf` writes to standard output.
 
 
+### _G.marshal(...)
+
+**Synopsis**
+
+```Lua
+local s = marshal("a", {"b", ["c"] = "d"})
+log(s) -- "a",{[1]="b",["c"]="d"} 
+```
+
+**Description**
+
+Marshal all parameters in Lua syntax.
+
+There is also a `_G.unmarshal(s)` in `libruleset.lua`.
+
+
 ### _G.async
 
 **Synopsis**
@@ -407,17 +423,18 @@ IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
 
 
-### await.rpcall
+### await.invoke
 
 **Synopsis**
 
 ```Lua
 async(function(addr)
     local begin = neosocksd.now()
-    local ok, ret = await.rpcall([[return "echo"]], addr)
-    if not ok or ret ~= "echo" then
-        error("await.rpcall: " .. ret)
+    local ok, ret = await.invoke([[return "echo"]], addr)
+    if not ok then
+        error("await.invoke: " .. ret)
     end
+    assert(ret == "echo")
     local rtt = neosocksd.now() - begin
     logf("ping %s: %dms", addr, math.ceil(rtt * 1e+3))
 end, "127.0.1.1:9080")
@@ -425,9 +442,9 @@ end, "127.0.1.1:9080")
 
 **Description**
 
-Run Lua code on another neosocksd and take one string back. Note that rpcall is not very fast as it is designed to work on the control plane.
+Run Lua code on another neosocksd and take the results back. `await.invoke` is designed to work on the control plane.
 
-Tip: the utility `marshal` and `unmarshal` in `libruleset.lua` is useful if you want to marshal multiple values / tables.
+Tip: the wrapper `await.rpcall` in `libruleset.lua` is useful if you want to implement RPC.
 
 
 ### await.sleep

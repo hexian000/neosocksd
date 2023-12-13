@@ -1,11 +1,8 @@
 /* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "codec.h"
-#include "http.h"
-#include "http_impl.h"
-#include "io/io.h"
-#include "io/memory.h"
+#include "http_server.h"
+#include "http_parser.h"
 #include "io/stream.h"
 #include "net/http.h"
 #include "net/url.h"
@@ -16,6 +13,7 @@
 #include "utils/slog.h"
 #include "resolver.h"
 #include "ruleset.h"
+#include "server.h"
 
 #include <strings.h>
 
@@ -150,32 +148,16 @@ static void server_stats_stateful(
 }
 #undef FORMAT_BYTES
 
-static struct stream *
-content_writer(struct http_ctx *restrict ctx, const size_t bufsize)
-{
-	ctx->cbuf = VBUF_RESERVE(ctx->cbuf, bufsize);
-	if (ctx->cbuf == NULL) {
-		LOGOOM();
-		return NULL;
-	}
-	ctx->cbuf->len = 0;
-	struct stream *w = io_heapwriter(&ctx->cbuf);
-	if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
-		return codec_zlib_writer(w);
-	}
-	return w;
-}
-
 static void http_handle_stats(
 	struct ev_loop *loop, struct http_ctx *restrict ctx,
 	struct url *restrict uri)
 {
-	const struct http_message *restrict msg = &ctx->http.msg;
+	const struct http_message *restrict msg = &ctx->parser.msg;
 	bool banner = true;
 	while (uri->query != NULL) {
 		char *key, *value;
 		if (!url_query_component(&uri->query, &key, &value)) {
-			http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+			http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 			return;
 		}
 		if (strcmp(key, "banner") == 0) {
@@ -185,33 +167,31 @@ static void http_handle_stats(
 		}
 	}
 
+	const enum content_encodings encoding =
+		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
+			CENCODING_DEFLATE :
+			CENCODING_NONE;
 	bool stateless;
 	if (strcmp(msg->req.method, "GET") == 0) {
-		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_CPLAINTEXT(ctx->wbuf);
-		if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
-			RESPHDR_CENCODING(ctx->wbuf, "deflate");
-		}
-		RESPHDR_NOCACHE(ctx->wbuf);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+		RESPHDR_NOCACHE(ctx->parser.wbuf);
 		stateless = true;
 	} else if (strcmp(msg->req.method, "POST") == 0) {
-		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_CPLAINTEXT(ctx->wbuf);
-		if (ctx->http.accept_encoding == CENCODING_DEFLATE) {
-			RESPHDR_CENCODING(ctx->wbuf, "deflate");
-		}
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 		stateless = false;
 	} else {
-		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
+		http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
 		return;
 	}
-	struct stream *w = content_writer(ctx, IO_BUFSIZE);
+	struct stream *w = content_writer(&ctx->parser.cbuf, 0, encoding);
 	if (w == NULL) {
-		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	/* borrow the read buffer */
-	struct buffer *restrict buf = (struct buffer *)&ctx->rbuf;
+	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
 	buf->len = 0;
 
 	if (banner) {
@@ -230,7 +210,8 @@ static void http_handle_stats(
 		const int cerr = stream_close(w);
 		if (werr != 0 || n < buf->len || cerr != 0) {
 			LOGE_F("stream error: %d, %zu, %d", werr, n, cerr);
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			http_resp_errpage(
+				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		}
 		return;
 	}
@@ -244,7 +225,7 @@ static void http_handle_stats(
 	int err = stream_write(w, buf->data, &n);
 	if (n < buf->len || err != 0) {
 		LOGE_F("stream_write error: %d, %zu/%zu", err, n, buf->len);
-		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 
@@ -257,20 +238,22 @@ static void http_handle_stats(
 		if (s == NULL) {
 			s = ruleset_error(G.ruleset);
 		}
-		const size_t len = strlen(s);
 		n = sizeof(header) - 1;
 		err = stream_write(w, header, &n);
 		if (n < sizeof(header) - 1 || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
 			       sizeof(header) - 1);
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			http_resp_errpage(
+				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
+		const size_t len = strlen(s);
 		n = len;
 		err = stream_write(w, s, &n);
 		if (n < len || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n, len);
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+			http_resp_errpage(
+				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
 	}
@@ -279,11 +262,15 @@ static void http_handle_stats(
 	err = stream_close(w);
 	if (err != 0) {
 		LOGE_F("stream_close error: %d", err);
-		http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	RESPHDR_CLENGTH(ctx->wbuf, ctx->cbuf->len);
-	RESPHDR_FINISH(ctx->wbuf);
+	const char *encoding_str = content_encoding_str[encoding];
+	if (encoding_str != NULL) {
+		RESPHDR_CENCODING(ctx->parser.wbuf, encoding_str);
+	}
+	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
+	RESPHDR_FINISH(ctx->parser.wbuf);
 }
 
 static bool http_leafnode_check(
@@ -291,47 +278,183 @@ static bool http_leafnode_check(
 	const char *method, const bool require_content)
 {
 	if (uri->path != NULL) {
-		http_resp_errpage(ctx, HTTP_NOT_FOUND);
+		http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
 		return false;
 	}
-	const struct http_message *restrict msg = &ctx->http.msg;
+	const struct http_message *restrict msg = &ctx->parser.msg;
 	if (method != NULL && strcmp(msg->req.method, method) != 0) {
-		http_resp_errpage(ctx, HTTP_METHOD_NOT_ALLOWED);
+		http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
-	if (require_content && ctx->cbuf == NULL) {
-		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+	if (require_content && ctx->parser.hdr.content.length == 0) {
+		http_resp_errpage(&ctx->parser, HTTP_LENGTH_REQUIRED);
 		return false;
 	}
 	return true;
 }
 
 #if WITH_RULESET
-static struct stream *content_reader(struct http_ctx *restrict ctx)
+static void
+handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 {
-	struct stream *r = NULL;
-	switch (ctx->http.content_encoding) {
-	case CENCODING_NONE:
-		r = io_memreader(ctx->cbuf->data, ctx->http.content_length);
-		break;
-	case CENCODING_DEFLATE:
-		r = codec_zlib_reader(io_memreader(
-			ctx->cbuf->data, ctx->http.content_length));
-		break;
-	case CENCODING_GZIP: {
-		size_t len = ctx->http.content_length;
-		const void *buf = gzip_unbox(ctx->cbuf->data, &len);
-		r = codec_inflate_reader(io_memreader(buf, len));
-	} break;
+	char *mime_type = ctx->parser.hdr.content.type;
+	if (!check_rpcall_mime(mime_type)) {
+		LOGD("rpcall: invalid content type");
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_BAD_REQUEST);
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		return;
 	}
-	if (r == NULL) {
-		return NULL;
+	struct stream *reader = content_reader(
+		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
+		ctx->parser.hdr.content.encoding);
+	if (reader == NULL) {
+		LOGOOM();
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		return;
 	}
-	/* lua reader requires direct_read */
-	if (r->vftable->direct_read == NULL) {
-		r = io_bufreader(r, 0);
+	const void *result;
+	size_t resultlen;
+	const bool ok = ruleset_rpcall(ruleset, reader, &result, &resultlen);
+	stream_close(reader);
+	if (!ok) {
+		const char *err = ruleset_error(ruleset);
+		LOGW_F("ruleset rpcall: %s", err);
+		const size_t len = strlen(err);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
+		RESPHDR_CLENGTH(ctx->parser.wbuf, len);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+		BUF_APPEND(ctx->parser.wbuf, err, len);
+		return;
 	}
-	return r;
+	const enum content_encodings encoding =
+		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) &&
+				(resultlen > HTTP_MAX_ENTITY) ?
+			CENCODING_DEFLATE :
+			CENCODING_NONE;
+	struct stream *w =
+		content_writer(&ctx->parser.cbuf, resultlen, encoding);
+	size_t n = resultlen;
+	int err = stream_write(w, result, &n);
+	if (n != resultlen || err != 0) {
+		LOGW_F("stream_write: error %d", err);
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	err = stream_close(w);
+	if (err != 0) {
+		LOGW_F("stream_close: error %d", err);
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
+	const char *encoding_str = content_encoding_str[encoding];
+	if (encoding_str != NULL) {
+		RESPHDR_CENCODING(ctx->parser.wbuf, encoding_str);
+	}
+	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
+	RESPHDR_FINISH(ctx->parser.wbuf);
+}
+
+static void
+handle_ruleset_invoke(struct http_ctx *restrict ctx, struct ruleset *ruleset)
+{
+	const int64_t start = clock_monotonic();
+	struct stream *reader = content_reader(
+		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
+		ctx->parser.hdr.content.encoding);
+	if (reader == NULL) {
+		LOGOOM();
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	const bool ok = ruleset_invoke(ruleset, reader);
+	stream_close(reader);
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	if (!ok) {
+		const char *err = ruleset_error(ruleset);
+		LOGW_F("ruleset invoke: %s", err);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		BUF_APPENDSTR(ctx->parser.wbuf, err);
+		BUF_APPENDCONST(ctx->parser.wbuf, "\n");
+		return;
+	}
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_FINISH(ctx->parser.wbuf);
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	char timecost[16];
+	(void)format_duration(
+		timecost, sizeof(timecost),
+		make_duration_nanos(clock_monotonic() - start));
+	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
+}
+
+static void handle_ruleset_update(
+	struct http_ctx *restrict ctx, struct ruleset *ruleset,
+	const char *module)
+{
+	const int64_t start = clock_monotonic();
+	struct stream *reader = content_reader(
+		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
+		ctx->parser.hdr.content.encoding);
+	if (reader == NULL) {
+		LOGOOM();
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	const bool ok = ruleset_update(ruleset, module, reader);
+	stream_close(reader);
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	if (!ok) {
+		const char *err = ruleset_error(ruleset);
+		LOGW_F("ruleset update: %s", err);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		BUF_APPENDSTR(ctx->parser.wbuf, err);
+		BUF_APPENDCONST(ctx->parser.wbuf, "\n");
+		return;
+	}
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_FINISH(ctx->parser.wbuf);
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	char timecost[16];
+	(void)format_duration(
+		timecost, sizeof(timecost),
+		make_duration_nanos(clock_monotonic() - start));
+	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
+}
+
+static void
+handle_ruleset_gc(struct http_ctx *restrict ctx, struct ruleset *ruleset)
+{
+	const int64_t start = clock_monotonic();
+	ruleset_gc(ruleset);
+	struct ruleset_vmstats vmstats;
+	ruleset_vmstats(ruleset, &vmstats);
+	char livemem[16];
+	(void)format_iec_bytes(
+		livemem, sizeof(livemem), (double)vmstats.byt_allocated);
+	char timecost[16];
+	(void)format_duration(
+		timecost, sizeof(timecost),
+		make_duration_nanos(clock_monotonic() - start));
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	RESPHDR_FINISH(ctx->parser.wbuf);
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	BUF_APPENDF(
+		ctx->parser.wbuf,
+		"Num Live Objects    : %zu\n"
+		"Async Routines      : %zu\n"
+		"Ruleset Live Memory : %s\n"
+		"Time Cost           : %s\n",
+		vmstats.num_object, vmstats.num_routine, livemem, timecost);
 }
 
 static void http_handle_ruleset(
@@ -341,51 +464,34 @@ static void http_handle_ruleset(
 	UNUSED(loop);
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset == NULL) {
-		RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_FINISH(ctx->wbuf);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_FINISH(ctx->parser.wbuf);
 		BUF_APPENDCONST(
-			ctx->wbuf, "ruleset not enabled, restart with -r\n");
+			ctx->parser.wbuf,
+			"ruleset not enabled, restart with -r\n");
 		return;
 	}
 
 	char *segment;
 	if (!url_path_segment(&uri->path, &segment)) {
-		http_resp_errpage(ctx, HTTP_NOT_FOUND);
+		http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
+		return;
+	}
+	if (strcmp(segment, "rpcall") == 0) {
+		if (!http_leafnode_check(ctx, uri, "POST", true)) {
+			return;
+		}
+		handle_ruleset_rpcall(ctx, ruleset);
 		return;
 	}
 	if (strcmp(segment, "invoke") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		const int64_t start = clock_monotonic();
-		struct stream *reader = content_reader(ctx);
-		if (reader == NULL) {
-			LOGOOM();
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
-			return;
-		}
-		const bool ok = ruleset_invoke(ruleset, reader);
-		stream_close(reader);
-		ctx->cbuf = VBUF_FREE(ctx->cbuf);
-		if (!ok) {
-			const char *err = ruleset_error(ruleset);
-			LOGW_F("ruleset invoke: %s", err);
-			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
-			RESPHDR_CPLAINTEXT(ctx->wbuf);
-			RESPHDR_FINISH(ctx->wbuf);
-			BUF_APPENDSTR(ctx->wbuf, err);
-			BUF_APPENDCONST(ctx->wbuf, "\n");
-			return;
-		}
-		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_FINISH(ctx->wbuf);
-		char timecost[16];
-		(void)format_duration(
-			timecost, sizeof(timecost),
-			make_duration_nanos(clock_monotonic() - start));
-		BUF_APPENDF(ctx->wbuf, "Time Cost           : %s\n", timecost);
+		handle_ruleset_invoke(ctx, ruleset);
 		return;
-	} else if (strcmp(segment, "update") == 0) {
+	}
+	if (strcmp(segment, "update") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
@@ -393,150 +499,50 @@ static void http_handle_ruleset(
 		while (uri->query != NULL) {
 			char *key, *value;
 			if (!url_query_component(&uri->query, &key, &value)) {
-				http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+				http_resp_errpage(
+					&ctx->parser, HTTP_BAD_REQUEST);
 				return;
 			}
 			if (strcmp(key, "module") == 0) {
 				module = value;
 			}
 		}
-		const int64_t start = clock_monotonic();
-		struct stream *reader = content_reader(ctx);
-		if (reader == NULL) {
-			LOGOOM();
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
-			return;
-		}
-		const bool ok = ruleset_update(ruleset, module, reader);
-		stream_close(reader);
-		ctx->cbuf = VBUF_FREE(ctx->cbuf);
-		if (!ok) {
-			const char *err = ruleset_error(ruleset);
-			LOGW_F("ruleset update: %s", err);
-			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
-			RESPHDR_CPLAINTEXT(ctx->wbuf);
-			RESPHDR_FINISH(ctx->wbuf);
-			BUF_APPENDSTR(ctx->wbuf, err);
-			BUF_APPENDCONST(ctx->wbuf, "\n");
-			return;
-		}
-		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_FINISH(ctx->wbuf);
-		char timecost[16];
-		(void)format_duration(
-			timecost, sizeof(timecost),
-			make_duration_nanos(clock_monotonic() - start));
-		BUF_APPENDF(ctx->wbuf, "Time Cost           : %s\n", timecost);
+		handle_ruleset_update(ctx, ruleset, module);
 		return;
-	} else if (strcmp(segment, "gc") == 0) {
+	}
+	if (strcmp(segment, "gc") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", false)) {
 			return;
 		}
-		const int64_t start = clock_monotonic();
-		ruleset_gc(ruleset);
-		struct ruleset_vmstats vmstats;
-		ruleset_vmstats(ruleset, &vmstats);
-		char livemem[16];
-		(void)format_iec_bytes(
-			livemem, sizeof(livemem),
-			(double)vmstats.byt_allocated);
-		char timecost[16];
-		(void)format_duration(
-			timecost, sizeof(timecost),
-			make_duration_nanos(clock_monotonic() - start));
-		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_CPLAINTEXT(ctx->wbuf);
-		RESPHDR_FINISH(ctx->wbuf);
-		BUF_APPENDF(
-			ctx->wbuf,
-			"Num Live Objects    : %zu\n"
-			"Async Routines      : %zu\n"
-			"Ruleset Live Memory : %s\n"
-			"Time Cost           : %s\n",
-			vmstats.num_object, vmstats.num_routine, livemem,
-			timecost);
-		return;
-	} else if (strcmp(segment, "rpcall") == 0) {
-		if (!http_leafnode_check(ctx, uri, "POST", true)) {
-			return;
-		}
-		if (ctx->http.content_type == NULL ||
-		    strcasecmp(ctx->http.content_type, MIME_RPCALL) != 0) {
-			LOGD_F("rpcall: invalid content type \"%s\"",
-			       ctx->http.content_type);
-			RESPHDR_BEGIN(ctx->wbuf, HTTP_BAD_REQUEST);
-			RESPHDR_CPLAINTEXT(ctx->wbuf);
-			RESPHDR_FINISH(ctx->wbuf);
-			return;
-		}
-		struct stream *reader = content_reader(ctx);
-		if (reader == NULL) {
-			LOGOOM();
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
-			return;
-		}
-		const void *result;
-		size_t resultlen;
-		const bool ok =
-			ruleset_rpcall(ruleset, reader, &result, &resultlen);
-		stream_close(reader);
-		if (!ok) {
-			const char *err = ruleset_error(ruleset);
-			LOGW_F("ruleset rpcall: %s", err);
-			const size_t len = strlen(err);
-			RESPHDR_BEGIN(ctx->wbuf, HTTP_INTERNAL_SERVER_ERROR);
-			RESPHDR_CTYPE(ctx->wbuf, MIME_RPCALL);
-			RESPHDR_CLENGTH(ctx->wbuf, len);
-			RESPHDR_FINISH(ctx->wbuf);
-			BUF_APPEND(ctx->wbuf, err, len);
-			return;
-		}
-		struct stream *w = content_writer(ctx, resultlen);
-		size_t n = resultlen;
-		int err = stream_write(w, result, &n);
-		if (n != resultlen || err != 0) {
-			LOGW_F("stream_write: error %d", err);
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
-			return;
-		}
-		err = stream_close(w);
-		if (err != 0) {
-			LOGW_F("stream_close: error %d", err);
-			http_resp_errpage(ctx, HTTP_INTERNAL_SERVER_ERROR);
-			return;
-		}
-		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_CTYPE(ctx->wbuf, MIME_RPCALL);
-		RESPHDR_CLENGTH(ctx->wbuf, n);
-		RESPHDR_FINISH(ctx->wbuf);
+		handle_ruleset_gc(ctx, ruleset);
 		return;
 	}
 
-	http_resp_errpage(ctx, HTTP_NOT_FOUND);
+	http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
 }
 #endif
 
 void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	const struct http_message *restrict msg = &ctx->http.msg;
+	const struct http_message *restrict msg = &ctx->parser.msg;
 	HTTP_CTX_LOG_F(DEBUG, ctx, "http: api \"%s\"", msg->req.url);
 	struct url uri;
 	if (!url_parse(msg->req.url, &uri)) {
 		HTTP_CTX_LOG(WARNING, ctx, "failed parsing url");
-		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+		http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 		return;
 	}
 	char *segment;
 	if (!url_path_segment(&uri.path, &segment)) {
-		http_resp_errpage(ctx, HTTP_BAD_REQUEST);
+		http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 		return;
 	}
 	if (strcmp(segment, "healthy") == 0) {
 		if (!http_leafnode_check(ctx, &uri, NULL, false)) {
 			return;
 		}
-		RESPHDR_BEGIN(ctx->wbuf, HTTP_OK);
-		RESPHDR_FINISH(ctx->wbuf);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+		RESPHDR_FINISH(ctx->parser.wbuf);
 		return;
 	}
 	if (strcmp(segment, "stats") == 0) {
@@ -552,5 +558,5 @@ void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 #endif
-	http_resp_errpage(ctx, HTTP_NOT_FOUND);
+	http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
 }

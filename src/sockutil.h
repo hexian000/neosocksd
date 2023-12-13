@@ -4,6 +4,8 @@
 #ifndef SOCKUTIL_H
 #define SOCKUTIL_H
 
+#include "io/stream.h"
+
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <errno.h>
@@ -43,5 +45,8 @@ int format_sa(const struct sockaddr *sa, char *s, size_t buf_size);
 bool parse_bindaddr(sockaddr_max_t *sa, const char *s);
 bool resolve_addr(
 	sockaddr_max_t *sa, const char *name, const char *service, int family);
+
+int socket_send(const int fd, const void *buf, size_t *len);
+int socket_recv(const int fd, void *buf, size_t *len);
 
 #endif /* SOCKUTIL_H */
