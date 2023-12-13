@@ -9,13 +9,13 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 
 - [Features](#features)
 - [Usage](#usage)
-	- [Basic Usage](#basic-usage)
-	- [Scripting Usage](#scripting-usage)
+  - [Basic Usage](#basic-usage)
+  - [Scripting Usage](#scripting-usage)
 - [Observability](#observability)
 - [Runtime Dependencies](#runtime-dependencies)
 - [Building from Source](#building-from-source)
-	- [Dependencies](#dependencies)
-	- [Building with CMake](#building-with-cmake)
+  - [Dependencies](#dependencies)
+  - [Building with CMake](#building-with-cmake)
 - [Credits](#credits)
 
 ## Features
@@ -155,3 +155,4 @@ Thanks to:
 - [libev](http://software.schmorp.de/pkg/libev.html)
 - [Lua](https://www.lua.org/)
 - [c-ares](https://c-ares.org/)
+- [miniz](https://github.com/richgel999/miniz)

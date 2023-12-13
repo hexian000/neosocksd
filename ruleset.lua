@@ -112,22 +112,29 @@ neosocksd.setinterval(60.0)
 
 _G.server_rtt = {}
 local function ping(route, tag)
+    local target = table.pack(route("api.neosocksd.lan:80"))
+    local payload = string.rep(" ", 32)
+    local result
     await.idle()
     local begin = neosocksd.now()
-    local ok, ret = await.rpcall([[return "echo"]], route("api.neosocksd.lan:80"))
-    if ok and ret == "echo" then
+    local ok, ret = await.rpcall(target, "echo", payload)
+    if not ok then
+        result = ret
+    elseif ret ~= payload then
+        result = string.format("echo mismatch: %q", ret)
+    else
         local rtt = neosocksd.now() - begin
-        ret = string.format("%dms", math.ceil(rtt * 1e+3))
+        result = string.format("%dms", math.ceil(rtt * 1e+3))
     end
-    logf("ping %q: %s", tag, ret)
-    server_rtt[tag] = ret
+    logf("ping %q: %s", tag, result)
+    server_rtt[tag] = result
 end
 
 _G.last_ping = nil
 function ruleset.tick(now)
     if not _G.last_ping or now - _G.last_ping > 3600 then
         for i, route in pairs(route_list) do
-            async(ping, table.unpack(route))
+            async(ping, route[1], route[2])
         end
         _G.last_ping = now
     end
