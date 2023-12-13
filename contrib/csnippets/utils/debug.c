@@ -34,7 +34,7 @@ void print_txt(FILE *f, const char *indent, const void *data, size_t n)
 			fprintf(f, " +\n%s     ", indent);
 			wrap = 0;
 		}
-		if (!isprint(ch)) {
+		if (!(isprint(ch) || isspace(ch))) {
 			ch = '?';
 		}
 		fputc(ch, f);

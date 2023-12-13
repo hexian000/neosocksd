@@ -71,7 +71,7 @@ char *http_parse(char *buf, struct http_message *msg);
 /**
  * @brief Parse a HTTP header line.
  * @details No allocations, the raw message until next position is destructed.
- * @param buf HTTP header line start.
+ * @param buf HTTP header line start, usually the return value of http_parse.
  * @param[out] key Header key, or NULL when HTTP header ends.
  * @param[out] value Header value, or NULL when HTTP header ends.
  * @return The start position of next parsing, or NULL when parsing failed.

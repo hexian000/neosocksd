@@ -3,19 +3,9 @@
 
 #include "buffer.h"
 
-#include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-
-size_t buf_append(struct buffer *restrict buf, const void *data, size_t n)
-{
-	unsigned char *b = buf->data + buf->len;
-	n = MIN(n, buf->cap - buf->len);
-	(void)memcpy(b, data, n);
-	buf->len += n;
-	return n;
-}
 
 int buf_vappendf(struct buffer *restrict buf, const char *format, va_list args)
 {
@@ -40,31 +30,11 @@ int buf_appendf(struct buffer *restrict buf, const char *format, ...)
 	return ret;
 }
 
-struct vbuffer *vbuf_alloc(struct vbuffer *restrict vbuf, const size_t cap)
-{
-	if (cap == 0) {
-		free(vbuf);
-		return NULL;
-	}
-	size_t len = 0;
-	if (vbuf != NULL) {
-		len = vbuf->len;
-	}
-	struct vbuffer *restrict newbuf =
-		realloc(vbuf, sizeof(struct vbuffer) + cap);
-	if (newbuf == NULL) {
-		return vbuf;
-	}
-	vbuf = newbuf;
-	vbuf->cap = cap;
-	vbuf->len = MIN(cap, len);
-	return vbuf;
-}
-
-struct vbuffer *vbuf_grow(struct vbuffer *restrict vbuf, const size_t want)
+struct vbuffer *
+vbuf_grow(struct vbuffer *restrict vbuf, const size_t want, const size_t maxcap)
 {
 	size_t cap = (vbuf != NULL) ? vbuf->cap : 0;
-	if (want <= cap) {
+	if (want <= cap || cap >= maxcap) {
 		return vbuf;
 	}
 	const size_t threshold1 = 256;
@@ -78,7 +48,7 @@ struct vbuffer *vbuf_grow(struct vbuffer *restrict vbuf, const size_t want)
 		} else {
 			grow = cap / 4 + 3 * threshold2 / 4;
 		}
-		if (cap >= SIZE_MAX - grow) {
+		if (grow > maxcap || cap >= maxcap - grow) {
 			/* overflow */
 			cap = want;
 			break;
@@ -109,7 +79,7 @@ vbuf_append(struct vbuffer *restrict vbuf, const void *data, size_t n)
 	size_t want = n;
 	if (vbuf != NULL) {
 		want += vbuf->len;
-		vbuf = vbuf_grow(vbuf, want);
+		vbuf = vbuf_grow(vbuf, want, SIZE_MAX);
 		if (vbuf->cap < want) {
 			return vbuf;
 		}
@@ -149,7 +119,7 @@ vbuf_vappendf(struct vbuffer *restrict vbuf, const char *format, va_list args)
 			vbuf->len += (size_t)ret;
 			return vbuf;
 		}
-		vbuf = vbuf_grow(vbuf, want);
+		vbuf = vbuf_grow(vbuf, want, SIZE_MAX);
 		if (vbuf->cap < want) {
 			return vbuf;
 		}

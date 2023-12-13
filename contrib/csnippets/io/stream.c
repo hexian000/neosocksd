@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "stream.h"
+
 #include <stddef.h>
 
 int stream_direct_read(struct stream *s, const void **buf, size_t *len)

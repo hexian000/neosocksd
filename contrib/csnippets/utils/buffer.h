@@ -31,38 +31,67 @@ struct buffer {
 	unsigned char data[];
 };
 
+/* These internal functions should NOT be called directly, use macros */
+
+/** @internal */
+static inline size_t
+buf_append(struct buffer *restrict buf, const void *data, size_t n)
+{
+	unsigned char *b = buf->data + buf->len;
+	n = MIN(n, buf->cap - buf->len);
+	(void)memcpy(b, data, n);
+	buf->len += n;
+	return n;
+}
+
+/** @internal */
+int buf_vappendf(struct buffer *restrict buf, const char *format, va_list args);
+
+/** @internal */
+int buf_appendf(struct buffer *restrict buf, const char *format, ...);
+
 /* heap allocated buffer */
 struct vbuffer {
 	BUFFER_HDR;
 	unsigned char data[];
 };
 
-/* These internal functions should NOT be called directly, use macros */
+/** @internal */
+static inline struct vbuffer *
+vbuf_alloc(struct vbuffer *restrict vbuf, const size_t cap)
+{
+	if (cap == 0) {
+		free(vbuf);
+		return NULL;
+	}
+	size_t len = 0;
+	if (vbuf != NULL) {
+		len = vbuf->len;
+	}
+	struct vbuffer *restrict newbuf =
+		realloc(vbuf, sizeof(struct vbuffer) + cap);
+	if (newbuf == NULL) {
+		return vbuf;
+	}
+	vbuf = newbuf;
+	vbuf->cap = cap;
+	vbuf->len = MIN(cap, len);
+	return vbuf;
+}
 
 /** @internal */
-size_t buf_append(struct buffer *buf, const void *data, size_t n);
-
-/** @internal */
-int buf_appendf(struct buffer *buf, const char *format, ...);
-
-/** @internal */
-int buf_vappendf(struct buffer *buf, const char *format, va_list args);
-
-/** @internal */
-struct vbuffer *vbuf_alloc(struct vbuffer *vbuf, size_t cap);
-
-/** @internal */
-struct vbuffer *vbuf_grow(struct vbuffer *vbuf, size_t want);
+struct vbuffer *vbuf_grow(struct vbuffer *vbuf, size_t want, size_t maxcap);
 
 /** @internal */
 struct vbuffer *vbuf_append(struct vbuffer *vbuf, const void *data, size_t n);
 
 /** @internal */
-struct vbuffer *vbuf_appendf(struct vbuffer *vbuf, const char *format, ...);
+struct vbuffer *
+vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
 
 /** @internal */
 struct vbuffer *
-vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
+vbuf_appendf(struct vbuffer *restrict vbuf, const char *format, ...);
 
 /**
  * @defgroup BUF
@@ -101,14 +130,14 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
 	 buf_append((struct buffer *)&(buf), (data), (n)))
 
 /**
- * @brief Append constant null-terminated string to buffer.
+ * @brief Append constant null-terminated string array to buffer.
  * @details The string will be truncated if there is not enough space.
  * usage: `size_t n = BUF_APPENDCONST(buf, "some string");`
  */
 #define BUF_APPENDCONST(buf, str)                                              \
 	(assert((buf).len <= (buf).cap),                                       \
 	 buf_append(                                                           \
-		 (struct buffer *)&(buf), (const unsigned char *)(str),        \
+		 (struct buffer *)&(buf), (const void *)(str),                 \
 		 sizeof(str) - 1u))
 
 /**
@@ -118,9 +147,7 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
  */
 #define BUF_APPENDSTR(buf, str)                                                \
 	(assert((buf).len <= (buf).cap),                                       \
-	 buf_append(                                                           \
-		 (struct buffer *)&(buf), (const unsigned char *)(str),        \
-		 strlen(str)))
+	 buf_append((struct buffer *)&(buf), (const void *)(str), strlen(str)))
 
 /**
  * @brief Append formatted string to buffer.
@@ -177,8 +204,9 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
 #define VBUF_NEW(size) vbuf_alloc(NULL, (size))
 
 #define VBUF_ASSERT_BOUND(vbuf)                                                \
-	assert((vbuf) == NULL || ((struct vbuffer *)(vbuf))->len <=            \
-					 ((struct vbuffer *)(vbuf))->cap)
+	assert((vbuf) == NULL || (((struct vbuffer *)(vbuf))->cap > 0 &&       \
+				  ((struct vbuffer *)(vbuf))->len <=           \
+					  ((struct vbuffer *)(vbuf))->cap))
 
 /**
  * @brief Free vbuffer object.
@@ -215,7 +243,7 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
 	 (vbuf) != NULL ? ((vbuf)->len = 0, (vbuf)) : NULL)
 
 /**
- * @brief Adjust vbuffer allocation if data can be preserved.
+ * @brief Adjust vbuffer allocation while preserving data.
  * @param vbuf If NULL, new buffer may be allocated.
  * @param want Expected vbuffer overall size in bytes.
  * @return If failed, the allocation remains unchanged.
@@ -234,17 +262,18 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
  */
 #define VBUF_RESERVE(vbuf, want)                                               \
 	(VBUF_ASSERT_BOUND(vbuf),                                              \
-	 vbuf_alloc((vbuf), MAX(VBUF_CAP(vbuf), (want))))
+	 (((want) > VBUF_CAP(vbuf)) ? vbuf_alloc((vbuf), (want)) : (vbuf)))
 
 /**
  * @brief Aggressively expand vbuffer allocation.
  * @param vbuf If NULL, new buffer may be allocated.
  * @param want Expected vbuffer overall size in bytes.
+ * @param maxcap Size limit in bytes.
  * @return If failed, the allocation remains unchanged.
- * @details usage: `vbuf = VBUF_GROW(vbuf, 16384);`
+ * @details usage: `vbuf = VBUF_GROW(vbuf, 16384, SIZE_MAX);`
  */
-#define VBUF_GROW(vbuf, want)                                                  \
-	(VBUF_ASSERT_BOUND(vbuf), vbuf_grow((vbuf), (want)))
+#define VBUF_GROW(vbuf, want, maxcap)                                          \
+	(VBUF_ASSERT_BOUND(vbuf), vbuf_grow((vbuf), (want), (maxcap)))
 
 /**
  * @brief Append fixed-length data to vbuffer.
@@ -257,7 +286,7 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
 	(VBUF_ASSERT_BOUND(vbuf), vbuf_append((vbuf), (data), (n)))
 
 /**
- * @brief Append constant null-terminated string to vbuffer.
+ * @brief Append constant null-terminated string array to vbuffer.
  * @param vbuf If NULL, the minimum required size is allocated.
  * @return If the allocation fails, the data remains unchanged.
  * @details Allocation will be expanded if there is not enough space.
@@ -265,7 +294,7 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
  */
 #define VBUF_APPENDCONST(vbuf, str)                                            \
 	(VBUF_ASSERT_BOUND(vbuf),                                              \
-	 vbuf_append((vbuf), (const unsigned char *)(str), sizeof(str) - 1u))
+	 vbuf_append((vbuf), (const void *)(str), sizeof(str) - 1u))
 
 /**
  * @brief Append null-terminated string to vbuffer.
@@ -276,7 +305,7 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
  */
 #define VBUF_APPENDSTR(vbuf, str)                                              \
 	(VBUF_ASSERT_BOUND(vbuf),                                              \
-	 vbuf_append((vbuf), (const unsigned char *)(str), strlen(str)))
+	 vbuf_append((vbuf), (const void *)(str), strlen(str)))
 
 /**
  * @brief Append formatted string to vbuffer.
@@ -303,7 +332,10 @@ vbuf_vappendf(struct vbuffer *vbuf, const char *format, va_list args);
  * @param vbuf If NULL, the behavior is undefined.
  * @details usage: `if(VBUF_EQUALS(vbuf_a, vbuf_b)) { ... }`
  */
-#define VBUF_EQUALS(a, b) BUF_EQUALS(*(a), *(b))
+#define VBUF_EQUALS(a, b)                                                      \
+	(VBUF_LEN(a) == 0 ? VBUF_LEN(b) == 0 :                                 \
+			    a->len == VBUF_LEN(b) &&                           \
+				    memcmp(a->data, b->data, a->len) == 0)
 
 /** @} VBUF */
 

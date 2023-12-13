@@ -1,10 +1,12 @@
 target_sources(csnippets
     PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/addr.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/url.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/http.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/mime.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/url.c"
     PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/addr.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/url.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/http.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/mime.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/url.h"
 )

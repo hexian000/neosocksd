@@ -30,7 +30,7 @@ struct stream {
 };
 
 /**
- * @brief Read a stream directly from the internal buffer.
+ * @brief Read a stream directly from the internal buffer. (optional support)
  * @param[out] buf Pointer to the internal buffer.
  * @param[inout] len Max length / returned length.
  * @return Error code, 0 for OK.
