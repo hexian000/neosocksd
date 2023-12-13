@@ -77,8 +77,4 @@ void http_ctx_close(struct ev_loop *loop, struct http_ctx *ctx);
 void http_handle_proxy(struct ev_loop *loop, struct http_ctx *ctx);
 void http_handle_api(struct ev_loop *loop, struct http_ctx *ctx);
 
-#if WITH_RULESET
-bool check_rpcall_mime(char *mime_type);
-#endif
-
 #endif /* HTTP_SERVER_H */

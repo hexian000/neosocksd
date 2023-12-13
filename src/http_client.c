@@ -106,13 +106,17 @@ response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		http_client_finish(loop, ctx, false, buf, (size_t)ret);
 		return;
 	}
+	if (!check_rpcall_mime(ctx->parser.hdr.content.type)) {
+		HTTP_CLIENT_ERROR(loop, ctx, "unsupported content-type");
+		return;
+	}
 	struct stream *r = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
 	if (r == NULL) {
 		LOGOOM();
-		const char buf[] = "out of memory";
-		http_client_finish(loop, ctx, false, buf, sizeof(buf) - 1);
+		HTTP_CLIENT_ERROR(loop, ctx, "out of memory");
+		return;
 	}
 	http_client_finish(loop, ctx, true, r, 0);
 }

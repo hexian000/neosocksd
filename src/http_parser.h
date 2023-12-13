@@ -98,6 +98,8 @@ struct stream *content_writer(
 #define MIME_RPCALL                                                            \
 	MIME_RPCALL_TYPE "/" MIME_RPCALL_SUBTYPE                               \
 			 "; version=" MIME_RPCALL_VERSION
+
+bool check_rpcall_mime(char *mime_type);
 #endif
 
 #endif /* HTTP_PARSER_H */
