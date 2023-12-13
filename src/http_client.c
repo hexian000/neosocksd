@@ -80,8 +80,12 @@ static void http_client_finish(
 	http_client_close(loop, ctx);
 }
 
-#define HTTP_CLIENT_ERROR(loop, ctx, msg)                                      \
-	http_client_finish((loop), (ctx), false, (msg ""), sizeof(msg) - 1)
+#define HTTP_RETURN_ERROR(loop, ctx, msg)                                      \
+	do {                                                                   \
+		http_client_finish(                                            \
+			(loop), (ctx), false, (msg ""), sizeof(msg) - 1);      \
+		return;                                                        \
+	} while (false)
 
 static void
 response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -90,11 +94,9 @@ response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct http_client_ctx *restrict ctx = watcher->data;
 	const int ret = http_parser_recv(&ctx->parser);
 	if (ret < 0) {
-		HTTP_CLIENT_ERROR(loop, ctx, "invalid response");
-		return;
+		HTTP_RETURN_ERROR(loop, ctx, "invalid response");
 	} else if (ret > 0) {
-		HTTP_CLIENT_ERROR(loop, ctx, "early EOF");
-		return;
+		HTTP_RETURN_ERROR(loop, ctx, "early EOF");
 	}
 	const struct http_message *restrict msg = &ctx->parser.msg;
 	if (strcmp(msg->rsp.code, "200") != 0) {
@@ -107,16 +109,14 @@ response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 	if (!check_rpcall_mime(ctx->parser.hdr.content.type)) {
-		HTTP_CLIENT_ERROR(loop, ctx, "unsupported content-type");
-		return;
+		HTTP_RETURN_ERROR(loop, ctx, "unsupported content-type");
 	}
 	struct stream *r = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
 	if (r == NULL) {
 		LOGOOM();
-		HTTP_CLIENT_ERROR(loop, ctx, "out of memory");
-		return;
+		HTTP_RETURN_ERROR(loop, ctx, "out of memory");
 	}
 	http_client_finish(loop, ctx, true, r, 0);
 }
@@ -178,8 +178,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	struct http_client_ctx *restrict ctx = data;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		HTTP_CLIENT_ERROR(loop, ctx, "failed connecting to server");
-		return;
+		HTTP_RETURN_ERROR(loop, ctx, "failed connecting to server");
 	}
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
@@ -196,7 +195,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct http_client_ctx *restrict ctx = watcher->data;
-	HTTP_CLIENT_ERROR(loop, ctx, "timeout");
+	HTTP_RETURN_ERROR(loop, ctx, "timeout");
 }
 
 static bool make_request(
