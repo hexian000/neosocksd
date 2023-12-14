@@ -1,5 +1,7 @@
 # neosocksd API Reference
 
+Version: dev
+
 ## Index
 
 - [RESTful API](#restful-api)

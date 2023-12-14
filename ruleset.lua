@@ -111,8 +111,7 @@ local ruleset = setmetatable({}, {
 neosocksd.setinterval(60.0)
 
 _G.server_rtt = {}
-local function ping(route, tag)
-    local target = table.pack(route("api.neosocksd.lan:80"))
+local function ping(target, tag)
     local payload = string.rep(" ", 32)
     local result
     await.idle()
@@ -133,8 +132,10 @@ end
 _G.last_ping = nil
 function ruleset.tick(now)
     if not _G.last_ping or now - _G.last_ping > 3600 then
-        for i, route in pairs(route_list) do
-            async(ping, route[1], route[2])
+        for k, v in pairs(route_list) do
+            local route, tag = v[1], v[2]
+            local target = table.pack(route("api.neosocksd.lan:80"))
+            async(ping, target, tag)
         end
         _G.last_ping = now
     end
