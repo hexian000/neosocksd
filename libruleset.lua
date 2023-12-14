@@ -91,6 +91,8 @@ end
 
 _G.list = list
 
+-- [[ logging utilities ]] --
+
 _G.MAX_RECENT_EVENTS = 16
 _G.recent_events = _G.recent_events or list:new()
 local function addevent_(tstamp, msg)
@@ -174,12 +176,13 @@ function _G.parse_cidr6(s)
     return subnet1, subnet2, shift
 end
 
+-- [[ RPC utilities ]] --
+
 function _G.unmarshal(s)
     return assert(load("return " .. s, "=unmarshal"))()
 end
 
 local rpc = _G.rpc or {}
-
 function rpc.echo(...)
     return ...
 end
@@ -191,8 +194,9 @@ function await.rpcall(target, func, ...)
     return await.invoke(code, table.unpack(target))
 end
 
--- [[ route table matchers ]] --
+-- [[ _G.route table matchers ]] --
 local inet = {}
+
 function inet.subnet(s)
     if type(s) ~= "table" then
         local subnet, shift = parse_cidr(s)
@@ -223,7 +227,9 @@ end
 
 _G.inet = inet
 
+-- [[ _G.route6 table matchers ]] --
 local inet6 = {}
+
 function inet6.subnet(s)
     if type(s) ~= "table" then
         local subnet1, subnet2, shift = parse_cidr6(s)
@@ -267,8 +273,9 @@ end
 
 _G.inet6 = inet6
 
--- [[ redirect table matchers ]] --
+-- [[ _G.redirect* table matchers ]] --
 local match = {}
+
 function match.any(...)
     return true
 end
@@ -426,6 +433,7 @@ _G.match = match
 
 -- [[ composite matchers ]] --
 local composite = {}
+
 function composite.anyof(t)
     return function(...)
         for i, match in ipairs(t) do
@@ -451,6 +459,7 @@ _G.composite = composite
 
 -- [[ rule actions ]] --
 local rule = {}
+
 function rule.direct()
     return function(addr)
         return addr
@@ -502,13 +511,8 @@ end
 
 _G.rule = rule
 
+-- [[ load balancing actions ]] --
 local lb = {}
-function lb.random(t)
-    local n = #t
-    return function(...)
-        return t[math.random(n)]
-    end
-end
 
 function lb.roundrobin(t)
     local i, n = 0, #t
@@ -520,7 +524,7 @@ end
 
 _G.lb = lb
 
--- [[ internal route functions ]] --
+-- [[ ruleset entrypoint functions ]] --
 _G.num_requests = _G.num_requests or 0
 _G.stat_requests = _G.stat_requests or list:new({ 0 })
 _G.MAX_STAT_REQUESTS = 60
@@ -683,17 +687,17 @@ end
 local ruleset = {}
 
 function ruleset.resolve(addr)
-    num_requests = num_requests + 1
+    _G.num_requests = _G.num_requests + 1
     return resolve_(addr)
 end
 
 function ruleset.route(addr)
-    num_requests = num_requests + 1
+    _G.num_requests = _G.num_requests + 1
     return route_(addr)
 end
 
 function ruleset.route6(addr)
-    num_requests = num_requests + 1
+    _G.num_requests = _G.num_requests + 1
     return route6_(addr)
 end
 

@@ -328,7 +328,7 @@ int socket_send(const int fd, const void *buf, size_t *len)
 		nbsend += nsend;
 	}
 	*len = nbsend;
-	LOGV_F("send: fd=%d total %zu bytes", fd, nbsend);
+	LOGV_F("send: fd=%d %zu bytes", fd, nbsend);
 	return 0;
 }
 
@@ -354,6 +354,6 @@ int socket_recv(const int fd, void *buf, size_t *len)
 		nbrecv += nrecv;
 	}
 	*len = nbrecv;
-	LOGV_F("recv: fd=%d total %zu bytes", fd, nbrecv);
+	LOGV_F("recv: fd=%d %zu bytes", fd, nbrecv);
 	return 0;
 }

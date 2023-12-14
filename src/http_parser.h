@@ -43,7 +43,8 @@ enum http_parser_state {
 };
 
 struct http_parser {
-	enum http_parser_state state;
+	enum http_parser_state mode, state;
+	int http_status;
 	int fd;
 	struct http_message msg;
 	char *next;
@@ -58,7 +59,7 @@ struct http_parser {
 };
 
 void http_parser_init(
-	struct http_parser *p, int fd, enum http_parser_state state);
+	struct http_parser *p, int fd, enum http_parser_state mode);
 
 int http_parser_recv(struct http_parser *parser);
 

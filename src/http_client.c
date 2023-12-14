@@ -2,6 +2,10 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "http_client.h"
+
+#if WITH_RULESET
+
+#include "http_parser.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
@@ -10,14 +14,12 @@
 #include "utils/debug.h"
 #include "conf.h"
 #include "codec.h"
-#include "http_parser.h"
 #include "session.h"
 #include "sockutil.h"
 #include "util.h"
 #include "dialer.h"
 
 #include <ev.h>
-#include <strings.h>
 
 #include <assert.h>
 #include <stddef.h>
@@ -25,9 +27,6 @@
 #include <stdlib.h>
 #include <limits.h>
 #include <string.h>
-
-#define HTTP_MAX_ENTITY 8192
-#define HTTP_MAX_CONTENT 4194304
 
 /* never rollback */
 enum http_client_state {
@@ -94,9 +93,10 @@ response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct http_client_ctx *restrict ctx = watcher->data;
 	const int ret = http_parser_recv(&ctx->parser);
 	if (ret < 0) {
-		HTTP_RETURN_ERROR(loop, ctx, "invalid response");
+		LOGD("error receiving response");
+		HTTP_RETURN_ERROR(loop, ctx, "error receiving response");
 	} else if (ret > 0) {
-		HTTP_RETURN_ERROR(loop, ctx, "early EOF");
+		return;
 	}
 	const struct http_message *restrict msg = &ctx->parser.msg;
 	if (strcmp(msg->rsp.code, "200") != 0) {
@@ -203,7 +203,7 @@ static bool make_request(
 	const size_t len)
 {
 	const enum content_encodings encoding =
-		(len > HTTP_MAX_ENTITY) ? CENCODING_DEFLATE : CENCODING_NONE;
+		(len > HTTP_MAX_CONTENT) ? CENCODING_DEFLATE : CENCODING_NONE;
 	struct stream *s = content_writer(&p->cbuf, len, encoding);
 	if (s == NULL) {
 		return false;
@@ -221,7 +221,7 @@ static bool make_request(
 		"Content-Length: %zu\r\n"
 		"Content-Type: %s\r\n"
 		"Accept-Encoding: deflate\r\n",
-		uri, MIME_RPCALL, n, MIME_RPCALL);
+		uri, MIME_RPCALL, VBUF_LEN(p->cbuf), MIME_RPCALL);
 	const char *encoding_str = content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		BUF_APPENDF(p->wbuf, "Content-Encoding: %s\r\n", encoding_str);
@@ -231,8 +231,8 @@ static bool make_request(
 		VERBOSE, p->wbuf.data, p->wbuf.len, "request header: %zu bytes",
 		p->wbuf.len);
 	LOG_BIN_F(
-		VERBOSE, p->cbuf->data, p->cbuf->len,
-		"request content: %zu bytes", p->cbuf->len);
+		VERBOSE, VBUF_DATA(p->cbuf), VBUF_LEN(p->cbuf),
+		"request content: %zu bytes", VBUF_LEN(p->cbuf));
 	return true;
 }
 
@@ -275,3 +275,5 @@ void http_client_cancel(struct ev_loop *loop, const handle_t h)
 {
 	http_client_close(loop, TO_POINTER(h));
 }
+
+#endif /* WITH_RULESET */

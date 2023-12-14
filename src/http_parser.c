@@ -9,9 +9,12 @@
 #include "codec.h"
 #include "sockutil.h"
 
+#include <strings.h>
+
 #include <ctype.h>
 #include <inttypes.h>
 #include <stddef.h>
+#include <string.h>
 
 const char *content_encoding_str[] = {
 	[CENCODING_NONE] = NULL,
@@ -141,7 +144,7 @@ static int parse_message(struct http_parser *restrict p)
 		return -1;
 	} else if (next == p->next) {
 		if (p->rbuf.len + 1 >= p->rbuf.cap) {
-			http_resp_errpage(p, HTTP_ENTITY_TOO_LARGE);
+			p->http_status = HTTP_ENTITY_TOO_LARGE;
 			p->state = STATE_PARSE_ERROR;
 			return 0;
 		}
@@ -228,18 +231,14 @@ static bool
 parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 {
 	LOGV_F("http_header: \"%s: %s\"", key, value);
-	if (strcasecmp(key, "Accept") == 0) {
-		p->hdr.accept = value;
-	} else if (strcasecmp(key, "Accept-Encoding") == 0) {
-		return parse_accept_encoding(p, value);
-	} else if (strcasecmp(key, "Content-Length") == 0) {
+	if (strcasecmp(key, "Content-Length") == 0) {
 		size_t content_length;
 		if (sscanf(value, "%zu", &content_length) != 1) {
-			http_resp_errpage(p, HTTP_BAD_REQUEST);
+			p->http_status = HTTP_BAD_REQUEST;
 			return false;
 		}
 		if (strcmp(p->msg.req.method, "CONNECT") == 0) {
-			http_resp_errpage(p, HTTP_BAD_REQUEST);
+			p->http_status = HTTP_BAD_REQUEST;
 			return false;
 		}
 		p->hdr.content.length = content_length;
@@ -247,12 +246,19 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 		p->hdr.content.type = value;
 	} else if (strcasecmp(key, "Content-Encoding") == 0) {
 		return parse_content_encoding(p, value);
-	} else if (strcasecmp(key, "Expect") == 0) {
-		if (strcasecmp(value, "100-continue") != 0) {
-			http_resp_errpage(p, HTTP_EXPECTATION_FAILED);
-			return false;
+	}
+	if (p->mode == STATE_PARSE_REQUEST) {
+		if (strcasecmp(key, "Accept") == 0) {
+			p->hdr.accept = value;
+		} else if (strcasecmp(key, "Accept-Encoding") == 0) {
+			return parse_accept_encoding(p, value);
+		} else if (strcasecmp(key, "Expect") == 0) {
+			if (strcasecmp(value, "100-continue") != 0) {
+				p->http_status = HTTP_EXPECTATION_FAILED;
+				return false;
+			}
+			p->expect_continue = true;
 		}
-		p->expect_continue = true;
 	}
 	return true;
 }
@@ -286,7 +292,7 @@ static int parse_content(struct http_parser *restrict p)
 {
 	const size_t content_length = p->hdr.content.length;
 	if (content_length > HTTP_MAX_CONTENT) {
-		http_resp_errpage(p, HTTP_ENTITY_TOO_LARGE);
+		p->http_status = HTTP_ENTITY_TOO_LARGE;
 		p->state = STATE_PARSE_ERROR;
 		return 0;
 	}
@@ -317,6 +323,10 @@ static bool recv_request(struct http_parser *restrict p)
 	size_t n = p->rbuf.cap - p->rbuf.len - 1;
 	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
 	if (err != 0) {
+		LOGE_F("recv: fd=%d %s", p->fd, strerror(err));
+		return false;
+	} else if (n == 0) {
+		LOGE_F("recv: fd=%d EOF", p->fd);
 		return false;
 	}
 	p->rbuf.len += n;
@@ -330,6 +340,10 @@ static bool recv_content(struct http_parser *restrict p)
 	size_t n = cbuf->cap - cbuf->len;
 	const int err = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
 	if (err != 0) {
+		LOGE_F("recv: fd=%d %s", p->fd, strerror(err));
+		return false;
+	} else if (n == 0) {
+		LOGE_F("recv: fd=%d EOF", p->fd);
 		return false;
 	}
 	cbuf->len += n;
@@ -352,7 +366,7 @@ int http_parser_recv(struct http_parser *restrict p)
 		}
 		break;
 	default:
-		FAIL();
+		return -1;
 	}
 
 	for (;;) {
@@ -388,9 +402,9 @@ int http_parser_recv(struct http_parser *restrict p)
 
 void http_parser_init(
 	struct http_parser *restrict p, const int fd,
-	const enum http_parser_state state)
+	const enum http_parser_state mode)
 {
-	p->state = state;
+	p->mode = p->state = mode;
 	p->fd = fd;
 	p->msg = (struct http_message){ 0 };
 	p->next = NULL;

@@ -169,10 +169,8 @@ vbuf_appendf(struct vbuffer *restrict vbuf, const char *format, ...);
 #define BUF_CONSUME(buf, n)                                                    \
 	do {                                                                   \
 		assert(n <= (buf).len && (buf).len <= (buf).cap);              \
-		unsigned char *b = (buf).data;                                 \
-		if (n < (buf).len) {                                           \
-			(void)memmove(b, b + n, (buf).len - n);                \
-		}                                                              \
+		const unsigned char *b = (buf).data;                           \
+		(void)memmove((buf).data, b + n, (buf).len - n);               \
 		(buf).len -= n;                                                \
 	} while (0)
 
@@ -203,10 +201,17 @@ vbuf_appendf(struct vbuffer *restrict vbuf, const char *format, ...);
  */
 #define VBUF_NEW(size) vbuf_alloc(NULL, (size))
 
-#define VBUF_ASSERT_BOUND(vbuf)                                                \
-	assert((vbuf) == NULL || (((struct vbuffer *)(vbuf))->cap > 0 &&       \
-				  ((struct vbuffer *)(vbuf))->len <=           \
-					  ((struct vbuffer *)(vbuf))->cap))
+#ifndef NDEBUG
+static inline void vbuf_assert_bound(const struct vbuffer *vbuf)
+{
+	assert((vbuf) == NULL ||
+	       ((vbuf)->cap > 0 && (vbuf)->len <= (vbuf)->cap));
+}
+
+#define VBUF_ASSERT_BOUND(vbuf) vbuf_assert_bound((vbuf))
+#else
+#define VBUF_ASSERT_BOUND(vbuf) ((void)(vbuf))
+#endif
 
 /**
  * @brief Free vbuffer object.
@@ -331,7 +336,13 @@ vbuf_appendf(struct vbuffer *restrict vbuf, const char *format, ...);
  * @param vbuf If NULL, the behavior is undefined.
  * @details usage: `VBUF_CONSUME(vbuf, sizeof(struct protocol_header));`
  */
-#define VBUF_CONSUME(vbuf, n) BUF_CONSUME(*(vbuf), (n))
+#define VBUF_CONSUME(vbuf, n)                                                  \
+	do {                                                                   \
+		if ((n) == 0) {                                                \
+			break;                                                 \
+		}                                                              \
+		BUF_CONSUME(*(vbuf), (n));                                     \
+	} while (0)
 
 /**
  * @brief Tests whether two vbuffers have the same content.

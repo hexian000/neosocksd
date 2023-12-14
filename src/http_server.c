@@ -22,7 +22,6 @@
 #include "util.h"
 
 #include <ev.h>
-#include <strings.h>
 
 #include <assert.h>
 #include <stdbool.h>
@@ -130,6 +129,7 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		ev_io_start(loop, &ctx->w_send);
 	} break;
 	case STATE_PARSE_ERROR:
+		http_resp_errpage(&ctx->parser, ctx->parser.http_status);
 		ctx->state = STATE_RESPONSE;
 		ev_io_start(loop, &ctx->w_send);
 		break;

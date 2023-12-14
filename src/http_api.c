@@ -15,8 +15,6 @@
 #include "ruleset.h"
 #include "server.h"
 
-#include <strings.h>
-
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -331,7 +329,7 @@ handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 	}
 	const enum content_encodings encoding =
 		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) &&
-				(resultlen > HTTP_MAX_ENTITY) ?
+				(resultlen > HTTP_MAX_CONTENT) ?
 			CENCODING_DEFLATE :
 			CENCODING_NONE;
 	struct stream *w =
