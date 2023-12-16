@@ -46,7 +46,7 @@ bool parse_bindaddr(sockaddr_max_t *sa, const char *s);
 bool resolve_addr(
 	sockaddr_max_t *sa, const char *name, const char *service, int family);
 
-int socket_send(const int fd, const void *buf, size_t *len);
-int socket_recv(const int fd, void *buf, size_t *len);
+int socket_send(int fd, const void *buf, size_t *len);
+int socket_recv(int fd, void *buf, size_t *len);
 
 #endif /* SOCKUTIL_H */

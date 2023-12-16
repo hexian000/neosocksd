@@ -219,11 +219,11 @@ struct dialreq *dialreq_new(const size_t num_proxy)
 	struct dialreq *restrict base = G.basereq;
 	const size_t num_base_proxy = (base != NULL) ? base->num_proxy : 0;
 	struct dialreq *restrict req = DIALREQ_NEW(num_base_proxy + num_proxy);
-	req->num_proxy = num_base_proxy;
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
 	}
+	req->num_proxy = num_base_proxy;
 	if (base != NULL) {
 		dialaddr_copy(&req->addr, &base->addr);
 		for (size_t i = 0; i < num_base_proxy; i++) {
@@ -580,6 +580,7 @@ static int recv_http_rsp(struct dialer *restrict d)
 		next = http_parsehdr(last, &key, &value);
 		if (next == NULL) {
 			DIALER_LOG(ERROR, d, "http_parsehdr: failed");
+			return -1;
 		} else if (next == last) {
 			return 1;
 		}

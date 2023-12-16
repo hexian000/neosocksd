@@ -3,33 +3,25 @@
 
 #include "http_server.h"
 #include "http_parser.h"
-#include "io/memory.h"
-#include "io/stream.h"
 #include "utils/minmax.h"
 #include "utils/buffer.h"
 #include "utils/slog.h"
 #include "utils/debug.h"
 #include "utils/object.h"
-#include "net/http.h"
-#include "net/mime.h"
 #include "session.h"
 #include "server.h"
 #include "sockutil.h"
 #include "transfer.h"
 #include "conf.h"
-#include "codec.h"
 #include "dialer.h"
 #include "util.h"
 
 #include <ev.h>
 
 #include <assert.h>
-#include <stdbool.h>
-#include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-#include <inttypes.h>
 
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
 static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
@@ -136,7 +128,6 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	default:
 		FAIL();
 	}
-	return;
 }
 
 void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -147,7 +138,7 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
-	const int err = socket_send(watcher->fd, buf, &len);
+	int err = socket_send(watcher->fd, buf, &len);
 	if (err != 0) {
 		HTTP_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
 		http_ctx_close(loop, ctx);
@@ -162,7 +153,7 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
 		buf = cbuf->data + ctx->parser.cpos;
 		len = cbuf->len - ctx->parser.cpos;
-		const int err = socket_send(watcher->fd, buf, &len);
+		err = socket_send(watcher->fd, buf, &len);
 		if (err != 0) {
 			HTTP_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
 			http_ctx_close(loop, ctx);

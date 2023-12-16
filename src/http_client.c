@@ -6,14 +6,12 @@
 #if WITH_RULESET
 
 #include "http_parser.h"
-#include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
 #include "utils/buffer.h"
 #include "utils/slog.h"
 #include "utils/debug.h"
 #include "conf.h"
-#include "codec.h"
 #include "session.h"
 #include "sockutil.h"
 #include "util.h"
@@ -34,8 +32,6 @@ enum http_client_state {
 	STATE_CLIENT_CONNECT,
 	STATE_CLIENT_REQUEST,
 	STATE_CLIENT_RESPONSE,
-	STATE_CLIENT_HEADER,
-	STATE_CLIENT_CONTENT,
 };
 
 struct http_client_ctx {
@@ -91,7 +87,7 @@ response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_EV_ERROR(revents);
 	struct http_client_ctx *restrict ctx = watcher->data;
-	const int ret = http_parser_recv(&ctx->parser);
+	int ret = http_parser_recv(&ctx->parser);
 	if (ret < 0) {
 		LOGD("error receiving response");
 		HTTP_RETURN_ERROR(loop, ctx, "error receiving response");
@@ -101,7 +97,7 @@ response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	const struct http_message *restrict msg = &ctx->parser.msg;
 	if (strcmp(msg->rsp.code, "200") != 0) {
 		char buf[64];
-		const int ret = snprintf(
+		ret = snprintf(
 			buf, sizeof(buf), "%s %s %s", msg->rsp.version,
 			msg->rsp.code, msg->rsp.status);
 		CHECK(ret > 0);
@@ -130,7 +126,7 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct http_parser *restrict p = &ctx->parser;
 	const unsigned char *buf = p->wbuf.data + p->wpos;
 	size_t len = p->wbuf.len - p->wpos;
-	const int err = socket_send(fd, buf, &len);
+	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
 		LOGE_F("send: %s", strerror(err));
 		http_client_close(loop, ctx);
@@ -146,7 +142,7 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const struct vbuffer *restrict cbuf = p->cbuf;
 		buf = cbuf->data + p->cpos;
 		len = cbuf->len - p->cpos;
-		const int err = socket_send(watcher->fd, buf, &len);
+		err = socket_send(watcher->fd, buf, &len);
 		if (err != 0) {
 			LOGE_F("send: %s", strerror(err));
 			http_client_close(loop, ctx);

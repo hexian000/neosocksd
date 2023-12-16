@@ -33,4 +33,6 @@ char *mime_parse(char *s, char **type, char **subtype);
  */
 char *mime_parseparam(char *s, char **key, char **value);
 
+/** @} */
+
 #endif /* NET_MIME_H */

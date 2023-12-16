@@ -53,12 +53,6 @@ static int mem_write(void *p, const void *buf, size_t *restrict len)
 	return 0;
 }
 
-static int mem_close(void *p)
-{
-	free(p);
-	return 0;
-}
-
 static struct stream *
 io_memstream(void *buf, const size_t bufsize, size_t *nwritten)
 {
@@ -83,7 +77,6 @@ struct stream *io_memreader(const void *buf, const size_t bufsize)
 	}
 	static const struct stream_vftable vftable = {
 		.direct_read = mem_direct_read,
-		.close = mem_close,
 	};
 	*s = (struct stream){ &vftable, NULL };
 	return s;
@@ -97,7 +90,6 @@ struct stream *io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
 	}
 	static const struct stream_vftable vftable = {
 		.write = mem_write,
-		.close = mem_close,
 	};
 	*s = (struct stream){ &vftable, NULL };
 	return s;

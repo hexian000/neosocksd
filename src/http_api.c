@@ -16,8 +16,6 @@
 #include "server.h"
 
 #include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define RESPHDR_CPLAINTEXT(buf)                                                \
@@ -336,8 +334,8 @@ handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 		content_writer(&ctx->parser.cbuf, resultlen, encoding);
 	size_t n = resultlen;
 	int err = stream_write(w, result, &n);
-	if (n != resultlen || err != 0) {
-		LOGW_F("stream_write: error %d", err);
+	if (err != 0) {
+		LOGW_F("stream_write: error %d, %zu/%zu", err, n, resultlen);
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}

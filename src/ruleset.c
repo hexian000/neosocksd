@@ -9,7 +9,6 @@
 #include "io/stream.h"
 #include "io/memory.h"
 #include "net/addr.h"
-#include "net/url.h"
 #include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/minmax.h"
@@ -236,20 +235,20 @@ int marshal_value(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 {
 	const int type = lua_type(L, idx);
 	switch (type) {
-	case LUA_TTABLE:
-		break;
-	case LUA_TSTRING:
-		return marshal_string(L, B, idx);
-	case LUA_TNUMBER:
-		lua_pushvalue(L, idx);
-		luaL_addvalue(B);
+	case LUA_TNIL:
+		luaL_addstring(B, "nil");
 		return 0;
 	case LUA_TBOOLEAN:
 		luaL_addstring(B, lua_toboolean(L, idx) ? "true" : "false");
 		return 0;
-	case LUA_TNIL:
-		luaL_addstring(B, "nil");
+	case LUA_TNUMBER:
+		lua_pushvalue(L, idx);
+		luaL_addvalue(B);
 		return 0;
+	case LUA_TSTRING:
+		return marshal_string(L, B, idx);
+	case LUA_TTABLE:
+		break;
 	default:
 		return luaL_error(
 			L, "%s is not marshallable", lua_typename(L, type));
@@ -560,7 +559,7 @@ static void init_registry(lua_State *restrict L)
 		ERR_INVALID_ROUTE,
 	};
 	lua_createtable(L, ARRAY_SIZE(errors), 0);
-	for (size_t i = 0; i < ARRAY_SIZE(errors); i++) {
+	for (lua_Integer i = 0; i < (lua_Integer)ARRAY_SIZE(errors); i++) {
 		lua_pushstring(L, errors[i]);
 		lua_seti(L, -2, i + 1);
 	}
@@ -1558,7 +1557,6 @@ const char *ruleset_error(struct ruleset *restrict r)
 		return "(no error)";
 	}
 	if (!lua_isstring(L, -1)) {
-		return lua_typename(L, lua_type(L, -1));
 		return "(error object is not a string)";
 	}
 	return lua_tostring(L, -1);
