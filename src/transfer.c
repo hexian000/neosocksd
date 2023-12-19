@@ -40,7 +40,7 @@ static void ev_io_set_active(
 	}
 }
 
-static int transfer_recv(struct transfer *restrict t)
+static ssize_t transfer_recv(struct transfer *restrict t)
 {
 	const int fd = t->w_recv.fd;
 	unsigned char *data = t->buf.data + t->buf.len;
@@ -61,10 +61,10 @@ static int transfer_recv(struct transfer *restrict t)
 		return -1;
 	}
 	t->buf.len += nrecv;
-	return (int)nrecv;
+	return nrecv;
 }
 
-static bool transfer_send(struct transfer *restrict t)
+static ssize_t transfer_send(struct transfer *restrict t)
 {
 	const int fd = t->w_send.fd;
 	const unsigned char *data = t->buf.data + t->pos;
@@ -87,7 +87,7 @@ static bool transfer_send(struct transfer *restrict t)
 	if (t->pos == t->buf.len) {
 		t->pos = t->buf.len = 0;
 	}
-	return (int)nsend;
+	return nsend;
 }
 
 static void
@@ -101,6 +101,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	struct transfer *restrict t = watcher->data;
 	enum transfer_state state = t->state;
+	size_t nbsend = 0;
 	while (XFER_CONNECTED <= state && state <= XFER_LINGER) {
 		int nrecv = 0, nsend = 0;
 		if (state == XFER_CONNECTED) {
@@ -112,12 +113,18 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		nsend = transfer_send(t);
 		if (nsend < 0) {
 			state = XFER_FINISHED;
-		} else if (t->byt_transferred != NULL) {
-			*t->byt_transferred += nsend;
+		} else {
+			nbsend += nsend;
 		}
 		if (nrecv <= 0 && nsend <= 0) {
 			/* no progress */
 			break;
+		}
+	}
+	{
+		uintmax_t *restrict byt_transferred = t->byt_transferred;
+		if (byt_transferred != NULL) {
+			*byt_transferred += nbsend;
 		}
 	}
 
