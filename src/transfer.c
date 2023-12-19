@@ -101,7 +101,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	struct transfer *restrict t = watcher->data;
 	enum transfer_state state = t->state;
-	for (; XFER_CONNECTED <= state && state <= XFER_LINGER;) {
+	while (XFER_CONNECTED <= state && state <= XFER_LINGER) {
 		int nrecv = 0, nsend = 0;
 		if (state == XFER_CONNECTED) {
 			nrecv = transfer_recv(t);
