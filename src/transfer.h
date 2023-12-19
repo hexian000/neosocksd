@@ -19,7 +19,7 @@ enum transfer_state {
 	XFER_INIT,
 	XFER_CONNECTED,
 	XFER_LINGER,
-	XFER_CLOSED,
+	XFER_FINISHED,
 };
 
 struct transfer {
@@ -27,6 +27,7 @@ struct transfer {
 	struct ev_io w_recv, w_send;
 	struct event_cb state_cb;
 	uintmax_t *byt_transferred;
+	size_t pos;
 	struct {
 		BUFFER_HDR;
 		unsigned char data[XFER_BUFSIZE];

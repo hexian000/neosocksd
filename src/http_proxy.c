@@ -10,8 +10,8 @@
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
 	struct http_ctx *restrict ctx = data;
-	if (ctx->uplink.state == XFER_CLOSED ||
-	    ctx->downlink.state == XFER_CLOSED) {
+	if (ctx->uplink.state == XFER_FINISHED ||
+	    ctx->downlink.state == XFER_FINISHED) {
 		http_ctx_close(loop, ctx);
 		return;
 	}

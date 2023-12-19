@@ -40,62 +40,54 @@ static void ev_io_set_active(
 	}
 }
 
-static bool transfer_recv(struct transfer *restrict t)
+static int transfer_recv(struct transfer *restrict t)
 {
-	bool ok = true;
-	if (t->state != XFER_CONNECTED) {
-		return ok;
-	}
-	size_t nbrecv = 0;
 	const int fd = t->w_recv.fd;
 	unsigned char *data = t->buf.data + t->buf.len;
-	size_t cap = t->buf.cap - t->buf.len;
-	while (cap > 0) {
-		const ssize_t nrecv = recv(fd, data, cap, 0);
-		if (nrecv < 0) {
-			const int err = errno;
-			if (IS_TRANSIENT_ERROR(err)) {
-				break;
-			}
-			LOGD_F("recv: fd=%d %s", fd, strerror(err));
-			ok = false;
-			break;
-		} else if (nrecv == 0) {
-			LOGV_F("recv: fd=%d EOF", fd);
-			ok = false;
-			break;
-		}
-		data += nrecv;
-		cap -= nrecv;
-		nbrecv += nrecv;
+	const size_t cap = t->buf.cap - t->buf.len;
+	if (cap == 0) {
+		return 0;
 	}
-	t->buf.len += nbrecv;
-	return ok;
+	const ssize_t nrecv = recv(fd, data, cap, 0);
+	if (nrecv < 0) {
+		const int err = errno;
+		if (IS_TRANSIENT_ERROR(err)) {
+			return 0;
+		}
+		LOGD_F("recv: fd=%d %s", fd, strerror(err));
+		return -1;
+	} else if (nrecv == 0) {
+		LOGV_F("recv: fd=%d EOF", fd);
+		return -1;
+	}
+	t->buf.len += nrecv;
+	return (int)nrecv;
 }
 
 static bool transfer_send(struct transfer *restrict t)
 {
-	size_t nbsend = 0;
 	const int fd = t->w_send.fd;
-	while (t->buf.len > 0) {
-		const unsigned char *data = t->buf.data + nbsend;
-		const size_t len = t->buf.len - nbsend;
-		const ssize_t nsend = send(fd, data, len, 0);
-		if (nsend < 0) {
-			const int err = errno;
-			if (IS_TRANSIENT_ERROR(err)) {
-				break;
-			}
-			LOGD_F("recv: fd=%d %s", fd, strerror(err));
-			return false;
-		} else if (nsend == 0) {
-			break;
-		}
-		nbsend += nsend;
+	const unsigned char *data = t->buf.data + t->pos;
+	const size_t len = t->buf.len - t->pos;
+	if (len == 0) {
+		return 0;
 	}
-	BUF_CONSUME(t->buf, nbsend);
-	(*t->byt_transferred) += nbsend;
-	return true;
+	const ssize_t nsend = send(fd, data, len, 0);
+	if (nsend < 0) {
+		const int err = errno;
+		if (IS_TRANSIENT_ERROR(err)) {
+			return 0;
+		}
+		LOGD_F("recv: fd=%d %s", fd, strerror(err));
+		return -1;
+	} else if (nsend == 0) {
+		return 0;
+	}
+	t->pos += nsend;
+	if (t->pos == t->buf.len) {
+		t->pos = t->buf.len = 0;
+	}
+	return (int)nsend;
 }
 
 static void
@@ -109,14 +101,23 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	struct transfer *restrict t = watcher->data;
 	enum transfer_state state = t->state;
-	if (state < XFER_LINGER) {
-		if (!transfer_recv(t)) {
-			state = XFER_LINGER;
+	for (; XFER_CONNECTED <= state && state <= XFER_LINGER;) {
+		int nrecv = 0, nsend = 0;
+		if (state == XFER_CONNECTED) {
+			nrecv = transfer_recv(t);
+			if (nrecv < 0) {
+				state = XFER_LINGER;
+			}
 		}
-	}
-	if (state < XFER_CLOSED) {
-		if (!transfer_send(t)) {
-			state = XFER_CLOSED;
+		nsend = transfer_send(t);
+		if (nsend < 0) {
+			state = XFER_FINISHED;
+		} else if (t->byt_transferred != NULL) {
+			*t->byt_transferred += nsend;
+		}
+		if (nrecv <= 0 && nsend <= 0) {
+			/* no progress */
+			break;
 		}
 	}
 
@@ -125,19 +126,20 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		state = XFER_CONNECTED;
 		/* fallthrough */
 	case XFER_CONNECTED: {
-		const bool has_data = t->buf.len > 0;
-		ev_io_set_active(loop, &t->w_recv, !has_data);
-		ev_io_set_active(loop, &t->w_send, has_data);
+		const bool can_recv = t->buf.len < t->buf.cap;
+		const bool can_send = t->pos < t->buf.len;
+		ev_io_set_active(loop, &t->w_recv, can_recv);
+		ev_io_set_active(loop, &t->w_send, can_send);
 	} break;
 	case XFER_LINGER:
-		if (t->buf.len > 0) {
+		if (t->pos < t->buf.len) {
 			ev_io_set_active(loop, &t->w_recv, false);
 			ev_io_set_active(loop, &t->w_send, true);
 			break;
 		}
-		state = XFER_CLOSED;
+		state = XFER_FINISHED;
 		/* fallthrough */
-	case XFER_CLOSED:
+	case XFER_FINISHED:
 		ev_io_stop(loop, &t->w_recv);
 		ev_io_stop(loop, &t->w_send);
 		break;
@@ -165,6 +167,7 @@ void transfer_init(
 	w_send->data = t;
 	t->state_cb = cb;
 	t->byt_transferred = byt_transferred;
+	t->pos = 0;
 	BUF_INIT(t->buf, 0);
 }
 
@@ -178,6 +181,6 @@ void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
 {
 	ev_io_stop(loop, &t->w_recv);
 	ev_io_stop(loop, &t->w_send);
-	t->state = XFER_CLOSED;
+	t->state = XFER_FINISHED;
 	XFER_CTX_LOG(DEBUG, t, "stop");
 }
