@@ -112,40 +112,31 @@ neosocksd.setinterval(60.0)
 
 _G.server_rtt = {}
 local function ping(target, tag)
-    local payload = string.rep(" ", 32)
-    local result
-    await.idle()
-    local begin = neosocksd.now()
-    local ok, ret = await.rpcall(target, "echo", payload)
-    if not ok then
-        result = ret
-    elseif ret ~= payload then
-        result = string.format("echo mismatch: %q", ret)
-    else
-        local rtt = neosocksd.now() - begin
-        result = string.format("%dms", math.ceil(rtt * 1e+3))
-    end
-    logf("ping %q: %s", tag, result)
-    server_rtt[tag] = result
-end
-
-_G.last_ping = nil
-function ruleset.tick(now)
-    if not _G.last_ping or now - _G.last_ping > 3600 then
-        for k, v in pairs(route_list) do
-            local route, tag = v[1], v[2]
-            local target = table.pack(route("api.neosocksd.lan:80"))
-            async(ping, target, tag)
+    while true do
+        local begin = neosocksd.now()
+        local ok, result = await.rpcall(target, "echo", string.rep(" ", 32))
+        if ok then
+            local rtt = neosocksd.now() - begin
+            result = string.format("%dms", math.ceil(rtt * 1e+3))
         end
-        _G.last_ping = now
+        logf("ping %q: %s", tag, result)
+        server_rtt[tag] = result
+        await.sleep(ok and 3600 or 60)
     end
-    return libruleset.tick(now)
 end
+async(function()
+    await.sleep(10)
+    for k, v in pairs(route_list) do
+        local route, tag = v[1], v[2]
+        local target = table.pack(route("api.neosocksd.lan:80"))
+        async(ping, target, tag)
+    end
+end)
 
 local function format_rtt()
     local w = list:new()
-    for server, msg in pairs(server_rtt) do
-        w:insertf("[%s] %s", server, msg)
+    for tag, result in pairs(server_rtt) do
+        w:insertf("[%s] %s", tag, result)
     end
     w:sort()
     return w:concat(", ")

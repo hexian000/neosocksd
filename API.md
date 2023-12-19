@@ -398,9 +398,9 @@ end, ...)
 
 **Description**
 
-Start an asynchronous routine. See [await.resolve](#awaitresolve) for full example.
+Start an asynchronous routine. Asynchronous routines are implemented by Lua coroutines. So they run concurrently, but never in parallel. See [await.resolve](#awaitresolve) for full example.
 
-*Notice: The await.\* functions should be called in asynchronous routines.*
+*Notice: The await.\* functions should only be called in asynchronous routines.*
 
 
 ### await.resolve
