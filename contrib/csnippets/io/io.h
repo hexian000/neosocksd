@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#define IO_BUFSIZE BUFSIZ
+#define IO_BUFSIZE ((size_t)16384)
 
 typedef int (*io_direct_reader)(void *, const void **buf, size_t *len);
 typedef int (*io_reader)(void *, void *buf, size_t *len);

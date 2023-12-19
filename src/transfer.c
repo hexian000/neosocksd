@@ -42,13 +42,11 @@ static void ev_io_set_active(
 
 static ssize_t transfer_recv(struct transfer *restrict t)
 {
-	const int fd = t->w_recv.fd;
-	unsigned char *data = t->buf.data + t->buf.len;
-	const size_t cap = t->buf.cap - t->buf.len;
-	if (cap == 0) {
+	if (t->buf.len > 0) {
 		return 0;
 	}
-	const ssize_t nrecv = recv(fd, data, cap, 0);
+	const int fd = t->w_recv.fd;
+	const ssize_t nrecv = recv(fd, t->buf.data, t->buf.cap, 0);
 	if (nrecv < 0) {
 		const int err = errno;
 		if (IS_TRANSIENT_ERROR(err)) {
@@ -60,18 +58,18 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 		LOGV_F("recv: fd=%d EOF", fd);
 		return -1;
 	}
-	t->buf.len += nrecv;
+	t->buf.len = nrecv;
 	return nrecv;
 }
 
 static ssize_t transfer_send(struct transfer *restrict t)
 {
+	if (t->buf.len == 0) {
+		return 0;
+	}
 	const int fd = t->w_send.fd;
 	const unsigned char *data = t->buf.data + t->pos;
 	const size_t len = t->buf.len - t->pos;
-	if (len == 0) {
-		return 0;
-	}
 	const ssize_t nsend = send(fd, data, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
@@ -103,14 +101,14 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	enum transfer_state state = t->state;
 	size_t nbsend = 0;
 	while (XFER_CONNECTED <= state && state <= XFER_LINGER) {
-		int nrecv = 0, nsend = 0;
+		int nrecv = 0;
 		if (state == XFER_CONNECTED) {
 			nrecv = transfer_recv(t);
 			if (nrecv < 0) {
 				state = XFER_LINGER;
 			}
 		}
-		nsend = transfer_send(t);
+		int nsend = transfer_send(t);
 		if (nsend < 0) {
 			state = XFER_FINISHED;
 		} else {
@@ -133,13 +131,12 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		state = XFER_CONNECTED;
 		/* fallthrough */
 	case XFER_CONNECTED: {
-		const bool can_recv = t->buf.len < t->buf.cap;
-		const bool can_send = t->pos < t->buf.len;
-		ev_io_set_active(loop, &t->w_recv, can_recv);
-		ev_io_set_active(loop, &t->w_send, can_send);
+		const bool has_data = (t->buf.len > 0);
+		ev_io_set_active(loop, &t->w_recv, !has_data);
+		ev_io_set_active(loop, &t->w_send, has_data);
 	} break;
 	case XFER_LINGER:
-		if (t->pos < t->buf.len) {
+		if (t->buf.len > 0) {
 			ev_io_set_active(loop, &t->w_recv, false);
 			ev_io_set_active(loop, &t->w_send, true);
 			break;
