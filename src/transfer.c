@@ -158,6 +158,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			VERBOSE, t, "state changed %d to %d", t->state, state);
 		t->state = state;
 		t->state_cb.cb(loop, t->state_cb.ctx);
+		return;
 	}
 }
 
