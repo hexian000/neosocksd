@@ -761,7 +761,6 @@ static int zlib_compress_(lua_State *restrict L)
 		return lua_error(L);
 	}
 	const int err = stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
-	s->r = s->w = NULL;
 	if (err != 0) {
 		return luaL_error(L, "compress error: %d", err);
 	}
@@ -801,7 +800,6 @@ static int zlib_uncompress_(lua_State *restrict L)
 		return lua_error(L);
 	}
 	const int err = stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
-	s->r = s->w = NULL;
 	if (err != 0) {
 		return luaL_error(L, "uncompress error: %d", err);
 	}

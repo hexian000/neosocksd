@@ -75,9 +75,9 @@ int stream_flush(struct stream *s);
 int stream_close(struct stream *s);
 
 /**
- * @brief Copy all data from one stream to another and close both.
- * @param[in] dst Transfer ownership of the dst stream.
- * @param[in] src Transfer ownership of the src stream.
+ * @brief Copy all data from one stream to another.
+ * @param[in] dst The destination stream.
+ * @param[in] src The source stream.
  * @param[in] buf Buffer used for copy.
  * @param[in] bufsize Size of buffer in bytes.
  * @return Error code, 0 for OK.

@@ -77,13 +77,5 @@ int stream_copy(
 			err = dsterr;
 		}
 	} while (len > 0 && err == 0);
-	const int srcerr = stream_close(src);
-	if (err == 0) {
-		err = srcerr;
-	}
-	const int dsterr = stream_close(dst);
-	if (err == 0) {
-		err = dsterr;
-	}
 	return err;
 }
