@@ -12,9 +12,11 @@ int stream_direct_read(struct stream *s, const void **buf, size_t *len)
 
 int stream_read(struct stream *s, void *buf, size_t *len)
 {
-	const io_reader read = s->vftable->read;
-	if (read != NULL) {
-		return read(s, buf, len);
+	{
+		const io_reader read = s->vftable->read;
+		if (read != NULL) {
+			return read(s, buf, len);
+		}
 	}
 	const io_direct_reader direct_read = s->vftable->direct_read;
 	int err = 0;
@@ -64,18 +66,16 @@ int stream_close(struct stream *s)
 int stream_copy(
 	struct stream *dst, struct stream *src, void *buf, const size_t bufsize)
 {
-	int err = 0;
 	size_t len;
 	do {
 		len = bufsize;
 		const int srcerr = stream_read(src, buf, &len);
 		const int dsterr = stream_write(dst, buf, &len);
-		if (err == 0) {
-			err = srcerr;
+		if (srcerr != 0) {
+			return srcerr;
+		} else if (dsterr != 0) {
+			return dsterr;
 		}
-		if (err == 0) {
-			err = dsterr;
-		}
-	} while (len > 0 && err == 0);
-	return err;
+	} while (len > 0);
+	return 0;
 }

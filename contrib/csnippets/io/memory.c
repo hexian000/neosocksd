@@ -426,13 +426,13 @@ struct stream *io_metered(struct stream *base, size_t *meter)
 		stream_close(base);
 		return NULL;
 	}
-	m->base = base;
-	m->meter = meter;
 	static const struct stream_vftable vftable = {
 		.direct_read = metered_direct_read,
 		.read = metered_read,
 		.write = metered_write,
 	};
 	m->s = (struct stream){ &vftable, NULL };
+	m->base = base;
+	m->meter = meter;
 	return &m->s;
 }

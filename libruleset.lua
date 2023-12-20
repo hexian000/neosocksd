@@ -277,7 +277,9 @@ _G.inet6 = inet6
 local match = {}
 
 function match.any(...)
-    return true
+    return function(addr)
+        return true
+    end
 end
 
 function match.exact(s)
@@ -323,16 +325,29 @@ function match.host(s)
 end
 
 function match.port(from, to)
-    if not to then
-        to = from
+    if type(from) ~= "table" then
+        if not to then
+            to = from
+        end
+        return function(addr)
+            local host, port = splithostport(addr)
+            if not port then
+                return false
+            end
+            port = tonumber(port)
+            return from <= port and port <= to
+        end
+    end
+    local t = {}
+    for _, v in pairs(from) do
+        t[tostring(v)] = true
     end
     return function(addr)
         local host, port = splithostport(addr)
         if not port then
             return false
         end
-        port = tonumber(port)
-        return from <= port and port <= to
+        return not not t[port]
     end
 end
 
@@ -434,6 +449,12 @@ _G.match = match
 -- [[ composite matchers ]] --
 local composite = {}
 
+function composite.inverse(f)
+    return function(...)
+        return not f(...)
+    end
+end
+
 function composite.anyof(t)
     return function(...)
         for i, match in ipairs(t) do
@@ -516,7 +537,7 @@ local lb = {}
 
 function lb.roundrobin(t)
     local i, n = 0, #t
-    return function(...)
+    return function(addr)
         i = i % n + 1
         return t[i]
     end

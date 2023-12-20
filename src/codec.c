@@ -48,15 +48,16 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 
 		unsigned char *avail = z->dstbuf + z->dstpos;
 		size_t n = z->dstlen - z->dstpos;
-		const int ret = stream_write(z->base, avail, &n);
+		const int err = stream_write(z->base, avail, &n);
 		z->dstpos += n;
+		if (err != 0) {
+			return err;
+		} else if (z->dstpos < z->dstlen) {
+			/* short write */
+			return -1;
+		}
 		/* no more output, flip */
-		if (z->dstpos == z->dstlen) {
-			z->dstpos = z->dstlen = 0;
-		}
-		if (ret != 0) {
-			return ret;
-		}
+		z->dstpos = z->dstlen = 0;
 	}
 	*len = nwritten;
 	if (z->status != TDEFL_STATUS_OKAY) {
@@ -68,7 +69,6 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 static int
 deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 {
-	int err = 0;
 	do {
 		unsigned char *buf = z->dstbuf + z->dstlen;
 		size_t n = sizeof(z->dstbuf) - z->dstlen;
@@ -78,22 +78,21 @@ deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 
 		buf = z->dstbuf + z->dstpos;
 		n = z->dstlen - z->dstpos;
-		err = stream_write(z->base, buf, &n);
+		const int err = stream_write(z->base, buf, &n);
 		z->dstpos += n;
 		if (err != 0) {
-			break;
-		} else if (z->dstpos != z->dstlen) {
-			err = -1; /* short write */
-			break;
+			return err;
+		} else if (z->dstpos < z->dstlen) {
+			/* short write */
+			return -1;
 		}
 		z->dstpos = z->dstlen = 0;
 
 		if (z->status < TDEFL_STATUS_OKAY) {
-			err = z->status;
-			break;
+			return z->status;
 		}
 	} while (z->status != TDEFL_STATUS_DONE);
-	return err;
+	return 0;
 }
 
 static int deflate_flush(void *p)
@@ -105,13 +104,10 @@ static int deflate_flush(void *p)
 static int deflate_close(void *p)
 {
 	struct deflate_stream *restrict z = p;
-	int err = deflate_flush_(z, TDEFL_FINISH);
-	const int ret = stream_close(z->base);
-	if (err == 0) {
-		err = ret;
-	}
+	const int flusherr = deflate_flush_(z, TDEFL_FINISH);
+	const int err = stream_close(z->base);
 	free(z);
-	return err;
+	return flusherr != 0 ? flusherr : err;
 }
 
 static struct stream *deflate_writer(struct stream *base, const bool zlib)
@@ -124,6 +120,12 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 		stream_close(base);
 		return NULL;
 	}
+	static const struct stream_vftable vftable = {
+		.write = deflate_write,
+		.flush = deflate_flush,
+		.close = deflate_close,
+	};
+	z->s = (struct stream){ &vftable, NULL };
 	z->base = base;
 	z->status = TDEFL_STATUS_OKAY;
 	const int flags =
@@ -135,12 +137,6 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 		return NULL;
 	}
 	z->dstpos = z->dstlen = 0;
-	static const struct stream_vftable vftable = {
-		.write = deflate_write,
-		.flush = deflate_flush,
-		.close = deflate_close,
-	};
-	z->s = (struct stream){ &vftable, NULL };
 	return &z->s;
 }
 
@@ -160,9 +156,10 @@ struct inflate_stream {
 	int flags;
 	tinfl_status status;
 	tinfl_decompressor inflator;
-	bool srceof : 1;
 	size_t dstpos, dstlen;
 	unsigned char dstbuf[TINFL_LZ_DICT_SIZE];
+	bool srceof : 1;
+	int srcerr;
 	size_t srcpos, srclen;
 	unsigned char srcbuf[IO_BUFSIZE];
 };
@@ -175,13 +172,10 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 		/* srcbuf is empty, input */
 		if (!z->srceof && z->srcpos == z->srclen) {
 			size_t n = sizeof(z->srcbuf);
-			const int ret = stream_read(z->base, z->srcbuf, &n);
+			z->srcerr = stream_read(z->base, z->srcbuf, &n);
 			z->srcpos = 0;
 			z->srclen = n;
-			if (ret != 0) {
-				return ret;
-			}
-			if (n == 0) {
+			if (n < sizeof(z->srcbuf) || z->srcerr != 0) {
 				z->srceof = true;
 			}
 		}
@@ -218,6 +212,9 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 			*buf = z->dstbuf + z->dstpos;
 			*len = n;
 			z->dstpos += n;
+			if (z->dstpos == z->dstlen) {
+				return z->srcerr;
+			}
 			return 0;
 		}
 	} while (z->status > TINFL_STATUS_DONE && !z->srceof);
@@ -231,9 +228,9 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 static int inflate_close(void *p)
 {
 	struct inflate_stream *restrict z = p;
-	const int ret = stream_close(z->base);
+	const int err = stream_close(z->base);
 	free(z);
-	return ret;
+	return err;
 }
 
 static struct stream *inflate_reader(struct stream *base, const bool zlib)
@@ -246,18 +243,19 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 		stream_close(base);
 		return NULL;
 	}
-	z->base = base;
-	z->flags = zlib ? TINFL_FLAG_PARSE_ZLIB_HEADER : 0;
-	z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
-	tinfl_init(&z->inflator);
-	z->srceof = false;
-	z->srcpos = z->srclen = 0;
-	z->dstpos = z->dstlen = 0;
 	static const struct stream_vftable vftable = {
 		.direct_read = inflate_direct_read,
 		.close = inflate_close,
 	};
 	z->s = (struct stream){ &vftable, NULL };
+	z->base = base;
+	z->flags = zlib ? TINFL_FLAG_PARSE_ZLIB_HEADER : 0;
+	z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
+	tinfl_init(&z->inflator);
+	z->dstpos = z->dstlen = 0;
+	z->srceof = false;
+	z->srcerr = 0;
+	z->srcpos = z->srclen = 0;
 	return &z->s;
 }
 

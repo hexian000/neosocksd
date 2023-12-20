@@ -45,12 +45,12 @@ struct socks_ctx {
 	enum socks_state state;
 	int accepted_fd, dialed_fd;
 	sockaddr_max_t accepted_sa;
+	struct dialaddr addr;
 	struct ev_timer w_timeout;
 	union {
 		/* during handshake */
 		struct {
 			struct ev_io w_socket;
-			struct dialaddr addr;
 			uint8_t auth_method;
 			struct {
 				BUFFER_HDR;
@@ -73,7 +73,7 @@ struct socks_ctx {
 		}                                                              \
 		char laddr[64];                                                \
 		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
-		if ((ctx)->state != STATE_CONNECT) {                           \
+		if ((ctx)->state < STATE_CONNECT) {                            \
 			LOG_F(level, "\"%s\": " format, laddr, __VA_ARGS__);   \
 			break;                                                 \
 		}                                                              \
