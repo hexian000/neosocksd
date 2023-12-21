@@ -199,7 +199,8 @@ static bool make_request(
 	const size_t len)
 {
 	const enum content_encodings encoding =
-		(len > HTTP_MAX_CONTENT) ? CENCODING_DEFLATE : CENCODING_NONE;
+		(len > RPCALL_COMPRESS_THRESHOLD) ? CENCODING_DEFLATE :
+						    CENCODING_NONE;
 	struct stream *s = content_writer(&p->cbuf, len, encoding);
 	if (s == NULL) {
 		return false;

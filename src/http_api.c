@@ -327,7 +327,7 @@ handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 	}
 	const enum content_encodings encoding =
 		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) &&
-				(resultlen > HTTP_MAX_CONTENT) ?
+				(resultlen > RPCALL_COMPRESS_THRESHOLD) ?
 			CENCODING_DEFLATE :
 			CENCODING_NONE;
 	struct stream *w =

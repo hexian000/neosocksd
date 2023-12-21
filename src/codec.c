@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "codec.h"
+#include "io/io.h"
 #include "io/stream.h"
 #include "utils/object.h"
 #include "utils/serialize.h"
@@ -153,15 +154,15 @@ struct stream *codec_deflate_writer(struct stream *base)
 struct inflate_stream {
 	struct stream s;
 	struct stream *base;
+	bool srceof : 1;
+	int srcerr;
+	size_t srclen;
+	const unsigned char *srcbuf;
 	int flags;
 	tinfl_status status;
 	tinfl_decompressor inflator;
 	size_t dstpos, dstlen;
 	unsigned char dstbuf[TINFL_LZ_DICT_SIZE];
-	bool srceof : 1;
-	int srcerr;
-	size_t srcpos, srclen;
-	unsigned char srcbuf[IO_BUFSIZE];
 };
 ASSERT_SUPER(struct stream, struct deflate_stream, s);
 
@@ -170,14 +171,15 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 	struct inflate_stream *restrict z = p;
 	do {
 		/* srcbuf is empty, input */
-		if (!z->srceof && z->srcpos == z->srclen) {
-			size_t n = sizeof(z->srcbuf);
-			z->srcerr = stream_read(z->base, z->srcbuf, &n);
-			z->srcpos = 0;
-			z->srclen = n;
+		if (z->srclen == 0 && !z->srceof) {
+			const void *srcbuf;
+			size_t n = IO_BUFSIZE;
+			z->srcerr = stream_direct_read(z->base, &srcbuf, &n);
 			if (n < sizeof(z->srcbuf) || z->srcerr != 0) {
 				z->srceof = true;
 			}
+			z->srclen = n;
+			z->srcbuf = srcbuf;
 		}
 
 		/* dstbuf is full, wrap */
@@ -186,19 +188,21 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 		}
 
 		/* srcbuf is not empty && dstbuf is not full, inflate */
-		if (z->status > TINFL_STATUS_DONE && z->srcpos != z->srclen &&
-		    z->dstlen < sizeof(z->dstbuf)) {
-			const unsigned char *src = z->srcbuf + z->srcpos;
-			size_t srclen = z->srclen - z->srcpos;
+		if (z->srclen > 0 && z->dstlen < sizeof(z->dstbuf) &&
+		    z->status > TINFL_STATUS_DONE) {
+			const unsigned char *src = z->srcbuf;
+			size_t srclen = z->srclen;
 			unsigned char *dst = z->dstbuf + z->dstlen;
 			size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
-			const int flags =
-				z->flags |
-				(z->srceof ? 0 : TINFL_FLAG_HAS_MORE_INPUT);
+			int flags = z->flags;
+			if (!z->srceof) {
+				flags |= TINFL_FLAG_HAS_MORE_INPUT;
+			}
 			z->status = tinfl_decompress(
 				&z->inflator, src, &srclen, z->dstbuf, dst,
 				&dstlen, flags);
-			z->srcpos += srclen;
+			z->srcbuf += srclen;
+			z->srclen -= srclen;
 			z->dstlen += dstlen;
 		}
 
@@ -249,13 +253,13 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 	};
 	z->s = (struct stream){ &vftable, NULL };
 	z->base = base;
+	z->srceof = false;
+	z->srcerr = 0;
+	z->srclen = 0;
 	z->flags = zlib ? TINFL_FLAG_PARSE_ZLIB_HEADER : 0;
 	z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
 	tinfl_init(&z->inflator);
 	z->dstpos = z->dstlen = 0;
-	z->srceof = false;
-	z->srcerr = 0;
-	z->srcpos = z->srclen = 0;
 	return &z->s;
 }
 
