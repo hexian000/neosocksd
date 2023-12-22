@@ -54,9 +54,18 @@ struct ruleset {
 
 #if LUA_VERSION_NUM >= 504
 #define HAVE_LUA_TOCLOSE 1
-#define lua_resume(L, from, narg) lua_resume((L), (from), (narg), &(int){ 0 });
+static int co_resume(lua_State *L, lua_State *from, int narg, int *nres)
+{
+	return lua_resume(L, from, narg, nres);
+}
 #elif LUA_VERSION_NUM == 503
 #define LUA_LOADED_TABLE "_LOADED"
+static int co_resume(lua_State *L, lua_State *from, int narg, int *nres)
+{
+	const int status = lua_resume(L, from, narg);
+	*nres = lua_gettop(L);
+	return status;
+}
 #endif
 
 #define RIDX_ERRORS (LUA_RIDX_LAST + 1)
@@ -853,7 +862,7 @@ static int ruleset_async_(lua_State *restrict L)
 		n--;
 		/* co stack: f, ... */
 	}
-	const int status = lua_resume(co, L, n);
+	const int status = co_resume(co, L, n, &n);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushboolean(L, 0);
 		lua_xmove(co, L, 1);
@@ -949,7 +958,7 @@ await_resume(struct ruleset *restrict r, const void *p, int narg, ...)
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}
 	va_end(args);
-	const int status = lua_resume(co, L, narg);
+	const int status = co_resume(co, L, narg, &(int){ 0 });
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_xmove(co, L, 1);
 		return false;
