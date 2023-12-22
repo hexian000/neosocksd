@@ -52,6 +52,13 @@ struct ruleset {
 	struct ev_timer w_ticker;
 };
 
+#if LUA_VERSION_NUM >= 504
+#define HAVE_LUA_TOCLOSE 1
+#define lua_resume(L, from, narg) lua_resume((L), (from), (narg), &(int){ 0 });
+#elif LUA_VERSION_NUM == 503
+#define LUA_LOADED_TABLE "_LOADED"
+#endif
+
 #define RIDX_ERRORS (LUA_RIDX_LAST + 1)
 #define RIDX_FUNCTIONS (LUA_RIDX_LAST + 2)
 #define RIDX_CONTEXTS (LUA_RIDX_LAST + 3)
@@ -60,8 +67,6 @@ struct ruleset {
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
 #define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
 #define ERR_INVALID_ROUTE "unable to parse route"
-
-#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM == 504)
 
 #define MT_AWAIT_IDLE "await.idle"
 #define MT_AWAIT_SLEEP "await.sleep"
@@ -848,7 +853,7 @@ static int ruleset_async_(lua_State *restrict L)
 		n--;
 		/* co stack: f, ... */
 	}
-	const int status = lua_resume(co, L, n, &n);
+	const int status = lua_resume(co, L, n);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushboolean(L, 0);
 		lua_xmove(co, L, 1);
@@ -944,12 +949,7 @@ await_resume(struct ruleset *restrict r, const void *p, int narg, ...)
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}
 	va_end(args);
-#if LUA_VERSION_NUM == 504
-	int nres = 0;
-	const int status = lua_resume(co, L, narg, &nres);
-#else
 	const int status = lua_resume(co, L, narg);
-#endif
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_xmove(co, L, 1);
 		return false;
