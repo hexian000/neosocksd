@@ -42,6 +42,11 @@ enum http_parser_state {
 	STATE_PARSE_OK,
 };
 
+struct http_parsehdr_cb {
+	bool (*func)(void *ctx, const char *key, char *value);
+	void *ctx;
+};
+
 struct http_parser {
 	enum http_parser_state mode, state;
 	int http_status;
@@ -50,6 +55,7 @@ struct http_parser {
 	char *next;
 	bool expect_continue : 1;
 	struct http_headers hdr;
+	struct http_parsehdr_cb on_header;
 	size_t wpos, cpos;
 	struct vbuffer *cbuf; /* content buffer */
 	struct {
@@ -59,7 +65,8 @@ struct http_parser {
 };
 
 void http_parser_init(
-	struct http_parser *p, int fd, enum http_parser_state mode);
+	struct http_parser *p, int fd, enum http_parser_state mode,
+	struct http_parsehdr_cb on_header);
 
 int http_parser_recv(struct http_parser *parser);
 

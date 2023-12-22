@@ -246,7 +246,8 @@ handle_t http_client_do(
 		return INVALID_HANDLE;
 	}
 	ctx->state = STATE_CLIENT_CONNECT;
-	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE);
+	const struct http_parsehdr_cb on_header = { NULL, NULL };
+	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, on_header);
 	if (!make_request(&ctx->parser, uri, content, len)) {
 		LOGOOM();
 		http_client_close(loop, ctx);

@@ -231,7 +231,8 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 		ev_io_init(w_send, send_cb, fd, EV_WRITE);
 		w_send->data = ctx;
 	}
-	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST);
+	const struct http_parsehdr_cb on_header = { NULL, NULL };
+	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
 	ctx->dialreq = NULL;
 	struct event_cb cb = (struct event_cb){
 		.cb = dialer_cb,

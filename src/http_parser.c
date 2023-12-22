@@ -231,6 +231,10 @@ static bool
 parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 {
 	LOGV_F("http_header: \"%s: %s\"", key, value);
+	if (p->on_header.func != NULL) {
+		/* external header handler */
+		return p->on_header.func(p->on_header.ctx, key, value);
+	}
 	if (strcasecmp(key, "Content-Length") == 0) {
 		size_t content_length;
 		if (sscanf(value, "%zu", &content_length) != 1) {
@@ -402,7 +406,8 @@ int http_parser_recv(struct http_parser *restrict p)
 
 void http_parser_init(
 	struct http_parser *restrict p, const int fd,
-	const enum http_parser_state mode)
+	const enum http_parser_state mode,
+	const struct http_parsehdr_cb on_header)
 {
 	p->mode = p->state = mode;
 	p->fd = fd;
@@ -410,6 +415,7 @@ void http_parser_init(
 	p->next = NULL;
 	p->expect_continue = false;
 	p->hdr = (struct http_headers){ 0 };
+	p->on_header = on_header;
 	p->wpos = p->cpos = 0;
 	p->cbuf = NULL;
 	BUF_INIT(p->rbuf, 0);
