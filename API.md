@@ -354,6 +354,8 @@ assert(s == s1)
 
 Data compression interface for zlib format (as declared in RFC 1950 and RFC 1951).
 
+Tip: Using compressed data for remote invocations is not recommended because `neosocksd.invoke` and `await.invoke` may compress long content internally.
+
 
 ### _G.NDEBUG
 
