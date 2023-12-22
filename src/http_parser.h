@@ -13,6 +13,11 @@
 #define HTTP_MAX_ENTITY 8192
 #define HTTP_MAX_CONTENT 4194304
 
+enum transfer_encodings {
+	TENCODING_NONE,
+	TENCODING_CHUNKED,
+};
+
 enum content_encodings {
 	CENCODING_NONE,
 	CENCODING_DEFLATE,
@@ -24,13 +29,25 @@ enum content_encodings {
 extern const char *content_encoding_str[];
 
 struct http_headers {
-	char *accept;
-	enum content_encodings accept_encoding;
+	/* hop-by-hop headers */
+	char *connection;
+	struct {
+		enum transfer_encodings accept;
+		enum transfer_encodings encoding;
+	} transfer;
+	/* representation headers */
 	struct {
 		size_t length;
 		char *type;
 		enum content_encodings encoding;
 	} content;
+	union {
+		/* request headers */
+		struct {
+			char *accept;
+			enum content_encodings accept_encoding;
+		};
+	};
 };
 
 enum http_parser_state {
@@ -93,8 +110,6 @@ struct stream *content_writer(
 			(code), status ? status : "", (int)date_len,           \
 			date_str);                                             \
 	} while (0)
-
-#define RESPHDR_ADD(buf, format, ...) BUF_APPENDF((buf), (format), __VA_ARGS__)
 
 #define RESPHDR_FINISH(buf) BUF_APPENDCONST(buf, "\r\n")
 

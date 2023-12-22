@@ -231,10 +231,39 @@ static bool
 parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 {
 	LOGV_F("http_header: \"%s: %s\"", key, value);
+
+	/* hop-by-hop headers */
+	if (strcasecmp(key, "Connection") == 0) {
+		p->hdr.connection = strtrimspace(value);
+		return true;
+	} else if (strcasecmp(key, "TE") == 0) {
+		value = strtrimspace(value);
+		if (value[0] == '\0') {
+			p->hdr.transfer.accept = TENCODING_NONE;
+			return true;
+		} else if (strcmp(value, "chunk") == 0) {
+			p->hdr.transfer.accept = TENCODING_CHUNKED;
+			return true;
+		}
+		return false;
+	} else if (strcasecmp(key, "Transfer-Encoding") == 0) {
+		value = strtrimspace(value);
+		if (value[0] == '\0') {
+			p->hdr.transfer.encoding = TENCODING_NONE;
+			return true;
+		} else if (strcmp(value, "chunk") == 0) {
+			p->hdr.transfer.encoding = TENCODING_CHUNKED;
+			return true;
+		}
+		return false;
+	}
+
+	/* custom header handler */
 	if (p->on_header.func != NULL) {
-		/* external header handler */
 		return p->on_header.func(p->on_header.ctx, key, value);
 	}
+
+	/* representation headers */
 	if (strcasecmp(key, "Content-Length") == 0) {
 		size_t content_length;
 		if (sscanf(value, "%zu", &content_length) != 1) {
@@ -251,9 +280,11 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 	} else if (strcasecmp(key, "Content-Encoding") == 0) {
 		return parse_content_encoding(p, value);
 	}
+
 	if (p->mode == STATE_PARSE_REQUEST) {
+		/* request headers */
 		if (strcasecmp(key, "Accept") == 0) {
-			p->hdr.accept = value;
+			p->hdr.accept = strtrimspace(value);
 		} else if (strcasecmp(key, "Accept-Encoding") == 0) {
 			return parse_accept_encoding(p, value);
 		} else if (strcasecmp(key, "Expect") == 0) {

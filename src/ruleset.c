@@ -958,7 +958,8 @@ await_resume(struct ruleset *restrict r, const void *p, int narg, ...)
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}
 	va_end(args);
-	const int status = co_resume(co, L, narg, &(int){ 0 });
+	int nres;
+	const int status = co_resume(co, L, narg, &nres);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_xmove(co, L, 1);
 		return false;
