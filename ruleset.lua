@@ -5,7 +5,7 @@ _G.libruleset = require("libruleset")
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
 
-local function is_disabled(...)
+local function is_disabled()
     local now = os.date("*t")
     if not (2 <= now.wday and now.wday <= 6) then
         return true
@@ -111,25 +111,40 @@ local ruleset = setmetatable({}, {
 neosocksd.setinterval(60.0)
 
 _G.server_rtt = {}
-local function ping(target, tag)
-    while true do
+local function ping(target)
+    local lasterr
+    local rtt = {}
+    for i = 1, 4 do
         local begin = neosocksd.now()
         local ok, result = await.rpcall(target, "echo", string.rep(" ", 32))
         if ok then
-            local rtt = neosocksd.now() - begin
-            result = string.format("%dms", math.ceil(rtt * 1e+3))
+            table.insert(rtt, neosocksd.now() - begin)
+        else
+            lasterr = result
         end
+    end
+    if rtt[1] then
+        rtt = math.min(table.unpack(rtt))
+        return true, string.format("%dms", math.ceil(rtt * 1e+3))
+    end
+    return false, lasterr
+end
+
+local function keepalive(target, tag)
+    while true do
+        local ok, result = ping(target)
         logf("ping %q: %s", tag, result)
         server_rtt[tag] = result
         await.sleep(ok and 3600 or 60)
     end
 end
+
 async(function()
     await.sleep(10)
     for k, v in pairs(route_list) do
         local route, tag = v[1], v[2]
         local target = table.pack(route("api.neosocksd.lan:80"))
-        async(ping, target, tag)
+        async(keepalive, target, tag)
     end
 end)
 
