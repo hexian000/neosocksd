@@ -101,18 +101,18 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	enum transfer_state state = t->state;
 	size_t nbsend = 0;
 	while (XFER_CONNECTED <= state && state <= XFER_LINGER) {
-		int nrecv = 0;
+		ssize_t nrecv = 0;
 		if (state == XFER_CONNECTED) {
 			nrecv = transfer_recv(t);
 			if (nrecv < 0) {
 				state = XFER_LINGER;
 			}
 		}
-		int nsend = transfer_send(t);
+		ssize_t nsend = transfer_send(t);
 		if (nsend < 0) {
 			state = XFER_FINISHED;
 		} else {
-			nbsend += nsend;
+			nbsend += (size_t)nsend;
 		}
 		if (nrecv <= 0 && nsend <= 0) {
 			/* no progress */

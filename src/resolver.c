@@ -2,31 +2,24 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "resolver.h"
-#include "proto/domain.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
-#include "utils/posixtime.h"
 #include "utils/minmax.h"
 #include "conf.h"
 #include "util.h"
 #include "sockutil.h"
 
+#include <ev.h>
 #if WITH_CARES
+/* for POSIX fd_set */
+#include <sys/select.h>
 #include <ares.h>
 #endif
-#include <ev.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <unistd.h>
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 

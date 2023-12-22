@@ -283,7 +283,24 @@ void forward_serve(
 }
 
 #if WITH_TPROXY
-static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
+
+#if WITH_RULESET
+static struct dialreq *
+tproxy_route(struct ruleset *r, const struct sockaddr *restrict sa)
+{
+	char addr_str[64];
+	format_sa(sa, addr_str, sizeof(addr_str));
+	switch (sa->sa_family) {
+	case AF_INET:
+		return ruleset_route(r, addr_str);
+	case AF_INET6:
+		return ruleset_route6(r, addr_str);
+	}
+	FAIL();
+}
+#endif
+
+static struct dialreq *tproxy_makereq(struct forward_ctx *restrict ctx)
 {
 	sockaddr_max_t dest;
 	socklen_t len = sizeof(dest);
@@ -307,16 +324,11 @@ static struct dialreq *make_tproxy(struct forward_ctx *restrict ctx)
 	}
 
 #if WITH_RULESET
-	if (G.ruleset != NULL) {
-		char addr_str[64];
-		format_sa(&dest.sa, addr_str, sizeof(addr_str));
-		switch (dest.sa.sa_family) {
-		case AF_INET:
-			return ruleset_route(G.ruleset, addr_str);
-		case AF_INET6:
-			return ruleset_route6(G.ruleset, addr_str);
+	{
+		struct ruleset *r = G.ruleset;
+		if (r != NULL) {
+			return tproxy_route(r, &dest.sa);
 		}
-		return NULL;
 	}
 #endif
 
@@ -352,7 +364,7 @@ void tproxy_serve(
 	}
 	(void)memcpy(
 		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
-	struct dialreq *req = make_tproxy(ctx);
+	struct dialreq *req = tproxy_makereq(ctx);
 	if (req == NULL) {
 		forward_ctx_close(loop, ctx);
 		return;

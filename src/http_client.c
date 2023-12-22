@@ -28,7 +28,6 @@
 
 /* never rollback */
 enum http_client_state {
-	STATE_CLIENT_INIT,
 	STATE_CLIENT_CONNECT,
 	STATE_CLIENT_REQUEST,
 	STATE_CLIENT_RESPONSE,
