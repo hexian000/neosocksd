@@ -193,6 +193,34 @@ static char *strtrimspace(char *s)
 	return strtrimrightspace(strtrimleftspace(s));
 }
 
+static bool parse_accept_te(struct http_parser *restrict p, char *value)
+{
+	value = strtrimspace(value);
+	if (value[0] == '\0') {
+		p->hdr.transfer.accept = TENCODING_NONE;
+		return true;
+	} else if (strcmp(value, "chunked") == 0) {
+		p->hdr.transfer.accept = TENCODING_CHUNKED;
+		return true;
+	}
+	p->http_status = HTTP_BAD_REQUEST;
+	return false;
+}
+
+static bool parse_transfer_encoding(struct http_parser *restrict p, char *value)
+{
+	value = strtrimspace(value);
+	if (value[0] == '\0') {
+		p->hdr.transfer.encoding = TENCODING_NONE;
+		return true;
+	} else if (strcmp(value, "chunked") == 0) {
+		p->hdr.transfer.encoding = TENCODING_CHUNKED;
+		return true;
+	}
+	p->http_status = HTTP_BAD_REQUEST;
+	return false;
+}
+
 static bool parse_accept_encoding(struct http_parser *restrict p, char *value)
 {
 	if (strcmp(value, "*") == 0) {
@@ -212,7 +240,23 @@ static bool parse_accept_encoding(struct http_parser *restrict p, char *value)
 			return true;
 		}
 	}
+	p->http_status = HTTP_BAD_REQUEST;
 	return false;
+}
+
+static bool parse_content_length(struct http_parser *restrict p, char *value)
+{
+	size_t content_length;
+	if (sscanf(value, "%zu", &content_length) != 1) {
+		p->http_status = HTTP_BAD_REQUEST;
+		return false;
+	}
+	if (strcmp(p->msg.req.method, "CONNECT") == 0) {
+		p->http_status = HTTP_BAD_REQUEST;
+		return false;
+	}
+	p->hdr.content.length = content_length;
+	return true;
 }
 
 static bool parse_content_encoding(struct http_parser *restrict p, char *value)
@@ -223,7 +267,7 @@ static bool parse_content_encoding(struct http_parser *restrict p, char *value)
 			return true;
 		}
 	}
-	http_resp_errpage(p, HTTP_UNSUPPORTED_MEDIA_TYPE);
+	p->http_status = HTTP_UNSUPPORTED_MEDIA_TYPE;
 	return false;
 }
 
@@ -237,25 +281,9 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 		p->hdr.connection = strtrimspace(value);
 		return true;
 	} else if (strcasecmp(key, "TE") == 0) {
-		value = strtrimspace(value);
-		if (value[0] == '\0') {
-			p->hdr.transfer.accept = TENCODING_NONE;
-			return true;
-		} else if (strcmp(value, "chunk") == 0) {
-			p->hdr.transfer.accept = TENCODING_CHUNKED;
-			return true;
-		}
-		return false;
+		return parse_accept_te(p, value);
 	} else if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		value = strtrimspace(value);
-		if (value[0] == '\0') {
-			p->hdr.transfer.encoding = TENCODING_NONE;
-			return true;
-		} else if (strcmp(value, "chunk") == 0) {
-			p->hdr.transfer.encoding = TENCODING_CHUNKED;
-			return true;
-		}
-		return false;
+		return parse_transfer_encoding(p, value);
 	}
 
 	/* custom header handler */
@@ -265,18 +293,9 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 
 	/* representation headers */
 	if (strcasecmp(key, "Content-Length") == 0) {
-		size_t content_length;
-		if (sscanf(value, "%zu", &content_length) != 1) {
-			p->http_status = HTTP_BAD_REQUEST;
-			return false;
-		}
-		if (strcmp(p->msg.req.method, "CONNECT") == 0) {
-			p->http_status = HTTP_BAD_REQUEST;
-			return false;
-		}
-		p->hdr.content.length = content_length;
+		return parse_content_length(p, value);
 	} else if (strcasecmp(key, "Content-Type") == 0) {
-		p->hdr.content.type = value;
+		p->hdr.content.type = strtrimspace(value);
 	} else if (strcasecmp(key, "Content-Encoding") == 0) {
 		return parse_content_encoding(p, value);
 	}
@@ -288,6 +307,7 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 		} else if (strcasecmp(key, "Accept-Encoding") == 0) {
 			return parse_accept_encoding(p, value);
 		} else if (strcasecmp(key, "Expect") == 0) {
+			value = strtrimspace(value);
 			if (strcasecmp(value, "100-continue") != 0) {
 				p->http_status = HTTP_EXPECTATION_FAILED;
 				return false;

@@ -119,6 +119,19 @@ vbuf_appendf(struct vbuffer *restrict vbuf, const char *format, ...);
 		(buf).len = (n);                                               \
 	} while (0)
 
+#define BUF_CONST(pbuf, str)                                                   \
+	do {                                                                   \
+		static struct {                                                \
+			BUFFER_HDR;                                            \
+			unsigned char data[sizeof(str)];                       \
+		} literalbuf = {                                               \
+			.cap = sizeof(str),                                    \
+			.len = sizeof(str) - 1,                                \
+			.data = str,                                           \
+		};                                                             \
+		(pbuf) = (struct buffer *)&literalbuf;                         \
+	} while (0)
+
 /**
  * @brief Append fixed-length data to buffer.
  * @return Number of bytes transferred.
