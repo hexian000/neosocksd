@@ -1290,7 +1290,7 @@ static int api_parse_ipv4_(lua_State *restrict L)
 		return 0;
 	}
 	const uint32_t *addr = (void *)&in;
-	lua_pushinteger(L, read_uint32((const void *)&addr[0]));
+	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[0]));
 	return 1;
 }
 
@@ -1305,17 +1305,17 @@ static int api_parse_ipv6_(lua_State *restrict L)
 	if (inet_pton(AF_INET6, s, &in6) != 1) {
 		return 0;
 	}
-	const lua_Unsigned *addr = (void *)&in6;
-#if LUA_MAXUNSIGNED >= UINT64_MAX
+	const lua_Integer *addr = (void *)&in6;
+#if LUA_32BITS
+	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[0]));
+	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[1]));
+	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[2]));
+	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[3]));
+	return 4;
+#else
 	lua_pushinteger(L, (lua_Integer)read_uint64((const void *)&addr[0]));
 	lua_pushinteger(L, (lua_Integer)read_uint64((const void *)&addr[1]));
 	return 2;
-#else
-	lua_pushinteger(L, read_uint32((const void *)&addr[0]));
-	lua_pushinteger(L, read_uint32((const void *)&addr[1]));
-	lua_pushinteger(L, read_uint32((const void *)&addr[2]));
-	lua_pushinteger(L, read_uint32((const void *)&addr[3]));
-	return 4;
 #endif
 }
 
