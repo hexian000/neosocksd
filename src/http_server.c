@@ -234,7 +234,7 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 	const struct http_parsehdr_cb on_header = { NULL, NULL };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
 	ctx->dialreq = NULL;
-	struct event_cb cb = (struct event_cb){
+	const struct event_cb cb = {
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};

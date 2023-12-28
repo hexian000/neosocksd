@@ -257,7 +257,7 @@ handle_t http_client_do(
 	ev_set_priority(&ctx->w_timeout, EV_MINPRI);
 	ctx->w_timeout.data = ctx;
 	ctx->dialreq = req;
-	struct event_cb cb = (struct event_cb){
+	const struct event_cb cb = {
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};

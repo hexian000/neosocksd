@@ -55,7 +55,7 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 			stats->num_sessions);
 	}
 
-	struct event_cb cb = {
+	const struct event_cb cb = {
 		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};

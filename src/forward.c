@@ -210,7 +210,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 			stats->num_sessions);
 	}
 
-	struct event_cb cb = {
+	const struct event_cb cb = {
 		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};
@@ -243,7 +243,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 		w_timeout->data = ctx;
 	}
 
-	struct event_cb cb = (struct event_cb){
+	const struct event_cb cb = {
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};

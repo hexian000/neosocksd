@@ -376,7 +376,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 			stats->num_sessions);
 	}
 
-	struct event_cb cb = {
+	const struct event_cb cb = {
 		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};
@@ -745,7 +745,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 
 	ctx->auth_method = SOCKS5AUTH_NOACCEPTABLE;
 	ctx->dialreq = NULL;
-	struct event_cb cb = (struct event_cb){
+	const struct event_cb cb = {
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};
