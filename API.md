@@ -316,7 +316,10 @@ local now = neosocksd.now()
 
 **Description**
 
-Get timestamp of the latest event in seconds.
+Formally, get the timestamp of the latest event in seconds.
+
+- Any ruleset callback must be invoked by an event.
+- Any asynchronous routine must be resumed by an event.
 
 
 ### regex.compile
@@ -400,7 +403,7 @@ end, ...)
 
 **Description**
 
-Start an asynchronous routine. Asynchronous routines are implemented by Lua coroutines. So they run concurrently, but never in parallel. See [await.resolve](#awaitresolve) for full example.
+Start an asynchronous routine. Asynchronous routines are supported by Lua coroutines. Therefore, they run concurrently, but not in parallel. See [await.resolve](#awaitresolve) for a full example.
 
 *Notice: The await.\* functions should only be called in asynchronous routines.*
 
@@ -420,7 +423,7 @@ end)
 
 **Description**
 
-Resolves a host name locally.
+Resolves a host name asynchronously. If asynchronous name resolution is not configured, `await.resolve` is the same as `neosocksd.resolve`.
 
 IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 

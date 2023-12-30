@@ -1,4 +1,4 @@
-/* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
+/* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "utils/slog.h"
@@ -402,14 +402,13 @@ int main(int argc, char **argv)
 		ev_signal_start(loop, w_sigterm);
 	}
 
-	/* start event loop */
-	LOGN("server start");
 #if WITH_SYSTEMD
 	(void)sd_notify(0, "READY=1");
 #endif
+	/* start event loop */
 	ev_run(loop, 0);
 
-	LOGN("server stop");
+	LOGN("shutdown gracefully");
 	if (api != NULL) {
 		server_stop(api);
 		api = NULL;
@@ -433,7 +432,7 @@ int main(int argc, char **argv)
 	}
 	ev_loop_destroy(loop);
 
-	LOGI("program terminated normally.");
+	LOGD("program terminated normally");
 	return EXIT_SUCCESS;
 }
 

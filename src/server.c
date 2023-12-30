@@ -1,4 +1,4 @@
-/* neosocksd (c) 2023 He Xian <hexian000@outlook.com>
+/* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "server.h"
@@ -158,10 +158,10 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		CLOSE_FD(fd);
 		return false;
 	}
-	if (LOGLEVEL(INFO)) {
+	if (LOGLEVEL(NOTICE)) {
 		char addr_str[64];
 		format_sa(bindaddr, addr_str, sizeof(addr_str));
-		LOG_F(INFO, "listen: %s", addr_str);
+		LOG_F(NOTICE, "listen at %s", addr_str);
 	}
 
 	struct ev_io *restrict w_accept = &s->l.w_accept;
