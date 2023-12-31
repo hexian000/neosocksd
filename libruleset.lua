@@ -26,6 +26,15 @@ function _G.eval(s, ...)
     return assert(load(s, "=eval"))(...)
 end
 
+function package.replace(modname, chunk)
+    local module = chunk()
+    local loaded = package.loaded[modname]
+    package.loaded[modname] = module
+    if _G[modname] == loaded then
+        _G[modname] = module
+    end
+end
+
 function string.startswith(s, sub)
     local n = string.len(sub)
     return string.sub(s, 1, n) == sub

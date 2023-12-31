@@ -426,8 +426,8 @@ static int ruleset_rpcall_(lua_State *restrict L)
 	return 1;
 }
 
-/* always reload and replace existing module */
-static int ruleset_require_(lua_State *restrict L)
+/* replace(modname, chunk) */
+static int package_replace_(lua_State *restrict L)
 {
 	const int idx_modname = 1;
 	luaL_checktype(L, idx_modname, LUA_TSTRING);
@@ -496,7 +496,7 @@ static int ruleset_update_(lua_State *restrict L)
 			return lua_error(L);
 		}
 	}
-	(void)ruleset_require_(L);
+	(void)package_replace_(L);
 	return 0;
 }
 
