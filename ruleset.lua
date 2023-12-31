@@ -110,7 +110,6 @@ local ruleset = setmetatable({}, {
 })
 neosocksd.setinterval(60.0)
 
-_G.server_rtt = {}
 local function ping(target)
     local lasterr
     local rtt = {}
@@ -140,7 +139,12 @@ local function keepalive(target, tag)
 end
 
 async(function()
+    if server_rtt then
+        _G.server_rtt = {}
+        return
+    end
     await.sleep(10)
+    _G.server_rtt = {}
     for k, v in pairs(route_list) do
         local route, tag = v[1], v[2]
         local target = table.pack(route("api.neosocksd.lan:80"))
@@ -149,6 +153,9 @@ async(function()
 end)
 
 local function format_rtt()
+    if not server_rtt then
+        return tostring(server_rtt)
+    end
     local w = list:new()
     for tag, result in pairs(server_rtt) do
         w:insertf("[%s] %s", tag, result)
