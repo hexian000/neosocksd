@@ -177,7 +177,7 @@ static int parse_message(struct http_parser *restrict p)
 
 static char *strtrimleftspace(char *restrict s)
 {
-	for (; *s && isspace(*s); s++) {
+	for (; *s && isspace((unsigned char)*s); s++) {
 	}
 	return s;
 }
@@ -185,7 +185,7 @@ static char *strtrimleftspace(char *restrict s)
 static char *strtrimrightspace(char *restrict s)
 {
 	char *restrict e = s + strlen(s) - 1;
-	for (; s < e && isspace(*e); e--) {
+	for (; s < e && isspace((unsigned char)*e); e--) {
 		*e = '\0';
 	}
 	return s;

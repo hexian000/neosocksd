@@ -194,7 +194,7 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 			luaL_addchar(B, ch);
 		} else if (iscntrl(ch)) {
 			char buff[10];
-			if (!isdigit(*(s + 1))) {
+			if (!isdigit((unsigned char)*(s + 1))) {
 				snprintf(buff, sizeof(buff), "\\%d", ch);
 			} else {
 				snprintf(buff, sizeof(buff), "\\%03d", ch);

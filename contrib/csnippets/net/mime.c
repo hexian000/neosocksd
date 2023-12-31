@@ -13,14 +13,14 @@
 static char *strtolower(char *s)
 {
 	for (char *restrict p = s; *p; p++) {
-		*p = tolower(*p);
+		*p = (unsigned char)tolower((unsigned char)*p);
 	}
 	return s;
 }
 
 static char *strtrimleftspace(char *restrict s)
 {
-	for (; *s && isspace(*s); s++) {
+	for (; *s && isspace((unsigned char)*s); s++) {
 	}
 	return s;
 }
@@ -28,7 +28,7 @@ static char *strtrimleftspace(char *restrict s)
 static char *strtrimrightspace(char *restrict s)
 {
 	char *restrict e = s + strlen(s) - 1;
-	for (; s < e && isspace(*e); e--) {
+	for (; s < e && isspace((unsigned char)*e); e--) {
 		*e = '\0';
 	}
 	return s;
@@ -61,7 +61,7 @@ char *mime_parse(char *s, char **type, char **subtype)
 static char *next_token(char *s)
 {
 	char *restrict sep;
-	for (sep = s; *sep && istoken(*sep); sep++) {
+	for (sep = s; *sep && istoken((unsigned char)*sep); sep++) {
 	}
 	return sep;
 }
@@ -91,7 +91,7 @@ static char *parse_value(char *s, char **value)
 		return s + 1;
 	}
 	for (char *r = s + 1, *w = s + 1; *r; r++, w++) {
-		char ch = *r;
+		unsigned char ch = *r;
 		switch (ch) {
 		case '\"':
 			r = strtrimleftspace(r + 1);

@@ -45,7 +45,10 @@ endif()
 
 target_compile_options(neosocksd PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 # be strict with original sources
-target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra -Werror)
+target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_options(neosocksd PRIVATE -Werror)
+endif()
 
 # find libev
 find_path(LIBEV_INCLUDE_DIR NAMES ev.h)
