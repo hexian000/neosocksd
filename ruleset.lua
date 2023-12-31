@@ -140,7 +140,7 @@ end
 
 async(function()
     if server_rtt then
-        _G.server_rtt = {}
+        -- keepalive routines are already running
         return
     end
     await.sleep(10)
