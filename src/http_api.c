@@ -60,29 +60,21 @@ static void server_stats(
 	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
 	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
 
-	const double uptime_hrs = uptime / 3600.0;
-	const double avgreq_hrs = (double)(stats->num_request) / uptime_hrs;
-	const double avgresolv_hrs =
-		(double)(resolv_stats->num_query) / uptime_hrs;
-	FORMAT_BYTES(avgbw_up, ((double)stats->byt_up) / uptime_hrs);
-	FORMAT_BYTES(avgbw_down, ((double)stats->byt_down) / uptime_hrs);
-
 	BUF_APPENDF(
 		*buf,
 		"Server Time         : %s\n"
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu)\n"
 		"Conn Accepts        : %ju (+%ju)\n"
-		"Requests            : %ju (+%ju), %.1f/hrs\n"
-		"Name Resolves       : %ju (+%ju), %.1f/hrs\n"
-		"Traffic             : Up %s, Down %s\n"
-		"Avg Bandwidth       : Up %s/hrs, Down %s/hrs\n",
+		"Requests            : %ju (+%ju)\n"
+		"Name Resolves       : %ju (+%ju)\n"
+		"Traffic             : Up %s, Down %s\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
 		lstats->num_serve, lstats->num_accept - lstats->num_serve,
 		stats->num_success, stats->num_request - stats->num_success,
-		avgreq_hrs, resolv_stats->num_success,
-		resolv_stats->num_query - resolv_stats->num_success,
-		avgresolv_hrs, xfer_up, xfer_down, avgbw_up, avgbw_down);
+		resolv_stats->num_success,
+		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
+		xfer_down);
 
 #if WITH_RULESET
 	if (G.ruleset != NULL) {
