@@ -224,11 +224,13 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 				ERROR, ctx, "getsockname: %s", strerror(err));
 		}
 	}
-	const size_t rsplen = sizeof(struct socks5_hdr) +
-			      sizeof(struct in6_addr) + sizeof(in_port_t);
-	unsigned char buf[rsplen];
-	unsigned char *const hdr = buf;
+	enum {
+		SOCKS5_RSPLEN = sizeof(struct socks5_hdr) +
+				sizeof(struct in6_addr) + sizeof(in_port_t)
+	};
+	unsigned char buf[SOCKS5_RSPLEN];
 
+	unsigned char *const hdr = buf;
 	write_uint8(hdr + offsetof(struct socks5_hdr, version), SOCKS5);
 	write_uint8(hdr + offsetof(struct socks5_hdr, command), rsp);
 	write_uint8(hdr + offsetof(struct socks5_hdr, reserved), 0);
