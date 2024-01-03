@@ -31,8 +31,6 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 - Embedded systems friendly.
 - Conforming to: ISO C11, POSIX.1-2008.
 
-Ruleset example: [ruleset.lua](ruleset.lua)
-
 ## Usage
 ### Basic Usage
 
@@ -53,9 +51,14 @@ Ruleset example: [ruleset.lua](ruleset.lua)
 # Start a hardened non-forking TCP port forwarder in the background
 sudo ./neosocksd -d -u nobody -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
     --proto-timeout --max-startups 60:30:100 --max-sessions 10000
+
+# Start a ruleset powered SOCKS4 / SOCKS4A / SOCKS5 server
+./neosocksd -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua -d
 ```
 
-See `./neosocksd -h` for details.
+See `./neosocksd -h` for more details.
+
+Rule set configuration example: [ruleset_simple.lua](ruleset_simple.lua)
 
 ### Scripting Usage
 
@@ -63,7 +66,7 @@ First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary rel
 
 Depending on how complex your customizations are, check out:
 
-- Level 1: Rule set configuration example at [ruleset.lua](ruleset.lua)
+- Level 1: Rule set scripting example at [ruleset.lua](ruleset.lua)
 - Level 2: Rule set library code in [libruleset.lua](libruleset.lua)
 - Level 3: Reference manual for enthusiasts and professionals: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 - Level 4: If you want to operate a larger system, the idea in [stub.lua](stub.lua) may be helpful.
@@ -71,26 +74,32 @@ Depending on how complex your customizations are, check out:
 Use the following command to start the server with the Lua scripts in current directory:
 
 ```sh
-# Start a ruleset powered SOCKS4 / SOCKS4A / SOCKS5 server
-./neosocksd -l [::]:1080 --api 127.0.1.1:9080 -r ruleset.lua -d
-
-# For debugging ruleset script
-./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua --traceback -v
+# Print ruleset logs and error traceback
+./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua --traceback --loglevel 6
 
 # Start a transparent proxy to route TCP traffic by ruleset
 sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
     --max-startups 60:30:100 --max-sessions 0 -u nobody -d
 ```
 
-Update ruleset on remote instance without restarting:
+Use the following command to update ruleset on remote instance without restarting:
 
 ```sh
-curl -vx socks5h://192.168.1.1:1080 \
-    http://api.neosocksd.lan/ruleset/update \
+# Reload ruleset
+curl -v http://127.0.1.1:9080/ruleset/update \
     --data-binary @ruleset.lua
-```
 
-The example host name `api.neosocksd.lan` is defined in [ruleset.lua](ruleset.lua).
+# Reload Lua module
+curl -v http://127.0.1.1:9080/ruleset/update?module=libruleset \
+    --data-binary @libruleset.lua
+
+# Run any script on the server
+curl -v http://127.0.1.1:9080/ruleset/invoke \
+    -d "_G.some_switch = true"
+curl -v http://127.0.1.1:9080/ruleset/invoke \
+    -H "Content-Encoding: gzip" \
+    --data-binary @biglist.lua.gz
+```
 
 
 ## Observability

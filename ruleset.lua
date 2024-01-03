@@ -1,10 +1,6 @@
 _G.libruleset = require("libruleset")
 
 -- [[ configurations ]] --
--- 1. ordered redirect rules (matched as string)
--- in {matcher, action, optional log tag}
--- matching stops after a match is found
-
 local function is_disabled()
     local now = os.date("*t")
     if not (2 <= now.wday and now.wday <= 6) then
@@ -12,6 +8,10 @@ local function is_disabled()
     end
     return not (9 <= now.hour and now.hour < 18)
 end
+
+-- 1. ordered redirect rules (matched as string)
+-- in {matcher, action, optional log tag}
+-- matching stops after a match is found
 
 -- redirect_name: for requests with name string
 _G.redirect_name = {
@@ -114,6 +114,7 @@ local function ping(target)
     local lasterr
     local rtt = {}
     for i = 1, 4 do
+        await.sleep(1)
         local begin = neosocksd.now()
         local ok, result = await.rpcall(target, "echo", string.rep(" ", 32))
         if ok then
@@ -129,35 +130,30 @@ local function ping(target)
     return false, lasterr
 end
 
+ruleset.running = true
 local function keepalive(target, tag)
-    while true do
+    while ruleset.running do
         local ok, result = ping(target)
         logf("ping %q: %s", tag, result)
-        server_rtt[tag] = result
+        ruleset.server_rtt[tag] = result
         await.sleep(ok and 3600 or 60)
     end
 end
 
-async(function()
-    if server_rtt then
-        -- keepalive routines are already running
-        return
-    end
-    await.sleep(10)
-    _G.server_rtt = {}
-    for k, v in pairs(route_list) do
-        local route, tag = v[1], v[2]
-        local target = table.pack(route("api.neosocksd.lan:80"))
-        async(keepalive, target, tag)
-    end
-end)
+if _G.ruleset then
+    -- stop old ruleset routines when reloading
+    _G.ruleset.running = false
+end
+ruleset.server_rtt = {}
+for k, v in pairs(route_list) do
+    local route, tag = v[1], v[2]
+    local target = table.pack(route("api.neosocksd.lan:80"))
+    async(keepalive, target, tag)
+end
 
 local function format_rtt()
-    if not server_rtt then
-        return tostring(server_rtt)
-    end
     local w = list:new()
-    for tag, result in pairs(server_rtt) do
+    for tag, result in pairs(ruleset.server_rtt) do
         w:insertf("[%s] %s", tag, result)
     end
     w:sort()
