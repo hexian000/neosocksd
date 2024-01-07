@@ -5,8 +5,9 @@
 [![Lint](https://github.com/hexian000/neosocksd/actions/workflows/lint.yml/badge.svg)](https://github.com/hexian000/neosocksd/actions/workflows/lint.yml)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua script as ruleset.
+A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua script as rule set.
 
+- [Introduction](#introduction)
 - [Features](#features)
 - [Usage](#usage)
   - [Basic Usage](#basic-usage)
@@ -17,6 +18,22 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
   - [Dependencies](#dependencies)
   - [Building with CMake](#building-with-cmake)
 - [Credits](#credits)
+
+## Introduction
+
+neosocksd is an unencrypted proxy server / port forwarder which can optionally handle requests in Lua scripts. This makes it a versatile building block. Here are some examples.
+
+1. Use in conjunction with other encrypted transport layer forwarders to form an encrypted proxy server.
+2. Setup before any TCP service to limit the number of connections and the rate of new connections.
+3. Use in conjunction with iptables to form a transparent proxy.
+4. Make TCP port forwarding over proxies.
+
+There are also different usages in scripting, such as:
+
+1. Implement connection redirection rules in script to form an Internet gateway.
+2. Implement a load balancer in script to form a RPC proxy.
+
+If you find that some proper usage is not well supported, please feel free to send issues or commits.
 
 ## Features
 
@@ -52,7 +69,7 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 sudo ./neosocksd -d -u nobody -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
     --proto-timeout --max-startups 60:30:100 --max-sessions 10000
 
-# Start a ruleset powered SOCKS4 / SOCKS4A / SOCKS5 server
+# Start a rule set powered SOCKS4 / SOCKS4A / SOCKS5 server
 ./neosocksd -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua -d
 ```
 
@@ -74,7 +91,7 @@ Depending on how complex your customizations are, check out:
 Use the following command to start the server with the Lua scripts in current directory:
 
 ```sh
-# Print ruleset logs and error traceback
+# Print rule set logs and error traceback
 ./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua --traceback --loglevel 6
 
 # Start a transparent proxy to route TCP traffic by ruleset
@@ -82,10 +99,10 @@ sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
     --max-startups 60:30:100 --max-sessions 0 -u nobody -d
 ```
 
-Use the following command to update ruleset on remote instance without restarting:
+Use the following command to update rule set on remote instance without restarting:
 
 ```sh
-# Reload ruleset
+# Reload rule set
 curl -v http://127.0.1.1:9080/ruleset/update \
     --data-binary @ruleset.lua
 
@@ -109,7 +126,7 @@ The builtin RESTful API server can be used for monitoring service status.
 ```sh
 # stateless
 watch curl -s http://127.0.1.1:9080/stats
-# stateful, will call ruleset stats function if available
+# stateful, will call rule set stats function if available
 watch curl -sX POST http://127.0.1.1:9080/stats
 ```
 
@@ -135,7 +152,7 @@ opkg install libev libcares
 | Name   | Version   | Required | Feature                    |
 | ------ | --------- | -------- | -------------------------- |
 | libev  | >= 4.31   | yes      |                            |
-| Lua    | >= 5.3    | no       | ruleset                    |
+| Lua    | >= 5.3    | no       | rule set                   |
 | c-ares | >= 1.16.0 | no       | asynchronous name resolves |
 
 ```sh
