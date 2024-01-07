@@ -88,12 +88,12 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" \
-        -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
     nice cmake --build "build"
     TARGET="$(cc -dumpmachine)"
     zip -9j "build/neosocksd-win32.${TARGET}.zip" \
         "/usr/bin/msys-2.0.dll" \
+        "/usr/bin/msys-cares-2.dll" \
         "build/src/neosocksd.exe"
     ls -lh "build/neosocksd-win32.${TARGET}.zip"
     ;;
