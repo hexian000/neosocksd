@@ -231,7 +231,7 @@ int format_sa(const struct sockaddr *sa, char *buf, const size_t buf_size)
 	return snprintf(buf, buf_size, "<af:%jd>", (intmax_t)sa->sa_family);
 }
 
-static bool find_addrinfo(sockaddr_max_t *sa, const struct addrinfo *it)
+static bool find_addrinfo(union sockaddr_max *sa, const struct addrinfo *it)
 {
 	for (; it != NULL; it = it->ai_next) {
 		switch (it->ai_family) {
@@ -251,7 +251,7 @@ static bool find_addrinfo(sockaddr_max_t *sa, const struct addrinfo *it)
 	return false;
 }
 
-bool parse_bindaddr(sockaddr_max_t *sa, const char *s)
+bool parse_bindaddr(union sockaddr_max *sa, const char *s)
 {
 	const size_t addrlen = strlen(s);
 	char buf[FQDN_MAX_LENGTH + 1 + 5 + 1];
@@ -285,7 +285,7 @@ bool parse_bindaddr(sockaddr_max_t *sa, const char *s)
 }
 
 bool resolve_addr(
-	sockaddr_max_t *sa, const char *name, const char *service,
+	union sockaddr_max *sa, const char *name, const char *service,
 	const int family)
 {
 	struct addrinfo hints = {

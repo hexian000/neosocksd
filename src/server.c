@@ -49,7 +49,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct listener_stats *restrict lstats = &s->l.stats;
 
 	for (;;) {
-		sockaddr_max_t addr;
+		union sockaddr_max addr;
 		socklen_t addrlen = sizeof(addr);
 		/* accept client request */
 		const int fd = accept(watcher->fd, &addr.sa, &addrlen);

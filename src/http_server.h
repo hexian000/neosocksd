@@ -39,7 +39,7 @@ struct http_ctx {
 	enum http_state state;
 	http_handler_fn handle;
 	int accepted_fd, dialed_fd;
-	sockaddr_max_t accepted_sa;
+	union sockaddr_max accepted_sa;
 	struct ev_timer w_timeout;
 	union {
 		struct {

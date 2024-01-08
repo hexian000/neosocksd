@@ -45,7 +45,7 @@ struct resolve_query {
 	struct resolve_cb done_cb;
 	struct ev_watcher w_start;
 	bool ok : 1;
-	sockaddr_max_t addr;
+	union sockaddr_max addr;
 	const char *name, *service;
 	int family;
 	char buf[];
@@ -186,7 +186,7 @@ static void sock_state_cb(
 }
 
 static bool
-find_addrinfo(sockaddr_max_t *addr, const struct ares_addrinfo_node *it)
+find_addrinfo(union sockaddr_max *addr, const struct ares_addrinfo_node *it)
 {
 	for (; it != NULL; it = it->ai_next) {
 		switch (it->ai_family) {

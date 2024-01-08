@@ -44,7 +44,7 @@ struct socks_ctx {
 	struct server *s;
 	enum socks_state state;
 	int accepted_fd, dialed_fd;
-	sockaddr_max_t accepted_sa;
+	union sockaddr_max accepted_sa;
 	struct dialaddr addr;
 	struct ev_timer w_timeout;
 	union {
@@ -213,7 +213,7 @@ static void socks4_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 
 static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 {
-	sockaddr_max_t addr = {
+	union sockaddr_max addr = {
 		.sa.sa_family = AF_INET,
 	};
 	socklen_t addrlen = sizeof(addr);

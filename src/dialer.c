@@ -950,7 +950,7 @@ static void resolve_cb(
 		return;
 	}
 
-	sockaddr_max_t addr;
+	union sockaddr_max addr;
 	memcpy(&addr.sa, sa, getsocklen(sa));
 	switch (sa->sa_family) {
 	case AF_INET:

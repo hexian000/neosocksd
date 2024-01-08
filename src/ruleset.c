@@ -1269,7 +1269,7 @@ static int await_invoke_(lua_State *restrict L)
 static int api_resolve_(lua_State *restrict L)
 {
 	const char *name = luaL_checkstring(L, 1);
-	sockaddr_max_t addr;
+	union sockaddr_max addr;
 	if (!resolve_addr(&addr, name, NULL, G.conf->resolve_pf)) {
 		lua_pushnil(L);
 		return 1;

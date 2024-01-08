@@ -38,7 +38,7 @@ struct forward_ctx {
 	struct server *s;
 	enum forward_state state;
 	int accepted_fd, dialed_fd;
-	sockaddr_max_t accepted_sa;
+	union sockaddr_max accepted_sa;
 	struct ev_timer w_timeout;
 	union {
 		/* connecting */
@@ -302,7 +302,7 @@ tproxy_route(struct ruleset *r, const struct sockaddr *restrict sa)
 
 static struct dialreq *tproxy_makereq(struct forward_ctx *restrict ctx)
 {
-	sockaddr_max_t dest;
+	union sockaddr_max dest;
 	socklen_t len = sizeof(dest);
 	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
 		const int err = errno;

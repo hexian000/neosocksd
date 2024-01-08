@@ -353,7 +353,7 @@ int main(int argc, char **argv)
 	}
 
 	{
-		sockaddr_max_t bindaddr;
+		union sockaddr_max bindaddr;
 		if (!parse_bindaddr(&bindaddr, conf->listen)) {
 			LOGF_F("unable to parse address: %s", conf->listen);
 			exit(EXIT_FAILURE);
@@ -367,7 +367,7 @@ int main(int argc, char **argv)
 
 	struct server *api = NULL;
 	if (conf->restapi != NULL) {
-		sockaddr_max_t apiaddr;
+		union sockaddr_max apiaddr;
 		if (!parse_bindaddr(&apiaddr, conf->restapi)) {
 			LOGF_F("unable to parse address: %s", conf->restapi);
 			exit(EXIT_FAILURE);

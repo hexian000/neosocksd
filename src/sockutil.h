@@ -22,11 +22,11 @@
 	((err) == EINTR || (err) == EAGAIN || (err) == EWOULDBLOCK ||          \
 	 (err) == ENOBUFS || (err) == ENOMEM)
 
-typedef union {
+union sockaddr_max {
 	struct sockaddr sa;
 	struct sockaddr_in in;
 	struct sockaddr_in6 in6;
-} sockaddr_max_t;
+};
 
 bool socket_set_nonblock(int fd);
 void socket_set_reuseport(int fd, bool reuseport);
@@ -42,9 +42,10 @@ int socket_get_error(int fd);
 socklen_t getsocklen(const struct sockaddr *sa);
 int format_sa(const struct sockaddr *sa, char *s, size_t buf_size);
 
-bool parse_bindaddr(sockaddr_max_t *sa, const char *s);
+bool parse_bindaddr(union sockaddr_max *sa, const char *s);
 bool resolve_addr(
-	sockaddr_max_t *sa, const char *name, const char *service, int family);
+	union sockaddr_max *sa, const char *name, const char *service,
+	int family);
 
 int socket_send(int fd, const void *buf, size_t *len);
 int socket_recv(int fd, void *buf, size_t *len);
