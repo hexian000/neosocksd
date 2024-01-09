@@ -73,7 +73,7 @@ void modify_io_events(
 	const int ioevents = events & (EV_READ | EV_WRITE);
 	if (ioevents == EV_NONE) {
 		if (ev_is_active(watcher)) {
-			LOGV_F("io fd=%d stop", fd);
+			LOGV_F("io: fd=%d stop", fd);
 			ev_io_stop(loop, watcher);
 		}
 		return;
@@ -87,7 +87,7 @@ void modify_io_events(
 #endif
 	}
 	if (!ev_is_active(watcher)) {
-		LOGV_F("io fd=%d events=0x%x", fd, ioevents);
+		LOGV_F("io: fd=%d events=0x%x", fd, ioevents);
 		ev_io_start(loop, watcher);
 	}
 }
