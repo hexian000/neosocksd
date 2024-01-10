@@ -65,6 +65,7 @@ struct socks_ctx {
 		};
 	};
 };
+ASSERT_SUPER(struct session, struct socks_ctx, ss);
 
 #define SOCKS_CTX_LOG_F(level, ctx, format, ...)                               \
 	do {                                                                   \

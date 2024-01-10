@@ -47,9 +47,9 @@ Internal API reserved for `await.invoke`.
 
 - **Path**: `/ruleset/rpcall`
 - **Method**: POST
-- **Content**: Lua script
+- **Content**: `application/x-neosocksd-rpc`
 - **Status**: HTTP 200, HTTP 500
-- **Response**: Return values.
+- **Response**: Invocation results.
 
 ### Ruleset Update
 
@@ -375,20 +375,20 @@ True if the log level doesn't allow printing debug logs. The log level depends o
 In the default implementation of `libruleset.lua`, this value controls whether `log`/`logf` writes to standard output.
 
 
-### _G.marshal(...)
+### _G.marshal
 
 **Synopsis**
 
 ```Lua
 local s = marshal("a", {"b", ["c"] = "d"})
-log(s) -- "a",{[1]="b",["c"]="d"} 
+log(s) -- "a",{"b",["c"]="d"}
 ```
 
 **Description**
 
 Marshal all parameters in Lua syntax.
 
-There is also a `_G.unmarshal(s)` in `libruleset.lua`.
+To be symmetric, there is also `_G.unmarshal(s)` in `libruleset.lua`.
 
 
 ### _G.async
@@ -423,7 +423,7 @@ end)
 
 **Description**
 
-Resolves a host name asynchronously. If asynchronous name resolution is not configured, `await.resolve` is the same as `neosocksd.resolve`.
+Resolves a host name asynchronously. If asynchronous name resolution is not configured, `await.resolve` behaves the same as `neosocksd.resolve`.
 
 IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 
@@ -451,7 +451,7 @@ end, "127.0.1.1:9080")
 
 Run Lua code on another neosocksd and take the results back. `await.invoke` is designed to work on the control plane.
 
-Tip: the wrapper `await.rpcall` in `libruleset.lua` is useful if you want to implement RPC.
+Tip: If you want to implement RPC, please refer to `await.rpcall` in `libruleset.lua`.
 
 
 ### await.sleep
@@ -468,7 +468,7 @@ end)
 
 Pause an asynchronous routine for at least specified interval in seconds.
 
-The valid interval range is `[1e-3, 1e+9]`.
+The interval is clamped to `[1e-3, 1e+9]`.
 
 
 ### await.idle

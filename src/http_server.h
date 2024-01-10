@@ -9,6 +9,7 @@
 #include "utils/buffer.h"
 #include "utils/slog.h"
 #include "utils/debug.h"
+#include "utils/object.h"
 #include "session.h"
 #include "transfer.h"
 #include "dialer.h"
@@ -53,6 +54,7 @@ struct http_ctx {
 		};
 	};
 };
+ASSERT_SUPER(struct session, struct http_ctx, ss);
 
 void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *ctx);
 void http_ctx_close(struct ev_loop *loop, struct http_ctx *ctx);

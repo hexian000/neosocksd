@@ -77,6 +77,7 @@ static int co_resume(lua_State *L, lua_State *from, int narg, int *nres)
 #define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
 #define ERR_INVALID_ROUTE "unable to parse route"
 
+#define MT_MARSHAL_CACHE "marshal.cache"
 #define MT_AWAIT_IDLE "await.idle"
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"
@@ -178,9 +179,6 @@ static int format_addr(lua_State *restrict L)
 	return 1;
 }
 
-static int marshal_value(lua_State *L, luaL_Buffer *B, int idx);
-static int marshal_table(lua_State *L, luaL_Buffer *B, int idx);
-
 static int
 marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 {
@@ -209,44 +207,13 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	return 0;
 }
 
-int marshal_table(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
+static int marshal_value(
+	lua_State *restrict L, luaL_Buffer *restrict B, const int idx,
+	const int depth)
 {
-	/* mark as open */
-	lua_pushvalue(L, idx);
-	lua_pushboolean(L, 1);
-	lua_rawset(L, 1);
-	/* marshal the table */
-	luaL_Buffer b;
-	luaL_buffinit(L, &b);
-	luaL_addchar(&b, '{');
-	bool first = true;
-	lua_pushnil(L); /* first key */
-	while (lua_next(L, idx) != 0) {
-		if (first) {
-			first = false;
-		} else {
-			luaL_addchar(&b, ',');
-		}
-		luaL_addchar(&b, '[');
-		marshal_value(L, &b, -2);
-		luaL_addchar(&b, ']');
-		luaL_addchar(&b, '=');
-		marshal_value(L, &b, -1);
-		lua_pop(L, 1);
+	if (depth > 200) {
+		return luaL_error(L, "table is too complex to marshal");
 	}
-	lua_pop(L, 1);
-	luaL_addchar(&b, '}');
-	luaL_pushresult(&b);
-	/* save as closed */
-	lua_pushvalue(L, idx);
-	lua_pushvalue(L, -2);
-	lua_rawset(L, 2);
-	luaL_addvalue(B);
-	return 0;
-}
-
-int marshal_value(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
-{
 	const int type = lua_type(L, idx);
 	switch (type) {
 	case LUA_TNIL:
@@ -282,24 +249,85 @@ int marshal_value(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 			L, "circular referenced table is not marshallable");
 	}
 	lua_pop(L, 1);
-	return marshal_table(L, B, idx);
+	/* mark as open */
+	lua_pushvalue(L, idx);
+	lua_pushboolean(L, 1);
+	lua_rawset(L, 1);
+	/* marshal the table */
+	luaL_Buffer b;
+	luaL_buffinit(L, &b);
+	luaL_addchar(&b, '{');
+	bool first = true;
+	/* auto index */
+	lua_Integer n = 0;
+	for (lua_Integer i = 1; lua_rawgeti(L, idx, i) != LUA_TNIL; i++) {
+		if (first) {
+			first = false;
+		} else {
+			luaL_addchar(&b, ',');
+		}
+		marshal_value(L, &b, -1, depth + 1);
+		lua_pop(L, 1);
+		n = i;
+		if (i == LUA_MAXINTEGER) {
+			lua_pushnil(L);
+			break;
+		}
+	}
+	/* explicit index */
+	while (lua_next(L, idx) != 0) {
+		if (lua_isinteger(L, -2)) {
+			const lua_Integer i = lua_tointeger(L, -2);
+			if (1 <= i && i <= n) {
+				/* already marshalled */
+				lua_pop(L, 1);
+				continue;
+			}
+		}
+		if (first) {
+			first = false;
+		} else {
+			luaL_addchar(&b, ',');
+		}
+		luaL_addchar(&b, '[');
+		marshal_value(L, &b, -2, depth + 1);
+		luaL_addchar(&b, ']');
+		luaL_addchar(&b, '=');
+		marshal_value(L, &b, -1, depth + 1);
+		lua_pop(L, 1);
+	}
+	lua_pop(L, 1);
+	luaL_addchar(&b, '}');
+	luaL_pushresult(&b);
+	/* save as closed */
+	lua_pushvalue(L, idx);
+	lua_pushvalue(L, -2);
+	lua_rawset(L, 2);
+	luaL_addvalue(B);
+	return 0;
 }
 
 /* s = marshal(...) */
 static int marshal_(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
-	lua_newtable(L), lua_newtable(L);
+	/* open */
+	lua_newtable(L);
+	/* closed */
+	lua_newtable(L);
+	if (luaL_newmetatable(L, MT_MARSHAL_CACHE)) {
+		lua_pushliteral(L, "kv");
+		lua_setfield(L, -2, "__mode");
+	}
+	lua_setmetatable(L, -2);
 	lua_rotate(L, 1, 2);
-	const int start = 3;
-	const int end = start + n;
 	luaL_Buffer b;
 	luaL_buffinitsize(L, &b, IO_BUFSIZE);
-	for (int i = start; i < end; i++) {
-		if (i > start) {
+	for (int i = 3; i <= 2 + n; i++) {
+		if (i > 3) {
 			luaL_addchar(&b, ',');
 		}
-		marshal_value(L, &b, i);
+		marshal_value(L, &b, i, 0);
 	}
 	luaL_pushresult(&b);
 	return 1;
@@ -420,8 +448,10 @@ static int ruleset_rpcall_(lua_State *restrict L)
 	if (lua_load(L, read_stream, s, "=rpc", NULL) != LUA_OK) {
 		return lua_error(L);
 	}
+	/* stack: marshal f */
 	lua_call(L, 0, LUA_MULTRET);
-	lua_call(L, lua_gettop(L) - 1, 1); /* marshal_ */
+	/* stack: marshal ... */
+	lua_call(L, lua_gettop(L) - 1, 1);
 	*result = lua_tolstring(L, -1, resultlen);
 	return 1;
 }

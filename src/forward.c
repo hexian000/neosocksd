@@ -52,6 +52,7 @@ struct forward_ctx {
 		};
 	};
 };
+ASSERT_SUPER(struct session, struct forward_ctx, ss);
 
 #define FW_CTX_LOG_F(level, ctx, format, ...)                                  \
 	do {                                                                   \
