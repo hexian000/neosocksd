@@ -36,14 +36,15 @@
 
 #include <assert.h>
 #include <ctype.h>
-#include <math.h>
+#include <locale.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <tgmath.h>
 
 struct ruleset {
 	struct ev_loop *loop;
@@ -179,7 +180,7 @@ static int format_addr(lua_State *restrict L)
 	return 1;
 }
 
-static int
+static void
 marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 {
 	size_t len;
@@ -204,49 +205,109 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		s++;
 	}
 	luaL_addchar(B, '"');
-	return 0;
+	return;
 }
 
-static int marshal_value(
+static void
+marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
+{
+	char buf[120];
+	if (lua_isinteger(L, idx)) {
+		const lua_Integer v = lua_tointeger(L, idx);
+		if (v == LUA_MININTEGER) {
+			const int ret = snprintf(
+				buf, sizeof(buf), "0x%" LUA_INTEGER_FRMLEN "x",
+				v);
+			UNUSED(ret);
+			assert(ret > 0);
+			luaL_addstring(B, buf);
+			return;
+		}
+		const int ret = snprintf(buf, sizeof(buf), LUA_INTEGER_FMT, v);
+		UNUSED(ret);
+		assert(ret > 0);
+		luaL_addstring(B, buf);
+		return;
+	}
+	const lua_Number v = lua_tonumber(L, idx);
+	switch (fpclassify(v)) {
+	case FP_NAN:
+		luaL_addstring(B, "0/0");
+		return;
+	case FP_INFINITE:
+		if (signbit(v)) {
+			luaL_addstring(B, "-1/0");
+			return;
+		}
+		luaL_addstring(B, "1/0");
+		return;
+	case FP_ZERO:
+		luaL_addstring(B, "0");
+		return;
+	default:
+		break;
+	}
+	const int ret =
+		snprintf(buf, sizeof(buf), "%" LUA_NUMBER_FRMLEN "a", v);
+	UNUSED(ret);
+	assert(ret > 0);
+	const char *point = localeconv()->decimal_point;
+	const size_t npoint = strlen(point);
+	if (npoint > 1 || point[0] != '.') {
+		char *s = strstr(buf, point);
+		if (s != NULL) {
+			*s = '.';
+			if (npoint > 1) {
+				memmove(s + 1, s + npoint,
+					strlen(s + npoint) + 1);
+			}
+		}
+	}
+	luaL_addstring(B, buf);
+	return;
+}
+
+static void marshal_value(
 	lua_State *restrict L, luaL_Buffer *restrict B, const int idx,
 	const int depth)
 {
 	if (depth > 200) {
-		return luaL_error(L, "table is too complex to marshal");
+		luaL_error(L, "table is too complex to marshal");
+		return;
 	}
 	const int type = lua_type(L, idx);
 	switch (type) {
 	case LUA_TNIL:
 		luaL_addstring(B, "nil");
-		return 0;
+		return;
 	case LUA_TBOOLEAN:
 		luaL_addstring(B, lua_toboolean(L, idx) ? "true" : "false");
-		return 0;
+		return;
 	case LUA_TNUMBER:
-		lua_pushvalue(L, idx);
-		luaL_addvalue(B);
-		return 0;
+		marshal_number(L, B, idx);
+		return;
 	case LUA_TSTRING:
-		return marshal_string(L, B, idx);
+		marshal_string(L, B, idx);
+		return;
 	case LUA_TTABLE:
 		break;
 	default:
-		return luaL_error(
-			L, "%s is not marshallable", lua_typename(L, type));
+		luaL_error(L, "%s is not marshallable", lua_typename(L, type));
+		return;
 	}
 	/* check closed */
 	lua_pushvalue(L, idx);
 	lua_rawget(L, 2);
 	if (!lua_isnil(L, -1)) {
 		luaL_addvalue(B);
-		return 0;
+		return;
 	}
 	/* check open */
 	lua_pushvalue(L, idx);
 	lua_rawget(L, 1);
 	if (!lua_isnil(L, -1)) {
-		return luaL_error(
-			L, "circular referenced table is not marshallable");
+		luaL_error(L, "circular referenced table is not marshallable");
+		return;
 	}
 	lua_pop(L, 1);
 	/* mark as open */
@@ -304,7 +365,7 @@ static int marshal_value(
 	lua_pushvalue(L, -2);
 	lua_rawset(L, 2);
 	luaL_addvalue(B);
-	return 0;
+	return;
 }
 
 /* s = marshal(...) */
@@ -352,7 +413,7 @@ static const char *unmarshal_stream(lua_State *L, void *ud, size_t *restrict sz)
 	*sz = SIZE_MAX; /* Lua allows arbitrary length */
 	const int err = stream_direct_read(ctx->s, &buf, sz);
 	if (err != 0) {
-		LOGE_F("read_stream: error %d", err);
+		LOGE_F("unmarshal_stream: error %d", err);
 	}
 	return *sz > 0 ? buf : NULL;
 }
