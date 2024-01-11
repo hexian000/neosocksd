@@ -242,7 +242,7 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		luaL_addstring(B, "1/0");
 		return;
 	case FP_ZERO:
-		luaL_addstring(B, "0");
+		luaL_addchar(B, '0');
 		return;
 	default:
 		break;
@@ -253,7 +253,7 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	assert(ret > 0);
 	const char *point = localeconv()->decimal_point;
 	const size_t npoint = strlen(point);
-	if (npoint > 1 || point[0] != '.') {
+	if (npoint > 1 || (npoint == 1 && point[0] != '.')) {
 		char *s = strstr(buf, point);
 		if (s != NULL) {
 			*s = '.';
