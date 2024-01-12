@@ -180,6 +180,8 @@ static int format_addr(lua_State *restrict L)
 	return 1;
 }
 
+#define luaL_addliteral(B, s) luaL_addlstring((B), ("" s), sizeof(s) - 1)
+
 static void
 marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 {
@@ -192,13 +194,15 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 			luaL_addchar(B, '\\');
 			luaL_addchar(B, ch);
 		} else if (iscntrl(ch)) {
-			char buff[10];
+			char buf[10];
+			int ret;
 			if (!isdigit((unsigned char)*(s + 1))) {
-				snprintf(buff, sizeof(buff), "\\%d", ch);
+				ret = snprintf(buf, sizeof(buf), "\\%d", ch);
 			} else {
-				snprintf(buff, sizeof(buff), "\\%03d", ch);
+				ret = snprintf(buf, sizeof(buf), "\\%03d", ch);
 			}
-			luaL_addstring(B, buff);
+			assert(ret > 0);
+			luaL_addlstring(B, buf, (size_t)ret);
 		} else {
 			luaL_addchar(B, ch);
 		}
@@ -214,32 +218,26 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	char buf[120];
 	if (lua_isinteger(L, idx)) {
 		const lua_Integer v = lua_tointeger(L, idx);
+		const char *fmt = LUA_INTEGER_FMT;
 		if (v == LUA_MININTEGER) {
-			const int ret = snprintf(
-				buf, sizeof(buf), "0x%" LUA_INTEGER_FRMLEN "x",
-				v);
-			UNUSED(ret);
-			assert(ret > 0);
-			luaL_addstring(B, buf);
-			return;
+			fmt = "0x%" LUA_INTEGER_FRMLEN "x";
 		}
-		const int ret = snprintf(buf, sizeof(buf), LUA_INTEGER_FMT, v);
-		UNUSED(ret);
+		const int ret = snprintf(buf, sizeof(buf), fmt, v);
 		assert(ret > 0);
-		luaL_addstring(B, buf);
+		luaL_addlstring(B, buf, (size_t)ret);
 		return;
 	}
 	const lua_Number v = lua_tonumber(L, idx);
 	switch (fpclassify(v)) {
 	case FP_NAN:
-		luaL_addstring(B, "0/0");
+		luaL_addliteral(B, "0/0");
 		return;
 	case FP_INFINITE:
 		if (signbit(v)) {
-			luaL_addstring(B, "-1/0");
+			luaL_addliteral(B, "-1/0");
 			return;
 		}
-		luaL_addstring(B, "1/0");
+		luaL_addliteral(B, "1/0");
 		return;
 	case FP_ZERO:
 		luaL_addchar(B, '0');
@@ -247,23 +245,26 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	default:
 		break;
 	}
-	const int ret =
-		snprintf(buf, sizeof(buf), "%" LUA_NUMBER_FRMLEN "a", v);
+	int ret = snprintf(buf, sizeof(buf), "%" LUA_NUMBER_FRMLEN "a", v);
 	UNUSED(ret);
 	assert(ret > 0);
 	const char *point = localeconv()->decimal_point;
 	const size_t npoint = strlen(point);
-	if (npoint > 1 || (npoint == 1 && point[0] != '.')) {
+	if (npoint > 1) {
 		char *s = strstr(buf, point);
 		if (s != NULL) {
 			*s = '.';
-			if (npoint > 1) {
-				memmove(s + 1, s + npoint,
-					strlen(s + npoint) + 1);
-			}
+			const size_t n = ret - (s - buf) - npoint + 1;
+			memmove(s + 1, s + npoint, n);
+			ret -= npoint - 1;
+		}
+	} else if (npoint == 1 && point[0] != '.') {
+		char *s = memchr(buf, point[0], (size_t)ret);
+		if (s != NULL) {
+			*s = '.';
 		}
 	}
-	luaL_addstring(B, buf);
+	luaL_addlstring(B, buf, (size_t)ret);
 	return;
 }
 
@@ -278,10 +279,14 @@ static void marshal_value(
 	const int type = lua_type(L, idx);
 	switch (type) {
 	case LUA_TNIL:
-		luaL_addstring(B, "nil");
+		luaL_addliteral(B, "nil");
 		return;
 	case LUA_TBOOLEAN:
-		luaL_addstring(B, lua_toboolean(L, idx) ? "true" : "false");
+		if (lua_toboolean(L, idx)) {
+			luaL_addliteral(B, "true");
+			return;
+		}
+		luaL_addliteral(B, "false");
 		return;
 	case LUA_TNUMBER:
 		marshal_number(L, B, idx);

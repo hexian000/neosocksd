@@ -49,6 +49,12 @@ static void unloadlibs(void);
 void loadlibs(void)
 {
 	{
+		static bool loaded = false;
+		if (loaded) {
+			return;
+		}
+		loaded = true;
+
 		const int ret = atexit(unloadlibs);
 		if (ret != 0) {
 			FAILMSGF("atexit: %d", ret);
