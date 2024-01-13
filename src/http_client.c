@@ -127,8 +127,8 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	size_t len = p->wbuf.len - p->wpos;
 	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
-		LOGE_F("send: %s", strerror(err));
-		http_client_close(loop, ctx);
+		const char *msg = strerror(err);
+		http_client_finish(loop, ctx, false, msg, strlen(msg));
 		return;
 	}
 	p->wpos += len;
@@ -143,8 +143,8 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		len = cbuf->len - p->cpos;
 		err = socket_send(watcher->fd, buf, &len);
 		if (err != 0) {
-			LOGE_F("send: %s", strerror(err));
-			http_client_close(loop, ctx);
+			const char *msg = strerror(err);
+			http_client_finish(loop, ctx, false, msg, strlen(msg));
 			return;
 		}
 		p->cpos += len;
