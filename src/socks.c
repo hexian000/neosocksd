@@ -664,7 +664,7 @@ static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 	make_request:;
 		char request[cap];
 		const int len = dialaddr_format(addr, request, cap);
-		assert(len >= 0);
+		CHECK(len >= 0);
 		if ((size_t)len >= cap) {
 			cap = (size_t)len + 1;
 			goto make_request;

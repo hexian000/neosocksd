@@ -201,7 +201,7 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 			} else {
 				ret = snprintf(buf, sizeof(buf), "\\%03d", ch);
 			}
-			assert(ret > 0);
+			CHECK(ret > 0);
 			luaL_addlstring(B, buf, (size_t)ret);
 		} else {
 			luaL_addchar(B, ch);
@@ -209,7 +209,6 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		s++;
 	}
 	luaL_addchar(B, '"');
-	return;
 }
 
 static void
@@ -223,7 +222,7 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 			fmt = "0x%" LUA_INTEGER_FRMLEN "x";
 		}
 		const int ret = snprintf(buf, sizeof(buf), fmt, v);
-		assert(ret > 0);
+		CHECK(ret > 0);
 		luaL_addlstring(B, buf, (size_t)ret);
 		return;
 	}
@@ -245,27 +244,27 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	default:
 		break;
 	}
-	int ret = snprintf(buf, sizeof(buf), "%" LUA_NUMBER_FRMLEN "a", v);
-	UNUSED(ret);
-	assert(ret > 0);
+	const int ret =
+		snprintf(buf, sizeof(buf), "%" LUA_NUMBER_FRMLEN "a", v);
+	CHECK(ret > 0);
+	size_t len = (size_t)ret;
 	const char *point = localeconv()->decimal_point;
 	const size_t npoint = strlen(point);
 	if (npoint > 1) {
 		char *s = strstr(buf, point);
 		if (s != NULL) {
 			*s = '.';
-			const size_t n = ret - (s - buf) - npoint + 1;
+			const size_t n = len - (s - buf) - npoint + 1;
 			memmove(s + 1, s + npoint, n);
-			ret -= npoint - 1;
+			len -= npoint - 1;
 		}
 	} else if (npoint == 1 && point[0] != '.') {
-		char *s = memchr(buf, point[0], (size_t)ret);
+		char *s = memchr(buf, point[0], len);
 		if (s != NULL) {
 			*s = '.';
 		}
 	}
-	luaL_addlstring(B, buf, (size_t)ret);
-	return;
+	luaL_addlstring(B, buf, len);
 }
 
 static void marshal_value(
@@ -370,7 +369,6 @@ static void marshal_value(
 	lua_pushvalue(L, -2);
 	lua_rawset(L, 2);
 	luaL_addvalue(B);
-	return;
 }
 
 /* s = marshal(...) */
