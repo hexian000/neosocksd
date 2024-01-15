@@ -1,31 +1,32 @@
 /* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "utils/slog.h"
-#include "utils/debug.h"
-#include "utils/minmax.h"
 #include "dialer.h"
-#include "session.h"
+#include "conf.h"
 #include "forward.h"
 #include "http.h"
-#include "socks.h"
 #include "resolver.h"
 #include "ruleset.h"
-#include "conf.h"
 #include "server.h"
+#include "session.h"
+#include "socks.h"
 #include "sockutil.h"
 #include "util.h"
+
+#include "utils/debug.h"
+#include "utils/minmax.h"
+#include "utils/slog.h"
 
 #include <ev.h>
 #if WITH_SYSTEMD
 #include <systemd/sd-daemon.h>
 #endif
 
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <signal.h>
 #include <string.h>
 
 static struct {
@@ -43,11 +44,13 @@ signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents);
 
 static void print_usage(const char *argv0)
 {
-	fprintf(stderr, "%s",
+	(void)fprintf(
+		stderr, "%s",
 		PROJECT_NAME " " PROJECT_VER "\n"
 			     "  " PROJECT_HOMEPAGE "\n\n");
-	fprintf(stderr, "usage: %s <option>... \n", argv0);
-	fprintf(stderr, "%s",
+	(void)fprintf(stderr, "usage: %s <option>... \n", argv0);
+	(void)fprintf(
+		stderr, "%s",
 		"  -h, --help                 show usage and exit\n"
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
@@ -97,7 +100,7 @@ static void print_usage(const char *argv0)
 		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
 		"  neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080  # forward port 80 to 8080\n"
 		"\n");
-	fflush(stderr);
+	(void)fflush(stderr);
 }
 
 static void parse_args(const int argc, char *const *const restrict argv)

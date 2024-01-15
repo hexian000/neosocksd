@@ -3,16 +3,18 @@
 
 #include "util.h"
 #include "resolver.h"
+
 #include "math/rand.h"
 #include "utils/debug.h"
-#include "utils/slog.h"
 #include "utils/posixtime.h"
+#include "utils/slog.h"
 
 #include <ev.h>
-#include <unistd.h>
+#include <fcntl.h>
+#include <pwd.h>
 #include <signal.h>
 #include <sys/stat.h>
-#include <pwd.h>
+#include <unistd.h>
 #if _BSD_SOURCE || _GNU_SOURCE
 #include <grp.h>
 #endif
@@ -134,7 +136,7 @@ void daemonize(const char *user, const bool nochdir, const bool noclose)
 {
 	/* Create an anonymous pipe for communicating with daemon process. */
 	int fd[2];
-	if (pipe(fd) == -1) {
+	if (pipe2(fd, O_CLOEXEC) == -1) {
 		const int err = errno;
 		FAILMSGF("pipe: %s", strerror(err));
 	}

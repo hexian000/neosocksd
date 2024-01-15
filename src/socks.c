@@ -2,20 +2,21 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "socks.h"
-#include "utils/buffer.h"
-#include "utils/serialize.h"
-#include "utils/slog.h"
-#include "utils/debug.h"
-#include "utils/object.h"
-#include "proto/socks.h"
 #include "conf.h"
 #include "dialer.h"
 #include "ruleset.h"
-#include "transfer.h"
 #include "server.h"
 #include "session.h"
 #include "sockutil.h"
+#include "transfer.h"
 #include "util.h"
+
+#include "proto/socks.h"
+#include "utils/buffer.h"
+#include "utils/debug.h"
+#include "utils/object.h"
+#include "utils/serialize.h"
+#include "utils/slog.h"
 
 #include <ev.h>
 #include <netinet/in.h>
@@ -197,7 +198,8 @@ send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 		const int err = errno;
 		SOCKS_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
 		return false;
-	} else if ((size_t)nsend != len) {
+	}
+	if ((size_t)nsend != len) {
 		SOCKS_CTX_LOG(ERROR, ctx, "send: short send");
 		return false;
 	}
@@ -630,7 +632,8 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 				DEBUG, ctx, "recv: fd=%d %s", fd,
 				strerror(err));
 			return -1;
-		} else if (nrecv == 0) {
+		}
+		if (nrecv == 0) {
 			/* connection is not established yet, we do not expect EOF here */
 			SOCKS_CTX_LOG_F(
 				DEBUG, ctx, "recv: fd=%d early EOF", fd);
@@ -644,7 +647,8 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 	const int want = socks_dispatch(ctx);
 	if (want < 0) {
 		return want;
-	} else if (want == 0) {
+	}
+	if (want == 0) {
 		return 0;
 	}
 	if (ctx->rbuf.len + (size_t)want > ctx->rbuf.cap) {
@@ -701,7 +705,8 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		/* error */
 		socks_ctx_close(loop, ctx);
 		return;
-	} else if (ret > 0) {
+	}
+	if (ret > 0) {
 		/* want more data */
 		return;
 	}

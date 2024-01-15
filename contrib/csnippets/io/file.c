@@ -46,7 +46,7 @@ struct stream *io_filereader(FILE *f)
 	(void)setvbuf(f, NULL, _IONBF, 0);
 	struct stream *restrict s = malloc(sizeof(struct stream));
 	if (s == NULL) {
-		fclose(f);
+		(void)fclose(f);
 		return NULL;
 	}
 	static const struct stream_vftable vftable = {
@@ -65,7 +65,7 @@ struct stream *io_filewriter(FILE *f)
 	(void)setvbuf(f, NULL, _IONBF, 0);
 	struct stream *restrict s = malloc(sizeof(struct stream));
 	if (s == NULL) {
-		fclose(f);
+		(void)fclose(f);
 		return NULL;
 	}
 	static const struct stream_vftable vftable = {

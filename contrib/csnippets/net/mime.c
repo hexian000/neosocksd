@@ -84,7 +84,8 @@ static char *parse_value(char *s, char **value)
 		s = next_token(s);
 		if (*s == '\0') {
 			return s;
-		} else if (*s != ';') {
+		}
+		if (*s != ';') {
 			return NULL;
 		}
 		*s = '\0';
@@ -145,7 +146,8 @@ char *mime_parseparam(char *buf, char **restrict key, char **restrict value)
 	char *next = parse_param(buf, key, value);
 	if (next == NULL) {
 		return NULL;
-	} else if (*key == NULL) {
+	}
+	if (*key == NULL) {
 		return next;
 	}
 	char *star = strchr(*key, '*');

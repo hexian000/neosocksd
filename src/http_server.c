@@ -2,19 +2,20 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "http_server.h"
-#include "http_parser.h"
-#include "utils/minmax.h"
-#include "utils/buffer.h"
-#include "utils/slog.h"
-#include "utils/debug.h"
-#include "utils/object.h"
-#include "session.h"
-#include "server.h"
-#include "sockutil.h"
-#include "transfer.h"
 #include "conf.h"
 #include "dialer.h"
+#include "http_parser.h"
+#include "server.h"
+#include "session.h"
+#include "sockutil.h"
+#include "transfer.h"
 #include "util.h"
+
+#include "utils/buffer.h"
+#include "utils/debug.h"
+#include "utils/minmax.h"
+#include "utils/object.h"
+#include "utils/slog.h"
 
 #include <ev.h>
 
@@ -109,7 +110,8 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	if (want < 0) {
 		http_ctx_close(loop, ctx);
 		return;
-	} else if (want > 0) {
+	}
+	if (want > 0) {
 		return;
 	}
 	switch (ctx->parser.state) {

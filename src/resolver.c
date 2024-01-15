@@ -2,17 +2,18 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "resolver.h"
-#include "utils/debug.h"
-#include "utils/slog.h"
-#include "utils/minmax.h"
 #include "conf.h"
-#include "util.h"
 #include "sockutil.h"
+#include "util.h"
+
+#include "utils/debug.h"
+#include "utils/minmax.h"
+#include "utils/slog.h"
 
 #include <ev.h>
 #if WITH_CARES
-/* for POSIX fd_set */
 #include <sys/select.h>
+/* ^ for POSIX fd_set */
 #include <ares.h>
 #endif
 

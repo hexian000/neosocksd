@@ -2,11 +2,12 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "http_parser.h"
-#include "http_server.h"
-#include "utils/debug.h"
 #include "conf.h"
-#include "server.h"
+#include "http_server.h"
 #include "ruleset.h"
+#include "server.h"
+
+#include "utils/debug.h"
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {

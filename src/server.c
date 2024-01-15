@@ -2,11 +2,12 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "server.h"
-#include "math/rand.h"
-#include "utils/slog.h"
 #include "conf.h"
 #include "sockutil.h"
 #include "util.h"
+
+#include "math/rand.h"
+#include "utils/slog.h"
 
 #include <ev.h>
 #include <sys/socket.h>

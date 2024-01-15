@@ -5,24 +5,25 @@
 
 #if WITH_RULESET
 
-#include "http_parser.h"
-#include "io/stream.h"
-#include "net/http.h"
-#include "utils/buffer.h"
-#include "utils/slog.h"
-#include "utils/debug.h"
 #include "conf.h"
+#include "dialer.h"
+#include "http_parser.h"
 #include "session.h"
 #include "sockutil.h"
 #include "util.h"
-#include "dialer.h"
+
+#include "io/stream.h"
+#include "net/http.h"
+#include "utils/buffer.h"
+#include "utils/debug.h"
+#include "utils/slog.h"
 
 #include <ev.h>
 
+#include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <limits.h>
 #include <string.h>
 
 /* never rollback */

@@ -292,7 +292,8 @@ static int buf_vprintf(void *p, const char *format, va_list args)
 	ret = vsnprintf(s, maxlen, format, args);
 	if (ret < 0) {
 		return ret;
-	} else if ((size_t)ret < maxlen) {
+	}
+	if ((size_t)ret < maxlen) {
 		b->len += (size_t)ret;
 		return 0;
 	}

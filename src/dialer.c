@@ -2,34 +2,35 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "dialer.h"
-#include "utils/arraysize.h"
-#include "utils/buffer.h"
-#include "utils/serialize.h"
-#include "utils/slog.h"
-#include "utils/debug.h"
-#include "net/addr.h"
-#include "net/url.h"
-#include "net/http.h"
+#include "conf.h"
 #include "proto/domain.h"
 #include "proto/socks.h"
-#include "conf.h"
+#include "resolver.h"
 #include "sockutil.h"
 #include "util.h"
-#include "resolver.h"
 
-#include <ev.h>
+#include "net/addr.h"
+#include "net/http.h"
+#include "net/url.h"
+#include "utils/arraysize.h"
+#include "utils/buffer.h"
+#include "utils/debug.h"
+#include "utils/serialize.h"
+#include "utils/slog.h"
+
 #include <arpa/inet.h>
+#include <ev.h>
 #include <sys/socket.h>
 
 #include <assert.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <inttypes.h>
 
 bool dialaddr_set(
 	struct dialaddr *restrict addr, const char *s, const size_t len)
@@ -316,7 +317,8 @@ send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 		DIALER_LOG_F(ERROR, d, "send: %s", strerror(err));
 		d->syserr = err;
 		return false;
-	} else if ((size_t)nsend != len) {
+	}
+	if ((size_t)nsend != len) {
 		DIALER_LOG_F(
 			ERROR, d, "short send: %zu < %zu", (size_t)nsend, len);
 		return false;
@@ -539,7 +541,8 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 		const int err = errno;
 		DIALER_LOG_F(ERROR, d, "recv: %s", strerror(err));
 		return false;
-	} else if (nrecv != (ssize_t)n) {
+	}
+	if (nrecv != (ssize_t)n) {
 		DIALER_LOG_F(ERROR, d, "recv: short read %zd/%zu", nrecv, n);
 		return false;
 	}
@@ -558,7 +561,8 @@ static int recv_http_rsp(struct dialer *restrict d)
 	if (next == NULL) {
 		DIALER_LOG(ERROR, d, "http_parse: failed");
 		return -1;
-	} else if (next == buf) {
+	}
+	if (next == buf) {
 		return 1;
 	}
 
@@ -581,7 +585,8 @@ static int recv_http_rsp(struct dialer *restrict d)
 		if (next == NULL) {
 			DIALER_LOG(ERROR, d, "http_parsehdr: failed");
 			return -1;
-		} else if (next == last) {
+		}
+		if (next == last) {
 			return 1;
 		}
 		if (key == NULL) {
@@ -773,7 +778,8 @@ static int dialer_recv(struct dialer *restrict d)
 		DIALER_LOG_F(ERROR, d, "%s", strerror(err));
 		d->syserr = err;
 		return -1;
-	} else if (nrecv == 0) {
+	}
+	if (nrecv == 0) {
 		DIALER_LOG(ERROR, d, "early EOF");
 		return -1;
 	}
@@ -793,7 +799,8 @@ static int dialer_recv(struct dialer *restrict d)
 	const int ret = recv_dispatch(d, &d->req->proxy[d->jump]);
 	if (ret < 0) {
 		return ret;
-	} else if (ret == 0) {
+	}
+	if (ret == 0) {
 		socket_rcvlowat(d->w_socket.fd, 1);
 		return 0;
 	}

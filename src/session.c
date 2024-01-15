@@ -2,8 +2,9 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "session.h"
-#include "utils/slog.h"
 #include "util.h"
+
+#include "utils/slog.h"
 
 #include <stddef.h>
 

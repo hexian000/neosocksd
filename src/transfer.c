@@ -2,18 +2,19 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "transfer.h"
+#include "sockutil.h"
+
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
-#include "sockutil.h"
 
 #include <ev.h>
-#include <errno.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <stddef.h>
+#include <errno.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -54,7 +55,8 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 		}
 		LOGD_F("recv: fd=%d %s", fd, strerror(err));
 		return -1;
-	} else if (nrecv == 0) {
+	}
+	if (nrecv == 0) {
 		LOGV_F("recv: fd=%d EOF", fd);
 		return -1;
 	}
@@ -78,7 +80,8 @@ static ssize_t transfer_send(struct transfer *restrict t)
 		}
 		LOGD_F("recv: fd=%d %s", fd, strerror(err));
 		return -1;
-	} else if (nsend == 0) {
+	}
+	if (nsend == 0) {
 		return 0;
 	}
 	t->pos += nsend;

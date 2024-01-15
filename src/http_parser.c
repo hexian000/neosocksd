@@ -2,15 +2,16 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "http_parser.h"
-#include "io/stream.h"
+#include "codec.h"
+#include "sockutil.h"
+
 #include "io/memory.h"
+#include "io/stream.h"
 #include "net/http.h"
 #include "net/mime.h"
 #include "utils/buffer.h"
-#include "utils/slog.h"
 #include "utils/debug.h"
-#include "codec.h"
-#include "sockutil.h"
+#include "utils/slog.h"
 
 #include <strings.h>
 
@@ -52,7 +53,8 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 		const int err = errno;
 		LOGE_F("send: %s", strerror(err));
 		return false;
-	} else if ((size_t)nsend != n) {
+	}
+	if ((size_t)nsend != n) {
 		LOGE("send: short send");
 		return false;
 	}
@@ -77,7 +79,8 @@ bool check_rpcall_mime(char *s)
 		s = mime_parseparam(s, &key, &value);
 		if (s == NULL) {
 			return false;
-		} else if (key == NULL) {
+		}
+		if (key == NULL) {
 			break;
 		}
 		if (strcmp(key, "version") == 0) {
@@ -145,7 +148,8 @@ static int parse_message(struct http_parser *restrict p)
 	if (next == NULL) {
 		LOGD("http: failed parsing request");
 		return -1;
-	} else if (next == p->next) {
+	}
+	if (next == p->next) {
 		if (p->rbuf.len + 1 >= p->rbuf.cap) {
 			p->http_status = HTTP_ENTITY_TOO_LARGE;
 			p->state = STATE_PARSE_ERROR;
@@ -202,7 +206,8 @@ static bool parse_accept_te(struct http_parser *restrict p, char *value)
 	if (value[0] == '\0') {
 		p->hdr.transfer.accept = TENCODING_NONE;
 		return true;
-	} else if (strcmp(value, "chunked") == 0) {
+	}
+	if (strcmp(value, "chunked") == 0) {
 		p->hdr.transfer.accept = TENCODING_CHUNKED;
 		return true;
 	}
@@ -216,7 +221,8 @@ static bool parse_transfer_encoding(struct http_parser *restrict p, char *value)
 	if (value[0] == '\0') {
 		p->hdr.transfer.encoding = TENCODING_NONE;
 		return true;
-	} else if (strcmp(value, "chunked") == 0) {
+	}
+	if (strcmp(value, "chunked") == 0) {
 		p->hdr.transfer.encoding = TENCODING_CHUNKED;
 		return true;
 	}
@@ -283,9 +289,11 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 	if (strcasecmp(key, "Connection") == 0) {
 		p->hdr.connection = strtrimspace(value);
 		return true;
-	} else if (strcasecmp(key, "TE") == 0) {
+	}
+	if (strcasecmp(key, "TE") == 0) {
 		return parse_accept_te(p, value);
-	} else if (strcasecmp(key, "Transfer-Encoding") == 0) {
+	}
+	if (strcasecmp(key, "Transfer-Encoding") == 0) {
 		return parse_transfer_encoding(p, value);
 	}
 
@@ -297,9 +305,12 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 	/* representation headers */
 	if (strcasecmp(key, "Content-Length") == 0) {
 		return parse_content_length(p, value);
-	} else if (strcasecmp(key, "Content-Type") == 0) {
+	}
+	if (strcasecmp(key, "Content-Type") == 0) {
 		p->hdr.content.type = strtrimspace(value);
-	} else if (strcasecmp(key, "Content-Encoding") == 0) {
+		return true;
+	}
+	if (strcasecmp(key, "Content-Encoding") == 0) {
 		return parse_content_encoding(p, value);
 	}
 
@@ -307,17 +318,23 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 		/* request headers */
 		if (strcasecmp(key, "Accept") == 0) {
 			p->hdr.accept = strtrimspace(value);
-		} else if (strcasecmp(key, "Accept-Encoding") == 0) {
+			return true;
+		}
+		if (strcasecmp(key, "Accept-Encoding") == 0) {
 			return parse_accept_encoding(p, value);
-		} else if (strcasecmp(key, "Expect") == 0) {
+		}
+		if (strcasecmp(key, "Expect") == 0) {
 			value = strtrimspace(value);
 			if (strcasecmp(value, "100-continue") != 0) {
 				p->http_status = HTTP_EXPECTATION_FAILED;
 				return false;
 			}
 			p->expect_continue = true;
+			return true;
 		}
 	}
+
+	LOGD_F("unknown http header: \"%s\" = \"%s\"", key, value);
 	return true;
 }
 
@@ -329,7 +346,8 @@ static int parse_header(struct http_parser *restrict p)
 	if (next == NULL) {
 		LOGD("http: failed parsing header");
 		return -1;
-	} else if (next == p->next) {
+	}
+	if (next == p->next) {
 		return 1;
 	}
 	p->next = next;
@@ -383,7 +401,8 @@ static bool recv_request(struct http_parser *restrict p)
 	if (err != 0) {
 		LOGE_F("recv: fd=%d %s", p->fd, strerror(err));
 		return false;
-	} else if (n == 0) {
+	}
+	if (n == 0) {
 		LOGE_F("recv: fd=%d EOF", p->fd);
 		return false;
 	}
@@ -400,7 +419,8 @@ static bool recv_content(struct http_parser *restrict p)
 	if (err != 0) {
 		LOGE_F("recv: fd=%d %s", p->fd, strerror(err));
 		return false;
-	} else if (n == 0) {
+	}
+	if (n == 0) {
 		LOGE_F("recv: fd=%d EOF", p->fd);
 		return false;
 	}

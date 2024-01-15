@@ -3,6 +3,10 @@
 
 #include "http_server.h"
 #include "http_parser.h"
+#include "resolver.h"
+#include "ruleset.h"
+#include "server.h"
+
 #include "io/stream.h"
 #include "net/http.h"
 #include "net/url.h"
@@ -11,9 +15,6 @@
 #include "utils/formats.h"
 #include "utils/posixtime.h"
 #include "utils/slog.h"
-#include "resolver.h"
-#include "ruleset.h"
-#include "server.h"
 
 #include <stddef.h>
 #include <string.h>

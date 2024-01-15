@@ -3,27 +3,28 @@
 
 #include "sockutil.h"
 #include "proto/domain.h"
+#include "util.h"
+
 #include "net/addr.h"
+#include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
-#include "utils/debug.h"
-#include "util.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <net/if.h>
 #include <sys/socket.h>
 
-#include <stddef.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 bool socket_set_nonblock(const int fd)
 {
@@ -320,7 +321,8 @@ int socket_send(const int fd, const void *buf, size_t *len)
 			LOGE_F("send: fd=%d %s", fd, strerror(err));
 			*len = nbsend;
 			return err;
-		} else if (nsend == 0) {
+		}
+		if (nsend == 0) {
 			break;
 		}
 		b += nsend;
@@ -346,7 +348,8 @@ int socket_recv(const int fd, void *buf, size_t *len)
 			}
 			LOGE_F("recv: fd=%d %s", fd, strerror(err));
 			return err;
-		} else if (nrecv == 0) {
+		}
+		if (nrecv == 0) {
 			break;
 		}
 		b += nrecv;

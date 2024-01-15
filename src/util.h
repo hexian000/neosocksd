@@ -5,10 +5,10 @@
 #define UTIL_H
 
 #include "utils/arraysize.h"
-#include "utils/slog.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/minmax.h"
+#include "utils/slog.h"
 
 #include <unistd.h>
 

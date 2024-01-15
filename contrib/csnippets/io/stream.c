@@ -73,7 +73,8 @@ int stream_copy(
 		const int dsterr = stream_write(dst, buf, &len);
 		if (srcerr != 0) {
 			return srcerr;
-		} else if (dsterr != 0) {
+		}
+		if (dsterr != 0) {
 			return dsterr;
 		}
 	} while (len > 0);

@@ -5,32 +5,33 @@
 
 #if WITH_RULESET
 
-#include "io/io.h"
-#include "io/stream.h"
-#include "io/memory.h"
-#include "net/addr.h"
-#include "utils/arraysize.h"
-#include "utils/buffer.h"
-#include "utils/minmax.h"
-#include "utils/serialize.h"
-#include "utils/slog.h"
-#include "utils/debug.h"
 #include "codec.h"
 #include "conf.h"
-#include "resolver.h"
 #include "dialer.h"
-#include "server.h"
 #include "http_client.h"
+#include "resolver.h"
+#include "server.h"
 #include "sockutil.h"
 #include "util.h"
 
-#include "luaconf.h"
-#include "lua.h"
-#include "lualib.h"
-#include "lauxlib.h"
+#include "io/io.h"
+#include "io/memory.h"
+#include "io/stream.h"
+#include "net/addr.h"
+#include "utils/arraysize.h"
+#include "utils/buffer.h"
+#include "utils/debug.h"
+#include "utils/minmax.h"
+#include "utils/serialize.h"
+#include "utils/slog.h"
 
-#include <ev.h>
+#include "lauxlib.h"
+#include "lua.h"
+#include "luaconf.h"
+#include "lualib.h"
+
 #include <arpa/inet.h>
+#include <ev.h>
 #include <netinet/in.h>
 #include <regex.h>
 
@@ -770,7 +771,8 @@ static int regex_find_(lua_State *restrict L)
 	if (err == REG_NOMATCH) {
 		lua_pushnil(L);
 		return 1;
-	} else if (err != 0) {
+	}
+	if (err != 0) {
 		char errbuf[256];
 		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
 		lua_pushlstring(L, errbuf, n);
@@ -791,7 +793,8 @@ static int regex_match_(lua_State *restrict L)
 	if (err == REG_NOMATCH) {
 		lua_pushnil(L);
 		return 1;
-	} else if (err != 0) {
+	}
+	if (err != 0) {
 		char errbuf[256];
 		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
 		lua_pushlstring(L, errbuf, n);

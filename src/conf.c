@@ -2,8 +2,9 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "conf.h"
-#include "utils/slog.h"
+
 #include "utils/minmax.h"
+#include "utils/slog.h"
 
 #include <limits.h>
 

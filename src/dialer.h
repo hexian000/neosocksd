@@ -5,12 +5,13 @@
 #define DIALER_H
 
 #include "proto/socks.h"
-#include "utils/arraysize.h"
-#include "utils/minmax.h"
-#include "utils/buffer.h"
 #include "resolver.h"
 #include "sockutil.h"
 #include "util.h"
+
+#include "utils/arraysize.h"
+#include "utils/buffer.h"
+#include "utils/minmax.h"
 
 #include <ev.h>
 #include <netinet/in.h>

@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "codec.h"
+
 #include "io/io.h"
 #include "io/stream.h"
 #include "utils/object.h"
@@ -10,11 +11,11 @@
 
 #include "miniz.h"
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <inttypes.h>
 
 struct deflate_stream {
 	struct stream s;
@@ -52,7 +53,8 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 		z->dstpos += n;
 		if (err != 0) {
 			return err;
-		} else if (z->dstpos < z->dstlen) {
+		}
+		if (z->dstpos < z->dstlen) {
 			/* short write */
 			return -1;
 		}
@@ -82,7 +84,8 @@ deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 		z->dstpos += n;
 		if (err != 0) {
 			return err;
-		} else if (z->dstpos < z->dstlen) {
+		}
+		if (z->dstpos < z->dstlen) {
 			/* short write */
 			return -1;
 		}
