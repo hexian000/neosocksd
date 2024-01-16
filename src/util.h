@@ -12,6 +12,7 @@
 
 #include <unistd.h>
 
+#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -40,10 +41,24 @@ extern struct globals {
 
 #define TSTAMP_NIL (-1.0)
 
-typedef uintptr_t handle_t;
-#define INVALID_HANDLE ((uintptr_t)NULL)
-#define TO_HANDLE(p) ((handle_t)(p))
-#define TO_POINTER(x) ((void *)(x))
+#if defined(INTPTR_MAX)
+typedef intptr_t handle_type;
+#else
+typedef ptrdiff_t handle_type;
+#endif
+
+static inline handle_type handle_make(void *p)
+{
+	assert((void *)(handle_type)p == p);
+	return (handle_type)p;
+}
+
+static inline void *handle_toptr(const handle_type h)
+{
+	return (void *)h;
+}
+
+#define INVALID_HANDLE (handle_make(NULL))
 
 #define CLOSE_FD(fd)                                                           \
 	do {                                                                   \

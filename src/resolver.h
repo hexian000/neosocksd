@@ -29,14 +29,14 @@ void resolver_free(struct resolver *r);
 
 struct resolve_cb {
 	void (*cb)(
-		handle_t h, struct ev_loop *loop, void *ctx,
+		handle_type h, struct ev_loop *loop, void *ctx,
 		const struct sockaddr *sa);
 	void *ctx;
 };
 
-handle_t resolve_do(
+handle_type resolve_do(
 	struct resolver *r, struct resolve_cb cb, const char *name,
 	const char *service, int family);
-void resolve_cancel(handle_t h);
+void resolve_cancel(handle_type h);
 
 #endif /* RESOLVER_H */

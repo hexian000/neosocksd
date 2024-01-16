@@ -223,9 +223,10 @@ static void http_handle_stats(
 		const char header[] = "\n"
 				      "Ruleset Stats\n"
 				      "================\n";
-		const char *s = ruleset_stats(G.ruleset, dt);
+		size_t len;
+		const char *s = ruleset_stats(G.ruleset, dt, &len);
 		if (s == NULL) {
-			s = ruleset_error(G.ruleset);
+			s = ruleset_error(G.ruleset, &len);
 		}
 		n = sizeof(header) - 1;
 		err = stream_write(w, header, &n);
@@ -236,7 +237,6 @@ static void http_handle_stats(
 				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
-		const size_t len = strlen(s);
 		n = len;
 		err = stream_write(w, s, &n);
 		if (n < len || err != 0) {
@@ -307,9 +307,9 @@ handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 	const bool ok = ruleset_rpcall(ruleset, reader, &result, &resultlen);
 	stream_close(reader);
 	if (!ok) {
-		const char *err = ruleset_error(ruleset);
+		size_t len;
+		const char *err = ruleset_error(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
-		const size_t len = strlen(err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
 		RESPHDR_CLENGTH(ctx->parser.wbuf, len);
@@ -364,12 +364,13 @@ handle_ruleset_invoke(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 	stream_close(reader);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
-		const char *err = ruleset_error(ruleset);
+		size_t len;
+		const char *err = ruleset_error(ruleset, &len);
 		LOGW_F("ruleset invoke: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPENDSTR(ctx->parser.wbuf, err);
+		BUF_APPEND(ctx->parser.wbuf, err, len);
 		BUF_APPENDCONST(ctx->parser.wbuf, "\n");
 		return;
 	}
@@ -400,12 +401,13 @@ static void handle_ruleset_update(
 	stream_close(reader);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
-		const char *err = ruleset_error(ruleset);
+		size_t len;
+		const char *err = ruleset_error(ruleset, &len);
 		LOGW_F("ruleset update: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPENDSTR(ctx->parser.wbuf, err);
+		BUF_APPEND(ctx->parser.wbuf, err, len);
 		BUF_APPENDCONST(ctx->parser.wbuf, "\n");
 		return;
 	}

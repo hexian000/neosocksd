@@ -10,7 +10,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <fcntl.h>
 #include <pwd.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -22,9 +21,9 @@
 #include <assert.h>
 #include <locale.h>
 #include <stddef.h>
-#include <stdlib.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 struct globals G = { 0 };
@@ -136,7 +135,7 @@ void daemonize(const char *user, const bool nochdir, const bool noclose)
 {
 	/* Create an anonymous pipe for communicating with daemon process. */
 	int fd[2];
-	if (pipe2(fd, O_CLOEXEC) == -1) {
+	if (pipe(fd) == -1) {
 		const int err = errno;
 		FAILMSGF("pipe: %s", strerror(err));
 	}

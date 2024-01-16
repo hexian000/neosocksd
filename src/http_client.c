@@ -65,7 +65,7 @@ static void http_client_finish(
 {
 	if (ctx->invoke_cb.func != NULL) {
 		ctx->invoke_cb.func(
-			TO_HANDLE(ctx), loop, ctx->invoke_cb.ctx, ok, data,
+			handle_make(ctx), loop, ctx->invoke_cb.ctx, ok, data,
 			len);
 		if (ok) {
 			stream_close((struct stream *)data);
@@ -232,7 +232,7 @@ static bool make_request(
 	return true;
 }
 
-handle_t http_client_do(
+handle_type http_client_do(
 	struct ev_loop *loop, struct dialreq *req, const char *uri,
 	const char *content, const size_t len, struct http_client_cb client_cb)
 {
@@ -265,12 +265,12 @@ handle_t http_client_do(
 
 	ev_timer_start(loop, &ctx->w_timeout);
 	dialer_start(&ctx->dialer, loop, req);
-	return TO_HANDLE(ctx);
+	return handle_make(ctx);
 }
 
-void http_client_cancel(struct ev_loop *loop, const handle_t h)
+void http_client_cancel(struct ev_loop *loop, const handle_type h)
 {
-	http_client_close(loop, TO_POINTER(h));
+	http_client_close(loop, handle_toptr(h));
 }
 
 #endif /* WITH_RULESET */

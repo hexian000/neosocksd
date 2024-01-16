@@ -54,20 +54,26 @@ struct resolve_query {
 
 #define RESOLVE_RETURN(q, loop)                                                \
 	do {                                                                   \
-		LOGV_F("resolve: [%p] finished ok=%d", (void *)(q), (q)->ok);  \
-		const struct resolve_query query = *(q);                       \
-		const handle_t h = TO_HANDLE(q);                               \
+		const bool ok = (q)->ok;                                       \
+		LOGV_F("resolve: [%p] finished ok=%d", (void *)(q), ok);       \
+		const struct resolve_cb done_cb = (q)->done_cb;                \
+		const handle_type h = handle_make(q);                          \
+		if (!ok) {                                                     \
+			free((q));                                             \
+			if (done_cb.cb == NULL) { /* cancelled */              \
+				return;                                        \
+			}                                                      \
+			done_cb.cb(h, (loop), done_cb.ctx, NULL);              \
+			return;                                                \
+		}                                                              \
+		if (done_cb.cb == NULL) { /* cancelled */                      \
+			free((q));                                             \
+			return;                                                \
+		}                                                              \
+		(q)->resolver->stats.num_success++;                            \
+		const union sockaddr_max addr = (q)->addr;                     \
 		free((q));                                                     \
-		if (query.done_cb.cb == NULL) { /* cancelled */                \
-			return;                                                \
-		}                                                              \
-		if (!query.ok) {                                               \
-			query.done_cb.cb(h, (loop), query.done_cb.ctx, NULL);  \
-			return;                                                \
-		}                                                              \
-		query.resolver->stats.num_success++;                           \
-		query.done_cb.cb(                                              \
-			h, (loop), query.done_cb.ctx, &query.addr.sa);         \
+		done_cb.cb(h, (loop), done_cb.ctx, &addr.sa);                  \
 		return;                                                        \
 	} while (0)
 
@@ -354,7 +360,7 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 	RESOLVE_RETURN(q, loop);
 }
 
-handle_t resolve_do(
+handle_type resolve_do(
 	struct resolver *r, struct resolve_cb cb, const char *name,
 	const char *service, const int family)
 {
@@ -382,12 +388,12 @@ handle_t resolve_do(
 	ev_init(&q->w_start, start_cb);
 	q->w_start.data = q;
 	ev_feed_event(r->loop, &q->w_start, EV_CUSTOM);
-	return TO_HANDLE(q);
+	return handle_make(q);
 }
 
-void resolve_cancel(handle_t h)
+void resolve_cancel(handle_type h)
 {
-	struct resolve_query *q = (void *)h;
+	struct resolve_query *q = handle_toptr(h);
 	LOGV_F("resolve: [%p] cancel", (void *)q);
 	q->done_cb = (struct resolve_cb){
 		.cb = NULL,

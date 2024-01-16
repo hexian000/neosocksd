@@ -70,9 +70,14 @@ static int co_resume(lua_State *L, lua_State *from, int narg, int *nres)
 }
 #endif
 
-#define RIDX_ERRORS (LUA_RIDX_LAST + 1)
-#define RIDX_FUNCTIONS (LUA_RIDX_LAST + 2)
-#define RIDX_CONTEXTS (LUA_RIDX_LAST + 3)
+#define CONST_LSTRING(s, len)                                                  \
+	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
+
+enum ruleset_ridx {
+	RIDX_ERRORS = LUA_RIDX_LAST + 1,
+	RIDX_FUNCTIONS = LUA_RIDX_LAST + 2,
+	RIDX_CONTEXTS = LUA_RIDX_LAST + 3,
+};
 
 #define ERR_MEMORY "out of memory"
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
@@ -633,9 +638,7 @@ ruleset_xpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	if (status == LUA_OK) {
 		return nresults;
 	}
-	lua_pushboolean(L, 0);
-	lua_pushvalue(L, -2);
-	return 2;
+	return lua_error(L);
 }
 
 static int ruleset_xpcall_(lua_State *restrict L)
@@ -1080,7 +1083,7 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	struct ruleset *restrict r = watcher->data;
 	const void *p = watcher;
 	if (!await_resume(r, p, 0)) {
-		LOGE_F("idle_cb: %s", ruleset_error(r));
+		LOGE_F("idle_cb: %s", ruleset_error(r, NULL));
 	}
 }
 
@@ -1088,7 +1091,7 @@ static int
 await_idle_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	await_unpin(r, L, (void *)ctx);
+	await_unpin(r, L, handle_toptr(ctx));
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -1136,7 +1139,7 @@ sleep_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	struct ruleset *restrict r = watcher->data;
 	const void *p = watcher;
 	if (!await_resume(r, p, 0)) {
-		LOGE_F("sleep_cb: %s", ruleset_error(r));
+		LOGE_F("sleep_cb: %s", ruleset_error(r, NULL));
 	}
 }
 
@@ -1144,7 +1147,7 @@ static int
 await_sleep_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	await_unpin(r, L, (void *)ctx);
+	await_unpin(r, L, handle_toptr(ctx));
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -1183,7 +1186,7 @@ static int await_sleep_(lua_State *restrict L)
 
 static int await_resolve_close_(struct lua_State *L)
 {
-	handle_t *restrict h = (handle_t *)lua_topointer(L, 1);
+	handle_type *restrict h = (handle_type *)lua_topointer(L, 1);
 	if (*h != INVALID_HANDLE) {
 		resolve_cancel(*h);
 		*h = INVALID_HANDLE;
@@ -1192,22 +1195,23 @@ static int await_resolve_close_(struct lua_State *L)
 }
 
 static void resolve_cb(
-	handle_t h, struct ev_loop *loop, void *ctx, const struct sockaddr *sa)
+	handle_type h, struct ev_loop *loop, void *ctx,
+	const struct sockaddr *sa)
 {
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
-	const void *p = TO_POINTER(h);
+	const void *p = handle_toptr(h);
 	if (!await_resume(r, p, 1, (void *)sa)) {
-		LOGE_F("resolve_cb: %s", ruleset_error(r));
+		LOGE_F("resolve_cb: %s", ruleset_error(r, NULL));
 	}
 }
 
 static int
 await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	handle_t *restrict p = (handle_t *)ctx;
+	handle_type *restrict p = (handle_type *)lua_topointer(L, (int)ctx);
 	struct ruleset *restrict r = find_ruleset(L);
-	await_unpin(r, L, TO_POINTER(*p));
+	await_unpin(r, L, handle_toptr(*p));
 	*p = INVALID_HANDLE;
 	switch (status) {
 	case LUA_OK:
@@ -1226,7 +1230,7 @@ static int await_resolve_(lua_State *restrict L)
 	luaL_checktype(L, 1, LUA_TSTRING);
 	struct ruleset *restrict r = find_ruleset(L);
 	const char *name = luaL_checkstring(L, 1);
-	const handle_t h = resolve_do(
+	const handle_type h = resolve_do(
 		G.resolver,
 		(struct resolve_cb){
 			.cb = resolve_cb,
@@ -1237,7 +1241,7 @@ static int await_resolve_(lua_State *restrict L)
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
-	handle_t *restrict p = lua_newuserdata(L, sizeof(handle_t));
+	handle_type *restrict p = lua_newuserdata(L, sizeof(handle_type));
 	*p = h;
 	if (luaL_newmetatable(L, MT_AWAIT_RESOLVE)) {
 		lua_pushcfunction(L, await_resolve_close_);
@@ -1251,14 +1255,15 @@ static int await_resolve_(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	await_pin(r, L, TO_POINTER(h));
-	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_resolve_k_);
-	return await_resolve_k_(L, status, (lua_KContext)p);
+	const lua_KContext ctx = (lua_KContext)lua_gettop(L);
+	await_pin(r, L, handle_toptr(h));
+	const int status = lua_yieldk(L, 0, ctx, await_resolve_k_);
+	return await_resolve_k_(L, status, ctx);
 }
 
 static int await_invoke_close_(struct lua_State *L)
 {
-	handle_t *h = (handle_t *)lua_topointer(L, 1);
+	handle_type *h = (handle_type *)lua_topointer(L, 1);
 	if (*h != INVALID_HANDLE) {
 		struct ruleset *restrict r = find_ruleset(L);
 		http_client_cancel(r->loop, *h);
@@ -1268,23 +1273,23 @@ static int await_invoke_close_(struct lua_State *L)
 }
 
 static void invoke_cb(
-	handle_t h, struct ev_loop *loop, void *ctx, bool ok, const void *data,
-	size_t len)
+	handle_type h, struct ev_loop *loop, void *ctx, bool ok,
+	const void *data, size_t len)
 {
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
-	const void *p = TO_POINTER(h);
+	const void *p = handle_toptr(h);
 	if (!await_resume(r, p, 3, (void *)&ok, (void *)data, (void *)&len)) {
-		LOGE_F("http_client_cb: %s", ruleset_error(r));
+		LOGE_F("http_client_cb: %s", ruleset_error(r, NULL));
 	}
 }
 
 static int
 await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	handle_t *restrict p = (handle_t *)ctx;
+	handle_type *restrict p = (handle_type *)lua_topointer(L, (int)ctx);
 	struct ruleset *restrict r = find_ruleset(L);
-	await_unpin(r, L, TO_POINTER(*p));
+	await_unpin(r, L, handle_toptr(*p));
 	*p = INVALID_HANDLE;
 	switch (status) {
 	case LUA_OK:
@@ -1336,14 +1341,14 @@ static int await_invoke_(lua_State *restrict L)
 		.func = invoke_cb,
 		.ctx = r,
 	};
-	handle_t h =
+	handle_type h =
 		http_client_do(r->loop, req, "/ruleset/rpcall", code, len, cb);
 	if (h == INVALID_HANDLE) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
 	lua_pop(L, 1); /* code */
-	handle_t *restrict p = lua_newuserdata(L, sizeof(handle_t));
+	handle_type *restrict p = lua_newuserdata(L, sizeof(handle_type));
 	*p = h;
 	if (luaL_newmetatable(L, MT_AWAIT_RPCALL)) {
 		lua_pushcfunction(L, await_invoke_close_);
@@ -1357,9 +1362,10 @@ static int await_invoke_(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	await_pin(r, L, TO_POINTER(h));
-	const int status = lua_yieldk(L, 0, (lua_KContext)p, await_invoke_k_);
-	return await_invoke_k_(L, status, (lua_KContext)p);
+	const lua_KContext ctx = (lua_KContext)lua_gettop(L);
+	await_pin(r, L, handle_toptr(h));
+	const int status = lua_yieldk(L, 0, ctx, await_invoke_k_);
+	return await_invoke_k_(L, status, ctx);
 }
 
 /* neosocksd.resolve(host) */
@@ -1424,7 +1430,7 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	const ev_tstamp now = ev_now(loop);
 	const bool ok = ruleset_pcall(r, FUNC_TICK, 2, 0, func, &now);
 	if (!ok) {
-		LOGE_F("ruleset.%s: %s", func, ruleset_error(r));
+		LOGE_F("ruleset.%s: %s", func, ruleset_error(r, NULL));
 		return;
 	}
 }
@@ -1640,7 +1646,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 		ruleset_free(r);
 		return NULL;
 	default:
-		FAILMSGF("ruleset init: %s", ruleset_error(r));
+		FAILMSGF("ruleset init: %s", ruleset_error(r, NULL));
 	}
 	return r;
 }
@@ -1655,16 +1661,16 @@ void ruleset_free(struct ruleset *restrict r)
 	free(r);
 }
 
-const char *ruleset_error(struct ruleset *restrict r)
+const char *ruleset_error(struct ruleset *restrict r, size_t *len)
 {
 	lua_State *restrict L = r->L;
 	if (lua_gettop(L) < 1) {
-		return "(no error)";
+		return CONST_LSTRING("(no error)", len);
 	}
 	if (!lua_isstring(L, -1)) {
-		return "(error object is not a string)";
+		return CONST_LSTRING("(error object is not a string)", len);
 	}
-	return lua_tostring(L, -1);
+	return lua_tolstring(L, -1, len);
 }
 
 bool ruleset_invoke(struct ruleset *r, struct stream *code)
@@ -1704,7 +1710,7 @@ dispatch_req(struct ruleset *restrict r, const char *func, const char *request)
 	const bool ok = ruleset_pcall(
 		r, FUNC_REQUEST, 2, 1, (void *)func, (void *)request);
 	if (!ok) {
-		LOGE_F("ruleset.%s: %s", func, ruleset_error(r));
+		LOGE_F("ruleset.%s: %s", func, ruleset_error(r, NULL));
 		return NULL;
 	}
 	return (struct dialreq *)lua_topointer(L, -1);
@@ -1731,17 +1737,18 @@ void ruleset_vmstats(
 	*s = r->vmstats;
 }
 
-const char *ruleset_stats(struct ruleset *restrict r, const double dt)
+const char *
+ruleset_stats(struct ruleset *restrict r, const double dt, size_t *len)
 {
 	lua_State *restrict L = r->L;
 	const char *func = "stats";
 	const bool ok =
 		ruleset_pcall(r, FUNC_STATS, 2, 1, (void *)func, (void *)&dt);
 	if (!ok) {
-		LOGE_F("ruleset.%s: %s", func, ruleset_error(r));
+		LOGE_F("ruleset.%s: %s", func, ruleset_error(r, NULL));
 		return NULL;
 	}
-	return lua_tostring(L, -1);
+	return lua_tolstring(L, -1, len);
 }
 
 #endif /* WITH_RULESET */

@@ -23,7 +23,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop);
 void ruleset_gc(struct ruleset *r);
 void ruleset_free(struct ruleset *r);
 
-const char *ruleset_error(struct ruleset *r);
+const char *ruleset_error(struct ruleset *r, size_t *len);
 
 bool ruleset_invoke(struct ruleset *r, struct stream *code);
 bool ruleset_update(struct ruleset *r, const char *modname, struct stream *code);
@@ -38,6 +38,6 @@ struct dialreq *ruleset_route(struct ruleset *r, const char *request);
 struct dialreq *ruleset_route6(struct ruleset *r, const char *request);
 
 void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
-const char *ruleset_stats(struct ruleset *r, double dt);
+const char *ruleset_stats(struct ruleset *r, double dt, size_t *len);
 
 #endif /* RULESET_H */

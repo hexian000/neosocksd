@@ -941,7 +941,7 @@ static bool connect_sa(
 }
 
 static void resolve_cb(
-	const handle_t h, struct ev_loop *loop, void *ctx,
+	const handle_type h, struct ev_loop *loop, void *ctx,
 	const struct sockaddr *restrict sa)
 {
 	UNUSED(h);
@@ -1017,7 +1017,7 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
-		const handle_t h = resolve_do(
+		const handle_type h = resolve_do(
 			G.resolver,
 			(struct resolve_cb){
 				.cb = resolve_cb,
