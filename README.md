@@ -10,8 +10,8 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
 - [Introduction](#introduction)
 - [Features](#features)
 - [Usage](#usage)
-  - [Basic Usage](#basic-usage)
-  - [Scripting Usage](#scripting-usage)
+  - [Command Line Arguments](#command-line-arguments)
+  - [Scripting](#scripting)
 - [Observability](#observability)
 - [Runtime Dependencies](#runtime-dependencies)
 - [Building from Source](#building-from-source)
@@ -19,9 +19,10 @@ A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua scr
   - [Building with CMake](#building-with-cmake)
 - [Credits](#credits)
 
+
 ## Introduction
 
-neosocksd is an unencrypted proxy server / port forwarder which can optionally handle requests in Lua scripts. This makes it a versatile building block. Here are some examples.
+neosocksd is an unencrypted proxy server / port forwarder which can optionally handle requests in Lua scripts. This makes it a versatile building block. Here are some examples:
 
 1. Use in conjunction with other encrypted transport layer forwarders to form an encrypted proxy server.
 2. Setup before any TCP service to limit the number of connections and the rate of new connections.
@@ -34,6 +35,7 @@ There are also different usages in scripting, such as:
 2. Implement a load balancer in script to form a RPC proxy.
 
 If you find that some proper usage is not well supported, please feel free to send issues or commits.
+
 
 ## Features
 
@@ -49,7 +51,7 @@ If you find that some proper usage is not well supported, please feel free to se
 - Conforming to: ISO C11, POSIX.1-2008.
 
 ## Usage
-### Basic Usage
+### Command Line Arguments
 
 ```sh
 ./neosocksd -l 0.0.0.0:1080               # Just a SOCKS server
@@ -75,18 +77,17 @@ sudo ./neosocksd -d -u nobody -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
 
 See `./neosocksd -h` for more details.
 
-Rule set configuration example: [ruleset_simple.lua](ruleset_simple.lua)
-
-### Scripting Usage
+### Scripting
 
 First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
 
 Depending on how complex your customizations are, check out:
 
-- Level 1: Rule set scripting example at [ruleset.lua](ruleset.lua)
-- Level 2: Rule set library code in [libruleset.lua](libruleset.lua)
-- Level 3: Reference manual for enthusiasts and professionals: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
-- Level 4: If you want to operate a larger system, the idea in [stub.lua](stub.lua) may be helpful.
+- Level 1: Rule set configuration example: [ruleset_simple.lua](ruleset_simple.lua)
+- Level 2: Rule set scripting example at [ruleset.lua](ruleset.lua)
+- Level 3: Rule set library code in [libruleset.lua](libruleset.lua)
+- Level 4: Developer manual: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
+- Level 5: If you want to operate a larger system, the idea in [stub.lua](stub.lua) may be helpful.
 
 Use the following command to start the server with the Lua scripts in current directory:
 
@@ -114,8 +115,7 @@ curl -v http://127.0.1.1:9080/ruleset/update?module=libruleset \
 curl -v http://127.0.1.1:9080/ruleset/invoke \
     -d "_G.some_switch = true"
 curl -v http://127.0.1.1:9080/ruleset/invoke \
-    -H "Content-Encoding: gzip" \
-    --data-binary @biglist.lua.gz
+    --data-binary @patch.lua
 ```
 
 
@@ -148,6 +148,7 @@ opkg install libev libcares
 
 *Lua is statically linked by default.*
 
+
 ## Building from Source
 ### Dependencies
 
@@ -176,6 +177,7 @@ cmake --build "neosocksd-build" --parallel
 ```
 
 See [m.sh](m.sh) for more information about cross compiling support.
+
 
 ## Credits
 

@@ -103,6 +103,7 @@ function _G.set_route(i, ...)
     _G.route_default = route_list[route_index]
 end
 
+-- support reloading libruleset
 local ruleset = setmetatable({}, {
     __index = function(t, k)
         return _G.libruleset[k]

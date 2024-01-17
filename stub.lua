@@ -1,5 +1,6 @@
 _G.libruleset = require("libruleset")
 
+-- support reloading libruleset
 local ruleset = setmetatable({}, {
     __index = function(t, k)
         return _G.libruleset[k]
@@ -7,7 +8,6 @@ local ruleset = setmetatable({}, {
 })
 
 local function check_update()
-    await.idle()
     os.execute([[ (
     HOSTNAME="$(cat /etc/hostname)"
     if curl -sLo /tmp/libruleset.lua "http://central.lan/neosocksd/${HOSTNAME}/libruleset.lua"; then
@@ -21,14 +21,12 @@ local function check_update()
 ) & ]])
 end
 
-function ruleset.tick(now)
-    async(check_update)
-    return libruleset.tick(now)
-end
-
-neosocksd.setinterval(60.0)
-
-async(check_update)
+async(function()
+    while true do
+        check_update()
+        await.sleep(60)
+    end
+end)
 
 logf("ruleset stub loaded, interpreter: %s", _VERSION)
 return ruleset
