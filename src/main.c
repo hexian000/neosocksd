@@ -443,7 +443,7 @@ int main(int argc, char **argv)
 static void
 signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 {
-	UNUSED(revents);
+	CHECK_EV_ERROR(revents, EV_SIGNAL);
 
 	switch (watcher->signum) {
 	case SIGHUP: {

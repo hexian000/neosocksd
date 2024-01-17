@@ -84,7 +84,7 @@ static void http_client_finish(
 static void
 response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_READ);
 	struct http_client_ctx *restrict ctx = watcher->data;
 	int ret = http_parser_recv(&ctx->parser);
 	if (ret < 0) {
@@ -119,7 +119,7 @@ response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 static void
 request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_WRITE);
 	const int fd = watcher->fd;
 	struct http_client_ctx *restrict ctx = watcher->data;
 	struct http_parser *restrict p = &ctx->parser;
@@ -188,7 +188,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_TIMER);
 	struct http_client_ctx *restrict ctx = watcher->data;
 	HTTP_RETURN_ERROR(loop, ctx, "timeout");
 }

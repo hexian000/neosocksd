@@ -161,7 +161,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_TIMER);
 	struct forward_ctx *restrict ctx = watcher->data;
 
 	switch (ctx->state) {

@@ -9,6 +9,7 @@
 #include "io/stream.h"
 #include "net/http.h"
 #include "net/mime.h"
+#include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
@@ -270,9 +271,12 @@ static bool parse_content_length(struct http_parser *restrict p, char *value)
 
 static bool parse_content_encoding(struct http_parser *restrict p, char *value)
 {
-	for (int i = CENCODING_NONE + 1; i < CENCODING_MAX; i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(content_encoding_str); i++) {
+		if (content_encoding_str[i] == NULL) {
+			continue;
+		}
 		if (strcasecmp(value, content_encoding_str[i]) == 0) {
-			p->hdr.content.encoding = i;
+			p->hdr.content.encoding = (enum content_encodings)i;
 			return true;
 		}
 	}

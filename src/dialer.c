@@ -815,7 +815,7 @@ static int dialer_recv(struct dialer *restrict d)
 
 static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_READ | EV_WRITE);
 	struct dialer *restrict d = watcher->data;
 
 	if (revents & EV_WRITE) {
@@ -944,9 +944,8 @@ static void resolve_cb(
 	const handle_type h, struct ev_loop *loop, void *ctx,
 	const struct sockaddr *restrict sa)
 {
-	UNUSED(h);
 	struct dialer *restrict d = ctx;
-	assert(h == d->resolve_handle);
+	(void)h, assert(h == d->resolve_handle);
 	d->resolve_handle = INVALID_HANDLE;
 
 	const struct dialaddr *restrict dialaddr =
@@ -986,7 +985,7 @@ static void resolve_cb(
 static void
 start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	UNUSED(revents);
+	CHECK_EV_ERROR(revents, EV_CUSTOM);
 	struct dialer *restrict d = watcher->data;
 	const struct dialreq *restrict req = d->req;
 	const struct dialaddr *restrict addr =

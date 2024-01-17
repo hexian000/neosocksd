@@ -79,14 +79,15 @@ struct event_cb {
 	void *ctx;
 };
 
-#define CHECK_EV_ERROR(revents)                                                \
+#define CHECK_EV_ERROR(revents, accept)                                        \
 	do {                                                                   \
-		if ((unsigned)(revents) & (unsigned)EV_ERROR) {                \
+		if (((revents)&EV_ERROR) != 0) {                               \
 			const int err = errno;                                 \
 			LOGE_F("error event: [errno=%d] %s", err,              \
 			       strerror(err));                                 \
 			return;                                                \
 		}                                                              \
+		assert(((revents) & (accept)) == (revents));                   \
 	} while (0)
 
 void init(int argc, char **argv);

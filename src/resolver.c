@@ -52,28 +52,30 @@ struct resolve_query {
 	char buf[];
 };
 
+static void
+resolve_finish(struct resolve_query *restrict q, struct ev_loop *loop)
+{
+	LOGV_F("resolve: [%p] finished ok=%d", (void *)q, q->ok);
+	if (q->done_cb.cb == NULL) { /* cancelled */
+		free(q);
+		return;
+	}
+	const handle_type h = handle_make(q);
+	const struct resolve_cb done_cb = q->done_cb;
+	if (!q->ok) {
+		free(q);
+		done_cb.cb(h, loop, done_cb.ctx, NULL);
+		return;
+	}
+	const union sockaddr_max addr = q->addr;
+	q->resolver->stats.num_success++;
+	free(q);
+	done_cb.cb(h, loop, done_cb.ctx, &addr.sa);
+}
+
 #define RESOLVE_RETURN(q, loop)                                                \
 	do {                                                                   \
-		const bool ok = (q)->ok;                                       \
-		LOGV_F("resolve: [%p] finished ok=%d", (void *)(q), ok);       \
-		const struct resolve_cb done_cb = (q)->done_cb;                \
-		const handle_type h = handle_make(q);                          \
-		if (!ok) {                                                     \
-			free((q));                                             \
-			if (done_cb.cb == NULL) { /* cancelled */              \
-				return;                                        \
-			}                                                      \
-			done_cb.cb(h, (loop), done_cb.ctx, NULL);              \
-			return;                                                \
-		}                                                              \
-		if (done_cb.cb == NULL) { /* cancelled */                      \
-			free((q));                                             \
-			return;                                                \
-		}                                                              \
-		(q)->resolver->stats.num_success++;                            \
-		const union sockaddr_max addr = (q)->addr;                     \
-		free((q));                                                     \
-		done_cb.cb(h, (loop), done_cb.ctx, &addr.sa);                  \
+		resolve_finish((q), (loop));                                   \
 		return;                                                        \
 	} while (0)
 
@@ -81,7 +83,7 @@ struct resolve_query {
 static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	UNUSED(loop);
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_READ | EV_WRITE);
 	struct resolver *restrict r = watcher->data;
 	const int fd = watcher->fd;
 	const ares_socket_t readable =
@@ -126,7 +128,7 @@ static size_t purge_watchers(struct resolver *restrict r)
 static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
-	UNUSED(revents);
+	CHECK_EV_ERROR(revents, EV_TIMER);
 	struct resolver *restrict r = watcher->data;
 	ares_process_fd(r->channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
 
@@ -332,7 +334,7 @@ const struct resolver_stats *resolver_stats(struct resolver *r)
 static void
 start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	UNUSED(revents);
+	CHECK_EV_ERROR(revents, EV_CUSTOM);
 	struct resolve_query *restrict q = watcher->data;
 	LOGV_F("resolve: [%p] start name=\"%s\" service=%s pf=%d", (void *)q,
 	       q->name, q->service, q->family);

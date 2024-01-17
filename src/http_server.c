@@ -103,7 +103,7 @@ http_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 
 void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_READ);
 	struct http_ctx *restrict ctx = watcher->data;
 
 	const int want = http_parser_recv(&ctx->parser);
@@ -134,7 +134,7 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_WRITE);
 	struct http_ctx *restrict ctx = watcher->data;
 	assert(ctx->state == STATE_RESPONSE || ctx->state == STATE_CONNECT);
 
@@ -199,7 +199,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents);
+	CHECK_EV_ERROR(revents, EV_TIMER);
 	struct http_ctx *restrict ctx = watcher->data;
 	http_ctx_close(loop, ctx);
 }

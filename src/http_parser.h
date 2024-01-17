@@ -22,8 +22,6 @@ enum content_encodings {
 	CENCODING_NONE,
 	CENCODING_DEFLATE,
 	CENCODING_GZIP,
-
-	CENCODING_MAX,
 };
 
 extern const char *content_encoding_str[];
