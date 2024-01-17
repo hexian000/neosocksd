@@ -12,7 +12,6 @@
 
 #include <unistd.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -46,10 +45,12 @@ typedef intptr_t handle_type;
 #else
 typedef ptrdiff_t handle_type;
 #endif
+_Static_assert(
+	sizeof(handle_type) >= sizeof(void *),
+	"handle_type can't hold a pointer");
 
 static inline handle_type handle_make(void *p)
 {
-	assert((void *)(handle_type)p == p);
 	return (handle_type)p;
 }
 

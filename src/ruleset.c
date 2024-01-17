@@ -56,10 +56,7 @@ struct ruleset {
 
 #if LUA_VERSION_NUM >= 504
 #define HAVE_LUA_TOCLOSE 1
-static int co_resume(lua_State *L, lua_State *from, int narg, int *nres)
-{
-	return lua_resume(L, from, narg, nres);
-}
+#define co_resume lua_resume
 #elif LUA_VERSION_NUM == 503
 #define LUA_LOADED_TABLE "_LOADED"
 static int co_resume(lua_State *L, lua_State *from, int narg, int *nres)
@@ -69,6 +66,8 @@ static int co_resume(lua_State *L, lua_State *from, int narg, int *nres)
 	return status;
 }
 #endif
+
+#define luaL_addliteral(B, s) luaL_addlstring((B), ("" s), sizeof(s) - 1)
 
 #define CONST_LSTRING(s, len)                                                  \
 	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
@@ -186,8 +185,6 @@ static int format_addr(lua_State *restrict L)
 	return 1;
 }
 
-#define luaL_addliteral(B, s) luaL_addlstring((B), ("" s), sizeof(s) - 1)
-
 static void
 marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 {
@@ -254,6 +251,7 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		snprintf(buf, sizeof(buf), "%" LUA_NUMBER_FRMLEN "a", v);
 	CHECK(ret > 0);
 	size_t len = (size_t)ret;
+	/* TODO: maybe #if __GLIBC__ here? */
 	const char *point = localeconv()->decimal_point;
 	const size_t npoint = strlen(point);
 	if (npoint > 1) {
@@ -827,7 +825,7 @@ static int luaopen_regex(lua_State *restrict L)
 }
 
 struct stream_context {
-	struct vbuffer *vbuf;
+	struct vbuffer *out;
 	struct stream *r, *w;
 	unsigned char buf[IO_BUFSIZE];
 };
@@ -844,7 +842,7 @@ static int stream_context_close_(struct lua_State *L)
 		(void)stream_close(s->w);
 		s->w = NULL;
 	}
-	s->vbuf = VBUF_FREE(s->vbuf);
+	s->out = VBUF_FREE(s->out);
 	return 0;
 }
 
@@ -854,7 +852,7 @@ static int zlib_compress_(lua_State *restrict L)
 	size_t len;
 	const char *src = luaL_checklstring(L, 1, &len);
 	struct stream_context *restrict s =
-		lua_newuserdata((L), sizeof(struct stream_context));
+		lua_newuserdata(L, sizeof(struct stream_context));
 	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
 		lua_pushcfunction(L, stream_context_close_);
 #if HAVE_LUA_TOCLOSE
@@ -867,9 +865,9 @@ static int zlib_compress_(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	s->vbuf = NULL;
+	s->out = NULL;
 	s->r = io_memreader(src, len);
-	s->w = codec_zlib_writer(io_heapwriter(&s->vbuf));
+	s->w = codec_zlib_writer(io_heapwriter(&s->out));
 	if (s->r == NULL || s->w == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
@@ -878,12 +876,12 @@ static int zlib_compress_(lua_State *restrict L)
 	if (err != 0) {
 		return luaL_error(L, "compress error: %d", err);
 	}
-	if (s->vbuf == NULL) {
-		lua_pushliteral(L, "");
+	if (s->out == NULL) {
+		lua_pushlstring(L, NULL, 0);
 		return 1;
 	}
-	const char *dst = (char *)s->vbuf->data;
-	lua_pushlstring(L, dst, s->vbuf->len);
+	const char *dst = (char *)s->out->data;
+	lua_pushlstring(L, dst, s->out->len);
 	return 1;
 }
 
@@ -893,7 +891,7 @@ static int zlib_uncompress_(lua_State *restrict L)
 	size_t len;
 	const char *src = luaL_checklstring(L, 1, &len);
 	struct stream_context *restrict s =
-		lua_newuserdata((L), sizeof(struct stream_context));
+		lua_newuserdata(L, sizeof(struct stream_context));
 	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
 		lua_pushcfunction(L, stream_context_close_);
 #if HAVE_LUA_TOCLOSE
@@ -906,9 +904,9 @@ static int zlib_uncompress_(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	s->vbuf = NULL;
+	s->out = NULL;
 	s->r = codec_zlib_reader(io_memreader(src, len));
-	s->w = io_heapwriter(&s->vbuf);
+	s->w = io_heapwriter(&s->out);
 	if (s->r == NULL || s->w == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
@@ -917,12 +915,12 @@ static int zlib_uncompress_(lua_State *restrict L)
 	if (err != 0) {
 		return luaL_error(L, "uncompress error: %d", err);
 	}
-	if (s->vbuf == NULL) {
-		lua_pushliteral(L, "");
+	if (s->out == NULL) {
+		lua_pushlstring(L, NULL, 0);
 		return 1;
 	}
-	const char *dst = (char *)s->vbuf->data;
-	lua_pushlstring(L, dst, s->vbuf->len);
+	const char *dst = (char *)s->out->data;
+	lua_pushlstring(L, dst, s->out->len);
 	return 1;
 }
 
@@ -1091,7 +1089,9 @@ static int
 await_idle_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	await_unpin(r, L, handle_toptr(ctx));
+	struct ev_idle *restrict w =
+		(struct ev_idle *)lua_topointer(L, (int)ctx);
+	await_unpin(r, L, w);
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -1118,8 +1118,9 @@ static int await_idle_(lua_State *restrict L)
 	lua_setmetatable(L, -2);
 	await_pin(r, L, w);
 	ev_idle_start(r->loop, w);
-	const int status = lua_yieldk(L, 0, (lua_KContext)w, await_idle_k_);
-	return await_idle_k_(L, status, (lua_KContext)w);
+	const lua_KContext ctx = (lua_KContext)lua_gettop(L);
+	const int status = lua_yieldk(L, 0, ctx, await_idle_k_);
+	return await_idle_k_(L, status, ctx);
 }
 
 static int await_sleep_gc_(struct lua_State *L)
@@ -1147,7 +1148,9 @@ static int
 await_sleep_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	await_unpin(r, L, handle_toptr(ctx));
+	struct ev_timer *restrict w =
+		(struct ev_timer *)lua_topointer(L, (int)ctx);
+	await_unpin(r, L, w);
 	switch (status) {
 	case LUA_OK:
 	case LUA_YIELD:
@@ -1180,8 +1183,9 @@ static int await_sleep_(lua_State *restrict L)
 	lua_setmetatable(L, -2);
 	await_pin(r, L, w);
 	ev_timer_start(r->loop, w);
-	const int status = lua_yieldk(L, 0, (lua_KContext)w, await_sleep_k_);
-	return await_sleep_k_(L, status, (lua_KContext)w);
+	const lua_KContext ctx = (lua_KContext)lua_gettop(L);
+	const int status = lua_yieldk(L, 0, ctx, await_sleep_k_);
+	return await_sleep_k_(L, status, ctx);
 }
 
 static int await_resolve_close_(struct lua_State *L)
