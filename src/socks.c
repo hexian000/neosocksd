@@ -272,7 +272,7 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents, EV_TIMER);
+	CHECK_REVENTS(revents, EV_TIMER);
 
 	struct socks_ctx *restrict ctx = watcher->data;
 	switch (ctx->state) {
@@ -697,7 +697,7 @@ static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents, EV_READ);
+	CHECK_REVENTS(revents, EV_READ);
 	struct socks_ctx *restrict ctx = watcher->data;
 
 	const int ret = socks_recv(ctx, watcher->fd);

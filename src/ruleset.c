@@ -1074,7 +1074,7 @@ static int await_idle_gc_(struct lua_State *L)
 
 static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents, EV_IDLE);
+	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct ruleset *restrict r = watcher->data;
 	const void *p = watcher;
@@ -1132,7 +1132,7 @@ static int await_sleep_gc_(struct lua_State *L)
 static void
 sleep_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents, EV_TIMER);
+	CHECK_REVENTS(revents, EV_TIMER);
 	ev_timer_stop(loop, watcher);
 	struct ruleset *restrict r = watcher->data;
 	const void *p = watcher;
@@ -1425,7 +1425,7 @@ static int api_parse_ipv6_(lua_State *restrict L)
 
 static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents, EV_TIMER);
+	CHECK_REVENTS(revents, EV_TIMER);
 	struct ruleset *restrict r = watcher->data;
 	const char *func = "tick";
 	const ev_tstamp now = ev_now(loop);

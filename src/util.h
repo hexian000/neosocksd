@@ -12,6 +12,7 @@
 
 #include <unistd.h>
 
+#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -72,22 +73,25 @@ static inline void *handle_toptr(const handle_type h)
 struct ev_loop;
 struct ev_io;
 
-void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
-
 struct event_cb {
 	void (*cb)(struct ev_loop *loop, void *ctx);
 	void *ctx;
 };
 
-#define CHECK_EV_ERROR(revents, accept)                                        \
+void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
+
+#define CHECK_REVENTS(revents, accept)                                         \
 	do {                                                                   \
 		if (((revents)&EV_ERROR) != 0) {                               \
 			const int err = errno;                                 \
 			LOGE_F("error event: [errno=%d] %s", err,              \
 			       strerror(err));                                 \
-			return;                                                \
+			if (((revents) & (accept)) == 0) {                     \
+				return;                                        \
+			}                                                      \
+		} else {                                                       \
+			assert(((revents) & (accept)) == (revents));           \
 		}                                                              \
-		assert(((revents) & (accept)) == (revents));                   \
 	} while (0)
 
 void init(int argc, char **argv);

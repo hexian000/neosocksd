@@ -43,7 +43,7 @@ static bool is_startup_limited(struct server *restrict s)
 
 static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents, EV_READ);
+	CHECK_REVENTS(revents, EV_READ);
 
 	struct server *restrict s = watcher->data;
 	const struct config *restrict conf = G.conf;
@@ -94,7 +94,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 static void
 timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
-	CHECK_EV_ERROR(revents, EV_TIMER);
+	CHECK_REVENTS(revents, EV_TIMER);
 	ev_timer_stop(loop, watcher);
 	struct listener *restrict l = watcher->data;
 	struct ev_io *restrict w_accept = &l->w_accept;
