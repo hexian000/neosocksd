@@ -4,12 +4,9 @@
 #ifndef HTTP_H
 #define HTTP_H
 
-#include "server.h"
-#include "util.h"
-
-#include <stddef.h>
-
-struct dialreq;
+struct server;
+struct ev_loop;
+struct sockaddr;
 
 /* http_proxy_serve: implements serve_fn */
 void http_proxy_serve(

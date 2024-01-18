@@ -7,6 +7,7 @@
 #include "http_parser.h"
 #include "dialer.h"
 #include "session.h"
+#include "sockutil.h"
 #include "transfer.h"
 
 #include "net/http.h"

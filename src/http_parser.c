@@ -18,7 +18,9 @@
 
 #include <ctype.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 const char *content_encoding_str[] = {

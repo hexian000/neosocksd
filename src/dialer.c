@@ -20,6 +20,7 @@
 
 #include <arpa/inet.h>
 #include <ev.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 
 #include <assert.h>

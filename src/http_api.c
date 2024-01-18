@@ -6,6 +6,7 @@
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
+#include "util.h"
 
 #include "io/stream.h"
 #include "net/http.h"
@@ -16,7 +17,9 @@
 #include "utils/posixtime.h"
 #include "utils/slog.h"
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #define RESPHDR_CPLAINTEXT(buf)                                                \

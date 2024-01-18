@@ -94,11 +94,7 @@ static ssize_t transfer_send(struct transfer *restrict t)
 static void
 transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
-	if (revents & EV_ERROR) {
-		const int err = errno;
-		LOGE_F("transfer error: %s", strerror(err));
-		return;
-	}
+	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
 
 	struct transfer *restrict t = watcher->data;
 	enum transfer_state state = t->state;

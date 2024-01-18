@@ -6,6 +6,7 @@
 #include "http_server.h"
 #include "ruleset.h"
 #include "server.h"
+#include "util.h"
 
 #include "utils/debug.h"
 

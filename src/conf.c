@@ -3,7 +3,6 @@
 
 #include "conf.h"
 
-#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <limits.h>

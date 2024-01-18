@@ -4,7 +4,9 @@
 #ifndef FORWARD_H
 #define FORWARD_H
 
-#include "server.h"
+struct server;
+struct ev_loop;
+struct sockaddr;
 
 /* forward_serve: implements serve_fn */
 void forward_serve(

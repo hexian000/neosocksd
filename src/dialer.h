@@ -5,8 +5,6 @@
 #define DIALER_H
 
 #include "proto/socks.h"
-#include "resolver.h"
-#include "sockutil.h"
 #include "util.h"
 
 #include "utils/arraysize.h"

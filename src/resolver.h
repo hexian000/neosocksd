@@ -4,7 +4,6 @@
 #ifndef RESOLVER_H
 #define RESOLVER_H
 
-#include "sockutil.h"
 #include "util.h"
 
 #include <stdbool.h>
@@ -26,6 +25,8 @@ void resolver_cleanup(void);
 struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf);
 const struct resolver_stats *resolver_stats(struct resolver *r);
 void resolver_free(struct resolver *r);
+
+struct sockaddr;
 
 struct resolve_cb {
 	void (*cb)(

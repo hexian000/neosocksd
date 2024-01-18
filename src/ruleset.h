@@ -4,8 +4,6 @@
 #ifndef RULESET_H
 #define RULESET_H
 
-#include "sockutil.h"
-
 #include <stdbool.h>
 #include <stddef.h>
 

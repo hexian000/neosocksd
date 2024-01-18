@@ -4,7 +4,9 @@
 #ifndef SOCKS_H
 #define SOCKS_H
 
-#include "server.h"
+struct server;
+struct ev_loop;
+struct sockaddr;
 
 /* socks_serve: implements serve_fn */
 void socks_serve(
