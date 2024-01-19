@@ -216,25 +216,30 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 static void
 marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 {
+	static const char xdigits[16] = "0123456789abcdef";
 	char buf[120];
 	if (lua_isinteger(L, idx)) {
-		const lua_Integer v = lua_tointeger(L, idx);
-		const char *fmt = LUA_INTEGER_FMT;
-		if (v == LUA_MININTEGER) {
-			fmt = "0x%" LUA_INTEGER_FRMLEN "x";
+		lua_Integer x = lua_tointeger(L, idx);
+		char *const bufend = &buf[sizeof(buf)];
+		char *s = bufend;
+		if (x < 0 && x != LUA_MININTEGER) {
+			x = -x;
+			luaL_addchar(B, '-');
 		}
-		const int ret = snprintf(buf, sizeof(buf), fmt, v);
-		CHECK(ret > 0);
-		luaL_addlstring(B, buf, (size_t)ret);
+		luaL_addliteral(B, "0x");
+		for (lua_Unsigned y = x; y; y >>= 4) {
+			*--s = xdigits[(y & 0xf)];
+		}
+		luaL_addlstring(B, s, bufend - s);
 		return;
 	}
-	const lua_Number v = lua_tonumber(L, idx);
-	switch (fpclassify(v)) {
+	lua_Number x = lua_tonumber(L, idx);
+	switch (fpclassify(x)) {
 	case FP_NAN:
 		luaL_addliteral(B, "0/0");
 		return;
 	case FP_INFINITE:
-		if (signbit(v)) {
+		if (signbit(x)) {
 			luaL_addliteral(B, "-1/0");
 			return;
 		}
@@ -246,28 +251,43 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	default:
 		break;
 	}
-	const int ret =
-		snprintf(buf, sizeof(buf), "%" LUA_NUMBER_FRMLEN "a", v);
-	CHECK(ret > 0);
-	size_t len = (size_t)ret;
-	/* TODO: maybe #if __GLIBC__ here? */
-	const char *point = localeconv()->decimal_point;
-	const size_t npoint = strlen(point);
-	if (npoint > 1) {
-		char *s = strstr(buf, point);
-		if (s != NULL) {
-			*s = '.';
-			const size_t n = len - (s - buf) - npoint + 1;
-			memmove(s + 1, s + npoint, n);
-			len -= npoint - 1;
-		}
-	} else if (npoint == 1 && point[0] != '.') {
-		char *s = memchr(buf, point[0], len);
-		if (s != NULL) {
-			*s = '.';
-		}
+	char *s = buf;
+	char ebuf[3 * sizeof(int)];
+	char *const ebufend = &ebuf[sizeof(ebuf)], *estr;
+	/* prefix */
+	if (signbit(x)) {
+		x = -x;
+		luaL_addchar(B, '-');
 	}
+	luaL_addliteral(B, "0x");
+	/* exponent */
+	int e2 = 0;
+	x = frexp(x, &e2) * 2;
+	if (x) {
+		e2--;
+	}
+	estr = ebufend;
+	for (int r = e2 < 0 ? -e2 : e2; r; r /= 10) {
+		*--estr = '0' + r % 10;
+	}
+	if (estr == ebufend) {
+		*--estr = '0';
+	}
+	*--estr = (e2 < 0 ? '-' : '+');
+	*--estr = 'p';
+	/* mantissa */
+	do {
+		const int i = x;
+		*s++ = xdigits[i];
+		x = 16 * (x - i);
+		if (s - buf == 1 && x) {
+			*s++ = '.';
+		}
+	} while (x);
+	const size_t len = (size_t)(s - buf);
 	luaL_addlstring(B, buf, len);
+	const size_t elen = (size_t)(ebufend - estr);
+	luaL_addlstring(B, estr, elen);
 }
 
 static void marshal_value(
