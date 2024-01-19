@@ -345,16 +345,11 @@ static void marshal_value(
 	luaL_Buffer b;
 	luaL_buffinit(L, &b);
 	luaL_addchar(&b, '{');
-	bool first = true;
 	/* auto index */
 	lua_Integer n = 0;
 	for (lua_Integer i = 1; lua_rawgeti(L, idx, i) != LUA_TNIL; i++) {
-		if (first) {
-			first = false;
-		} else {
-			luaL_addchar(&b, ',');
-		}
 		marshal_value(L, &b, -1, depth + 1);
+		luaL_addchar(&b, ',');
 		lua_pop(L, 1);
 		n = i;
 		if (i == LUA_MAXINTEGER) {
@@ -372,16 +367,11 @@ static void marshal_value(
 				continue;
 			}
 		}
-		if (first) {
-			first = false;
-		} else {
-			luaL_addchar(&b, ',');
-		}
 		luaL_addchar(&b, '[');
 		marshal_value(L, &b, -2, depth + 1);
-		luaL_addchar(&b, ']');
-		luaL_addchar(&b, '=');
+		luaL_addliteral(&b, "]=");
 		marshal_value(L, &b, -1, depth + 1);
+		luaL_addchar(&b, ',');
 		lua_pop(L, 1);
 	}
 	lua_pop(L, 1);
