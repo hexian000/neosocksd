@@ -253,8 +253,6 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		break;
 	}
 	char *s = buf;
-	char ebuf[3 * sizeof(int)];
-	char *const ebufend = &ebuf[sizeof(ebuf)], *estr;
 	/* prefix */
 	if (signbit(x)) {
 		x = -x;
@@ -268,11 +266,12 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	if (x) {
 		e2--;
 	}
-	estr = ebufend;
+	char *const bufend = &buf[sizeof(buf)];
+	char *estr = bufend;
 	for (int r = e2 < 0 ? -e2 : e2; r; r /= 10) {
 		*--estr = '0' + r % 10;
 	}
-	if (estr == ebufend) {
+	if (estr == bufend) {
 		*--estr = '0';
 	}
 	*--estr = (e2 < 0 ? '-' : '+');
@@ -288,7 +287,7 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	} while (x);
 	const size_t len = (size_t)(s - buf);
 	luaL_addlstring(B, buf, len);
-	const size_t elen = (size_t)(ebufend - estr);
+	const size_t elen = (size_t)(bufend - estr);
 	luaL_addlstring(B, estr, elen);
 }
 
