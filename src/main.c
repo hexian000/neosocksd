@@ -410,9 +410,10 @@ int main(int argc, char **argv)
 	(void)sd_notify(0, "READY=1");
 #endif
 	/* start event loop */
+	LOGN("server start");
 	ev_run(loop, 0);
 
-	LOGN("shutdown gracefully");
+	LOGN("server shutdown gracefully");
 	if (api != NULL) {
 		server_stop(api);
 		api = NULL;
