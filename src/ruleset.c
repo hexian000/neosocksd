@@ -193,18 +193,17 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	while (len--) {
 		const unsigned char ch = *s;
 		if (ch == '"' || ch == '\\' || ch == '\n') {
-			luaL_addchar(B, '\\');
-			luaL_addchar(B, ch);
+			char buf[2] = { '\\', ch };
+			luaL_addlstring(B, buf, sizeof(buf));
 		} else if (iscntrl(ch)) {
-			char buf[10];
-			int ret;
-			if (!isdigit((unsigned char)*(s + 1))) {
-				ret = snprintf(buf, sizeof(buf), "\\%d", ch);
-			} else {
-				ret = snprintf(buf, sizeof(buf), "\\%03d", ch);
-			}
-			CHECK(ret > 0);
-			luaL_addlstring(B, buf, (size_t)ret);
+			char buf[4];
+			char *s = &buf[sizeof(buf)];
+			uint_fast8_t x = ch;
+			*--s = '0' + x % 10, x /= 10;
+			*--s = '0' + x % 10, x /= 10;
+			*--s = '0' + x % 10, x /= 10;
+			*--s = '\\';
+			luaL_addlstring(B, buf, sizeof(buf));
 		} else {
 			luaL_addchar(B, ch);
 		}
@@ -216,6 +215,7 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 static void
 marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 {
+	static const char prefix[3] = "-0x";
 	static const char xdigits[16] = "0123456789abcdef";
 	char buf[120];
 	if (lua_isinteger(L, idx)) {
@@ -224,9 +224,10 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		char *s = bufend;
 		if (x < 0 && x != LUA_MININTEGER) {
 			x = -x;
-			luaL_addchar(B, '-');
+			luaL_addlstring(B, prefix, sizeof(prefix));
+		} else {
+			luaL_addlstring(B, prefix + 1, sizeof(prefix) - 1);
 		}
-		luaL_addliteral(B, "0x");
 		for (lua_Unsigned y = x; y; y >>= 4) {
 			*--s = xdigits[(y & 0xf)];
 		}
@@ -257,9 +258,10 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 	/* prefix */
 	if (signbit(x)) {
 		x = -x;
-		luaL_addchar(B, '-');
+		luaL_addlstring(B, prefix, sizeof(prefix));
+	} else {
+		luaL_addlstring(B, prefix + 1, sizeof(prefix) - 1);
 	}
-	luaL_addliteral(B, "0x");
 	/* exponent */
 	int e2 = 0;
 	x = frexp(x, &e2) * 2;
