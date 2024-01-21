@@ -222,6 +222,10 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		lua_Integer x = lua_tointeger(L, idx);
 		char *const bufend = &buf[sizeof(buf)];
 		char *s = bufend;
+		if (x == 0) {
+			luaL_addchar(B, '0');
+			return;
+		}
 		if (x < 0 && x != LUA_MININTEGER) {
 			x = -x;
 			luaL_addlstring(B, prefix, sizeof(prefix));
@@ -230,9 +234,6 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		}
 		for (lua_Unsigned y = x; y; y >>= 4) {
 			*--s = xdigits[(y & 0xf)];
-		}
-		if (s == bufend) {
-			*--s = '0';
 		}
 		luaL_addlstring(B, s, bufend - s);
 		return;
