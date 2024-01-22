@@ -22,6 +22,7 @@
 #include <systemd/sd-daemon.h>
 #endif
 
+#include <inttypes.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
