@@ -49,10 +49,13 @@ bool dialaddr_set(
 		LOGE_F("invalid address: \"%s\"", s);
 		return false;
 	}
-	if (sscanf(port, "%" SCNu16, &addr->port) != 1) {
+	char *endptr;
+	uintmax_t portvalue = strtoumax(port, &endptr, 10);
+	if (*endptr || portvalue > UINT16_MAX) {
 		LOGE_F("unable to parse port number: \"%s\"", port);
 		return false;
 	}
+	addr->port = (uint16_t)portvalue;
 	if (inet_pton(AF_INET, host, &addr->in) == 1) {
 		addr->type = ATYP_INET;
 		return true;

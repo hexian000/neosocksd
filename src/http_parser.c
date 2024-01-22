@@ -258,11 +258,13 @@ static bool parse_accept_encoding(struct http_parser *restrict p, char *value)
 
 static bool parse_content_length(struct http_parser *restrict p, char *value)
 {
-	size_t content_length;
-	if (sscanf(value, "%zu", &content_length) != 1) {
+	char *endptr;
+	uintmax_t lenvalue = strtoumax(value, &endptr, 10);
+	if (*endptr || lenvalue > SIZE_MAX) {
 		p->http_status = HTTP_BAD_REQUEST;
 		return false;
 	}
+	const size_t content_length = (size_t)lenvalue;
 	if (strcmp(p->msg.req.method, "CONNECT") == 0) {
 		p->http_status = HTTP_BAD_REQUEST;
 		return false;

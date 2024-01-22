@@ -63,6 +63,7 @@ void loadlibs(void)
 	}
 	srand64((uint64_t)clock_realtime());
 
+	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
 	resolver_init();
 }

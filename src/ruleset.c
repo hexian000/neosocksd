@@ -201,7 +201,7 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 			uint_fast8_t x = ch;
 			*--s = '0' + x % 10, x /= 10;
 			*--s = '0' + x % 10, x /= 10;
-			*--s = '0' + x % 10, x /= 10;
+			*--s = '0' + x % 10;
 			*--s = '\\';
 			luaL_addlstring(B, buf, sizeof(buf));
 		} else {
@@ -634,10 +634,10 @@ static int ruleset_traceback_(lua_State *restrict L)
 {
 	size_t len;
 	const char *msg = luaL_tolstring(L, -1, &len);
+	LOG_STACK_F(DEBUG, 0, "ruleset traceback: %.*s", (int)len, msg);
 	luaL_traceback(L, L, msg, 1);
 	msg = lua_tolstring(L, -1, &len);
-	LOG_TXT(DEBUG, msg, len, "Lua traceback");
-	LOG_STACK(DEBUG, 0, "C traceback");
+	LOG_TXT(VERBOSE, msg, len, "Lua traceback");
 	return 1;
 }
 

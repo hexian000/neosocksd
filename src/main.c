@@ -22,9 +22,11 @@
 #include <systemd/sd-daemon.h>
 #endif
 
+#include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,7 +80,7 @@ static void print_usage(const char *argv0)
 		"  --traceback                print ruleset error traceback (for debugging)\n"
 		"  --memlimit <limit>         set a soft limit on the Lua heap size in MiB\n"
 #endif
-		"  --api <bind_address>       RESTful API for monitoring\n"
+		"  --api <bind_address>       RESTful API listen address\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
 		"  --proto-timeout            keep the session in halfopen state until there is\n"
@@ -212,9 +214,12 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		if (strcmp(argv[i], "--memlimit") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			if (sscanf(argv[i], "%d", &conf->memlimit) != 1) {
+			char *endptr;
+			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
+			if (*endptr || value > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
+			conf->memlimit = (int)value;
 			continue;
 		}
 #endif
@@ -239,9 +244,12 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		if (strcmp(argv[i], "--loglevel") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			if (sscanf(argv[i], "%d", &conf->log_level) != 1) {
+			char *endptr;
+			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
+			if (*endptr || value > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
+			conf->log_level = (int)value;
 			continue;
 		}
 		if (strcmp(argv[i], "-v") == 0 ||
@@ -263,24 +271,35 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		    strcmp(argv[i], "--max-sessions") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			int num;
-			if (sscanf(argv[i], "%d", &num) != 1) {
+			char *endptr;
+			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
+			if (*endptr || value > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
-			conf->max_sessions = num;
+			conf->max_sessions = (int)value;
 			continue;
 		}
 		if (strcmp(argv[i], "--max-startups") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			int start, rate, full;
-			if (sscanf(argv[i], "%d:%d:%d", &start, &rate, &full) !=
-			    3) {
+			char *nptr = argv[i];
+			const uintmax_t start = strtoumax(nptr, &nptr, 10);
+			if (*nptr != ':' || start > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
-			conf->startup_limit_start = start;
+			nptr++;
+			const uintmax_t rate = strtoumax(nptr, &nptr, 10);
+			if (*nptr != ':' || rate > INT_MAX) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			nptr++;
+			const uintmax_t full = strtoumax(nptr, &nptr, 10);
+			if (*nptr != '\0' || full > INT_MAX) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			conf->startup_limit_start = (int)start;
 			conf->startup_limit_rate = (double)rate / 100.0;
-			conf->startup_limit_full = full;
+			conf->startup_limit_full = (int)full;
 			continue;
 		}
 		if (strcmp(argv[i], "--proto-timeout") == 0) {
