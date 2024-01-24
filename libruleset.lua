@@ -102,10 +102,11 @@ _G.list = list
 
 -- [[ logging utilities ]] --
 
-_G.MAX_RECENT_EVENTS = 16
-_G.recent_events = _G.recent_events or list:new()
+_G.RECENT_EVENTS_LIMIT = 16
+_G.recent_events = _G.recent_events or list:new({ ["#"] = 0 })
 local function addevent_(tstamp, msg)
-    local entry = recent_events[1]
+    local n = recent_events["#"]
+    local entry = recent_events[n]
     if entry and entry.msg == msg then
         entry.count = entry.count + 1
         entry.tstamp = tstamp
@@ -116,8 +117,13 @@ local function addevent_(tstamp, msg)
         count = 1,
         tstamp = tstamp
     }
-    recent_events[MAX_RECENT_EVENTS] = nil
-    return recent_events:insert(1, entry)
+    n = n + 1
+    recent_events[n] = entry
+    if n >= 2 * RECENT_EVENTS_LIMIT then
+        table.move(recent_events, n - RECENT_EVENTS_LIMIT, n, 1, recent_events)
+        n = RECENT_EVENTS_LIMIT
+    end
+    recent_events["#"] = n
 end
 
 function _G.log(...)
@@ -751,7 +757,9 @@ function ruleset.stats(dt)
         _G.last_clock = clock
     end
     w:insert("> Recent Events")
-    for i, entry in recent_events:iter() do
+    local n = recent_events["#"]
+    for i = n, math.max(1, n - RECENT_EVENTS_LIMIT), -1 do
+        local entry = recent_events[i]
         if not entry then
             break
         end
