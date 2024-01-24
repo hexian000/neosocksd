@@ -162,7 +162,7 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 	if (LOGLEVEL(NOTICE)) {
 		char addr_str[64];
 		format_sa(bindaddr, addr_str, sizeof(addr_str));
-		LOG_F(NOTICE, "listen at %s", addr_str);
+		LOG_F(NOTICE, "listen: %s", addr_str);
 	}
 
 	struct ev_io *restrict w_accept = &s->l.w_accept;
