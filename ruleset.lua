@@ -131,21 +131,25 @@ local function ping(target)
     return false, lasterr
 end
 
-ruleset.running = true
-local function keepalive(target, tag)
-    while ruleset.running do
-        local ok, result = ping(target)
-        logf("ping %q: %s", tag, result)
-        ruleset.server_rtt[tag] = result
-        await.sleep(ok and 3600 or 60)
-    end
-end
-
 if _G.ruleset then
     -- stop old ruleset routines when reloading
     _G.ruleset.running = false
 end
+ruleset.running = true
 ruleset.server_rtt = {}
+local function keepalive(target, tag)
+    while ruleset.running do
+        local interval = 60
+        if not is_disabled() then
+            local ok, result = ping(target)
+            logf("ping %q: %s", tag, result)
+            ruleset.server_rtt[tag] = result
+            if ok then interval = 3600 end
+        end
+        await.sleep(interval)
+    end
+end
+
 for k, v in pairs(route_list) do
     local route, tag = v[1], v[2]
     local target = table.pack(route("api.neosocksd.lan:80"))
