@@ -103,9 +103,9 @@ _G.list = list
 -- [[ logging utilities ]] --
 
 _G.RECENT_EVENTS_LIMIT = 16
-_G.recent_events = _G.recent_events or list:new({ ["#"] = 0 })
+_G.recent_events = _G.recent_events or {}
 local function addevent_(tstamp, msg)
-    local n = recent_events["#"]
+    local n = recent_events["#"] or 0
     local entry = recent_events[n]
     if entry and entry.msg == msg then
         entry.count = entry.count + 1
@@ -757,7 +757,7 @@ function ruleset.stats(dt)
         _G.last_clock = clock
     end
     w:insert("> Recent Events")
-    local n = recent_events["#"]
+    local n = recent_events["#"] or 0
     for i = n, math.max(1, n - RECENT_EVENTS_LIMIT), -1 do
         local entry = recent_events[i]
         if not entry then
@@ -772,7 +772,8 @@ function ruleset.stats(dt)
     end
     w:insert("> Request Stats")
     render_(w)
-    return w:concat("\n") .. "\n"
+    w:insert("")
+    return w:concat("\n")
 end
 
 return ruleset
