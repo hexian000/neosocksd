@@ -128,14 +128,12 @@ static struct dialreq *pop_dialreq(lua_State *restrict L, const int n)
 			return NULL;
 		}
 		if (i < nproxy) {
-			LOGV_F("PROXY %s", s);
 			if (!dialreq_addproxy(req, s, len)) {
 				dialreq_free(req);
 				return NULL;
 			}
 		} else {
-			LOGV_F("CONNECT %s", s);
-			if (!dialaddr_set(&req->addr, s, len)) {
+			if (!dialaddr_parse(&req->addr, s, len)) {
 				dialreq_free(req);
 				return NULL;
 			}
@@ -470,13 +468,13 @@ static int ruleset_request_(lua_State *restrict L)
 	case LUA_TNIL:
 		return 0;
 	default:
-		LOGE_F("request \"%s\": invalid return type %s", request,
+		LOGE_F("request `%s': invalid return type %s", request,
 		       lua_typename(L, type));
 		return 0;
 	}
 	struct dialreq *req = pop_dialreq(L, n);
 	if (req == NULL) {
-		LOGE_F("request \"%s\": invalid return", request);
+		LOGE_F("request `%s': invalid return", request);
 	}
 	lua_pushlightuserdata(L, req);
 	return 1;
@@ -1486,7 +1484,7 @@ static int api_splithostport_(lua_State *restrict L)
 	buf[len] = '\0';
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
-		(void)lua_pushfstring(L, "invalid address: \"%s\"", s);
+		(void)lua_pushfstring(L, "invalid address: `%s'", s);
 		return lua_error(L);
 	}
 	lua_settop(L, 0);

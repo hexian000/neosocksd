@@ -294,7 +294,7 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 	}
 	ret = ares_set_servers_ports_csv(r->channel, nameserver);
 	if (ret != ARES_SUCCESS) {
-		LOGE_F("failed using nameserver \"%s\": %s", nameserver,
+		LOGE_F("failed using nameserver `%s': %s", nameserver,
 		       ares_strerror(ret));
 		return true;
 	}
@@ -336,7 +336,7 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct resolve_query *restrict q = watcher->data;
-	LOGV_F("resolve: [%p] start name=\"%s\" service=%s pf=%d", (void *)q,
+	LOGV_F("resolve: [%p] start name=`%s' service=%s pf=%d", (void *)q,
 	       q->name, q->service, q->family);
 	struct resolver *restrict r = q->resolver;
 	r->stats.num_query++;

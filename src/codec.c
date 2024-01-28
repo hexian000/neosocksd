@@ -329,7 +329,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 			return NULL;
 		}
 		b += slen, n -= slen;
-		LOGD_F("gzip: NAME \"%s\"", name);
+		LOGD_F("gzip: NAME `%s'", name);
 	}
 	if (header.flg & GZIP_FCOMMENT) {
 		const char *comment = (char *)b;
@@ -338,7 +338,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 			return NULL;
 		}
 		b += slen, n -= slen;
-		LOGD_F("gzip: COMMENT \"%s\"", comment);
+		LOGD_F("gzip: COMMENT `%s'", comment);
 	}
 	if (header.flg & GZIP_FHCRC) {
 		if (n < 2) {

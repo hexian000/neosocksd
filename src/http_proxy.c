@@ -84,7 +84,7 @@ static struct dialreq *make_dialreq(const char *addr_str)
 		LOGOOM();
 		return NULL;
 	}
-	if (!dialaddr_set(&req->addr, addr_str, strlen(addr_str))) {
+	if (!dialaddr_parse(&req->addr, addr_str, strlen(addr_str))) {
 		dialreq_free(req);
 		return NULL;
 	}
@@ -98,7 +98,7 @@ void http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 		return;
 	}
-	HTTP_CTX_LOG_F(DEBUG, ctx, "http: CONNECT \"%s\"", msg->req.url);
+	HTTP_CTX_LOG_F(DEBUG, ctx, "http: CONNECT `%s'", msg->req.url);
 
 	struct dialreq *req = make_dialreq(msg->req.url);
 	if (req == NULL) {

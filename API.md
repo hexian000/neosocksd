@@ -109,8 +109,6 @@ The proxy addresses are specified in URI format, supported scheme:
 - `socks5://example.org:1080`: SOCKS5 server.
 - `http://example.org:8080`: HTTP/1.1 CONNECT server.
 
-*Notice: The port number can not be omitted.*
-
 
 ### ruleset.route
 

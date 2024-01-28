@@ -1,6 +1,7 @@
 /* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/* internal */
 #include "dialer.h"
 #include "conf.h"
 #include "forward.h"
@@ -13,15 +14,18 @@
 #include "sockutil.h"
 #include "util.h"
 
+/* contrib */
 #include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
+/* runtime */
 #include <ev.h>
 #if WITH_SYSTEMD
 #include <systemd/sd-daemon.h>
 #endif
 
+/* std */
 #include <inttypes.h>
 #include <limits.h>
 #include <signal.h>
@@ -111,7 +115,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #define OPT_REQUIRE_ARG(argc, argv, i)                                         \
 	do {                                                                   \
 		if ((i) + 1 >= (argc)) {                                       \
-			LOGF_F("option \"%s\" requires an argument",           \
+			LOGF_F("option `%s' requires an argument",             \
 			       (argv)[(i)]);                                   \
 			exit(EXIT_FAILURE);                                    \
 		}                                                              \
@@ -119,8 +123,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 #define OPT_ARG_ERROR(argv, i)                                                 \
 	do {                                                                   \
-		LOGF_F("argument error: %s \"%s\"", (argv)[(i)-1],             \
-		       (argv)[(i)]);                                           \
+		LOGF_F("argument error: %s `%s'", (argv)[(i)-1], (argv)[(i)]); \
 		exit(EXIT_FAILURE);                                            \
 	} while (false)
 
@@ -310,7 +313,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		if (strcmp(argv[i], "--") == 0) {
 			break;
 		}
-		LOGF_F("unknown argument: \"%s\", try \"%s --help\" for more information",
+		LOGF_F("unknown argument: `%s', try \"%s --help\" for more information",
 		       argv[i], argv[0]);
 		exit(EXIT_FAILURE);
 	}

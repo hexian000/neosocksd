@@ -160,8 +160,8 @@ static int parse_message(struct http_parser *restrict p)
 		}
 		return 1;
 	}
-	LOGV_F("http_message: \"%s\" \"%s\" \"%s\"", msg->any.field1,
-	       msg->any.field2, msg->any.field3);
+	LOGV_F("http_message: `%s' `%s' `%s'", msg->any.field1, msg->any.field2,
+	       msg->any.field3);
 	const char *version = NULL;
 	switch (p->state) {
 	case STATE_PARSE_REQUEST:
@@ -174,7 +174,7 @@ static int parse_message(struct http_parser *restrict p)
 		FAIL();
 	}
 	if (strncmp(version, "HTTP/1.", 7) != 0) {
-		LOGD_F("http: unsupported protocol \"%s\"", version);
+		LOGD_F("http: unsupported protocol `%s'", version);
 		return -1;
 	}
 	p->next = next;
@@ -259,7 +259,7 @@ static bool parse_accept_encoding(struct http_parser *restrict p, char *value)
 static bool parse_content_length(struct http_parser *restrict p, char *value)
 {
 	char *endptr;
-	uintmax_t lenvalue = strtoumax(value, &endptr, 10);
+	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
 	if (*endptr || lenvalue > SIZE_MAX) {
 		p->http_status = HTTP_BAD_REQUEST;
 		return false;
@@ -342,7 +342,7 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 		}
 	}
 
-	LOGD_F("unknown http header: \"%s\" = \"%s\"", key, value);
+	LOGD_F("unknown http header: `%s' = `%s'", key, value);
 	return true;
 }
 

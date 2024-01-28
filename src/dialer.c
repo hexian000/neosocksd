@@ -33,7 +33,31 @@
 #include <stdlib.h>
 #include <string.h>
 
-bool dialaddr_set(
+static bool
+dialaddr_set(struct dialaddr *addr, const char *host, const uint16_t port)
+{
+	addr->port = port;
+	if (inet_pton(AF_INET, host, &addr->in) == 1) {
+		addr->type = ATYP_INET;
+		return true;
+	}
+	if (inet_pton(AF_INET6, host, &addr->in6) == 1) {
+		addr->type = ATYP_INET6;
+		return true;
+	}
+	const size_t hostlen = strlen(host);
+	if (hostlen > FQDN_MAX_LENGTH) {
+		LOGE_F("hostname too long: `%s'", host);
+		return false;
+	}
+	struct domain_name *restrict domain = &addr->domain;
+	memcpy(domain->name, host, hostlen);
+	domain->len = (uint8_t)hostlen;
+	addr->type = ATYP_DOMAIN;
+	return true;
+}
+
+bool dialaddr_parse(
 	struct dialaddr *restrict addr, const char *s, const size_t len)
 {
 	/* FQDN + ':' + port */
@@ -46,34 +70,16 @@ bool dialaddr_set(
 	buf[len] = '\0';
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
-		LOGE_F("invalid address: \"%s\"", s);
+		LOGE_F("invalid address: `%s'", s);
 		return false;
 	}
 	char *endptr;
-	uintmax_t portvalue = strtoumax(port, &endptr, 10);
+	const uintmax_t portvalue = strtoumax(port, &endptr, 10);
 	if (*endptr || portvalue > UINT16_MAX) {
-		LOGE_F("unable to parse port number: \"%s\"", port);
+		LOGE_F("unable to parse port number: `%s'", port);
 		return false;
 	}
-	addr->port = (uint16_t)portvalue;
-	if (inet_pton(AF_INET, host, &addr->in) == 1) {
-		addr->type = ATYP_INET;
-		return true;
-	}
-	if (inet_pton(AF_INET6, host, &addr->in6) == 1) {
-		addr->type = ATYP_INET6;
-		return true;
-	}
-	const size_t hostlen = strlen(host);
-	if (hostlen > FQDN_MAX_LENGTH) {
-		LOGE_F("hostname too long: \"%s\"", host);
-		return false;
-	}
-	struct domain_name *restrict domain = &addr->domain;
-	memcpy(domain->name, host, hostlen);
-	domain->len = (uint8_t)hostlen;
-	addr->type = ATYP_DOMAIN;
-	return true;
+	return dialaddr_set(addr, host, (uint16_t)portvalue);
 }
 
 void dialaddr_copy(
@@ -131,7 +137,7 @@ bool dialreq_addproxy(
 {
 	/* should be more than enough */
 	if (urilen >= 1024) {
-		LOGE_F("proxy uri is too long: \"%s\"", proxy_uri);
+		LOGE_F("proxy uri is too long: `%s'", proxy_uri);
 		return false;
 	}
 	char buf[urilen + 1];
@@ -139,31 +145,44 @@ bool dialreq_addproxy(
 	buf[urilen] = '\0';
 	struct url uri;
 	if (!url_parse(buf, &uri) || uri.scheme == NULL) {
-		LOGE_F("unable to parse uri: \"%s\"", proxy_uri);
+		LOGE_F("unable to parse uri: `%s'", proxy_uri);
 		return false;
 	}
 	enum proxy_protocol protocol;
-	const char *addr = NULL;
+	char *host, *port;
 	if (strcmp(uri.scheme, "http") == 0) {
 		protocol = PROTO_HTTP;
-		addr = uri.host;
+		if (!splithostport(uri.host, &host, &port)) {
+			host = uri.host;
+			port = "80";
+		}
 	} else if (
 		strcmp(uri.scheme, "socks4") == 0 ||
 		strcmp(uri.scheme, "socks4a") == 0) {
 		protocol = PROTO_SOCKS4A;
-		addr = uri.host;
+		if (!splithostport(uri.host, &host, &port)) {
+			host = uri.host;
+			port = "1080";
+		}
 	} else if (strcmp(uri.scheme, "socks5") == 0) {
 		protocol = PROTO_SOCKS5;
-		addr = uri.host;
+		if (!splithostport(uri.host, &host, &port)) {
+			host = uri.host;
+			port = "1080";
+		}
+	} else {
+		LOGE_F("dialer: invalid proxy scheme `%s'", uri.scheme);
+		return false;
 	}
-	if (addr == NULL) {
-		LOGE_F("dialer: invalid proxy \"%s\"", proxy_uri);
+	char *endptr;
+	const uintmax_t portvalue = strtoumax(port, &endptr, 10);
+	if (*endptr || portvalue > UINT16_MAX) {
+		LOGE_F("unable to parse port number: `%s'", port);
 		return false;
 	}
 	struct proxy_req *restrict proxy = &req->proxy[req->num_proxy];
 	proxy->proto = protocol;
-	const size_t addrlen = strlen(addr);
-	if (!dialaddr_set(&proxy->addr, addr, addrlen)) {
+	if (!dialaddr_set(&proxy->addr, host, (uint16_t)portvalue)) {
 		return false;
 	}
 	req->num_proxy++;
@@ -193,7 +212,7 @@ struct dialreq *dialreq_parse(const char *addr, const char *csv)
 		return NULL;
 	}
 	if (addr != NULL) {
-		if (!dialaddr_set(&req->addr, addr, strlen(addr))) {
+		if (!dialaddr_parse(&req->addr, addr, strlen(addr))) {
 			dialreq_free(req);
 			return NULL;
 		}
@@ -306,7 +325,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 				&req->proxy[jump + 1].addr :                   \
 				&req->addr;                                    \
 		dialaddr_format(addr, raddr, sizeof(raddr));                   \
-		LOG_F(level, "connect \"%s\" over proxy[%zu]: " format, raddr, \
+		LOG_F(level, "connect `%s' over proxy[%zu]: " format, raddr,   \
 		      jump, __VA_ARGS__);                                      \
 	} while (0)
 #define DIALER_LOG(level, d, message) DIALER_LOG_F(level, d, "%s", message)
@@ -835,7 +854,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 				char addr_str[64];
 				dialaddr_format(
 					addr, addr_str, sizeof(addr_str));
-				LOG_F(ERROR, "connect \"%s\": %s", addr_str,
+				LOG_F(ERROR, "connect `%s': %s", addr_str,
 				      strerror(sockerr));
 			}
 			d->syserr = sockerr;
@@ -910,7 +929,7 @@ static bool connect_sa(
 	if (LOGLEVEL(VERBOSE)) {
 		char addr_str[64];
 		format_sa(sa, addr_str, sizeof(addr_str));
-		LOG_F(VERBOSE, "dialer: connect \"%s\"", addr_str);
+		LOG_F(VERBOSE, "dialer: connect `%s'", addr_str);
 	}
 	d->state = STATE_CONNECT;
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
@@ -919,7 +938,7 @@ static bool connect_sa(
 			if (LOGLEVEL(ERROR)) {
 				char addr_str[64];
 				format_sa(sa, addr_str, sizeof(addr_str));
-				LOG_F(ERROR, "connect \"%s\": %s", addr_str,
+				LOG_F(ERROR, "connect `%s': %s", addr_str,
 				      strerror(err));
 			}
 			d->syserr = err;
@@ -978,7 +997,7 @@ static void resolve_cb(
 		dialaddr_format(dialaddr, node_str, sizeof(node_str));
 		char addr_str[64];
 		format_sa(&addr.sa, addr_str, sizeof(addr_str));
-		LOG_F(VERBOSE, "resolve: \"%s\" is %s", node_str, addr_str);
+		LOG_F(VERBOSE, "resolve: `%s' is %s", node_str, addr_str);
 	}
 
 	if (!connect_sa(d, loop, &addr.sa)) {

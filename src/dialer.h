@@ -34,7 +34,7 @@ struct dialaddr {
 	};
 };
 
-bool dialaddr_set(struct dialaddr *addr, const char *s, size_t len);
+bool dialaddr_parse(struct dialaddr *addr, const char *s, size_t len);
 void dialaddr_copy(struct dialaddr *dst, const struct dialaddr *src);
 int dialaddr_format(const struct dialaddr *addr, char *buf, size_t bufsize);
 
