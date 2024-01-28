@@ -333,7 +333,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 static bool
 send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 {
-	LOG_BIN_F(VERBOSE, buf, len, "send: %zu bytes", len);
+	LOG_BIN_F(VERYVERBOSE, buf, len, "send: %zu bytes", len);
 	const ssize_t nsend = send(d->w_socket.fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
@@ -816,7 +816,7 @@ static int dialer_recv(struct dialer *restrict d)
 	}
 	d->buf.len = (size_t)nrecv;
 	LOG_BIN_F(
-		VERBOSE, d->buf.data, d->buf.len, "recv: %zu bytes",
+		VERYVERBOSE, d->buf.data, d->buf.len, "recv: %zu bytes",
 		d->buf.len);
 
 	const int ret = recv_dispatch(d, &d->req->proxy[d->jump]);
