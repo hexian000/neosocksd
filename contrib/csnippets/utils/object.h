@@ -1,11 +1,22 @@
 /* csnippets (c) 2019-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+#ifndef UTILS_OBJECT_H
+#define UTILS_OBJECT_H
+
 /**
  * @defgroup object
  * @brief Tricky macros for class-like supports.
  * @{
  */
+
+#define ASSERT_TYPE(type, value)                                               \
+	((void)sizeof(struct {                                                 \
+		_Static_assert(                                                \
+			_Generic((value), type : 1, default : 0),              \
+			"type assertion failed");                              \
+		int _;                                                         \
+	}))
 
 #ifndef ASSERT_SUPER
 #define ASSERT_SUPER(super, type, member)                                      \
@@ -17,10 +28,7 @@
 
 #ifndef DOWNCAST
 #define DOWNCAST(from, to, member, ptr)                                        \
-	((void)sizeof(struct{                                                  \
-		_Static_assert(_Generic(&(((to *)0)->member),                  \
-			from * : 1, default : 0), "member type mismatch");     \
-		int _; }),                                                     \
+	(ASSERT_TYPE(from *, &(((to *)0)->member)),                            \
 	_Generic((ptr),                                                        \
 	from * : (to *)                                                        \
 		(((unsigned char *)(ptr)) - offsetof(to, member)),             \
@@ -33,3 +41,5 @@
 #endif
 
 /** @} */
+
+#endif /* UTILS_OBJECT_H */

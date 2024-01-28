@@ -6,6 +6,7 @@
 
 #include "math/rand.h"
 #include "utils/debug.h"
+#include "utils/intbound.h"
 #include "utils/posixtime.h"
 #include "utils/slog.h"
 
@@ -127,12 +128,10 @@ void drop_privileges(const char *name)
 	uid_t uid = (uid_t)-1;
 	gid_t gid = (gid_t)-1;
 	const struct passwd *pw = NULL;
-
 	if (user != NULL) {
 		char *endptr;
 		const intmax_t uidvalue = strtoimax(user, &endptr, 10);
-		uid = (uid_t)uidvalue;
-		if (*endptr || uidvalue != (intmax_t)uid) {
+		if (*endptr || !BOUNDCHECK_INT(uid, uidvalue)) {
 			/* search user database for user name */
 			pw = getpwnam(user);
 			if (pw == NULL) {
@@ -143,14 +142,15 @@ void drop_privileges(const char *name)
 			LOGD_F("passwd: `%s' uid=%jd gid=%jd", user,
 			       (intmax_t)pw->pw_uid, (intmax_t)pw->pw_gid);
 			uid = pw->pw_uid;
+		} else {
+			uid = (uid_t)uidvalue;
 		}
 	}
 
 	if (group != NULL) {
 		char *endptr;
 		const intmax_t gidvalue = strtoimax(group, &endptr, 10);
-		gid = (gid_t)gidvalue;
-		if (*endptr || gidvalue != (intmax_t)gid) {
+		if (*endptr || !BOUNDCHECK_INT(gid, gidvalue)) {
 			/* search group database for group name */
 			const struct group *gr = getgrnam(group);
 			if (gr == NULL) {
@@ -161,6 +161,8 @@ void drop_privileges(const char *name)
 			LOGD_F("group: `%s' gid=%jd", group,
 			       (intmax_t)gr->gr_gid);
 			gid = gr->gr_gid;
+		} else {
+			gid = (uid_t)gidvalue;
 		}
 	} else if (user != NULL && colon != NULL) {
 		/* group is not specified, search from user database */
