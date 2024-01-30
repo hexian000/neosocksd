@@ -326,16 +326,21 @@ handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 				(resultlen > RPCALL_COMPRESS_THRESHOLD) ?
 			CENCODING_DEFLATE :
 			CENCODING_NONE;
-	struct stream *w =
+	struct stream *writer =
 		content_writer(&ctx->parser.cbuf, resultlen, encoding);
+	if (writer == NULL) {
+		LOGOOM();
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
 	size_t n = resultlen;
-	int err = stream_write(w, result, &n);
+	int err = stream_write(writer, result, &n);
 	if (err != 0) {
 		LOGW_F("stream_write: error %d, %zu/%zu", err, n, resultlen);
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	err = stream_close(w);
+	err = stream_close(writer);
 	if (err != 0) {
 		LOGW_F("stream_close: error %d", err);
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);

@@ -117,7 +117,7 @@ struct stream *content_reader(
 	}
 	/* lua reader requires direct_read */
 	if (r->vftable->direct_read == NULL) {
-		r = io_bufreader(r, 0);
+		r = io_bufreader(r, IO_BUFSIZE);
 	}
 	return r;
 }

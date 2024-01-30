@@ -4,6 +4,7 @@
 #include "codec.h"
 
 #include "io/io.h"
+#include "io/memory.h"
 #include "io/stream.h"
 #include "utils/object.h"
 #include "utils/serialize.h"
@@ -244,6 +245,13 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 {
 	if (base == NULL) {
 		return NULL;
+	}
+	/* inflate reader requires direct_read */
+	if (base->vftable->direct_read == NULL) {
+		base = io_bufreader(base, IO_BUFSIZE);
+		if (base == NULL) {
+			return NULL;
+		}
 	}
 	struct inflate_stream *z = malloc(sizeof(struct inflate_stream));
 	if (z == NULL) {
