@@ -69,7 +69,7 @@ If you find that some proper usage is not well supported, please feel free to se
 ./neosocksd --http -l 127.0.0.1:8118 -x socks4a://203.0.113.1:1080 -d
 
 # Start a hardened non-forking TCP port forwarder in the background
-sudo ./neosocksd -d -u nobody -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
+sudo ./neosocksd -d -u nobody:nogroup -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
     --proto-timeout --max-startups 60:30:100 --max-sessions 10000
 
 # Start a rule set powered SOCKS4 / SOCKS4A / SOCKS5 server
@@ -98,7 +98,7 @@ Use the following command to start the server with the Lua scripts in current di
 
 # Start a transparent proxy to route TCP traffic by ruleset
 sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
-    --max-startups 60:30:100 --max-sessions 0 -u nobody -d
+    --max-startups 60:30:100 --max-sessions 0 -u nobody:nogroup -d
 ```
 
 Use the following command to update rule set on remote instance without restarting:
