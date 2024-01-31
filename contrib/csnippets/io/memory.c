@@ -324,9 +324,6 @@ static struct stream *io_bufstream(struct stream *base, size_t bufsize)
 	if (base == NULL) {
 		return NULL;
 	}
-	if (bufsize == 0) {
-		bufsize = IO_BUFSIZE;
-	}
 	struct buffered_stream *b =
 		malloc(sizeof(struct buffered_stream) + bufsize);
 	if (b == NULL) {
@@ -342,6 +339,9 @@ static struct stream *io_bufstream(struct stream *base, size_t bufsize)
 
 struct stream *io_bufreader(struct stream *base, const size_t bufsize)
 {
+	if (bufsize == 0) {
+		return base;
+	}
 	struct stream *s = io_bufstream(base, bufsize);
 	if (s == NULL) {
 		return NULL;
@@ -362,6 +362,9 @@ static const struct stream_vftable vftable_bufwriter = {
 };
 struct stream *io_bufwriter(struct stream *base, const size_t bufsize)
 {
+	if (bufsize == 0) {
+		return base;
+	}
 	struct stream *restrict s = io_bufstream(base, bufsize);
 	if (s == NULL) {
 		return NULL;
