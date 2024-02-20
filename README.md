@@ -5,7 +5,7 @@
 [![Downloads](https://img.shields.io/github/downloads/hexian000/neosocksd/total.svg)](https://github.com/hexian000/neosocksd/releases)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-A lightweight SOCKS4 / SOCKS4A / SOCKS5 / HTTP proxy server that can run Lua script as rule set.
+A lightweight unencrypted proxy server that can run Lua script as rule set.
 
 - [Introduction](#introduction)
 - [Features](#features)
@@ -39,14 +39,15 @@ If you find that some proper usage is not well supported, please feel free to se
 
 ## Features
 
-- Plain old protocols with no built-in support for authentication or encryption.
+- SOCKS4 / SOCKS4A / SOCKS5 / HTTP with no built-in support for authentication or encryption.
+- Transparent proxy. (Linux only)
 - Only TCP CONNECT requests are supported.
-- Flexible and versatile: can be used for Internet gateway, RPC proxy, etc.
 - Lua scripts powered rule set.
 - Routing connections by rule and even building an autonomous proxy mesh.
-- Horizontally scalable.
 - RESTful API for monitoring and updating rules online.
 - IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
+- Horizontally scalable.
+- Flexible and versatile: can be used for Internet gateway, RPC proxy, etc.
 - Embedded systems friendly.
 - Conforming to: ISO C11, POSIX.1-2008.
 
