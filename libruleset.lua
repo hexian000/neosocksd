@@ -472,8 +472,8 @@ end
 
 function composite.anyof(t)
     return function(...)
-        for i, match in ipairs(t) do
-            if match(...) then
+        for i, matcher in ipairs(t) do
+            if matcher(...) then
                 return true
             end
         end
@@ -483,9 +483,9 @@ end
 
 function composite.maybe(t, k)
     return function(...)
-        local match = t[k]
-        if match then
-            return match(...)
+        local matcher = t[k]
+        if matcher then
+            return matcher(...)
         end
         return false
     end
