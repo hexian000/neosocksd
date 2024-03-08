@@ -12,7 +12,7 @@ _G.redirect_name = {
     -- self-assignment
     { match.exact("api.neosocksd.lan:80"), rule.redirect("127.0.1.1:9080") },
     -- admin routes
-    { match.exact("server.lan:22"),        rule.redirect("127.0.0.1:22"),  "ssh" },
+    { match.host("server.lan"),            rule.redirect("127.0.0.1:"),    "localhost" },
     -- if in _G.hosts, go to _G.route/_G.route6
     -- otherwise, go to _G.route_default
 }

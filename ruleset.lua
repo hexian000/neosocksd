@@ -20,7 +20,7 @@ _G.redirect_name = {
     -- self-assignment
     { match.exact("api.neosocksd.lan:80"),       rule.redirect("127.0.1.1:9080") },
     -- admin routes
-    { match.exact("localhost:22"),               rule.redirect("127.0.0.1:22"),                               "ssh" },
+    { match.host("server.lan"),                  rule.redirect("127.0.0.1:"),                                 "localhost" },
     { match.exact("region1.lan:22"),             rule.redirect("localhost:22", "socks5://192.168.32.1:1080"), "region1" },
     { match.exact("region2.lan:22"),             rule.redirect("localhost:22", "socks5://192.168.33.1:1080"), "region2" },
     -- global condition
