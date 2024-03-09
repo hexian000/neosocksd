@@ -327,15 +327,13 @@ static void marshal_value(
 	}
 	/* check closed */
 	lua_pushvalue(L, idx);
-	lua_rawget(L, 2);
-	if (!lua_isnil(L, -1)) {
+	if (lua_rawget(L, 2) != LUA_TNIL) {
 		luaL_addvalue(B);
 		return;
 	}
 	/* check open */
 	lua_pushvalue(L, idx);
-	lua_rawget(L, 1);
-	if (!lua_isnil(L, -1)) {
+	if (lua_rawget(L, 1) != LUA_TNIL) {
 		luaL_error(L, "circular referenced table is not marshallable");
 		return;
 	}
