@@ -920,8 +920,8 @@ static bool connect_sa(
 #endif
 	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
 	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
-#if WITH_TCP_FASTOPEN
-	if (conf->tcp_fastopen) {
+#if WITH_TCP_FASTOPEN_CONNECT
+	if (conf->tcp_fastopen_connect) {
 		socket_set_fastopen_connect(fd, true);
 	}
 #endif

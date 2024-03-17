@@ -2,8 +2,8 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 /* internal */
-#include "dialer.h"
 #include "conf.h"
+#include "dialer.h"
 #include "forward.h"
 #include "http.h"
 #include "resolver.h"
@@ -74,8 +74,11 @@ static void print_usage(const char *argv0)
 #if WITH_REUSEPORT
 		"  --reuseport                allow multiple instances to listen on the same port\n"
 #endif
+#if WITH_SPLICE
+		"  --pipe                     use pipes to transfer data between connections\n"
+#endif
 #if WITH_TCP_FASTOPEN
-		"  --no-fastopen              disable TCP fast open (RFC 7413)\n"
+		"  --no-fastopen              disable server-side TCP fast open (RFC 7413)\n"
 #endif
 #if WITH_TPROXY
 		"  --tproxy                   operate as a transparent proxy\n"
@@ -194,9 +197,25 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			continue;
 		}
 #endif
+#if WITH_SPLICE
+		if (strcmp(argv[i], "--pipe") == 0) {
+			conf->pipe = true;
+			continue;
+		}
+#endif
 #if WITH_TCP_FASTOPEN
 		if (strcmp(argv[i], "--no-fastopen") == 0) {
 			conf->tcp_fastopen = false;
+			continue;
+		}
+#endif
+#if WITH_TCP_FASTOPEN_CONNECT
+		/* If "--fastopen-connect" is specified:
+		 * 1. "--pipe" may not work
+		 * 2. server first protocols may not work
+		 * This option will not appear in "--help" */
+		if (strcmp(argv[i], "--fastopen-connect") == 0) {
+			conf->tcp_fastopen_connect = true;
 			continue;
 		}
 #endif

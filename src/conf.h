@@ -33,11 +33,17 @@ struct config {
 
 	bool http : 1;
 	bool proto_timeout : 1;
+#if WITH_SPLICE
+	bool pipe : 1;
+#endif
 #if WITH_REUSEPORT
 	bool reuseport : 1;
 #endif
 #if WITH_TCP_FASTOPEN
 	bool tcp_fastopen : 1;
+#endif
+#if WITH_TCP_FASTOPEN_CONNECT
+	bool tcp_fastopen_connect : 1;
 #endif
 	bool tcp_nodelay : 1;
 	bool tcp_keepalive : 1;

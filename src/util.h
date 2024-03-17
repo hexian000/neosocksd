@@ -93,6 +93,16 @@ void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
 		}                                                              \
 	} while (0)
 
+#if WITH_SPLICE
+struct splice_pipe {
+	int fd[2];
+	size_t cap, len;
+};
+
+bool pipe_get(struct splice_pipe *pipe);
+void pipe_put(struct splice_pipe *pipe);
+#endif
+
 void init(int argc, char **argv);
 void loadlibs(void);
 

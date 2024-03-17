@@ -11,6 +11,9 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+#if WITH_SPLICE
+#include <fcntl.h>
+#endif
 #include <grp.h>
 #include <pwd.h>
 #include <sys/stat.h>
@@ -27,6 +30,74 @@
 #include <string.h>
 
 struct globals G = { 0 };
+
+#if WITH_SPLICE
+#define PIPE_BUFSIZE 262144
+
+void pipe_close(struct splice_pipe *restrict pipe)
+{
+	if (pipe->fd[0] != -1) {
+		CLOSE_FD(pipe->fd[0]);
+	}
+	if (pipe->fd[1] != -1) {
+		CLOSE_FD(pipe->fd[1]);
+	}
+}
+
+static bool pipe_new(struct splice_pipe *restrict pipe)
+{
+	pipe->fd[0] = pipe->fd[1] = -1;
+	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
+		LOGW_F("pipe2: %s", strerror(errno));
+		return false;
+	}
+	const int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, PIPE_BUFSIZE);
+	if (pipe_cap < 0) {
+		LOGW_F("fcntl: %s", strerror(errno));
+		pipe_close(pipe);
+		return false;
+	}
+	if (pipe_cap < PIPE_BUFSIZE) {
+		LOGW_F("pipe: insufficient capacity %d", pipe_cap);
+		pipe_close(pipe);
+		return false;
+	}
+	pipe->cap = (size_t)pipe_cap;
+	pipe->len = 0;
+	return true;
+}
+
+static struct {
+	size_t cap, len;
+	struct splice_pipe pipes[16];
+} pipe_pool = { .cap = 16, .len = 0 };
+
+bool pipe_get(struct splice_pipe *restrict pipe)
+{
+	if (pipe_pool.len == 0) {
+		return pipe_new(pipe);
+	}
+	*pipe = pipe_pool.pipes[--pipe_pool.len];
+	return true;
+}
+
+void pipe_put(struct splice_pipe *restrict pipe)
+{
+	if (pipe->cap < PIPE_BUFSIZE || pipe->len > 0 ||
+	    pipe_pool.len == pipe_pool.cap) {
+		pipe_close(pipe);
+		return;
+	}
+	pipe_pool.pipes[pipe_pool.len++] = *pipe;
+}
+
+static void pipe_closeall(void)
+{
+	while (pipe_pool.len > 0) {
+		pipe_close(&pipe_pool.pipes[--pipe_pool.len]);
+	}
+}
+#endif
 
 void init(int argc, char **argv)
 {
@@ -71,6 +142,9 @@ void loadlibs(void)
 void unloadlibs(void)
 {
 	resolver_cleanup();
+#if WITH_SPLICE
+	pipe_closeall();
+#endif
 }
 
 void modify_io_events(

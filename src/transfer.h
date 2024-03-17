@@ -14,7 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define XFER_BUFSIZE ((size_t)16384)
+#define XFER_BUFSIZE 16384
 
 enum transfer_state {
 	XFER_INIT,
@@ -28,6 +28,9 @@ struct transfer {
 	struct ev_io w_recv, w_send;
 	struct event_cb state_cb;
 	uintmax_t *byt_transferred;
+#if WITH_SPLICE
+	struct splice_pipe pipe;
+#endif
 	size_t pos;
 	struct {
 		BUFFER_HDR;

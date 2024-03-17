@@ -6,6 +6,7 @@
 #include "utils/slog.h"
 
 #include <limits.h>
+#include <stdbool.h>
 
 struct config conf_default(void)
 {
@@ -18,15 +19,18 @@ struct config conf_default(void)
 		.tcp_keepalive = true,
 		.tcp_sndbuf = 0,
 		.tcp_rcvbuf = 0,
+#if WITH_TCP_FASTOPEN
+		.tcp_fastopen = true,
+#endif
+#if WITH_TCP_FASTOPEN_CONNECT
+		.tcp_fastopen_connect = false,
+#endif
 
 		.max_sessions = 16384,
 		.startup_limit_start = 0,
 		.startup_limit_rate = 30,
 		.startup_limit_full = 0,
 	};
-#if WITH_TCP_FASTOPEN
-	conf.tcp_fastopen = true;
-#endif
 	return conf;
 }
 
@@ -83,9 +87,13 @@ bool conf_check(const struct config *restrict conf)
 		LOGW("ruleset will not work in forwarding mode");
 	}
 #endif
-	if ((conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 4096) ||
-	    (conf->tcp_rcvbuf > 0 && conf->tcp_rcvbuf < 4096)) {
-		LOGW("probably too small tcp buffer");
+	if (conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 16384) {
+		LOGW("tcp send buffer is too small");
+		return false;
+	}
+	if (conf->tcp_rcvbuf > 0 && conf->tcp_rcvbuf < 16384) {
+		LOGW("tcp recv buffer is too small");
+		return false;
 	}
 
 	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&

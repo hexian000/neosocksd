@@ -2,13 +2,18 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "transfer.h"
+#include "conf.h"
 #include "sockutil.h"
+#include "util.h"
 
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
 #include <ev.h>
+#if WITH_SPLICE
+#include <fcntl.h>
+#endif
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -41,13 +46,14 @@ static void ev_io_set_active(
 	}
 }
 
-static ssize_t transfer_recv(struct transfer *restrict t)
+static ssize_t transfer_recv(struct transfer *restrict t, const int fd)
 {
-	if (t->buf.len > 0) {
+	const size_t cap = t->buf.cap - t->buf.len;
+	if (cap == 0) {
 		return 0;
 	}
-	const int fd = t->w_recv.fd;
-	const ssize_t nrecv = recv(fd, t->buf.data, t->buf.cap, 0);
+	unsigned char *data = t->buf.data + t->buf.len;
+	const ssize_t nrecv = recv(fd, data, cap, 0);
 	if (nrecv < 0) {
 		const int err = errno;
 		if (IS_TRANSIENT_ERROR(err)) {
@@ -57,38 +63,95 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 		return -1;
 	}
 	if (nrecv == 0) {
-		LOGV_F("recv: fd=%d EOF", fd);
+		LOGD_F("recv: fd=%d EOF", fd);
 		return -1;
 	}
-	t->buf.len = nrecv;
+	t->buf.len += (size_t)nrecv;
 	return nrecv;
 }
 
-static ssize_t transfer_send(struct transfer *restrict t)
+static ssize_t transfer_drain(struct transfer *restrict t)
 {
-	if (t->buf.len == 0) {
+	const int fd = t->w_recv.fd;
+#if WITH_SPLICE
+	if (t->pipe.fd[1] != -1) {
+		const size_t cap = t->pipe.cap - t->pipe.len;
+		if (cap == 0) {
+			return 0;
+		}
+		const ssize_t nrecv = splice(
+			fd, NULL, t->pipe.fd[1], NULL, cap, SPLICE_F_NONBLOCK);
+		if (nrecv < 0) {
+			const int err = errno;
+			if (IS_TRANSIENT_ERROR(err)) {
+				return 0;
+			}
+			LOGD_F("pipe: recv fd=%d %s", fd, strerror(err));
+			return -1;
+		}
+		if (nrecv == 0) {
+			LOGD_F("pipe: recv fd=%d EOF", fd);
+			return -1;
+		}
+		t->pipe.len += (size_t)nrecv;
+		return nrecv;
+	}
+#endif
+
+	return transfer_recv(t, fd);
+}
+
+static ssize_t transfer_send(struct transfer *restrict t, const int fd)
+{
+	const size_t len = t->buf.len - t->pos;
+	if (len == 0) {
 		return 0;
 	}
-	const int fd = t->w_send.fd;
 	const unsigned char *data = t->buf.data + t->pos;
-	const size_t len = t->buf.len - t->pos;
 	const ssize_t nsend = send(fd, data, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		LOGD_F("recv: fd=%d %s", fd, strerror(err));
+		LOGD_F("send: fd=%d %s", fd, strerror(err));
 		return -1;
 	}
 	if (nsend == 0) {
 		return 0;
 	}
-	t->pos += nsend;
+	t->pos += (size_t)nsend;
 	if (t->pos == t->buf.len) {
 		t->pos = t->buf.len = 0;
 	}
 	return nsend;
+}
+
+static ssize_t transfer_pump(struct transfer *restrict t)
+{
+	const int fd = t->w_send.fd;
+#if WITH_SPLICE
+	if (t->pipe.fd[0] != -1) {
+		size_t len = t->pipe.len;
+		if (len == 0) {
+			return 0;
+		}
+		const ssize_t nsend = splice(
+			t->pipe.fd[0], NULL, fd, NULL, len, SPLICE_F_NONBLOCK);
+		if (nsend < 0) {
+			const int err = errno;
+			if (IS_TRANSIENT_ERROR(err)) {
+				return 0;
+			}
+			LOGD_F("pipe: send fd=%d %s", fd, strerror(err));
+			return -1;
+		}
+		t->pipe.len -= (size_t)nsend;
+		return nsend;
+	}
+#endif
+
+	return transfer_send(t, fd);
 }
 
 static void
@@ -99,15 +162,15 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct transfer *restrict t = watcher->data;
 	enum transfer_state state = t->state;
 	size_t nbsend = 0;
-	while (XFER_CONNECTED <= state && state <= XFER_LINGER) {
+	while (state <= XFER_LINGER) {
 		ssize_t nrecv = 0;
-		if (state == XFER_CONNECTED) {
-			nrecv = transfer_recv(t);
+		if (state <= XFER_CONNECTED) {
+			nrecv = transfer_drain(t);
 			if (nrecv < 0) {
 				state = XFER_LINGER;
 			}
 		}
-		ssize_t nsend = transfer_send(t);
+		ssize_t nsend = transfer_pump(t);
 		if (nsend < 0) {
 			state = XFER_FINISHED;
 		} else {
@@ -118,24 +181,28 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			break;
 		}
 	}
-	{
+	if (nbsend > 0) {
 		uintmax_t *restrict byt_transferred = t->byt_transferred;
 		if (byt_transferred != NULL) {
 			*byt_transferred += nbsend;
 		}
+		XFER_CTX_LOG_F(
+			VERYVERBOSE, t,
+			"%zu bytes transmitted (%zu bytes in buffer)", nbsend,
+			t->buf.len);
 	}
 
+	const bool has_data = (t->buf.len > 0);
 	switch (state) {
 	case XFER_INIT:
 		state = XFER_CONNECTED;
 		/* fallthrough */
 	case XFER_CONNECTED: {
-		const bool has_data = (t->buf.len > 0);
 		ev_io_set_active(loop, &t->w_recv, !has_data);
 		ev_io_set_active(loop, &t->w_send, has_data);
 	} break;
 	case XFER_LINGER:
-		if (t->buf.len > 0) {
+		if (has_data) {
 			ev_io_set_active(loop, &t->w_recv, false);
 			ev_io_set_active(loop, &t->w_send, true);
 			break;
@@ -171,6 +238,14 @@ void transfer_init(
 	w_send->data = t;
 	t->state_cb = cb;
 	t->byt_transferred = byt_transferred;
+
+#if WITH_SPLICE
+	t->pipe = (struct splice_pipe){
+		.fd = { -1, -1 },
+		.cap = 0,
+		.len = 0,
+	};
+#endif
 	t->pos = 0;
 	BUF_INIT(t->buf, 0);
 }
@@ -178,6 +253,17 @@ void transfer_init(
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 {
 	XFER_CTX_LOG(DEBUG, t, "start");
+#if WITH_SPLICE
+	if (G.conf->pipe) {
+		if (!pipe_get(&t->pipe)) {
+			t->pipe = (struct splice_pipe){
+				.fd = { -1, -1 },
+				.cap = 0,
+				.len = 0,
+			};
+		}
+	}
+#endif
 	ev_io_start(loop, &t->w_recv);
 }
 
@@ -185,6 +271,9 @@ void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
 {
 	ev_io_stop(loop, &t->w_recv);
 	ev_io_stop(loop, &t->w_send);
+#if WITH_SPLICE
+	pipe_put(&t->pipe);
+#endif
 	t->state = XFER_FINISHED;
 	XFER_CTX_LOG(DEBUG, t, "stop");
 }
