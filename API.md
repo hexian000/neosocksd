@@ -475,11 +475,18 @@ The interval is clamped to `[1e-3, 1e+9]`.
 
 ```Lua
 async(function()
-    await.idle()
-    -- ......
+    while ruleset.running do
+        await.sleep(10)
+        local tasks = _G.tasks
+        _G.tasks = {}
+        for i, v in ipairs(tasks) do
+            await.idle()
+            -- ......
+        end
+    end
 end)
 ```
 
 **Description**
 
-Pause an asynchronous routine until there is nothing better to do. This can be used to do some non-urgent cleanups in the background, for example.
+Pause an asynchronous routine until there is nothing better to do. For example, this can be used to choose a good time to start some non-urgent tasks in the background.
