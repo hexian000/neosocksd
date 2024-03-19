@@ -14,13 +14,14 @@
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/formats.h"
-#include "utils/posixtime.h"
 #include "utils/slog.h"
 
+#include <ev.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
 
 #define RESPHDR_CPLAINTEXT(buf)                                                \
 	BUF_APPENDCONST(                                                       \
@@ -356,10 +357,11 @@ handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 	RESPHDR_FINISH(ctx->parser.wbuf);
 }
 
-static void
-handle_ruleset_invoke(struct http_ctx *restrict ctx, struct ruleset *ruleset)
+static void handle_ruleset_invoke(
+	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct ruleset *ruleset)
 {
-	const int64_t start = clock_monotonic();
+	const ev_tstamp start = ev_now(loop);
 	struct stream *reader = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
@@ -385,18 +387,18 @@ handle_ruleset_invoke(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	const ev_tstamp end = ev_time();
 	char timecost[16];
 	(void)format_duration(
-		timecost, sizeof(timecost),
-		make_duration_nanos(clock_monotonic() - start));
+		timecost, sizeof(timecost), make_duration(end - start));
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 }
 
 static void handle_ruleset_update(
-	struct http_ctx *restrict ctx, struct ruleset *ruleset,
-	const char *module)
+	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct ruleset *ruleset, const char *module)
 {
-	const int64_t start = clock_monotonic();
+	const ev_tstamp start = ev_now(loop);
 	struct stream *reader = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
@@ -422,27 +424,28 @@ static void handle_ruleset_update(
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	const ev_tstamp end = ev_time();
 	char timecost[16];
 	(void)format_duration(
-		timecost, sizeof(timecost),
-		make_duration_nanos(clock_monotonic() - start));
+		timecost, sizeof(timecost), make_duration(end - start));
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 }
 
-static void
-handle_ruleset_gc(struct http_ctx *restrict ctx, struct ruleset *ruleset)
+static void handle_ruleset_gc(
+	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct ruleset *ruleset)
 {
-	const int64_t start = clock_monotonic();
+	const ev_tstamp start = ev_now(loop);
 	ruleset_gc(ruleset);
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
 	char livemem[16];
 	(void)format_iec_bytes(
 		livemem, sizeof(livemem), (double)vmstats.byt_allocated);
+	const ev_tstamp end = ev_time();
 	char timecost[16];
 	(void)format_duration(
-		timecost, sizeof(timecost),
-		make_duration_nanos(clock_monotonic() - start));
+		timecost, sizeof(timecost), make_duration(end - start));
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
@@ -487,7 +490,7 @@ static void http_handle_ruleset(
 		if (!http_leafnode_check(ctx, uri, "POST", true)) {
 			return;
 		}
-		handle_ruleset_invoke(ctx, ruleset);
+		handle_ruleset_invoke(loop, ctx, ruleset);
 		return;
 	}
 	if (strcmp(segment, "update") == 0) {
@@ -506,14 +509,14 @@ static void http_handle_ruleset(
 				module = value;
 			}
 		}
-		handle_ruleset_update(ctx, ruleset, module);
+		handle_ruleset_update(loop, ctx, ruleset, module);
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {
 		if (!http_leafnode_check(ctx, uri, "POST", false)) {
 			return;
 		}
-		handle_ruleset_gc(ctx, ruleset);
+		handle_ruleset_gc(loop, ctx, ruleset);
 		return;
 	}
 

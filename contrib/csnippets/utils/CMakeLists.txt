@@ -12,6 +12,5 @@ target_sources(csnippets
     "${CMAKE_CURRENT_SOURCE_DIR}/debug.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/formats.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/minmax.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/posixtime.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/slog.h"
 )

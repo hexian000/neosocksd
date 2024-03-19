@@ -7,7 +7,6 @@
 #include "math/rand.h"
 #include "utils/debug.h"
 #include "utils/intbound.h"
-#include "utils/posixtime.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -28,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 struct globals G = { 0 };
 
@@ -132,7 +132,7 @@ void loadlibs(void)
 			FAILMSGF("atexit: %d", ret);
 		}
 	}
-	srand64((uint64_t)clock_realtime());
+	srand64((uint64_t)time(NULL));
 
 	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
