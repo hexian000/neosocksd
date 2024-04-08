@@ -845,6 +845,22 @@ static int stream_context_close_(struct lua_State *L)
 	return 0;
 }
 
+static int stream_copyall(struct stream_context *restrict s)
+{
+	int ret = stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
+	int err = stream_close(s->r);
+	s->r = NULL;
+	if (ret == 0) {
+		ret = err;
+	}
+	err = stream_close(s->w);
+	s->w = NULL;
+	if (ret == 0) {
+		ret = err;
+	}
+	return ret;
+}
+
 /* z = zlib.compress(s) */
 static int zlib_compress_(lua_State *restrict L)
 {
@@ -871,7 +887,7 @@ static int zlib_compress_(lua_State *restrict L)
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
-	const int err = stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
+	const int err = stream_copyall(s);
 	if (err != 0) {
 		return luaL_error(L, "compress error: %d", err);
 	}
@@ -910,7 +926,7 @@ static int zlib_uncompress_(lua_State *restrict L)
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
-	const int err = stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
+	const int err = stream_copyall(s);
 	if (err != 0) {
 		return luaL_error(L, "uncompress error: %d", err);
 	}
