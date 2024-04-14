@@ -47,15 +47,6 @@ int format_addr(lua_State *restrict L)
 	return 1;
 }
 
-void check_memlimit(struct ruleset *restrict r)
-{
-	const size_t memlimit = G.conf->memlimit;
-	if (memlimit == 0 || (r->vmstats.byt_allocated >> 20u) < memlimit) {
-		return;
-	}
-	ruleset_gc(r);
-}
-
 const char *read_stream(lua_State *L, void *ud, size_t *restrict sz)
 {
 	UNUSED(L);

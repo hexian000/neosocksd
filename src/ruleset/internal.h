@@ -6,6 +6,7 @@
 
 #include "ruleset.h"
 #include "conf.h"
+#include "util.h"
 
 #include "lua.h"
 
@@ -44,7 +45,7 @@ enum ruleset_functions {
 #define CONST_LSTRING(s, len)                                                  \
 	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
 
-static inline struct ruleset *find_ruleset(lua_State *L)
+static inline struct ruleset *find_ruleset(lua_State *restrict L)
 {
 	void *ud;
 	(void)lua_getallocf(L, &ud);
@@ -53,7 +54,14 @@ static inline struct ruleset *find_ruleset(lua_State *L)
 
 int format_addr(lua_State *L);
 
-void check_memlimit(struct ruleset *r);
+static inline void check_memlimit(struct ruleset *restrict r)
+{
+	const size_t memlimit = G.conf->memlimit;
+	if (memlimit == 0 || (r->vmstats.byt_allocated >> 20u) < memlimit) {
+		return;
+	}
+	ruleset_gc(r);
+}
 
 struct reader_status {
 	struct stream *s;
