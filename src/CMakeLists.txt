@@ -4,7 +4,6 @@ add_executable(neosocksd
     sockutil.c sockutil.h
     dialer.c dialer.h
     resolver.c resolver.h
-    codec.c codec.h
     ruleset.c ruleset.h
     transfer.c transfer.h
     session.c session.h
@@ -16,6 +15,9 @@ add_executable(neosocksd
     server.c server.h
     main.c
 )
+add_subdirectory(codec)
+add_subdirectory(proto)
+target_include_directories(neosocksd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(neosocksd PRIVATE csnippets miniz)
 
 if(TARGET_LINUX)
@@ -97,6 +99,9 @@ else()
     message(STATUS "c-ares: ${LIBCARES_VERSION}")
     message(STATUS "c-ares: ${LIBCARES_LIBRARY}")
     set(WITH_CARES TRUE)
+endif()
+
+if(WITH_CARES)
     target_include_directories(neosocksd SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
     target_link_libraries(neosocksd PRIVATE ${LIBCARES_LIBRARY})
 endif()
@@ -148,13 +153,16 @@ else()
     message(STATUS "Lua: ${LUA_VERSION}")
     message(STATUS "Lua: ${LUA_LIBRARY}")
     set(WITH_LUA TRUE)
-    target_include_directories(neosocksd SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
-    target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY})
 endif()
 
 if(WITH_LUA)
-    target_link_libraries(neosocksd PRIVATE ${CMAKE_DL_LIBS})
+    target_include_directories(neosocksd SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
+    target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
     set(WITH_RULESET TRUE)
+endif()
+
+if(WITH_RULESET)
+    add_subdirectory(ruleset)
 endif()
 
 # find systemd

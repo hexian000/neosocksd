@@ -21,7 +21,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop);
 void ruleset_gc(struct ruleset *r);
 void ruleset_free(struct ruleset *r);
 
-const char *ruleset_error(struct ruleset *r, size_t *len);
+const char *ruleset_geterror(struct ruleset *r, size_t *len);
 
 bool ruleset_invoke(struct ruleset *r, struct stream *code);
 bool ruleset_update(struct ruleset *r, const char *modname, struct stream *code);

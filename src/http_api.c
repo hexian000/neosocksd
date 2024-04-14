@@ -230,7 +230,7 @@ static void http_handle_stats(
 		size_t len;
 		const char *s = ruleset_stats(G.ruleset, dt, &len);
 		if (s == NULL) {
-			s = ruleset_error(G.ruleset, &len);
+			s = ruleset_geterror(G.ruleset, &len);
 		}
 		n = sizeof(header) - 1;
 		err = stream_write(w, header, &n);
@@ -312,7 +312,7 @@ handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 	stream_close(reader);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_error(ruleset, &len);
+		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
@@ -375,7 +375,7 @@ static void handle_ruleset_invoke(
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_error(ruleset, &len);
+		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset invoke: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
@@ -412,7 +412,7 @@ static void handle_ruleset_update(
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_error(ruleset, &len);
+		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset update: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);

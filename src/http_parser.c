@@ -2,9 +2,9 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "http_parser.h"
-#include "codec.h"
 #include "sockutil.h"
 
+#include "codec/codec.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
