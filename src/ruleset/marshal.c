@@ -219,7 +219,7 @@ static void marshal_value(
 }
 
 /* s = marshal(...) */
-int api_marshal(lua_State *restrict L)
+int api_marshal_(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
 	/* open */

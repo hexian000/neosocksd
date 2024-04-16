@@ -56,7 +56,7 @@ struct reader_status {
 	size_t prefixlen;
 };
 
-const char *stream_reader(lua_State *L, void *ud, size_t *sz);
+const char *ruleset_reader(lua_State *L, void *ud, size_t *sz);
 
 enum ruleset_functions {
 	FUNC_REQUEST = 1,

@@ -309,7 +309,7 @@ await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 		.prefix = "return ",
 		.prefixlen = 7,
 	};
-	if (lua_load(L, stream_reader, &rd, "=unmarshal", NULL)) {
+	if (lua_load(L, ruleset_reader, &rd, "=unmarshal", NULL)) {
 		return lua_error(L);
 	}
 	lua_call(L, 0, LUA_MULTRET);

@@ -93,7 +93,7 @@ static int ruleset_loadfile_(lua_State *restrict L)
 static int ruleset_invoke_(lua_State *restrict L)
 {
 	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 1) };
-	if (lua_load(L, stream_reader, &rd, "=invoke", NULL)) {
+	if (lua_load(L, ruleset_reader, &rd, "=invoke", NULL)) {
 		return lua_error(L);
 	}
 	lua_call(L, 0, 0);
@@ -106,8 +106,8 @@ static int ruleset_rpcall_(lua_State *restrict L)
 	const void **result = (const void **)lua_topointer(L, 2);
 	size_t *resultlen = (size_t *)lua_topointer(L, 3);
 	lua_settop(L, 0);
-	lua_pushcfunction(L, api_marshal);
-	if (lua_load(L, stream_reader, &rd, "=rpc", NULL)) {
+	lua_pushcfunction(L, api_marshal_);
+	if (lua_load(L, ruleset_reader, &rd, "=rpc", NULL)) {
 		return lua_error(L);
 	}
 	/* stack: marshal f */
@@ -169,7 +169,7 @@ static int ruleset_update_(lua_State *restrict L)
 	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 2) };
 	lua_settop(L, 0);
 	if (modname == NULL) {
-		if (lua_load(L, stream_reader, &rd, "=ruleset", NULL)) {
+		if (lua_load(L, ruleset_reader, &rd, "=ruleset", NULL)) {
 			return lua_error(L);
 		}
 		lua_pushliteral(L, "ruleset");
@@ -184,7 +184,7 @@ static int ruleset_update_(lua_State *restrict L)
 		name[0] = '=';
 		memcpy(name + 1, modname, namelen);
 		name[1 + namelen] = '\0';
-		if (lua_load(L, stream_reader, &rd, name, NULL)) {
+		if (lua_load(L, ruleset_reader, &rd, name, NULL)) {
 			return lua_error(L);
 		}
 	}
@@ -255,7 +255,7 @@ static int ruleset_xpcall_(lua_State *restrict L)
 }
 
 /* neosocksd.invoke(code, addr, proxyN, ..., proxy1) */
-static int api_invoke(lua_State *restrict L)
+static int api_invoke_(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
 	for (int i = 1; i <= MAX(2, n); i++) {
@@ -275,7 +275,7 @@ static int api_invoke(lua_State *restrict L)
 }
 
 /* neosocksd.resolve(host) */
-static int api_resolve(lua_State *restrict L)
+static int api_resolve_(lua_State *restrict L)
 {
 	const char *name = luaL_checkstring(L, 1);
 	union sockaddr_max addr;
@@ -288,7 +288,7 @@ static int api_resolve(lua_State *restrict L)
 }
 
 /* neosocksd.parse_ipv4(ipv4) */
-static int api_parse_ipv4(lua_State *restrict L)
+static int api_parse_ipv4_(lua_State *restrict L)
 {
 	const char *s = lua_tostring(L, 1);
 	if (s == NULL) {
@@ -304,7 +304,7 @@ static int api_parse_ipv4(lua_State *restrict L)
 }
 
 /* neosocksd.parse_ipv6(ipv6) */
-static int api_parse_ipv6(lua_State *restrict L)
+static int api_parse_ipv6_(lua_State *restrict L)
 {
 	const char *s = lua_tostring(L, 1);
 	if (s == NULL) {
@@ -342,7 +342,7 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 }
 
 /* neosocksd.setinterval(interval) */
-static int api_setinterval(lua_State *restrict L)
+static int api_setinterval_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TNUMBER);
 	double interval = lua_tonumber(L, 1);
@@ -362,7 +362,7 @@ static int api_setinterval(lua_State *restrict L)
 }
 
 /* neosocksd.splithostport() */
-static int api_splithostport(lua_State *restrict L)
+static int api_splithostport_(lua_State *restrict L)
 {
 	size_t len;
 	const char *s = luaL_checklstring(L, 1, &len);
@@ -386,7 +386,7 @@ static int api_splithostport(lua_State *restrict L)
 }
 
 /* neosocksd.stats() */
-static int api_stats(lua_State *restrict L)
+static int api_stats_(lua_State *restrict L)
 {
 	struct server *restrict s = G.server;
 	if (s == NULL) {
@@ -410,7 +410,7 @@ static int api_stats(lua_State *restrict L)
 }
 
 /* neosocksd.now() */
-static int api_now(lua_State *restrict L)
+static int api_now_(lua_State *restrict L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
 	const ev_tstamp now = ev_now(r->loop);
@@ -420,17 +420,17 @@ static int api_now(lua_State *restrict L)
 
 static int luaopen_neosocksd(lua_State *restrict L)
 {
-	lua_pushcfunction(L, api_marshal);
+	lua_pushcfunction(L, api_marshal_);
 	lua_setglobal(L, "marshal");
 	const luaL_Reg apilib[] = {
-		{ "invoke", api_invoke },
-		{ "resolve", api_resolve },
-		{ "setinterval", api_setinterval },
-		{ "splithostport", api_splithostport },
-		{ "parse_ipv4", api_parse_ipv4 },
-		{ "parse_ipv6", api_parse_ipv6 },
-		{ "stats", api_stats },
-		{ "now", api_now },
+		{ "invoke", api_invoke_ },
+		{ "resolve", api_resolve_ },
+		{ "setinterval", api_setinterval_ },
+		{ "splithostport", api_splithostport_ },
+		{ "parse_ipv4", api_parse_ipv4_ },
+		{ "parse_ipv6", api_parse_ipv6_ },
+		{ "stats", api_stats_ },
+		{ "now", api_now_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, apilib);

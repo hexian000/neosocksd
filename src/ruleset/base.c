@@ -48,7 +48,7 @@ int format_addr_(lua_State *restrict L)
 	return 1;
 }
 
-const char *stream_reader(lua_State *L, void *ud, size_t *restrict sz)
+const char *ruleset_reader(lua_State *L, void *ud, size_t *restrict sz)
 {
 	UNUSED(L);
 	struct reader_status *restrict rd = ud;
