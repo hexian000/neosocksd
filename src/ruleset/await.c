@@ -2,77 +2,24 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "await.h"
+#include "base.h"
+
 #include "conf.h"
 #include "http_client.h"
 #include "resolver.h"
-#include "ruleset/internal.h"
 #include "util.h"
 
 #include "lauxlib.h"
 
 #include "utils/slog.h"
 
+#include <lua.h>
 #include <tgmath.h>
-
-#if LUA_VERSION_NUM >= 504
-#define HAVE_LUA_TOCLOSE 1
-#define co_resume lua_resume
-#elif LUA_VERSION_NUM == 503
-#define LUA_LOADED_TABLE "_LOADED"
-static int co_resume(lua_State *L, lua_State *from, int narg, int *nres)
-{
-	const int status = lua_resume(L, from, narg);
-	*nres = lua_gettop(L);
-	return status;
-}
-#endif
 
 #define MT_AWAIT_IDLE "await.idle"
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"
 #define MT_AWAIT_RPCALL "await.invoke"
-
-/* ok, ... = async(f, ...) */
-static int ruleset_async_(lua_State *restrict L)
-{
-	luaL_checktype(L, 1, LUA_TFUNCTION);
-	int n = lua_gettop(L);
-	lua_State *restrict co = lua_newthread(L);
-	lua_pop(L, 1);
-	if (G.conf->traceback) {
-		if (lua_rawgeti(co, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) !=
-		    LUA_TTABLE) {
-			lua_pushliteral(L, ERR_BAD_REGISTRY);
-			return lua_error(L);
-		}
-		if (lua_rawgeti(co, -1, FUNC_XPCALL) != LUA_TFUNCTION) {
-			lua_pushliteral(L, ERR_BAD_REGISTRY);
-			return lua_error(L);
-		}
-		lua_remove(co, -2); /* RIDX_FUNCTIONS */
-		lua_xmove(L, co, n);
-		/* co stack: FUNC_XPCALL, f, ... */
-	} else {
-		lua_xmove(L, co, n);
-		n--;
-		/* co stack: f, ... */
-	}
-	const int status = co_resume(co, L, n, &n);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_pushboolean(L, 0);
-		lua_xmove(co, L, 1);
-		return 2;
-	}
-	lua_settop(L, 0);
-	if (!lua_checkstack(L, 1 + n)) {
-		lua_pushboolean(L, 0);
-		lua_pushliteral(L, "too many results");
-		return 2;
-	}
-	lua_pushboolean(L, 1);
-	lua_xmove(co, L, n);
-	return 1 + n;
-}
 
 #define AWAIT_CHECK_YIELDABLE(L)                                               \
 	do {                                                                   \
@@ -111,37 +58,6 @@ await_unpin(struct ruleset *restrict r, lua_State *restrict L, const void *p)
 	r->vmstats.num_routine--;
 }
 
-static bool
-await_resume(struct ruleset *restrict r, const void *p, int narg, ...)
-{
-	check_memlimit(r);
-	lua_State *restrict L = r->L;
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
-		LOGE(ERR_BAD_REGISTRY);
-		return NULL;
-	}
-	lua_rawgetp(L, -1, p);
-	lua_State *restrict co = lua_tothread(L, -1);
-	lua_pop(L, 2);
-	if (co == NULL) {
-		LOGE_F("async context lost: %p", p);
-		return false;
-	}
-	va_list args;
-	va_start(args, narg);
-	for (int i = 0; i < narg; i++) {
-		lua_pushlightuserdata(co, va_arg(args, void *));
-	}
-	va_end(args);
-	int nres;
-	const int status = co_resume(co, L, narg, &nres);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_xmove(co, L, 1);
-		return false;
-	}
-	return true;
-}
-
 static int await_idle_gc_(struct lua_State *L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
@@ -156,7 +72,7 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	ev_idle_stop(loop, watcher);
 	struct ruleset *restrict r = watcher->data;
 	const void *p = watcher;
-	if (!await_resume(r, p, 0)) {
+	if (!ruleset_resume(r, p, 0)) {
 		LOGE_F("idle_cb: %s", ruleset_geterror(r, NULL));
 	}
 }
@@ -214,7 +130,7 @@ sleep_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	ev_timer_stop(loop, watcher);
 	struct ruleset *restrict r = watcher->data;
 	const void *p = watcher;
-	if (!await_resume(r, p, 0)) {
+	if (!ruleset_resume(r, p, 0)) {
 		LOGE_F("sleep_cb: %s", ruleset_geterror(r, NULL));
 	}
 }
@@ -280,7 +196,7 @@ static void resolve_cb(
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
 	const void *p = handle_toptr(h);
-	if (!await_resume(r, p, 1, (void *)sa)) {
+	if (!ruleset_resume(r, p, 1, (void *)sa)) {
 		LOGE_F("resolve_cb: %s", ruleset_geterror(r, NULL));
 	}
 }
@@ -299,7 +215,7 @@ await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	default:
 		return lua_error(L);
 	}
-	return format_addr(L);
+	return format_addr_(L);
 }
 
 /* await.resolve(host) */
@@ -358,7 +274,7 @@ static void invoke_cb(
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
 	const void *p = handle_toptr(h);
-	if (!await_resume(r, p, 3, (void *)&ok, (void *)data, (void *)&len)) {
+	if (!ruleset_resume(r, p, 3, (void *)&ok, (void *)data, (void *)&len)) {
 		LOGE_F("http_client_cb: %s", ruleset_geterror(r, NULL));
 	}
 }
@@ -393,7 +309,7 @@ await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 		.prefix = "return ",
 		.prefixlen = 7,
 	};
-	if (lua_load(L, read_stream, &rd, "=unmarshal", NULL) != LUA_OK) {
+	if (lua_load(L, stream_reader, &rd, "=unmarshal", NULL)) {
 		return lua_error(L);
 	}
 	lua_call(L, 0, LUA_MULTRET);
@@ -410,7 +326,7 @@ static int await_invoke_(lua_State *restrict L)
 	for (int i = 2; i <= MAX(2, n); i++) {
 		luaL_checktype(L, i, LUA_TSTRING);
 	}
-	struct dialreq *req = pop_dialreq(L, n - 1);
+	struct dialreq *req = pop_dialreq_(L, n - 1);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
@@ -449,9 +365,11 @@ static int await_invoke_(lua_State *restrict L)
 
 int luaopen_await(lua_State *restrict L)
 {
-	lua_newtable(L);
-	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
-	lua_pushcfunction(L, ruleset_async_);
+	if (lua_geti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+		lua_newtable(L);
+		lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
+	}
+	lua_pushcfunction(L, api_async);
 	lua_setglobal(L, "async");
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },

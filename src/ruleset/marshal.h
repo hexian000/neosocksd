@@ -6,6 +6,6 @@
 
 #include "lua.h"
 
-int rulesetapi_marshal(lua_State *L);
+int api_marshal(lua_State *L);
 
 #endif /* RULESET_MARSHAL_H */

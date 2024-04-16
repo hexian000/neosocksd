@@ -1,13 +1,13 @@
 target_sources(neosocksd
     PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/await.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/internal.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/base.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/marshal.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/regex.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/zlib.h"
     PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/await.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/internal.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/base.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/marshal.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/regex.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/zlib.c"

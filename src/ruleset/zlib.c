@@ -2,8 +2,9 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "zlib.h"
+#include "base.h"
+
 #include "codec/codec.h"
-#include "internal.h"
 
 #include "io/memory.h"
 #include "utils/buffer.h"
