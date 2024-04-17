@@ -8,13 +8,14 @@
 #include "conf.h"
 #include "dialer.h"
 #include "http_client.h"
+#include "server.h"
+#include "util.h"
+
 #include "ruleset/await.h"
 #include "ruleset/base.h"
 #include "ruleset/marshal.h"
 #include "ruleset/regex.h"
 #include "ruleset/zlib.h"
-#include "server.h"
-#include "util.h"
 
 #include "net/addr.h"
 #include "utils/arraysize.h"
@@ -27,8 +28,9 @@
 #include "lua.h"
 #include "lualib.h"
 
-#include <arpa/inet.h>
 #include <ev.h>
+
+#include <arpa/inet.h>
 #include <netinet/in.h>
 
 #include <stdarg.h>
@@ -420,8 +422,7 @@ static int api_now_(lua_State *restrict L)
 
 static int luaopen_neosocksd(lua_State *restrict L)
 {
-	lua_pushcfunction(L, api_marshal_);
-	lua_setglobal(L, "marshal");
+	lua_register(L, "marshal", api_marshal_);
 	const luaL_Reg apilib[] = {
 		{ "invoke", api_invoke_ },
 		{ "resolve", api_resolve_ },

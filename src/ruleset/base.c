@@ -5,6 +5,7 @@
 #include "util.h"
 
 #include "lauxlib.h"
+#include "lua.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -145,7 +146,7 @@ bool ruleset_pcall(
 }
 
 /* ok, ... = async(f, ...) */
-int api_async(lua_State *restrict L)
+int api_async_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TFUNCTION);
 	int n = lua_gettop(L);

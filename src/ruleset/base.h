@@ -78,6 +78,6 @@ int format_addr_(lua_State *L);
 
 struct dialreq *pop_dialreq_(lua_State *L, const int n);
 
-int api_async(lua_State *L);
+int api_async_(lua_State *L);
 
 #endif /* RULESET_BASE_H */

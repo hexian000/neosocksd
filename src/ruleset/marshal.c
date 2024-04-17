@@ -131,7 +131,8 @@ static void marshal_value(
 	const int depth)
 {
 	if (depth > 200) {
-		luaL_error(L, "table is too complex to marshal");
+		lua_pushliteral(L, "table is too complex to marshal");
+		(void)lua_error(L);
 		return;
 	}
 	const int type = lua_type(L, idx);

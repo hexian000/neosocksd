@@ -10,10 +10,10 @@
 #include "util.h"
 
 #include "lauxlib.h"
+#include "lua.h"
 
 #include "utils/slog.h"
 
-#include <lua.h>
 #include <tgmath.h>
 
 #define MT_AWAIT_IDLE "await.idle"
@@ -369,8 +369,7 @@ int luaopen_await(lua_State *restrict L)
 		lua_newtable(L);
 		lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
 	}
-	lua_pushcfunction(L, api_async);
-	lua_setglobal(L, "async");
+	lua_register(L, "async", api_async_);
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },
 		{ "invoke", await_invoke_ },
