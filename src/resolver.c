@@ -389,6 +389,7 @@ handle_type resolve_do(
 	q->family = family;
 	ev_init(&q->w_start, start_cb);
 	q->w_start.data = q;
+	q->ok = false;
 	ev_feed_event(r->loop, &q->w_start, EV_CUSTOM);
 	return handle_make(q);
 }
