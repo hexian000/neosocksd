@@ -106,24 +106,23 @@ _G.RECENT_EVENTS_LIMIT = 16
 _G.recent_events = _G.recent_events or {}
 local function addevent_(tstamp, msg)
     local n = recent_events["#"] or 0
-    local entry = recent_events[n]
+    local i = recent_events["^"] or n
+    local entry = recent_events[i]
     if entry and entry.msg == msg then
         entry.count = entry.count + 1
         entry.tstamp = tstamp
         return
     end
-    entry = {
+    i                = (i % RECENT_EVENTS_LIMIT) + 1
+    recent_events[i] = {
         msg = msg,
         count = 1,
         tstamp = tstamp
     }
-    n = n + 1
-    recent_events[n] = entry
-    if n >= 2 * RECENT_EVENTS_LIMIT then
-        table.move(recent_events, n - RECENT_EVENTS_LIMIT, n, 1, recent_events)
-        n = RECENT_EVENTS_LIMIT
+    if n < i then
+        n = i
     end
-    recent_events["#"] = n
+    recent_events["^"], recent_events["#"] = i, n
 end
 
 function _G.log(...)
@@ -758,7 +757,8 @@ function ruleset.stats(dt)
     end
     w:insert("> Recent Events")
     local n = recent_events["#"] or 0
-    for i = n, math.max(1, n - RECENT_EVENTS_LIMIT), -1 do
+    local i = recent_events["^"] or n
+    for _ = 1, n do
         local entry = recent_events[i]
         if not entry then
             break
@@ -769,6 +769,8 @@ function ruleset.stats(dt)
         else
             w:insertf("%s %s (x%d)", tstamp, entry.msg, entry.count)
         end
+        i = i - 1
+        if i < 1 then i = n end
     end
     w:insert("> Request Stats")
     render_(w)

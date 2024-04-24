@@ -143,7 +143,7 @@ local function keepalive(target, tag)
         if not is_disabled() then
             local ok, result = ping(target)
             logf("ping %q: %s", tag, result)
-            ruleset.server_rtt[tag] = result
+            ruleset.server_rtt[tag] = ok and result or "error"
             if ok then interval = 3600 end
         end
         await.sleep(interval)
