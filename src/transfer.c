@@ -194,17 +194,18 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			t->buf.len);
 	}
 
-	const bool has_data = (t->buf.len > 0);
+	const bool can_recv = (t->buf.len < t->buf.cap);
+	const bool can_send = (t->pos < t->buf.len);
 	switch (state) {
 	case XFER_INIT:
 		state = XFER_CONNECTED;
 		/* fallthrough */
 	case XFER_CONNECTED: {
-		ev_io_set_active(loop, &t->w_recv, !has_data);
-		ev_io_set_active(loop, &t->w_send, has_data);
+		ev_io_set_active(loop, &t->w_recv, can_recv);
+		ev_io_set_active(loop, &t->w_send, can_send);
 	} break;
 	case XFER_LINGER:
-		if (has_data) {
+		if (can_send) {
 			ev_io_set_active(loop, &t->w_recv, false);
 			ev_io_set_active(loop, &t->w_send, true);
 			break;
