@@ -1,12 +1,17 @@
 _G.libruleset = require("libruleset")
 
 -- [[ configurations ]] --
+_G.enable_until = nil
 local function is_disabled()
-    local now = os.date("*t")
-    if not (2 <= now.wday and now.wday <= 6) then
+    local now = os.time()
+    if _G.enable_until and now < _G.enable_until then
+        return false
+    end
+    local date = os.date("*t", now)
+    if not (2 <= date.wday and date.wday <= 6) then
         return true
     end
-    return not (9 <= now.hour and now.hour < 18)
+    return not (9 <= date.hour and date.hour < 18)
 end
 
 -- 1. ordered redirect rules (matched as string)
