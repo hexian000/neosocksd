@@ -699,8 +699,8 @@ local function render_(w)
         last_requests = v
     end
     requests:insert(num_requests - last_requests)
-    local peak = math.max(requests:unpack())
-    local q = math.max(peak, 1)
+    local peak = math.max(0, requests:unpack())
+    local q = math.max(1, peak)
     for i, v in ipairs(requests) do
         requests[i] = math.floor(v / q * 5.0 + 0.5)
     end
