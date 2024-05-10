@@ -3,25 +3,6 @@ function _G.printf(...)
     return print(string.format(...))
 end
 
-function _G.errorf(s, ...)
-    local level = tonumber(s)
-    if level then
-        return error(string.format(...), level + 1)
-    end
-    return error(string.format(s, ...), 2)
-end
-
-function _G.assertf(v, s, ...)
-    if v then
-        return
-    end
-    local level = tonumber(s)
-    if level then
-        return error(string.format(...), level + 1)
-    end
-    return error(string.format(s, ...), 2)
-end
-
 function _G.eval(s, ...)
     return assert(load(s, "=eval"))(...)
 end
@@ -155,40 +136,44 @@ local splithostport = neosocksd.splithostport
 local parse_ipv4 = neosocksd.parse_ipv4
 local parse_ipv6 = neosocksd.parse_ipv6
 
-function _G.parse_cidr(s)
+local function parse_cidr(s)
     local addr, shift = s:match("^(.+)/(%d+)$")
-    local shift = tonumber(shift)
+    shift = tonumber(shift)
     if not shift or shift < 0 or shift > 32 then
-        errorf(2, "invalid prefix size %q", s)
+        error(string.format("invalid prefix size %q", s), 2)
     end
     local mask = ~((1 << (32 - shift)) - 1)
     local subnet = parse_ipv4(addr)
     if not subnet or (subnet & mask ~= subnet) then
-        errorf(2, "invalid subnet %q", s)
+        error(string.format("invalid subnet %q", s), 2)
     end
     return subnet, shift
 end
 
-function _G.parse_cidr6(s)
+_G.parse_cidr = parse_cidr
+
+local function parse_cidr6(s)
     local addr, shift = s:match("^(.+)/(%d+)$")
-    local shift = tonumber(shift)
+    shift = tonumber(shift)
     if not shift or shift < 0 or shift > 128 then
-        errorf(2, "invalid prefix size %q", s)
+        error(string.format("invalid prefix size %q", s), 2)
     end
     local subnet1, subnet2 = parse_ipv6(addr)
     if shift > 64 then
         local mask = ~((1 << (128 - shift)) - 1)
         if not subnet1 or (subnet2 & mask ~= subnet2) then
-            errorf(2, "invalid subnet %q", s)
+            error(string.format("invalid subnet %q", s), 2)
         end
     else
         local mask = ~((1 << (64 - shift)) - 1)
         if not subnet1 or (subnet1 & mask ~= subnet1) or subnet2 ~= 0 then
-            errorf(2, "invalid subnet %q", s)
+            error(string.format("invalid subnet %q", s), 2)
         end
     end
     return subnet1, subnet2, shift
 end
+
+_G.parse_cidr6 = parse_cidr6
 
 -- [[ RPC utilities ]] --
 
@@ -299,7 +284,9 @@ end
 function match.exact(s)
     if type(s) ~= "table" then
         local host, port = splithostport(s)
-        assertf(host and port, 2, "exact matcher should contain host and port: %q", s)
+        if not host or not port then
+            error(string.format("exact matcher should contain host and port: %q", s), 2)
+        end
         return function(addr)
             return addr == s
         end
@@ -307,7 +294,9 @@ function match.exact(s)
     local t = {}
     for _, v in pairs(s) do
         local host, port = splithostport(v)
-        assertf(host and port, 2, "exact matcher should contain host and port: %q", v)
+        if not host or not port then
+            error(string.format("exact matcher should contain host and port: %q", s), 2)
+        end
         t[v] = true
     end
     return function(addr)
@@ -400,7 +389,9 @@ function match.domain(s)
 end
 
 function match.domaintree(tree)
-    assertf(type(tree) == "table", 2, "domain tree should be a table")
+    if type(tree) ~= "table" then
+        error("domain tree should be a table", 2)
+    end
     return function(addr)
         local host, port = splithostport(addr)
         if not host then
