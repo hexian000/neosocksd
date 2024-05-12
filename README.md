@@ -22,19 +22,11 @@ A lightweight unencrypted proxy server that can run Lua script as rule set.
 
 ## Introduction
 
-neosocksd is an unencrypted proxy server / port forwarder which can optionally handle requests in Lua scripts. This makes it a versatile building block. Here are some examples:
+neosocksd is an unencrypted proxy server that allows highly customized rule sets in Lua.
 
-1. Use in conjunction with other encrypted transport layer forwarders to form an encrypted proxy server.
-2. Setup before any TCP service to limit the number of connections and the rate of new connections.
-3. Use in conjunction with iptables to form a transparent proxy.
-4. Make TCP port forwarding over proxies.
+If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](ruleset_simple.lua).
 
-There are also different usages in scripting, such as:
-
-1. Implement connection redirection rules in script to form an Internet gateway.
-2. Implement a load balancer in script to form a RPC proxy.
-
-If you find that some proper usage is not well supported, please feel free to send issues or commits.
+For advanced scripting usage, see [scripting](#scripting).
 
 
 ## Features
@@ -83,13 +75,9 @@ See `./neosocksd -h` for more details.
 
 First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
 
-Depending on how complex your customizations are, check out:
-
-- Level 1: Rule set configuration example: [ruleset_simple.lua](ruleset_simple.lua)
-- Level 2: Rule set scripting example at [ruleset.lua](ruleset.lua)
-- Level 3: Rule set library code in [libruleset.lua](libruleset.lua)
-- Level 4: Developer manual: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
-- Level 5: If you want to operate a larger system, the idea in [stub.lua](stub.lua) may be helpful.
+- [ruleset.lua](ruleset.lua) is a demo script.
+- [libruleset.lua](libruleset.lua) provides rule table facilities.
+- Developer manual: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
 Use the following command to start the server with the Lua scripts in current directory:
 
