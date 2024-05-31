@@ -214,7 +214,6 @@ static bool parse_accept_te(struct http_parser *restrict p, char *value)
 		p->hdr.transfer.accept = TENCODING_CHUNKED;
 		return true;
 	}
-	p->http_status = HTTP_BAD_REQUEST;
 	return false;
 }
 
@@ -229,7 +228,6 @@ static bool parse_transfer_encoding(struct http_parser *restrict p, char *value)
 		p->hdr.transfer.encoding = TENCODING_CHUNKED;
 		return true;
 	}
-	p->http_status = HTTP_BAD_REQUEST;
 	return false;
 }
 
@@ -252,7 +250,6 @@ static bool parse_accept_encoding(struct http_parser *restrict p, char *value)
 			return true;
 		}
 	}
-	p->http_status = HTTP_BAD_REQUEST;
 	return false;
 }
 
@@ -261,12 +258,10 @@ static bool parse_content_length(struct http_parser *restrict p, char *value)
 	char *endptr;
 	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
 	if (*endptr || lenvalue > SIZE_MAX) {
-		p->http_status = HTTP_BAD_REQUEST;
 		return false;
 	}
 	const size_t content_length = (size_t)lenvalue;
 	if (strcmp(p->msg.req.method, "CONNECT") == 0) {
-		p->http_status = HTTP_BAD_REQUEST;
 		return false;
 	}
 	p->hdr.content.length = content_length;
@@ -492,6 +487,7 @@ void http_parser_init(
 	const struct http_parsehdr_cb on_header)
 {
 	p->mode = p->state = mode;
+	p->http_status = HTTP_BAD_REQUEST;
 	p->fd = fd;
 	p->msg = (struct http_message){ 0 };
 	p->next = NULL;
