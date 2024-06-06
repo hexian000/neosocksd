@@ -73,15 +73,16 @@ ASSERT_SUPER(struct session, struct socks_ctx, ss);
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		char laddr[64];                                                \
-		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
+		char caddr[64];                                                \
+		format_sa(&(ctx)->accepted_sa.sa, caddr, sizeof(caddr));       \
 		if ((ctx)->state < STATE_CONNECT) {                            \
-			LOG_F(level, "`%s': " format, laddr, __VA_ARGS__);     \
+			LOG_F(level, "client `%s': " format, caddr,            \
+			      __VA_ARGS__);                                    \
 			break;                                                 \
 		}                                                              \
-		char raddr[64];                                                \
-		dialaddr_format(&(ctx)->addr, raddr, sizeof(raddr));           \
-		LOG_F(level, "`%s' -> `%s': " format, laddr, raddr,            \
+		char saddr[64];                                                \
+		dialaddr_format(&(ctx)->addr, saddr, sizeof(saddr));           \
+		LOG_F(level, "`%s' -> `%s': " format, caddr, saddr,            \
 		      __VA_ARGS__);                                            \
 	} while (0)
 #define SOCKS_CTX_LOG(level, ctx, message)                                     \
@@ -353,8 +354,9 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		SOCKS_CTX_LOG(
-			DEBUG, ctx, "unable to establish client connection");
+		SOCKS_CTX_LOG_F(
+			ERROR, ctx, "unable to establish client connection: %s",
+			strerror(ctx->dialer.syserr));
 		socks_senderr(ctx, ctx->dialer.syserr);
 		socks_ctx_close(loop, ctx);
 		return;

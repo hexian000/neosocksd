@@ -66,13 +66,14 @@ void http_ctx_close(struct ev_loop *loop, struct http_ctx *ctx);
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		char laddr[64];                                                \
-		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
+		char caddr[64];                                                \
+		format_sa(&(ctx)->accepted_sa.sa, caddr, sizeof(caddr));       \
 		if ((ctx)->state != STATE_CONNECT) {                           \
-			LOG_F(level, "`%s': " format, laddr, __VA_ARGS__);     \
+			LOG_F(level, "client `%s': " format, caddr,            \
+			      __VA_ARGS__);                                    \
 			break;                                                 \
 		}                                                              \
-		LOG_F(level, "`%s' -> `%s': " format, laddr,                   \
+		LOG_F(level, "`%s' -> `%s': " format, caddr,                   \
 		      (ctx)->parser.msg.req.url, __VA_ARGS__);                 \
 	} while (0)
 #define HTTP_CTX_LOG(level, ctx, message)                                      \

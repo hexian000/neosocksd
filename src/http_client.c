@@ -173,6 +173,8 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	struct http_client_ctx *restrict ctx = data;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
+		LOGE_F("unable to establish client connection: %s",
+		       strerror(ctx->dialer.syserr));
 		HTTP_RETURN_ERROR(loop, ctx, "failed connecting to server");
 	}
 	dialreq_free(ctx->dialreq);

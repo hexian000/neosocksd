@@ -60,9 +60,9 @@ ASSERT_SUPER(struct session, struct forward_ctx, ss);
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		char laddr[64];                                                \
-		format_sa(&(ctx)->accepted_sa.sa, laddr, sizeof(laddr));       \
-		LOG_F(level, "`%s': " format, laddr, __VA_ARGS__);             \
+		char caddr[64];                                                \
+		format_sa(&(ctx)->accepted_sa.sa, caddr, sizeof(caddr));       \
+		LOG_F(level, "client `%s': " format, caddr, __VA_ARGS__);      \
 	} while (0)
 #define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
 
@@ -188,7 +188,9 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		FW_CTX_LOG(DEBUG, ctx, "unable to establish client connection");
+		FW_CTX_LOG_F(
+			ERROR, ctx, "unable to establish client connection: %s",
+			strerror(ctx->dialer.syserr));
 		forward_ctx_close(loop, ctx);
 		return;
 	}

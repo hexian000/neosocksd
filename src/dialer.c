@@ -337,7 +337,7 @@ send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 	const ssize_t nsend = send(d->w_socket.fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
-		DIALER_LOG_F(ERROR, d, "send: %s", strerror(err));
+		DIALER_LOG_F(DEBUG, d, "send: %s", strerror(err));
 		d->syserr = err;
 		return false;
 	}
@@ -798,7 +798,7 @@ static int dialer_recv(struct dialer *restrict d)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 1;
 		}
-		DIALER_LOG_F(ERROR, d, "%s", strerror(err));
+		DIALER_LOG_F(DEBUG, d, "recv: %s", strerror(err));
 		d->syserr = err;
 		return -1;
 	}
@@ -845,7 +845,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		assert(d->state == STATE_CONNECT);
 		const int sockerr = socket_get_error(d->w_socket.fd);
 		if (sockerr != 0) {
-			if (LOGLEVEL(ERROR)) {
+			if (LOGLEVEL(DEBUG)) {
 				const struct dialreq *restrict req = (d)->req;
 				const struct dialaddr *restrict addr =
 					req->num_proxy > 0 ?
@@ -854,7 +854,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 				char addr_str[64];
 				dialaddr_format(
 					addr, addr_str, sizeof(addr_str));
-				LOG_F(ERROR, "connect `%s': %s", addr_str,
+				LOG_F(DEBUG, "connect `%s': %s", addr_str,
 				      strerror(sockerr));
 			}
 			d->syserr = sockerr;
@@ -901,13 +901,13 @@ static bool connect_sa(
 	const int fd = socket(sa->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
-		LOGE_F("socket: %s", strerror(err));
+		LOGD_F("socket: %s", strerror(err));
 		d->syserr = err;
 		return false;
 	}
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
-		LOGE_F("fcntl: %s", strerror(err));
+		LOGD_F("fcntl: %s", strerror(err));
 		CLOSE_FD(fd);
 		d->syserr = err;
 		return false;
@@ -935,10 +935,10 @@ static bool connect_sa(
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
 		const int err = errno;
 		if (err != EINTR && err != EINPROGRESS) {
-			if (LOGLEVEL(ERROR)) {
+			if (LOGLEVEL(DEBUG)) {
 				char addr_str[64];
 				format_sa(sa, addr_str, sizeof(addr_str));
-				LOG_F(ERROR, "connect `%s': %s", addr_str,
+				LOG_F(DEBUG, "connect `%s': %s", addr_str,
 				      strerror(err));
 			}
 			d->syserr = err;
