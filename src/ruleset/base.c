@@ -145,38 +145,52 @@ bool ruleset_pcall(
 	return lua_pcall(L, nargs, nresults, traceback ? 1 : 0) == LUA_OK;
 }
 
+int api_async_traceback_(lua_State *restrict L)
+{
+	int n = lua_gettop(L);
+	lua_State *restrict co = lua_newthread(L);
+	lua_pop(L, 1);
+	if (lua_rawgeti(co, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	if (lua_rawgeti(co, -1, FUNC_XPCALL) != LUA_TFUNCTION) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	lua_remove(co, -2); /* RIDX_FUNCTIONS */
+	lua_xmove(L, co, n);
+	lua_settop(L, 0);
+	/* co stack: FUNC_XPCALL, f, ... */
+	(void)co_resume(co, L, n, &n);
+	if (!lua_checkstack(L, n)) {
+		lua_pushboolean(L, 0);
+		lua_pushliteral(L, "too many results");
+		return 2;
+	}
+	lua_xmove(co, L, n);
+	return n;
+}
+
 /* ok, ... = async(f, ...) */
 int api_async_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TFUNCTION);
+	if (G.conf->traceback) {
+		return api_async_traceback_(L);
+	}
 	int n = lua_gettop(L);
 	lua_State *restrict co = lua_newthread(L);
 	lua_pop(L, 1);
-	if (G.conf->traceback) {
-		if (lua_rawgeti(co, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) !=
-		    LUA_TTABLE) {
-			lua_pushliteral(L, ERR_BAD_REGISTRY);
-			return lua_error(L);
-		}
-		if (lua_rawgeti(co, -1, FUNC_XPCALL) != LUA_TFUNCTION) {
-			lua_pushliteral(L, ERR_BAD_REGISTRY);
-			return lua_error(L);
-		}
-		lua_remove(co, -2); /* RIDX_FUNCTIONS */
-		lua_xmove(L, co, n);
-		/* co stack: FUNC_XPCALL, f, ... */
-	} else {
-		lua_xmove(L, co, n);
-		n--;
-		/* co stack: f, ... */
-	}
-	const int status = co_resume(co, L, n, &n);
+	lua_xmove(L, co, n);
+	lua_settop(L, 0);
+	/* co stack: f, ... */
+	const int status = co_resume(co, L, n - 1, &n);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushboolean(L, 0);
 		lua_xmove(co, L, 1);
 		return 2;
 	}
-	lua_settop(L, 0);
 	if (!lua_checkstack(L, 1 + n)) {
 		lua_pushboolean(L, 0);
 		lua_pushliteral(L, "too many results");
@@ -193,15 +207,15 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 	lua_State *restrict L = r->L;
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
 		LOGE(ERR_BAD_REGISTRY);
-		return NULL;
+		return false;
 	}
 	lua_rawgetp(L, -1, ctx);
 	lua_State *restrict co = lua_tothread(L, -1);
-	lua_pop(L, 2);
 	if (co == NULL) {
 		LOGE_F("async context lost: %p", ctx);
 		return false;
 	}
+	lua_pop(L, 2);
 	va_list args;
 	va_start(args, narg);
 	for (int i = 0; i < narg; i++) {
@@ -210,9 +224,19 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 	va_end(args);
 	int nres;
 	const int status = co_resume(co, L, narg, &nres);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_xmove(co, L, 1);
-		return false;
+	switch (status) {
+	case LUA_OK:
+		if (G.conf->traceback && !lua_toboolean(co, 1)) {
+			lua_xmove(co, L, 1);
+			return false;
+		}
+		/* fallthrough */
+	case LUA_YIELD:
+		return true;
+	default:
+		break;
 	}
-	return true;
+	LOGE_F("co_resume status: %d", status);
+	lua_xmove(co, L, 1);
+	return false;
 }

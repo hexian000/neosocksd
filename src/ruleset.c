@@ -229,10 +229,16 @@ ruleset_xpcall_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	UNUSED(ctx);
 	/* stack: FUNC_TRACEBACK, true, ... */
 	const int nresults = lua_gettop(L) - 1;
-	if (status == LUA_OK) {
+	if (status == LUA_OK || status == LUA_YIELD) {
 		return nresults;
 	}
-	return lua_error(L);
+	lua_pushboolean(L, 0);
+	if (nresults > 1) {
+		lua_pushvalue(L, -2);
+	} else {
+		lua_pushnil(L);
+	}
+	return 2;
 }
 
 static int ruleset_xpcall_(lua_State *restrict L)
@@ -597,6 +603,9 @@ const char *ruleset_geterror(struct ruleset *restrict r, size_t *len)
 		return CONST_LSTRING("(no error)", len);
 	}
 	if (!lua_isstring(L, -1)) {
+		if (lua_isnil(L, -1)) {
+			return CONST_LSTRING("(nil)", len);
+		}
 		return CONST_LSTRING("(error object is not a string)", len);
 	}
 	return lua_tolstring(L, -1, len);
