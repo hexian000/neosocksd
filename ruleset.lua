@@ -136,47 +136,64 @@ local function ping(target)
     return false, lasterr
 end
 
-if _G.ruleset then
-    -- stop old ruleset routines when reloading
-    _G.ruleset.running = false
-end
-ruleset.running = true
-ruleset.server_rtt = {}
-local function keepalive(target, tag)
+local function keepalive(target, i)
     while ruleset.running do
         local interval = 60
         if not is_disabled() then
             local ok, result = ping(target)
-            logf("ping %q: %s", tag, result)
-            ruleset.server_rtt[tag] = ok and result or "error"
+            local tag = route_list[i][2]
+            logf("ping %q: %s", tag or i, result)
+            ruleset.server_rtt[i] = ok and result or "error"
             if ok then interval = 3600 end
         end
         await.sleep(interval)
     end
 end
 
-for k, v in pairs(route_list) do
-    local route, tag = v[1], v[2]
-    local target = table.pack(route("api.neosocksd.lan:80"))
-    async(keepalive, target, tag)
-end
-
 local function format_rtt()
     local w = list:new()
-    for tag, result in pairs(ruleset.server_rtt) do
-        w:insertf("[%s] %s", tag, result)
+    for i, result in ipairs(ruleset.server_rtt) do
+        local tag = route_list[i][2]
+        w:insertf("[%s] %s", tag or i, result)
     end
-    w:sort()
     return w:concat(", ")
 end
 
 function ruleset.stats(dt)
     local w = list:new()
-    w:insertf("%-20s: %d", "Default Route", route_index)
+    if is_disabled and is_disabled() then
+        w:insertf("%-20s: %s", "Default Route", "(service disabled)")
+    elseif route_default == route_list[route_index] then
+        w:insertf("%-20s: [%d] %s", "Default Route", route_index, route_default[2] or route_default[1])
+    else
+        w:insertf("%-20s: [?] %s", "Default Route", route_default[2] or route_default[1])
+    end
     w:insertf("%-20s: %s", "Server RTT", format_rtt())
     w:insert(libruleset.stats(dt))
     return w:concat("\n")
 end
+
+function ruleset.stop()
+    ruleset.running = false
+end
+
+local function start()
+    if _G.ruleset and _G.ruleset.stop then
+        local ok, err = pcall(_G.ruleset.stop)
+        if not ok then
+            logf("ruleset.stop: %s", err)
+        end
+    end
+    ruleset.running = true
+    ruleset.server_rtt = {}
+    for i, v in ipairs(route_list) do
+        local route = v[1]
+        local target = table.pack(route("api.neosocksd.lan:80"))
+        async(keepalive, target, i)
+    end
+    _G.ruleset = ruleset
+end
+start()
 
 logf("ruleset loaded, interpreter: %s", _VERSION)
 return ruleset

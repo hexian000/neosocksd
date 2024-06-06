@@ -1,6 +1,7 @@
 _G.libruleset    = require("libruleset")
 
 -- [[ configurations ]] --
+
 -- 1. ordered redirect rules (matched as string)
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
