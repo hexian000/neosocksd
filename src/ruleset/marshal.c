@@ -19,10 +19,10 @@ static void
 marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 {
 	size_t len;
-	const char *restrict s = lua_tolstring(L, idx, &len);
+	const char *restrict str = lua_tolstring(L, idx, &len);
 	luaL_addchar(B, '"');
 	while (len--) {
-		const unsigned char ch = *s;
+		const unsigned char ch = *str;
 		if (ch == '"' || ch == '\\' || ch == '\n') {
 			char buf[2] = { '\\', ch };
 			luaL_addlstring(B, buf, sizeof(buf));
@@ -38,7 +38,7 @@ marshal_string(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 		} else {
 			luaL_addchar(B, ch);
 		}
-		s++;
+		str++;
 	}
 	luaL_addchar(B, '"');
 }
