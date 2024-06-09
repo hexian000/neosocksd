@@ -26,6 +26,16 @@ function string.endswith(s, sub)
     return string.sub(s, -n) == sub
 end
 
+function table.get(t, ...)
+    local n = select('#', ...)
+    local v = t
+    for i = 1, n do
+        if v == nil then return nil end
+        v = v[select(i, ...)]
+    end
+    return v
+end
+
 local list = {
     iter = ipairs,
     insert = table.insert,

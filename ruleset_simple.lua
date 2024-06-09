@@ -60,13 +60,12 @@ _G.route6        = {
 -- in {action, optional log tag}
 _G.route_default = { rule.direct(), "default" }
 
--- support reloading libruleset
-local ruleset    = setmetatable({}, {
+neosocksd.setinterval(60.0)
+
+logf("ruleset loaded, interpreter: %s", _VERSION)
+-- inherit undefined fields from libruleset
+return setmetatable({}, {
     __index = function(t, k)
         return _G.libruleset[k]
     end
 })
-neosocksd.setinterval(60.0)
-
-logf("ruleset loaded, interpreter: %s", _VERSION)
-return ruleset

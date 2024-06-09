@@ -108,13 +108,7 @@ function _G.set_route(i, ...)
     _G.route_default = route_list[route_index]
 end
 
--- support reloading libruleset
-local ruleset = setmetatable({}, {
-    __index = function(t, k)
-        return _G.libruleset[k]
-    end
-})
-neosocksd.setinterval(60.0)
+local ruleset = {}
 
 local function ping(target)
     local lasterr
@@ -178,8 +172,9 @@ function ruleset.stop()
 end
 
 local function start()
-    if _G.ruleset and _G.ruleset.stop then
-        local ok, err = pcall(_G.ruleset.stop)
+    local stop = table.get(_G, "ruleset", "stop")
+    if stop then
+        local ok, err = pcall(stop)
         if not ok then
             logf("ruleset.stop: %s", err)
         end
@@ -191,9 +186,14 @@ local function start()
         local target = table.pack(route("api.neosocksd.lan:80"))
         async(keepalive, target, i)
     end
-    _G.ruleset = ruleset
+    neosocksd.setinterval(60.0)
 end
 start()
 
 logf("ruleset loaded, interpreter: %s", _VERSION)
-return ruleset
+-- inherit undefined fields from libruleset
+return setmetatable(ruleset, {
+    __index = function(t, k)
+        return _G.libruleset[k]
+    end
+})
