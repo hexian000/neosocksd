@@ -83,7 +83,7 @@ target_link_libraries(neosocksd PRIVATE ${LIBEV_LIBRARY})
 # find c-ares
 find_path(LIBCARES_INCLUDE_DIR NAMES ares.h)
 if(BUILD_STATIC OR LINK_STATIC_LIBS)
-    find_library(LIBCARES_LIBRARY NAMES libcares.a)
+    find_library(LIBCARES_LIBRARY NAMES libcares_static.a libcares.a)
 else()
     find_library(LIBCARES_LIBRARY NAMES cares)
 endif()
