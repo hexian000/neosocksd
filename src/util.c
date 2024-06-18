@@ -174,15 +174,15 @@ void modify_io_events(
 	}
 }
 
-void drop_privileges(const char *name)
+bool parse_user(struct user_ident *ident, const char *s)
 {
-	const size_t len = strlen(name);
+	const size_t len = strlen(s);
 	if (len >= 1024) {
-		LOGE_F("user name is too long: `%s'", name);
-		return;
+		LOGE_F("user name is too long: `%s'", s);
+		return false;
 	}
 	char buf[len + 1];
-	memcpy(buf, name, len + 1);
+	memcpy(buf, s, len + 1);
 
 	const char *user = NULL, *group = NULL;
 	char *const colon = strchr(buf, ':');
@@ -211,7 +211,7 @@ void drop_privileges(const char *name)
 			if (pw == NULL) {
 				LOGE_F("passwd: name `%s' does not exist",
 				       user);
-				return;
+				return false;
 			}
 			LOGD_F("passwd: `%s' uid=%jd gid=%jd", user,
 			       (intmax_t)pw->pw_uid, (intmax_t)pw->pw_gid);
@@ -230,7 +230,7 @@ void drop_privileges(const char *name)
 			if (gr == NULL) {
 				LOGE_F("group: name `%s' does not exist",
 				       group);
-				return;
+				return false;
 			}
 			LOGD_F("group: `%s' gid=%jd", group,
 			       (intmax_t)gr->gr_gid);
@@ -245,14 +245,24 @@ void drop_privileges(const char *name)
 			if (pw == NULL) {
 				LOGE_F("passwd: user `%s' does not exist",
 				       user);
-				return;
+				return false;
 			}
 			LOGD_F("passwd: `%s' uid=%jd gid=%jd", user,
 			       (intmax_t)pw->pw_uid, (intmax_t)pw->pw_gid);
 		}
 		gid = pw->pw_gid;
 	}
+	if (ident != NULL) {
+		*ident = (struct user_ident){
+			.uid = uid,
+			.gid = gid,
+		};
+	}
+	return true;
+}
 
+void drop_privileges(const struct user_ident *restrict ident)
+{
 #if _BSD_SOURCE || _GNU_SOURCE
 	if (setgroups(0, NULL) != 0) {
 		const int err = errno;
@@ -260,17 +270,17 @@ void drop_privileges(const char *name)
 		       strerror(err));
 	}
 #endif
-	if (gid != (gid_t)-1) {
-		LOGD_F("setgid: %jd", (intmax_t)gid);
-		if (setgid(gid) != 0 || setegid(gid) != 0) {
+	if (ident->gid != (gid_t)-1) {
+		LOGD_F("setgid: %jd", (intmax_t)ident->gid);
+		if (setgid(ident->gid) != 0 || setegid(ident->gid) != 0) {
 			const int err = errno;
 			LOGW_F("unable to drop group privileges: %s",
 			       strerror(err));
 		}
 	}
-	if (uid != (uid_t)-1) {
-		LOGD_F("setuid: %jd", (intmax_t)uid);
-		if (setuid(uid) != 0 || seteuid(uid) != 0) {
+	if (ident->uid != (uid_t)-1) {
+		LOGD_F("setuid: %jd", (intmax_t)ident->uid);
+		if (setuid(ident->uid) != 0 || seteuid(ident->uid) != 0) {
 			const int err = errno;
 			LOGW_F("unable to drop user privileges: %s",
 			       strerror(err));
@@ -278,7 +288,8 @@ void drop_privileges(const char *name)
 	}
 }
 
-void daemonize(const char *user, const bool nochdir, const bool noclose)
+void daemonize(
+	const struct user_ident *ident, const bool nochdir, const bool noclose)
 {
 	/* Create an anonymous pipe for communicating with daemon process. */
 	int fd[2];
@@ -344,8 +355,8 @@ void daemonize(const char *user, const bool nochdir, const bool noclose)
 		}
 	}
 	/* In the daemon process, drop privileges */
-	if (user != NULL) {
-		drop_privileges(user);
+	if (ident != NULL) {
+		drop_privileges(ident);
 	}
 	/* From the daemon process, notify the original process started
            that initialization is complete. */

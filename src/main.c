@@ -427,10 +427,16 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (conf->daemonize) {
-		daemonize(conf->user_name, true, false);
-	} else if (conf->user_name != NULL) {
-		drop_privileges(conf->user_name);
+	if (conf->user_name != NULL) {
+		struct user_ident ident;
+		if (!parse_user(&ident, conf->user_name)) {
+			exit(EXIT_FAILURE);
+		}
+		if (conf->daemonize) {
+			daemonize(&ident, true, false);
+		} else {
+			drop_privileges(&ident);
+		}
 	}
 
 	/* signal watchers */

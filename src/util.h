@@ -106,7 +106,12 @@ void pipe_put(struct splice_pipe *pipe);
 void init(int argc, char **argv);
 void loadlibs(void);
 
-void drop_privileges(const char *user);
-void daemonize(const char *user, bool nochdir, bool noclose);
+struct user_ident {
+	uid_t uid;
+	gid_t gid;
+};
+bool parse_user(struct user_ident *ident, const char *s);
+void drop_privileges(const struct user_ident *ident);
+void daemonize(const struct user_ident *ident, bool nochdir, bool noclose);
 
 #endif /* UTIL_H */
