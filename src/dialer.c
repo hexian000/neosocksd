@@ -289,9 +289,9 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 		/* fallthrough */
 	case STATE_CONNECT:
 	case STATE_HANDSHAKE1:
-	case STATE_HANDSHAKE2: {
+	case STATE_HANDSHAKE2:
 		ev_io_stop(loop, &d->w_socket);
-	} break;
+		break;
 	case STATE_DONE:
 		break;
 	}
