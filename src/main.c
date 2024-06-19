@@ -427,15 +427,20 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (conf->user_name != NULL) {
-		struct user_ident ident;
-		if (!parse_user(&ident, conf->user_name)) {
-			exit(EXIT_FAILURE);
+	{
+		struct user_ident ident, *pident = NULL;
+		if (conf->user_name != NULL) {
+			if (!parse_user(&ident, conf->user_name)) {
+				LOGF_F("failed to parse user ident: `%s'",
+				       conf->user_name);
+				exit(EXIT_FAILURE);
+			}
+			pident = &ident;
 		}
 		if (conf->daemonize) {
-			daemonize(&ident, true, false);
-		} else {
-			drop_privileges(&ident);
+			daemonize(pident, true, false);
+		} else if (pident != NULL) {
+			drop_privileges(pident);
 		}
 	}
 
