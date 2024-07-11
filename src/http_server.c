@@ -23,6 +23,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
 static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
@@ -267,8 +268,7 @@ static void http_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	(void)memcpy(
-		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
+	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
 	http_ctx_start(loop, ctx);
 }
 

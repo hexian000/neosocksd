@@ -786,7 +786,6 @@ void socks_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	(void)memcpy(
-		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
+	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
 	socks_ctx_start(loop, ctx);
 }

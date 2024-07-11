@@ -40,6 +40,7 @@ void socket_rcvlowat(int fd, size_t bytes);
 int socket_get_error(int fd);
 
 socklen_t getsocklen(const struct sockaddr *sa);
+void copy_sa(struct sockaddr *dst, const struct sockaddr *src);
 int format_sa(const struct sockaddr *sa, char *s, size_t buf_size);
 
 bool parse_bindaddr(union sockaddr_max *sa, const char *s);

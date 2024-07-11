@@ -281,8 +281,7 @@ void forward_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	(void)memcpy(
-		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
+	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
 	forward_ctx_start(loop, ctx, G.basereq);
 }
 
@@ -366,8 +365,7 @@ void tproxy_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	(void)memcpy(
-		&ctx->accepted_sa.sa, accepted_sa, getsocklen(accepted_sa));
+	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
 	struct dialreq *req = tproxy_makereq(ctx);
 	if (req == NULL) {
 		forward_ctx_close(loop, ctx);

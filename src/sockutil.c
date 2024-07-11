@@ -175,7 +175,7 @@ int socket_get_error(const int fd)
 	return value;
 }
 
-socklen_t getsocklen(const struct sockaddr *sa)
+socklen_t getsocklen(const struct sockaddr *restrict sa)
 {
 	switch (sa->sa_family) {
 	case AF_INET:
@@ -185,7 +185,22 @@ socklen_t getsocklen(const struct sockaddr *sa)
 	default:
 		break;
 	}
-	FAIL();
+	FAILMSGF("unexpected af: %jd", (intmax_t)sa->sa_family);
+}
+
+void copy_sa(struct sockaddr *restrict dst, const struct sockaddr *restrict src)
+{
+	switch (src->sa_family) {
+	case AF_INET:
+		*(struct sockaddr_in *)dst = *(const struct sockaddr_in *)src;
+		return;
+	case AF_INET6:
+		*(struct sockaddr_in6 *)dst = *(const struct sockaddr_in6 *)src;
+		return;
+	default:
+		break;
+	}
+	FAILMSGF("unexpected af: %jd", (intmax_t)src->sa_family);
 }
 
 static int

@@ -980,7 +980,7 @@ static void resolve_cb(
 	}
 
 	union sockaddr_max addr;
-	memcpy(&addr.sa, sa, getsocklen(sa));
+	copy_sa(&addr.sa, sa);
 	switch (sa->sa_family) {
 	case AF_INET:
 		addr.in.sin_port = htons(dialaddr->port);
