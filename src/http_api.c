@@ -266,7 +266,7 @@ static void http_handle_stats(
 	RESPHDR_FINISH(ctx->parser.wbuf);
 }
 
-static bool http_leafnode_check(
+static bool restapi_check(
 	struct http_ctx *restrict ctx, const struct url *restrict uri,
 	const char *method, const bool require_content)
 {
@@ -480,21 +480,21 @@ static void http_handle_ruleset(
 		return;
 	}
 	if (strcmp(segment, "rpcall") == 0) {
-		if (!http_leafnode_check(ctx, uri, "POST", true)) {
+		if (!restapi_check(ctx, uri, "POST", true)) {
 			return;
 		}
 		handle_ruleset_rpcall(ctx, ruleset);
 		return;
 	}
 	if (strcmp(segment, "invoke") == 0) {
-		if (!http_leafnode_check(ctx, uri, "POST", true)) {
+		if (!restapi_check(ctx, uri, "POST", true)) {
 			return;
 		}
 		handle_ruleset_invoke(loop, ctx, ruleset);
 		return;
 	}
 	if (strcmp(segment, "update") == 0) {
-		if (!http_leafnode_check(ctx, uri, "POST", true)) {
+		if (!restapi_check(ctx, uri, "POST", true)) {
 			return;
 		}
 		const char *module = NULL;
@@ -513,7 +513,7 @@ static void http_handle_ruleset(
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {
-		if (!http_leafnode_check(ctx, uri, "POST", false)) {
+		if (!restapi_check(ctx, uri, "POST", false)) {
 			return;
 		}
 		handle_ruleset_gc(loop, ctx, ruleset);
@@ -540,7 +540,7 @@ void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 	if (strcmp(segment, "healthy") == 0) {
-		if (!http_leafnode_check(ctx, &uri, NULL, false)) {
+		if (!restapi_check(ctx, &uri, NULL, false)) {
 			return;
 		}
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
@@ -548,7 +548,7 @@ void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 	if (strcmp(segment, "stats") == 0) {
-		if (!http_leafnode_check(ctx, &uri, NULL, false)) {
+		if (!restapi_check(ctx, &uri, NULL, false)) {
 			return;
 		}
 		http_handle_stats(loop, ctx, &uri);

@@ -307,8 +307,7 @@ static void socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 			ctx, ok ? SOCKS4RSP_GRANTED : SOCKS4RSP_REJECTED);
 		return;
 	case SOCKS5:
-		socks5_sendrsp(
-			ctx, ok ? SOCKS5RSP_SUCCEEDED : SOCKS5RSP_NOALLOWED);
+		socks5_sendrsp(ctx, ok ? SOCKS5RSP_SUCCEEDED : SOCKS5RSP_FAIL);
 		return;
 	default:
 		break;
@@ -364,7 +363,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	ctx->dialed_fd = fd;
 	socks_sendrsp(ctx, true);
 
-	SOCKS_CTX_LOG(DEBUG, ctx, "connected");
+	SOCKS_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
 	/* cleanup before state change */
 	ev_io_stop(loop, &ctx->w_socket);
 	dialreq_free(ctx->dialreq);
@@ -621,28 +620,24 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 
 static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 {
-	while (ctx->rbuf.len < ctx->rbuf.cap) {
-		unsigned char *buf = ctx->rbuf.data + ctx->rbuf.len;
-		const size_t n = ctx->rbuf.cap - ctx->rbuf.len;
-		const ssize_t nrecv = recv(fd, buf, n, 0);
-		if (nrecv < 0) {
-			const int err = errno;
-			if (IS_TRANSIENT_ERROR(err)) {
-				break;
-			}
-			SOCKS_CTX_LOG_F(
-				DEBUG, ctx, "recv: fd=%d %s", fd,
-				strerror(err));
-			return -1;
+	unsigned char *buf = ctx->rbuf.data + ctx->rbuf.len;
+	const size_t n = ctx->rbuf.cap - ctx->rbuf.len;
+	const ssize_t nrecv = recv(fd, buf, n, 0);
+	if (nrecv < 0) {
+		const int err = errno;
+		if (IS_TRANSIENT_ERROR(err)) {
+			return 1;
 		}
-		if (nrecv == 0) {
-			/* connection is not established yet, we do not expect EOF here */
-			SOCKS_CTX_LOG_F(
-				DEBUG, ctx, "recv: fd=%d early EOF", fd);
-			return -1;
-		}
-		ctx->rbuf.len += (size_t)nrecv;
+		SOCKS_CTX_LOG_F(
+			DEBUG, ctx, "recv: fd=%d %s", fd, strerror(err));
+		return -1;
 	}
+	if (nrecv == 0) {
+		/* connection is not established yet, we do not expect EOF here */
+		SOCKS_CTX_LOG_F(DEBUG, ctx, "recv: fd=%d early EOF", fd);
+		return -1;
+	}
+	ctx->rbuf.len += (size_t)nrecv;
 	LOG_BIN_F(
 		VERYVERBOSE, ctx->rbuf.data, ctx->rbuf.len,
 		"recv: fd=%d %zu bytes", fd, ctx->rbuf.len);
@@ -654,7 +649,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 		return 0;
 	}
 	if (ctx->rbuf.len + (size_t)want > ctx->rbuf.cap) {
-		SOCKS_CTX_LOG(ERROR, ctx, "recv: header too long");
+		SOCKS_CTX_LOG(ERROR, ctx, "garbage after socks header");
 		return -1;
 	}
 	return 1;
@@ -750,10 +745,10 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 		struct ev_io *restrict w_socket = &ctx->w_socket;
 		ev_io_init(w_socket, recv_cb, accepted_fd, EV_READ);
 		w_socket->data = ctx;
-		BUF_INIT(ctx->rbuf, 0);
 	}
 
 	ctx->auth_method = SOCKS5AUTH_NOACCEPTABLE;
+	BUF_INIT(ctx->rbuf, 0);
 	ctx->dialreq = NULL;
 	const struct event_cb cb = {
 		.cb = dialer_cb,

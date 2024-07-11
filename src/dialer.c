@@ -1079,7 +1079,7 @@ void dialer_start(
 	struct dialer *restrict d, struct ev_loop *restrict loop,
 	const struct dialreq *restrict req)
 {
-	LOGV_F("dialer: [%p] start", (void *)d);
+	LOGV_F("dialer: [%p] start, num_proxy=%zu", (void *)d, req->num_proxy);
 	d->req = req;
 	d->syserr = 0;
 	ev_feed_event(loop, &d->w_start, EV_CUSTOM);

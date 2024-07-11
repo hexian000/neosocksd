@@ -39,7 +39,6 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_stop(loop, &ctx->w_recv);
 	ev_io_stop(loop, &ctx->w_send);
 
-	HTTP_CTX_LOG(DEBUG, ctx, "connected");
 	/* cleanup before state change */
 	dialreq_free(ctx->dialreq);
 
@@ -69,6 +68,29 @@ void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		&stats->byt_down);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
+}
+
+static void dialer_cb(struct ev_loop *loop, void *data)
+{
+	struct http_ctx *restrict ctx = data;
+	assert(ctx->state == STATE_CONNECT);
+
+	const int fd = dialer_get(&ctx->dialer);
+	if (fd < 0) {
+		HTTP_CTX_LOG_F(
+			ERROR, ctx, "unable to establish client connection: %s",
+			strerror(ctx->dialer.syserr));
+		http_resp_errpage(&ctx->parser, HTTP_BAD_GATEWAY);
+		ev_io_start(loop, &ctx->w_send);
+		return;
+	}
+	HTTP_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
+
+	ctx->dialed_fd = fd;
+	BUF_APPENDCONST(
+		ctx->parser.wbuf,
+		"HTTP/1.1 200 Connection established\r\n\r\n");
+	ev_io_start(loop, &ctx->w_send);
 }
 
 static struct dialreq *make_dialreq(const char *addr_str)
@@ -105,7 +127,12 @@ void http_handle_proxy(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_resp_errpage(&ctx->parser, HTTP_BAD_GATEWAY);
 		return;
 	}
-	ctx->dialreq = req;
 	ctx->state = STATE_CONNECT;
+	ctx->dialreq = req;
+	const struct event_cb cb = {
+		.cb = dialer_cb,
+		.ctx = ctx,
+	};
+	dialer_init(&ctx->dialer, cb);
 	dialer_start(&ctx->dialer, loop, req);
 }

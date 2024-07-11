@@ -177,27 +177,6 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	http_ctx_close(loop, ctx);
 }
 
-static void dialer_cb(struct ev_loop *loop, void *data)
-{
-	struct http_ctx *restrict ctx = data;
-	assert(ctx->state == STATE_CONNECT);
-
-	const int fd = dialer_get(&ctx->dialer);
-	if (fd < 0) {
-		HTTP_CTX_LOG_F(
-			ERROR, ctx, "unable to establish client connection: %s",
-			strerror(ctx->dialer.syserr));
-		http_resp_errpage(&ctx->parser, HTTP_BAD_GATEWAY);
-		ev_io_start(loop, &ctx->w_send);
-		return;
-	}
-	ctx->dialed_fd = fd;
-	BUF_APPENDCONST(
-		ctx->parser.wbuf,
-		"HTTP/1.1 200 Connection established\r\n\r\n");
-	ev_io_start(loop, &ctx->w_send);
-}
-
 static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
@@ -237,12 +216,6 @@ http_ctx_new(struct server *restrict s, const int fd, http_handler_fn handler)
 	}
 	const struct http_parsehdr_cb on_header = { NULL, NULL };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
-	ctx->dialreq = NULL;
-	const struct event_cb cb = {
-		.cb = dialer_cb,
-		.ctx = ctx,
-	};
-	dialer_init(&ctx->dialer, cb);
 	ctx->ss.close = http_ss_close;
 	session_add(&ctx->ss);
 	return ctx;

@@ -196,7 +196,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	}
 	ctx->dialed_fd = fd;
 
-	FW_CTX_LOG(DEBUG, ctx, "connected");
+	FW_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
 	/* cleanup before state change */
 	dialreq_free(ctx->dialreq);
 

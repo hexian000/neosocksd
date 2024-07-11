@@ -149,7 +149,7 @@ static int parse_message(struct http_parser *restrict p)
 	struct http_message *restrict msg = &p->msg;
 	next = http_parse(next, msg);
 	if (next == NULL) {
-		LOGD("http: failed parsing request");
+		LOGD("http: failed parsing message");
 		return -1;
 	}
 	if (next == p->next) {
@@ -337,7 +337,7 @@ parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 		}
 	}
 
-	LOGD_F("unknown http header: `%s' = `%s'", key, value);
+	LOGV_F("unknown http header: `%s' = `%s'", key, value);
 	return true;
 }
 
