@@ -69,8 +69,8 @@ static bool pipe_new(struct splice_pipe *restrict pipe)
 
 static struct {
 	size_t cap, len;
-	struct splice_pipe pipes[16];
-} pipe_pool = { .cap = 16, .len = 0 };
+	struct splice_pipe pipes[128];
+} pipe_pool = { .cap = 128, .len = 0 };
 
 bool pipe_get(struct splice_pipe *restrict pipe)
 {
@@ -91,11 +91,14 @@ void pipe_put(struct splice_pipe *restrict pipe)
 	pipe_pool.pipes[pipe_pool.len++] = *pipe;
 }
 
-static void pipe_closeall(void)
+void pipe_shrink(const size_t count)
 {
-	while (pipe_pool.len > 0) {
-		pipe_close(&pipe_pool.pipes[--pipe_pool.len]);
+	size_t n = pipe_pool.len;
+	const size_t stop = count < n ? n - count : 0;
+	while (n > stop) {
+		pipe_close(&pipe_pool.pipes[--n]);
 	}
+	pipe_pool.len = n;
 }
 #endif
 
@@ -143,7 +146,7 @@ void unloadlibs(void)
 {
 	resolver_cleanup();
 #if WITH_SPLICE
-	pipe_closeall();
+	pipe_shrink(SIZE_MAX);
 #endif
 }
 

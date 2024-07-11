@@ -101,6 +101,7 @@ struct splice_pipe {
 
 bool pipe_get(struct splice_pipe *pipe);
 void pipe_put(struct splice_pipe *pipe);
+void pipe_shrink(size_t count);
 #endif
 
 void init(int argc, char **argv);
