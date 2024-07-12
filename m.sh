@@ -108,6 +108,7 @@ case "$1" in
         -DCMAKE_ANDROID_ARCH_ABI="${ABI}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT};${LIBROOT}" \
+        -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
     nice cmake --build "build"
     ls -lh "build/src/kcptun-libev"
