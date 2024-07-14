@@ -40,7 +40,9 @@ static struct {
 	struct ev_signal w_sighup;
 	struct ev_signal w_sigint;
 	struct ev_signal w_sigterm;
+#if WITH_SPLICE
 	struct ev_timer w_timer;
+#endif
 
 	struct config conf;
 	struct server server;
