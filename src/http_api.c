@@ -279,7 +279,7 @@ static bool restapi_check(
 		http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
-	if (require_content && ctx->parser.hdr.content.length == 0) {
+	if (require_content && !ctx->parser.hdr.content.has_length) {
 		http_resp_errpage(&ctx->parser, HTTP_LENGTH_REQUIRED);
 		return false;
 	}

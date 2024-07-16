@@ -264,6 +264,7 @@ static bool parse_content_length(struct http_parser *restrict p, char *value)
 	if (strcmp(p->msg.req.method, "CONNECT") == 0) {
 		return false;
 	}
+	p->hdr.content.has_length = true;
 	p->hdr.content.length = content_length;
 	return true;
 }
@@ -369,6 +370,10 @@ static int parse_header(struct http_parser *restrict p)
 
 static int parse_content(struct http_parser *restrict p)
 {
+	if (!p->hdr.content.has_length) {
+		/* not implemented */
+		return 0;
+	}
 	const size_t content_length = p->hdr.content.length;
 	if (content_length > HTTP_MAX_CONTENT) {
 		p->http_status = HTTP_ENTITY_TOO_LARGE;

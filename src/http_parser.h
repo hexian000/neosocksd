@@ -35,6 +35,7 @@ struct http_headers {
 	} transfer;
 	/* representation headers */
 	struct {
+		bool has_length : 1;
 		size_t length;
 		char *type;
 		enum content_encodings encoding;
