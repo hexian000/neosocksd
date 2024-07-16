@@ -4,14 +4,12 @@
 #ifndef SOCKUTIL_H
 #define SOCKUTIL_H
 
-#include "io/stream.h"
-
 #include <netinet/in.h>
 #include <sys/socket.h>
 
 #include <errno.h>
 #include <stdbool.h>
-#include <stdint.h>
+#include <stddef.h>
 
 /* Check if the error is generally "transient":
  *   In accept()/send()/recv()/sendmsg()/recvmsg()/sendmmsg()/recvmmsg(),

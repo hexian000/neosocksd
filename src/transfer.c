@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "transfer.h"
+
 #include "conf.h"
 #include "sockutil.h"
 #include "util.h"
@@ -11,11 +12,12 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
 #if WITH_SPLICE
 #include <fcntl.h>
 #endif
 #include <sys/socket.h>
-#include <unistd.h>
+#include <sys/types.h>
 
 #include <errno.h>
 #include <stdbool.h>

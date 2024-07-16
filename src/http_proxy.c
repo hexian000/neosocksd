@@ -1,14 +1,23 @@
 /* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "http_parser.h"
 #include "conf.h"
+#include "dialer.h"
+#include "http_parser.h"
 #include "http_server.h"
 #include "ruleset.h"
 #include "server.h"
+#include "transfer.h"
 #include "util.h"
 
+#include "net/http.h"
+#include "utils/buffer.h"
 #include "utils/debug.h"
+
+#include <ev.h>
+
+#include <assert.h>
+#include <string.h>
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {

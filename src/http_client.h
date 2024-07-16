@@ -6,6 +6,9 @@
 
 #include "util.h"
 
+#include <stdbool.h>
+#include <stddef.h>
+
 struct ev_loop;
 struct dialreq;
 

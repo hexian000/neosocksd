@@ -4,10 +4,7 @@
 #ifndef CONF_H
 #define CONF_H
 
-#include "sockutil.h"
-
 #include <stdbool.h>
-#include <stdint.h>
 
 struct config {
 	const char *listen;

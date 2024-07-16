@@ -5,12 +5,14 @@
 #define RULESET_BASE_H
 
 #include "ruleset.h"
-#include "conf.h"
 #include "util.h"
 
 #include "lua.h"
 
 #include <ev.h>
+
+#include <stdbool.h>
+#include <stddef.h>
 
 struct ruleset {
 	struct ev_loop *loop;

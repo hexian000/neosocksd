@@ -4,23 +4,18 @@
 #ifndef HTTP_SERVER_H
 #define HTTP_SERVER_H
 
-#include "http_parser.h"
 #include "dialer.h"
+#include "http_parser.h"
 #include "session.h"
 #include "sockutil.h"
 #include "transfer.h"
 
-#include "net/http.h"
-#include "utils/buffer.h"
-#include "utils/debug.h"
 #include "utils/object.h"
 #include "utils/slog.h"
 
 #include <ev.h>
 
-#include <inttypes.h>
 #include <stddef.h>
-#include <stdint.h>
 
 struct http_ctx;
 
@@ -35,6 +30,8 @@ enum http_state {
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
 };
+
+struct server;
 
 struct http_ctx {
 	struct session ss;

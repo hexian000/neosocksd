@@ -8,7 +8,9 @@
 #include "conf.h"
 #include "dialer.h"
 #include "http_client.h"
+#include "proto/domain.h"
 #include "server.h"
+#include "sockutil.h"
 #include "util.h"
 
 #include "ruleset/await.h"
@@ -32,12 +34,14 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
 
-#include <stdarg.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <tgmath.h>
+#include <stdlib.h>
+#include <string.h>
 
 static void find_callback(lua_State *restrict L, const int idx)
 {

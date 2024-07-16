@@ -9,6 +9,8 @@
 #include "lua.h"
 
 #include <ctype.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <tgmath.h>
 
 #define MT_MARSHAL_CACHE "marshal.cache"

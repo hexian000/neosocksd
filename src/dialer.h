@@ -4,6 +4,7 @@
 #ifndef DIALER_H
 #define DIALER_H
 
+#include "proto/domain.h"
 #include "proto/socks.h"
 #include "util.h"
 

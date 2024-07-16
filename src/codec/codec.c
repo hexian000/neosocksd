@@ -142,7 +142,7 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 		return NULL;
 	}
 	z->dstpos = z->dstlen = 0;
-	return &z->s;
+	return (struct stream *)z;
 }
 
 struct stream *codec_zlib_writer(struct stream *base)
@@ -271,7 +271,7 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 	z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
 	tinfl_init(&z->inflator);
 	z->dstpos = z->dstlen = 0;
-	return &z->s;
+	return (struct stream *)z;
 }
 
 struct stream *codec_zlib_reader(struct stream *base)

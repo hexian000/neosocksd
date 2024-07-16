@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "util.h"
+
 #include "resolver.h"
 
 #include "math/rand.h"
@@ -10,12 +11,14 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
 #if WITH_SPLICE
 #include <fcntl.h>
 #endif
 #include <grp.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #if WITH_RULESET
@@ -23,9 +26,11 @@
 #endif
 
 #include <assert.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <locale.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>

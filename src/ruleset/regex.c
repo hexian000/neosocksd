@@ -8,6 +8,8 @@
 
 #include <regex.h>
 
+#include <stddef.h>
+
 #define MT_REGEX "regex"
 
 static int regex_gc_(lua_State *restrict L)

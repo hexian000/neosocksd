@@ -4,12 +4,10 @@
 #ifndef UTIL_H
 #define UTIL_H
 
-#include "utils/arraysize.h"
-#include "utils/buffer.h"
-#include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <assert.h>

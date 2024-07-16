@@ -5,6 +5,7 @@
 #include "sockutil.h"
 
 #include "codec/codec.h"
+#include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
@@ -15,8 +16,12 @@
 #include "utils/slog.h"
 
 #include <strings.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
+#include <assert.h>
 #include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>

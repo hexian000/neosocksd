@@ -21,6 +21,7 @@
 
 /* runtime */
 #include <ev.h>
+#include <sys/socket.h>
 #if WITH_SYSTEMD
 #include <systemd/sd-daemon.h>
 #endif

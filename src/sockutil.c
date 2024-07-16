@@ -2,8 +2,8 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "sockutil.h"
+
 #include "proto/domain.h"
-#include "util.h"
 
 #include "net/addr.h"
 #include "utils/debug.h"
@@ -18,8 +18,10 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 
+#include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -76,7 +78,7 @@ void socket_set_fastopen(const int fd, const int backlog)
 		LOGW_F("TCP_FASTOPEN: %s", strerror(err));
 	}
 #else
-	UNUSED(fd);
+	(void)fd;
 	if (backlog > 0) {
 		LOGW_F("TCP_FASTOPEN: %s", "not supported in current build");
 	}
@@ -93,7 +95,7 @@ void socket_set_fastopen_connect(const int fd, const bool enabled)
 		LOGW_F("TCP_FASTOPEN_CONNECT: %s", strerror(err));
 	}
 #else
-	UNUSED(fd);
+	(void)fd;
 	if (enabled) {
 		LOGW_F("TCP_FASTOPEN_CONNECT: %s",
 		       "not supported in current build");
@@ -129,7 +131,7 @@ void socket_bind_netdev(const int fd, const char *netdev)
 		LOGW_F("SO_BINDTODEVICE: %s", strerror(err));
 	}
 #else
-	UNUSED(fd);
+	(void)fd;
 	if (netdev[0] != '\0') {
 		LOGW_F("SO_BINDTODEVICE: %s", "not supported in current build");
 	}
@@ -146,7 +148,7 @@ void socket_set_transparent(const int fd, const bool tproxy)
 		FAILMSGF("IP_TRANSPARENT: %s", strerror(err));
 	}
 #else
-	UNUSED(fd);
+	(void)fd;
 	CHECKMSGF(
 		!tproxy, "IP_TRANSPARENT: %s",
 		"not supported in current build");

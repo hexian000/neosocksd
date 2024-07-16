@@ -2,15 +2,20 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "zlib.h"
+
 #include "base.h"
+
+#include "io/io.h"
+#include "io/memory.h"
+#include "io/stream.h"
+#include "utils/buffer.h"
 
 #include "codec/codec.h"
 
-#include "io/memory.h"
-#include "utils/buffer.h"
-
 #include "lauxlib.h"
 #include "lua.h"
+
+#include <stddef.h>
 
 #define MT_STREAM_CONTEXT "stream_context"
 

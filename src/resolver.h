@@ -6,7 +6,6 @@
 
 #include "util.h"
 
-#include <stdbool.h>
 #include <stdint.h>
 
 struct ev_loop;

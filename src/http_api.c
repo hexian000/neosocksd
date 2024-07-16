@@ -17,6 +17,7 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

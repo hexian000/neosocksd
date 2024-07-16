@@ -2,8 +2,10 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "socks.h"
+
 #include "conf.h"
 #include "dialer.h"
+#include "proto/domain.h"
 #include "ruleset.h"
 #include "server.h"
 #include "session.h"
@@ -19,9 +21,13 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
 #include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
 #include <assert.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>

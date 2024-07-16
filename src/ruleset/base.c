@@ -1,7 +1,15 @@
+/* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
+ * This code is licensed under MIT license (see LICENSE for details) */
+
 #include "base.h"
+
+#include "io/stream.h"
+#include "utils/debug.h"
+#include "utils/slog.h"
 
 #include "conf.h"
 #include "dialer.h"
+#include "ruleset.h"
 #include "util.h"
 
 #include "lauxlib.h"
@@ -9,6 +17,14 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
+
+#include <errno.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 
 int format_addr_(lua_State *restrict L)
 {

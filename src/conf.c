@@ -5,8 +5,11 @@
 
 #include "utils/slog.h"
 
+#include <sys/socket.h>
+
 #include <limits.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 struct config conf_default(void)
 {

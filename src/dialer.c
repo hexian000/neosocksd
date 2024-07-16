@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "dialer.h"
+
 #include "conf.h"
 #include "proto/domain.h"
 #include "proto/socks.h"
@@ -18,10 +19,12 @@
 #include "utils/serialize.h"
 #include "utils/slog.h"
 
-#include <arpa/inet.h>
 #include <ev.h>
+
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 
 #include <assert.h>
 #include <errno.h>

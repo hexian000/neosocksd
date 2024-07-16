@@ -10,6 +10,7 @@
 struct ev_loop;
 struct stream;
 struct ruleset;
+struct dialreq;
 
 struct ruleset_vmstats {
 	size_t num_object;

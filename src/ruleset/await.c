@@ -2,19 +2,28 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "await.h"
+
 #include "base.h"
+
+#include "io/stream.h"
+#include "utils/buffer.h"
+#include "utils/minmax.h"
+#include "utils/slog.h"
 
 #include "conf.h"
 #include "http_client.h"
 #include "resolver.h"
+#include "ruleset.h"
 #include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
 
-#include "utils/slog.h"
+#include <ev.h>
 
-#include <tgmath.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stddef.h>
 
 #define MT_AWAIT_IDLE "await.idle"
 #define MT_AWAIT_SLEEP "await.sleep"

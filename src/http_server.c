@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "http_server.h"
+
 #include "conf.h"
 #include "dialer.h"
 #include "http_parser.h"
@@ -15,7 +16,6 @@
 #include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/object.h"
-#include "utils/slog.h"
 
 #include <ev.h>
 
@@ -23,7 +23,6 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
 static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);

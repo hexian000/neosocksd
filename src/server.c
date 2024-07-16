@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "server.h"
+
 #include "conf.h"
 #include "sockutil.h"
 #include "util.h"
@@ -10,9 +11,10 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
+#include <sys/socket.h>
+
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
