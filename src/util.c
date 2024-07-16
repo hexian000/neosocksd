@@ -18,6 +18,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if WITH_RULESET
+#include "lua.h"
+#endif
+
 #include <assert.h>
 #include <inttypes.h>
 #include <locale.h>
@@ -140,6 +144,9 @@ void loadlibs(void)
 	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
 	resolver_init();
+#if WITH_RULESET
+	LOGD("ruleset interpreter: " LUA_RELEASE);
+#endif
 }
 
 void unloadlibs(void)
