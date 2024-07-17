@@ -246,21 +246,32 @@ int format_sa(const struct sockaddr *sa, char *buf, const size_t buf_size)
 	return snprintf(buf, buf_size, "<af:%jd>", (intmax_t)sa->sa_family);
 }
 
-static bool find_addrinfo(union sockaddr_max *sa, const struct addrinfo *it)
+static bool find_addrinfo(union sockaddr_max *sa, const struct addrinfo *node)
 {
-	for (; it != NULL; it = it->ai_next) {
+	for (const struct addrinfo *it = node; it != NULL; it = it->ai_next) {
+#define EXPECT_ADDRLEN(p, expected)                                            \
+	do {                                                                   \
+		if ((p)->ai_addrlen != (expected)) {                           \
+			LOGE_F("getaddrinfo: invalid ai_addrlen %ju (af=%d)",  \
+			       (uintmax_t)(p)->ai_addrlen, (p)->ai_family);    \
+			continue;                                              \
+		}                                                              \
+	} while (0)
+
 		switch (it->ai_family) {
 		case AF_INET:
-			CHECK(it->ai_addrlen == sizeof(struct sockaddr_in));
+			EXPECT_ADDRLEN(it, sizeof(struct sockaddr_in));
 			sa->in = *(struct sockaddr_in *)it->ai_addr;
 			break;
 		case AF_INET6:
-			CHECK(it->ai_addrlen == sizeof(struct sockaddr_in6));
+			EXPECT_ADDRLEN(it, sizeof(struct sockaddr_in6));
 			sa->in6 = *(struct sockaddr_in6 *)it->ai_addr;
 			break;
 		default:
 			continue;
 		}
+
+#undef EXPECT_ADDRLEN
 		return true;
 	}
 	return false;

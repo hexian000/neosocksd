@@ -21,6 +21,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -195,21 +196,33 @@ static void sock_state_cb(
 }
 
 static bool
-find_addrinfo(union sockaddr_max *addr, const struct ares_addrinfo_node *it)
+find_addrinfo(union sockaddr_max *addr, const struct ares_addrinfo_node *node)
 {
-	for (; it != NULL; it = it->ai_next) {
+	for (const struct ares_addrinfo_node *it = node; it != NULL;
+	     it = it->ai_next) {
+#define EXPECT_ADDRLEN(p, expected)                                            \
+	do {                                                                   \
+		if ((p)->ai_addrlen != (expected)) {                           \
+			LOGE_F("ares: invalid ai_addrlen %ju (af=%d)",         \
+			       (uintmax_t)(p)->ai_addrlen, (p)->ai_family);    \
+			continue;                                              \
+		}                                                              \
+	} while (0)
+
 		switch (it->ai_family) {
 		case AF_INET:
-			CHECK(it->ai_addrlen == sizeof(struct sockaddr_in));
+			EXPECT_ADDRLEN(it, sizeof(struct sockaddr_in));
 			addr->in = *(struct sockaddr_in *)it->ai_addr;
 			break;
 		case AF_INET6:
-			CHECK(it->ai_addrlen == sizeof(struct sockaddr_in6));
+			EXPECT_ADDRLEN(it, sizeof(struct sockaddr_in6));
 			addr->in6 = *(struct sockaddr_in6 *)it->ai_addr;
 			break;
 		default:
 			continue;
 		}
+
+#undef EXPECT_ADDRLEN
 		return true;
 	}
 	return false;
