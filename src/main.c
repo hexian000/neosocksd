@@ -2,10 +2,11 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 /* internal */
+#include "api_server.h"
 #include "conf.h"
 #include "dialer.h"
 #include "forward.h"
-#include "http.h"
+#include "http_proxy.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
@@ -428,7 +429,7 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 		api = &app.apiserver;
-		server_init(api, loop, http_api_serve, s);
+		server_init(api, loop, api_serve, s);
 		if (!server_start(api, &apiaddr.sa)) {
 			LOGF("failed to start api server");
 			exit(EXIT_FAILURE);

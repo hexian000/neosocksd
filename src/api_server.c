@@ -1,19 +1,27 @@
 /* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "http_server.h"
-#include "http_parser.h"
+#include "api_server.h"
+
+#include "conf.h"
+#include "dialer.h"
+#include "httputil.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
+#include "session.h"
+#include "sockutil.h"
+#include "transfer.h"
 #include "util.h"
 
 #include "io/stream.h"
 #include "net/http.h"
+#include "net/mime.h"
 #include "net/url.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/formats.h"
+#include "utils/object.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -24,26 +32,79 @@
 #include <string.h>
 #include <time.h>
 
-#define RESPHDR_CPLAINTEXT(buf)                                                \
-	BUF_APPENDCONST(                                                       \
-		(buf), "Content-Type: text/plain; charset=utf-8\r\n"           \
-		       "X-Content-Type-Options: nosniff\r\n")
+/* never rollback */
+enum api_state {
+	STATE_INIT,
+	STATE_REQUEST,
+	STATE_RESPONSE,
+};
 
-#define RESPHDR_CTYPE(buf, type)                                               \
-	BUF_APPENDF((buf), "Content-Type: %s\r\n", (type))
+struct api_ctx {
+	struct session ss;
+	struct server *s;
+	enum api_state state;
+	int accepted_fd, dialed_fd;
+	union sockaddr_max accepted_sa;
+	struct ev_timer w_timeout;
+	union {
+		struct {
+			struct ev_io w_recv, w_send;
+			struct dialreq *dialreq;
+			struct dialer dialer;
+			struct http_parser parser;
+		};
+		struct { /* connected */
+			struct transfer uplink, downlink;
+		};
+	};
+};
+ASSERT_SUPER(struct session, struct api_ctx, ss);
 
-#define RESPHDR_CLENGTH(buf, len)                                              \
-	BUF_APPENDF((buf), "Content-Length: %zu\r\n", (len))
-
-#define RESPHDR_CENCODING(buf, encoding)                                       \
-	BUF_APPENDF((buf), "Content-Encoding: %s\r\n", (encoding))
-
-#define RESPHDR_NOCACHE(buf)                                                   \
-	BUF_APPENDCONST((buf), "Cache-Control: no-store\r\n")
+#define API_CTX_LOG_F(level, ctx, format, ...)                                 \
+	do {                                                                   \
+		if (!LOGLEVEL(level)) {                                        \
+			break;                                                 \
+		}                                                              \
+		char caddr[64];                                                \
+		format_sa(&(ctx)->accepted_sa.sa, caddr, sizeof(caddr));       \
+		LOG_F(level, "client `%s': " format, caddr, __VA_ARGS__);      \
+	} while (0)
+#define API_CTX_LOG(level, ctx, message)                                       \
+	API_CTX_LOG_F(level, ctx, "%s", message)
 
 #define FORMAT_BYTES(name, value)                                              \
 	char name[16];                                                         \
 	(void)format_iec_bytes(name, sizeof(name), (value))
+
+#if WITH_RULESET
+bool check_rpcall_mime(char *s)
+{
+	if (s == NULL) {
+		return false;
+	}
+	char *type, *subtype;
+	s = mime_parse(s, &type, &subtype);
+	if (s == NULL || strcmp(type, MIME_RPCALL_TYPE) != 0 ||
+	    strcmp(subtype, MIME_RPCALL_SUBTYPE) != 0) {
+		return false;
+	}
+	const char *version = NULL;
+	char *key, *value;
+	for (;;) {
+		s = mime_parseparam(s, &key, &value);
+		if (s == NULL) {
+			return false;
+		}
+		if (key == NULL) {
+			break;
+		}
+		if (strcmp(key, "version") == 0) {
+			version = value;
+		}
+	}
+	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
+}
+#endif
 
 static void server_stats(
 	struct buffer *restrict buf, const struct server *restrict s,
@@ -143,7 +204,7 @@ static void server_stats_stateful(
 #undef FORMAT_BYTES
 
 static void http_handle_stats(
-	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct url *restrict uri)
 {
 	const struct http_message *restrict msg = &ctx->parser.msg;
@@ -268,7 +329,7 @@ static void http_handle_stats(
 }
 
 static bool restapi_check(
-	struct http_ctx *restrict ctx, const struct url *restrict uri,
+	struct api_ctx *restrict ctx, const struct url *restrict uri,
 	const char *method, const bool require_content)
 {
 	if (uri->path != NULL) {
@@ -289,7 +350,7 @@ static bool restapi_check(
 
 #if WITH_RULESET
 static void
-handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
+handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 {
 	char *mime_type = ctx->parser.hdr.content.type;
 	if (!check_rpcall_mime(mime_type)) {
@@ -359,7 +420,7 @@ handle_ruleset_rpcall(struct http_ctx *restrict ctx, struct ruleset *ruleset)
 }
 
 static void handle_ruleset_invoke(
-	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset)
 {
 	const ev_tstamp start = ev_now(loop);
@@ -396,7 +457,7 @@ static void handle_ruleset_invoke(
 }
 
 static void handle_ruleset_update(
-	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset, const char *module)
 {
 	const ev_tstamp start = ev_now(loop);
@@ -433,7 +494,7 @@ static void handle_ruleset_update(
 }
 
 static void handle_ruleset_gc(
-	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset)
 {
 	const ev_tstamp start = ev_now(loop);
@@ -461,7 +522,7 @@ static void handle_ruleset_gc(
 }
 
 static void http_handle_ruleset(
-	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct url *restrict uri)
 {
 	UNUSED(loop);
@@ -525,13 +586,13 @@ static void http_handle_ruleset(
 }
 #endif
 
-void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
+static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	const struct http_message *restrict msg = &ctx->parser.msg;
-	HTTP_CTX_LOG_F(DEBUG, ctx, "http: api `%s'", msg->req.url);
+	API_CTX_LOG_F(DEBUG, ctx, "http: api `%s'", msg->req.url);
 	struct url uri;
 	if (!url_parse(msg->req.url, &uri)) {
-		HTTP_CTX_LOG(WARNING, ctx, "failed parsing url");
+		API_CTX_LOG(WARNING, ctx, "failed parsing url");
 		http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 		return;
 	}
@@ -562,4 +623,246 @@ void http_handle_api(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 #endif
 	http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
+}
+
+static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
+static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents);
+static void
+timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
+
+static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
+{
+	ev_timer_stop(loop, &ctx->w_timeout);
+
+	struct server_stats *restrict stats = &ctx->s->stats;
+	switch (ctx->state) {
+	case STATE_INIT:
+		return;
+	case STATE_REQUEST:
+	case STATE_RESPONSE:
+		ev_io_stop(loop, &ctx->w_recv);
+		ev_io_stop(loop, &ctx->w_send);
+		return;
+	}
+	API_CTX_LOG_F(INFO, ctx, "closed, %zu active", stats->num_sessions);
+}
+
+static void http_ctx_free(struct api_ctx *restrict ctx)
+{
+	if (ctx == NULL) {
+		return;
+	}
+	assert(!ev_is_active(&ctx->w_timeout));
+	if (ctx->accepted_fd != -1) {
+		CLOSE_FD(ctx->accepted_fd);
+		ctx->accepted_fd = -1;
+	}
+	if (ctx->dialed_fd != -1) {
+		CLOSE_FD(ctx->dialed_fd);
+		ctx->dialed_fd = -1;
+	}
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	session_del(&ctx->ss);
+	free(ctx);
+}
+
+static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
+{
+	API_CTX_LOG_F(
+		DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		ctx->state);
+	api_ctx_stop(loop, ctx);
+	http_ctx_free(ctx);
+}
+
+static void
+api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+{
+	struct api_ctx *restrict ctx =
+		DOWNCAST(struct session, struct api_ctx, ss, ss);
+	api_ctx_close(loop, ctx);
+}
+
+void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_READ);
+	struct api_ctx *restrict ctx = watcher->data;
+
+	const int want = http_parser_recv(&ctx->parser);
+	if (want < 0) {
+		api_ctx_close(loop, ctx);
+		return;
+	}
+	if (want > 0) {
+		return;
+	}
+	switch (ctx->parser.state) {
+	case STATE_PARSE_OK: {
+		struct server_stats *restrict stats = &ctx->s->stats;
+		stats->num_request++;
+		api_handle(loop, ctx);
+		ctx->state = STATE_RESPONSE;
+		ev_io_start(loop, &ctx->w_send);
+	} break;
+	case STATE_PARSE_ERROR:
+		http_resp_errpage(&ctx->parser, ctx->parser.http_status);
+		ctx->state = STATE_RESPONSE;
+		ev_io_start(loop, &ctx->w_send);
+		break;
+	default:
+		FAIL();
+	}
+}
+
+void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_WRITE);
+	struct api_ctx *restrict ctx = watcher->data;
+	assert(ctx->state == STATE_RESPONSE);
+
+	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
+	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
+	int err = socket_send(watcher->fd, buf, &len);
+	if (err != 0) {
+		API_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
+		api_ctx_close(loop, ctx);
+		return;
+	}
+	ctx->parser.wpos += len;
+	if (ctx->parser.wpos < ctx->parser.wbuf.len) {
+		return;
+	}
+
+	if (ctx->parser.cbuf != NULL) {
+		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
+		buf = cbuf->data + ctx->parser.cpos;
+		len = cbuf->len - ctx->parser.cpos;
+		err = socket_send(watcher->fd, buf, &len);
+		if (err != 0) {
+			API_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
+			api_ctx_close(loop, ctx);
+			return;
+		}
+		ctx->parser.cpos += len;
+		if (ctx->parser.cpos < cbuf->len) {
+			return;
+		}
+	}
+
+	/* Connection: close */
+	api_ctx_close(loop, ctx);
+}
+
+static void
+timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_TIMER);
+	struct api_ctx *restrict ctx = watcher->data;
+	api_ctx_close(loop, ctx);
+}
+
+static bool parse_header(void *ctx, const char *key, char *value)
+{
+	struct http_parser *restrict p = &((struct api_ctx *)ctx)->parser;
+
+	/* hop-by-hop headers */
+	if (strcasecmp(key, "Connection") == 0) {
+		p->hdr.connection = strtrimspace(value);
+		return true;
+	}
+	if (strcasecmp(key, "TE") == 0) {
+		return parsehdr_accept_te(p, value);
+	}
+	if (strcasecmp(key, "Transfer-Encoding") == 0) {
+		return parsehdr_transfer_encoding(p, value);
+	}
+
+	/* representation headers */
+	if (strcasecmp(key, "Content-Length") == 0) {
+		return parsehdr_content_length(p, value);
+	}
+	if (strcasecmp(key, "Content-Type") == 0) {
+		p->hdr.content.type = strtrimspace(value);
+		return true;
+	}
+	if (strcasecmp(key, "Content-Encoding") == 0) {
+		return parsehdr_content_encoding(p, value);
+	}
+
+	/* request headers */
+	if (strcasecmp(key, "Accept") == 0) {
+		p->hdr.accept = strtrimspace(value);
+		return true;
+	}
+	if (strcasecmp(key, "Accept-Encoding") == 0) {
+		return parsehdr_accept_encoding(p, value);
+	}
+	if (strcasecmp(key, "Expect") == 0) {
+		value = strtrimspace(value);
+		if (strcasecmp(value, "100-continue") != 0) {
+			p->http_status = HTTP_EXPECTATION_FAILED;
+			return false;
+		}
+		p->expect_continue = true;
+		return true;
+	}
+
+	LOGV_F("unknown http header: `%s' = `%s'", key, value);
+	return true;
+}
+
+static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
+{
+	struct api_ctx *restrict ctx = malloc(sizeof(struct api_ctx));
+	if (ctx == NULL) {
+		return NULL;
+	}
+	ctx->s = s;
+	ctx->state = STATE_INIT;
+	ctx->accepted_fd = fd;
+	ctx->dialed_fd = -1;
+
+	{
+		struct ev_timer *restrict w_timeout = &ctx->w_timeout;
+		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
+		ev_set_priority(w_timeout, EV_MINPRI);
+		w_timeout->data = ctx;
+	}
+	{
+		struct ev_io *restrict w_recv = &ctx->w_recv;
+		ev_io_init(w_recv, recv_cb, fd, EV_READ);
+		w_recv->data = ctx;
+	}
+	{
+		struct ev_io *restrict w_send = &ctx->w_send;
+		ev_io_init(w_send, send_cb, fd, EV_WRITE);
+		w_send->data = ctx;
+	}
+	const struct http_parsehdr_cb on_header = { parse_header, ctx };
+	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
+	ctx->ss.close = api_ss_close;
+	session_add(&ctx->ss);
+	return ctx;
+}
+
+static void api_ctx_start(struct ev_loop *loop, struct api_ctx *restrict ctx)
+{
+	ev_io_start(loop, &ctx->w_recv);
+	ev_timer_start(loop, &ctx->w_timeout);
+
+	ctx->state = STATE_REQUEST;
+}
+
+void api_serve(
+	struct server *s, struct ev_loop *loop, const int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	struct api_ctx *restrict ctx = api_ctx_new(s, accepted_fd);
+	if (ctx == NULL) {
+		LOGOOM();
+		CLOSE_FD(accepted_fd);
+		return;
+	}
+	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
+	api_ctx_start(loop, ctx);
 }

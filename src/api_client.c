@@ -1,13 +1,13 @@
 /* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "http_client.h"
+#include "api_client.h"
 
 #if WITH_RULESET
 
 #include "conf.h"
 #include "dialer.h"
-#include "http_parser.h"
+#include "httputil.h"
 #include "session.h"
 #include "sockutil.h"
 #include "util.h"
@@ -28,15 +28,15 @@
 #include <string.h>
 
 /* never rollback */
-enum http_client_state {
+enum api_client_state {
 	STATE_CLIENT_CONNECT,
 	STATE_CLIENT_REQUEST,
 	STATE_CLIENT_RESPONSE,
 };
 
-struct http_client_ctx {
-	enum http_client_state state;
-	struct http_client_cb invoke_cb;
+struct api_client_ctx {
+	enum api_client_state state;
+	struct api_client_cb invoke_cb;
 	struct ev_timer w_timeout;
 	struct dialreq *dialreq;
 	struct dialer dialer;
@@ -44,8 +44,8 @@ struct http_client_ctx {
 	struct http_parser parser;
 };
 
-static void http_client_close(
-	struct ev_loop *restrict loop, struct http_client_ctx *restrict ctx)
+static void api_client_close(
+	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
 	if (ctx->state == STATE_CLIENT_CONNECT) {
@@ -60,8 +60,8 @@ static void http_client_close(
 	free(ctx);
 }
 
-static void http_client_finish(
-	struct ev_loop *loop, struct http_client_ctx *restrict ctx, bool ok,
+static void api_client_finish(
+	struct ev_loop *loop, struct api_client_ctx *restrict ctx, bool ok,
 	const void *data, const size_t len)
 {
 	if (ctx->invoke_cb.func != NULL) {
@@ -72,25 +72,24 @@ static void http_client_finish(
 			stream_close((struct stream *)data);
 		}
 	}
-	http_client_close(loop, ctx);
+	api_client_close(loop, ctx);
 }
 
-#define HTTP_RETURN_ERROR(loop, ctx, msg)                                      \
+#define API_RETURN_ERROR(loop, ctx, msg)                                       \
 	do {                                                                   \
-		http_client_finish(                                            \
+		api_client_finish(                                             \
 			(loop), (ctx), false, (msg ""), sizeof(msg) - 1);      \
 		return;                                                        \
 	} while (false)
 
-static void
-response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
-	struct http_client_ctx *restrict ctx = watcher->data;
+	struct api_client_ctx *restrict ctx = watcher->data;
 	int ret = http_parser_recv(&ctx->parser);
 	if (ret < 0) {
 		LOGD("error receiving response");
-		HTTP_RETURN_ERROR(loop, ctx, "error receiving response");
+		API_RETURN_ERROR(loop, ctx, "error receiving response");
 	} else if (ret > 0) {
 		return;
 	}
@@ -101,35 +100,34 @@ response_read_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			buf, sizeof(buf), "%s %s %s", msg->rsp.version,
 			msg->rsp.code, msg->rsp.status);
 		CHECK(ret > 0);
-		http_client_finish(loop, ctx, false, buf, (size_t)ret);
+		api_client_finish(loop, ctx, false, buf, (size_t)ret);
 		return;
 	}
 	if (!check_rpcall_mime(ctx->parser.hdr.content.type)) {
-		HTTP_RETURN_ERROR(loop, ctx, "unsupported content-type");
+		API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 	}
 	struct stream *r = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
 	if (r == NULL) {
 		LOGOOM();
-		HTTP_RETURN_ERROR(loop, ctx, "out of memory");
+		API_RETURN_ERROR(loop, ctx, "out of memory");
 	}
-	http_client_finish(loop, ctx, true, r, 0);
+	api_client_finish(loop, ctx, true, r, 0);
 }
 
-static void
-request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	const int fd = watcher->fd;
-	struct http_client_ctx *restrict ctx = watcher->data;
+	struct api_client_ctx *restrict ctx = watcher->data;
 	struct http_parser *restrict p = &ctx->parser;
 	const unsigned char *buf = p->wbuf.data + p->wpos;
 	size_t len = p->wbuf.len - p->wpos;
 	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
 		const char *msg = strerror(err);
-		http_client_finish(loop, ctx, false, msg, strlen(msg));
+		api_client_finish(loop, ctx, false, msg, strlen(msg));
 		return;
 	}
 	p->wpos += len;
@@ -145,7 +143,7 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		err = socket_send(watcher->fd, buf, &len);
 		if (err != 0) {
 			const char *msg = strerror(err);
-			http_client_finish(loop, ctx, false, msg, strlen(msg));
+			api_client_finish(loop, ctx, false, msg, strlen(msg));
 			return;
 		}
 		p->cpos += len;
@@ -157,7 +155,7 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 
 	if (ctx->invoke_cb.func == NULL) {
-		http_client_close(loop, ctx);
+		api_client_close(loop, ctx);
 		return;
 	}
 	ev_io_stop(loop, watcher);
@@ -165,25 +163,25 @@ request_write_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	ctx->state = STATE_CLIENT_RESPONSE;
 	p->fd = fd;
 	ev_io_set(watcher, fd, EV_READ);
-	ev_set_cb(watcher, response_read_cb);
+	ev_set_cb(watcher, recv_cb);
 	ev_io_start(loop, watcher);
 }
 
 static void dialer_cb(struct ev_loop *loop, void *data)
 {
-	struct http_client_ctx *restrict ctx = data;
+	struct api_client_ctx *restrict ctx = data;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		LOGE_F("unable to establish client connection: %s",
 		       strerror(ctx->dialer.syserr));
-		HTTP_RETURN_ERROR(loop, ctx, "failed connecting to server");
+		API_RETURN_ERROR(loop, ctx, "failed connecting to server");
 	}
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
 
 	ctx->state = STATE_CLIENT_REQUEST;
 	struct ev_io *restrict w_write = &ctx->w_socket;
-	ev_io_init(w_write, request_write_cb, fd, EV_WRITE);
+	ev_io_init(w_write, send_cb, fd, EV_WRITE);
 	w_write->data = ctx;
 	ev_io_start(loop, w_write);
 }
@@ -192,8 +190,8 @@ static void
 timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
-	struct http_client_ctx *restrict ctx = watcher->data;
-	HTTP_RETURN_ERROR(loop, ctx, "timeout");
+	struct api_client_ctx *restrict ctx = watcher->data;
+	API_RETURN_ERROR(loop, ctx, "timeout");
 }
 
 static bool make_request(
@@ -235,24 +233,54 @@ static bool make_request(
 	return true;
 }
 
-handle_type http_client_do(
+static bool parse_header(void *ctx, const char *key, char *value)
+{
+	struct http_parser *restrict p =
+		&((struct api_client_ctx *)ctx)->parser;
+
+	/* hop-by-hop headers */
+	if (strcasecmp(key, "Connection") == 0) {
+		p->hdr.connection = strtrimspace(value);
+		return true;
+	}
+	if (strcasecmp(key, "Transfer-Encoding") == 0) {
+		return parsehdr_transfer_encoding(p, value);
+	}
+
+	/* representation headers */
+	if (strcasecmp(key, "Content-Length") == 0) {
+		return parsehdr_content_length(p, value);
+	}
+	if (strcasecmp(key, "Content-Type") == 0) {
+		p->hdr.content.type = strtrimspace(value);
+		return true;
+	}
+	if (strcasecmp(key, "Content-Encoding") == 0) {
+		return parsehdr_content_encoding(p, value);
+	}
+
+	LOGV_F("unknown http header: `%s' = `%s'", key, value);
+	return true;
+}
+
+handle_type api_invoke(
 	struct ev_loop *loop, struct dialreq *req, const char *uri,
-	const char *content, const size_t len, struct http_client_cb client_cb)
+	const char *content, const size_t len, struct api_client_cb client_cb)
 {
 	CHECK(len <= INT_MAX);
-	struct http_client_ctx *restrict ctx =
-		malloc(sizeof(struct http_client_ctx));
+	struct api_client_ctx *restrict ctx =
+		malloc(sizeof(struct api_client_ctx));
 	if (ctx == NULL) {
 		LOGOOM();
 		dialreq_free(req);
 		return INVALID_HANDLE;
 	}
 	ctx->state = STATE_CLIENT_CONNECT;
-	const struct http_parsehdr_cb on_header = { NULL, NULL };
+	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, on_header);
 	if (!make_request(&ctx->parser, uri, content, len)) {
 		LOGOOM();
-		http_client_close(loop, ctx);
+		api_client_close(loop, ctx);
 		return INVALID_HANDLE;
 	}
 	ctx->invoke_cb = client_cb;
@@ -271,9 +299,9 @@ handle_type http_client_do(
 	return handle_make(ctx);
 }
 
-void http_client_cancel(struct ev_loop *loop, const handle_type h)
+void api_cancel(struct ev_loop *loop, const handle_type h)
 {
-	http_client_close(loop, handle_toptr(h));
+	api_client_close(loop, handle_toptr(h));
 }
 
 #endif /* WITH_RULESET */

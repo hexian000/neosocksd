@@ -149,6 +149,11 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 #endif
 	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
 	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
+	if (LOGLEVEL(NOTICE)) {
+		char addr_str[64];
+		format_sa(bindaddr, addr_str, sizeof(addr_str));
+		LOG_F(NOTICE, "listen: %s", addr_str);
+	}
 	if (bind(fd, bindaddr, getsocklen(bindaddr)) != 0) {
 		const int err = errno;
 		LOGE_F("bind error: %s", strerror(err));
@@ -160,11 +165,6 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		LOGE_F("listen error: %s", strerror(err));
 		CLOSE_FD(fd);
 		return false;
-	}
-	if (LOGLEVEL(NOTICE)) {
-		char addr_str[64];
-		format_sa(bindaddr, addr_str, sizeof(addr_str));
-		LOG_F(NOTICE, "listen: %s", addr_str);
 	}
 
 	struct ev_io *restrict w_accept = &s->l.w_accept;

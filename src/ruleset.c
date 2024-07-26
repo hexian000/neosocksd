@@ -5,9 +5,9 @@
 
 #if WITH_RULESET
 
+#include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
-#include "http_client.h"
 #include "proto/domain.h"
 #include "server.h"
 #include "sockutil.h"
@@ -281,8 +281,8 @@ static int api_invoke_(lua_State *restrict L)
 	struct ruleset *restrict r = find_ruleset(L);
 	size_t len;
 	const char *code = lua_tolstring(L, 1, &len);
-	struct http_client_cb cb = { NULL, NULL };
-	http_client_do(r->loop, req, "/ruleset/invoke", code, len, cb);
+	struct api_client_cb cb = { NULL, NULL };
+	api_invoke(r->loop, req, "/ruleset/invoke", code, len, cb);
 	return 0;
 }
 

@@ -1,8 +1,10 @@
 /* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "http_parser.h"
+#include "httputil.h"
+
 #include "sockutil.h"
+#include "util.h"
 
 #include "codec/codec.h"
 #include "io/io.h"
@@ -20,7 +22,6 @@
 #include <sys/types.h>
 
 #include <assert.h>
-#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -68,36 +69,6 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 	}
 	return true;
 }
-
-#if WITH_RULESET
-bool check_rpcall_mime(char *s)
-{
-	if (s == NULL) {
-		return false;
-	}
-	char *type, *subtype;
-	s = mime_parse(s, &type, &subtype);
-	if (s == NULL || strcmp(type, MIME_RPCALL_TYPE) != 0 ||
-	    strcmp(subtype, MIME_RPCALL_SUBTYPE) != 0) {
-		return false;
-	}
-	const char *version = NULL;
-	char *key, *value;
-	for (;;) {
-		s = mime_parseparam(s, &key, &value);
-		if (s == NULL) {
-			return false;
-		}
-		if (key == NULL) {
-			break;
-		}
-		if (strcmp(key, "version") == 0) {
-			version = value;
-		}
-	}
-	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
-}
-#endif
 
 struct stream *content_reader(
 	const void *buf, size_t len, const enum content_encodings encoding)
@@ -187,164 +158,11 @@ static int parse_message(struct http_parser *restrict p)
 	return 0;
 }
 
-static char *strtrimleftspace(char *restrict s)
-{
-	for (; *s && isspace((unsigned char)*s); s++) {
-	}
-	return s;
-}
-
-static char *strtrimrightspace(char *restrict s)
-{
-	char *restrict e = s + strlen(s) - 1;
-	for (; s < e && isspace((unsigned char)*e); e--) {
-		*e = '\0';
-	}
-	return s;
-}
-
-static char *strtrimspace(char *s)
-{
-	return strtrimrightspace(strtrimleftspace(s));
-}
-
-static bool parse_accept_te(struct http_parser *restrict p, char *value)
-{
-	value = strtrimspace(value);
-	if (value[0] == '\0') {
-		p->hdr.transfer.accept = TENCODING_NONE;
-		return true;
-	}
-	if (strcmp(value, "chunked") == 0) {
-		p->hdr.transfer.accept = TENCODING_CHUNKED;
-		return true;
-	}
-	return false;
-}
-
-static bool parse_transfer_encoding(struct http_parser *restrict p, char *value)
-{
-	value = strtrimspace(value);
-	if (value[0] == '\0') {
-		p->hdr.transfer.encoding = TENCODING_NONE;
-		return true;
-	}
-	if (strcmp(value, "chunked") == 0) {
-		p->hdr.transfer.encoding = TENCODING_CHUNKED;
-		return true;
-	}
-	return false;
-}
-
-static bool parse_accept_encoding(struct http_parser *restrict p, char *value)
-{
-	if (strcmp(value, "*") == 0) {
-		p->hdr.accept_encoding = CENCODING_DEFLATE;
-		return true;
-	}
-	const char *deflate = content_encoding_str[CENCODING_DEFLATE];
-	for (char *token = strtok(value, ","); token != NULL;
-	     token = strtok(NULL, ",")) {
-		char *q = strchr(token, ';');
-		if (q != NULL) {
-			*q = '\0';
-		}
-		token = strtrimspace(token);
-		if (strcasecmp(token, deflate) == 0) {
-			p->hdr.accept_encoding = CENCODING_DEFLATE;
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool parse_content_length(struct http_parser *restrict p, char *value)
-{
-	char *endptr;
-	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
-	if (*endptr || lenvalue > SIZE_MAX) {
-		return false;
-	}
-	const size_t content_length = (size_t)lenvalue;
-	if (strcmp(p->msg.req.method, "CONNECT") == 0) {
-		return false;
-	}
-	p->hdr.content.has_length = true;
-	p->hdr.content.length = content_length;
-	return true;
-}
-
-static bool parse_content_encoding(struct http_parser *restrict p, char *value)
-{
-	for (size_t i = 0; i < ARRAY_SIZE(content_encoding_str); i++) {
-		if (content_encoding_str[i] == NULL) {
-			continue;
-		}
-		if (strcasecmp(value, content_encoding_str[i]) == 0) {
-			p->hdr.content.encoding = (enum content_encodings)i;
-			return true;
-		}
-	}
-	p->http_status = HTTP_UNSUPPORTED_MEDIA_TYPE;
-	return false;
-}
-
 static bool
 parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 {
 	LOGV_F("http_header: \"%s: %s\"", key, value);
-
-	/* hop-by-hop headers */
-	if (strcasecmp(key, "Connection") == 0) {
-		p->hdr.connection = strtrimspace(value);
-		return true;
-	}
-	if (strcasecmp(key, "TE") == 0) {
-		return parse_accept_te(p, value);
-	}
-	if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		return parse_transfer_encoding(p, value);
-	}
-
-	/* custom header handler */
-	if (p->on_header.func != NULL) {
-		return p->on_header.func(p->on_header.ctx, key, value);
-	}
-
-	/* representation headers */
-	if (strcasecmp(key, "Content-Length") == 0) {
-		return parse_content_length(p, value);
-	}
-	if (strcasecmp(key, "Content-Type") == 0) {
-		p->hdr.content.type = strtrimspace(value);
-		return true;
-	}
-	if (strcasecmp(key, "Content-Encoding") == 0) {
-		return parse_content_encoding(p, value);
-	}
-
-	if (p->mode == STATE_PARSE_REQUEST) {
-		/* request headers */
-		if (strcasecmp(key, "Accept") == 0) {
-			p->hdr.accept = strtrimspace(value);
-			return true;
-		}
-		if (strcasecmp(key, "Accept-Encoding") == 0) {
-			return parse_accept_encoding(p, value);
-		}
-		if (strcasecmp(key, "Expect") == 0) {
-			value = strtrimspace(value);
-			if (strcasecmp(value, "100-continue") != 0) {
-				p->http_status = HTTP_EXPECTATION_FAILED;
-				return false;
-			}
-			p->expect_continue = true;
-			return true;
-		}
-	}
-
-	LOGV_F("unknown http header: `%s' = `%s'", key, value);
-	return true;
+	return p->on_header.func(p->on_header.ctx, key, value);
 }
 
 static int parse_header(struct http_parser *restrict p)
@@ -403,7 +221,6 @@ static int parse_content(struct http_parser *restrict p)
 	if (VBUF_LEN(p->cbuf) < content_length) {
 		return 1;
 	}
-	p->state = STATE_PARSE_OK;
 	return 0;
 }
 
@@ -481,7 +298,8 @@ int http_parser_recv(struct http_parser *restrict p)
 			if (ret != 0) {
 				return ret;
 			}
-			break;
+			p->state = STATE_PARSE_OK;
+			/* fallthrough */
 		case STATE_PARSE_ERROR:
 		case STATE_PARSE_OK:
 			return 0;
@@ -496,7 +314,7 @@ void http_parser_init(
 	const enum http_parser_state mode,
 	const struct http_parsehdr_cb on_header)
 {
-	p->mode = p->state = mode;
+	p->state = mode;
 	p->http_status = HTTP_BAD_REQUEST;
 	p->fd = fd;
 	p->msg = (struct http_message){ 0 };

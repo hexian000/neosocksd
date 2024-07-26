@@ -97,8 +97,36 @@ struct splice_pipe {
 	size_t cap, len;
 };
 
-bool pipe_get(struct splice_pipe *pipe);
-void pipe_put(struct splice_pipe *pipe);
+#define PIPE_BUFSIZE 262144
+#define PIPE_CACHESIZE 128
+
+extern struct pipe_cache {
+	size_t cap, len;
+	struct splice_pipe pipes[PIPE_CACHESIZE];
+} pipe_cache;
+
+void pipe_close(struct splice_pipe *pipe);
+bool pipe_new(struct splice_pipe *pipe);
+
+static inline bool pipe_get(struct splice_pipe *restrict pipe)
+{
+	if (pipe_cache.len == 0) {
+		return pipe_new(pipe);
+	}
+	*pipe = pipe_cache.pipes[--pipe_cache.len];
+	return true;
+}
+
+static inline void pipe_put(struct splice_pipe *restrict pipe)
+{
+	if (pipe->cap < PIPE_BUFSIZE || pipe->len > 0 ||
+	    pipe_cache.len == pipe_cache.cap) {
+		pipe_close(pipe);
+		return;
+	}
+	pipe_cache.pipes[pipe_cache.len++] = *pipe;
+}
+
 void pipe_shrink(size_t count);
 #endif
 

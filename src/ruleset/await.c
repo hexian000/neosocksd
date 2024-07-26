@@ -10,8 +10,8 @@
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
+#include "api_client.h"
 #include "conf.h"
-#include "http_client.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "util.h"
@@ -270,7 +270,7 @@ static int await_invoke_close_(struct lua_State *L)
 	handle_type *h = (handle_type *)lua_topointer(L, 1);
 	if (*h != INVALID_HANDLE) {
 		struct ruleset *restrict r = find_ruleset(L);
-		http_client_cancel(r->loop, *h);
+		api_cancel(r->loop, *h);
 		*h = INVALID_HANDLE;
 	}
 	return 0;
@@ -284,7 +284,7 @@ static void invoke_cb(
 	struct ruleset *restrict r = ctx;
 	const void *p = handle_toptr(h);
 	if (!ruleset_resume(r, p, 3, (void *)&ok, (void *)data, (void *)&len)) {
-		LOGE_F("http_client_cb: %s", ruleset_geterror(r, NULL));
+		LOGE_F("api_client_cb: %s", ruleset_geterror(r, NULL));
 	}
 }
 
@@ -341,12 +341,12 @@ static int await_invoke_(lua_State *restrict L)
 		return lua_error(L);
 	}
 	struct ruleset *restrict r = find_ruleset(L);
-	struct http_client_cb cb = {
+	struct api_client_cb cb = {
 		.func = invoke_cb,
 		.ctx = r,
 	};
 	handle_type h =
-		http_client_do(r->loop, req, "/ruleset/rpcall", code, len, cb);
+		api_invoke(r->loop, req, "/ruleset/rpcall", code, len, cb);
 	if (h == INVALID_HANDLE) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);

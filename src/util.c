@@ -41,7 +41,7 @@
 struct globals G = { 0 };
 
 #if WITH_SPLICE
-#define PIPE_BUFSIZE 262144
+struct pipe_cache pipe_cache = { .cap = PIPE_CACHESIZE, .len = 0 };
 
 void pipe_close(struct splice_pipe *restrict pipe)
 {
@@ -53,7 +53,7 @@ void pipe_close(struct splice_pipe *restrict pipe)
 	}
 }
 
-static bool pipe_new(struct splice_pipe *restrict pipe)
+bool pipe_new(struct splice_pipe *restrict pipe)
 {
 	pipe->fd[0] = pipe->fd[1] = -1;
 	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
@@ -76,38 +76,14 @@ static bool pipe_new(struct splice_pipe *restrict pipe)
 	return true;
 }
 
-static struct {
-	size_t cap, len;
-	struct splice_pipe pipes[128];
-} pipe_pool = { .cap = 128, .len = 0 };
-
-bool pipe_get(struct splice_pipe *restrict pipe)
-{
-	if (pipe_pool.len == 0) {
-		return pipe_new(pipe);
-	}
-	*pipe = pipe_pool.pipes[--pipe_pool.len];
-	return true;
-}
-
-void pipe_put(struct splice_pipe *restrict pipe)
-{
-	if (pipe->cap < PIPE_BUFSIZE || pipe->len > 0 ||
-	    pipe_pool.len == pipe_pool.cap) {
-		pipe_close(pipe);
-		return;
-	}
-	pipe_pool.pipes[pipe_pool.len++] = *pipe;
-}
-
 void pipe_shrink(const size_t count)
 {
-	size_t n = pipe_pool.len;
+	size_t n = pipe_cache.len;
 	const size_t stop = count < n ? n - count : 0;
 	while (n > stop) {
-		pipe_close(&pipe_pool.pipes[--n]);
+		pipe_close(&pipe_cache.pipes[--n]);
 	}
-	pipe_pool.len = n;
+	pipe_cache.len = n;
 }
 #endif
 
