@@ -359,10 +359,14 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "unable to establish client connection: %s",
-			strerror(ctx->dialer.syserr));
-		socks_senderr(ctx, ctx->dialer.syserr);
+		const int err = ctx->dialer.syserr;
+		if (err != 0) {
+			SOCKS_CTX_LOG_F(
+				ERROR, ctx,
+				"unable to establish client connection: %s",
+				strerror(err));
+		}
+		socks_senderr(ctx, err);
 		socks_ctx_close(loop, ctx);
 		return;
 	}
@@ -666,16 +670,11 @@ static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 #if WITH_RULESET
 	struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		size_t cap =
+		const size_t cap =
 			addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
-	make_request:;
 		char request[cap];
 		const int len = dialaddr_format(addr, request, cap);
-		CHECK(len >= 0);
-		if ((size_t)len >= cap) {
-			cap = (size_t)len + 1;
-			goto make_request;
-		}
+		CHECK(len >= 0 && (size_t)len < cap);
 		switch (addr->type) {
 		case ATYP_DOMAIN:
 			return ruleset_resolve(ruleset, request);

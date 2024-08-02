@@ -85,11 +85,6 @@ bool conf_check(const struct config *restrict conf)
 		LOGE("incompatible flags are specified");
 		return false;
 	}
-#if WITH_RULESET
-	if (conf->ruleset != NULL && conf->forward != NULL) {
-		LOGW("ruleset will not work in forwarding mode");
-	}
-#endif
 	if (conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 16384) {
 		LOGW("tcp send buffer is too small");
 		return false;

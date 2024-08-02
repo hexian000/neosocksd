@@ -273,6 +273,27 @@ static void forward_ctx_start(
 	stats->num_halfopen++;
 }
 
+#if WITH_RULESET
+static struct dialreq *
+forward_route(struct ruleset *r, const struct dialaddr *restrict addr)
+{
+	const size_t cap =
+		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
+	char request[cap];
+	const int len = dialaddr_format(addr, request, cap);
+	CHECK(len >= 0 && (size_t)len < cap);
+	switch (addr->type) {
+	case ATYP_INET:
+		return ruleset_route(r, request);
+	case ATYP_INET6:
+		return ruleset_route6(r, request);
+	case ATYP_DOMAIN:
+		return ruleset_resolve(r, request);
+	}
+	FAIL();
+}
+#endif
+
 void forward_serve(
 	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa)
@@ -284,7 +305,21 @@ void forward_serve(
 		return;
 	}
 	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
-	forward_ctx_start(loop, ctx, G.basereq);
+	struct dialreq *req = G.basereq;
+#if WITH_RULESET
+	struct ruleset *r = G.ruleset;
+	if (r != NULL) {
+		req = forward_route(r, &req->addr);
+		if (req == NULL) {
+			LOGE("forwarding failed: ruleset error");
+			forward_ctx_close(loop, ctx);
+			return;
+		}
+		/* need to be freed */
+		ctx->dialreq = req;
+	}
+#endif
+	forward_ctx_start(loop, ctx, req);
 }
 
 #if WITH_TPROXY
@@ -329,11 +364,9 @@ static struct dialreq *tproxy_makereq(struct forward_ctx *restrict ctx)
 	}
 
 #if WITH_RULESET
-	{
-		struct ruleset *r = G.ruleset;
-		if (r != NULL) {
-			return tproxy_route(r, &dest.sa);
-		}
+	struct ruleset *r = G.ruleset;
+	if (r != NULL) {
+		return tproxy_route(r, &dest.sa);
 	}
 #endif
 
@@ -373,6 +406,7 @@ void tproxy_serve(
 		forward_ctx_close(loop, ctx);
 		return;
 	}
+	/* need to be freed */
 	ctx->dialreq = req;
 	forward_ctx_start(loop, ctx, req);
 }

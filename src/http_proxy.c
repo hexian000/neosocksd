@@ -228,7 +228,7 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 	struct dialreq *req = make_dialreq(msg->req.url);
 	if (req == NULL) {
-		http_resp_errpage(&ctx->parser, HTTP_BAD_GATEWAY);
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	ctx->state = STATE_CONNECT;

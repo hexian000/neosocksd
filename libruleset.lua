@@ -552,9 +552,9 @@ local lb = {}
 
 function lb.roundrobin(t)
     local i, n = 0, #t
-    return function(addr)
+    return function(...)
         i = i % n + 1
-        return t[i]
+        return t[i](...)
     end
 end
 
