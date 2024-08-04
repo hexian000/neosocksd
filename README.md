@@ -54,10 +54,11 @@ For advanced scripting usage, see [scripting](#scripting).
 ./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
 # High-performance dynamic TCP load balancer
-./neosocksd --pipe -l 0.0.0.0:30001 -f 203.0.113.1:30001 --api 127.0.1.1:9080 -r lb.lua -d
+./neosocksd --pipe -d -u nobody:nogroup -l 0.0.0.0:30001 \
+    -f 10.0.0.1:30001 --api 127.0.1.1:9080 -r lb.lua
 
 # Forward connection over proxy chain
-# Tip: forwarding in SOCKS5 requires 1 more roundtrip than SOCKS4A/HTTP, so is generally not a good idea.
+# Tip: forwarding in SOCKS5 needs 1 more roundtrip than SOCKS4A/HTTP, so is usually not a good idea.
 ./neosocksd -l 0.0.0.0:12345 -f 192.168.2.2:12345 -x "socks4a://192.168.1.1:1080,http://192.168.2.1:8118"
 
 # Convert proxy protocol to SOCKS4A
