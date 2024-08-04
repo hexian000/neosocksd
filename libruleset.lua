@@ -559,18 +559,16 @@ function lb.roundrobin(t)
 end
 
 function lb.iwrr(t, cyclesize)
-    local sum = 0
+    local max = 0
     for _, v in ipairs(t) do
-        sum = sum + v[1]
-        v[1] = sum
+        max = math.max(max, v[1])
     end
     for _, v in ipairs(t) do
-        v[1] = v[1] / sum
+        v[1] = v[1] / max
     end
     local step = 0.01
     if cyclesize then step = 1 / cyclesize end
     local i, r, n = 0, 0, #t
-    t[n][1] = 1
     return function(...)
         repeat
             i = i % n + 1
