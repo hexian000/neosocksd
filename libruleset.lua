@@ -558,6 +558,29 @@ function lb.roundrobin(t)
     end
 end
 
+function lb.iwrr(t, cyclesize)
+    local sum = 0
+    for _, v in ipairs(t) do
+        sum = sum + v[1]
+        v[1] = sum
+    end
+    for _, v in ipairs(t) do
+        v[1] = v[1] / sum
+    end
+    local step = 0.01
+    if cyclesize then step = 1 / cyclesize end
+    local i, r, n = 0, 0, #t
+    t[n][1] = 1
+    return function(...)
+        repeat
+            i = i % n + 1
+        until r < t[i][1]
+        r = r + step
+        if r >= 1 then r = r - 1 end
+        return t[i][2](...)
+    end
+end
+
 _G.lb = lb
 
 -- [[ ruleset entrypoint functions ]] --
