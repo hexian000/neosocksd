@@ -31,12 +31,8 @@ typedef void (*http_handler_fn)(struct ev_loop *loop, struct http_ctx *ctx);
 /* never rollback */
 enum http_state {
 	STATE_INIT,
-	STATE_REQUEST_HEADER,
-	STATE_REQUEST_CONTENT,
-	STATE_REQUEST_TRAILER,
-	STATE_RESPONSE_HEADER,
-	STATE_RESPONSE_CONTENT,
-	STATE_RESPONSE_TRAILER,
+	STATE_REQUEST,
+	STATE_RESPONSE,
 	STATE_CONNECT,
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
@@ -92,12 +88,8 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	switch (ctx->state) {
 	case STATE_INIT:
 		return;
-	case STATE_REQUEST_HEADER:
-	case STATE_REQUEST_CONTENT:
-	case STATE_REQUEST_TRAILER:
-	case STATE_RESPONSE_HEADER:
-	case STATE_RESPONSE_CONTENT:
-	case STATE_RESPONSE_TRAILER:
+	case STATE_REQUEST:
+	case STATE_RESPONSE:
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		stats->num_halfopen--;
@@ -173,7 +165,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 			ERROR, ctx, "unable to establish client connection: %s",
 			strerror(ctx->dialer.syserr));
 		http_resp_errpage(&ctx->parser, HTTP_BAD_GATEWAY);
-		ctx->state = STATE_RESPONSE_HEADER;
+		ctx->state = STATE_RESPONSE;
 		ev_io_start(loop, &ctx->w_send);
 		return;
 	}
@@ -210,8 +202,8 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	/* TODO */
 	UNUSED(loop);
-	http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
-	ctx->state = STATE_RESPONSE_HEADER;
+	http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
+	ctx->state = STATE_RESPONSE;
 	ev_io_start(loop, &ctx->w_send);
 }
 
@@ -319,7 +311,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	} break;
 	case STATE_PARSE_ERROR:
 		http_resp_errpage(&ctx->parser, ctx->parser.http_status);
-		ctx->state = STATE_RESPONSE_HEADER;
+		ctx->state = STATE_RESPONSE;
 		ev_io_start(loop, &ctx->w_send);
 		break;
 	default:
@@ -331,8 +323,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct http_ctx *restrict ctx = watcher->data;
-	assert(ctx->state == STATE_RESPONSE_HEADER ||
-	       ctx->state == STATE_CONNECT);
+	assert(ctx->state == STATE_RESPONSE || ctx->state == STATE_CONNECT);
 
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
@@ -469,7 +460,7 @@ static void http_ctx_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_recv);
 	ev_timer_start(loop, &ctx->w_timeout);
 
-	ctx->state = STATE_REQUEST_HEADER;
+	ctx->state = STATE_REQUEST;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen++;
 }
