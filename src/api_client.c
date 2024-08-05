@@ -94,7 +94,19 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 	const struct http_message *restrict msg = &ctx->parser.msg;
-	if (strcmp(msg->rsp.code, "200") != 0) {
+	if (strcmp(msg->rsp.code, "200") == 0) {
+		/* OK - get the results */
+		if (!check_rpcall_mime(ctx->parser.hdr.content.type)) {
+			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
+		}
+	} else if (VBUF_LEN(ctx->parser.cbuf) > 0) {
+		/* return content as error info */
+		api_client_finish(
+			loop, ctx, false, VBUF_DATA(ctx->parser.cbuf),
+			VBUF_LEN(ctx->parser.cbuf));
+		return;
+	} else {
+		/* HTTP error info */
 		char buf[64];
 		ret = snprintf(
 			buf, sizeof(buf), "%s %s %s", msg->rsp.version,
@@ -102,9 +114,6 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		CHECK(ret > 0);
 		api_client_finish(loop, ctx, false, buf, (size_t)ret);
 		return;
-	}
-	if (!check_rpcall_mime(ctx->parser.hdr.content.type)) {
-		API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 	}
 	struct stream *r = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
