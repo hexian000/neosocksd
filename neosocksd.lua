@@ -1,4 +1,5 @@
--- neosocksd.lua: dummy lib
+-- neosocksd.lua: dummy lib for linter
+error("dummy lib should not be loaded")
 
 _G.NDEBUG = true
 _G.async = pcall

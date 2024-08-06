@@ -19,6 +19,7 @@ end
 rebuild()
 
 function rpc.set_weight(s, w)
+    logf("rpc.set_weight(%q, %q)", s, w)
     local old = backends[s]
     backends[s] = w
     rebuild()
@@ -26,6 +27,7 @@ function rpc.set_weight(s, w)
 end
 
 function rpc.set_backends(t)
+    logf("rpc.set_backends(%s)", marshal(t))
     local old = backends
     backends = t or backends
     rebuild()
