@@ -1,11 +1,10 @@
 -- [[ useful library routines ]] --
-function _G.printf(...)
-    return print(string.format(...))
-end
+local strformat = string.format
 
-function _G.eval(s, ...)
-    return assert(load(s, "=eval"))(...)
+local function printf(...)
+    return print(strformat(...))
 end
+_G.printf = printf
 
 function package.replace(modname, chunk)
     local module = chunk()
@@ -62,7 +61,7 @@ function list:totable()
 end
 
 function list:insertf(s, ...)
-    return self:insert(string.format(s, ...))
+    return self:insert(strformat(s, ...))
 end
 
 function list:append(t)
@@ -74,7 +73,7 @@ function list:clone()
 end
 
 function list:map(f)
-    for i, v in ipairs(self) do
+    for i, v in self:iter() do
         self[i] = f(v)
     end
     return self
@@ -93,7 +92,7 @@ _G.list = list
 
 -- [[ logging utilities ]] --
 
-_G.RECENT_EVENTS_LIMIT = 16
+_G.RECENT_EVENTS_LIMIT = _G.RECENT_EVENTS_LIMIT or 16
 _G.recent_events = _G.recent_events or {}
 local function addevent_(tstamp, msg)
     local n = recent_events["#"] or 0
@@ -116,8 +115,7 @@ local function addevent_(tstamp, msg)
     recent_events["^"], recent_events["#"] = i, n
 end
 
-function _G.log(...)
-    local msg = list:pack(...):map(tostring):concat("\t")
+local function log_(msg)
     local now = os.time()
     addevent_(now, msg)
     if _G.NDEBUG then
@@ -135,12 +133,18 @@ function _G.log(...)
         source = info.short_src
     end
     local line = info.currentline
-    return _G.printf("D %s %s:%d %s", timestamp, source, line, msg)
+    return printf("D %s %s:%d %s", timestamp, source, line, msg)
 end
 
-function _G.logf(s, ...)
-    return _G.log(string.format(s, ...))
+local function log(...)
+    return log_(list:pack(...):map(tostring):concat("\t"))
 end
+_G.log = log
+
+local function logf(...)
+    return log_(strformat(...))
+end
+_G.logf = logf
 
 local splithostport = neosocksd.splithostport
 local parse_ipv4 = neosocksd.parse_ipv4
@@ -199,7 +203,7 @@ end
 _G.rpc = rpc
 
 function await.rpcall(target, func, ...)
-    local code = string.format("return _G.rpc.%s(%s)", func, marshal(...))
+    local code = strformat("return _G.rpc.%s(%s)", func, marshal(...))
     return await.invoke(code, table.unpack(target))
 end
 
@@ -317,7 +321,7 @@ end
 function match.host(s)
     if type(s) ~= "table" then
         return function(addr)
-            local host, port = splithostport(addr)
+            local host, _ = splithostport(addr)
             if not host then
                 return false
             end
@@ -329,7 +333,7 @@ function match.host(s)
         t[v] = true
     end
     return function(addr)
-        local host, port = splithostport(addr)
+        local host, _ = splithostport(addr)
         if not host then
             return false
         end
@@ -343,7 +347,7 @@ function match.port(from, to)
             to = from
         end
         return function(addr)
-            local host, port = splithostport(addr)
+            local _, port = splithostport(addr)
             if not port then
                 return false
             end
@@ -356,7 +360,7 @@ function match.port(from, to)
         t[tostring(v)] = true
     end
     return function(addr)
-        local host, port = splithostport(addr)
+        local _, port = splithostport(addr)
         if not port then
             return false
         end
@@ -373,7 +377,7 @@ function match.domain(s)
             suffix = "." .. s
         end
         return function(addr)
-            local host, port = splithostport(addr)
+            local host, _ = splithostport(addr)
             if not host then
                 return false
             end
@@ -384,8 +388,8 @@ function match.domain(s)
     for _, v in pairs(s) do
         local path, n = {}, 0
         for seg in v:gmatch("[^.]+") do
-            table.insert(path, seg)
             n = n + 1
+            path[n] = seg
         end
         local t = tree
         for i = n, 2, -1 do
@@ -403,14 +407,14 @@ function match.domaintree(tree)
         error("domain tree should be a table", 2)
     end
     return function(addr)
-        local host, port = splithostport(addr)
+        local host, _ = splithostport(addr)
         if not host then
             return false
         end
         local path, n = {}, 0
         for seg in host:gmatch("[^.]+") do
-            table.insert(path, seg)
             n = n + 1
+            path[n] = seg
         end
         local t = tree
         for i = n, 1, -1 do
@@ -524,13 +528,13 @@ function rule.redirect(dst, ...)
     if host == "" then
         return function(addr)
             local host, _ = splithostport(addr)
-            return string.format("%s:%s", host, port), chain:unpack()
+            return strformat("%s:%s", host, port), chain:unpack()
         end
     end
     if port == "" then
         return function(addr)
             local _, port = splithostport(addr)
-            return string.format("%s:%s", host, port), chain:unpack()
+            return strformat("%s:%s", host, port), chain:unpack()
         end
     end
     return function(addr)
@@ -723,7 +727,7 @@ local function render_(w)
     requests:insert(num_requests - last_requests)
     local peak = math.max(0, requests:unpack())
     local q = math.max(1, peak)
-    for i, v in ipairs(requests) do
+    for i, v in requests:iter() do
         requests[i] = math.floor(v / q * 5.0 + 0.5)
     end
     for y = 4, 0, -1 do
