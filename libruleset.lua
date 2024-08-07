@@ -1,4 +1,5 @@
 -- [[ useful library routines ]] --
+local _ -- discard upvalue
 local strformat = string.format
 
 local function printf(...)
@@ -627,7 +628,7 @@ local function route_(addr)
         end
     end
     -- check route table
-    local host, port = splithostport(addr)
+    local host, _ = splithostport(addr)
     if not host then
         logf("route: invalid address %q", addr)
         return nil
@@ -660,7 +661,7 @@ local function route6_(addr)
         end
     end
     -- check route table
-    local host, port = splithostport(addr)
+    local host, _ = splithostport(addr)
     if not host then
         logf("route6: invalid address %q", addr)
         return nil
