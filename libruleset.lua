@@ -36,6 +36,7 @@ function table.get(t, ...)
     return v
 end
 
+-- [[ list: linear list ]] --
 local list = {
     iter = ipairs,
     insert = table.insert,
@@ -44,17 +45,17 @@ local list = {
     concat = table.concat,
     sort = table.sort
 }
-
-local list_mt = {
-    __index = list
-}
+local list_mt = { __index = list }
 
 function list:new(t)
     return setmetatable(t or {}, list_mt)
 end
 
-function list:pack(...)
-    return setmetatable({ ... }, list_mt)
+function list:check(t)
+    if type(t) ~= "table" or getmetatable(t) ~= list_mt then
+        return nil
+    end
+    return t
 end
 
 function list:totable()
@@ -91,34 +92,101 @@ end
 
 _G.list = list
 
--- [[ logging utilities ]] --
+-- [[ rlist: ring buffer ]] --
+local rlist = {}
+local rlist_mt = { __index = rlist }
 
-_G.RECENT_EVENTS_LIMIT = _G.RECENT_EVENTS_LIMIT or 16
-_G.recent_events = _G.recent_events or {}
-local function addevent_(tstamp, msg)
-    local n = recent_events["#"] or 0
-    local i = recent_events["^"] or n
-    local entry = recent_events[i]
-    if entry and entry.msg == msg then
-        entry.count = entry.count + 1
-        entry.tstamp = tstamp
-        return
-    end
-    i                = (i % RECENT_EVENTS_LIMIT) + 1
-    recent_events[i] = {
-        msg = msg,
-        count = 1,
-        tstamp = tstamp
-    }
-    if n < i then
-        n = i
-    end
-    recent_events["^"], recent_events["#"] = i, n
+function rlist:new(cap, t)
+    t = t or {}
+    local n = #t
+    t.pos = n % cap + 1
+    t.len = n
+    t.cap = cap
+    return setmetatable(t, rlist_mt)
 end
 
+function rlist:check(t)
+    if type(t) ~= "table" or getmetatable(t) ~= rlist_mt then
+        return nil
+    end
+    return t
+end
+
+function rlist:push(value)
+    local pos = self.pos
+    local len = self.len
+    local cap = self.cap
+    self[pos] = value
+    self.pos  = (pos % cap) + 1
+    if len < cap then
+        self.len = len + 1
+    end
+end
+
+function rlist:get(i)
+    local len = self.len
+    if 1 <= i and i <= len then
+        local pos = self.pos - i
+        if pos < 1 then
+            pos = pos + len
+        end
+        return self[pos]
+    end
+    return nil
+end
+
+function rlist:next(i)
+    local len = self.len
+    if i then i = i + 1 else i = 1 end
+    if 1 <= i and i <= len then
+        local pos = self.pos - i
+        if pos < 1 then
+            pos = pos + len
+        end
+        return i, self[pos]
+    end
+    return nil, nil
+end
+
+function rlist:prev(i)
+    local len = self.len
+    if i then i = i - 1 else i = len end
+    if 1 <= i and i <= len then
+        local pos = self.pos - i
+        if pos < 1 then
+            pos = pos + len
+        end
+        return i, self[pos]
+    end
+    return nil, nil
+end
+
+function rlist:iter()
+    return rlist.next, self, nil
+end
+
+function rlist:reviter()
+    return rlist.prev, self, nil
+end
+
+_G.rlist = rlist
+
+-- [[ logging utilities ]] --
+_G.RECENT_EVENTS_LIMIT = _G.RECENT_EVENTS_LIMIT or 16
+_G.recent_events = rlist:check(_G.recent_events) or rlist:new(_G.RECENT_EVENTS_LIMIT)
 local function log_(msg)
     local now = os.time()
-    addevent_(now, msg)
+    local entry = recent_events:get(1)
+    if entry and entry.msg == msg then
+        entry.count = entry.count + 1
+        entry.tstamp = now
+        return
+    end
+    recent_events:push({
+        msg = msg,
+        count = 1,
+        tstamp = now
+    })
     if _G.NDEBUG then
         return
     end
@@ -138,7 +206,7 @@ local function log_(msg)
 end
 
 local function log(...)
-    return log_(list:pack(...):map(tostring):concat("\t"))
+    return log_(list:new({ ... }):map(tostring):concat("\t"))
 end
 _G.log = log
 
@@ -524,7 +592,7 @@ function rule.default()
 end
 
 function rule.redirect(dst, ...)
-    local chain = list:pack(...):reverse()
+    local chain = list:new({ ... }):reverse()
     local host, port = splithostport(dst)
     if host == "" then
         return function(addr)
@@ -544,7 +612,7 @@ function rule.redirect(dst, ...)
 end
 
 function rule.proxy(...)
-    local chain = list:pack(...):reverse()
+    local chain = list:new({ ... }):reverse()
     return function(addr)
         return addr, chain:unpack()
     end
@@ -588,8 +656,7 @@ _G.lb = lb
 
 -- [[ ruleset entrypoint functions ]] --
 _G.num_requests = _G.num_requests or 0
-_G.stat_requests = _G.stat_requests or list:new({ 0 })
-_G.MAX_STAT_REQUESTS = 60
+_G.stat_requests = rlist:check(_G.stat_requests) or rlist:new(60, { _G.num_requests })
 
 local function matchtab_(t, ...)
     for i, rule in ipairs(t) do
@@ -717,7 +784,7 @@ end
 local function render_(w)
     local requests, n = list:new(), 0
     local last_requests
-    for i, v in stat_requests:iter() do
+    for _, v in stat_requests:reviter() do
         if last_requests then
             local delta = v - last_requests
             requests:insert(delta)
@@ -764,10 +831,7 @@ function ruleset.route6(addr)
 end
 
 function ruleset.tick(now)
-    stat_requests:insert(num_requests)
-    if stat_requests[MAX_STAT_REQUESTS + 1] then
-        stat_requests:remove(1)
-    end
+    stat_requests:push(num_requests)
 end
 
 function ruleset.stats(dt)
@@ -783,21 +847,13 @@ function ruleset.stats(dt)
         _G.last_clock = clock
     end
     w:insert("> Recent Events")
-    local n = recent_events["#"] or 0
-    local i = recent_events["^"] or n
-    for _ = 1, n do
-        local entry = recent_events[i]
-        if not entry then
-            break
-        end
+    for _, entry in recent_events:iter() do
         local tstamp = os.date("%Y-%m-%dT%T%z", entry.tstamp)
         if entry.count == 1 then
             w:insertf("%s %s", tstamp, entry.msg)
         else
             w:insertf("%s %s (x%d)", tstamp, entry.msg, entry.count)
         end
-        i = i - 1
-        if i < 1 then i = n end
     end
     w:insert("> Request Stats")
     render_(w)
