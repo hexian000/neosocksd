@@ -13,8 +13,6 @@
 #include <stdint.h>
 #include <tgmath.h>
 
-#define MT_MARSHAL_CACHE "marshal.cache"
-
 #define luaL_addliteral(B, s) luaL_addlstring((B), ("" s), sizeof(s) - 1)
 
 static void
@@ -229,11 +227,12 @@ int api_marshal_(lua_State *restrict L)
 	lua_newtable(L);
 	/* closed */
 	lua_newtable(L);
-	if (luaL_newmetatable(L, MT_MARSHAL_CACHE)) {
-		lua_pushliteral(L, "kv");
-		lua_setfield(L, -2, "__mode");
-	}
+	/* closed_mt */
+	lua_newtable(L);
+	lua_pushliteral(L, "kv");
+	lua_setfield(L, -2, "__mode");
 	lua_setmetatable(L, -2);
+
 	lua_rotate(L, 1, 2);
 	luaL_Buffer b;
 	luaL_buffinitsize(L, &b, IO_BUFSIZE);
