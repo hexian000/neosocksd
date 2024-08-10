@@ -1,5 +1,4 @@
 -- [[ useful library routines ]] --
-local _ -- discard upvalue
 local strformat = string.format
 
 local function printf(...)
@@ -43,20 +42,7 @@ local list = {
     remove = table.remove,
     unpack = table.unpack,
     concat = table.concat,
-    sort = table.sort
 }
-local list_mt = { __index = list }
-
-function list:new(t)
-    return setmetatable(t or {}, list_mt)
-end
-
-function list:check(t)
-    if type(t) ~= "table" or getmetatable(t) ~= list_mt then
-        return nil
-    end
-    return t
-end
 
 function list:totable()
     return setmetatable(self, nil)
@@ -90,11 +76,27 @@ function list:reverse()
     return self
 end
 
+local list_mt = {
+    __name = "list",
+    __index = list,
+    __clone = list.clone,
+}
+function list:new(t)
+    return setmetatable(t or {}, list_mt)
+end
+
+function list:check(t)
+    if type(t) ~= "table" or getmetatable(t) ~= list_mt then
+        return nil
+    end
+    return t
+end
+
 _G.list = list
 
 -- [[ rlist: ring buffer ]] --
 local rlist = {}
-local rlist_mt = { __index = rlist }
+local rlist_mt = { __name = "rlist", __index = rlist }
 
 function rlist:new(cap, t)
     t = t or {}
