@@ -2,6 +2,7 @@ target_sources(neosocksd
     PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/await.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/base.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/compat.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/marshal.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/regex.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/zlib.h"

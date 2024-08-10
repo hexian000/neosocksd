@@ -3,6 +3,8 @@
 
 #include "base.h"
 
+#include "compat.h"
+
 #include "io/stream.h"
 #include "utils/debug.h"
 #include "utils/slog.h"

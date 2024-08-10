@@ -30,6 +30,8 @@
 #define MT_AWAIT_RESOLVE "await.resolve"
 #define MT_AWAIT_RPCALL "await.invoke"
 
+#define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
+
 #define AWAIT_CHECK_YIELDABLE(L)                                               \
 	do {                                                                   \
 		if (!lua_isyieldable((L))) {                                   \

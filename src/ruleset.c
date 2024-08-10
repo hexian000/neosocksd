@@ -15,6 +15,7 @@
 
 #include "ruleset/await.h"
 #include "ruleset/base.h"
+#include "ruleset/compat.h"
 #include "ruleset/marshal.h"
 #include "ruleset/regex.h"
 #include "ruleset/zlib.h"
@@ -112,7 +113,7 @@ static int ruleset_rpcall_(lua_State *restrict L)
 	const void **result = (const void **)lua_topointer(L, 2);
 	size_t *resultlen = (size_t *)lua_topointer(L, 3);
 	lua_settop(L, 0);
-	lua_pushcfunction(L, api_marshal_);
+	lua_getglobal(L, "marshal");
 	if (lua_load(L, ruleset_reader, &rd, "=rpc", NULL)) {
 		return lua_error(L);
 	}
@@ -453,7 +454,6 @@ static void init_registry(lua_State *restrict L)
 	const char *errors[] = {
 		ERR_MEMORY,
 		ERR_BAD_REGISTRY,
-		ERR_NOT_YIELDABLE,
 		ERR_INVALID_ROUTE,
 	};
 	const int nerrors = (int)ARRAY_SIZE(errors);

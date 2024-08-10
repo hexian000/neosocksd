@@ -3,6 +3,8 @@
 
 #include "marshal.h"
 
+#include "compat.h"
+
 #include "io/io.h"
 
 #include "lauxlib.h"
@@ -131,8 +133,8 @@ static void marshal_value(
 	const int depth)
 {
 	if (depth > 200) {
-		lua_pushliteral(L, "table is too complex to marshal");
-		(void)lua_error(L);
+		(void)lua_pushliteral(L, "table is too complex to marshal");
+		lua_error(L);
 		return;
 	}
 	const int type = lua_type(L, idx);
@@ -154,25 +156,35 @@ static void marshal_value(
 		marshal_string(L, B, idx);
 		return;
 	case LUA_TTABLE:
+#if HAVE_LUA_WARNING
+		if (lua_getmetatable(L, idx)) {
+			lua_warning(L, "marshal: ", 1);
+			lua_warning(L, luaL_tolstring(L, idx, NULL), 1);
+			lua_warning(L, " has a metatable", 0);
+		}
+#endif
 		break;
 	default:
-		luaL_error(L, "%s is not marshallable", lua_typename(L, type));
+		(void)luaL_tolstring(L, idx, NULL);
+		(void)lua_pushliteral(L, " is not marshallable");
+		lua_concat(L, 2);
+		lua_error(L);
 		return;
 	}
-	/* check closed */
+	/* check cached */
 	lua_pushvalue(L, idx);
 	if (lua_rawget(L, 2) != LUA_TNIL) {
 		luaL_addvalue(B);
 		return;
 	}
-	/* check open */
+	/* check visited */
 	lua_pushvalue(L, idx);
 	if (lua_rawget(L, 1) != LUA_TNIL) {
 		luaL_error(L, "circular referenced table is not marshallable");
 		return;
 	}
 	lua_pop(L, 1);
-	/* mark as open */
+	/* mark as visited */
 	lua_pushvalue(L, idx);
 	lua_pushboolean(L, 1);
 	lua_rawset(L, 1);
@@ -182,15 +194,12 @@ static void marshal_value(
 	luaL_addchar(&b, '{');
 	/* auto index */
 	lua_Integer n = 0;
-	for (lua_Integer i = 1; lua_rawgeti(L, idx, i) != LUA_TNIL; i++) {
+	for (lua_Unsigned i = 1;
+	     lua_rawgeti(L, idx, (lua_Integer)i) != LUA_TNIL; i++) {
 		marshal_value(L, &b, -1, depth + 1);
 		luaL_addchar(&b, ',');
 		lua_pop(L, 1);
 		n = i;
-		if (i == LUA_MAXINTEGER) {
-			lua_pushnil(L);
-			break;
-		}
 	}
 	/* explicit index */
 	while (lua_next(L, idx) != 0) {
@@ -212,7 +221,7 @@ static void marshal_value(
 	lua_pop(L, 1);
 	luaL_addchar(&b, '}');
 	luaL_pushresult(&b);
-	/* save as closed */
+	/* save as cached */
 	lua_pushvalue(L, idx);
 	lua_pushvalue(L, -2);
 	lua_rawset(L, 2);
@@ -223,11 +232,11 @@ static void marshal_value(
 int api_marshal_(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
-	/* open */
+	/* visited */
 	lua_newtable(L);
-	/* closed */
+	/* cached */
 	lua_newtable(L);
-	/* closed_mt */
+	/* cached_mt */
 	lua_newtable(L);
 	lua_pushliteral(L, "kv");
 	lua_setfield(L, -2, "__mode");
