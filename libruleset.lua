@@ -43,6 +43,18 @@ local list = {
     unpack = table.unpack,
     concat = table.concat,
 }
+local list_mt = { __name = "list", __index = list, }
+
+function list:new(t)
+    return setmetatable(t or {}, list_mt)
+end
+
+function list:check(t)
+    if type(t) ~= "table" or getmetatable(t) ~= list_mt then
+        return nil
+    end
+    return t
+end
 
 function list:totable()
     return setmetatable(self, nil)
@@ -54,10 +66,6 @@ end
 
 function list:append(t)
     return table.move(t, 1, #t, #self + 1, self)
-end
-
-function list:clone()
-    return list:new():append(self)
 end
 
 function list:map(f)
@@ -74,22 +82,6 @@ function list:reverse()
         self[i], self[j] = self[j], self[i]
     end
     return self
-end
-
-local list_mt = {
-    __name = "list",
-    __index = list,
-    __clone = list.clone,
-}
-function list:new(t)
-    return setmetatable(t or {}, list_mt)
-end
-
-function list:check(t)
-    if type(t) ~= "table" or getmetatable(t) ~= list_mt then
-        return nil
-    end
-    return t
 end
 
 _G.list = list
@@ -197,7 +189,6 @@ local function log_(msg)
     local source = info.source
     if source:startswith("@") then
         source = source:sub(2)
-        source = source:match("^.*/([^/]+)$") or source
     elseif source:startswith("=") then
         source = "<" .. source:sub(2) .. ">"
     else
@@ -225,12 +216,12 @@ local function parse_cidr(s)
     local addr, shift = s:match("^(.+)/(%d+)$")
     shift = tonumber(shift)
     if not shift or shift < 0 or shift > 32 then
-        error(string.format("invalid prefix size %q", s), 2)
+        error(strformat("invalid prefix size %q", s), 2)
     end
     local mask = ~((1 << (32 - shift)) - 1)
     local subnet = parse_ipv4(addr)
     if not subnet or (subnet & mask ~= subnet) then
-        error(string.format("invalid subnet %q", s), 2)
+        error(strformat("invalid subnet %q", s), 2)
     end
     return subnet, shift
 end
@@ -241,18 +232,18 @@ local function parse_cidr6(s)
     local addr, shift = s:match("^(.+)/(%d+)$")
     shift = tonumber(shift)
     if not shift or shift < 0 or shift > 128 then
-        error(string.format("invalid prefix size %q", s), 2)
+        error(strformat("invalid prefix size %q", s), 2)
     end
     local subnet1, subnet2 = parse_ipv6(addr)
     if shift > 64 then
         local mask = ~((1 << (128 - shift)) - 1)
         if not subnet1 or (subnet2 & mask ~= subnet2) then
-            error(string.format("invalid subnet %q", s), 2)
+            error(strformat("invalid subnet %q", s), 2)
         end
     else
         local mask = ~((1 << (64 - shift)) - 1)
         if not subnet1 or (subnet1 & mask ~= subnet1) or subnet2 ~= 0 then
-            error(string.format("invalid subnet %q", s), 2)
+            error(strformat("invalid subnet %q", s), 2)
         end
     end
     return subnet1, subnet2, shift
@@ -370,7 +361,7 @@ function match.exact(s)
     if type(s) ~= "table" then
         local host, port = splithostport(s)
         if not host or not port then
-            error(string.format("exact matcher should contain host and port: %q", s), 2)
+            error(strformat("exact matcher should contain host and port: %q", s), 2)
         end
         return function(addr)
             return addr == s
@@ -380,7 +371,7 @@ function match.exact(s)
     for _, v in pairs(s) do
         local host, port = splithostport(v)
         if not host or not port then
-            error(string.format("exact matcher should contain host and port: %q", s), 2)
+            error(strformat("exact matcher should contain host and port: %q", s), 2)
         end
         t[v] = true
     end
@@ -770,7 +761,7 @@ local function resolve_(addr)
         local entry = hosts[host]
         if entry then
             host = entry
-            addr = string.format("%s:%s", host, port)
+            addr = strformat("%s:%s", host, port)
         end
     end
     -- check if the addr is a raw address

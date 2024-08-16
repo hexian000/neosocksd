@@ -65,7 +65,7 @@ neosocksd.setinterval(60.0)
 logf("ruleset loaded, interpreter: %s", _VERSION)
 -- inherit undefined fields from libruleset
 return setmetatable({}, {
-    __index = function(t, k)
+    __index = function(_, k)
         return _G.libruleset[k]
     end
 })
