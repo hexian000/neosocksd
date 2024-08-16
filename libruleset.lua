@@ -50,10 +50,11 @@ function list:new(t)
 end
 
 function list:check(t)
-    if type(t) ~= "table" or getmetatable(t) ~= list_mt then
-        return nil
+    local mt = getmetatable(t)
+    if mt and mt.__name == list_mt.__name then
+        return t
     end
-    return t
+    return nil
 end
 
 function list:totable()
@@ -100,10 +101,11 @@ function rlist:new(cap, t)
 end
 
 function rlist:check(t)
-    if type(t) ~= "table" or getmetatable(t) ~= rlist_mt then
-        return nil
+    local mt = getmetatable(t)
+    if mt and mt.__name == rlist_mt.__name then
+        return t
     end
-    return t
+    return nil
 end
 
 function rlist:push(value)
