@@ -503,10 +503,6 @@ static int ruleset_luainit_(lua_State *restrict L)
 	/* set flags */
 	lua_pushboolean(L, !LOGLEVEL(DEBUG));
 	lua_setglobal(L, "NDEBUG");
-	/* prefer generational GC on supported lua versions */
-#ifdef LUA_GCGEN
-	lua_gc(L, LUA_GCGEN, 0, 0);
-#endif
 	return 0;
 }
 
