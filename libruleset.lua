@@ -187,12 +187,11 @@ local function log_(msg)
         return
     end
     local timestamp = os.date("%Y-%m-%dT%T%z", now)
-    local info = debug.getinfo(2, "Sl")
-    local source = info.source
-    if source:startswith("@") then
+    local info      = debug.getinfo(2, "Sl")
+    local source    = info.source
+    local srctype   = source:sub(1, 1)
+    if srctype == "@" or srctype == "=" then
         source = source:sub(2)
-    elseif source:startswith("=") then
-        source = "<" .. source:sub(2) .. ">"
     else
         source = info.short_src
     end
