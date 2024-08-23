@@ -13,6 +13,7 @@
 #include "transfer.h"
 #include "util.h"
 
+#include "codec/base64.h"
 #include "net/http.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
@@ -22,6 +23,7 @@
 #include <ev.h>
 
 #include <assert.h>
+#include <stddef.h>
 #include <string.h>
 
 struct http_ctx;
@@ -183,7 +185,7 @@ static struct dialreq *make_dialreq(const char *addr_str)
 #if WITH_RULESET
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		return ruleset_resolve(ruleset, addr_str);
+		return ruleset_resolve(ruleset, addr_str, NULL, NULL);
 	}
 #endif
 	struct dialreq *req = dialreq_new(0);
@@ -196,6 +198,59 @@ static struct dialreq *make_dialreq(const char *addr_str)
 		return NULL;
 	}
 	return req;
+}
+
+static void parse_proxy_auth(
+	unsigned char *buf, const size_t bufsize, const char **username,
+	const char **password, const char *authtype, const char *credentials)
+{
+	if (authtype == NULL || credentials == NULL) {
+		return;
+	}
+	if (strcmp(authtype, "Basic") != 0) {
+		return;
+	}
+	size_t dstlen = bufsize - 1;
+	if (!base64_decode(
+		    buf, &dstlen, (const unsigned char *)credentials,
+		    strlen(credentials))) {
+		return;
+	}
+	char *s = (char *)buf;
+	s[dstlen] = '\0';
+	char *sep = strchr(s, ':');
+	if (sep == NULL) {
+		return;
+	}
+	*sep = '\0';
+	*username = s;
+	*password = sep + 1;
+	return;
+}
+
+static struct dialreq *req_connect(struct http_ctx *restrict ctx)
+{
+	const char *addr_str = ctx->parser.msg.req.url;
+#if WITH_RULESET
+	struct ruleset *restrict ruleset = G.ruleset;
+	if (ruleset == NULL) {
+		return make_dialreq(addr_str);
+	}
+	unsigned char buf[512];
+	const char *username = NULL;
+	const char *password = NULL;
+	parse_proxy_auth(
+		buf, sizeof(buf), &username, &password,
+		ctx->parser.hdr.proxy_authorization.type,
+		ctx->parser.hdr.proxy_authorization.credentials);
+	const bool auth_required = G.conf->auth_required;
+	if (auth_required && (username == NULL || password == NULL)) {
+		return NULL;
+	}
+	return ruleset_resolve(ruleset, addr_str, username, password);
+#else
+	return make_dialreq(addr_str);
+#endif
 }
 
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
@@ -218,7 +273,24 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 
-	struct dialreq *req = make_dialreq(msg->req.url);
+	unsigned char buf[512];
+	const char *username = NULL;
+	const char *password = NULL;
+	parse_proxy_auth(
+		buf, sizeof(buf), &username, &password,
+		ctx->parser.hdr.proxy_authorization.type,
+		ctx->parser.hdr.proxy_authorization.credentials);
+	if (G.conf->auth_required && (username == NULL || password == NULL)) {
+		RESPHDR_BEGIN(
+			ctx->parser.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+		BUF_APPENDCONST(
+			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		return;
+	}
+
+	struct dialreq *req = req_connect(ctx);
 	if (req == NULL) {
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
@@ -378,7 +450,7 @@ static bool parse_header(void *data, const char *key, char *value)
 
 	/* hop-by-hop headers */
 	if (strcasecmp(key, "Connection") == 0) {
-		p->hdr.connection = strtrimspace(value);
+		p->hdr.connection = value;
 		return true;
 	}
 	if (strcasecmp(key, "Keep-Alive") == 0) {
@@ -389,7 +461,13 @@ static bool parse_header(void *data, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "Proxy-Authorization") == 0) {
-		/* TODO */
+		char *sep = strchr(value, ' ');
+		if (sep == NULL) {
+			return false;
+		}
+		*sep = '\0';
+		p->hdr.proxy_authorization.type = value;
+		p->hdr.proxy_authorization.credentials = sep + 1;
 		return true;
 	}
 	if (strcasecmp(key, "Proxy-Connection") == 0) {

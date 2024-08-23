@@ -284,11 +284,11 @@ forward_route(struct ruleset *r, const struct dialaddr *restrict addr)
 	CHECK(len >= 0 && (size_t)len < cap);
 	switch (addr->type) {
 	case ATYP_INET:
-		return ruleset_route(r, request);
+		return ruleset_route(r, request, NULL, NULL);
 	case ATYP_INET6:
-		return ruleset_route6(r, request);
+		return ruleset_route6(r, request, NULL, NULL);
 	case ATYP_DOMAIN:
-		return ruleset_resolve(r, request);
+		return ruleset_resolve(r, request, NULL, NULL);
 	}
 	FAIL();
 }
@@ -332,9 +332,9 @@ tproxy_route(struct ruleset *r, const struct sockaddr *restrict sa)
 	format_sa(sa, addr_str, sizeof(addr_str));
 	switch (sa->sa_family) {
 	case AF_INET:
-		return ruleset_route(r, addr_str);
+		return ruleset_route(r, addr_str, NULL, NULL);
 	case AF_INET6:
-		return ruleset_route6(r, addr_str);
+		return ruleset_route6(r, addr_str, NULL, NULL);
 	}
 	FAIL();
 }

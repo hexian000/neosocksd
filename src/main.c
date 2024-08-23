@@ -71,6 +71,7 @@ static void print_usage(const char *argv0)
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
+		"  --auth-required            require basic authentication\n"
 		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
 		"  -x, --proxy proxy1[,...[,proxyN]]\n"
 		"                             forward outbound connection over proxy chain\n"
@@ -183,6 +184,10 @@ static void parse_args(const int argc, char *const *const restrict argv)
 #endif
 		if (strcmp(argv[i], "--http") == 0) {
 			conf->http = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--auth-required") == 0) {
+			conf->auth_required = true;
 			continue;
 		}
 #if WITH_TPROXY

@@ -6,6 +6,7 @@
 #include "conf.h"
 #include "dialer.h"
 #include "proto/domain.h"
+#include "proto/socks.h"
 #include "ruleset.h"
 #include "server.h"
 #include "session.h"
@@ -13,7 +14,6 @@
 #include "transfer.h"
 #include "util.h"
 
-#include "proto/socks.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/object.h"
@@ -41,6 +41,7 @@ enum socks_state {
 	STATE_INIT,
 	STATE_HANDSHAKE1,
 	STATE_HANDSHAKE2,
+	STATE_HANDSHAKE3,
 	STATE_CONNECT,
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
@@ -58,11 +59,17 @@ struct socks_ctx {
 		/* during handshake */
 		struct {
 			struct ev_io w_socket;
-			uint8_t auth_method;
+			struct {
+				uint8_t method;
+				const char *username;
+				const char *password;
+				char credentials[512];
+			} auth;
 			struct {
 				BUFFER_HDR;
 				unsigned char data[SOCKS_REQ_MAXLEN];
 			} rbuf;
+			unsigned char *next;
 			struct dialreq *dialreq;
 			struct dialer dialer;
 		};
@@ -416,13 +423,13 @@ static unsigned char *find_zero(unsigned char *s, const size_t len)
 	return NULL;
 }
 
-static int socks4a_recv(struct socks_ctx *restrict ctx, unsigned char *next)
+static int socks4a_recv(struct socks_ctx *restrict ctx)
 {
-	unsigned char *terminator = find_zero(next, ctx->rbuf.len);
+	unsigned char *terminator = find_zero(ctx->next, ctx->rbuf.len);
 	if (terminator == NULL) {
 		return 1;
 	}
-	const size_t namelen = (size_t)(terminator - next);
+	const size_t namelen = (size_t)(terminator - ctx->next);
 	if (namelen > FQDN_MAX_LENGTH) {
 		return -1;
 	}
@@ -430,7 +437,7 @@ static int socks4a_recv(struct socks_ctx *restrict ctx, unsigned char *next)
 	ctx->addr.type = ATYP_DOMAIN;
 	struct domain_name *restrict domain = &ctx->addr.domain;
 	domain->len = (uint8_t)namelen;
-	memcpy(domain->name, next, namelen);
+	memcpy(domain->name, ctx->next, namelen);
 	ctx->addr.port =
 		read_uint16(ctx->rbuf.data + offsetof(struct socks4_hdr, port));
 
@@ -448,22 +455,30 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 		ctx->rbuf.data + offsetof(struct socks4_hdr, command));
 	if (command != SOCKS4CMD_CONNECT) {
 		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "SOCKS4 command not supported: %" PRIu8,
+			DEBUG, ctx, "SOCKS4 command not supported: %" PRIu8,
 			command);
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
 	}
-	unsigned char *terminator = find_zero(
-		ctx->rbuf.data + sizeof(struct socks4_hdr), ctx->rbuf.len);
-	if (terminator == NULL) {
-		return 1;
+	char *userid = (char *)ctx->rbuf.data + sizeof(struct socks4_hdr);
+	const size_t maxlen =
+		MIN(ctx->rbuf.len - sizeof(struct socks4_hdr),
+		    sizeof(ctx->auth.credentials));
+	const size_t idlen = strnlen(userid, maxlen);
+	if (idlen == maxlen) {
+		return -1;
 	}
+	strcpy(ctx->auth.credentials, userid);
+	ctx->auth.username = ctx->auth.credentials;
+	ctx->auth.password = NULL;
+
 	const uint32_t ip = read_uint32(
 		ctx->rbuf.data + offsetof(struct socks4_hdr, address));
 	const uint32_t mask = UINT32_C(0xFFFFFF00);
 	if (!(ip & mask) && (ip & ~mask)) {
 		/* SOCKS 4A */
-		return socks4a_recv(ctx, terminator + 1);
+		ctx->next = ctx->rbuf.data + sizeof(struct socks4_hdr) + idlen;
+		return socks4a_recv(ctx);
 	}
 
 	ctx->addr.type = ATYP_INET;
@@ -479,20 +494,28 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 
 static int socks5_req(struct socks_ctx *restrict ctx)
 {
-	assert(ctx->state == STATE_HANDSHAKE2);
-	const unsigned char *hdr = ctx->rbuf.data;
-	const size_t len = ctx->rbuf.len;
+	assert(ctx->state == STATE_HANDSHAKE3);
+	const unsigned char *hdr = ctx->next;
+	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
 	size_t expected = sizeof(struct socks5_hdr);
 	if (len < expected) {
 		return (int)(expected - len) + 1;
 	}
 
+	const uint8_t version =
+		read_uint8(hdr + offsetof(struct socks5_hdr, version));
+	if (version != SOCKS5) {
+		SOCKS_CTX_LOG_F(
+			DEBUG, ctx, "SOCKS5: unsupported version %" PRIu8,
+			version);
+		return -1;
+	}
 	const uint8_t command =
 		read_uint8(hdr + offsetof(struct socks5_hdr, command));
 	if (command != SOCKS5CMD_CONNECT) {
 		socks5_sendrsp(ctx, SOCKS5RSP_CMDNOSUPPORT);
 		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "SOCKS5: unsupported command %" PRIu8,
+			DEBUG, ctx, "SOCKS5: unsupported command %" PRIu8,
 			command);
 		return -1;
 	}
@@ -517,7 +540,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	default:
 		socks5_sendrsp(ctx, SOCKS5RSP_ATYPNOSUPPORT);
 		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "SOCKS5: unsupported addrtype: %" PRIu8,
+			DEBUG, ctx, "SOCKS5: unsupported addrtype: %" PRIu8,
 			addrtype);
 		return -1;
 	}
@@ -557,9 +580,70 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 
 static int socks5_auth(struct socks_ctx *restrict ctx)
 {
+	assert(ctx->state == STATE_HANDSHAKE2);
+	switch (ctx->auth.method) {
+	case SOCKS5AUTH_NOAUTH:
+		ctx->state = STATE_HANDSHAKE3;
+		return socks5_req(ctx);
+	case SOCKS5AUTH_USERPASS:
+		break;
+	default:
+		FAIL();
+	}
+	const unsigned char *req = ctx->next;
+	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
+	size_t want = 2;
+	if (len < want) {
+		return (int)(want - len);
+	}
+	const uint8_t ver = read_uint8(req + 0);
+	if (ver != 0x01) {
+		SOCKS_CTX_LOG(
+			DEBUG, ctx,
+			"SOCKS5: incompatible authentication version");
+		return -1;
+	}
+	const uint8_t ulen = read_uint8(req + 1);
+	want += ulen + 1;
+	if (len < want) {
+		return (int)(want - len);
+	}
+	const uint8_t plen = read_uint8(req + 2 + ulen);
+	want += plen;
+	if (len < want) {
+		return (int)(want - len);
+	}
+	unsigned char wbuf[2] = {
+		0x01, /* VER = 1 */
+		0x01, /* STATUS = FAILED */
+	};
+	if (ulen == 0 || plen == 0) {
+		(void)send_rsp(ctx, wbuf, sizeof(wbuf));
+		return -1;
+	}
+	const unsigned char *credentials = req + 2;
+	memcpy(ctx->auth.credentials, credentials, ulen + 1 + plen);
+	ctx->auth.credentials[ulen] = '\0';
+	ctx->auth.credentials[ulen + 1 + plen] = '\0';
+	ctx->auth.username = ctx->auth.credentials;
+	ctx->auth.password = ctx->auth.credentials + ulen + 1;
+
+	/* authentication is always successful because the request is unknown yet */
+	wbuf[1] = 0x00; /* STATUS = SUCCESS */
+	if (!send_rsp(ctx, wbuf, sizeof(wbuf))) {
+		return -1;
+	}
+
+	ctx->next += want;
+	ctx->state = STATE_HANDSHAKE3;
+	return socks5_req(ctx);
+}
+
+static int socks5_authmethod(struct socks_ctx *restrict ctx)
+{
 	assert(ctx->state == STATE_HANDSHAKE1);
-	const unsigned char *req = ctx->rbuf.data;
-	const size_t len = ctx->rbuf.len;
+	const unsigned char *req = ctx->next;
+	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
 	size_t want = sizeof(struct socks5_auth_req);
 	if (len < want) {
 		return (int)(want - len);
@@ -570,12 +654,17 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	if (len < want) {
 		return (int)(want - len);
 	}
+	const bool auth_required = G.conf->auth_required;
 	uint8_t method = SOCKS5AUTH_NOACCEPTABLE;
 	const uint8_t *methods = req + sizeof(struct socks5_auth_req);
 	for (size_t i = 0; i < n; i++) {
 		switch (methods[i]) {
 		case SOCKS5AUTH_NOAUTH:
-			/* accept */
+			if (!auth_required) {
+				break;
+			}
+			continue;
+		case SOCKS5AUTH_USERPASS:
 			break;
 		default:
 			continue;
@@ -591,16 +680,15 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	}
 	if (method == SOCKS5AUTH_NOACCEPTABLE) {
 		SOCKS_CTX_LOG(
-			ERROR, ctx,
+			DEBUG, ctx,
 			"SOCKS5: no acceptable authentication method");
 		return -1;
 	}
-	ctx->auth_method = method;
+	ctx->auth.method = method;
 
-	/* remove the auth request */
-	BUF_CONSUME(ctx->rbuf, sizeof(struct socks5_auth_req) + n);
+	ctx->next += want;
 	ctx->state = STATE_HANDSHAKE2;
-	return socks5_req(ctx);
+	return socks5_auth(ctx);
 }
 
 static int socks_dispatch(struct socks_ctx *restrict ctx)
@@ -614,8 +702,10 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 	case DISPATCH_TUPLE(SOCKS4, STATE_HANDSHAKE1):
 		return socks4_req(ctx);
 	case DISPATCH_TUPLE(SOCKS5, STATE_HANDSHAKE1):
-		return socks5_auth(ctx);
+		return socks5_authmethod(ctx);
 	case DISPATCH_TUPLE(SOCKS5, STATE_HANDSHAKE2):
+		return socks5_auth(ctx);
+	case DISPATCH_TUPLE(SOCKS5, STATE_HANDSHAKE3):
 		return socks5_req(ctx);
 	default:
 		SOCKS_CTX_LOG_F(
@@ -667,27 +757,6 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 
 static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 {
-#if WITH_RULESET
-	struct ruleset *restrict ruleset = G.ruleset;
-	if (ruleset != NULL) {
-		const size_t cap =
-			addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
-		char request[cap];
-		const int len = dialaddr_format(addr, request, cap);
-		CHECK(len >= 0 && (size_t)len < cap);
-		switch (addr->type) {
-		case ATYP_DOMAIN:
-			return ruleset_resolve(ruleset, request);
-		case ATYP_INET:
-			return ruleset_route(ruleset, request);
-		case ATYP_INET6:
-			return ruleset_route6(ruleset, request);
-		default:
-			break;
-		}
-		FAIL();
-	}
-#endif
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {
 		LOGOOM();
@@ -695,6 +764,37 @@ static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 	}
 	dialaddr_copy(&req->addr, addr);
 	return req;
+}
+
+static struct dialreq *req_connect(struct socks_ctx *restrict ctx)
+{
+#if WITH_RULESET
+	struct ruleset *restrict ruleset = G.ruleset;
+	if (ruleset == NULL) {
+		return make_dialreq(&ctx->addr);
+	}
+	const struct dialaddr *restrict addr = &ctx->addr;
+	const size_t cap =
+		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
+	char request[cap];
+	const int len = dialaddr_format(addr, request, cap);
+	CHECK(len >= 0 && (size_t)len < cap);
+	const char *username = ctx->auth.username;
+	const char *password = ctx->auth.password;
+	switch (addr->type) {
+	case ATYP_DOMAIN:
+		return ruleset_resolve(ruleset, request, username, password);
+	case ATYP_INET:
+		return ruleset_route(ruleset, request, username, password);
+	case ATYP_INET6:
+		return ruleset_route6(ruleset, request, username, password);
+	default:
+		break;
+	}
+	FAIL();
+#else
+	return make_dialreq(&ctx->addr);
+#endif
 }
 
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -716,7 +816,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
 
-	struct dialreq *req = make_dialreq(&ctx->addr);
+	struct dialreq *req = req_connect(ctx);
 	if (req == NULL) {
 		socks_sendrsp(ctx, false);
 		socks_ctx_close(loop, ctx);
@@ -752,8 +852,9 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 		w_socket->data = ctx;
 	}
 
-	ctx->auth_method = SOCKS5AUTH_NOACCEPTABLE;
+	ctx->auth.method = SOCKS5AUTH_NOACCEPTABLE;
 	BUF_INIT(ctx->rbuf, 0);
+	ctx->next = ctx->rbuf.data;
 	ctx->dialreq = NULL;
 	const struct event_cb cb = {
 		.cb = dialer_cb,

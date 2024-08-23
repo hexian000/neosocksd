@@ -53,14 +53,26 @@ static void find_callback(lua_State *restrict L, const int idx)
 	lua_pop(L, 1);
 }
 
+static const char *replace_cstring(lua_State *restrict L, const int idx)
+{
+	const char *s = lua_topointer(L, idx);
+	if (s != NULL) {
+		(void)lua_pushstring(L, s);
+	} else {
+		lua_pushnil(L);
+	}
+	lua_replace(L, idx);
+	return s;
+}
+
 static int ruleset_request_(lua_State *restrict L)
 {
 	find_callback(L, 1);
-	const char *request = lua_topointer(L, 2);
-	(void)lua_pushstring(L, request);
-	lua_replace(L, 2);
+	const char *request = replace_cstring(L, 2);
+	(void)replace_cstring(L, 3);
+	(void)replace_cstring(L, 4);
 
-	lua_call(L, 1, LUA_MULTRET);
+	lua_call(L, 3, LUA_MULTRET);
 	const int n = lua_gettop(L);
 	if (n < 1) {
 		return 0;
@@ -638,12 +650,14 @@ void ruleset_gc(struct ruleset *restrict r)
 	lua_gc(r->L, LUA_GCCOLLECT, 0);
 }
 
-static struct dialreq *
-dispatch_req(struct ruleset *restrict r, const char *func, const char *request)
+static struct dialreq *dispatch_req(
+	struct ruleset *restrict r, const char *func, const char *request,
+	const char *username, const char *password)
 {
 	lua_State *restrict L = r->L;
 	const bool ok = ruleset_pcall(
-		r, FUNC_REQUEST, 2, 1, (void *)func, (void *)request);
+		r, FUNC_REQUEST, 4, 1, (void *)func, (void *)request,
+		(void *)username, (void *)password);
 	if (!ok) {
 		LOGE_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
 		return NULL;
@@ -651,19 +665,25 @@ dispatch_req(struct ruleset *restrict r, const char *func, const char *request)
 	return (struct dialreq *)lua_topointer(L, -1);
 }
 
-struct dialreq *ruleset_resolve(struct ruleset *r, const char *request)
+struct dialreq *ruleset_resolve(
+	struct ruleset *r, const char *request, const char *username,
+	const char *password)
 {
-	return dispatch_req(r, "resolve", request);
+	return dispatch_req(r, "resolve", request, username, password);
 }
 
-struct dialreq *ruleset_route(struct ruleset *r, const char *request)
+struct dialreq *ruleset_route(
+	struct ruleset *r, const char *request, const char *username,
+	const char *password)
 {
-	return dispatch_req(r, "route", request);
+	return dispatch_req(r, "route", request, username, password);
 }
 
-struct dialreq *ruleset_route6(struct ruleset *r, const char *request)
+struct dialreq *ruleset_route6(
+	struct ruleset *r, const char *request, const char *username,
+	const char *password)
 {
-	return dispatch_req(r, "route6", request);
+	return dispatch_req(r, "route6", request, username, password);
 }
 
 void ruleset_vmstats(

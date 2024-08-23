@@ -51,6 +51,10 @@ struct http_headers {
 	struct {
 		char *accept;
 		enum content_encodings accept_encoding;
+		struct {
+			char *type;
+			char *credentials;
+		} proxy_authorization;
 	};
 };
 

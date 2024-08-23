@@ -10,7 +10,7 @@
 #define istspecial(c) (!!strchr("()<>@,;:\"/[]?=", (c)))
 #define istoken(c) (!iscntrl(c) && !istspecial(c))
 
-static char *strtolower(char *s)
+static inline char *strtolower(char *s)
 {
 	for (char *restrict p = s; *p; p++) {
 		*p = (unsigned char)tolower((unsigned char)*p);
@@ -18,14 +18,14 @@ static char *strtolower(char *s)
 	return s;
 }
 
-static char *strtrimleftspace(char *restrict s)
+static inline char *strtrimleftspace(char *restrict s)
 {
 	for (; *s && isspace((unsigned char)*s); s++) {
 	}
 	return s;
 }
 
-static char *strtrimrightspace(char *restrict s)
+static inline char *strtrimrightspace(char *restrict s)
 {
 	char *restrict e = s + strlen(s) - 1;
 	for (; s < e && isspace((unsigned char)*e); e--) {
@@ -34,7 +34,7 @@ static char *strtrimrightspace(char *restrict s)
 	return s;
 }
 
-static char *strtrimspace(char *s)
+static inline char *strtrimspace(char *s)
 {
 	return strtrimrightspace(strtrimleftspace(s));
 }

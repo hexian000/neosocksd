@@ -9,6 +9,7 @@ else()
     target_compile_definitions(csnippets PRIVATE _POSIX_C_SOURCE=200809L)
 endif()
 
+add_subdirectory(codec)
 add_subdirectory(io)
 add_subdirectory(math)
 add_subdirectory(net)

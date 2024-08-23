@@ -98,7 +98,7 @@ _G.route_list = {
     [1] = { rule.proxy("socks4a://127.0.0.1:1081"), "default1" },
     [2] = { rule.proxy("socks4a://127.0.0.2:1081"), "default2" }
 }
-_G.route_default = route_index[1]
+_G.route_default = route_list[1]
 
 function _G.set_route(i, ...)
     _G.route_index = i
@@ -187,6 +187,7 @@ local function start()
         async(keepalive, target, i)
     end
     neosocksd.setinterval(60.0)
+    collectgarbage("generational", 20, 100)
 end
 start()
 

@@ -255,7 +255,7 @@ _G.parse_cidr6 = parse_cidr6
 -- [[ RPC utilities ]] --
 
 function _G.unmarshal(s)
-    return assert(load("return " .. s, "=unmarshal"))()
+    return assert(load("return " .. s, "=unmarshal", "t", {}))()
 end
 
 local rpc = _G.rpc or {}
@@ -650,6 +650,7 @@ _G.lb = lb
 
 -- [[ ruleset entrypoint functions ]] --
 _G.num_requests = _G.num_requests or 0
+_G.num_authorized = _G.num_authorized or 0
 _G.stat_requests = rlist:check(_G.stat_requests) or rlist:new(60, { _G.num_requests })
 
 local function matchtab_(t, ...)
@@ -809,18 +810,34 @@ end
 -- [[ ruleset callbacks, see API.md for details ]] --
 local ruleset = {}
 
-function ruleset.resolve(addr)
+function ruleset.authenticate(addr, username, password)
+    return true
+end
+
+function ruleset.resolve(addr, username, password)
     _G.num_requests = _G.num_requests + 1
+    if not ruleset.authenticate(addr, username, password) then
+        return nil
+    end
+    _G.num_authorized = _G.num_authorized + 1
     return resolve_(addr)
 end
 
-function ruleset.route(addr)
+function ruleset.route(addr, username, password)
     _G.num_requests = _G.num_requests + 1
+    if not ruleset.authenticate(addr, username, password) then
+        return nil
+    end
+    _G.num_authorized = _G.num_authorized + 1
     return route_(addr)
 end
 
-function ruleset.route6(addr)
+function ruleset.route6(addr, username, password)
     _G.num_requests = _G.num_requests + 1
+    if not ruleset.authenticate(addr, username, password) then
+        return nil
+    end
+    _G.num_authorized = _G.num_authorized + 1
     return route6_(addr)
 end
 

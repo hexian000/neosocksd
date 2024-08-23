@@ -32,9 +32,15 @@ bool ruleset_rpcall(
 	struct ruleset *r, struct stream *code, const void **result,
 	size_t *resultlen);
 
-struct dialreq *ruleset_resolve(struct ruleset *r, const char *request);
-struct dialreq *ruleset_route(struct ruleset *r, const char *request);
-struct dialreq *ruleset_route6(struct ruleset *r, const char *request);
+struct dialreq *ruleset_resolve(
+	struct ruleset *r, const char *request, const char *username,
+	const char *password);
+struct dialreq *ruleset_route(
+	struct ruleset *r, const char *request, const char *username,
+	const char *password);
+struct dialreq *ruleset_route6(
+	struct ruleset *r, const char *request, const char *username,
+	const char *password);
 
 void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
 const char *ruleset_stats(struct ruleset *r, double dt, size_t *len);

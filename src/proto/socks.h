@@ -39,6 +39,7 @@ enum socks5_address_type {
 
 enum socks5_authenticate_method {
 	SOCKS5AUTH_NOAUTH = UINT8_C(0x00),
+	SOCKS5AUTH_USERPASS = UINT8_C(0x02),
 	SOCKS5AUTH_NOACCEPTABLE = UINT8_C(0xFF),
 };
 
