@@ -10,7 +10,7 @@
 #include "io/stream.h"
 #include "utils/buffer.h"
 
-#include "codec/codec.h"
+#include "codec.h"
 
 #include "lauxlib.h"
 #include "lua.h"

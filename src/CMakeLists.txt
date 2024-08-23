@@ -4,6 +4,7 @@ add_executable(neosocksd
     sockutil.c sockutil.h
     dialer.c dialer.h
     resolver.c resolver.h
+    codec.c codec.h
     ruleset.c ruleset.h
     transfer.c transfer.h
     session.c session.h
@@ -16,7 +17,6 @@ add_executable(neosocksd
     server.c server.h
     main.c
 )
-add_subdirectory(codec)
 add_subdirectory(proto)
 target_include_directories(neosocksd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(neosocksd PRIVATE csnippets miniz)
@@ -171,6 +171,14 @@ if(ENABLE_SYSTEMD)
         target_include_directories(neosocksd SYSTEM PRIVATE ${SYSTEMD_INCLUDE_DIR})
         target_link_libraries(neosocksd PRIVATE ${SYSTEMD_LIBRARY})
     endif()
+endif()
+
+find_path(JEMALLOC_INCLUDE_DIR NAMES jemalloc/jemalloc.h)
+find_library(JEMALLOC_LIBRARY NAMES jemalloc)
+if(EXISTS "${JEMALLOC_INCLUDE_DIR}/jemalloc/jemalloc.h" AND EXISTS "${JEMALLOC_LIBRARY}")
+    message(STATUS "jemalloc: ${JEMALLOC_LIBRARY}")
+    target_include_directories(neosocksd SYSTEM PRIVATE ${JEMALLOC_INCLUDE_DIR})
+    target_link_libraries(neosocksd PRIVATE ${JEMALLOC_LIBRARY})
 endif()
 
 include(CheckLibraryExists)

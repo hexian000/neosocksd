@@ -53,6 +53,7 @@ option(LINK_STATIC_LUA "Link against static liblua" ON)
 option(ENABLE_SANITIZERS "Build with sanitizers" OFF)
 option(ENABLE_SYSTEMD "Enable systemd integration" OFF)
 option(ENABLE_RULESET "Enable ruleset scripting (requires Lua)" ON)
+option(ENABLE_JEMALLOC "Enable jemalloc" OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
