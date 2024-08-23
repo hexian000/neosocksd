@@ -31,7 +31,7 @@ For advanced scripting usage, see [scripting](#scripting).
 
 ## Features
 
-- SOCKS4 / SOCKS4A / SOCKS5 / HTTP with no built-in support for authentication or encryption.
+- SOCKS4 / SOCKS4A / SOCKS5 / HTTP with no built-in support for encryption.
 - Transparent proxy. (Linux only)
 - Only TCP CONNECT requests are supported.
 - Lua scripts powered rule set.
