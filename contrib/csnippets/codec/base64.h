@@ -1,8 +1,8 @@
 /* csnippets (c) 2019-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#ifndef UTIL_BASE64_H
-#define UTIL_BASE64_H
+#ifndef CODEC_BASE64_H
+#define CODEC_BASE64_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -44,4 +44,4 @@ bool base64_decode(
 
 /** @} */
 
-#endif /* UTIL_BASE64_H */
+#endif /* CODEC_BASE64_H */

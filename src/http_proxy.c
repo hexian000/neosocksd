@@ -228,36 +228,31 @@ static void parse_proxy_auth(
 	return;
 }
 
-static struct dialreq *req_connect(struct http_ctx *restrict ctx)
+static bool req_connect(
+	struct http_ctx *restrict ctx, const char *username,
+	const char *password)
 {
 	const char *addr_str = ctx->parser.msg.req.url;
 #if WITH_RULESET
-	struct ruleset *restrict ruleset = G.ruleset;
-	if (ruleset == NULL) {
-		return make_dialreq(addr_str);
+	struct ruleset *restrict r = G.ruleset;
+	if (r != NULL) {
+		struct dialreq *req =
+			ruleset_resolve(r, addr_str, username, password);
+		if (req == NULL) {
+			return false;
+		}
+		return true;
 	}
-	unsigned char buf[512];
-	const char *username = NULL;
-	const char *password = NULL;
-	parse_proxy_auth(
-		buf, sizeof(buf), &username, &password,
-		ctx->parser.hdr.proxy_authorization.type,
-		ctx->parser.hdr.proxy_authorization.credentials);
-	const bool auth_required = G.conf->auth_required;
-	if (auth_required && (username == NULL || password == NULL)) {
-		return NULL;
-	}
-	return ruleset_resolve(ruleset, addr_str, username, password);
-#else
-	return make_dialreq(addr_str);
 #endif
+	ctx->dialreq = make_dialreq(addr_str);
+	return true;
 }
 
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	/* TODO */
 	UNUSED(loop);
-	http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
+	http_resp_errpage(&ctx->parser, HTTP_FORBIDDEN);
 	ctx->state = STATE_RESPONSE;
 	ev_io_start(loop, &ctx->w_send);
 }
@@ -283,26 +278,27 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	if (G.conf->auth_required && (username == NULL || password == NULL)) {
 		RESPHDR_BEGIN(
 			ctx->parser.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 		BUF_APPENDCONST(
 			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
 		RESPHDR_FINISH(ctx->parser.wbuf);
 		return;
 	}
 
-	struct dialreq *req = req_connect(ctx);
-	if (req == NULL) {
+	if (!req_connect(ctx, username, password)) {
+		http_resp_errpage(&ctx->parser, HTTP_FORBIDDEN);
+		return;
+	}
+	if (ctx->dialreq == NULL) {
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	ctx->state = STATE_CONNECT;
-	ctx->dialreq = req;
 	const struct event_cb cb = {
 		.cb = dialer_cb,
 		.ctx = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
-	dialer_start(&ctx->dialer, loop, req);
+	dialer_start(&ctx->dialer, loop, ctx->dialreq);
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -456,8 +452,14 @@ static bool parse_header(void *data, const char *key, char *value)
 	if (strcasecmp(key, "Keep-Alive") == 0) {
 		return true;
 	}
-	if (strcasecmp(key, "Proxy-Authenticate") == 0) {
-		/* TODO */
+	if (strcasecmp(key, "Authorization") == 0) {
+		char *sep = strchr(value, ' ');
+		if (sep == NULL) {
+			return false;
+		}
+		*sep = '\0';
+		p->hdr.authorization.type = value;
+		p->hdr.authorization.credentials = sep + 1;
 		return true;
 	}
 	if (strcasecmp(key, "Proxy-Authorization") == 0) {

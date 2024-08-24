@@ -54,6 +54,10 @@ struct http_headers {
 		struct {
 			char *type;
 			char *credentials;
+		} authorization;
+		struct {
+			char *type;
+			char *credentials;
 		} proxy_authorization;
 	};
 };

@@ -93,6 +93,10 @@ bool conf_check(const struct config *restrict conf)
 		LOGW("tcp recv buffer is too small");
 		return false;
 	}
+	if (conf->auth_required && conf->ruleset == NULL) {
+		LOGW("ruleset must be enabled for authentication");
+		return false;
+	}
 
 	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
 	       RANGE_CHECK(
