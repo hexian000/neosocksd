@@ -59,14 +59,27 @@ marshal_number(lua_State *restrict L, luaL_Buffer *restrict B, const int idx)
 			luaL_addchar(B, '0');
 			return;
 		}
+		const char *p = prefix;
+		size_t plen = sizeof(prefix);
 		if (x < 0 && x != LUA_MININTEGER) {
 			x = -x;
-			luaL_addlstring(B, prefix, sizeof(prefix));
 		} else {
-			luaL_addlstring(B, prefix + 1, sizeof(prefix) - 1);
+			p++, plen--;
 		}
-		for (lua_Unsigned y = x; y; y >>= 4) {
-			*--s = xdigits[(y & 0xf)];
+		lua_Unsigned y = x;
+		if (y <= UINTMAX_C(999999999999)) {
+			luaL_addlstring(B, p, plen - 2);
+			do {
+				*--s = '0' + y % 10;
+				y /= 10;
+			} while (y);
+		} else {
+			/* hexadecimal is shorter */
+			luaL_addlstring(B, p, plen);
+			do {
+				*--s = xdigits[(y & 0xf)];
+				y >>= 4;
+			} while (y);
 		}
 		luaL_addlstring(B, s, bufend - s);
 		return;
