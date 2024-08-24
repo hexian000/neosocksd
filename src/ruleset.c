@@ -112,7 +112,7 @@ static int ruleset_loadfile_(lua_State *restrict L)
 static int ruleset_invoke_(lua_State *restrict L)
 {
 	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 1) };
-	if (lua_load(L, ruleset_reader, &rd, "=invoke", NULL)) {
+	if (lua_load(L, ruleset_reader, &rd, "=(invoke)", NULL)) {
 		return lua_error(L);
 	}
 	lua_call(L, 0, 0);
@@ -126,7 +126,7 @@ static int ruleset_rpcall_(lua_State *restrict L)
 	size_t *resultlen = (size_t *)lua_topointer(L, 3);
 	lua_settop(L, 0);
 	lua_getglobal(L, "marshal");
-	if (lua_load(L, ruleset_reader, &rd, "=rpc", NULL)) {
+	if (lua_load(L, ruleset_reader, &rd, "=(rpc)", NULL)) {
 		return lua_error(L);
 	}
 	/* stack: marshal f */
