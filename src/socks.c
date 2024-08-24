@@ -112,6 +112,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		return;
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2:
+	case STATE_HANDSHAKE3:
 		ev_io_stop(loop, &ctx->w_socket);
 		stats->num_halfopen--;
 		return;
@@ -292,6 +293,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	switch (ctx->state) {
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2:
+	case STATE_HANDSHAKE3:
 		SOCKS_CTX_LOG(WARNING, ctx, "handshake timeout");
 		break;
 	case STATE_CONNECT: {
