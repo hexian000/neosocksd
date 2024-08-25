@@ -415,24 +415,10 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	transfer_start(loop, &ctx->downlink);
 }
 
-static unsigned char *find_zero(unsigned char *s, const size_t len)
+static int socks4a_req(struct socks_ctx *restrict ctx)
 {
-	for (size_t i = 0; i < len; i++) {
-		if (s[i] == 0) {
-			return s + i;
-		}
-	}
-	return NULL;
-}
-
-static int socks4a_recv(struct socks_ctx *restrict ctx)
-{
-	unsigned char *terminator = find_zero(ctx->next, ctx->rbuf.len);
-	if (terminator == NULL) {
-		return 1;
-	}
-	const size_t namelen = (size_t)(terminator - ctx->next);
-	if (namelen > FQDN_MAX_LENGTH) {
+	const size_t namelen = strnlen((const char *)ctx->next, ctx->rbuf.len);
+	if (namelen == ctx->rbuf.len || namelen > FQDN_MAX_LENGTH) {
 		return -1;
 	}
 
@@ -480,7 +466,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 	if (!(ip & mask) && (ip & ~mask)) {
 		/* SOCKS 4A */
 		ctx->next = ctx->rbuf.data + sizeof(struct socks4_hdr) + idlen;
-		return socks4a_recv(ctx);
+		return socks4a_req(ctx);
 	}
 
 	ctx->addr.type = ATYP_INET;
@@ -492,6 +478,17 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 
 	/* protocol finished */
 	return 0;
+}
+
+static int socks4_dispatch(struct socks_ctx *restrict ctx)
+{
+	switch (ctx->state) {
+	case STATE_HANDSHAKE1:
+		return socks4_req(ctx);
+	default:
+		break;
+	}
+	FAIL();
 }
 
 static int socks5_req(struct socks_ctx *restrict ctx)
@@ -693,31 +690,38 @@ static int socks5_authmethod(struct socks_ctx *restrict ctx)
 	return socks5_auth(ctx);
 }
 
+static int socks5_dispatch(struct socks_ctx *restrict ctx)
+{
+	switch (ctx->state) {
+	case STATE_HANDSHAKE1:
+		return socks5_authmethod(ctx);
+	case STATE_HANDSHAKE2:
+		return socks5_auth(ctx);
+	case STATE_HANDSHAKE3:
+		return socks5_req(ctx);
+	default:
+		break;
+	}
+	FAIL();
+}
+
 static int socks_dispatch(struct socks_ctx *restrict ctx)
 {
 	if (ctx->rbuf.len < 1) {
 		return 1;
 	}
 	const int version = read_uint8(ctx->rbuf.data);
-#define DISPATCH_TUPLE(version, state) ((state) << 8 | (version))
-	switch (DISPATCH_TUPLE(version, ctx->state)) {
-	case DISPATCH_TUPLE(SOCKS4, STATE_HANDSHAKE1):
-		return socks4_req(ctx);
-	case DISPATCH_TUPLE(SOCKS5, STATE_HANDSHAKE1):
-		return socks5_authmethod(ctx);
-	case DISPATCH_TUPLE(SOCKS5, STATE_HANDSHAKE2):
-		return socks5_auth(ctx);
-	case DISPATCH_TUPLE(SOCKS5, STATE_HANDSHAKE3):
-		return socks5_req(ctx);
+	switch (version) {
+	case SOCKS4:
+		return socks4_dispatch(ctx);
+	case SOCKS5:
+		return socks5_dispatch(ctx);
 	default:
-		SOCKS_CTX_LOG_F(
-			ERROR, ctx,
-			"invalid SOCKS message: version=0x%02x state=%d",
-			version, ctx->state);
-		return -1;
+		break;
 	}
-#undef DISPATCH_TUPLE
-	FAIL();
+	SOCKS_CTX_LOG_F(
+		ERROR, ctx, "invalid SOCKS message: version=0x%02x", version);
+	return -1;
 }
 
 static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
