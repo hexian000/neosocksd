@@ -115,7 +115,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		stats->num_sessions--;
 		break;
 	}
-	HTTP_CTX_LOG_F(INFO, ctx, "closed, %zu active", stats->num_sessions);
+	HTTP_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
 }
 
 static void http_ctx_free(struct http_ctx *restrict ctx)
@@ -318,7 +318,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 		stats->num_sessions++;
 		stats->num_success++;
 		HTTP_CTX_LOG_F(
-			INFO, ctx, "established, %zu active",
+			DEBUG, ctx, "established, %zu active",
 			stats->num_sessions);
 		ev_timer_stop(loop, &ctx->w_timeout);
 		return;
@@ -340,7 +340,7 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		stats->num_sessions++;
 		stats->num_success++;
 		HTTP_CTX_LOG_F(
-			INFO, ctx, "established, %zu active",
+			DEBUG, ctx, "established, %zu active",
 			stats->num_sessions);
 	}
 

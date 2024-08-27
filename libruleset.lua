@@ -255,7 +255,7 @@ _G.parse_cidr6 = parse_cidr6
 -- [[ RPC utilities ]] --
 
 function _G.unmarshal(s)
-    return assert(load("return " .. s, "=(unmarshal)", "t", {}))()
+    return assert(load("return " .. s, "=(unmarshal)", "bt", {}))()
 end
 
 local rpc = _G.rpc or {}
@@ -266,7 +266,7 @@ end
 _G.rpc = rpc
 
 function await.rpcall(target, func, ...)
-    local code = strformat("return _G.rpc.%s(%s)", func, marshal(...))
+    local code = strformat("return rpc.%s(%s)", func, marshal(...))
     return await.invoke(code, table.unpack(target))
 end
 

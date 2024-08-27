@@ -36,6 +36,7 @@
 enum api_state {
 	STATE_INIT,
 	STATE_REQUEST,
+	STATE_YIELD,
 	STATE_RESPONSE,
 };
 
@@ -350,31 +351,18 @@ static bool restapi_check(
 
 #if WITH_RULESET
 static void
-handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
+rpcall_finished(void *data, const bool ok, const void *result, size_t resultlen)
 {
-	char *mime_type = ctx->parser.hdr.content.type;
-	if (!check_rpcall_mime(mime_type)) {
-		LOGD("rpcall: invalid content type");
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_BAD_REQUEST);
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		return;
-	}
-	struct stream *reader = content_reader(
-		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
-		ctx->parser.hdr.content.encoding);
-	if (reader == NULL) {
-		LOGOOM();
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
-	const void *result;
-	size_t resultlen;
-	const bool ok = ruleset_rpcall(ruleset, reader, &result, &resultlen);
-	stream_close(reader);
+	struct api_ctx *restrict ctx = data;
+	ctx->state = STATE_RESPONSE;
+	struct ev_loop *const loop = ctx->s->loop;
+	ev_timer_start(loop, &ctx->w_timeout);
+	ev_io_start(loop, &ctx->w_send);
+
 	if (!ok) {
+		struct ruleset *r = G.ruleset;
 		size_t len;
-		const char *err = ruleset_geterror(ruleset, &len);
+		const char *err = ruleset_geterror(r, &len);
 		LOGW_F("ruleset rpcall: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
@@ -417,6 +405,42 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 	}
 	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
 	RESPHDR_FINISH(ctx->parser.wbuf);
+}
+
+static void
+handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
+{
+	char *mime_type = ctx->parser.hdr.content.type;
+	if (!check_rpcall_mime(mime_type)) {
+		LOGD("rpcall: invalid content type");
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_BAD_REQUEST);
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		return;
+	}
+	struct stream *reader = content_reader(
+		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
+		ctx->parser.hdr.content.encoding);
+	if (reader == NULL) {
+		LOGOOM();
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	const bool ok = ruleset_rpcall(ruleset, reader, rpcall_finished, ctx);
+	stream_close(reader);
+	if (!ok) {
+		size_t len;
+		const char *err = ruleset_geterror(ruleset, &len);
+		LOGW_F("ruleset rpcall: %s", err);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
+		RESPHDR_CLENGTH(ctx->parser.wbuf, len);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+		BUF_APPEND(ctx->parser.wbuf, err, len);
+		return;
+	}
+	ctx->state = STATE_YIELD;
 }
 
 static void handle_ruleset_invoke(
@@ -639,15 +663,16 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	case STATE_INIT:
 		return;
 	case STATE_REQUEST:
+	case STATE_YIELD:
 	case STATE_RESPONSE:
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
-		return;
+		break;
 	}
-	API_CTX_LOG_F(INFO, ctx, "closed, %zu active", stats->num_sessions);
+	API_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void http_ctx_free(struct api_ctx *restrict ctx)
+static void api_ctx_free(struct api_ctx *restrict ctx)
 {
 	if (ctx == NULL) {
 		return;
@@ -672,7 +697,7 @@ static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
 		ctx->state);
 	api_ctx_stop(loop, ctx);
-	http_ctx_free(ctx);
+	api_ctx_free(ctx);
 }
 
 static void
@@ -696,17 +721,25 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	if (want > 0) {
 		return;
 	}
+	ev_io_stop(loop, watcher);
+	ctx->state = STATE_RESPONSE;
 	switch (ctx->parser.state) {
 	case STATE_PARSE_OK: {
 		struct server_stats *restrict stats = &ctx->s->stats;
 		stats->num_request++;
 		api_handle(loop, ctx);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
 	} break;
 	case STATE_PARSE_ERROR:
 		http_resp_errpage(&ctx->parser, ctx->parser.http_status);
-		ctx->state = STATE_RESPONSE;
+		break;
+	default:
+		FAIL();
+	}
+	switch (ctx->state) {
+	case STATE_YIELD:
+		ev_timer_stop(loop, &ctx->w_timeout);
+		break;
+	case STATE_RESPONSE:
 		ev_io_start(loop, &ctx->w_send);
 		break;
 	default:

@@ -96,7 +96,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	default:
 		FAIL();
 	}
-	FW_CTX_LOG_F(INFO, ctx, "closed, %zu active", stats->num_sessions);
+	FW_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
 }
 
 static void forward_ctx_free(struct forward_ctx *restrict ctx)
@@ -154,7 +154,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 		stats->num_sessions++;
 		stats->num_success++;
 		FW_CTX_LOG_F(
-			INFO, ctx, "established, %zu active",
+			DEBUG, ctx, "established, %zu active",
 			stats->num_sessions);
 		ev_timer_stop(loop, &ctx->w_timeout);
 		return;
@@ -212,7 +212,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		stats->num_sessions++;
 		stats->num_success++;
 		FW_CTX_LOG_F(
-			INFO, ctx, "established, %zu active",
+			DEBUG, ctx, "established, %zu active",
 			stats->num_sessions);
 	}
 

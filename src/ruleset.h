@@ -28,9 +28,11 @@ bool ruleset_invoke(struct ruleset *r, struct stream *code);
 bool ruleset_update(struct ruleset *r, const char *modname, struct stream *code);
 bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
+typedef void (*rpcall_finished_fn)(
+	void *data, bool ok, const void *result, size_t resultlen);
 bool ruleset_rpcall(
-	struct ruleset *r, struct stream *code, const void **result,
-	size_t *resultlen);
+	struct ruleset *r, struct stream *code, rpcall_finished_fn callback,
+	void *data);
 
 struct dialreq *ruleset_resolve(
 	struct ruleset *r, const char *request, const char *username,

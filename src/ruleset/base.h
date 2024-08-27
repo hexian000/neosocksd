@@ -54,7 +54,6 @@ enum ruleset_functions {
 	FUNC_STATS,
 	FUNC_TICK,
 	FUNC_TRACEBACK,
-	FUNC_XPCALL,
 	FUNC_RPCALL,
 };
 
@@ -67,5 +66,6 @@ int format_addr_(lua_State *L);
 struct dialreq *pop_dialreq_(lua_State *L, const int n);
 
 int api_async_(lua_State *L);
+int thread_main_(lua_State *L);
 
 #endif /* RULESET_BASE_H */

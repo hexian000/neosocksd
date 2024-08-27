@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <assert.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -163,60 +164,83 @@ bool ruleset_pcall(
 	return lua_pcall(L, nargs, nresults, traceback ? 1 : 0) == LUA_OK;
 }
 
-int api_async_traceback_(lua_State *restrict L)
+int thread_main_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	int n = lua_gettop(L);
-	lua_State *restrict co = lua_newthread(L);
-	lua_pop(L, 1);
-	if (lua_rawgeti(co, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
+	UNUSED(ctx);
+	if (lua_isnil(L, lua_upvalueindex(1))) {
+		return 0;
 	}
-	if (lua_rawgeti(co, -1, FUNC_XPCALL) != LUA_TFUNCTION) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
-	lua_remove(co, -2); /* RIDX_FUNCTIONS */
-	lua_xmove(L, co, n);
-	lua_settop(L, 0);
-	/* co stack: FUNC_XPCALL, f, ... */
-	(void)co_resume(co, L, n, &n);
-	if (!lua_checkstack(L, n)) {
+	/* stack: FUNC_TRACEBACK?, true, ... */
+	int n = lua_gettop(L) - 1;
+	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushboolean(L, 0);
-		lua_pushliteral(L, "too many results");
-		return 2;
+		if (n > 1) {
+			lua_pushvalue(L, -2);
+		} else {
+			lua_pushnil(L);
+		}
+		n = 2;
 	}
-	lua_xmove(co, L, n);
-	return n;
+	lua_pushvalue(L, lua_upvalueindex(1));
+	lua_replace(L, 1);
+	/* lua stack: f ok ... */
+	lua_call(L, n, 0);
+	return 0;
+}
+
+static int push_traceback_(lua_State *restrict L)
+{
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	if (lua_rawgeti(L, -1, FUNC_TRACEBACK) != LUA_TFUNCTION) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	lua_replace(L, -2);
+	return 1;
+}
+
+/* thread_main(f, ...) */
+int thread_main_(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	const int n = lua_gettop(L) - 1;
+	const int errfunc = G.conf->traceback ? 1 : 0;
+	if (errfunc) {
+		(void)push_traceback_(L);
+	} else {
+		lua_pushnil(L);
+	}
+	lua_pushboolean(L, 1);
+	lua_rotate(L, 1, 2);
+	/* FUNC_TRACEBACK?, true, f, ... */
+	const int status =
+		lua_pcallk(L, n, LUA_MULTRET, errfunc, 0, thread_main_k_);
+	return thread_main_k_(L, status, 0);
 }
 
 /* ok, ... = async(f, ...) */
 int api_async_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TFUNCTION);
-	if (G.conf->traceback) {
-		return api_async_traceback_(L);
-	}
 	int n = lua_gettop(L);
 	lua_State *restrict co = lua_newthread(L);
 	lua_pop(L, 1);
+	lua_pushnil(co);
+	lua_pushcclosure(co, thread_main_, 1);
 	lua_xmove(L, co, n);
 	lua_settop(L, 0);
-	/* co stack: f, ... */
-	const int status = co_resume(co, L, n - 1, &n);
+	/* co stack: thread_main, f, ... */
+	const int status = co_resume(co, L, n, &n);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushboolean(L, 0);
 		lua_xmove(co, L, 1);
 		return 2;
 	}
-	if (!lua_checkstack(L, 1 + n)) {
-		lua_pushboolean(L, 0);
-		lua_pushliteral(L, "too many results");
-		return 2;
-	}
 	lua_pushboolean(L, 1);
-	lua_xmove(co, L, n);
-	return 1 + n;
+	return 1;
 }
 
 bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
@@ -244,11 +268,6 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 	const int status = co_resume(co, L, narg, &nres);
 	switch (status) {
 	case LUA_OK:
-		if (G.conf->traceback && !lua_toboolean(co, 1)) {
-			lua_xmove(co, L, 1);
-			return false;
-		}
-		/* fallthrough */
 	case LUA_YIELD:
 		return true;
 	default:
