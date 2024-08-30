@@ -410,7 +410,10 @@ static bool send_http_req(
 	char buf[cap];
 #define APPEND(b, s)                                                           \
 	do {                                                                   \
-		assert(b + CONSTSTRLEN(s) <= buf + cap);                       \
+		if (b + CONSTSTRLEN(s) > buf + cap) {                          \
+			DIALER_LOG(ERROR, d, "buffer overflow");               \
+			return false;                                          \
+		}                                                              \
 		memcpy((b), (s), CONSTSTRLEN(s));                              \
 		(b) += CONSTSTRLEN(s);                                         \
 	} while (0)
@@ -438,7 +441,10 @@ static bool send_http_req(
 		size_t len = cap - (b - buf);
 		const bool ok =
 			base64_encode((unsigned char *)b, &len, src, srclen);
-		assert(ok && b + len <= buf + cap);
+		if (!ok || b + len > buf + cap) {
+			DIALER_LOG(ERROR, d, "failed to format credential");
+			return false;
+		}
 		b += len;
 		APPEND(b, "\r\n");
 	}
