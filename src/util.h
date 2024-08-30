@@ -4,6 +4,7 @@
 #ifndef UTIL_H
 #define UTIL_H
 
+#include "utils/arraysize.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
@@ -34,6 +35,8 @@ extern struct globals {
 	struct session *sessions;
 	struct dialreq *basereq;
 } G;
+
+#define CONSTSTRLEN(s) (ARRAY_SIZE(s) - 1)
 
 #define UNUSED(x) (void)(x)
 

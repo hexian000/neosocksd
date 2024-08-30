@@ -63,7 +63,6 @@ struct socks_ctx {
 				uint8_t method;
 				const char *username;
 				const char *password;
-				char credentials[512];
 			} auth;
 			struct {
 				BUFFER_HDR;
@@ -450,14 +449,12 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 	}
 	char *userid = (char *)ctx->rbuf.data + sizeof(struct socks4_hdr);
 	const size_t maxlen =
-		MIN(ctx->rbuf.len - sizeof(struct socks4_hdr),
-		    sizeof(ctx->auth.credentials));
+		MIN(ctx->rbuf.len - sizeof(struct socks4_hdr), 512);
 	const size_t idlen = strnlen(userid, maxlen);
 	if (idlen == maxlen) {
 		return -1;
 	}
-	strcpy(ctx->auth.credentials, userid);
-	ctx->auth.username = ctx->auth.credentials;
+	ctx->auth.username = userid;
 	ctx->auth.password = NULL;
 
 	const uint32_t ip = read_uint32(
@@ -620,12 +617,21 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 		(void)send_rsp(ctx, wbuf, sizeof(wbuf));
 		return -1;
 	}
-	const unsigned char *credentials = req + 2;
-	memcpy(ctx->auth.credentials, credentials, ulen + 1 + plen);
-	ctx->auth.credentials[ulen] = '\0';
-	ctx->auth.credentials[ulen + 1 + plen] = '\0';
-	ctx->auth.username = ctx->auth.credentials;
-	ctx->auth.password = ctx->auth.credentials + ulen + 1;
+	/* rewrite the buffer as null-terminated string */
+	const char *req_user = (const char *)req + 2;
+	char *username = (char *)ctx->next;
+	for (size_t i = 0; i < ulen; i++) {
+		username[i] = req_user[i];
+	}
+	username[ulen] = '\0';
+	const char *req_pass = (const char *)req + 2 + ulen + 1;
+	char *password = username + ulen + 1;
+	for (size_t i = 0; i < plen; i++) {
+		password[i] = req_pass[i];
+	}
+	password[plen] = '\0';
+	ctx->auth.username = username;
+	ctx->auth.password = password;
 
 	/* authentication is always successful because the request is unknown yet */
 	wbuf[1] = 0x00; /* STATUS = SUCCESS */
