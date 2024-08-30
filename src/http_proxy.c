@@ -241,6 +241,7 @@ static bool req_connect(
 		if (req == NULL) {
 			return false;
 		}
+		ctx->dialreq = req;
 		return true;
 	}
 #endif
@@ -260,6 +261,7 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void
 http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
+	ctx->dialreq = NULL;
 	const struct http_message *restrict msg = &ctx->parser.msg;
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx, "http: %s `%s'", msg->req.method, msg->req.url);
