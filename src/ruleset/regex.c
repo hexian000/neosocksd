@@ -25,7 +25,7 @@ static int regex_compile_(lua_State *restrict L)
 	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *pat = lua_tostring(L, 1);
 	regex_t *preg = lua_newuserdata(L, sizeof(regex_t));
-	const int err = regcomp(preg, pat, REG_EXTENDED);
+	const int err = regcomp(preg, pat, REG_EXTENDED | REG_NEWLINE);
 	if (err != 0) {
 		char errbuf[256];
 		const size_t n = regerror(err, preg, errbuf, sizeof(errbuf));
