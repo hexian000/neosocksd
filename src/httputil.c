@@ -49,7 +49,7 @@ void http_resp_errpage(struct http_parser *restrict p, const uint16_t code)
 		return;
 	}
 	p->wbuf.len += len;
-	LOGD_F("http: response error page %" PRIu16, code);
+	LOG_STACK_F(VERBOSE, 0, "http: response error page %" PRIu16, code);
 }
 
 static bool reply_short(struct http_parser *restrict p, const char *s)

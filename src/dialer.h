@@ -8,7 +8,6 @@
 #include "proto/socks.h"
 #include "util.h"
 
-#include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/minmax.h"
 
@@ -48,6 +47,8 @@ enum proxy_protocol {
 struct proxy_req {
 	enum proxy_protocol proto;
 	struct dialaddr addr;
+	char *username, *password;
+	char credential[512];
 };
 
 struct dialreq {
@@ -61,9 +62,9 @@ bool dialreq_addproxy(struct dialreq *r, const char *proxy_uri, size_t urilen);
 struct dialreq *dialreq_parse(const char *addr, const char *csv);
 void dialreq_free(struct dialreq *r);
 
-#define DIALER_BUF_SIZE                                                        \
-	MAX(ARRAY_SIZE("CONNECT") + (FQDN_MAX_LENGTH + ARRAY_SIZE(":65535")) + \
-		    ARRAY_SIZE("HTTP/1.1\r\n"),                                \
+#define DIALER_RBUF_SIZE                                                       \
+	MAX(CONSTSTRLEN("CONNECT ") + FQDN_MAX_LENGTH +                        \
+		    CONSTSTRLEN(":65535 HTTP/1.1\r\n\r\n"),                    \
 	    SOCKS_REQ_MAXLEN)
 
 struct dialer {
@@ -75,10 +76,11 @@ struct dialer {
 	int syserr;
 	struct ev_watcher w_start;
 	struct ev_io w_socket;
+	unsigned char *next;
 	struct {
 		BUFFER_HDR;
-		unsigned char data[DIALER_BUF_SIZE];
-	} buf;
+		unsigned char data[DIALER_RBUF_SIZE];
+	} rbuf;
 };
 
 void dialer_init(struct dialer *d, struct event_cb cb);

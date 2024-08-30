@@ -10,6 +10,7 @@
 #include "sockutil.h"
 #include "util.h"
 
+#include "codec/base64.h"
 #include "net/addr.h"
 #include "net/http.h"
 #include "net/url.h"
@@ -29,6 +30,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -134,6 +136,24 @@ int dialaddr_format(
 	FAIL();
 }
 
+static bool proxy_set_credential(
+	struct proxy_req *restrict proxy, const char *username,
+	const char *password)
+{
+	const size_t ulen = strlen(username) + 1;
+	const size_t plen = (password != NULL) ? strlen(password) + 1 : 0;
+	if (ulen + plen > sizeof(proxy->credential)) {
+		return false;
+	}
+	proxy->username = proxy->credential;
+	memcpy(proxy->username, username, ulen);
+	if (password != NULL) {
+		proxy->password = proxy->credential + ulen;
+		memcpy(proxy->password, password, plen);
+	}
+	return true;
+}
+
 bool dialreq_addproxy(
 	struct dialreq *restrict req, const char *proxy_uri,
 	const size_t urilen)
@@ -188,6 +208,16 @@ bool dialreq_addproxy(
 	if (!dialaddr_set(&proxy->addr, host, (uint16_t)portvalue)) {
 		return false;
 	}
+	proxy->username = NULL;
+	proxy->password = NULL;
+	if (uri.userinfo != NULL) {
+		char *username, *password;
+		if (!url_unescape_userinfo(uri.userinfo, &username, &password) ||
+		    !proxy_set_credential(proxy, username, password)) {
+			LOGE_F("invalid proxy userinfo: `%s'", uri.userinfo);
+			return false;
+		}
+	}
 	req->num_proxy++;
 	return true;
 }
@@ -241,6 +271,19 @@ struct dialreq *dialreq_parse(const char *addr, const char *csv)
 	return req;
 }
 
+static void
+proxy_copy(struct proxy_req *restrict dst, const struct proxy_req *restrict src)
+{
+	dst->proto = src->proto;
+	dialaddr_copy(&dst->addr, &src->addr);
+	if (src->username != NULL) {
+		(void)proxy_set_credential(dst, src->username, src->password);
+	} else {
+		dst->username = NULL;
+		dst->password = NULL;
+	}
+}
+
 struct dialreq *dialreq_new(const size_t num_proxy)
 {
 	struct dialreq *restrict base = G.basereq;
@@ -254,9 +297,7 @@ struct dialreq *dialreq_new(const size_t num_proxy)
 	if (base != NULL) {
 		dialaddr_copy(&req->addr, &base->addr);
 		for (size_t i = 0; i < num_base_proxy; i++) {
-			req->proxy[i].proto = base->proxy[i].proto;
-			dialaddr_copy(
-				&req->proxy[i].addr, &base->proxy[i].addr);
+			proxy_copy(&req->proxy[i], &base->proxy[i]);
 		}
 	}
 	return req;
@@ -274,6 +315,7 @@ enum dialer_state {
 	STATE_CONNECT,
 	STATE_HANDSHAKE1,
 	STATE_HANDSHAKE2,
+	STATE_HANDSHAKE3,
 	STATE_DONE,
 };
 
@@ -293,6 +335,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 	case STATE_CONNECT:
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2:
+	case STATE_HANDSHAKE3:
 		ev_io_stop(loop, &d->w_socket);
 		break;
 	case STATE_DONE:
@@ -333,8 +376,8 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 	} while (0)
 #define DIALER_LOG(level, d, message) DIALER_LOG_F(level, d, "%s", message)
 
-static bool
-send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
+static bool dialer_send(
+	struct dialer *restrict d, const unsigned char *buf, const size_t len)
 {
 	LOG_BIN_F(VERYVERBOSE, buf, len, "send: %zu bytes", len);
 	const ssize_t nsend = send(d->w_socket.fd, buf, len, 0);
@@ -352,60 +395,71 @@ send_req(struct dialer *restrict d, const unsigned char *buf, const size_t len)
 	return true;
 }
 
-/* RFC 7231: 4.3.6.  CONNECT */
-static bool
-send_http_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
-{
-	size_t addrcap;
-	switch (addr->type) {
-	case ATYP_INET:
-		addrcap = INET_ADDRSTRLEN;
-		break;
-	case ATYP_INET6:
-		addrcap = INET6_ADDRSTRLEN;
-		break;
-	case ATYP_DOMAIN:
-		addrcap = addr->domain.len + 1;
-		break;
-	default:
-		FAIL();
-	}
+#define DIALER_HTTP_REQ_MAXLEN                                                 \
+	(CONSTSTRLEN("CONNECT ") + FQDN_MAX_LENGTH +                           \
+	 CONSTSTRLEN(":65535 HTTP/1.1\r\n") +                                  \
+	 CONSTSTRLEN("Proxy-Authorization: Basic ") + 685 +                    \
+	 CONSTSTRLEN("\r\n") + CONSTSTRLEN("\r\n"))
 
-#define STRLEN(s) (ARRAY_SIZE(s) - 1)
-#define STRLENB(s) (STRLEN(s) * sizeof((s)[0]))
+/* RFC 7231: 4.3.6.  CONNECT */
+static bool send_http_req(
+	struct dialer *restrict d, const struct proxy_req *proxy,
+	const struct dialaddr *restrict addr)
+{
+	const size_t cap = DIALER_HTTP_REQ_MAXLEN;
+	char buf[cap];
 #define APPEND(b, s)                                                           \
 	do {                                                                   \
-		memcpy((b), (s), STRLENB(s));                                  \
-		(b) += STRLEN(s);                                              \
+		assert(b + CONSTSTRLEN(s) <= buf + cap);                       \
+		memcpy((b), (s), CONSTSTRLEN(s));                              \
+		(b) += CONSTSTRLEN(s);                                         \
 	} while (0)
-	/* "CONNECT example.org:80 HTTP/1.1\r\n\r\n" */
-	addrcap += STRLEN(":65535");
-	const size_t cap =
-		STRLEN("CONNECT ") + addrcap + STRLEN(" HTTP/1.1\r\n\r\n");
-	char buf[cap];
 	char *b = buf;
 	APPEND(b, "CONNECT ");
-	const int n = dialaddr_format(addr, b, addrcap);
-	if (n < 0 || (size_t)n >= addrcap) {
+	const int n = dialaddr_format(addr, b, cap - (b - buf));
+	if (n < 0 || (size_t)n >= cap - (b - buf)) {
+		DIALER_LOG(ERROR, d, "failed to format host address");
 		return false;
 	}
 	b += n;
-	APPEND(b, " HTTP/1.1\r\n\r\n");
+	APPEND(b, " HTTP/1.1\r\n");
+	if (proxy->username != NULL) {
+		APPEND(b, "Proxy-Authorization: Basic ");
+		const size_t ulen = strlen(proxy->username);
+		const size_t plen =
+			(proxy->password != NULL) ? strlen(proxy->password) : 0;
+		const size_t srclen = ulen + 1 + plen;
+		unsigned char src[srclen];
+		memcpy(src, proxy->username, ulen);
+		src[ulen] = ':';
+		if (plen > 0) {
+			memcpy(src + ulen + 1, proxy->password, plen);
+		}
+		size_t len = cap - (b - buf);
+		const bool ok =
+			base64_encode((unsigned char *)b, &len, src, srclen);
+		assert(ok && b + len <= buf + cap);
+		b += len;
+		APPEND(b, "\r\n");
+	}
+	APPEND(b, "\r\n");
+#undef APPEND
 
-	if (!send_req(d, (unsigned char *)buf, (size_t)(b - buf))) {
+	if (!dialer_send(d, (unsigned char *)buf, (size_t)(b - buf))) {
 		return false;
 	}
-	socket_rcvlowat(d->w_socket.fd, STRLENB("HTTP/2 200 \r\n\r\n"));
-#undef APPEND
-#undef STRLENB
-#undef STRLEN
+	socket_rcvlowat(d->w_socket.fd, CONSTSTRLEN("HTTP/2 200 \r\n\r\n"));
 	return true;
 }
 
 static bool send_socks4a_req(
-	struct dialer *restrict d, const struct dialaddr *restrict addr)
+	struct dialer *restrict d, const struct proxy_req *proxy,
+	const struct dialaddr *restrict addr)
 {
-	size_t cap = sizeof(struct socks4_hdr) + 1;
+	size_t cap = sizeof(struct socks4_hdr);
+	const size_t idlen =
+		(proxy->username != NULL) ? strlen(proxy->username) : 0;
+	cap += idlen + 1;
 	switch (addr->type) {
 	case ATYP_INET:
 		break;
@@ -423,10 +477,10 @@ static bool send_socks4a_req(
 	write_uint8(
 		buf + offsetof(struct socks4_hdr, command), SOCKS4CMD_CONNECT);
 	write_uint16(buf + offsetof(struct socks4_hdr, port), addr->port);
-	unsigned char *const address =
-		buf + offsetof(struct socks4_hdr, address);
-	buf[sizeof(struct socks4_hdr)] = 0; /* ident = "" */
-	size_t len = sizeof(struct socks4_hdr) + 1;
+	unsigned char *address = buf + offsetof(struct socks4_hdr, address);
+	unsigned char *userid = buf + sizeof(struct socks4_hdr);
+	memcpy(userid, proxy->username, idlen + 1);
+	size_t len = sizeof(struct socks4_hdr) + idlen + 1;
 	switch (addr->type) {
 	case ATYP_INET:
 		memcpy(address, &addr->in, sizeof(addr->in));
@@ -451,24 +505,59 @@ static bool send_socks4a_req(
 		len += n + 1;
 	} break;
 	}
-	if (!send_req(d, buf, len)) {
+	if (!dialer_send(d, buf, len)) {
 		return false;
 	}
 	socket_rcvlowat(d->w_socket.fd, SOCKS4_RSP_MINLEN);
 	return true;
 }
 
-static bool send_socks5_auth(
-	struct dialer *restrict d, const struct dialaddr *restrict addr)
+static bool send_socks5_authmethod(
+	struct dialer *restrict d, const struct proxy_req *restrict proxy)
 {
-	UNUSED(addr);
-	unsigned char buf[3] = { SOCKS5, 0x01, 0x00 };
-	return send_req(d, buf, sizeof(buf));
+	assert(d->state == STATE_HANDSHAKE1);
+	if (proxy->username == NULL) {
+		unsigned char buf[] = { SOCKS5, 0x01, SOCKS5AUTH_NOAUTH };
+		return dialer_send(d, buf, sizeof(buf));
+	}
+	unsigned char buf[] = { SOCKS5, 0x02, SOCKS5AUTH_NOAUTH,
+				SOCKS5AUTH_USERPASS };
+	return dialer_send(d, buf, sizeof(buf));
+}
+
+static bool send_socks5_auth(
+	struct dialer *restrict d, const struct proxy_req *restrict proxy)
+{
+	assert(d->state == STATE_HANDSHAKE2);
+	const size_t ulen = strlen(proxy->username);
+	const size_t plen =
+		(proxy->password != NULL) ? strlen(proxy->password) : 0;
+	if (ulen > UCHAR_MAX || plen > UCHAR_MAX) {
+		DIALER_LOG_F(
+			ERROR, d, "socks5 credentials too long: %zu, %zu", ulen,
+			plen);
+		return false;
+	}
+	const size_t len = 1 + 1 + ulen + 1 + plen;
+	unsigned char buf[len];
+	unsigned char *p = buf;
+	*p++ = 0x01; /* version */
+	*p++ = (unsigned char)ulen;
+	if (ulen > 0) {
+		(void)memcpy(p, proxy->username, ulen);
+	}
+	p += ulen;
+	*p++ = (unsigned char)plen;
+	if (plen > 0) {
+		(void)memcpy(p, proxy->password, plen);
+	}
+	return dialer_send(d, buf, len);
 }
 
 static bool
 send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 {
+	assert(d->state == STATE_HANDSHAKE3);
 	size_t cap = sizeof(struct socks5_hdr);
 	switch (addr->type) {
 	case ATYP_INET:
@@ -523,31 +612,33 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		len += sizeof(uint16_t);
 	} break;
 	}
-	if (!send_req(d, buf, len)) {
+	if (!dialer_send(d, buf, len)) {
 		return false;
 	}
 	socket_rcvlowat(d->w_socket.fd, SOCKS5_RSP_MINLEN);
 	return true;
 }
 
-static bool send_proxy_req(struct dialer *restrict d)
+static bool send_dispatch(struct dialer *restrict d)
 {
 	const struct dialreq *restrict req = d->req;
 	const size_t jump = d->jump;
 	const size_t next = jump + 1;
-	const enum proxy_protocol proto = req->proxy[jump].proto;
+	const struct proxy_req *restrict proxy = &req->proxy[jump];
 	const struct dialaddr *addr =
 		next < req->num_proxy ? &req->proxy[next].addr : &req->addr;
-	switch (proto) {
+	switch (proxy->proto) {
 	case PROTO_HTTP:
-		return send_http_req(d, addr);
+		return send_http_req(d, proxy, addr);
 	case PROTO_SOCKS4A:
-		return send_socks4a_req(d, addr);
+		return send_socks4a_req(d, proxy, addr);
 	case PROTO_SOCKS5:
 		switch (d->state) {
 		case STATE_HANDSHAKE1:
-			return send_socks5_auth(d, addr);
+			return send_socks5_authmethod(d, proxy);
 		case STATE_HANDSHAKE2:
+			return send_socks5_auth(d, proxy);
+		case STATE_HANDSHAKE3:
 			return send_socks5_req(d, addr);
 		default:
 			break;
@@ -562,7 +653,7 @@ static bool send_proxy_req(struct dialer *restrict d)
 static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 {
 	LOGV_F("consume_rcvbuf: %zu bytes", n);
-	const ssize_t nrecv = recv(d->w_socket.fd, d->buf.data, n, 0);
+	const ssize_t nrecv = recv(d->w_socket.fd, d->next, n, 0);
 	if (nrecv < 0) {
 		const int err = errno;
 		DIALER_LOG_F(ERROR, d, "recv: %s", strerror(err));
@@ -572,17 +663,58 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 		DIALER_LOG_F(ERROR, d, "recv: short read %zd/%zu", nrecv, n);
 		return false;
 	}
+	d->next += n;
 	return true;
+}
+
+static int recv_http_hdr(struct dialer *restrict d)
+{
+	char *const buf = (char *)d->next;
+	char *key, *value;
+	char *last = buf, *next;
+	for (;;) {
+		next = http_parsehdr(last, &key, &value);
+		if (next == NULL) {
+			DIALER_LOG(ERROR, d, "http_parsehdr: failed");
+			return -1;
+		}
+		if (next == last) {
+			if (!consume_rcvbuf(d, (size_t)(next - buf))) {
+				return -1;
+			}
+			return 1;
+		}
+		if (key == NULL) {
+			break;
+		}
+		LOGV_F("http: \"%s: %s\"", key, value);
+		last = next;
+	}
+
+	/* protocol finished */
+	if (!consume_rcvbuf(d, (size_t)(next - buf))) {
+		return -1;
+	}
+	return 0;
 }
 
 static int recv_http_rsp(struct dialer *restrict d)
 {
-	if (d->buf.len == d->buf.cap) {
+	assert(d->state == STATE_HANDSHAKE1);
+	DIALER_LOG_F(
+		DEBUG, d, "state: %d len: %zu cap: %zu", d->state, d->rbuf.len,
+		d->rbuf.cap);
+	if (d->rbuf.len >= d->rbuf.cap) {
+		DIALER_LOG(ERROR, d, "http: response too long");
 		return -1;
 	}
-	d->buf.data[d->buf.len] = 0;
+	d->rbuf.data[d->rbuf.len] = '\0';
+	if (d->next > d->rbuf.data) {
+		return recv_http_hdr(d);
+	}
+
 	struct http_message msg;
-	char *buf = (char *)d->buf.data;
+	char *const buf = (char *)d->next;
 	char *next = http_parse(buf, &msg);
 	if (next == NULL) {
 		DIALER_LOG(ERROR, d, "http_parse: failed");
@@ -604,37 +736,21 @@ static int recv_http_rsp(struct dialer *restrict d)
 		return -1;
 	}
 
-	char *key, *value;
-	char *last = next;
-	for (;;) {
-		next = http_parsehdr(last, &key, &value);
-		if (next == NULL) {
-			DIALER_LOG(ERROR, d, "http_parsehdr: failed");
-			return -1;
-		}
-		if (next == last) {
-			return 1;
-		}
-		if (key == NULL) {
-			break;
-		}
-		LOGV_F("http: \"%s: %s\"", key, value);
-		last = next;
-	}
-
-	/* protocol finished, remove header */
 	if (!consume_rcvbuf(d, (size_t)(next - buf))) {
 		return -1;
 	}
-	return 0;
+	return recv_http_hdr(d);
 }
 
 static int recv_socks4a_rsp(struct dialer *restrict d)
 {
-	if (d->buf.len < sizeof(struct socks4_hdr)) {
-		return (int)(sizeof(struct socks4_hdr) - d->buf.len);
+	assert(d->state == STATE_HANDSHAKE1);
+	const unsigned char *hdr = d->next;
+	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
+	const size_t want = sizeof(struct socks4_hdr);
+	if (len < want) {
+		return (int)(want - len);
 	}
-	const unsigned char *hdr = d->buf.data;
 	const uint8_t version =
 		read_uint8(hdr + offsetof(struct socks4_hdr, version));
 	if (version != UINT8_C(0)) {
@@ -658,13 +774,13 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 		return -1;
 	}
 	/* protocol finished, remove header */
-	if (!consume_rcvbuf(d, sizeof(struct socks4_hdr))) {
+	if (!consume_rcvbuf(d, want)) {
 		return -1;
 	}
 	return 0;
 }
 
-static const char *socks5_errors[] = {
+static const char *socks5_errorstr[] = {
 	[SOCKS5RSP_SUCCEEDED] = "Succeeded",
 	[SOCKS5RSP_FAIL] = "General SOCKS server failure",
 	[SOCKS5RSP_NOALLOWED] = "Connection not allowed by ruleset",
@@ -678,12 +794,12 @@ static const char *socks5_errors[] = {
 
 static int recv_socks5_rsp(struct dialer *restrict d)
 {
-	assert(d->state == STATE_HANDSHAKE2);
-	const unsigned char *hdr = d->buf.data;
-	const size_t len = d->buf.len;
-	size_t expected = sizeof(struct socks5_hdr);
-	if (len < expected) {
-		return (int)(expected - len) + 1;
+	assert(d->state == STATE_HANDSHAKE3);
+	const unsigned char *hdr = d->next;
+	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
+	size_t want = sizeof(struct socks5_hdr);
+	if (len < want) {
+		return (int)(want - len) + 1;
 	}
 
 	const uint8_t version =
@@ -697,9 +813,10 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 	const uint8_t command =
 		read_uint8(hdr + offsetof(struct socks5_hdr, command));
 	if (command != SOCKS5RSP_SUCCEEDED) {
-		if (command < ARRAY_SIZE(socks5_errors)) {
+		if (command < ARRAY_SIZE(socks5_errorstr)) {
 			DIALER_LOG_F(
-				ERROR, d, "SOCKS5: %s", socks5_errors[command]);
+				ERROR, d, "SOCKS5: %s",
+				socks5_errorstr[command]);
 			return -1;
 		}
 		DIALER_LOG_F(
@@ -711,10 +828,10 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		read_uint8(hdr + offsetof(struct socks5_hdr, addrtype));
 	switch (addrtype) {
 	case SOCKS5ADDR_IPV4:
-		expected += sizeof(struct in_addr) + sizeof(in_port_t);
+		want += sizeof(struct in_addr) + sizeof(in_port_t);
 		break;
 	case SOCKS5ADDR_IPV6:
-		expected += sizeof(struct in6_addr) + sizeof(in_port_t);
+		want += sizeof(struct in6_addr) + sizeof(in_port_t);
 		break;
 	default:
 		DIALER_LOG_F(
@@ -722,11 +839,11 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 			addrtype);
 		return -1;
 	}
-	if (len < expected) {
-		return (int)(expected - len);
+	if (len < want) {
+		return (int)(want - len);
 	}
-	/* protocol finished, remove header */
-	if (!consume_rcvbuf(d, expected)) {
+	/* protocol finished */
+	if (!consume_rcvbuf(d, want)) {
 		return -1;
 	}
 	return 0;
@@ -734,12 +851,42 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 
 static int recv_socks5_auth(struct dialer *restrict d)
 {
-	assert(d->state == STATE_HANDSHAKE1);
-	const size_t rsplen = sizeof(struct socks5_auth_rsp);
-	if (d->buf.len < rsplen) {
-		return (int)(rsplen - d->buf.len);
+	assert(d->state == STATE_HANDSHAKE2);
+	const unsigned char *hdr = d->next;
+	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
+	const size_t want = 2;
+	if (len < want) {
+		return (int)(want - len);
 	}
-	const unsigned char *hdr = d->buf.data;
+	const uint8_t version = read_uint8(hdr + 0);
+	const uint8_t status = read_uint8(hdr + 1);
+	if (version != 0x01 || status != 0x00) {
+		DIALER_LOG_F(
+			ERROR, d,
+			"authenticate failed: version=0x%02" PRIx8
+			" status=0x%02" PRIx8,
+			version, status);
+		return -1;
+	}
+	if (!consume_rcvbuf(d, want)) {
+		return -1;
+	}
+	d->state = STATE_HANDSHAKE3;
+	if (!send_dispatch(d)) {
+		return -1;
+	}
+	return recv_socks5_rsp(d);
+}
+
+static int recv_socks5_authmethod(struct dialer *restrict d)
+{
+	assert(d->state == STATE_HANDSHAKE1);
+	const unsigned char *hdr = d->next;
+	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
+	size_t want = sizeof(struct socks5_auth_rsp);
+	if (len < want) {
+		return (int)(want - len);
+	}
 	const uint8_t version =
 		read_uint8(hdr + offsetof(struct socks5_auth_rsp, version));
 	if (version != SOCKS5) {
@@ -750,28 +897,35 @@ static int recv_socks5_auth(struct dialer *restrict d)
 	}
 	const uint8_t method =
 		read_uint8(hdr + offsetof(struct socks5_auth_rsp, method));
-	if (method != SOCKS5AUTH_NOAUTH) {
-		DIALER_LOG_F(
-			ERROR, d, "unsupported SOCKS5 auth method: %" PRIu8,
-			method);
+
+	if (!consume_rcvbuf(d, want)) {
 		return -1;
 	}
-	/* protocol finished, remove header */
-	if (!consume_rcvbuf(d, rsplen)) {
-		return -1;
+	switch (method) {
+	case SOCKS5AUTH_NOAUTH:
+		d->state = STATE_HANDSHAKE3;
+		if (!send_dispatch(d)) {
+			return -1;
+		}
+		return recv_socks5_rsp(d);
+	case SOCKS5AUTH_USERPASS:
+		d->state = STATE_HANDSHAKE2;
+		if (!send_dispatch(d)) {
+			return -1;
+		}
+		return recv_socks5_auth(d);
+	default:
+		break;
 	}
-	BUF_CONSUME(d->buf, rsplen);
-	d->state = STATE_HANDSHAKE2;
-	if (!send_proxy_req(d)) {
-		return -1;
-	}
-	return recv_socks5_rsp(d);
+	DIALER_LOG_F(
+		ERROR, d, "unsupported SOCKS5 auth method: %" PRIu8, method);
+	return -1;
 }
 
 static int
-recv_dispatch(struct dialer *restrict d, const struct proxy_req *restrict req)
+recv_dispatch(struct dialer *restrict d, const struct proxy_req *restrict proxy)
 {
-	switch (req->proto) {
+	switch (proxy->proto) {
 	case PROTO_HTTP:
 		return recv_http_rsp(d);
 	case PROTO_SOCKS4A:
@@ -779,8 +933,10 @@ recv_dispatch(struct dialer *restrict d, const struct proxy_req *restrict req)
 	case PROTO_SOCKS5:
 		switch (d->state) {
 		case STATE_HANDSHAKE1:
-			return recv_socks5_auth(d);
+			return recv_socks5_authmethod(d);
 		case STATE_HANDSHAKE2:
+			return recv_socks5_auth(d);
+		case STATE_HANDSHAKE3:
 			return recv_socks5_rsp(d);
 		default:
 			break;
@@ -795,7 +951,9 @@ recv_dispatch(struct dialer *restrict d, const struct proxy_req *restrict req)
 static int dialer_recv(struct dialer *restrict d)
 {
 	const int fd = d->w_socket.fd;
-	const ssize_t nrecv = recv(fd, d->buf.data, d->buf.cap, MSG_PEEK);
+	unsigned char *buf = d->next;
+	const size_t n = d->rbuf.cap - d->rbuf.len;
+	const ssize_t nrecv = recv(fd, buf, n, MSG_PEEK);
 	if (nrecv < 0) {
 		const int err = errno;
 		if (IS_TRANSIENT_ERROR(err)) {
@@ -817,21 +975,22 @@ static int dialer_recv(struct dialer *restrict d)
 		DIALER_LOG_F(ERROR, d, "%s", strerror(sockerr));
 		return -1;
 	}
-	d->buf.len = (size_t)nrecv;
+	d->rbuf.len += (size_t)nrecv;
 	LOG_BIN_F(
-		VERYVERBOSE, d->buf.data, d->buf.len, "recv: %zu bytes",
-		d->buf.len);
+		VERYVERBOSE, buf, (size_t)nrecv, "recv: %zu bytes",
+		(size_t)nrecv);
 
 	const int ret = recv_dispatch(d, &d->req->proxy[d->jump]);
 	if (ret < 0) {
 		return ret;
 	}
 	if (ret == 0) {
+		/* restore default */
 		socket_rcvlowat(d->w_socket.fd, 1);
 		return 0;
 	}
-	const size_t want = d->buf.len + (size_t)ret;
-	if (want > d->buf.cap) {
+	const size_t want = (d->rbuf.data + d->rbuf.len) - d->next + ret;
+	if (want > d->rbuf.cap) {
 		DIALER_LOG(ERROR, d, "recv: header too long");
 		return -1;
 	}
@@ -867,7 +1026,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			DIALER_RETURN(d, loop, true);
 		}
 		d->state = STATE_HANDSHAKE1;
-		if (!send_proxy_req(d)) {
+		if (!send_dispatch(d)) {
 			DIALER_RETURN(d, loop, false);
 		}
 		modify_io_events(loop, watcher, EV_READ);
@@ -875,7 +1034,8 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 
 	if (revents & EV_READ) {
 		assert(d->state == STATE_HANDSHAKE1 ||
-		       d->state == STATE_HANDSHAKE2);
+		       d->state == STATE_HANDSHAKE2 ||
+		       d->state == STATE_HANDSHAKE3);
 		const int ret = dialer_recv(d);
 		if (ret < 0) {
 			DIALER_RETURN(d, loop, false);
@@ -884,14 +1044,14 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			return;
 		}
 
-		d->buf.len = 0;
+		d->rbuf.len = 0;
 		d->jump++;
 		if (d->jump >= d->req->num_proxy) {
 			DIALER_RETURN(d, loop, true);
 		}
 
 		d->state = STATE_HANDSHAKE1;
-		if (!send_proxy_req(d)) {
+		if (!send_dispatch(d)) {
 			DIALER_RETURN(d, loop, false);
 		}
 	}
@@ -958,7 +1118,7 @@ static bool connect_sa(
 	}
 
 	d->state = STATE_HANDSHAKE1;
-	if (!send_proxy_req(d)) {
+	if (!send_dispatch(d)) {
 		CLOSE_FD(fd);
 		return false;
 	}
@@ -1075,7 +1235,8 @@ void dialer_init(struct dialer *restrict d, const struct event_cb cb)
 		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
 		w_socket->data = d;
 	}
-	BUF_INIT(d->buf, 0);
+	d->next = d->rbuf.data;
+	BUF_INIT(d->rbuf, 0);
 }
 
 void dialer_start(

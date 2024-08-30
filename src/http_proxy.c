@@ -233,6 +233,9 @@ static bool req_connect(
 	const char *password)
 {
 	const char *addr_str = ctx->parser.msg.req.url;
+	HTTP_CTX_LOG_F(
+		VERBOSE, ctx, "http: CONNECT `%s' `%s' `%s'", addr_str,
+		username, password);
 #if WITH_RULESET
 	struct ruleset *restrict r = G.ruleset;
 	if (r != NULL) {
@@ -263,8 +266,6 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	ctx->dialreq = NULL;
 	const struct http_message *restrict msg = &ctx->parser.msg;
-	HTTP_CTX_LOG_F(
-		DEBUG, ctx, "http: %s `%s'", msg->req.method, msg->req.url);
 	if (strcmp(msg->req.method, "CONNECT") != 0) {
 		http_proxy_pass(loop, ctx);
 		return;
