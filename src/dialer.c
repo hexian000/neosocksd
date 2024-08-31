@@ -484,7 +484,11 @@ static bool send_socks4a_req(
 	write_uint16(buf + offsetof(struct socks4_hdr, port), addr->port);
 	unsigned char *address = buf + offsetof(struct socks4_hdr, address);
 	unsigned char *userid = buf + sizeof(struct socks4_hdr);
-	memcpy(userid, proxy->username, idlen + 1);
+	if (idlen > 0) {
+		memcpy(userid, proxy->username, idlen + 1);
+	} else {
+		userid[0] = '\0';
+	}
 	size_t len = sizeof(struct socks4_hdr) + idlen + 1;
 	switch (addr->type) {
 	case ATYP_INET:
