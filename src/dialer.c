@@ -1136,7 +1136,8 @@ static void resolve_cb(
 	const struct sockaddr *restrict sa)
 {
 	struct dialer *restrict d = ctx;
-	(void)h, ASSERT(h == d->resolve_handle);
+	UNUSED(h);
+	ASSERT(h == d->resolve_handle);
 	d->resolve_handle = INVALID_HANDLE;
 
 	const struct dialaddr *restrict dialaddr =
