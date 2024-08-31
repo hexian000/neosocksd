@@ -22,7 +22,6 @@
 
 #include <ev.h>
 
-#include <assert.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -123,7 +122,7 @@ static void http_ctx_free(struct http_ctx *restrict ctx)
 	if (ctx == NULL) {
 		return;
 	}
-	assert(!ev_is_active(&ctx->w_timeout));
+	ASSERT(!ev_is_active(&ctx->w_timeout));
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -157,7 +156,7 @@ http_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct http_ctx *restrict ctx = data;
-	assert(ctx->state == STATE_CONNECT);
+	ASSERT(ctx->state == STATE_CONNECT);
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
 
@@ -394,7 +393,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct http_ctx *restrict ctx = watcher->data;
-	assert(ctx->state == STATE_RESPONSE || ctx->state == STATE_CONNECT);
+	ASSERT(ctx->state == STATE_RESPONSE || ctx->state == STATE_CONNECT);
 
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;

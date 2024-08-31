@@ -21,7 +21,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -55,7 +54,7 @@ void http_resp_errpage(struct http_parser *restrict p, const uint16_t code)
 static bool reply_short(struct http_parser *restrict p, const char *s)
 {
 	const size_t n = strlen(s);
-	assert(n < 256);
+	ASSERT(n < 256);
 	LOG_BIN_F(VERBOSE, s, n, "reply_short: fd=%d %zu bytes", p->fd, n);
 	const ssize_t nsend = send(p->fd, s, n, 0);
 	if (nsend < 0) {

@@ -27,7 +27,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -345,7 +344,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 		CLOSE_FD(d->w_socket.fd);
 		ev_io_set(&d->w_socket, -1, EV_NONE);
 	}
-	assert(!ev_is_active(&d->w_socket));
+	ASSERT(!ev_is_active(&d->w_socket));
 	d->state = STATE_DONE;
 }
 
@@ -364,7 +363,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 		}                                                              \
 		const size_t jump = (d)->jump;                                 \
 		const struct dialreq *restrict req = (d)->req;                 \
-		assert(jump < req->num_proxy);                                 \
+		ASSERT(jump < req->num_proxy);                                 \
 		char raddr[64];                                                \
 		const struct dialaddr *addr =                                  \
 			jump + 1 < req->num_proxy ?                            \
@@ -521,7 +520,7 @@ static bool send_socks4a_req(
 static bool send_socks5_authmethod(
 	struct dialer *restrict d, const struct proxy_req *restrict proxy)
 {
-	assert(d->state == STATE_HANDSHAKE1);
+	ASSERT(d->state == STATE_HANDSHAKE1);
 	if (proxy->username == NULL) {
 		unsigned char buf[] = { SOCKS5, 0x01, SOCKS5AUTH_NOAUTH };
 		return dialer_send(d, buf, sizeof(buf));
@@ -534,7 +533,7 @@ static bool send_socks5_authmethod(
 static bool send_socks5_auth(
 	struct dialer *restrict d, const struct proxy_req *restrict proxy)
 {
-	assert(d->state == STATE_HANDSHAKE2);
+	ASSERT(d->state == STATE_HANDSHAKE2);
 	const size_t ulen = strlen(proxy->username);
 	const size_t plen =
 		(proxy->password != NULL) ? strlen(proxy->password) : 0;
@@ -563,7 +562,7 @@ static bool send_socks5_auth(
 static bool
 send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 {
-	assert(d->state == STATE_HANDSHAKE3);
+	ASSERT(d->state == STATE_HANDSHAKE3);
 	size_t cap = sizeof(struct socks5_hdr);
 	switch (addr->type) {
 	case ATYP_INET:
@@ -706,7 +705,7 @@ static int recv_http_hdr(struct dialer *restrict d)
 
 static int recv_http_rsp(struct dialer *restrict d)
 {
-	assert(d->state == STATE_HANDSHAKE1);
+	ASSERT(d->state == STATE_HANDSHAKE1);
 	DIALER_LOG_F(
 		DEBUG, d, "state: %d len: %zu cap: %zu", d->state, d->rbuf.len,
 		d->rbuf.cap);
@@ -750,7 +749,7 @@ static int recv_http_rsp(struct dialer *restrict d)
 
 static int recv_socks4a_rsp(struct dialer *restrict d)
 {
-	assert(d->state == STATE_HANDSHAKE1);
+	ASSERT(d->state == STATE_HANDSHAKE1);
 	const unsigned char *hdr = d->next;
 	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
 	const size_t want = sizeof(struct socks4_hdr);
@@ -800,7 +799,7 @@ static const char *socks5_errorstr[] = {
 
 static int recv_socks5_rsp(struct dialer *restrict d)
 {
-	assert(d->state == STATE_HANDSHAKE3);
+	ASSERT(d->state == STATE_HANDSHAKE3);
 	const unsigned char *hdr = d->next;
 	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
 	size_t want = sizeof(struct socks5_hdr);
@@ -857,7 +856,7 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 
 static int recv_socks5_auth(struct dialer *restrict d)
 {
-	assert(d->state == STATE_HANDSHAKE2);
+	ASSERT(d->state == STATE_HANDSHAKE2);
 	const unsigned char *hdr = d->next;
 	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
 	const size_t want = 2;
@@ -886,7 +885,7 @@ static int recv_socks5_auth(struct dialer *restrict d)
 
 static int recv_socks5_authmethod(struct dialer *restrict d)
 {
-	assert(d->state == STATE_HANDSHAKE1);
+	ASSERT(d->state == STATE_HANDSHAKE1);
 	const unsigned char *hdr = d->next;
 	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
 	size_t want = sizeof(struct socks5_auth_rsp);
@@ -1010,7 +1009,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct dialer *restrict d = watcher->data;
 
 	if (revents & EV_WRITE) {
-		assert(d->state == STATE_CONNECT);
+		ASSERT(d->state == STATE_CONNECT);
 		const int sockerr = socket_get_error(d->w_socket.fd);
 		if (sockerr != 0) {
 			if (LOGLEVEL(DEBUG)) {
@@ -1039,7 +1038,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 
 	if (revents & EV_READ) {
-		assert(d->state == STATE_HANDSHAKE1 ||
+		ASSERT(d->state == STATE_HANDSHAKE1 ||
 		       d->state == STATE_HANDSHAKE2 ||
 		       d->state == STATE_HANDSHAKE3);
 		const int ret = dialer_recv(d);
@@ -1137,7 +1136,7 @@ static void resolve_cb(
 	const struct sockaddr *restrict sa)
 {
 	struct dialer *restrict d = ctx;
-	(void)h, assert(h == d->resolve_handle);
+	(void)h, ASSERT(h == d->resolve_handle);
 	d->resolve_handle = INVALID_HANDLE;
 
 	const struct dialaddr *restrict dialaddr =
@@ -1257,7 +1256,7 @@ void dialer_start(
 
 int dialer_get(struct dialer *d)
 {
-	assert(d->state == STATE_DONE);
+	ASSERT(d->state == STATE_DONE);
 	return d->w_socket.fd;
 }
 

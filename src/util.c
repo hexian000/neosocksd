@@ -142,7 +142,7 @@ void modify_io_events(
 	struct ev_loop *loop, struct ev_io *restrict watcher, const int events)
 {
 	const int fd = watcher->fd;
-	assert(fd != -1);
+	ASSERT(fd != -1);
 	const int ioevents = events & (EV_READ | EV_WRITE);
 	if (ioevents == EV_NONE) {
 		if (ev_is_active(watcher)) {

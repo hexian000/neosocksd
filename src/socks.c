@@ -26,7 +26,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -143,7 +142,7 @@ static void socks_ctx_free(struct socks_ctx *restrict ctx)
 	if (ctx == NULL) {
 		return;
 	}
-	assert(!ev_is_active(&ctx->w_timeout));
+	ASSERT(!ev_is_active(&ctx->w_timeout));
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -177,7 +176,7 @@ socks_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
 	struct socks_ctx *restrict ctx = data;
-	assert(ctx->state == STATE_CONNECTED ||
+	ASSERT(ctx->state == STATE_CONNECTED ||
 	       ctx->state == STATE_ESTABLISHED);
 
 	if (ctx->uplink.state == XFER_FINISHED ||
@@ -363,7 +362,7 @@ static void socks_senderr(struct socks_ctx *restrict ctx, const int err)
 static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct socks_ctx *restrict ctx = data;
-	assert(ctx->state == STATE_CONNECT);
+	ASSERT(ctx->state == STATE_CONNECT);
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
@@ -434,7 +433,7 @@ static int socks4a_req(struct socks_ctx *restrict ctx)
 
 static int socks4_req(struct socks_ctx *restrict ctx)
 {
-	assert(ctx->state == STATE_HANDSHAKE1);
+	ASSERT(ctx->state == STATE_HANDSHAKE1);
 	if (ctx->rbuf.len <= sizeof(struct socks4_hdr)) {
 		return (int)(sizeof(struct socks4_hdr) - ctx->rbuf.len) + 1;
 	}
@@ -479,7 +478,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 
 static int socks5_req(struct socks_ctx *restrict ctx)
 {
-	assert(ctx->state == STATE_HANDSHAKE3);
+	ASSERT(ctx->state == STATE_HANDSHAKE3);
 	const unsigned char *hdr = ctx->next;
 	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
 	size_t expected = sizeof(struct socks5_hdr);
@@ -565,7 +564,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 
 static int socks5_auth(struct socks_ctx *restrict ctx)
 {
-	assert(ctx->state == STATE_HANDSHAKE2);
+	ASSERT(ctx->state == STATE_HANDSHAKE2);
 	switch (ctx->auth.method) {
 	case SOCKS5AUTH_NOAUTH:
 		ctx->state = STATE_HANDSHAKE3;
@@ -635,7 +634,7 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 
 static int socks5_authmethod(struct socks_ctx *restrict ctx)
 {
-	assert(ctx->state == STATE_HANDSHAKE1);
+	ASSERT(ctx->state == STATE_HANDSHAKE1);
 	const unsigned char *req = ctx->next;
 	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
 	size_t want = sizeof(struct socks5_auth_req);

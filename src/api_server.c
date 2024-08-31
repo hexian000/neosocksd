@@ -677,7 +677,7 @@ static void api_ctx_free(struct api_ctx *restrict ctx)
 	if (ctx == NULL) {
 		return;
 	}
-	assert(!ev_is_active(&ctx->w_timeout));
+	ASSERT(!ev_is_active(&ctx->w_timeout));
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -751,7 +751,7 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct api_ctx *restrict ctx = watcher->data;
-	assert(ctx->state == STATE_RESPONSE);
+	ASSERT(ctx->state == STATE_RESPONSE);
 
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;

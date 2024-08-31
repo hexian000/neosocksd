@@ -21,7 +21,6 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>

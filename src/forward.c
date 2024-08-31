@@ -20,7 +20,6 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -137,7 +136,7 @@ forward_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
 	struct forward_ctx *restrict ctx = data;
-	assert(ctx->state == STATE_CONNECTED ||
+	ASSERT(ctx->state == STATE_CONNECTED ||
 	       ctx->state == STATE_ESTABLISHED);
 
 	if (ctx->uplink.state == XFER_FINISHED ||
@@ -186,7 +185,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct forward_ctx *restrict ctx = data;
-	assert(ctx->state == STATE_CONNECT);
+	ASSERT(ctx->state == STATE_CONNECT);
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {

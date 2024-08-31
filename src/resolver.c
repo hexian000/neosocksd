@@ -18,7 +18,6 @@
 #include <ares.h>
 #endif
 
-#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -278,7 +277,7 @@ void resolver_free(struct resolver *restrict r)
 #if WITH_CARES
 		ares_destroy(r->channel);
 		(void)purge_watchers(r);
-		assert(!ev_is_active(&r->sockets.watcher) &&
+		ASSERT(!ev_is_active(&r->sockets.watcher) &&
 		       r->sockets.next == NULL);
 #endif
 	}
