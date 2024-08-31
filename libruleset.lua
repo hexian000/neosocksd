@@ -809,14 +809,24 @@ end
 
 -- [[ ruleset callbacks, see API.md for details ]] --
 local ruleset = {}
+_G.ruleset = _G.ruleset or ruleset
+_G.secrets = _G.secrets or {}
 
 function ruleset.authenticate(addr, username, password)
-    return true
+    if not username then
+        return true -- authenticate is not required
+    end
+    local secret = _G.secrets[username]
+    if secret == true or secret == password then
+        return true
+    end
+    logf("authenticate failed: %q %q", username, password)
+    return false
 end
 
 function ruleset.resolve(addr, username, password)
     _G.num_requests = _G.num_requests + 1
-    if not ruleset.authenticate(addr, username, password) then
+    if not _G.ruleset.authenticate(addr, username, password) then
         return nil
     end
     _G.num_authorized = _G.num_authorized + 1
@@ -825,7 +835,7 @@ end
 
 function ruleset.route(addr, username, password)
     _G.num_requests = _G.num_requests + 1
-    if not ruleset.authenticate(addr, username, password) then
+    if not _G.ruleset.authenticate(addr, username, password) then
         return nil
     end
     _G.num_authorized = _G.num_authorized + 1
@@ -834,7 +844,7 @@ end
 
 function ruleset.route6(addr, username, password)
     _G.num_requests = _G.num_requests + 1
-    if not ruleset.authenticate(addr, username, password) then
+    if not _G.ruleset.authenticate(addr, username, password) then
         return nil
     end
     _G.num_authorized = _G.num_authorized + 1

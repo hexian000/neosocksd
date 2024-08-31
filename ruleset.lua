@@ -23,7 +23,7 @@ _G.redirect_name = {
     -- access mDNS sites directly
     { match.domain(".local"),                    rule.direct() },
     -- self-assignment
-    { match.exact("api.neosocksd.lan:80"),       rule.redirect("127.0.1.1:9080") },
+    { match.exact("api.neosocksd.internal:80"),  rule.redirect("127.0.1.1:9080") },
     -- admin routes
     { match.host("server.lan"),                  rule.redirect("127.0.0.1:"),                                 "localhost" },
     { match.exact("region1.lan:22"),             rule.redirect("localhost:22", "socks5://192.168.32.1:1080"), "region1" },
@@ -183,7 +183,7 @@ local function start()
     ruleset.server_rtt = {}
     for i, v in ipairs(route_list) do
         local route = v[1]
-        local target = table.pack(route("api.neosocksd.lan:80"))
+        local target = table.pack(route("api.neosocksd.internal:80"))
         async(keepalive, target, i)
     end
     neosocksd.setinterval(60.0)

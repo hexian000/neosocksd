@@ -9,11 +9,11 @@ _G.libruleset    = require("libruleset")
 -- redirect_name: for requests with name string
 _G.redirect_name = {
     -- access mDNS sites directly
-    { match.domain(".local"),              rule.direct() },
+    { match.domain(".local"),                   rule.direct() },
     -- self-assignment
-    { match.exact("api.neosocksd.lan:80"), rule.redirect("127.0.1.1:9080") },
+    { match.exact("api.neosocksd.internal:80"), rule.redirect("127.0.1.1:9080") },
     -- admin routes
-    { match.host("server.lan"),            rule.redirect("127.0.0.1:"),    "localhost" },
+    { match.host("server.lan"),                 rule.redirect("127.0.0.1:"),    "localhost" },
     -- if in _G.hosts, go to _G.route/_G.route6
     -- otherwise, go to _G.route_default
 }

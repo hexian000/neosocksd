@@ -283,7 +283,7 @@ The valid interval range is `[1e-3, 1e+9]`, use `setinterval(0)` to stop the tim
 
 ```Lua
 -- neosocksd.invoke(code, host, proxyN, ..., proxy1)
-neosocksd.invoke([[log("test rpc")]], "api.neosocksd.lan:80", "socks4a://127.0.0.1:1080")
+neosocksd.invoke([[log("test rpc")]], "api.neosocksd.internal:80", "socks4a://127.0.0.1:1080")
 ```
 
 **Description**
