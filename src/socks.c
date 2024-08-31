@@ -853,6 +853,8 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 	}
 
 	ctx->auth.method = SOCKS5AUTH_NOACCEPTABLE;
+	ctx->auth.username = NULL;
+	ctx->auth.password = NULL;
 	BUF_INIT(ctx->rbuf, 0);
 	ctx->next = ctx->rbuf.data;
 	ctx->dialreq = NULL;
