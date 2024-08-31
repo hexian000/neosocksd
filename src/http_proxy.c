@@ -234,8 +234,8 @@ static bool req_connect(
 {
 	const char *addr_str = ctx->parser.msg.req.url;
 	HTTP_CTX_LOG_F(
-		VERBOSE, ctx, "http: CONNECT `%s' `%s' `%s'", addr_str,
-		username, password);
+		VERBOSE, ctx, "http: CONNECT `%s' username=`%s'", addr_str,
+		username);
 #if WITH_RULESET
 	struct ruleset *restrict r = G.ruleset;
 	if (r != NULL) {

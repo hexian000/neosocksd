@@ -820,7 +820,7 @@ function ruleset.authenticate(addr, username, password)
     if secret == true or secret == password then
         return true
     end
-    logf("authenticate failed: %q %q", username, password)
+    logf("authenticate failed: %q", username)
     return false
 end
 

@@ -477,17 +477,6 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 	return 0;
 }
 
-static int socks4_dispatch(struct socks_ctx *restrict ctx)
-{
-	switch (ctx->state) {
-	case STATE_HANDSHAKE1:
-		return socks4_req(ctx);
-	default:
-		break;
-	}
-	FAIL();
-}
-
 static int socks5_req(struct socks_ctx *restrict ctx)
 {
 	assert(ctx->state == STATE_HANDSHAKE3);
@@ -719,7 +708,7 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 	const int version = read_uint8(ctx->rbuf.data);
 	switch (version) {
 	case SOCKS4:
-		return socks4_dispatch(ctx);
+		return socks4_req(ctx);
 	case SOCKS5:
 		return socks5_dispatch(ctx);
 	default:
