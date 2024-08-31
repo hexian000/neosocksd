@@ -173,12 +173,7 @@ int thread_main_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	int n = lua_gettop(L) - 1;
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushboolean(L, 0);
-		if (n > 1) {
-			lua_pushvalue(L, -2);
-		} else {
-			lua_pushnil(L);
-		}
-		n = 2;
+		lua_replace(L, 2);
 	}
 	lua_pushvalue(L, lua_upvalueindex(1));
 	lua_replace(L, 1);

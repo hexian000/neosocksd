@@ -260,6 +260,7 @@ end
 
 local rpc = _G.rpc or {}
 function rpc.echo(...)
+    -- await.rpcall(t, "echo", ...)
     return ...
 end
 
@@ -268,6 +269,18 @@ _G.rpc = rpc
 function await.rpcall(target, func, ...)
     local code = strformat("return rpc.%s(%s)", func, marshal(...))
     return await.invoke(code, table.unpack(target))
+end
+
+local msgh = _G.msgh or {}
+function msgh.nop(...)
+    -- logf("msgh.nop(%s)", marshal(...))
+end
+
+_G.msgh = msgh
+
+function neosocksd.sendmsg(target, func, ...)
+    local code = strformat("return msgh.%s(%s)", func, marshal(...))
+    return neosocksd.invoke(code, table.unpack(target))
 end
 
 -- [[ _G.route table matchers ]] --

@@ -29,6 +29,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -38,6 +39,10 @@ enum api_state {
 	STATE_REQUEST,
 	STATE_YIELD,
 	STATE_RESPONSE,
+};
+
+struct weak_ref {
+	void *p;
 };
 
 struct api_ctx {
@@ -50,6 +55,7 @@ struct api_ctx {
 	union {
 		struct {
 			struct ev_io w_recv, w_send;
+			struct weak_ref *ref;
 			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct http_parser parser;
@@ -353,10 +359,15 @@ static bool restapi_check(
 static void
 rpcall_finished(void *data, const bool ok, const void *result, size_t resultlen)
 {
-	struct api_ctx *restrict ctx = data;
+	struct weak_ref *restrict ref = data;
+	struct api_ctx *restrict ctx = ref->p;
+	free(ref);
+	if (ctx == NULL) {
+		return;
+	}
+	ASSERT(ctx->state == STATE_YIELD);
 	ctx->state = STATE_RESPONSE;
 	struct ev_loop *const loop = ctx->s->loop;
-	ev_timer_start(loop, &ctx->w_timeout);
 	ev_io_start(loop, &ctx->w_send);
 
 	if (!ok) {
@@ -373,10 +384,10 @@ rpcall_finished(void *data, const bool ok, const void *result, size_t resultlen)
 		return;
 	}
 	const enum content_encodings encoding =
-		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) &&
-				(resultlen > RPCALL_COMPRESS_THRESHOLD) ?
-			CENCODING_DEFLATE :
-			CENCODING_NONE;
+		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ||
+				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
+			CENCODING_NONE :
+			CENCODING_DEFLATE;
 	struct stream *writer =
 		content_writer(&ctx->parser.cbuf, resultlen, encoding);
 	if (writer == NULL) {
@@ -426,9 +437,17 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	const bool ok = ruleset_rpcall(ruleset, reader, rpcall_finished, ctx);
+	struct weak_ref *ref = malloc(sizeof(struct weak_ref));
+	if (ref == NULL) {
+		LOGOOM();
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	ref->p = ctx;
+	const bool ok = ruleset_rpcall(ruleset, reader, rpcall_finished, ref);
 	stream_close(reader);
 	if (!ok) {
+		free(ref);
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
@@ -441,6 +460,7 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 		return;
 	}
 	ctx->state = STATE_YIELD;
+	ctx->ref = ref;
 }
 
 static void handle_ruleset_invoke(
@@ -665,6 +685,9 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	case STATE_REQUEST:
 	case STATE_YIELD:
 	case STATE_RESPONSE:
+		if (ctx->ref != NULL) {
+			ctx->ref->p = NULL;
+		}
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		break;
@@ -737,7 +760,6 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	switch (ctx->state) {
 	case STATE_YIELD:
-		ev_timer_stop(loop, &ctx->w_timeout);
 		break;
 	case STATE_RESPONSE:
 		ev_io_start(loop, &ctx->w_send);
@@ -871,6 +893,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 		ev_io_init(w_send, send_cb, fd, EV_WRITE);
 		w_send->data = ctx;
 	}
+	ctx->ref = NULL;
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
 	ctx->ss.close = api_ss_close;
