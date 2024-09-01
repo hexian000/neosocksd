@@ -668,7 +668,7 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 		DIALER_LOG_F(ERROR, d, "recv: %s", strerror(err));
 		return false;
 	}
-	if (nrecv != (ssize_t)n) {
+	if ((size_t)nrecv != n) {
 		DIALER_LOG_F(ERROR, d, "recv: short read %zd/%zu", nrecv, n);
 		return false;
 	}
@@ -1053,7 +1053,9 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			return;
 		}
 
+		/* clear buffer for next jump */
 		d->rbuf.len = 0;
+		d->next = d->rbuf.data;
 		d->jump++;
 		if (d->jump >= d->req->num_proxy) {
 			DIALER_RETURN(d, loop, true);
