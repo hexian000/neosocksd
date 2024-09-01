@@ -34,5 +34,11 @@ function rpc.set_backends(t)
     return old
 end
 
+local function main(...)
+    pcall(collectgarbage, "generational")
+    neosocksd.setinterval(60.0)
+    return _G.libruleset
+end
+
 logf("ruleset loaded, interpreter: %s", _VERSION)
-return _G.libruleset
+return main(...)

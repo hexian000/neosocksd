@@ -7,10 +7,10 @@ end
 _G.printf = printf
 
 function package.replace(modname, chunk)
-    local module = chunk()
+    local module = chunk(modname)
     local loaded = package.loaded[modname]
     package.loaded[modname] = module
-    if _G[modname] == loaded then
+    if rawequal(_G[modname], loaded) then
         _G[modname] = module
     end
 end
@@ -82,6 +82,11 @@ function list:reverse()
         local j = n - i + 1
         self[i], self[j] = self[j], self[i]
     end
+    return self
+end
+
+function list:sort(...)
+    table.sort(self, ...)
     return self
 end
 
@@ -170,8 +175,7 @@ _G.rlist = rlist
 -- [[ logging utilities ]] --
 _G.RECENT_EVENTS_LIMIT = _G.RECENT_EVENTS_LIMIT or 16
 _G.recent_events = rlist:check(_G.recent_events) or rlist:new(_G.RECENT_EVENTS_LIMIT)
-local function log_(msg)
-    local now = os.time()
+local function log_(now, info, msg)
     local entry = recent_events:get(1)
     if entry and entry.msg == msg then
         entry.count = entry.count + 1
@@ -187,7 +191,6 @@ local function log_(msg)
         return
     end
     local timestamp = os.date("%Y-%m-%dT%T%z", now)
-    local info      = debug.getinfo(2, "Sl")
     local source    = info.source
     local srctype   = source:sub(1, 1)
     if srctype == "@" or srctype == "=" then
@@ -200,12 +203,18 @@ local function log_(msg)
 end
 
 local function log(...)
-    return log_(list:new({ ... }):map(tostring):concat("\t"))
+    local now  = os.time()
+    local info = debug.getinfo(2, "Sl")
+    local msg  = list:new({ ... }):map(tostring):concat("\t")
+    return log_(now, info, msg)
 end
 _G.log = log
 
 local function logf(...)
-    return log_(strformat(...))
+    local now  = os.time()
+    local info = debug.getinfo(2, "Sl")
+    local msg  = strformat(...)
+    return log_(now, info, msg)
 end
 _G.logf = logf
 
@@ -822,15 +831,18 @@ end
 
 -- [[ ruleset callbacks, see API.md for details ]] --
 local ruleset = {}
-_G.ruleset = _G.ruleset or ruleset
 _G.secrets = _G.secrets or {}
 
-function ruleset.authenticate(addr, username, password)
-    if not username then
-        return true -- authenticate is not required
+local function authenticate(addr, username, password)
+    local auth = table.get(_G, "ruleset", "authenticate")
+    if auth then
+        return auth(addr, username, password)
     end
-    local secret = _G.secrets[username]
-    if secret == true or secret == password then
+    if not username then
+        return true -- authenticate is not required by protocol
+    end
+    local s = _G.secrets[username]
+    if s == true or s == password then
         return true
     end
     logf("authenticate failed: %q", username)
@@ -839,7 +851,7 @@ end
 
 function ruleset.resolve(addr, username, password)
     _G.num_requests = _G.num_requests + 1
-    if not _G.ruleset.authenticate(addr, username, password) then
+    if not authenticate(addr, username, password) then
         return nil
     end
     _G.num_authorized = _G.num_authorized + 1
@@ -848,7 +860,7 @@ end
 
 function ruleset.route(addr, username, password)
     _G.num_requests = _G.num_requests + 1
-    if not _G.ruleset.authenticate(addr, username, password) then
+    if not authenticate(addr, username, password) then
         return nil
     end
     _G.num_authorized = _G.num_authorized + 1
@@ -857,7 +869,7 @@ end
 
 function ruleset.route6(addr, username, password)
     _G.num_requests = _G.num_requests + 1
-    if not _G.ruleset.authenticate(addr, username, password) then
+    if not authenticate(addr, username, password) then
         return nil
     end
     _G.num_authorized = _G.num_authorized + 1
@@ -891,7 +903,6 @@ function ruleset.stats(dt)
     end
     w:insert("> Request Stats")
     render_(w)
-    w:insert("")
     return w:concat("\n")
 end
 

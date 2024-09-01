@@ -1,10 +1,25 @@
 _G.libruleset = require("libruleset")
+_G.agent = require("agent")
+
+agent.peername = "peer0"
+
+agent.conns = {
+    { "socks4a://127.0.32.1:1080" },
+    { "socks4a://127.0.32.1:1080", "socks4a://127.0.32.2:1080" },
+    { "socks4a://127.0.33.1:1080" },
+}
+
+agent.services = {
+    ["serv.internal:80"] = "192.168.1.1:8080",
+}
 
 -- [[ configurations ]] --
-_G.enable_until = nil
+local ruleset = {}
+
+ruleset.enable_until = nil
 local function is_disabled()
     local now = os.time()
-    if _G.enable_until and now < _G.enable_until then
+    if ruleset.enable_until and now < ruleset.enable_until then
         return false
     end
     local date = os.date("*t", now)
@@ -14,20 +29,25 @@ local function is_disabled()
     return not (9 <= date.hour and date.hour < 18)
 end
 
+ruleset.API_ENDPOINT = "api.neosocksd.internal:80"
+ruleset.RESERVED_DOMAIN = ".neosocksd.internal"
+
 -- 1. ordered redirect rules (matched as string)
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
 
 -- redirect_name: for requests with name string
 _G.redirect_name = {
-    -- access mDNS sites directly
-    { match.domain(".local"),                    rule.direct() },
-    -- self-assignment
-    { match.exact("api.neosocksd.internal:80"),  rule.redirect("127.0.1.1:9080") },
     -- admin routes
-    { match.host("server.lan"),                  rule.redirect("127.0.0.1:"),                                 "localhost" },
+    { match.exact("localhost:22"),               rule.redirect("127.0.0.1:22"),                               "ssh" },
     { match.exact("region1.lan:22"),             rule.redirect("localhost:22", "socks5://192.168.32.1:1080"), "region1" },
     { match.exact("region2.lan:22"),             rule.redirect("localhost:22", "socks5://192.168.33.1:1080"), "region2" },
+    -- access mDNS sites directly
+    { match.domain(".local"),                    rule.direct() },
+    -- internal assignment
+    { match.exact(ruleset.API_ENDPOINT),         rule.redirect("127.0.1.1:9080") },
+    { match.domain(ruleset.RESERVED_DOMAIN),     rule.reject() },
+    { match.agent(),                             rule.agent() },
     -- global condition
     { is_disabled,                               rule.reject(),                                               "off" },
     -- proxy routes
@@ -93,108 +113,31 @@ _G.route6 = {
 
 -- 4. the global default applies to any unmatched requests
 -- in {action, optional log tag}
-_G.route_index = 1
-_G.route_list = {
-    [1] = { rule.proxy("socks4a://127.0.0.1:1081"), "default1" },
-    [2] = { rule.proxy("socks4a://127.0.0.2:1081"), "default2" }
-}
-_G.route_default = route_list[1]
-
-function _G.set_route(i, ...)
-    _G.route_index = i
-    if select("#", ...) > 0 then
-        _G.route_list[route_index] = { rule.proxy(...) }
-    end
-    _G.route_default = route_list[route_index]
-end
-
-local ruleset = {}
-
-local function ping(target)
-    local lasterr
-    local rtt = {}
-    for i = 1, 4 do
-        await.sleep(1)
-        local begin = neosocksd.now()
-        local ok, result = await.rpcall(target, "echo", string.rep(" ", 32))
-        if ok then
-            table.insert(rtt, neosocksd.now() - begin)
-        else
-            lasterr = result
-        end
-    end
-    if rtt[1] then
-        rtt = math.min(table.unpack(rtt))
-        return true, string.format("%dms", math.ceil(rtt * 1e+3))
-    end
-    return false, lasterr
-end
-
-local function keepalive(target, i)
-    while ruleset.running do
-        local interval = 60
-        if not is_disabled() then
-            local ok, result = ping(target)
-            local tag = route_list[i][2]
-            logf("ping %q: %s", tag or i, result)
-            ruleset.server_rtt[i] = ok and result or "error"
-            if ok then interval = 3600 end
-        end
-        await.sleep(interval)
-    end
-end
-
-local function format_rtt()
-    local w = list:new()
-    for i, result in ipairs(ruleset.server_rtt) do
-        local tag = route_list[i][2]
-        w:insertf("[%s] %s", tag or i, result)
-    end
-    return w:concat(", ")
-end
+_G.route_default = { rule.agent("internet"), "default" }
 
 function ruleset.stats(dt)
     local w = list:new()
     if is_disabled and is_disabled() then
-        w:insertf("%-20s: %s", "Default Route", "(service disabled)")
-    elseif route_default == route_list[route_index] then
-        w:insertf("%-20s: [%d] %s", "Default Route", route_index, route_default[2] or route_default[1])
+        w:insertf("%-20s: %s", "Status", "(service disabled)")
     else
-        w:insertf("%-20s: [?] %s", "Default Route", route_default[2] or route_default[1])
+        w:insertf("%-20s: %s", "Status", "running")
     end
-    w:insertf("%-20s: %s", "Server RTT", format_rtt())
+    w:insert(agent.stats(dt))
     w:insert(libruleset.stats(dt))
+    w:insert("")
     return w:concat("\n")
 end
 
-function ruleset.stop()
-    ruleset.running = false
-end
-
-local function start()
-    local stop = table.get(_G, "ruleset", "stop")
-    if stop then
-        local ok, err = pcall(stop)
-        if not ok then
-            logf("ruleset.stop: %s", err)
-        end
-    end
-    ruleset.running = true
-    ruleset.server_rtt = {}
-    for i, v in ipairs(route_list) do
-        local route = v[1]
-        local target = table.pack(route("api.neosocksd.internal:80"))
-        async(keepalive, target, i)
-    end
+local function main(...)
+    pcall(collectgarbage, "generational")
     neosocksd.setinterval(60.0)
-    collectgarbage("generational", 20, 100)
+    -- inherit undefined fields from libruleset
+    return setmetatable(ruleset, {
+        __index = function(_, k)
+            return _G.libruleset[k]
+        end
+    })
 end
-start()
 
 logf("ruleset loaded, interpreter: %s", _VERSION)
--- inherit undefined fields from libruleset
-return setmetatable(ruleset, {
-    __index = function(_, k)
-        return _G.libruleset[k]
-    end
-})
+return main(...)
