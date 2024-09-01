@@ -19,9 +19,9 @@
 #include "net/mime.h"
 #include "net/url.h"
 #include "utils/buffer.h"
+#include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/formats.h"
-#include "utils/class.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -394,7 +394,7 @@ rpcall_finished(void *data, const bool ok, const void *result, size_t resultlen)
 		struct ruleset *r = G.ruleset;
 		size_t len;
 		const char *err = ruleset_geterror(r, &len);
-		LOGW_F("ruleset rpcall: %s", err);
+		LOGV_F("ruleset rpcall: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
 		RESPHDR_CLENGTH(ctx->parser.wbuf, len);

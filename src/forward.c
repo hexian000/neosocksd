@@ -12,8 +12,8 @@
 #include "transfer.h"
 #include "util.h"
 
-#include "utils/debug.h"
 #include "utils/class.h"
+#include "utils/debug.h"
 #include "utils/slog.h"
 
 #include <ev.h>

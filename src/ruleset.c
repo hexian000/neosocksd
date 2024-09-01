@@ -135,6 +135,8 @@ static int rpcall_callback_(lua_State *restrict co)
 	void *const data = (void *)lua_topointer(co, lua_upvalueindex(2));
 	const bool ok = !!lua_toboolean(co, 1);
 	if (!ok) {
+		struct ruleset *restrict r = find_ruleset(co);
+		lua_xmove(co, r->L, 1);
 		callback(data, false, NULL, 0);
 		return 0;
 	}
@@ -275,7 +277,7 @@ static int ruleset_traceback_(lua_State *restrict L)
 {
 	size_t len;
 	const char *msg = luaL_tolstring(L, -1, &len);
-	LOG_STACK_F(DEBUG, 0, "ruleset traceback: %.*s", (int)len, msg);
+	LOG_STACK_F(VERBOSE, 0, "ruleset traceback: %.*s", (int)len, msg);
 	luaL_traceback(L, L, msg, 1);
 	msg = lua_tolstring(L, -1, &len);
 	LOG_TXT(VERBOSE, msg, len, "Lua traceback");
@@ -424,6 +426,8 @@ static int api_stats_(lua_State *restrict L)
 	struct ruleset *restrict r = find_ruleset(L);
 	const struct server_stats *restrict stats = &s->stats;
 	lua_newtable(L);
+	lua_pushinteger(L, (lua_Integer)slog_level);
+	lua_setfield(L, -2, "loglevel");
 	lua_pushinteger(L, (lua_Integer)stats->num_halfopen);
 	lua_setfield(L, -2, "num_halfopen");
 	lua_pushinteger(L, (lua_Integer)stats->num_sessions);

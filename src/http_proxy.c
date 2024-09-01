@@ -16,8 +16,8 @@
 #include "codec/base64.h"
 #include "net/http.h"
 #include "utils/buffer.h"
-#include "utils/debug.h"
 #include "utils/class.h"
+#include "utils/debug.h"
 #include "utils/slog.h"
 
 #include <ev.h>

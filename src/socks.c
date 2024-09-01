@@ -15,8 +15,8 @@
 #include "util.h"
 
 #include "utils/buffer.h"
-#include "utils/debug.h"
 #include "utils/class.h"
+#include "utils/debug.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
 
