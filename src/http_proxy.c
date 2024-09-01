@@ -17,7 +17,7 @@
 #include "net/http.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
-#include "utils/object.h"
+#include "utils/class.h"
 #include "utils/slog.h"
 
 #include <ev.h>

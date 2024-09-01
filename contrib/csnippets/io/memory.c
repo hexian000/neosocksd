@@ -4,7 +4,7 @@
 #include "memory.h"
 #include "stream.h"
 #include "utils/buffer.h"
-#include "utils/object.h"
+#include "utils/class.h"
 
 #include <assert.h>
 #include <stdarg.h>

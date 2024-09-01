@@ -1,11 +1,11 @@
 /* csnippets (c) 2019-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#ifndef UTILS_OBJECT_H
-#define UTILS_OBJECT_H
+#ifndef UTILS_CLASS_H
+#define UTILS_CLASS_H
 
 /**
- * @defgroup object
+ * @defgroup class
  * @brief Tricky macros for class-like supports.
  * @{
  */
@@ -42,4 +42,4 @@
 
 /** @} */
 
-#endif /* UTILS_OBJECT_H */
+#endif /* UTILS_CLASS_H */
