@@ -866,10 +866,6 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	}
 
 	/* request headers */
-	if (strcasecmp(key, "Accept") == 0) {
-		p->hdr.accept = strtrimspace(value);
-		return true;
-	}
 	if (strcasecmp(key, "Accept-Encoding") == 0) {
 		return parsehdr_accept_encoding(p, value);
 	}

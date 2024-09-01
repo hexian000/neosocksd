@@ -223,11 +223,10 @@ static bool make_request(
 	BUF_APPENDF(
 		p->wbuf,
 		"POST %s HTTP/1.1\r\n"
-		"Accept: %s\r\n"
+		"Accept-Encoding: deflate\r\n"
 		"Content-Length: %zu\r\n"
-		"Content-Type: %s\r\n"
-		"Accept-Encoding: deflate\r\n",
-		uri, MIME_RPCALL, VBUF_LEN(p->cbuf), MIME_RPCALL);
+		"Content-Type: %s\r\n",
+		uri, VBUF_LEN(p->cbuf), MIME_RPCALL);
 	const char *encoding_str = content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		BUF_APPENDF(p->wbuf, "Content-Encoding: %s\r\n", encoding_str);

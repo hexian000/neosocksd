@@ -50,7 +50,6 @@ struct http_headers {
 	} content;
 	/* request headers */
 	struct {
-		char *accept;
 		enum content_encodings accept_encoding;
 		struct {
 			char *type;
