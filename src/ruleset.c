@@ -229,25 +229,24 @@ static int package_replace_(lua_State *restrict L)
 static int ruleset_update_(lua_State *restrict L)
 {
 	const char *modname = lua_topointer(L, 1);
-	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 2) };
-	lua_settop(L, 0);
 	if (modname == NULL) {
-		if (lua_load(L, ruleset_reader, &rd, "=ruleset", NULL)) {
+		modname = "ruleset";
+	}
+	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 2) };
+	const char *chunkname = lua_topointer(L, 3);
+	lua_settop(L, 0);
+	(void)lua_pushstring(L, modname);
+	if (chunkname == NULL) {
+		const size_t namelen = strlen(modname);
+		char chunkname[1 + namelen + 1];
+		chunkname[0] = '=';
+		memcpy(chunkname + 1, modname, namelen);
+		chunkname[1 + namelen] = '\0';
+		if (lua_load(L, ruleset_reader, &rd, chunkname, NULL)) {
 			return lua_error(L);
 		}
-		lua_pushliteral(L, "ruleset");
-		lua_call(L, 1, 1);
-		lua_setglobal(L, "ruleset");
-		return 0;
-	}
-	{
-		const size_t namelen = strlen(modname);
-		(void)lua_pushlstring(L, modname, namelen);
-		char name[1 + namelen + 1];
-		name[0] = '=';
-		memcpy(name + 1, modname, namelen);
-		name[1 + namelen] = '\0';
-		if (lua_load(L, ruleset_reader, &rd, name, NULL)) {
+	} else {
+		if (lua_load(L, ruleset_reader, &rd, chunkname, NULL)) {
 			return lua_error(L);
 		}
 	}
@@ -641,9 +640,11 @@ bool ruleset_rpcall(
 	return ruleset_pcall(r, FUNC_RPCALL, 3, 1, code, callback, data);
 }
 
-bool ruleset_update(struct ruleset *r, const char *modname, struct stream *code)
+bool ruleset_update(
+	struct ruleset *r, const char *modname, struct stream *code,
+	const char *chunkname)
 {
-	return ruleset_pcall(r, FUNC_UPDATE, 2, 0, modname, code);
+	return ruleset_pcall(r, FUNC_UPDATE, 2, 0, modname, code, chunkname);
 }
 
 bool ruleset_loadfile(struct ruleset *r, const char *filename)

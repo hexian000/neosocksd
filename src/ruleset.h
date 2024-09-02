@@ -25,7 +25,9 @@ void ruleset_free(struct ruleset *r);
 const char *ruleset_geterror(struct ruleset *r, size_t *len);
 
 bool ruleset_invoke(struct ruleset *r, struct stream *code);
-bool ruleset_update(struct ruleset *r, const char *modname, struct stream *code);
+bool ruleset_update(
+	struct ruleset *r, const char *modname, struct stream *code,
+	const char *chunkname);
 bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
 typedef void (*rpcall_finished_fn)(

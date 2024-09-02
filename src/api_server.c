@@ -523,7 +523,7 @@ static void handle_ruleset_invoke(
 
 static void handle_ruleset_update(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct ruleset *ruleset, const char *module)
+	struct ruleset *ruleset, const char *module, const char *chunkname)
 {
 	const ev_tstamp start = ev_now(loop);
 	struct stream *reader = content_reader(
@@ -534,7 +534,7 @@ static void handle_ruleset_update(
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	const bool ok = ruleset_update(ruleset, module, reader);
+	const bool ok = ruleset_update(ruleset, module, reader, chunkname);
 	stream_close(reader);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
@@ -625,6 +625,7 @@ static void http_handle_ruleset(
 			return;
 		}
 		const char *module = NULL;
+		const char *chunkname = NULL;
 		while (uri->query != NULL) {
 			char *key, *value;
 			if (!url_query_component(&uri->query, &key, &value)) {
@@ -634,9 +635,11 @@ static void http_handle_ruleset(
 			}
 			if (strcmp(key, "module") == 0) {
 				module = value;
+			} else if (strcmp(key, "chunkname") == 0) {
+				chunkname = value;
 			}
 		}
-		handle_ruleset_update(loop, ctx, ruleset, module);
+		handle_ruleset_update(loop, ctx, ruleset, module, chunkname);
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {
