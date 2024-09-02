@@ -415,10 +415,17 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 static int socks4a_req(struct socks_ctx *restrict ctx)
 {
-	const size_t namelen = strnlen((const char *)ctx->next, ctx->rbuf.len);
-	if (namelen == ctx->rbuf.len || namelen > FQDN_MAX_LENGTH) {
+	const char *req = (const char *)ctx->next;
+	const size_t maxlen = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
+	const size_t namelen = strnlen(req, maxlen);
+	if (namelen > FQDN_MAX_LENGTH) {
 		return -1;
 	}
+	if (namelen == maxlen) {
+		return 1;
+	}
+
+	LOG_BIN(VERBOSE, ctx->next, namelen, "socks4a_req");
 
 	ctx->addr.type = ATYP_DOMAIN;
 	struct domain_name *restrict domain = &ctx->addr.domain;
@@ -434,11 +441,15 @@ static int socks4a_req(struct socks_ctx *restrict ctx)
 static int socks4_req(struct socks_ctx *restrict ctx)
 {
 	ASSERT(ctx->state == STATE_HANDSHAKE1);
-	if (ctx->rbuf.len <= sizeof(struct socks4_hdr)) {
-		return (int)(sizeof(struct socks4_hdr) - ctx->rbuf.len) + 1;
+	ASSERT(ctx->next == ctx->rbuf.data);
+	const unsigned char *hdr = ctx->next;
+	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
+	const size_t want = sizeof(struct socks4_hdr) + 1;
+	if (len < want) {
+		return (int)(want - len);
 	}
-	const uint8_t command = read_uint8(
-		ctx->rbuf.data + offsetof(struct socks4_hdr, command));
+	const uint8_t command =
+		read_uint8(hdr + offsetof(struct socks4_hdr, command));
 	if (command != SOCKS4CMD_CONNECT) {
 		SOCKS_CTX_LOG_F(
 			DEBUG, ctx, "SOCKS4 command not supported: %" PRIu8,
@@ -446,31 +457,31 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
 	}
-	char *userid = (char *)ctx->rbuf.data + sizeof(struct socks4_hdr);
-	const size_t maxlen =
-		MIN(ctx->rbuf.len - sizeof(struct socks4_hdr), 512);
+	char *userid = (char *)hdr + sizeof(struct socks4_hdr);
+	const size_t maxlen = ctx->rbuf.len - sizeof(struct socks4_hdr);
 	const size_t idlen = strnlen(userid, maxlen);
-	if (idlen == maxlen) {
+	if (idlen >= 256) {
 		return -1;
+	}
+	if (idlen == maxlen) {
+		return 1;
 	}
 	ctx->auth.username = userid;
 	ctx->auth.password = NULL;
 
-	const uint32_t ip = read_uint32(
-		ctx->rbuf.data + offsetof(struct socks4_hdr, address));
+	const uint32_t ip =
+		read_uint32(hdr + offsetof(struct socks4_hdr, address));
 	const uint32_t mask = UINT32_C(0xFFFFFF00);
 	if (!(ip & mask) && (ip & ~mask)) {
 		/* SOCKS 4A */
-		ctx->next = ctx->rbuf.data + sizeof(struct socks4_hdr) + idlen;
+		ctx->next += sizeof(struct socks4_hdr) + idlen + 1;
 		return socks4a_req(ctx);
 	}
 
 	ctx->addr.type = ATYP_INET;
-	memcpy(&ctx->addr.in,
-	       ctx->rbuf.data + offsetof(struct socks4_hdr, address),
+	memcpy(&ctx->addr.in, hdr + offsetof(struct socks4_hdr, address),
 	       sizeof(ctx->addr.in));
-	ctx->addr.port =
-		read_uint16(ctx->rbuf.data + offsetof(struct socks4_hdr, port));
+	ctx->addr.port = read_uint16(hdr + offsetof(struct socks4_hdr, port));
 
 	/* protocol finished */
 	return 0;
@@ -481,9 +492,9 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	ASSERT(ctx->state == STATE_HANDSHAKE3);
 	const unsigned char *hdr = ctx->next;
 	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
-	size_t expected = sizeof(struct socks5_hdr);
-	if (len < expected) {
-		return (int)(expected - len) + 1;
+	size_t want = sizeof(struct socks5_hdr);
+	if (len < want) {
+		return (int)(want - len);
 	}
 
 	const uint8_t version =
@@ -507,19 +518,19 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		read_uint8(hdr + offsetof(struct socks5_hdr, addrtype));
 	switch (addrtype) {
 	case SOCKS5ADDR_IPV4:
-		expected += sizeof(struct in_addr) + sizeof(in_port_t);
+		want += sizeof(struct in_addr) + sizeof(in_port_t);
 		break;
 	case SOCKS5ADDR_IPV6:
-		expected += sizeof(struct in6_addr) + sizeof(in_port_t);
+		want += sizeof(struct in6_addr) + sizeof(in_port_t);
 		break;
 	case SOCKS5ADDR_DOMAIN: {
-		expected += 1;
-		if (len < expected) {
-			return (int)(expected - len);
+		want += 1;
+		if (len < want) {
+			return (int)(want - len);
 		}
 		const uint8_t addrlen =
 			read_uint8(hdr + sizeof(struct socks5_hdr));
-		expected += (size_t)addrlen + sizeof(in_port_t);
+		want += (size_t)addrlen + sizeof(in_port_t);
 	} break;
 	default:
 		socks5_sendrsp(ctx, SOCKS5RSP_ATYPNOSUPPORT);
@@ -528,8 +539,8 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 			addrtype);
 		return -1;
 	}
-	if (len < expected) {
-		return (int)(expected - len);
+	if (len < want) {
+		return (int)(want - len);
 	}
 	const unsigned char *rawaddr = hdr + sizeof(struct socks5_hdr);
 	switch (addrtype) {
@@ -781,6 +792,7 @@ static struct dialreq *req_connect(struct socks_ctx *restrict ctx)
 	CHECK(len >= 0 && (size_t)len < cap);
 	const char *username = ctx->auth.username;
 	const char *password = ctx->auth.password;
+	SOCKS_CTX_LOG_F(VERBOSE, ctx, "request: `%s' `%s'", request, username);
 	switch (addr->type) {
 	case ATYP_DOMAIN:
 		return ruleset_resolve(ruleset, request, username, password);
