@@ -1,6 +1,10 @@
 #!/bin/sh
 cd "$(dirname "$0")"
 GENERATOR="Unix Makefiles"
+NPROC="1"
+if command -v nproc >/dev/null 2>&1; then
+    NPROC="$(nproc --all)"
+fi
 set -ex
 
 case "$1" in
@@ -13,7 +17,7 @@ case "$1" in
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT};${LIBROOT}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/src/neosocksd"
     ;;
 "xs")
@@ -26,7 +30,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DBUILD_STATIC=ON \
         -S . -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/src/neosocksd"
     ;;
 "r")
@@ -35,7 +39,7 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/src/neosocksd"
     ;;
 "s")
@@ -45,7 +49,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DBUILD_STATIC=ON \
         -S . -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/src/neosocksd"
     ;;
 "p")
@@ -54,7 +58,7 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     (cd "build/src" && objdump -drwS "neosocksd" >"neosocksd.S")
     ls -lh "build/src/neosocksd"
     ;;
@@ -66,7 +70,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DFORCE_POSIX=ON \
         -S . -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/src/neosocksd"
     ;;
 "clang")
@@ -78,7 +82,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld --rtlib=compiler-rt" \
         -S . -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     (cd "build/src" && llvm-objdump -drwS "neosocksd" >"neosocksd.S")
     ls -lh "build/src/neosocksd"
     ;;
@@ -89,7 +93,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" \
         -S "." -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     TARGET="$(cc -dumpmachine)"
     zip -9j "build/neosocksd-win32.${TARGET}.zip" \
         "/usr/bin/msys-2.0.dll" \
@@ -110,7 +114,7 @@ case "$1" in
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT};${LIBROOT}" \
         -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
-    nice cmake --build "build"
+    nice cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/src/kcptun-libev"
     ;;
 "d")
@@ -125,7 +129,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     ln -sf build/compile_commands.json compile_commands.json
-    nice cmake --build "build" --parallel
+    nice cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/src/neosocksd"
     ;;
 "san")
@@ -138,7 +142,7 @@ case "$1" in
         -DCMAKE_C_COMPILER="clang" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
-    nice cmake --build "build" --parallel
+    nice cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/src/neosocksd"
     ;;
 "c")
@@ -151,7 +155,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     ln -sf build/compile_commands.json compile_commands.json
-    nice cmake --build "build" --parallel
+    nice cmake --build "build" --parallel "${NPROC}"
     # cd "build/src/tests" && ctest
     ls -lh "build/src/neosocksd"
     ;;
