@@ -22,9 +22,10 @@ struct ruleset {
 };
 
 enum ruleset_ridx {
-	RIDX_ERRORS = LUA_RIDX_LAST + 1,
+	RIDX_STRINGS = LUA_RIDX_LAST + 1,
 	RIDX_FUNCTIONS = LUA_RIDX_LAST + 2,
 	RIDX_CONTEXTS = LUA_RIDX_LAST + 3,
+	RIDX_LASTERROR = LUA_RIDX_LAST + 4,
 };
 
 #define ERR_MEMORY "out of memory"

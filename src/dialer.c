@@ -139,13 +139,15 @@ static bool proxy_set_credential(
 	struct proxy_req *restrict proxy, const char *username,
 	const char *password)
 {
-	const size_t ulen = strlen(username) + 1;
+	const size_t ulen = (username != NULL) ? strlen(username) + 1 : 0;
 	const size_t plen = (password != NULL) ? strlen(password) + 1 : 0;
 	if (ulen + plen > sizeof(proxy->credential)) {
 		return false;
 	}
-	proxy->username = proxy->credential;
-	memcpy(proxy->username, username, ulen);
+	if (username != NULL) {
+		proxy->username = proxy->credential;
+		memcpy(proxy->username, username, ulen);
+	}
 	if (password != NULL) {
 		proxy->password = proxy->credential + ulen;
 		memcpy(proxy->password, password, plen);
@@ -275,12 +277,7 @@ proxy_copy(struct proxy_req *restrict dst, const struct proxy_req *restrict src)
 {
 	dst->proto = src->proto;
 	dialaddr_copy(&dst->addr, &src->addr);
-	if (src->username != NULL) {
-		(void)proxy_set_credential(dst, src->username, src->password);
-	} else {
-		dst->username = NULL;
-		dst->password = NULL;
-	}
+	(void)proxy_set_credential(dst, src->username, src->password);
 }
 
 struct dialreq *dialreq_new(const size_t num_proxy)

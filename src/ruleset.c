@@ -44,33 +44,21 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void find_callback(lua_State *restrict L, const int idx)
+/* request(func, request, username, password) */
+static int cfunc_request_(lua_State *restrict L)
 {
-	const char *func = lua_topointer(L, idx);
+	ASSERT(lua_gettop(L) == 4);
+	const char *func = lua_topointer(L, 1);
+	const char *request = lua_topointer(L, 2);
+	const char *username = lua_topointer(L, 3);
+	const char *password = lua_topointer(L, 4);
+	lua_settop(L, 0);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
-	lua_replace(L, idx);
-	lua_pop(L, 1);
-}
-
-static const char *replace_cstring(lua_State *restrict L, const int idx)
-{
-	const char *s = lua_topointer(L, idx);
-	if (s != NULL) {
-		(void)lua_pushstring(L, s);
-	} else {
-		lua_pushnil(L);
-	}
-	lua_replace(L, idx);
-	return s;
-}
-
-static int ruleset_request_(lua_State *restrict L)
-{
-	find_callback(L, 1);
-	const char *request = replace_cstring(L, 2);
-	(void)replace_cstring(L, 3);
-	(void)replace_cstring(L, 4);
+	lua_replace(L, -2);
+	(void)lua_pushstring(L, request);
+	(void)lua_pushstring(L, username);
+	(void)lua_pushstring(L, password);
 
 	lua_call(L, 3, LUA_MULTRET);
 	const int n = lua_gettop(L);
@@ -96,10 +84,13 @@ static int ruleset_request_(lua_State *restrict L)
 	return 1;
 }
 
-static int ruleset_loadfile_(lua_State *restrict L)
+/* loadfile(filename) */
+static int cfunc_loadfile_(lua_State *restrict L)
 {
+	ASSERT(lua_gettop(L) == 1);
 	const char *filename = lua_topointer(L, 1);
-	lua_pop(L, 1);
+	lua_settop(L, 0);
+
 	if (luaL_loadfile(L, filename)) {
 		return lua_error(L);
 	}
@@ -109,9 +100,13 @@ static int ruleset_loadfile_(lua_State *restrict L)
 	return 0;
 }
 
-static int ruleset_invoke_(lua_State *restrict L)
+/* invoke(codestream) */
+static int cfunc_invoke_(lua_State *restrict L)
 {
+	ASSERT(lua_gettop(L) == 1);
 	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 1) };
+	lua_settop(L, 0);
+
 	if (lua_load(L, ruleset_reader, &rd, "=(invoke)", NULL)) {
 		return lua_error(L);
 	}
@@ -150,12 +145,15 @@ static int rpcall_callback_(lua_State *restrict co)
 	return 0;
 }
 
-static int ruleset_rpcall_(lua_State *restrict L)
+/* rpcall(codestream, callback, data) */
+static int cfunc_rpcall_(lua_State *restrict L)
 {
+	ASSERT(lua_gettop(L) == 3);
 	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 1) };
 	lua_State *restrict co = lua_newthread(L);
-	lua_pop(L, 1);
+	lua_replace(L, 1);
 	lua_xmove(L, co, 2);
+
 	lua_pushcclosure(co, rpcall_callback_, 2);
 	lua_pushcclosure(co, thread_main_, 1);
 	if (lua_load(co, ruleset_reader, &rd, "=(rpc)", NULL)) {
@@ -226,15 +224,15 @@ static int package_replace_(lua_State *restrict L)
 	return 1;
 }
 
-static int ruleset_update_(lua_State *restrict L)
+/* update(modname, codestream, chunkname) */
+static int cfunc_update_(lua_State *restrict L)
 {
+	ASSERT(lua_gettop(L) == 3);
 	const char *modname = lua_topointer(L, 1);
-	if (modname == NULL) {
-		modname = "ruleset";
-	}
 	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 2) };
 	const char *chunkname = lua_topointer(L, 3);
 	lua_settop(L, 0);
+
 	(void)lua_pushstring(L, modname);
 	if (chunkname == NULL) {
 		const size_t namelen = strlen(modname);
@@ -254,25 +252,39 @@ static int ruleset_update_(lua_State *restrict L)
 	return 0;
 }
 
-static int ruleset_stats_(lua_State *restrict L)
+/* stats(func, dt) */
+static int cfunc_stats_(lua_State *restrict L)
 {
-	find_callback(L, 1);
-	lua_pushnumber(L, *(double *)lua_topointer(L, -1));
-	lua_replace(L, 2);
+	ASSERT(lua_gettop(L) == 2);
+	const char *func = lua_topointer(L, 1);
+	const double dt = *(double *)lua_topointer(L, 2);
+	lua_settop(L, 0);
+
+	(void)lua_getglobal(L, "ruleset");
+	(void)lua_getfield(L, -1, func);
+	lua_replace(L, -2);
+	lua_pushnumber(L, dt);
 	lua_call(L, 1, 1);
 	return 1;
 }
 
-static int ruleset_tick_(lua_State *restrict L)
+/* tick(func, now) */
+static int cfunc_tick_(lua_State *restrict L)
 {
-	find_callback(L, 1);
-	lua_pushnumber(L, *(ev_tstamp *)lua_topointer(L, 2));
-	lua_replace(L, 2);
+	ASSERT(lua_gettop(L) == 2);
+	const char *func = lua_topointer(L, 1);
+	const ev_tstamp now = *(ev_tstamp *)lua_topointer(L, 2);
+	lua_settop(L, 0);
+
+	(void)lua_getglobal(L, "ruleset");
+	(void)lua_getfield(L, -1, func);
+	lua_replace(L, -2);
+	lua_pushnumber(L, now);
 	lua_call(L, 1, 0);
 	return 0;
 }
 
-static int ruleset_traceback_(lua_State *restrict L)
+static int cfunc_traceback_(lua_State *restrict L)
 {
 	size_t len;
 	const char *msg = luaL_tolstring(L, -1, &len);
@@ -427,6 +439,8 @@ static int api_stats_(lua_State *restrict L)
 	lua_newtable(L);
 	lua_pushinteger(L, (lua_Integer)slog_level);
 	lua_setfield(L, -2, "loglevel");
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	lua_setfield(L, -2, "lasterror");
 	lua_pushinteger(L, (lua_Integer)stats->num_halfopen);
 	lua_setfield(L, -2, "num_halfopen");
 	lua_pushinteger(L, (lua_Integer)stats->num_sessions);
@@ -469,28 +483,28 @@ static int luaopen_neosocksd(lua_State *restrict L)
 
 static void init_registry(lua_State *restrict L)
 {
-	const char *errors[] = {
+	const char *strings[] = {
 		ERR_MEMORY,
 		ERR_BAD_REGISTRY,
 		ERR_INVALID_ROUTE,
 	};
-	const int nerrors = (int)ARRAY_SIZE(errors);
-	lua_createtable(L, nerrors, 0);
-	for (int i = 0; i < nerrors; i++) {
-		lua_pushstring(L, errors[i]);
+	const int nstrings = (int)ARRAY_SIZE(strings);
+	lua_createtable(L, nstrings, 0);
+	for (int i = 0; i < nstrings; i++) {
+		lua_pushstring(L, strings[i]);
 		lua_rawseti(L, -2, i + 1);
 	}
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_ERRORS);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_STRINGS);
 
 	const lua_CFunction funcs[] = {
-		[FUNC_REQUEST] = ruleset_request_,
-		[FUNC_LOADFILE] = ruleset_loadfile_,
-		[FUNC_INVOKE] = ruleset_invoke_,
-		[FUNC_UPDATE] = ruleset_update_,
-		[FUNC_STATS] = ruleset_stats_,
-		[FUNC_TICK] = ruleset_tick_,
-		[FUNC_TRACEBACK] = ruleset_traceback_,
-		[FUNC_RPCALL] = ruleset_rpcall_,
+		[FUNC_REQUEST] = cfunc_request_,
+		[FUNC_LOADFILE] = cfunc_loadfile_,
+		[FUNC_INVOKE] = cfunc_invoke_,
+		[FUNC_UPDATE] = cfunc_update_,
+		[FUNC_STATS] = cfunc_stats_,
+		[FUNC_TICK] = cfunc_tick_,
+		[FUNC_TRACEBACK] = cfunc_traceback_,
+		[FUNC_RPCALL] = cfunc_rpcall_,
 	};
 	const int nfuncs = (int)ARRAY_SIZE(funcs) - 1;
 	lua_createtable(L, nfuncs, 0);

@@ -160,7 +160,12 @@ bool ruleset_pcall(
 		lua_pushlightuserdata(L, va_arg(args, void *));
 	}
 	va_end(args);
-	return lua_pcall(L, nargs, nresults, traceback ? 1 : 0) == LUA_OK;
+	if (lua_pcall(L, nargs, nresults, traceback ? 1 : 0) != LUA_OK) {
+		lua_pushvalue(L, -1);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		return false;
+	}
+	return true;
 }
 
 int thread_main_k_(lua_State *restrict L, const int status, lua_KContext ctx)
@@ -174,6 +179,12 @@ int thread_main_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushboolean(L, 0);
 		lua_replace(L, 2);
+		lua_pushvalue(L, -1);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	}
+	if (lua_isnil(L, lua_upvalueindex(1))) {
+		LOGW_F("async error: %s", lua_tostring(L, -1));
+		return 0;
 	}
 	lua_pushvalue(L, lua_upvalueindex(1));
 	lua_replace(L, 1);
@@ -215,26 +226,23 @@ int thread_main_(lua_State *restrict L)
 	return thread_main_k_(L, status, 0);
 }
 
-/* ok, ... = async(f, ...) */
+/* async(f, ...) */
 int api_async_(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TFUNCTION);
 	int n = lua_gettop(L);
 	lua_State *restrict co = lua_newthread(L);
-	lua_pop(L, 1);
+	lua_insert(L, 1);
 	lua_pushnil(co);
 	lua_pushcclosure(co, thread_main_, 1);
 	lua_xmove(L, co, n);
-	lua_settop(L, 0);
 	/* co stack: thread_main, f, ... */
 	const int status = co_resume(co, L, n, &n);
 	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_pushboolean(L, 0);
 		lua_xmove(co, L, 1);
-		return 2;
+		return lua_error(L);
 	}
-	lua_pushboolean(L, 1);
-	return 1;
+	return 0;
 }
 
 bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)

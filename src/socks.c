@@ -425,8 +425,6 @@ static int socks4a_req(struct socks_ctx *restrict ctx)
 		return 1;
 	}
 
-	LOG_BIN(VERBOSE, ctx->next, namelen, "socks4a_req");
-
 	ctx->addr.type = ATYP_DOMAIN;
 	struct domain_name *restrict domain = &ctx->addr.domain;
 	domain->len = (uint8_t)namelen;
