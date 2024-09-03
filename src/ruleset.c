@@ -201,7 +201,7 @@ static int package_replace_(lua_State *restrict L)
 	if (lua_gettable(L, idx_loaded) != LUA_TNIL) {
 		lua_pushvalue(L, idx_modname);
 		lua_gettable(L, idx_glb); /* _G[modname] */
-		glb = lua_compare(L, -2, -1, LUA_OPEQ);
+		glb = lua_rawequal(L, -2, -1);
 		lua_pop(L, 2);
 	} else {
 		lua_pop(L, 1);
@@ -235,10 +235,11 @@ static int cfunc_update_(lua_State *restrict L)
 
 	(void)lua_pushstring(L, modname);
 	if (chunkname == NULL) {
-		const size_t namelen = strlen(modname);
+		const char *name = (modname != NULL) ? modname : "ruleset";
+		const size_t namelen = strlen(name);
 		char chunkname[1 + namelen + 1];
 		chunkname[0] = '=';
-		memcpy(chunkname + 1, modname, namelen);
+		memcpy(chunkname + 1, name, namelen);
 		chunkname[1 + namelen] = '\0';
 		if (lua_load(L, ruleset_reader, &rd, chunkname, NULL)) {
 			return lua_error(L);
@@ -247,6 +248,12 @@ static int cfunc_update_(lua_State *restrict L)
 		if (lua_load(L, ruleset_reader, &rd, chunkname, NULL)) {
 			return lua_error(L);
 		}
+	}
+	if (modname == NULL) {
+		lua_pushliteral(L, "ruleset");
+		lua_call(L, 1, 1);
+		lua_setglobal(L, "ruleset");
+		return 0;
 	}
 	(void)package_replace_(L);
 	return 0;
@@ -658,7 +665,7 @@ bool ruleset_update(
 	struct ruleset *r, const char *modname, struct stream *code,
 	const char *chunkname)
 {
-	return ruleset_pcall(r, FUNC_UPDATE, 2, 0, modname, code, chunkname);
+	return ruleset_pcall(r, FUNC_UPDATE, 3, 0, modname, code, chunkname);
 }
 
 bool ruleset_loadfile(struct ruleset *r, const char *filename)

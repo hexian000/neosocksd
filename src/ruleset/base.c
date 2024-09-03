@@ -142,18 +142,18 @@ bool ruleset_pcall(
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		return false;
 	}
+	if (lua_rawgeti(L, 1, func) != LUA_TFUNCTION) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return false;
+	}
 	const bool traceback = G.conf->traceback;
 	if (traceback) {
 		if (lua_rawgeti(L, 1, FUNC_TRACEBACK) != LUA_TFUNCTION) {
 			lua_pushliteral(L, ERR_BAD_REGISTRY);
 			return false;
 		}
+		lua_replace(L, 1);
 	}
-	if (lua_rawgeti(L, 1, func) != LUA_TFUNCTION) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return false;
-	}
-	lua_remove(L, 1);
 	va_list args;
 	va_start(args, nresults);
 	for (int i = 0; i < nargs; i++) {
