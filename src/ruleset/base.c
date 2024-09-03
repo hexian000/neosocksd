@@ -172,22 +172,21 @@ int thread_main_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	UNUSED(ctx);
 	if (lua_isnil(L, lua_upvalueindex(1))) {
+		if (status != LUA_OK && status != LUA_YIELD) {
+			LOGW_F("async error: %s", lua_tostring(L, -1));
+			lua_pushvalue(L, -1);
+			lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		}
 		return 0;
 	}
 	/* stack: FUNC_TRACEBACK?, true, ... */
-	int n = lua_gettop(L) - 1;
+	const int n = lua_gettop(L) - 1;
+	lua_pushvalue(L, lua_upvalueindex(1));
+	lua_replace(L, 1);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushboolean(L, 0);
 		lua_replace(L, 2);
-		lua_pushvalue(L, -1);
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	}
-	if (lua_isnil(L, lua_upvalueindex(1))) {
-		LOGW_F("async error: %s", lua_tostring(L, -1));
-		return 0;
-	}
-	lua_pushvalue(L, lua_upvalueindex(1));
-	lua_replace(L, 1);
 	/* lua stack: f ok ... */
 	lua_call(L, n, 0);
 	return 0;
