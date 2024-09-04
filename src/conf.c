@@ -87,15 +87,23 @@ bool conf_check(const struct config *restrict conf)
 	}
 	if (conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 16384) {
 		LOGW("tcp send buffer is too small");
-		return false;
 	}
 	if (conf->tcp_rcvbuf > 0 && conf->tcp_rcvbuf < 16384) {
 		LOGW("tcp recv buffer is too small");
-		return false;
 	}
-	if (conf->auth_required && conf->ruleset == NULL) {
-		LOGW("ruleset must be enabled for authentication");
-		return false;
+	if (conf->auth_required) {
+		if (conf->ruleset == NULL) {
+			LOGE("ruleset must be enabled for authentication");
+			return false;
+		}
+		if (conf->forward != NULL
+#if WITH_TPROXY
+		    || conf->transparent
+#endif
+		) {
+			LOGE("authentication is not supported in current mode");
+			return false;
+		}
 	}
 
 	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
