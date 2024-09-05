@@ -3,8 +3,11 @@ _G.libruleset = require("libruleset")
 local agent = {}
 
 -- agent.peername = "peer0"
+agent.peername = table.get(_G, "agent", "peername")
 -- agent.conns[id] = { proxy1, proxy2, ... }
+agent.conns = table.get(_G, "agent", "conns")
 -- agent.services[service] = addr
+agent.services = table.get(_G, "agent", "services")
 
 agent.API_ENDPOINT = "api.neosocksd.internal:80"
 agent.INTERNAL_DOMAIN = ".internal"

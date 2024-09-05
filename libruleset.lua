@@ -191,14 +191,8 @@ local function log_(now, info, msg)
         return
     end
     local timestamp = os.date("%Y-%m-%dT%T%z", now)
-    local source    = info.source
-    local srctype   = source:sub(1, 1)
-    if srctype == "@" or srctype == "=" then
-        source = source:sub(2)
-    else
-        source = info.short_src
-    end
-    local line = info.currentline
+    local source    = info.source:match("[@/](.+)$") or info.short_src
+    local line      = info.currentline
     return printf("D %s %s:%d %s", timestamp, source, line, msg)
 end
 
@@ -676,9 +670,9 @@ _G.num_authorized = _G.num_authorized or 0
 _G.stat_requests = rlist:check(_G.stat_requests) or rlist:new(60, { _G.num_requests })
 
 local function matchtab_(t, ...)
-    for i, rule in ipairs(t) do
-        local match, action, tag = table.unpack(rule)
-        if match(...) then
+    for _, item in ipairs(t) do
+        local matcher, action, tag = table.unpack(item)
+        if matcher(...) then
             return action, tag
         end
     end
