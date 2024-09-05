@@ -61,12 +61,11 @@ _G.route6        = {
 -- in {action, optional log tag}
 _G.route_default = { rule.direct(), "default" }
 
-neosocksd.setinterval(60.0)
+local function main(...)
+    pcall(collectgarbage, "generational")
+    neosocksd.setinterval(60.0)
+    return _G.libruleset
+end
 
 logf("ruleset loaded, interpreter: %s", _VERSION)
--- inherit undefined fields from libruleset
-return setmetatable({}, {
-    __index = function(_, k)
-        return _G.libruleset[k]
-    end
-})
+return main(...)
