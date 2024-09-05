@@ -81,6 +81,7 @@ First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary rel
 
 - [ruleset.lua](ruleset.lua) is a demo script.
 - [libruleset.lua](libruleset.lua) provides rule table facilities.
+- [agent.lua](agent.lua) implements a simple Layer 4 autonomous system that can discover peers and services and automatically relay connections when necessary.
 - Developer manual: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
 Use the following command to start the server with the Lua scripts in current directory:

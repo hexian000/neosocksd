@@ -42,16 +42,16 @@ _G.neosocksd = neosocksd
 
 local regex = {}
 
-function regex:find(s)
+function regex:find(s, init)
     return 0, 0
 end
 
-function regex:match(s)
+function regex:match(s, init)
     return s
 end
 
 local regex_mt = { __index = regex }
-function regex.compile(pat)
+function regex.compile(pattern)
     return setmetatable({}, regex_mt)
 end
 

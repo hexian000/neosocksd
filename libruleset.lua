@@ -191,7 +191,7 @@ local function log_(now, info, msg)
         return
     end
     local timestamp = os.date("%Y-%m-%dT%T%z", now)
-    local source    = info.source:match("[@/](.+)$") or info.short_src
+    local source    = info.source:match("^@.-([^/]+)$") or info.short_src
     local line      = info.currentline
     return printf("D %s %s:%d %s", timestamp, source, line, msg)
 end
