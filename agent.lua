@@ -14,14 +14,28 @@ agent.INTERNAL_DOMAIN = ".internal"
 
 -- peerdb[peername] = { services = { "serv.internal" } }, timestamp = os.time() }
 _G.peerdb = _G.peerdb or {}
--- _G.conninfo[connid] = { [peername] = { rtt = 0, route = { peername, "peer1" }, timestamp = os.time() } }
+-- _G.conninfo[connid] = { [peername] = { route = { peername, "peer1" }, rtt = 0, timestamp = os.time() } }
 _G.conninfo = _G.conninfo or {}
 
+local BOOTSTRAP_DELAY = 10
 local SYNC_INTERVAL_BASE = 600
 local SYNC_INTERVAL_RANDOM = 600
 local PEERDB_TIMESTAMP_TOLERANCE = 600
 local PEERDB_EXPIRY_TIME = 3600
 local CONNINFO_EXPIRY_TIME = 3600
+
+local function get_conninfo(connid, peername)
+    local info = table.get(_G, "conninfo", connid, peername)
+    if not info then return nil end
+    if not info.timestamp then
+        return info
+    end
+    local now = os.time()
+    if now < info.timestamp + CONNINFO_EXPIRY_TIME then
+        return info
+    end
+    return nil
+end
 
 local function build_services()
     local services = {}
@@ -33,11 +47,12 @@ local function build_services()
     return services
 end
 local function build_peers()
-    local peers, rtt = {}, {}
+    local peers, rtts = {}, {}
     for connid, conn in pairs(_G.conninfo) do
         for peername, info in pairs(conn) do
-            if not rtt[peername] or info.rtt < rtt[peername] then
-                rtt[peername] = info.rtt
+            local rtt = info.rtt or math.huge
+            if not rtts[peername] or rtt < rtts[peername] then
+                rtts[peername] = rtt
                 peers[peername] = connid
             end
         end
@@ -117,10 +132,13 @@ local function update_peerdb(peername, peerdb)
     services = build_services()
 end
 
-
-local function update_conninfo(connid, peername, rtt, route)
+local function update_conninfo(connid, peername, route, rtt)
     local conn = _G.conninfo[connid] or {}
-    conn[peername] = { rtt = rtt, route = route, timestamp = os.time() }
+    if rtt then
+        conn[peername] = { route = route, rtt = rtt, timestamp = os.time() }
+    elseif not conn[peername] then
+        conn[peername] = { route = route }
+    end
     _G.conninfo[connid] = conn
     peers = build_peers()
 end
@@ -170,19 +188,17 @@ local function probe_via(connid, peername)
     if not minrtt then
         return nil, lasterr
     end
-    update_conninfo(connid, peername, minrtt, bestroute)
+    update_conninfo(connid, peername, bestroute, minrtt)
     return minrtt, bestroute
 end
 
 local function probe(peername)
-    local now = os.time()
     local minrtt, bestconnid, bestroute
     for connid, _ in pairs(agent.conns) do
-        local conn = _G.conninfo[connid] or {}
-        local info = conn[peername]
         local rtt, route
-        if info and now < info.timestamp + CONNINFO_EXPIRY_TIME then
-            rtt, route = info.rtt, info.route
+        local info = get_conninfo(connid, peername)
+        if info then
+            rtt, route = info.rtt or math.huge, info.route
         else
             rtt, route = probe_via(connid, peername)
         end
@@ -207,22 +223,24 @@ local function sync(connid)
     end
     local peername, peerdb = r1, r2
     update_peerdb(peername, peerdb)
+    update_conninfo(connid, peername, { peername })
 end
 
-local function bootstrap()
-    await.idle()
+local function update_self()
     local svclist = {}
     for service, _ in pairs(agent.services) do
         table.insert(svclist, service)
     end
-    _G.peerdb[agent.peername] = { services = svclist }
+    _G.peerdb[agent.peername] = {
+        services = svclist,
+        timestamp = os.time(),
+    }
 end
 
 local function maintenance()
-    await.sleep(10)
-    bootstrap()
+    await.sleep(BOOTSTRAP_DELAY)
     while agent.running do
-        _G.peerdb[agent.peername].timestamp = os.time()
+        update_self()
         for connid, _ in pairs(agent.conns) do
             sync(connid)
         end
