@@ -35,10 +35,10 @@
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
 
-static void ev_io_set_active(
+static inline void ev_io_set_active(
 	struct ev_loop *loop, struct ev_io *restrict watcher, const bool active)
 {
-	if (!!ev_is_active(watcher) == active) {
+	if (!!ev_is_active(watcher) == !!active) {
 		return;
 	}
 	if (active) {
@@ -196,8 +196,16 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			t->buf.len);
 	}
 
+#if WITH_SPLICE
+	const bool is_splice = (t->pipe.fd[0] != -1);
+	const bool can_recv = is_splice ? (t->pipe.len < t->pipe.cap) :
+					  (t->buf.len < t->buf.cap);
+	const bool can_send =
+		is_splice ? (t->pipe.len > 0) : (t->pos < t->buf.len);
+#else
 	const bool can_recv = (t->buf.len < t->buf.cap);
 	const bool can_send = (t->pos < t->buf.len);
+#endif
 	switch (state) {
 	case XFER_INIT:
 		state = XFER_CONNECTED;

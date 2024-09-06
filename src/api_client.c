@@ -293,7 +293,6 @@ handle_type api_invoke(
 	}
 	ctx->invoke_cb = client_cb;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
-	ev_set_priority(&ctx->w_timeout, EV_MINPRI);
 	ctx->w_timeout.data = ctx;
 	ctx->dialreq = req;
 	const struct event_cb cb = {

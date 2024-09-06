@@ -517,7 +517,6 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	{
 		struct ev_timer *restrict w_timeout = &ctx->w_timeout;
 		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
-		ev_set_priority(w_timeout, EV_MINPRI);
 		w_timeout->data = ctx;
 	}
 	{

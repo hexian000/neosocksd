@@ -5,13 +5,13 @@
 #define UTIL_H
 
 #include "utils/arraysize.h"
+#include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -88,7 +88,7 @@ void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
 			LOGE_F("error event: [errno=%d] %s", err,              \
 			       strerror(err));                                 \
 		}                                                              \
-		assert(((revents) & ((accept) | EV_ERROR)) == (revents));      \
+		ASSERT(((revents) & ((accept) | EV_ERROR)) == (revents));      \
 		if (((revents) & (accept)) == 0) {                             \
 			return;                                                \
 		}                                                              \
