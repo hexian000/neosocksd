@@ -197,8 +197,8 @@ local function probe(peername)
     for connid, _ in pairs(agent.conns) do
         local rtt, route
         local info = get_conninfo(connid, peername)
-        if info then
-            rtt, route = info.rtt or math.huge, info.route
+        if info and info.rtt then
+            rtt, route = info.rtt, info.route
         else
             rtt, route = probe_via(connid, peername)
         end
