@@ -25,7 +25,7 @@ static size_t cstrpos(lua_Integer pos, size_t len)
 		return (size_t)pos - 1;
 	}
 	if (pos == 0) {
-		return 1;
+		return 0;
 	}
 	if ((size_t)(-pos) > len) {
 		return 0;
@@ -81,6 +81,19 @@ static int regex_find_(lua_State *restrict L)
 	return 2 + preg->re_nsub;
 }
 
+static int push_matches(
+	lua_State *restrict L, const char *s,
+	const regmatch_t *restrict matches, const size_t nmatch)
+{
+	luaL_checkstack(L, nmatch, "too many subexpressions");
+	for (size_t i = 0; i < nmatch; i++) {
+		const char *match = s + matches[i].rm_so;
+		const size_t len = matches[i].rm_eo - matches[i].rm_so;
+		lua_pushlstring(L, match, len);
+	}
+	return nmatch;
+}
+
 /* regex.match(reg, s [, init]) */
 static int regex_match_(lua_State *restrict L)
 {
@@ -90,8 +103,8 @@ static int regex_match_(lua_State *restrict L)
 	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
 	s += init;
 	const size_t nmatch = preg->re_nsub + 1;
-	regmatch_t match[nmatch];
-	const int err = regexec(preg, s, nmatch, match, 0);
+	regmatch_t matches[nmatch];
+	const int err = regexec(preg, s, nmatch, matches, 0);
 	if (err == REG_NOMATCH) {
 		return 0;
 	}
@@ -101,19 +114,7 @@ static int regex_match_(lua_State *restrict L)
 		lua_pushlstring(L, errbuf, n);
 		return lua_error(L);
 	}
-	if (preg->re_nsub == 0) {
-		const char *sub = s + match[0].rm_so;
-		const size_t len = match[0].rm_eo - match[0].rm_so;
-		lua_pushlstring(L, sub, len);
-		return 1;
-	}
-	luaL_checkstack(L, preg->re_nsub, "too many subexpressions");
-	for (size_t i = 1; i < nmatch; i++) {
-		const char *sub = s + match[i].rm_so;
-		const size_t len = match[i].rm_eo - match[i].rm_so;
-		lua_pushlstring(L, sub, len);
-	}
-	return preg->re_nsub;
+	return push_matches(L, s, matches, nmatch);
 }
 
 static int gmatch_aux_(lua_State *restrict L)
@@ -124,8 +125,8 @@ static int gmatch_aux_(lua_State *restrict L)
 	const size_t init = cstrpos(lua_tointeger(L, lua_upvalueindex(3)), len);
 	s += init;
 	const size_t nmatch = preg->re_nsub + 1;
-	regmatch_t match[nmatch];
-	const int err = regexec(preg, s, nmatch, match, 0);
+	regmatch_t matches[nmatch];
+	const int err = regexec(preg, s, nmatch, matches, 0);
 	if (err == REG_NOMATCH) {
 		return 0;
 	}
@@ -135,21 +136,9 @@ static int gmatch_aux_(lua_State *restrict L)
 		lua_pushlstring(L, errbuf, n);
 		return lua_error(L);
 	}
-	lua_pushinteger(L, init + match[0].rm_eo);
+	lua_pushinteger(L, init + matches[0].rm_eo + 1);
 	lua_copy(L, -1, lua_upvalueindex(3));
-	if (preg->re_nsub == 0) {
-		const char *sub = s + match[0].rm_so;
-		const size_t len = match[0].rm_eo - match[0].rm_so;
-		lua_pushlstring(L, sub, len);
-		return 1;
-	}
-	luaL_checkstack(L, preg->re_nsub, "too many subexpressions");
-	for (size_t i = 1; i < nmatch; i++) {
-		const char *sub = s + match[i].rm_so;
-		const size_t len = match[i].rm_eo - match[i].rm_so;
-		lua_pushlstring(L, sub, len);
-	}
-	return preg->re_nsub;
+	return push_matches(L, s, matches, nmatch);
 }
 
 /* regex.gmatch(reg, s [, init]) */
