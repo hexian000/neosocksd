@@ -31,6 +31,7 @@ enum ruleset_ridx {
 #define ERR_MEMORY "out of memory"
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
 #define ERR_INVALID_ROUTE "unable to parse route"
+#define ERR_NOT_YIELDABLE "current routine is not yieldable"
 
 static inline struct ruleset *find_ruleset(lua_State *restrict L)
 {
@@ -66,7 +67,6 @@ int format_addr_(lua_State *L);
 
 struct dialreq *pop_dialreq_(lua_State *L, const int n);
 
-int api_async_(lua_State *L);
 int thread_main_(lua_State *L);
 
 #endif /* RULESET_BASE_H */

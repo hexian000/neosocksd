@@ -123,7 +123,7 @@ static int cfunc_invoke_(lua_State *restrict L)
 	return 0;
 }
 
-static int rpcall_callback_(lua_State *restrict co)
+static int rpcall_finished_(lua_State *restrict co)
 {
 	rpcall_finished_fn callback;
 	*(const void **)&callback = lua_topointer(co, lua_upvalueindex(1));
@@ -154,7 +154,7 @@ static int cfunc_rpcall_(lua_State *restrict L)
 	lua_replace(L, 1);
 	lua_xmove(L, co, 2);
 
-	lua_pushcclosure(co, rpcall_callback_, 2);
+	lua_pushcclosure(co, rpcall_finished_, 2);
 	lua_pushcclosure(co, thread_main_, 1);
 	if (lua_load(co, ruleset_reader, &rd, "=(rpc)", NULL)) {
 		lua_xmove(co, L, 1);
@@ -494,6 +494,7 @@ static void init_registry(lua_State *restrict L)
 		ERR_MEMORY,
 		ERR_BAD_REGISTRY,
 		ERR_INVALID_ROUTE,
+		ERR_NOT_YIELDABLE,
 	};
 	const int nstrings = (int)ARRAY_SIZE(strings);
 	lua_createtable(L, nstrings, 0);

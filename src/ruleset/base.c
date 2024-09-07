@@ -225,25 +225,6 @@ int thread_main_(lua_State *restrict L)
 	return thread_main_k_(L, status, 0);
 }
 
-/* async(f, ...) */
-int api_async_(lua_State *restrict L)
-{
-	luaL_checktype(L, 1, LUA_TFUNCTION);
-	int n = lua_gettop(L);
-	lua_State *restrict co = lua_newthread(L);
-	lua_insert(L, 1);
-	lua_pushnil(co);
-	lua_pushcclosure(co, thread_main_, 1);
-	lua_xmove(L, co, n);
-	/* co stack: thread_main, f, ... */
-	const int status = co_resume(co, L, n, &n);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_xmove(co, L, 1);
-		return lua_error(L);
-	}
-	return 0;
-}
-
 bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 {
 	check_memlimit(r);
@@ -267,14 +248,11 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 	va_end(args);
 	int nres;
 	const int status = co_resume(co, L, narg, &nres);
-	switch (status) {
-	case LUA_OK:
-	case LUA_YIELD:
-		return true;
-	default:
-		break;
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_xmove(co, L, 1);
+		lua_pushvalue(L, -1);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		return false;
 	}
-	LOGE_F("co_resume status: %d", status);
-	lua_xmove(co, L, 1);
-	return false;
+	return true;
 }

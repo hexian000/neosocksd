@@ -2,10 +2,20 @@
 error("dummy lib should not be loaded")
 
 _G.NDEBUG = true
-_G.async = pcall
 _G.marshal = function(...)
     return ""
 end
+
+
+local async = setmetatable({}, {
+    __call = function(_, f, ...)
+        return true, f(...)
+    end,
+})
+
+function async.wait(t) return true end
+
+_G.async = async
 
 
 local await = {}

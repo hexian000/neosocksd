@@ -4,9 +4,11 @@
 #include "await.h"
 
 #include "base.h"
+#include "compat.h"
 
 #include "io/stream.h"
 #include "utils/buffer.h"
+#include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
@@ -21,16 +23,16 @@
 
 #include <ev.h>
 
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 
+#define MT_ASYNC "async"
 #define MT_AWAIT_IDLE "await.idle"
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"
 #define MT_AWAIT_RPCALL "await.invoke"
-
-#define ERR_NOT_YIELDABLE "await cannot be used in non-yieldable context"
 
 #define AWAIT_CHECK_YIELDABLE(L)                                               \
 	do {                                                                   \
@@ -40,6 +42,7 @@
 		}                                                              \
 	} while (0)
 
+/* [-0, +0, -] */
 static void
 await_pin(struct ruleset *restrict r, lua_State *restrict L, const void *p)
 {
@@ -56,6 +59,7 @@ await_pin(struct ruleset *restrict r, lua_State *restrict L, const void *p)
 	r->vmstats.num_routine++;
 }
 
+/* [-0, +0, -] */
 static void
 await_unpin(struct ruleset *restrict r, lua_State *restrict L, const void *p)
 {
@@ -95,11 +99,7 @@ await_idle_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	struct ev_idle *restrict w =
 		(struct ev_idle *)lua_topointer(L, (int)ctx);
 	await_unpin(r, L, w);
-	switch (status) {
-	case LUA_OK:
-	case LUA_YIELD:
-		break;
-	default:
+	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
 	return 0;
@@ -121,7 +121,7 @@ static int await_idle_(lua_State *restrict L)
 	lua_setmetatable(L, -2);
 	await_pin(r, L, w);
 	ev_idle_start(r->loop, w);
-	const lua_KContext ctx = (lua_KContext)lua_gettop(L);
+	const lua_KContext ctx = (lua_KContext)lua_absindex(L, -1);
 	const int status = lua_yieldk(L, 0, ctx, await_idle_k_);
 	return await_idle_k_(L, status, ctx);
 }
@@ -153,11 +153,7 @@ await_sleep_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	struct ev_timer *restrict w =
 		(struct ev_timer *)lua_topointer(L, (int)ctx);
 	await_unpin(r, L, w);
-	switch (status) {
-	case LUA_OK:
-	case LUA_YIELD:
-		break;
-	default:
+	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
 	return 0;
@@ -185,7 +181,7 @@ static int await_sleep_(lua_State *restrict L)
 	lua_setmetatable(L, -2);
 	await_pin(r, L, w);
 	ev_timer_start(r->loop, w);
-	const lua_KContext ctx = (lua_KContext)lua_gettop(L);
+	const lua_KContext ctx = (lua_KContext)lua_absindex(L, -1);
 	const int status = lua_yieldk(L, 0, ctx, await_sleep_k_);
 	return await_sleep_k_(L, status, ctx);
 }
@@ -219,11 +215,7 @@ await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	struct ruleset *restrict r = find_ruleset(L);
 	await_unpin(r, L, handle_toptr(*p));
 	*p = INVALID_HANDLE;
-	switch (status) {
-	case LUA_OK:
-	case LUA_YIELD:
-		break;
-	default:
+	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
 	return format_addr_(L);
@@ -261,7 +253,7 @@ static int await_resolve_(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	const lua_KContext ctx = (lua_KContext)lua_gettop(L);
+	const lua_KContext ctx = (lua_KContext)lua_absindex(L, -1);
 	await_pin(r, L, handle_toptr(h));
 	const int status = lua_yieldk(L, 0, ctx, await_resolve_k_);
 	return await_resolve_k_(L, status, ctx);
@@ -297,11 +289,7 @@ await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	struct ruleset *restrict r = find_ruleset(L);
 	await_unpin(r, L, handle_toptr(*p));
 	*p = INVALID_HANDLE;
-	switch (status) {
-	case LUA_OK:
-	case LUA_YIELD:
-		break;
-	default:
+	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
 	const bool ok = *(bool *)lua_topointer(L, -3);
@@ -373,10 +361,132 @@ static int await_invoke_(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	const lua_KContext ctx = (lua_KContext)lua_gettop(L);
+	const lua_KContext ctx = (lua_KContext)lua_absindex(L, -1);
 	await_pin(r, L, handle_toptr(h));
 	const int status = lua_yieldk(L, 0, ctx, await_invoke_k_);
 	return await_invoke_k_(L, status, ctx);
+}
+
+enum {
+	UVIDX_THREAD = 1,
+	UVIDX_RESULTS,
+	UVIDX_WAKEUP,
+};
+#define UVIDX_LAST UVIDX_WAKEUP
+
+static int async_finished_(lua_State *restrict L)
+{
+	const int nres = lua_gettop(L);
+	/* save results */
+	lua_createtable(L, nres, 1);
+	lua_pushinteger(L, nres);
+	lua_setfield(L, -2, "#");
+	for (int i = 1; i <= nres; i++) {
+		lua_pushvalue(L, i);
+		lua_rawseti(L, -2, i);
+	}
+	lua_setiuservalue(L, lua_upvalueindex(1), UVIDX_RESULTS);
+
+	/* wake up */
+	lua_settop(L, 0);
+	if (lua_getiuservalue(L, lua_upvalueindex(1), UVIDX_WAKEUP) !=
+	    LUA_TTABLE) {
+		return 0;
+	}
+	const lua_Unsigned nwakeups = lua_rawlen(L, -1);
+	ASSERT(nwakeups <= LUA_MAXINTEGER);
+	for (lua_Unsigned i = 1; i <= nwakeups; i++) {
+		lua_rawgeti(L, -1, (lua_Integer)i);
+		lua_State *restrict co = lua_tothread(L, -1);
+		ASSERT(co != L);
+		int n = 0;
+		const int status = co_resume(co, L, n, &n);
+		if (status != LUA_OK && status != LUA_YIELD) {
+			LOGW_F("async error: %s", lua_tostring(L, -1));
+			lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		}
+		lua_pop(L, 1);
+	}
+	lua_pushnil(L);
+	lua_setiuservalue(L, lua_upvalueindex(1), UVIDX_WAKEUP);
+	return 0;
+}
+
+static int push_async_results(lua_State *restrict L, const int idx)
+{
+	lua_getfield(L, idx, "#");
+	const int n = MIN(lua_tointeger(L, -1), INT_MAX);
+	luaL_checkstack(L, n, "too many results");
+	for (lua_Integer i = 1; i <= n; i++) {
+		lua_rawgeti(L, idx, i);
+	}
+	return n;
+}
+
+static int
+async_wait_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+{
+	const void *p = lua_topointer(L, (int)ctx);
+	struct ruleset *restrict r = find_ruleset(L);
+	await_unpin(r, L, p);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		return lua_error(L);
+	}
+	(void)lua_getiuservalue(L, 1, UVIDX_RESULTS);
+	const int idx = lua_absindex(L, -1);
+	return push_async_results(L, idx);
+}
+
+static int async_wait_(lua_State *restrict L)
+{
+	AWAIT_CHECK_YIELDABLE(L);
+	void *p = luaL_checkudata(L, 1, MT_ASYNC);
+	lua_settop(L, 1);
+
+	if (lua_getiuservalue(L, 1, UVIDX_RESULTS) == LUA_TTABLE) {
+		const int idx = lua_absindex(L, -1);
+		return push_async_results(L, idx);
+	}
+	if (lua_getiuservalue(L, 1, UVIDX_WAKEUP) != LUA_TTABLE) {
+		lua_newtable(L);
+	}
+	const lua_Unsigned n = lua_rawlen(L, -1);
+	ASSERT(n < LUA_MAXINTEGER);
+	(void)lua_pushthread(L);
+	lua_rawseti(L, -2, (lua_Integer)(n + 1));
+	lua_setiuservalue(L, 1, UVIDX_WAKEUP);
+	struct ruleset *restrict r = find_ruleset(L);
+	(void)lua_getiuservalue(L, 1, UVIDX_THREAD);
+	await_pin(r, L, p);
+	const lua_KContext ctx = 1;
+	const int status = lua_yieldk(L, 0, ctx, async_wait_k_);
+	return async_wait_k_(L, status, ctx);
+}
+
+/* __call(async, f, ...) */
+static int api_async_(lua_State *restrict L)
+{
+	luaL_checktype(L, 2, LUA_TFUNCTION);
+	int n = lua_gettop(L) - 1;
+	(void)lua_newuserdatauv(L, 0, UVIDX_LAST);
+	luaL_setmetatable(L, MT_ASYNC);
+	lua_State *restrict co = lua_newthread(L);
+	lua_setiuservalue(L, -2, UVIDX_THREAD);
+	lua_replace(L, 1);
+
+	lua_pushvalue(L, 1);
+	lua_xmove(L, co, 1);
+	lua_pushcclosure(co, async_finished_, 1);
+	lua_pushcclosure(co, thread_main_, 1);
+	lua_xmove(L, co, n);
+	/* co stack: thread_main, f, ... */
+	const int status = co_resume(co, L, n, &n);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_xmove(co, L, 1);
+		return lua_error(L);
+	}
+	ASSERT(lua_gettop(L) == 1);
+	return 1;
 }
 
 int luaopen_await(lua_State *restrict L)
@@ -385,7 +495,23 @@ int luaopen_await(lua_State *restrict L)
 		lua_newtable(L);
 		lua_seti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
 	}
-	lua_register(L, "async", api_async_);
+	const luaL_Reg asynclib[] = {
+		{ "wait", async_wait_ },
+		{ NULL, NULL },
+	};
+	luaL_newlib(L, asynclib);
+	if (luaL_newmetatable(L, MT_ASYNC)) {
+		lua_pushvalue(L, -2);
+		lua_setfield(L, -2, "__index");
+	}
+	lua_pop(L, 1);
+	lua_newtable(L);
+	/* lua stack: asynclib mt */
+	lua_pushcfunction(L, api_async_);
+	lua_setfield(L, -2, "__call");
+	lua_setmetatable(L, -2);
+	lua_setglobal(L, "async");
+
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },
 		{ "invoke", await_invoke_ },
