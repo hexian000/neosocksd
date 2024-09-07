@@ -113,7 +113,7 @@ static void slog_write_file(
 
 	const int ret = BUF_VAPPENDF(slog_buffer, format, args);
 	if (ret < 0) {
-		BUF_APPENDCONST(slog_buffer, "<log format error>");
+		BUF_APPENDCONST(slog_buffer, "(log format error)");
 	}
 	/* overwritting the null terminator is not an issue */
 	BUF_APPENDCONST(slog_buffer, "\n");
@@ -136,7 +136,7 @@ static void slog_write_syslog(
 	BUF_INIT(slog_buffer, 0);
 	const int ret = BUF_VAPPENDF(slog_buffer, format, args);
 	if (ret < 0) {
-		BUF_APPENDCONST(slog_buffer, "<log format error>");
+		BUF_APPENDCONST(slog_buffer, "(log format error)");
 	}
 
 	syslog(LOG_USER | slog_level_map[(level)], "%c %s:%d %.*s",
