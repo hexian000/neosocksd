@@ -55,7 +55,6 @@ void pipe_close(struct splice_pipe *restrict pipe)
 
 bool pipe_new(struct splice_pipe *restrict pipe)
 {
-	pipe->fd[0] = pipe->fd[1] = -1;
 	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
 		LOGW_F("pipe2: %s", strerror(errno));
 		return false;
