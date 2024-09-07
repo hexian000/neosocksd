@@ -50,6 +50,13 @@ function regex:match(s, init)
     return s
 end
 
+function regex:gmatch(s, init)
+    return function()
+        init = init + 1
+        return self:match(s, init)
+    end
+end
+
 local regex_mt = { __index = regex }
 function regex.compile(pattern)
     return setmetatable({}, regex_mt)
