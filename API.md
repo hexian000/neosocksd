@@ -326,7 +326,7 @@ Formally, get the timestamp of the latest event in seconds.
 
 ```Lua
 local reg = regex.compile([[\.example\.(com|org)$]])
-local s, e, sub1 = reg:find(host)
+local s, e = reg:find(host)
 if s then
     -- ......
 end
