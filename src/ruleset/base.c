@@ -249,9 +249,8 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 	int nres;
 	const int status = co_resume(co, L, narg, &nres);
 	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_xmove(co, L, 1);
-		lua_pushvalue(L, -1);
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		lua_pushvalue(co, -1);
+		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
 	}
 	return true;

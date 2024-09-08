@@ -638,16 +638,20 @@ void ruleset_free(struct ruleset *restrict r)
 const char *ruleset_geterror(struct ruleset *restrict r, size_t *len)
 {
 	lua_State *restrict L = r->L;
-	if (lua_gettop(L) < 1) {
-		return CONST_LSTRING("(no error)", len);
+	const char *s = NULL;
+	switch (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR)) {
+	case LUA_TNIL:
+		s = CONST_LSTRING("(nil)", len);
+		break;
+	case LUA_TSTRING:
+		s = lua_tolstring(L, -1, len);
+		break;
+	default:
+		s = CONST_LSTRING("(error object is not a string)", len);
+		break;
 	}
-	if (!lua_isstring(L, -1)) {
-		if (lua_isnil(L, -1)) {
-			return CONST_LSTRING("(nil)", len);
-		}
-		return CONST_LSTRING("(error object is not a string)", len);
-	}
-	return lua_tolstring(L, -1, len);
+	lua_pop(L, 1);
+	return s;
 }
 
 bool ruleset_invoke(struct ruleset *r, struct stream *code)
