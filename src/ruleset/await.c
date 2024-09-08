@@ -393,10 +393,7 @@ static int async_finished_(lua_State *restrict L)
 	    LUA_TTABLE) {
 		return 0;
 	}
-	const lua_Unsigned nwakeups = lua_rawlen(L, -1);
-	ASSERT(nwakeups <= LUA_MAXINTEGER);
-	for (lua_Unsigned i = 1; i <= nwakeups; i++) {
-		lua_rawgeti(L, -1, (lua_Integer)i);
+	for (lua_Integer i = 1; lua_rawgeti(L, -1, i) == LUA_TTHREAD; i++) {
 		lua_State *restrict co = lua_tothread(L, -1);
 		ASSERT(co != L);
 		int n = 0;
@@ -415,7 +412,11 @@ static int async_finished_(lua_State *restrict L)
 static int push_async_results(lua_State *restrict L, const int idx)
 {
 	lua_getfield(L, idx, "#");
-	const int n = MIN(lua_tointeger(L, -1), INT_MAX);
+	const lua_Integer n = lua_tointeger(L, -1);
+	if (n < 0 || n > INT_MAX) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
 	luaL_checkstack(L, n, "too many results");
 	for (lua_Integer i = 1; i <= n; i++) {
 		lua_rawgeti(L, idx, i);
