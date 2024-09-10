@@ -152,10 +152,10 @@ static int cfunc_rpcall_(lua_State *restrict L)
 	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 1) };
 	lua_State *restrict co = lua_newthread(L);
 	lua_replace(L, 1);
-	lua_xmove(L, co, 2);
+	lua_pushcclosure(L, rpcall_finished_, 2);
+	lua_pushcclosure(L, thread_main_, 1);
+	lua_xmove(L, co, 1);
 
-	lua_pushcclosure(co, rpcall_finished_, 2);
-	lua_pushcclosure(co, thread_main_, 1);
 	if (lua_load(co, ruleset_reader, &rd, "=(rpc)", NULL)) {
 		lua_xmove(co, L, 1);
 		return lua_error(L);

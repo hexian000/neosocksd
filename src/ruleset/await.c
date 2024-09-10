@@ -368,29 +368,33 @@ static int await_invoke_(lua_State *restrict L)
 }
 
 enum {
-	UVIDX_THREAD = 1,
-	UVIDX_RESULTS,
-	UVIDX_WAKEUP,
+	IDX_THREAD = 1,
+	IDX_RESULTS,
+	IDX_WAKEUP,
 };
-#define UVIDX_LAST UVIDX_WAKEUP
 
 static int async_finished_(lua_State *restrict L)
 {
 	const int nres = lua_gettop(L);
+	/* save error */
+	if (!lua_toboolean(L, 1)) {
+		lua_pushvalue(L, -1);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	}
+
 	/* save results */
 	lua_createtable(L, nres, 1);
 	lua_pushinteger(L, nres);
-	lua_setfield(L, -2, "#");
+	lua_rawseti(L, -2, 0);
 	for (int i = 1; i <= nres; i++) {
 		lua_pushvalue(L, i);
 		lua_rawseti(L, -2, i);
 	}
-	lua_setiuservalue(L, lua_upvalueindex(1), UVIDX_RESULTS);
+	lua_rawseti(L, lua_upvalueindex(1), IDX_RESULTS);
 
 	/* wake up */
 	lua_settop(L, 0);
-	if (lua_getiuservalue(L, lua_upvalueindex(1), UVIDX_WAKEUP) !=
-	    LUA_TTABLE) {
+	if (lua_rawgeti(L, lua_upvalueindex(1), IDX_WAKEUP) != LUA_TTABLE) {
 		return 0;
 	}
 	for (lua_Integer i = 1; lua_rawgeti(L, -1, i) == LUA_TTHREAD; i++) {
@@ -399,19 +403,19 @@ static int async_finished_(lua_State *restrict L)
 		int n = 0;
 		const int status = co_resume(co, L, n, &n);
 		if (status != LUA_OK && status != LUA_YIELD) {
-			LOGW_F("async error: %s", lua_tostring(L, -1));
+			lua_pushvalue(co, -1);
 			lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		}
 		lua_pop(L, 1);
 	}
 	lua_pushnil(L);
-	lua_setiuservalue(L, lua_upvalueindex(1), UVIDX_WAKEUP);
+	lua_rawseti(L, lua_upvalueindex(1), IDX_WAKEUP);
 	return 0;
 }
 
 static int push_async_results(lua_State *restrict L, const int idx)
 {
-	lua_getfield(L, idx, "#");
+	lua_rawgeti(L, idx, 0);
 	const lua_Integer n = lua_tointeger(L, -1);
 	if (n < 0 || n > INT_MAX) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
@@ -433,7 +437,7 @@ async_wait_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
-	(void)lua_getiuservalue(L, 1, UVIDX_RESULTS);
+	(void)lua_rawgeti(L, 1, IDX_RESULTS);
 	const int idx = lua_absindex(L, -1);
 	return push_async_results(L, idx);
 }
@@ -441,24 +445,29 @@ async_wait_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 static int async_wait_(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
-	void *p = luaL_checkudata(L, 1, MT_ASYNC);
+	luaL_argexpected(
+		L,
+		lua_istable(L, 1) && lua_getmetatable(L, 1) &&
+			luaL_getmetatable(L, MT_ASYNC) == LUA_TTABLE &&
+			lua_rawequal(L, -1, -2),
+		1, MT_ASYNC);
 	lua_settop(L, 1);
 
-	if (lua_getiuservalue(L, 1, UVIDX_RESULTS) == LUA_TTABLE) {
+	if (lua_rawgeti(L, 1, IDX_RESULTS) == LUA_TTABLE) {
 		const int idx = lua_absindex(L, -1);
 		return push_async_results(L, idx);
 	}
-	if (lua_getiuservalue(L, 1, UVIDX_WAKEUP) != LUA_TTABLE) {
+	if (lua_rawgeti(L, 1, IDX_WAKEUP) != LUA_TTABLE) {
 		lua_newtable(L);
 	}
 	const lua_Unsigned n = lua_rawlen(L, -1);
 	ASSERT(n < LUA_MAXINTEGER);
 	(void)lua_pushthread(L);
 	lua_rawseti(L, -2, (lua_Integer)(n + 1));
-	lua_setiuservalue(L, 1, UVIDX_WAKEUP);
+	lua_rawseti(L, 1, IDX_WAKEUP);
 	struct ruleset *restrict r = find_ruleset(L);
-	(void)lua_getiuservalue(L, 1, UVIDX_THREAD);
-	await_pin(r, L, p);
+	(void)lua_rawgeti(L, 1, IDX_THREAD);
+	await_pin(r, L, lua_tothread(L, -1));
 	const lua_KContext ctx = 1;
 	const int status = lua_yieldk(L, 0, ctx, async_wait_k_);
 	return async_wait_k_(L, status, ctx);
@@ -469,16 +478,16 @@ static int api_async_(lua_State *restrict L)
 {
 	luaL_checktype(L, 2, LUA_TFUNCTION);
 	int n = lua_gettop(L) - 1;
-	(void)lua_newuserdatauv(L, 0, UVIDX_LAST);
+	lua_newtable(L);
 	luaL_setmetatable(L, MT_ASYNC);
-	lua_State *restrict co = lua_newthread(L);
-	lua_setiuservalue(L, -2, UVIDX_THREAD);
 	lua_replace(L, 1);
+	lua_State *restrict co = lua_newthread(L);
+	lua_rawseti(L, 1, IDX_THREAD);
 
 	lua_pushvalue(L, 1);
+	lua_pushcclosure(L, async_finished_, 1);
+	lua_pushcclosure(L, thread_main_, 1);
 	lua_xmove(L, co, 1);
-	lua_pushcclosure(co, async_finished_, 1);
-	lua_pushcclosure(co, thread_main_, 1);
 	lua_xmove(L, co, n);
 	/* co stack: thread_main, f, ... */
 	const int status = co_resume(co, L, n, &n);

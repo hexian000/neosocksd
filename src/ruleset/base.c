@@ -171,14 +171,6 @@ bool ruleset_pcall(
 int thread_main_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	UNUSED(ctx);
-	if (lua_isnil(L, lua_upvalueindex(1))) {
-		if (status != LUA_OK && status != LUA_YIELD) {
-			LOGW_F("async error: %s", lua_tostring(L, -1));
-			lua_pushvalue(L, -1);
-			lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
-		}
-		return 0;
-	}
 	/* stack: FUNC_TRACEBACK?, true, ... */
 	const int n = lua_gettop(L) - 1;
 	lua_pushvalue(L, lua_upvalueindex(1));
