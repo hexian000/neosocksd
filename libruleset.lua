@@ -555,7 +555,7 @@ end
 
 function composite.anyof(t)
     return function(...)
-        for i, matcher in ipairs(t) do
+        for _, matcher in ipairs(t) do
             if matcher(...) then
                 return true
             end
