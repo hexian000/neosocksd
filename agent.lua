@@ -150,6 +150,45 @@ function rpc.sync(peername, peerdb)
     return agent.peername, _G.peerdb
 end
 
+function agent.sync(connid)
+    assert(agent.conns[connid], string.format("unknown connid [%d]", connid))
+    local ok, r1, r2 = callbyconn(connid, "sync", agent.peername, _G.peerdb)
+    if not ok then
+        logf("sync failed: connid=%d %s", connid, r1)
+        return
+    end
+    local peername, peerdb = r1, r2
+    local conn = _G.conninfo[connid] or {}
+    for peer, info in pairs(conn) do
+        if info.route[#info.route] ~= peername then
+            conn[peer] = nil
+            logf("invalid route: [%d] %q %s", connid, peername, format_route(info.route))
+        end
+    end
+    if not conn[peername] then
+        conn[peername] = { route = { peername } }
+    end
+    _G.conninfo[connid] = conn
+    update_peerdb(peername, peerdb)
+end
+
+local function find_conn(peername, ttl)
+    local now = os.time()
+    local connid, minrtt
+    for id, _ in pairs(agent.conns) do
+        local info = table.get(_G.conninfo, id, peername)
+        if info and #info.route <= ttl and
+            is_valid(info, CONNINFO_EXPIRY_TIME, now) then
+            local rtt = info.rtt or math.huge
+            if not minrtt or rtt < minrtt then
+                minrtt = rtt
+                connid = id
+            end
+        end
+    end
+    return connid
+end
+
 function rpc.probe(peername, ttl)
     if peername == agent.peername then
         return { peername }
@@ -158,17 +197,7 @@ function rpc.probe(peername, ttl)
     if ttl < 1 then
         error("ttl expired in transit")
     end
-    local connid, minrtt
-    for id, _ in pairs(agent.conns) do
-        local info = table.get(_G.conninfo, id, peername)
-        if info and #info.route <= ttl then
-            local rtt = info.rtt or math.huge
-            if not minrtt or rtt < minrtt then
-                minrtt = rtt
-                connid = id
-            end
-        end
-    end
+    local connid = find_conn(peername, ttl)
     if not connid then
         error("peer not reachable")
     end
@@ -197,12 +226,16 @@ local function probe_via(connid, peername)
             lasterr = result
         end
     end
+    local conn = _G.conninfo[connid] or {}
+    _G.conninfo[connid] = conn
     if not minrtt then
+        if conn[peername] then
+            conn[peername] = nil
+            services, peers = build_index()
+        end
         return nil, lasterr
     end
-    local conn = _G.conninfo[connid] or {}
     conn[peername] = { route = bestroute, rtt = minrtt, timestamp = os.time() }
-    _G.conninfo[connid] = conn
     services, peers = build_index()
     return minrtt, bestroute
 end
@@ -234,26 +267,28 @@ function agent.probe(peername)
     logf("probe: [%d] %q %s %.0fms", bestconnid, peername, route, minrtt * 1e+3)
 end
 
-function agent.sync(connid)
-    assert(agent.conns[connid], string.format("unknown connid [%d]", connid))
-    local ok, r1, r2 = callbyconn(connid, "sync", agent.peername, _G.peerdb)
-    if not ok then
-        logf("sync failed: connid=%d %s", connid, r1)
-        return
+function rpc.relay(peername, ttl, func, ...)
+    if peername == agent.peername then
+        return rpc[func](...)
     end
-    local peername, peerdb = r1, r2
-    local conn = _G.conninfo[connid] or {}
-    for peer, info in pairs(conn) do
-        if info.route[#info.route] ~= peername then
-            conn[peer] = nil
-            logf("invalid route: [%d] %q %s", connid, peername, format_route(info.route))
-        end
+    ttl = ttl - 1
+    if ttl < 1 then
+        error("ttl expired in transit")
     end
-    if not conn[peername] then
-        conn[peername] = { route = { peername } }
+    local connid = find_conn(peername, ttl)
+    if not connid then
+        error("peer not reachable")
     end
-    _G.conninfo[connid] = conn
-    update_peerdb(peername, peerdb)
+    return callbyconn(connid, func, ...)
+end
+
+function agent.rpcall(peer, func, ...)
+    local ttl = 2
+    local connid = find_conn(peer, ttl)
+    if not connid then
+        error("peer not reachable")
+    end
+    return callbyconn(connid, "relay", peer, ttl, func, ...)
 end
 
 function agent.maintenance()
