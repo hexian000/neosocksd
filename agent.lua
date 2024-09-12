@@ -267,30 +267,6 @@ function agent.probe(peername)
     logf("probe: [%d] %q %s %.0fms", bestconnid, peername, route, minrtt * 1e+3)
 end
 
-function rpc.relay(peername, ttl, func, ...)
-    if peername == agent.peername then
-        return rpc[func](...)
-    end
-    ttl = ttl - 1
-    if ttl < 1 then
-        error("ttl expired in transit")
-    end
-    local connid = find_conn(peername, ttl)
-    if not connid then
-        error("peer not reachable")
-    end
-    return callbyconn(connid, func, ...)
-end
-
-function agent.rpcall(peer, func, ...)
-    local ttl = 2
-    local connid = find_conn(peer, ttl)
-    if not connid then
-        error("peer not reachable")
-    end
-    return callbyconn(connid, "relay", peer, ttl, func, ...)
-end
-
 function agent.maintenance()
     local now = os.time()
     -- update self

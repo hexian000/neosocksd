@@ -30,7 +30,6 @@ local function is_disabled()
 end
 
 ruleset.API_ENDPOINT = "api.neosocksd.internal:80"
-ruleset.RESERVED_DOMAIN = ".neosocksd.internal"
 
 -- 1. ordered redirect rules (matched as string)
 -- in {matcher, action, optional log tag}
@@ -46,7 +45,6 @@ _G.redirect_name = {
     { match.domain(".local"),                    rule.direct() },
     -- internal assignment
     { match.exact(ruleset.API_ENDPOINT),         rule.redirect("127.0.1.1:9080") },
-    { match.domain(ruleset.RESERVED_DOMAIN),     rule.reject() },
     { match.agent(),                             rule.agent() },
     -- global condition
     { is_disabled,                               rule.reject(),                                               "off" },
