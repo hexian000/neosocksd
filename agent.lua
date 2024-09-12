@@ -292,6 +292,7 @@ function agent.maintenance()
     end
     log("agent: probe finished")
     -- remove stale data
+    now = os.time()
     for peername, data in pairs(_G.peerdb) do
         if not is_valid(data, PEERDB_EXPIRY_TIME, now) then
             logf("peer expired: %q (time=%d)", peername, data.timestamp - now)
@@ -303,8 +304,8 @@ function agent.maintenance()
             if not _G.peerdb[peername] then
                 conn[peername] = nil
             elseif not is_valid(info, CONNINFO_EXPIRY_TIME, now) then
-                logf("route expired: [%d] %q %s (time=%d)", connid,
-                    peername, format_route(info.route), info.timestamp - now)
+                logf("route expired: [%d] %q %s", connid,
+                    peername, format_route(info.route))
                 conn[peername] = nil
             end
         end
