@@ -41,10 +41,6 @@ enum api_state {
 	STATE_RESPONSE,
 };
 
-struct weakptr {
-	void *p;
-};
-
 struct api_ctx {
 	struct session ss;
 	struct server *s;
@@ -55,7 +51,7 @@ struct api_ctx {
 	union {
 		struct {
 			struct ev_io w_recv, w_send;
-			struct weakptr *weakctx;
+			struct rpcall_state *rpcstate;
 			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct http_parser parser;
@@ -82,27 +78,6 @@ ASSERT_SUPER(struct session, struct api_ctx, ss);
 #define FORMAT_BYTES(name, value)                                              \
 	char name[16];                                                         \
 	(void)format_iec_bytes(name, sizeof(name), (value))
-
-static inline struct weakptr *weakptr_wrap(void *p)
-{
-	struct weakptr *w = malloc(sizeof(struct weakptr));
-	if (w != NULL) {
-		w->p = p;
-	}
-	return w;
-}
-
-static inline void *weakptr_unwrap(struct weakptr *w)
-{
-	void *p = (w != NULL) ? w->p : NULL;
-	free(w);
-	return p;
-}
-
-static inline void weakptr_reset(struct weakptr *w)
-{
-	w->p = NULL;
-}
 
 #if WITH_RULESET
 bool check_rpcall_mime(char *s)
@@ -377,30 +352,27 @@ static bool restapi_check(
 }
 
 #if WITH_RULESET
-static void
-rpcall_finished(void *data, const bool ok, const void *result, size_t resultlen)
+static void rpcall_finished(
+	struct rpcall_state *state, const bool ok, const void *result,
+	size_t resultlen)
 {
-	struct api_ctx *restrict ctx = weakptr_unwrap(data);
+	struct api_ctx *restrict ctx = state->data;
 	if (ctx == NULL) {
 		return;
 	}
-	ctx->weakctx = NULL;
 	ASSERT(ctx->state == STATE_YIELD);
 	ctx->state = STATE_RESPONSE;
 	struct ev_loop *const loop = ctx->s->loop;
 	ev_io_start(loop, &ctx->w_send);
 
 	if (!ok) {
-		struct ruleset *r = G.ruleset;
-		size_t len;
-		const char *err = ruleset_geterror(r, &len);
-		LOGV_F("ruleset rpcall: %s", err);
+		LOGV_F("ruleset rpcall: %s", result);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
-		RESPHDR_CLENGTH(ctx->parser.wbuf, len);
+		RESPHDR_CLENGTH(ctx->parser.wbuf, resultlen);
 		RESPHDR_FINISH(ctx->parser.wbuf);
 		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-		BUF_APPEND(ctx->parser.wbuf, err, len);
+		BUF_APPEND(ctx->parser.wbuf, result, resultlen);
 		return;
 	}
 	const enum content_encodings encoding =
@@ -457,31 +429,29 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	ctx->weakctx = weakptr_wrap(ctx);
-	if (ctx->weakctx == NULL) {
-		LOGOOM();
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
 	ctx->state = STATE_YIELD;
-	const bool ok =
-		ruleset_rpcall(ruleset, reader, rpcall_finished, ctx->weakctx);
+	ctx->rpcstate = ruleset_rpcall(
+		ruleset, reader,
+		&(struct rpcall_state){
+			.callback = rpcall_finished,
+			.data = ctx,
+		});
 	stream_close(reader);
-	if (!ok) {
-		(void)weakptr_unwrap(ctx->weakctx);
-		ctx->weakctx = NULL;
-		ctx->state = STATE_RESPONSE;
-		size_t len;
-		const char *err = ruleset_geterror(ruleset, &len);
-		LOGW_F("ruleset rpcall: %s", err);
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
-		RESPHDR_CLENGTH(ctx->parser.wbuf, len);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-		BUF_APPEND(ctx->parser.wbuf, err, len);
+	if (ctx->rpcstate != NULL) {
+		/* wait callback */
 		return;
 	}
+	/* error */
+	ctx->state = STATE_RESPONSE;
+	size_t len;
+	const char *err = ruleset_geterror(ruleset, &len);
+	LOGW_F("ruleset rpcall: %s", err);
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+	RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
+	RESPHDR_CLENGTH(ctx->parser.wbuf, len);
+	RESPHDR_FINISH(ctx->parser.wbuf);
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	BUF_APPEND(ctx->parser.wbuf, err, len);
 }
 
 static void handle_ruleset_invoke(
@@ -709,8 +679,9 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	case STATE_REQUEST:
 	case STATE_YIELD:
 	case STATE_RESPONSE:
-		if (ctx->weakctx != NULL) {
-			weakptr_reset(ctx->weakctx);
+		if (ctx->rpcstate != NULL) {
+			ctx->rpcstate->callback = NULL;
+			ctx->rpcstate->data = NULL;
 		}
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
@@ -912,7 +883,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 		ev_io_init(w_send, send_cb, fd, EV_WRITE);
 		w_send->data = ctx;
 	}
-	ctx->weakctx = NULL;
+	ctx->rpcstate = NULL;
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
 	ctx->ss.close = api_ss_close;

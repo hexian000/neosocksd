@@ -30,11 +30,17 @@ bool ruleset_update(
 	const char *chunkname);
 bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
+struct rpcall_state;
 typedef void (*rpcall_finished_fn)(
-	void *data, bool ok, const void *result, size_t resultlen);
-bool ruleset_rpcall(
-	struct ruleset *r, struct stream *code, rpcall_finished_fn callback,
-	void *data);
+	struct rpcall_state *state, bool ok, const void *result,
+	size_t resultlen);
+struct rpcall_state {
+	rpcall_finished_fn callback;
+	void *data;
+};
+struct rpcall_state *ruleset_rpcall(
+	struct ruleset *r, struct stream *code,
+	const struct rpcall_state *init_state);
 
 struct dialreq *ruleset_resolve(
 	struct ruleset *r, const char *request, const char *username,

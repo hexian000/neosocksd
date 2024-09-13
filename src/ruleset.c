@@ -125,71 +125,65 @@ static int cfunc_invoke_(lua_State *restrict L)
 	return 0;
 }
 
-struct rpcall_ud {
-	struct reader_status reader;
-	rpcall_finished_fn callback;
-	void *data;
-};
-
 static int rpcall_close_(lua_State *restrict co)
 {
-	struct rpcall_ud *restrict ud =
-		(struct rpcall_ud *)lua_touserdata(co, 1);
-	if (ud->callback != NULL) {
+	struct rpcall_state *restrict state = lua_touserdata(co, 1);
+	if (state->callback != NULL) {
 		const char err[] = "rpcall is closed";
-		ud->callback(ud->data, false, err, sizeof(err) - 1);
-		ud->callback = NULL;
+		state->callback(state->data, false, err, sizeof(err) - 1);
+		state->callback = NULL;
 	}
 	return 0;
 }
 
 static int rpcall_finished_(lua_State *restrict co)
 {
-	struct rpcall_ud *restrict ud =
-		(struct rpcall_ud *)lua_touserdata(co, lua_upvalueindex(1));
-	const bool ok = !!lua_toboolean(co, 1);
-	if (!ok) {
-		struct ruleset *restrict r = find_ruleset(co);
-		lua_xmove(co, r->L, 1);
-		ud->callback(ud->data, false, NULL, 0);
-		ud->callback = NULL;
+	struct rpcall_state *restrict state =
+		lua_touserdata(co, lua_upvalueindex(1));
+	if (state->callback == NULL) {
 		return 0;
 	}
-	const int n = lua_gettop(co) - 1;
-	lua_getglobal(co, "marshal");
-	lua_replace(co, 1);
-	lua_call(co, n, 1);
+	/* co stack: ok ... */
+	const bool ok = !!lua_toboolean(co, 1);
+	if (ok) {
+		const int n = lua_gettop(co) - 1;
+		lua_getglobal(co, "marshal");
+		lua_replace(co, 1);
+		lua_call(co, n, 1);
+	}
 	size_t len;
 	const char *s = lua_tolstring(co, -1, &len);
-	ud->callback(ud->data, true, s, len);
-	ud->callback = NULL;
+	state->callback(state, ok, s, len);
+	state->callback = NULL;
 	return 0;
 }
 
-/* rpcall(codestream, callback, data) */
+/* rpcall(codestream, init_state) */
 static int cfunc_rpcall_(lua_State *restrict L)
 {
-	ASSERT(lua_gettop(L) == 3);
-	struct rpcall_ud *restrict ud =
-		lua_newuserdata(L, sizeof(struct rpcall_ud));
-	ud->reader = (struct reader_status){
+	ASSERT(lua_gettop(L) == 2);
+	struct reader_status rd = {
 		.s = (struct stream *)lua_topointer(L, 1),
 	};
-	*(const void **)&ud->callback = lua_topointer(L, 2);
-	ud->data = (void *)lua_topointer(L, 3);
+	struct rpcall_state *restrict state =
+		lua_newuserdata(L, sizeof(struct rpcall_state));
+	*state = *(const struct rpcall_state *)lua_topointer(L, 2);
 	if (luaL_newmetatable(L, MT_RPCALL)) {
 		lua_pushcfunction(L, rpcall_close_);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
+	lua_replace(L, 2);
+	lua_pushvalue(L, 2);
 	lua_pushcclosure(L, rpcall_finished_, 1);
 	lua_pushcclosure(L, thread_main_, 1);
 	lua_State *restrict co = lua_newthread(L);
 	lua_replace(L, 1);
 	lua_xmove(L, co, 1);
-	lua_settop(L, 1);
+	/* lua stack: co state */
+	ASSERT(lua_gettop(L) == 2);
 
-	if (lua_load(co, ruleset_reader, &ud->reader, "=(rpc)", NULL)) {
+	if (lua_load(co, ruleset_reader, &rd, "=(rpc)", NULL)) {
 		lua_xmove(co, L, 1);
 		return lua_error(L);
 	}
@@ -209,7 +203,10 @@ static int cfunc_rpcall_(lua_State *restrict L)
 		lua_xmove(co, L, 1);
 		return lua_error(L);
 	}
-	return 0;
+	lua_pop(L, n);
+	/* lua stack: co state */
+	ASSERT(lua_gettop(L) == 2);
+	return 1;
 }
 
 /* replace(modname, chunk) */
@@ -692,11 +689,15 @@ bool ruleset_invoke(struct ruleset *r, struct stream *code)
 	return ruleset_pcall(r, FUNC_INVOKE, 1, 0, code);
 }
 
-bool ruleset_rpcall(
-	struct ruleset *r, struct stream *code, rpcall_finished_fn callback,
-	void *data)
+struct rpcall_state *ruleset_rpcall(
+	struct ruleset *r, struct stream *code,
+	const struct rpcall_state *init_state)
 {
-	return ruleset_pcall(r, FUNC_RPCALL, 3, 1, code, callback, data);
+	const bool ok = ruleset_pcall(r, FUNC_RPCALL, 2, 1, code, init_state);
+	if (!ok) {
+		return NULL;
+	}
+	return (struct rpcall_state *)lua_touserdata(r->L, -1);
 }
 
 bool ruleset_update(
