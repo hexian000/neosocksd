@@ -353,7 +353,7 @@ static bool restapi_check(
 
 #if WITH_RULESET
 static void rpcall_finished(
-	struct rpcall_state *state, const bool ok, const void *result,
+	struct rpcall_state *state, const bool ok, const char *result,
 	size_t resultlen)
 {
 	struct api_ctx *restrict ctx = state->data;

@@ -32,7 +32,7 @@ bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
 struct rpcall_state;
 typedef void (*rpcall_finished_fn)(
-	struct rpcall_state *state, bool ok, const void *result,
+	struct rpcall_state *state, bool ok, const char *result,
 	size_t resultlen);
 struct rpcall_state {
 	rpcall_finished_fn callback;

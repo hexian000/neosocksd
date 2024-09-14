@@ -30,7 +30,7 @@
 
 int format_addr_(lua_State *restrict L)
 {
-	const struct sockaddr *sa = lua_topointer(L, -1);
+	const struct sockaddr *sa = lua_touserdata(L, -1);
 	if (sa == NULL) {
 		lua_pushnil(L);
 		return 1;

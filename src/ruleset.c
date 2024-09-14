@@ -50,10 +50,10 @@
 static int cfunc_request_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 4);
-	const char *func = lua_topointer(L, 1);
-	const char *request = lua_topointer(L, 2);
-	const char *username = lua_topointer(L, 3);
-	const char *password = lua_topointer(L, 4);
+	const char *func = lua_touserdata(L, 1);
+	const char *request = lua_touserdata(L, 2);
+	const char *username = lua_touserdata(L, 3);
+	const char *password = lua_touserdata(L, 4);
 	lua_settop(L, 0);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
@@ -90,7 +90,7 @@ static int cfunc_request_(lua_State *restrict L)
 static int cfunc_loadfile_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 1);
-	const char *filename = lua_topointer(L, 1);
+	const char *filename = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
 	if (luaL_loadfile(L, filename)) {
@@ -106,7 +106,7 @@ static int cfunc_loadfile_(lua_State *restrict L)
 static int cfunc_invoke_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 1);
-	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 1) };
+	struct reader_status rd = { .s = lua_touserdata(L, 1) };
 	lua_settop(L, 0);
 
 	if (lua_load(L, ruleset_reader, &rd, "=(invoke)", NULL)) {
@@ -163,11 +163,11 @@ static int cfunc_rpcall_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 2);
 	struct reader_status rd = {
-		.s = (struct stream *)lua_topointer(L, 1),
+		.s = lua_touserdata(L, 1),
 	};
 	struct rpcall_state *restrict state =
 		lua_newuserdata(L, sizeof(struct rpcall_state));
-	*state = *(const struct rpcall_state *)lua_topointer(L, 2);
+	*state = *(const struct rpcall_state *)lua_touserdata(L, 2);
 	if (luaL_newmetatable(L, MT_RPCALL)) {
 		lua_pushcfunction(L, rpcall_close_);
 		lua_setfield(L, -2, "__gc");
@@ -258,9 +258,9 @@ static int package_replace_(lua_State *restrict L)
 static int cfunc_update_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 3);
-	const char *modname = lua_topointer(L, 1);
-	struct reader_status rd = { .s = (struct stream *)lua_topointer(L, 2) };
-	const char *chunkname = lua_topointer(L, 3);
+	const char *modname = lua_touserdata(L, 1);
+	struct reader_status rd = { .s = lua_touserdata(L, 2) };
+	const char *chunkname = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
 	(void)lua_pushstring(L, modname);
@@ -293,8 +293,8 @@ static int cfunc_update_(lua_State *restrict L)
 static int cfunc_stats_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 2);
-	const char *func = lua_topointer(L, 1);
-	const double dt = *(double *)lua_topointer(L, 2);
+	const char *func = lua_touserdata(L, 1);
+	const double dt = *(double *)lua_touserdata(L, 2);
 	lua_settop(L, 0);
 
 	(void)lua_getglobal(L, "ruleset");
@@ -309,8 +309,8 @@ static int cfunc_stats_(lua_State *restrict L)
 static int cfunc_tick_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 2);
-	const char *func = lua_topointer(L, 1);
-	const ev_tstamp now = *(ev_tstamp *)lua_topointer(L, 2);
+	const char *func = lua_touserdata(L, 1);
+	const ev_tstamp now = *(ev_tstamp *)lua_touserdata(L, 2);
 	lua_settop(L, 0);
 
 	(void)lua_getglobal(L, "ruleset");
@@ -729,7 +729,7 @@ static struct dialreq *dispatch_req(
 		LOGE_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
 		return NULL;
 	}
-	return (struct dialreq *)lua_topointer(L, -1);
+	return lua_touserdata(L, -1);
 }
 
 struct dialreq *ruleset_resolve(

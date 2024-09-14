@@ -27,8 +27,7 @@ struct stream_context {
 
 static int stream_context_close_(struct lua_State *L)
 {
-	struct stream_context *restrict s =
-		(struct stream_context *)lua_topointer(L, 1);
+	struct stream_context *restrict s = lua_touserdata(L, 1);
 	if (s->r != NULL) {
 		(void)stream_close(s->r);
 		s->r = NULL;

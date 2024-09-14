@@ -32,7 +32,7 @@
 #define MT_AWAIT_IDLE "await.idle"
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"
-#define MT_AWAIT_RPCALL "await.invoke"
+#define MT_AWAIT_INVOKE "await.invoke"
 
 #define AWAIT_CHECK_YIELDABLE(L)                                               \
 	do {                                                                   \
@@ -76,7 +76,7 @@ await_unpin(struct ruleset *restrict r, lua_State *restrict L, const void *p)
 static int await_idle_gc_(struct lua_State *L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	struct ev_idle *w = (struct ev_idle *)lua_topointer(L, 1);
+	struct ev_idle *w = lua_touserdata(L, 1);
 	ev_idle_stop(r->loop, w);
 	return 0;
 }
@@ -96,8 +96,7 @@ static int
 await_idle_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	struct ev_idle *restrict w =
-		(struct ev_idle *)lua_topointer(L, (int)ctx);
+	struct ev_idle *restrict w = lua_touserdata(L, (int)ctx);
 	await_unpin(r, L, w);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
@@ -129,7 +128,7 @@ static int await_idle_(lua_State *restrict L)
 static int await_sleep_gc_(struct lua_State *L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	struct ev_timer *w = (struct ev_timer *)lua_topointer(L, 1);
+	struct ev_timer *w = lua_touserdata(L, 1);
 	ev_timer_stop(r->loop, w);
 	return 0;
 }
@@ -150,8 +149,7 @@ static int
 await_sleep_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
 	struct ruleset *restrict r = find_ruleset(L);
-	struct ev_timer *restrict w =
-		(struct ev_timer *)lua_topointer(L, (int)ctx);
+	struct ev_timer *restrict w = lua_touserdata(L, (int)ctx);
 	await_unpin(r, L, w);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
@@ -188,7 +186,7 @@ static int await_sleep_(lua_State *restrict L)
 
 static int await_resolve_close_(struct lua_State *L)
 {
-	handle_type *restrict h = (handle_type *)lua_topointer(L, 1);
+	handle_type *restrict h = lua_touserdata(L, 1);
 	if (*h != INVALID_HANDLE) {
 		resolve_cancel(*h);
 		*h = INVALID_HANDLE;
@@ -211,7 +209,7 @@ static void resolve_cb(
 static int
 await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	handle_type *restrict p = (handle_type *)lua_topointer(L, (int)ctx);
+	handle_type *restrict p = lua_touserdata(L, (int)ctx);
 	struct ruleset *restrict r = find_ruleset(L);
 	await_unpin(r, L, handle_toptr(*p));
 	*p = INVALID_HANDLE;
@@ -261,7 +259,7 @@ static int await_resolve_(lua_State *restrict L)
 
 static int await_invoke_close_(struct lua_State *L)
 {
-	handle_type *h = (handle_type *)lua_topointer(L, 1);
+	handle_type *h = lua_touserdata(L, 1);
 	if (*h != INVALID_HANDLE) {
 		struct ruleset *restrict r = find_ruleset(L);
 		api_cancel(r->loop, *h);
@@ -285,16 +283,16 @@ static void invoke_cb(
 static int
 await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	handle_type *restrict p = (handle_type *)lua_topointer(L, (int)ctx);
+	handle_type *restrict p = lua_touserdata(L, (int)ctx);
 	struct ruleset *restrict r = find_ruleset(L);
 	await_unpin(r, L, handle_toptr(*p));
 	*p = INVALID_HANDLE;
 	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
-	const bool ok = *(bool *)lua_topointer(L, -3);
-	const void *data = lua_topointer(L, -2);
-	const size_t len = *(size_t *)lua_topointer(L, -1);
+	const bool ok = *(bool *)lua_touserdata(L, -3);
+	const void *data = lua_touserdata(L, -2);
+	const size_t len = *(size_t *)lua_touserdata(L, -1);
 	lua_pop(L, 3);
 	lua_pushboolean(L, ok);
 	if (!ok) {
@@ -349,7 +347,7 @@ static int await_invoke_(lua_State *restrict L)
 	lua_pop(L, 1); /* code */
 	handle_type *restrict p = lua_newuserdata(L, sizeof(handle_type));
 	*p = h;
-	if (luaL_newmetatable(L, MT_AWAIT_RPCALL)) {
+	if (luaL_newmetatable(L, MT_AWAIT_INVOKE)) {
 		lua_pushcfunction(L, await_invoke_close_);
 #if HAVE_LUA_TOCLOSE
 		lua_pushvalue(L, -1);
@@ -431,7 +429,7 @@ static int push_async_results(lua_State *restrict L, const int idx)
 static int
 async_wait_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	const void *p = lua_topointer(L, (int)ctx);
+	const void *p = lua_touserdata(L, (int)ctx);
 	struct ruleset *restrict r = find_ruleset(L);
 	await_unpin(r, L, p);
 	if (status != LUA_OK && status != LUA_YIELD) {
@@ -468,7 +466,7 @@ static int async_wait_(lua_State *restrict L)
 	struct ruleset *restrict r = find_ruleset(L);
 	(void)lua_rawgeti(L, 1, IDX_THREAD);
 	await_pin(r, L, lua_tothread(L, -1));
-	const lua_KContext ctx = 1;
+	const lua_KContext ctx = lua_absindex(L, -1);
 	const int status = lua_yieldk(L, 0, ctx, async_wait_k_);
 	return async_wait_k_(L, status, ctx);
 }
