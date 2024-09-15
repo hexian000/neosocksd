@@ -44,7 +44,8 @@
 /* [-0, +0, m] */
 static void context_pin(lua_State *restrict L, const void *p)
 {
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
+	    LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
 	}
@@ -54,20 +55,21 @@ static void context_pin(lua_State *restrict L, const void *p)
 	}
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
-	find_ruleset(L)->vmstats.num_routine++;
+	find_ruleset(L)->vmstats.num_context++;
 }
 
 /* [-0, +0, m] */
 static void context_unpin(lua_State *restrict L, const void *p)
 {
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
+	    LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
 	}
 	lua_pushnil(L);
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
-	find_ruleset(L)->vmstats.num_routine--;
+	find_ruleset(L)->vmstats.num_context--;
 }
 
 static int await_idle_gc_(struct lua_State *L)
@@ -360,9 +362,10 @@ static int await_invoke_(lua_State *restrict L)
 
 int luaopen_await(lua_State *restrict L)
 {
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
+	    LUA_TTABLE) {
 		lua_newtable(L);
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
 	}
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve_ },

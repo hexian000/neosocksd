@@ -150,8 +150,8 @@ static void server_stats(
 		BUF_APPENDF(
 			*buf,
 			"Ruleset Memory      : %s (%zu objects)\n"
-			"Async Routines      : %zu\n",
-			heap_total, vmstats.num_object, vmstats.num_routine);
+			"Async Contexts      : %zu\n",
+			heap_total, vmstats.num_object, vmstats.num_context);
 	}
 #endif
 }
@@ -542,10 +542,10 @@ static void handle_ruleset_gc(
 	BUF_APPENDF(
 		ctx->parser.wbuf,
 		"Num Live Objects    : %zu\n"
-		"Async Routines      : %zu\n"
+		"Async Contexts      : %zu\n"
 		"Ruleset Live Memory : %s\n"
 		"Time Cost           : %s\n",
-		vmstats.num_object, vmstats.num_routine, livemem, timecost);
+		vmstats.num_object, vmstats.num_context, livemem, timecost);
 }
 
 static void http_handle_ruleset(

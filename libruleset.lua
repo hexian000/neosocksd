@@ -1,3 +1,5 @@
+_G.config = neosocksd.config()
+
 -- [[ useful library routines ]] --
 local strformat = string.format
 
@@ -193,9 +195,7 @@ function thread:wait()
     end
     local co = coroutine.running()
     self.wakeup[co] = true
-    repeat
-        coroutine.yield()
-    until self.result
+    coroutine.yield()
     return table.unpack(self.result)
 end
 
@@ -207,7 +207,6 @@ function _G.async(f, ...)
 end
 
 -- [[ logging utilities ]] --
-_G.config = neosocksd.config()
 _G.RECENT_EVENTS_LIMIT = _G.RECENT_EVENTS_LIMIT or 16
 _G.recent_events = rlist:check(_G.recent_events) or rlist:new(_G.RECENT_EVENTS_LIMIT)
 local function log_(now, info, msg)
@@ -468,11 +467,11 @@ function match.port(from, to)
             to = from
         end
         return function(addr)
-            local _, port = splithostport(addr)
+            local _, s = splithostport(addr)
+            local port = tonumber(s)
             if not port then
                 return false
             end
-            port = tonumber(port)
             return from <= port and port <= to
         end
     end

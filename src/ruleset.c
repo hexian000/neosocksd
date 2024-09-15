@@ -526,7 +526,7 @@ static void init_registry(lua_State *restrict L)
 		lua_pushstring(L, strings[i]);
 		lua_rawseti(L, -2, i + 1);
 	}
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_STRINGS);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_CONSTANT);
 
 	const lua_CFunction funcs[] = {
 		[FUNC_REQUEST] = cfunc_request_,
@@ -544,7 +544,7 @@ static void init_registry(lua_State *restrict L)
 		lua_pushcfunction(L, funcs[i]);
 		lua_seti(L, -2, i);
 	}
-	lua_seti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS);
+	lua_seti(L, LUA_REGISTRYINDEX, RIDX_CFUNCTION);
 }
 
 static int ruleset_luainit_(lua_State *restrict L)

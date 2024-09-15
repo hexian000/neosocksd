@@ -138,7 +138,7 @@ bool ruleset_pcall(
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	check_memlimit(r);
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CFUNCTION) != LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		return false;
 	}
@@ -190,7 +190,8 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 {
 	check_memlimit(r);
 	lua_State *restrict L = r->L;
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
+	    LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
