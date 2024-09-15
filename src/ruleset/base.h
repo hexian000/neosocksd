@@ -67,6 +67,6 @@ int format_addr_(lua_State *L);
 
 struct dialreq *pop_dialreq_(lua_State *L, const int n);
 
-int ruleset_traceback_(lua_State *restrict L);
+int ruleset_traceback_(lua_State *L);
 
 #endif /* RULESET_BASE_H */

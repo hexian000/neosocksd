@@ -177,7 +177,7 @@ local thread = {}
 local thread_mt = { __name = "async", __index = thread }
 
 local function thread_main(t, f, ...)
-    if _G.traceback then
+    if config.traceback then
         t.result = table.pack(xpcall(f, neosocksd.traceback, ...))
     else
         t.result = table.pack(pcall(f, ...))
@@ -207,6 +207,7 @@ function _G.async(f, ...)
 end
 
 -- [[ logging utilities ]] --
+_G.config = neosocksd.config()
 _G.RECENT_EVENTS_LIMIT = _G.RECENT_EVENTS_LIMIT or 16
 _G.recent_events = rlist:check(_G.recent_events) or rlist:new(_G.RECENT_EVENTS_LIMIT)
 local function log_(now, info, msg)
@@ -221,7 +222,7 @@ local function log_(now, info, msg)
         count = 1,
         tstamp = now
     })
-    if _G.NDEBUG then
+    if config.loglevel < 6 then
         return
     end
     local timestamp = os.date("%Y-%m-%dT%T%z", now)

@@ -435,6 +435,28 @@ static int api_splithostport_(lua_State *restrict L)
 	return 2;
 }
 
+/* neosocksd.config() */
+static int api_config_(lua_State *restrict L)
+{
+	const struct config *restrict conf = G.conf;
+	lua_newtable(L);
+	lua_pushinteger(L, (lua_Integer)slog_level);
+	lua_setfield(L, -2, "loglevel");
+	lua_pushboolean(L, conf->auth_required);
+	lua_setfield(L, -2, "auth_required");
+	lua_pushboolean(L, conf->traceback);
+	lua_setfield(L, -2, "traceback");
+	lua_pushstring(L, conf->listen);
+	lua_setfield(L, -2, "listen");
+	lua_pushstring(L, conf->restapi);
+	lua_setfield(L, -2, "api");
+	lua_pushstring(L, conf->proxy);
+	lua_setfield(L, -2, "proxy");
+	lua_pushstring(L, conf->forward);
+	lua_setfield(L, -2, "forward");
+	return 1;
+}
+
 /* neosocksd.stats() */
 static int api_stats_(lua_State *restrict L)
 {
@@ -446,8 +468,6 @@ static int api_stats_(lua_State *restrict L)
 	struct ruleset *restrict r = find_ruleset(L);
 	const struct server_stats *restrict stats = &s->stats;
 	lua_newtable(L);
-	lua_pushinteger(L, (lua_Integer)slog_level);
-	lua_setfield(L, -2, "loglevel");
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	lua_setfield(L, -2, "lasterror");
 	lua_pushinteger(L, (lua_Integer)stats->num_halfopen);
@@ -476,6 +496,7 @@ static int luaopen_neosocksd(lua_State *restrict L)
 {
 	lua_register(L, "marshal", api_marshal_);
 	const luaL_Reg apilib[] = {
+		{ "config", api_config_ },
 		{ "invoke", api_invoke_ },
 		{ "now", api_now_ },
 		{ "parse_ipv4", api_parse_ipv4_ },

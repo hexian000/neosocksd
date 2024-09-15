@@ -210,6 +210,22 @@ Custom information in a string.
 
 ## Lua API
 
+### neosocksd.config
+
+**Synopsis**
+
+```Lua
+_G.config = neosocksd.config()
+if config.loglevel >= 6 then
+    print("...")
+end
+```
+
+**Description**
+
+Return a table about server configurations.
+
+
 ### neosocksd.resolve
 
 **Synopsis**

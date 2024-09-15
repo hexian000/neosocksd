@@ -22,6 +22,8 @@ _G.await = await
 
 local neosocksd = {}
 
+function neosocksd.config() return {} end
+
 function neosocksd.invoke(code, addr, ...) end
 
 function neosocksd.now() return 0 end
