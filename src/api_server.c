@@ -48,18 +48,11 @@ struct api_ctx {
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
 	struct ev_timer w_timeout;
-	union {
-		struct {
-			struct ev_io w_recv, w_send;
-			struct rpcall_state *rpcstate;
-			struct dialreq *dialreq;
-			struct dialer dialer;
-			struct http_parser parser;
-		};
-		struct { /* connected */
-			struct transfer uplink, downlink;
-		};
-	};
+	struct ev_io w_recv, w_send;
+	struct rpcall_state *rpcstate;
+	struct dialreq *dialreq;
+	struct dialer dialer;
+	struct http_parser parser;
 };
 ASSERT_SUPER(struct session, struct api_ctx, ss);
 
@@ -352,29 +345,30 @@ static bool restapi_check(
 }
 
 #if WITH_RULESET
-static void rpcall_finished(
-	struct rpcall_state *state, const bool ok, const char *result,
-	size_t resultlen)
+static void rpcall_return(void *data, const char *result, size_t resultlen)
 {
-	struct api_ctx *restrict ctx = state->data;
+	struct api_ctx *restrict ctx = data;
 	if (ctx == NULL) {
 		return;
 	}
 	ASSERT(ctx->state == STATE_YIELD);
+	ctx->rpcstate = NULL;
 	ctx->state = STATE_RESPONSE;
 	struct ev_loop *const loop = ctx->s->loop;
 	ev_io_start(loop, &ctx->w_send);
 
-	if (!ok) {
-		LOGV_F("ruleset rpcall: %s", result);
+	if (result == NULL) {
+		const char err[] = "rpcall is closed";
+		const size_t errlen = sizeof(err) - 1;
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
-		RESPHDR_CLENGTH(ctx->parser.wbuf, resultlen);
+		RESPHDR_CLENGTH(ctx->parser.wbuf, errlen);
 		RESPHDR_FINISH(ctx->parser.wbuf);
 		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-		BUF_APPEND(ctx->parser.wbuf, result, resultlen);
+		BUF_APPEND(ctx->parser.wbuf, err, errlen);
 		return;
 	}
+	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall_return");
 	const enum content_encodings encoding =
 		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ||
 				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
@@ -430,28 +424,26 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 		return;
 	}
 	ctx->state = STATE_YIELD;
-	ctx->rpcstate = ruleset_rpcall(
-		ruleset, reader,
-		&(struct rpcall_state){
-			.callback = rpcall_finished,
-			.data = ctx,
-		});
+	struct rpcall_state *rpcstate =
+		ruleset_rpcall(ruleset, reader, rpcall_return, ctx);
 	stream_close(reader);
-	if (ctx->rpcstate != NULL) {
-		/* wait callback */
+	if (rpcstate == NULL) {
+		ctx->state = STATE_RESPONSE;
+		size_t len;
+		const char *err = ruleset_geterror(ruleset, &len);
+		LOGW_F("ruleset rpcall: %s", err);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
+		RESPHDR_CLENGTH(ctx->parser.wbuf, len);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+		BUF_APPEND(ctx->parser.wbuf, err, len);
 		return;
 	}
-	/* error */
-	ctx->state = STATE_RESPONSE;
-	size_t len;
-	const char *err = ruleset_geterror(ruleset, &len);
-	LOGW_F("ruleset rpcall: %s", err);
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-	RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
-	RESPHDR_CLENGTH(ctx->parser.wbuf, len);
-	RESPHDR_FINISH(ctx->parser.wbuf);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	BUF_APPEND(ctx->parser.wbuf, err, len);
+	if (ctx->state == STATE_YIELD) {
+		/* not returned yet */
+		ctx->rpcstate = rpcstate;
+	}
 }
 
 static void handle_ruleset_invoke(
@@ -671,6 +663,10 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
 static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
+	if (ctx->rpcstate != NULL) {
+		ruleset_rpcall_cancel(ctx->rpcstate);
+		ctx->rpcstate = NULL;
+	}
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
@@ -679,10 +675,6 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	case STATE_REQUEST:
 	case STATE_YIELD:
 	case STATE_RESPONSE:
-		if (ctx->rpcstate != NULL) {
-			ctx->rpcstate->callback = NULL;
-			ctx->rpcstate->data = NULL;
-		}
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		break;

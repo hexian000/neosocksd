@@ -7,17 +7,6 @@ _G.marshal = function(...)
 end
 
 
-local async = setmetatable({}, {
-    __call = function(_, f, ...)
-        return true, f(...)
-    end,
-})
-
-function async.wait(t) return true end
-
-_G.async = async
-
-
 local await = {}
 
 function await.resolve(s) return "" end
@@ -33,19 +22,23 @@ _G.await = await
 
 local neosocksd = {}
 
-function neosocksd.resolve(s) return "" end
+function neosocksd.invoke(code, addr, ...) end
+
+function neosocksd.now() return 0 end
 
 function neosocksd.parse_ipv4(s) return 0 end
 
 function neosocksd.parse_ipv6(s) return 0, 0 end
 
+function neosocksd.resolve(s) return "" end
+
 function neosocksd.setinterval(n) end
 
-function neosocksd.invoke(code, addr, ...) end
+function neosocksd.splithostport(s) return "", "" end
 
 function neosocksd.stats() return {} end
 
-function neosocksd.now() return 0 end
+function neosocksd.traceback(s) return debug.traceback(s) end
 
 _G.neosocksd = neosocksd
 

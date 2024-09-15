@@ -125,87 +125,70 @@ static int cfunc_invoke_(lua_State *restrict L)
 	return 0;
 }
 
-static int rpcall_close_(lua_State *restrict co)
+struct rpcall_state {
+	rpcall_return_fn callback;
+	void *data;
+};
+
+static int rpcall_gc_(lua_State *restrict L)
 {
-	struct rpcall_state *restrict state = lua_touserdata(co, 1);
+	struct rpcall_state *restrict state = lua_touserdata(L, 1);
 	if (state->callback != NULL) {
-		const char err[] = "rpcall is closed";
-		state->callback(state->data, false, err, sizeof(err) - 1);
+		state->callback(state->data, NULL, 0);
 		state->callback = NULL;
 	}
 	return 0;
 }
 
-static int rpcall_finished_(lua_State *restrict co)
+static int rpcall_return_(lua_State *restrict co)
 {
 	struct rpcall_state *restrict state =
 		lua_touserdata(co, lua_upvalueindex(1));
 	if (state->callback == NULL) {
 		return 0;
 	}
-	/* co stack: ok ... */
-	const bool ok = !!lua_toboolean(co, 1);
-	if (ok) {
-		const int n = lua_gettop(co) - 1;
-		lua_getglobal(co, "marshal");
-		lua_replace(co, 1);
-		lua_call(co, n, 1);
-	}
 	size_t len;
-	const char *s = lua_tolstring(co, -1, &len);
-	state->callback(state, ok, s, len);
+	const char *s = luaL_checklstring(co, 1, &len);
+	state->callback(state->data, s, len);
 	state->callback = NULL;
 	return 0;
 }
 
-/* rpcall(codestream, init_state) */
+/* rpcall(codestream, callback, data) */
 static int cfunc_rpcall_(lua_State *restrict L)
 {
-	ASSERT(lua_gettop(L) == 2);
+	ASSERT(lua_gettop(L) == 3);
 	struct reader_status rd = {
 		.s = lua_touserdata(L, 1),
 	};
-	struct rpcall_state *restrict state =
+	struct rpcall_state *restrict ctx =
 		lua_newuserdata(L, sizeof(struct rpcall_state));
-	*state = *(const struct rpcall_state *)lua_touserdata(L, 2);
+	*(void **)&ctx->callback = lua_touserdata(L, 2);
+	ctx->data = lua_touserdata(L, 3);
 	if (luaL_newmetatable(L, MT_RPCALL)) {
-		lua_pushcfunction(L, rpcall_close_);
+		lua_pushcfunction(L, rpcall_gc_);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-	lua_replace(L, 2);
-	lua_pushvalue(L, 2);
-	lua_pushcclosure(L, rpcall_finished_, 1);
-	lua_pushcclosure(L, thread_main_, 1);
-	lua_State *restrict co = lua_newthread(L);
 	lua_replace(L, 1);
-	lua_xmove(L, co, 1);
-	/* lua stack: co state */
-	ASSERT(lua_gettop(L) == 2);
-
-	if (lua_load(co, ruleset_reader, &rd, "=(rpc)", NULL)) {
-		lua_xmove(co, L, 1);
+	lua_settop(L, 1);
+	if (lua_load(L, ruleset_reader, &rd, "=(rpc)", NULL)) {
 		return lua_error(L);
 	}
-	lua_newtable(co);
-	lua_newtable(co);
-	lua_pushvalue(co, LUA_REGISTRYINDEX);
-	/* co stack: thread_main chunk t mt _G */
-	lua_setfield(co, -2, "__index");
-	(void)lua_setmetatable(co, -2);
-	if (lua_setupvalue(co, -2, -1) == NULL) {
-		lua_pop(co, 1);
+	lua_createtable(L, 0, 1);
+	lua_pushvalue(L, 1);
+	lua_pushcclosure(L, rpcall_return_, 1);
+	lua_setfield(L, -2, "rpcall_return");
+	lua_newtable(L);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+	/* lua stack: state chunk env mt _G */
+	lua_setfield(L, -2, "__index");
+	(void)lua_setmetatable(L, -2);
+	if (lua_setupvalue(L, -2, 1) == NULL) {
+		return 0;
 	}
-	/* co stack: thread_main chunk */
-	int n = 1;
-	const int status = co_resume(co, L, n, &n);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_xmove(co, L, 1);
-		return lua_error(L);
-	}
-	lua_pop(L, n);
-	/* lua stack: co state */
-	ASSERT(lua_gettop(L) == 2);
+	lua_call(L, 0, 0);
+	ASSERT(lua_gettop(L) == 1);
 	return 1;
 }
 
@@ -319,17 +302,6 @@ static int cfunc_tick_(lua_State *restrict L)
 	lua_pushnumber(L, now);
 	lua_call(L, 1, 0);
 	return 0;
-}
-
-static int cfunc_traceback_(lua_State *restrict L)
-{
-	size_t len;
-	const char *msg = luaL_tolstring(L, -1, &len);
-	LOG_STACK_F(VERBOSE, 0, "ruleset traceback: %.*s", (int)len, msg);
-	luaL_traceback(L, L, msg, 1);
-	msg = lua_tolstring(L, -1, &len);
-	LOG_TXT(VERBOSE, msg, len, "Lua traceback");
-	return 1;
 }
 
 /* neosocksd.invoke(code, addr, proxyN, ..., proxy1) */
@@ -505,13 +477,14 @@ static int luaopen_neosocksd(lua_State *restrict L)
 	lua_register(L, "marshal", api_marshal_);
 	const luaL_Reg apilib[] = {
 		{ "invoke", api_invoke_ },
+		{ "now", api_now_ },
+		{ "parse_ipv4", api_parse_ipv4_ },
+		{ "parse_ipv6", api_parse_ipv6_ },
 		{ "resolve", api_resolve_ },
 		{ "setinterval", api_setinterval_ },
 		{ "splithostport", api_splithostport_ },
-		{ "parse_ipv4", api_parse_ipv4_ },
-		{ "parse_ipv6", api_parse_ipv6_ },
 		{ "stats", api_stats_ },
-		{ "now", api_now_ },
+		{ "traceback", ruleset_traceback_ },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, apilib);
@@ -541,7 +514,7 @@ static void init_registry(lua_State *restrict L)
 		[FUNC_UPDATE] = cfunc_update_,
 		[FUNC_STATS] = cfunc_stats_,
 		[FUNC_TICK] = cfunc_tick_,
-		[FUNC_TRACEBACK] = cfunc_traceback_,
+		[FUNC_TRACEBACK] = ruleset_traceback_,
 		[FUNC_RPCALL] = cfunc_rpcall_,
 	};
 	const int nfuncs = (int)ARRAY_SIZE(funcs) - 1;
@@ -572,6 +545,8 @@ static int ruleset_luainit_(lua_State *restrict L)
 	/* set flags */
 	lua_pushboolean(L, !LOGLEVEL(DEBUG));
 	lua_setglobal(L, "NDEBUG");
+	lua_pushboolean(L, G.conf->traceback);
+	lua_setglobal(L, "traceback");
 	return 0;
 }
 
@@ -690,14 +665,20 @@ bool ruleset_invoke(struct ruleset *r, struct stream *code)
 }
 
 struct rpcall_state *ruleset_rpcall(
-	struct ruleset *r, struct stream *code,
-	const struct rpcall_state *init_state)
+	struct ruleset *r, struct stream *code, rpcall_return_fn callback,
+	void *data)
 {
-	const bool ok = ruleset_pcall(r, FUNC_RPCALL, 2, 1, code, init_state);
+	const bool ok =
+		ruleset_pcall(r, FUNC_RPCALL, 3, 1, code, callback, data);
 	if (!ok) {
 		return NULL;
 	}
 	return (struct rpcall_state *)lua_touserdata(r->L, -1);
+}
+
+void ruleset_rpcall_cancel(struct rpcall_state *state)
+{
+	state->callback = NULL;
 }
 
 bool ruleset_update(

@@ -31,16 +31,12 @@ bool ruleset_update(
 bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
 struct rpcall_state;
-typedef void (*rpcall_finished_fn)(
-	struct rpcall_state *state, bool ok, const char *result,
-	size_t resultlen);
-struct rpcall_state {
-	rpcall_finished_fn callback;
-	void *data;
-};
+typedef void (*rpcall_return_fn)(
+	void *data, const char *result, size_t resultlen);
 struct rpcall_state *ruleset_rpcall(
-	struct ruleset *r, struct stream *code,
-	const struct rpcall_state *init_state);
+	struct ruleset *r, struct stream *code, rpcall_return_fn callback,
+	void *data);
+void ruleset_rpcall_cancel(struct rpcall_state *state);
 
 struct dialreq *ruleset_resolve(
 	struct ruleset *r, const char *request, const char *username,

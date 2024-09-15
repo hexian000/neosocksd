@@ -172,6 +172,40 @@ end
 
 _G.rlist = rlist
 
+-- [[ thread: asynchronous routines ]] --
+local thread = {}
+local thread_mt = { __name = "async", __index = thread }
+
+local function thread_main(t, f, ...)
+    if _G.traceback then
+        t.result = table.pack(xpcall(f, neosocksd.traceback, ...))
+    else
+        t.result = table.pack(pcall(f, ...))
+    end
+    for co, _ in pairs(t.wakeup) do
+        coroutine.resume(co)
+    end
+end
+
+function thread:wait()
+    if self.result then
+        return table.unpack(self.result)
+    end
+    local co = coroutine.running()
+    self.wakeup[co] = true
+    repeat
+        coroutine.yield()
+    until self.result
+    return table.unpack(self.result)
+end
+
+function _G.async(f, ...)
+    local co = coroutine.create(thread_main)
+    local t = setmetatable({ co = co, wakeup = {} }, thread_mt)
+    coroutine.resume(co, t, f, ...)
+    return t
+end
+
 -- [[ logging utilities ]] --
 _G.RECENT_EVENTS_LIMIT = _G.RECENT_EVENTS_LIMIT or 16
 _G.recent_events = rlist:check(_G.recent_events) or rlist:new(_G.RECENT_EVENTS_LIMIT)
@@ -269,8 +303,15 @@ end
 
 _G.rpc = rpc
 
+function _G.rpcall(ret, func, ...)
+    local co = coroutine.create(function(...)
+        return ret(marshal(pcall(...)))
+    end)
+    coroutine.resume(co, _G.rpc[func], ...)
+end
+
 function await.rpcall(target, func, ...)
-    local code = strformat("return rpc.%s(%s)", func, marshal(...))
+    local code = strformat("_G.rpcall(rpcall_return,%s)", marshal(func, ...))
     return await.invoke(code, table.unpack(target))
 end
 

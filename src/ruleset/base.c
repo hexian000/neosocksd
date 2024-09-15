@@ -168,53 +168,22 @@ bool ruleset_pcall(
 	return true;
 }
 
-int thread_main_k_(lua_State *restrict L, const int status, lua_KContext ctx)
+int ruleset_traceback_(lua_State *restrict L)
 {
-	UNUSED(ctx);
-	/* stack: FUNC_TRACEBACK?, true, ... */
-	const int n = lua_gettop(L) - 1;
-	lua_pushvalue(L, lua_upvalueindex(1));
-	lua_replace(L, 1);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_pushboolean(L, 0);
-		lua_replace(L, 2);
+	size_t errlen;
+	const char *err = lua_tolstring(L, 1, &errlen);
+	if (err == NULL && !lua_isnoneornil(L, 1)) {
+		LOG_STACK(DEBUG, 0, "C traceback");
+		return 1;
 	}
-	/* lua stack: f ok ... */
-	lua_call(L, n, 0);
-	return 0;
-}
-
-static int push_traceback_(lua_State *restrict L)
-{
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FUNCTIONS) != LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
-	if (lua_rawgeti(L, -1, FUNC_TRACEBACK) != LUA_TFUNCTION) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
-	lua_replace(L, -2);
+	luaL_traceback(L, L, err, 1);
+	size_t msglen;
+	const char *msg = lua_tolstring(L, -1, &msglen);
+	LOG_TXT_F(
+		DEBUG, msg, msglen, "Lua traceback for `%.*s'", (int)errlen,
+		err);
+	LOG_STACK_F(DEBUG, 0, "C traceback for `%.*s'", (int)errlen, err);
 	return 1;
-}
-
-/* thread_main(f, ...) */
-int thread_main_(lua_State *restrict L)
-{
-	luaL_checktype(L, 1, LUA_TFUNCTION);
-	const int n = lua_gettop(L) - 1;
-	const int errfunc = G.conf->traceback ? 1 : 0;
-	if (errfunc) {
-		(void)push_traceback_(L);
-	} else {
-		lua_pushnil(L);
-	}
-	lua_pushboolean(L, 1);
-	lua_rotate(L, 1, 2);
-	/* FUNC_TRACEBACK?, true, f, ... */
-	const int status =
-		lua_pcallk(L, n, LUA_MULTRET, errfunc, 0, thread_main_k_);
-	return thread_main_k_(L, status, 0);
 }
 
 bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
@@ -222,13 +191,15 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 	check_memlimit(r);
 	lua_State *restrict L = r->L;
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CONTEXTS) != LUA_TTABLE) {
-		LOGE(ERR_BAD_REGISTRY);
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
 	}
 	lua_rawgetp(L, -1, ctx);
 	lua_State *restrict co = lua_tothread(L, -1);
 	if (co == NULL) {
-		LOGE_F("async context lost: %p", ctx);
+		lua_pushfstring(L, "async context lost: %p", ctx);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
 	}
 	lua_pop(L, 2);

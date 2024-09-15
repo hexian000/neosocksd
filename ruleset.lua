@@ -111,7 +111,7 @@ _G.route6 = {
 
 -- 4. the global default applies to any unmatched requests
 -- in {action, optional log tag}
-_G.route_default = { rule.agent("internet"), "default" }
+_G.route_default = { rule.agent("gateway"), "default" }
 
 function ruleset.stats(dt)
     local w = list:new()

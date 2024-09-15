@@ -320,6 +320,19 @@ Formally, get the timestamp of the latest event in seconds.
 - Any asynchronous routine must be resumed by an event.
 
 
+### neosocksd.traceback
+
+**Synopsis**
+
+```Lua
+local ok, result = xpcall(f, neosocksd.traceback, ...)
+```
+
+**Description**
+
+In supported builds, log both Lua and C traceback.
+
+
 ### regex.compile
 
 **Synopsis**
@@ -361,21 +374,6 @@ Data compression interface for zlib format (as declared in RFC 1950 and RFC 1951
 Tip: Using compressed data for remote invocations is not recommended because [neosocksd.invoke](#neosocksdinvoke) and [await.invoke](#awaitinvoke) may compress long content internally.
 
 
-### _G.NDEBUG
-
-**Synopsis**
-
-```Lua
-logf("some debug log: %d", 123)
-```
-
-**Description**
-
-True if the log level doesn't allow printing debug logs. The log level depends on command line argument `--loglevel`.
-
-In the default implementation of `libruleset.lua`, this value controls whether `log`/`logf` writes to standard output.
-
-
 ### _G.marshal
 
 **Synopsis**
@@ -405,6 +403,8 @@ end, ...)
 **Description**
 
 Start an asynchronous routine. Asynchronous routines are supported by Lua coroutines. Therefore, they run concurrently, but not in parallel. See [await.resolve](#awaitresolve) for a full example.
+
+This function is implemented in `libruleset.lua`.
 
 *Notice: The await.\* functions should only be called in asynchronous routines.*
 
