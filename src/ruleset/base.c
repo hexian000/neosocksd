@@ -170,19 +170,17 @@ bool ruleset_pcall(
 
 int ruleset_traceback_(lua_State *restrict L)
 {
-	size_t errlen;
-	const char *err = lua_tolstring(L, 1, &errlen);
-	if (err == NULL && !lua_isnoneornil(L, 1)) {
+	const char *err = lua_tostring(L, 1);
+	luaL_traceback(L, L, err, 1);
+	size_t len;
+	const char *s = lua_tolstring(L, -1, &len);
+	if (err == NULL) {
+		LOG_TXT(DEBUG, s, len, "Lua traceback");
 		LOG_STACK(DEBUG, 0, "C traceback");
 		return 1;
 	}
-	luaL_traceback(L, L, err, 1);
-	size_t msglen;
-	const char *msg = lua_tolstring(L, -1, &msglen);
-	LOG_TXT_F(
-		DEBUG, msg, msglen, "Lua traceback for `%.*s'", (int)errlen,
-		err);
-	LOG_STACK_F(DEBUG, 0, "C traceback for `%.*s'", (int)errlen, err);
+	LOG_TXT_F(DEBUG, s, len, "Lua traceback for `%s'", err);
+	LOG_STACK_F(DEBUG, 0, "C traceback for `%s'", err);
 	return 1;
 }
 
