@@ -319,10 +319,11 @@ function agent.stats(dt)
     for peername, connid in pairs(peers) do
         local info = table.get(_G.conninfo, connid, peername)
         if info and info.rtt then
-            w:insertf("%-20s: %s [%s] %s %.0fms", peername, os.date("%Y-%m-%dT%T%z", info.timestamp),
-                connid, format_route(info.route), info.rtt * 1e+3)
+            w:insertf("%-16s: %s [%s] %4.0fms %s", string.format("%q", peername),
+                os.date("%Y-%m-%dT%T%z", info.timestamp), connid,
+                info.rtt * 1e+3, format_route(info.route))
         else
-            w:insertf("%-20s: [%s] no route", peername, connid)
+            w:insertf("%-16s: [%s] no route", peername, connid)
         end
     end
     w:sort():insert(1, "> Peers")
