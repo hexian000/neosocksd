@@ -290,7 +290,6 @@ end
 _G.parse_cidr6 = parse_cidr6
 
 -- [[ RPC utilities ]] --
-
 function _G.unmarshal(s)
     return assert(load("return " .. s, "=(unmarshal)", "bt", {}))()
 end
@@ -305,13 +304,13 @@ _G.rpc = rpc
 
 function _G.rpcall(ret, func, ...)
     local co = coroutine.create(function(...)
-        return ret("return " .. marshal(pcall(...)))
+        ret("return " .. marshal(pcall(...)))
     end)
     coroutine.resume(co, _G.rpc[func], ...)
 end
 
 function await.rpcall(target, func, ...)
-    local code = strformat("_G.rpcall(rpcall_return,%s)", marshal(func, ...))
+    local code = strformat("rpcall(rpcall_return,%s)", marshal(func, ...))
     local ok, result = await.invoke(code, table.unpack(target))
     if ok then return result() end
     return ok, result
@@ -325,7 +324,7 @@ end
 _G.msgh = msgh
 
 function neosocksd.sendmsg(target, func, ...)
-    local code = strformat("return msgh.%s(%s)", func, marshal(...))
+    local code = strformat("msgh.%s(%s)", func, marshal(...))
     return neosocksd.invoke(code, table.unpack(target))
 end
 
