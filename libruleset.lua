@@ -134,6 +134,12 @@ function rlist:get(i)
             pos = pos + len
         end
         return self[pos]
+    elseif -len <= i and i <= -1 then
+        local pos = self.pos - (len + i + 1)
+        if pos < 1 then
+            pos = pos + len
+        end
+        return self[pos]
     end
     return nil
 end
@@ -151,25 +157,8 @@ function rlist:next(i)
     return nil, nil
 end
 
-function rlist:prev(i)
-    local len = self.len
-    if i then i = i - 1 else i = len end
-    if 1 <= i and i <= len then
-        local pos = self.pos - i
-        if pos < 1 then
-            pos = pos + len
-        end
-        return i, self[pos]
-    end
-    return nil, nil
-end
-
 function rlist:iter()
     return rlist.next, self, nil
-end
-
-function rlist:reviter()
-    return rlist.prev, self, nil
 end
 
 _G.rlist = rlist
@@ -207,8 +196,7 @@ function _G.async(f, ...)
 end
 
 -- [[ logging utilities ]] --
-_G.RECENT_EVENTS_LIMIT = _G.RECENT_EVENTS_LIMIT or 16
-_G.recent_events = rlist:check(_G.recent_events) or rlist:new(_G.RECENT_EVENTS_LIMIT)
+_G.recent_events = rlist:check(_G.recent_events) or rlist:new(100)
 local function log_(now, info, msg)
     local entry = recent_events:get(1)
     if entry and entry.msg == msg then
@@ -929,7 +917,9 @@ function ruleset.stats(dt)
         _G.last_clock = clock
     end
     w:insert("> Recent Events")
-    for _, entry in recent_events:iter() do
+    for i = 1, 10 do
+        local entry = recent_events:get(i)
+        if not entry then break end
         local tstamp = os.date("%Y-%m-%dT%T%z", entry.tstamp)
         if entry.count == 1 then
             w:insertf("%s %s", tstamp, entry.msg)
