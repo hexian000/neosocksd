@@ -106,10 +106,10 @@ static int cfunc_loadfile_(lua_State *restrict L)
 static int cfunc_invoke_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 1);
-	struct reader_status rd = { .s = lua_touserdata(L, 1) };
+	void *stream = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
-	if (lua_load(L, ruleset_reader, &rd, "=(invoke)", NULL)) {
+	if (lua_load(L, ruleset_reader, stream, "=(invoke)", NULL)) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
@@ -158,9 +158,7 @@ static int rpcall_return_(lua_State *restrict co)
 static int cfunc_rpcall_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 3);
-	struct reader_status rd = {
-		.s = lua_touserdata(L, 1),
-	};
+	void *stream = lua_touserdata(L, 1);
 	struct rpcall_state *restrict ctx =
 		lua_newuserdata(L, sizeof(struct rpcall_state));
 	*(void **)&ctx->callback = lua_touserdata(L, 2);
@@ -172,7 +170,7 @@ static int cfunc_rpcall_(lua_State *restrict L)
 	lua_setmetatable(L, -2);
 	lua_replace(L, 1);
 	lua_settop(L, 1);
-	if (lua_load(L, ruleset_reader, &rd, "=(rpc)", NULL)) {
+	if (lua_load(L, ruleset_reader, stream, "=(rpc)", NULL)) {
 		return lua_error(L);
 	}
 	lua_createtable(L, 0, 1);
@@ -242,7 +240,7 @@ static int cfunc_update_(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 3);
 	const char *modname = lua_touserdata(L, 1);
-	struct reader_status rd = { .s = lua_touserdata(L, 2) };
+	void *stream = lua_touserdata(L, 2);
 	const char *chunkname = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
@@ -254,11 +252,11 @@ static int cfunc_update_(lua_State *restrict L)
 		chunkname[0] = '=';
 		memcpy(chunkname + 1, name, namelen);
 		chunkname[1 + namelen] = '\0';
-		if (lua_load(L, ruleset_reader, &rd, chunkname, NULL)) {
+		if (lua_load(L, ruleset_reader, stream, chunkname, NULL)) {
 			return lua_error(L);
 		}
 	} else {
-		if (lua_load(L, ruleset_reader, &rd, chunkname, NULL)) {
+		if (lua_load(L, ruleset_reader, stream, chunkname, NULL)) {
 			return lua_error(L);
 		}
 	}
@@ -442,6 +440,8 @@ static int api_config_(lua_State *restrict L)
 	lua_newtable(L);
 	lua_pushinteger(L, (lua_Integer)slog_level);
 	lua_setfield(L, -2, "loglevel");
+	lua_pushnumber(L, (lua_Number)conf->timeout);
+	lua_setfield(L, -2, "timeout");
 	lua_pushboolean(L, conf->auth_required);
 	lua_setfield(L, -2, "auth_required");
 	lua_pushboolean(L, conf->traceback);

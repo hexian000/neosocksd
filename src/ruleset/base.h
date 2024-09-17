@@ -40,12 +40,6 @@ static inline struct ruleset *find_ruleset(lua_State *restrict L)
 	return ud;
 }
 
-struct reader_status {
-	struct stream *s;
-	const char *prefix;
-	size_t prefixlen;
-};
-
 const char *ruleset_reader(lua_State *L, void *ud, size_t *sz);
 
 enum ruleset_functions {

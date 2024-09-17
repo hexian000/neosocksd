@@ -151,10 +151,10 @@ function rpc.sync(peername, peerdb)
 end
 
 function agent.sync(connid)
-    assert(agent.conns[connid], string.format("unknown connid [%d]", connid))
+    assert(agent.conns[connid], string.format("unknown connid [%s]", connid))
     local ok, r1, r2 = callbyconn(connid, "sync", agent.peername, _G.peerdb)
     if not ok then
-        logf("sync failed: connid=%d %s", connid, r1)
+        logf("sync failed: [%s] %s", connid, r1)
         return
     end
     local peername, peerdb = r1, r2
@@ -162,7 +162,7 @@ function agent.sync(connid)
     for peer, info in pairs(conn) do
         if info.route[#info.route] ~= peername then
             conn[peer] = nil
-            logf("invalid route: [%d] %q %s", connid, peername, format_route(info.route))
+            logf("invalid route: [%s] %q %s", connid, peername, format_route(info.route))
         end
     end
     if not conn[peername] then
@@ -252,7 +252,7 @@ function agent.probe(peername)
             rtt, route = info.rtt, info.route
         else
             rtt, route = probe_via(connid, peername)
-            if not rtt then err:insertf("[%d] %q", connid, route) end
+            if not rtt then err:insertf("[%s] %q", connid, route) end
         end
         if rtt and (not minrtt or rtt < minrtt) then
             minrtt, bestconnid, bestroute = rtt, connid, route
@@ -263,7 +263,7 @@ function agent.probe(peername)
         return
     end
     local route = format_route(bestroute)
-    logf("probe: [%d] %q %s %.0fms", bestconnid, peername, route, minrtt * 1e+3)
+    logf("probe: [%s] %q %s %.0fms", bestconnid, peername, route, minrtt * 1e+3)
 end
 
 function agent.maintenance()
@@ -303,7 +303,7 @@ function agent.maintenance()
             if not _G.peerdb[peername] then
                 conn[peername] = nil
             elseif not is_valid(info, CONNINFO_EXPIRY_TIME, now) then
-                logf("route expired: [%d] %q %s", connid,
+                logf("route expired: [%s] %q %s", connid,
                     peername, format_route(info.route))
                 conn[peername] = nil
             end

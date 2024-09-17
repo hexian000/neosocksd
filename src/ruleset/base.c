@@ -70,16 +70,10 @@ int format_addr_(lua_State *restrict L)
 const char *ruleset_reader(lua_State *L, void *ud, size_t *restrict sz)
 {
 	UNUSED(L);
-	struct reader_status *restrict rd = ud;
-	const void *buf = rd->prefix;
-	if (buf != NULL) {
-		*sz = rd->prefixlen;
-		rd->prefix = NULL;
-		rd->prefixlen = 0;
-		return buf;
-	}
+	struct stream *s = ud;
+	const void *buf;
 	*sz = SIZE_MAX; /* Lua allows arbitrary length */
-	const int err = stream_direct_read(rd->s, &buf, sz);
+	const int err = stream_direct_read(s, &buf, sz);
 	if (err != 0) {
 		LOGE_F("read_stream: error %d", err);
 	}

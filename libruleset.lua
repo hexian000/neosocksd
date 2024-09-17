@@ -305,14 +305,16 @@ _G.rpc = rpc
 
 function _G.rpcall(ret, func, ...)
     local co = coroutine.create(function(...)
-        return ret(marshal(pcall(...)))
+        return ret("return " .. marshal(pcall(...)))
     end)
     coroutine.resume(co, _G.rpc[func], ...)
 end
 
 function await.rpcall(target, func, ...)
     local code = strformat("_G.rpcall(rpcall_return,%s)", marshal(func, ...))
-    return await.invoke(code, table.unpack(target))
+    local ok, result = await.invoke(code, table.unpack(target))
+    if ok then return result() end
+    return ok, result
 end
 
 local msgh = _G.msgh or {}

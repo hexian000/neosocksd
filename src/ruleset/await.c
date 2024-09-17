@@ -286,31 +286,28 @@ await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 		return lua_error(L);
 	}
 	const bool ok = *(bool *)lua_touserdata(L, -3);
-	const void *data = lua_touserdata(L, -2);
+	void *data = lua_touserdata(L, -2);
 	const size_t len = *(size_t *)lua_touserdata(L, -1);
 	lua_settop(L, 0);
 
+	lua_pushboolean(L, ok);
 	if (!ok) {
-		lua_pushboolean(L, 0);
 		lua_pushlstring(L, data, len);
 		return 2;
 	}
-	/* unmarshal */
-	struct reader_status rd = {
-		.s = (struct stream *)data,
-		.prefix = "return ",
-		.prefixlen = 7,
-	};
-	if (lua_load(L, ruleset_reader, &rd, "=(unmarshal)", NULL)) {
+	if (lua_load(L, ruleset_reader, data, "=(rpc)", NULL)) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
-	/* lua stack: ok chunk env */
+	lua_newtable(L);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+	/* lua stack: ok chunk env mt _G */
+	lua_setfield(L, -2, "__index");
+	(void)lua_setmetatable(L, -2);
 	if (lua_setupvalue(L, -2, -1) == NULL) {
 		lua_pop(L, 1);
 	}
-	lua_call(L, 0, LUA_MULTRET);
-	return lua_gettop(L);
+	return 2;
 }
 
 /* ok, ... = await.invoke(code, addr, proxyN, ..., proxy1) */
