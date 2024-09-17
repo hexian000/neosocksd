@@ -306,6 +306,9 @@ end
 
 local function mainloop()
     await.sleep(BOOTSTRAP_DELAY)
+    if not agent.peername then
+        return
+    end
     while agent.running do
         agent.maintenance()
         await.sleep(SYNC_INTERVAL_BASE + math.random(SYNC_INTERVAL_RANDOM))
@@ -342,10 +345,8 @@ local function main(...)
             logf("agent.stop: %s", err)
         end
     end
-    if agent.peername then
-        agent.running = true
-        async(mainloop)
-    end
+    agent.running = true
+    async(mainloop)
     return agent
 end
 
