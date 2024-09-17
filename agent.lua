@@ -313,14 +313,20 @@ local function mainloop()
 end
 
 function agent.stats(dt)
+    if not agent.running then return "" end
+    local now = os.time()
     local w = list:new()
     for peername, connid in pairs(peers) do
         local info = table.get(_G.conninfo, connid, peername)
         if info and info.rtt then
-            w:insertf("[%s] %.0fms", peername, info.rtt * 1e+3)
+            w:insertf("%-20s: %s [%s] %s %.0fms", peername, os.date("%Y-%m-%dT%T%z", info.timestamp),
+                connid, format_route(info.route), info.rtt * 1e+3)
+        else
+            w:insertf("%-20s: [%s] no route", peername, connid)
         end
     end
-    return string.format("%-20s: %s", "Peer RTT", w:sort():concat(", "))
+    w:sort():insert(1, "> Peers")
+    return w:concat("\n")
 end
 
 function agent.stop()

@@ -120,8 +120,8 @@ function ruleset.stats(dt)
     else
         w:insertf("%-20s: %s", "Status", "running")
     end
-    w:insert(agent.stats(dt))
     w:insert(libruleset.stats(dt))
+    w:insert(agent.stats(dt))
     w:insert("")
     return w:concat("\n")
 end
