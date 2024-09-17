@@ -241,6 +241,7 @@ function agent.probe(peername)
     assert(_G.peerdb[peername], string.format("unknown peer %q", peername))
     local now = os.time()
     local err = list:new()
+    local updated
     local minrtt, bestconnid, bestroute
     for connid, _ in pairs(agent.conns) do
         local rtt, route
@@ -250,6 +251,7 @@ function agent.probe(peername)
         else
             rtt, route = probe_via(connid, peername)
             if not rtt then err:insertf("[%s] %q", connid, route) end
+            updated = true
         end
         if rtt and (not minrtt or rtt < minrtt) then
             minrtt, bestconnid, bestroute = rtt, connid, route
@@ -259,8 +261,10 @@ function agent.probe(peername)
         logf("probe failed: %q %s", peername, err:concat(", "))
         return
     end
-    local route = format_route(bestroute)
-    logf("probe: [%s] %q %s %.0fms", bestconnid, peername, route, minrtt * 1e+3)
+    if updated then
+        logf("probe: [%s] %q %s %.0fms", bestconnid, peername,
+            format_route(bestroute), minrtt * 1e+3)
+    end
 end
 
 function agent.maintenance()
@@ -295,8 +299,8 @@ function agent.maintenance()
             _G.peerdb[peername] = nil
         end
     end
-    for connid, conn in pairs(_G.conninfo) do
-        for peername, info in pairs(conn) do
+    for _, conn in pairs(_G.conninfo) do
+        for peername, _ in pairs(conn) do
             if not _G.peerdb[peername] then
                 conn[peername] = nil
             end
