@@ -335,8 +335,10 @@ local function main(...)
             logf("agent.stop: %s", err)
         end
     end
-    agent.running = true
-    async(mainloop)
+    if agent.peername then
+        agent.running = true
+        async(mainloop)
+    end
     return agent
 end
 
