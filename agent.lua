@@ -43,12 +43,10 @@ local function build_index()
     local peers, peer_rtt = {}, {}
     for connid, conn in pairs(_G.conninfo) do
         for peername, info in pairs(conn) do
-            if is_valid(info, CONNINFO_EXPIRY_TIME, now) then
-                local rtt = info.rtt or math.huge
-                if not peer_rtt[peername] or rtt < peer_rtt[peername] then
-                    peer_rtt[peername] = rtt
-                    peers[peername] = connid
-                end
+            local rtt = info.rtt or math.huge
+            if not peer_rtt[peername] or rtt < peer_rtt[peername] then
+                peer_rtt[peername] = rtt
+                peers[peername] = connid
             end
         end
     end
@@ -177,8 +175,7 @@ local function find_conn(peername, ttl)
     local connid, minrtt
     for id, _ in pairs(agent.conns) do
         local info = table.get(_G.conninfo, id, peername)
-        if info and #info.route <= ttl and
-            is_valid(info, CONNINFO_EXPIRY_TIME, now) then
+        if info and #info.route <= ttl then
             local rtt = info.rtt or math.huge
             if not minrtt or rtt < minrtt then
                 minrtt = rtt
@@ -301,10 +298,6 @@ function agent.maintenance()
     for connid, conn in pairs(_G.conninfo) do
         for peername, info in pairs(conn) do
             if not _G.peerdb[peername] then
-                conn[peername] = nil
-            elseif not is_valid(info, CONNINFO_EXPIRY_TIME, now) then
-                logf("route expired: [%s] %q %s", connid,
-                    peername, format_route(info.route))
                 conn[peername] = nil
             end
         end
