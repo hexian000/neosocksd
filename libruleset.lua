@@ -825,7 +825,8 @@ end
 local function render_(w)
     local requests, n = list:new(), 0
     local last_requests
-    for _, v in stat_requests:reviter() do
+    for i = stat_requests.len, 1, -1 do
+        local v = stat_requests:get(i)
         if last_requests then
             local delta = v - last_requests
             requests:insert(delta)
