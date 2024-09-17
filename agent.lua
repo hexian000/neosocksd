@@ -317,16 +317,15 @@ end
 
 function agent.stats(dt)
     if not agent.running then return "" end
-    local now = os.time()
     local w = list:new()
     for peername, connid in pairs(peers) do
         local info = table.get(_G.conninfo, connid, peername)
+        local tag = string.format("%q", peername)
         if info and info.rtt then
-            w:insertf("%-16s: %s [%s] %4.0fms %s", string.format("%q", peername),
-                os.date("%Y-%m-%dT%T%z", info.timestamp), connid,
-                info.rtt * 1e+3, format_route(info.route))
+            w:insertf("%-16s: %s [%s] %4.0fms %s", tag, os.date("%Y-%m-%dT%T%z", info.timestamp),
+                connid, info.rtt * 1e+3, format_route(info.route))
         else
-            w:insertf("%-16s: [%s] no route", peername, connid)
+            w:insertf("%-16s: [%s] no route", tag, connid)
         end
     end
     w:sort():insert(1, "> Peers")
