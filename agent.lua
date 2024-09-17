@@ -174,7 +174,7 @@ local function find_conn(peername, ttl)
     local now = os.time()
     local connid, minrtt
     for id, _ in pairs(agent.conns) do
-        local info = table.get(_G.conninfo, id, peername)
+        local info = table.get(_G.conninfo[id], peername)
         if info and #info.route <= ttl then
             local rtt = info.rtt or math.huge
             if not minrtt or rtt < minrtt then
@@ -245,7 +245,7 @@ function agent.probe(peername)
     local minrtt, bestconnid, bestroute
     for connid, _ in pairs(agent.conns) do
         local rtt, route
-        local info = table.get(_G.conninfo, connid, peername)
+        local info = table.get(_G.conninfo[connid], peername)
         if info and info.rtt and is_valid(info, CONNINFO_EXPIRY_TIME, now) then
             rtt, route = info.rtt, info.route
         else
@@ -323,13 +323,16 @@ function agent.stats(dt)
     if not agent.running then return "" end
     local w = list:new()
     for peername, connid in pairs(peers) do
-        local info = table.get(_G.conninfo, connid, peername)
+        local info = table.get(_G.conninfo[connid], peername)
+        local data = _G.peerdb[peername]
         local tag = string.format("%q", peername)
         if info and info.rtt then
-            w:insertf("%-16s: %s [%s] %4.0fms %s", tag, os.date("%Y-%m-%dT%T%z", info.timestamp),
-                connid, info.rtt * 1e+3, format_route(info.route))
-        else
-            w:insertf("%-16s: [%s] no route", tag, connid)
+            local timestamp = os.date("%Y-%m-%dT%T%z", info.timestamp)
+            w:insertf("%-16s: %s [%s] %4.0fms %s", tag, timestamp, connid,
+                info.rtt * 1e+3, format_route(info.route))
+        elseif data then
+            local timestamp = os.date("%Y-%m-%dT%T%z", data.timestamp)
+            w:insertf("%-16s: %s [%s] no route", tag, timestamp, connid)
         end
     end
     w:sort():insert(1, "> Peers")
