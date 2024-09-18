@@ -290,7 +290,7 @@ end
 
 local function mainloop()
     await.sleep(BOOTSTRAP_DELAY)
-    if not agent.peername then
+    if not agent.peername or agent.passive then
         return
     end
     while agent.running do
