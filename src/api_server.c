@@ -11,7 +11,6 @@
 #include "server.h"
 #include "session.h"
 #include "sockutil.h"
-#include "transfer.h"
 #include "util.h"
 
 #include "io/stream.h"
@@ -25,6 +24,7 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+#include <strings.h>
 
 #include <stdbool.h>
 #include <stddef.h>

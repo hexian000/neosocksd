@@ -4,10 +4,7 @@
 #ifndef HTTP_PARSER_H
 #define HTTP_PARSER_H
 
-#include "util.h"
-
 #include "net/http.h"
-#include "utils/arraysize.h"
 #include "utils/buffer.h"
 
 #include <ctype.h>

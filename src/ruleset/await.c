@@ -4,9 +4,7 @@
 #include "await.h"
 
 #include "base.h"
-#include "compat.h"
 
-#include "io/stream.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/minmax.h"
@@ -23,7 +21,6 @@
 
 #include <ev.h>
 
-#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>

@@ -15,7 +15,6 @@
 
 #include "ruleset/await.h"
 #include "ruleset/base.h"
-#include "ruleset/compat.h"
 #include "ruleset/marshal.h"
 #include "ruleset/regex.h"
 #include "ruleset/zlib.h"

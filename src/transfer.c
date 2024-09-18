@@ -17,7 +17,6 @@
 #include <fcntl.h>
 #endif
 #include <sys/socket.h>
-#include <sys/types.h>
 
 #include <errno.h>
 #include <stdbool.h>

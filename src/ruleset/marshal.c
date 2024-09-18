@@ -3,8 +3,6 @@
 
 #include "marshal.h"
 
-#include "compat.h"
-
 #include "lauxlib.h"
 #include "lua.h"
 

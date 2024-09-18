@@ -27,8 +27,6 @@
 
 struct http_ctx;
 
-typedef void (*http_handler_fn)(struct ev_loop *loop, struct http_ctx *ctx);
-
 /* never rollback */
 enum http_state {
 	STATE_INIT,

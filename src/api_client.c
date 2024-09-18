@@ -19,6 +19,7 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+#include <strings.h>
 
 #include <limits.h>
 #include <stdbool.h>
