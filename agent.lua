@@ -22,7 +22,6 @@ local SYNC_INTERVAL_BASE = 600
 local SYNC_INTERVAL_RANDOM = 600
 local TIMESTAMP_TOLERANCE = 600
 local PEERDB_EXPIRY_TIME = 3600
-local CONNINFO_EXPIRY_TIME = 3600
 
 local function is_valid(t, expiry_time, now)
     local timestamp = t.timestamp
@@ -239,20 +238,12 @@ end
 
 function agent.probe(peername)
     assert(_G.peerdb[peername], string.format("unknown peer %q", peername))
-    local now = os.time()
     local err = list:new()
     local updated
     local minrtt, bestconnid, bestroute
     for connid, _ in pairs(agent.conns) do
-        local rtt, route
-        local info = table.get(_G.conninfo[connid], peername)
-        if info and info.rtt and is_valid(info, CONNINFO_EXPIRY_TIME, now) then
-            rtt, route = info.rtt, info.route
-        else
-            rtt, route = probe_via(connid, peername)
-            if not rtt then err:insertf("[%s] %q", connid, route) end
-            updated = true
-        end
+        local rtt, route = probe_via(connid, peername)
+        if not rtt then err:insertf("[%s] %q", connid, route) end
         if rtt and (not minrtt or rtt < minrtt) then
             minrtt, bestconnid, bestroute = rtt, connid, route
         end
@@ -306,6 +297,7 @@ function agent.maintenance()
             end
         end
     end
+    services, peers = build_index()
 end
 
 local function mainloop()
