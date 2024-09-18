@@ -157,8 +157,7 @@ function agent.sync(connid)
     update_peerdb(peername, peerdb)
 end
 
-local function find_conn(peername, ttl)
-    local now = os.time()
+local function findconn(peername, ttl)
     local connid, minrtt
     for id, _ in pairs(agent.conns) do
         local info = table.get(_G.conninfo[id], peername)
@@ -181,7 +180,7 @@ function rpc.probe(peername, ttl)
     if ttl < 1 then
         error("ttl expired in transit")
     end
-    local connid = find_conn(peername, ttl)
+    local connid = findconn(peername, ttl)
     if not connid then
         error("peer not reachable")
     end
@@ -227,7 +226,6 @@ end
 function agent.probe(peername)
     assert(_G.peerdb[peername], string.format("unknown peer %q", peername))
     local err = list:new()
-    local updated
     local minrtt, bestconnid, bestroute
     for connid, _ in pairs(agent.conns) do
         local rtt, route = probe_via(connid, peername)
@@ -236,13 +234,11 @@ function agent.probe(peername)
             minrtt, bestconnid, bestroute = rtt, connid, route
         end
     end
-    if not minrtt then
-        logf("probe failed: %q %s", peername, err:concat(", "))
-        return
-    end
-    if updated then
+    if minrtt then
         logf("probe: [%s] %q %s %.0fms", bestconnid, peername,
             format_route(bestroute), minrtt * 1e+3)
+    elseif err[1] then
+        logf("probe failed: %q %s", peername, err:concat(", "))
     end
 end
 
@@ -290,7 +286,7 @@ end
 
 local function mainloop()
     await.sleep(BOOTSTRAP_DELAY)
-    if not agent.peername or agent.passive then
+    if not agent.peername then
         return
     end
     while agent.running do
