@@ -83,19 +83,7 @@ function match.agent()
     end
 end
 
-function rule.agent(peer)
-    if peer then
-        if peer == agent.peername then
-            return function(addr)
-                return addr
-            end
-        end
-        return function(addr)
-            local connid = peers[peer]
-            local conn = agent.conns[connid]
-            return addr, list:new(conn):reverse():unpack()
-        end
-    end
+function rule.agent()
     return function(addr)
         local peername = services[addr]
         if not peername then
