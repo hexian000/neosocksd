@@ -38,6 +38,9 @@ local function is_valid(t, expiry_time, now)
 end
 
 local function build_index()
+    if not agent.peername then
+        return {}, {}
+    end
     local peers, peer_rtt = {}, {}
     peer_rtt[agent.peername] = 0
     for connid, conn in pairs(_G.conninfo) do
@@ -68,7 +71,7 @@ local function build_index()
 end
 -- services[service] = peername
 -- peers[peername] = connid
-local services, peers = {}, {}
+local services, peers = build_index()
 
 local splithostport = neosocksd.splithostport
 function match.agent()
