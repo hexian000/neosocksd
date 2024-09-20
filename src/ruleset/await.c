@@ -292,7 +292,7 @@ await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 		lua_pushlstring(L, data, len);
 		return 2;
 	}
-	if (lua_load(L, ruleset_reader, data, "=(rpc)", NULL)) {
+	if (lua_load(L, ruleset_reader, data, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);

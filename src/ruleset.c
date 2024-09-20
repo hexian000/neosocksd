@@ -108,7 +108,7 @@ static int cfunc_invoke_(lua_State *restrict L)
 	void *stream = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
-	if (lua_load(L, ruleset_reader, stream, "=(invoke)", NULL)) {
+	if (lua_load(L, ruleset_reader, stream, "=(invoke)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
@@ -169,7 +169,7 @@ static int cfunc_rpcall_(lua_State *restrict L)
 	lua_setmetatable(L, -2);
 	lua_replace(L, 1);
 	lua_settop(L, 1);
-	if (lua_load(L, ruleset_reader, stream, "=(rpc)", NULL)) {
+	if (lua_load(L, ruleset_reader, stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
 	lua_createtable(L, 0, 1);

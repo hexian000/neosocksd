@@ -279,7 +279,7 @@ _G.parse_cidr6 = parse_cidr6
 
 -- [[ RPC utilities ]] --
 function _G.unmarshal(s)
-    return assert(load("return " .. s, "=(unmarshal)", "bt", {}))()
+    return assert(load("return " .. s, "=(unmarshal)", "t", {}))()
 end
 
 local rpc = _G.rpc or {}
