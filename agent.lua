@@ -68,7 +68,7 @@ local function build_index()
 end
 -- services[service] = peername
 -- peers[peername] = connid
-local services, peers = build_index()
+local services, peers = {}, {}
 
 local splithostport = neosocksd.splithostport
 function match.agent()
