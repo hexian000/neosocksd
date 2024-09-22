@@ -31,16 +31,14 @@ For advanced scripting usage, see [scripting](#scripting).
 
 ## Features
 
-- SOCKS4 / SOCKS4A / SOCKS5 / HTTP with no built-in support for encryption.
-- Transparent proxy. (Linux only)
-- Only TCP CONNECT requests are supported.
-- Lua scripts powered rule set.
-- Routing connections by rule and even building an autonomous proxy mesh.
-- RESTful API for monitoring and updating rules online.
-- IPv6 supported (SOCKS4A / SOCKS5 / HTTP).
-- Horizontally scalable.
-- Flexible and versatile: can be used for Internet gateway, RPC proxy, etc.
-- Embedded systems friendly.
+- Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (TCP only), HTTP CONNECT, transparent proxy (Linux).
+- High performance: transfer over 10 Gbps per x86 core on Linux. (with `--pipe`, 2024)
+- Basic security: supports username/password authentication.
+- Flexible: Lua scripts powered rule set.
+- Versatile: [working demo](agent.lua) of autonomous peer discovery and connection relay. 
+- Hot reloadable: RESTful API for monitoring and updating Lua modules.
+- Morden: Full IPv6 support. Horizontally scalable.
+- Tiny: embedded systems friendly.
 - Conforming to: ISO C11, POSIX.1-2008.
 
 
