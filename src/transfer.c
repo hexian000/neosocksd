@@ -29,27 +29,29 @@
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		LOG_F(level, "%d -> %d: " format, t->w_recv.fd, t->w_send.fd,  \
+		LOG_F(level, "%d -> %d: " format, t->src_fd, t->dst_fd,        \
 		      __VA_ARGS__);                                            \
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
 
-static inline void ev_io_set_active(
-	struct ev_loop *loop, struct ev_io *restrict watcher, const bool active)
+static void update_watcher(
+	struct transfer *restrict t, struct ev_loop *loop, const int events)
 {
-	if (!!ev_is_active(watcher) == !!active) {
+	ASSERT(events == EV_READ || events == EV_WRITE);
+	struct ev_io *restrict watcher = &t->w_socket;
+	const int ioevents = watcher->events & (EV_READ | EV_WRITE);
+	if (ioevents == events) {
 		return;
 	}
-	if (active) {
-		ev_io_start(loop, watcher);
-	} else {
-		ev_io_stop(loop, watcher);
-	}
+	const int fd = (events & EV_WRITE) ? t->dst_fd : t->src_fd;
+	ev_io_stop(loop, watcher);
+	ev_io_set(watcher, fd, events);
+	ev_io_start(loop, watcher);
 }
 
 static ssize_t transfer_recv(struct transfer *restrict t)
 {
-	const int fd = t->w_recv.fd;
+	const int fd = t->src_fd;
 	const size_t cap = t->buf.cap - t->buf.len;
 	if (cap == 0) {
 		return 0;
@@ -74,7 +76,7 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 
 static ssize_t transfer_send(struct transfer *restrict t)
 {
-	const int fd = t->w_send.fd;
+	const int fd = t->dst_fd;
 	const size_t len = t->buf.len - t->pos;
 	if (len == 0) {
 		return 0;
@@ -126,7 +128,8 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			break;
 		}
 	}
-	if (nbsend > 0) {
+	const bool has_work = (nbsend > 0);
+	if (has_work) {
 		uintmax_t *restrict byt_transferred = t->byt_transferred;
 		if (byt_transferred != NULL) {
 			*byt_transferred += nbsend;
@@ -137,27 +140,27 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			t->buf.len);
 	}
 
-	const bool can_recv = (t->buf.len < t->buf.cap);
-	const bool can_send = (t->pos < t->buf.len);
+	const bool has_data = (t->pos < t->buf.len);
 	switch (state) {
 	case XFER_INIT:
 		state = XFER_CONNECTED;
 		/* fallthrough */
 	case XFER_CONNECTED: {
-		ev_io_set_active(loop, &t->w_recv, can_recv);
-		ev_io_set_active(loop, &t->w_send, can_send);
+		if (has_data) {
+			update_watcher(t, loop, EV_WRITE);
+		} else if (!has_work) {
+			update_watcher(t, loop, EV_READ);
+		}
 	} break;
 	case XFER_LINGER:
-		if (can_send) {
-			ev_io_set_active(loop, &t->w_recv, false);
-			ev_io_set_active(loop, &t->w_send, true);
+		if (has_data) {
+			update_watcher(t, loop, EV_WRITE);
 			break;
 		}
 		state = XFER_FINISHED;
 		/* fallthrough */
 	case XFER_FINISHED:
-		ev_io_stop(loop, &t->w_recv);
-		ev_io_stop(loop, &t->w_send);
+		ev_io_stop(loop, &t->w_socket);
 		break;
 	default:
 		FAIL();
@@ -226,12 +229,12 @@ static void pipe_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	while (state <= XFER_LINGER) {
 		ssize_t nrecv = 0;
 		if (state <= XFER_CONNECTED) {
-			nrecv = splice_drain(&t->pipe, t->w_recv.fd);
+			nrecv = splice_drain(&t->pipe, t->src_fd);
 			if (nrecv < 0) {
 				state = XFER_LINGER;
 			}
 		}
-		ssize_t nsend = splice_pump(&t->pipe, t->w_send.fd);
+		ssize_t nsend = splice_pump(&t->pipe, t->dst_fd);
 		if (nsend < 0) {
 			state = XFER_FINISHED;
 		} else {
@@ -241,7 +244,8 @@ static void pipe_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			break;
 		}
 	}
-	if (nbsend > 0) {
+	const bool has_work = (nbsend > 0);
+	if (has_work) {
 		uintmax_t *restrict byt_transferred = t->byt_transferred;
 		if (byt_transferred != NULL) {
 			*byt_transferred += nbsend;
@@ -252,27 +256,27 @@ static void pipe_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			t->pipe.len);
 	}
 
-	const bool can_recv = (t->pipe.len == 0);
-	const bool can_send = (t->pipe.len > 0);
+	const bool has_data = (t->pipe.len > 0);
 	switch (state) {
 	case XFER_INIT:
 		state = XFER_CONNECTED;
 		/* fallthrough */
 	case XFER_CONNECTED: {
-		ev_io_set_active(loop, &t->w_recv, can_recv);
-		ev_io_set_active(loop, &t->w_send, can_send);
+		if (has_data) {
+			update_watcher(t, loop, EV_WRITE);
+		} else if (!has_work) {
+			update_watcher(t, loop, EV_READ);
+		}
 	} break;
 	case XFER_LINGER:
-		if (can_send) {
-			ev_io_set_active(loop, &t->w_recv, false);
-			ev_io_set_active(loop, &t->w_send, true);
+		if (has_data) {
+			update_watcher(t, loop, EV_WRITE);
 			break;
 		}
 		state = XFER_FINISHED;
 		/* fallthrough */
 	case XFER_FINISHED:
-		ev_io_stop(loop, &t->w_recv);
-		ev_io_stop(loop, &t->w_send);
+		ev_io_stop(loop, &t->w_socket);
 		break;
 	default:
 		FAIL();
@@ -292,12 +296,11 @@ void transfer_init(
 	const int dst_fd, uintmax_t *byt_transferred)
 {
 	t->state = XFER_INIT;
-	struct ev_io *restrict w_recv = &t->w_recv;
-	ev_io_init(w_recv, transfer_cb, src_fd, EV_READ);
-	w_recv->data = t;
-	struct ev_io *restrict w_send = &t->w_send;
-	ev_io_init(w_send, transfer_cb, dst_fd, EV_WRITE);
-	w_send->data = t;
+	t->src_fd = src_fd;
+	t->dst_fd = dst_fd;
+	struct ev_io *restrict w_socket = &t->w_socket;
+	ev_io_init(w_socket, transfer_cb, src_fd, EV_READ);
+	w_socket->data = t;
 	t->state_cb = cb;
 	t->byt_transferred = byt_transferred;
 
@@ -319,19 +322,17 @@ void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 	if (G.conf->pipe) {
 		struct splice_pipe pipe;
 		if (pipe_get(&pipe)) {
-			ev_set_cb(&t->w_recv, pipe_cb);
-			ev_set_cb(&t->w_send, pipe_cb);
+			ev_set_cb(&t->w_socket, pipe_cb);
 			t->pipe = pipe;
 		}
 	}
 #endif
-	ev_io_start(loop, &t->w_recv);
+	ev_io_start(loop, &t->w_socket);
 }
 
 void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
 {
-	ev_io_stop(loop, &t->w_recv);
-	ev_io_stop(loop, &t->w_send);
+	ev_io_stop(loop, &t->w_socket);
 #if WITH_SPLICE
 	if (t->pipe.fd[0] != -1) {
 		pipe_put(&t->pipe);

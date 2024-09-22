@@ -24,7 +24,8 @@ enum transfer_state {
 
 struct transfer {
 	enum transfer_state state;
-	struct ev_io w_recv, w_send;
+	int src_fd, dst_fd;
+	struct ev_io w_socket;
 	struct event_cb state_cb;
 	uintmax_t *byt_transferred;
 #if WITH_SPLICE
