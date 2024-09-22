@@ -31,11 +31,11 @@ end
 
 ruleset.API_ENDPOINT = "api.neosocksd.internal:80"
 
--- 1. ordered redirect rules (matched as string)
+-- 1. _G.redirect*: match the raw request "host:port"
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
 
--- redirect_name: for requests with name string
+-- _G.redirect_name: for requests with name string
 _G.redirect_name = {
     -- admin routes
     { match.exact("localhost:22"),               rule.redirect("127.0.0.1:22"),                               "ssh" },
@@ -57,7 +57,7 @@ _G.redirect_name = {
     -- otherwise, go to _G.route_default
 }
 
--- redirect: for requests with IPv4 address
+-- _G.redirect: for requests with IPv4 address
 _G.redirect = {
     -- redirect TCP DNS to local cache
     { match.exact("1.1.1.1:53"), rule.redirect("127.0.0.53:53") },
@@ -67,14 +67,14 @@ _G.redirect = {
     -- go to _G.route
 }
 
--- redirect6: for requests with IPv6 address
+-- _G.redirect6: for requests with IPv6 address
 _G.redirect6 = {
     -- global condition
     { is_disabled, rule.reject(), "off" },
     -- go to _G.route6
 }
 
--- 2. unordered hosts map
+-- 2. _G.hosts: map unmatched hosts
 _G.hosts = {
     ["gateway.region1.lan"] = "192.168.32.1",
     ["host123.region1.lan"] = "192.168.32.123",
@@ -82,7 +82,7 @@ _G.hosts = {
     ["host123.region2.lan"] = "192.168.33.123"
 }
 
--- 3. ordered routes (matched as address)
+-- 3. _G.route*: match the IP address
 _G.route = {
     -- reject loopback or link-local
     { inet.subnet("127.0.0.0/8"),       rule.reject() },

@@ -53,21 +53,18 @@ For advanced scripting usage, see [scripting](#scripting).
 ./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # And bind outbound connections to eth0
 ./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
-# High-performance dynamic TCP load balancer
-./neosocksd --pipe -d -u nobody: -l 0.0.0.0:30001 \
-    -f 10.0.0.1:30001 --api 127.0.1.1:9080 -r lb.lua
-
 # Forward connection over proxy chain
 # Tip: forwarding in SOCKS5 needs 1 more roundtrip than SOCKS4A/HTTP, so is usually not a good idea.
-./neosocksd -l 0.0.0.0:12345 -f 192.168.2.2:12345 -x "socks4a://192.168.1.1:1080,http://192.168.2.1:8118"
+./neosocksd -l 0.0.0.0:12345 -f 192.168.2.2:12345 -x "socks4a://192.168.1.1:1080,http://192.168.2.1:8080"
 
 # Convert proxy protocol to SOCKS4A
 ./neosocksd -l 127.0.0.1:1080 -x socks4a://203.0.113.1:1080 -d
-./neosocksd --http -l 127.0.0.1:8118 -x socks4a://203.0.113.1:1080 -d
+./neosocksd --http -l 127.0.0.1:8080 -x socks4a://203.0.113.1:1080 -d
 
-# Start a hardened non-forking TCP port forwarder in the background
-sudo ./neosocksd -d -u nobody: -l 0.0.0.0:80 -f 127.0.0.1:8080 -t 15 \
-    --proto-timeout --max-startups 60:30:100 --max-sessions 10000
+# Start a hardened load balancer in the background
+sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 \
+    --max-startups 60:30:100 -l :80 -t 15 --proto-timeout \
+    -f 10.0.0.1:30001 --api 127.0.1.1:9080 -r lb.lua
 
 # Start a rule set powered SOCKS4 / SOCKS4A / SOCKS5 server
 ./neosocksd -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua -d
@@ -81,7 +78,7 @@ First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary rel
 
 - [ruleset.lua](ruleset.lua) is a fancy demo script.
 - [libruleset.lua](libruleset.lua) provides rule table facilities.
-- [agent.lua](agent.lua) implements autonomous proxy discovery and connection relay.
+- [agent.lua](agent.lua) implements autonomous peer discovery and connection relay.
 - Developer manual: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
 Use the following command to start the server with the Lua scripts in current directory:

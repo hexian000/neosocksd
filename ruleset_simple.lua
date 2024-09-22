@@ -2,11 +2,11 @@ _G.libruleset    = require("libruleset")
 
 -- [[ configurations ]] --
 
--- 1. ordered redirect rules (matched as string)
+-- 1. _G.redirect*: match the raw request "host:port"
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
 
--- redirect_name: for requests with name string
+-- _G.redirect_name: for requests with name string
 _G.redirect_name = {
     -- access mDNS sites directly
     { match.domain(".local"),   rule.direct() },
@@ -16,7 +16,7 @@ _G.redirect_name = {
     -- otherwise, go to _G.route_default
 }
 
--- redirect: for requests with IPv4 address
+-- _G.redirect: for requests with IPv4 address
 _G.redirect      = {
     -- redirect TCP DNS to local cache
     { match.exact("1.1.1.1:53"), rule.redirect("127.0.0.53:53") },
@@ -24,19 +24,18 @@ _G.redirect      = {
     -- go to _G.route
 }
 
--- redirect6: for requests with IPv6 address
+-- _G.redirect6: for requests with IPv6 address
 _G.redirect6     = {
     -- go to _G.route6
 }
 
--- 2. unordered hosts map
+-- 2. _G.hosts: map unmatched hosts
 _G.hosts         = {
     ["server.lan"] = "127.0.0.1",
 }
 
--- 3. ordered routes (matched as address)
+-- 3. _G.route*: match the IP address
 _G.route         = {
-    { inet.subnet("127.0.0.1/32"),   rule.direct() },
     -- reject loopback or link-local
     { inet.subnet("127.0.0.0/8"),    rule.reject() },
     { inet.subnet("169.254.0.0/16"), rule.reject() },
