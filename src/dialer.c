@@ -402,11 +402,10 @@ static bool send_http_req(
 	struct dialer *restrict d, const struct proxy_req *proxy,
 	const struct dialaddr *restrict addr)
 {
-	const size_t cap = DIALER_HTTP_REQ_MAXLEN;
-	char buf[cap];
+	char buf[DIALER_HTTP_REQ_MAXLEN];
 #define APPEND(b, s)                                                           \
 	do {                                                                   \
-		if (b + CONSTSTRLEN(s) > buf + cap) {                          \
+		if (b + CONSTSTRLEN(s) > buf + sizeof(buf)) {                  \
 			DIALER_LOG(ERROR, d, "buffer overflow");               \
 			return false;                                          \
 		}                                                              \
@@ -415,8 +414,8 @@ static bool send_http_req(
 	} while (0)
 	char *b = buf;
 	APPEND(b, "CONNECT ");
-	const int n = dialaddr_format(addr, b, cap - (b - buf));
-	if (n < 0 || (size_t)n >= cap - (b - buf)) {
+	const int n = dialaddr_format(addr, b, sizeof(buf) - (b - buf));
+	if (n < 0 || (size_t)n >= sizeof(buf) - (b - buf)) {
 		DIALER_LOG(ERROR, d, "failed to format host address");
 		return false;
 	}
@@ -434,10 +433,10 @@ static bool send_http_req(
 		if (plen > 0) {
 			memcpy(src + ulen + 1, proxy->password, plen);
 		}
-		size_t len = cap - (b - buf);
+		size_t len = sizeof(buf) - (b - buf);
 		const bool ok =
 			base64_encode((unsigned char *)b, &len, src, srclen);
-		if (!ok || b + len > buf + cap) {
+		if (!ok || b + len > buf + sizeof(buf)) {
 			DIALER_LOG(ERROR, d, "failed to format credential");
 			return false;
 		}
