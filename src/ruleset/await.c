@@ -101,8 +101,6 @@ await_idle_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 static int await_idle_(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
-	lua_settop(L, 0);
-
 	struct ruleset *restrict r = find_ruleset(L);
 	struct ev_idle *restrict w = lua_newuserdata(L, sizeof(struct ev_idle));
 	ev_idle_init(w, idle_cb);
@@ -154,8 +152,6 @@ static int await_sleep_(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
 	lua_Number n = luaL_checknumber(L, 1);
-	lua_settop(L, 1);
-
 	if (!isnormal(n)) {
 		return 0;
 	}
@@ -217,8 +213,6 @@ static int await_resolve_(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
 	const char *name = luaL_checkstring(L, 1);
-	lua_settop(L, 1);
-
 	const handle_type h = resolve_do(
 		G.resolver,
 		(struct resolve_cb){
@@ -285,8 +279,6 @@ await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	const bool ok = *(bool *)lua_touserdata(L, -3);
 	void *data = lua_touserdata(L, -2);
 	const size_t len = *(size_t *)lua_touserdata(L, -1);
-	lua_settop(L, 0);
-
 	lua_pushboolean(L, ok);
 	if (!ok) {
 		lua_pushlstring(L, data, len);
@@ -317,11 +309,12 @@ static int await_invoke_(lua_State *restrict L)
 	for (int i = 2; i <= MAX(2, n); i++) {
 		luaL_checktype(L, i, LUA_TSTRING);
 	}
-	struct dialreq *req = pop_dialreq_(L, n - 1);
+	struct dialreq *req = make_dialreq_(L, n - 1);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
 	}
+	lua_pop(L, n - 1);
 	struct ruleset *restrict r = find_ruleset(L);
 	struct api_client_cb cb = {
 		.func = invoke_cb,

@@ -28,12 +28,12 @@
 #include <stdint.h>
 #include <string.h>
 
+/* addr = format_addr_(sa) */
 int format_addr_(lua_State *restrict L)
 {
 	const struct sockaddr *sa = lua_touserdata(L, -1);
 	if (sa == NULL) {
-		lua_pushnil(L);
-		return 1;
+		return 0;
 	}
 	const int af = sa->sa_family;
 	switch (af) {
@@ -83,36 +83,36 @@ const char *ruleset_reader(lua_State *L, void *ud, size_t *restrict sz)
 	return buf;
 }
 
-struct dialreq *pop_dialreq_(lua_State *restrict L, const int n)
+struct dialreq *make_dialreq_(lua_State *restrict L, const int n)
 {
 	if (n < 1) {
 		return NULL;
 	}
-	const size_t nproxy = (size_t)(n - 1);
-	struct dialreq *req = dialreq_new(nproxy);
+	struct dialreq *req = dialreq_new((size_t)(n - 1));
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
 	}
 	size_t len;
-	for (size_t i = 0; i <= nproxy; i++) {
-		const char *s = lua_tolstring(L, -1, &len);
+	for (int i = 1; i < n; i++) {
+		const char *s = lua_tolstring(L, -i, &len);
 		if (s == NULL) {
 			dialreq_free(req);
 			return NULL;
 		}
-		if (i < nproxy) {
-			if (!dialreq_addproxy(req, s, len)) {
-				dialreq_free(req);
-				return NULL;
-			}
-		} else {
-			if (!dialaddr_parse(&req->addr, s, len)) {
-				dialreq_free(req);
-				return NULL;
-			}
+		if (!dialreq_addproxy(req, s, len)) {
+			dialreq_free(req);
+			return NULL;
 		}
-		lua_pop(L, 1);
+	}
+	const char *s = lua_tolstring(L, -n, &len);
+	if (s == NULL) {
+		dialreq_free(req);
+		return NULL;
+	}
+	if (!dialaddr_parse(&req->addr, s, len)) {
+		dialreq_free(req);
+		return NULL;
 	}
 	return req;
 }

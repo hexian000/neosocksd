@@ -54,15 +54,14 @@ static int cfunc_request_(lua_State *restrict L)
 	const char *username = lua_touserdata(L, 3);
 	const char *password = lua_touserdata(L, 4);
 	lua_settop(L, 0);
+
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
-	lua_replace(L, -2);
-	(void)lua_pushstring(L, request);
-	(void)lua_pushstring(L, username);
-	(void)lua_pushstring(L, password);
-
+	lua_pushstring(L, request);
+	lua_pushstring(L, username);
+	lua_pushstring(L, password);
 	lua_call(L, 3, LUA_MULTRET);
-	const int n = lua_gettop(L);
+	const int n = lua_gettop(L) - 1;
 	if (n < 1) {
 		return 0;
 	}
@@ -77,7 +76,7 @@ static int cfunc_request_(lua_State *restrict L)
 		       lua_typename(L, type));
 		return 0;
 	}
-	struct dialreq *req = pop_dialreq_(L, n);
+	struct dialreq *req = make_dialreq_(L, n);
 	if (req == NULL) {
 		LOGE_F("request `%s': invalid return", request);
 	}
@@ -172,7 +171,7 @@ static int cfunc_rpcall_(lua_State *restrict L)
 	if (lua_load(L, ruleset_reader, stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
-	lua_createtable(L, 0, 1);
+	lua_newtable(L);
 	lua_pushvalue(L, 1);
 	lua_pushcclosure(L, rpcall_return_, 1);
 	lua_setfield(L, -2, "rpcall_return");
@@ -243,7 +242,7 @@ static int cfunc_update_(lua_State *restrict L)
 	const char *chunkname = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
-	(void)lua_pushstring(L, modname);
+	lua_pushstring(L, modname);
 	if (chunkname == NULL) {
 		const char *name = (modname != NULL) ? modname : "ruleset";
 		const size_t namelen = strlen(name);
@@ -308,7 +307,7 @@ static int api_invoke_(lua_State *restrict L)
 	for (int i = 1; i <= MAX(2, n); i++) {
 		luaL_checktype(L, i, LUA_TSTRING);
 	}
-	struct dialreq *req = pop_dialreq_(L, n - 1);
+	struct dialreq *req = make_dialreq_(L, n - 1);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
@@ -327,8 +326,7 @@ static int api_resolve_(lua_State *restrict L)
 	const char *name = luaL_checkstring(L, 1);
 	union sockaddr_max addr;
 	if (!resolve_addr(&addr, name, NULL, G.conf->resolve_pf)) {
-		lua_pushnil(L);
-		return 1;
+		return 0;
 	}
 	lua_pushlightuserdata(L, &addr.sa);
 	return format_addr_(L);
@@ -419,16 +417,14 @@ static int api_splithostport_(lua_State *restrict L)
 		return lua_error(L);
 	}
 	char buf[len + 1];
-	(void)memcpy(buf, s, len);
+	memcpy(buf, s, len);
 	buf[len] = '\0';
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
-		(void)lua_pushfstring(L, "invalid address: `%s'", s);
-		return lua_error(L);
+		return luaL_error(L, "invalid address: `%s'", s);
 	}
-	lua_settop(L, 0);
-	(void)lua_pushstring(L, host);
-	(void)lua_pushstring(L, port);
+	lua_pushstring(L, host);
+	lua_pushstring(L, port);
 	return 2;
 }
 
@@ -436,7 +432,7 @@ static int api_splithostport_(lua_State *restrict L)
 static int api_config_(lua_State *restrict L)
 {
 	const struct config *restrict conf = G.conf;
-	lua_newtable(L);
+	lua_createtable(L, 0, 8);
 	lua_pushinteger(L, (lua_Integer)slog_level);
 	lua_setfield(L, -2, "loglevel");
 	lua_pushnumber(L, (lua_Number)conf->timeout);
@@ -461,12 +457,11 @@ static int api_stats_(lua_State *restrict L)
 {
 	struct server *restrict s = G.server;
 	if (s == NULL) {
-		lua_pushnil(L);
-		return 1;
+		return 0;
 	}
 	struct ruleset *restrict r = find_ruleset(L);
 	const struct server_stats *restrict stats = &s->stats;
-	lua_newtable(L);
+	lua_createtable(L, 0, 6);
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	lua_setfield(L, -2, "lasterror");
 	lua_pushinteger(L, (lua_Integer)stats->num_halfopen);
@@ -693,7 +688,7 @@ struct rpcall_state *ruleset_rpcall(
 	if (!ok) {
 		return NULL;
 	}
-	return (struct rpcall_state *)lua_touserdata(r->L, -1);
+	return lua_touserdata(r->L, -1);
 }
 
 void ruleset_rpcall_cancel(struct rpcall_state *state)

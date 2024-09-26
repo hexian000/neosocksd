@@ -306,6 +306,8 @@ neosocksd.invoke([[log("test rpc")]], "api.neosocksd.internal:80", "socks4a://12
 
 Run Lua code on another neosocksd. This function returns immediately. In case of failure, the invocation is lost.
 
+Tip: To implement message notification, please refer to `neosocksd.sendmsg` in `libruleset.lua`.
+
 
 ### neosocksd.stats
 
@@ -466,9 +468,9 @@ end, "127.0.1.1:9080")
 
 **Description**
 
-Run Lua code on another neosocksd and take the results back. `await.invoke` is designed to work on the control plane.
+Run Lua code on another neosocksd and take the results back. `await.invoke` is likely to be less efficient than `neosocksd.invoke`.
 
-Tip: If you want to implement RPC, please refer to `await.rpcall` in `libruleset.lua`.
+Tip: To implement asynchronous RPC, please refer to `await.rpcall` in `libruleset.lua`.
 
 
 ### await.sleep
@@ -508,4 +510,4 @@ end)
 
 **Description**
 
-Pause an asynchronous routine until there is nothing better to do. For example, this can be used to choose a good time to start some non-urgent tasks in the background.
+Pause an asynchronous routine until there is nothing better to do. For example, this can be used to choose a good time to do some non-urgent tasks in the background.

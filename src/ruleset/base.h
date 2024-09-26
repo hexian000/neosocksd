@@ -59,7 +59,7 @@ bool ruleset_resume(struct ruleset *r, const void *ctx, int narg, ...);
 
 int format_addr_(lua_State *L);
 
-struct dialreq *pop_dialreq_(lua_State *L, const int n);
+struct dialreq *make_dialreq_(lua_State *L, const int n);
 
 int ruleset_traceback_(lua_State *L);
 
