@@ -258,15 +258,14 @@ static void marshal_value(lua_State *restrict L, const int idx, const int depth)
 		luaL_addchar(&b, ',');
 		lua_pushvalue(L, kidx);
 	}
-	lua_pop(L, 1);
 	luaL_addchar(&b, '}');
 	luaL_pushresult(&b);
+	lua_copy(L, -1, ridx);
 	/* save as cached */
 	lua_pushvalue(L, idx);
 	lua_pushvalue(L, -2);
 	lua_rawset(L, 2);
 	/* return */
-	lua_copy(L, -1, ridx);
 	lua_settop(L, ridx);
 }
 
