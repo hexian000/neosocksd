@@ -859,15 +859,16 @@ local ruleset = {}
 _G.secrets = _G.secrets or {}
 
 local function authenticate(addr, username, password)
+    if not config.auth_required then
+        -- authenticate is not required
+        return true
+    end
     local auth = table.get(_G, "ruleset", "authenticate")
     if auth then
         return auth(addr, username, password)
     end
-    if not username then
-        return true -- authenticate is not required by protocol
-    end
-    local s = _G.secrets[username]
-    if s == true or s == password then
+    local s = table.get(_G, "secrets", username)
+    if s and (s == true or s == password) then
         return true
     end
     logf("authenticate failed: %q", username)
