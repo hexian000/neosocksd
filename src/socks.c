@@ -380,7 +380,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	ctx->dialed_fd = fd;
 	socks_sendrsp(ctx, true);
 
-	SOCKS_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
+	SOCKS_CTX_LOG_F(VERBOSE, ctx, "connected, fd=%d", fd);
 	/* cleanup before state change */
 	ev_io_stop(loop, &ctx->w_socket);
 	dialreq_free(ctx->dialreq);

@@ -67,7 +67,7 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 		return -1;
 	}
 	if (nrecv == 0) {
-		LOGD_F("recv: fd=%d EOF", fd);
+		LOGV_F("recv: fd=%d EOF", fd);
 		return -1;
 	}
 	t->buf.len += (size_t)nrecv;
@@ -192,7 +192,7 @@ static ssize_t splice_drain(struct splice_pipe *restrict pipe, const int fd)
 		return -1;
 	}
 	if (nrecv == 0) {
-		LOGD_F("pipe: recv fd=%d EOF", fd);
+		LOGV_F("pipe: recv fd=%d EOF", fd);
 		return -1;
 	}
 	pipe->len += (size_t)nrecv;
@@ -317,7 +317,7 @@ void transfer_init(
 
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 {
-	XFER_CTX_LOG(DEBUG, t, "start");
+	XFER_CTX_LOG(VERBOSE, t, "start");
 #if WITH_SPLICE
 	if (G.conf->pipe) {
 		struct splice_pipe pipe;
@@ -339,5 +339,5 @@ void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
 	}
 #endif
 	t->state = XFER_FINISHED;
-	XFER_CTX_LOG(DEBUG, t, "stop");
+	XFER_CTX_LOG(VERBOSE, t, "stop");
 }

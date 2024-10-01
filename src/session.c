@@ -40,5 +40,5 @@ void session_closeall(struct ev_loop *loop)
 		ss->close(loop, ss);
 		num++;
 	}
-	LOGI_F("%zu sessions closed", num);
+	LOGI_F("shutdown: %zu sessions closed", num);
 }

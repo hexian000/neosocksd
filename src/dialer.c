@@ -1163,12 +1163,12 @@ static void resolve_cb(
 		FAIL();
 	}
 
-	if (LOGLEVEL(VERBOSE)) {
+	if (LOGLEVEL(DEBUG)) {
 		char node_str[dialaddr->domain.len + 1 + 5 + 1];
 		dialaddr_format(dialaddr, node_str, sizeof(node_str));
 		char addr_str[64];
 		format_sa(&addr.sa, addr_str, sizeof(addr_str));
-		LOG_F(VERBOSE, "resolve: `%s' is %s", node_str, addr_str);
+		LOG_F(DEBUG, "resolve: `%s' is %s", node_str, addr_str);
 	}
 
 	if (!connect_sa(d, loop, &addr.sa)) {
