@@ -264,6 +264,8 @@ static void http_handle_stats(
 			http_resp_errpage(
 				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		}
+		RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
+		RESPHDR_FINISH(ctx->parser.wbuf);
 		return;
 	}
 	static ev_tstamp last = TSTAMP_NIL;
