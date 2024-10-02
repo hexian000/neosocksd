@@ -199,43 +199,26 @@ static void server_stats_stateful(
 }
 #undef FORMAT_BYTES
 
-static void http_handle_stats(
+static bool parse_bool(const char *s)
+{
+	return strcmp(s, "1") == 0 || strcmp(s, "y") == 0 ||
+	       strcmp(s, "yes") == 0 || strcmp(s, "on") == 0 ||
+	       strcmp(s, "t") == 0 || strcmp(s, "true") == 0;
+}
+
+static void api_get_stats(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct url *restrict uri)
 {
-	const struct http_message *restrict msg = &ctx->parser.msg;
-	bool banner = true;
-	while (uri->query != NULL) {
-		char *key, *value;
-		if (!url_query_component(&uri->query, &key, &value)) {
-			http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
-			return;
-		}
-		if (strcmp(key, "banner") == 0) {
-			if (strcmp(value, "no") == 0) {
-				banner = false;
-			}
-		}
-	}
-
+	UNUSED(uri);
 	const enum content_encodings encoding =
 		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
 			CENCODING_DEFLATE :
 			CENCODING_NONE;
-	bool stateless;
-	if (strcmp(msg->req.method, "GET") == 0) {
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-		RESPHDR_NOCACHE(ctx->parser.wbuf);
-		stateless = true;
-	} else if (strcmp(msg->req.method, "POST") == 0) {
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-		stateless = false;
-	} else {
-		http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
-		return;
-	}
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	RESPHDR_NOCACHE(ctx->parser.wbuf);
+
 	struct stream *w = content_writer(&ctx->parser.cbuf, 0, encoding);
 	if (w == NULL) {
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
@@ -245,55 +228,88 @@ static void http_handle_stats(
 	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
 	buf->len = 0;
 
-	if (banner) {
-		BUF_APPENDCONST(
-			*buf, PROJECT_NAME " " PROJECT_VER "\n"
-					   "  " PROJECT_HOMEPAGE "\n\n");
-	}
-
-	const ev_tstamp now = ev_now(loop);
+	BUF_APPENDCONST(
+		*buf, PROJECT_NAME " " PROJECT_VER "\n"
+				   "  " PROJECT_HOMEPAGE "\n\n");
 	const double uptime = ev_now(loop) - ctx->s->stats.started;
 	server_stats(buf, ctx->s->data, uptime);
 
-	if (stateless) {
-		size_t n = buf->len;
-		const int werr = stream_write(w, buf->data, &n);
-		const int cerr = stream_close(w);
-		if (werr != 0 || n < buf->len || cerr != 0) {
-			LOGE_F("stream error: %d, %zu, %d", werr, n, cerr);
-			http_resp_errpage(
-				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		}
-		RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		return;
-	}
-	static ev_tstamp last = TSTAMP_NIL;
-	const double dt = (last == TSTAMP_NIL) ? uptime : now - last;
-	last = now;
-
-	server_stats_stateful(buf, ctx->s->data, dt);
-
 	size_t n = buf->len;
-	int err = stream_write(w, buf->data, &n);
-	if (n < buf->len || err != 0) {
-		LOGE_F("stream_write error: %d, %zu/%zu", err, n, buf->len);
+	const int werr = stream_write(w, buf->data, &n);
+	const int cerr = stream_close(w);
+	if (werr != 0 || n < buf->len || cerr != 0) {
+		LOGE_F("stream error: %d, %zu, %d", werr, n, cerr);
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+	}
+	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
+	RESPHDR_FINISH(ctx->parser.wbuf);
+}
+
+static void api_post_stats(
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	struct url *restrict uri)
+{
+	bool server = true;
+#if WITH_RULESET
+	bool ruleset = (G.ruleset != NULL);
+#endif
+	while (uri->query != NULL) {
+		char *key, *value;
+		if (!url_query_component(&uri->query, &key, &value)) {
+			http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
+			return;
+		}
+		if (strcmp(key, "server") == 0) {
+			server = parse_bool(value);
+		}
+	}
+
+	const enum content_encodings encoding =
+		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
+			CENCODING_DEFLATE :
+			CENCODING_NONE;
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+
+	struct stream *w = content_writer(&ctx->parser.cbuf, 0, encoding);
+	if (w == NULL) {
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
+	/* borrow the read buffer */
+	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
+	buf->len = 0;
+
+	const ev_tstamp now = ev_now(loop);
+	const double uptime = now - ctx->s->stats.started;
+	static ev_tstamp last = TSTAMP_NIL;
+	const double dt = (last == TSTAMP_NIL) ? uptime : now - last;
+	if (server) {
+		BUF_APPENDCONST(
+			*buf, PROJECT_NAME " " PROJECT_VER "\n"
+					   "  " PROJECT_HOMEPAGE "\n\n");
+		server_stats(buf, ctx->s->data, uptime);
+		last = now;
+		server_stats_stateful(buf, ctx->s->data, dt);
+
+		size_t n = buf->len;
+		int err = stream_write(w, buf->data, &n);
+		if (n < buf->len || err != 0) {
+			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
+			       buf->len);
+			http_resp_errpage(
+				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+	}
 
 #if WITH_RULESET
-	if (G.ruleset != NULL) {
+	if (server && ruleset) {
 		const char header[] = "\n"
 				      "Ruleset Stats\n"
 				      "================\n";
-		size_t len;
-		const char *s = ruleset_stats(G.ruleset, dt, &len);
-		if (s == NULL) {
-			s = ruleset_geterror(G.ruleset, &len);
-		}
-		n = sizeof(header) - 1;
-		err = stream_write(w, header, &n);
+		size_t n = sizeof(header) - 1;
+		int err = stream_write(w, header, &n);
 		if (n < sizeof(header) - 1 || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
 			       sizeof(header) - 1);
@@ -301,8 +317,15 @@ static void http_handle_stats(
 				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
-		n = len;
-		err = stream_write(w, s, &n);
+	}
+	if (ruleset) {
+		size_t len;
+		const char *s = ruleset_stats(G.ruleset, dt, &len);
+		if (s == NULL) {
+			s = ruleset_geterror(G.ruleset, &len);
+		}
+		size_t n = len;
+		int err = stream_write(w, s, &n);
 		if (n < len || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n, len);
 			http_resp_errpage(
@@ -312,7 +335,7 @@ static void http_handle_stats(
 	}
 #endif
 
-	err = stream_close(w);
+	int err = stream_close(w);
 	if (err != 0) {
 		LOGE_F("stream_close error: %d", err);
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
@@ -324,6 +347,22 @@ static void http_handle_stats(
 	}
 	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
 	RESPHDR_FINISH(ctx->parser.wbuf);
+}
+
+static void http_handle_stats(
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	struct url *restrict uri)
+{
+	const struct http_message *restrict msg = &ctx->parser.msg;
+	if (strcmp(msg->req.method, "GET") == 0) {
+		api_get_stats(loop, ctx, uri);
+		return;
+	}
+	if (strcmp(msg->req.method, "POST") == 0) {
+		api_post_stats(loop, ctx, uri);
+		return;
+	}
+	http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
 }
 
 static bool restapi_check(

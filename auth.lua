@@ -4,12 +4,9 @@ _G.secrets = {
     ["lamer"] = "secret",
 }
 
-local RESERVED_DOMAIN = ".neosocksd.internal"
-
 _G.redirect_name = {
-    { match.host("localhost"),       rule.reject() },
-    { match.domain("localdomain"),   rule.reject() },
-    { match.domain(RESERVED_DOMAIN), rule.reject() },
+    { match.host("localhost"),     rule.reject() },
+    { match.domain("localdomain"), rule.reject() },
 }
 
 _G.route = {
