@@ -60,7 +60,7 @@ Load the posted script and use it as follows:
 3. If the field `_G.name` refers to the named module, it will be updated too.
 
 - **Path**: `/ruleset/update`
-- **Query**: `?module=name` (optional)
+- **Query**: `?module=name&chunkname=name.lua` (optional)
 - **Method**: POST
 - **Content**: Lua ruleset script or Lua module script
 - **Status**: HTTP 200, HTTP 500
