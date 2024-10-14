@@ -433,7 +433,7 @@ static int api_config_(lua_State *restrict L)
 {
 	const struct config *restrict conf = G.conf;
 	lua_createtable(L, 0, 8);
-	lua_pushinteger(L, (lua_Integer)slog_level);
+	lua_pushinteger(L, (lua_Integer)conf->log_level);
 	lua_setfield(L, -2, "loglevel");
 	lua_pushnumber(L, (lua_Number)conf->timeout);
 	lua_setfield(L, -2, "timeout");

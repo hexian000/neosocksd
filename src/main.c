@@ -354,8 +354,7 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 #undef OPT_REQUIRE_ARG
 #undef OPT_ARG_ERROR
-	slog_level = CLAMP(
-		conf->log_level, LOG_LEVEL_SILENCE, LOG_LEVEL_VERYVERBOSE);
+	slog_setlevel(conf->log_level);
 }
 
 int main(int argc, char **argv)

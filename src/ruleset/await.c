@@ -5,8 +5,6 @@
 
 #include "base.h"
 
-#include "utils/buffer.h"
-#include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
