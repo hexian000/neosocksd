@@ -232,7 +232,7 @@ static bool make_request(
 	if (encoding_str != NULL) {
 		BUF_APPENDF(p->wbuf, "Content-Encoding: %s\r\n", encoding_str);
 	}
-	BUF_APPENDCONST(p->wbuf, "\r\n");
+	BUF_APPENDSTR(p->wbuf, "\r\n");
 	LOG_TXT_F(
 		VERYVERBOSE, (const char *)p->wbuf.data, p->wbuf.len,
 		"request header: %zu bytes", p->wbuf.len);

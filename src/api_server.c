@@ -228,7 +228,7 @@ static void api_get_stats(
 	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
 	buf->len = 0;
 
-	BUF_APPENDCONST(
+	BUF_APPENDSTR(
 		*buf, PROJECT_NAME " " PROJECT_VER "\n"
 				   "  " PROJECT_HOMEPAGE "\n\n");
 	const double uptime = ev_now(loop) - ctx->s->stats.started;
@@ -285,7 +285,7 @@ static void api_post_stats(
 	static ev_tstamp last = TSTAMP_NIL;
 	const double dt = (last == TSTAMP_NIL) ? uptime : now - last;
 	if (server) {
-		BUF_APPENDCONST(
+		BUF_APPENDSTR(
 			*buf, PROJECT_NAME " " PROJECT_VER "\n"
 					   "  " PROJECT_HOMEPAGE "\n\n");
 		server_stats(buf, ctx->s->data, uptime);
@@ -511,7 +511,7 @@ static void handle_ruleset_invoke(
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 		RESPHDR_FINISH(ctx->parser.wbuf);
 		BUF_APPEND(ctx->parser.wbuf, err, len);
-		BUF_APPENDCONST(ctx->parser.wbuf, "\n");
+		BUF_APPENDSTR(ctx->parser.wbuf, "\n");
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
@@ -548,7 +548,7 @@ static void handle_ruleset_update(
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 		RESPHDR_FINISH(ctx->parser.wbuf);
 		BUF_APPEND(ctx->parser.wbuf, err, len);
-		BUF_APPENDCONST(ctx->parser.wbuf, "\n");
+		BUF_APPENDSTR(ctx->parser.wbuf, "\n");
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
@@ -598,7 +598,7 @@ static void http_handle_ruleset(
 	if (ruleset == NULL) {
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPENDCONST(
+		BUF_APPENDSTR(
 			ctx->parser.wbuf,
 			"ruleset not enabled, restart with -r\n");
 		return;

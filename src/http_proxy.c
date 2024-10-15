@@ -171,7 +171,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	HTTP_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
 
 	ctx->dialed_fd = fd;
-	BUF_APPENDCONST(
+	BUF_APPENDSTR(
 		ctx->parser.wbuf,
 		"HTTP/1.1 200 Connection established\r\n\r\n");
 	ev_io_start(loop, &ctx->w_send);
@@ -278,7 +278,7 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	if (G.conf->auth_required && (username == NULL || password == NULL)) {
 		RESPHDR_BEGIN(
 			ctx->parser.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
-		BUF_APPENDCONST(
+		BUF_APPENDSTR(
 			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
 		RESPHDR_FINISH(ctx->parser.wbuf);
 		return;

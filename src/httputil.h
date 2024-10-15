@@ -236,7 +236,7 @@ struct stream *content_writer(
 	} while (0)
 
 #define RESPHDR_CPLAINTEXT(buf)                                                \
-	BUF_APPENDCONST(                                                       \
+	BUF_APPENDSTR(                                                         \
 		(buf), "Content-Type: text/plain; charset=utf-8\r\n"           \
 		       "X-Content-Type-Options: nosniff\r\n")
 
@@ -249,10 +249,9 @@ struct stream *content_writer(
 #define RESPHDR_CENCODING(buf, encoding)                                       \
 	BUF_APPENDF((buf), "Content-Encoding: %s\r\n", (encoding))
 
-#define RESPHDR_NOCACHE(buf)                                                   \
-	BUF_APPENDCONST((buf), "Cache-Control: no-store\r\n")
+#define RESPHDR_NOCACHE(buf) BUF_APPENDSTR((buf), "Cache-Control: no-store\r\n")
 
-#define RESPHDR_FINISH(buf) BUF_APPENDCONST(buf, "\r\n")
+#define RESPHDR_FINISH(buf) BUF_APPENDSTR(buf, "\r\n")
 
 #if WITH_RULESET
 #define MIME_RPCALL_TYPE "application"
