@@ -30,6 +30,7 @@ local function is_disabled()
 end
 
 ruleset.API_ENDPOINT = "api.neosocksd.internal:80"
+ruleset.RESERVED_DOMAIN = ".neosocksd.internal"
 
 -- 1. _G.redirect*: match the raw request "host:port"
 -- in {matcher, action, optional log tag}
@@ -38,18 +39,19 @@ ruleset.API_ENDPOINT = "api.neosocksd.internal:80"
 -- _G.redirect_name: for requests with name string
 _G.redirect_name = {
     -- access mDNS sites directly
-    { match.domain(".local"),            rule.direct() },
+    { match.domain(".local"),                rule.direct() },
     -- loopback, rule.redirect(addr, proxy1, proxy2, ...)
-    { match.exact("peer0.lan:22"),       rule.redirect("localhost:22"),          "ssh" },
-    { match.exact("peer0.lan:80"),       rule.redirect("localhost:80"),          "web" },
-    { match.exact("peer0.lan:443"),      rule.reject() },
+    { match.exact("peer0.lan:22"),           rule.redirect("host-gateway:22"),       "ssh" },
+    { match.exact("peer0.lan:80"),           rule.redirect("nginx:80"),              "web" },
+    { match.exact("peer0.lan:443"),          rule.redirect("nginx:443"),             "web" },
     -- internal assignment
-    { match.exact(ruleset.API_ENDPOINT), rule.redirect("127.0.1.1:9080") },
-    { match.agent(),                     rule.agent() },
+    { match.exact(ruleset.API_ENDPOINT),     rule.redirect("127.0.1.1:9080") },
+    { match.domain(ruleset.RESERVED_DOMAIN), rule.reject() },
+    { match.agent(),                         rule.agent() },
     -- global condition
-    { is_disabled,                       rule.reject(),                          "off" },
+    { is_disabled,                           rule.reject(),                          "off" },
     -- dynamically loaded big domains list, rule.proxy(proxy1, proxy2, ...)
-    { composite.maybe(_G, "biglist"),    rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
+    { composite.maybe(_G, "biglist"),        rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
     -- if in _G.hosts, go to _G.route/_G.route6
     -- otherwise, go to _G.route_default
 }
