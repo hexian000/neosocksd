@@ -544,8 +544,16 @@ static void init_registry(lua_State *restrict L)
 static int ruleset_luainit_(lua_State *restrict L)
 {
 	init_registry(L);
-	/* load all libraries */
+	/* load Lua libraries */
 	luaL_openlibs(L);
+	/* restrict package searcher */
+	lua_getglobal(L, "package");
+	lua_pushliteral(L, "?.lua");
+	lua_setfield(L, -2, "path");
+	lua_pushliteral(L, "?.so");
+	lua_setfield(L, -2, "cpath");
+	lua_pop(L, 1);
+	/* load built-in libraries */
 	const luaL_Reg libs[] = {
 		{ "neosocksd", luaopen_neosocksd },
 		{ "await", luaopen_await },
