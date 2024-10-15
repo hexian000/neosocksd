@@ -52,8 +52,7 @@ For advanced scripting usage, see [scripting](#scripting).
 ./neosocksd --http -l 0.0.0.0:8080        # HTTP CONNECT server
 
 # Forward connection over proxy chain
-# Tip: forwarding in SOCKS5 needs 1 more roundtrip than SOCKS4A/HTTP, so is usually not a good idea.
-./neosocksd -l 0.0.0.0:12345 -f 192.168.2.2:12345 -x "socks4a://192.168.1.1:1080,http://192.168.2.1:8080"
+./neosocksd -l 0.0.0.0:12345 -f 192.168.2.2:12345 -x "socks5://user:pass@192.168.1.1:1080,http://192.168.2.1:8080"
 
 # Convert proxy protocol to SOCKS4A
 ./neosocksd -l 127.0.0.1:1080 -x socks4a://203.0.113.1:1080 -d
@@ -93,19 +92,21 @@ sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
 Use the following command to update rule set on remote instance without restarting:
 
 ```sh
-# Reload rule set
-curl -v http://127.0.1.1:9080/ruleset/update \
+# Update the rule set
+curl "http://127.0.1.1:9080/ruleset/update" \
     --data-binary @ruleset.lua
 
-# Reload Lua module
-curl -v http://127.0.1.1:9080/ruleset/update?module=libruleset \
+# Update a module
+curl "http://127.0.1.1:9080/ruleset/update?module=libruleset" \
     --data-binary @libruleset.lua
 
+# Update gzip compressed module
+curl "http://127.0.1.1:9080/ruleset/update?module=biglist&chunkname=biglist.lua" \
+    -H "Content-Encoding: gzip" --data-binary @biglist.lua.gz
+
 # Run any script on the server
-curl -v http://127.0.1.1:9080/ruleset/invoke \
-    -d "_G.some_switch = true"
-curl -v http://127.0.1.1:9080/ruleset/invoke \
-    --data-binary @patch.lua
+curl "http://127.0.1.1:9080/ruleset/invoke" -d "_G.some_switch = true"
+curl "http://127.0.1.1:9080/ruleset/invoke" --data-binary @patch.lua
 ```
 
 

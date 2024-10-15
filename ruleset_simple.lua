@@ -2,16 +2,20 @@ _G.libruleset    = require("libruleset")
 
 -- [[ configurations ]] --
 
--- 1. _G.redirect*: match the raw request "host:port"
+-- 1. _G.redirect*: match the full request "host:port"
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
 
 -- _G.redirect_name: for requests with name string
 _G.redirect_name = {
     -- access mDNS sites directly
-    { match.domain(".local"),   rule.direct() },
-    -- admin routes
-    { match.host("server.lan"), rule.redirect("127.0.0.1:"), "localhost" },
+    { match.domain(".local"),        rule.direct() },
+    -- loopback
+    { match.exact("server.lan:22"),  rule.redirect("127.0.0.1:22"), "ssh" },
+    { match.exact("server.lan:80"),  rule.redirect("127.0.0.1:80"), "web" },
+    { match.exact("server.lan:443"), rule.reject(),                 "web" },
+    -- self assignment
+    { match.host("server.lan"),      rule.redirect("127.0.0.1:"),   "localhost" },
     -- if in _G.hosts, go to _G.route/_G.route6
     -- otherwise, go to _G.route_default
 }
@@ -31,7 +35,7 @@ _G.redirect6     = {
 
 -- 2. _G.hosts: map unmatched hosts
 _G.hosts         = {
-    ["server.lan"] = "127.0.0.1",
+    ["site1.lan"] = "192.168.1.100",
 }
 
 -- 3. _G.route*: match the IP address
@@ -55,7 +59,7 @@ _G.route6        = {
 
 -- 4. the global default applies to any unmatched requests
 -- in {action, optional log tag}
-_G.route_default = { rule.direct(), "default" }
+_G.route_default = { rule.proxy("socks5://user:pass@internet-gateway.lan:1080"), "internet" }
 
 local function main(...)
     pcall(collectgarbage, "generational")
