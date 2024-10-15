@@ -24,10 +24,6 @@ A lightweight unencrypted proxy server that can run Lua script as rule set.
 
 neosocksd is an unencrypted proxy server that allows highly customized rule sets in Lua.
 
-If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](ruleset_simple.lua).
-
-For advanced scripting usage, see [scripting](#scripting).
-
 
 ## Features
 
@@ -70,6 +66,8 @@ sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 \
 See `./neosocksd -h` for more details.
 
 ### Scripting
+
+If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](ruleset_simple.lua).
 
 First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
 
