@@ -234,7 +234,7 @@ static bool make_request(
 	}
 	BUF_APPENDCONST(p->wbuf, "\r\n");
 	LOG_TXT_F(
-		VERYVERBOSE, p->wbuf.data, p->wbuf.len,
+		VERYVERBOSE, (const char *)p->wbuf.data, p->wbuf.len,
 		"request header: %zu bytes", p->wbuf.len);
 	LOG_BIN_F(
 		VERYVERBOSE, VBUF_DATA(p->cbuf), VBUF_LEN(p->cbuf),
