@@ -7,7 +7,6 @@
 
 A lightweight unencrypted proxy server that can run Lua script as rule set.
 
-- [Introduction](#introduction)
 - [Features](#features)
 - [Usage](#usage)
   - [Command Line Arguments](#command-line-arguments)
@@ -18,11 +17,6 @@ A lightweight unencrypted proxy server that can run Lua script as rule set.
   - [Dependencies](#dependencies)
   - [Building with CMake](#building-with-cmake)
 - [Credits](#credits)
-
-
-## Introduction
-
-neosocksd is an unencrypted proxy server that allows highly customized rule sets in Lua.
 
 
 ## Features
