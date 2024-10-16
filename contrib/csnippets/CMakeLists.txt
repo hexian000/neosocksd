@@ -3,10 +3,10 @@ target_include_directories(csnippets BEFORE PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(csnippets PUBLIC "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 target_compile_options(csnippets PRIVATE -pedantic -Wall -Wextra)
 
-if(TARGET_LINUX)
-    target_compile_definitions(csnippets PRIVATE _GNU_SOURCE)
-else()
+if(FORCE_POSIX)
     target_compile_definitions(csnippets PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(csnippets PRIVATE _GNU_SOURCE)
 endif()
 
 add_subdirectory(codec)
