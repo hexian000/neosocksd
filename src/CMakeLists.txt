@@ -28,6 +28,7 @@ else()
 endif()
 
 include(CheckSymbolExists)
+check_symbol_exists(clock_gettime "time.h" HAVE_CLOCK_GETTIME)
 check_symbol_exists(pipe2 "unistd.h" HAVE_PIPE2)
 check_symbol_exists(splice "fcntl.h" HAVE_SPLICE)
 check_symbol_exists(IP_TRANSPARENT "netinet/in.h" HAVE_IP_TRANSPARENT)
