@@ -14,7 +14,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     nice cmake --build "build"
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "xs")
     # cross compiling, environment vars need to be set
@@ -27,7 +27,7 @@ case "$1" in
         -DBUILD_STATIC=ON \
         -S . -B "build"
     nice cmake --build "build"
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "r")
     rm -rf "build" && mkdir -p "build"
@@ -36,7 +36,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     nice cmake --build "build"
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "s")
     rm -rf "build" && mkdir -p "build"
@@ -46,7 +46,7 @@ case "$1" in
         -DBUILD_STATIC=ON \
         -S . -B "build"
     nice cmake --build "build"
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "p")
     rm -rf "build" && mkdir -p "build"
@@ -56,7 +56,7 @@ case "$1" in
         -S . -B "build"
     nice cmake --build "build"
     (cd "build/src" && objdump -drwS "neosocksd" >"neosocksd.S")
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "posix")
     # force POSIX APIs
@@ -67,7 +67,7 @@ case "$1" in
         -DFORCE_POSIX=ON \
         -S . -B "build"
     nice cmake --build "build"
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "clang")
     # rebuild with Linux clang/lld
@@ -80,7 +80,7 @@ case "$1" in
         -S . -B "build"
     nice cmake --build "build"
     (cd "build/src" && llvm-objdump -drwS "neosocksd" >"neosocksd.S")
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "msys2")
     rm -rf "build" && mkdir "build"
@@ -94,7 +94,7 @@ case "$1" in
     zip -9j "build/neosocksd-win32.${HOST}.zip" \
         "/usr/bin/msys-2.0.dll" \
         "/usr/bin/msys-cares-2.dll" \
-        "build/src/neosocksd.exe"
+        "build/bin/neosocksd.exe"
     ls -lh "build/neosocksd-win32.${HOST}.zip"
     ;;
 "ndk")
@@ -126,7 +126,7 @@ case "$1" in
         -S . -B "build"
     ln -sf build/compile_commands.json compile_commands.json
     nice cmake --build "build" --parallel
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "san")
     # rebuild with clang & sanitizers
@@ -139,7 +139,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     nice cmake --build "build" --parallel
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 "c")
     rm -rf "build" "compile_commands.json"
@@ -153,6 +153,6 @@ case "$1" in
     ln -sf build/compile_commands.json compile_commands.json
     nice cmake --build "build" --parallel
     # cd "build/src/tests" && ctest
-    ls -lh "build/src/neosocksd"
+    ls -lh "build/bin/neosocksd"
     ;;
 esac
