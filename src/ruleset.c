@@ -42,6 +42,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MT_RPCALL "rpcall"
 
@@ -474,6 +475,13 @@ static int api_stats_(lua_State *restrict L)
 	lua_setfield(L, -2, "byt_down");
 	lua_pushnumber(L, (lua_Number)(ev_now(r->loop) - stats->started));
 	lua_setfield(L, -2, "uptime");
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_PROCESS_CPUTIME_ID)
+	struct timespec t;
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t) == 0) {
+		lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
+		lua_setfield(L, -2, "cputime");
+	}
+#endif
 	return 1;
 }
 
