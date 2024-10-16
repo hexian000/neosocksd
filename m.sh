@@ -55,7 +55,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     nice cmake --build "build"
-    (cd "build/src" && objdump -drwS "neosocksd" >"neosocksd.S")
+    (cd "build/bin" && objdump -drwS "neosocksd" >"neosocksd.S")
     ls -lh "build/bin/neosocksd"
     ;;
 "posix")
@@ -79,7 +79,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     nice cmake --build "build"
-    (cd "build/src" && llvm-objdump -drwS "neosocksd" >"neosocksd.S")
+    (cd "build/bin" && llvm-objdump -drwS "neosocksd" >"neosocksd.S")
     ls -lh "build/bin/neosocksd"
     ;;
 "msys2")
@@ -110,7 +110,7 @@ case "$1" in
         -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
     nice cmake --build "build"
-    ls -lh "build/src/kcptun-libev"
+    ls -lh "build/bin/neosocksd"
     ;;
 "d")
     if command -v clang-format >/dev/null; then
