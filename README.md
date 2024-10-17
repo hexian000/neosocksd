@@ -23,12 +23,12 @@ A lightweight unencrypted proxy server that can run Lua script as rule set.
 
 - Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (TCP only), HTTP CONNECT, transparent proxy (Linux).
 - High performance: transfer over 10 Gbps per x86 core on Linux. (with `--pipe`, 2024)
+- Tiny: the executable is less than 1 MiB on most platforms.
 - Basic security: supports username/password authentication.
 - Flexible: Lua scripts powered rule set.
-- Versatile: [working demo](agent.lua) of autonomous peer discovery and connection relay. 
+- Versatile: [working demo](agent.lua) of peer discovery and connection relay.
 - Hot reloadable: RESTful API for monitoring and updating Lua modules.
-- Morden: Full IPv6 support. Horizontally scalable.
-- Tiny: embedded systems friendly.
+- Morden: full IPv6 support & horizontally scalable.
 - Conforming to: ISO C11, POSIX.1-2008.
 
 
@@ -61,14 +61,15 @@ See `./neosocksd -h` for more details.
 
 ### Scripting
 
+First, deploy neosocksd with `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
+
 If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](ruleset_simple.lua).
 
-First, deploy neosocksd with `ruleset.lua` and `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
-
 - [ruleset.lua](ruleset.lua) is a fancy demo script.
+- [agent.lua](agent.lua) implements peer discovery and connection relay based on rule set RPC.
 - [libruleset.lua](libruleset.lua) provides rule table facilities.
-- [agent.lua](agent.lua) implements autonomous peer discovery and connection relay.
-- Developer manual: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference), [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
+- [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference)
+- [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
 Use the following command to start the server with the Lua scripts in current directory:
 
