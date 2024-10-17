@@ -134,7 +134,8 @@ function rlist:get(i)
             pos = pos + len
         end
         return self[pos]
-    elseif -len <= i and i <= -1 then
+    end
+    if -len <= i and i <= -1 then
         local pos = self.pos - (len + i + 1)
         if pos < 1 then
             pos = pos + len
@@ -658,6 +659,31 @@ function rule.proxy(...)
     end
 end
 
+function rule.rewrite(pattern, repl, ...)
+    local chain = list:new({ ... }):reverse()
+    return function(addr)
+        return addr:gsub(pattern, repl), chain:unpack()
+    end
+end
+
+function rule.loopback(pattern, repl)
+    return function(addr)
+        local ruleset = table.get(_G, "ruleset")
+        if not ruleset then
+            return nil
+        end
+        addr = addr:gsub(pattern, repl)
+        local host, _ = splithostport(addr)
+        if parse_ipv4(host) then
+            return ruleset.route(addr)
+        end
+        if parse_ipv6(host) then
+            return ruleset.route6(addr)
+        end
+        return ruleset.resolve(addr)
+    end
+end
+
 _G.rule = rule
 
 -- [[ load balancing actions ]] --
@@ -815,7 +841,8 @@ local function resolve_(addr)
     -- check if the addr is a raw address
     if parse_ipv4(host) then
         return route_(addr)
-    elseif parse_ipv6(host) then
+    end
+    if parse_ipv6(host) then
         return route6_(addr)
     end
     -- global default
