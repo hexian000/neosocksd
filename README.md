@@ -5,7 +5,7 @@
 [![Downloads](https://img.shields.io/github/downloads/hexian000/neosocksd/total.svg)](https://github.com/hexian000/neosocksd/releases)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-A lightweight unencrypted proxy server that can run Lua script as rule set.
+A fast and lightweight proxy server that can run Lua script as rule set.
 
 - [Features](#features)
 - [Usage](#usage)
@@ -24,12 +24,13 @@ A lightweight unencrypted proxy server that can run Lua script as rule set.
 - Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (TCP only), HTTP CONNECT, transparent proxy (Linux).
 - High performance: transfer over 10 Gbps per x86 core on Linux. (with `--pipe`, 2024)
 - Tiny: the executable is around 500 KiB on most platforms.
-- Basic security: supports username/password authentication.
 - Flexible: Lua scripts powered rule set.
 - Versatile: RPC facilities for scripting, see [scripting](#scripting).
 - Hot reloadable: RESTful API for monitoring and updating Lua modules.
 - Morden: full IPv6 support & horizontally scalable.
 - Conforming to: ISO C11, POSIX.1-2008. Additional features may be available on certain platforms.
+
+neosocksd only supports basic authentication (plain text username and password) and does not natively support any encryption. Feel free to use with other transport layer utilities, such as [tlswrapper](https://github.com/hexian000/tlswrapper) or [kcptun-libev](https://github.com/hexian000/kcptun-libev).
 
 
 ## Usage
