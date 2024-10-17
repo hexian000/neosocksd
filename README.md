@@ -45,16 +45,16 @@ A lightweight unencrypted proxy server that can run Lua script as rule set.
 ./neosocksd -l 0.0.0.0:12345 -f 192.168.2.2:12345 -x "socks5://user:pass@192.168.1.1:1080,http://192.168.2.1:8080"
 
 # Convert proxy protocol to SOCKS4A
-./neosocksd -l 127.0.0.1:1080 -x socks4a://203.0.113.1:1080 -d
-./neosocksd --http -l 127.0.0.1:8080 -x socks4a://203.0.113.1:1080 -d
+./neosocksd -l 127.0.0.1:1080 -x socks4a://203.0.113.1:1080
+./neosocksd --http -l 127.0.0.1:8080 -x socks4a://203.0.113.1:1080
 
 # Start a hardened load balancer in the background
 sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 \
-    --max-startups 60:30:100 -l :80 -t 15 --proto-timeout \
-    -f 10.0.0.1:30001 --api 127.0.1.1:9080 -r lb.lua
+    --max-startups 60:30:100 --proto-timeout -t 15 \
+    -l :80 -f : -r lb.lua --api 127.0.1.1:9080
 
 # Start a rule set powered SOCKS4 / SOCKS4A / SOCKS5 server
-./neosocksd -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua -d
+./neosocksd -d -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua
 ```
 
 See `./neosocksd -h` for more details.

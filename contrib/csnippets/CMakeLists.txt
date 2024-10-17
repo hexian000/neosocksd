@@ -8,6 +8,7 @@ if(FORCE_POSIX)
 else()
     target_compile_definitions(csnippets PRIVATE _GNU_SOURCE)
 endif()
+target_compile_definitions(csnippets PUBLIC SLOG_MT_SAFE=0)
 
 add_subdirectory(codec)
 add_subdirectory(io)
