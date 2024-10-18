@@ -244,6 +244,9 @@ static bool req_connect(
 		ctx->dialreq = req;
 		return true;
 	}
+#else
+	(void)username;
+	(void)password;
 #endif
 	ctx->dialreq = make_dialreq(addr_str);
 	return true;

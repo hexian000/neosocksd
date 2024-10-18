@@ -185,6 +185,12 @@ if(ENABLE_JEMALLOC)
     endif()
 endif()
 
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    if(NOT ENABLE_SANITIZERS)
+        set(WITH_CRASH_HANDLER TRUE)
+    endif()
+endif()
+
 include(CheckLibraryExists)
 check_library_exists(m ldexp "" LIBM)
 if(LIBM)

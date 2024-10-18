@@ -26,6 +26,10 @@ struct server;
 struct session;
 
 extern struct globals {
+	struct {
+		int argc;
+		char **argv;
+	};
 	const struct config *conf;
 	struct resolver *resolver;
 #if WITH_RULESET

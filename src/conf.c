@@ -92,10 +92,12 @@ bool conf_check(const struct config *restrict conf)
 		LOGW("tcp recv buffer is too small");
 	}
 	if (conf->auth_required) {
+#if WITH_RULESET
 		if (conf->ruleset == NULL) {
 			LOGE("ruleset must be enabled for authentication");
 			return false;
 		}
+#endif
 		if (conf->forward != NULL
 #if WITH_TPROXY
 		    || conf->transparent

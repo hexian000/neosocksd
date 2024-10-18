@@ -49,7 +49,9 @@ struct api_ctx {
 	union sockaddr_max accepted_sa;
 	struct ev_timer w_timeout;
 	struct ev_io w_recv, w_send;
+#if WITH_RULESET
 	struct rpcall_state *rpcstate;
+#endif
 	struct dialreq *dialreq;
 	struct dialer dialer;
 	struct http_parser parser;
@@ -704,10 +706,12 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
 static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
+#if WITH_RULESET
 	if (ctx->rpcstate != NULL) {
 		ruleset_rpcall_cancel(ctx->rpcstate);
 		ctx->rpcstate = NULL;
 	}
+#endif
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
@@ -916,7 +920,9 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 		ev_io_init(w_send, send_cb, fd, EV_WRITE);
 		w_send->data = ctx;
 	}
+#if WITH_RULESET
 	ctx->rpcstate = NULL;
+#endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
 	ctx->ss.close = api_ss_close;

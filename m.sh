@@ -58,6 +58,17 @@ case "$1" in
     (cd "build/bin" && objdump -drwS "neosocksd" >"neosocksd.S")
     ls -lh "build/bin/neosocksd"
     ;;
+"min")
+    # rebuild for minimized size
+    rm -rf "build" && mkdir "build"
+    cmake -G "${GENERATOR}" \
+        -DCMAKE_BUILD_TYPE="MinSizeRel" \
+        -DENABLE_RULESET=OFF \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -S "." -B "build"
+    nice cmake --build "build"
+    ls -lh "build/bin/neosocksd"
+    ;;
 "posix")
     # force POSIX APIs
     rm -rf "build" && mkdir -p "build"
@@ -143,14 +154,7 @@ case "$1" in
     rm -rf "build" "compile_commands.json"
     ;;
 *)
-    mkdir -p "build"
-    cmake -G "${GENERATOR}" \
-        -DCMAKE_BUILD_TYPE="Debug" \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-        -S . -B "build"
-    ln -sf build/compile_commands.json compile_commands.json
     nice cmake --build "build" --parallel
-    # cd "build/src/tests" && ctest
     ls -lh "build/bin/neosocksd"
     ;;
 esac
