@@ -90,29 +90,32 @@ void pipe_shrink(const size_t count)
 static void crash_handler(int signo)
 {
 	LOG_STACK_F(FATAL, 2, "FATAL ERROR: %s", strsignal(signo));
-	_Exit(EXIT_FAILURE);
+	struct sigaction act = {
+		.sa_handler = SIG_DFL,
+	};
+	if (sigaction(signo, &act, NULL) != 0 || raise(signo) != 0) {
+		_Exit(EXIT_FAILURE);
+	}
 }
 
-static void crash_handler_init(void)
+static void set_crash_handler(bool enabled)
 {
-	struct sigaction crash = {
-		.sa_handler = crash_handler,
+	struct sigaction act = {
+		.sa_handler = enabled ? crash_handler : SIG_DFL,
 	};
 #define SET_SIGACTION(sig, action)                                             \
 	if (sigaction((sig), (action), NULL) != 0) {                           \
 		const int err = errno;                                         \
-		FAILMSGF("sigaction: %s", strerror(err));                      \
+		LOGE_F("sigaction: %s", strerror(err));                        \
 	}
-	SET_SIGACTION(SIGABRT, &crash);
-	SET_SIGACTION(SIGBUS, &crash);
-	SET_SIGACTION(SIGFPE, &crash);
-	SET_SIGACTION(SIGILL, &crash);
-	SET_SIGACTION(SIGQUIT, &crash);
-	SET_SIGACTION(SIGSEGV, &crash);
-	SET_SIGACTION(SIGSYS, &crash);
-	SET_SIGACTION(SIGTRAP, &crash);
-	SET_SIGACTION(SIGXCPU, &crash);
-	SET_SIGACTION(SIGXFSZ, &crash);
+	SET_SIGACTION(SIGQUIT, &act);
+	SET_SIGACTION(SIGILL, &act);
+	SET_SIGACTION(SIGTRAP, &act);
+	SET_SIGACTION(SIGABRT, &act);
+	SET_SIGACTION(SIGBUS, &act);
+	SET_SIGACTION(SIGFPE, &act);
+	SET_SIGACTION(SIGSEGV, &act);
+	SET_SIGACTION(SIGSYS, &act);
 #undef SET_SIGACTION
 }
 #endif /* WITH_CRASH_HANDLER */
@@ -125,8 +128,8 @@ static void crash_handler_init(void)
 
 void init(int argc, char **argv)
 {
-	G.argc = argc;
-	G.argv = argv;
+	(void)argc;
+	(void)argv;
 	(void)setlocale(LC_ALL, "");
 	slog_setoutput(SLOG_OUTPUT_FILE, stdout);
 	{
@@ -146,9 +149,6 @@ void init(int argc, char **argv)
 		const int err = errno;
 		FAILMSGF("sigaction: %s", strerror(err));
 	}
-#if WITH_CRASH_HANDLER
-	crash_handler_init();
-#endif
 }
 
 static void unloadlibs(void);
@@ -167,6 +167,9 @@ void loadlibs(void)
 			FAILMSGF("atexit: %d", ret);
 		}
 	}
+#if WITH_CRASH_HANDLER
+	set_crash_handler(true);
+#endif
 	srand64((uint64_t)time(NULL));
 
 	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);
