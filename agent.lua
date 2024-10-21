@@ -224,9 +224,12 @@ end
 
 function agent.probe(peername)
     assert(_G.peerdb[peername], string.format("unknown peer %q", peername))
-    local errors = list:new()
+    local t, errors = {}, list:new()
     for connid, _ in pairs(agent.conns) do
-        local err = probe_via(connid, peername)
+        t[connid] = async(probe_via, connid, peername)
+    end
+    for connid, r in pairs(t) do
+        local _, err = r:wait()
         if err then
             errors:insertf("[%s] %q", connid, err)
         end
