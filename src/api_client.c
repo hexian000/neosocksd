@@ -51,7 +51,10 @@ static void api_client_close(
 	ev_timer_stop(loop, &ctx->w_timeout);
 	if (ctx->state == STATE_CLIENT_CONNECT) {
 		dialer_cancel(&ctx->dialer, loop);
+	}
+	if (ctx->dialreq != NULL) {
 		dialreq_free(ctx->dialreq);
+		ctx->dialreq = NULL;
 	}
 	if (ctx->state >= STATE_CLIENT_REQUEST) {
 		ev_io_stop(loop, &ctx->w_socket);
@@ -186,6 +189,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		       strerror(ctx->dialer.syserr));
 		API_RETURN_ERROR(loop, ctx, "failed connecting to server");
 	}
+	ASSERT(ctx->dialreq != NULL);
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
 
