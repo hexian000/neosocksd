@@ -159,7 +159,7 @@ static void
 socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 {
 	SOCKS_CTX_LOG_F(
-		DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
 		ctx->state);
 	socks_ctx_stop(loop, ctx);
 	socks_ctx_free(ctx);
@@ -171,6 +171,18 @@ socks_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 	struct socks_ctx *restrict ctx =
 		DOWNCAST(struct session, struct socks_ctx, ss, ss);
 	socks_ctx_close(loop, ctx);
+}
+
+static void on_established(struct ev_loop *loop, struct socks_ctx *restrict ctx)
+{
+	ev_timer_stop(loop, &ctx->w_timeout);
+
+	struct server_stats *restrict stats = &ctx->s->stats;
+	stats->num_halfopen--;
+	stats->num_sessions++;
+	stats->num_success++;
+	SOCKS_CTX_LOG_F(
+		DEBUG, ctx, "established, %zu active", stats->num_sessions);
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -188,14 +200,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 	    ctx->uplink.state == XFER_CONNECTED &&
 	    ctx->downlink.state == XFER_CONNECTED) {
 		ctx->state = STATE_ESTABLISHED;
-		struct server_stats *restrict stats = &ctx->s->stats;
-		stats->num_halfopen--;
-		stats->num_sessions++;
-		stats->num_success++;
-		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "established, %zu active",
-			stats->num_sessions);
-		ev_timer_stop(loop, &ctx->w_timeout);
+		on_established(loop, ctx);
 		return;
 	}
 }
@@ -385,24 +390,18 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	ev_io_stop(loop, &ctx->w_socket);
 	dialreq_free(ctx->dialreq);
 
-	struct server_stats *restrict stats = &ctx->s->stats;
 	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
 	} else {
-		ev_timer_stop(loop, &ctx->w_timeout);
 		ctx->state = STATE_ESTABLISHED;
-		stats->num_halfopen--;
-		stats->num_sessions++;
-		stats->num_success++;
-		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "established, %zu active",
-			stats->num_sessions);
+		on_established(loop, ctx);
 	}
 
 	const struct event_cb cb = {
 		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};
+	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
 		&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd,
 		&stats->byt_up);
@@ -834,6 +833,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	ctx->dialreq = req;
 
+	SOCKS_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
 	dialer_start(&ctx->dialer, loop, req);
 }

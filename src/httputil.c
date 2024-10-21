@@ -225,11 +225,11 @@ static bool recv_request(struct http_parser *restrict p)
 	size_t n = p->rbuf.cap - p->rbuf.len - 1;
 	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
 	if (err != 0) {
-		LOGE_F("recv: fd=%d %s", p->fd, strerror(err));
+		LOGD_F("recv: fd=%d %s", p->fd, strerror(err));
 		return false;
 	}
 	if (n == 0) {
-		LOGE_F("recv: fd=%d EOF", p->fd);
+		LOGV_F("recv: fd=%d EOF", p->fd);
 		return false;
 	}
 	p->rbuf.len += n;
@@ -243,11 +243,11 @@ static bool recv_content(struct http_parser *restrict p)
 	size_t n = cbuf->cap - cbuf->len;
 	const int err = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
 	if (err != 0) {
-		LOGE_F("recv: fd=%d %s", p->fd, strerror(err));
+		LOGD_F("recv: fd=%d %s", p->fd, strerror(err));
 		return false;
 	}
 	if (n == 0) {
-		LOGE_F("recv: fd=%d EOF", p->fd);
+		LOGV_F("recv: fd=%d EOF", p->fd);
 		return false;
 	}
 	cbuf->len += n;

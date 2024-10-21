@@ -969,7 +969,7 @@ static int dialer_recv(struct dialer *restrict d)
 		return -1;
 	}
 	if (nrecv == 0) {
-		DIALER_LOG(ERROR, d, "early EOF");
+		DIALER_LOG(DEBUG, d, "early EOF");
 		return -1;
 	}
 	const int sockerr = socket_get_error(fd);

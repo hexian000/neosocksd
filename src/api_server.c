@@ -749,7 +749,7 @@ static void api_ctx_free(struct api_ctx *restrict ctx)
 static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	API_CTX_LOG_F(
-		DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
 		ctx->state);
 	api_ctx_stop(loop, ctx);
 	api_ctx_free(ctx);

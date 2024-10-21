@@ -376,7 +376,7 @@ int socket_recv(const int fd, void *buf, size_t *len)
 			return err;
 		}
 		if (nrecv == 0) {
-			LOGD_F("recv: fd=%d EOF", fd);
+			LOGV_F("recv: fd=%d EOF", fd);
 			break;
 		}
 		b += nrecv;

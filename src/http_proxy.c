@@ -137,7 +137,7 @@ static void http_ctx_free(struct http_ctx *restrict ctx)
 static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	HTTP_CTX_LOG_F(
-		DEBUG, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
 		ctx->state);
 	http_ctx_stop(loop, ctx);
 	http_ctx_free(ctx);
@@ -295,6 +295,7 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
+	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
 	const struct event_cb cb = {
 		.cb = dialer_cb,
@@ -302,6 +303,18 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	};
 	dialer_init(&ctx->dialer, cb);
 	dialer_start(&ctx->dialer, loop, ctx->dialreq);
+}
+
+static void on_established(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	ev_timer_stop(loop, &ctx->w_timeout);
+
+	struct server_stats *restrict stats = &ctx->s->stats;
+	stats->num_halfopen--;
+	stats->num_sessions++;
+	stats->num_success++;
+	HTTP_CTX_LOG_F(
+		DEBUG, ctx, "established, %zu active", stats->num_sessions);
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -316,14 +329,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 	    ctx->uplink.state == XFER_CONNECTED &&
 	    ctx->downlink.state == XFER_CONNECTED) {
 		ctx->state = STATE_ESTABLISHED;
-		struct server_stats *restrict stats = &ctx->s->stats;
-		stats->num_halfopen--;
-		stats->num_sessions++;
-		stats->num_success++;
-		HTTP_CTX_LOG_F(
-			DEBUG, ctx, "established, %zu active",
-			stats->num_sessions);
-		ev_timer_stop(loop, &ctx->w_timeout);
+		on_established(loop, ctx);
 		return;
 	}
 }
@@ -333,24 +339,18 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_stop(loop, &ctx->w_recv);
 	ev_io_stop(loop, &ctx->w_send);
 
-	struct server_stats *restrict stats = &ctx->s->stats;
 	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
 	} else {
-		ev_timer_stop(loop, &ctx->w_timeout);
 		ctx->state = STATE_ESTABLISHED;
-		stats->num_halfopen--;
-		stats->num_sessions++;
-		stats->num_success++;
-		HTTP_CTX_LOG_F(
-			DEBUG, ctx, "established, %zu active",
-			stats->num_sessions);
+		on_established(loop, ctx);
 	}
 
 	const struct event_cb cb = {
 		.cb = xfer_state_cb,
 		.ctx = ctx,
 	};
+	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
 		&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd,
 		&stats->byt_up);
