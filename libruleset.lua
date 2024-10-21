@@ -8,6 +8,11 @@ local function printf(...)
 end
 _G.printf = printf
 
+-- avoid clock_t wrapping
+if neosocksd.clock and neosocksd.clock() then
+    os.clock = neosocksd.clock
+end
+
 function package.replace(modname, chunk)
     local module = chunk(modname)
     local loaded = package.loaded[modname]

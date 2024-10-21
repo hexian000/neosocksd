@@ -433,7 +433,8 @@ static int api_splithostport_(lua_State *restrict L)
 static int api_config_(lua_State *restrict L)
 {
 	const struct config *restrict conf = G.conf;
-	lua_createtable(L, 0, 8);
+	lua_createtable(L, 0, 16);
+
 	lua_pushinteger(L, (lua_Integer)conf->log_level);
 	lua_setfield(L, -2, "loglevel");
 	lua_pushnumber(L, (lua_Number)conf->timeout);
@@ -462,7 +463,8 @@ static int api_stats_(lua_State *restrict L)
 	}
 	struct ruleset *restrict r = find_ruleset(L);
 	const struct server_stats *restrict stats = &s->stats;
-	lua_createtable(L, 0, 6);
+	lua_createtable(L, 0, 16);
+
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	lua_setfield(L, -2, "lasterror");
 	lua_pushinteger(L, (lua_Integer)stats->num_halfopen);
@@ -475,15 +477,21 @@ static int api_stats_(lua_State *restrict L)
 	lua_setfield(L, -2, "byt_down");
 	lua_pushnumber(L, (lua_Number)(ev_now(r->loop) - stats->started));
 	lua_setfield(L, -2, "uptime");
-#if HAVE_CLOCK_GETTIME && defined(CLOCK_PROCESS_CPUTIME_ID)
-	struct timespec t;
-	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t) == 0) {
-		lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
-		lua_setfield(L, -2, "cputime");
-	}
-#endif
 	return 1;
 }
+
+#if HAVE_CLOCK_GETTIME
+/* neosocksd.clock() */
+static int api_clock_(lua_State *restrict L)
+{
+	struct timespec t;
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t)) {
+		return 0;
+	}
+	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
+	return 1;
+}
+#endif /* HAVE_CLOCK_GETTIME */
 
 /* neosocksd.now() */
 static int api_now_(lua_State *restrict L)
@@ -501,6 +509,9 @@ static int luaopen_neosocksd(lua_State *restrict L)
 		{ "config", api_config_ },
 		{ "invoke", api_invoke_ },
 		{ "now", api_now_ },
+#if HAVE_CLOCK_GETTIME
+		{ "clock", api_clock_ },
+#endif
 		{ "parse_ipv4", api_parse_ipv4_ },
 		{ "parse_ipv6", api_parse_ipv6_ },
 		{ "resolve", api_resolve_ },
