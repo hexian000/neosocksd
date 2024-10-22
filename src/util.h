@@ -38,30 +38,9 @@ extern struct globals {
 
 #define CONSTSTRLEN(s) (ARRAY_SIZE(s) - 1)
 
-#define UNUSED(x) (void)(x)
+#define UNUSED(x) ((void)(x))
 
 #define TSTAMP_NIL (-1.0)
-
-#if defined(INTPTR_MAX)
-typedef intptr_t handle_type;
-#else
-typedef ptrdiff_t handle_type;
-#endif
-_Static_assert(
-	sizeof(handle_type) >= sizeof(void *),
-	"handle_type can't hold a pointer");
-
-static inline handle_type handle_make(void *p)
-{
-	return (handle_type)p;
-}
-
-static inline void *handle_toptr(const handle_type h)
-{
-	return (void *)h;
-}
-
-#define INVALID_HANDLE (handle_make(NULL))
 
 #define CLOSE_FD(fd)                                                           \
 	do {                                                                   \

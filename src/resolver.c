@@ -59,17 +59,16 @@ resolve_finish(struct resolve_query *restrict q, struct ev_loop *loop)
 		free(q);
 		return;
 	}
-	const handle_type h = handle_make(q);
 	const struct resolve_cb done_cb = q->done_cb;
 	if (!q->ok) {
+		done_cb.cb(q, loop, done_cb.ctx, NULL);
 		free(q);
-		done_cb.cb(h, loop, done_cb.ctx, NULL);
 		return;
 	}
 	const union sockaddr_max addr = q->addr;
 	q->resolver->stats.num_success++;
+	done_cb.cb(q, loop, done_cb.ctx, &addr.sa);
 	free(q);
-	done_cb.cb(h, loop, done_cb.ctx, &addr.sa);
 }
 
 #define RESOLVE_RETURN(q, loop)                                                \
@@ -373,7 +372,7 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 	RESOLVE_RETURN(q, loop);
 }
 
-handle_type resolve_do(
+struct resolve_query *resolve_do(
 	struct resolver *r, struct resolve_cb cb, const char *name,
 	const char *service, const int family)
 {
@@ -383,7 +382,7 @@ handle_type resolve_do(
 		malloc(sizeof(struct resolve_query) + namelen + servlen);
 	if (q == NULL) {
 		LOGOOM();
-		return INVALID_HANDLE;
+		return NULL;
 	}
 	q->resolver = r;
 	q->done_cb = cb;
@@ -402,13 +401,12 @@ handle_type resolve_do(
 	q->w_start.data = q;
 	q->ok = false;
 	ev_feed_event(r->loop, &q->w_start, EV_CUSTOM);
-	return handle_make(q);
+	return q;
 }
 
-void resolve_cancel(handle_type h)
+void resolve_cancel(struct resolve_query *q)
 {
-	struct resolve_query *q = handle_toptr(h);
-	LOGV_F("resolve: [%p] cancel", (void *)q);
+	LOGV_F("resolve: [%p] cancel", q);
 	q->done_cb = (struct resolve_cb){
 		.cb = NULL,
 		.ctx = NULL,

@@ -12,6 +12,7 @@ struct ev_loop;
 struct config;
 
 struct resolver;
+struct resolve_query;
 
 struct resolver_stats {
 	uintmax_t num_query;
@@ -29,14 +30,14 @@ struct sockaddr;
 
 struct resolve_cb {
 	void (*cb)(
-		handle_type h, struct ev_loop *loop, void *ctx,
+		struct resolve_query *q, struct ev_loop *loop, void *ctx,
 		const struct sockaddr *sa);
 	void *ctx;
 };
 
-handle_type resolve_do(
+struct resolve_query *resolve_do(
 	struct resolver *r, struct resolve_cb cb, const char *name,
 	const char *service, int family);
-void resolve_cancel(handle_type h);
+void resolve_cancel(struct resolve_query *q);
 
 #endif /* RESOLVER_H */

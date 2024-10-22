@@ -70,8 +70,7 @@ static void api_client_finish(
 {
 	if (ctx->invoke_cb.func != NULL) {
 		ctx->invoke_cb.func(
-			handle_make(ctx), loop, ctx->invoke_cb.ctx, ok, data,
-			len);
+			ctx, loop, ctx->invoke_cb.data, ok, data, len);
 		if (ok) {
 			stream_close((struct stream *)data);
 		}
@@ -276,9 +275,9 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	return true;
 }
 
-handle_type api_invoke(
+struct api_client_ctx *api_invoke(
 	struct ev_loop *loop, struct dialreq *req, const char *uri,
-	const char *content, const size_t len, struct api_client_cb client_cb)
+	const char *payload, const size_t len, struct api_client_cb client_cb)
 {
 	CHECK(len <= INT_MAX);
 	struct api_client_ctx *restrict ctx =
@@ -286,15 +285,15 @@ handle_type api_invoke(
 	if (ctx == NULL) {
 		LOGOOM();
 		dialreq_free(req);
-		return INVALID_HANDLE;
+		return NULL;
 	}
 	ctx->state = STATE_CLIENT_CONNECT;
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, on_header);
-	if (!make_request(&ctx->parser, uri, content, len)) {
+	if (!make_request(&ctx->parser, uri, payload, len)) {
 		LOGOOM();
 		api_client_close(loop, ctx);
-		return INVALID_HANDLE;
+		return NULL;
 	}
 	ctx->invoke_cb = client_cb;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
@@ -308,12 +307,12 @@ handle_type api_invoke(
 
 	ev_timer_start(loop, &ctx->w_timeout);
 	dialer_start(&ctx->dialer, loop, req);
-	return handle_make(ctx);
+	return ctx;
 }
 
-void api_cancel(struct ev_loop *loop, const handle_type h)
+void api_cancel(struct ev_loop *loop, struct api_client_ctx *ctx)
 {
-	api_client_close(loop, handle_toptr(h));
+	api_client_close(loop, ctx);
 }
 
 #endif /* WITH_RULESET */

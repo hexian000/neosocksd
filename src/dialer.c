@@ -323,9 +323,9 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 		ev_clear_pending(loop, &d->w_start);
 		break;
 	case STATE_RESOLVE:
-		if (d->resolve_handle != INVALID_HANDLE) {
+		if (d->resolve_handle != NULL) {
 			resolve_cancel(d->resolve_handle);
-			d->resolve_handle = INVALID_HANDLE;
+			d->resolve_handle = NULL;
 		}
 		/* fallthrough */
 	case STATE_CONNECT:
@@ -1134,13 +1134,13 @@ static bool connect_sa(
 }
 
 static void resolve_cb(
-	const handle_type h, struct ev_loop *loop, void *ctx,
+	struct resolve_query *q, struct ev_loop *loop, void *ctx,
 	const struct sockaddr *restrict sa)
 {
 	struct dialer *restrict d = ctx;
-	UNUSED(h);
-	ASSERT(h == d->resolve_handle);
-	d->resolve_handle = INVALID_HANDLE;
+	UNUSED(q);
+	ASSERT(q == d->resolve_handle);
+	d->resolve_handle = NULL;
 
 	const struct dialaddr *restrict dialaddr =
 		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
@@ -1210,14 +1210,14 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
-		const handle_type h = resolve_do(
+		void *h = resolve_do(
 			G.resolver,
 			(struct resolve_cb){
 				.cb = resolve_cb,
 				.ctx = d,
 			},
 			host, NULL, G.conf->resolve_pf);
-		if (h == INVALID_HANDLE) {
+		if (h == NULL) {
 			DIALER_RETURN(d, loop, false);
 		}
 		d->resolve_handle = h;
@@ -1231,7 +1231,7 @@ void dialer_init(struct dialer *restrict d, const struct event_cb cb)
 {
 	d->done_cb = cb;
 	d->req = NULL;
-	d->resolve_handle = INVALID_HANDLE;
+	d->resolve_handle = NULL;
 	d->jump = 0;
 	d->state = STATE_INIT;
 	d->syserr = 0;

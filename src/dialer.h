@@ -70,7 +70,7 @@ void dialreq_free(struct dialreq *r);
 struct dialer {
 	struct event_cb done_cb;
 	const struct dialreq *req;
-	handle_type resolve_handle;
+	void *resolve_handle;
 	size_t jump;
 	int state;
 	int syserr;

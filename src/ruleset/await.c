@@ -174,21 +174,20 @@ static int await_sleep_(lua_State *restrict L)
 
 static int await_resolve_close_(struct lua_State *L)
 {
-	handle_type *restrict h = lua_touserdata(L, 1);
-	if (*h != INVALID_HANDLE) {
-		resolve_cancel(*h);
-		*h = INVALID_HANDLE;
+	struct resolve_query **p = lua_touserdata(L, 1);
+	if (*p != NULL) {
+		resolve_cancel(*p);
+		*p = NULL;
 	}
 	return 0;
 }
 
 static void resolve_cb(
-	handle_type h, struct ev_loop *loop, void *ctx,
+	struct resolve_query *p, struct ev_loop *loop, void *ctx,
 	const struct sockaddr *sa)
 {
 	UNUSED(loop);
 	struct ruleset *restrict r = ctx;
-	const void *p = handle_toptr(h);
 	if (!ruleset_resume(r, p, 1, (void *)sa)) {
 		LOGE_F("resolve_cb: %s", ruleset_geterror(r, NULL));
 	}
@@ -197,9 +196,9 @@ static void resolve_cb(
 static int
 await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	handle_type *restrict p = lua_touserdata(L, (int)ctx);
-	context_unpin(L, handle_toptr(*p));
-	*p = INVALID_HANDLE;
+	struct resolve_query **p = lua_touserdata(L, (int)ctx);
+	context_unpin(L, *p);
+	*p = NULL;
 	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
@@ -211,19 +210,20 @@ static int await_resolve_(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
 	const char *name = luaL_checkstring(L, 1);
-	const handle_type h = resolve_do(
+	struct resolve_query *q = resolve_do(
 		G.resolver,
 		(struct resolve_cb){
 			.cb = resolve_cb,
 			.ctx = find_ruleset(L),
 		},
 		name, NULL, G.conf->resolve_pf);
-	if (h == INVALID_HANDLE) {
+	if (q == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
-	handle_type *restrict p = lua_newuserdata(L, sizeof(handle_type));
-	*p = h;
+	struct resolve_query **p =
+		lua_newuserdata(L, sizeof(struct resolve_query *));
+	*p = q;
 	if (luaL_newmetatable(L, MT_AWAIT_RESOLVE)) {
 		lua_pushcfunction(L, await_resolve_close_);
 #if HAVE_LUA_TOCLOSE
@@ -237,30 +237,30 @@ static int await_resolve_(lua_State *restrict L)
 	lua_toclose(L, -1);
 #endif
 	const int ctx = lua_absindex(L, -1);
-	context_pin(L, handle_toptr(h));
+	context_pin(L, q);
 	const int status = lua_yieldk(L, 0, ctx, await_resolve_k_);
 	return await_resolve_k_(L, status, ctx);
 }
 
 static int await_invoke_close_(struct lua_State *L)
 {
-	handle_type *h = lua_touserdata(L, 1);
-	if (*h != INVALID_HANDLE) {
+	struct api_client_ctx **h = lua_touserdata(L, 1);
+	if (*h != NULL) {
 		struct ruleset *restrict r = find_ruleset(L);
 		api_cancel(r->loop, *h);
-		*h = INVALID_HANDLE;
+		*h = NULL;
 	}
 	return 0;
 }
 
 static void invoke_cb(
-	handle_type h, struct ev_loop *loop, void *ctx, bool ok,
-	const void *data, size_t len)
+	struct api_client_ctx *ctx, struct ev_loop *loop, void *data, bool ok,
+	const void *payload, size_t len)
 {
 	UNUSED(loop);
-	struct ruleset *restrict r = ctx;
-	const void *p = handle_toptr(h);
-	if (!ruleset_resume(r, p, 3, (void *)&ok, (void *)data, (void *)&len)) {
+	struct ruleset *restrict r = data;
+	if (!ruleset_resume(
+		    r, ctx, 3, (void *)&ok, (void *)payload, (void *)&len)) {
 		LOGE_F("invoke_cb: %s", ruleset_geterror(r, NULL));
 	}
 }
@@ -268,21 +268,21 @@ static void invoke_cb(
 static int
 await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	handle_type *restrict p = lua_touserdata(L, (int)ctx);
-	context_unpin(L, handle_toptr(*p));
-	*p = INVALID_HANDLE;
+	struct api_client_ctx **p = lua_touserdata(L, (int)ctx);
+	context_unpin(L, *p);
+	*p = NULL;
 	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
 	const bool ok = *(bool *)lua_touserdata(L, -3);
-	void *data = lua_touserdata(L, -2);
+	void *payload = lua_touserdata(L, -2);
 	const size_t len = *(size_t *)lua_touserdata(L, -1);
 	lua_pushboolean(L, ok);
 	if (!ok) {
-		lua_pushlstring(L, data, len);
+		lua_pushlstring(L, payload, len);
 		return 2;
 	}
-	if (lua_load(L, ruleset_reader, data, "=(rpc)", "t")) {
+	if (lua_load(L, ruleset_reader, payload, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
@@ -316,17 +316,18 @@ static int await_invoke_(lua_State *restrict L)
 	struct ruleset *restrict r = find_ruleset(L);
 	struct api_client_cb cb = {
 		.func = invoke_cb,
-		.ctx = r,
+		.data = r,
 	};
-	handle_type h =
+	struct api_client_ctx *apictx =
 		api_invoke(r->loop, req, "/ruleset/rpcall", code, len, cb);
-	if (h == INVALID_HANDLE) {
+	if (apictx == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
 	lua_pop(L, 1); /* code */
-	handle_type *restrict p = lua_newuserdata(L, sizeof(handle_type));
-	*p = h;
+	struct api_client_ctx **p =
+		lua_newuserdata(L, sizeof(struct api_client_ctx *));
+	*p = apictx;
 	if (luaL_newmetatable(L, MT_AWAIT_INVOKE)) {
 		lua_pushcfunction(L, await_invoke_close_);
 #if HAVE_LUA_TOCLOSE
@@ -340,7 +341,7 @@ static int await_invoke_(lua_State *restrict L)
 	lua_toclose(L, -1);
 #endif
 	const int ctx = lua_absindex(L, -1);
-	context_pin(L, handle_toptr(h));
+	context_pin(L, apictx);
 	const int status = lua_yieldk(L, 0, ctx, await_invoke_k_);
 	return await_invoke_k_(L, status, ctx);
 }

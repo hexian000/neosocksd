@@ -95,7 +95,7 @@ curl "http://127.0.1.1:9080/ruleset/update?module=libruleset" \
     --data-binary @libruleset.lua
 
 # Update gzip compressed module
-curl "http://127.0.1.1:9080/ruleset/update?module=biglist&chunkname=biglist.lua" \
+curl "http://127.0.1.1:9080/ruleset/update?module=biglist&chunkname=%40biglist.lua" \
     -H "Content-Encoding: gzip" --data-binary @biglist.lua.gz
 
 # Run any script on the server
