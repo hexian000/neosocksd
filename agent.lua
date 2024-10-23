@@ -123,7 +123,7 @@ local function update_peerdb(peername, peerdb)
             local old = _G.peerdb[peer]
             if not old or data.timestamp > old.timestamp then
                 _G.peerdb[peer] = data
-                logf("peerdb: updated peer %q from %q (time=%d)",
+                evlogf("peerdb: updated peer %q from %q (time=%d)",
                     peer, peername, data.timestamp - now)
             end
         end
@@ -140,7 +140,7 @@ function agent.sync(connid)
     assert(agent.conns[connid], string.format("unknown connid [%s]", connid))
     local ok, r1, r2 = callbyconn(connid, "sync", agent.peername, _G.peerdb)
     if not ok then
-        logf("sync failed: [%s] %s", connid, r1)
+        evlogf("sync failed: [%s] %s", connid, r1)
         return
     end
     local peername, peerdb = r1, r2
@@ -148,7 +148,7 @@ function agent.sync(connid)
     for peer, info in pairs(conn) do
         if info.route[#info.route] ~= peername then
             conn[peer] = nil
-            logf("invalid route: [%s] %q %s", connid, peername, format_route(info.route))
+            evlogf("invalid route: [%s] %q %s", connid, peername, format_route(info.route))
         end
     end
     if not conn[peername] then
@@ -237,10 +237,10 @@ function agent.probe(peername)
     end
     if #errors < #agent.conns then
         local connid, minrtt, bestroute = findconn(peername, 2)
-        logf("probe: [%s] %q %s %.0fms", connid, peername,
+        evlogf("probe: [%s] %q %s %.0fms", connid, peername,
             format_route(bestroute), minrtt * 1e+3)
     elseif errors[1] then
-        logf("probe failed: %q %s", peername, errors:sort():concat(", "))
+        evlogf("probe failed: %q %s", peername, errors:sort():concat(", "))
     end
 end
 
@@ -258,19 +258,19 @@ function agent.maintenance()
     for connid, _ in pairs(agent.conns) do
         agent.sync(connid)
     end
-    log("agent: sync finished")
+    evlog("agent: sync finished")
     -- probe
     for peername, _ in pairs(_G.peerdb) do
         if peername ~= agent.peername then
             agent.probe(peername)
         end
     end
-    log("agent: probe finished")
+    evlog("agent: probe finished")
     -- remove stale data
     local now = os.time()
     for peername, data in pairs(_G.peerdb) do
         if not is_valid(data, PEERDB_EXPIRY_TIME, now) then
-            logf("peer expired: %q (time=%d)", peername, data.timestamp - now)
+            evlogf("peer expired: %q (time=%d)", peername, data.timestamp - now)
             _G.peerdb[peername] = nil
         end
     end
@@ -324,7 +324,7 @@ local function main(...)
     if stop then
         local ok, err = pcall(stop)
         if not ok then
-            logf("agent.stop: %s", err)
+            evlogf("agent.stop: %s", err)
         end
     end
     agent.running = true

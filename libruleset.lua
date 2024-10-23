@@ -203,7 +203,7 @@ end
 
 -- [[ logging utilities ]] --
 _G.recent_events = rlist:check(_G.recent_events) or rlist:new(100)
-local function log_(now, info, msg)
+local function evlog_(now, msg)
     local entry = recent_events:get(1)
     if entry and entry.msg == msg then
         entry.count = entry.count + 1
@@ -215,6 +215,9 @@ local function log_(now, info, msg)
         count = 1,
         tstamp = now
     })
+end
+
+local function log_(now, info, msg)
     if config.loglevel < 6 then
         return
     end
@@ -232,13 +235,31 @@ local function log(...)
 end
 _G.log = log
 
-local function logf(...)
+local function logf(s, ...)
     local now  = os.time()
     local info = debug.getinfo(2, "Sl")
-    local msg  = strformat(...)
+    local msg  = strformat(s, ...)
     return log_(now, info, msg)
 end
 _G.logf = logf
+
+local function evlog(...)
+    local now  = os.time()
+    local info = debug.getinfo(2, "Sl")
+    local msg  = list:new({ ... }):map(tostring):concat("\t")
+    evlog_(now, msg)
+    return log_(now, info, msg)
+end
+_G.evlog = evlog
+
+local function evlogf(s, ...)
+    local now  = os.time()
+    local info = debug.getinfo(2, "Sl")
+    local msg  = strformat(s, ...)
+    evlog_(now, msg)
+    return log_(now, info, msg)
+end
+_G.evlogf = evlogf
 
 local splithostport = neosocksd.splithostport
 local parse_ipv4 = neosocksd.parse_ipv4
@@ -297,6 +318,7 @@ end
 _G.rpc = rpc
 
 function _G.rpcall(ret, func, ...)
+    logf("rpcall: %q", func)
     local co = coroutine.create(function(...)
         ret("return " .. marshal(pcall(...)))
     end)
@@ -746,7 +768,7 @@ local function default_(addr)
         local action, tag = table.unpack(route)
         if action then
             if tag then
-                logf("[%s] %q", tag, addr)
+                evlogf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -761,24 +783,20 @@ local function route_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                logf("[%s] %q", tag, addr)
+                evlogf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
     end
     -- check route table
-    local host, _ = splithostport(addr)
-    if not host then
-        logf("route: invalid address %q", addr)
-        return nil
-    end
     local routetab = _G.route
     if routetab then
+        local host, _ = splithostport(addr)
         local ip = parse_ipv4(host)
         local action, tag = matchtab_(routetab, ip)
         if action then
             if tag then
-                logf("[%s] %q", tag, addr)
+                evlogf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -794,24 +812,20 @@ local function route6_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                logf("[%s] %q", tag, addr)
+                evlogf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
     end
     -- check route table
-    local host, _ = splithostport(addr)
-    if not host then
-        logf("route6: invalid address %q", addr)
-        return nil
-    end
     local routetab = _G.route6
     if routetab then
+        local host, _ = splithostport(addr)
         local ip1, ip2 = parse_ipv6(host)
         local action, tag = matchtab_(routetab, ip1, ip2)
         if action then
             if tag then
-                logf("[%s] %q", tag, addr)
+                evlogf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -827,7 +841,7 @@ local function resolve_(addr)
         local action, tag = matchtab_(redirtab, addr)
         if action then
             if tag then
-                logf("[%s] %q", tag, addr)
+                evlogf("[%s] %q", tag, addr)
             end
             return action(addr)
         end
@@ -903,7 +917,7 @@ local function authenticate(addr, username, password)
     if s and (s == true or s == password) then
         return true
     end
-    logf("authenticate failed: %q", username)
+    evlogf("authenticate failed: %q", username)
     return false
 end
 
