@@ -178,12 +178,14 @@ int ruleset_traceback_(lua_State *restrict L)
 	return 1;
 }
 
-bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
+bool ruleset_resume(
+	struct ruleset *restrict r, const void *ctx, const int narg, ...)
 {
 	check_memlimit(r);
 	lua_State *restrict L = r->L;
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
 	    LUA_TTABLE) {
+		lua_pop(L, 1);
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
@@ -191,6 +193,7 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 	lua_rawgetp(L, -1, ctx);
 	lua_State *restrict co = lua_tothread(L, -1);
 	if (co == NULL) {
+		lua_pop(L, 2);
 		lua_pushfstring(L, "async context lost: %p", ctx);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
@@ -203,7 +206,7 @@ bool ruleset_resume(struct ruleset *restrict r, const void *ctx, int narg, ...)
 	}
 	va_end(args);
 	int nres;
-	const int status = co_resume(co, L, narg, &nres);
+	const int status = co_resume(co, NULL, narg, &nres);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_pushvalue(co, -1);
 		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
