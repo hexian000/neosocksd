@@ -71,9 +71,9 @@ static void api_client_finish(
 	if (ctx->invoke_cb.func != NULL) {
 		ctx->invoke_cb.func(
 			ctx, loop, ctx->invoke_cb.data, ok, data, len);
-		if (ok) {
-			stream_close((struct stream *)data);
-		}
+	}
+	if (ok) {
+		stream_close((struct stream *)data);
 	}
 	api_client_close(loop, ctx);
 }
@@ -300,8 +300,8 @@ struct api_client_ctx *api_invoke(
 	ctx->w_timeout.data = ctx;
 	ctx->dialreq = req;
 	const struct event_cb cb = {
-		.cb = dialer_cb,
-		.ctx = ctx,
+		.func = dialer_cb,
+		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
 

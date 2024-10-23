@@ -169,7 +169,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		XFER_CTX_LOG_F(
 			VERBOSE, t, "state changed %d to %d", t->state, state);
 		t->state = state;
-		t->state_cb.cb(loop, t->state_cb.ctx);
+		t->state_cb.func(loop, t->state_cb.data);
 		return;
 	}
 }
@@ -285,7 +285,7 @@ static void pipe_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		XFER_CTX_LOG_F(
 			VERBOSE, t, "state changed %d to %d", t->state, state);
 		t->state = state;
-		t->state_cb.cb(loop, t->state_cb.ctx);
+		t->state_cb.func(loop, t->state_cb.data);
 		return;
 	}
 }

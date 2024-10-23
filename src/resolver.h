@@ -29,10 +29,10 @@ void resolver_free(struct resolver *r);
 struct sockaddr;
 
 struct resolve_cb {
-	void (*cb)(
-		struct resolve_query *q, struct ev_loop *loop, void *ctx,
+	void (*func)(
+		struct resolve_query *q, struct ev_loop *loop, void *data,
 		const struct sockaddr *sa);
-	void *ctx;
+	void *data;
 };
 
 struct resolve_query *resolve_do(

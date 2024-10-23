@@ -215,8 +215,8 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	}
 
 	const struct event_cb cb = {
-		.cb = xfer_state_cb,
-		.ctx = ctx,
+		.func = xfer_state_cb,
+		.data = ctx,
 	};
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
@@ -248,8 +248,8 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	}
 
 	const struct event_cb cb = {
-		.cb = dialer_cb,
-		.ctx = ctx,
+		.func = dialer_cb,
+		.data = ctx,
 	};
 	ctx->dialreq = NULL;
 	dialer_init(&ctx->dialer, cb);

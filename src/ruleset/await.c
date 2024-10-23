@@ -109,7 +109,7 @@ static int await_idle_(lua_State *restrict L)
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-	const int ctx = lua_absindex(L, -1);
+	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, w);
 	ev_idle_start(r->loop, w);
 	const int status = lua_yieldk(L, 0, ctx, await_idle_k_);
@@ -165,7 +165,7 @@ static int await_sleep_(lua_State *restrict L)
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-	const int ctx = lua_absindex(L, -1);
+	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, w);
 	ev_timer_start(r->loop, w);
 	const int status = lua_yieldk(L, 0, ctx, await_sleep_k_);
@@ -174,21 +174,21 @@ static int await_sleep_(lua_State *restrict L)
 
 static int await_resolve_close_(struct lua_State *L)
 {
-	struct resolve_query **p = lua_touserdata(L, 1);
-	if (*p != NULL) {
-		resolve_cancel(*p);
-		*p = NULL;
+	struct resolve_query **ud = lua_touserdata(L, 1);
+	if (*ud != NULL) {
+		resolve_cancel(*ud);
+		*ud = NULL;
 	}
 	return 0;
 }
 
 static void resolve_cb(
-	struct resolve_query *p, struct ev_loop *loop, void *ctx,
+	struct resolve_query *q, struct ev_loop *loop, void *data,
 	const struct sockaddr *sa)
 {
 	UNUSED(loop);
-	struct ruleset *restrict r = ctx;
-	if (!ruleset_resume(r, p, 1, (void *)sa)) {
+	struct ruleset *restrict r = data;
+	if (!ruleset_resume(r, q, 1, (void *)sa)) {
 		LOGE_F("resolve_cb: %s", ruleset_geterror(r, NULL));
 	}
 }
@@ -196,9 +196,9 @@ static void resolve_cb(
 static int
 await_resolve_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	struct resolve_query **p = lua_touserdata(L, (int)ctx);
-	context_unpin(L, *p);
-	*p = NULL;
+	struct resolve_query **ud = lua_touserdata(L, (int)ctx);
+	context_unpin(L, *ud);
+	*ud = NULL;
 	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
@@ -213,17 +213,17 @@ static int await_resolve_(lua_State *restrict L)
 	struct resolve_query *q = resolve_do(
 		G.resolver,
 		(struct resolve_cb){
-			.cb = resolve_cb,
-			.ctx = find_ruleset(L),
+			.func = resolve_cb,
+			.data = find_ruleset(L),
 		},
 		name, NULL, G.conf->resolve_pf);
 	if (q == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
-	struct resolve_query **p =
+	struct resolve_query **ud =
 		lua_newuserdata(L, sizeof(struct resolve_query *));
-	*p = q;
+	*ud = q;
 	if (luaL_newmetatable(L, MT_AWAIT_RESOLVE)) {
 		lua_pushcfunction(L, await_resolve_close_);
 #if HAVE_LUA_TOCLOSE
@@ -236,7 +236,7 @@ static int await_resolve_(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	const int ctx = lua_absindex(L, -1);
+	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, q);
 	const int status = lua_yieldk(L, 0, ctx, await_resolve_k_);
 	return await_resolve_k_(L, status, ctx);
@@ -244,11 +244,11 @@ static int await_resolve_(lua_State *restrict L)
 
 static int await_invoke_close_(struct lua_State *L)
 {
-	struct api_client_ctx **h = lua_touserdata(L, 1);
-	if (*h != NULL) {
+	struct api_client_ctx **ud = lua_touserdata(L, 1);
+	if (*ud != NULL) {
 		struct ruleset *restrict r = find_ruleset(L);
-		api_cancel(r->loop, *h);
-		*h = NULL;
+		api_cancel(r->loop, *ud);
+		*ud = NULL;
 	}
 	return 0;
 }
@@ -268,9 +268,9 @@ static void invoke_cb(
 static int
 await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 {
-	struct api_client_ctx **p = lua_touserdata(L, (int)ctx);
-	context_unpin(L, *p);
-	*p = NULL;
+	struct api_client_ctx **ud = lua_touserdata(L, (int)ctx);
+	context_unpin(L, *ud);
+	*ud = NULL;
 	if (status != LUA_OK && status != LUA_YIELD) {
 		return lua_error(L);
 	}
@@ -325,9 +325,9 @@ static int await_invoke_(lua_State *restrict L)
 		return lua_error(L);
 	}
 	lua_pop(L, 1); /* code */
-	struct api_client_ctx **p =
+	struct api_client_ctx **ud =
 		lua_newuserdata(L, sizeof(struct api_client_ctx *));
-	*p = apictx;
+	*ud = apictx;
 	if (luaL_newmetatable(L, MT_AWAIT_INVOKE)) {
 		lua_pushcfunction(L, await_invoke_close_);
 #if HAVE_LUA_TOCLOSE
@@ -340,7 +340,7 @@ static int await_invoke_(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	const int ctx = lua_absindex(L, -1);
+	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, apictx);
 	const int status = lua_yieldk(L, 0, ctx, await_invoke_k_);
 	return await_invoke_k_(L, status, ctx);

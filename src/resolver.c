@@ -54,20 +54,18 @@ struct resolve_query {
 static void
 resolve_finish(struct resolve_query *restrict q, struct ev_loop *loop)
 {
-	LOGV_F("resolve: [%p] finished ok=%d", (void *)q, q->ok);
-	if (q->done_cb.cb == NULL) { /* cancelled */
+	LOGV_F("resolve: [%p] finished ok=%d", q, q->ok);
+	if (q->done_cb.func == NULL) { /* cancelled */
 		free(q);
 		return;
 	}
-	const struct resolve_cb done_cb = q->done_cb;
 	if (!q->ok) {
-		done_cb.cb(q, loop, done_cb.ctx, NULL);
+		q->done_cb.func(q, loop, q->done_cb.data, NULL);
 		free(q);
 		return;
 	}
-	const union sockaddr_max addr = q->addr;
 	q->resolver->stats.num_success++;
-	done_cb.cb(q, loop, done_cb.ctx, &addr.sa);
+	q->done_cb.func(q, loop, q->done_cb.data, &q->addr.sa);
 	free(q);
 }
 
@@ -408,7 +406,7 @@ void resolve_cancel(struct resolve_query *q)
 {
 	LOGV_F("resolve: [%p] cancel", q);
 	q->done_cb = (struct resolve_cb){
-		.cb = NULL,
-		.ctx = NULL,
+		.func = NULL,
+		.data = NULL,
 	};
 }

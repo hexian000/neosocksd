@@ -323,9 +323,9 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 		ev_clear_pending(loop, &d->w_start);
 		break;
 	case STATE_RESOLVE:
-		if (d->resolve_handle != NULL) {
-			resolve_cancel(d->resolve_handle);
-			d->resolve_handle = NULL;
+		if (d->resolve_query != NULL) {
+			resolve_cancel(d->resolve_query);
+			d->resolve_query = NULL;
 		}
 		/* fallthrough */
 	case STATE_CONNECT:
@@ -349,7 +349,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 	do {                                                                   \
 		LOGV_F("dialer: [%p] finished ok=%d", (void *)(d), (ok));      \
 		dialer_stop((d), (loop), (ok));                                \
-		(d)->done_cb.cb((loop), (d)->done_cb.ctx);                     \
+		(d)->done_cb.func((loop), (d)->done_cb.data);                  \
 		return;                                                        \
 	} while (0)
 
@@ -1139,8 +1139,8 @@ static void resolve_cb(
 {
 	struct dialer *restrict d = ctx;
 	UNUSED(q);
-	ASSERT(q == d->resolve_handle);
-	d->resolve_handle = NULL;
+	ASSERT(q == d->resolve_query);
+	d->resolve_query = NULL;
 
 	const struct dialaddr *restrict dialaddr =
 		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
@@ -1210,17 +1210,17 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
-		void *h = resolve_do(
+		struct resolve_query *q = resolve_do(
 			G.resolver,
 			(struct resolve_cb){
-				.cb = resolve_cb,
-				.ctx = d,
+				.func = resolve_cb,
+				.data = d,
 			},
 			host, NULL, G.conf->resolve_pf);
-		if (h == NULL) {
+		if (q == NULL) {
 			DIALER_RETURN(d, loop, false);
 		}
-		d->resolve_handle = h;
+		d->resolve_query = q;
 	} break;
 	default:
 		FAIL();
@@ -1231,7 +1231,7 @@ void dialer_init(struct dialer *restrict d, const struct event_cb cb)
 {
 	d->done_cb = cb;
 	d->req = NULL;
-	d->resolve_handle = NULL;
+	d->resolve_query = NULL;
 	d->jump = 0;
 	d->state = STATE_INIT;
 	d->syserr = 0;

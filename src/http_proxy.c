@@ -245,8 +245,8 @@ static bool req_connect(
 		return true;
 	}
 #else
-	(void)username;
-	(void)password;
+	UNUSED(username);
+	UNUSED(password);
 #endif
 	ctx->dialreq = make_dialreq(addr_str);
 	return true;
@@ -298,8 +298,8 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
 	const struct event_cb cb = {
-		.cb = dialer_cb,
-		.ctx = ctx,
+		.func = dialer_cb,
+		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
 	dialer_start(&ctx->dialer, loop, ctx->dialreq);
@@ -347,8 +347,8 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 
 	const struct event_cb cb = {
-		.cb = xfer_state_cb,
-		.ctx = ctx,
+		.func = xfer_state_cb,
+		.data = ctx,
 	};
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
