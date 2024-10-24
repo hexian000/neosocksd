@@ -198,7 +198,7 @@ find_addrinfo(union sockaddr_max *addr, const struct ares_addrinfo_node *node)
 #define EXPECT_ADDRLEN(p, expected)                                            \
 	do {                                                                   \
 		if ((p)->ai_addrlen != (expected)) {                           \
-			LOGE_F("ares: invalid ai_addrlen %ju (af=%d)",         \
+			LOGE_F("resolve: invalid ai_addrlen %ju (af=%d)",      \
 			       (uintmax_t)(p)->ai_addrlen, (p)->ai_family);    \
 			continue;                                              \
 		}                                                              \
@@ -239,7 +239,7 @@ addrinfo_cb(void *arg, int status, int timeouts, struct ares_addrinfo *info)
 	case ARES_EDESTRUCTION:
 		return;
 	default:
-		LOGW_F("ares: %s", ares_strerror(status));
+		LOGW_F("resolve: %s", ares_strerror(status));
 		break;
 	}
 	RESOLVE_RETURN(q, r->loop);
@@ -302,7 +302,7 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 	}
 	ret = ares_set_servers_ports_csv(r->channel, nameserver);
 	if (ret != ARES_SUCCESS) {
-		LOGE_F("failed using nameserver `%s': %s", nameserver,
+		LOGE_F("failed to set nameserver `%s': %s", nameserver,
 		       ares_strerror(ret));
 		return true;
 	}

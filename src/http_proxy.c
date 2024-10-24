@@ -161,7 +161,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		HTTP_CTX_LOG_F(
-			ERROR, ctx, "unable to establish client connection: %s",
+			DEBUG, ctx, "unable to establish client connection: %s",
 			strerror(ctx->dialer.syserr));
 		http_resp_errpage(&ctx->parser, HTTP_BAD_GATEWAY);
 		ctx->state = STATE_RESPONSE;
@@ -396,11 +396,13 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct http_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RESPONSE || ctx->state == STATE_CONNECT);
 
+	const int fd = watcher->fd;
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
-	int err = socket_send(watcher->fd, buf, &len);
+	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
-		HTTP_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
+		HTTP_CTX_LOG_F(
+			WARNING, ctx, "send: fd=%d %s", fd, strerror(err));
 		http_ctx_close(loop, ctx);
 		return;
 	}
@@ -415,7 +417,9 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		len = cbuf->len - ctx->parser.cpos;
 		err = socket_send(watcher->fd, buf, &len);
 		if (err != 0) {
-			HTTP_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
+			HTTP_CTX_LOG_F(
+				WARNING, ctx, "send: fd=%d %s", fd,
+				strerror(err));
 			http_ctx_close(loop, ctx);
 			return;
 		}

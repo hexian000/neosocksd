@@ -625,12 +625,12 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 static int l_panic(lua_State *L)
 {
 	if (lua_isstring(L, -1)) {
-		LOGF_F("panic: %s", lua_tostring(L, -1));
+		LOG_STACK_F(FATAL, 0, "panic: %s", lua_tostring(L, -1));
 	} else {
-		LOGF_F("panic: (%s: %p)", lua_typename(L, lua_type(L, -1)),
-		       lua_topointer(L, -1));
+		LOG_STACK_F(
+			FATAL, 0, "panic: (%s: %p)",
+			lua_typename(L, lua_type(L, -1)), lua_topointer(L, -1));
 	}
-	LOG_STACK(FATAL, 0, "stacktrace");
 	return 0; /* return to Lua to abort */
 }
 

@@ -343,7 +343,6 @@ int socket_send(const int fd, const void *buf, size_t *len)
 			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
-			LOGD_F("send: fd=%d %s", fd, strerror(err));
 			*len = nbsend;
 			return err;
 		}
@@ -355,7 +354,6 @@ int socket_send(const int fd, const void *buf, size_t *len)
 		nbsend += nsend;
 	}
 	*len = nbsend;
-	LOGV_F("send: fd=%d %zu bytes", fd, nbsend);
 	return 0;
 }
 
@@ -371,12 +369,10 @@ int socket_recv(const int fd, void *buf, size_t *len)
 			if (IS_TRANSIENT_ERROR(err)) {
 				break;
 			}
-			LOGD_F("recv: fd=%d %s", fd, strerror(err));
 			*len = nbrecv;
 			return err;
 		}
 		if (nrecv == 0) {
-			LOGV_F("recv: fd=%d EOF", fd);
 			break;
 		}
 		b += nrecv;
@@ -384,6 +380,5 @@ int socket_recv(const int fd, void *buf, size_t *len)
 		nbrecv += nrecv;
 	}
 	*len = nbrecv;
-	LOGV_F("recv: fd=%d %zu bytes", fd, nbrecv);
 	return 0;
 }

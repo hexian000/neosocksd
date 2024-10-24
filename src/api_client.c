@@ -91,7 +91,6 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct api_client_ctx *restrict ctx = watcher->data;
 	int ret = http_parser_recv(&ctx->parser);
 	if (ret < 0) {
-		LOGD("error receiving response");
 		API_RETURN_ERROR(loop, ctx, "error receiving response");
 	} else if (ret > 0) {
 		return;
@@ -184,8 +183,11 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	struct api_client_ctx *restrict ctx = data;
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
-		LOGE_F("unable to establish client connection: %s",
-		       strerror(ctx->dialer.syserr));
+		const int err = ctx->dialer.syserr;
+		if (err != 0) {
+			LOGD_F("unable to establish client connection: %s",
+			       strerror(err));
+		}
 		API_RETURN_ERROR(loop, ctx, "failed connecting to server");
 	}
 	ASSERT(ctx->dialreq != NULL);

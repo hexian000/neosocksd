@@ -196,7 +196,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		FW_CTX_LOG_F(
-			ERROR, ctx, "unable to establish client connection: %s",
+			DEBUG, ctx, "unable to establish client connection: %s",
 			strerror(ctx->dialer.syserr));
 		forward_ctx_close(loop, ctx);
 		return;
@@ -310,7 +310,6 @@ void forward_serve(
 	if (r != NULL) {
 		req = forward_route(r, &req->addr);
 		if (req == NULL) {
-			LOGE("forwarding failed: ruleset error");
 			forward_ctx_close(loop, ctx);
 			return;
 		}

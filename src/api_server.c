@@ -807,11 +807,13 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RESPONSE);
 
+	const int fd = watcher->fd;
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
-	int err = socket_send(watcher->fd, buf, &len);
+	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
-		API_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
+		API_CTX_LOG_F(
+			WARNING, ctx, "send: fd=%d %s", fd, strerror(err));
 		api_ctx_close(loop, ctx);
 		return;
 	}
@@ -826,7 +828,9 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		len = cbuf->len - ctx->parser.cpos;
 		err = socket_send(watcher->fd, buf, &len);
 		if (err != 0) {
-			API_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
+			API_CTX_LOG_F(
+				WARNING, ctx, "send: fd=%d %s", fd,
+				strerror(err));
 			api_ctx_close(loop, ctx);
 			return;
 		}

@@ -208,17 +208,19 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 static bool
 send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 {
-	LOG_BIN_F(
-		VERYVERBOSE, buf, len, "send_rsp: fd=%d %zu bytes",
-		ctx->accepted_fd, len);
-	const ssize_t nsend = send(ctx->accepted_fd, buf, len, 0);
+	const int fd = ctx->accepted_fd;
+	LOG_BIN_F(VERYVERBOSE, buf, len, "send_rsp: fd=%d %zu bytes", fd, len);
+	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
-		SOCKS_CTX_LOG_F(ERROR, ctx, "send: %s", strerror(err));
+		SOCKS_CTX_LOG_F(
+			WARNING, ctx, "send: fd=%d %s", fd, strerror(err));
 		return false;
 	}
 	if ((size_t)nsend != len) {
-		SOCKS_CTX_LOG(ERROR, ctx, "send: short send");
+		SOCKS_CTX_LOG_F(
+			WARNING, ctx, "send: fd=%d %zu < %zu", fd,
+			(size_t)nsend, len);
 		return false;
 	}
 	return true;
@@ -374,7 +376,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		const int err = ctx->dialer.syserr;
 		if (err != 0) {
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx,
+				DEBUG, ctx,
 				"unable to establish client connection: %s",
 				strerror(err));
 		}
@@ -449,7 +451,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 		read_uint8(hdr + offsetof(struct socks4_hdr, command));
 	if (command != SOCKS4CMD_CONNECT) {
 		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "SOCKS4 command not supported: %" PRIu8,
+			ERROR, ctx, "SOCKS4 command not supported: %" PRIu8,
 			command);
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
@@ -498,7 +500,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		read_uint8(hdr + offsetof(struct socks5_hdr, version));
 	if (version != SOCKS5) {
 		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "SOCKS5: unsupported version %" PRIu8,
+			ERROR, ctx, "SOCKS5: unsupported version %" PRIu8,
 			version);
 		return -1;
 	}
@@ -507,7 +509,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	if (command != SOCKS5CMD_CONNECT) {
 		socks5_sendrsp(ctx, SOCKS5RSP_CMDNOSUPPORT);
 		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "SOCKS5: unsupported command %" PRIu8,
+			ERROR, ctx, "SOCKS5: unsupported command %" PRIu8,
 			command);
 		return -1;
 	}
@@ -532,7 +534,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	default:
 		socks5_sendrsp(ctx, SOCKS5RSP_ATYPNOSUPPORT);
 		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "SOCKS5: unsupported addrtype: %" PRIu8,
+			ERROR, ctx, "SOCKS5: unsupported addrtype: %" PRIu8,
 			addrtype);
 		return -1;
 	}
@@ -591,7 +593,7 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	const uint8_t ver = read_uint8(req + 0);
 	if (ver != 0x01) {
 		SOCKS_CTX_LOG(
-			DEBUG, ctx,
+			ERROR, ctx,
 			"SOCKS5: incompatible authentication version");
 		return -1;
 	}
@@ -681,7 +683,7 @@ static int socks5_authmethod(struct socks_ctx *restrict ctx)
 	}
 	if (method == SOCKS5AUTH_NOACCEPTABLE) {
 		SOCKS_CTX_LOG(
-			DEBUG, ctx,
+			ERROR, ctx,
 			"SOCKS5: no acceptable authentication method");
 		return -1;
 	}
@@ -737,12 +739,12 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 			return 1;
 		}
 		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "recv: fd=%d %s", fd, strerror(err));
+			WARNING, ctx, "recv: fd=%d %s", fd, strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
 		/* connection is not established yet, we do not expect EOF here */
-		SOCKS_CTX_LOG_F(DEBUG, ctx, "recv: fd=%d early EOF", fd);
+		SOCKS_CTX_LOG_F(WARNING, ctx, "recv: fd=%d early EOF", fd);
 		return -1;
 	}
 	ctx->rbuf.len += (size_t)nrecv;

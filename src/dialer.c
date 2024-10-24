@@ -375,17 +375,19 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 static bool dialer_send(
 	struct dialer *restrict d, const unsigned char *buf, const size_t len)
 {
-	LOG_BIN_F(VERYVERBOSE, buf, len, "send: %zu bytes", len);
-	const ssize_t nsend = send(d->w_socket.fd, buf, len, 0);
+	const int fd = d->w_socket.fd;
+	LOG_BIN_F(VERYVERBOSE, buf, len, "send: fd=%d %zu bytes", fd, len);
+	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
-		DIALER_LOG_F(DEBUG, d, "send: %s", strerror(err));
+		DIALER_LOG_F(WARNING, d, "send: fd=%d %s", fd, strerror(err));
 		d->syserr = err;
 		return false;
 	}
 	if ((size_t)nsend != len) {
 		DIALER_LOG_F(
-			ERROR, d, "short send: %zu < %zu", (size_t)nsend, len);
+			WARNING, d, "send: fd=%d short send %zu < %zu", fd,
+			(size_t)nsend, len);
 		return false;
 	}
 	return true;
@@ -658,14 +660,15 @@ static bool send_dispatch(struct dialer *restrict d)
 static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 {
 	LOGV_F("consume_rcvbuf: %zu bytes", n);
-	const ssize_t nrecv = recv(d->w_socket.fd, d->next, n, 0);
+	const int fd = d->w_socket.fd;
+	const ssize_t nrecv = recv(fd, d->next, n, 0);
 	if (nrecv < 0) {
 		const int err = errno;
-		DIALER_LOG_F(ERROR, d, "recv: %s", strerror(err));
+		DIALER_LOG_F(WARNING, d, "recv: fd=%d %s", fd, strerror(err));
 		return false;
 	}
 	if ((size_t)nrecv != n) {
-		DIALER_LOG_F(ERROR, d, "recv: short read %zd/%zu", nrecv, n);
+		DIALER_LOG_F(WARNING, d, "recv: fd=%d early EOF", fd);
 		return false;
 	}
 	d->next += n;
@@ -964,12 +967,12 @@ static int dialer_recv(struct dialer *restrict d)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 1;
 		}
-		DIALER_LOG_F(DEBUG, d, "recv: %s", strerror(err));
+		DIALER_LOG_F(WARNING, d, "recv: fd=%d %s", fd, strerror(err));
 		d->syserr = err;
 		return -1;
 	}
 	if (nrecv == 0) {
-		DIALER_LOG(DEBUG, d, "early EOF");
+		DIALER_LOG_F(WARNING, d, "recv: fd=%d early EOF", fd);
 		return -1;
 	}
 	const int sockerr = socket_get_error(fd);
@@ -977,7 +980,8 @@ static int dialer_recv(struct dialer *restrict d)
 		if (IS_TRANSIENT_ERROR(sockerr)) {
 			return 1;
 		}
-		DIALER_LOG_F(ERROR, d, "%s", strerror(sockerr));
+		DIALER_LOG_F(
+			WARNING, d, "recv: fd=%d %s", fd, strerror(sockerr));
 		return -1;
 	}
 	d->rbuf.len += (size_t)nrecv;
@@ -1012,7 +1016,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		ASSERT(d->state == STATE_CONNECT);
 		const int sockerr = socket_get_error(d->w_socket.fd);
 		if (sockerr != 0) {
-			if (LOGLEVEL(DEBUG)) {
+			if (LOGLEVEL(WARNING)) {
 				const struct dialreq *restrict req = (d)->req;
 				const struct dialaddr *restrict addr =
 					req->num_proxy > 0 ?
@@ -1021,7 +1025,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 				char addr_str[64];
 				dialaddr_format(
 					addr, addr_str, sizeof(addr_str));
-				LOG_F(DEBUG, "connect `%s': %s", addr_str,
+				LOG_F(WARNING, "connect `%s': %s", addr_str,
 				      strerror(sockerr));
 			}
 			d->syserr = sockerr;
@@ -1071,13 +1075,13 @@ static bool connect_sa(
 	const int fd = socket(sa->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
-		LOGD_F("socket: %s", strerror(err));
+		LOGE_F("socket: %s", strerror(err));
 		d->syserr = err;
 		return false;
 	}
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
-		LOGD_F("fcntl: %s", strerror(err));
+		LOGE_F("fcntl: %s", strerror(err));
 		CLOSE_FD(fd);
 		d->syserr = err;
 		return false;
@@ -1105,10 +1109,10 @@ static bool connect_sa(
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
 		const int err = errno;
 		if (err != EINTR && err != EINPROGRESS) {
-			if (LOGLEVEL(DEBUG)) {
+			if (LOGLEVEL(WARNING)) {
 				char addr_str[64];
 				format_sa(sa, addr_str, sizeof(addr_str));
-				LOG_F(DEBUG, "connect `%s': %s", addr_str,
+				LOG_F(WARNING, "connect `%s': %s", addr_str,
 				      strerror(err));
 			}
 			d->syserr = err;
@@ -1145,7 +1149,7 @@ static void resolve_cb(
 	const struct dialaddr *restrict dialaddr =
 		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
 	if (sa == NULL) {
-		LOGE_F("name resolution failed: \"%.*s\"",
+		LOGW_F("name resolution failed: \"%.*s\"",
 		       (int)dialaddr->domain.len, dialaddr->domain.name);
 		return;
 	}

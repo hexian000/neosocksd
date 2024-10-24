@@ -56,11 +56,12 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 	const ssize_t nsend = send(p->fd, s, n, 0);
 	if (nsend < 0) {
 		const int err = errno;
-		LOGE_F("send: %s", strerror(err));
+		LOGW_F("send: fd=%d %s", p->fd, strerror(err));
 		return false;
 	}
 	if ((size_t)nsend != n) {
-		LOGE("send: short send");
+		LOGW_F("send: fd=%d short send %zu < %zu", p->fd, (size_t)nsend,
+		       n);
 		return false;
 	}
 	return true;
@@ -225,11 +226,11 @@ static bool recv_request(struct http_parser *restrict p)
 	size_t n = p->rbuf.cap - p->rbuf.len - 1;
 	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
 	if (err != 0) {
-		LOGD_F("recv: fd=%d %s", p->fd, strerror(err));
+		LOGW_F("recv: fd=%d %s", p->fd, strerror(err));
 		return false;
 	}
 	if (n == 0) {
-		LOGV_F("recv: fd=%d EOF", p->fd);
+		LOGW_F("recv: fd=%d early EOF", p->fd);
 		return false;
 	}
 	p->rbuf.len += n;
@@ -243,11 +244,11 @@ static bool recv_content(struct http_parser *restrict p)
 	size_t n = cbuf->cap - cbuf->len;
 	const int err = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
 	if (err != 0) {
-		LOGD_F("recv: fd=%d %s", p->fd, strerror(err));
+		LOGW_F("recv: fd=%d %s", p->fd, strerror(err));
 		return false;
 	}
 	if (n == 0) {
-		LOGV_F("recv: fd=%d EOF", p->fd);
+		LOGW_F("recv: fd=%d early EOF", p->fd);
 		return false;
 	}
 	cbuf->len += n;
