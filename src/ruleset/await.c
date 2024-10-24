@@ -275,14 +275,14 @@ await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 		return lua_error(L);
 	}
 	const bool ok = *(bool *)lua_touserdata(L, -3);
-	void *payload = lua_touserdata(L, -2);
+	const void *payload = lua_touserdata(L, -2);
 	const size_t len = *(size_t *)lua_touserdata(L, -1);
 	lua_pushboolean(L, ok);
 	if (!ok) {
 		lua_pushlstring(L, payload, len);
 		return 2;
 	}
-	if (lua_load(L, ruleset_reader, payload, "=(rpc)", "t")) {
+	if (lua_load(L, ruleset_reader, (void *)payload, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
@@ -291,7 +291,7 @@ await_invoke_k_(lua_State *restrict L, const int status, lua_KContext ctx)
 	/* lua stack: ok chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	(void)lua_setmetatable(L, -2);
-	if (lua_setupvalue(L, -2, -1) == NULL) {
+	if (lua_setupvalue(L, -2, 1) == NULL) {
 		lua_pop(L, 1);
 	}
 	return 2;

@@ -114,10 +114,10 @@ static int cfunc_invoke_(lua_State *restrict L)
 	lua_newtable(L);
 	lua_newtable(L);
 	lua_pushvalue(L, LUA_REGISTRYINDEX);
-	/* lua stack: chunk t mt _G */
+	/* lua stack: chunk env mt _G */
 	lua_setfield(L, -2, "__index");
-	(void)lua_setmetatable(L, -2);
-	if (lua_setupvalue(L, -2, -1) == NULL) {
+	lua_setmetatable(L, -2);
+	if (lua_setupvalue(L, -2, 1) == NULL) {
 		lua_pop(L, 1);
 	}
 	lua_call(L, 0, 0);
@@ -180,7 +180,7 @@ static int cfunc_rpcall_(lua_State *restrict L)
 	lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
 	/* lua stack: state chunk env mt _G */
 	lua_setfield(L, -2, "__index");
-	(void)lua_setmetatable(L, -2);
+	lua_setmetatable(L, -2);
 	if (lua_setupvalue(L, -2, 1) == NULL) {
 		return 0;
 	}

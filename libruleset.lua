@@ -1,6 +1,7 @@
 _G.config = neosocksd.config()
 
 -- [[ useful library routines ]] --
+local print = _G.print
 local strformat = string.format
 
 local function printf(...)
