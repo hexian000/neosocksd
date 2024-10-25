@@ -306,7 +306,7 @@ neosocksd.invoke([[log("test rpc")]], "api.neosocksd.internal:80", "socks4a://12
 
 Run Lua code on another neosocksd. This function returns immediately. In case of failure, the invocation is lost.
 
-Tip: To implement message notification, please refer to `neosocksd.sendmsg` in `libruleset.lua`.
+Tip: Please refer to `neosocksd.sendmsg` in `libruleset.lua`.
 
 
 ### neosocksd.stats
@@ -456,11 +456,17 @@ Tip: To reduce delays caused by name resolution. It's recommended to set up a lo
 ```Lua
 async(function(addr)
     local begin = neosocksd.now()
-    local ok, ret = await.invoke([[return "echo"]], addr)
+    local ok, result = await.invoke([[await.idle(); return "ok"]], addr)
     if not ok then
-        error("await.invoke: " .. ret)
+        -- on failure, the result is string
+        error("invocation failed: " .. result)
     end
-    assert(ret == "echo")
+    -- on success, the result is function
+    ok, result = result()
+    if not ok then
+        error("remote error: " .. result)
+    end
+    assert(result == "ok")
     local rtt = neosocksd.now() - begin
     logf("ping %s: %dms", addr, math.ceil(rtt * 1e+3))
 end, "127.0.1.1:9080")
@@ -468,9 +474,9 @@ end, "127.0.1.1:9080")
 
 **Description**
 
-Run Lua code on another neosocksd and take the results back. `await.invoke` is likely to be less efficient than `neosocksd.invoke`.
+Run Lua code on another neosocksd and return the result. On another neosocksd, the code runs in asynchronous routine. Therefore, you can call `await.*` functions in the code. `await.invoke` is likely to be less efficient than `neosocksd.invoke`.
 
-Tip: To implement asynchronous RPC, please refer to `await.rpcall` in `libruleset.lua`.
+Tip: Please refer to `await.rpcall` in `libruleset.lua`.
 
 
 ### await.sleep
