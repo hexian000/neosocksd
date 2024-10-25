@@ -67,7 +67,7 @@ int format_addr_(lua_State *restrict L)
 	return 1;
 }
 
-const char *ruleset_reader(lua_State *L, void *ud, size_t *restrict sz)
+const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
 {
 	UNUSED(L);
 	struct stream *s = ud;
@@ -142,10 +142,7 @@ bool ruleset_pcall(
 	}
 	const bool traceback = G.conf->traceback;
 	if (traceback) {
-		if (lua_rawgeti(L, 1, FUNC_TRACEBACK) != LUA_TFUNCTION) {
-			lua_pushliteral(L, ERR_BAD_REGISTRY);
-			return false;
-		}
+		lua_pushcfunction(L, aux_traceback);
 		lua_replace(L, 1);
 	}
 	va_list args;
@@ -162,7 +159,7 @@ bool ruleset_pcall(
 	return true;
 }
 
-int ruleset_traceback_(lua_State *restrict L)
+int aux_traceback(lua_State *restrict L)
 {
 	const char *err = lua_tostring(L, 1);
 	luaL_traceback(L, L, err, 1);
@@ -178,17 +175,67 @@ int ruleset_traceback_(lua_State *restrict L)
 	return 1;
 }
 
-bool ruleset_resume(
+void aux_resume(lua_State *restrict L, const int tidx, const int narg)
+{
+	lua_State *restrict co = lua_tothread(L, tidx);
+	ASSERT(co != NULL);
+	int status, nres;
+#if LUA_VERSION_NUM >= 504
+	status = lua_resume(co, NULL, narg, &nres);
+#elif LUA_VERSION_NUM == 503
+	{
+		const int base = lua_gettop(co) - narg;
+		status = lua_resume(co, NULL, narg);
+		nres = lua_gettop(co) - base;
+	}
+#endif
+	if (status == LUA_YIELD) {
+		return;
+	}
+	/* thread is finished */
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE) !=
+	    LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		lua_error(L);
+		return;
+	}
+	lua_pushvalue(L, tidx); /* thread */
+	if (lua_rawget(L, -2) != LUA_TFUNCTION) {
+		/* thread has no finish function */
+		lua_pushvalue(L, tidx);
+		lua_pushnil(L);
+		lua_rawset(L, -4);
+		return;
+	}
+	if (status == LUA_OK) {
+		luaL_checkstack(L, 1 + nres, NULL);
+		lua_pushboolean(L, 1);
+		lua_xmove(co, L, nres);
+		nres = 1 + nres;
+	} else {
+		luaL_checkstack(L, 2, NULL);
+		lua_pushboolean(L, 0);
+		lua_xmove(co, L, 1);
+		nres = 2;
+	}
+	/* call finish function */
+	if (lua_pcall(L, nres, 0, 0) != LUA_OK) {
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	}
+}
+
+void ruleset_resume(
 	struct ruleset *restrict r, const void *ctx, const int narg, ...)
 {
-	check_memlimit(r);
 	lua_State *restrict L = r->L;
+	lua_settop(L, 0);
+	check_memlimit(r);
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
 	    LUA_TTABLE) {
 		lua_pop(L, 1);
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
-		return false;
+		return;
 	}
 	lua_rawgetp(L, -1, ctx);
 	lua_State *restrict co = lua_tothread(L, -1);
@@ -196,21 +243,13 @@ bool ruleset_resume(
 		lua_pop(L, 2);
 		lua_pushfstring(L, "async context lost: %p", ctx);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
-		return false;
+		return;
 	}
-	lua_pop(L, 2);
 	va_list args;
 	va_start(args, narg);
 	for (int i = 0; i < narg; i++) {
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}
 	va_end(args);
-	int nres;
-	const int status = co_resume(co, NULL, narg, &nres);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_pushvalue(co, -1);
-		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
-		return false;
-	}
-	return true;
+	aux_resume(L, 2, narg);
 }

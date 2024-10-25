@@ -4,6 +4,7 @@
 #include "zlib.h"
 
 #include "base.h"
+#include "compat.h"
 
 #include "io/io.h"
 #include "io/memory.h"

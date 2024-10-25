@@ -467,8 +467,12 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 		return;
 	}
 	ctx->state = STATE_YIELD;
-	struct rpcall_state *rpcstate =
-		ruleset_rpcall(ruleset, reader, rpcall_return, ctx);
+	struct rpcall_state *rpcstate = ruleset_rpcall(
+		ruleset, reader,
+		(struct rpcall_cb){
+			.func = rpcall_return,
+			.data = ctx,
+		});
 	stream_close(reader);
 	if (rpcstate == NULL) {
 		ctx->state = STATE_RESPONSE;
@@ -484,7 +488,7 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 		return;
 	}
 	if (ctx->state == STATE_YIELD) {
-		/* not returned yet */
+		/* rpcall_return is not called yet */
 		ctx->rpcstate = rpcstate;
 	}
 }

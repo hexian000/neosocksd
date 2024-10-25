@@ -22,10 +22,16 @@ struct ruleset {
 };
 
 enum ruleset_ridx {
+	/* t[idx] = string */
 	RIDX_CONSTANT = LUA_RIDX_LAST + 1,
+	/* t[idx] = function */
 	RIDX_CFUNCTION = LUA_RIDX_LAST + 2,
-	RIDX_AWAIT_CONTEXT = LUA_RIDX_LAST + 3,
-	RIDX_LASTERROR = LUA_RIDX_LAST + 4,
+	/* last error */
+	RIDX_LASTERROR = LUA_RIDX_LAST + 3,
+	/* t[coroutine] = finish callback */
+	RIDX_ASYNC_ROUTINE = LUA_RIDX_LAST + 4,
+	/* t[lightuseradta] = coroutine */
+	RIDX_AWAIT_CONTEXT = LUA_RIDX_LAST + 5,
 };
 
 #define ERR_MEMORY "out of memory"
@@ -40,7 +46,11 @@ static inline struct ruleset *find_ruleset(lua_State *restrict L)
 	return ud;
 }
 
-const char *ruleset_reader(lua_State *L, void *ud, size_t *sz);
+const char *aux_reader(lua_State *L, void *ud, size_t *sz);
+
+int aux_traceback(lua_State *L);
+
+void aux_resume(lua_State *L, int tidx, int narg);
 
 enum ruleset_functions {
 	FUNC_REQUEST = 1,
@@ -49,18 +59,15 @@ enum ruleset_functions {
 	FUNC_UPDATE,
 	FUNC_STATS,
 	FUNC_TICK,
-	FUNC_TRACEBACK,
 	FUNC_RPCALL,
 };
 
 bool ruleset_pcall(struct ruleset *r, int func, int nargs, int nresults, ...);
 
-bool ruleset_resume(struct ruleset *r, const void *ctx, int narg, ...);
+void ruleset_resume(struct ruleset *r, const void *ctx, int narg, ...);
 
 int format_addr_(lua_State *L);
 
 struct dialreq *make_dialreq_(lua_State *L, const int n);
-
-int ruleset_traceback_(lua_State *L);
 
 #endif /* RULESET_BASE_H */

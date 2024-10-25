@@ -4,6 +4,7 @@
 #include "util.h"
 
 #include "resolver.h"
+#include "ruleset.h"
 
 #include "math/rand.h"
 #include "utils/arraysize.h"

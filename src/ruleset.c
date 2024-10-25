@@ -15,10 +15,12 @@
 
 #include "ruleset/await.h"
 #include "ruleset/base.h"
+#include "ruleset/compat.h"
 #include "ruleset/marshal.h"
 #include "ruleset/regex.h"
 #include "ruleset/zlib.h"
 
+#include "io/stream.h"
 #include "net/addr.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
@@ -108,84 +110,108 @@ static int cfunc_invoke_(lua_State *restrict L)
 	void *stream = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
-	if (lua_load(L, ruleset_reader, stream, "=(invoke)", "t")) {
+	if (lua_load(L, aux_reader, stream, "=(invoke)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
 	lua_newtable(L);
-	lua_pushvalue(L, LUA_REGISTRYINDEX);
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
 	/* lua stack: chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
-	if (lua_setupvalue(L, -2, 1) == NULL) {
-		lua_pop(L, 1);
-	}
+	const char *upvalue = lua_setupvalue(L, -2, 1);
+	CHECK(upvalue != NULL && CONSTSTREQUAL(upvalue, "_ENV"));
 	lua_call(L, 0, 0);
 	return 0;
 }
 
 struct rpcall_state {
-	rpcall_return_fn callback;
-	void *data;
+	struct rpcall_cb callback;
 };
 
 static int rpcall_gc_(lua_State *restrict L)
 {
 	struct rpcall_state *restrict state = lua_touserdata(L, 1);
-	if (state->callback != NULL) {
-		state->callback(state->data, NULL, 0);
-		state->callback = NULL;
+	if (state->callback.func != NULL) {
+		state->callback.func(state->callback.data, NULL, 0);
+		state->callback.func = NULL;
 	}
 	return 0;
 }
 
-static int rpcall_return_(lua_State *restrict co)
+/* finish(ok, ...) */
+static int rpcall_finish_(lua_State *restrict L)
 {
 	struct rpcall_state *restrict state =
-		lua_touserdata(co, lua_upvalueindex(1));
-	if (state->callback == NULL) {
+		lua_touserdata(L, lua_upvalueindex(1));
+	if (state->callback.func == NULL) {
 		return 0;
 	}
+	const int n = lua_gettop(L);
+	lua_pushliteral(L, "return ");
+	lua_pushcfunction(L, api_marshal_);
+	lua_rotate(L, 1, 2);
+	/* lua stack: marshal ok ... */
+	lua_call(L, n, 1);
+	lua_concat(L, 2);
 	size_t len;
-	const char *s = luaL_checklstring(co, 1, &len);
-	state->callback(state->data, s, len);
-	state->callback = NULL;
+	const char *s = lua_tolstring(L, 1, &len);
+	state->callback.func(state->callback.data, s, len);
+	state->callback.func = NULL;
 	return 0;
 }
 
 /* rpcall(codestream, callback, data) */
 static int cfunc_rpcall_(lua_State *restrict L)
 {
-	ASSERT(lua_gettop(L) == 3);
-	void *stream = lua_touserdata(L, 1);
-	struct rpcall_state *restrict ctx =
+	ASSERT(lua_gettop(L) == 2);
+	struct stream *stream = lua_touserdata(L, 1);
+	const struct rpcall_cb *in_cb = lua_touserdata(L, 2);
+	struct rpcall_state *restrict state =
 		lua_newuserdata(L, sizeof(struct rpcall_state));
-	*(void **)&ctx->callback = lua_touserdata(L, 2);
-	ctx->data = lua_touserdata(L, 3);
+	*state = (struct rpcall_state){ .callback = *in_cb };
 	if (luaL_newmetatable(L, MT_RPCALL)) {
 		lua_pushcfunction(L, rpcall_gc_);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-	lua_replace(L, 1);
+	lua_copy(L, -1, 1);
 	lua_settop(L, 1);
-	if (lua_load(L, ruleset_reader, stream, "=(rpc)", "t")) {
+
+	lua_State *restrict co = lua_newthread(L);
+	if (lua_load(L, aux_reader, stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, rpcall_return_, 1);
-	lua_setfield(L, -2, "rpcall_return");
 	lua_newtable(L);
-	lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
-	/* lua stack: state chunk env mt _G */
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
+	}
+	/* lua stack: state co chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
-	if (lua_setupvalue(L, -2, 1) == NULL) {
-		return 0;
+	const char *upvalue = lua_setupvalue(L, -2, 1);
+	CHECK(upvalue != NULL && CONSTSTREQUAL(upvalue, "_ENV"));
+
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE) !=
+	    LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		return lua_error(L);
 	}
-	lua_call(L, 0, 0);
-	ASSERT(lua_gettop(L) == 1);
+	lua_pushvalue(L, 2);
+	lua_pushvalue(L, 1);
+	lua_pushcclosure(L, rpcall_finish_, 1);
+	/* lua stack: state co chunk RIDX_ASYNC_ROUTINE co finish */
+	lua_rawset(L, -3);
+	lua_pop(L, 1);
+	lua_xmove(L, co, 1);
+	/* lua stack: state co; co stack: chunk */
+	aux_resume(L, 2, 0);
+	lua_pushvalue(L, 1);
 	return 1;
 }
 
@@ -251,11 +277,11 @@ static int cfunc_update_(lua_State *restrict L)
 		chunkname[0] = '=';
 		memcpy(chunkname + 1, name, namelen);
 		chunkname[1 + namelen] = '\0';
-		if (lua_load(L, ruleset_reader, stream, chunkname, NULL)) {
+		if (lua_load(L, aux_reader, stream, chunkname, NULL)) {
 			return lua_error(L);
 		}
 	} else {
-		if (lua_load(L, ruleset_reader, stream, chunkname, NULL)) {
+		if (lua_load(L, aux_reader, stream, chunkname, NULL)) {
 			return lua_error(L);
 		}
 	}
@@ -518,7 +544,7 @@ static int luaopen_neosocksd(lua_State *restrict L)
 		{ "setinterval", api_setinterval_ },
 		{ "splithostport", api_splithostport_ },
 		{ "stats", api_stats_ },
-		{ "traceback", ruleset_traceback_ },
+		{ "traceback", aux_traceback },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, apilib);
@@ -548,7 +574,6 @@ static void init_registry(lua_State *restrict L)
 		[FUNC_UPDATE] = cfunc_update_,
 		[FUNC_STATS] = cfunc_stats_,
 		[FUNC_TICK] = cfunc_tick_,
-		[FUNC_TRACEBACK] = ruleset_traceback_,
 		[FUNC_RPCALL] = cfunc_rpcall_,
 	};
 	const int nfuncs = (int)ARRAY_SIZE(funcs) - 1;
@@ -664,7 +689,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 		ruleset_free(r);
 		return NULL;
 	default:
-		FAILMSGF("ruleset init: %s", ruleset_geterror(r, NULL));
+		FAILMSGF("ruleset init: %s", lua_tostring(L, -1));
 	}
 	return r;
 }
@@ -707,11 +732,9 @@ bool ruleset_invoke(struct ruleset *r, struct stream *code)
 }
 
 struct rpcall_state *ruleset_rpcall(
-	struct ruleset *r, struct stream *code, rpcall_return_fn callback,
-	void *data)
+	struct ruleset *r, struct stream *code, struct rpcall_cb callback)
 {
-	const bool ok =
-		ruleset_pcall(r, FUNC_RPCALL, 3, 1, code, callback, data);
+	const bool ok = ruleset_pcall(r, FUNC_RPCALL, 2, 1, code, &callback);
 	if (!ok) {
 		return NULL;
 	}
@@ -720,7 +743,7 @@ struct rpcall_state *ruleset_rpcall(
 
 void ruleset_rpcall_cancel(struct rpcall_state *state)
 {
-	state->callback = NULL;
+	state->callback.func = NULL;
 }
 
 bool ruleset_update(

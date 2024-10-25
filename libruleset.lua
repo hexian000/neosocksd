@@ -190,6 +190,7 @@ function thread:wait()
         return table.unpack(self.result)
     end
     local co = coroutine.running()
+    assert(self.co ~= co)
     self.wakeup[co] = true
     coroutine.yield()
     return table.unpack(self.result)
@@ -318,16 +319,8 @@ end
 
 _G.rpc = rpc
 
-function _G.rpcall(ret, func, ...)
-    logf("rpcall: %q", func)
-    local co = coroutine.create(function(...)
-        ret("return " .. marshal(pcall(...)))
-    end)
-    coroutine.resume(co, _G.rpc[func], ...)
-end
-
 function await.rpcall(target, func, ...)
-    local code = strformat("rpcall(rpcall_return,%s)", marshal(func, ...))
+    local code = strformat("return rpc.%s(%s)", func, marshal(...))
     local ok, result = await.invoke(code, table.unpack(target))
     if ok then return result() end
     return ok, result
