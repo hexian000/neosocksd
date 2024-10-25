@@ -270,7 +270,7 @@ static void marshal_value(lua_State *restrict L, const int idx, const int depth)
 }
 
 /* s = marshal(...) */
-int api_marshal_(lua_State *restrict L)
+int api_marshal(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
 	/* visited */

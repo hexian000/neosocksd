@@ -5,7 +5,6 @@
 #define RULESET_BASE_H
 
 #include "ruleset.h"
-#include "util.h"
 
 #include "lua.h"
 
@@ -24,14 +23,12 @@ struct ruleset {
 enum ruleset_ridx {
 	/* t[idx] = string */
 	RIDX_CONSTANT = LUA_RIDX_LAST + 1,
-	/* t[idx] = function */
-	RIDX_CFUNCTION = LUA_RIDX_LAST + 2,
 	/* last error */
-	RIDX_LASTERROR = LUA_RIDX_LAST + 3,
+	RIDX_LASTERROR,
 	/* t[coroutine] = finish callback */
-	RIDX_ASYNC_ROUTINE = LUA_RIDX_LAST + 4,
+	RIDX_ASYNC_ROUTINE,
 	/* t[lightuseradta] = coroutine */
-	RIDX_AWAIT_CONTEXT = LUA_RIDX_LAST + 5,
+	RIDX_AWAIT_CONTEXT,
 };
 
 #define ERR_MEMORY "out of memory"
@@ -52,17 +49,8 @@ int aux_traceback(lua_State *L);
 
 void aux_resume(lua_State *L, int tidx, int narg);
 
-enum ruleset_functions {
-	FUNC_REQUEST = 1,
-	FUNC_LOADFILE,
-	FUNC_INVOKE,
-	FUNC_UPDATE,
-	FUNC_STATS,
-	FUNC_TICK,
-	FUNC_RPCALL,
-};
-
-bool ruleset_pcall(struct ruleset *r, int func, int nargs, int nresults, ...);
+bool ruleset_pcall(
+	struct ruleset *r, lua_CFunction func, int nargs, int nresults, ...);
 
 void ruleset_resume(struct ruleset *r, const void *ctx, int narg, ...);
 

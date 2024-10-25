@@ -1,11 +1,11 @@
 /* neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#ifndef RULESET_MARSHAL_H
-#define RULESET_MARSHAL_H
+#ifndef RULESET_API_H
+#define RULESET_API_H
 
 #include "lua.h"
 
-int api_marshal(lua_State *L);
+int luaopen_neosocksd(lua_State *L);
 
-#endif /* RULESET_MARSHAL_H */
+#endif /* RULESET_API_H */

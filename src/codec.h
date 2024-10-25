@@ -4,9 +4,9 @@
 #ifndef CODEC_H
 #define CODEC_H
 
-#include "io/stream.h"
-
 #include <stddef.h>
+
+struct stream;
 
 /* RFC 1950 */
 struct stream *codec_zlib_writer(struct stream *base);

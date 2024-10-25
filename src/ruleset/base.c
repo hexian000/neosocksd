@@ -2,11 +2,13 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "base.h"
-
 #include "compat.h"
 
 #include "io/stream.h"
+#include "net/addr.h"
+#include "utils/arraysize.h"
 #include "utils/debug.h"
+#include "utils/serialize.h"
 #include "utils/slog.h"
 
 #include "conf.h"
@@ -127,24 +129,17 @@ static inline void check_memlimit(struct ruleset *restrict r)
 }
 
 bool ruleset_pcall(
-	struct ruleset *restrict r, int func, int nargs, int nresults, ...)
+	struct ruleset *restrict r, lua_CFunction func, int nargs, int nresults,
+	...)
 {
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	check_memlimit(r);
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_CFUNCTION) != LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return false;
-	}
-	if (lua_rawgeti(L, 1, func) != LUA_TFUNCTION) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return false;
-	}
 	const bool traceback = G.conf->traceback;
 	if (traceback) {
 		lua_pushcfunction(L, aux_traceback);
-		lua_replace(L, 1);
 	}
+	lua_pushcfunction(L, func);
 	va_list args;
 	va_start(args, nresults);
 	for (int i = 0; i < nargs; i++) {

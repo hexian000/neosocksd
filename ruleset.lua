@@ -136,5 +136,5 @@ local function main(...)
     })
 end
 
-logf("ruleset loaded, interpreter: %s", _VERSION)
+evlogf("ruleset loaded, interpreter: %s", _VERSION)
 return main(...)
