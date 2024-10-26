@@ -11,6 +11,7 @@ agent.hosts = table.get(_G, "agent", "hosts")
 
 local API_ENDPOINT = "api.neosocksd.internal:80"
 local INTERNAL_DOMAIN = ".internal"
+-- <host>.peerN.peer2.peer1.relay.neosocksd.internal
 local RELAY_DOMAIN = ".relay.neosocksd.internal"
 
 -- _G.peerdb[peername] = { hosts = { hostname, "host1" } }, timestamp = os.time() }

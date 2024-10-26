@@ -36,21 +36,21 @@ local INTERNAL_DOMAIN = ".internal"
 
 -- _G.redirect_name: for requests with name string
 _G.redirect_name = {
-    -- access mDNS sites directly
-    { match.domain(".local"),           rule.direct() },
-    -- loopback, rule.redirect(addr, proxy1, proxy2, ...)
-    { match.exact("peer0.lan:22"),      rule.redirect("host-gateway:22"),       "ssh" },
-    { match.exact("peer0.lan:80"),      rule.redirect("nginx:80"),              "web" },
-    { match.exact("peer0.lan:443"),     rule.redirect("nginx:443"),             "web" },
-    -- internal assignment
-    { match.exact(API_ENDPOINT),        rule.redirect("127.0.1.1:9080") },
-    { match.agent(),                    rule.agent() },
-    { match.exact("peer0.internal:22"), rule.redirect("host-gateway:22"),       "ssh" },
-    { match.domain(INTERNAL_DOMAIN),    rule.reject() },
+    -- rule.redirect(addr, proxy1, proxy2, ...)
+    { match.exact("peer0.lan:22"),        rule.redirect("host-gateway:22"),       "ssh" },
+    { match.exact("peer0.lan:80"),        rule.redirect("nginx:80"),              "web" },
+    { match.exact("peer0.lan:443"),       rule.redirect("nginx:443"),             "web" },
+    -- access local sites directly
+    { match.domain({ ".lan", ".local" }), rule.direct(),                          "lan" },
+    -- ".internal" assignment
+    { match.exact(API_ENDPOINT),          rule.redirect("127.0.1.1:9080") },
+    { match.agent(),                      rule.agent() }, -- agent relay
+    { match.exact("peer0.internal:22"),   rule.redirect("host-gateway:22"),       "ssh" },
+    { match.domain(INTERNAL_DOMAIN),      rule.reject(),                          "unknown" },
     -- global condition
-    { is_disabled,                      rule.reject(),                          "off" },
+    { is_disabled,                        rule.reject(),                          "off" },
     -- dynamically loaded big domains list, rule.proxy(proxy1, proxy2, ...)
-    { composite.maybe(_G, "biglist"),   rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
+    { composite.maybe(_G, "biglist"),     rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
     -- if in _G.hosts, go to _G.route/_G.route6
     -- otherwise, go to _G.route_default
 }
