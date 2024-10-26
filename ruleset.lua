@@ -8,10 +8,8 @@ agent.conns = {
     { "socks4a://127.0.32.1:1080", "socks4a://127.0.32.2:1080" },
     { "socks4a://127.0.33.1:1080" },
 }
-agent.services = {
-    -- announce the services below to all peers
-    ["peer0.internal:22"] = "127.0.0.1:22",
-}
+-- route "peer0.internal" to current peer
+agent.hosts = { "peer0" }
 
 -- [[ configurations ]] --
 local ruleset = {}
@@ -29,8 +27,8 @@ local function is_disabled()
     return not (9 <= date.hour and date.hour < 18)
 end
 
-ruleset.API_ENDPOINT = "api.neosocksd.internal:80"
-ruleset.RESERVED_DOMAIN = ".neosocksd.internal"
+local API_ENDPOINT = "api.neosocksd.internal:80"
+local INTERNAL_DOMAIN = ".internal"
 
 -- 1. _G.redirect*: match the raw request "host:port"
 -- in {matcher, action, optional log tag}
@@ -39,19 +37,20 @@ ruleset.RESERVED_DOMAIN = ".neosocksd.internal"
 -- _G.redirect_name: for requests with name string
 _G.redirect_name = {
     -- access mDNS sites directly
-    { match.domain(".local"),                rule.direct() },
+    { match.domain(".local"),           rule.direct() },
     -- loopback, rule.redirect(addr, proxy1, proxy2, ...)
-    { match.exact("peer0.lan:22"),           rule.redirect("host-gateway:22"),       "ssh" },
-    { match.exact("peer0.lan:80"),           rule.redirect("nginx:80"),              "web" },
-    { match.exact("peer0.lan:443"),          rule.redirect("nginx:443"),             "web" },
+    { match.exact("peer0.lan:22"),      rule.redirect("host-gateway:22"),       "ssh" },
+    { match.exact("peer0.lan:80"),      rule.redirect("nginx:80"),              "web" },
+    { match.exact("peer0.lan:443"),     rule.redirect("nginx:443"),             "web" },
     -- internal assignment
-    { match.exact(ruleset.API_ENDPOINT),     rule.redirect("127.0.1.1:9080") },
-    { match.domain(ruleset.RESERVED_DOMAIN), rule.reject() },
-    { match.agent(),                         rule.agent() },
+    { match.exact(API_ENDPOINT),        rule.redirect("127.0.1.1:9080") },
+    { match.agent(),                    rule.agent() },
+    { match.exact("peer0.internal:22"), rule.redirect("host-gateway:22"),       "ssh" },
+    { match.domain(INTERNAL_DOMAIN),    rule.reject() },
     -- global condition
-    { is_disabled,                           rule.reject(),                          "off" },
+    { is_disabled,                      rule.reject(),                          "off" },
     -- dynamically loaded big domains list, rule.proxy(proxy1, proxy2, ...)
-    { composite.maybe(_G, "biglist"),        rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
+    { composite.maybe(_G, "biglist"),   rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
     -- if in _G.hosts, go to _G.route/_G.route6
     -- otherwise, go to _G.route_default
 }

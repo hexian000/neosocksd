@@ -6,13 +6,14 @@ local agent = {}
 agent.peername = table.get(_G, "agent", "peername")
 -- agent.conns[id] = { proxy1, proxy2, ... }
 agent.conns = table.get(_G, "agent", "conns")
--- agent.services[service] = addr
-agent.services = table.get(_G, "agent", "services")
+-- agent.hosts = { "host1", "host2", ... }
+agent.hosts = table.get(_G, "agent", "hosts")
 
-agent.API_ENDPOINT = "api.neosocksd.internal:80"
-agent.INTERNAL_DOMAIN = ".internal"
+local API_ENDPOINT = "api.neosocksd.internal:80"
+local INTERNAL_DOMAIN = ".internal"
+local RELAY_DOMAIN = ".relay.neosocksd.internal"
 
--- _G.peerdb[peername] = { services = { "serv.internal" } }, timestamp = os.time() }
+-- _G.peerdb[peername] = { hosts = { hostname, "host1" } }, timestamp = os.time() }
 _G.peerdb = _G.peerdb or {}
 -- _G.conninfo[connid] = { [peername] = { route = { peername, "peer1" }, rtt = 0, timestamp = os.time() } }
 _G.conninfo = _G.conninfo or {}
@@ -52,47 +53,80 @@ local function build_index()
             end
         end
     end
-    local services, service_rtt = {}, {}
+    local hosts, host_rtt = {}, {}
     for peername, data in pairs(_G.peerdb) do
-        for _, service in pairs(data.services) do
+        for _, host in pairs(data.hosts or {}) do
             local rtt = peer_rtt[peername]
             if rtt then
-                local knownrtt = service_rtt[service]
+                local knownrtt = host_rtt[host]
                 if not knownrtt or rtt < knownrtt then
-                    service_rtt[service] = rtt
-                    services[service] = peername
+                    host_rtt[host] = rtt
+                    hosts[host] = peername
                 end
-            elseif not services[service] then
-                services[service] = peername
+            elseif not hosts[host] then
+                hosts[host] = peername
             end
         end
     end
-    return services, peers
+    return hosts, peers
 end
--- services[service] = peername
+-- hosts[host] = peername
 -- peers[peername] = connid
-local services, peers = build_index()
+local hosts, peers = build_index()
+
+local function subdomain(host, domain)
+    local n = domain:len()
+    if host:sub(-n) ~= domain then
+        return nil
+    end
+    return host:sub(1, -n - 1)
+end
 
 local splithostport = neosocksd.splithostport
 function match.agent()
     return function(addr)
-        local host, _ = splithostport(addr)
-        if not host then
+        local fqdn, _ = splithostport(addr)
+        if fqdn:endswith(RELAY_DOMAIN) then
+            return true
+        end
+        local sub = subdomain(fqdn, INTERNAL_DOMAIN)
+        if not sub then
             return false
         end
-        return host:endswith(agent.INTERNAL_DOMAIN)
+        local peername = hosts[sub]
+        return peername ~= nil and peername ~= agent.peername
     end
 end
 
+local strformat = string.format
 function rule.agent()
     return function(addr)
-        local peername = services[addr]
-        if not peername then
-            return nil
-        elseif peername == agent.peername then
-            return agent.services[addr]
+        local fqdn, port = splithostport(addr)
+        local sub = subdomain(fqdn, RELAY_DOMAIN)
+        if sub then
+            local remain, peername = sub:match("^(.+)%.([^.]+)$")
+            local domain
+            if remain:match("^[^.]+$") then
+                domain = INTERNAL_DOMAIN
+            else
+                domain = RELAY_DOMAIN
+            end
+            addr = strformat("%s%s:%s", remain, domain, port)
+            local connid = peers[peername]
+            local conn = agent.conns[connid]
+            return addr, list:new(conn):reverse():unpack()
         end
+        sub = subdomain(fqdn, INTERNAL_DOMAIN)
+        assert(sub)
+        local peername = hosts[sub]
+        assert(peername ~= nil and peername ~= agent.peername)
         local connid = peers[peername]
+        local route = table.get(_G.conninfo, connid, peername, "route")
+        local t = list:new():append(route)
+        t[1], t[#t] = sub, nil
+        if #t > 1 then
+            addr = strformat("%s%s:%s", t:concat("."), RELAY_DOMAIN, port)
+        end
         local conn = agent.conns[connid]
         return addr, list:new(conn):reverse():unpack()
     end
@@ -109,7 +143,7 @@ local function callbyconn(connid, func, ...)
         error("cancelled")
     end
     local target = list:new():append(agent.conns[connid])
-    target:insert(agent.API_ENDPOINT)
+    target:insert(API_ENDPOINT)
     target = target:reverse():totable()
     return await.rpcall(target, func, ...)
 end
@@ -128,7 +162,7 @@ local function update_peerdb(peername, peerdb)
             end
         end
     end
-    services, peers = build_index()
+    hosts, peers = build_index()
 end
 
 function rpc.sync(peername, peerdb)
@@ -218,7 +252,7 @@ local function probe_via(connid, peername)
     local conn = _G.conninfo[connid] or {}
     conn[peername] = result
     _G.conninfo[connid] = conn
-    services, peers = build_index()
+    hosts, peers = build_index()
     return err
 end
 
@@ -247,12 +281,8 @@ end
 
 function agent.maintenance()
     -- update self
-    local svclist = {}
-    for service, _ in pairs(agent.services) do
-        table.insert(svclist, service)
-    end
     _G.peerdb[agent.peername] = {
-        services = svclist,
+        hosts = agent.hosts,
         timestamp = os.time(),
     }
     -- sync
@@ -282,7 +312,7 @@ function agent.maintenance()
             end
         end
     end
-    services, peers = build_index()
+    hosts, peers = build_index()
 end
 
 local function mainloop()
@@ -308,7 +338,7 @@ function agent.stats(dt)
         if info and info.rtt then
             w:insertf("%-16s: %s [%s] %4.0fms %s", tag, timestamp, connid,
                 info.rtt * 1e+3, format_route(info.route))
-        elseif data and peername ~= agent.peername then
+        elseif peername ~= agent.peername then
             w:insertf("%-16s: %s no route", tag, timestamp)
         end
     end
