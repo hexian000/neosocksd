@@ -105,9 +105,12 @@ bool check_rpcall_mime(char *s)
 #endif
 
 static void server_stats(
-	struct buffer *restrict buf, const struct server *restrict s,
+	struct buffer *restrict buf, const struct server *restrict api,
 	const double uptime)
 {
+	const struct server_stats *restrict apistats = &api->stats;
+	const struct listener_stats *restrict apilstats = &api->l.stats;
+	const struct server *restrict s = api->data;
 	const struct server_stats *restrict stats = &s->stats;
 	const struct listener_stats *restrict lstats = &s->l.stats;
 	const struct resolver_stats *restrict resolv_stats =
@@ -130,13 +133,14 @@ static void server_stats(
 		"Server Time         : %s\n"
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu)\n"
-		"Conn Accepts        : %ju (+%ju)\n"
 		"Requests            : %ju (+%ju)\n"
+		"API Requests        : %ju (+%ju)\n"
 		"Name Resolves       : %ju (+%ju)\n"
 		"Traffic             : Up %s, Down %s\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
-		lstats->num_serve, lstats->num_accept - lstats->num_serve,
-		stats->num_success, stats->num_request - stats->num_success,
+		stats->num_success, lstats->num_accept - stats->num_success,
+		apistats->num_request,
+		apilstats->num_accept - apistats->num_request,
 		resolv_stats->num_success,
 		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
 		xfer_down);
@@ -159,17 +163,20 @@ static void server_stats(
 }
 
 static void server_stats_stateful(
-	struct buffer *restrict buf, const struct server *restrict s,
+	struct buffer *restrict buf, const struct server *restrict api,
 	const double dt)
 {
+	const struct server_stats *restrict apistats = &api->stats;
+	const struct server *restrict s = api->data;
 	const struct server_stats *restrict stats = &s->stats;
 	const struct listener_stats *restrict lstats = &s->l.stats;
 
 	static struct {
-		uintmax_t num_request;
 		uintmax_t xfer_up, xfer_down;
 		uintmax_t num_accept;
 		uintmax_t num_reject;
+		uintmax_t num_request;
+		uintmax_t num_api_request;
 	} last = { 0 };
 
 	FORMAT_BYTES(xfer_rate_up, (double)(stats->byt_up - last.xfer_up) / dt);
@@ -181,23 +188,26 @@ static void server_stats_stateful(
 	const double accept_rate =
 		(double)(lstats->num_accept - last.num_accept) / dt;
 	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
-
 	const double request_rate =
 		(double)(stats->num_request - last.num_request) / dt;
+	const double api_request_rate =
+		(double)(apistats->num_request - last.num_api_request) / dt;
 
 	BUF_APPENDF(
 		*buf,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
 		"Request Rate        : %.1f/s\n"
+		"API Request Rate    : %.1f/s\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n",
-		accept_rate, reject_rate, request_rate, xfer_rate_up,
-		xfer_rate_down);
+		accept_rate, reject_rate, request_rate, api_request_rate,
+		xfer_rate_up, xfer_rate_down);
 
-	last.num_request = stats->num_request;
 	last.xfer_up = stats->byt_up;
 	last.xfer_down = stats->byt_down;
 	last.num_accept = lstats->num_accept;
 	last.num_reject = num_reject;
+	last.num_request = stats->num_request;
+	last.num_api_request = apistats->num_request;
 }
 #undef FORMAT_BYTES
 
@@ -234,7 +244,7 @@ static void api_get_stats(
 		*buf, PROJECT_NAME " " PROJECT_VER "\n"
 				   "  " PROJECT_HOMEPAGE "\n\n");
 	const double uptime = ev_now(loop) - ctx->s->stats.started;
-	server_stats(buf, ctx->s->data, uptime);
+	server_stats(buf, ctx->s, uptime);
 
 	size_t n = buf->len;
 	const int werr = stream_write(w, buf->data, &n);
@@ -290,9 +300,9 @@ static void api_post_stats(
 		BUF_APPENDSTR(
 			*buf, PROJECT_NAME " " PROJECT_VER "\n"
 					   "  " PROJECT_HOMEPAGE "\n\n");
-		server_stats(buf, ctx->s->data, uptime);
+		server_stats(buf, ctx->s, uptime);
 		last = now;
-		server_stats_stateful(buf, ctx->s->data, dt);
+		server_stats_stateful(buf, ctx->s, dt);
 
 		size_t n = buf->len;
 		int err = stream_write(w, buf->data, &n);
