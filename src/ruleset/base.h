@@ -49,13 +49,13 @@ int aux_traceback(lua_State *L);
 
 void aux_resume(lua_State *L, int tidx, int narg);
 
+int aux_format_addr(lua_State *L);
+
+struct dialreq *aux_make_dialreq(lua_State *L, const int n);
+
 bool ruleset_pcall(
 	struct ruleset *r, lua_CFunction func, int nargs, int nresults, ...);
 
 void ruleset_resume(struct ruleset *r, const void *ctx, int narg, ...);
-
-int format_addr_(lua_State *L);
-
-struct dialreq *make_dialreq_(lua_State *L, const int n);
 
 #endif /* RULESET_BASE_H */

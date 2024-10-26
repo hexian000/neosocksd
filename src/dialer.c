@@ -195,7 +195,7 @@ bool dialreq_addproxy(
 			port = "1080";
 		}
 	} else {
-		LOGE_F("dialer: invalid proxy scheme `%s'", uri.scheme);
+		LOGE_F("dialer: unknown proxy scheme `%s'", uri.scheme);
 		return false;
 	}
 	char *endptr;

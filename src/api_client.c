@@ -277,7 +277,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	return true;
 }
 
-struct api_client_ctx *api_invoke(
+struct api_client_ctx *api_client_do(
 	struct ev_loop *loop, struct dialreq *req, const char *uri,
 	const char *payload, const size_t len, struct api_client_cb client_cb)
 {
@@ -312,7 +312,7 @@ struct api_client_ctx *api_invoke(
 	return ctx;
 }
 
-void api_cancel(struct ev_loop *loop, struct api_client_ctx *ctx)
+void api_client_cancel(struct ev_loop *loop, struct api_client_ctx *ctx)
 {
 	api_client_close(loop, ctx);
 }

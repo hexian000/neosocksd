@@ -26,7 +26,7 @@ struct stream_context {
 	unsigned char buf[IO_BUFSIZE];
 };
 
-static int stream_context_close_(struct lua_State *L)
+static int stream_context_close(struct lua_State *L)
 {
 	struct stream_context *restrict s = lua_touserdata(L, 1);
 	if (s->r != NULL) {
@@ -58,14 +58,14 @@ static int stream_copyall(struct stream_context *restrict s)
 }
 
 /* z = zlib.compress(s) */
-static int zlib_compress_(lua_State *restrict L)
+static int zlib_compress(lua_State *restrict L)
 {
 	size_t len;
 	const char *src = luaL_checklstring(L, 1, &len);
 	struct stream_context *restrict s =
 		lua_newuserdata(L, sizeof(struct stream_context));
 	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
-		lua_pushcfunction(L, stream_context_close_);
+		lua_pushcfunction(L, stream_context_close);
 #if HAVE_LUA_TOCLOSE
 		lua_pushvalue(L, -1);
 		lua_setfield(L, -3, "__close");
@@ -97,14 +97,14 @@ static int zlib_compress_(lua_State *restrict L)
 }
 
 /* s = zlib.uncompress(z) */
-static int zlib_uncompress_(lua_State *restrict L)
+static int zlib_uncompress(lua_State *restrict L)
 {
 	size_t len;
 	const char *src = luaL_checklstring(L, 1, &len);
 	struct stream_context *restrict s =
 		lua_newuserdata(L, sizeof(struct stream_context));
 	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
-		lua_pushcfunction(L, stream_context_close_);
+		lua_pushcfunction(L, stream_context_close);
 #if HAVE_LUA_TOCLOSE
 		lua_pushvalue(L, -1);
 		lua_setfield(L, -3, "__close");
@@ -138,8 +138,8 @@ static int zlib_uncompress_(lua_State *restrict L)
 int luaopen_zlib(lua_State *restrict L)
 {
 	const luaL_Reg zlib[] = {
-		{ "compress", zlib_compress_ },
-		{ "uncompress", zlib_uncompress_ },
+		{ "compress", zlib_compress },
+		{ "uncompress", zlib_uncompress },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, zlib);

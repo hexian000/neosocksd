@@ -12,7 +12,7 @@
 
 #define MT_REGEX "regex"
 
-static int regex_gc_(lua_State *restrict L)
+static int regex_gc(lua_State *restrict L)
 {
 	regex_t *preg = lua_touserdata(L, 1);
 	regfree(preg);
@@ -34,7 +34,7 @@ static size_t cstrpos(lua_Integer pos, size_t len)
 }
 
 /* regex.compile(pattern) */
-static int regex_compile_(lua_State *restrict L)
+static int regex_compile(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TSTRING);
 	const char *pattern = lua_tostring(L, 1);
@@ -51,7 +51,7 @@ static int regex_compile_(lua_State *restrict L)
 }
 
 /* regex.find(reg, s [, init]) */
-static int regex_find_(lua_State *restrict L)
+static int regex_find(lua_State *restrict L)
 {
 	regex_t *preg = luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
@@ -88,7 +88,7 @@ static int push_matches(
 }
 
 /* regex.match(reg, s [, init]) */
-static int regex_match_(lua_State *restrict L)
+static int regex_match(lua_State *restrict L)
 {
 	const regex_t *restrict preg = luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
@@ -135,7 +135,7 @@ static int gmatch_aux_(lua_State *restrict L)
 }
 
 /* regex.gmatch(reg, s [, init]) */
-static int regex_gmatch_(lua_State *restrict L)
+static int regex_gmatch(lua_State *restrict L)
 {
 	(void)luaL_checkudata(L, 1, MT_REGEX);
 	(void)luaL_checkstring(L, 2);
@@ -149,17 +149,17 @@ static int regex_gmatch_(lua_State *restrict L)
 int luaopen_regex(lua_State *restrict L)
 {
 	const luaL_Reg regexlib[] = {
-		{ "compile", regex_compile_ },
-		{ "find", regex_find_ },
-		{ "match", regex_match_ },
-		{ "gmatch", regex_gmatch_ },
+		{ "compile", regex_compile },
+		{ "find", regex_find },
+		{ "match", regex_match },
+		{ "gmatch", regex_gmatch },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, regexlib);
 	if (luaL_newmetatable(L, MT_REGEX)) {
 		lua_pushvalue(L, -2);
 		lua_setfield(L, -2, "__index");
-		lua_pushcfunction(L, regex_gc_);
+		lua_pushcfunction(L, regex_gc);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_pop(L, 1);

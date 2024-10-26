@@ -27,13 +27,13 @@
 #include <time.h>
 
 /* neosocksd.invoke(code, addr, proxyN, ..., proxy1) */
-static int api_invoke_(lua_State *restrict L)
+static int api_invoke(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
 	for (int i = 1; i <= MAX(2, n); i++) {
 		luaL_checktype(L, i, LUA_TSTRING);
 	}
-	struct dialreq *req = make_dialreq_(L, n - 1);
+	struct dialreq *req = aux_make_dialreq(L, n - 1);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
@@ -42,12 +42,12 @@ static int api_invoke_(lua_State *restrict L)
 	size_t len;
 	const char *code = lua_tolstring(L, 1, &len);
 	struct api_client_cb cb = { NULL, NULL };
-	api_invoke(r->loop, req, "/ruleset/invoke", code, len, cb);
+	api_client_do(r->loop, req, "/ruleset/invoke", code, len, cb);
 	return 0;
 }
 
 /* neosocksd.resolve(host) */
-static int api_resolve_(lua_State *restrict L)
+static int api_resolve(lua_State *restrict L)
 {
 	const char *name = luaL_checkstring(L, 1);
 	union sockaddr_max addr;
@@ -55,11 +55,11 @@ static int api_resolve_(lua_State *restrict L)
 		return 0;
 	}
 	lua_pushlightuserdata(L, &addr.sa);
-	return format_addr_(L);
+	return aux_format_addr(L);
 }
 
 /* neosocksd.parse_ipv4(ipv4) */
-static int api_parse_ipv4_(lua_State *restrict L)
+static int api_parse_ipv4(lua_State *restrict L)
 {
 	const char *s = lua_tostring(L, 1);
 	if (s == NULL) {
@@ -75,7 +75,7 @@ static int api_parse_ipv4_(lua_State *restrict L)
 }
 
 /* neosocksd.parse_ipv6(ipv6) */
-static int api_parse_ipv6_(lua_State *restrict L)
+static int api_parse_ipv6(lua_State *restrict L)
 {
 	const char *s = lua_tostring(L, 1);
 	if (s == NULL) {
@@ -100,7 +100,7 @@ static int api_parse_ipv6_(lua_State *restrict L)
 }
 
 /* neosocksd.setinterval(interval) */
-static int api_setinterval_(lua_State *restrict L)
+static int api_setinterval(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TNUMBER);
 	double interval = lua_tonumber(L, 1);
@@ -120,7 +120,7 @@ static int api_setinterval_(lua_State *restrict L)
 }
 
 /* neosocksd.splithostport() */
-static int api_splithostport_(lua_State *restrict L)
+static int api_splithostport(lua_State *restrict L)
 {
 	size_t len;
 	const char *s = luaL_checklstring(L, 1, &len);
@@ -142,7 +142,7 @@ static int api_splithostport_(lua_State *restrict L)
 }
 
 /* neosocksd.config() */
-static int api_config_(lua_State *restrict L)
+static int api_config(lua_State *restrict L)
 {
 	const struct config *restrict conf = G.conf;
 	lua_createtable(L, 0, 16);
@@ -167,7 +167,7 @@ static int api_config_(lua_State *restrict L)
 }
 
 /* neosocksd.stats() */
-static int api_stats_(lua_State *restrict L)
+static int api_stats(lua_State *restrict L)
 {
 	struct server *restrict s = G.server;
 	if (s == NULL) {
@@ -194,11 +194,24 @@ static int api_stats_(lua_State *restrict L)
 
 #if HAVE_CLOCK_GETTIME
 /* neosocksd.clock() */
-static int api_clock_(lua_State *restrict L)
+static int api_clock(lua_State *restrict L)
 {
 	struct timespec t;
 	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t)) {
-		return 0;
+		lua_pushinteger(L, -1);
+		return 1;
+	}
+	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
+	return 1;
+}
+
+/* neosocksd.time() */
+static int api_time(lua_State *restrict L)
+{
+	struct timespec t;
+	if (clock_gettime(CLOCK_MONOTONIC, &t)) {
+		lua_pushinteger(L, -1);
+		return 1;
 	}
 	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
 	return 1;
@@ -206,7 +219,7 @@ static int api_clock_(lua_State *restrict L)
 #endif /* HAVE_CLOCK_GETTIME */
 
 /* neosocksd.now() */
-static int api_now_(lua_State *restrict L)
+static int api_now(lua_State *restrict L)
 {
 	struct ruleset *restrict r = find_ruleset(L);
 	const ev_tstamp now = ev_now(r->loop);
@@ -218,18 +231,19 @@ int luaopen_neosocksd(lua_State *restrict L)
 {
 	lua_register(L, "marshal", api_marshal);
 	const luaL_Reg apilib[] = {
-		{ "config", api_config_ },
-		{ "invoke", api_invoke_ },
-		{ "now", api_now_ },
+		{ "config", api_config },
+		{ "invoke", api_invoke },
+		{ "now", api_now },
 #if HAVE_CLOCK_GETTIME
-		{ "clock", api_clock_ },
+		{ "clock", api_clock },
+		{ "monotonic", api_time },
 #endif
-		{ "parse_ipv4", api_parse_ipv4_ },
-		{ "parse_ipv6", api_parse_ipv6_ },
-		{ "resolve", api_resolve_ },
-		{ "setinterval", api_setinterval_ },
-		{ "splithostport", api_splithostport_ },
-		{ "stats", api_stats_ },
+		{ "parse_ipv4", api_parse_ipv4 },
+		{ "parse_ipv6", api_parse_ipv6 },
+		{ "resolve", api_resolve },
+		{ "setinterval", api_setinterval },
+		{ "splithostport", api_splithostport },
+		{ "stats", api_stats },
 		{ "traceback", aux_traceback },
 		{ NULL, NULL },
 	};

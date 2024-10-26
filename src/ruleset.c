@@ -29,68 +29,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-static void init_registry(lua_State *restrict L)
-{
-	const char *strings[] = {
-		ERR_MEMORY,
-		ERR_BAD_REGISTRY,
-		ERR_INVALID_ROUTE,
-		ERR_NOT_YIELDABLE,
-	};
-	const int nstrings = (int)ARRAY_SIZE(strings);
-	lua_createtable(L, nstrings, 0);
-	for (int i = 0; i < nstrings; i++) {
-		lua_pushstring(L, strings[i]);
-		lua_rawseti(L, -2, i + 1);
-	}
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_CONSTANT);
-}
-
-static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
-{
-	CHECK_REVENTS(revents, EV_TIMER);
-	struct ruleset *restrict r = watcher->data;
-	const char *func = "tick";
-	const ev_tstamp now = ev_now(loop);
-	const bool ok = ruleset_pcall(r, cfunc_tick, 2, 0, func, &now);
-	if (!ok) {
-		LOGE_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
-		return;
-	}
-}
-
-static int ruleset_luainit_(lua_State *restrict L)
-{
-	init_registry(L);
-	/* load Lua libraries */
-	luaL_openlibs(L);
-	/* restrict package searcher */
-	lua_getglobal(L, "package");
-	lua_pushliteral(L, "?.lua");
-	lua_setfield(L, -2, "path");
-	lua_pushliteral(L, "?.so");
-	lua_setfield(L, -2, "cpath");
-	lua_pop(L, 1);
-	/* load built-in libraries */
-	const luaL_Reg libs[] = {
-		{ "neosocksd", luaopen_neosocksd },
-		{ "await", luaopen_await },
-		{ "regex", luaopen_regex },
-		{ "zlib", luaopen_zlib },
-		{ NULL, NULL },
-	};
-	for (const luaL_Reg *lib = libs; lib->func; lib++) {
-		luaL_requiref(L, lib->name, lib->func, 1);
-		lua_pop(L, 1);
-	}
-	/* set flags */
-	lua_pushboolean(L, !LOGLEVEL(DEBUG));
-	lua_setglobal(L, "NDEBUG");
-	lua_pushboolean(L, G.conf->traceback);
-	lua_setglobal(L, "traceback");
-	return 0;
-}
-
 static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
 	struct ruleset *restrict r = ud;
@@ -133,6 +71,63 @@ static int l_panic(lua_State *L)
 	return 0; /* return to Lua to abort */
 }
 
+static int ruleset_luainit(lua_State *restrict L)
+{
+	const char *strings[] = {
+		ERR_MEMORY,
+		ERR_BAD_REGISTRY,
+		ERR_INVALID_ROUTE,
+		ERR_NOT_YIELDABLE,
+	};
+	const int nstrings = (int)ARRAY_SIZE(strings);
+	lua_createtable(L, nstrings, 0);
+	for (int i = 0; i < nstrings; i++) {
+		lua_pushstring(L, strings[i]);
+		lua_rawseti(L, -2, i + 1);
+	}
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_CONSTANT);
+	/* load Lua libraries */
+	luaL_openlibs(L);
+	/* restrict package searcher */
+	lua_getglobal(L, "package");
+	lua_pushliteral(L, "?.lua");
+	lua_setfield(L, -2, "path");
+	lua_pushliteral(L, "?.so");
+	lua_setfield(L, -2, "cpath");
+	lua_pop(L, 1);
+	/* load built-in libraries */
+	const luaL_Reg libs[] = {
+		{ "neosocksd", luaopen_neosocksd },
+		{ "await", luaopen_await },
+		{ "regex", luaopen_regex },
+		{ "zlib", luaopen_zlib },
+		{ NULL, NULL },
+	};
+	for (const luaL_Reg *lib = libs; lib->func; lib++) {
+		luaL_requiref(L, lib->name, lib->func, 1);
+		lua_pop(L, 1);
+	}
+	/* set flags */
+	lua_pushboolean(L, !LOGLEVEL(DEBUG));
+	lua_setglobal(L, "NDEBUG");
+	lua_pushboolean(L, G.conf->traceback);
+	lua_setglobal(L, "traceback");
+	return 0;
+}
+
+static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_TIMER);
+	struct ruleset *restrict r = watcher->data;
+	const char *func = "tick";
+	const ev_tstamp now = ev_now(loop);
+	const bool ok = ruleset_pcall(r, cfunc_tick, 2, 0, func, &now);
+	if (!ok) {
+		LOGE_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
+		return;
+	}
+}
+
 struct ruleset *ruleset_new(struct ev_loop *loop)
 {
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
@@ -155,7 +150,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 		w_ticker->data = r;
 	}
 
-	lua_pushcfunction(L, ruleset_luainit_);
+	lua_pushcfunction(L, ruleset_luainit);
 	switch (lua_pcall(L, 0, 0, 0)) {
 	case LUA_OK:
 		break;

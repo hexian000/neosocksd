@@ -31,7 +31,7 @@
 #include <string.h>
 
 /* addr = format_addr_(sa) */
-int format_addr_(lua_State *restrict L)
+int aux_format_addr(lua_State *restrict L)
 {
 	const struct sockaddr *sa = lua_touserdata(L, -1);
 	if (sa == NULL) {
@@ -85,7 +85,7 @@ const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
 	return buf;
 }
 
-struct dialreq *make_dialreq_(lua_State *restrict L, const int n)
+struct dialreq *aux_make_dialreq(lua_State *restrict L, const int n)
 {
 	if (n < 1) {
 		return NULL;

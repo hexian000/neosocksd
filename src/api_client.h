@@ -18,10 +18,10 @@ struct api_client_cb {
 	void *data;
 };
 
-struct api_client_ctx *api_invoke(
+struct api_client_ctx *api_client_do(
 	struct ev_loop *loop, struct dialreq *req, const char *uri,
 	const char *payload, size_t len, struct api_client_cb cb);
 
-void api_cancel(struct ev_loop *loop, struct api_client_ctx *ctx);
+void api_client_cancel(struct ev_loop *loop, struct api_client_ctx *ctx);
 
 #endif /* API_CLIENT_H */

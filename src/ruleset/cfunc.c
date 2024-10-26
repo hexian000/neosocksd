@@ -44,7 +44,7 @@ int cfunc_request(lua_State *restrict L)
 		       lua_typename(L, type));
 		return 0;
 	}
-	struct dialreq *req = make_dialreq_(L, n);
+	struct dialreq *req = aux_make_dialreq(L, n);
 	if (req == NULL) {
 		LOGE_F("request `%s': invalid return", request);
 	}
@@ -93,7 +93,7 @@ int cfunc_invoke(lua_State *restrict L)
 	return 0;
 }
 
-static int rpcall_gc_(lua_State *restrict L)
+static int rpcall_gc(lua_State *restrict L)
 {
 	struct rpcall_state *restrict state = lua_touserdata(L, 1);
 	if (state->callback.func != NULL) {
@@ -104,7 +104,7 @@ static int rpcall_gc_(lua_State *restrict L)
 }
 
 /* finish(ok, ...) */
-static int rpcall_finish_(lua_State *restrict L)
+static int rpcall_finish(lua_State *restrict L)
 {
 	struct rpcall_state *restrict state =
 		lua_touserdata(L, lua_upvalueindex(1));
@@ -137,7 +137,7 @@ int cfunc_rpcall(lua_State *restrict L)
 		lua_newuserdata(L, sizeof(struct rpcall_state));
 	*state = (struct rpcall_state){ .callback = *in_cb };
 	if (luaL_newmetatable(L, MT_RPCALL)) {
-		lua_pushcfunction(L, rpcall_gc_);
+		lua_pushcfunction(L, rpcall_gc);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
@@ -167,7 +167,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	}
 	lua_pushvalue(L, 2);
 	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, rpcall_finish_, 1);
+	lua_pushcclosure(L, rpcall_finish, 1);
 	/* lua stack: state co chunk RIDX_ASYNC_ROUTINE co finish */
 	lua_rawset(L, -3);
 	lua_pop(L, 1);
@@ -179,7 +179,7 @@ int cfunc_rpcall(lua_State *restrict L)
 }
 
 /* replace(modname, chunk) */
-static int package_replace_(lua_State *restrict L)
+static int aux_package_replace(lua_State *restrict L)
 {
 	const int idx_modname = 1;
 	luaL_checktype(L, idx_modname, LUA_TSTRING);
@@ -254,7 +254,7 @@ int cfunc_update(lua_State *restrict L)
 		lua_setglobal(L, "ruleset");
 		return 0;
 	}
-	(void)package_replace_(L);
+	(void)aux_package_replace(L);
 	return 0;
 }
 
