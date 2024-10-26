@@ -195,13 +195,15 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 		return;
 	}
 	lua_pushvalue(L, tidx); /* thread */
-	if (lua_rawget(L, -2) != LUA_TFUNCTION) {
+	if (lua_rawget(L, -2) == LUA_TNIL) {
 		/* thread has no finish function */
-		lua_pushvalue(L, tidx);
-		lua_pushnil(L);
-		lua_rawset(L, -4);
 		return;
 	}
+	lua_pushvalue(L, tidx);
+	lua_pushnil(L);
+	/* RIDX_ASYNC_ROUTINE finish thread nil */
+	lua_rawset(L, -4);
+	lua_replace(L, -2);
 	if (status == LUA_OK) {
 		luaL_checkstack(L, 1 + nres, NULL);
 		lua_pushboolean(L, 1);
