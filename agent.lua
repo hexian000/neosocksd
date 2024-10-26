@@ -135,7 +135,7 @@ end
 
 local function format_route(route)
     return list:new():append(route):reverse():map(function(s)
-        return string.format("%q", s)
+        return strformat("%q", s)
     end):concat("->")
 end
 
@@ -172,7 +172,7 @@ function rpc.sync(peername, peerdb)
 end
 
 function agent.sync(connid)
-    assert(agent.conns[connid], string.format("unknown connid [%s]", connid))
+    assert(agent.conns[connid], strformat("unknown connid [%s]", connid))
     local ok, r1, r2 = callbyconn(connid, "sync", agent.peername, _G.peerdb)
     if not ok then
         evlogf("sync failed: [%s] %s", connid, r1)
@@ -258,7 +258,7 @@ local function probe_via(connid, peername)
 end
 
 function agent.probe(peername)
-    assert(_G.peerdb[peername], string.format("unknown peer %q", peername))
+    assert(_G.peerdb[peername], strformat("unknown peer %q", peername))
     local errors = list:new()
     local t = {}
     for connid, _ in pairs(agent.conns) do
@@ -331,7 +331,7 @@ function agent.stats(dt)
     if not agent.running then return "" end
     local w = list:new()
     for peername, data in pairs(_G.peerdb) do
-        local tag = string.format("%q", peername)
+        local tag = strformat("%q", peername)
         local timestamp = os.date("%Y-%m-%dT%T%z", data.timestamp)
         local connid, conn, info = peers[peername], nil, nil
         if connid then conn = _G.conninfo[connid] end
