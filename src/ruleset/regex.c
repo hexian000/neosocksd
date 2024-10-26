@@ -157,6 +157,8 @@ int luaopen_regex(lua_State *restrict L)
 	};
 	luaL_newlib(L, regexlib);
 	if (luaL_newmetatable(L, MT_REGEX)) {
+		lua_pushliteral(L, "regex");
+		lua_setfield(L, -2, "__name");
 		lua_pushvalue(L, -2);
 		lua_setfield(L, -2, "__index");
 		lua_pushcfunction(L, regex_gc);
