@@ -227,6 +227,11 @@ static int api_now(lua_State *restrict L)
 	return 1;
 }
 
+static int api_traceback(lua_State *restrict L)
+{
+	return aux_traceback(L);
+}
+
 int luaopen_neosocksd(lua_State *restrict L)
 {
 	lua_register(L, "marshal", api_marshal);
@@ -244,7 +249,7 @@ int luaopen_neosocksd(lua_State *restrict L)
 		{ "setinterval", api_setinterval },
 		{ "splithostport", api_splithostport },
 		{ "stats", api_stats },
-		{ "traceback", aux_traceback },
+		{ "traceback", api_traceback },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, apilib);

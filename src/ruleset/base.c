@@ -161,12 +161,12 @@ int aux_traceback(lua_State *restrict L)
 	size_t len;
 	const char *s = lua_tolstring(L, -1, &len);
 	if (err == NULL) {
-		LOG_TXT(VERBOSE, s, len, "Lua traceback");
-		LOG_STACK(VERBOSE, 0, "C traceback");
+		LOG_STACK(WARNING, 0, "C traceback");
+		LOG_TXT(WARNING, s, len, "Lua traceback");
 		return 1;
 	}
-	LOG_TXT_F(VERBOSE, s, len, "Lua traceback for `%s'", err);
-	LOG_STACK_F(VERBOSE, 0, "C traceback for `%s'", err);
+	LOG_STACK_F(WARNING, 0, "C traceback for `%s'", err);
+	LOG_TXT_F(WARNING, s, len, "Lua traceback for `%s'", err);
 	return 1;
 }
 

@@ -241,6 +241,19 @@ local addr = neosocksd.resolve("www.example.com")
 Resolves a host name locally and blocks the whole server until resolution is finished or times out.
 
 
+### neosocksd.splithostport
+
+**Synopsis**
+
+```Lua
+local host, port = neosocksd.splithostport("example.com:80")
+```
+
+**Description**
+
+Split address string into host and port. Raises error on failure.
+
+
 ### neosocksd.parse_ipv4
 
 **Synopsis**
@@ -249,14 +262,14 @@ Resolves a host name locally and blocks the whole server until resolution is fin
 local subnet = neosocksd.parse_ipv4("169.254.0.0")
 local mask = 0xFFFF0000 -- 169.254.0.0/16
 local ip = neosocksd.parse_ipv4("203.0.113.1")
-if (ip & mask) == subnet then
+if ip and (ip & mask) == subnet then
     -- ......
 end
 ```
 
 **Description**
 
-Parses an IPv4 address into integers.
+Parses an IPv4 address into integers. Returns nil on failure.
 
 
 ### neosocksd.parse_ipv6
@@ -268,14 +281,14 @@ Parses an IPv4 address into integers.
 local subnet1, subnet2 = neosocksd.parse_ipv6("FE80::")
 local mask1 = 0xFFC0000000000000 -- fe80::/10
 local ip1, ip2 = neosocksd.parse_ipv6("2001:DB8::1")
-if (ip1 & mask1) == subnet1 then
+if ip1 and (ip1 & mask1) == subnet1 then
     -- ......
 end
 ```
 
 **Description**
 
-Parses an IPv6 address into integers.
+Parses an IPv6 address into integers. Returns nil on failure.
 
 
 ### neosocksd.setinterval

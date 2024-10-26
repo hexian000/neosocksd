@@ -428,20 +428,14 @@ end
 
 function match.exact(s)
     if type(s) ~= "table" then
-        local host, port = splithostport(s)
-        if not host or not port then
-            error(strformat("exact matcher should contain host and port: %q", s), 2)
-        end
+        local _, _ = splithostport(s)
         return function(addr)
             return addr == s
         end
     end
     local t = {}
     for _, v in pairs(s) do
-        local host, port = splithostport(v)
-        if not host or not port then
-            error(strformat("exact matcher should contain host and port: %q", s), 2)
-        end
+        local _, _ = splithostport(v)
         t[v] = true
     end
     return function(addr)
@@ -453,9 +447,6 @@ function match.host(s)
     if type(s) ~= "table" then
         return function(addr)
             local host, _ = splithostport(addr)
-            if not host then
-                return false
-            end
             return host == s
         end
     end
@@ -465,10 +456,7 @@ function match.host(s)
     end
     return function(addr)
         local host, _ = splithostport(addr)
-        if not host then
-            return false
-        end
-        return not not t[host]
+        return t[host] ~= nil
     end
 end
 
@@ -492,10 +480,7 @@ function match.port(from, to)
     end
     return function(addr)
         local _, port = splithostport(addr)
-        if not port then
-            return false
-        end
-        return not not t[port]
+        return t[port] ~= nil
     end
 end
 
@@ -509,9 +494,6 @@ function match.domain(s)
         end
         return function(addr)
             local host, _ = splithostport(addr)
-            if not host then
-                return false
-            end
             return host == s or host:endswith(suffix)
         end
     end
@@ -539,9 +521,6 @@ function match.domaintree(tree)
     end
     return function(addr)
         local host, _ = splithostport(addr)
-        if not host then
-            return false
-        end
         local path, n = {}, 0
         for seg in host:gmatch("[^.]+") do
             n = n + 1
