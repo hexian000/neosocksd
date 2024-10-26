@@ -107,12 +107,14 @@ function rule.agent()
         if sub then
             local remain, peername = sub:match("^(.+)%.([^.]+)$")
             local domain
-            if remain:match("^[^.]+$") then
-                domain = INTERNAL_DOMAIN
-            else
+            if remain then
+                sub = remain
                 domain = RELAY_DOMAIN
+            else
+                peername = hosts[sub]
+                domain = INTERNAL_DOMAIN
             end
-            addr = strformat("%s%s:%s", remain, domain, port)
+            addr = strformat("%s%s:%s", sub, domain, port)
             local connid = peers[peername]
             local conn = agent.conns[connid]
             return addr, list:new(conn):reverse():unpack()
@@ -123,9 +125,15 @@ function rule.agent()
         assert(peername ~= nil and peername ~= agent.peername)
         local connid = peers[peername]
         local route = table.get(_G.conninfo, connid, peername, "route")
+        if not route then
+            evlogf("%q: peer not reachable", peername)
+            return nil
+        end
         local t = list:new():append(route)
+        peername = t[#t]
+        connid = peers[peername]
         t[1], t[#t] = sub, nil
-        if #t > 1 then
+        if peername ~= hosts[sub] then
             addr = strformat("%s%s:%s", t:concat("."), RELAY_DOMAIN, port)
         end
         local conn = agent.conns[connid]
