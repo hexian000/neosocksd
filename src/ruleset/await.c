@@ -33,7 +33,7 @@
 #define AWAIT_CHECK_YIELDABLE(L)                                               \
 	do {                                                                   \
 		if (!lua_isyieldable((L))) {                                   \
-			lua_pushliteral((L), ERR_NOT_YIELDABLE);               \
+			lua_pushliteral((L), ERR_NOT_ASYNC_ROUTINE);           \
 			return lua_error((L));                                 \
 		}                                                              \
 	} while (0)
@@ -45,10 +45,12 @@ static void context_pin(lua_State *restrict L, const void *p)
 	    LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
+		return;
 	}
 	if (lua_pushthread(L)) {
-		lua_pushliteral(L, ERR_NOT_YIELDABLE);
+		lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 		lua_error(L);
+		return;
 	}
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
@@ -62,6 +64,7 @@ static void context_unpin(lua_State *restrict L, const void *p)
 	    LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
+		return;
 	}
 	lua_pushnil(L);
 	lua_rawsetp(L, -2, p);
@@ -114,7 +117,8 @@ static int await_idle(lua_State *restrict L)
 	context_pin(L, w);
 	ev_idle_start(r->loop, w);
 	lua_yieldk(L, 0, ctx, await_idle_k);
-	FAIL();
+	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
+	return lua_error(L);
 }
 
 static int await_sleep_gc(struct lua_State *restrict L)
@@ -168,7 +172,8 @@ static int await_sleep(lua_State *restrict L)
 	context_pin(L, w);
 	ev_timer_start(r->loop, w);
 	lua_yieldk(L, 0, ctx, await_sleep_k);
-	FAIL();
+	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
+	return lua_error(L);
 }
 
 static int await_resolve_close(struct lua_State *restrict L)
@@ -236,7 +241,8 @@ static int await_resolve(lua_State *restrict L)
 	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, q);
 	lua_yieldk(L, 0, ctx, await_resolve_k);
-	FAIL();
+	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
+	return lua_error(L);
 }
 
 static int await_invoke_close(struct lua_State *restrict L)
@@ -339,7 +345,8 @@ static int await_invoke(lua_State *restrict L)
 	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, apictx);
 	lua_yieldk(L, 0, ctx, await_invoke_k);
-	FAIL();
+	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
+	return lua_error(L);
 }
 
 int luaopen_await(lua_State *restrict L)

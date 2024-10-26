@@ -77,7 +77,7 @@ static int ruleset_luainit(lua_State *restrict L)
 		ERR_MEMORY,
 		ERR_BAD_REGISTRY,
 		ERR_INVALID_ROUTE,
-		ERR_NOT_YIELDABLE,
+		ERR_NOT_ASYNC_ROUTINE,
 	};
 	const int nstrings = (int)ARRAY_SIZE(strings);
 	lua_createtable(L, nstrings, 0);

@@ -34,7 +34,7 @@ enum ruleset_ridx {
 #define ERR_MEMORY "out of memory"
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
 #define ERR_INVALID_ROUTE "unable to parse route"
-#define ERR_NOT_YIELDABLE "current routine is not yieldable"
+#define ERR_NOT_ASYNC_ROUTINE "not in asynchronous routine"
 
 static inline struct ruleset *find_ruleset(lua_State *restrict L)
 {
