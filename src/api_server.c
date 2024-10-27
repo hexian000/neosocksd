@@ -316,20 +316,6 @@ static bool api_post_stats(
 	}
 
 #if WITH_RULESET
-	if (server && ruleset) {
-		const char header[] = "\n"
-				      "Ruleset Stats\n"
-				      "================\n";
-		size_t n = sizeof(header) - 1;
-		int err = stream_write(w, header, &n);
-		if (n < sizeof(header) - 1 || err != 0) {
-			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
-			       sizeof(header) - 1);
-			http_resp_errpage(
-				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-			return false;
-		}
-	}
 	if (ruleset) {
 		size_t len;
 		const char *s = ruleset_stats(G.ruleset, dt, &len);
