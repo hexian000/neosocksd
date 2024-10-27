@@ -43,7 +43,7 @@
 struct globals G = { 0 };
 
 #if WITH_SPLICE
-struct pipe_cache pipe_cache = { .cap = PIPE_CACHESIZE, .len = 0 };
+struct pipe_cache pipe_cache = { .cap = PIPE_MAXCACHED, .len = 0 };
 
 void pipe_close(struct splice_pipe *restrict pipe)
 {

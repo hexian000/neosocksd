@@ -351,16 +351,14 @@ static int await_invoke(lua_State *restrict L)
 
 int luaopen_await(lua_State *restrict L)
 {
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE) !=
-	    LUA_TTABLE) {
-		lua_newtable(L);
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE);
-	}
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
-	    LUA_TTABLE) {
-		lua_newtable(L);
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
-	}
+	lua_newtable(L); /* async routine */
+	lua_newtable(L); /* mt */
+	lua_pushliteral(L, "k");
+	lua_setfield(L, -2, "__mode");
+	lua_setmetatable(L, -2);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE);
+	lua_newtable(L); /* await context */
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
 	const luaL_Reg awaitlib[] = {
 		{ "resolve", await_resolve },
 		{ "invoke", await_invoke },

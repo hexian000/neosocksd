@@ -137,12 +137,14 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 	SOCKS_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void socks_ctx_free(struct socks_ctx *restrict ctx)
+static void
+socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 {
-	if (ctx == NULL) {
-		return;
-	}
-	ASSERT(!ev_is_active(&ctx->w_timeout));
+	SOCKS_CTX_LOG_F(
+		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		ctx->state);
+	socks_ctx_stop(loop, ctx);
+
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -153,16 +155,6 @@ static void socks_ctx_free(struct socks_ctx *restrict ctx)
 	}
 	session_del(&ctx->ss);
 	free(ctx);
-}
-
-static void
-socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
-{
-	SOCKS_CTX_LOG_F(
-		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
-		ctx->state);
-	socks_ctx_stop(loop, ctx);
-	socks_ctx_free(ctx);
 }
 
 static void

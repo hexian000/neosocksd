@@ -181,6 +181,7 @@ local function thread_main(t, f, ...)
         t.result = table.pack(pcall(f, ...))
     end
     for co, _ in pairs(t.wakeup) do
+        t.wakeup[co] = nil
         coroutine.resume(co)
     end
 end

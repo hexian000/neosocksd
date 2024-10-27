@@ -135,9 +135,10 @@ bool ruleset_pcall(
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	check_memlimit(r);
-	const bool traceback = G.conf->traceback;
-	if (traceback) {
+	int errfunc = 0;
+	if (G.conf->traceback) {
 		lua_pushcfunction(L, aux_traceback);
+		errfunc = 1;
 	}
 	lua_pushcfunction(L, func);
 	va_list args;
@@ -146,7 +147,7 @@ bool ruleset_pcall(
 		lua_pushlightuserdata(L, va_arg(args, void *));
 	}
 	va_end(args);
-	if (lua_pcall(L, nargs, nresults, traceback ? 1 : 0) != LUA_OK) {
+	if (lua_pcall(L, nargs, nresults, errfunc) != LUA_OK) {
 		lua_pushvalue(L, -1);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
@@ -187,23 +188,29 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 	if (status == LUA_YIELD) {
 		return;
 	}
-	/* thread is finished */
+	/* routine is finished */
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE) !=
 	    LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
 		return;
 	}
-	lua_pushvalue(L, tidx); /* thread */
+	lua_pushvalue(L, tidx); /* co */
 	if (lua_rawget(L, -2) == LUA_TNIL) {
-		/* thread has no finish function */
+		/* no finish function */
 		return;
 	}
 	lua_pushvalue(L, tidx);
 	lua_pushnil(L);
-	/* RIDX_ASYNC_ROUTINE finish thread nil */
+	/* lua stack: RIDX_ASYNC_ROUTINE finish co nil */
 	lua_rawset(L, -4);
-	lua_replace(L, -2);
+	int errfunc = 0;
+	if (G.conf->traceback) {
+		lua_pushcfunction(L, aux_traceback);
+		lua_replace(L, -2);
+		errfunc = lua_absindex(L, -2);
+	}
+	/* lua stack: traceback? finish co nil */
 	if (status == LUA_OK) {
 		luaL_checkstack(L, 1 + nres, NULL);
 		lua_pushboolean(L, 1);
@@ -216,7 +223,7 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 		nres = 2;
 	}
 	/* call finish function */
-	if (lua_pcall(L, nres, 0, 0) != LUA_OK) {
+	if (lua_pcall(L, nres, 0, errfunc) != LUA_OK) {
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	}
 }
@@ -242,11 +249,12 @@ void ruleset_resume(
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return;
 	}
+	lua_replace(L, 1);
 	va_list args;
 	va_start(args, narg);
 	for (int i = 0; i < narg; i++) {
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}
 	va_end(args);
-	aux_resume(L, 2, narg);
+	aux_resume(L, 1, narg);
 }

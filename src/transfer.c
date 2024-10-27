@@ -315,6 +315,27 @@ void transfer_init(
 	BUF_INIT(t->buf, 0);
 }
 
+#if WITH_SPLICE
+static bool pipe_get(struct splice_pipe *restrict pipe)
+{
+	if (pipe_cache.len == 0) {
+		return pipe_new(pipe);
+	}
+	*pipe = pipe_cache.pipes[--pipe_cache.len];
+	return true;
+}
+
+static void pipe_put(struct splice_pipe *restrict pipe)
+{
+	if (pipe->cap < PIPE_BUFSIZE || pipe->len > 0 ||
+	    pipe_cache.len == pipe_cache.cap) {
+		pipe_close(pipe);
+		return;
+	}
+	pipe_cache.pipes[pipe_cache.len++] = *pipe;
+}
+#endif
+
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 {
 	XFER_CTX_LOG(VERBOSE, t, "start");

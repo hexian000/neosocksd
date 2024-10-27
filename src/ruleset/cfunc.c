@@ -174,7 +174,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_xmove(L, co, 1);
 	/* lua stack: state co; co stack: chunk */
 	aux_resume(L, 2, 0);
-	lua_pushvalue(L, 1);
+	lua_settop(L, 1);
 	return 1;
 }
 

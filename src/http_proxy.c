@@ -115,12 +115,13 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	HTTP_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void http_ctx_free(struct http_ctx *restrict ctx)
+static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	if (ctx == NULL) {
-		return;
-	}
-	ASSERT(!ev_is_active(&ctx->w_timeout));
+	HTTP_CTX_LOG_F(
+		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		ctx->state);
+	http_ctx_stop(loop, ctx);
+
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -132,15 +133,6 @@ static void http_ctx_free(struct http_ctx *restrict ctx)
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	session_del(&ctx->ss);
 	free(ctx);
-}
-
-static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
-{
-	HTTP_CTX_LOG_F(
-		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
-		ctx->state);
-	http_ctx_stop(loop, ctx);
-	http_ctx_free(ctx);
 }
 
 static void

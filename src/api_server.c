@@ -744,12 +744,13 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	API_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void api_ctx_free(struct api_ctx *restrict ctx)
+static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	if (ctx == NULL) {
-		return;
-	}
-	ASSERT(!ev_is_active(&ctx->w_timeout));
+	API_CTX_LOG_F(
+		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		ctx->state);
+	api_ctx_stop(loop, ctx);
+
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -761,15 +762,6 @@ static void api_ctx_free(struct api_ctx *restrict ctx)
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	session_del(&ctx->ss);
 	free(ctx);
-}
-
-static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
-{
-	API_CTX_LOG_F(
-		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
-		ctx->state);
-	api_ctx_stop(loop, ctx);
-	api_ctx_free(ctx);
 }
 
 static void

@@ -98,11 +98,14 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	FW_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void forward_ctx_free(struct forward_ctx *restrict ctx)
+static void
+forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
-	if (ctx == NULL) {
-		return;
-	}
+	FW_CTX_LOG_F(
+		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
+		ctx->state);
+	forward_ctx_stop(loop, ctx);
+
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -113,16 +116,6 @@ static void forward_ctx_free(struct forward_ctx *restrict ctx)
 	}
 	session_del(&ctx->ss);
 	free(ctx);
-}
-
-static void
-forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
-{
-	FW_CTX_LOG_F(
-		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
-		ctx->state);
-	forward_ctx_stop(loop, ctx);
-	forward_ctx_free(ctx);
 }
 
 static void
