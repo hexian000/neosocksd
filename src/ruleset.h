@@ -19,16 +19,11 @@ struct ruleset_vmstats {
 };
 
 struct ruleset *ruleset_new(struct ev_loop *loop);
-void ruleset_gc(struct ruleset *r);
 void ruleset_free(struct ruleset *r);
 
 const char *ruleset_geterror(struct ruleset *r, size_t *len);
 
 bool ruleset_invoke(struct ruleset *r, struct stream *code);
-bool ruleset_update(
-	struct ruleset *r, const char *modname, struct stream *code,
-	const char *chunkname);
-bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
 struct rpcall_state;
 struct rpcall_cb {
@@ -38,6 +33,13 @@ struct rpcall_cb {
 struct rpcall_state *ruleset_rpcall(
 	struct ruleset *r, struct stream *code, struct rpcall_cb callback);
 void ruleset_rpcall_cancel(struct rpcall_state *state);
+
+bool ruleset_update(
+	struct ruleset *r, const char *modname, struct stream *code,
+	const char *chunkname);
+bool ruleset_loadfile(struct ruleset *r, const char *filename);
+
+bool ruleset_gc(struct ruleset *r);
 
 struct dialreq *ruleset_resolve(
 	struct ruleset *r, const char *request, const char *username,

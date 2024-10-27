@@ -61,12 +61,13 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 
 static int l_panic(lua_State *L)
 {
-	if (lua_isstring(L, -1)) {
+	const int type = lua_type(L, -1);
+	if (type == LUA_TSTRING) {
 		LOG_STACK_F(FATAL, 0, "panic: %s", lua_tostring(L, -1));
 	} else {
 		LOG_STACK_F(
-			FATAL, 0, "panic: (%s: %p)",
-			lua_typename(L, lua_type(L, -1)), lua_topointer(L, -1));
+			FATAL, 0, "panic: (%s: %p)", lua_typename(L, type),
+			lua_topointer(L, -1));
 	}
 	return 0; /* return to Lua to abort */
 }
@@ -119,11 +120,10 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct ruleset *restrict r = watcher->data;
-	const char *func = "tick";
 	const ev_tstamp now = ev_now(loop);
-	const bool ok = ruleset_pcall(r, cfunc_tick, 2, 0, func, &now);
+	const bool ok = ruleset_pcall(r, cfunc_tick, 1, 0, &now);
 	if (!ok) {
-		LOGE_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
+		LOGW_F("ruleset.tick: %s", ruleset_geterror(r, NULL));
 		return;
 	}
 }
@@ -227,9 +227,9 @@ bool ruleset_loadfile(struct ruleset *r, const char *filename)
 	return ruleset_pcall(r, cfunc_loadfile, 1, 0, filename);
 }
 
-void ruleset_gc(struct ruleset *restrict r)
+bool ruleset_gc(struct ruleset *restrict r)
 {
-	lua_gc(r->L, LUA_GCCOLLECT, 0);
+	return ruleset_pcall(r, cfunc_gc, 0, 0);
 }
 
 static struct dialreq *dispatch_req(
@@ -241,7 +241,7 @@ static struct dialreq *dispatch_req(
 		r, cfunc_request, 4, 1, (void *)func, (void *)request,
 		(void *)username, (void *)password);
 	if (!ok) {
-		LOGE_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
+		LOGW_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
 		return NULL;
 	}
 	return lua_touserdata(L, -1);
@@ -282,7 +282,7 @@ ruleset_stats(struct ruleset *restrict r, const double dt, size_t *len)
 	const bool ok =
 		ruleset_pcall(r, cfunc_stats, 2, 1, (void *)func, (void *)&dt);
 	if (!ok) {
-		LOGE_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
+		LOGW_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
 		return NULL;
 	}
 	return lua_tolstring(L, -1, len);

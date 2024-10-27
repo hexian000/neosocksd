@@ -25,4 +25,6 @@ int cfunc_stats(lua_State *L);
 
 int cfunc_tick(lua_State *L);
 
+int cfunc_gc(lua_State *L);
+
 #endif /* RULESET_CFUNC_H */

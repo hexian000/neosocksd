@@ -54,7 +54,7 @@ static void context_pin(lua_State *restrict L, const void *p)
 	}
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
-	find_ruleset(L)->vmstats.num_context++;
+	aux_getruleset(L)->vmstats.num_context++;
 }
 
 /* [-0, +0, -] */
@@ -69,12 +69,12 @@ static void context_unpin(lua_State *restrict L, const void *p)
 	lua_pushnil(L);
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
-	find_ruleset(L)->vmstats.num_context--;
+	aux_getruleset(L)->vmstats.num_context--;
 }
 
 static int await_idle_gc(struct lua_State *restrict L)
 {
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	struct ev_idle *w = lua_touserdata(L, 1);
 	ev_idle_stop(r->loop, w);
 	return 0;
@@ -103,7 +103,7 @@ await_idle_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 static int await_idle(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	struct ev_idle *restrict w = lua_newuserdata(L, sizeof(struct ev_idle));
 	ev_idle_init(w, idle_cb);
 	ev_set_priority(w, EV_MINPRI);
@@ -123,7 +123,7 @@ static int await_idle(lua_State *restrict L)
 
 static int await_sleep_gc(struct lua_State *restrict L)
 {
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	struct ev_timer *w = lua_touserdata(L, 1);
 	ev_timer_stop(r->loop, w);
 	return 0;
@@ -157,7 +157,7 @@ static int await_sleep(lua_State *restrict L)
 		return 0;
 	}
 	n = CLAMP(n, 1e-3, 1e+9);
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	struct ev_timer *restrict w =
 		lua_newuserdata(L, sizeof(struct ev_timer));
 	ev_timer_init(w, sleep_cb, n, 0.0);
@@ -216,7 +216,7 @@ static int await_resolve(lua_State *restrict L)
 		G.resolver,
 		(struct resolve_cb){
 			.func = resolve_cb,
-			.data = find_ruleset(L),
+			.data = aux_getruleset(L),
 		},
 		name, NULL, G.conf->resolve_pf);
 	if (q == NULL) {
@@ -249,7 +249,7 @@ static int await_invoke_close(struct lua_State *restrict L)
 {
 	struct api_client_ctx **ud = lua_touserdata(L, 1);
 	if (*ud != NULL) {
-		struct ruleset *restrict r = find_ruleset(L);
+		struct ruleset *restrict r = aux_getruleset(L);
 		api_client_cancel(r->loop, *ud);
 		*ud = NULL;
 	}
@@ -311,7 +311,7 @@ static int await_invoke(lua_State *restrict L)
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
 	}
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	struct api_client_cb cb = {
 		.func = invoke_cb,
 		.data = r,

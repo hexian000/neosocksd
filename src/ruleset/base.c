@@ -30,6 +30,29 @@
 #include <stdint.h>
 #include <string.h>
 
+struct ruleset *aux_getruleset(lua_State *restrict L)
+{
+	void *ud;
+	(void)lua_getallocf(L, &ud);
+	return ud;
+}
+
+const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
+{
+	UNUSED(L);
+	struct stream *s = ud;
+	const void *buf;
+	*sz = SIZE_MAX; /* Lua allows arbitrary length */
+	const int err = stream_direct_read(s, &buf, sz);
+	if (err != 0) {
+		LOGE_F("read_stream: error %d", err);
+	}
+	if (*sz == 0) {
+		return NULL;
+	}
+	return buf;
+}
+
 /* addr = format_addr_(sa) */
 int aux_format_addr(lua_State *restrict L)
 {
@@ -68,22 +91,6 @@ int aux_format_addr(lua_State *restrict L)
 		return luaL_error(L, "unknown af: %d", af);
 	}
 	return 1;
-}
-
-const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
-{
-	UNUSED(L);
-	struct stream *s = ud;
-	const void *buf;
-	*sz = SIZE_MAX; /* Lua allows arbitrary length */
-	const int err = stream_direct_read(s, &buf, sz);
-	if (err != 0) {
-		LOGE_F("read_stream: error %d", err);
-	}
-	if (*sz == 0) {
-		return NULL;
-	}
-	return buf;
 }
 
 struct dialreq *aux_todialreq(lua_State *restrict L, const int n)
@@ -132,42 +139,6 @@ struct dialreq *aux_todialreq(lua_State *restrict L, const int n)
 	lua_pop(L, n);
 	lua_pushlightuserdata(L, req);
 	return req;
-}
-
-static inline void check_memlimit(struct ruleset *restrict r)
-{
-	const size_t memlimit = G.conf->memlimit;
-	if (memlimit == 0 || (r->vmstats.byt_allocated >> 20u) < memlimit) {
-		return;
-	}
-	ruleset_gc(r);
-}
-
-bool ruleset_pcall(
-	struct ruleset *restrict r, lua_CFunction func, int nargs, int nresults,
-	...)
-{
-	lua_State *restrict L = r->L;
-	lua_settop(L, 0);
-	check_memlimit(r);
-	int errfunc = 0;
-	if (G.conf->traceback) {
-		lua_pushcfunction(L, aux_traceback);
-		errfunc = 1;
-	}
-	lua_pushcfunction(L, func);
-	va_list args;
-	va_start(args, nresults);
-	for (int i = 0; i < nargs; i++) {
-		lua_pushlightuserdata(L, va_arg(args, void *));
-	}
-	va_end(args);
-	if (lua_pcall(L, nargs, nresults, errfunc) != LUA_OK) {
-		lua_pushvalue(L, -1);
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
-		return false;
-	}
-	return true;
 }
 
 int aux_traceback(lua_State *restrict L)
@@ -238,8 +209,43 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 	}
 }
 
-void ruleset_resume(
-	struct ruleset *restrict r, const void *ctx, const int narg, ...)
+static inline void check_memlimit(struct ruleset *restrict r)
+{
+	const size_t memlimit = G.conf->memlimit;
+	if (memlimit == 0 || (r->vmstats.byt_allocated >> 20u) < memlimit) {
+		return;
+	}
+	(void)lua_gc(r->L, LUA_GCCOLLECT, 0);
+}
+
+bool ruleset_pcall(
+	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
+	const int nresults, ...)
+{
+	lua_State *restrict L = r->L;
+	lua_settop(L, 0);
+	check_memlimit(r);
+	int errfunc = 0;
+	if (G.conf->traceback) {
+		lua_pushcfunction(L, aux_traceback);
+		errfunc = 1;
+	}
+	lua_pushcfunction(L, func);
+	va_list args;
+	va_start(args, nresults);
+	for (int i = 0; i < nargs; i++) {
+		lua_pushlightuserdata(L, va_arg(args, void *));
+	}
+	va_end(args);
+	if (lua_pcall(L, nargs, nresults, errfunc) != LUA_OK) {
+		lua_pushvalue(L, -1);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		return false;
+	}
+	return true;
+}
+
+void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 {
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);

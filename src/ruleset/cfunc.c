@@ -263,18 +263,24 @@ int cfunc_stats(lua_State *restrict L)
 	return 1;
 }
 
-/* tick(func, now) */
+/* tick(now) */
 int cfunc_tick(lua_State *restrict L)
 {
-	ASSERT(lua_gettop(L) == 2);
-	const char *func = lua_touserdata(L, 1);
-	const ev_tstamp now = *(ev_tstamp *)lua_touserdata(L, 2);
-	lua_settop(L, 0);
-
+	ASSERT(lua_gettop(L) == 1);
+	const ev_tstamp now = *(ev_tstamp *)lua_touserdata(L, 1);
 	(void)lua_getglobal(L, "ruleset");
-	(void)lua_getfield(L, -1, func);
-	lua_replace(L, -2);
+	(void)lua_getfield(L, -1, "tick");
+	lua_copy(L, -1, 1);
+	lua_settop(L, 1);
+
 	lua_pushnumber(L, now);
 	lua_call(L, 1, 0);
+	return 0;
+}
+
+/* gc() */
+int cfunc_gc(lua_State *restrict L)
+{
+	(void)lua_gc(L, LUA_GCCOLLECT, 0);
 	return 0;
 }

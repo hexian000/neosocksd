@@ -36,28 +36,25 @@ enum ruleset_ridx {
 #define ERR_INVALID_ROUTE "unable to parse route"
 #define ERR_NOT_ASYNC_ROUTINE "not in asynchronous routine"
 
-static inline struct ruleset *find_ruleset(lua_State *restrict L)
-{
-	void *ud;
-	(void)lua_getallocf(L, &ud);
-	return ud;
-}
+struct ruleset *aux_getruleset(lua_State *L);
 
 const char *aux_reader(lua_State *L, void *ud, size_t *sz);
-
-int aux_traceback(lua_State *L);
-
-void aux_resume(lua_State *L, int tidx, int narg);
 
 /* [-1, +1, v] */
 int aux_format_addr(lua_State *L);
 
 /* [-n, +1, -] */
-struct dialreq *aux_todialreq(lua_State *L, const int n);
+struct dialreq *aux_todialreq(lua_State *L, int n);
 
+int aux_traceback(lua_State *L);
+
+void aux_resume(lua_State *L, int tidx, int narg);
+
+/* main routine */
 bool ruleset_pcall(
 	struct ruleset *r, lua_CFunction func, int nargs, int nresults, ...);
 
-void ruleset_resume(struct ruleset *r, const void *ctx, int narg, ...);
+/* asynchronous routine */
+void ruleset_resume(struct ruleset *r, void *ctx, int narg, ...);
 
 #endif /* RULESET_BASE_H */

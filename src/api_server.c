@@ -283,9 +283,6 @@ static bool api_post_stats(
 		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
 			CENCODING_DEFLATE :
 			CENCODING_NONE;
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
-	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-
 	struct stream *w = content_writer(&ctx->parser.cbuf, 0, encoding);
 	if (w == NULL) {
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
@@ -356,6 +353,9 @@ static bool api_post_stats(
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return false;
 	}
+
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	const char *encoding_str = content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		RESPHDR_CENCODING(ctx->parser.wbuf, encoding_str);
@@ -587,7 +587,18 @@ static bool handle_ruleset_gc(
 	struct ruleset *ruleset)
 {
 	const ev_tstamp start = ev_now(loop);
-	ruleset_gc(ruleset);
+	const bool ok = ruleset_gc(ruleset);
+	if (!ok) {
+		size_t len;
+		const char *err = ruleset_geterror(ruleset, &len);
+		LOGW_F("ruleset gc: %s", err);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		BUF_APPEND(ctx->parser.wbuf, err, len);
+		BUF_APPENDSTR(ctx->parser.wbuf, "\n");
+		return false;
+	}
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
 	char livemem[16];

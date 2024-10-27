@@ -37,7 +37,7 @@ static int api_invoke(lua_State *restrict L)
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
 	}
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	struct api_client_cb cb = { NULL, NULL };
 	api_client_do(r->loop, req, "/ruleset/invoke", code, len, cb);
 	return 0;
@@ -102,7 +102,7 @@ static int api_setinterval(lua_State *restrict L)
 	luaL_checktype(L, 1, LUA_TNUMBER);
 	double interval = lua_tonumber(L, 1);
 
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	struct ev_timer *restrict w_ticker = &r->w_ticker;
 	ev_timer_stop(r->loop, w_ticker);
 	if (!isnormal(interval)) {
@@ -170,7 +170,7 @@ static int api_stats(lua_State *restrict L)
 	if (s == NULL) {
 		return 0;
 	}
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	const struct server_stats *restrict stats = &s->stats;
 	lua_createtable(L, 0, 16);
 
@@ -218,7 +218,7 @@ static int api_time(lua_State *restrict L)
 /* neosocksd.now() */
 static int api_now(lua_State *restrict L)
 {
-	struct ruleset *restrict r = find_ruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	const ev_tstamp now = ev_now(r->loop);
 	lua_pushnumber(L, (lua_Number)now);
 	return 1;
