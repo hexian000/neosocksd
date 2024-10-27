@@ -67,7 +67,7 @@ ASSERT_SUPER(struct session, struct http_ctx, ss);
 			break;                                                 \
 		}                                                              \
 		char caddr[64];                                                \
-		format_sa(&(ctx)->accepted_sa.sa, caddr, sizeof(caddr));       \
+		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
 		if ((ctx)->state != STATE_CONNECT) {                           \
 			LOG_F(level, "client `%s': " format, caddr,            \
 			      __VA_ARGS__);                                    \

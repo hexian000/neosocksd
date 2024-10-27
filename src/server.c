@@ -71,7 +71,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		lstats->num_accept++;
 		if (LOGLEVEL(VERBOSE)) {
 			char addr_str[64];
-			format_sa(&addr.sa, addr_str, sizeof(addr_str));
+			format_sa(addr_str, sizeof(addr_str), &addr.sa);
 			LOG_F(VERBOSE, "accept `%s': fd=%d listener=%d",
 			      addr_str, fd, watcher->fd);
 		}
@@ -151,7 +151,7 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 	if (LOGLEVEL(NOTICE)) {
 		char addr_str[64];
-		format_sa(bindaddr, addr_str, sizeof(addr_str));
+		format_sa(addr_str, sizeof(addr_str), bindaddr);
 		LOG_F(NOTICE, "listen: %s", addr_str);
 	}
 	if (bind(fd, bindaddr, getsocklen(bindaddr)) != 0) {

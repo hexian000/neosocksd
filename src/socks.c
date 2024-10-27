@@ -85,14 +85,14 @@ ASSERT_SUPER(struct session, struct socks_ctx, ss);
 			break;                                                 \
 		}                                                              \
 		char caddr[64];                                                \
-		format_sa(&(ctx)->accepted_sa.sa, caddr, sizeof(caddr));       \
+		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
 		if ((ctx)->state < STATE_CONNECT) {                            \
 			LOG_F(level, "client `%s': " format, caddr,            \
 			      __VA_ARGS__);                                    \
 			break;                                                 \
 		}                                                              \
 		char saddr[64];                                                \
-		dialaddr_format(&(ctx)->addr, saddr, sizeof(saddr));           \
+		dialaddr_format(saddr, sizeof(saddr), &(ctx)->addr);           \
 		LOG_F(level, "`%s' -> `%s': " format, caddr, saddr,            \
 		      __VA_ARGS__);                                            \
 	} while (0)
@@ -779,7 +779,7 @@ static struct dialreq *req_connect(struct socks_ctx *restrict ctx)
 	const size_t cap =
 		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
 	char request[cap];
-	const int len = dialaddr_format(addr, request, cap);
+	const int len = dialaddr_format(request, cap, addr);
 	CHECK(len >= 0 && (size_t)len < cap);
 	const char *username = ctx->auth.username;
 	const char *password = ctx->auth.password;

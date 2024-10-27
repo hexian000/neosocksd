@@ -39,7 +39,7 @@ int socket_get_error(int fd);
 
 socklen_t getsocklen(const struct sockaddr *sa);
 void copy_sa(struct sockaddr *dst, const struct sockaddr *src);
-int format_sa(const struct sockaddr *sa, char *s, size_t buf_size);
+int format_sa(char *s, size_t maxlen, const struct sockaddr *sa);
 
 bool parse_bindaddr(union sockaddr_max *sa, const char *s);
 bool resolve_addr(

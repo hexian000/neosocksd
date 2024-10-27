@@ -37,6 +37,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+const char *proxy_protocol_str[PROTO_MAX] = {
+	[PROTO_HTTP] = "http",
+	[PROTO_SOCKS4A] = "socks4a",
+	[PROTO_SOCKS5] = "socks5",
+};
+
 static bool
 dialaddr_set(struct dialaddr *addr, const char *host, const uint16_t port)
 {
@@ -108,26 +114,27 @@ void dialaddr_copy(
 }
 
 int dialaddr_format(
-	const struct dialaddr *restrict addr, char *buf, const size_t maxlen)
+	char *restrict s, const size_t maxlen,
+	const struct dialaddr *restrict addr)
 {
 	switch (addr->type) {
 	case ATYP_INET: {
-		char s[INET_ADDRSTRLEN];
-		if (inet_ntop(AF_INET, &addr->in, s, sizeof(s)) == NULL) {
+		char buf[INET_ADDRSTRLEN];
+		if (inet_ntop(AF_INET, &addr->in, buf, sizeof(buf)) == NULL) {
 			return -1;
 		}
-		return snprintf(buf, maxlen, "%s:%" PRIu16, s, addr->port);
+		return snprintf(s, maxlen, "%s:%" PRIu16, buf, addr->port);
 	}
 	case ATYP_INET6: {
-		char s[INET6_ADDRSTRLEN];
-		if (inet_ntop(AF_INET6, &addr->in6, s, sizeof(s)) == NULL) {
+		char buf[INET6_ADDRSTRLEN];
+		if (inet_ntop(AF_INET6, &addr->in6, buf, sizeof(buf)) == NULL) {
 			return -1;
 		}
-		return snprintf(buf, maxlen, "[%s]:%" PRIu16, s, addr->port);
+		return snprintf(s, maxlen, "[%s]:%" PRIu16, buf, addr->port);
 	}
 	case ATYP_DOMAIN:
 		return snprintf(
-			buf, maxlen, "%.*s:%" PRIu16, (int)addr->domain.len,
+			s, maxlen, "%.*s:%" PRIu16, (int)addr->domain.len,
 			addr->domain.name, addr->port);
 	default:
 		break;
@@ -280,6 +287,77 @@ proxy_copy(struct proxy_req *restrict dst, const struct proxy_req *restrict src)
 	(void)proxy_set_credential(dst, src->username, src->password);
 }
 
+static int
+format_userinfo(char *restrict s, size_t maxlen, struct proxy_req *restrict p)
+{
+	if (p->username == NULL) {
+		return 0;
+	}
+	if (p->password != NULL) {
+		for (char *s = p->password; *s != '\0'; s++) {
+			*s = '*';
+		}
+	}
+	const size_t n =
+		url_escape_userinfo(s, maxlen - 1, p->username, p->password);
+	s[n] = '\0';
+	return (int)n;
+}
+
+static int
+format_proxy_req(char *restrict s, size_t maxlen, struct proxy_req *restrict p)
+{
+	char userinfo[1536];
+	int nuserinfo = format_userinfo(userinfo, sizeof(userinfo), p);
+	ASSERT(nuserinfo >= 0);
+	char host[FQDN_MAX_LENGTH + 1 + 5];
+	int nhost = dialaddr_format(host, sizeof(host), &p->addr);
+	ASSERT(nhost > 0);
+	if (maxlen < (size_t)(nuserinfo + nhost + 1)) {
+		return -1;
+	}
+	const struct url u = {
+		.scheme = (char *)proxy_protocol_str[p->proto],
+		.userinfo = (nuserinfo > 0 ? userinfo : NULL),
+		.host = host,
+	};
+	const size_t n = url_build(s, maxlen - 1, &u);
+	s[n] = '\0';
+	return (int)n;
+}
+
+int dialreq_format(
+	char *restrict s, size_t maxlen, const struct dialreq *restrict r)
+{
+	if (maxlen == 0) {
+		return 0;
+	}
+	if (maxlen > INT_MAX) {
+		maxlen = INT_MAX;
+	}
+	int n = 0;
+	for (size_t i = 0; i < r->num_proxy; i++) {
+		struct proxy_req proxy = { 0 };
+		proxy_copy(&proxy, &r->proxy[i]);
+		int ret = format_proxy_req(s, maxlen, &proxy);
+		s += ret;
+		maxlen -= ret;
+		n += ret;
+		ret = snprintf(s, maxlen, "->");
+		ASSERT(ret > 0);
+		s += ret;
+		maxlen -= ret;
+		n += ret;
+		if (maxlen <= 1) {
+			return n;
+		}
+	}
+	int ret = dialaddr_format(s, maxlen, &r->addr);
+	ASSERT(ret > 0);
+	n += ret;
+	return n;
+}
+
 struct dialreq *dialreq_new(const size_t num_proxy)
 {
 	struct dialreq *restrict base = G.basereq;
@@ -366,7 +444,7 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 			jump + 1 < req->num_proxy ?                            \
 				&req->proxy[jump + 1].addr :                   \
 				&req->addr;                                    \
-		dialaddr_format(addr, raddr, sizeof(raddr));                   \
+		dialaddr_format(raddr, sizeof(raddr), addr);                   \
 		LOG_F(level, "connect `%s' over proxy[%zu]: " format, raddr,   \
 		      jump, __VA_ARGS__);                                      \
 	} while (0)
@@ -416,7 +494,7 @@ static bool send_http_req(
 	} while (0)
 	char *b = buf;
 	APPEND(b, "CONNECT ");
-	const int n = dialaddr_format(addr, b, sizeof(buf) - (b - buf));
+	const int n = dialaddr_format(b, sizeof(buf) - (b - buf), addr);
 	if (n < 0 || (size_t)n >= sizeof(buf) - (b - buf)) {
 		DIALER_LOG(ERROR, d, "failed to format host address");
 		return false;
@@ -1024,7 +1102,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 						&req->addr;
 				char addr_str[64];
 				dialaddr_format(
-					addr, addr_str, sizeof(addr_str));
+					addr_str, sizeof(addr_str), addr);
 				LOG_F(WARNING, "connect `%s': %s", addr_str,
 				      strerror(sockerr));
 			}
@@ -1102,7 +1180,7 @@ static bool connect_sa(
 	ev_io_set(&d->w_socket, fd, EV_NONE);
 	if (LOGLEVEL(VERBOSE)) {
 		char addr_str[64];
-		format_sa(sa, addr_str, sizeof(addr_str));
+		format_sa(addr_str, sizeof(addr_str), sa);
 		LOG_F(VERBOSE, "dialer: connect `%s'", addr_str);
 	}
 	d->state = STATE_CONNECT;
@@ -1111,7 +1189,7 @@ static bool connect_sa(
 		if (err != EINTR && err != EINPROGRESS) {
 			if (LOGLEVEL(WARNING)) {
 				char addr_str[64];
-				format_sa(sa, addr_str, sizeof(addr_str));
+				format_sa(addr_str, sizeof(addr_str), sa);
 				LOG_F(WARNING, "connect `%s': %s", addr_str,
 				      strerror(err));
 			}
@@ -1169,9 +1247,9 @@ static void resolve_cb(
 
 	if (LOGLEVEL(DEBUG)) {
 		char node_str[dialaddr->domain.len + 1 + 5 + 1];
-		dialaddr_format(dialaddr, node_str, sizeof(node_str));
+		dialaddr_format(node_str, sizeof(node_str), dialaddr);
 		char addr_str[64];
-		format_sa(&addr.sa, addr_str, sizeof(addr_str));
+		format_sa(addr_str, sizeof(addr_str), &addr.sa);
 		LOG_F(DEBUG, "resolve: `%s' is %s", node_str, addr_str);
 	}
 
@@ -1255,7 +1333,12 @@ void dialer_start(
 	struct dialer *restrict d, struct ev_loop *restrict loop,
 	const struct dialreq *restrict req)
 {
-	LOGV_F("dialer: [%p] start, num_proxy=%zu", (void *)d, req->num_proxy);
+	if (LOGLEVEL(VERBOSE)) {
+		char s[4096];
+		int r = dialreq_format(s, sizeof(s), req);
+		ASSERT(r > 0);
+		LOG_F(VERBOSE, "dialer: [%p] start, `%.*s'", (void *)d, r, s);
+	}
 	d->req = req;
 	d->syserr = 0;
 	ev_feed_event(loop, &d->w_start, EV_CUSTOM);

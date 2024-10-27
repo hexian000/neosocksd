@@ -64,7 +64,7 @@ ASSERT_SUPER(struct session, struct api_ctx, ss);
 			break;                                                 \
 		}                                                              \
 		char caddr[64];                                                \
-		format_sa(&(ctx)->accepted_sa.sa, caddr, sizeof(caddr));       \
+		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
 		LOG_F(level, "client `%s': " format, caddr, __VA_ARGS__);      \
 	} while (0)
 #define API_CTX_LOG(level, ctx, message)                                       \

@@ -62,7 +62,7 @@ ASSERT_SUPER(struct session, struct forward_ctx, ss);
 			break;                                                 \
 		}                                                              \
 		char caddr[64];                                                \
-		format_sa(&(ctx)->accepted_sa.sa, caddr, sizeof(caddr));       \
+		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
 		LOG_F(level, "client `%s': " format, caddr, __VA_ARGS__);      \
 	} while (0)
 #define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
@@ -272,7 +272,7 @@ forward_route(struct ruleset *r, const struct dialaddr *restrict addr)
 	const size_t cap =
 		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
 	char request[cap];
-	const int len = dialaddr_format(addr, request, cap);
+	const int len = dialaddr_format(request, cap, addr);
 	CHECK(len >= 0 && (size_t)len < cap);
 	switch (addr->type) {
 	case ATYP_INET:
@@ -320,7 +320,7 @@ static struct dialreq *
 tproxy_route(struct ruleset *r, const struct sockaddr *restrict sa)
 {
 	char addr_str[64];
-	format_sa(sa, addr_str, sizeof(addr_str));
+	format_sa(addr_str, sizeof(addr_str), sa);
 	switch (sa->sa_family) {
 	case AF_INET:
 		return ruleset_route(r, addr_str, NULL, NULL);

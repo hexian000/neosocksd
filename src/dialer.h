@@ -36,13 +36,16 @@ struct dialaddr {
 
 bool dialaddr_parse(struct dialaddr *addr, const char *s, size_t len);
 void dialaddr_copy(struct dialaddr *dst, const struct dialaddr *src);
-int dialaddr_format(const struct dialaddr *addr, char *buf, size_t bufsize);
+int dialaddr_format(char *s, size_t maxlen, const struct dialaddr *addr);
 
 enum proxy_protocol {
 	PROTO_HTTP,
 	PROTO_SOCKS4A,
 	PROTO_SOCKS5,
+
+	PROTO_MAX,
 };
+extern const char *proxy_protocol_str[PROTO_MAX];
 
 struct proxy_req {
 	enum proxy_protocol proto;
@@ -60,6 +63,7 @@ struct dialreq {
 struct dialreq *dialreq_new(size_t num_proxy);
 bool dialreq_addproxy(struct dialreq *r, const char *proxy_uri, size_t urilen);
 struct dialreq *dialreq_parse(const char *addr, const char *csv);
+int dialreq_format(char *s, size_t maxlen, const struct dialreq *r);
 void dialreq_free(struct dialreq *r);
 
 #define DIALER_RBUF_SIZE                                                       \
