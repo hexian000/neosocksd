@@ -143,7 +143,7 @@ int dialaddr_format(
 }
 
 static bool proxy_set_credential(
-	struct proxy_req *restrict proxy, const char *username,
+	struct proxyreq *restrict proxy, const char *username,
 	const char *password)
 {
 	const size_t ulen = (username != NULL) ? strlen(username) + 1 : 0;
@@ -211,7 +211,7 @@ bool dialreq_addproxy(
 		LOGE_F("unable to parse port number: `%s'", port);
 		return false;
 	}
-	struct proxy_req *restrict proxy = &req->proxy[req->num_proxy];
+	struct proxyreq *restrict proxy = &req->proxy[req->num_proxy];
 	proxy->proto = protocol;
 	if (!dialaddr_set(&proxy->addr, host, (uint16_t)portvalue)) {
 		return false;
@@ -231,7 +231,7 @@ bool dialreq_addproxy(
 }
 
 #define DIALREQ_NEW(n)                                                         \
-	(malloc(sizeof(struct dialreq) + sizeof(struct proxy_req) * (n)))
+	(malloc(sizeof(struct dialreq) + sizeof(struct proxyreq) * (n)))
 
 struct dialreq *dialreq_parse(const char *addr, const char *csv)
 {
@@ -280,45 +280,24 @@ struct dialreq *dialreq_parse(const char *addr, const char *csv)
 }
 
 static void
-proxy_copy(struct proxy_req *restrict dst, const struct proxy_req *restrict src)
+proxy_copy(struct proxyreq *restrict dst, const struct proxyreq *restrict src)
 {
 	dst->proto = src->proto;
 	dialaddr_copy(&dst->addr, &src->addr);
 	(void)proxy_set_credential(dst, src->username, src->password);
 }
 
-static int
-format_userinfo(char *restrict s, size_t maxlen, struct proxy_req *restrict p)
+static int format_proxyreq(
+	char *restrict s, size_t maxlen, const struct proxyreq *restrict req)
 {
-	if (p->username == NULL) {
-		return 0;
-	}
-	if (p->password != NULL) {
-		for (char *s = p->password; *s != '\0'; s++) {
-			*s = '*';
-		}
-	}
-	const size_t n =
-		url_escape_userinfo(s, maxlen - 1, p->username, p->password);
-	s[n] = '\0';
-	return (int)n;
-}
-
-static int
-format_proxy_req(char *restrict s, size_t maxlen, struct proxy_req *restrict p)
-{
-	char userinfo[1536];
-	int nuserinfo = format_userinfo(userinfo, sizeof(userinfo), p);
-	ASSERT(nuserinfo >= 0);
 	char host[FQDN_MAX_LENGTH + 1 + 5];
-	int nhost = dialaddr_format(host, sizeof(host), &p->addr);
+	int nhost = dialaddr_format(host, sizeof(host), &req->addr);
 	ASSERT(nhost > 0);
-	if (maxlen < (size_t)(nuserinfo + nhost + 1)) {
+	if (maxlen < (size_t)(nhost + 1)) {
 		return -1;
 	}
 	const struct url u = {
-		.scheme = (char *)proxy_protocol_str[p->proto],
-		.userinfo = (nuserinfo > 0 ? userinfo : NULL),
+		.scheme = (char *)proxy_protocol_str[req->proto],
 		.host = host,
 	};
 	const size_t n = url_build(s, maxlen - 1, &u);
@@ -337,9 +316,7 @@ int dialreq_format(
 	}
 	int n = 0;
 	for (size_t i = 0; i < r->num_proxy; i++) {
-		struct proxy_req proxy = { 0 };
-		proxy_copy(&proxy, &r->proxy[i]);
-		int ret = format_proxy_req(s, maxlen, &proxy);
+		int ret = format_proxyreq(s, maxlen, &r->proxy[i]);
 		s += ret;
 		maxlen -= ret;
 		n += ret;
@@ -425,28 +402,46 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 
 #define DIALER_RETURN(d, loop, ok)                                             \
 	do {                                                                   \
-		LOGV_F("dialer: [%p] finished ok=%d", (void *)(d), (ok));      \
+		LOGV_F("dialer %p: finished ok=%d", (void *)(d), (ok));        \
 		dialer_stop((d), (loop), (ok));                                \
 		(d)->done_cb.func((loop), (d)->done_cb.data);                  \
 		return;                                                        \
 	} while (0)
+
+static int
+format_status(char *restrict s, size_t maxlen, const struct dialer *restrict d)
+{
+	const size_t jump = d->jump;
+	const struct dialreq *restrict req = d->req;
+	ASSERT(jump < req->num_proxy);
+	char raddr[64], proxy[256];
+	const struct dialaddr *addr = &req->addr;
+	if (jump + 1 < req->num_proxy) {
+		addr = &req->proxy[jump + 1].addr;
+	}
+	const int nraddr = dialaddr_format(raddr, sizeof(raddr), addr);
+	if (nraddr < 0) {
+		return nraddr;
+	}
+	const int nproxy =
+		format_proxyreq(proxy, sizeof(proxy), &req->proxy[jump]);
+	if (nproxy < 0) {
+		return nproxy;
+	}
+	return snprintf(
+		s, maxlen, "connect `%.*s' over [%zu] `%.*s'", nraddr, raddr,
+		jump, nproxy, proxy);
+}
 
 #define DIALER_LOG_F(level, d, format, ...)                                    \
 	do {                                                                   \
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		const size_t jump = (d)->jump;                                 \
-		const struct dialreq *restrict req = (d)->req;                 \
-		ASSERT(jump < req->num_proxy);                                 \
-		char raddr[64];                                                \
-		const struct dialaddr *addr =                                  \
-			jump + 1 < req->num_proxy ?                            \
-				&req->proxy[jump + 1].addr :                   \
-				&req->addr;                                    \
-		dialaddr_format(raddr, sizeof(raddr), addr);                   \
-		LOG_F(level, "connect `%s' over proxy[%zu]: " format, raddr,   \
-		      jump, __VA_ARGS__);                                      \
+		char status[256];                                              \
+		const int n = format_status(status, sizeof(status), (d));      \
+		ASSERT(n > 0);                                                 \
+		LOG_F(level, "%.*s: " format, n, status, __VA_ARGS__);         \
 	} while (0)
 #define DIALER_LOG(level, d, message) DIALER_LOG_F(level, d, "%s", message)
 
@@ -479,7 +474,7 @@ static bool dialer_send(
 
 /* RFC 7231: 4.3.6.  CONNECT */
 static bool send_http_req(
-	struct dialer *restrict d, const struct proxy_req *proxy,
+	struct dialer *restrict d, const struct proxyreq *proxy,
 	const struct dialaddr *restrict addr)
 {
 	char buf[DIALER_HTTP_REQ_MAXLEN];
@@ -534,7 +529,7 @@ static bool send_http_req(
 }
 
 static bool send_socks4a_req(
-	struct dialer *restrict d, const struct proxy_req *proxy,
+	struct dialer *restrict d, const struct proxyreq *proxy,
 	const struct dialaddr *restrict addr)
 {
 	size_t cap = sizeof(struct socks4_hdr);
@@ -598,7 +593,7 @@ static bool send_socks4a_req(
 }
 
 static bool send_socks5_authmethod(
-	struct dialer *restrict d, const struct proxy_req *restrict proxy)
+	struct dialer *restrict d, const struct proxyreq *restrict proxy)
 {
 	ASSERT(d->state == STATE_HANDSHAKE1);
 	if (proxy->username == NULL) {
@@ -611,7 +606,7 @@ static bool send_socks5_authmethod(
 }
 
 static bool send_socks5_auth(
-	struct dialer *restrict d, const struct proxy_req *restrict proxy)
+	struct dialer *restrict d, const struct proxyreq *restrict proxy)
 {
 	ASSERT(d->state == STATE_HANDSHAKE2);
 	const size_t ulen = strlen(proxy->username);
@@ -709,7 +704,7 @@ static bool send_dispatch(struct dialer *restrict d)
 	const struct dialreq *restrict req = d->req;
 	const size_t jump = d->jump;
 	const size_t next = jump + 1;
-	const struct proxy_req *restrict proxy = &req->proxy[jump];
+	const struct proxyreq *restrict proxy = &req->proxy[jump];
 	const struct dialaddr *addr =
 		next < req->num_proxy ? &req->proxy[next].addr : &req->addr;
 	switch (proxy->proto) {
@@ -1009,7 +1004,7 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 }
 
 static int
-recv_dispatch(struct dialer *restrict d, const struct proxy_req *restrict proxy)
+recv_dispatch(struct dialer *restrict d, const struct proxyreq *restrict proxy)
 {
 	switch (proxy->proto) {
 	case PROTO_HTTP:
@@ -1337,7 +1332,7 @@ void dialer_start(
 		char s[4096];
 		int r = dialreq_format(s, sizeof(s), req);
 		ASSERT(r > 0);
-		LOG_F(VERBOSE, "dialer: [%p] start, `%.*s'", (void *)d, r, s);
+		LOG_F(VERBOSE, "dialer %p: start, `%.*s'", (void *)d, r, s);
 	}
 	d->req = req;
 	d->syserr = 0;

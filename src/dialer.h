@@ -47,7 +47,7 @@ enum proxy_protocol {
 };
 extern const char *proxy_protocol_str[PROTO_MAX];
 
-struct proxy_req {
+struct proxyreq {
 	enum proxy_protocol proto;
 	struct dialaddr addr;
 	char *username, *password;
@@ -57,7 +57,7 @@ struct proxy_req {
 struct dialreq {
 	struct dialaddr addr;
 	size_t num_proxy;
-	struct proxy_req proxy[];
+	struct proxyreq proxy[];
 };
 
 struct dialreq *dialreq_new(size_t num_proxy);
