@@ -21,34 +21,23 @@ int cfunc_request(lua_State *restrict L)
 	const char *request = lua_touserdata(L, 2);
 	const char *username = lua_touserdata(L, 3);
 	const char *password = lua_touserdata(L, 4);
-	lua_settop(L, 0);
-
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
+	lua_copy(L, -1, 1);
+	lua_settop(L, 1);
+
 	lua_pushstring(L, request);
 	lua_pushstring(L, username);
 	lua_pushstring(L, password);
 	lua_call(L, 3, LUA_MULTRET);
-	const int n = lua_gettop(L) - 1;
+	const int n = lua_gettop(L);
 	if (n < 1) {
 		return 0;
 	}
-	const int type = lua_type(L, -1);
-	switch (type) {
-	case LUA_TSTRING:
-		break;
-	case LUA_TNIL:
-		return 0;
-	default:
-		LOGE_F("request `%s': invalid return type %s", request,
-		       lua_typename(L, type));
-		return 0;
-	}
-	struct dialreq *req = aux_make_dialreq(L, n);
+	struct dialreq *req = aux_todialreq(L, n);
 	if (req == NULL) {
-		LOGE_F("request `%s': invalid return", request);
+		LOGW_F("ruleset.%s `%s': invalid return", func, request);
 	}
-	lua_pushlightuserdata(L, req);
 	return 1;
 }
 
@@ -115,7 +104,7 @@ static int rpcall_finish(lua_State *restrict L)
 	lua_pushliteral(L, "return ");
 	lua_pushcfunction(L, api_marshal);
 	lua_rotate(L, 1, 2);
-	/* lua stack: marshal ok ... */
+	/* lua stack: "return " marshal ... */
 	lua_call(L, n, 1);
 	lua_concat(L, 2);
 	size_t len;

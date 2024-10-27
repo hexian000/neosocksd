@@ -57,7 +57,7 @@ static void context_pin(lua_State *restrict L, const void *p)
 	find_ruleset(L)->vmstats.num_context++;
 }
 
-/* [-0, +0, m] */
+/* [-0, +0, -] */
 static void context_unpin(lua_State *restrict L, const void *p)
 {
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
@@ -305,16 +305,12 @@ static int await_invoke(lua_State *restrict L)
 	AWAIT_CHECK_YIELDABLE(L);
 	size_t len;
 	const char *code = luaL_checklstring(L, 1, &len);
-	const int n = lua_gettop(L);
-	for (int i = 2; i <= MAX(2, n); i++) {
-		luaL_checktype(L, i, LUA_TSTRING);
-	}
-	struct dialreq *req = aux_make_dialreq(L, n - 1);
+	const int n = lua_gettop(L) - 1;
+	struct dialreq *req = aux_todialreq(L, n);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
 	}
-	lua_pop(L, n - 1);
 	struct ruleset *restrict r = find_ruleset(L);
 	struct api_client_cb cb = {
 		.func = invoke_cb,
@@ -326,7 +322,8 @@ static int await_invoke(lua_State *restrict L)
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
-	lua_pop(L, 1); /* code */
+	/* lua stack: code dialreq */
+	lua_pop(L, 2);
 	struct api_client_ctx **ud =
 		lua_newuserdata(L, sizeof(struct api_client_ctx *));
 	*ud = apictx;

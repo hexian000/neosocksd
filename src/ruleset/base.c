@@ -33,6 +33,7 @@
 /* addr = format_addr_(sa) */
 int aux_format_addr(lua_State *restrict L)
 {
+	/* lua stack: ... sa */
 	const struct sockaddr *sa = lua_touserdata(L, -1);
 	if (sa == NULL) {
 		return 0;
@@ -85,14 +86,18 @@ const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
 	return buf;
 }
 
-struct dialreq *aux_make_dialreq(lua_State *restrict L, const int n)
+struct dialreq *aux_todialreq(lua_State *restrict L, const int n)
 {
+	/* lua stack: ... addr proxyN ... proxy1 */
 	if (n < 1) {
+		lua_pushlightuserdata(L, NULL);
 		return NULL;
 	}
 	struct dialreq *req = dialreq_new((size_t)(n - 1));
 	if (req == NULL) {
 		LOGOOM();
+		lua_pop(L, n);
+		lua_pushlightuserdata(L, NULL);
 		return NULL;
 	}
 	size_t len;
@@ -100,22 +105,32 @@ struct dialreq *aux_make_dialreq(lua_State *restrict L, const int n)
 		const char *s = lua_tolstring(L, -i, &len);
 		if (s == NULL) {
 			dialreq_free(req);
+			lua_pop(L, n);
+			lua_pushlightuserdata(L, NULL);
 			return NULL;
 		}
 		if (!dialreq_addproxy(req, s, len)) {
 			dialreq_free(req);
+			lua_pop(L, n);
+			lua_pushlightuserdata(L, NULL);
 			return NULL;
 		}
 	}
 	const char *s = lua_tolstring(L, -n, &len);
 	if (s == NULL) {
 		dialreq_free(req);
+		lua_pop(L, n);
+		lua_pushlightuserdata(L, NULL);
 		return NULL;
 	}
 	if (!dialaddr_parse(&req->addr, s, len)) {
 		dialreq_free(req);
+		lua_pop(L, n);
+		lua_pushlightuserdata(L, NULL);
 		return NULL;
 	}
+	lua_pop(L, n);
+	lua_pushlightuserdata(L, req);
 	return req;
 }
 
@@ -202,28 +217,23 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 	}
 	lua_pushvalue(L, tidx);
 	lua_pushnil(L);
-	/* lua stack: RIDX_ASYNC_ROUTINE finish co nil */
+	/* lua stack: ... RIDX_ASYNC_ROUTINE finish co nil */
 	lua_rawset(L, -4);
 	int errfunc = 0;
 	if (G.conf->traceback) {
-		lua_pushcfunction(L, aux_traceback);
-		lua_replace(L, -2);
 		errfunc = lua_absindex(L, -2);
+		lua_pushcfunction(L, aux_traceback);
+		lua_replace(L, errfunc);
 	}
-	/* lua stack: traceback? finish co nil */
-	if (status == LUA_OK) {
-		luaL_checkstack(L, 1 + nres, NULL);
-		lua_pushboolean(L, 1);
-		lua_xmove(co, L, nres);
-		nres = 1 + nres;
-	} else {
-		luaL_checkstack(L, 2, NULL);
-		lua_pushboolean(L, 0);
-		lua_xmove(co, L, 1);
-		nres = 2;
+	/* lua stack: ... traceback? finish */
+	if (status != LUA_OK) {
+		nres = 1;
 	}
+	luaL_checkstack(L, 1 + nres, NULL);
+	lua_pushboolean(L, status == LUA_OK);
+	lua_xmove(co, L, nres);
 	/* call finish function */
-	if (lua_pcall(L, nres, 0, errfunc) != LUA_OK) {
+	if (lua_pcall(L, 1 + nres, 0, errfunc) != LUA_OK) {
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	}
 }

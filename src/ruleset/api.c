@@ -29,18 +29,15 @@
 /* neosocksd.invoke(code, addr, proxyN, ..., proxy1) */
 static int api_invoke(lua_State *restrict L)
 {
-	const int n = lua_gettop(L);
-	for (int i = 1; i <= MAX(2, n); i++) {
-		luaL_checktype(L, i, LUA_TSTRING);
-	}
-	struct dialreq *req = aux_make_dialreq(L, n - 1);
+	size_t len;
+	const char *code = luaL_checklstring(L, 1, &len);
+	const int n = lua_gettop(L) - 1;
+	struct dialreq *req = aux_todialreq(L, n);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_ROUTE);
 		return lua_error(L);
 	}
 	struct ruleset *restrict r = find_ruleset(L);
-	size_t len;
-	const char *code = lua_tolstring(L, 1, &len);
 	struct api_client_cb cb = { NULL, NULL };
 	api_client_do(r->loop, req, "/ruleset/invoke", code, len, cb);
 	return 0;
