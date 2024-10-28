@@ -12,6 +12,7 @@
 #include "ruleset/await.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
+#include "ruleset/marshal.h"
 #include "ruleset/regex.h"
 #include "ruleset/zlib.h"
 
@@ -99,6 +100,7 @@ static int ruleset_luainit(lua_State *restrict L)
 	/* load built-in libraries */
 	const luaL_Reg libs[] = {
 		{ "neosocksd", luaopen_neosocksd },
+		{ "marshal", luaopen_marshal },
 		{ "await", luaopen_await },
 		{ "regex", luaopen_regex },
 		{ "zlib", luaopen_zlib },

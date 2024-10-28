@@ -389,9 +389,6 @@ static bool restapi_check(
 static void rpcall_return(void *data, const char *result, size_t resultlen)
 {
 	struct api_ctx *restrict ctx = data;
-	if (ctx == NULL) {
-		return;
-	}
 	ASSERT(ctx->state == STATE_YIELD);
 	ctx->rpcstate = NULL;
 	ctx->state = STATE_RESPONSE;
@@ -472,6 +469,7 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 		});
 	stream_close(reader);
 	if (rpcstate == NULL) {
+		/* no callback */
 		ctx->state = STATE_RESPONSE;
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);

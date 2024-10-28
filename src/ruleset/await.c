@@ -3,15 +3,13 @@
 
 #include "await.h"
 
-#include "base.h"
-#include "compat.h"
-
 #include "utils/debug.h"
 #include "utils/minmax.h"
 
 #include "api_client.h"
 #include "conf.h"
 #include "resolver.h"
+#include "ruleset/base.h"
 #include "util.h"
 
 #include "lauxlib.h"
@@ -35,6 +33,8 @@
 			return lua_error((L));                                 \
 		}                                                              \
 	} while (0)
+
+#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
 
 /* [-0, +0, m] */
 static void context_pin(lua_State *restrict L, const void *p)

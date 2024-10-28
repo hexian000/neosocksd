@@ -488,13 +488,13 @@ int main(int argc, char **argv)
 	LOGN("server start");
 	ev_run(loop, 0);
 
-	LOGN("server shutdown gracefully");
 	if (api != NULL) {
 		server_stop(api);
 		api = NULL;
 	}
 	server_stop(s);
 	G.server = NULL;
+	LOGN("server shutdown gracefully");
 
 #if WITH_RULESET
 	if (G.ruleset != NULL) {

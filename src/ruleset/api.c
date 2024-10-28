@@ -2,8 +2,6 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "api.h"
-#include "base.h"
-#include "marshal.h"
 
 #include "net/addr.h"
 #include "utils/minmax.h"
@@ -12,6 +10,8 @@
 #include "api_client.h"
 #include "conf.h"
 #include "proto/domain.h"
+#include "ruleset/base.h"
+#include "ruleset/marshal.h"
 #include "server.h"
 #include "sockutil.h"
 #include "util.h"
@@ -230,7 +230,6 @@ static int api_traceback(lua_State *restrict L)
 
 int luaopen_neosocksd(lua_State *restrict L)
 {
-	lua_register(L, "marshal", api_marshal);
 	const luaL_Reg apilib[] = {
 		{ "config", api_config },
 		{ "invoke", api_invoke },

@@ -3,11 +3,11 @@
 
 #include "cfunc.h"
 
-#include "base.h"
-#include "marshal.h"
-#include "util.h"
-
 #include "utils/debug.h"
+
+#include "ruleset/base.h"
+#include "ruleset/marshal.h"
+#include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -103,7 +103,7 @@ static int rpcall_finish(lua_State *restrict L)
 	}
 	const int n = lua_gettop(L);
 	lua_pushliteral(L, "return ");
-	lua_pushcfunction(L, api_marshal);
+	lua_getglobal(L, "marshal");
 	lua_rotate(L, 1, 2);
 	/* lua stack: "return " marshal ... */
 	lua_call(L, n, 1);
@@ -125,7 +125,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	const struct rpcall_cb *in_cb = lua_touserdata(L, 2);
 	struct rpcall_state *restrict state =
 		lua_newuserdata(L, sizeof(struct rpcall_state));
-	*state = (struct rpcall_state){ .callback = *in_cb };
+	*state = (struct rpcall_state){ .callback = { NULL, NULL } };
 	if (luaL_newmetatable(L, MT_RPCALL)) {
 		lua_pushcfunction(L, rpcall_gc);
 		lua_setfield(L, -2, "__gc");
@@ -162,11 +162,14 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_rawset(L, -3);
 	lua_pop(L, 1);
 	lua_xmove(L, co, 1);
+	state->callback = *in_cb;
 	/* lua stack: state co; co stack: chunk */
 	aux_resume(L, 2, 0);
 	lua_settop(L, 1);
 	return 1;
 }
+
+#define LUA_LOADED_TABLE "_LOADED"
 
 /* replace(modname, chunk) */
 static int aux_package_replace(lua_State *restrict L)

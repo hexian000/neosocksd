@@ -3,15 +3,13 @@
 
 #include "zlib.h"
 
-#include "base.h"
-#include "compat.h"
-
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "utils/buffer.h"
 
 #include "codec.h"
+#include "ruleset/base.h"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -19,6 +17,8 @@
 #include <stddef.h>
 
 #define MT_STREAM_CONTEXT "stream_context"
+
+#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
 
 struct stream_context {
 	struct vbuffer *out;

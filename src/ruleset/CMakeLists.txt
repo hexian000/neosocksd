@@ -4,7 +4,6 @@ target_sources(neosocksd
     "${CMAKE_CURRENT_SOURCE_DIR}/await.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/base.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/cfunc.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/compat.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/marshal.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/regex.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/zlib.h"
