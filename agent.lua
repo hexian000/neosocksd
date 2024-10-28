@@ -5,9 +5,9 @@ local agent = {}
 -- agent.peername = "peer0"
 agent.peername = table.get(_G.agent, "peername")
 -- agent.conns[id] = { proxy1, proxy2, ... }
-agent.conns = table.get(_G.agent, "conns")
+agent.conns = table.get(_G.agent, "conns") or {}
 -- agent.hosts = { "host1", "host2", ... }
-agent.hosts = table.get(_G.agent, "hosts")
+agent.hosts = table.get(_G.agent, "hosts") or {}
 
 -- _G.peerdb[peername] = { hosts = { hostname, "host1" } }, timestamp = os.time() }
 _G.peerdb = _G.peerdb or {}
@@ -42,11 +42,10 @@ local function is_valid(t, expiry_time, now)
 end
 
 local function build_index()
-    if not agent.peername then
-        return {}, {}
-    end
     local peers, peer_rtt = {}, {}
-    peer_rtt[agent.peername] = 0
+    if agent.peername then
+        peer_rtt[agent.peername] = 0
+    end
     for connid, conn in pairs(_G.conninfo) do
         for peername, info in pairs(conn) do
             local rtt = info.rtt or math.huge
@@ -177,10 +176,9 @@ local function update_peerdb(peername, peerdb)
 end
 
 function rpc.sync(peername, peerdb)
-    if type(peername) ~= "string" or type(peerdb) ~= "table" then
-        error("invalid argument")
+    if type(peername) == "string" and type(peerdb) == "table" then
+        update_peerdb(peername, peerdb)
     end
-    update_peerdb(peername, peerdb)
     return agent.peername, _G.peerdb
 end
 
@@ -223,6 +221,9 @@ local function findconn(peername, ttl)
 end
 
 function rpc.probe(peername, ttl)
+    if not agent.peername then
+        error("peer is not available for relay")
+    end
     if type(peername) ~= "string" or math.type(ttl) ~= "integer" or
         ttl > 16 then
         error("invalid argument")
@@ -299,10 +300,12 @@ end
 
 function agent.maintenance()
     -- update self
-    _G.peerdb[agent.peername] = {
-        hosts = agent.hosts,
-        timestamp = os.time(),
-    }
+    if agent.peername then
+        _G.peerdb[agent.peername] = {
+            hosts = agent.hosts,
+            timestamp = os.time(),
+        }
+    end
     -- sync
     for connid, _ in pairs(agent.conns) do
         agent.sync(connid)
@@ -335,9 +338,6 @@ end
 
 local function mainloop()
     await.sleep(BOOTSTRAP_DELAY)
-    if not agent.peername then
-        return
-    end
     while agent.running do
         agent.maintenance()
         await.sleep(SYNC_INTERVAL_BASE + math.random(SYNC_INTERVAL_RANDOM))
