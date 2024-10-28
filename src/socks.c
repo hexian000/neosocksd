@@ -24,7 +24,6 @@
 
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 
 #include <errno.h>
 #include <inttypes.h>
@@ -204,9 +203,8 @@ send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 	LOG_BIN_F(VERYVERBOSE, buf, len, "send_rsp: fd=%d %zu bytes", fd, len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
-		const int err = errno;
 		SOCKS_CTX_LOG_F(
-			WARNING, ctx, "send: fd=%d %s", fd, strerror(err));
+			WARNING, ctx, "send: fd=%d %s", fd, strerror(errno));
 		return false;
 	}
 	if ((size_t)nsend != len) {
@@ -234,9 +232,8 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 	socklen_t addrlen = sizeof(addr);
 	if (ctx->dialed_fd != -1) {
 		if (getsockname(ctx->dialed_fd, &addr.sa, &addrlen) != 0) {
-			const int err = errno;
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "getsockname: %s", strerror(err));
+				ERROR, ctx, "getsockname: %s", strerror(errno));
 		}
 	}
 	enum {

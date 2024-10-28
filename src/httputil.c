@@ -4,7 +4,6 @@
 #include "httputil.h"
 
 #include "sockutil.h"
-#include "util.h"
 
 #include "codec.h"
 #include "io/io.h"
@@ -55,8 +54,7 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 	LOG_BIN_F(VERBOSE, s, n, "reply_short: fd=%d %zu bytes", p->fd, n);
 	const ssize_t nsend = send(p->fd, s, n, 0);
 	if (nsend < 0) {
-		const int err = errno;
-		LOGW_F("send: fd=%d %s", p->fd, strerror(err));
+		LOGW_F("send: fd=%d %s", p->fd, strerror(errno));
 		return false;
 	}
 	if ((size_t)nsend != n) {

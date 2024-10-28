@@ -53,7 +53,6 @@ struct api_ctx {
 	struct rpcall_state *rpcstate;
 #endif
 	struct dialreq *dialreq;
-	struct dialer dialer;
 	struct http_parser parser;
 };
 ASSERT_SUPER(struct session, struct api_ctx, ss);
@@ -612,7 +611,6 @@ static bool http_handle_ruleset(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct url *restrict uri)
 {
-	UNUSED(loop);
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset == NULL) {
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);

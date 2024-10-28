@@ -23,8 +23,9 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_SYSTEM_NAME="Linux" \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT};${LIBROOT}" \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DBUILD_STATIC=ON \
+        -DENABLE_JEMALLOC=ON \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     nice cmake --build "build"
     ls -lh "build/bin/neosocksd"
@@ -43,6 +44,7 @@ case "$1" in
     cmake -G "${GENERATOR}" \
         -DCMAKE_BUILD_TYPE="Release" \
         -DBUILD_STATIC=ON \
+        -DENABLE_JEMALLOC=ON \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -S . -B "build"
     nice cmake --build "build"

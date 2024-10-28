@@ -2,18 +2,13 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "base.h"
-#include "compat.h"
 
 #include "io/stream.h"
-#include "net/addr.h"
-#include "utils/arraysize.h"
 #include "utils/debug.h"
-#include "utils/serialize.h"
 #include "utils/slog.h"
 
 #include "conf.h"
 #include "dialer.h"
-#include "ruleset.h"
 #include "util.h"
 
 #include "lauxlib.h"
@@ -69,8 +64,7 @@ int aux_format_addr(lua_State *restrict L)
 			af, &((const struct sockaddr_in *)sa)->sin_addr, buf,
 			sizeof(buf));
 		if (addr_str == NULL) {
-			const int err = errno;
-			lua_pushstring(L, strerror(err));
+			lua_pushstring(L, strerror(errno));
 			return lua_error(L);
 		}
 		lua_pushstring(L, addr_str);
@@ -81,8 +75,7 @@ int aux_format_addr(lua_State *restrict L)
 			af, &((const struct sockaddr_in6 *)sa)->sin6_addr, buf,
 			sizeof(buf));
 		if (addr_str == NULL) {
-			const int err = errno;
-			lua_pushstring(L, strerror(err));
+			lua_pushstring(L, strerror(errno));
 			return lua_error(L);
 		}
 		lua_pushstring(L, addr_str);

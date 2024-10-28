@@ -7,12 +7,14 @@
 #include "net/http.h"
 #include "utils/buffer.h"
 
+#include <strings.h>
+
 #include <ctype.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <strings.h>
+#include <string.h>
 
 #define HTTP_MAX_ENTITY 8192
 #define HTTP_MAX_CONTENT 4194304
@@ -96,18 +98,28 @@ void http_parser_init(
 
 int http_parser_recv(struct http_parser *parser);
 
-static inline char *strtrimleftspace(char *restrict s)
+static inline char *strlower(char *s)
 {
-	for (; *s && isspace((unsigned char)*s); s++) {
+	for (unsigned char *restrict p = (unsigned char *)s; *p; p++) {
+		*p = tolower(*p);
 	}
 	return s;
 }
 
-static inline char *strtrimrightspace(char *restrict s)
+static inline char *strtrimleftspace(char *s)
 {
-	char *restrict e = s + strlen(s) - 1;
-	for (; s < e && isspace((unsigned char)*e); e--) {
-		*e = '\0';
+	const unsigned char *restrict p = (unsigned char *)s;
+	while (*p && isspace(*p)) {
+		p++;
+	}
+	return (char *)p;
+}
+
+static inline char *strtrimrightspace(char *s)
+{
+	unsigned char *restrict e = (unsigned char *)s + strlen(s) - 1;
+	while ((unsigned char *)s < e && isspace(*e)) {
+		*e-- = '\0';
 	}
 	return s;
 }
@@ -115,14 +127,6 @@ static inline char *strtrimrightspace(char *restrict s)
 static inline char *strtrimspace(char *s)
 {
 	return strtrimrightspace(strtrimleftspace(s));
-}
-
-static inline char *strlower(char *s)
-{
-	for (char *p = s; *p != '\0'; ++p) {
-		*s = (unsigned char)tolower((unsigned char)*s);
-	}
-	return s;
 }
 
 static inline bool

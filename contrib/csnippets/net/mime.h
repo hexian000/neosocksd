@@ -4,7 +4,6 @@
 #ifndef NET_MIME_H
 #define NET_MIME_H
 
-#include <stdbool.h>
 #include <stddef.h>
 
 /**

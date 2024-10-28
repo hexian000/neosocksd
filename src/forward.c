@@ -23,7 +23,6 @@
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -336,8 +335,7 @@ static struct dialreq *tproxy_makereq(struct forward_ctx *restrict ctx)
 	union sockaddr_max dest;
 	socklen_t len = sizeof(dest);
 	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
-		const int err = errno;
-		FW_CTX_LOG_F(ERROR, ctx, "getsockname: %s", strerror(err));
+		FW_CTX_LOG_F(ERROR, ctx, "getsockname: %s", strerror(errno));
 		return NULL;
 	}
 	switch (dest.sa.sa_family) {

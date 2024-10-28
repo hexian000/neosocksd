@@ -8,12 +8,10 @@
 
 #include "utils/debug.h"
 #include "utils/minmax.h"
-#include "utils/slog.h"
 
 #include "api_client.h"
 #include "conf.h"
 #include "resolver.h"
-#include "ruleset.h"
 #include "util.h"
 
 #include "lauxlib.h"

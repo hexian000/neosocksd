@@ -80,8 +80,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			return;
 		}
 		if (!socket_set_nonblock(fd)) {
-			const int err = errno;
-			LOGE_F("fcntl: %s", strerror(err));
+			LOGE_F("fcntl: %s", strerror(errno));
 			CLOSE_FD(fd);
 			return;
 		}
@@ -119,13 +118,11 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 {
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
-		const int err = errno;
-		LOGE_F("socket: %s", strerror(err));
+		LOGE_F("socket: %s", strerror(errno));
 		return false;
 	}
 	if (!socket_set_nonblock(fd)) {
-		const int err = errno;
-		LOGE_F("fcntl: %s", strerror(err));
+		LOGE_F("fcntl: %s", strerror(errno));
 		CLOSE_FD(fd);
 		return false;
 	}
@@ -155,14 +152,12 @@ bool server_start(struct server *s, const struct sockaddr *bindaddr)
 		LOG_F(NOTICE, "listen: %s", addr_str);
 	}
 	if (bind(fd, bindaddr, getsocklen(bindaddr)) != 0) {
-		const int err = errno;
-		LOGE_F("bind error: %s", strerror(err));
+		LOGE_F("bind error: %s", strerror(errno));
 		CLOSE_FD(fd);
 		return false;
 	}
 	if (listen(fd, backlog)) {
-		const int err = errno;
-		LOGE_F("listen error: %s", strerror(err));
+		LOGE_F("listen error: %s", strerror(errno));
 		CLOSE_FD(fd);
 		return false;
 	}

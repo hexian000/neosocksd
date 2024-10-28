@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "cfunc.h"
+
 #include "base.h"
 #include "marshal.h"
 #include "util.h"
@@ -225,11 +226,11 @@ int cfunc_update(lua_State *restrict L)
 	if (chunkname == NULL) {
 		const char *name = (modname != NULL) ? modname : "ruleset";
 		const size_t namelen = strlen(name);
-		char chunkname[1 + namelen + 1];
-		chunkname[0] = '=';
-		memcpy(chunkname + 1, name, namelen);
-		chunkname[1 + namelen] = '\0';
-		if (lua_load(L, aux_reader, stream, chunkname, NULL)) {
+		char luaname[1 + namelen + 1];
+		luaname[0] = '=';
+		memcpy(luaname + 1, name, namelen);
+		luaname[1 + namelen] = '\0';
+		if (lua_load(L, aux_reader, stream, luaname, NULL)) {
 			return lua_error(L);
 		}
 	} else {

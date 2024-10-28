@@ -176,6 +176,9 @@ local function update_peerdb(peername, peerdb)
 end
 
 function rpc.sync(peername, peerdb)
+    if type(peername) ~= "string" or type(peerdb) ~= "table" then
+        error("invalid argument")
+    end
     update_peerdb(peername, peerdb)
     return agent.peername, _G.peerdb
 end
@@ -219,6 +222,10 @@ local function findconn(peername, ttl)
 end
 
 function rpc.probe(peername, ttl)
+    if type(peername) ~= "string" or math.type(ttl) ~= "integer" or
+        ttl > 255 then
+        error("invalid argument")
+    end
     if peername == agent.peername then
         return { peername }
     end

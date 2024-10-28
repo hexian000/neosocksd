@@ -122,7 +122,7 @@ See [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Re
 
 ## Runtime Dependencies
 
-If you downloaded a *-static build in the [Releases](https://github.com/hexian000/neosocksd/releases) section, you don't have to install the dependencies below.
+**Simple solution**: Download a `-static` build in the [Releases](https://github.com/hexian000/neosocksd/releases) section so no dependencies need to be installed.
 
 ```sh
 # Debian & Ubuntu

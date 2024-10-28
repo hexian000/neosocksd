@@ -12,12 +12,11 @@
 #include "ruleset/await.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
-#include "ruleset/compat.h"
-#include "ruleset/marshal.h"
 #include "ruleset/regex.h"
 #include "ruleset/zlib.h"
 
 #include "utils/arraysize.h"
+#include "utils/debug.h"
 #include "utils/slog.h"
 
 #include "lauxlib.h"
@@ -28,6 +27,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {

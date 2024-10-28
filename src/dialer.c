@@ -25,7 +25,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 
 #include <errno.h>
 #include <inttypes.h>
@@ -438,10 +437,12 @@ format_status(char *restrict s, size_t maxlen, const struct dialer *restrict d)
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		char status[256];                                              \
-		const int n = format_status(status, sizeof(status), (d));      \
-		ASSERT(n > 0);                                                 \
-		LOG_F(level, "%.*s: " format, n, status, __VA_ARGS__);         \
+		char status_str[256];                                          \
+		const int nstatus =                                            \
+			format_status(status_str, sizeof(status_str), (d));    \
+		ASSERT(nstatus > 0);                                           \
+		LOG_F(level, "%.*s: " format, nstatus, status_str,             \
+		      __VA_ARGS__);                                            \
 	} while (0)
 #define DIALER_LOG(level, d, message) DIALER_LOG_F(level, d, "%s", message)
 
@@ -570,8 +571,7 @@ static bool send_socks4a_req(
 		char *const b = (char *)buf + len;
 		if (inet_ntop(AF_INET6, &addr->in6, b, INET6_ADDRSTRLEN) ==
 		    NULL) {
-			const int err = errno;
-			LOGE_F("inet_ntop: %s", strerror(err));
+			LOGE_F("inet_ntop: %s", strerror(errno));
 			return false;
 		}
 		len += strlen(b) + 1;

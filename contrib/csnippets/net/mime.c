@@ -10,26 +10,28 @@
 #define istspecial(c) (!!strchr("()<>@,;:\"/[]?=", (c)))
 #define istoken(c) (!iscntrl(c) && !istspecial(c))
 
-static inline char *strtolower(char *s)
+static inline char *strlower(char *s)
 {
-	for (char *restrict p = s; *p; p++) {
-		*p = (unsigned char)tolower((unsigned char)*p);
+	for (unsigned char *restrict p = (unsigned char *)s; *p; p++) {
+		*p = tolower(*p);
 	}
 	return s;
 }
 
-static inline char *strtrimleftspace(char *restrict s)
+static inline char *strtrimleftspace(char *s)
 {
-	for (; *s && isspace((unsigned char)*s); s++) {
+	const unsigned char *restrict p = (unsigned char *)s;
+	while (*p && isspace(*p)) {
+		p++;
 	}
-	return s;
+	return (char *)p;
 }
 
-static inline char *strtrimrightspace(char *restrict s)
+static inline char *strtrimrightspace(char *s)
 {
-	char *restrict e = s + strlen(s) - 1;
-	for (; s < e && isspace((unsigned char)*e); e--) {
-		*e = '\0';
+	unsigned char *restrict e = (unsigned char *)s + strlen(s) - 1;
+	while ((unsigned char *)s < e && isspace(*e)) {
+		*e-- = '\0';
 	}
 	return s;
 }
@@ -53,8 +55,8 @@ char *mime_parse(char *s, char **type, char **subtype)
 		return NULL;
 	}
 	*slash = '\0';
-	*type = strtolower(strtrimspace(s));
-	*subtype = strtolower(strtrimspace(slash + 1));
+	*type = strlower(strtrimspace(s));
+	*subtype = strlower(strtrimspace(slash + 1));
 	return next;
 }
 
@@ -91,7 +93,9 @@ static char *parse_value(char *s, char **value)
 		*s = '\0';
 		return s + 1;
 	}
-	for (char *r = s + 1, *w = s + 1; *r; r++, w++) {
+	s++;
+	unsigned char *w = (unsigned char *)s;
+	for (char *r = s; *r; r++) {
 		unsigned char ch = *r;
 		switch (ch) {
 		case '\"':
@@ -100,7 +104,7 @@ static char *parse_value(char *s, char **value)
 				r++;
 			}
 			*w = '\0';
-			*value = s + 1;
+			*value = s;
 			return r;
 		case '\\':
 			ch = *(r + 1);
@@ -130,14 +134,14 @@ static char *parse_param(char *s, char **restrict key, char **restrict value)
 	if (next == NULL) {
 		return NULL;
 	}
-	*key = strtolower(*key);
+	*key = strlower(*key);
 
 	next = strtrimleftspace(next);
 	next = parse_value(next, value);
 	if (next == NULL) {
 		return NULL;
 	}
-	*value = strtolower(*value);
+	*value = strlower(*value);
 	return next;
 }
 

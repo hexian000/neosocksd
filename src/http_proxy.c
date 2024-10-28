@@ -21,8 +21,11 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+#include <strings.h>
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 struct http_ctx;
@@ -214,7 +217,6 @@ static void parse_proxy_auth(
 	*sep = '\0';
 	*username = s;
 	*password = sep + 1;
-	return;
 }
 
 static bool req_connect(
@@ -237,7 +239,6 @@ static bool req_connect(
 		return true;
 	}
 #else
-	UNUSED(username);
 	UNUSED(password);
 #endif
 	ctx->dialreq = make_dialreq(addr_str);
@@ -247,7 +248,6 @@ static bool req_connect(
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	/* not supported */
-	UNUSED(loop);
 	http_resp_errpage(&ctx->parser, HTTP_FORBIDDEN);
 	ctx->state = STATE_RESPONSE;
 	ev_io_start(loop, &ctx->w_send);
