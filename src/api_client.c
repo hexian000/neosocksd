@@ -213,9 +213,7 @@ static bool make_request(
 	struct http_parser *restrict p, const char *uri, const char *content,
 	const size_t len)
 {
-	const enum content_encodings encoding =
-		(len < RPCALL_COMPRESS_THRESHOLD) ? CENCODING_NONE :
-						    CENCODING_DEFLATE;
+	const enum content_encodings encoding = CENCODING_DEFLATE;
 	struct stream *s = content_writer(&p->cbuf, len, encoding);
 	if (s == NULL) {
 		return false;

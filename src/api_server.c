@@ -411,8 +411,7 @@ static void rpcall_return(void *data, const char *result, size_t resultlen)
 	}
 	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall_return");
 	const enum content_encodings encoding =
-		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ||
-				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
+		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ?
 			CENCODING_NONE :
 			CENCODING_DEFLATE;
 	struct stream *writer =

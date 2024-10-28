@@ -267,8 +267,6 @@ struct stream *content_writer(
 			 "; version=" MIME_RPCALL_VERSION
 
 bool check_rpcall_mime(char *mime_type);
-
-#define RPCALL_COMPRESS_THRESHOLD 262144
 #endif /* WITH_RULESET */
 
 #endif /* HTTP_PARSER_H */
