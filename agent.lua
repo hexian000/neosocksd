@@ -3,28 +3,29 @@ _G.libruleset = require("libruleset")
 local agent = {}
 
 -- agent.peername = "peer0"
-agent.peername = table.get(_G, "agent", "peername")
+agent.peername = table.get(_G.agent, "peername")
 -- agent.conns[id] = { proxy1, proxy2, ... }
-agent.conns = table.get(_G, "agent", "conns")
+agent.conns = table.get(_G.agent, "conns")
 -- agent.hosts = { "host1", "host2", ... }
-agent.hosts = table.get(_G, "agent", "hosts")
-
-local API_ENDPOINT = "api.neosocksd.internal:80"
-local INTERNAL_DOMAIN = ".internal"
--- <host>.peerN.peer2.peer1.relay.neosocksd.internal
-local RELAY_DOMAIN = ".relay.neosocksd.internal"
+agent.hosts = table.get(_G.agent, "hosts")
 
 -- _G.peerdb[peername] = { hosts = { hostname, "host1" } }, timestamp = os.time() }
 _G.peerdb = _G.peerdb or {}
 -- _G.conninfo[connid] = { [peername] = { route = { peername, "peer1" }, rtt = 0, timestamp = os.time() } }
 _G.conninfo = _G.conninfo or {}
 
+local API_ENDPOINT = "api.neosocksd.internal:80"
+local INTERNAL_DOMAIN = ".internal"
+-- <host>.peerN.peer2.peer1.relay.neosocksd.internal
+local RELAY_DOMAIN = ".relay.neosocksd.internal"
+
 local BOOTSTRAP_DELAY = 10
 local SYNC_INTERVAL_BASE = 600
 local SYNC_INTERVAL_RANDOM = 600
 local TIMESTAMP_TOLERANCE = 600
 local PEERDB_EXPIRY_TIME = 3600
-local PROBE_TTL = 2
+
+agent.probettl = table.get(_G.agent, "probettl") or 2
 
 local function is_valid(t, expiry_time, now)
     local timestamp = t.timestamp
@@ -223,7 +224,7 @@ end
 
 function rpc.probe(peername, ttl)
     if type(peername) ~= "string" or math.type(ttl) ~= "integer" or
-        ttl > 255 then
+        ttl > 16 then
         error("invalid argument")
     end
     if peername == agent.peername then
@@ -250,7 +251,7 @@ local function probe_via(connid, peername)
     for _ = 1, 4 do
         await.sleep(1)
         local probe_start = neosocksd.now()
-        local ok, result = callbyconn(connid, "probe", peername, PROBE_TTL)
+        local ok, result = callbyconn(connid, "probe", peername, agent.probettl)
         local probe_end = neosocksd.now()
         if ok then
             local rtt = probe_end - probe_start
@@ -288,7 +289,7 @@ function agent.probe(peername)
         end
     end
     if #errors < #agent.conns then
-        local connid, minrtt, bestroute = findconn(peername, PROBE_TTL)
+        local connid, minrtt, bestroute = findconn(peername, agent.probettl)
         evlogf("probe: [%s] %q %s %.0fms", connid, peername,
             format_route(bestroute), minrtt * 1e+3)
     elseif errors[1] then
