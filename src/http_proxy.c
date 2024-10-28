@@ -246,7 +246,7 @@ static bool req_connect(
 
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	/* TODO */
+	/* not supported */
 	UNUSED(loop);
 	http_resp_errpage(&ctx->parser, HTTP_FORBIDDEN);
 	ctx->state = STATE_RESPONSE;
@@ -471,22 +471,11 @@ static bool parse_header(void *data, const char *key, char *value)
 		p->hdr.proxy_authorization.credentials = sep + 1;
 		return true;
 	}
-	if (strcasecmp(key, "Proxy-Connection") == 0) {
-		/* TODO */
-		return true;
-	}
 	if (strcasecmp(key, "TE") == 0) {
 		return parsehdr_accept_te(p, value);
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
 		return parsehdr_transfer_encoding(p, value);
-	}
-	if (strcasecmp(key, "Trailer") == 0) {
-		/* TODO */
-		return true;
-	}
-	if (strcasecmp(key, "Upgrade") == 0) {
-		return true;
 	}
 
 	/* Host */

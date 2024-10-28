@@ -133,8 +133,8 @@ static int parse_message(struct http_parser *restrict p)
 		}
 		return 1;
 	}
-	LOGV_F("http_message: `%s' `%s' `%s'", msg->any.field1, msg->any.field2,
-	       msg->any.field3);
+	LOGVV_F("http_message: `%s' `%s' `%s'", msg->any.field1,
+		msg->any.field2, msg->any.field3);
 	const char *version = NULL;
 	switch (p->state) {
 	case STATE_PARSE_REQUEST:
@@ -158,7 +158,7 @@ static int parse_message(struct http_parser *restrict p)
 static bool
 parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
 {
-	LOGV_F("http_header: \"%s: %s\"", key, value);
+	LOGVV_F("http_header: \"%s: %s\"", key, value);
 	return p->on_header.func(p->on_header.ctx, key, value);
 }
 
