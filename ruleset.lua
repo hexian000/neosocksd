@@ -111,7 +111,7 @@ _G.route6 = {
 -- in {action, optional log tag}
 _G.route_default = { rule.proxy("socks5://user:pass@internet-gateway.lan:1080"), "internet" }
 
-function ruleset.stats(dt)
+function ruleset.stats(dt, q)
     local w = list:new()
     if is_disabled and is_disabled() then
         w:insertf("%-20s: %s", "Status", "(service disabled)")
