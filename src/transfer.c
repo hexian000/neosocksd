@@ -327,8 +327,7 @@ static bool pipe_get(struct splice_pipe *restrict pipe)
 
 static void pipe_put(struct splice_pipe *restrict pipe)
 {
-	if (pipe->cap < PIPE_BUFSIZE || pipe->len > 0 ||
-	    pipe_cache.len == pipe_cache.cap) {
+	if (pipe->len > 0 || pipe_cache.len == pipe_cache.cap) {
 		pipe_close(pipe);
 		return;
 	}

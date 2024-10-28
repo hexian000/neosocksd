@@ -78,7 +78,6 @@ struct splice_pipe {
 };
 
 #define PIPE_MAXCACHED 128
-#define PIPE_BUFSIZE 262144
 
 extern struct pipe_cache {
 	size_t cap, len;

@@ -6,14 +6,13 @@
 
 #include "util.h"
 
+#include "io/io.h"
 #include "utils/buffer.h"
 
 #include <ev.h>
 
 #include <stddef.h>
 #include <stdint.h>
-
-#define XFER_BUFSIZE 16384
 
 enum transfer_state {
 	XFER_INIT,
@@ -34,7 +33,7 @@ struct transfer {
 	size_t pos;
 	struct {
 		BUFFER_HDR;
-		unsigned char data[XFER_BUFSIZE];
+		unsigned char data[IO_BUFSIZE];
 	} buf;
 };
 

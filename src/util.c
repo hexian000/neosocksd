@@ -53,6 +53,8 @@ void pipe_close(struct splice_pipe *restrict pipe)
 	}
 }
 
+#define PIPE_BUFSIZE 262144
+
 bool pipe_new(struct splice_pipe *restrict pipe)
 {
 	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
