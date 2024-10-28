@@ -24,6 +24,7 @@ local SYNC_INTERVAL_BASE = 600
 local SYNC_INTERVAL_RANDOM = 600
 local TIMESTAMP_TOLERANCE = 600
 local PEERDB_EXPIRY_TIME = 3600
+local PROBE_TTL = 2
 
 local function is_valid(t, expiry_time, now)
     local timestamp = t.timestamp
@@ -242,7 +243,7 @@ local function probe_via(connid, peername)
     for _ = 1, 4 do
         await.sleep(1)
         local probe_start = neosocksd.now()
-        local ok, result = callbyconn(connid, "probe", peername, 2)
+        local ok, result = callbyconn(connid, "probe", peername, PROBE_TTL)
         local probe_end = neosocksd.now()
         if ok then
             local rtt = probe_end - probe_start
@@ -280,7 +281,7 @@ function agent.probe(peername)
         end
     end
     if #errors < #agent.conns then
-        local connid, minrtt, bestroute = findconn(peername, 2)
+        local connid, minrtt, bestroute = findconn(peername, PROBE_TTL)
         evlogf("probe: [%s] %q %s %.0fms", connid, peername,
             format_route(bestroute), minrtt * 1e+3)
     elseif errors[1] then
