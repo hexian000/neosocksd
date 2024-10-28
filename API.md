@@ -188,9 +188,9 @@ Ignored
 **Synopsis**
 
 ```Lua
-function ruleset.stats(dt)
+function ruleset.stats(dt, q)
     local w = {}
-    table.insert(w, string.format("dt = %.03f", dt))
+    table.insert(w, string.format("dt = %.03f, q = %q", dt, q))
     return table.concat(w, "\n")
 end
 ```

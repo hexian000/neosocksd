@@ -52,6 +52,7 @@ struct dialreq *ruleset_route6(
 	const char *password);
 
 void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
-const char *ruleset_stats(struct ruleset *r, double dt, size_t *len);
+const char *
+ruleset_stats(struct ruleset *r, double dt, const char *query, size_t *len);
 
 #endif /* RULESET_H */

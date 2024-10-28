@@ -276,15 +276,15 @@ void ruleset_vmstats(
 	*s = r->vmstats;
 }
 
-const char *
-ruleset_stats(struct ruleset *restrict r, const double dt, size_t *len)
+const char *ruleset_stats(
+	struct ruleset *restrict r, const double dt, const char *query,
+	size_t *len)
 {
 	lua_State *restrict L = r->L;
-	const char *func = "stats";
 	const bool ok =
-		ruleset_pcall(r, cfunc_stats, 2, 1, (void *)func, (void *)&dt);
+		ruleset_pcall(r, cfunc_stats, 2, 1, (void *)&dt, (void *)query);
 	if (!ok) {
-		LOGW_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
+		LOGW_F("ruleset.stats: %s", ruleset_geterror(r, NULL));
 		return NULL;
 	}
 	return lua_tolstring(L, -1, len);

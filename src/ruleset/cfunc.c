@@ -251,19 +251,21 @@ int cfunc_update(lua_State *restrict L)
 	return 0;
 }
 
-/* stats(func, dt) */
+/* stats(dt, query) */
 int cfunc_stats(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 2);
-	const char *func = lua_touserdata(L, 1);
-	const double dt = *(double *)lua_touserdata(L, 2);
-	lua_settop(L, 0);
-
+	const double dt = *(double *)lua_touserdata(L, 1);
+	const char *query = lua_touserdata(L, 2);
 	(void)lua_getglobal(L, "ruleset");
-	(void)lua_getfield(L, -1, func);
+	(void)lua_getfield(L, -1, "stats");
+	lua_copy(L, -1, 1);
+	lua_settop(L, 1);
+
 	lua_replace(L, -2);
 	lua_pushnumber(L, dt);
-	lua_call(L, 1, 1);
+	lua_pushstring(L, query);
+	lua_call(L, 2, 1);
 	return 1;
 }
 

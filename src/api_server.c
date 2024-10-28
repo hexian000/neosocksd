@@ -264,6 +264,7 @@ static bool api_post_stats(
 	struct url *restrict uri)
 {
 	bool server = true;
+	const char *query = NULL;
 #if WITH_RULESET
 	bool ruleset = (G.ruleset != NULL);
 #endif
@@ -275,6 +276,9 @@ static bool api_post_stats(
 		}
 		if (strcmp(key, "server") == 0) {
 			server = parse_bool(value);
+		}
+		if (strcmp(key, "q") == 0) {
+			query = value;
 		}
 	}
 
@@ -317,7 +321,7 @@ static bool api_post_stats(
 #if WITH_RULESET
 	if (ruleset) {
 		size_t len;
-		const char *s = ruleset_stats(G.ruleset, dt, &len);
+		const char *s = ruleset_stats(G.ruleset, dt, query, &len);
 		if (s == NULL) {
 			s = ruleset_geterror(G.ruleset, &len);
 		}
