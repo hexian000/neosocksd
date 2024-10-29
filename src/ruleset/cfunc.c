@@ -4,15 +4,18 @@
 #include "cfunc.h"
 
 #include "utils/debug.h"
+#include "utils/slog.h"
 
 #include "ruleset/base.h"
-#include "ruleset/marshal.h"
 #include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
 
 #include <ev.h>
+
+#include <stddef.h>
+#include <string.h>
 
 /* request(func, request, username, password) */
 int cfunc_request(lua_State *restrict L)

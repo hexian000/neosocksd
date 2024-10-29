@@ -3,9 +3,6 @@
 
 #include "marshal.h"
 
-#include "ruleset/base.h"
-#include "utils/debug.h"
-
 #include "lauxlib.h"
 #include "lua.h"
 
@@ -245,7 +242,6 @@ int api_marshal(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
 	lua_State *restrict co = lua_tothread(L, lua_upvalueindex(1));
-	ASSERT(co != NULL);
 	lua_settop(co, 0);
 	luaL_checkstack(co, 1 + n, NULL);
 	/* visited */

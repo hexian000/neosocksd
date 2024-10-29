@@ -11,13 +11,14 @@
 #include "conf.h"
 #include "proto/domain.h"
 #include "ruleset/base.h"
-#include "ruleset/marshal.h"
 #include "server.h"
 #include "sockutil.h"
 #include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
+
+#include <ev.h>
 
 #include <arpa/inet.h>
 
