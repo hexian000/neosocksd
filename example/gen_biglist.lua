@@ -110,8 +110,7 @@ local function parse_list(filename)
             local s = line:match("^full:(.*)$")
             table.insert(host, s)
         elseif line:find("%.") then
-            local s = "." .. line
-            table.insert(domain, s)
+            table.insert(domain, line)
         end
     end
     local tree = {}
