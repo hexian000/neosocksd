@@ -66,11 +66,14 @@ See `./neosocksd -h` for more details.
 
 First, deploy neosocksd with `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
 
-If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](ruleset_simple.lua).
+If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](examples/ruleset_simple.lua).
 
-- [ruleset.lua](ruleset.lua) is a fancy demo script.
+More examples are available in [examples](examples).
+
+Other resources:
+
 - [agent.lua](agent.lua) implements peer discovery and connection relay based on RPC.
-- [libruleset.lua](libruleset.lua) provides rule table facilities.
+- [libruleset.lua](libruleset.lua) provides rule set and RPC facilities.
 - [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference)
 - [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 

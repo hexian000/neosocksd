@@ -1,3 +1,7 @@
+-- neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
+-- This code is licensed under MIT license (see LICENSE for details)
+
+-- [[ libruleset.lua: rule set and RPC facilities ]] --
 _G.config = neosocksd.config()
 
 -- [[ useful library routines ]] --

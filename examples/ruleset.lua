@@ -1,3 +1,4 @@
+-- [[ ruleset.lua: code with rule table example ]] --
 _G.libruleset = require("libruleset")
 _G.agent = require("agent")
 

@@ -1,3 +1,4 @@
+-- [[ lb.lua: load balancer example ]] --
 _G.libruleset = require("libruleset")
 
 local backends = {

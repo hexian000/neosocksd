@@ -1,10 +1,13 @@
--- neosocksd.lua: dummy lib for linter
+-- neosocksd (c) 2023-2024 He Xian <hexian000@outlook.com>
+-- This code is licensed under MIT license (see LICENSE for details)
+
+-- [[ neosocksd.lua: dummy lib for linter ]] --
 error("dummy lib should not be loaded")
 
-_G.NDEBUG = true
-_G.marshal = function(...)
+local function marshal(...)
     return ""
 end
+_G.marshal = marshal
 
 
 local await = {}

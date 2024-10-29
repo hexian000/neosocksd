@@ -1,3 +1,4 @@
+-- [[ ruleset_simple.lua: simple rule table example ]] --
 _G.libruleset    = require("libruleset")
 
 -- [[ configurations ]] --

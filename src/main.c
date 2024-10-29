@@ -103,8 +103,8 @@ static void print_usage(const char *argv0)
 		"                             can take (default: 60.0)\n"
 		"  --proto-timeout            keep the session in halfopen state until there is\n"
 		"                             bidirectional traffic\n"
-		"  --loglevel <level>         0-7 are Silence, Fatal, Error, Warning, Notice,\n"
-		"                             Info, Debug, Verbose respectively (default: 4)\n"
+		"  --loglevel <level>         0-8 are Silence, Fatal, Error, Warning, Notice, Info,\n"
+		"                             Debug, Verbose, VeryVerbose respectively (default: 4)\n"
 		"  -v, --verbose              increase logging verbosity, can be specified more than once\n"
 		"                             e.g. \"-v -v\" prints debug messages\n"
 		"  -s, --silence              decrease logging verbosity\n"
@@ -120,6 +120,9 @@ static void print_usage(const char *argv0)
 		"example:\n"
 		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
 		"  neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080  # forward port 80 to 8080\n"
+		"  neosocksd -l 127.0.0.1:1080 -x socks5://user:pass@gate.internal:1080\n"
+		"  neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua\n"
+		"  neosocksd -l 0.0.0.0:10500 -f : -r lb.lua\n"
 		"\n");
 	(void)fflush(stderr);
 }

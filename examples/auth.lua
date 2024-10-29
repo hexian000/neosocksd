@@ -1,3 +1,4 @@
+-- [[ auth.lua: basic authentication example ]] --
 _G.libruleset = require("libruleset")
 
 _G.secrets = {

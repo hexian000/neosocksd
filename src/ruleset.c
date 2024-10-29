@@ -111,8 +111,6 @@ static int ruleset_luainit(lua_State *restrict L)
 		lua_pop(L, 1);
 	}
 	/* set flags */
-	lua_pushboolean(L, !LOGLEVEL(DEBUG));
-	lua_setglobal(L, "NDEBUG");
 	lua_pushboolean(L, G.conf->traceback);
 	lua_setglobal(L, "traceback");
 	return 0;
