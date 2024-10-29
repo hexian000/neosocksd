@@ -52,7 +52,6 @@ struct http_ctx {
 	union {
 		struct {
 			struct ev_io w_recv, w_send;
-			const char *host;
 			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct http_parser parser;
@@ -477,15 +476,7 @@ static bool parse_header(void *data, const char *key, char *value)
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
 		return parsehdr_transfer_encoding(p, value);
 	}
-
-	/* Host */
-	if (strcasecmp(key, "Host") == 0) {
-		ctx->host = value;
-		/* fallthrough */
-	}
-
-	/* copy other headers */
-	BUF_APPENDF(p->wbuf, "%s: %s\r\n", key, value);
+	/* ignore other headers */
 	return true;
 }
 

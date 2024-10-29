@@ -402,7 +402,7 @@ assert(s == s1)
 
 Data compression interface for zlib format (as declared in RFC 1950 and RFC 1951).
 
-Tip: [neosocksd.invoke](#neosocksdinvoke) and [await.invoke](#awaitinvoke) will compress the data internally. No additional compression is required.
+Tip: [neosocksd.invoke](#neosocksdinvoke) and [await.invoke](#awaitinvoke) will compress the data internally.
 
 
 ### _G.marshal
