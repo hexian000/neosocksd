@@ -66,7 +66,7 @@ See `./neosocksd -h` for more details.
 
 First, deploy neosocksd with `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
 
-If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](examples/ruleset_simple.lua).
+If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](example/ruleset_simple.lua).
 
 More examples are available in [example](example).
 
