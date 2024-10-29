@@ -68,7 +68,7 @@ First, deploy neosocksd with `libruleset.lua`. (For binary releases, check `neos
 
 If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](examples/ruleset_simple.lua).
 
-More examples are available in [examples](examples).
+More examples are available in [example](example).
 
 Other resources:
 
