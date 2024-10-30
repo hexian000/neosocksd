@@ -174,7 +174,7 @@ bool dialreq_addproxy(
 	memcpy(buf, proxy_uri, urilen);
 	buf[urilen] = '\0';
 	struct url uri;
-	if (!url_parse(buf, &uri) || uri.scheme == NULL) {
+	if (!url_parse(buf, &uri) || uri.scheme == NULL || uri.host == NULL) {
 		LOGE_F("unable to parse uri: `%s'", proxy_uri);
 		return false;
 	}

@@ -269,16 +269,16 @@ static bool api_post_stats(
 	bool ruleset = (G.ruleset != NULL);
 #endif
 	while (uri->query != NULL) {
-		char *key, *value;
-		if (!url_query_component(&uri->query, &key, &value)) {
+		struct url_query_component comp;
+		if (!url_query_component(&uri->query, &comp)) {
 			http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 			return false;
 		}
-		if (strcmp(key, "server") == 0) {
-			server = parse_bool(value);
+		if (strcmp(comp.key, "q") == 0) {
+			query = comp.value;
 		}
-		if (strcmp(key, "q") == 0) {
-			query = value;
+		if (strcmp(comp.key, "server") == 0) {
+			server = parse_bool(comp.value);
 		}
 	}
 
@@ -646,16 +646,16 @@ static bool http_handle_ruleset(
 		const char *module = NULL;
 		const char *chunkname = NULL;
 		while (uri->query != NULL) {
-			char *key, *value;
-			if (!url_query_component(&uri->query, &key, &value)) {
+			struct url_query_component comp;
+			if (!url_query_component(&uri->query, &comp)) {
 				http_resp_errpage(
 					&ctx->parser, HTTP_BAD_REQUEST);
 				return false;
 			}
-			if (strcmp(key, "module") == 0) {
-				module = value;
-			} else if (strcmp(key, "chunkname") == 0) {
-				chunkname = value;
+			if (strcmp(comp.key, "module") == 0) {
+				module = comp.value;
+			} else if (strcmp(comp.key, "chunkname") == 0) {
+				chunkname = comp.value;
 			}
 		}
 		return handle_ruleset_update(
