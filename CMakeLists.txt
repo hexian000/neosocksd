@@ -52,7 +52,7 @@ option(ENABLE_SANITIZERS "Enable address, leak, undefined sanitizer in debug bui
 option(ENABLE_LTO "Enable link time optimization in release build" ON)
 option(BUILD_STATIC "Build a static executable" OFF)
 option(BUILD_PIE "Build a position independent executable" OFF)
-option(ENABLE_JEMALLOC "Enable jemalloc" OFF)
+option(ENABLE_MIMALLOC "Enable mimalloc" OFF)
 option(FORCE_POSIX "Build the core features using POSIX.1 APIs only" OFF)
 option(LINK_STATIC_LIBS "Link against static libraries" OFF)
 option(ENABLE_SYSTEMD "Enable systemd integration" OFF)
