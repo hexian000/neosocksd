@@ -149,15 +149,18 @@ static void server_stats(
 	if (G.ruleset != NULL) {
 		struct ruleset_vmstats vmstats;
 		ruleset_vmstats(G.ruleset, &vmstats);
-		char heap_total[16];
+		char allocated[16];
 		(void)format_iec_bytes(
-			heap_total, sizeof(heap_total),
+			allocated, sizeof(allocated),
 			(double)vmstats.byt_allocated);
+		char objects[16];
+		(void)format_si_prefix(
+			objects, sizeof(objects), (double)vmstats.num_object);
 		BUF_APPENDF(
 			*buf,
-			"Ruleset Allocated   : %s (%zu objects)\n"
+			"Ruleset Allocated   : %s (%s objects)\n"
 			"Async Contexts      : %zu\n",
-			heap_total, vmstats.num_object, vmstats.num_context);
+			allocated, objects, vmstats.num_context);
 	}
 #endif
 }
@@ -590,6 +593,9 @@ static bool handle_ruleset_gc(
 	char allocated[16];
 	(void)format_iec_bytes(
 		allocated, sizeof(allocated), (double)vmstats.byt_allocated);
+	char objects[16];
+	(void)format_si_prefix(
+		objects, sizeof(objects), (double)vmstats.num_object);
 	const ev_tstamp end = ev_time();
 	char timecost[16];
 	(void)format_duration(
@@ -601,10 +607,10 @@ static bool handle_ruleset_gc(
 	BUF_APPENDF(
 		ctx->parser.wbuf,
 		"Ruleset Allocated   : %s\n"
-		"Num Live Objects    : %zu\n"
+		"Num Live Objects    : %s\n"
 		"Async Contexts      : %zu\n"
 		"Time Cost           : %s\n",
-		allocated, vmstats.num_object, vmstats.num_context, timecost);
+		allocated, objects, vmstats.num_context, timecost);
 	return true;
 }
 
