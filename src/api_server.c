@@ -267,8 +267,8 @@ static bool api_post_stats(
 	struct url *restrict uri)
 {
 	bool server = true;
-	const char *query = NULL;
 #if WITH_RULESET
+	const char *query = NULL;
 	bool ruleset = (G.ruleset != NULL);
 #endif
 	while (uri->query != NULL) {
@@ -277,9 +277,11 @@ static bool api_post_stats(
 			http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 			return false;
 		}
+#if WITH_RULESET
 		if (strcmp(comp.key, "q") == 0) {
 			query = comp.value;
 		}
+#endif
 		if (strcmp(comp.key, "server") == 0) {
 			server = parse_bool(comp.value);
 		}
