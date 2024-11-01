@@ -158,11 +158,8 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 #if LUA_VERSION_NUM >= 504
 	status = lua_resume(co, NULL, narg, &nres);
 #elif LUA_VERSION_NUM == 503
-	{
-		const int base = lua_gettop(co) - narg;
-		status = lua_resume(co, NULL, narg);
-		nres = lua_gettop(co) - base;
-	}
+	status = lua_resume(co, NULL, narg);
+	nres = lua_gettop(co);
 #endif
 	if (status == LUA_YIELD) {
 		return;

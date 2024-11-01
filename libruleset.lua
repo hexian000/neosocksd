@@ -318,7 +318,7 @@ end
 
 local rpc = _G.rpc or {}
 function rpc.echo(...)
-    -- await.rpcall(t, "echo", ...)
+    -- logf("rpc.echo(%s)", marshal(...))
     return ...
 end
 
