@@ -112,9 +112,9 @@ endif()
 find_path(LUA_INCLUDE_DIR
     NAMES luaconf.h lua.h lualib.h lauxlib.h
     PATH_SUFFIXES
-    include/lua54 include/lua5.4 include/lua-5.4
-    include/lua53 include/lua5.3 include/lua-5.3
-    include/lua include
+    lua54 lua5.4 lua-5.4
+    lua53 lua5.3 lua-5.3
+    lua
 )
 find_library(LUA_LIBRARY
     NAMES
@@ -122,9 +122,9 @@ find_library(LUA_LIBRARY
     liblua53.a liblua5.3.a liblua-5.3.a
     liblua.a
     PATH_SUFFIXES
-    lib/lua54 lib/lua5.4 lib/lua-5.4
-    lib/lua53 lib/lua5.3 lib/lua-5.3
-    lib/lua lib
+    lua54 lua5.4 lua-5.4
+    lua53 lua5.3 lua-5.3
+    lua
 )
 if((NOT EXISTS ${LUA_LIBRARY}) AND (NOT BUILD_STATIC))
     find_library(LUA_LIBRARY
@@ -133,9 +133,9 @@ if((NOT EXISTS ${LUA_LIBRARY}) AND (NOT BUILD_STATIC))
         lua53 lua5.3 lua-5.3
         lua
         PATH_SUFFIXES
-        lib/lua54 lib/lua5.4 lib/lua-5.4
-        lib/lua53 lib/lua5.3 lib/lua-5.3
-        lib/lua lib
+        lua54 lua5.4 lua-5.4
+        lua53 lua5.3 lua-5.3
+        lua
     )
 endif()
 if(EXISTS "${LUA_INCLUDE_DIR}/lua.h")
@@ -182,7 +182,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInf
 endif()
 
 if(ENABLE_MIMALLOC)
-    find_library(MIMALLOC_LIBRARY NAMES libmimalloc.a PATH_SUFFIXES lib/mimalloc-2.1 lib)
+    find_library(MIMALLOC_LIBRARY NAMES libmimalloc.a PATH_SUFFIXES mimalloc-2.1)
     if(EXISTS "${MIMALLOC_LIBRARY}")
         message(STATUS "mimalloc: ${MIMALLOC_LIBRARY}")
         target_link_libraries(neosocksd PRIVATE ${MIMALLOC_LIBRARY})

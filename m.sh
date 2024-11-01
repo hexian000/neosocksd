@@ -72,6 +72,7 @@ case "$1" in
         -DCMAKE_SYSTEM_VERSION="${ANDROID_API_LEVEL}" \
         -DCMAKE_ANDROID_ARCH_ABI="${ABI_NAME}" \
         -DCMAKE_FIND_ROOT_PATH="${SYSROOT};${LIBROOT}" \
+        -DENABLE_MIMALLOC=ON \
         -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
     nice cmake --build "build" --parallel "${NPROC}"
