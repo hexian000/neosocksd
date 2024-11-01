@@ -315,7 +315,7 @@ static int await_invoke(lua_State *restrict L)
 		.data = r,
 	};
 	struct api_client_ctx *apictx =
-		api_client_do(r->loop, req, "/ruleset/rpcall", code, len, cb);
+		api_client_rpcall(r->loop, req, code, len, cb);
 	if (apictx == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);

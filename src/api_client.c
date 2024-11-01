@@ -15,6 +15,7 @@
 #include "io/stream.h"
 #include "net/http.h"
 #include "utils/buffer.h"
+#include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
@@ -36,14 +37,16 @@ enum api_client_state {
 };
 
 struct api_client_ctx {
+	struct session ss;
 	enum api_client_state state;
-	struct api_client_cb invoke_cb;
+	struct api_client_cb cb;
 	struct ev_timer w_timeout;
 	struct dialreq *dialreq;
 	struct dialer dialer;
 	struct ev_io w_socket;
 	struct http_parser parser;
 };
+ASSERT_SUPER(struct session, struct api_client_ctx, ss);
 
 static void api_client_close(
 	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx)
@@ -61,16 +64,28 @@ static void api_client_close(
 		CLOSE_FD(ctx->w_socket.fd);
 	}
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	session_del(&ctx->ss);
 	free(ctx);
+}
+
+static void
+api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+{
+	struct api_client_ctx *restrict ctx =
+		DOWNCAST(struct session, struct api_client_ctx, ss, ss);
+	if (ctx->cb.func != NULL) {
+		/* managed by ruleset */
+		return;
+	}
+	api_client_close(loop, ctx);
 }
 
 static void api_client_finish(
 	struct ev_loop *loop, struct api_client_ctx *restrict ctx, bool ok,
 	const void *data, const size_t len)
 {
-	if (ctx->invoke_cb.func != NULL) {
-		ctx->invoke_cb.func(
-			ctx, loop, ctx->invoke_cb.data, ok, data, len);
+	if (ctx->cb.func != NULL) {
+		ctx->cb.func(ctx, loop, ctx->cb.data, ok, data, len);
 	}
 	if (ok) {
 		stream_close((struct stream *)data);
@@ -165,7 +180,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		p->cbuf = VBUF_FREE(p->cbuf);
 	}
 
-	if (ctx->invoke_cb.func == NULL) {
+	if (ctx->cb.func == NULL) {
 		api_client_close(loop, ctx);
 		return;
 	}
@@ -275,7 +290,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	return true;
 }
 
-struct api_client_ctx *api_client_do(
+static struct api_client_ctx *api_client_do(
 	struct ev_loop *loop, struct dialreq *req, const char *uri,
 	const char *payload, const size_t len, struct api_client_cb client_cb)
 {
@@ -295,7 +310,7 @@ struct api_client_ctx *api_client_do(
 		api_client_close(loop, ctx);
 		return NULL;
 	}
-	ctx->invoke_cb = client_cb;
+	ctx->cb = client_cb;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 	ctx->dialreq = req;
@@ -304,10 +319,32 @@ struct api_client_ctx *api_client_do(
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
+	ctx->ss.close = api_ss_close;
+	session_add(&ctx->ss);
 
 	ev_timer_start(loop, &ctx->w_timeout);
 	dialer_start(&ctx->dialer, loop, req);
+	if (client_cb.func == NULL) {
+		return NULL;
+	}
 	return ctx;
+}
+
+void api_client_invoke(
+	struct ev_loop *loop, struct dialreq *req, const char *payload,
+	const size_t len)
+{
+	(void)api_client_do(
+		loop, req, "/ruleset/invoke", payload, len,
+		(struct api_client_cb){ NULL, NULL });
+}
+
+struct api_client_ctx *api_client_rpcall(
+	struct ev_loop *loop, struct dialreq *req, const char *payload,
+	const size_t len, const struct api_client_cb cb)
+{
+	ASSERT(cb.func != NULL);
+	return api_client_do(loop, req, "/ruleset/rpcall", payload, len, cb);
 }
 
 void api_client_cancel(struct ev_loop *loop, struct api_client_ctx *ctx)

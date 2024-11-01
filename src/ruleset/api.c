@@ -38,8 +38,7 @@ static int api_invoke(lua_State *restrict L)
 		return lua_error(L);
 	}
 	struct ruleset *restrict r = aux_getruleset(L);
-	struct api_client_cb cb = { NULL, NULL };
-	api_client_do(r->loop, req, "/ruleset/invoke", code, len, cb);
+	api_client_invoke(r->loop, req, code, len);
 	return 0;
 }
 
