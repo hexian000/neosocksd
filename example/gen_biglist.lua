@@ -109,7 +109,7 @@ local function parse_list(filename)
         elseif line:find("^full:") then
             local s = line:match("^full:(.*)$")
             table.insert(host, s)
-        elseif line:find("%.") then
+        elseif line ~= "" then
             table.insert(domain, line)
         end
     end
