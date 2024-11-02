@@ -20,7 +20,7 @@ case "$1" in
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -DCMAKE_SKIP_RPATH=ON \
         -S . -B "build"
-    nice cmake --build "build" --parallel "${NPROC}"
+    cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/bin/neosocksd"
     ;;
 "posix")
@@ -30,22 +30,21 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Release" \
         -DFORCE_POSIX=ON \
-        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -S . -B "build"
-    nice cmake --build "build" --parallel "${NPROC}"
+    ln -sf build/compile_commands.json compile_commands.json
+    cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/bin/neosocksd"
     ;;
 "clang")
     # rebuild with Linux clang/lld
     rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_C_COMPILER="clang" \
         -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld --rtlib=compiler-rt" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -S . -B "build"
-    nice cmake --build "build" --parallel "${NPROC}"
+    cmake --build "build" --parallel "${NPROC}"
     (cd "build/bin" && llvm-objdump -drwS "neosocksd" >"neosocksd.S")
     ls -lh "build/bin/neosocksd"
     ;;
@@ -57,7 +56,7 @@ case "$1" in
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" \
         -S "." -B "build"
-    nice cmake --build "build" --parallel "${NPROC}"
+    cmake --build "build" --parallel "${NPROC}"
     HOST="$(cc -dumpmachine)"
     zip -9j "build/neosocksd-win32.${HOST}.zip" \
         "/usr/bin/msys-2.0.dll" \
@@ -79,7 +78,7 @@ case "$1" in
         -DENABLE_MIMALLOC=ON \
         -DLINK_STATIC_LIBS=ON \
         -S "." -B "build"
-    nice cmake --build "build" --parallel "${NPROC}"
+    cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/bin/neosocksd"
     ;;
 "san")
@@ -91,30 +90,29 @@ case "$1" in
         -DCMAKE_C_COMPILER="clang" \
         -DENABLE_SANITIZERS=ON \
         -S . -B "build"
-    nice cmake --build "build" --parallel
+    ln -sf build/compile_commands.json compile_commands.json
+    cmake --build "build" --parallel
     ls -lh "build/bin/neosocksd"
     ;;
 "min")
     # rebuild for minimized size
     rm -rf "build" && mkdir "build"
     cmake -G "${GENERATOR}" \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="MinSizeRel" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -DENABLE_RULESET=OFF \
         -S "." -B "build"
-    nice cmake --build "build" --parallel "${NPROC}"
+    cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/bin/neosocksd"
     ;;
 "p")
     # rebuild for profiling
     rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -S . -B "build"
-    nice cmake --build "build" --parallel "${NPROC}"
+    cmake --build "build" --parallel "${NPROC}"
     (cd "build/bin" && objdump -drwS "neosocksd" >"neosocksd.S")
     ls -lh "build/bin/neosocksd"
     ;;
@@ -124,9 +122,9 @@ case "$1" in
     cmake -G "${GENERATOR}" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Release" \
-        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -S . -B "build"
-    nice cmake --build "build" --parallel "${NPROC}"
+    ln -sf build/compile_commands.json compile_commands.json
+    cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/bin/neosocksd"
     ;;
 "d")
@@ -136,15 +134,15 @@ case "$1" in
     fi
     rm -rf "build" && mkdir -p "build"
     cmake -G "${GENERATOR}" \
-        -DCMAKE_BUILD_TYPE="Debug" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DCMAKE_BUILD_TYPE="Debug" \
         -S . -B "build"
     ln -sf build/compile_commands.json compile_commands.json
-    nice cmake --build "build" --parallel
+    cmake --build "build" --parallel
     ls -lh "build/bin/neosocksd"
     ;;
 *)
-    nice cmake --build "build" --parallel
+    cmake --build "build" --parallel
     ls -lh "build/bin/neosocksd"
     ;;
 esac
