@@ -105,9 +105,6 @@ static void print_usage(const char *argv0)
 		"                             bidirectional traffic\n"
 		"  --loglevel <level>         0-8 are Silence, Fatal, Error, Warning, Notice, Info,\n"
 		"                             Debug, Verbose, VeryVerbose respectively (default: 4)\n"
-		"  -v, --verbose              increase logging verbosity, can be specified more than once\n"
-		"                             e.g. \"-v -v\" prints debug messages\n"
-		"  -s, --silence              decrease logging verbosity\n"
 		"  -d, --daemonize            run in background and write logs to syslog\n"
 		"  -u, --user [user][:[group]]\n"
 		"                             run as the specified identity, e.g. `nobody:nogroup'\n"
@@ -291,16 +288,6 @@ static void parse_args(const int argc, char *const *const restrict argv)
 				OPT_ARG_ERROR(argv, i);
 			}
 			conf->log_level = (int)value;
-			continue;
-		}
-		if (strcmp(argv[i], "-v") == 0 ||
-		    strcmp(argv[i], "--verbose") == 0) {
-			conf->log_level++;
-			continue;
-		}
-		if (strcmp(argv[i], "-s") == 0 ||
-		    strcmp(argv[i], "--silence") == 0) {
-			conf->log_level--;
 			continue;
 		}
 		if (strcmp(argv[i], "-d") == 0 ||
