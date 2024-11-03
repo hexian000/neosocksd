@@ -81,7 +81,7 @@ int cfunc_invoke(lua_State *restrict L)
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
-	CHECK(upvalue != NULL && CONSTSTREQUAL(upvalue, "_ENV"));
+	CHECK(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
 	lua_call(L, 0, 0);
 	return 0;
 }
@@ -151,7 +151,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
-	CHECK(upvalue != NULL && CONSTSTREQUAL(upvalue, "_ENV"));
+	CHECK(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
 
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE) !=
 	    LUA_TTABLE) {

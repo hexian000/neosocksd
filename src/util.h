@@ -35,7 +35,6 @@ extern struct globals {
 } G;
 
 #define CONSTSTRLEN(s) (sizeof(s) - 1)
-#define CONSTSTREQUAL(s1, s2) (strncmp((s1), ("" s2), sizeof(s2)) == 0)
 
 #define UNUSED(x) ((void)(x))
 
