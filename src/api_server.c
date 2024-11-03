@@ -221,55 +221,14 @@ static bool parse_bool(const char *s)
 	       strcmp(s, "t") == 0 || strcmp(s, "true") == 0;
 }
 
-static bool api_get_stats(
+static bool http_handle_stats(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct url *restrict uri)
 {
-	UNUSED(uri);
-	const enum content_encodings encoding =
-		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
-			CENCODING_DEFLATE :
-			CENCODING_NONE;
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
-	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-	RESPHDR_NOCACHE(ctx->parser.wbuf);
-
-	struct stream *w = content_writer(&ctx->parser.cbuf, 0, encoding);
-	if (w == NULL) {
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		return false;
-	}
-	/* borrow the read buffer */
-	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
-	buf->len = 0;
-
-	BUF_APPENDSTR(
-		*buf, PROJECT_NAME " " PROJECT_VER "\n"
-				   "  " PROJECT_HOMEPAGE "\n\n");
-	const double uptime = ev_now(loop) - ctx->s->stats.started;
-	server_stats(buf, ctx->s, uptime);
-
-	size_t n = buf->len;
-	const int werr = stream_write(w, buf->data, &n);
-	const int cerr = stream_close(w);
-	if (werr != 0 || n < buf->len || cerr != 0) {
-		LOGE_F("stream error: %d, %zu, %d", werr, n, cerr);
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		return false;
-	}
-	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
-	RESPHDR_FINISH(ctx->parser.wbuf);
-	return true;
-}
-
-static bool api_post_stats(
-	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct url *restrict uri)
-{
+	bool nobanner = false;
 	bool server = true;
 #if WITH_RULESET
 	const char *query = NULL;
-	bool ruleset = (G.ruleset != NULL);
 #endif
 	while (uri->query != NULL) {
 		struct url_query_component comp;
@@ -277,14 +236,28 @@ static bool api_post_stats(
 			http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
 			return false;
 		}
+		if (strcmp(comp.key, "nobanner") == 0) {
+			nobanner = parse_bool(comp.value);
+		}
 #if WITH_RULESET
-		if (strcmp(comp.key, "q") == 0) {
+		else if (strcmp(comp.key, "q") == 0) {
 			query = comp.value;
 		}
 #endif
-		if (strcmp(comp.key, "server") == 0) {
+		else if (strcmp(comp.key, "server") == 0) {
 			server = parse_bool(comp.value);
 		}
+	}
+
+	const struct http_message *restrict msg = &ctx->parser.msg;
+	bool stateless;
+	if (strcmp(msg->req.method, "GET") == 0) {
+		stateless = true;
+	} else if (strcmp(msg->req.method, "POST") == 0) {
+		stateless = false;
+	} else {
+		http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
+		return false;
 	}
 
 	const enum content_encodings encoding =
@@ -300,17 +273,22 @@ static bool api_post_stats(
 	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
 	buf->len = 0;
 
+	if (!nobanner) {
+		BUF_APPENDSTR(
+			*buf, PROJECT_NAME " " PROJECT_VER "\n"
+					   "  " PROJECT_HOMEPAGE "\n\n");
+	}
+
 	const ev_tstamp now = ev_now(loop);
 	const double uptime = now - ctx->s->stats.started;
 	static ev_tstamp last = TSTAMP_NIL;
 	const double dt = (last == TSTAMP_NIL) ? uptime : now - last;
 	if (server) {
-		BUF_APPENDSTR(
-			*buf, PROJECT_NAME " " PROJECT_VER "\n"
-					   "  " PROJECT_HOMEPAGE "\n\n");
 		server_stats(buf, ctx->s, uptime);
-		last = now;
-		server_stats_stateful(buf, ctx->s, dt);
+		if (!stateless) {
+			last = now;
+			server_stats_stateful(buf, ctx->s, dt);
+		}
 
 		size_t n = buf->len;
 		int err = stream_write(w, buf->data, &n);
@@ -324,11 +302,12 @@ static bool api_post_stats(
 	}
 
 #if WITH_RULESET
-	if (ruleset) {
+	struct ruleset *ruleset = G.ruleset;
+	if (!stateless && ruleset != NULL) {
 		size_t len;
-		const char *s = ruleset_stats(G.ruleset, dt, query, &len);
+		const char *s = ruleset_stats(ruleset, dt, query, &len);
 		if (s == NULL) {
-			s = ruleset_geterror(G.ruleset, &len);
+			s = ruleset_geterror(ruleset, &len);
 		}
 		size_t n = len;
 		int err = stream_write(w, s, &n);
@@ -350,6 +329,9 @@ static bool api_post_stats(
 
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	if (stateless) {
+		RESPHDR_NOCACHE(ctx->parser.wbuf);
+	}
 	const char *encoding_str = content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		RESPHDR_CENCODING(ctx->parser.wbuf, encoding_str);
@@ -357,21 +339,6 @@ static bool api_post_stats(
 	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	return true;
-}
-
-static bool http_handle_stats(
-	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct url *restrict uri)
-{
-	const struct http_message *restrict msg = &ctx->parser.msg;
-	if (strcmp(msg->req.method, "GET") == 0) {
-		return api_get_stats(loop, ctx, uri);
-	}
-	if (strcmp(msg->req.method, "POST") == 0) {
-		return api_post_stats(loop, ctx, uri);
-	}
-	http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
-	return false;
 }
 
 static bool restapi_check(
