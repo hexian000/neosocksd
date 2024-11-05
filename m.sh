@@ -31,7 +31,7 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="Release" \
         -DFORCE_POSIX=ON \
         -S . -B "build"
-    ln -sf build/compile_commands.json compile_commands.json
+    cp build/compile_commands.json compile_commands.json
     cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/bin/neosocksd"
     ;;
@@ -90,7 +90,7 @@ case "$1" in
         -DCMAKE_C_COMPILER="clang" \
         -DENABLE_SANITIZERS=ON \
         -S . -B "build"
-    ln -sf build/compile_commands.json compile_commands.json
+    cp build/compile_commands.json compile_commands.json
     cmake --build "build" --parallel
     ls -lh "build/bin/neosocksd"
     ;;
@@ -123,7 +123,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Release" \
         -S . -B "build"
-    ln -sf build/compile_commands.json compile_commands.json
+    cp build/compile_commands.json compile_commands.json
     cmake --build "build" --parallel "${NPROC}"
     ls -lh "build/bin/neosocksd"
     ;;
@@ -137,7 +137,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Debug" \
         -S . -B "build"
-    ln -sf build/compile_commands.json compile_commands.json
+    cp build/compile_commands.json compile_commands.json
     cmake --build "build" --parallel
     ls -lh "build/bin/neosocksd"
     ;;
