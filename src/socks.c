@@ -78,21 +78,29 @@ struct socks_ctx {
 };
 ASSERT_SUPER(struct session, struct socks_ctx, ss);
 
+static int format_status(
+	char *restrict s, size_t maxlen, const struct socks_ctx *restrict ctx)
+{
+	char caddr[64];
+	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
+	if ((ctx)->state != STATE_CONNECT) {
+		return snprintf(s, maxlen, "client `%s'", caddr);
+	}
+	char saddr[64];
+	dialaddr_format(saddr, sizeof(saddr), &(ctx)->addr);
+	return snprintf(s, maxlen, "`%s' -> `%s'", caddr, saddr);
+}
+
 #define SOCKS_CTX_LOG_F(level, ctx, format, ...)                               \
 	do {                                                                   \
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		char caddr[64];                                                \
-		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
-		if ((ctx)->state < STATE_CONNECT) {                            \
-			LOG_F(level, "client `%s': " format, caddr,            \
-			      __VA_ARGS__);                                    \
-			break;                                                 \
-		}                                                              \
-		char saddr[64];                                                \
-		dialaddr_format(saddr, sizeof(saddr), &(ctx)->addr);           \
-		LOG_F(level, "`%s' -> `%s': " format, caddr, saddr,            \
+		char status_str[256];                                          \
+		const int nstatus =                                            \
+			format_status(status_str, sizeof(status_str), (ctx));  \
+		ASSERT(nstatus > 0);                                           \
+		LOG_F(level, "%.*s: " format, nstatus, status_str,             \
 		      __VA_ARGS__);                                            \
 	} while (0)
 #define SOCKS_CTX_LOG(level, ctx, message)                                     \

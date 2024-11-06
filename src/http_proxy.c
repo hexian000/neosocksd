@@ -25,6 +25,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -63,20 +64,29 @@ struct http_ctx {
 };
 ASSERT_SUPER(struct session, struct http_ctx, ss);
 
+static int format_status(
+	char *restrict s, size_t maxlen, const struct http_ctx *restrict ctx)
+{
+	char caddr[64];
+	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
+	if ((ctx)->state != STATE_CONNECT) {
+		return snprintf(s, maxlen, "client `%s'", caddr);
+	}
+	return snprintf(
+		s, maxlen, "`%s' -> `%s'", caddr, ctx->parser.msg.req.url);
+}
+
 #define HTTP_CTX_LOG_F(level, ctx, format, ...)                                \
 	do {                                                                   \
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		char caddr[64];                                                \
-		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
-		if ((ctx)->state != STATE_CONNECT) {                           \
-			LOG_F(level, "client `%s': " format, caddr,            \
-			      __VA_ARGS__);                                    \
-			break;                                                 \
-		}                                                              \
-		LOG_F(level, "`%s' -> `%s': " format, caddr,                   \
-		      (ctx)->parser.msg.req.url, __VA_ARGS__);                 \
+		char status_str[256];                                          \
+		const int nstatus =                                            \
+			format_status(status_str, sizeof(status_str), (ctx));  \
+		ASSERT(nstatus > 0);                                           \
+		LOG_F(level, "%.*s: " format, nstatus, status_str,             \
+		      __VA_ARGS__);                                            \
 	} while (0)
 #define HTTP_CTX_LOG(level, ctx, message)                                      \
 	HTTP_CTX_LOG_F(level, ctx, "%s", message)
