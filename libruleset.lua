@@ -14,7 +14,7 @@ end
 _G.printf = printf
 
 -- avoid clock_t wrapping
-if neosocksd.clock and neosocksd.clock() then
+if neosocksd.clock and neosocksd.clock() ~= -1 then
     os.clock = neosocksd.clock
 end
 
