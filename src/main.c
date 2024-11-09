@@ -42,9 +42,6 @@ static struct {
 	struct ev_signal w_sighup;
 	struct ev_signal w_sigint;
 	struct ev_signal w_sigterm;
-#if WITH_SPLICE
-	struct ev_timer w_timer;
-#endif
 
 	struct config conf;
 	struct server server;
@@ -53,10 +50,6 @@ static struct {
 
 static void
 signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents);
-#if WITH_SPLICE
-static void
-timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents);
-#endif
 
 static void print_usage(const char *argv0)
 {
@@ -462,14 +455,6 @@ int main(int argc, char **argv)
 		ev_set_priority(w_sigterm, EV_MAXPRI);
 		ev_signal_start(loop, w_sigterm);
 	}
-#if WITH_SPLICE
-	if (G.conf->pipe) {
-		struct ev_timer *restrict w_timer = &app.w_timer;
-		ev_timer_init(w_timer, timer_cb, 10.0, 10.0);
-		ev_set_priority(w_timer, EV_MINPRI);
-		ev_timer_start(loop, w_timer);
-	}
-#endif
 
 #if WITH_SYSTEMD
 	(void)sd_notify(0, "READY=1");
@@ -547,13 +532,3 @@ void signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 		break;
 	}
 }
-
-#if WITH_SPLICE
-void timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
-{
-	CHECK_REVENTS(revents, EV_TIMER);
-	UNUSED(loop);
-	UNUSED(watcher);
-	pipe_shrink(1);
-}
-#endif
