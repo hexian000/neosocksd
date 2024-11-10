@@ -220,15 +220,20 @@ local function evlog_(now, msg)
     recent_events:push({
         msg = msg,
         count = 1,
-        tstamp = now
+        tstamp = now,
     })
+end
+
+local function format_timestamp(t)
+    local s = os.date("%Y-%m-%dT%T%z", t)
+    return s:sub(1, -3) .. ":" .. s:sub(-2, -1)
 end
 
 local function log_(now, info, msg)
     if config.loglevel < 6 then
         return
     end
-    local timestamp = os.date("%Y-%m-%dT%T%z", now)
+    local timestamp = format_timestamp(now)
     local source    = info.source:match("^@.-([^/]+)$") or info.short_src
     local line      = info.currentline
     return printf("D %s %s:%d %s", timestamp, source, line, msg)
@@ -946,7 +951,7 @@ function ruleset.stats(dt)
     for i = 1, 10 do
         local entry = recent_events:get(i)
         if not entry then break end
-        local tstamp = os.date("%Y-%m-%dT%T%z", entry.tstamp)
+        local tstamp = format_timestamp(entry.tstamp)
         if entry.count == 1 then
             w:insertf("%s %s", tstamp, entry.msg)
         else
