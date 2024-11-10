@@ -96,7 +96,6 @@ case "$1" in
     cmake \
         -DCMAKE_BUILD_TYPE="MinSizeRel" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
-        -DENABLE_RULESET=OFF \
         -S "." -B "build"
     cmake --build "build"
     ls -lh "build/bin/neosocksd"
