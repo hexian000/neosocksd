@@ -64,7 +64,10 @@ static void api_client_close(
 		CLOSE_FD(ctx->w_socket.fd);
 	}
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	session_del(&ctx->ss);
+	if (ctx->ss.close != NULL) {
+		/* managed by session */
+		session_del(&ctx->ss);
+	}
 	free(ctx);
 }
 
@@ -73,10 +76,6 @@ api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 {
 	struct api_client_ctx *restrict ctx =
 		DOWNCAST(struct session, struct api_client_ctx, ss, ss);
-	if (ctx->cb.func != NULL) {
-		/* managed by ruleset */
-		return;
-	}
 	api_client_close(loop, ctx);
 }
 
@@ -319,8 +318,14 @@ static struct api_client_ctx *api_client_do(
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, cb);
-	ctx->ss.close = api_ss_close;
-	session_add(&ctx->ss);
+	if (ctx->cb.func != NULL) {
+		/* managed by ruleset */
+		ctx->ss.close = NULL;
+	} else {
+		/* managed by session */
+		ctx->ss.close = api_ss_close;
+		session_add(&ctx->ss);
+	}
 
 	ev_timer_start(loop, &ctx->w_timeout);
 	dialer_start(&ctx->dialer, loop, req);
