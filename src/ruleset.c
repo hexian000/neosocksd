@@ -63,9 +63,14 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 static int l_panic(lua_State *L)
 {
 	const int type = lua_type(L, -1);
-	if (type == LUA_TSTRING) {
+	switch (type) {
+	case LUA_TNIL:
+		LOG_STACK(FATAL, 0, "panic: (nil)");
+		break;
+	case LUA_TSTRING:
 		LOG_STACK_F(FATAL, 0, "panic: %s", lua_tostring(L, -1));
-	} else {
+		break;
+	default:
 		LOG_STACK_F(
 			FATAL, 0, "panic: (%s: %p)", lua_typename(L, type),
 			lua_topointer(L, -1));

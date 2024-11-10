@@ -136,17 +136,26 @@ struct dialreq *aux_todialreq(lua_State *restrict L, const int n)
 
 int aux_traceback(lua_State *restrict L)
 {
-	const char *err = lua_tostring(L, 1);
+	const int type = lua_type(L, 1);
+	const char *err;
+	switch (type) {
+	case LUA_TNIL:
+		err = "(nil)";
+		break;
+	case LUA_TNUMBER:
+	case LUA_TSTRING:
+		err = lua_tostring(L, 1);
+		break;
+	default:
+		err = lua_pushfstring(
+			L, "(%s: %p)", lua_typename(L, type),
+			lua_topointer(L, 1));
+	}
+	LOG_STACK_F(WARNING, 0, "traceback: %s", err);
 	luaL_traceback(L, L, err, 1);
 	size_t len;
 	const char *s = lua_tolstring(L, -1, &len);
-	if (err == NULL) {
-		LOG_STACK(WARNING, 0, "C traceback");
-		LOG_TXT(WARNING, s, len, "Lua traceback");
-		return 1;
-	}
-	LOG_STACK_F(WARNING, 0, "C traceback for `%s'", err);
-	LOG_TXT_F(WARNING, s, len, "Lua traceback for `%s'", err);
+	LOG_TXT_F(VERBOSE, s, len, "traceback: %s", err);
 	return 1;
 }
 
