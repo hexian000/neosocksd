@@ -471,6 +471,8 @@ static bool dialer_send(
 	 CONSTSTRLEN("Proxy-Authorization: Basic ") + 685 +                    \
 	 CONSTSTRLEN("\r\n") + CONSTSTRLEN("\r\n"))
 
+#define HTTP_RSP_MINLEN (CONSTSTRLEN("HTTP/2 200 \r\n\r\n"))
+
 /* RFC 7231: 4.3.6.  CONNECT */
 static bool send_http_req(
 	struct dialer *restrict d, const struct proxyreq *proxy,
@@ -523,7 +525,7 @@ static bool send_http_req(
 	if (!dialer_send(d, (unsigned char *)buf, (size_t)(b - buf))) {
 		return false;
 	}
-	socket_rcvlowat(d->w_socket.fd, CONSTSTRLEN("HTTP/2 200 \r\n\r\n"));
+	socket_rcvlowat(d->w_socket.fd, HTTP_RSP_MINLEN);
 	return true;
 }
 

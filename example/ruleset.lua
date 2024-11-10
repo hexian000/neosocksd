@@ -69,10 +69,9 @@ _G.redirect = {
 -- _G.redirect6: handle IPv6 requests in "[ipv6]:port"
 _G.redirect6 = {
     -- redirect TCP DNS to local cache
-    { match.exact("[2606:4700:4700::1111]:53"), rule.redirect("127.0.0.53:53") },
-    { match.exact("[2606:4700:4700::1001]:53"), rule.redirect("127.0.0.53:53") },
+    { match.port(53), rule.redirect("127.0.0.53:53") },
     -- global condition
-    { is_disabled,                              rule.reject(),                 "off" },
+    { is_disabled,    rule.reject(),                 "off" },
     -- go to _G.route6
 }
 
@@ -87,7 +86,7 @@ _G.hosts = {
 -- jump to region2 through region1 proxy
 local proxy_region2 = rule.proxy("socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080")
 
--- 3. _G.route*: handle requests by IP address (faster subnet matching)
+-- 3. _G.route*: Handle requests by IP address (to match subnet efficiently)
 _G.route = {
     -- reject loopback or link-local
     { inet.subnet("127.0.0.0/8"),     rule.reject() },
