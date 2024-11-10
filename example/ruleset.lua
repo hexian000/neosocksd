@@ -31,11 +31,11 @@ end
 local API_ENDPOINT = "api.neosocksd.internal:80"
 local INTERNAL_DOMAIN = ".internal"
 
--- 1. _G.redirect*: match the raw request "host:port"
+-- 1. _G.redirect*: handle requests as a string
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
 
--- _G.redirect_name: for requests with name string
+-- _G.redirect_name: handle domain name requests in "host:port"
 _G.redirect_name = {
     -- rule.redirect(addr, proxy1, proxy2, ...)
     { match.exact("peer0.lan:22"),         rule.redirect("host-gateway:22"),       "ssh" },
@@ -56,7 +56,7 @@ _G.redirect_name = {
     -- otherwise, go to _G.route_default
 }
 
--- _G.redirect: for requests with IPv4 address
+-- _G.redirect: handle IPv4 requests in "ip:port"
 _G.redirect = {
     -- redirect TCP DNS to local cache
     { match.exact("1.1.1.1:53"), rule.redirect("127.0.0.53:53") },
@@ -66,10 +66,13 @@ _G.redirect = {
     -- go to _G.route
 }
 
--- _G.redirect6: for requests with IPv6 address
+-- _G.redirect6: handle IPv6 requests in "[ipv6]:port"
 _G.redirect6 = {
+    -- redirect TCP DNS to local cache
+    { match.exact("[2606:4700:4700::1111]:53"), rule.redirect("127.0.0.53:53") },
+    { match.exact("[2606:4700:4700::1001]:53"), rule.redirect("127.0.0.53:53") },
     -- global condition
-    { is_disabled, rule.reject(), "off" },
+    { is_disabled,                              rule.reject(),                 "off" },
     -- go to _G.route6
 }
 
@@ -84,7 +87,7 @@ _G.hosts = {
 -- jump to region2 through region1 proxy
 local proxy_region2 = rule.proxy("socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080")
 
--- 3. _G.route*: match the IP address
+-- 3. _G.route*: handle requests by IP address (faster subnet matching)
 _G.route = {
     -- reject loopback or link-local
     { inet.subnet("127.0.0.0/8"),     rule.reject() },
