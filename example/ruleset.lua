@@ -38,20 +38,20 @@ local INTERNAL_DOMAIN = ".internal"
 -- _G.redirect_name: for requests with name string
 _G.redirect_name = {
     -- rule.redirect(addr, proxy1, proxy2, ...)
-    { match.exact("peer0.lan:22"),        rule.redirect("host-gateway:22"),       "ssh" },
-    { match.exact("peer0.lan:80"),        rule.redirect("nginx:80"),              "web" },
-    { match.exact("peer0.lan:443"),       rule.redirect("nginx:443"),             "web" },
+    { match.exact("peer0.lan:22"),         rule.redirect("host-gateway:22"),       "ssh" },
+    { match.exact("peer0.lan:80"),         rule.redirect("nginx:80"),              "web" },
+    { match.exact("peer0.lan:443"),        rule.redirect("nginx:443"),             "web" },
     -- access local sites directly
-    { match.domain({ ".lan", ".local" }), rule.direct(),                          "lan" },
+    { match.domain({ ".lan", ".local" }),  rule.direct(),                          "lan" },
     -- ".internal" assignment
-    { match.exact(API_ENDPOINT),          rule.redirect("127.0.1.1:9080") },
-    { match.agent(),                      rule.agent() }, -- agent relay
-    { match.exact("peer0.internal:22"),   rule.redirect("host-gateway:22"),       "ssh" },
-    { match.domain(INTERNAL_DOMAIN),      rule.reject(),                          "unknown" },
+    { match.exact(API_ENDPOINT),           rule.redirect("127.0.1.1:9080") },
+    { match.agent(),                       rule.agent() }, -- agent relay
+    { match.exact("peer0.internal:22"),    rule.redirect("host-gateway:22"),       "ssh" },
+    { match.domain(INTERNAL_DOMAIN),       rule.reject(),                          "unknown" },
     -- global condition
-    { is_disabled,                        rule.reject(),                          "off" },
+    { is_disabled,                         rule.reject(),                          "off" },
     -- dynamically loaded big domains list, rule.proxy(proxy1, proxy2, ...)
-    { composite.maybe(_G, "biglist"),     rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
+    { composite.maybe(_G, "biglist_name"), rule.proxy("socks4a://proxy.lan:1080"), "biglist" },
     -- if in _G.hosts, go to _G.route/_G.route6
     -- otherwise, go to _G.route_default
 }
@@ -81,19 +81,22 @@ _G.hosts = {
     ["host123.region2.lan"] = "192.168.33.123"
 }
 
+-- jump to region2 through region1 proxy
+local proxy_region2 = rule.proxy("socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080")
+
 -- 3. _G.route*: match the IP address
 _G.route = {
     -- reject loopback or link-local
-    { inet.subnet("127.0.0.0/8"),      rule.reject() },
-    { inet.subnet("169.254.0.0/16"),   rule.reject() },
+    { inet.subnet("127.0.0.0/8"),     rule.reject() },
+    { inet.subnet("169.254.0.0/16"),  rule.reject() },
     -- region1 proxy
-    { inet.subnet("192.168.32.0/24"),  rule.proxy("socks4a://192.168.32.1:1080"),                                "region1" },
-    -- jump to region2 through region1 proxy (for a fancy demo)
-    { inet.subnet("192.168.33.0/24"),  rule.proxy("socks4a://192.168.32.1:1080", "socks4a://192.168.33.1:1080"), "region2" },
+    { inet.subnet("192.168.32.0/24"), rule.proxy("socks4a://192.168.32.1:1080"), "region1" },
+    -- region2 proxy
+    { inet.subnet("192.168.33.0/24"), proxy_region2,                             "region2" },
     -- access other lan addresses directly
-    { inet.subnet("192.168.0.0/16"),   rule.direct(),                                                            "lan" },
+    { inet.subnet("192.168.0.0/16"),  rule.direct(),                             "lan" },
     -- dynamically loaded big IP ranges list
-    { composite.maybe(_G, "biglist4"), rule.direct(),                                                            "biglist" },
+    { composite.maybe(_G, "biglist"), rule.direct(),                             "biglist" },
     -- go to _G.route_default
 }
 
@@ -108,9 +111,9 @@ _G.route6 = {
     -- go to _G.route_default
 }
 
--- 4. the global default applies to any unmatched requests
+-- 4. the global default applies to all unmatched requests
 -- in {action, optional log tag}
-_G.route_default = { rule.proxy("socks5://user:pass@internet-gateway.lan:1080"), "internet" }
+_G.route_default = { rule.proxy("socks5://user:pass@gateway.lan:1080"), "wan" }
 
 function ruleset.stats(dt, q)
     local w = list:new()

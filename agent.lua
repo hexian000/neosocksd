@@ -5,6 +5,7 @@
 _G.libruleset = require("libruleset")
 
 local agent = {}
+agent.running = true
 
 -- agent.peername = "peer0"
 agent.peername = table.get(_G.agent, "peername")
@@ -380,7 +381,6 @@ local function main(...)
             evlogf("agent.stop: %s", err)
         end
     end
-    agent.running = true
     async(mainloop)
     return agent
 end

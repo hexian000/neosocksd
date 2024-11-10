@@ -136,9 +136,9 @@ function main(args)
     local cidr6 = parse_cidr(args[2])
     local domain, host, regex = parse_list(args[3])
     local f = io.stdout
-    f:write(string.format("_G.biglist4=inet.subnet(%s)\n", marshal(cidr)))
+    f:write(string.format("_G.biglist=inet.subnet(%s)\n", marshal(cidr)))
     f:write(string.format("_G.biglist6=inet6.subnet(%s)\n", marshal(cidr6)))
-    f:write(string.format("_G.biglist=composite.anyof({match.domaintree(%s),match.host(%s),match.regex(%s)})\n",
+    f:write(string.format("_G.biglist_name=composite.anyof({match.domaintree(%s),match.host(%s),match.regex(%s)})\n",
         marshal(domain), marshal(host), marshal(regex)))
     f:close()
     return 0

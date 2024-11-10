@@ -58,7 +58,7 @@ _G.route6        = {
     -- go to _G.route_default
 }
 
--- 4. the global default applies to any unmatched requests
+-- 4. the global default applies to all unmatched requests
 -- in {action, optional log tag}
 _G.route_default = { rule.proxy("socks5://user:pass@internet-gateway.lan:1080"), "internet" }
 

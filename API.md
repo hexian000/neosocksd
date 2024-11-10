@@ -60,7 +60,7 @@ Load the posted script and use it as follows:
 3. If the field `_G.name` refers to the named module, it will be updated too.
 
 - **Path**: `/ruleset/update`
-- **Query**: `?module=name&chunkname=name.lua` (optional)
+- **Query**: `?module=name&chunkname=%40name.lua` (optional)
 - **Method**: POST
 - **Content**: Lua ruleset script or Lua module script
 - **Status**: HTTP 200, HTTP 500
@@ -172,7 +172,7 @@ end
 
 **Description**
 
-Periodic timer callback.
+Periodic timer callback. See [neosocksd.setinterval](#neosocksdsetinterval).
 
 **Params**
 
@@ -251,7 +251,7 @@ local host, port = neosocksd.splithostport("example.com:80")
 
 **Description**
 
-Split address string into host and port. Raises error on failure.
+Split address string into host and port. Raises an error on failure.
 
 
 ### neosocksd.parse_ipv4
@@ -301,7 +301,7 @@ neosocksd.setinterval(1.5)
 
 **Description**
 
-Set tick interval in seconds, see also [ruleset.tick](#rulesettick).
+Set the interval to call [ruleset.tick](#rulesettick) in seconds.
 
 The valid interval range is `[1e-3, 1e+9]`, use `setinterval(0)` to stop the timer tick.
 
@@ -455,7 +455,7 @@ end)
 
 **Description**
 
-Resolves a host name asynchronously. If asynchronous name resolution is not configured, `await.resolve` behaves the same as `neosocksd.resolve`.
+Resolves a host name asynchronously. If asynchronous name resolution is not supported, `await.resolve` behaves the same as `neosocksd.resolve`.
 
 IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
 
