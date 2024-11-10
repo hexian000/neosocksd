@@ -225,7 +225,7 @@ local function evlog_(now, msg)
 end
 
 local function format_timestamp(t)
-    local s = os.date("%Y-%m-%dT%T%z", t)
+    local s = os.date("%FT%T%z", t)
     return s:sub(1, -3) .. ":" .. s:sub(-2, -1)
 end
 _G.format_timestamp = format_timestamp
