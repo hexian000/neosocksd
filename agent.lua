@@ -354,7 +354,7 @@ function agent.stats(dt)
     local w = list:new()
     for peername, data in pairs(_G.peerdb) do
         local tag = strformat("%q", peername)
-        local timestamp = os.date("%Y-%m-%dT%T%z", data.timestamp)
+        local timestamp = format_timestamp(data.timestamp)
         local connid, conn, info = peers[peername], nil, nil
         if connid then conn = _G.conninfo[connid] end
         if conn then info = conn[peername] end

@@ -228,6 +228,7 @@ local function format_timestamp(t)
     local s = os.date("%Y-%m-%dT%T%z", t)
     return s:sub(1, -3) .. ":" .. s:sub(-2, -1)
 end
+_G.format_timestamp = format_timestamp
 
 local function log_(now, info, msg)
     if config.loglevel < 6 then
