@@ -50,8 +50,8 @@ case "$1" in
     rm -rf "build" && mkdir "build"
     cmake \
         -DCMAKE_BUILD_TYPE="Release" \
-        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" \
+        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -S "." -B "build"
     cmake --build "build"
     HOST="$(cc -dumpmachine)"
@@ -106,7 +106,6 @@ case "$1" in
     cmake \
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
-        -DLINK_STATIC_LIBS=ON \
         -S . -B "build"
     cmake --build "build"
     (cd "build/bin" && objdump -drwS "neosocksd" >"neosocksd.S")
@@ -117,7 +116,6 @@ case "$1" in
     rm -rf "build" && mkdir -p "build"
     cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -DCMAKE_BUILD_TYPE="Release" \
         -S . -B "build"
     cp build/compile_commands.json compile_commands.json

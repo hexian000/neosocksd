@@ -180,21 +180,19 @@ bool dialreq_addproxy(
 	}
 	enum proxy_protocol protocol;
 	char *host, *port;
-	if (strcmp(uri.scheme, "http") == 0) {
+	if (strcmp(uri.scheme, proxy_protocol_str[PROTO_HTTP]) == 0) {
 		protocol = PROTO_HTTP;
 		if (!splithostport(uri.host, &host, &port)) {
 			host = uri.host;
 			port = "80";
 		}
-	} else if (
-		strcmp(uri.scheme, "socks4") == 0 ||
-		strcmp(uri.scheme, "socks4a") == 0) {
+	} else if (strcmp(uri.scheme, proxy_protocol_str[PROTO_SOCKS4A]) == 0) {
 		protocol = PROTO_SOCKS4A;
 		if (!splithostport(uri.host, &host, &port)) {
 			host = uri.host;
 			port = "1080";
 		}
-	} else if (strcmp(uri.scheme, "socks5") == 0) {
+	} else if (strcmp(uri.scheme, proxy_protocol_str[PROTO_SOCKS5]) == 0) {
 		protocol = PROTO_SOCKS5;
 		if (!splithostport(uri.host, &host, &port)) {
 			host = uri.host;
