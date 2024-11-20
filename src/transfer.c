@@ -49,6 +49,24 @@ static void update_watcher(
 	ev_io_start(loop, watcher);
 }
 
+static void update_stats(
+	struct transfer *restrict t, const size_t nbsend, const size_t buffered)
+{
+	uintmax_t *restrict byt_transferred = t->byt_transferred;
+	if (byt_transferred != NULL) {
+		*byt_transferred += nbsend;
+	}
+	if (buffered > 0) {
+		XFER_CTX_LOG_F(
+			VERYVERBOSE, t,
+			"%zu bytes transmitted (%zu bytes buffered)", nbsend,
+			buffered);
+		return;
+	}
+	XFER_CTX_LOG_F(
+		VERYVERBOSE, t, "%zu bytes transmitted", nbsend, buffered);
+}
+
 static ssize_t transfer_recv(struct transfer *restrict t)
 {
 	const int fd = t->src_fd;
@@ -130,14 +148,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	const bool has_work = (nbsend > 0);
 	if (has_work) {
-		uintmax_t *restrict byt_transferred = t->byt_transferred;
-		if (byt_transferred != NULL) {
-			*byt_transferred += nbsend;
-		}
-		XFER_CTX_LOG_F(
-			VERYVERBOSE, t,
-			"%zu bytes transmitted (%zu bytes in buffer)", nbsend,
-			t->buf.len);
+		update_stats(t, nbsend, t->buf.len);
 	}
 
 	const bool has_data = (t->pos < t->buf.len);
@@ -246,14 +257,7 @@ static void pipe_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 	const bool has_work = (nbsend > 0);
 	if (has_work) {
-		uintmax_t *restrict byt_transferred = t->byt_transferred;
-		if (byt_transferred != NULL) {
-			*byt_transferred += nbsend;
-		}
-		XFER_CTX_LOG_F(
-			VERYVERBOSE, t,
-			"%zu bytes transmitted (%zu bytes in pipe)", nbsend,
-			t->pipe.len);
+		update_stats(t, nbsend, t->pipe.len);
 	}
 
 	const bool has_data = (t->pipe.len > 0);
