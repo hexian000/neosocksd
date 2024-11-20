@@ -1176,7 +1176,7 @@ static bool connect_sa(
 	if (LOGLEVEL(VERBOSE)) {
 		char addr_str[64];
 		format_sa(addr_str, sizeof(addr_str), sa);
-		LOG_F(VERBOSE, "dialer: connect `%s'", addr_str);
+		LOG_F(VERBOSE, "dialer: connect %s", addr_str);
 	}
 	d->state = STATE_CONNECT;
 	if (connect(fd, sa, getsocklen(sa)) != 0) {
@@ -1185,7 +1185,7 @@ static bool connect_sa(
 			if (LOGLEVEL(WARNING)) {
 				char addr_str[64];
 				format_sa(addr_str, sizeof(addr_str), sa);
-				LOG_F(WARNING, "connect `%s': %s", addr_str,
+				LOG_F(WARNING, "connect %s: %s", addr_str,
 				      strerror(err));
 			}
 			d->syserr = err;

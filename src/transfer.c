@@ -67,6 +67,18 @@ static void update_stats(
 		VERYVERBOSE, t, "%zu bytes transmitted", nbsend, buffered);
 }
 
+static void set_state(
+	struct transfer *restrict t, struct ev_loop *loop,
+	const enum transfer_state state)
+{
+	if (t->state == state) {
+		return;
+	}
+	XFER_CTX_LOG_F(VERBOSE, t, "state %d changed to %d", t->state, state);
+	t->state = state;
+	t->state_cb.func(loop, t->state_cb.data);
+}
+
 static ssize_t transfer_recv(struct transfer *restrict t)
 {
 	const int fd = t->src_fd;
@@ -176,13 +188,7 @@ transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	default:
 		FAIL();
 	}
-	if (t->state != state) {
-		XFER_CTX_LOG_F(
-			VERBOSE, t, "state changed %d to %d", t->state, state);
-		t->state = state;
-		t->state_cb.func(loop, t->state_cb.data);
-		return;
-	}
+	set_state(t, loop, state);
 }
 
 #if WITH_SPLICE
@@ -285,13 +291,7 @@ static void pipe_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	default:
 		FAIL();
 	}
-	if (t->state != state) {
-		XFER_CTX_LOG_F(
-			VERBOSE, t, "state changed %d to %d", t->state, state);
-		t->state = state;
-		t->state_cb.func(loop, t->state_cb.data);
-		return;
-	}
+	set_state(t, loop, state);
 }
 #endif
 
