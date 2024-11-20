@@ -52,9 +52,8 @@ neosocksd only supports basic authentication (plain text username and password) 
 ./neosocksd --http -l 127.0.0.1:8080 -x socks4a://203.0.113.1:1080
 
 # Start a hardened load balancer in the background
-sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 \
-    --max-startups 60:30:100 --proto-timeout -t 15 \
-    -l :80 -f : -r lb.lua --api 127.0.1.1:9080
+sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 --max-startups 60:30:100 \
+    --proto-timeout -t 15 -l :80 -f : -r lb.lua --api 127.0.1.1:9080
 
 # Start a rule set powered SOCKS4 / SOCKS4A / SOCKS5 server
 ./neosocksd -d -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua
@@ -91,8 +90,8 @@ sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
 Use the following command to update rule set on remote instance without restarting:
 
 ```sh
-# Update the rule set
-curl "http://127.0.1.1:9080/ruleset/update" \
+# Update the rule set, optionally specify the chunk name to be displayed in the stack traceback
+curl "http://127.0.1.1:9080/ruleset/update?chunkname=%40ruleset.lua" \
     --data-binary @ruleset.lua
 
 # Update a module
@@ -159,11 +158,10 @@ apk add libev-dev lua5.4-dev c-ares-dev
 
 ```sh
 git clone https://github.com/hexian000/neosocksd.git
-mkdir "neosocksd-build"
+mkdir -p neosocksd-build && cd neosocksd-build
 cmake -DCMAKE_BUILD_TYPE="Release" \
-    -S "neosocksd" \
-    -B "neosocksd-build"
-cmake --build "neosocksd-build" --parallel
+    ../neosocksd
+cmake --build . --parallel
 ```
 
 See [m.sh](m.sh) for more information about cross compiling support.
