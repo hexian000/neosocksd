@@ -84,11 +84,11 @@ static int format_status(
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if ((ctx)->state != STATE_CONNECT) {
-		return snprintf(s, maxlen, "client `%s'", caddr);
+		return snprintf(s, maxlen, "client %s", caddr);
 	}
 	char saddr[64];
 	dialaddr_format(saddr, sizeof(saddr), &(ctx)->addr);
-	return snprintf(s, maxlen, "`%s' -> `%s'", caddr, saddr);
+	return snprintf(s, maxlen, "%s -> `%s'", caddr, saddr);
 }
 
 #define SOCKS_CTX_LOG_F(level, ctx, format, ...)                               \

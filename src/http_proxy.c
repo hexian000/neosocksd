@@ -70,10 +70,10 @@ static int format_status(
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if ((ctx)->state != STATE_CONNECT) {
-		return snprintf(s, maxlen, "client `%s'", caddr);
+		return snprintf(s, maxlen, "client %s", caddr);
 	}
 	return snprintf(
-		s, maxlen, "`%s' -> `%s'", caddr, ctx->parser.msg.req.url);
+		s, maxlen, "%s -> `%s'", caddr, ctx->parser.msg.req.url);
 }
 
 #define HTTP_CTX_LOG_F(level, ctx, format, ...)                                \

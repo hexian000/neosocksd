@@ -62,7 +62,7 @@ ASSERT_SUPER(struct session, struct forward_ctx, ss);
 		}                                                              \
 		char caddr[64];                                                \
 		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
-		LOG_F(level, "client `%s': " format, caddr, __VA_ARGS__);      \
+		LOG_F(level, "client %s: " format, caddr, __VA_ARGS__);        \
 	} while (0)
 #define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
 
