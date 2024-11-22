@@ -304,9 +304,13 @@ static int await_invoke(lua_State *restrict L)
 	size_t len;
 	const char *code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L) - 1;
-	struct dialreq *req = aux_todialreq(L, n);
+	if (!aux_todialreq(L, n)) {
+		lua_pushliteral(L, ERR_INVALID_INVOKE);
+		return lua_error(L);
+	}
+	struct dialreq *req = lua_touserdata(L, -1);
 	if (req == NULL) {
-		lua_pushliteral(L, ERR_INVALID_ROUTE);
+		lua_pushliteral(L, ERR_INVALID_INVOKE);
 		return lua_error(L);
 	}
 	struct ruleset *restrict r = aux_getruleset(L);

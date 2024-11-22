@@ -86,19 +86,23 @@ int aux_format_addr(lua_State *restrict L)
 	return 1;
 }
 
-struct dialreq *aux_todialreq(lua_State *restrict L, const int n)
+bool aux_todialreq(lua_State *restrict L, const int n)
 {
 	/* lua stack: ... addr proxyN ... proxy1 */
 	if (n < 1) {
 		lua_pushlightuserdata(L, NULL);
-		return NULL;
+		return true;
+	}
+	if (lua_isnil(L, -1)) {
+		lua_pop(L, n);
+		lua_pushlightuserdata(L, NULL);
+		return true;
 	}
 	struct dialreq *req = dialreq_new((size_t)(n - 1));
 	if (req == NULL) {
 		LOGOOM();
 		lua_pop(L, n);
-		lua_pushlightuserdata(L, NULL);
-		return NULL;
+		return false;
 	}
 	size_t len;
 	for (int i = 1; i < n; i++) {
@@ -106,32 +110,28 @@ struct dialreq *aux_todialreq(lua_State *restrict L, const int n)
 		if (s == NULL) {
 			dialreq_free(req);
 			lua_pop(L, n);
-			lua_pushlightuserdata(L, NULL);
-			return NULL;
+			return false;
 		}
 		if (!dialreq_addproxy(req, s, len)) {
 			dialreq_free(req);
 			lua_pop(L, n);
-			lua_pushlightuserdata(L, NULL);
-			return NULL;
+			return false;
 		}
 	}
 	const char *s = lua_tolstring(L, -n, &len);
 	if (s == NULL) {
 		dialreq_free(req);
 		lua_pop(L, n);
-		lua_pushlightuserdata(L, NULL);
-		return NULL;
+		return false;
 	}
 	if (!dialaddr_parse(&req->addr, s, len)) {
 		dialreq_free(req);
 		lua_pop(L, n);
-		lua_pushlightuserdata(L, NULL);
-		return NULL;
+		return false;
 	}
 	lua_pop(L, n);
 	lua_pushlightuserdata(L, req);
-	return req;
+	return true;
 }
 
 int aux_traceback(lua_State *restrict L)

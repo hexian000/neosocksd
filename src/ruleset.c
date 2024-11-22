@@ -83,7 +83,7 @@ static int ruleset_luainit(lua_State *restrict L)
 	const char *strings[] = {
 		ERR_MEMORY,
 		ERR_BAD_REGISTRY,
-		ERR_INVALID_ROUTE,
+		ERR_INVALID_INVOKE,
 		ERR_NOT_ASYNC_ROUTINE,
 	};
 	const int nstrings = (int)ARRAY_SIZE(strings);

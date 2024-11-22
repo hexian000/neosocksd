@@ -38,8 +38,7 @@ int cfunc_request(lua_State *restrict L)
 	if (n < 1) {
 		return 0;
 	}
-	struct dialreq *req = aux_todialreq(L, n);
-	if (req == NULL) {
+	if (!aux_todialreq(L, n)) {
 		LOGW_F("ruleset.%s `%s': invalid return", func, request);
 	}
 	return 1;

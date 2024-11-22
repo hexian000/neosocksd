@@ -33,7 +33,7 @@ enum ruleset_ridx {
 
 #define ERR_MEMORY "out of memory"
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
-#define ERR_INVALID_ROUTE "unable to parse route"
+#define ERR_INVALID_INVOKE "invalid invocation target"
 #define ERR_NOT_ASYNC_ROUTINE "not in asynchronous routine"
 
 struct ruleset *aux_getruleset(lua_State *L);
@@ -43,8 +43,8 @@ const char *aux_reader(lua_State *L, void *ud, size_t *sz);
 /* [-1, +1, v] */
 int aux_format_addr(lua_State *L);
 
-/* [-n, +1, -] */
-struct dialreq *aux_todialreq(lua_State *L, int n);
+/* [-n, +(0|1), -] */
+bool aux_todialreq(lua_State *L, int n);
 
 int aux_traceback(lua_State *L);
 
