@@ -32,7 +32,6 @@ static int api_invoke(lua_State *restrict L)
 {
 	size_t len;
 	const char *code = luaL_checklstring(L, 1, &len);
-	(void)luaL_checkstring(L, 2);
 	const int n = lua_gettop(L) - 1;
 	if (!aux_todialreq(L, n)) {
 		lua_pushliteral(L, ERR_INVALID_INVOKE);
