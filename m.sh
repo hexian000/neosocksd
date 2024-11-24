@@ -51,6 +51,7 @@ case "$1" in
     cmake \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" \
+        -DLINK_STATIC_LIBS=ON \
         ..
     cmake --build .
     HOST="$(cc -dumpmachine)"
