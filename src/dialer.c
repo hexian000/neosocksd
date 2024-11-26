@@ -732,7 +732,7 @@ static bool send_dispatch(struct dialer *restrict d)
 
 static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 {
-	LOGV_F("consume_rcvbuf: %zu bytes", n);
+	LOGVV_F("recv: consume %zu bytes", n);
 	const int fd = d->w_socket.fd;
 	const ssize_t nrecv = recv(fd, d->next, n, 0);
 	if (nrecv < 0) {
