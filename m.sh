@@ -8,6 +8,21 @@ case "$1" in
     # clean artifacts
     rm -rf build compile_commands.json
     ;;
+"doc")
+    VERSION="dev"
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        VERSION="$(git tag --points-at HEAD)"
+        if [ -z "${VERSION}" ]; then
+            VERSION="git-$(git rev-parse --short HEAD)"
+        fi
+        if ! git diff --quiet HEAD --; then
+            VERSION="${VERSION}+"
+        fi
+    fi
+    mkdir -p build
+    cp -r neosocksd.lua libruleset.lua agent.lua example build/
+    sed "s/^Version: dev$/Version: ${VERSION}/g" API.md >build/API.md
+    ;;
 "x")
     # cross compiling, environment vars need to be set
     rm -rf build && mkdir -p build && cd build
