@@ -652,7 +652,9 @@ static bool http_handle_ruleset(
 static bool api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	const struct http_message *restrict msg = &ctx->parser.msg;
-	API_CTX_LOG_F(DEBUG, ctx, "http: api `%s'", msg->req.url);
+	API_CTX_LOG_F(
+		DEBUG, ctx, "http: api `%s', content %zu bytes", msg->req.url,
+		ctx->parser.hdr.content.length);
 	struct url uri;
 	if (!url_parse(msg->req.url, &uri)) {
 		API_CTX_LOG(WARNING, ctx, "failed parsing url");
