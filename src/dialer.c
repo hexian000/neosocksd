@@ -1347,6 +1347,6 @@ int dialer_get(struct dialer *d)
 
 void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 {
-	LOGV_F("dialer: [%p] cancel", (void *)d);
+	LOGV_F("dialer %p: cancel", (void *)d);
 	dialer_stop(d, loop, false);
 }

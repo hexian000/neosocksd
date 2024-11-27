@@ -54,7 +54,7 @@ struct resolve_query {
 static void
 resolve_finish(struct resolve_query *restrict q, struct ev_loop *loop)
 {
-	LOGV_F("resolve: [%p] finished ok=%d", q, q->ok);
+	LOGV_F("resolve %p: finished ok=%d", q, q->ok);
 	if (q->done_cb.func == NULL) { /* cancelled */
 		free(q);
 		return;
@@ -344,7 +344,7 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct resolve_query *restrict q = watcher->data;
-	LOGV_F("resolve: [%p] start name=`%s' service=%s pf=%d", (void *)q,
+	LOGV_F("resolve %p: start name=`%s' service=%s pf=%d", (void *)q,
 	       q->name, q->service, q->family);
 	struct resolver *restrict r = q->resolver;
 	r->stats.num_query++;
@@ -404,7 +404,7 @@ struct resolve_query *resolve_do(
 
 void resolve_cancel(struct resolve_query *q)
 {
-	LOGV_F("resolve: [%p] cancel", q);
+	LOGV_F("resolve %p: cancel", q);
 	q->done_cb = (struct resolve_cb){
 		.func = NULL,
 		.data = NULL,

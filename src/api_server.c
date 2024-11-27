@@ -64,7 +64,8 @@ ASSERT_SUPER(struct session, struct api_ctx, ss);
 		}                                                              \
 		char caddr[64];                                                \
 		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
-		LOG_F(level, "client `%s': " format, caddr, __VA_ARGS__);      \
+		LOG_F(level, "[%d] %s: " format, (ctx)->accepted_fd, caddr,    \
+		      __VA_ARGS__);                                            \
 	} while (0)
 #define API_CTX_LOG(level, ctx, message)                                       \
 	API_CTX_LOG_F(level, ctx, "%s", message)
@@ -717,9 +718,7 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	API_CTX_LOG_F(
-		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
-		ctx->state);
+	API_CTX_LOG_F(VERBOSE, ctx, "close, state=%d", ctx->state);
 	api_ctx_stop(loop, ctx);
 
 	if (ctx->accepted_fd != -1) {

@@ -70,10 +70,11 @@ static int format_status(
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if ((ctx)->state != STATE_CONNECT) {
-		return snprintf(s, maxlen, "client %s", caddr);
+		return snprintf(s, maxlen, "[%d] %s", ctx->accepted_fd, caddr);
 	}
 	return snprintf(
-		s, maxlen, "%s -> `%s'", caddr, ctx->parser.msg.req.url);
+		s, maxlen, "[%d] %s -> `%s'", ctx->accepted_fd, caddr,
+		ctx->parser.msg.req.url);
 }
 
 #define HTTP_CTX_LOG_F(level, ctx, format, ...)                                \
@@ -130,8 +131,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	HTTP_CTX_LOG_F(
-		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
-		ctx->state);
+		VERBOSE, ctx, "close state=%d", ctx->accepted_fd, ctx->state);
 	http_ctx_stop(loop, ctx);
 
 	if (ctx->accepted_fd != -1) {
@@ -234,8 +234,8 @@ static bool req_connect(
 {
 	const char *addr_str = ctx->parser.msg.req.url;
 	HTTP_CTX_LOG_F(
-		VERBOSE, ctx, "http: CONNECT `%s' username=`%s'", addr_str,
-		username);
+		VERBOSE, ctx, "http: username=%s CONNECT `%s'", username,
+		addr_str);
 #if WITH_RULESET
 	struct ruleset *restrict r = G.ruleset;
 	if (r != NULL) {
@@ -402,8 +402,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
 	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
-		HTTP_CTX_LOG_F(
-			WARNING, ctx, "send: fd=%d %s", fd, strerror(err));
+		HTTP_CTX_LOG_F(WARNING, ctx, "send: %s", fd, strerror(err));
 		http_ctx_close(loop, ctx);
 		return;
 	}
@@ -418,9 +417,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		len = cbuf->len - ctx->parser.cpos;
 		err = socket_send(watcher->fd, buf, &len);
 		if (err != 0) {
-			HTTP_CTX_LOG_F(
-				WARNING, ctx, "send: fd=%d %s", fd,
-				strerror(err));
+			HTTP_CTX_LOG_F(WARNING, ctx, "send: %s", strerror(err));
 			http_ctx_close(loop, ctx);
 			return;
 		}

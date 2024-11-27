@@ -72,8 +72,8 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		if (LOGLEVEL(VERBOSE)) {
 			char addr_str[64];
 			format_sa(addr_str, sizeof(addr_str), &addr.sa);
-			LOG_F(VERBOSE, "accept `%s': fd=%d listener=%d",
-			      addr_str, fd, watcher->fd);
+			LOG_F(VERBOSE, "accept from listener %d: [%d] %s",
+			      watcher->fd, fd, addr_str);
 		}
 		if (is_startup_limited(s)) {
 			CLOSE_FD(fd);

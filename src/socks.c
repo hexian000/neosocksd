@@ -84,11 +84,12 @@ static int format_status(
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if ((ctx)->state != STATE_CONNECT) {
-		return snprintf(s, maxlen, "client %s", caddr);
+		return snprintf(s, maxlen, "[%d] %s", ctx->accepted_fd, caddr);
 	}
 	char saddr[64];
-	dialaddr_format(saddr, sizeof(saddr), &(ctx)->addr);
-	return snprintf(s, maxlen, "%s -> `%s'", caddr, saddr);
+	dialaddr_format(saddr, sizeof(saddr), &ctx->addr);
+	return snprintf(
+		s, maxlen, "[%d] %s -> `%s'", ctx->accepted_fd, caddr, saddr);
 }
 
 #define SOCKS_CTX_LOG_F(level, ctx, format, ...)                               \
@@ -147,9 +148,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 static void
 socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 {
-	SOCKS_CTX_LOG_F(
-		VERBOSE, ctx, "close fd=%d state=%d", ctx->accepted_fd,
-		ctx->state);
+	SOCKS_CTX_LOG_F(VERBOSE, ctx, "close, state=%d", ctx->state);
 	socks_ctx_stop(loop, ctx);
 
 	if (ctx->accepted_fd != -1) {
@@ -208,17 +207,15 @@ static bool
 send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 {
 	const int fd = ctx->accepted_fd;
-	LOG_BIN_F(VERYVERBOSE, buf, len, "send_rsp: fd=%d %zu bytes", fd, len);
+	LOG_BIN_F(VERYVERBOSE, buf, len, "[%d] send_rsp: %zu bytes", fd, len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
-		SOCKS_CTX_LOG_F(
-			WARNING, ctx, "send: fd=%d %s", fd, strerror(errno));
+		SOCKS_CTX_LOG_F(WARNING, ctx, "send: %s", strerror(errno));
 		return false;
 	}
 	if ((size_t)nsend != len) {
 		SOCKS_CTX_LOG_F(
-			WARNING, ctx, "send: fd=%d %zu < %zu", fd,
-			(size_t)nsend, len);
+			WARNING, ctx, "send: %zu < %zu", (size_t)nsend, len);
 		return false;
 	}
 	return true;
@@ -735,19 +732,18 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 1;
 		}
-		SOCKS_CTX_LOG_F(
-			WARNING, ctx, "recv: fd=%d %s", fd, strerror(err));
+		SOCKS_CTX_LOG_F(WARNING, ctx, "recv: %s", strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
 		/* connection is not established yet, we do not expect EOF here */
-		SOCKS_CTX_LOG_F(WARNING, ctx, "recv: fd=%d early EOF", fd);
+		SOCKS_CTX_LOG(WARNING, ctx, "recv: early EOF");
 		return -1;
 	}
 	ctx->rbuf.len += (size_t)nrecv;
 	LOG_BIN_F(
 		VERYVERBOSE, ctx->rbuf.data, ctx->rbuf.len,
-		"recv: fd=%d %zu bytes", fd, ctx->rbuf.len);
+		"[%d] recv: %zu bytes", fd, ctx->rbuf.len);
 	const int want = socks_dispatch(ctx);
 	if (want < 0) {
 		return want;
@@ -788,7 +784,8 @@ static struct dialreq *req_connect(struct socks_ctx *restrict ctx)
 	CHECK(len >= 0 && (size_t)len < cap);
 	const char *username = ctx->auth.username;
 	const char *password = ctx->auth.password;
-	SOCKS_CTX_LOG_F(VERBOSE, ctx, "request: `%s' `%s'", request, username);
+	SOCKS_CTX_LOG_F(
+		VERBOSE, ctx, "request: username=%s `%s'", username, request);
 	switch (addr->type) {
 	case ATYP_DOMAIN:
 		return ruleset_resolve(ruleset, request, username, password);
