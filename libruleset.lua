@@ -890,10 +890,6 @@ local ruleset = {}
 _G.secrets = _G.secrets or {}
 
 local function authenticate(addr, username, password)
-    if not config.auth_required then
-        -- authenticate is not required
-        return true
-    end
     local auth = table.get(_G, "ruleset", "authenticate")
     if auth then
         return auth(addr, username, password)
@@ -906,32 +902,28 @@ local function authenticate(addr, username, password)
     return false
 end
 
-function ruleset.resolve(addr, username, password)
-    _G.num_requests = _G.num_requests + 1
-    if not authenticate(addr, username, password) then
-        return nil
+local function with_authenticate(f)
+    if not config.auth_required then
+        -- authenticate is not required
+        return function(addr, username, password)
+            _G.num_requests = _G.num_requests + 1
+            _G.num_authorized = _G.num_authorized + 1
+            return f(addr)
+        end
     end
-    _G.num_authorized = _G.num_authorized + 1
-    return resolve_(addr)
+    return function(addr, username, password)
+        _G.num_requests = _G.num_requests + 1
+        if not authenticate(addr, username, password) then
+            return nil
+        end
+        _G.num_authorized = _G.num_authorized + 1
+        return f(addr)
+    end
 end
 
-function ruleset.route(addr, username, password)
-    _G.num_requests = _G.num_requests + 1
-    if not authenticate(addr, username, password) then
-        return nil
-    end
-    _G.num_authorized = _G.num_authorized + 1
-    return route_(addr)
-end
-
-function ruleset.route6(addr, username, password)
-    _G.num_requests = _G.num_requests + 1
-    if not authenticate(addr, username, password) then
-        return nil
-    end
-    _G.num_authorized = _G.num_authorized + 1
-    return route6_(addr)
-end
+ruleset.resolve = with_authenticate(resolve_)
+ruleset.route = with_authenticate(route_)
+ruleset.route6 = with_authenticate(route6_)
 
 function ruleset.tick(now)
     stat_requests:push(num_requests)
