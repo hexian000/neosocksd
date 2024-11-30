@@ -19,9 +19,9 @@ case "$1" in
             VERSION="${VERSION}+"
         fi
     fi
-    mkdir -p build
-    cp -r neosocksd.lua libruleset.lua agent.lua example build/
-    sed "s/^Version: dev$/Version: ${VERSION}/g" API.md >build/API.md
+    mkdir -p build/doc
+    cp -r neosocksd.lua libruleset.lua agent.lua example build/doc/
+    sed "s/^Version: dev$/Version: ${VERSION}/g" API.md >build/doc/API.md
     ;;
 "x")
     # cross compiling, environment vars need to be set
