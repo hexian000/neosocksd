@@ -132,6 +132,7 @@ local function parse_list(filename)
 end
 
 function main(args)
+    assert(args[1] and args[2] and args[3], "3 arguments required")
     local cidr = parse_cidr(args[1])
     local cidr6 = parse_cidr(args[2])
     local domain, host, regex = parse_list(args[3])
