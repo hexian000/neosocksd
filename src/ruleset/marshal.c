@@ -15,6 +15,15 @@
 
 #define luaL_addliteral(B, s) luaL_addlstring((B), ("" s), sizeof(s) - 1)
 
+#define MAX_DEPTH 200
+
+struct marshal_ctx {
+	lua_State *L;
+	int idx_visited;
+	int depth;
+	luaL_Buffer b;
+};
+
 /* [-0, +0, m] */
 static void
 marshal_string(luaL_Buffer *restrict B, lua_State *restrict L, const int idx)
@@ -144,16 +153,12 @@ marshal_number(luaL_Buffer *restrict B, lua_State *restrict L, const int idx)
 	luaL_addlstring(B, estr, bufend - estr);
 }
 
-enum {
-	IDX_VISITED = 1,
-};
-
 /* [-0, +0, m] */
-static void marshal_value(
-	luaL_Buffer *restrict B, lua_State *restrict L, const int idx,
-	const int depth)
+static void marshal_value(struct marshal_ctx *restrict ctx, const int idx)
 {
-	if (depth > 200) {
+	luaL_Buffer *restrict B = &ctx->b;
+	lua_State *restrict L = ctx->L;
+	if (ctx->depth >= MAX_DEPTH) {
 		lua_pushliteral(L, "table is too complex to marshal");
 		lua_error(L);
 		return;
@@ -195,7 +200,7 @@ static void marshal_value(
 
 	/* check visited */
 	lua_pushvalue(L, idx);
-	if (lua_rawget(L, IDX_VISITED) != LUA_TNIL) {
+	if (lua_rawget(L, ctx->idx_visited) != LUA_TNIL) {
 		lua_pushliteral(
 			L, "circular referenced table is not marshallable");
 		lua_error(L);
@@ -205,36 +210,27 @@ static void marshal_value(
 	/* mark as visited */
 	lua_pushvalue(L, idx);
 	lua_pushboolean(L, 1);
-	lua_rawset(L, IDX_VISITED);
+	lua_rawset(L, ctx->idx_visited);
 	/* marshal the table */
+	ctx->depth++;
 	luaL_addchar(B, '{');
 	/* auto index */
-	lua_Integer n = 0;
-	for (lua_Unsigned i = 1;
-	     lua_rawgeti(L, idx, (lua_Integer)i) != LUA_TNIL; i++) {
-		marshal_value(B, L, lua_absindex(L, -1), depth + 1);
-		lua_pop(L, 1);
-		luaL_addchar(B, ',');
-		n = i;
-	}
-	/* explicit index */
+	lua_Integer i = 1;
+	lua_pushnil(L);
 	while (lua_next(L, idx) != 0) {
-		if (lua_isinteger(L, -2)) {
-			const lua_Integer i = lua_tointeger(L, -2);
-			if (1 <= i && i <= n) {
-				/* already marshalled */
-				lua_pop(L, 1);
-				continue;
-			}
+		if (lua_isinteger(L, -2) && lua_tointeger(L, -2) == i) {
+			i = luaL_intop(+, i, 1);
+		} else {
+			luaL_addchar(B, '[');
+			marshal_value(ctx, lua_absindex(L, -2));
+			luaL_addliteral(B, "]=");
 		}
-		luaL_addchar(B, '[');
-		marshal_value(B, L, lua_absindex(L, -2), depth + 1);
-		luaL_addliteral(B, "]=");
-		marshal_value(B, L, lua_absindex(L, -1), depth + 1);
+		marshal_value(ctx, lua_absindex(L, -1));
 		luaL_addchar(B, ',');
 		lua_pop(L, 1);
 	}
 	luaL_addchar(B, '}');
+	ctx->depth--;
 }
 
 /* s = marshal(...) */
@@ -242,28 +238,39 @@ int api_marshal(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
 	lua_State *restrict co = lua_tothread(L, lua_upvalueindex(1));
-	lua_settop(co, 0);
-	luaL_checkstack(co, 1 + n, NULL);
-	/* visited */
-	lua_newtable(co);
-	lua_xmove(L, co, n);
+	if (co != NULL) {
+		lua_pushvalue(L, lua_upvalueindex(1));
+		lua_pushnil(L);
+		lua_replace(L, lua_upvalueindex(1));
+	} else {
+		co = lua_newthread(L);
+	}
+	const int idx_thread = lua_absindex(L, -1);
 
-	luaL_Buffer b;
-	luaL_buffinit(L, &b);
+	struct marshal_ctx ctx;
+	ctx.L = L;
+	/* visited */
+	lua_createtable(L, 0, 16);
+	ctx.idx_visited = lua_absindex(L, -1);
+	ctx.depth = 1;
+	luaL_buffinit(co, &ctx.b);
 	/* co stack: visited ... */
 	for (int i = 1; i <= n; i++) {
 		if (i > 1) {
-			luaL_addchar(&b, ',');
+			luaL_addchar(&ctx.b, ',');
 		}
-		marshal_value(&b, co, 1 + i, 0);
+		marshal_value(&ctx, i);
 	}
-	luaL_pushresult(&b);
+	luaL_pushresult(&ctx.b);
+	lua_xmove(co, L, 1);
+
+	lua_copy(L, idx_thread, lua_upvalueindex(1));
 	return 1;
 }
 
 int luaopen_marshal(lua_State *restrict L)
 {
-	(void)lua_newthread(L);
+	lua_pushnil(L);
 	lua_pushcclosure(L, api_marshal, 1);
 	return 1;
 }
