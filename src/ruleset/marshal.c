@@ -165,15 +165,14 @@ static void marshal_number(struct marshal_context *restrict m, const int idx)
 	m->vbuf = VBUF_APPEND(m->vbuf, estr, bufend - estr);
 }
 
-static void check_allocation(const struct marshal_context *restrict m)
-{
-	/* VBUF_APPEND* will always reserve 1 extra byte */
-	if (m->vbuf->len == m->vbuf->cap) {
-		lua_pushliteral(m->L, ERR_MEMORY);
-		lua_error(m->L);
-		return;
-	}
-}
+#define CHECK_ALLOCATION(m)                                                    \
+	do {                                                                   \
+		/* VBUF_APPEND* will always reserve 1 extra byte */            \
+		if (m->vbuf->len == m->vbuf->cap) {                            \
+			lua_pushliteral(m->L, ERR_MEMORY);                     \
+			lua_error(m->L);                                       \
+		}                                                              \
+	} while (0)
 
 /* [-0, +0, m] */
 static void marshal_value(struct marshal_context *restrict m, const int idx)
@@ -188,7 +187,7 @@ static void marshal_value(struct marshal_context *restrict m, const int idx)
 	switch (type) {
 	case LUA_TNIL:
 		m->vbuf = VBUF_APPENDSTR(m->vbuf, "nil");
-		check_allocation(m);
+		CHECK_ALLOCATION(m);
 		return;
 	case LUA_TBOOLEAN:
 		if (lua_toboolean(L, idx)) {
@@ -196,15 +195,15 @@ static void marshal_value(struct marshal_context *restrict m, const int idx)
 		} else {
 			m->vbuf = VBUF_APPENDSTR(m->vbuf, "false");
 		}
-		check_allocation(m);
+		CHECK_ALLOCATION(m);
 		return;
 	case LUA_TNUMBER:
 		marshal_number(m, idx);
-		check_allocation(m);
+		CHECK_ALLOCATION(m);
 		return;
 	case LUA_TSTRING:
 		marshal_string(m, idx);
-		check_allocation(m);
+		CHECK_ALLOCATION(m);
 		return;
 	case LUA_TTABLE:
 #if HAVE_LUA_WARNING
@@ -256,7 +255,7 @@ static void marshal_value(struct marshal_context *restrict m, const int idx)
 	}
 	m->vbuf = VBUF_APPENDSTR(m->vbuf, "}");
 	m->depth--;
-	check_allocation(m);
+	CHECK_ALLOCATION(m);
 }
 
 /* s = marshal(...) */
