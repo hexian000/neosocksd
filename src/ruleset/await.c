@@ -70,7 +70,7 @@ static void context_unpin(lua_State *restrict L, const void *p)
 	aux_getruleset(L)->vmstats.num_context--;
 }
 
-static int await_idle_gc(struct lua_State *restrict L)
+static int await_idle_gc(lua_State *restrict L)
 {
 	struct ruleset *restrict r = aux_getruleset(L);
 	struct ev_idle *w = lua_touserdata(L, 1);
@@ -119,7 +119,7 @@ static int await_idle(lua_State *restrict L)
 	return lua_error(L);
 }
 
-static int await_sleep_gc(struct lua_State *restrict L)
+static int await_sleep_gc(lua_State *restrict L)
 {
 	struct ruleset *restrict r = aux_getruleset(L);
 	struct ev_timer *w = lua_touserdata(L, 1);
@@ -174,7 +174,7 @@ static int await_sleep(lua_State *restrict L)
 	return lua_error(L);
 }
 
-static int await_resolve_close(struct lua_State *restrict L)
+static int await_resolve_close(lua_State *restrict L)
 {
 	struct resolve_query **ud = lua_touserdata(L, 1);
 	if (*ud != NULL) {
@@ -243,7 +243,7 @@ static int await_resolve(lua_State *restrict L)
 	return lua_error(L);
 }
 
-static int await_invoke_close(struct lua_State *restrict L)
+static int await_invoke_close(lua_State *restrict L)
 {
 	struct api_client_ctx **ud = lua_touserdata(L, 1);
 	if (*ud != NULL) {

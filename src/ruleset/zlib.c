@@ -26,7 +26,7 @@ struct stream_context {
 	unsigned char buf[IO_BUFSIZE];
 };
 
-static int stream_context_close(struct lua_State *L)
+static int stream_context_close(lua_State *L)
 {
 	struct stream_context *restrict s = lua_touserdata(L, 1);
 	if (s->r != NULL) {
