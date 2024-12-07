@@ -179,7 +179,6 @@ static void marshal_table(struct marshal_context *restrict m, const int idx)
 		lua_error(L);
 		return;
 	}
-	lua_pop(L, 1);
 	/* mark as visited */
 	lua_pushvalue(L, idx);
 	lua_pushboolean(L, 1);
@@ -189,7 +188,6 @@ static void marshal_table(struct marshal_context *restrict m, const int idx)
 	m->vbuf = VBUF_APPENDSTR(m->vbuf, "{");
 	/* auto index */
 	lua_Integer i = 1;
-	lua_pushnil(L);
 	while (lua_next(L, idx) != 0) {
 		if (lua_isinteger(L, -2) && lua_tointeger(L, -2) == i) {
 			i = luaL_intop(+, i, 1);
@@ -302,6 +300,7 @@ int api_marshal(lua_State *restrict L)
 		marshal_value(m, i);
 	}
 	lua_pushlstring(L, (const char *)m->vbuf->data, m->vbuf->len);
+	m->vbuf = VBUF_FREE(m->vbuf);
 	return 1;
 }
 

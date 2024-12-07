@@ -146,7 +146,7 @@ static int api_splithostport(lua_State *restrict L)
 static int api_config(lua_State *restrict L)
 {
 	const struct config *restrict conf = G.conf;
-	lua_createtable(L, 0, 16);
+	lua_createtable(L, 0, 8);
 
 	lua_pushinteger(L, (lua_Integer)conf->log_level);
 	lua_setfield(L, -2, "loglevel");
@@ -176,7 +176,7 @@ static int api_stats(lua_State *restrict L)
 	}
 	struct ruleset *restrict r = aux_getruleset(L);
 	const struct server_stats *restrict stats = &s->stats;
-	lua_createtable(L, 0, 16);
+	lua_createtable(L, 0, 6);
 
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	lua_setfield(L, -2, "lasterror");
