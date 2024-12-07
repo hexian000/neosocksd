@@ -3,11 +3,12 @@
 
 #include "marshal.h"
 
-#include "lauxlib.h"
-#include "lua.h"
+#include "utils/buffer.h"
 
 #include "ruleset/base.h"
-#include "utils/buffer.h"
+
+#include "lauxlib.h"
+#include "lua.h"
 
 #include <ctype.h>
 #include <stddef.h>
@@ -15,10 +16,9 @@
 #include <tgmath.h>
 
 #define HAVE_LUA_WARNING (LUA_VERSION_NUM >= 504)
+#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
 
 #define MT_MARSHAL_CONTEXT "marshal_context"
-
-#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
 
 #define MAX_DEPTH 200
 
@@ -34,6 +34,16 @@ static int marshal_context_close(lua_State *L)
 	struct marshal_context *restrict m = lua_touserdata(L, 1);
 	m->vbuf = VBUF_FREE(m->vbuf);
 	return 0;
+}
+
+static void check_allocation(const struct marshal_context *restrict m)
+{
+	/* VBUF_APPEND* will always reserve 1 extra byte */
+	if (m->vbuf->len == m->vbuf->cap) {
+		lua_pushliteral(m->L, ERR_MEMORY);
+		lua_error(m->L);
+		return;
+	}
 }
 
 /* [-0, +0, m] */
@@ -63,6 +73,7 @@ static void marshal_string(struct marshal_context *restrict m, const int idx)
 		str++;
 	}
 	m->vbuf = VBUF_APPENDSTR(m->vbuf, "\"");
+	check_allocation(m);
 }
 
 /* [-0, +0, m] */
@@ -163,6 +174,7 @@ static void marshal_number(struct marshal_context *restrict m, const int idx)
 	m->vbuf = VBUF_APPEND(m->vbuf, p, pend - p);
 	m->vbuf = VBUF_APPEND(m->vbuf, buf, s - buf);
 	m->vbuf = VBUF_APPEND(m->vbuf, estr, bufend - estr);
+	check_allocation(m);
 }
 
 /* [-0, +0, m] */
@@ -171,11 +183,6 @@ static void marshal_value(struct marshal_context *restrict m, const int idx)
 	lua_State *restrict L = m->L;
 	if (m->depth >= MAX_DEPTH) {
 		lua_pushliteral(L, "table is too complex to marshal");
-		lua_error(L);
-		return;
-	}
-	if (m->vbuf->len == m->vbuf->cap) {
-		lua_pushliteral(L, ERR_MEMORY);
 		lua_error(L);
 		return;
 	}
@@ -247,6 +254,7 @@ static void marshal_value(struct marshal_context *restrict m, const int idx)
 	}
 	m->vbuf = VBUF_APPENDSTR(m->vbuf, "}");
 	m->depth--;
+	check_allocation(m);
 }
 
 /* s = marshal(...) */
