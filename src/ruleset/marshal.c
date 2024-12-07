@@ -36,10 +36,10 @@ static int marshal_context_close(lua_State *L)
 	return 0;
 }
 
-/* [-0, +0, m] */
+/* [-0, +0, v] */
 static void marshal_value(struct marshal_context *m, int idx);
 
-/* [-0, +0, m] */
+/* [-0, +0, -] */
 static void marshal_string(struct marshal_context *restrict m, const int idx)
 {
 	lua_State *restrict L = m->L;
@@ -68,7 +68,7 @@ static void marshal_string(struct marshal_context *restrict m, const int idx)
 	m->vbuf = VBUF_APPENDSTR(m->vbuf, "\"");
 }
 
-/* [-0, +0, m] */
+/* [-0, +0, -] */
 static void marshal_number(struct marshal_context *restrict m, const int idx)
 {
 	lua_State *restrict L = m->L;
@@ -168,6 +168,7 @@ static void marshal_number(struct marshal_context *restrict m, const int idx)
 	m->vbuf = VBUF_APPEND(m->vbuf, estr, bufend - estr);
 }
 
+/* [-0, +0, m] */
 static void marshal_table(struct marshal_context *restrict m, const int idx)
 {
 	lua_State *restrict L = m->L;
@@ -213,7 +214,6 @@ static void marshal_table(struct marshal_context *restrict m, const int idx)
 		}                                                              \
 	} while (0)
 
-/* [-0, +0, m] */
 static void marshal_value(struct marshal_context *restrict m, const int idx)
 {
 	lua_State *restrict L = m->L;

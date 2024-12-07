@@ -32,6 +32,14 @@ struct ruleset *aux_getruleset(lua_State *restrict L)
 	return ud;
 }
 
+void aux_pushregtable(lua_State *restrict L, const int idx)
+{
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, idx) != LUA_TTABLE) {
+		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		lua_error(L);
+	}
+}
+
 const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
 {
 	UNUSED(L);
@@ -48,7 +56,7 @@ const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
 	return buf;
 }
 
-/* addr = format_addr_(sa) */
+/* addr = format_addr(sa) */
 int aux_format_addr(lua_State *restrict L)
 {
 	/* lua stack: ... sa */
@@ -64,8 +72,7 @@ int aux_format_addr(lua_State *restrict L)
 			af, &((const struct sockaddr_in *)sa)->sin_addr, buf,
 			sizeof(buf));
 		if (addr_str == NULL) {
-			lua_pushstring(L, strerror(errno));
-			return lua_error(L);
+			return luaL_error(L, "inet_ntop: %s", strerror(errno));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -75,8 +82,7 @@ int aux_format_addr(lua_State *restrict L)
 			af, &((const struct sockaddr_in6 *)sa)->sin6_addr, buf,
 			sizeof(buf));
 		if (addr_str == NULL) {
-			lua_pushstring(L, strerror(errno));
-			return lua_error(L);
+			return luaL_error(L, "inet_ntop: %s", strerror(errno));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -174,12 +180,7 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 		return;
 	}
 	/* routine is finished */
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE) !=
-	    LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		lua_error(L);
-		return;
-	}
+	aux_pushregtable(L, RIDX_ASYNC_ROUTINE);
 	lua_pushvalue(L, tidx); /* co */
 	if (lua_rawget(L, -2) == LUA_TNIL) {
 		/* no finish function */

@@ -39,12 +39,7 @@
 /* [-0, +0, m] */
 static void context_pin(lua_State *restrict L, const void *p)
 {
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
-	    LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		lua_error(L);
-		return;
-	}
+	aux_pushregtable(L, RIDX_AWAIT_CONTEXT);
 	if (lua_pushthread(L)) {
 		lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 		lua_error(L);
@@ -58,12 +53,7 @@ static void context_pin(lua_State *restrict L, const void *p)
 /* [-0, +0, -] */
 static void context_unpin(lua_State *restrict L, const void *p)
 {
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
-	    LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		lua_error(L);
-		return;
-	}
+	aux_pushregtable(L, RIDX_AWAIT_CONTEXT);
 	lua_pushnil(L);
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
@@ -285,10 +275,7 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	}
 	lua_newtable(L);
 	lua_newtable(L);
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) != LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
+	aux_pushregtable(L, LUA_RIDX_GLOBALS);
 	/* lua stack: ok chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);

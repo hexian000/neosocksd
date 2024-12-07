@@ -108,7 +108,7 @@ static int regex_match(lua_State *restrict L)
 	return push_matches(L, s, matches, nmatch);
 }
 
-static int gmatch_aux_(lua_State *restrict L)
+static int gmatch_aux(lua_State *restrict L)
 {
 	const regex_t *restrict preg = lua_touserdata(L, lua_upvalueindex(1));
 	size_t len;
@@ -140,7 +140,7 @@ static int regex_gmatch(lua_State *restrict L)
 	const lua_Integer init = luaL_optinteger(L, 3, 0);
 	lua_settop(L, 2);
 	lua_pushinteger(L, init);
-	lua_pushcclosure(L, gmatch_aux_, 3);
+	lua_pushcclosure(L, gmatch_aux, 3);
 	return 1;
 }
 

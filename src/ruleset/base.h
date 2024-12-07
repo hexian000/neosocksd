@@ -38,6 +38,9 @@ enum ruleset_ridx {
 
 struct ruleset *aux_getruleset(lua_State *L);
 
+/* [-0, +1, v] */
+void aux_pushregtable(lua_State *L, int idx);
+
 const char *aux_reader(lua_State *L, void *ud, size_t *sz);
 
 /* [-1, +1, v] */

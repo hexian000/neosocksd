@@ -72,10 +72,7 @@ int cfunc_invoke(lua_State *restrict L)
 	}
 	lua_newtable(L);
 	lua_newtable(L);
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) != LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
+	aux_pushregtable(L, LUA_RIDX_GLOBALS);
 	/* lua stack: chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
@@ -142,21 +139,14 @@ int cfunc_rpcall(lua_State *restrict L)
 	}
 	lua_newtable(L);
 	lua_newtable(L);
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) != LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
+	aux_pushregtable(L, LUA_RIDX_GLOBALS);
 	/* lua stack: state co chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
 	CHECK(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
 
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE) !=
-	    LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
+	aux_pushregtable(L, RIDX_ASYNC_ROUTINE);
 	lua_pushvalue(L, 2);
 	lua_pushvalue(L, 1);
 	lua_pushcclosure(L, rpcall_finish, 1);
@@ -184,10 +174,7 @@ static int aux_package_replace(lua_State *restrict L)
 	const int idx_loaded = 3;
 	luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
 	const int idx_glb = 4;
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS) != LUA_TTABLE) {
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
-		return lua_error(L);
-	}
+	aux_pushregtable(L, LUA_RIDX_GLOBALS);
 
 	int glb = 0;
 	/* LOADED[modname] */
