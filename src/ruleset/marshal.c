@@ -37,6 +37,9 @@ static int marshal_context_close(lua_State *L)
 }
 
 /* [-0, +0, m] */
+static void marshal_value(struct marshal_context *m, int idx);
+
+/* [-0, +0, m] */
 static void marshal_string(struct marshal_context *restrict m, const int idx)
 {
 	lua_State *restrict L = m->L;
@@ -165,6 +168,44 @@ static void marshal_number(struct marshal_context *restrict m, const int idx)
 	m->vbuf = VBUF_APPEND(m->vbuf, estr, bufend - estr);
 }
 
+static void marshal_table(struct marshal_context *restrict m, const int idx)
+{
+	lua_State *restrict L = m->L;
+	/* check visited */
+	lua_pushvalue(L, idx);
+	if (lua_rawget(L, m->idx_visited) != LUA_TNIL) {
+		lua_pushliteral(
+			L, "circular referenced table is not marshallable");
+		lua_error(L);
+		return;
+	}
+	lua_pop(L, 1);
+	/* mark as visited */
+	lua_pushvalue(L, idx);
+	lua_pushboolean(L, 1);
+	lua_rawset(L, m->idx_visited);
+	/* marshal the table */
+	m->depth++;
+	m->vbuf = VBUF_APPENDSTR(m->vbuf, "{");
+	/* auto index */
+	lua_Integer i = 1;
+	lua_pushnil(L);
+	while (lua_next(L, idx) != 0) {
+		if (lua_isinteger(L, -2) && lua_tointeger(L, -2) == i) {
+			i = luaL_intop(+, i, 1);
+		} else {
+			m->vbuf = VBUF_APPENDSTR(m->vbuf, "[");
+			marshal_value(m, lua_absindex(L, -2));
+			m->vbuf = VBUF_APPENDSTR(m->vbuf, "]=");
+		}
+		marshal_value(m, lua_absindex(L, -1));
+		m->vbuf = VBUF_APPENDSTR(m->vbuf, ",");
+		lua_pop(L, 1);
+	}
+	m->vbuf = VBUF_APPENDSTR(m->vbuf, "}");
+	m->depth--;
+}
+
 #define CHECK_ALLOCATION(m)                                                    \
 	do {                                                                   \
 		/* VBUF_APPEND* will always reserve 1 extra byte */            \
@@ -214,48 +255,11 @@ static void marshal_value(struct marshal_context *restrict m, const int idx)
 			lua_pop(L, 1);
 		}
 #endif
-		break;
-	default:
-		luaL_error(
-			L, "%s is not marshallable",
-			luaL_tolstring(L, idx, NULL));
+		marshal_table(m, idx);
+		CHECK_ALLOCATION(m);
 		return;
 	}
-
-	/* check visited */
-	lua_pushvalue(L, idx);
-	if (lua_rawget(L, m->idx_visited) != LUA_TNIL) {
-		lua_pushliteral(
-			L, "circular referenced table is not marshallable");
-		lua_error(L);
-		return;
-	}
-	lua_pop(L, 1);
-	/* mark as visited */
-	lua_pushvalue(L, idx);
-	lua_pushboolean(L, 1);
-	lua_rawset(L, m->idx_visited);
-	/* marshal the table */
-	m->depth++;
-	m->vbuf = VBUF_APPENDSTR(m->vbuf, "{");
-	/* auto index */
-	lua_Integer i = 1;
-	lua_pushnil(L);
-	while (lua_next(L, idx) != 0) {
-		if (lua_isinteger(L, -2) && lua_tointeger(L, -2) == i) {
-			i = luaL_intop(+, i, 1);
-		} else {
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, "[");
-			marshal_value(m, lua_absindex(L, -2));
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, "]=");
-		}
-		marshal_value(m, lua_absindex(L, -1));
-		m->vbuf = VBUF_APPENDSTR(m->vbuf, ",");
-		lua_pop(L, 1);
-	}
-	m->vbuf = VBUF_APPENDSTR(m->vbuf, "}");
-	m->depth--;
-	CHECK_ALLOCATION(m);
+	luaL_error(L, "%s is not marshallable", luaL_tolstring(L, idx, NULL));
 }
 
 /* s = marshal(...) */
