@@ -172,6 +172,11 @@ static void marshal_number(struct marshal_context *restrict m, const int idx)
 static void marshal_table(struct marshal_context *restrict m, const int idx)
 {
 	lua_State *restrict L = m->L;
+	if (m->depth > MAX_DEPTH) {
+		lua_pushliteral(L, "table is too complex to marshal");
+		lua_error(L);
+		return;
+	}
 	/* check visited */
 	lua_pushvalue(L, idx);
 	if (lua_rawget(L, m->idx_visited) != LUA_TNIL) {
@@ -205,45 +210,27 @@ static void marshal_table(struct marshal_context *restrict m, const int idx)
 	m->depth--;
 }
 
-#define CHECK_ALLOCATION(m)                                                    \
-	do {                                                                   \
-		/* VBUF_APPEND* will always reserve 1 extra byte */            \
-		if (m->vbuf->len == m->vbuf->cap) {                            \
-			lua_pushliteral(m->L, ERR_MEMORY);                     \
-			lua_error(m->L);                                       \
-		}                                                              \
-	} while (0)
-
 static void marshal_value(struct marshal_context *restrict m, const int idx)
 {
 	lua_State *restrict L = m->L;
-	if (m->depth >= MAX_DEPTH) {
-		lua_pushliteral(L, "table is too complex to marshal");
-		lua_error(L);
-		return;
-	}
 	const int type = lua_type(L, idx);
 	switch (type) {
 	case LUA_TNIL:
 		m->vbuf = VBUF_APPENDSTR(m->vbuf, "nil");
-		CHECK_ALLOCATION(m);
-		return;
+		break;
 	case LUA_TBOOLEAN:
 		if (lua_toboolean(L, idx)) {
 			m->vbuf = VBUF_APPENDSTR(m->vbuf, "true");
 		} else {
 			m->vbuf = VBUF_APPENDSTR(m->vbuf, "false");
 		}
-		CHECK_ALLOCATION(m);
-		return;
+		break;
 	case LUA_TNUMBER:
 		marshal_number(m, idx);
-		CHECK_ALLOCATION(m);
-		return;
+		break;
 	case LUA_TSTRING:
 		marshal_string(m, idx);
-		CHECK_ALLOCATION(m);
-		return;
+		break;
 	case LUA_TTABLE:
 #if HAVE_LUA_WARNING
 		if (lua_getmetatable(L, idx)) {
@@ -254,10 +241,19 @@ static void marshal_value(struct marshal_context *restrict m, const int idx)
 		}
 #endif
 		marshal_table(m, idx);
-		CHECK_ALLOCATION(m);
+		break;
+	default:
+		luaL_error(
+			L, "%s is not marshallable",
+			luaL_tolstring(L, idx, NULL));
 		return;
 	}
-	luaL_error(L, "%s is not marshallable", luaL_tolstring(L, idx, NULL));
+	/* VBUF_APPEND* will always reserve 1 extra byte */
+	if (VBUF_REMAINING(m->vbuf) == 0) {
+		lua_pushliteral(m->L, ERR_MEMORY);
+		lua_error(m->L);
+		return;
+	}
 }
 
 /* s = marshal(...) */
