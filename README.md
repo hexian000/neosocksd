@@ -59,7 +59,7 @@ sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 --max-startups 60:30:
 ./neosocksd -d -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua
 ```
 
-See `./neosocksd -h` for more details.
+See `./neosocksd --help` for more details.
 
 ### Scripting
 
@@ -127,7 +127,7 @@ See [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Re
 **Simple solution**: Download a `-static` build in the [Releases](https://github.com/hexian000/neosocksd/releases) section so no dependencies need to be installed.
 
 ```sh
-# Debian & Ubuntu
+# Debian / Ubuntu
 sudo apt install libev4 libc-ares2
 # Alpine Linux
 apk add libev c-ares
@@ -135,7 +135,7 @@ apk add libev c-ares
 opkg install libev libcares
 ```
 
-*Lua is statically linked by default.*
+*Lua is linked statically.*
 
 
 ## Building from Source
@@ -148,7 +148,7 @@ opkg install libev libcares
 | c-ares | >= 1.16.0 | no       | asynchronous name resolves |
 
 ```sh
-# Debian & Ubuntu
+# Debian / Ubuntu
 sudo apt install libev-dev liblua5.4-dev libc-ares-dev
 # Alpine Linux
 apk add libev-dev lua5.4-dev c-ares-dev
