@@ -931,16 +931,6 @@ end
 
 function ruleset.stats(dt)
     local w = list:new()
-    local clock = os.clock()
-    if clock > 0.0 then
-        local last_clock = _G.last_clock
-        if last_clock and clock >= last_clock then
-            w:insertf("%-20s: %.03f %%", "Server Load", (clock - last_clock) / dt * 100.0)
-        else
-            w:insertf("%-20s: (unknown)", "Server Load")
-        end
-        _G.last_clock = clock
-    end
     w:insert("> Recent Events")
     for i = 1, 10 do
         local entry = recent_events:get(i)

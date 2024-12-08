@@ -193,7 +193,18 @@ static int api_stats(lua_State *restrict L)
 	return 1;
 }
 
-#if HAVE_CLOCK_GETTIME
+/* neosocksd.monotonic_time() */
+static int api_monotonic_time(lua_State *restrict L)
+{
+	struct timespec t;
+	if (clock_gettime(CLOCK_MONOTONIC, &t)) {
+		lua_pushinteger(L, -1);
+		return 1;
+	}
+	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
+	return 1;
+}
+
 /* neosocksd.clock() */
 static int api_clock(lua_State *restrict L)
 {
@@ -205,7 +216,6 @@ static int api_clock(lua_State *restrict L)
 	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
 	return 1;
 }
-#endif /* HAVE_CLOCK_GETTIME */
 
 /* neosocksd.now() */
 static int api_now(lua_State *restrict L)
@@ -227,9 +237,8 @@ int luaopen_neosocksd(lua_State *restrict L)
 		{ "config", api_config },
 		{ "invoke", api_invoke },
 		{ "now", api_now },
-#if HAVE_CLOCK_GETTIME
+		{ "monotonic_time", api_monotonic_time },
 		{ "clock", api_clock },
-#endif
 		{ "parse_ipv4", api_parse_ipv4 },
 		{ "parse_ipv6", api_parse_ipv6 },
 		{ "resolve", api_resolve },
