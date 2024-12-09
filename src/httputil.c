@@ -97,7 +97,7 @@ struct stream *content_writer(
 	struct vbuffer **restrict pvbuf, const size_t bufsize,
 	const enum content_encodings encoding)
 {
-	*pvbuf = VBUF_RESERVE(*pvbuf, bufsize);
+	*pvbuf = VBUF_RESIZE(*pvbuf, bufsize);
 	*pvbuf = VBUF_RESET(*pvbuf);
 	switch (encoding) {
 	case CENCODING_NONE:

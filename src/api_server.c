@@ -6,6 +6,7 @@
 #include "conf.h"
 #include "dialer.h"
 #include "httputil.h"
+#include "io/io.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
@@ -298,7 +299,8 @@ static bool http_handle_stats(
 		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
 			CENCODING_DEFLATE :
 			CENCODING_NONE;
-	struct stream *w = content_writer(&ctx->parser.cbuf, 0, encoding);
+	struct stream *w =
+		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, encoding);
 	if (w == NULL) {
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return false;

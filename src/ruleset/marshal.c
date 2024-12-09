@@ -29,7 +29,7 @@ struct marshal_context {
 	int depth;
 };
 
-static int marshal_context_close(lua_State *L)
+static int marshal_context_close(lua_State *restrict L)
 {
 	struct marshal_context *restrict m = lua_touserdata(L, 1);
 	m->vbuf = VBUF_FREE(m->vbuf);
@@ -295,7 +295,7 @@ int api_marshal(lua_State *restrict L)
 		}
 		marshal_value(m, i);
 	}
-	lua_pushlstring(L, (const char *)m->vbuf->data, m->vbuf->len);
+	lua_pushlstring(L, VBUF_DATA(m->vbuf), VBUF_LEN(m->vbuf));
 	m->vbuf = VBUF_FREE(m->vbuf);
 	return 1;
 }

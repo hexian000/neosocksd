@@ -26,7 +26,7 @@ struct stream_context {
 	unsigned char buf[IO_BUFSIZE];
 };
 
-static int stream_context_close(lua_State *L)
+static int stream_context_close(lua_State *restrict L)
 {
 	struct stream_context *restrict s = lua_touserdata(L, 1);
 	if (s->r != NULL) {
@@ -76,10 +76,10 @@ static int zlib_compress(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	s->out = NULL;
+	s->out = VBUF_NEW(IO_BUFSIZE);
 	s->r = io_memreader(src, len);
 	s->w = codec_zlib_writer(io_heapwriter(&s->out));
-	if (s->r == NULL || s->w == NULL) {
+	if (s->out == NULL || s->r == NULL || s->w == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
@@ -87,12 +87,8 @@ static int zlib_compress(lua_State *restrict L)
 	if (err != 0) {
 		return luaL_error(L, "compress error: %d", err);
 	}
-	if (s->out == NULL) {
-		lua_pushlstring(L, NULL, 0);
-		return 1;
-	}
-	const char *dst = (char *)s->out->data;
-	lua_pushlstring(L, dst, s->out->len);
+	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
+	s->out = VBUF_FREE(s->out);
 	return 1;
 }
 
@@ -115,10 +111,10 @@ static int zlib_uncompress(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	s->out = NULL;
+	s->out = VBUF_NEW(IO_BUFSIZE);
 	s->r = codec_zlib_reader(io_memreader(src, len));
 	s->w = io_heapwriter(&s->out);
-	if (s->r == NULL || s->w == NULL) {
+	if (s->out == NULL || s->r == NULL || s->w == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
@@ -126,12 +122,8 @@ static int zlib_uncompress(lua_State *restrict L)
 	if (err != 0) {
 		return luaL_error(L, "uncompress error: %d", err);
 	}
-	if (s->out == NULL) {
-		lua_pushlstring(L, NULL, 0);
-		return 1;
-	}
-	const char *dst = (char *)s->out->data;
-	lua_pushlstring(L, dst, s->out->len);
+	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
+	s->out = VBUF_FREE(s->out);
 	return 1;
 }
 
