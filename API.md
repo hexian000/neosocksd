@@ -44,16 +44,12 @@ Version: dev
 
 ### /healthy
 
-Check server liveness.
-
 - **Method**: Any
 - **Status**: HTTP 200
 
+Check server liveness.
+
 ### /stats
-
-GET: Get the stateless server statistics.
-
-POST: Calculate server statistics since the last request.
 
 - **Method**: GET, POST
 - **Query**:
@@ -63,30 +59,28 @@ POST: Calculate server statistics since the last request.
 - **Status**: HTTP 200
 - **Response**: Server statistics in `text/plain`.
 
-### /ruleset/invoke
+GET: Get the stateless server statistics.
 
-Run the POSTed script.
+POST: Calculate server statistics since the last request.
+
+### /ruleset/invoke
 
 - **Method**: POST
 - **Content**: Lua script
 - **Status**: HTTP 200, HTTP 500
 
-### /ruleset/rpcall
+Run the POSTed script.
 
-Internal API reserved for [await.invoke](#awaitinvoke).
+### /ruleset/rpcall
 
 - **Method**: POST
 - **Content**: `application/x-neosocksd-rpc`
 - **Status**: HTTP 200, HTTP 500
 - **Response**: Invocation results.
 
+Internal API reserved for [await.invoke](#awaitinvoke).
+
 ### /ruleset/update
-
-Load the posted script and use it as follows:
-
-1. If module name is not specified, replace the ruleset.
-2. If module name is specified, replace the named Lua module.
-3. If the field `_G.name` refers to the named module, update it.
 
 - **Method**: POST
 - **Query**:
@@ -95,13 +89,19 @@ Load the posted script and use it as follows:
 - **Content**: Lua ruleset script or Lua module script
 - **Status**: HTTP 200, HTTP 500
 
-### /ruleset/gc
+Load the posted script and use it as follows:
 
-Trigger the garbage collector to free some memory.
+1. If module name is not specified, replace the ruleset.
+2. If module name is specified, replace the named Lua module.
+3. If the field `_G.name` refers to the named module, update it.
+
+### /ruleset/gc
 
 - **Method**: POST
 - **Content**: None
 - **Status**: HTTP 200
+
+Trigger the garbage collector to free some memory.
 
 
 ## Ruleset Callbacks
