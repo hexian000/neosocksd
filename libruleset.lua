@@ -20,11 +20,6 @@ local function format_timestamp(t)
 end
 _G.format_timestamp = format_timestamp
 
--- avoid clock_t wrapping
-if neosocksd.clock and neosocksd.clock() ~= -1 then
-    os.clock = neosocksd.clock
-end
-
 function package.replace(modname, chunk)
     local module = chunk(modname)
     local loaded = package.loaded[modname]
