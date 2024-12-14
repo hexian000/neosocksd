@@ -25,7 +25,6 @@
 
 #include <math.h>
 #include <stddef.h>
-#include <time.h>
 
 /* neosocksd.invoke(code, addr, proxyN, ..., proxy1) */
 static int api_invoke(lua_State *restrict L)
@@ -193,30 +192,6 @@ static int api_stats(lua_State *restrict L)
 	return 1;
 }
 
-/* neosocksd.monotonic_time() */
-static int api_monotonic_time(lua_State *restrict L)
-{
-	struct timespec t;
-	if (clock_gettime(CLOCK_MONOTONIC, &t)) {
-		lua_pushinteger(L, -1);
-		return 1;
-	}
-	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
-	return 1;
-}
-
-/* neosocksd.clock() */
-static int api_clock(lua_State *restrict L)
-{
-	struct timespec t;
-	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t)) {
-		lua_pushinteger(L, -1);
-		return 1;
-	}
-	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
-	return 1;
-}
-
 /* neosocksd.now() */
 static int api_now(lua_State *restrict L)
 {
@@ -237,8 +212,6 @@ int luaopen_neosocksd(lua_State *restrict L)
 		{ "config", api_config },
 		{ "invoke", api_invoke },
 		{ "now", api_now },
-		{ "monotonic_time", api_monotonic_time },
-		{ "clock", api_clock },
 		{ "parse_ipv4", api_parse_ipv4 },
 		{ "parse_ipv6", api_parse_ipv6 },
 		{ "resolve", api_resolve },

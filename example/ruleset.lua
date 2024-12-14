@@ -117,6 +117,34 @@ _G.route6 = {
 -- in {action, optional log tag}
 _G.route_default = { rule.proxy("socks5://user:pass@gateway.lan:1080"), "wan" }
 
+_G.request_time = rlist:check(_G.request_time) or rlist:new(1000)
+local function with_measure(f)
+    return function(...)
+        return (function(cost, ...)
+            request_time:push(cost)
+            return ...
+        end)(time.measure(f, ...))
+    end
+end
+
+ruleset.resolve = with_measure(libruleset.resolve)
+ruleset.route = with_measure(libruleset.route)
+ruleset.route6 = with_measure(libruleset.route6)
+
+local function measure_stats()
+    local t = list:new()
+    for _, v in request_time:iter() do
+        t:insert(v)
+    end
+    t:sort()
+    local n = #t
+    if n < 1 then return 0, 0, 0, 0 end
+    local i50 = math.floor(n * 0.50 + 0.5)
+    local i90 = math.floor(n * 0.90 + 0.5)
+    local i99 = math.floor(n * 0.99 + 0.5)
+    return t[i50] * 1e+3, t[i90] * 1e+3, t[i99] * 1e+3, t[n] * 1e+3
+end
+
 function ruleset.stats(dt, q)
     local w = list:new()
     if is_disabled and is_disabled() then
@@ -124,6 +152,7 @@ function ruleset.stats(dt, q)
     else
         w:insertf("%-20s: %s", "Status", "running")
     end
+    w:insertf("%-20s: P50=%.3fms P90=%.3fms P99=%.3fms MAX=%.3fms", "Request Time", measure_stats())
     w:insert(libruleset.stats(dt))
     w:insert(agent.stats(dt))
     w:insert("")

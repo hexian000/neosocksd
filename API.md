@@ -388,6 +388,24 @@ end
 Lua interface for [POSIX Extended Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html#tag_09_04).
 
 
+### time.\*
+
+**Synopsis**
+
+```Lua
+local t0 = time.monotonic() -- CLOCK_MONOTONIC
+local t1 = time.process()   -- CLOCK_PROCESS_CPUTIME_ID
+local t2 = time.thread()    -- CLOCK_THREAD_CPUTIME_ID
+local t3 = time.wall()      -- CLOCK_REALTIME
+-- measure function time with monotonic clock
+local t, ... = time.measure(f, ...)
+```
+
+**Description**
+
+Lua interface for POSIX `clock_gettime()`.
+
+
 ### zlib.compress
 
 **Synopsis**

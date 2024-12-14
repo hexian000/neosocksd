@@ -73,6 +73,21 @@ end
 _G.regex = regex
 
 
+local time = {}
+
+function time.monotonic() return -1 end
+
+function time.process() return -1 end
+
+function time.thread() return -1 end
+
+function time.wall() return -1 end
+
+function time.measure(f, ...) return -1, f(...) end
+
+_G.time = time
+
+
 local zlib = {}
 
 function zlib.compress(s) return "" end

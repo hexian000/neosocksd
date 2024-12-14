@@ -6,7 +6,6 @@
 #include "conf.h"
 #include "dialer.h"
 #include "httputil.h"
-#include "io/io.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
@@ -14,6 +13,7 @@
 #include "sockutil.h"
 #include "util.h"
 
+#include "io/io.h"
 #include "io/stream.h"
 #include "net/http.h"
 #include "net/mime.h"
