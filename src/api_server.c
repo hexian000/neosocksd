@@ -273,15 +273,14 @@ static bool http_handle_stats(
 		}
 		if (strcmp(comp.key, "nobanner") == 0) {
 			nobanner = parse_bool(comp.value);
+		} else if (strcmp(comp.key, "server") == 0) {
+			server = parse_bool(comp.value);
 		}
 #if WITH_RULESET
 		else if (strcmp(comp.key, "q") == 0) {
 			query = comp.value;
 		}
 #endif
-		else if (strcmp(comp.key, "server") == 0) {
-			server = parse_bool(comp.value);
-		}
 	}
 
 	const struct http_message *restrict msg = &ctx->parser.msg;
@@ -528,8 +527,8 @@ static bool handle_ruleset_invoke(
 		return false;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	const ev_tstamp end = ev_time();
 	char timecost[16];
 	(void)format_duration(
@@ -566,8 +565,8 @@ static bool handle_ruleset_update(
 		return false;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	const ev_tstamp end = ev_time();
 	char timecost[16];
 	(void)format_duration(

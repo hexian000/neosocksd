@@ -2,74 +2,103 @@
 
 Version: dev
 
-## Index
-
 - [RESTful API](#restful-api)
+  - [/healthy](#healthy)
+  - [/stats](#stats)
+  - [/ruleset/invoke](#rulesetinvoke)
+  - [/ruleset/rpcall](#rulesetrpcall)
+  - [/ruleset/update](#rulesetupdate)
+  - [/ruleset/gc](#rulesetgc)
 - [Ruleset Callbacks](#ruleset-callbacks)
+  - [ruleset.resolve](#rulesetresolve)
+  - [ruleset.route](#rulesetroute)
+  - [ruleset.route6](#rulesetroute6)
+  - [ruleset.tick](#rulesettick)
+  - [ruleset.stats](#rulesetstats)
 - [Lua API](#lua-api)
+  - [neosocksd.config](#neosocksdconfig)
+  - [neosocksd.resolve](#neosocksdresolve)
+  - [neosocksd.splithostport](#neosocksdsplithostport)
+  - [neosocksd.parse\_ipv4](#neosocksdparse_ipv4)
+  - [neosocksd.parse\_ipv6](#neosocksdparse_ipv6)
+  - [neosocksd.setinterval](#neosocksdsetinterval)
+  - [neosocksd.invoke](#neosocksdinvoke)
+  - [neosocksd.stats](#neosocksdstats)
+  - [neosocksd.now](#neosocksdnow)
+  - [neosocksd.traceback](#neosocksdtraceback)
+  - [regex.compile](#regexcompile)
+  - [time.\*](#time)
+  - [zlib.compress](#zlibcompress)
+  - [\_G.marshal](#_gmarshal)
+  - [\_G.async](#_gasync)
+  - [await.resolve](#awaitresolve)
+  - [await.invoke](#awaitinvoke)
+  - [await.sleep](#awaitsleep)
+  - [await.idle](#awaitidle)
+
 
 ## RESTful API
 
 1. The RESTful API server runs `HTTP/1.1`.
 2. The content length limit for a single request is 4 MiB.
 
-### Healthy Check
+### /healthy
 
 Check server liveness.
 
-- **Path**: `/healthy`
 - **Method**: Any
 - **Status**: HTTP 200
 
-### Server Statistics
+### /stats
 
 GET: Get the stateless server statistics.
 
 POST: Calculate server statistics since the last request.
 
-- **Path**: `/stats`
 - **Method**: GET, POST
+- **Query**:
+  - `nobanner`: omit the banner, default to 0.
+  - `server`: show server statistics, default to 1.
+  - `q`: argument for [ruleset.stats](#rulesetstats).
 - **Status**: HTTP 200
-- **Response**: Server statistics in plain text.
+- **Response**: Server statistics in `text/plain`.
 
-### Ruleset Invoke
+### /ruleset/invoke
 
-Run the posted script.
+Run the POSTed script.
 
-- **Path**: `/ruleset/invoke`
 - **Method**: POST
 - **Content**: Lua script
 - **Status**: HTTP 200, HTTP 500
 
-### Ruleset RPCall
+### /ruleset/rpcall
 
 Internal API reserved for [await.invoke](#awaitinvoke).
 
-- **Path**: `/ruleset/rpcall`
 - **Method**: POST
 - **Content**: `application/x-neosocksd-rpc`
 - **Status**: HTTP 200, HTTP 500
 - **Response**: Invocation results.
 
-### Ruleset Update
+### /ruleset/update
 
 Load the posted script and use it as follows:
 
 1. If module name is not specified, replace the ruleset.
 2. If module name is specified, replace the named Lua module.
-3. If the field `_G.name` refers to the named module, it will be updated too.
+3. If the field `_G.name` refers to the named module, update it.
 
-- **Path**: `/ruleset/update`
-- **Query**: `?module=name&chunkname=%40name.lua` (optional)
 - **Method**: POST
+- **Query**:
+  - `module`: replace a loaded Lua module, like `libruleset`.
+  - `chunkname`: chunk name for stack traceback, like `%40libruleset.lua`.
 - **Content**: Lua ruleset script or Lua module script
 - **Status**: HTTP 200, HTTP 500
 
-### Ruleset GC
+### /ruleset/gc
 
 Trigger the garbage collector to free some memory.
 
-- **Path**: `/ruleset/gc`
 - **Method**: POST
 - **Content**: None
 - **Status**: HTTP 200
@@ -197,7 +226,7 @@ end
 
 **Description**
 
-Generate custom information to be provided in the API `/stats`. See also [stats](#server-statistics).
+Generate custom information to be provided in the API `/stats`. See also [stats](#stats).
 
 **Params**
 
@@ -403,7 +432,7 @@ local t, ... = time.measure(f, ...)
 
 **Description**
 
-Lua interface for POSIX `clock_gettime()`.
+Lua interface for POSIX function [clock_gettime()](https://pubs.opengroup.org/onlinepubs/9699919799/functions/clock_gettime.html).
 
 
 ### zlib.compress
