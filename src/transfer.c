@@ -29,7 +29,7 @@
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		LOG_F(level, "%d -> %d: " format, t->src_fd, t->dst_fd,        \
+		LOG_F(level, "%d -> %d: " format, (t)->src_fd, (t)->dst_fd,    \
 		      __VA_ARGS__);                                            \
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
