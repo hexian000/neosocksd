@@ -98,7 +98,6 @@ struct stream *content_writer(
 	const enum content_encodings encoding)
 {
 	*pvbuf = VBUF_RESIZE(*pvbuf, bufsize);
-	*pvbuf = VBUF_RESET(*pvbuf);
 	switch (encoding) {
 	case CENCODING_NONE:
 		return io_heapwriter(pvbuf);
