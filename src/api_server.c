@@ -103,6 +103,37 @@ bool check_rpcall_mime(char *s)
 	}
 	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
 }
+
+static void append_memstats(struct buffer *restrict buf, struct ruleset *r)
+{
+	if (r == NULL) {
+		return;
+	}
+	struct ruleset_vmstats vmstats;
+	ruleset_vmstats(r, &vmstats);
+	char allocated[16];
+	(void)format_iec_bytes(
+		allocated, sizeof(allocated), (double)vmstats.byt_allocated);
+	char objects[16];
+	(void)format_si_prefix(
+		objects, sizeof(objects), (double)vmstats.num_object);
+
+	const size_t memlimit = G.conf->memlimit << 20u;
+	if (memlimit != 0) {
+		char memlimit_str[16];
+		(void)format_iec_bytes(
+			memlimit_str, sizeof(memlimit_str), (double)memlimit);
+		BUF_APPENDF(
+			*buf, "%-20s: %s ≤ %s (%s objects)\n",
+			"Ruleset Allocated", allocated, memlimit_str, objects);
+	} else {
+		BUF_APPENDF(
+			*buf, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
+			allocated, objects);
+	}
+	BUF_APPENDF(
+		*buf, "%-20s: %zu\n", "Async Contexts", vmstats.num_context);
+}
 #endif
 
 static void server_stats(
@@ -148,22 +179,7 @@ static void server_stats(
 		xfer_down);
 
 #if WITH_RULESET
-	if (G.ruleset != NULL) {
-		struct ruleset_vmstats vmstats;
-		ruleset_vmstats(G.ruleset, &vmstats);
-		char allocated[16];
-		(void)format_iec_bytes(
-			allocated, sizeof(allocated),
-			(double)vmstats.byt_allocated);
-		char objects[16];
-		(void)format_si_prefix(
-			objects, sizeof(objects), (double)vmstats.num_object);
-		BUF_APPENDF(
-			*buf,
-			"Ruleset Allocated   : %s (%s objects)\n"
-			"Async Contexts      : %zu\n",
-			allocated, objects, vmstats.num_context);
-	}
+	append_memstats(buf, G.ruleset);
 #endif
 }
 
@@ -608,13 +624,8 @@ static bool handle_ruleset_gc(
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	BUF_APPENDF(
-		ctx->parser.wbuf,
-		"Ruleset Allocated   : %s\n"
-		"Num Live Objects    : %s\n"
-		"Async Contexts      : %zu\n"
-		"Time Cost           : %s\n",
-		allocated, objects, vmstats.num_context, timecost);
+	append_memstats((struct buffer *)&ctx->parser.wbuf, G.ruleset);
+	BUF_APPENDF(ctx->parser.wbuf, "%-20s: %s\n", "Time Cost", timecost);
 	return true;
 }
 
