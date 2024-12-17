@@ -124,7 +124,7 @@ static void append_memstats(struct buffer *restrict buf, struct ruleset *r)
 		(void)format_iec_bytes(
 			memlimit_str, sizeof(memlimit_str), (double)memlimit);
 		BUF_APPENDF(
-			*buf, "%-20s: %s ≤ %s (%s objects)\n",
+			*buf, "%-20s: %s < %s (%s objects)\n",
 			"Ruleset Allocated", allocated, memlimit_str, objects);
 	} else {
 		BUF_APPENDF(
@@ -625,7 +625,7 @@ static bool handle_ruleset_gc(
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	append_memstats((struct buffer *)&ctx->parser.wbuf, G.ruleset);
-	BUF_APPENDF(ctx->parser.wbuf, "%-20s: %s\n", "Time Cost", timecost);
+	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	return true;
 }
 
