@@ -111,21 +111,17 @@ static void append_memstats(struct buffer *restrict buf, struct ruleset *r)
 	}
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(r, &vmstats);
-	char allocated[16];
-	(void)format_iec_bytes(
-		allocated, sizeof(allocated), (double)vmstats.byt_allocated);
+	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
 	char objects[16];
 	(void)format_si_prefix(
 		objects, sizeof(objects), (double)vmstats.num_object);
 
-	const size_t memlimit = G.conf->memlimit << 20u;
-	if (memlimit != 0) {
-		char memlimit_str[16];
-		(void)format_iec_bytes(
-			memlimit_str, sizeof(memlimit_str), (double)memlimit);
+	const size_t memlimit_mb = G.conf->memlimit;
+	if (memlimit_mb > 0) {
+		FORMAT_BYTES(memlimit, (double)(memlimit_mb << 20u));
 		BUF_APPENDF(
 			*buf, "%-20s: %s < %s (%s objects)\n",
-			"Ruleset Allocated", allocated, memlimit_str, objects);
+			"Ruleset Allocated", allocated, memlimit, objects);
 	} else {
 		BUF_APPENDF(
 			*buf, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
@@ -263,7 +259,6 @@ static void server_stats_stateful(
 	last.num_request = stats->num_request;
 	last.num_api_request = apistats->num_request;
 }
-#undef FORMAT_BYTES
 
 static bool parse_bool(const char *s)
 {
@@ -610,9 +605,7 @@ static bool handle_ruleset_gc(
 	}
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
-	char allocated[16];
-	(void)format_iec_bytes(
-		allocated, sizeof(allocated), (double)vmstats.byt_allocated);
+	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
 	char objects[16];
 	(void)format_si_prefix(
 		objects, sizeof(objects), (double)vmstats.num_object);
