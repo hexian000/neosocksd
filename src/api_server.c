@@ -128,7 +128,7 @@ static void append_memstats(struct buffer *restrict buf, struct ruleset *r)
 			allocated, objects);
 	}
 	BUF_APPENDF(
-		*buf, "%-20s: %zu\n", "Async Contexts", vmstats.num_context);
+		*buf, "%-20s: %zu\n", "Async Routines", vmstats.num_context);
 }
 #endif
 
