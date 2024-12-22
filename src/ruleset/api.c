@@ -169,26 +169,32 @@ static int api_config(lua_State *restrict L)
 /* neosocksd.stats() */
 static int api_stats(lua_State *restrict L)
 {
-	struct server *restrict s = G.server;
-	if (s == NULL) {
-		return 0;
-	}
 	struct ruleset *restrict r = aux_getruleset(L);
-	const struct server_stats *restrict stats = &s->stats;
-	lua_createtable(L, 0, 6);
+	struct server_stats stats = { 0 };
+	{
+		const struct server *restrict s = G.server;
+		if (s != NULL) {
+			stats = s->stats;
+		}
+	}
+	lua_createtable(L, 0, 8);
 
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	lua_setfield(L, -2, "lasterror");
-	lua_pushinteger(L, (lua_Integer)stats->num_halfopen);
+	lua_pushinteger(L, (lua_Integer)stats.num_halfopen);
 	lua_setfield(L, -2, "num_halfopen");
-	lua_pushinteger(L, (lua_Integer)stats->num_sessions);
+	lua_pushinteger(L, (lua_Integer)stats.num_sessions);
 	lua_setfield(L, -2, "num_sessions");
-	lua_pushinteger(L, (lua_Integer)stats->byt_up);
+	lua_pushinteger(L, (lua_Integer)stats.byt_up);
 	lua_setfield(L, -2, "byt_up");
-	lua_pushinteger(L, (lua_Integer)stats->byt_down);
+	lua_pushinteger(L, (lua_Integer)stats.byt_down);
 	lua_setfield(L, -2, "byt_down");
-	lua_pushnumber(L, (lua_Number)(ev_now(r->loop) - stats->started));
+	lua_pushnumber(L, (lua_Number)(ev_now(r->loop) - stats.started));
 	lua_setfield(L, -2, "uptime");
+	lua_pushinteger(L, (lua_Integer)r->vmstats.num_context);
+	lua_setfield(L, -2, "num_context");
+	lua_pushinteger(L, (lua_Integer)r->vmstats.num_object);
+	lua_setfield(L, -2, "num_object");
 	return 1;
 }
 

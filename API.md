@@ -252,7 +252,7 @@ end
 
 **Description**
 
-Return a table about server configurations.
+Returns a table of server configurations.
 
 
 ### neosocksd.resolve
@@ -361,7 +361,7 @@ local t = neosocksd.stats()
 
 **Description**
 
-Return a table of raw statistics.
+Return a table of raw statistics. If called during the initial loading phase, unavailable data will be set to zero.
 
 
 ### neosocksd.now

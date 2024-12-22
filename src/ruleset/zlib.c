@@ -67,10 +67,10 @@ static int zlib_compress(lua_State *restrict L)
 	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
 		lua_pushcfunction(L, stream_context_close);
 #if HAVE_LUA_TOCLOSE
-		lua_pushvalue(L, -1);
-		lua_setfield(L, -3, "__close");
-#endif
+		lua_setfield(L, -2, "__close");
+#else
 		lua_setfield(L, -2, "__gc");
+#endif
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
@@ -102,10 +102,10 @@ static int zlib_uncompress(lua_State *restrict L)
 	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
 		lua_pushcfunction(L, stream_context_close);
 #if HAVE_LUA_TOCLOSE
-		lua_pushvalue(L, -1);
-		lua_setfield(L, -3, "__close");
-#endif
+		lua_setfield(L, -2, "__close");
+#else
 		lua_setfield(L, -2, "__gc");
+#endif
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
