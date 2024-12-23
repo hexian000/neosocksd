@@ -75,6 +75,10 @@ ASSERT_SUPER(struct session, struct api_ctx, ss);
 	char name[16];                                                         \
 	(void)format_iec_bytes(name, sizeof(name), (value))
 
+#define FORMAT_SI(name, value)                                                 \
+	char name[16];                                                         \
+	(void)format_si_prefix(name, sizeof(name), (value))
+
 #if WITH_RULESET
 bool check_rpcall_mime(char *s)
 {
@@ -104,17 +108,11 @@ bool check_rpcall_mime(char *s)
 	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
 }
 
-static void append_memstats(struct buffer *restrict buf, struct ruleset *r)
+static void
+append_memstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 {
-	if (r == NULL) {
-		return;
-	}
-	struct ruleset_vmstats vmstats;
-	ruleset_vmstats(r, &vmstats);
-	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
-	char objects[16];
-	(void)format_si_prefix(
-		objects, sizeof(objects), (double)vmstats.num_object);
+	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
+	FORMAT_SI(objects, (double)vm->num_object);
 
 	const size_t memlimit_mb = G.conf->memlimit;
 	if (memlimit_mb > 0) {
@@ -127,8 +125,7 @@ static void append_memstats(struct buffer *restrict buf, struct ruleset *r)
 			*buf, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
 			allocated, objects);
 	}
-	BUF_APPENDF(
-		*buf, "%-20s: %zu\n", "Async Routines", vmstats.num_context);
+	BUF_APPENDF(*buf, "%-20s: %zu\n", "Async Routines", vm->num_context);
 }
 #endif
 
@@ -175,7 +172,12 @@ static void server_stats(
 		xfer_down);
 
 #if WITH_RULESET
-	append_memstats(buf, G.ruleset);
+	const struct ruleset *r = G.ruleset;
+	if (r != NULL) {
+		struct ruleset_vmstats vmstats;
+		ruleset_vmstats(r, &vmstats);
+		append_memstats(buf, &vmstats);
+	}
 #endif
 }
 
@@ -438,7 +440,7 @@ static void rpcall_return(void *data, const char *result, size_t resultlen)
 }
 
 static bool
-handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
+handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *r)
 {
 	char *mime_type = ctx->parser.hdr.content.type;
 	if (!check_rpcall_mime(mime_type)) {
@@ -458,7 +460,7 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 	}
 	ctx->state = STATE_YIELD;
 	struct rpcall_state *rpcstate = ruleset_rpcall(
-		ruleset, reader,
+		r, reader,
 		(struct rpcall_cb){
 			.func = rpcall_return,
 			.data = ctx,
@@ -468,7 +470,7 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 		/* no callback */
 		ctx->state = STATE_RESPONSE;
 		size_t len;
-		const char *err = ruleset_geterror(ruleset, &len);
+		const char *err = ruleset_geterror(r, &len);
 		LOGW_F("ruleset rpcall: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
@@ -486,8 +488,7 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *ruleset)
 }
 
 static bool handle_ruleset_invoke(
-	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct ruleset *ruleset)
+	struct ev_loop *loop, struct api_ctx *restrict ctx, struct ruleset *r)
 {
 	const ev_tstamp start = ev_now(loop);
 	struct stream *reader = content_reader(
@@ -498,12 +499,12 @@ static bool handle_ruleset_invoke(
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return false;
 	}
-	const bool ok = ruleset_invoke(ruleset, reader);
+	const bool ok = ruleset_invoke(r, reader);
 	stream_close(reader);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_geterror(ruleset, &len);
+		const char *err = ruleset_geterror(r, &len);
 		LOGW_F("ruleset invoke: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
@@ -524,8 +525,8 @@ static bool handle_ruleset_invoke(
 }
 
 static bool handle_ruleset_update(
-	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct ruleset *ruleset, const char *module, const char *chunkname)
+	struct ev_loop *loop, struct api_ctx *restrict ctx, struct ruleset *r,
+	const char *module, const char *chunkname)
 {
 	const ev_tstamp start = ev_now(loop);
 	struct stream *reader = content_reader(
@@ -536,12 +537,12 @@ static bool handle_ruleset_update(
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return false;
 	}
-	const bool ok = ruleset_update(ruleset, module, reader, chunkname);
+	const bool ok = ruleset_update(r, module, reader, chunkname);
 	stream_close(reader);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_geterror(ruleset, &len);
+		const char *err = ruleset_geterror(r, &len);
 		LOGW_F("ruleset update: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
@@ -562,14 +563,15 @@ static bool handle_ruleset_update(
 }
 
 static bool handle_ruleset_gc(
-	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct ruleset *ruleset)
+	struct ev_loop *loop, struct api_ctx *restrict ctx, struct ruleset *r)
 {
 	const ev_tstamp start = ev_now(loop);
-	const bool ok = ruleset_gc(ruleset);
+	struct ruleset_vmstats before;
+	ruleset_vmstats(r, &before);
+	const bool ok = ruleset_gc(r);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_geterror(ruleset, &len);
+		const char *err = ruleset_geterror(r, &len);
 		LOGW_F("ruleset gc: %s", err);
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
 		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
@@ -579,11 +581,9 @@ static bool handle_ruleset_gc(
 		return false;
 	}
 	struct ruleset_vmstats vmstats;
-	ruleset_vmstats(ruleset, &vmstats);
+	ruleset_vmstats(r, &vmstats);
 	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
-	char objects[16];
-	(void)format_si_prefix(
-		objects, sizeof(objects), (double)vmstats.num_object);
+	FORMAT_SI(objects, (double)vmstats.num_object);
 	const ev_tstamp end = ev_time();
 	char timecost[16];
 	(void)format_duration(
@@ -592,7 +592,17 @@ static bool handle_ruleset_gc(
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	append_memstats((struct buffer *)&ctx->parser.wbuf, G.ruleset);
+
+	FORMAT_BYTES(
+		freed_bytes,
+		(double)((intmax_t)vmstats.byt_allocated - (intmax_t)before.byt_allocated));
+	FORMAT_SI(
+		freed_objects,
+		(double)((intmax_t)vmstats.num_object - (intmax_t)before.num_object));
+	BUF_APPENDF(
+		ctx->parser.wbuf, "%-20s: %s (%s objects)\n", "Difference",
+		freed_bytes, freed_objects);
+	append_memstats((struct buffer *)&ctx->parser.wbuf, &vmstats);
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	return true;
 }
