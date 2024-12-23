@@ -163,8 +163,8 @@ int cfunc_rpcall(lua_State *restrict L)
 
 #define LUA_LOADED_TABLE "_LOADED"
 
-/* replace(modname, chunk) */
-static int aux_package_replace(lua_State *restrict L)
+/* m = replace(modname, chunk) */
+static int package_replace(lua_State *restrict L)
 {
 	const int idx_modname = 1;
 	luaL_checktype(L, idx_modname, LUA_TSTRING);
@@ -214,29 +214,29 @@ int cfunc_update(lua_State *restrict L)
 	const char *chunkname = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
-	lua_pushstring(L, modname);
-	if (chunkname == NULL) {
-		const char *name = (modname != NULL) ? modname : "ruleset";
-		const size_t namelen = strlen(name);
-		char luaname[1 + namelen + 1];
-		luaname[0] = '=';
-		memcpy(luaname + 1, name, namelen);
-		luaname[1 + namelen] = '\0';
-		if (lua_load(L, aux_reader, stream, luaname, NULL)) {
-			return lua_error(L);
-		}
+	if (modname != NULL) {
+		modname = lua_pushstring(L, modname);
 	} else {
-		if (lua_load(L, aux_reader, stream, chunkname, NULL)) {
-			return lua_error(L);
-		}
+		modname = lua_pushliteral(L, "ruleset");
 	}
-	if (modname == NULL) {
-		lua_pushliteral(L, "ruleset");
+	if (chunkname != NULL) {
+		chunkname = lua_pushstring(L, chunkname);
+	} else {
+		chunkname = lua_pushfstring(L, "=%s", modname);
+	}
+	if (lua_load(L, aux_reader, stream, chunkname, NULL)) {
+		return lua_error(L);
+	}
+	if (strcmp(modname, "ruleset") == 0) {
+		lua_pushvalue(L, 1);
 		lua_call(L, 1, 1);
-		lua_setglobal(L, "ruleset");
+		lua_setglobal(L, modname);
 		return 0;
 	}
-	(void)aux_package_replace(L);
+	lua_pushcfunction(L, package_replace);
+	lua_pushstring(L, modname);
+	lua_pushvalue(L, -3);
+	lua_call(L, 2, 1);
 	return 0;
 }
 

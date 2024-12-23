@@ -79,6 +79,10 @@ ASSERT_SUPER(struct session, struct api_ctx, ss);
 	char name[16];                                                         \
 	(void)format_si_prefix(name, sizeof(name), (value))
 
+#define FORMAT_DURATION(name, value)                                           \
+	char name[16];                                                         \
+	(void)format_duration(name, sizeof(name), (value))
+
 #if WITH_RULESET
 bool check_rpcall_mime(char *s)
 {
@@ -145,10 +149,7 @@ static void server_stats(
 	(void)strftime(
 		timestamp, sizeof(timestamp), "%FT%T%z",
 		localtime(&server_time));
-	char str_uptime[16];
-	(void)format_duration(
-		str_uptime, sizeof(str_uptime), make_duration(uptime));
-
+	FORMAT_DURATION(str_uptime, make_duration(uptime));
 	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
 	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
 
@@ -517,9 +518,7 @@ static bool handle_ruleset_invoke(
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	const ev_tstamp end = ev_time();
-	char timecost[16];
-	(void)format_duration(
-		timecost, sizeof(timecost), make_duration(end - start));
+	FORMAT_DURATION(timecost, make_duration(end - start));
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	return true;
 }
@@ -555,9 +554,7 @@ static bool handle_ruleset_update(
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	const ev_tstamp end = ev_time();
-	char timecost[16];
-	(void)format_duration(
-		timecost, sizeof(timecost), make_duration(end - start));
+	FORMAT_DURATION(timecost, make_duration(end - start));
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	return true;
 }
@@ -585,9 +582,7 @@ static bool handle_ruleset_gc(
 	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
 	FORMAT_SI(objects, (double)vmstats.num_object);
 	const ev_tstamp end = ev_time();
-	char timecost[16];
-	(void)format_duration(
-		timecost, sizeof(timecost), make_duration(end - start));
+	FORMAT_DURATION(timecost, make_duration(end - start));
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
