@@ -179,36 +179,6 @@ static void server_stats(
 #endif
 }
 
-static const char *
-format_load(char *buf, const size_t bufsize, const char *fail)
-{
-	static struct {
-		double monotime, cputime;
-	} last = { .monotime = TSTAMP_NIL, .cputime = TSTAMP_NIL };
-
-	const char *load_str = fail;
-	double monotime, cputime;
-	struct timespec t;
-	if (clock_gettime(CLOCK_MONOTONIC, &t)) {
-		return load_str;
-	}
-	monotime = t.tv_sec + t.tv_nsec * 1e-9;
-	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t)) {
-		return load_str;
-	}
-	cputime = t.tv_sec + t.tv_nsec * 1e-9;
-	if (last.monotime != TSTAMP_NIL && last.cputime != TSTAMP_NIL) {
-		const double busy = cputime - last.cputime;
-		const double total = monotime - last.monotime;
-		const double load = busy / total * 100.0;
-		(void)snprintf(buf, bufsize, "%.03f%%", load);
-		load_str = buf;
-	}
-	last.monotime = monotime;
-	last.cputime = cputime;
-	return load_str;
-}
-
 static void server_stats_stateful(
 	struct buffer *restrict buf, const struct server *restrict api,
 	const double dt)
@@ -240,7 +210,13 @@ static void server_stats_stateful(
 	const double api_request_rate =
 		(double)(apistats->num_request - last.num_api_request) / dt;
 
-	char load_buf[16];
+	char load_str[16] = "(unknown)";
+	const double load = thread_load();
+	if (load >= 0) {
+		(void)snprintf(
+			load_str, sizeof(load_str), "%.01f%%", load * 100);
+	}
+
 	BUF_APPENDF(
 		*buf,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
@@ -249,8 +225,7 @@ static void server_stats_stateful(
 		"Bandwidth           : Up %s/s, Down %s/s\n"
 		"Server Load         : %s\n",
 		accept_rate, reject_rate, request_rate, api_request_rate,
-		xfer_rate_up, xfer_rate_down,
-		format_load(load_buf, sizeof(load_buf), "(unknown)"));
+		xfer_rate_up, xfer_rate_down, load_str);
 
 	last.xfer_up = stats->byt_up;
 	last.xfer_down = stats->byt_down;
