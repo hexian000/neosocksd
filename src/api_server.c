@@ -218,7 +218,7 @@ static void server_stats_stateful(
 	const double load = thread_load();
 	if (load >= 0) {
 		(void)snprintf(
-			load_str, sizeof(load_str), "%.01f%%", load * 100);
+			load_str, sizeof(load_str), "%.03f%%", load * 100);
 	}
 
 	BUF_APPENDF(
