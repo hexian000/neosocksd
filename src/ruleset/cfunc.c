@@ -205,13 +205,13 @@ static int package_replace(lua_State *restrict L)
 	return 1;
 }
 
-/* update(modname, codestream, chunkname) */
+/* update(modname, chunkname, codestream) */
 int cfunc_update(lua_State *restrict L)
 {
 	ASSERT(lua_gettop(L) == 3);
 	const char *modname = lua_touserdata(L, 1);
-	void *stream = lua_touserdata(L, 2);
-	const char *chunkname = lua_touserdata(L, 3);
+	const char *chunkname = lua_touserdata(L, 2);
+	void *stream = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
 	if (modname != NULL) {
@@ -227,6 +227,7 @@ int cfunc_update(lua_State *restrict L)
 	if (lua_load(L, aux_reader, stream, chunkname, NULL)) {
 		return lua_error(L);
 	}
+	/* lua stack: modname chunkname chunk */
 	if (strcmp(modname, "ruleset") == 0) {
 		lua_pushvalue(L, 1);
 		lua_call(L, 1, 1);
@@ -234,8 +235,8 @@ int cfunc_update(lua_State *restrict L)
 		return 0;
 	}
 	lua_pushcfunction(L, package_replace);
-	lua_pushstring(L, modname);
-	lua_pushvalue(L, -3);
+	lua_pushvalue(L, 1);
+	lua_pushvalue(L, 3);
 	lua_call(L, 2, 0);
 	return 0;
 }

@@ -223,10 +223,10 @@ void ruleset_rpcall_cancel(struct rpcall_state *state)
 }
 
 bool ruleset_update(
-	struct ruleset *r, const char *modname, struct stream *code,
-	const char *chunkname)
+	struct ruleset *r, const char *modname, const char *chunkname,
+	struct stream *code)
 {
-	return ruleset_pcall(r, cfunc_update, 3, 0, modname, code, chunkname);
+	return ruleset_pcall(r, cfunc_update, 3, 0, modname, chunkname, code);
 }
 
 bool ruleset_loadfile(struct ruleset *r, const char *filename)

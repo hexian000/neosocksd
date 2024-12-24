@@ -537,7 +537,7 @@ static bool handle_ruleset_update(
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		return false;
 	}
-	const bool ok = ruleset_update(r, module, reader, chunkname);
+	const bool ok = ruleset_update(r, module, chunkname, reader);
 	stream_close(reader);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
