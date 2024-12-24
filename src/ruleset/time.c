@@ -1,7 +1,7 @@
 /* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "api.h"
+#include "time.h"
 
 #include "lauxlib.h"
 #include "lua.h"

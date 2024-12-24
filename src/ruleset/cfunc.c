@@ -3,11 +3,11 @@
 
 #include "cfunc.h"
 
+#include "io/stream.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
 #include "ruleset/base.h"
-#include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -236,7 +236,7 @@ int cfunc_update(lua_State *restrict L)
 	lua_pushcfunction(L, package_replace);
 	lua_pushstring(L, modname);
 	lua_pushvalue(L, -3);
-	lua_call(L, 2, 1);
+	lua_call(L, 2, 0);
 	return 0;
 }
 

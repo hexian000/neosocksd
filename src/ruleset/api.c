@@ -4,7 +4,6 @@
 #include "api.h"
 
 #include "net/addr.h"
-#include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/serialize.h"
 
@@ -22,6 +21,8 @@
 #include <ev.h>
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 #include <math.h>
 #include <stddef.h>
