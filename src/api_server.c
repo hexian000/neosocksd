@@ -119,9 +119,9 @@ append_memstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
 	FORMAT_SI(objects, (double)vm->num_object);
 
-	const size_t memlimit_mb = G.conf->memlimit;
+	const int memlimit_mb = G.conf->memlimit;
 	if (memlimit_mb > 0) {
-		FORMAT_BYTES(memlimit, (double)(memlimit_mb << 20u));
+		FORMAT_BYTES(memlimit, ((double)memlimit_mb) * 0x1p20);
 		BUF_APPENDF(
 			*buf, "%-20s: %s < %s (%s objects)\n",
 			"Ruleset Allocated", allocated, memlimit, objects);

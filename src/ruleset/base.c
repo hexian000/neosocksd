@@ -209,10 +209,13 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 	}
 }
 
-static inline void check_memlimit(struct ruleset *restrict r)
+static void check_memlimit(struct ruleset *restrict r)
 {
-	const size_t memlimit = G.conf->memlimit;
-	if (memlimit == 0 || (r->vmstats.byt_allocated >> 20u) < memlimit) {
+	const int memlimit_mb = G.conf->memlimit;
+	if (memlimit_mb <= 0) {
+		return;
+	}
+	if (r->vmstats.byt_allocated < ((size_t)memlimit_mb << 20u)) {
 		return;
 	}
 	(void)lua_gc(r->L, LUA_GCCOLLECT, 0);

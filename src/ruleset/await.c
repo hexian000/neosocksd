@@ -215,12 +215,12 @@ static int await_resolve(lua_State *restrict L)
 		lua_newuserdata(L, sizeof(struct resolve_query *));
 	*ud = q;
 	if (luaL_newmetatable(L, MT_AWAIT_RESOLVE)) {
-		lua_pushcfunction(L, await_resolve_close);
 #if HAVE_LUA_TOCLOSE
+		lua_pushcfunction(L, await_resolve_close);
 		lua_setfield(L, -2, "__close");
-#else
-		lua_setfield(L, -2, "__gc");
 #endif
+		lua_pushcfunction(L, await_resolve_close);
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
@@ -317,12 +317,12 @@ static int await_invoke(lua_State *restrict L)
 		lua_newuserdata(L, sizeof(struct api_client_ctx *));
 	*ud = apictx;
 	if (luaL_newmetatable(L, MT_AWAIT_INVOKE)) {
-		lua_pushcfunction(L, await_invoke_close);
 #if HAVE_LUA_TOCLOSE
+		lua_pushcfunction(L, await_invoke_close);
 		lua_setfield(L, -2, "__close");
-#else
-		lua_setfield(L, -2, "__gc");
 #endif
+		lua_pushcfunction(L, await_invoke_close);
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE

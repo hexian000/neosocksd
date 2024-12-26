@@ -36,28 +36,30 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 	struct ruleset *restrict r = ud;
 	if (nsize == 0) {
 		/* free */
-		if (ptr != NULL) {
-			free(ptr);
-			r->vmstats.byt_allocated -= osize;
-			r->vmstats.num_object--;
+		if (ptr == NULL) {
+			return NULL;
 		}
+		free(ptr);
+		r->vmstats.byt_allocated -= osize;
+		r->vmstats.num_object--;
 		return NULL;
 	}
 	if (ptr == NULL) {
 		/* malloc */
 		void *ret = malloc(nsize);
-		if (ret != NULL) {
-			r->vmstats.num_object++;
-			r->vmstats.byt_allocated += nsize;
+		if (ret == NULL) {
+			return NULL;
 		}
+		r->vmstats.num_object++;
+		r->vmstats.byt_allocated += nsize;
 		return ret;
 	}
 	/* realloc */
 	void *ret = realloc(ptr, nsize);
-	if (ret != NULL) {
-		r->vmstats.byt_allocated =
-			r->vmstats.byt_allocated - osize + nsize;
+	if (ret == NULL) {
+		return NULL;
 	}
+	r->vmstats.byt_allocated = r->vmstats.byt_allocated - osize + nsize;
 	return ret;
 }
 

@@ -89,7 +89,7 @@ static void print_usage(const char *argv0)
 #if WITH_RULESET
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --traceback                print ruleset error traceback (for debugging)\n"
-		"  --memlimit <limit>         set a soft limit on the Lua heap size in MiB\n"
+		"  --memlimit <size>          set a soft limit on the total Lua object size in MiB\n"
 #endif
 		"  --api <bind_address>       RESTful API listen address\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
@@ -244,13 +244,14 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		}
 		if (strcmp(argv[i], "--memlimit") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			++i;
-			char *endptr;
-			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
-			if (*endptr || value > INT_MAX) {
+			char *s = argv[++i];
+			intmax_t soft = strtoimax(s, &s, 10);
+			if (soft > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
+			} else if (soft < 0) {
+				soft = 0;
 			}
-			conf->memlimit = (int)value;
+			conf->memlimit = (int)soft;
 			continue;
 		}
 #endif

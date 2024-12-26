@@ -267,12 +267,12 @@ int api_marshal(lua_State *restrict L)
 	struct marshal_context *restrict m =
 		lua_newuserdata(L, sizeof(struct marshal_context));
 	if (luaL_newmetatable(L, MT_MARSHAL_CONTEXT)) {
-		lua_pushcfunction(L, marshal_context_close);
 #if HAVE_LUA_TOCLOSE
+		lua_pushcfunction(L, marshal_context_close);
 		lua_setfield(L, -2, "__close");
-#else
-		lua_setfield(L, -2, "__gc");
 #endif
+		lua_pushcfunction(L, marshal_context_close);
+		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
 #if HAVE_LUA_TOCLOSE
