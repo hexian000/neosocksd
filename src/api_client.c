@@ -302,6 +302,7 @@ static struct api_client_ctx *api_client_do(
 		return NULL;
 	}
 	ctx->state = STATE_CLIENT_CONNECT;
+	ctx->dialreq = req;
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, on_header);
 	if (!make_request(&ctx->parser, uri, payload, len)) {
@@ -312,7 +313,6 @@ static struct api_client_ctx *api_client_do(
 	ctx->cb = client_cb;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
-	ctx->dialreq = req;
 	const struct event_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,
