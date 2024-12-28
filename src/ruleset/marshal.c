@@ -4,6 +4,7 @@
 #include "marshal.h"
 
 #include "utils/buffer.h"
+#include "utils/debug.h"
 
 #include "ruleset/base.h"
 
@@ -18,39 +19,27 @@
 #define HAVE_LUA_WARNING (LUA_VERSION_NUM >= 504)
 #define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
 
-#define MT_MARSHAL_CONTEXT "marshal_context"
+#define MT_MARSHAL_BUFFER "marshal_buffer"
 
-#define MAX_DEPTH 200
-
-struct marshal_context {
-	struct vbuffer *vbuf;
-	lua_State *L;
-	int idx_visited;
-	int depth;
-};
-
-static int marshal_context_close(lua_State *restrict L)
+static int marshal_buffer_gc(lua_State *restrict L)
 {
-	struct marshal_context *restrict m = lua_touserdata(L, 1);
-	m->vbuf = VBUF_FREE(m->vbuf);
+	struct vbuffer **pvbuf = lua_touserdata(L, 1);
+	*pvbuf = VBUF_FREE(*pvbuf);
 	return 0;
 }
 
-/* [-0, +0, v] */
-static void marshal_value(struct marshal_context *m, int idx);
-
 /* [-0, +0, -] */
-static void marshal_string(struct marshal_context *restrict m, const int idx)
+static void marshal_string(lua_State *L, struct vbuffer **pvbuf)
 {
-	lua_State *restrict L = m->L;
+	const int idx = 1;
 	size_t len;
 	const char *restrict str = lua_tolstring(L, idx, &len);
-	m->vbuf = VBUF_APPENDSTR(m->vbuf, "\"");
+	*pvbuf = VBUF_APPENDSTR(*pvbuf, "\"");
 	while (len--) {
 		const unsigned char ch = *str;
 		if (ch == '"' || ch == '\\' || ch == '\n') {
 			char buf[2] = { '\\', ch };
-			m->vbuf = VBUF_APPEND(m->vbuf, buf, sizeof(buf));
+			*pvbuf = VBUF_APPEND(*pvbuf, buf, sizeof(buf));
 		} else if (iscntrl(ch)) {
 			char buf[4];
 			char *s = &buf[sizeof(buf)];
@@ -59,19 +48,19 @@ static void marshal_string(struct marshal_context *restrict m, const int idx)
 			*--s = '0' + x % 10, x /= 10;
 			*--s = '0' + x % 10;
 			*--s = '\\';
-			m->vbuf = VBUF_APPEND(m->vbuf, buf, sizeof(buf));
+			*pvbuf = VBUF_APPEND(*pvbuf, buf, sizeof(buf));
 		} else {
-			m->vbuf = VBUF_APPEND(m->vbuf, &ch, sizeof(ch));
+			*pvbuf = VBUF_APPEND(*pvbuf, &ch, sizeof(ch));
 		}
 		str++;
 	}
-	m->vbuf = VBUF_APPENDSTR(m->vbuf, "\"");
+	*pvbuf = VBUF_APPENDSTR(*pvbuf, "\"");
 }
 
 /* [-0, +0, -] */
-static void marshal_number(struct marshal_context *restrict m, const int idx)
+static void marshal_number(lua_State *L, struct vbuffer **pvbuf)
 {
-	lua_State *restrict L = m->L;
+	const int idx = 1;
 	static const char prefix[3] = "-0x";
 	static const char xdigits[16] = "0123456789abcdef";
 	char buf[120];
@@ -80,7 +69,7 @@ static void marshal_number(struct marshal_context *restrict m, const int idx)
 		char *const bufend = &buf[sizeof(buf)];
 		char *s = bufend;
 		if (x == 0) {
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, "0");
+			*pvbuf = VBUF_APPENDSTR(*pvbuf, "0");
 			return;
 		}
 		const char *p = prefix;
@@ -107,23 +96,23 @@ static void marshal_number(struct marshal_context *restrict m, const int idx)
 		while (p < pend) {
 			*--s = *--pend;
 		}
-		m->vbuf = VBUF_APPEND(m->vbuf, s, bufend - s);
+		*pvbuf = VBUF_APPEND(*pvbuf, s, bufend - s);
 		return;
 	}
 	lua_Number x = lua_tonumber(L, idx);
 	switch (fpclassify(x)) {
 	case FP_NAN:
-		m->vbuf = VBUF_APPENDSTR(m->vbuf, "0/0");
+		*pvbuf = VBUF_APPENDSTR(*pvbuf, "0/0");
 		return;
 	case FP_INFINITE:
 		if (signbit(x)) {
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, "-1/0");
+			*pvbuf = VBUF_APPENDSTR(*pvbuf, "-1/0");
 			return;
 		}
-		m->vbuf = VBUF_APPENDSTR(m->vbuf, "1/0");
+		*pvbuf = VBUF_APPENDSTR(*pvbuf, "1/0");
 		return;
 	case FP_ZERO:
-		m->vbuf = VBUF_APPENDSTR(m->vbuf, "0");
+		*pvbuf = VBUF_APPENDSTR(*pvbuf, "0");
 		return;
 	default:
 		break;
@@ -163,23 +152,22 @@ static void marshal_number(struct marshal_context *restrict m, const int idx)
 		}
 	} while (x);
 
-	m->vbuf = VBUF_APPEND(m->vbuf, p, pend - p);
-	m->vbuf = VBUF_APPEND(m->vbuf, buf, s - buf);
-	m->vbuf = VBUF_APPEND(m->vbuf, estr, bufend - estr);
+	*pvbuf = VBUF_APPEND(*pvbuf, p, pend - p);
+	*pvbuf = VBUF_APPEND(*pvbuf, buf, s - buf);
+	*pvbuf = VBUF_APPEND(*pvbuf, estr, bufend - estr);
 }
 
+#define IDX_BUFFER (lua_upvalueindex(1))
+#define IDX_VISITED (lua_upvalueindex(2))
+#define IDX_MARSHAL (lua_upvalueindex(3))
+
 /* [-0, +0, m] */
-static void marshal_table(struct marshal_context *restrict m, const int idx)
+static void marshal_table(lua_State *L, struct vbuffer **pvbuf)
 {
-	lua_State *restrict L = m->L;
-	if (m->depth > MAX_DEPTH) {
-		lua_pushliteral(L, "table is too complex to marshal");
-		lua_error(L);
-		return;
-	}
+	const int idx = 1;
 	/* check visited */
 	lua_pushvalue(L, idx);
-	if (lua_rawget(L, m->idx_visited) != LUA_TNIL) {
+	if (lua_rawget(L, IDX_VISITED) != LUA_TNIL) {
 		lua_pushliteral(
 			L, "circular referenced table is not marshallable");
 		lua_error(L);
@@ -188,48 +176,52 @@ static void marshal_table(struct marshal_context *restrict m, const int idx)
 	/* mark as visited */
 	lua_pushvalue(L, idx);
 	lua_pushboolean(L, 1);
-	lua_rawset(L, m->idx_visited);
+	lua_rawset(L, IDX_VISITED);
 	/* marshal the table */
-	m->depth++;
-	m->vbuf = VBUF_APPENDSTR(m->vbuf, "{");
+	*pvbuf = VBUF_APPENDSTR(*pvbuf, "{");
 	/* auto index */
 	lua_Integer i = 1;
 	while (lua_next(L, idx) != 0) {
 		if (lua_isinteger(L, -2) && lua_tointeger(L, -2) == i) {
 			i = luaL_intop(+, i, 1);
 		} else {
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, "[");
-			marshal_value(m, lua_absindex(L, -2));
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, "]=");
+			*pvbuf = VBUF_APPENDSTR(*pvbuf, "[");
+			lua_pushvalue(L, IDX_MARSHAL);
+			lua_pushvalue(L, -3);
+			lua_call(L, 1, 0);
+			*pvbuf = VBUF_APPENDSTR(*pvbuf, "]=");
 		}
-		marshal_value(m, lua_absindex(L, -1));
-		m->vbuf = VBUF_APPENDSTR(m->vbuf, ",");
+		lua_pushvalue(L, IDX_MARSHAL);
+		lua_pushvalue(L, -2);
+		lua_call(L, 1, 0);
+		*pvbuf = VBUF_APPENDSTR(*pvbuf, ",");
 		lua_pop(L, 1);
 	}
-	m->vbuf = VBUF_APPENDSTR(m->vbuf, "}");
-	m->depth--;
+	*pvbuf = VBUF_APPENDSTR(*pvbuf, "}");
 }
 
-static void marshal_value(struct marshal_context *restrict m, const int idx)
+/* [-0, +0, v] */
+static int marshal_value(lua_State *L)
 {
-	lua_State *restrict L = m->L;
+	const int idx = 1;
+	struct vbuffer **pvbuf = lua_touserdata(L, IDX_BUFFER);
 	const int type = lua_type(L, idx);
 	switch (type) {
 	case LUA_TNIL:
-		m->vbuf = VBUF_APPENDSTR(m->vbuf, "nil");
+		*pvbuf = VBUF_APPENDSTR(*pvbuf, "nil");
 		break;
 	case LUA_TBOOLEAN:
 		if (lua_toboolean(L, idx)) {
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, "true");
+			*pvbuf = VBUF_APPENDSTR(*pvbuf, "true");
 		} else {
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, "false");
+			*pvbuf = VBUF_APPENDSTR(*pvbuf, "false");
 		}
 		break;
 	case LUA_TNUMBER:
-		marshal_number(m, idx);
+		marshal_number(L, pvbuf);
 		break;
 	case LUA_TSTRING:
-		marshal_string(m, idx);
+		marshal_string(L, pvbuf);
 		break;
 	case LUA_TTABLE:
 #if HAVE_LUA_WARNING
@@ -240,20 +232,19 @@ static void marshal_value(struct marshal_context *restrict m, const int idx)
 			lua_pop(L, 1);
 		}
 #endif
-		marshal_table(m, idx);
+		marshal_table(L, pvbuf);
 		break;
 	default:
-		luaL_error(
+		return luaL_error(
 			L, "%s is not marshallable",
 			luaL_tolstring(L, idx, NULL));
-		return;
 	}
 	/* VBUF_APPEND* will always reserve 1 extra byte */
-	if (VBUF_REMAINING(m->vbuf) == 0) {
-		lua_pushliteral(m->L, ERR_MEMORY);
-		lua_error(m->L);
-		return;
+	if (VBUF_REMAINING(*pvbuf) == 0) {
+		lua_pushliteral(L, ERR_MEMORY);
+		return lua_error(L);
 	}
+	return 0;
 }
 
 /* s = marshal(...) */
@@ -264,39 +255,35 @@ int api_marshal(lua_State *restrict L)
 		lua_pushliteral(L, "");
 		return 1;
 	}
-	struct marshal_context *restrict m =
-		lua_newuserdata(L, sizeof(struct marshal_context));
-	if (luaL_newmetatable(L, MT_MARSHAL_CONTEXT)) {
-#if HAVE_LUA_TOCLOSE
-		lua_pushcfunction(L, marshal_context_close);
-		lua_setfield(L, -2, "__close");
-#endif
-		lua_pushcfunction(L, marshal_context_close);
+	struct vbuffer **pvbuf = lua_newuserdata(L, sizeof(struct vbuffer *));
+	*pvbuf = VBUF_NEW(1024);
+	if (luaL_newmetatable(L, MT_MARSHAL_BUFFER)) {
+		lua_pushcfunction(L, marshal_buffer_gc);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-#if HAVE_LUA_TOCLOSE
-	lua_toclose(L, -1);
-#endif
-	m->vbuf = VBUF_NEW(1024);
-	if (m->vbuf == NULL) {
+	if (*pvbuf == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
-	m->L = L;
-	/* visited */
-	lua_createtable(L, 0, 16);
-	m->idx_visited = lua_absindex(L, -1);
-	m->depth = 1;
+	/* build closure */
+	/* Lua stack: ... IDX_BUFFER */
+	lua_createtable(L, 0, 16); /* IDX_VISITED */
+	lua_pushnil(L); /* IDX_MARSHAL */
+	lua_pushcclosure(L, marshal_value, 3);
+	lua_pushvalue(L, -1);
+	CHECK(lua_setupvalue(L, -2, 3) != NULL);
 	/* co stack: visited ... */
 	for (int i = 1; i <= n; i++) {
 		if (i > 1) {
-			m->vbuf = VBUF_APPENDSTR(m->vbuf, ",");
+			*pvbuf = VBUF_APPENDSTR(*pvbuf, ",");
 		}
-		marshal_value(m, i);
+		lua_pushvalue(L, -1); /* the closure */
+		lua_pushvalue(L, i);
+		lua_call(L, 1, 0);
 	}
-	lua_pushlstring(L, VBUF_DATA(m->vbuf), VBUF_LEN(m->vbuf));
-	m->vbuf = VBUF_FREE(m->vbuf);
+	lua_pushlstring(L, VBUF_DATA(*pvbuf), VBUF_LEN(*pvbuf));
+	*pvbuf = VBUF_FREE(*pvbuf);
 	return 1;
 }
 
