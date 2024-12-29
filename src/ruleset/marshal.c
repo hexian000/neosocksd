@@ -272,11 +272,14 @@ int api_marshal(lua_State *restrict L)
 	lua_pushvalue(L, -1);
 	CHECK(lua_setupvalue(L, -2, 3) != NULL);
 	/* co stack: visited ... */
-	for (int i = 1; i <= n; i++) {
-		if (i > 1) {
-			*pvbuf = VBUF_APPENDSTR(*pvbuf, ",");
-		}
+	int i = 1;
+	for (; i < n; i++) {
 		lua_pushvalue(L, -1); /* the closure */
+		lua_pushvalue(L, i);
+		lua_call(L, 1, 0);
+		*pvbuf = VBUF_APPENDSTR(*pvbuf, ",");
+	}
+	if (i == n) {
 		lua_pushvalue(L, i);
 		lua_call(L, 1, 0);
 	}
