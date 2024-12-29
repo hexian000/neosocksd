@@ -93,9 +93,7 @@ static void marshal_number(lua_State *L, struct vbuffer **pvbuf)
 				y >>= 4;
 			} while (y);
 		}
-		while (p < pend) {
-			*--s = *--pend;
-		}
+		*pvbuf = VBUF_APPEND(*pvbuf, p, pend - p);
 		*pvbuf = VBUF_APPEND(*pvbuf, s, bufend - s);
 		return;
 	}
