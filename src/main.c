@@ -354,6 +354,12 @@ int main(int argc, char **argv)
 	G.conf = conf;
 	loadlibs();
 
+	G.basereq = dialreq_parse(conf->forward, conf->proxy);
+	if (G.basereq == NULL) {
+		LOGF("unable to parse outbound configuration");
+		exit(EXIT_FAILURE);
+	}
+
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);
 
@@ -376,11 +382,6 @@ int main(int argc, char **argv)
 
 	struct server *restrict s = &app.server;
 	server_init(s, loop, NULL, NULL);
-	G.basereq = dialreq_parse(conf->forward, conf->proxy);
-	if (G.basereq == NULL) {
-		LOGF("unable to parse outbound configuration");
-		exit(EXIT_FAILURE);
-	}
 	if (conf->forward != NULL) {
 		s->serve = forward_serve;
 	}
@@ -486,6 +487,8 @@ int main(int argc, char **argv)
 		dialreq_free(G.basereq);
 		G.basereq = NULL;
 	}
+
+	session_closeall(loop);
 	ev_loop_destroy(loop);
 
 	LOGD("program terminated normally");
@@ -528,7 +531,6 @@ void signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 #if WITH_SYSTEMD
 		(void)sd_notify(0, "STOPPING=1");
 #endif
-		session_closeall(loop);
 		ev_break(loop, EVBREAK_ALL);
 		break;
 	}
