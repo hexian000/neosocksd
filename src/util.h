@@ -91,6 +91,7 @@ void pipe_shrink(size_t count);
 
 void init(int argc, char **argv);
 void loadlibs(void);
+void unloadlibs(void);
 
 struct user_ident {
 	uid_t uid;

@@ -166,27 +166,13 @@ void init(int argc, char **argv)
 	if (sigaction(SIGPIPE, &ignore, NULL) != 0) {
 		FAILMSGF("sigaction: %s", strerror(errno));
 	}
-}
-
-static void unloadlibs(void);
-
-void loadlibs(void)
-{
-	{
-		static bool loaded = false;
-		if (loaded) {
-			return;
-		}
-		loaded = true;
-
-		const int ret = atexit(unloadlibs);
-		if (ret != 0) {
-			FAILMSGF("atexit: %d", ret);
-		}
-	}
 #if WITH_CRASH_HANDLER
 	set_crash_handler();
 #endif
+}
+
+void loadlibs(void)
+{
 	srand64((uint64_t)time(NULL));
 
 	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);

@@ -490,6 +490,7 @@ int main(int argc, char **argv)
 
 	session_closeall(loop);
 	ev_loop_destroy(loop);
+	unloadlibs();
 
 	LOGD("program terminated normally");
 	return EXIT_SUCCESS;
