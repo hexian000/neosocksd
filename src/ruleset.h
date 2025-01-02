@@ -25,14 +25,15 @@ const char *ruleset_geterror(struct ruleset *r, size_t *len);
 
 bool ruleset_invoke(struct ruleset *r, struct stream *code);
 
-struct rpcall_state;
+struct ruleset_state;
+void ruleset_cancel(struct ruleset_state *state);
+
 struct rpcall_cb {
 	void (*func)(void *data, const char *result, size_t resultlen);
 	void *data;
 };
-struct rpcall_state *ruleset_rpcall(
+struct ruleset_state *ruleset_rpcall(
 	struct ruleset *r, struct stream *code, struct rpcall_cb callback);
-void ruleset_rpcall_cancel(struct rpcall_state *state);
 
 bool ruleset_update(
 	struct ruleset *r, const char *modname, const char *chunkname,

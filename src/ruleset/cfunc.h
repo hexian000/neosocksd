@@ -8,15 +8,23 @@
 
 #include "lua.h"
 
+enum ruleset_callback_type {
+	RCB_RPCALL,
+};
+
+struct ruleset_state {
+	int type;
+	union {
+		struct rpcall_cb rpcall;
+	};
+};
+
 int cfunc_request(lua_State *L);
 
 int cfunc_loadfile(lua_State *L);
 
 int cfunc_invoke(lua_State *L);
 
-struct rpcall_state {
-	struct rpcall_cb callback;
-};
 int cfunc_rpcall(lua_State *L);
 
 int cfunc_update(lua_State *L);

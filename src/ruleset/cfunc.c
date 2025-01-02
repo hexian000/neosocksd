@@ -17,6 +17,24 @@
 #include <stddef.h>
 #include <string.h>
 
+#define MT_RULESET_STATE "ruleset_state"
+
+static int ruleset_state_gc(lua_State *restrict L)
+{
+	struct ruleset_state *restrict state = lua_touserdata(L, 1);
+	switch (state->type) {
+	case RCB_RPCALL:
+		if (state->rpcall.func != NULL) {
+			state->rpcall.func(state->rpcall.data, NULL, 0);
+			state->rpcall.func = NULL;
+		}
+		break;
+	default:
+		FAIL();
+	}
+	return 0;
+}
+
 /* request(func, request, username, password) */
 int cfunc_request(lua_State *restrict L)
 {
@@ -72,7 +90,7 @@ int cfunc_invoke(lua_State *restrict L)
 	}
 	lua_newtable(L);
 	lua_newtable(L);
-	aux_pushregtable(L, LUA_RIDX_GLOBALS);
+	aux_getregtable(L, LUA_RIDX_GLOBALS);
 	/* lua stack: chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
@@ -82,22 +100,12 @@ int cfunc_invoke(lua_State *restrict L)
 	return 0;
 }
 
-static int rpcall_gc(lua_State *restrict L)
-{
-	struct rpcall_state *restrict state = lua_touserdata(L, 1);
-	if (state->callback.func != NULL) {
-		state->callback.func(state->callback.data, NULL, 0);
-		state->callback.func = NULL;
-	}
-	return 0;
-}
-
 /* finish(ok, ...) */
 static int rpcall_finish(lua_State *restrict L)
 {
-	struct rpcall_state *restrict state =
+	struct ruleset_state *restrict state =
 		lua_touserdata(L, lua_upvalueindex(1));
-	if (state->callback.func == NULL) {
+	if (state->rpcall.func == NULL) {
 		return 0;
 	}
 	const int n = lua_gettop(L);
@@ -109,12 +117,10 @@ static int rpcall_finish(lua_State *restrict L)
 	lua_concat(L, 2);
 	size_t len;
 	const char *s = lua_tolstring(L, 1, &len);
-	state->callback.func(state->callback.data, s, len);
-	state->callback.func = NULL;
+	state->rpcall.func(state->rpcall.data, s, len);
+	state->rpcall.func = NULL;
 	return 0;
 }
-
-#define MT_RPCALL "rpcall"
 
 /* rpcall(codestream, callback, data) */
 int cfunc_rpcall(lua_State *restrict L)
@@ -122,11 +128,14 @@ int cfunc_rpcall(lua_State *restrict L)
 	ASSERT(lua_gettop(L) == 2);
 	struct stream *stream = lua_touserdata(L, 1);
 	const struct rpcall_cb *in_cb = lua_touserdata(L, 2);
-	struct rpcall_state *restrict state =
-		lua_newuserdata(L, sizeof(struct rpcall_state));
-	*state = (struct rpcall_state){ .callback = { NULL, NULL } };
-	if (luaL_newmetatable(L, MT_RPCALL)) {
-		lua_pushcfunction(L, rpcall_gc);
+	struct ruleset_state *restrict state =
+		lua_newuserdata(L, sizeof(struct ruleset_state));
+	*state = (struct ruleset_state){
+		.type = RCB_RPCALL,
+		.rpcall = { NULL, NULL },
+	};
+	if (luaL_newmetatable(L, MT_RULESET_STATE)) {
+		lua_pushcfunction(L, ruleset_state_gc);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
@@ -139,14 +148,14 @@ int cfunc_rpcall(lua_State *restrict L)
 	}
 	lua_newtable(L);
 	lua_newtable(L);
-	aux_pushregtable(L, LUA_RIDX_GLOBALS);
+	aux_getregtable(L, LUA_RIDX_GLOBALS);
 	/* lua stack: state co chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
 	CHECK(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
 
-	aux_pushregtable(L, RIDX_ASYNC_ROUTINE);
+	aux_getregtable(L, RIDX_ASYNC_ROUTINE);
 	lua_pushvalue(L, 2);
 	lua_pushvalue(L, 1);
 	lua_pushcclosure(L, rpcall_finish, 1);
@@ -154,7 +163,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_rawset(L, -3);
 	lua_pop(L, 1);
 	lua_xmove(L, co, 1);
-	state->callback = *in_cb;
+	state->rpcall = *in_cb;
 	/* lua stack: state co; co stack: chunk */
 	aux_resume(L, 2, 0);
 	lua_settop(L, 1);
@@ -174,7 +183,7 @@ static int package_replace(lua_State *restrict L)
 	const int idx_loaded = 3;
 	luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
 	const int idx_glb = 4;
-	aux_pushregtable(L, LUA_RIDX_GLOBALS);
+	aux_getregtable(L, LUA_RIDX_GLOBALS);
 
 	int glb = 0;
 	/* LOADED[modname] */

@@ -52,7 +52,7 @@ struct api_ctx {
 	struct ev_timer w_timeout;
 	struct ev_io w_recv, w_send;
 #if WITH_RULESET
-	struct rpcall_state *rpcstate;
+	struct ruleset_state *rpcstate;
 #endif
 	struct dialreq *dialreq;
 	struct http_parser parser;
@@ -461,7 +461,7 @@ handle_ruleset_rpcall(struct api_ctx *restrict ctx, struct ruleset *r)
 		return false;
 	}
 	ctx->state = STATE_YIELD;
-	struct rpcall_state *rpcstate = ruleset_rpcall(
+	struct ruleset_state *rpcstate = ruleset_rpcall(
 		r, reader,
 		(struct rpcall_cb){
 			.func = rpcall_return,
@@ -718,7 +718,7 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	ev_timer_stop(loop, &ctx->w_timeout);
 #if WITH_RULESET
 	if (ctx->rpcstate != NULL) {
-		ruleset_rpcall_cancel(ctx->rpcstate);
+		ruleset_cancel(ctx->rpcstate);
 		ctx->rpcstate = NULL;
 	}
 #endif

@@ -32,7 +32,7 @@ struct ruleset *aux_getruleset(lua_State *restrict L)
 	return ud;
 }
 
-void aux_pushregtable(lua_State *restrict L, const int idx)
+void aux_getregtable(lua_State *restrict L, const int idx)
 {
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, idx) != LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
@@ -180,7 +180,7 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 		return;
 	}
 	/* routine is finished */
-	aux_pushregtable(L, RIDX_ASYNC_ROUTINE);
+	aux_getregtable(L, RIDX_ASYNC_ROUTINE);
 	lua_pushvalue(L, tidx); /* co */
 	if (lua_rawget(L, -2) == LUA_TNIL) {
 		/* no finish function */

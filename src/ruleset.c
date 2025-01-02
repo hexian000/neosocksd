@@ -209,7 +209,18 @@ bool ruleset_invoke(struct ruleset *r, struct stream *code)
 	return ruleset_pcall(r, cfunc_invoke, 1, 0, code);
 }
 
-struct rpcall_state *ruleset_rpcall(
+void ruleset_cancel(struct ruleset_state *state)
+{
+	switch (state->type) {
+	case RCB_RPCALL:
+		state->rpcall.func = NULL;
+		break;
+	default:
+		FAIL();
+	}
+}
+
+struct ruleset_state *ruleset_rpcall(
 	struct ruleset *r, struct stream *code, struct rpcall_cb callback)
 {
 	const bool ok = ruleset_pcall(r, cfunc_rpcall, 2, 1, code, &callback);
@@ -217,11 +228,6 @@ struct rpcall_state *ruleset_rpcall(
 		return NULL;
 	}
 	return lua_touserdata(r->L, -1);
-}
-
-void ruleset_rpcall_cancel(struct rpcall_state *state)
-{
-	state->callback.func = NULL;
 }
 
 bool ruleset_update(
