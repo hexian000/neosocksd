@@ -13,8 +13,6 @@
 
 #include <ev.h>
 #if WITH_CARES
-#include <sys/select.h>
-/* ^ for POSIX fd_set */
 #include <ares.h>
 #endif
 
