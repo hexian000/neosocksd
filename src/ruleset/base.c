@@ -209,10 +209,9 @@ void aux_resume(lua_State *restrict L, const int tidx, const int narg)
 	}
 }
 
-static bool ruleset_pcallkv(
+static bool ruleset_pcallv(
 	lua_State *restrict L, const lua_CFunction func, const int nargs,
-	const int nresults, const lua_KContext ctx, const lua_KFunction kfunc,
-	va_list args)
+	const int nresults, va_list args)
 {
 	int errfunc = 0;
 	if (G.conf->traceback) {
@@ -223,7 +222,7 @@ static bool ruleset_pcallkv(
 	for (int i = 0; i < nargs; i++) {
 		lua_pushlightuserdata(L, va_arg(args, void *));
 	}
-	if (lua_pcallk(L, nargs, nresults, errfunc, ctx, kfunc) != LUA_OK) {
+	if (lua_pcall(L, nargs, nresults, errfunc) != LUA_OK) {
 		lua_pushvalue(L, -1);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
@@ -252,24 +251,7 @@ bool ruleset_pcall(
 	check_memlimit(r);
 	va_list args;
 	va_start(args, nresults);
-	const bool result =
-		ruleset_pcallkv(L, func, nargs, nresults, 0, NULL, args);
-	va_end(args);
-	return result;
-}
-
-bool ruleset_pcallk(
-	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
-	const int nresults, const lua_KContext ctx, const lua_KFunction kfunc,
-	...)
-{
-	lua_State *restrict L = r->L;
-	lua_settop(L, 0);
-	check_memlimit(r);
-	va_list args;
-	va_start(args, kfunc);
-	const bool result =
-		ruleset_pcallkv(L, func, nargs, nresults, ctx, kfunc, args);
+	const bool result = ruleset_pcallv(L, func, nargs, nresults, args);
 	va_end(args);
 	return result;
 }

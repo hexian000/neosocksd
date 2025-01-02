@@ -57,9 +57,6 @@ void aux_resume(lua_State *L, int tidx, int narg);
 /* main routine */
 bool ruleset_pcall(
 	struct ruleset *r, lua_CFunction func, int nargs, int nresults, ...);
-bool ruleset_pcallk(
-	struct ruleset *r, lua_CFunction func, int nargs, int nresults,
-	lua_KContext ctx, lua_KFunction kfunc, ...);
 
 /* asynchronous routine */
 void ruleset_resume(struct ruleset *r, void *ctx, int narg, ...);
