@@ -236,7 +236,7 @@ static void check_memlimit(struct ruleset *restrict r)
 	if (memlimit_mb <= 0) {
 		return;
 	}
-	if (r->vmstats.byt_allocated < ((size_t)memlimit_mb << 20u)) {
+	if ((r->vmstats.byt_allocated >> 20u) < (size_t)memlimit_mb) {
 		return;
 	}
 	(void)lua_gc(r->L, LUA_GCCOLLECT, 0);
