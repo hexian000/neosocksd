@@ -130,7 +130,6 @@ append_memstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 			*buf, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
 			allocated, objects);
 	}
-	BUF_APPENDF(*buf, "%-20s: %zu\n", "Async Routines", vm->num_context);
 }
 #endif
 

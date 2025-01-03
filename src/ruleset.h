@@ -15,7 +15,6 @@ struct dialreq;
 struct ruleset_vmstats {
 	size_t num_object;
 	size_t byt_allocated;
-	size_t num_context;
 };
 
 struct ruleset *ruleset_new(struct ev_loop *loop);

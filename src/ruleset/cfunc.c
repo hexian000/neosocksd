@@ -3,11 +3,11 @@
 
 #include "cfunc.h"
 
+#include "base.h"
+
 #include "io/stream.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
-
-#include "ruleset/base.h"
 
 #include "lauxlib.h"
 #include "lua.h"

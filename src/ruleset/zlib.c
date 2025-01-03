@@ -3,13 +3,14 @@
 
 #include "zlib.h"
 
+#include "base.h"
+
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "utils/buffer.h"
 
 #include "codec.h"
-#include "ruleset/base.h"
 
 #include "lauxlib.h"
 #include "lua.h"

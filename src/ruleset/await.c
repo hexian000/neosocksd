@@ -3,13 +3,14 @@
 
 #include "await.h"
 
+#include "base.h"
+
 #include "utils/debug.h"
 #include "utils/minmax.h"
 
 #include "api_client.h"
 #include "conf.h"
 #include "resolver.h"
-#include "ruleset/base.h"
 #include "util.h"
 
 #include "lauxlib.h"
@@ -47,7 +48,6 @@ static void context_pin(lua_State *restrict L, const void *p)
 	}
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
-	aux_getruleset(L)->vmstats.num_context++;
 }
 
 /* [-0, +0, -] */
@@ -57,7 +57,6 @@ static void context_unpin(lua_State *restrict L, const void *p)
 	lua_pushnil(L);
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
-	aux_getruleset(L)->vmstats.num_context--;
 }
 
 static int await_idle_gc(lua_State *restrict L)

@@ -3,6 +3,8 @@
 
 #include "api.h"
 
+#include "base.h"
+
 #include "net/addr.h"
 #include "utils/minmax.h"
 #include "utils/serialize.h"
@@ -10,7 +12,6 @@
 #include "api_client.h"
 #include "conf.h"
 #include "proto/domain.h"
-#include "ruleset/base.h"
 #include "server.h"
 #include "sockutil.h"
 #include "util.h"
@@ -192,8 +193,6 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "byt_down");
 	lua_pushnumber(L, (lua_Number)(ev_now(r->loop) - stats.started));
 	lua_setfield(L, -2, "uptime");
-	lua_pushinteger(L, (lua_Integer)r->vmstats.num_context);
-	lua_setfield(L, -2, "num_context");
 	lua_pushinteger(L, (lua_Integer)r->vmstats.num_object);
 	lua_setfield(L, -2, "num_object");
 	return 1;
