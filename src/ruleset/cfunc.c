@@ -286,6 +286,7 @@ int cfunc_tick(lua_State *restrict L)
 /* gc() */
 int cfunc_gc(lua_State *restrict L)
 {
+	ASSERT(lua_gettop(L) == 0);
 	(void)lua_gc(L, LUA_GCCOLLECT, 0);
 	return 0;
 }

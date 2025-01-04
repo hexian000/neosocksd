@@ -134,6 +134,25 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	}
 }
 
+static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	const int memlimit_mb = G.conf->memlimit;
+	if (memlimit_mb <= 0) {
+		return;
+	}
+	struct ruleset *restrict r = watcher->data;
+	if ((r->vmstats.byt_allocated >> 20u) < (size_t)memlimit_mb) {
+		return;
+	}
+	const bool ok = ruleset_pcall(r, cfunc_gc, 0, 0);
+	if (!ok) {
+		LOGW_F("ruleset gc: %s", ruleset_geterror(r, NULL));
+		return;
+	}
+}
+
 struct ruleset *ruleset_new(struct ev_loop *loop)
 {
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
@@ -154,6 +173,9 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 		struct ev_timer *restrict w_ticker = &r->w_ticker;
 		ev_timer_init(w_ticker, tick_cb, 1.0, 1.0);
 		w_ticker->data = r;
+		struct ev_idle *restrict w_idle = &r->w_idle;
+		ev_idle_init(w_idle, idle_cb);
+		w_idle->data = r;
 	}
 
 	lua_pushcfunction(L, ruleset_luainit);

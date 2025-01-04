@@ -18,6 +18,7 @@ struct ruleset {
 	struct ruleset_vmstats vmstats;
 	lua_State *L;
 	struct ev_timer w_ticker;
+	struct ev_idle w_idle;
 };
 
 enum ruleset_ridx {

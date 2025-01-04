@@ -15,6 +15,7 @@
 #include "lua.h"
 
 #include <arpa/inet.h>
+#include <ev.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
@@ -230,25 +231,13 @@ static bool ruleset_pcallv(
 	return true;
 }
 
-static void check_memlimit(struct ruleset *restrict r)
-{
-	const int memlimit_mb = G.conf->memlimit;
-	if (memlimit_mb <= 0) {
-		return;
-	}
-	if ((r->vmstats.byt_allocated >> 20u) < (size_t)memlimit_mb) {
-		return;
-	}
-	(void)lua_gc(r->L, LUA_GCCOLLECT, 0);
-}
-
 bool ruleset_pcall(
 	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
 	const int nresults, ...)
 {
+	ev_idle_start(r->loop, &r->w_idle);
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
-	check_memlimit(r);
 	va_list args;
 	va_start(args, nresults);
 	const bool result = ruleset_pcallv(L, func, nargs, nresults, args);
@@ -258,9 +247,9 @@ bool ruleset_pcall(
 
 void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 {
+	ev_idle_start(r->loop, &r->w_idle);
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
-	check_memlimit(r);
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
 	    LUA_TTABLE) {
 		lua_pop(L, 1);
