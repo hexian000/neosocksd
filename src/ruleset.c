@@ -119,9 +119,6 @@ static int ruleset_luainit(lua_State *restrict L)
 		luaL_requiref(L, lib->name, lib->func, 1);
 		lua_pop(L, 1);
 	}
-	/* set flags */
-	lua_pushboolean(L, G.conf->traceback);
-	lua_setglobal(L, "traceback");
 	return 0;
 }
 
