@@ -73,14 +73,20 @@ idle_cb(struct ev_loop *loop, struct ev_idle *watcher, const int revents)
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct ruleset *r = watcher->data;
-	ruleset_resume(r, watcher, 0);
+	ruleset_resume(r, watcher, 1, NULL);
 }
 
 static int
 await_idle_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
-	context_unpin(L, lua_touserdata(L, (int)ctx));
-	if (status != LUA_OK && status != LUA_YIELD) {
+	CHECK(status == LUA_YIELD);
+	const int base = (int)ctx;
+	ASSERT(lua_gettop(L) == base + 1);
+	void *p = lua_touserdata(L, base);
+	context_unpin(L, p);
+	const char *err = lua_touserdata(L, base + 1);
+	if (err != NULL) {
+		lua_pushstring(L, err);
 		return lua_error(L);
 	}
 	return 0;
@@ -100,10 +106,9 @@ static int await_idle(lua_State *restrict L)
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, w);
 	ev_idle_start(r->loop, w);
-	lua_yieldk(L, 0, ctx, await_idle_k);
+	lua_yieldk(L, 0, lua_gettop(L), await_idle_k);
 	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 	return lua_error(L);
 }
@@ -122,14 +127,20 @@ sleep_cb(struct ev_loop *loop, struct ev_timer *watcher, const int revents)
 	CHECK_REVENTS(revents, EV_TIMER);
 	ev_timer_stop(loop, watcher);
 	struct ruleset *r = watcher->data;
-	ruleset_resume(r, watcher, 0);
+	ruleset_resume(r, watcher, 1, NULL);
 }
 
 static int
 await_sleep_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
-	context_unpin(L, lua_touserdata(L, (int)ctx));
-	if (status != LUA_OK && status != LUA_YIELD) {
+	CHECK(status == LUA_YIELD);
+	const int base = (int)ctx;
+	ASSERT(lua_gettop(L) == base + 1);
+	void *p = lua_touserdata(L, base);
+	context_unpin(L, p);
+	const char *err = lua_touserdata(L, base + 1);
+	if (err != NULL) {
+		lua_pushstring(L, err);
 		return lua_error(L);
 	}
 	return 0;
@@ -155,10 +166,9 @@ static int await_sleep(lua_State *restrict L)
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, w);
 	ev_timer_start(r->loop, w);
-	lua_yieldk(L, 0, ctx, await_sleep_k);
+	lua_yieldk(L, 0, lua_gettop(L), await_sleep_k);
 	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 	return lua_error(L);
 }
@@ -179,18 +189,23 @@ static void resolve_cb(
 {
 	UNUSED(loop);
 	struct ruleset *r = data;
-	ruleset_resume(r, q, 1, (void *)sa);
+	ruleset_resume(r, q, 2, NULL, (void *)sa);
 }
 
 static int
 await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
-	struct resolve_query **ud = lua_touserdata(L, (int)ctx);
+	CHECK(status == LUA_YIELD);
+	const int base = (int)ctx;
+	struct resolve_query **ud = lua_touserdata(L, base);
 	context_unpin(L, *ud);
 	*ud = NULL;
-	if (status != LUA_OK && status != LUA_YIELD) {
+	const char *err = lua_touserdata(L, base + 1);
+	if (err != NULL) {
+		lua_pushstring(L, err);
 		return lua_error(L);
 	}
+	ASSERT(lua_gettop(L) == base + 2);
 	return aux_format_addr(L);
 }
 
@@ -199,6 +214,7 @@ static int await_resolve(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
 	const char *name = luaL_checkstring(L, 1);
+	lua_settop(L, 1);
 	struct resolve_query *q = resolve_do(
 		G.resolver,
 		(struct resolve_cb){
@@ -225,9 +241,8 @@ static int await_resolve(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	const lua_KContext ctx = lua_absindex(L, -1);
 	context_pin(L, q);
-	lua_yieldk(L, 0, ctx, await_resolve_k);
+	lua_yieldk(L, 0, lua_gettop(L), await_resolve_k);
 	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 	return lua_error(L);
 }
@@ -249,21 +264,27 @@ static void invoke_cb(
 {
 	UNUSED(loop);
 	struct ruleset *r = data;
-	ruleset_resume(r, ctx, 3, (void *)&ok, (void *)payload, (void *)&len);
+	ruleset_resume(
+		r, ctx, 4, NULL, (void *)&ok, (void *)payload, (void *)&len);
 }
 
 static int
 await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
-	struct api_client_ctx **ud = lua_touserdata(L, (int)ctx);
+	CHECK(status == LUA_YIELD);
+	const int base = (int)ctx;
+	struct api_client_ctx **ud = lua_touserdata(L, base);
 	context_unpin(L, *ud);
 	*ud = NULL;
-	if (status != LUA_OK && status != LUA_YIELD) {
+	const char *err = lua_touserdata(L, base + 1);
+	if (err != NULL) {
+		lua_pushstring(L, err);
 		return lua_error(L);
 	}
-	const bool ok = *(bool *)lua_touserdata(L, -3);
-	const void *payload = lua_touserdata(L, -2);
-	const size_t len = *(size_t *)lua_touserdata(L, -1);
+	ASSERT(lua_gettop(L) == base + 4);
+	const bool ok = *(bool *)lua_touserdata(L, base + 2);
+	const void *payload = lua_touserdata(L, base + 3);
+	const size_t len = *(size_t *)lua_touserdata(L, base + 4);
 	lua_pushboolean(L, ok);
 	if (!ok) {
 		lua_pushlstring(L, payload, len);

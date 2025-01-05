@@ -261,8 +261,7 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	lua_State *restrict co = lua_tothread(L, -1);
 	if (co == NULL) {
 		lua_pop(L, 2);
-		lua_pushfstring(L, "async context lost: %p", ctx);
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		LOGD_F("async context lost: %p", ctx);
 		return;
 	}
 	lua_replace(L, 1);
