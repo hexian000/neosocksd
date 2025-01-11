@@ -18,8 +18,6 @@ function await.invoke(code, addr, ...) return false, ... end
 
 function await.sleep(n) end
 
-function await.idle() end
-
 _G.await = await
 
 

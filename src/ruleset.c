@@ -126,29 +126,18 @@ static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct ruleset *restrict r = watcher->data;
-	const ev_tstamp now = ev_now(loop);
-	const bool ok = ruleset_pcall(r, cfunc_tick, 1, 0, &now);
-	if (!ok) {
-		LOGW_F("ruleset.tick: %s", ruleset_geterror(r, NULL));
-		return;
-	}
+	ev_idle_start(loop, &r->w_idle);
 }
 
 static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
-	const int memlimit_mb = G.conf->memlimit;
-	if (memlimit_mb <= 0) {
-		return;
-	}
 	struct ruleset *restrict r = watcher->data;
-	if ((r->vmstats.byt_allocated >> 20u) < (size_t)memlimit_mb) {
-		return;
-	}
-	const bool ok = ruleset_pcall(r, cfunc_gc, 0, 0);
+	const ev_tstamp now = ev_now(loop);
+	const bool ok = ruleset_pcall(r, cfunc_tick, 1, 0, &now);
 	if (!ok) {
-		LOGW_F("ruleset gc: %s", ruleset_geterror(r, NULL));
+		LOGW_F("ruleset.tick: %s", ruleset_geterror(r, NULL));
 		return;
 	}
 }
@@ -161,6 +150,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	}
 	r->loop = loop;
 	r->vmstats = (struct ruleset_vmstats){ 0 };
+	r->memlimit_kb = G.conf->memlimit << 10u;
 	lua_State *restrict L = lua_newstate(l_alloc, r);
 	if (L == NULL) {
 		ruleset_free(r);

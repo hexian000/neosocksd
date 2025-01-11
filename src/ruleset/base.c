@@ -235,7 +235,6 @@ bool ruleset_pcall(
 	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
 	const int nresults, ...)
 {
-	ev_idle_start(r->loop, &r->w_idle);
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	va_list args;
@@ -247,7 +246,6 @@ bool ruleset_pcall(
 
 void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 {
-	ev_idle_start(r->loop, &r->w_idle);
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=

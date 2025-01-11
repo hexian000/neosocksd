@@ -35,9 +35,23 @@ static int ruleset_state_gc(lua_State *restrict L)
 	return 0;
 }
 
+static void check_memlimit(lua_State *restrict L)
+{
+	struct ruleset *restrict r = aux_getruleset(L);
+	const int memlimit_kb = r->memlimit_kb;
+	if (memlimit_kb <= 0) {
+		return;
+	}
+	if (lua_gc(L, LUA_GCCOUNT, 0) < memlimit_kb) {
+		return;
+	}
+	(void)lua_gc(L, LUA_GCCOLLECT, 0);
+}
+
 /* request(func, request, username, password) */
 int cfunc_request(lua_State *restrict L)
 {
+	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 4);
 	const char *func = lua_touserdata(L, 1);
 	const char *request = lua_touserdata(L, 2);
@@ -65,6 +79,7 @@ int cfunc_request(lua_State *restrict L)
 /* loadfile(filename) */
 int cfunc_loadfile(lua_State *restrict L)
 {
+	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
 	const char *filename = lua_touserdata(L, 1);
 	lua_settop(L, 0);
@@ -81,6 +96,7 @@ int cfunc_loadfile(lua_State *restrict L)
 /* invoke(codestream) */
 int cfunc_invoke(lua_State *restrict L)
 {
+	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
 	void *stream = lua_touserdata(L, 1);
 	lua_settop(L, 0);
@@ -125,6 +141,7 @@ static int rpcall_finish(lua_State *restrict L)
 /* rpcall(codestream, callback, data) */
 int cfunc_rpcall(lua_State *restrict L)
 {
+	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 2);
 	struct stream *stream = lua_touserdata(L, 1);
 	const struct rpcall_cb *in_cb = lua_touserdata(L, 2);
@@ -217,6 +234,7 @@ static int package_replace(lua_State *restrict L)
 /* update(modname, chunkname, codestream) */
 int cfunc_update(lua_State *restrict L)
 {
+	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 3);
 	const char *modname = lua_touserdata(L, 1);
 	const char *chunkname = lua_touserdata(L, 2);
@@ -253,6 +271,7 @@ int cfunc_update(lua_State *restrict L)
 /* stats(dt, query) */
 int cfunc_stats(lua_State *restrict L)
 {
+	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 2);
 	const double dt = *(double *)lua_touserdata(L, 1);
 	const char *query = lua_touserdata(L, 2);
@@ -271,6 +290,7 @@ int cfunc_stats(lua_State *restrict L)
 /* tick(now) */
 int cfunc_tick(lua_State *restrict L)
 {
+	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
 	const ev_tstamp now = *(ev_tstamp *)lua_touserdata(L, 1);
 	(void)lua_getglobal(L, "ruleset");

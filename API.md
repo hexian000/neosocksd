@@ -34,7 +34,6 @@ Version: dev
   - [await.resolve](#awaitresolve)
   - [await.invoke](#awaitinvoke)
   - [await.sleep](#awaitsleep)
-  - [await.idle](#awaitidle)
 
 
 ## RESTful API
@@ -553,27 +552,4 @@ end)
 
 Pause an asynchronous routine for at least specified interval in seconds.
 
-The interval is clamped to `[1e-3, 1e+9]`.
-
-
-### await.idle
-
-**Synopsis**
-
-```Lua
-async(function()
-    while ruleset.running do
-        await.sleep(10)
-        local tasks = _G.tasks
-        _G.tasks = {}
-        for i, v in ipairs(tasks) do
-            await.idle()
-            -- ......
-        end
-    end
-end)
-```
-
-**Description**
-
-Pause an asynchronous routine until there is nothing better to do. For example, this can be used to choose a good time to do some non-urgent tasks in the background.
+The interval must be in the range `[0, 1e+9]`.
