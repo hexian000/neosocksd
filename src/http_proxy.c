@@ -53,6 +53,9 @@ struct http_ctx {
 	union {
 		struct {
 			struct ev_io w_recv, w_send;
+#if WITH_RULESET
+			struct ev_idle w_ruleset;
+#endif
 			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct http_parser parser;
@@ -228,31 +231,51 @@ static void parse_proxy_auth(
 	*password = sep + 1;
 }
 
-static bool req_connect(
-	struct http_ctx *restrict ctx, const char *username,
-	const char *password)
+static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	const char *addr_str = ctx->parser.msg.req.url;
-	HTTP_CTX_LOG_F(
-		VERBOSE, ctx, "http: username=%s CONNECT `%s'", username,
-		addr_str);
-#if WITH_RULESET
-	struct ruleset *restrict r = G.ruleset;
-	if (r != NULL) {
-		struct dialreq *req =
-			ruleset_resolve(r, addr_str, username, password);
-		if (req == NULL) {
-			return false;
-		}
-		ctx->dialreq = req;
-		return true;
+	if (ctx->dialreq == NULL) {
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		ctx->state = STATE_RESPONSE;
+		ev_io_start(loop, &ctx->w_send);
+		return;
 	}
-#else
-	UNUSED(password);
-#endif
-	ctx->dialreq = make_dialreq(addr_str);
-	return true;
+	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
+	ctx->state = STATE_CONNECT;
+	dialer_start(&ctx->dialer, loop, ctx->dialreq);
 }
+
+#if WITH_RULESET
+static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct ruleset *restrict ruleset = G.ruleset;
+	ASSERT(ruleset != NULL);
+	struct http_ctx *restrict ctx = watcher->data;
+
+	unsigned char buf[512];
+	const char *username = NULL;
+	const char *password = NULL;
+	parse_proxy_auth(
+		buf, sizeof(buf), &username, &password,
+		ctx->parser.hdr.proxy_authorization.type,
+		ctx->parser.hdr.proxy_authorization.credentials);
+	if (G.conf->auth_required && (username == NULL || password == NULL)) {
+		RESPHDR_BEGIN(
+			ctx->parser.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
+		BUF_APPENDSTR(
+			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		ctx->state = STATE_RESPONSE;
+		ev_io_start(loop, &ctx->w_send);
+		return;
+	}
+
+	const char *addr_str = ctx->parser.msg.req.url;
+	ctx->dialreq = ruleset_resolve(ruleset, addr_str, username, password);
+	http_connect(loop, ctx);
+}
+#endif
 
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
@@ -272,38 +295,18 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 
-	unsigned char buf[512];
-	const char *username = NULL;
-	const char *password = NULL;
-	parse_proxy_auth(
-		buf, sizeof(buf), &username, &password,
-		ctx->parser.hdr.proxy_authorization.type,
-		ctx->parser.hdr.proxy_authorization.credentials);
-	if (G.conf->auth_required && (username == NULL || password == NULL)) {
-		RESPHDR_BEGIN(
-			ctx->parser.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
-		BUF_APPENDSTR(
-			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
-		RESPHDR_FINISH(ctx->parser.wbuf);
+	const char *addr_str = ctx->parser.msg.req.url;
+	HTTP_CTX_LOG_F(VERBOSE, ctx, "http: CONNECT `%s'", addr_str);
+#if WITH_RULESET
+	struct ruleset *restrict ruleset = G.ruleset;
+	if (ruleset != NULL) {
+		ev_idle_start(loop, &ctx->w_ruleset);
 		return;
 	}
+#endif
 
-	if (!req_connect(ctx, username, password)) {
-		http_resp_errpage(&ctx->parser, HTTP_FORBIDDEN);
-		return;
-	}
-	if (ctx->dialreq == NULL) {
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
-	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
-	ctx->state = STATE_CONNECT;
-	const struct event_cb cb = {
-		.func = dialer_cb,
-		.data = ctx,
-	};
-	dialer_init(&ctx->dialer, cb);
-	dialer_start(&ctx->dialer, loop, ctx->dialreq);
+	ctx->dialreq = make_dialreq(addr_str);
+	http_connect(loop, ctx);
 }
 
 static void on_established(struct ev_loop *loop, struct http_ctx *restrict ctx)
@@ -513,8 +516,21 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 		ev_io_init(w_send, send_cb, fd, EV_WRITE);
 		w_send->data = ctx;
 	}
+#if WITH_RULESET
+	{
+		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
+		ev_idle_init(w_ruleset, idle_cb);
+		w_ruleset->data = ctx;
+	}
+#endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
+	const struct event_cb cb = {
+		.func = dialer_cb,
+		.data = ctx,
+	};
+	dialer_init(&ctx->dialer, cb);
+
 	ctx->ss.close = http_ss_close;
 	session_add(&ctx->ss);
 	return ctx;
