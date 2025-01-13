@@ -67,7 +67,7 @@ int cfunc_request(lua_State *restrict L)
 	const char *request = lua_touserdata(L, 2);
 	const char *username = lua_touserdata(L, 3);
 	const char *password = lua_touserdata(L, 4);
-	struct ruleset_request_cb *callback = lua_touserdata(L, 5);
+	const struct ruleset_request_cb *in_cb = lua_touserdata(L, 5);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
 	lua_copy(L, -1, 1);
@@ -83,12 +83,10 @@ int cfunc_request(lua_State *restrict L)
 	}
 	if (!aux_todialreq(L, n)) {
 		LOGW_F("ruleset.%s `%s': invalid return", func, request);
-		callback->func(callback->loop, callback->data, NULL);
-		callback->func = NULL;
+		in_cb->func(in_cb->loop, in_cb->data, NULL);
 		return 0;
 	}
-	callback->func(callback->loop, callback->data, lua_touserdata(L, -1));
-	callback->func = NULL;
+	in_cb->func(in_cb->loop, in_cb->data, lua_touserdata(L, -1));
 	return 1;
 }
 
