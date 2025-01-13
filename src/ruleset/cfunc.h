@@ -9,13 +9,15 @@
 #include "lua.h"
 
 enum ruleset_callback_type {
+	RCB_REQUEST,
 	RCB_RPCALL,
 };
 
 struct ruleset_state {
 	int type;
 	union {
-		struct rpcall_cb rpcall;
+		struct ruleset_request_cb request;
+		struct ruleset_rpcall_cb rpcall;
 	};
 };
 

@@ -179,7 +179,7 @@ static int api_stats(lua_State *restrict L)
 			stats = s->stats;
 		}
 	}
-	lua_createtable(L, 0, 8);
+	lua_createtable(L, 0, 9);
 
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	lua_setfield(L, -2, "lasterror");
@@ -193,6 +193,8 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "byt_down");
 	lua_pushnumber(L, (lua_Number)(ev_now(r->loop) - stats.started));
 	lua_setfield(L, -2, "uptime");
+	lua_pushinteger(L, (lua_Integer)r->vmstats.byt_allocated);
+	lua_setfield(L, -2, "bytes_allocated");
 	lua_pushinteger(L, (lua_Integer)r->vmstats.num_object);
 	lua_setfield(L, -2, "num_object");
 	return 1;

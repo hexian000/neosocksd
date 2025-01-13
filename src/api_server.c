@@ -479,12 +479,11 @@ static void handle_ruleset_rpcall(
 		return;
 	}
 	ctx->state = STATE_YIELD;
-	struct ruleset_state *rpcstate = ruleset_rpcall(
-		r, reader,
-		(struct rpcall_cb){
-			.func = rpcall_return,
-			.data = ctx,
-		});
+	const struct ruleset_rpcall_cb callback = {
+		.func = rpcall_return,
+		.data = ctx,
+	};
+	struct ruleset_state *rpcstate = ruleset_rpcall(r, reader, &callback);
 	stream_close(reader);
 	if (rpcstate == NULL) {
 		/* no callback */

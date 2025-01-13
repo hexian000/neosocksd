@@ -29,6 +29,7 @@
 /* never rollback */
 enum forward_state {
 	STATE_INIT,
+	STATE_REQUEST,
 	STATE_CONNECT,
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
@@ -44,6 +45,10 @@ struct forward_ctx {
 	union {
 		/* connecting */
 		struct {
+#if WITH_RULESET
+			struct ev_idle w_ruleset;
+			struct ruleset_state *ruleset_state;
+#endif
 			struct dialreq *dialreq;
 			struct dialer dialer;
 		};
@@ -76,6 +81,15 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	switch (ctx->state) {
 	case STATE_INIT:
 		return;
+	case STATE_REQUEST:
+#if WITH_RULESET
+		ev_idle_stop(loop, &ctx->w_ruleset);
+		if (ctx->ruleset_state != NULL) {
+			ruleset_cancel(ctx->ruleset_state);
+			ctx->ruleset_state = NULL;
+		}
+#endif
+		/* fallthrough */
 	case STATE_CONNECT:
 		dialer_cancel(&ctx->dialer, loop);
 		dialreq_free(ctx->dialreq);
@@ -220,6 +234,76 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	transfer_start(loop, &ctx->downlink);
 }
 
+static void forward_ctx_start(
+	struct ev_loop *loop, struct forward_ctx *restrict ctx,
+	const struct dialreq *req)
+{
+	dialer_start(&ctx->dialer, loop, req);
+	ev_timer_start(loop, &ctx->w_timeout);
+
+	FW_CTX_LOG(VERBOSE, ctx, "connect");
+	ctx->state = STATE_CONNECT;
+	struct server_stats *restrict stats = &ctx->s->stats;
+	stats->num_request++;
+	stats->num_halfopen++;
+}
+
+#if WITH_RULESET
+static void
+forward_ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
+{
+	struct forward_ctx *restrict ctx = data;
+	ctx->ruleset_state = NULL;
+	if (req == NULL) {
+		forward_ctx_close(loop, ctx);
+		return;
+	}
+	ctx->dialreq = req;
+	forward_ctx_start(loop, ctx, req);
+}
+
+static void
+forward_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct forward_ctx *restrict ctx = watcher->data;
+	struct ruleset *restrict ruleset = G.ruleset;
+	ASSERT(ruleset != NULL);
+	const struct dialaddr *addr = &G.basereq->addr;
+
+	const size_t cap =
+		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
+	char request[cap];
+	const int len = dialaddr_format(request, cap, addr);
+	CHECK(len >= 0 && (size_t)len < cap);
+	const struct ruleset_request_cb callback = {
+		.func = forward_ruleset_cb,
+		.loop = loop,
+		.data = ctx,
+	};
+	struct ruleset_state *state;
+	switch (addr->type) {
+	case ATYP_INET:
+		state = ruleset_route(ruleset, request, NULL, NULL, &callback);
+		break;
+	case ATYP_INET6:
+		state = ruleset_route6(ruleset, request, NULL, NULL, &callback);
+		break;
+	case ATYP_DOMAIN:
+		state = ruleset_resolve(
+			ruleset, request, NULL, NULL, &callback);
+		break;
+	default:
+		FAIL();
+	}
+	if (state == NULL) {
+		forward_ctx_close(loop, ctx);
+		return;
+	}
+}
+#endif
+
 static struct forward_ctx *
 forward_ctx_new(struct server *restrict s, const int accepted_fd)
 {
@@ -237,6 +321,14 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
 		w_timeout->data = ctx;
 	}
+#if WITH_RULESET
+	{
+		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
+		ev_idle_init(w_ruleset, forward_idle_cb);
+		w_ruleset->data = ctx;
+	}
+	ctx->ruleset_state = NULL;
+#endif
 
 	const struct event_cb cb = {
 		.func = dialer_cb,
@@ -249,41 +341,6 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	return ctx;
 }
 
-static void forward_ctx_start(
-	struct ev_loop *loop, struct forward_ctx *restrict ctx,
-	struct dialreq *req)
-{
-	dialer_start(&ctx->dialer, loop, req);
-	ev_timer_start(loop, &ctx->w_timeout);
-
-	FW_CTX_LOG(VERBOSE, ctx, "connect");
-	ctx->state = STATE_CONNECT;
-	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->num_request++;
-	stats->num_halfopen++;
-}
-
-#if WITH_RULESET
-static struct dialreq *
-forward_route(struct ruleset *r, const struct dialaddr *restrict addr)
-{
-	const size_t cap =
-		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
-	char request[cap];
-	const int len = dialaddr_format(request, cap, addr);
-	CHECK(len >= 0 && (size_t)len < cap);
-	switch (addr->type) {
-	case ATYP_INET:
-		return ruleset_route(r, request, NULL, NULL);
-	case ATYP_INET6:
-		return ruleset_route6(r, request, NULL, NULL);
-	case ATYP_DOMAIN:
-		return ruleset_resolve(r, request, NULL, NULL);
-	}
-	FAIL();
-}
-#endif
-
 void forward_serve(
 	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa)
@@ -295,37 +352,87 @@ void forward_serve(
 		return;
 	}
 	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
-	struct dialreq *req = G.basereq;
+	ctx->state = STATE_REQUEST;
 #if WITH_RULESET
-	struct ruleset *r = G.ruleset;
-	if (r != NULL) {
-		req = forward_route(r, &req->addr);
-		if (req == NULL) {
-			forward_ctx_close(loop, ctx);
-			return;
-		}
-		/* need to be freed */
-		ctx->dialreq = req;
+	struct ruleset *ruleset = G.ruleset;
+	if (ruleset != NULL) {
+		ev_idle_start(loop, &ctx->w_ruleset);
+		return;
 	}
 #endif
-	forward_ctx_start(loop, ctx, req);
+	forward_ctx_start(loop, ctx, G.basereq);
 }
 
 #if WITH_TPROXY
 
 #if WITH_RULESET
-static struct dialreq *
-tproxy_route(struct ruleset *r, const struct sockaddr *restrict sa)
+static void
+tproxy_ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
 {
-	char addr_str[64];
-	format_sa(addr_str, sizeof(addr_str), sa);
-	switch (sa->sa_family) {
-	case AF_INET:
-		return ruleset_route(r, addr_str, NULL, NULL);
-	case AF_INET6:
-		return ruleset_route6(r, addr_str, NULL, NULL);
+	struct forward_ctx *restrict ctx = data;
+	ctx->ruleset_state = NULL;
+	if (req == NULL) {
+		forward_ctx_close(loop, ctx);
+		return;
 	}
-	FAIL();
+	ctx->dialreq = req;
+	forward_ctx_start(loop, ctx, req);
+}
+
+static void
+tproxy_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct forward_ctx *restrict ctx = watcher->data;
+	struct ruleset *restrict ruleset = G.ruleset;
+	ASSERT(ruleset != NULL);
+
+	union sockaddr_max dest;
+	socklen_t len = sizeof(dest);
+	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
+		FW_CTX_LOG_F(ERROR, ctx, "getsockname: %s", strerror(errno));
+		forward_ctx_close(loop, ctx);
+		return;
+	}
+	switch (dest.sa.sa_family) {
+	case AF_INET:
+		CHECK(len >= sizeof(struct sockaddr_in));
+		break;
+	case AF_INET6:
+		CHECK(len >= sizeof(struct sockaddr_in6));
+		break;
+	default:
+		FW_CTX_LOG_F(
+			ERROR, ctx, "tproxy: unsupported af:%jd",
+			(intmax_t)dest.sa.sa_family);
+		forward_ctx_close(loop, ctx);
+		return;
+	}
+
+	char addr_str[64];
+	format_sa(addr_str, sizeof(addr_str), &dest.sa);
+	const struct ruleset_request_cb callback = {
+		.func = tproxy_ruleset_cb,
+		.loop = loop,
+		.data = ctx,
+	};
+	struct ruleset_state *state;
+	switch (dest.sa.sa_family) {
+	case AF_INET:
+		state = ruleset_route(ruleset, addr_str, NULL, NULL, &callback);
+		break;
+	case AF_INET6:
+		state = ruleset_route6(
+			ruleset, addr_str, NULL, NULL, &callback);
+		break;
+	default:
+		FAIL();
+	}
+	if (state == NULL) {
+		forward_ctx_close(loop, ctx);
+		return;
+	}
 }
 #endif
 
@@ -350,13 +457,6 @@ static struct dialreq *tproxy_makereq(struct forward_ctx *restrict ctx)
 			(intmax_t)dest.sa.sa_family);
 		return NULL;
 	}
-
-#if WITH_RULESET
-	struct ruleset *r = G.ruleset;
-	if (r != NULL) {
-		return tproxy_route(r, &dest.sa);
-	}
-#endif
 
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {
@@ -389,13 +489,22 @@ void tproxy_serve(
 		return;
 	}
 	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
-	struct dialreq *req = tproxy_makereq(ctx);
-	if (req == NULL) {
+
+	ctx->state = STATE_REQUEST;
+#if WITH_RULESET
+	struct ruleset *ruleset = G.ruleset;
+	if (ruleset != NULL) {
+		ev_set_cb(&ctx->w_ruleset, tproxy_idle_cb);
+		ev_idle_start(loop, &ctx->w_ruleset);
+		return;
+	}
+#endif
+
+	ctx->dialreq = tproxy_makereq(ctx);
+	if (ctx->dialreq == NULL) {
 		forward_ctx_close(loop, ctx);
 		return;
 	}
-	/* need to be freed */
-	ctx->dialreq = req;
-	forward_ctx_start(loop, ctx, req);
+	forward_ctx_start(loop, ctx, ctx->dialreq);
 }
 #endif /* WITH_TPROXY */

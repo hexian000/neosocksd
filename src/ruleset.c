@@ -221,6 +221,9 @@ bool ruleset_invoke(struct ruleset *r, struct stream *code)
 void ruleset_cancel(struct ruleset_state *state)
 {
 	switch (state->type) {
+	case RCB_REQUEST:
+		state->request.func = NULL;
+		break;
 	case RCB_RPCALL:
 		state->rpcall.func = NULL;
 		break;
@@ -230,9 +233,10 @@ void ruleset_cancel(struct ruleset_state *state)
 }
 
 struct ruleset_state *ruleset_rpcall(
-	struct ruleset *r, struct stream *code, struct rpcall_cb callback)
+	struct ruleset *r, struct stream *code,
+	const struct ruleset_rpcall_cb *callback)
 {
-	const bool ok = ruleset_pcall(r, cfunc_rpcall, 2, 1, code, &callback);
+	const bool ok = ruleset_pcall(r, cfunc_rpcall, 2, 1, code, callback);
 	if (!ok) {
 		return NULL;
 	}
@@ -256,14 +260,15 @@ bool ruleset_gc(struct ruleset *restrict r)
 	return ruleset_pcall(r, cfunc_gc, 0, 0);
 }
 
-static struct dialreq *dispatch_req(
+struct ruleset_state *dispatch_req(
 	struct ruleset *restrict r, const char *func, const char *request,
-	const char *username, const char *password)
+	const char *username, const char *password,
+	const struct ruleset_request_cb *callback)
 {
 	lua_State *restrict L = r->L;
 	const bool ok = ruleset_pcall(
-		r, cfunc_request, 4, 1, (void *)func, (void *)request,
-		(void *)username, (void *)password);
+		r, cfunc_request, 5, 1, (void *)func, (void *)request,
+		(void *)username, (void *)password, (void *)callback);
 	if (!ok) {
 		LOGW_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
 		return NULL;
@@ -271,25 +276,26 @@ static struct dialreq *dispatch_req(
 	return lua_touserdata(L, -1);
 }
 
-struct dialreq *ruleset_resolve(
+struct ruleset_state *ruleset_resolve(
 	struct ruleset *r, const char *request, const char *username,
-	const char *password)
+	const char *password, const struct ruleset_request_cb *callback)
 {
-	return dispatch_req(r, "resolve", request, username, password);
+	return dispatch_req(
+		r, "resolve", request, username, password, callback);
 }
 
-struct dialreq *ruleset_route(
+struct ruleset_state *ruleset_route(
 	struct ruleset *r, const char *request, const char *username,
-	const char *password)
+	const char *password, const struct ruleset_request_cb *callback)
 {
-	return dispatch_req(r, "route", request, username, password);
+	return dispatch_req(r, "route", request, username, password, callback);
 }
 
-struct dialreq *ruleset_route6(
+struct ruleset_state *ruleset_route6(
 	struct ruleset *r, const char *request, const char *username,
-	const char *password)
+	const char *password, const struct ruleset_request_cb *callback)
 {
-	return dispatch_req(r, "route6", request, username, password);
+	return dispatch_req(r, "route6", request, username, password, callback);
 }
 
 void ruleset_vmstats(

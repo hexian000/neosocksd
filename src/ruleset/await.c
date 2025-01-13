@@ -128,10 +128,10 @@ static int await_sleep(lua_State *restrict L)
 	}
 	lua_setmetatable(L, -2);
 	context_pin(L, ud);
-	if (n == 0) {
-		ev_idle_start(r->loop, &ud->w_idle);
-	} else {
+	if (n > 0) {
 		ev_timer_start(r->loop, &ud->w_timer);
+	} else {
+		ev_idle_start(r->loop, &ud->w_idle);
 	}
 	lua_yieldk(L, 0, lua_gettop(L), await_sleep_k);
 	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);

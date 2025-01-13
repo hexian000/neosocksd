@@ -55,6 +55,7 @@ struct http_ctx {
 			struct ev_io w_recv, w_send;
 #if WITH_RULESET
 			struct ev_idle w_ruleset;
+			struct ruleset_state *ruleset_state;
 #endif
 			struct dialreq *dialreq;
 			struct dialer dialer;
@@ -104,6 +105,14 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	case STATE_INIT:
 		return;
 	case STATE_REQUEST:
+#if WITH_RULESET
+		ev_idle_stop(loop, &ctx->w_ruleset);
+		if (ctx->ruleset_state != NULL) {
+			ruleset_cancel(ctx->ruleset_state);
+			ctx->ruleset_state = NULL;
+		}
+#endif
+		/* fallthrough */
 	case STATE_RESPONSE:
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
@@ -186,12 +195,6 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 
 static struct dialreq *make_dialreq(const char *addr_str)
 {
-#if WITH_RULESET
-	struct ruleset *ruleset = G.ruleset;
-	if (ruleset != NULL) {
-		return ruleset_resolve(ruleset, addr_str, NULL, NULL);
-	}
-#endif
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {
 		LOGOOM();
@@ -245,6 +248,14 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 }
 
 #if WITH_RULESET
+static void ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
+{
+	struct http_ctx *restrict ctx = data;
+	ctx->ruleset_state = NULL;
+	ctx->dialreq = req;
+	http_connect(loop, ctx);
+}
+
 static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
@@ -272,8 +283,19 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	}
 
 	const char *addr_str = ctx->parser.msg.req.url;
-	ctx->dialreq = ruleset_resolve(ruleset, addr_str, username, password);
-	http_connect(loop, ctx);
+	const struct ruleset_request_cb callback = {
+		.func = ruleset_cb,
+		.loop = loop,
+		.data = ctx,
+	};
+	struct ruleset_state *state = ruleset_resolve(
+		ruleset, addr_str, username, password, &callback);
+	if (state == NULL) {
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		ctx->state = STATE_RESPONSE;
+		ev_io_start(loop, &ctx->w_send);
+		return;
+	}
 }
 #endif
 
@@ -522,6 +544,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 		ev_idle_init(w_ruleset, idle_cb);
 		w_ruleset->data = ctx;
 	}
+	ctx->ruleset_state = NULL;
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);

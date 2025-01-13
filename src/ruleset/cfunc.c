@@ -9,6 +9,9 @@
 #include "utils/debug.h"
 #include "utils/slog.h"
 
+#include "ruleset.h"
+#include "util.h"
+
 #include "lauxlib.h"
 #include "lua.h"
 
@@ -23,6 +26,13 @@ static int ruleset_state_gc(lua_State *restrict L)
 {
 	struct ruleset_state *restrict state = lua_touserdata(L, 1);
 	switch (state->type) {
+	case RCB_REQUEST:
+		if (state->request.func != NULL) {
+			struct ruleset *r = aux_getruleset(L);
+			state->request.func(r->loop, state->request.data, NULL);
+			state->request.func = NULL;
+		}
+		break;
 	case RCB_RPCALL:
 		if (state->rpcall.func != NULL) {
 			state->rpcall.func(state->rpcall.data, NULL, 0);
@@ -52,11 +62,12 @@ static void check_memlimit(lua_State *restrict L)
 int cfunc_request(lua_State *restrict L)
 {
 	check_memlimit(L);
-	ASSERT(lua_gettop(L) == 4);
+	ASSERT(lua_gettop(L) == 5);
 	const char *func = lua_touserdata(L, 1);
 	const char *request = lua_touserdata(L, 2);
 	const char *username = lua_touserdata(L, 3);
 	const char *password = lua_touserdata(L, 4);
+	struct ruleset_request_cb *callback = lua_touserdata(L, 5);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
 	lua_copy(L, -1, 1);
@@ -72,7 +83,12 @@ int cfunc_request(lua_State *restrict L)
 	}
 	if (!aux_todialreq(L, n)) {
 		LOGW_F("ruleset.%s `%s': invalid return", func, request);
+		callback->func(callback->loop, callback->data, NULL);
+		callback->func = NULL;
+		return 0;
 	}
+	callback->func(callback->loop, callback->data, lua_touserdata(L, -1));
+	callback->func = NULL;
 	return 1;
 }
 
@@ -144,7 +160,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 2);
 	struct stream *stream = lua_touserdata(L, 1);
-	const struct rpcall_cb *in_cb = lua_touserdata(L, 2);
+	const struct ruleset_rpcall_cb *in_cb = lua_touserdata(L, 2);
 	struct ruleset_state *restrict state =
 		lua_newuserdata(L, sizeof(struct ruleset_state));
 	*state = (struct ruleset_state){

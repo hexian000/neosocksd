@@ -8,6 +8,7 @@
 #include "proto/domain.h"
 #include "proto/socks.h"
 #include "ruleset.h"
+#include "ruleset/base.h"
 #include "server.h"
 #include "session.h"
 #include "sockutil.h"
@@ -40,6 +41,7 @@ enum socks_state {
 	STATE_HANDSHAKE1,
 	STATE_HANDSHAKE2,
 	STATE_HANDSHAKE3,
+	STATE_REQUEST,
 	STATE_CONNECT,
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
@@ -69,6 +71,7 @@ struct socks_ctx {
 			unsigned char *next;
 #if WITH_RULESET
 			struct ev_idle w_ruleset;
+			struct ruleset_state *ruleset_state;
 #endif
 			struct dialreq *dialreq;
 			struct dialer dialer;
@@ -123,6 +126,16 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 	case STATE_HANDSHAKE2:
 	case STATE_HANDSHAKE3:
 		ev_io_stop(loop, &ctx->w_socket);
+		stats->num_halfopen--;
+		return;
+	case STATE_REQUEST:
+#if WITH_RULESET
+		ev_idle_stop(loop, &ctx->w_ruleset);
+		if (ctx->ruleset_state != NULL) {
+			ruleset_cancel(ctx->ruleset_state);
+			ctx->ruleset_state = NULL;
+		}
+#endif
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECT:
@@ -774,18 +787,15 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	dialer_start(&ctx->dialer, loop, ctx->dialreq);
 }
 
-static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
+#if WITH_RULESET
+static void ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
 {
-	struct dialreq *req = dialreq_new(0);
-	if (req == NULL) {
-		LOGOOM();
-		return NULL;
-	}
-	dialaddr_copy(&req->addr, addr);
-	return req;
+	struct socks_ctx *restrict ctx = data;
+	ctx->ruleset_state = NULL;
+	ctx->dialreq = req;
+	socks_connect(loop, ctx);
 }
 
-#if WITH_RULESET
 static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
@@ -803,25 +813,46 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	const char *password = ctx->auth.password;
 	SOCKS_CTX_LOG_F(
 		VERBOSE, ctx, "request: username=%s `%s'", username, request);
+	const struct ruleset_request_cb callback = {
+		.func = ruleset_cb,
+		.loop = loop,
+		.data = ctx,
+	};
+	struct ruleset_state *state;
 	switch (addr->type) {
 	case ATYP_DOMAIN:
-		ctx->dialreq =
-			ruleset_resolve(ruleset, request, username, password);
+		state = ruleset_resolve(
+			ruleset, request, username, password, &callback);
 		break;
 	case ATYP_INET:
-		ctx->dialreq =
-			ruleset_route(ruleset, request, username, password);
+		state = ruleset_route(
+			ruleset, request, username, password, &callback);
 		break;
 	case ATYP_INET6:
-		ctx->dialreq =
-			ruleset_route6(ruleset, request, username, password);
+		state = ruleset_route6(
+			ruleset, request, username, password, &callback);
 		break;
 	default:
 		FAIL();
 	}
-	socks_connect(loop, ctx);
+	if (state == NULL) {
+		socks_sendrsp(ctx, false);
+		socks_ctx_close(loop, ctx);
+		return;
+	}
 }
 #endif
+
+static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
+{
+	struct dialreq *req = dialreq_new(0);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	dialaddr_copy(&req->addr, addr);
+	return req;
+}
 
 static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
@@ -839,6 +870,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 
+	ctx->state = STATE_REQUEST;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
 
@@ -881,6 +913,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 		ev_idle_init(w_ruleset, idle_cb);
 		w_ruleset->data = ctx;
 	}
+	ctx->ruleset_state = NULL;
 #endif
 
 	ctx->auth.method = SOCKS5AUTH_NOACCEPTABLE;

@@ -27,12 +27,13 @@ bool ruleset_invoke(struct ruleset *r, struct stream *code);
 struct ruleset_state;
 void ruleset_cancel(struct ruleset_state *state);
 
-struct rpcall_cb {
+struct ruleset_rpcall_cb {
 	void (*func)(void *data, const char *result, size_t resultlen);
 	void *data;
 };
 struct ruleset_state *ruleset_rpcall(
-	struct ruleset *r, struct stream *code, struct rpcall_cb callback);
+	struct ruleset *r, struct stream *code,
+	const struct ruleset_rpcall_cb *callback);
 
 bool ruleset_update(
 	struct ruleset *r, const char *modname, const char *chunkname,
@@ -41,15 +42,20 @@ bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
 bool ruleset_gc(struct ruleset *r);
 
-struct dialreq *ruleset_resolve(
+struct ruleset_request_cb {
+	void (*func)(struct ev_loop *loop, void *data, struct dialreq *req);
+	struct ev_loop *loop;
+	void *data;
+};
+struct ruleset_state *ruleset_resolve(
 	struct ruleset *r, const char *request, const char *username,
-	const char *password);
-struct dialreq *ruleset_route(
+	const char *password, const struct ruleset_request_cb *callback);
+struct ruleset_state *ruleset_route(
 	struct ruleset *r, const char *request, const char *username,
-	const char *password);
-struct dialreq *ruleset_route6(
+	const char *password, const struct ruleset_request_cb *callback);
+struct ruleset_state *ruleset_route6(
 	struct ruleset *r, const char *request, const char *username,
-	const char *password);
+	const char *password, const struct ruleset_request_cb *callback);
 
 void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
 const char *
