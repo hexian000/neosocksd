@@ -324,7 +324,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 #if WITH_RULESET
 	{
 		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
-		ev_idle_init(w_ruleset, forward_idle_cb);
+		ev_idle_init(w_ruleset, NULL);
 		w_ruleset->data = ctx;
 	}
 	ctx->ruleset_state = NULL;
@@ -356,6 +356,7 @@ void forward_serve(
 #if WITH_RULESET
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
+		ev_set_cb(&ctx->w_ruleset, forward_idle_cb);
 		ev_idle_start(loop, &ctx->w_ruleset);
 		return;
 	}
