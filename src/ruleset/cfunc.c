@@ -28,8 +28,8 @@ static int ruleset_state_gc(lua_State *restrict L)
 	switch (state->type) {
 	case RCB_REQUEST:
 		if (state->request.func != NULL) {
-			struct ruleset *r = aux_getruleset(L);
-			state->request.func(r->loop, state->request.data, NULL);
+			state->request.func(
+				state->request.loop, state->request.data, NULL);
 			state->request.func = NULL;
 		}
 		break;
@@ -58,6 +58,7 @@ static void check_memlimit(lua_State *restrict L)
 	(void)lua_gc(L, LUA_GCCOLLECT, 0);
 }
 
+struct dialreq;
 /* request(func, request, username, password) */
 int cfunc_request(lua_State *restrict L)
 {
@@ -68,31 +69,43 @@ int cfunc_request(lua_State *restrict L)
 	const char *username = lua_touserdata(L, 3);
 	const char *password = lua_touserdata(L, 4);
 	const struct ruleset_request_cb *in_cb = lua_touserdata(L, 5);
+	struct ruleset_state *restrict ud =
+		lua_newuserdata(L, sizeof(struct ruleset_state));
+	*ud = (struct ruleset_state){
+		.type = RCB_REQUEST,
+		.request = { NULL, NULL, NULL },
+	};
+	if (luaL_newmetatable(L, MT_RULESET_STATE)) {
+		lua_pushcfunction(L, ruleset_state_gc);
+		lua_setfield(L, -2, "__gc");
+	}
+	lua_setmetatable(L, -2);
+	lua_copy(L, -1, 1);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
-	lua_copy(L, -1, 1);
-	lua_settop(L, 1);
+	lua_copy(L, -1, 2);
+	lua_settop(L, 2);
 
 	lua_pushstring(L, request);
 	lua_pushstring(L, username);
 	lua_pushstring(L, password);
 	lua_call(L, 3, LUA_MULTRET);
-	const int n = lua_gettop(L);
+	const int base = 1;
+	const int n = lua_gettop(L) - base;
 	if (n < 1) {
 		return 0;
 	}
-	if (!aux_todialreq(L, n)) {
-		LOGW_F("ruleset.%s `%s': invalid return", func, request);
-		in_cb->func(in_cb->loop, in_cb->data, NULL);
+	struct dialreq *req;
+	if (aux_todialreq(L, n)) {
+		req = lua_touserdata(L, -1);
 	} else {
-		in_cb->func(in_cb->loop, in_cb->data, lua_touserdata(L, -1));
+		LOGW_F("ruleset.%s `%s': invalid return", func, request);
+		req = NULL;
 	}
-	struct ruleset_state *restrict ud =
-		lua_newuserdata(L, sizeof(struct ruleset_state));
-	*ud = (struct ruleset_state){
-		.type = RCB_REQUEST,
-		.rpcall = { NULL, NULL },
-	};
+	lua_pushvalue(L, 1);
+	ud->request = *in_cb;
+	ud->request.func(ud->request.loop, ud->request.data, req);
+	ud->request.func = NULL;
 	return 1;
 }
 
@@ -141,6 +154,7 @@ static int rpcall_finish(lua_State *restrict L)
 {
 	struct ruleset_state *restrict state =
 		lua_touserdata(L, lua_upvalueindex(1));
+	ASSERT(state->type == RCB_RPCALL);
 	if (state->rpcall.func == NULL) {
 		return 0;
 	}

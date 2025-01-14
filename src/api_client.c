@@ -97,10 +97,11 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct api_client_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->cb.func != NULL);
-	ctx->cb.func(
-		ctx, loop, ctx->cb.data, ctx->result.errmsg, ctx->result.errlen,
-		ctx->result.stream);
+	if (ctx->cb.func != NULL) {
+		ctx->cb.func(
+			ctx, loop, ctx->cb.data, ctx->result.errmsg,
+			ctx->result.errlen, ctx->result.stream);
+	}
 	if (ctx->result.stream != NULL) {
 		stream_close(ctx->result.stream);
 		ctx->result.stream = NULL;
@@ -112,19 +113,14 @@ static void api_client_finish(
 	struct ev_loop *loop, struct api_client_ctx *restrict ctx,
 	const char *errmsg, const size_t errlen, struct stream *stream)
 {
+	ctx->result.errmsg = errmsg;
+	ctx->result.errlen = errlen;
+	ctx->result.stream = stream;
 	/* ignore further io events */
-	ev_io_stop(loop, &ctx->w_socket);
-	if (ctx->cb.func != NULL) {
-		ctx->result.errmsg = errmsg;
-		ctx->result.errlen = errlen;
-		ctx->result.stream = stream;
-		ev_idle_start(loop, &ctx->w_ruleset);
-		return;
+	if (ctx->state >= STATE_CLIENT_REQUEST) {
+		ev_io_stop(loop, &ctx->w_socket);
 	}
-	if (stream != NULL) {
-		stream_close(stream);
-	}
-	api_client_close(loop, ctx);
+	ev_idle_start(loop, &ctx->w_ruleset);
 }
 
 #define API_RETURN_ERROR(loop, ctx, msg)                                       \
