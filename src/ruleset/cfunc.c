@@ -58,6 +58,28 @@ static void check_memlimit(lua_State *restrict L)
 	(void)lua_gc(L, LUA_GCCOLLECT, 0);
 }
 
+/* finish(ok, ...) */
+static int request_finish(lua_State *restrict L)
+{
+	struct ruleset_state *restrict state =
+		lua_touserdata(L, lua_upvalueindex(1));
+	ASSERT(state->type == RCB_REQUEST);
+	if (state->request.func == NULL) {
+		return 0;
+	}
+	if (!lua_toboolean(L, 1)) {
+		return 0;
+	}
+	const int n = lua_gettop(L) - 1;
+	struct dialreq *req = NULL;
+	if (lua_toboolean(L, 1) && n > 0 && aux_todialreq(L, n)) {
+		req = lua_touserdata(L, -1);
+	}
+	state->request.func(state->request.loop, state->request.data, req);
+	state->request.func = NULL;
+	return 0;
+}
+
 struct dialreq;
 /* request(func, request, username, password) */
 int cfunc_request(lua_State *restrict L)
@@ -82,32 +104,27 @@ int cfunc_request(lua_State *restrict L)
 	}
 	lua_setmetatable(L, -2);
 	lua_copy(L, -1, 1);
-	(void)lua_getglobal(L, "ruleset");
-	(void)lua_getfield(L, -1, func);
-	lua_copy(L, -1, 2);
-	lua_settop(L, 2);
 
-	lua_pushstring(L, request);
-	lua_pushstring(L, username);
-	lua_pushstring(L, password);
-	lua_call(L, 3, LUA_MULTRET);
-	const int base = 1;
-	const int n = lua_gettop(L) - base;
-	if (n < 1) {
-		return 0;
-	}
-	struct dialreq *req;
-	if (aux_todialreq(L, n)) {
-		req = lua_touserdata(L, -1);
-	} else {
-		LOGW_F("ruleset.%s `%s': invalid return", func, request);
-		req = NULL;
-	}
+	lua_State *restrict co = lua_newthread(L);
+	lua_copy(L, -1, 2);
+	(void)lua_getglobal(co, "ruleset");
+	(void)lua_getfield(co, -1, func);
+	lua_replace(co, -2);
+	lua_pushstring(co, request);
+	lua_pushstring(co, username);
+	lua_pushstring(co, password);
+
+	lua_settop(L, 2);
+	aux_getregtable(L, RIDX_ASYNC_ROUTINE);
+	lua_pushvalue(L, 2);
 	lua_pushvalue(L, 1);
+	lua_pushcclosure(L, request_finish, 1);
+	lua_rawset(L, -3);
+
 	state->request = *in_cb;
 	*pstate = state;
-	state->request.func(state->request.loop, state->request.data, req);
-	state->request.func = NULL;
+	aux_resume(L, 2, 3);
+	lua_settop(L, 1);
 	return 1;
 }
 
