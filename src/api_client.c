@@ -40,6 +40,7 @@ struct api_client_ctx {
 	struct session ss;
 	enum api_client_state state;
 	struct api_client_cb cb;
+	struct ev_idle w_start;
 	struct ev_timer w_timeout;
 	struct ev_idle w_ruleset;
 	struct dialreq *dialreq;
@@ -57,6 +58,7 @@ ASSERT_SUPER(struct session, struct api_client_ctx, ss);
 static void api_client_close(
 	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx)
 {
+	ev_idle_stop(loop, &ctx->w_start);
 	ev_timer_stop(loop, &ctx->w_timeout);
 	ev_idle_stop(loop, &ctx->w_ruleset);
 	if (ctx->state == STATE_CLIENT_CONNECT) {
@@ -320,9 +322,18 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	return true;
 }
 
-static struct api_client_ctx *api_client_do(
-	struct ev_loop *loop, struct dialreq *req, const char *uri,
-	const char *payload, const size_t len,
+static void start_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct api_client_ctx *restrict ctx = watcher->data;
+	ev_timer_start(loop, &ctx->w_timeout);
+	dialer_do(&ctx->dialer, loop, ctx->dialreq);
+}
+
+static bool api_client_do(
+	struct ev_loop *loop, struct api_client_ctx **pctx, struct dialreq *req,
+	const char *uri, const char *payload, const size_t len,
 	const struct api_client_cb *in_cb)
 {
 	CHECK(len <= INT_MAX);
@@ -331,7 +342,7 @@ static struct api_client_ctx *api_client_do(
 	if (ctx == NULL) {
 		LOGOOM();
 		dialreq_free(req);
-		return NULL;
+		return false;
 	}
 	ctx->state = STATE_CLIENT_CONNECT;
 	ctx->dialreq = req;
@@ -340,9 +351,11 @@ static struct api_client_ctx *api_client_do(
 	if (!make_request(&ctx->parser, uri, payload, len)) {
 		LOGOOM();
 		api_client_close(loop, ctx);
-		return NULL;
+		return false;
 	}
 	ctx->cb = *in_cb;
+	ev_idle_init(&ctx->w_start, start_cb);
+	ctx->w_start.data = ctx;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 	ev_idle_init(&ctx->w_ruleset, idle_cb);
@@ -354,7 +367,7 @@ static struct api_client_ctx *api_client_do(
 		.func = dialer_cb,
 		.data = ctx,
 	};
-	dialer_init(&ctx->dialer, cb);
+	dialer_init(&ctx->dialer, &cb);
 	if (ctx->cb.func != NULL) {
 		/* managed by ruleset */
 		ctx->ss.close = NULL;
@@ -364,12 +377,11 @@ static struct api_client_ctx *api_client_do(
 		session_add(&ctx->ss);
 	}
 
-	ev_timer_start(loop, &ctx->w_timeout);
-	dialer_start(&ctx->dialer, loop, req);
-	if (in_cb->func == NULL) {
-		return NULL;
+	ev_idle_start(loop, &ctx->w_start);
+	if (pctx != NULL) {
+		*pctx = ctx;
 	}
-	return ctx;
+	return true;
 }
 
 void api_client_invoke(
@@ -377,16 +389,17 @@ void api_client_invoke(
 	const size_t len)
 {
 	(void)api_client_do(
-		loop, req, "/ruleset/invoke", payload, len,
+		loop, NULL, req, "/ruleset/invoke", payload, len,
 		&(struct api_client_cb){ NULL, NULL });
 }
 
-struct api_client_ctx *api_client_rpcall(
-	struct ev_loop *loop, struct dialreq *req, const char *payload,
-	const size_t len, const struct api_client_cb *cb)
+bool api_client_rpcall(
+	struct ev_loop *loop, struct api_client_ctx **pctx, struct dialreq *req,
+	const char *payload, const size_t len, const struct api_client_cb *cb)
 {
 	ASSERT(cb->func != NULL);
-	return api_client_do(loop, req, "/ruleset/rpcall", payload, len, cb);
+	return api_client_do(
+		loop, pctx, req, "/ruleset/rpcall", payload, len, cb);
 }
 
 void api_client_cancel(struct ev_loop *loop, struct api_client_ctx *ctx)

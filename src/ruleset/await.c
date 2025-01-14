@@ -338,8 +338,9 @@ static int await_invoke(lua_State *restrict L)
 		.func = invoke_cb,
 		.data = ud,
 	};
-	ud->ctx = api_client_rpcall(r->loop, req, code, len, &cb);
-	if (ud->ctx == NULL) {
+	const bool ok =
+		api_client_rpcall(r->loop, &ud->ctx, req, code, len, &cb);
+	if (!ok) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}

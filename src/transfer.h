@@ -38,7 +38,7 @@ struct transfer {
 };
 
 void transfer_init(
-	struct transfer *t, struct event_cb cb, int src_fd, int dst_fd,
+	struct transfer *t, const struct event_cb *cb, int src_fd, int dst_fd,
 	uintmax_t *byt_transferred);
 
 void transfer_start(struct ev_loop *loop, struct transfer *t);

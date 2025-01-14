@@ -372,7 +372,6 @@ dialer_stop(struct dialer *restrict d, struct ev_loop *loop, const bool ok)
 {
 	switch (d->state) {
 	case STATE_INIT:
-		ev_clear_pending(loop, &d->w_start);
 		break;
 	case STATE_RESOLVE:
 		if (d->resolve_query != NULL) {
@@ -1253,11 +1252,8 @@ static void resolve_cb(
 	}
 }
 
-static void
-start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 {
-	CHECK_REVENTS(revents, EV_CUSTOM);
-	struct dialer *restrict d = watcher->data;
 	const struct dialreq *restrict req = d->req;
 	const struct dialaddr *restrict addr =
 		req->num_proxy > 0 ? &req->proxy[0].addr : &req->addr;
@@ -1304,18 +1300,15 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 	}
 }
 
-void dialer_init(struct dialer *restrict d, const struct event_cb cb)
+void dialer_init(struct dialer *restrict d, const struct event_cb *cb)
 {
-	d->done_cb = cb;
+	d->done_cb = *cb;
 	d->req = NULL;
 	d->resolve_query = NULL;
 	d->jump = 0;
 	d->state = STATE_INIT;
 	d->syserr = 0;
 	{
-		struct ev_watcher *restrict w_start = &d->w_start;
-		ev_init(w_start, start_cb);
-		w_start->data = d;
 		struct ev_io *restrict w_socket = &d->w_socket;
 		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
 		w_socket->data = d;
@@ -1324,7 +1317,7 @@ void dialer_init(struct dialer *restrict d, const struct event_cb cb)
 	BUF_INIT(d->rbuf, 0);
 }
 
-void dialer_start(
+void dialer_do(
 	struct dialer *restrict d, struct ev_loop *restrict loop,
 	const struct dialreq *restrict req)
 {
@@ -1336,7 +1329,7 @@ void dialer_start(
 	}
 	d->req = req;
 	d->syserr = 0;
-	ev_feed_event(loop, &d->w_start, EV_CUSTOM);
+	dialer_start(d, loop);
 }
 
 int dialer_get(struct dialer *d)

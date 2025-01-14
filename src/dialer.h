@@ -78,7 +78,6 @@ struct dialer {
 	size_t jump;
 	int state;
 	int syserr;
-	struct ev_watcher w_start;
 	struct ev_io w_socket;
 	unsigned char *next;
 	struct {
@@ -87,9 +86,9 @@ struct dialer {
 	} rbuf;
 };
 
-void dialer_init(struct dialer *d, struct event_cb cb);
+void dialer_init(struct dialer *d, const struct event_cb *cb);
 
-void dialer_start(
+void dialer_do(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req);
 
 void dialer_cancel(struct dialer *d, struct ev_loop *loop);

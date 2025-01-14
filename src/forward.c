@@ -226,10 +226,10 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	};
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
-		&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd,
+		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
 		&stats->byt_up);
 	transfer_init(
-		&ctx->downlink, cb, ctx->dialed_fd, ctx->accepted_fd,
+		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
 		&stats->byt_down);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
@@ -239,7 +239,6 @@ static void forward_ctx_start(
 	struct ev_loop *loop, struct forward_ctx *restrict ctx,
 	const struct dialreq *req)
 {
-	dialer_start(&ctx->dialer, loop, req);
 	ev_timer_start(loop, &ctx->w_timeout);
 
 	FW_CTX_LOG(VERBOSE, ctx, "connect");
@@ -247,6 +246,7 @@ static void forward_ctx_start(
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
 	stats->num_halfopen++;
+	dialer_do(&ctx->dialer, loop, req);
 }
 
 #if WITH_RULESET
@@ -341,7 +341,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 		.data = ctx,
 	};
 	ctx->dialreq = NULL;
-	dialer_init(&ctx->dialer, cb);
+	dialer_init(&ctx->dialer, &cb);
 	ctx->ss.close = forward_ss_close;
 	session_add(&ctx->ss);
 	return ctx;

@@ -244,7 +244,7 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
-	dialer_start(&ctx->dialer, loop, ctx->dialreq);
+	dialer_do(&ctx->dialer, loop, ctx->dialreq);
 }
 
 #if WITH_RULESET
@@ -379,10 +379,10 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	};
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
-		&ctx->uplink, cb, ctx->accepted_fd, ctx->dialed_fd,
+		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
 		&stats->byt_up);
 	transfer_init(
-		&ctx->downlink, cb, ctx->dialed_fd, ctx->accepted_fd,
+		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
 		&stats->byt_down);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
@@ -553,7 +553,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 		.func = dialer_cb,
 		.data = ctx,
 	};
-	dialer_init(&ctx->dialer, cb);
+	dialer_init(&ctx->dialer, &cb);
 
 	ctx->ss.close = http_ss_close;
 	session_add(&ctx->ss);

@@ -296,8 +296,8 @@ static void pipe_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 #endif
 
 void transfer_init(
-	struct transfer *restrict t, const struct event_cb cb, const int src_fd,
-	const int dst_fd, uintmax_t *byt_transferred)
+	struct transfer *restrict t, const struct event_cb *cb,
+	const int src_fd, const int dst_fd, uintmax_t *byt_transferred)
 {
 	t->state = XFER_INIT;
 	t->src_fd = src_fd;
@@ -305,7 +305,7 @@ void transfer_init(
 	struct ev_io *restrict w_socket = &t->w_socket;
 	ev_io_init(w_socket, transfer_cb, src_fd, EV_READ);
 	w_socket->data = t;
-	t->state_cb = cb;
+	t->state_cb = *cb;
 	t->byt_transferred = byt_transferred;
 
 #if WITH_SPLICE
