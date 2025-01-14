@@ -139,7 +139,6 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECT:
-		ev_io_stop(loop, &ctx->w_socket);
 		dialer_cancel(&ctx->dialer, loop);
 		dialreq_free(ctx->dialreq);
 		ctx->dialreq = NULL;
@@ -311,6 +310,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	case STATE_HANDSHAKE3:
 		SOCKS_CTX_LOG(WARNING, ctx, "handshake timeout");
 		break;
+	case STATE_REQUEST:
 	case STATE_CONNECT: {
 		const uint8_t version = read_uint8(ctx->rbuf.data);
 		if (version == SOCKS5) {
@@ -803,6 +803,7 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	struct ruleset *restrict ruleset = G.ruleset;
 	ASSERT(ruleset != NULL);
 	struct socks_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_REQUEST);
 	const struct dialaddr *restrict addr = &ctx->addr;
 	const size_t cap =
 		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
@@ -870,6 +871,8 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 
+	/* ignore further io events */
+	ev_io_stop(loop, &ctx->w_socket);
 	ctx->state = STATE_REQUEST;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;

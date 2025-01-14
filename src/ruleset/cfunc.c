@@ -84,9 +84,15 @@ int cfunc_request(lua_State *restrict L)
 	if (!aux_todialreq(L, n)) {
 		LOGW_F("ruleset.%s `%s': invalid return", func, request);
 		in_cb->func(in_cb->loop, in_cb->data, NULL);
-		return 0;
+	} else {
+		in_cb->func(in_cb->loop, in_cb->data, lua_touserdata(L, -1));
 	}
-	in_cb->func(in_cb->loop, in_cb->data, lua_touserdata(L, -1));
+	struct ruleset_state *restrict ud =
+		lua_newuserdata(L, sizeof(struct ruleset_state));
+	*ud = (struct ruleset_state){
+		.type = RCB_REQUEST,
+		.rpcall = { NULL, NULL },
+	};
 	return 1;
 }
 

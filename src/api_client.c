@@ -41,10 +41,16 @@ struct api_client_ctx {
 	enum api_client_state state;
 	struct api_client_cb cb;
 	struct ev_timer w_timeout;
+	struct ev_idle w_ruleset;
 	struct dialreq *dialreq;
 	struct dialer dialer;
 	struct ev_io w_socket;
 	struct http_parser parser;
+	struct {
+		const char *errmsg;
+		size_t errlen;
+		struct stream *stream;
+	} result;
 };
 ASSERT_SUPER(struct session, struct api_client_ctx, ss);
 
@@ -52,6 +58,7 @@ static void api_client_close(
 	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
+	ev_idle_stop(loop, &ctx->w_ruleset);
 	if (ctx->state == STATE_CLIENT_CONNECT) {
 		dialer_cancel(&ctx->dialer, loop);
 	}
@@ -62,6 +69,12 @@ static void api_client_close(
 	if (ctx->state >= STATE_CLIENT_REQUEST) {
 		ev_io_stop(loop, &ctx->w_socket);
 		CLOSE_FD(ctx->w_socket.fd);
+	}
+	if (ctx->state == STATE_CLIENT_RESPONSE) {
+		if (ctx->result.stream != NULL) {
+			stream_close(ctx->result.stream);
+			ctx->result.stream = NULL;
+		}
 	}
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (ctx->ss.close != NULL) {
@@ -79,15 +92,37 @@ api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 	api_client_close(loop, ctx);
 }
 
-static void api_client_finish(
-	struct ev_loop *loop, struct api_client_ctx *restrict ctx, bool ok,
-	const void *data, const size_t len)
+static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
-	if (ctx->cb.func != NULL) {
-		ctx->cb.func(ctx, loop, ctx->cb.data, ok, data, len);
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct api_client_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->cb.func != NULL);
+	ctx->cb.func(
+		ctx, loop, ctx->cb.data, ctx->result.errmsg, ctx->result.errlen,
+		ctx->result.stream);
+	if (ctx->result.stream != NULL) {
+		stream_close(ctx->result.stream);
+		ctx->result.stream = NULL;
 	}
-	if (ok) {
-		stream_close((struct stream *)data);
+	api_client_close(loop, ctx);
+}
+
+static void api_client_finish(
+	struct ev_loop *loop, struct api_client_ctx *restrict ctx,
+	const char *errmsg, const size_t errlen, struct stream *stream)
+{
+	/* ignore further io events */
+	ev_io_stop(loop, &ctx->w_socket);
+	if (ctx->cb.func != NULL) {
+		ctx->result.errmsg = errmsg;
+		ctx->result.errlen = errlen;
+		ctx->result.stream = stream;
+		ev_idle_start(loop, &ctx->w_ruleset);
+		return;
+	}
+	if (stream != NULL) {
+		stream_close(stream);
 	}
 	api_client_close(loop, ctx);
 }
@@ -95,7 +130,7 @@ static void api_client_finish(
 #define API_RETURN_ERROR(loop, ctx, msg)                                       \
 	do {                                                                   \
 		api_client_finish(                                             \
-			(loop), (ctx), false, (msg ""), sizeof(msg) - 1);      \
+			(loop), (ctx), (msg ""), sizeof(msg) - 1, NULL);       \
 		return;                                                        \
 	} while (false)
 
@@ -118,8 +153,8 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	} else if (VBUF_LEN(ctx->parser.cbuf) > 0) {
 		/* return content as error info */
 		api_client_finish(
-			loop, ctx, false, VBUF_DATA(ctx->parser.cbuf),
-			VBUF_LEN(ctx->parser.cbuf));
+			loop, ctx, VBUF_DATA(ctx->parser.cbuf),
+			VBUF_LEN(ctx->parser.cbuf), NULL);
 		return;
 	} else {
 		/* HTTP error info */
@@ -128,7 +163,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			buf, sizeof(buf), "%s %s %s", msg->rsp.version,
 			msg->rsp.code, msg->rsp.status);
 		CHECK(ret > 0);
-		api_client_finish(loop, ctx, false, buf, (size_t)ret);
+		api_client_finish(loop, ctx, buf, (size_t)ret, NULL);
 		return;
 	}
 	struct stream *r = content_reader(
@@ -138,7 +173,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		LOGOOM();
 		API_RETURN_ERROR(loop, ctx, "out of memory");
 	}
-	api_client_finish(loop, ctx, true, r, 0);
+	api_client_finish(loop, ctx, NULL, 0, r);
 }
 
 static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -152,7 +187,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
 		const char *msg = strerror(err);
-		api_client_finish(loop, ctx, false, msg, strlen(msg));
+		api_client_finish(loop, ctx, msg, strlen(msg), NULL);
 		return;
 	}
 	p->wpos += len;
@@ -168,7 +203,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		err = socket_send(watcher->fd, buf, &len);
 		if (err != 0) {
 			const char *msg = strerror(err);
-			api_client_finish(loop, ctx, false, msg, strlen(msg));
+			api_client_finish(loop, ctx, msg, strlen(msg), NULL);
 			return;
 		}
 		p->cpos += len;
@@ -291,7 +326,8 @@ static bool parse_header(void *ctx, const char *key, char *value)
 
 static struct api_client_ctx *api_client_do(
 	struct ev_loop *loop, struct dialreq *req, const char *uri,
-	const char *payload, const size_t len, struct api_client_cb client_cb)
+	const char *payload, const size_t len,
+	const struct api_client_cb *in_cb)
 {
 	CHECK(len <= INT_MAX);
 	struct api_client_ctx *restrict ctx =
@@ -310,9 +346,14 @@ static struct api_client_ctx *api_client_do(
 		api_client_close(loop, ctx);
 		return NULL;
 	}
-	ctx->cb = client_cb;
+	ctx->cb = *in_cb;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
+	ev_idle_init(&ctx->w_ruleset, idle_cb);
+	ctx->w_ruleset.data = ctx;
+	ctx->result.errmsg = NULL;
+	ctx->result.errlen = 0;
+	ctx->result.stream = NULL;
 	const struct event_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,
@@ -329,7 +370,7 @@ static struct api_client_ctx *api_client_do(
 
 	ev_timer_start(loop, &ctx->w_timeout);
 	dialer_start(&ctx->dialer, loop, req);
-	if (client_cb.func == NULL) {
+	if (in_cb->func == NULL) {
 		return NULL;
 	}
 	return ctx;
@@ -341,14 +382,14 @@ void api_client_invoke(
 {
 	(void)api_client_do(
 		loop, req, "/ruleset/invoke", payload, len,
-		(struct api_client_cb){ NULL, NULL });
+		&(struct api_client_cb){ NULL, NULL });
 }
 
 struct api_client_ctx *api_client_rpcall(
 	struct ev_loop *loop, struct dialreq *req, const char *payload,
-	const size_t len, const struct api_client_cb cb)
+	const size_t len, const struct api_client_cb *cb)
 {
-	ASSERT(cb.func != NULL);
+	ASSERT(cb->func != NULL);
 	return api_client_do(loop, req, "/ruleset/rpcall", payload, len, cb);
 }
 

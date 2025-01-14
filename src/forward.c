@@ -179,6 +179,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 
 	switch (ctx->state) {
 	case STATE_INIT:
+	case STATE_REQUEST:
 	case STATE_CONNECT:
 		FW_CTX_LOG(WARNING, ctx, "connection timeout");
 		break;

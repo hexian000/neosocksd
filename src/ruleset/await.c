@@ -252,15 +252,15 @@ static int await_invoke_close(lua_State *restrict L)
 
 static void invoke_cb(
 	struct api_client_ctx *ctx, struct ev_loop *loop, void *data,
-	const bool ok, const void *payload, const size_t len)
+	const char *err, const size_t errlen, struct stream *stream)
 {
 	UNUSED(loop);
 	struct await_invoke_userdata *restrict ud = data;
 	ASSERT(ud->ctx == ctx);
 	ud->ctx = NULL;
 	ruleset_resume(
-		ud->ruleset, ud, 4, NULL, (void *)&ok, (void *)payload,
-		(void *)&len);
+		ud->ruleset, ud, 4, NULL, (void *)err, (void *)&errlen,
+		(void *)stream);
 }
 
 static int
@@ -276,15 +276,15 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 		return lua_error(L);
 	}
 	ASSERT(lua_gettop(L) == base + 4);
-	const bool ok = *(bool *)lua_touserdata(L, base + 2);
-	const void *payload = lua_touserdata(L, base + 3);
-	const size_t len = *(size_t *)lua_touserdata(L, base + 4);
-	lua_pushboolean(L, ok);
-	if (!ok) {
-		lua_pushlstring(L, payload, len);
+	const char *errmsg = lua_touserdata(L, base + 2);
+	const size_t errlen = *(size_t *)lua_touserdata(L, base + 3);
+	struct stream *stream = lua_touserdata(L, base + 4);
+	lua_pushboolean(L, errmsg == NULL);
+	if (errmsg != NULL) {
+		lua_pushlstring(L, errmsg, errlen);
 		return 2;
 	}
-	if (lua_load(L, aux_reader, (void *)payload, "=(rpc)", "t")) {
+	if (lua_load(L, aux_reader, (void *)stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
@@ -334,11 +334,11 @@ static int await_invoke(lua_State *restrict L)
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, -1);
 #endif
-	struct api_client_cb cb = {
+	const struct api_client_cb cb = {
 		.func = invoke_cb,
 		.data = ud,
 	};
-	ud->ctx = api_client_rpcall(r->loop, req, code, len, cb);
+	ud->ctx = api_client_rpcall(r->loop, req, code, len, &cb);
 	if (ud->ctx == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
