@@ -40,7 +40,6 @@ enum api_state {
 	STATE_INIT,
 	STATE_REQUEST,
 #if WITH_RULESET
-	STATE_RULESET,
 	STATE_YIELD,
 #endif
 	STATE_RESPONSE,
@@ -55,7 +54,6 @@ struct api_ctx {
 	struct ev_timer w_timeout;
 	struct ev_io w_recv, w_send;
 #if WITH_RULESET
-	struct ev_idle w_ruleset;
 	struct ruleset_state *rpcstate;
 #endif
 	struct dialreq *dialreq;
@@ -713,14 +711,6 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_send);
 	return;
 }
-
-static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
-{
-	CHECK_REVENTS(revents, EV_IDLE);
-	ev_idle_stop(loop, watcher);
-	struct api_ctx *restrict ctx = watcher->data;
-	http_handle_ruleset(loop, ctx);
-}
 #endif
 
 static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
@@ -766,8 +756,7 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 #if WITH_RULESET
 	if (strcmp(segment, "ruleset") == 0) {
-		ctx->state = STATE_RULESET;
-		ev_idle_start(loop, &ctx->w_ruleset);
+		http_handle_ruleset(loop, ctx);
 		return;
 	}
 #endif
@@ -787,9 +776,6 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	case STATE_REQUEST:
 #if WITH_RULESET
-	case STATE_RULESET:
-		ev_idle_stop(loop, &ctx->w_ruleset);
-		/* fallthrough */
 	case STATE_YIELD:
 		if (ctx->rpcstate != NULL) {
 			ruleset_cancel(ctx->rpcstate);
@@ -985,11 +971,6 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 		w_send->data = ctx;
 	}
 #if WITH_RULESET
-	{
-		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
-		ev_idle_init(w_ruleset, idle_cb);
-		w_ruleset->data = ctx;
-	}
 	ctx->rpcstate = NULL;
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
