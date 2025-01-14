@@ -20,8 +20,8 @@
 #include <ev.h>
 
 #include <math.h>
-#include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"
