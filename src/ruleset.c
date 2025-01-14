@@ -260,7 +260,7 @@ bool ruleset_gc(struct ruleset *restrict r)
 	return ruleset_pcall(r, cfunc_gc, 0, 0);
 }
 
-struct ruleset_state *dispatch_req(
+static struct ruleset_state *dispatch_req(
 	struct ruleset *restrict r, const char *func, const char *request,
 	const char *username, const char *password,
 	const struct ruleset_request_cb *callback)

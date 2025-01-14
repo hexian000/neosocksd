@@ -376,8 +376,8 @@ struct resolve_query *resolve_do(
 	struct resolver *r, struct resolve_cb cb, const char *name,
 	const char *service, const int family)
 {
-	const size_t namelen = name != NULL ? strlen(name) + 1 : 0;
-	const size_t servlen = service != NULL ? strlen(service) + 1 : 0;
+	const size_t namelen = (name != NULL) ? strlen(name) + 1 : 0;
+	const size_t servlen = (service != NULL) ? strlen(service) + 1 : 0;
 	struct resolve_query *restrict q =
 		malloc(sizeof(struct resolve_query) + namelen + servlen);
 	if (q == NULL) {
