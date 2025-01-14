@@ -40,7 +40,7 @@ struct api_client_ctx {
 	struct session ss;
 	enum api_client_state state;
 	struct api_client_cb cb;
-	struct ev_idle w_start;
+	struct ev_watcher w_start;
 	struct ev_timer w_timeout;
 	struct ev_idle w_ruleset;
 	struct dialreq *dialreq;
@@ -58,7 +58,7 @@ ASSERT_SUPER(struct session, struct api_client_ctx, ss);
 static void api_client_close(
 	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx)
 {
-	ev_idle_stop(loop, &ctx->w_start);
+	ev_clear_pending(loop, &ctx->w_start);
 	ev_timer_stop(loop, &ctx->w_timeout);
 	ev_idle_stop(loop, &ctx->w_ruleset);
 	if (ctx->state == STATE_CLIENT_CONNECT) {
@@ -322,10 +322,10 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	return true;
 }
 
-static void start_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+static void
+start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	CHECK_REVENTS(revents, EV_IDLE);
-	ev_idle_stop(loop, watcher);
+	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct api_client_ctx *restrict ctx = watcher->data;
 	ev_timer_start(loop, &ctx->w_timeout);
 	dialer_do(&ctx->dialer, loop, ctx->dialreq);
@@ -354,7 +354,7 @@ static bool api_client_do(
 		return false;
 	}
 	ctx->cb = *in_cb;
-	ev_idle_init(&ctx->w_start, start_cb);
+	ev_init(&ctx->w_start, start_cb);
 	ctx->w_start.data = ctx;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
@@ -377,7 +377,7 @@ static bool api_client_do(
 		session_add(&ctx->ss);
 	}
 
-	ev_idle_start(loop, &ctx->w_start);
+	ev_feed_event(loop, &ctx->w_start, EV_CUSTOM);
 	if (pctx != NULL) {
 		*pctx = ctx;
 	}
