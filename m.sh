@@ -35,6 +35,18 @@ case "$1" in
     cmake --build .
     ls -lh bin/neosocksd
     ;;
+"vanilla")
+    # rebuild without ruleset
+    rm -rf build && mkdir -p build && cd build
+    cmake \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DCMAKE_BUILD_TYPE="Release" \
+        -DENABLE_RULESET=OFF \
+        ..
+    cp compile_commands.json ../
+    cmake --build .
+    ls -lh bin/neosocksd
+    ;;
 "posix")
     # rebuild for strict POSIX compliance
     rm -rf build && mkdir -p build && cd build

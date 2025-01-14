@@ -207,6 +207,28 @@ static struct dialreq *make_dialreq(const char *addr_str)
 	return req;
 }
 
+static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	if (ctx->dialreq == NULL) {
+		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		ctx->state = STATE_RESPONSE;
+		ev_io_start(loop, &ctx->w_send);
+		return;
+	}
+	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
+	ctx->state = STATE_CONNECT;
+	dialer_do(&ctx->dialer, loop, ctx->dialreq);
+}
+
+#if WITH_RULESET
+static void ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
+{
+	struct http_ctx *restrict ctx = data;
+	ctx->ruleset_state = NULL;
+	ctx->dialreq = req;
+	http_connect(loop, ctx);
+}
+
 static void parse_proxy_auth(
 	unsigned char *buf, const size_t bufsize, const char **username,
 	const char **password, const char *authtype, const char *credentials)
@@ -232,28 +254,6 @@ static void parse_proxy_auth(
 	*sep = '\0';
 	*username = s;
 	*password = sep + 1;
-}
-
-static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
-{
-	if (ctx->dialreq == NULL) {
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
-		return;
-	}
-	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
-	ctx->state = STATE_CONNECT;
-	dialer_do(&ctx->dialer, loop, ctx->dialreq);
-}
-
-#if WITH_RULESET
-static void ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
-{
-	struct http_ctx *restrict ctx = data;
-	ctx->ruleset_state = NULL;
-	ctx->dialreq = req;
-	http_connect(loop, ctx);
 }
 
 static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)

@@ -39,8 +39,10 @@
 enum api_state {
 	STATE_INIT,
 	STATE_REQUEST,
+#if WITH_RULESET
 	STATE_RULESET,
 	STATE_YIELD,
+#endif
 	STATE_RESPONSE,
 };
 
@@ -780,22 +782,23 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
-#if WITH_RULESET
-	if (ctx->rpcstate != NULL) {
-		ruleset_cancel(ctx->rpcstate);
-		ctx->rpcstate = NULL;
-	}
-#endif
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
 	case STATE_INIT:
 		return;
 	case STATE_REQUEST:
+#if WITH_RULESET
 	case STATE_RULESET:
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		/* fallthrough */
 	case STATE_YIELD:
+		if (ctx->rpcstate != NULL) {
+			ruleset_cancel(ctx->rpcstate);
+			ctx->rpcstate = NULL;
+		}
+#endif
+		/* fallthrough */
 	case STATE_RESPONSE:
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
