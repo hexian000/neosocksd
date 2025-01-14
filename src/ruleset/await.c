@@ -70,10 +70,10 @@ struct await_sleep_userdata {
 
 static int await_sleep_gc(lua_State *restrict L)
 {
-	struct ruleset *restrict r = aux_getruleset(L);
 	struct await_sleep_userdata *ud = lua_touserdata(L, 1);
-	ev_timer_stop(r->loop, &ud->w_timer);
-	ev_idle_stop(r->loop, &ud->w_idle);
+	struct ev_loop *loop = ud->ruleset->loop;
+	ev_timer_stop(loop, &ud->w_timer);
+	ev_idle_stop(loop, &ud->w_idle);
 	return 0;
 }
 
@@ -358,12 +358,15 @@ static int await_invoke(lua_State *restrict L)
 struct await_execute_userdata {
 	struct ruleset *ruleset;
 	struct ev_child w_child;
+	struct ev_idle w_idle;
 };
 
 static int await_execute_close(lua_State *restrict L)
 {
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, 1);
-	ev_child_stop(ud->ruleset->loop, &ud->w_child);
+	struct ev_loop *loop = ud->ruleset->loop;
+	ev_child_stop(loop, &ud->w_child);
+	ev_idle_stop(loop, &ud->w_idle);
 	return 0;
 }
 
@@ -372,6 +375,15 @@ child_cb(struct ev_loop *loop, struct ev_child *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CHILD);
 	ev_child_stop(loop, watcher);
+	struct await_execute_userdata *restrict ud = watcher->data;
+	ev_idle_start(loop, &ud->w_idle);
+}
+
+static void child_finish_cb(
+	struct ev_loop *loop, struct ev_idle *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
 	struct await_execute_userdata *restrict ud = watcher->data;
 	ruleset_resume(ud->ruleset, ud, 1, NULL);
 }
@@ -406,6 +418,9 @@ static int await_execute(lua_State *restrict L)
 		lua_newuserdata(L, sizeof(struct await_execute_userdata));
 	ud->ruleset = r;
 	ev_child_init(&ud->w_child, child_cb, 0, 0);
+	ud->w_child.data = ud;
+	ev_idle_init(&ud->w_idle, child_finish_cb);
+	ud->w_idle.data = ud;
 	if (luaL_newmetatable(L, MT_AWAIT_EXECUTE)) {
 #if HAVE_LUA_TOCLOSE
 		lua_pushcfunction(L, await_execute_close);
