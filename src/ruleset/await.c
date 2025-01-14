@@ -18,14 +18,17 @@
 #include "lua.h"
 
 #include <ev.h>
+#include <unistd.h>
 
 #include <math.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"
 #define MT_AWAIT_INVOKE "await.invoke"
+#define MT_AWAIT_EXECUTE "await.execute"
 
 #define AWAIT_CHECK_YIELDABLE(L)                                               \
 	do {                                                                   \
@@ -114,6 +117,7 @@ static int await_sleep(lua_State *restrict L)
 	AWAIT_CHECK_YIELDABLE(L);
 	lua_Number n = luaL_checknumber(L, 1);
 	luaL_argcheck(L, isfinite(n) && 0 <= n && n <= 1e+9, 1, NULL);
+	lua_settop(L, 1);
 	struct ruleset *restrict r = aux_getruleset(L);
 	struct await_sleep_userdata *restrict ud =
 		lua_newuserdata(L, sizeof(struct await_sleep_userdata));
@@ -314,7 +318,8 @@ static int await_invoke(lua_State *restrict L)
 		lua_pushliteral(L, ERR_INVALID_INVOKE);
 		return lua_error(L);
 	}
-	/* lua stack: code dialreq */
+	lua_settop(L, 1);
+	/* lua stack: code */
 	struct ruleset *restrict r = aux_getruleset(L);
 	struct await_invoke_userdata *restrict ud =
 		lua_newuserdata(L, sizeof(struct await_invoke_userdata));
@@ -350,6 +355,91 @@ static int await_invoke(lua_State *restrict L)
 	return lua_error(L);
 }
 
+struct await_execute_userdata {
+	struct ruleset *ruleset;
+	struct ev_child w_child;
+};
+
+static int await_execute_close(lua_State *restrict L)
+{
+	struct await_execute_userdata *restrict ud = lua_touserdata(L, 1);
+	ev_child_stop(ud->ruleset->loop, &ud->w_child);
+	return 0;
+}
+
+static void
+child_cb(struct ev_loop *loop, struct ev_child *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_CHILD);
+	ev_child_stop(loop, watcher);
+	struct await_execute_userdata *restrict ud = watcher->data;
+	ruleset_resume(ud->ruleset, ud, 1, NULL);
+}
+
+static int
+await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
+{
+	CHECK(status == LUA_YIELD);
+	const int base = (int)ctx;
+	struct await_execute_userdata *restrict ud = lua_touserdata(L, base);
+	context_unpin(L, ud);
+	const char *err = lua_touserdata(L, base + 1);
+	if (err != NULL) {
+		lua_pushstring(L, err);
+		return lua_error(L);
+	}
+	ASSERT(lua_gettop(L) == base + 1);
+	lua_pushinteger(L, ud->w_child.rstatus);
+	return 0;
+}
+
+/* status = await.execute(command) */
+static int await_execute(lua_State *restrict L)
+{
+	AWAIT_CHECK_YIELDABLE(L);
+	size_t len;
+	const char *command = luaL_checklstring(L, 1, &len);
+	lua_settop(L, 1);
+
+	struct ruleset *restrict r = aux_getruleset(L);
+	struct await_execute_userdata *restrict ud =
+		lua_newuserdata(L, sizeof(struct await_execute_userdata));
+	ud->ruleset = r;
+	ev_child_init(&ud->w_child, child_cb, 0, 0);
+	if (luaL_newmetatable(L, MT_AWAIT_EXECUTE)) {
+#if HAVE_LUA_TOCLOSE
+		lua_pushcfunction(L, await_execute_close);
+		lua_setfield(L, -2, "__close");
+#endif
+		lua_pushcfunction(L, await_execute_close);
+		lua_setfield(L, -2, "__gc");
+	}
+	lua_setmetatable(L, -2);
+#if HAVE_LUA_TOCLOSE
+	lua_toclose(L, -1);
+#endif
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		const char *err = strerror(errno);
+		lua_pushstring(L, err);
+		return lua_error(L);
+	}
+	if (pid == 0) {
+		const int status = system(command);
+		_Exit(status);
+		FAIL();
+	}
+	ev_child_set(&ud->w_child, pid, 0);
+	ud->w_child.data = ud;
+	ev_child_start(r->loop, &ud->w_child);
+
+	context_pin(L, ud);
+	lua_yieldk(L, 0, lua_gettop(L), await_execute_k);
+	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
+	return lua_error(L);
+}
+
 int luaopen_await(lua_State *restrict L)
 {
 	lua_newtable(L); /* async routine */
@@ -361,6 +451,7 @@ int luaopen_await(lua_State *restrict L)
 	lua_newtable(L); /* await context */
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
 	const luaL_Reg awaitlib[] = {
+		{ "execute", await_execute },
 		{ "invoke", await_invoke },
 		{ "resolve", await_resolve },
 		{ "sleep", await_sleep },

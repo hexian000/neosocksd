@@ -12,9 +12,11 @@ _G.marshal = marshal
 
 local await = {}
 
-function await.resolve(s) return "" end
+function await.execute(command) return 0 end
 
 function await.invoke(code, addr, ...) return false, ... end
+
+function await.resolve(s) return "" end
 
 function await.sleep(n) end
 

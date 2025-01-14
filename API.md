@@ -31,8 +31,9 @@ Version: dev
   - [zlib.compress](#zlibcompress)
   - [\_G.marshal](#_gmarshal)
   - [\_G.async](#_gasync)
-  - [await.resolve](#awaitresolve)
+  - [await.execute](#awaitexecute)
   - [await.invoke](#awaitinvoke)
+  - [await.resolve](#awaitresolve)
   - [await.sleep](#awaitsleep)
 
 
@@ -486,14 +487,14 @@ This function is implemented in `libruleset.lua`.
 *Notice: The await.\* functions should only be called in asynchronous routines.*
 
 
-### await.resolve
+### await.execute
 
 **Synopsis**
 
 ```Lua
 async(function()
-    local addr = await.resolve("www.example.com")
-    if addr then
+    local status = await.execute("curl -sX POST http://example.com/v1/api")
+    if status ~= 0 then
         -- ......
     end
 end)
@@ -501,11 +502,7 @@ end)
 
 **Description**
 
-Resolves a host name asynchronously. If asynchronous name resolution is not supported, `await.resolve` behaves the same as `neosocksd.resolve`.
-
-IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
-
-Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
+Execute a shell command asynchronously.
 
 
 ### await.invoke
@@ -536,6 +533,28 @@ end, "127.0.1.1:9080")
 Run Lua code on another neosocksd and return the result. On another neosocksd, the code runs in asynchronous routine. Therefore, you can call `await.*` functions in the code. `await.invoke` is likely to be less efficient than `neosocksd.invoke`.
 
 Tip: Please refer to `await.rpcall` in `libruleset.lua`.
+
+
+### await.resolve
+
+**Synopsis**
+
+```Lua
+async(function()
+    local addr = await.resolve("www.example.com")
+    if addr then
+        -- ......
+    end
+end)
+```
+
+**Description**
+
+Resolves a host name asynchronously. If asynchronous name resolution is not supported, `await.resolve` behaves the same as `neosocksd.resolve`.
+
+IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
+
+Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
 
 
 ### await.sleep
