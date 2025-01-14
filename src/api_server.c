@@ -178,10 +178,10 @@ static void server_stats(
 		xfer_down);
 
 #if WITH_RULESET
-	const struct ruleset *r = G.ruleset;
-	if (r != NULL) {
+	const struct ruleset *ruleset = G.ruleset;
+	if (ruleset != NULL) {
 		struct ruleset_vmstats vmstats;
-		ruleset_vmstats(r, &vmstats);
+		ruleset_vmstats(ruleset, &vmstats);
 		append_memstats(buf, &vmstats);
 	}
 #endif
@@ -718,8 +718,6 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
-	struct ruleset *restrict ruleset = G.ruleset;
-	ASSERT(ruleset != NULL);
 	struct api_ctx *restrict ctx = watcher->data;
 	http_handle_ruleset(loop, ctx);
 }

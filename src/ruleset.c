@@ -214,7 +214,7 @@ const char *ruleset_geterror(struct ruleset *restrict r, size_t *len)
 	return s;
 }
 
-bool ruleset_invoke(struct ruleset *r, struct stream *code)
+bool ruleset_invoke(struct ruleset *restrict r, struct stream *code)
 {
 	return ruleset_pcall(r, cfunc_invoke, 1, 0, code);
 }
@@ -234,8 +234,8 @@ void ruleset_cancel(struct ruleset_state *state)
 }
 
 bool ruleset_rpcall(
-	struct ruleset *r, struct ruleset_state **state, struct stream *code,
-	const struct ruleset_rpcall_cb *callback)
+	struct ruleset *restrict r, struct ruleset_state **state,
+	struct stream *code, const struct ruleset_rpcall_cb *callback)
 {
 	const bool ok =
 		ruleset_pcall(r, cfunc_rpcall, 3, 1, state, code, callback);
@@ -246,13 +246,13 @@ bool ruleset_rpcall(
 }
 
 bool ruleset_update(
-	struct ruleset *r, const char *modname, const char *chunkname,
+	struct ruleset *restrict r, const char *modname, const char *chunkname,
 	struct stream *code)
 {
 	return ruleset_pcall(r, cfunc_update, 3, 0, modname, chunkname, code);
 }
 
-bool ruleset_loadfile(struct ruleset *r, const char *filename)
+bool ruleset_loadfile(struct ruleset *restrict r, const char *filename)
 {
 	return ruleset_pcall(r, cfunc_loadfile, 1, 0, filename);
 }
@@ -280,8 +280,8 @@ static bool dispatch_req(
 }
 
 bool ruleset_resolve(
-	struct ruleset *r, struct ruleset_state **state, const char *request,
-	const char *username, const char *password,
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *request, const char *username, const char *password,
 	const struct ruleset_request_cb *callback)
 {
 	return dispatch_req(
@@ -289,8 +289,8 @@ bool ruleset_resolve(
 }
 
 bool ruleset_route(
-	struct ruleset *r, struct ruleset_state **state, const char *request,
-	const char *username, const char *password,
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *request, const char *username, const char *password,
 	const struct ruleset_request_cb *callback)
 {
 	return dispatch_req(
@@ -298,8 +298,8 @@ bool ruleset_route(
 }
 
 bool ruleset_route6(
-	struct ruleset *r, struct ruleset_state **state, const char *request,
-	const char *username, const char *password,
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *request, const char *username, const char *password,
 	const struct ruleset_request_cb *callback)
 {
 	return dispatch_req(
