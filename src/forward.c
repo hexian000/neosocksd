@@ -283,22 +283,27 @@ forward_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 		.loop = loop,
 		.data = ctx,
 	};
-	struct ruleset_state *state;
+	bool ok;
 	switch (addr->type) {
 	case ATYP_INET:
-		state = ruleset_route(ruleset, request, NULL, NULL, &callback);
+		ok = ruleset_route(
+			ruleset, &ctx->ruleset_state, request, NULL, NULL,
+			&callback);
 		break;
 	case ATYP_INET6:
-		state = ruleset_route6(ruleset, request, NULL, NULL, &callback);
+		ok = ruleset_route6(
+			ruleset, &ctx->ruleset_state, request, NULL, NULL,
+			&callback);
 		break;
 	case ATYP_DOMAIN:
-		state = ruleset_resolve(
-			ruleset, request, NULL, NULL, &callback);
+		ok = ruleset_resolve(
+			ruleset, &ctx->ruleset_state, request, NULL, NULL,
+			&callback);
 		break;
 	default:
 		FAIL();
 	}
-	if (state == NULL) {
+	if (!ok) {
 		forward_ctx_close(loop, ctx);
 		return;
 	}
@@ -419,19 +424,22 @@ tproxy_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 		.loop = loop,
 		.data = ctx,
 	};
-	struct ruleset_state *state;
+	bool ok;
 	switch (dest.sa.sa_family) {
 	case AF_INET:
-		state = ruleset_route(ruleset, addr_str, NULL, NULL, &callback);
+		ok = ruleset_route(
+			ruleset, &ctx->ruleset_state, addr_str, NULL, NULL,
+			&callback);
 		break;
 	case AF_INET6:
-		state = ruleset_route6(
-			ruleset, addr_str, NULL, NULL, &callback);
+		ok = ruleset_route6(
+			ruleset, &ctx->ruleset_state, addr_str, NULL, NULL,
+			&callback);
 		break;
 	default:
 		FAIL();
 	}
-	if (state == NULL) {
+	if (!ok) {
 		forward_ctx_close(loop, ctx);
 		return;
 	}

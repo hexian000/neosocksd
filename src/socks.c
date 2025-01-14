@@ -819,24 +819,27 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 		.loop = loop,
 		.data = ctx,
 	};
-	struct ruleset_state *state;
+	bool ok;
 	switch (addr->type) {
 	case ATYP_DOMAIN:
-		state = ruleset_resolve(
-			ruleset, request, username, password, &callback);
+		ok = ruleset_resolve(
+			ruleset, &ctx->ruleset_state, request, username,
+			password, &callback);
 		break;
 	case ATYP_INET:
-		state = ruleset_route(
-			ruleset, request, username, password, &callback);
+		ok = ruleset_route(
+			ruleset, &ctx->ruleset_state, request, username,
+			password, &callback);
 		break;
 	case ATYP_INET6:
-		state = ruleset_route6(
-			ruleset, request, username, password, &callback);
+		ok = ruleset_route6(
+			ruleset, &ctx->ruleset_state, request, username,
+			password, &callback);
 		break;
 	default:
 		FAIL();
 	}
-	if (state == NULL) {
+	if (!ok) {
 		socks_sendrsp(ctx, false);
 		socks_ctx_close(loop, ctx);
 		return;

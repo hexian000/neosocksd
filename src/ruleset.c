@@ -232,11 +232,12 @@ void ruleset_cancel(struct ruleset_state *state)
 	}
 }
 
-struct ruleset_state *ruleset_rpcall(
-	struct ruleset *r, struct stream *code,
+bool ruleset_rpcall(
+	struct ruleset *r, struct ruleset_state **state, struct stream *code,
 	const struct ruleset_rpcall_cb *callback)
 {
-	const bool ok = ruleset_pcall(r, cfunc_rpcall, 2, 1, code, callback);
+	const bool ok =
+		ruleset_pcall(r, cfunc_rpcall, 3, 1, state, code, callback);
 	if (!ok) {
 		return NULL;
 	}
@@ -260,15 +261,16 @@ bool ruleset_gc(struct ruleset *restrict r)
 	return ruleset_pcall(r, cfunc_gc, 0, 0);
 }
 
-static struct ruleset_state *dispatch_req(
-	struct ruleset *restrict r, const char *func, const char *request,
-	const char *username, const char *password,
-	const struct ruleset_request_cb *callback)
+static bool dispatch_req(
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *func, const char *request, const char *username,
+	const char *password, const struct ruleset_request_cb *callback)
 {
 	lua_State *restrict L = r->L;
 	const bool ok = ruleset_pcall(
-		r, cfunc_request, 5, 1, (void *)func, (void *)request,
-		(void *)username, (void *)password, (void *)callback);
+		r, cfunc_request, 6, 1, (void *)state, (void *)func,
+		(void *)request, (void *)username, (void *)password,
+		(void *)callback);
 	if (!ok) {
 		LOGW_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
 		return NULL;
@@ -276,26 +278,31 @@ static struct ruleset_state *dispatch_req(
 	return lua_touserdata(L, -1);
 }
 
-struct ruleset_state *ruleset_resolve(
-	struct ruleset *r, const char *request, const char *username,
-	const char *password, const struct ruleset_request_cb *callback)
+bool ruleset_resolve(
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
+	const struct ruleset_request_cb *callback)
 {
 	return dispatch_req(
-		r, "resolve", request, username, password, callback);
+		r, state, "resolve", request, username, password, callback);
 }
 
-struct ruleset_state *ruleset_route(
-	struct ruleset *r, const char *request, const char *username,
-	const char *password, const struct ruleset_request_cb *callback)
+bool ruleset_route(
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
+	const struct ruleset_request_cb *callback)
 {
-	return dispatch_req(r, "route", request, username, password, callback);
+	return dispatch_req(
+		r, state, "route", request, username, password, callback);
 }
 
-struct ruleset_state *ruleset_route6(
-	struct ruleset *r, const char *request, const char *username,
-	const char *password, const struct ruleset_request_cb *callback)
+bool ruleset_route6(
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
+	const struct ruleset_request_cb *callback)
 {
-	return dispatch_req(r, "route6", request, username, password, callback);
+	return dispatch_req(
+		r, state, "route6", request, username, password, callback);
 }
 
 void ruleset_vmstats(

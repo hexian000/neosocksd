@@ -31,8 +31,8 @@ struct ruleset_rpcall_cb {
 	void (*func)(void *data, const char *result, size_t resultlen);
 	void *data;
 };
-struct ruleset_state *ruleset_rpcall(
-	struct ruleset *r, struct stream *code,
+bool ruleset_rpcall(
+	struct ruleset *r, struct ruleset_state **state, struct stream *code,
 	const struct ruleset_rpcall_cb *callback);
 
 bool ruleset_update(
@@ -47,15 +47,18 @@ struct ruleset_request_cb {
 	struct ev_loop *loop;
 	void *data;
 };
-struct ruleset_state *ruleset_resolve(
-	struct ruleset *r, const char *request, const char *username,
-	const char *password, const struct ruleset_request_cb *callback);
-struct ruleset_state *ruleset_route(
-	struct ruleset *r, const char *request, const char *username,
-	const char *password, const struct ruleset_request_cb *callback);
-struct ruleset_state *ruleset_route6(
-	struct ruleset *r, const char *request, const char *username,
-	const char *password, const struct ruleset_request_cb *callback);
+bool ruleset_resolve(
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
+	const struct ruleset_request_cb *callback);
+bool ruleset_route(
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
+	const struct ruleset_request_cb *callback);
+bool ruleset_route6(
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
+	const struct ruleset_request_cb *callback);
 
 void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
 const char *

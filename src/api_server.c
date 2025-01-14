@@ -483,9 +483,9 @@ static void handle_ruleset_rpcall(
 		.func = rpcall_return,
 		.data = ctx,
 	};
-	struct ruleset_state *rpcstate = ruleset_rpcall(r, reader, &callback);
+	const bool ok = ruleset_rpcall(r, &ctx->rpcstate, reader, &callback);
 	stream_close(reader);
-	if (rpcstate == NULL) {
+	if (!ok) {
 		/* no callback */
 		ctx->state = STATE_RESPONSE;
 		size_t len;
@@ -501,12 +501,6 @@ static void handle_ruleset_rpcall(
 		ev_io_start(loop, &ctx->w_send);
 		return;
 	}
-	if (ctx->state != STATE_YIELD) {
-		/* rpcall_return is called */
-		return;
-	}
-	/* rpcall_return is not called yet */
-	ctx->rpcstate = rpcstate;
 }
 
 static void handle_ruleset_invoke(

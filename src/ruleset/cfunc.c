@@ -63,15 +63,16 @@ struct dialreq;
 int cfunc_request(lua_State *restrict L)
 {
 	check_memlimit(L);
-	ASSERT(lua_gettop(L) == 5);
-	const char *func = lua_touserdata(L, 1);
-	const char *request = lua_touserdata(L, 2);
-	const char *username = lua_touserdata(L, 3);
-	const char *password = lua_touserdata(L, 4);
-	const struct ruleset_request_cb *in_cb = lua_touserdata(L, 5);
-	struct ruleset_state *restrict ud =
+	ASSERT(lua_gettop(L) == 6);
+	struct ruleset_state **pstate = lua_touserdata(L, 1);
+	const char *func = lua_touserdata(L, 2);
+	const char *request = lua_touserdata(L, 3);
+	const char *username = lua_touserdata(L, 4);
+	const char *password = lua_touserdata(L, 5);
+	const struct ruleset_request_cb *in_cb = lua_touserdata(L, 6);
+	struct ruleset_state *restrict state =
 		lua_newuserdata(L, sizeof(struct ruleset_state));
-	*ud = (struct ruleset_state){
+	*state = (struct ruleset_state){
 		.type = RCB_REQUEST,
 		.request = { NULL, NULL, NULL },
 	};
@@ -103,9 +104,10 @@ int cfunc_request(lua_State *restrict L)
 		req = NULL;
 	}
 	lua_pushvalue(L, 1);
-	ud->request = *in_cb;
-	ud->request.func(ud->request.loop, ud->request.data, req);
-	ud->request.func = NULL;
+	state->request = *in_cb;
+	*pstate = state;
+	state->request.func(state->request.loop, state->request.data, req);
+	state->request.func = NULL;
 	return 1;
 }
 
@@ -176,9 +178,10 @@ static int rpcall_finish(lua_State *restrict L)
 int cfunc_rpcall(lua_State *restrict L)
 {
 	check_memlimit(L);
-	ASSERT(lua_gettop(L) == 2);
-	struct stream *stream = lua_touserdata(L, 1);
-	const struct ruleset_rpcall_cb *in_cb = lua_touserdata(L, 2);
+	ASSERT(lua_gettop(L) == 3);
+	struct ruleset_state **pstate = lua_touserdata(L, 1);
+	struct stream *stream = lua_touserdata(L, 2);
+	const struct ruleset_rpcall_cb *in_cb = lua_touserdata(L, 3);
 	struct ruleset_state *restrict state =
 		lua_newuserdata(L, sizeof(struct ruleset_state));
 	*state = (struct ruleset_state){
@@ -215,6 +218,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_pop(L, 1);
 	lua_xmove(L, co, 1);
 	state->rpcall = *in_cb;
+	*pstate = state;
 	/* lua stack: state co; co stack: chunk */
 	aux_resume(L, 2, 0);
 	lua_settop(L, 1);

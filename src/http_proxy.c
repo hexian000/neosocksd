@@ -288,9 +288,10 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 		.loop = loop,
 		.data = ctx,
 	};
-	struct ruleset_state *state = ruleset_resolve(
-		ruleset, addr_str, username, password, &callback);
-	if (state == NULL) {
+	const bool ok = ruleset_resolve(
+		ruleset, &ctx->ruleset_state, addr_str, username, password,
+		&callback);
+	if (!ok) {
 		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
 		ctx->state = STATE_RESPONSE;
 		ev_io_start(loop, &ctx->w_send);
