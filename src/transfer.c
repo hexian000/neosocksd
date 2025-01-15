@@ -304,6 +304,7 @@ void transfer_init(
 	t->dst_fd = dst_fd;
 	struct ev_io *restrict w_socket = &t->w_socket;
 	ev_io_init(w_socket, transfer_cb, src_fd, EV_READ);
+	ev_set_priority(w_socket, EV_MINPRI);
 	w_socket->data = t;
 	t->state_cb = *cb;
 	t->byt_transferred = byt_transferred;
