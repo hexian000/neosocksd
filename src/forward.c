@@ -92,8 +92,6 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		/* fallthrough */
 	case STATE_CONNECT:
 		dialer_cancel(&ctx->dialer, loop);
-		dialreq_free(ctx->dialreq);
-		ctx->dialreq = NULL;
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECTED:
@@ -118,6 +116,8 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	FW_CTX_LOG_F(VERBOSE, ctx, "close, state=%d", ctx->state);
 	forward_ctx_stop(loop, ctx);
 
+	dialreq_free(ctx->dialreq);
+	ctx->dialreq = NULL;
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -212,6 +212,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	FW_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
 	/* cleanup before state change */
 	dialreq_free(ctx->dialreq);
+	ctx->dialreq = NULL;
 
 	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
@@ -336,11 +337,11 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->ruleset_state = NULL;
 #endif
 
+	ctx->dialreq = NULL;
 	const struct event_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,
 	};
-	ctx->dialreq = NULL;
 	dialer_init(&ctx->dialer, &cb);
 	ctx->ss.close = forward_ss_close;
 	session_add(&ctx->ss);

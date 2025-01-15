@@ -122,8 +122,6 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		dialer_cancel(&ctx->dialer, loop);
-		dialreq_free(ctx->dialreq);
-		ctx->dialreq = NULL;
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECTED:
@@ -146,6 +144,8 @@ static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		VERBOSE, ctx, "close state=%d", ctx->accepted_fd, ctx->state);
 	http_ctx_stop(loop, ctx);
 
+	dialreq_free(ctx->dialreq);
+	ctx->dialreq = NULL;
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -311,7 +311,6 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void
 http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	ctx->dialreq = NULL;
 	const struct http_message *restrict msg = &ctx->parser.msg;
 	if (strcmp(msg->req.method, "CONNECT") != 0) {
 		http_proxy_pass(loop, ctx);
@@ -547,13 +546,14 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	}
 	ctx->ruleset_state = NULL;
 #endif
-	const struct http_parsehdr_cb on_header = { parse_header, ctx };
-	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
+	ctx->dialreq = NULL;
 	const struct event_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, &cb);
+	const struct http_parsehdr_cb on_header = { parse_header, ctx };
+	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
 
 	ctx->ss.close = http_ss_close;
 	session_add(&ctx->ss);
