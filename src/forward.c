@@ -116,8 +116,9 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	FW_CTX_LOG_F(VERBOSE, ctx, "close, state=%d", ctx->state);
 	forward_ctx_stop(loop, ctx);
 
-	dialreq_free(ctx->dialreq);
-	ctx->dialreq = NULL;
+	if (ctx->state < STATE_CONNECTED) {
+		dialreq_free(ctx->dialreq);
+	}
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -212,7 +213,6 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	FW_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
 	/* cleanup before state change */
 	dialreq_free(ctx->dialreq);
-	ctx->dialreq = NULL;
 
 	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
@@ -272,7 +272,8 @@ forward_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	struct forward_ctx *restrict ctx = watcher->data;
 	struct ruleset *restrict ruleset = G.ruleset;
 	ASSERT(ruleset != NULL);
-	const struct dialaddr *addr = &G.basereq->addr;
+	const struct dialreq *restrict req = G.basereq;
+	const struct dialaddr *restrict addr = &req->addr;
 
 	const size_t cap =
 		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
@@ -368,7 +369,8 @@ void forward_serve(
 		return;
 	}
 #endif
-	forward_ctx_start(loop, ctx, G.basereq);
+	const struct dialreq *req = G.basereq;
+	forward_ctx_start(loop, ctx, req);
 }
 
 #if WITH_TPROXY
@@ -511,11 +513,12 @@ void tproxy_serve(
 	}
 #endif
 
-	ctx->dialreq = tproxy_makereq(ctx);
-	if (ctx->dialreq == NULL) {
+	struct dialreq *req = tproxy_makereq(ctx);
+	if (req == NULL) {
 		forward_ctx_close(loop, ctx);
 		return;
 	}
-	forward_ctx_start(loop, ctx, ctx->dialreq);
+	ctx->dialreq = req;
+	forward_ctx_start(loop, ctx, req);
 }
 #endif /* WITH_TPROXY */

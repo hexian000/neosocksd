@@ -144,8 +144,9 @@ static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		VERBOSE, ctx, "close state=%d", ctx->accepted_fd, ctx->state);
 	http_ctx_stop(loop, ctx);
 
-	dialreq_free(ctx->dialreq);
-	ctx->dialreq = NULL;
+	if (ctx->state < STATE_CONNECTED) {
+		dialreq_free(ctx->dialreq);
+	}
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -171,8 +172,6 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 {
 	struct http_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
-	dialreq_free(ctx->dialreq);
-	ctx->dialreq = NULL;
 
 	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
@@ -362,8 +361,10 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 
 static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
+	/* cleanup before state change */
 	ev_io_stop(loop, &ctx->w_recv);
 	ev_io_stop(loop, &ctx->w_send);
+	dialreq_free(ctx->dialreq);
 
 	if (G.conf->proto_timeout) {
 		ctx->state = STATE_CONNECTED;
