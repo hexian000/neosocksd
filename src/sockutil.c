@@ -135,7 +135,8 @@ void socket_set_transparent(const int fd, const bool tproxy)
 	int val = tproxy ? 1 : 0;
 	if (setsockopt(fd, SOL_IP, IP_TRANSPARENT, &val, sizeof(val))) {
 		/* this is a fatal error */
-		FAILMSGF("IP_TRANSPARENT: %s", strerror(errno));
+		const int err = errno;
+		FAILMSGF("IP_TRANSPARENT: %s", strerror(err));
 	}
 #else
 	(void)fd;
