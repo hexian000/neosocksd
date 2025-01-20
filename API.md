@@ -122,6 +122,8 @@ Process a host name request. Specifically:
 - SOCKS5 with host name (a.k.a. "socks5h")
 - Any SOCKS4A
 
+*This callback is called from an asynchronous routine.*
+
 **Params**
 
 - `domain`: full qualified domain name and port, like `"www.example.org:80"`
@@ -155,6 +157,8 @@ Process an IPv4 request. Specifically:
 - SOCKS5 with IPv4 address
 - Any SOCKS4
 
+*This callback is called from an asynchronous routine.*
+
 **Params**
 
 - `addr`: address and port, like `"203.0.113.1:80"`
@@ -180,6 +184,8 @@ Process an IPv6 request. Specifically:
 
 - SOCKS5 with IPv6 address
 
+*This callback is called from an asynchronous routine.*
+
 **Params**
 
 - `addr`: address and port, like `"[2001:DB8::1]:80"`
@@ -202,6 +208,8 @@ end
 **Description**
 
 Periodic timer callback. See [neosocksd.setinterval](#neosocksdsetinterval).
+
+*This callback is NOT called from an asynchronous routine.*
 
 **Params**
 
@@ -227,6 +235,8 @@ end
 **Description**
 
 Generate custom information to be provided in the API `/stats`. See also [stats](#stats).
+
+*This callback is NOT called from an asynchronous routine.*
 
 **Params**
 
