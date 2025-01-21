@@ -7,6 +7,7 @@
 
 #include "utils/debug.h"
 #include "utils/minmax.h"
+#include "utils/slog.h"
 
 #include "api_client.h"
 #include "conf.h"
@@ -21,6 +22,7 @@
 #include <unistd.h>
 
 #include <math.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,12 +70,13 @@ struct await_sleep_userdata {
 	struct ev_idle w_idle;
 };
 
-static int await_sleep_gc(lua_State *restrict L)
+static int await_sleep_close(lua_State *restrict L)
 {
 	struct await_sleep_userdata *ud = lua_touserdata(L, 1);
 	struct ev_loop *loop = ud->ruleset->loop;
 	ev_timer_stop(loop, &ud->w_timer);
 	ev_idle_stop(loop, &ud->w_idle);
+	context_unpin(L, ud);
 	return 0;
 }
 
@@ -127,10 +130,17 @@ static int await_sleep(lua_State *restrict L)
 	ev_idle_init(&ud->w_idle, sleep_finish_cb);
 	ud->w_idle.data = ud;
 	if (luaL_newmetatable(L, MT_AWAIT_SLEEP)) {
-		lua_pushcfunction(L, await_sleep_gc);
+#if HAVE_LUA_TOCLOSE
+		lua_pushcfunction(L, await_sleep_close);
+		lua_setfield(L, -2, "__close");
+#endif
+		lua_pushcfunction(L, await_sleep_close);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
+#if HAVE_LUA_TOCLOSE
+	lua_toclose(L, -1);
+#endif
 	context_pin(L, ud);
 	if (n > 0) {
 		ev_timer_start(r->loop, &ud->w_timer);
@@ -157,6 +167,7 @@ static int await_resolve_close(lua_State *restrict L)
 		ud->query = NULL;
 	}
 	ev_idle_stop(ud->ruleset->loop, &ud->w_idle);
+	context_unpin(L, ud);
 	return 0;
 }
 
@@ -251,6 +262,7 @@ static int await_invoke_close(lua_State *restrict L)
 		api_client_cancel(r->loop, ud->ctx);
 		ud->ctx = NULL;
 	}
+	context_unpin(L, ud);
 	return 0;
 }
 
@@ -364,9 +376,17 @@ struct await_execute_userdata {
 static int await_execute_close(lua_State *restrict L)
 {
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, 1);
+	const pid_t pid = ud->w_child.pid;
 	struct ev_loop *loop = ud->ruleset->loop;
 	ev_child_stop(loop, &ud->w_child);
 	ev_idle_stop(loop, &ud->w_idle);
+	if (pid > 0) {
+		if (kill(pid, SIGKILL) != 0) {
+			LOGE_F("kill: %s", strerror(errno));
+		}
+		ud->w_child.pid = 0;
+	}
+	context_unpin(L, ud);
 	return 0;
 }
 
@@ -375,6 +395,7 @@ child_cb(struct ev_loop *loop, struct ev_child *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CHILD);
 	ev_child_stop(loop, watcher);
+	watcher->pid = 0;
 	struct await_execute_userdata *restrict ud = watcher->data;
 	ev_idle_start(loop, &ud->w_idle);
 }
@@ -441,9 +462,12 @@ static int await_execute(lua_State *restrict L)
 		return lua_error(L);
 	}
 	if (pid == 0) {
-		const int status = system(command);
-		_Exit(status);
-		FAIL();
+		if (setsid() < 0) {
+			LOGW_F("setsid: %s", strerror(errno));
+		}
+		const char *argv[] = { "sh", "-c", command, NULL };
+		execv("/bin/sh", (char **)argv);
+		FAILMSGF("execv: %s", strerror(errno));
 	}
 	ev_child_set(&ud->w_child, pid, 0);
 	ud->w_child.data = ud;
