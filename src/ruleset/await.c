@@ -64,6 +64,23 @@ static void context_unpin(lua_State *restrict L, const void *p)
 	lua_pop(L, 1);
 }
 
+#if HAVE_LUA_TOCLOSE
+#define CLOSESLOT(func, idx)                                                   \
+	do {                                                                   \
+		(void)(func);                                                  \
+		(void)(idx);                                                   \
+	} while (0)
+#else
+#define CLOSESLOT(func, idx)                                                   \
+	do {                                                                   \
+		lua_pushcfunction(L, (func));                                  \
+		lua_pushvalue(L, (idx));                                       \
+		lua_call(L, 1, 0);                                             \
+		lua_pushnil(L);                                                \
+		lua_replace(L, (idx));                                         \
+	} while (0)
+#endif
+
 struct await_sleep_userdata {
 	struct ruleset *ruleset;
 	struct ev_timer w_timer;
@@ -78,6 +95,11 @@ static int await_sleep_close(lua_State *restrict L)
 	ev_idle_stop(loop, &ud->w_idle);
 	context_unpin(L, ud);
 	return 0;
+}
+
+static int await_sleep_gc(lua_State *restrict L)
+{
+	return await_sleep_close(L);
 }
 
 static void
@@ -103,9 +125,8 @@ await_sleep_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	CHECK(status == LUA_YIELD);
 	const int base = (int)ctx;
-	ASSERT(lua_gettop(L) == base + 1);
-	struct await_sleep_userdata *restrict ud = lua_touserdata(L, base);
-	context_unpin(L, ud);
+	ASSERT(lua_gettop(L) >= base + 1);
+	CLOSESLOT(await_sleep_close, base);
 	const char *err = lua_touserdata(L, base + 1);
 	if (err != NULL) {
 		lua_pushstring(L, err);
@@ -134,7 +155,7 @@ static int await_sleep(lua_State *restrict L)
 		lua_pushcfunction(L, await_sleep_close);
 		lua_setfield(L, -2, "__close");
 #endif
-		lua_pushcfunction(L, await_sleep_close);
+		lua_pushcfunction(L, await_sleep_gc);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
@@ -171,6 +192,11 @@ static int await_resolve_close(lua_State *restrict L)
 	return 0;
 }
 
+static int await_resolve_gc(lua_State *restrict L)
+{
+	return await_resolve_close(L);
+}
+
 static void resolve_cb(
 	struct resolve_query *q, struct ev_loop *loop, void *data,
 	const struct sockaddr *sa)
@@ -197,8 +223,8 @@ await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	CHECK(status == LUA_YIELD);
 	const int base = (int)ctx;
-	struct await_resolve_userdata *ud = lua_touserdata(L, base);
-	context_unpin(L, ud);
+	ASSERT(lua_gettop(L) >= base + 1);
+	CLOSESLOT(await_resolve_close, base);
 	const char *err = lua_touserdata(L, base + 1);
 	if (err != NULL) {
 		lua_pushstring(L, err);
@@ -225,7 +251,7 @@ static int await_resolve(lua_State *restrict L)
 		lua_pushcfunction(L, await_resolve_close);
 		lua_setfield(L, -2, "__close");
 #endif
-		lua_pushcfunction(L, await_resolve_close);
+		lua_pushcfunction(L, await_resolve_gc);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
@@ -266,6 +292,11 @@ static int await_invoke_close(lua_State *restrict L)
 	return 0;
 }
 
+static int await_invoke_gc(lua_State *restrict L)
+{
+	return await_invoke_close(L);
+}
+
 static void invoke_cb(
 	struct api_client_ctx *ctx, struct ev_loop *loop, void *data,
 	const char *err, const size_t errlen, struct stream *stream)
@@ -284,8 +315,8 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	CHECK(status == LUA_YIELD);
 	const int base = (int)ctx;
-	struct await_invoke_userdata *restrict ud = lua_touserdata(L, base);
-	context_unpin(L, ud);
+	ASSERT(lua_gettop(L) >= base + 1);
+	CLOSESLOT(await_invoke_close, base);
 	const char *err = lua_touserdata(L, base + 1);
 	if (err != NULL) {
 		lua_pushstring(L, err);
@@ -344,7 +375,7 @@ static int await_invoke(lua_State *restrict L)
 		lua_pushcfunction(L, await_invoke_close);
 		lua_setfield(L, -2, "__close");
 #endif
-		lua_pushcfunction(L, await_invoke_close);
+		lua_pushcfunction(L, await_invoke_gc);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
@@ -390,6 +421,11 @@ static int await_execute_close(lua_State *restrict L)
 	return 0;
 }
 
+static int await_execute_gc(lua_State *restrict L)
+{
+	return await_execute_close(L);
+}
+
 static void
 child_cb(struct ev_loop *loop, struct ev_child *watcher, const int revents)
 {
@@ -414,15 +450,17 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	CHECK(status == LUA_YIELD);
 	const int base = (int)ctx;
+	ASSERT(lua_gettop(L) >= base + 1);
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, base);
-	context_unpin(L, ud);
+	const int rstatus = ud->w_child.rstatus;
+	CLOSESLOT(await_execute_close, base);
 	const char *err = lua_touserdata(L, base + 1);
 	if (err != NULL) {
 		lua_pushstring(L, err);
 		return lua_error(L);
 	}
 	ASSERT(lua_gettop(L) == base + 1);
-	lua_pushinteger(L, ud->w_child.rstatus);
+	lua_pushinteger(L, rstatus);
 	return 0;
 }
 
@@ -447,7 +485,7 @@ static int await_execute(lua_State *restrict L)
 		lua_pushcfunction(L, await_execute_close);
 		lua_setfield(L, -2, "__close");
 #endif
-		lua_pushcfunction(L, await_execute_close);
+		lua_pushcfunction(L, await_execute_gc);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
