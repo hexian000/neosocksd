@@ -97,11 +97,6 @@ static int await_sleep_close(lua_State *restrict L)
 	return 0;
 }
 
-static int await_sleep_gc(lua_State *restrict L)
-{
-	return await_sleep_close(L);
-}
-
 static void
 sleep_cb(struct ev_loop *loop, struct ev_timer *watcher, const int revents)
 {
@@ -155,7 +150,7 @@ static int await_sleep(lua_State *restrict L)
 		lua_pushcfunction(L, await_sleep_close);
 		lua_setfield(L, -2, "__close");
 #endif
-		lua_pushcfunction(L, await_sleep_gc);
+		lua_pushcfunction(L, await_sleep_close);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
@@ -190,11 +185,6 @@ static int await_resolve_close(lua_State *restrict L)
 	ev_idle_stop(ud->ruleset->loop, &ud->w_idle);
 	context_unpin(L, ud);
 	return 0;
-}
-
-static int await_resolve_gc(lua_State *restrict L)
-{
-	return await_resolve_close(L);
 }
 
 static void resolve_cb(
@@ -251,7 +241,7 @@ static int await_resolve(lua_State *restrict L)
 		lua_pushcfunction(L, await_resolve_close);
 		lua_setfield(L, -2, "__close");
 #endif
-		lua_pushcfunction(L, await_resolve_gc);
+		lua_pushcfunction(L, await_resolve_close);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
@@ -290,11 +280,6 @@ static int await_invoke_close(lua_State *restrict L)
 	}
 	context_unpin(L, ud);
 	return 0;
-}
-
-static int await_invoke_gc(lua_State *restrict L)
-{
-	return await_invoke_close(L);
 }
 
 static void invoke_cb(
@@ -375,7 +360,7 @@ static int await_invoke(lua_State *restrict L)
 		lua_pushcfunction(L, await_invoke_close);
 		lua_setfield(L, -2, "__close");
 #endif
-		lua_pushcfunction(L, await_invoke_gc);
+		lua_pushcfunction(L, await_invoke_close);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
@@ -419,11 +404,6 @@ static int await_execute_close(lua_State *restrict L)
 	}
 	context_unpin(L, ud);
 	return 0;
-}
-
-static int await_execute_gc(lua_State *restrict L)
-{
-	return await_execute_close(L);
 }
 
 static void
@@ -485,7 +465,7 @@ static int await_execute(lua_State *restrict L)
 		lua_pushcfunction(L, await_execute_close);
 		lua_setfield(L, -2, "__close");
 #endif
-		lua_pushcfunction(L, await_execute_gc);
+		lua_pushcfunction(L, await_execute_close);
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
