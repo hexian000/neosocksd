@@ -265,7 +265,7 @@ int api_marshal(lua_State *restrict L)
 		return lua_error(L);
 	}
 	/* build closure */
-	/* Lua stack: ... IDX_BUFFER */
+	/* lua stack: ... IDX_BUFFER */
 	lua_createtable(L, 0, 16); /* IDX_VISITED */
 	lua_pushnil(L); /* IDX_MARSHAL */
 	lua_pushcclosure(L, marshal_value, 3);

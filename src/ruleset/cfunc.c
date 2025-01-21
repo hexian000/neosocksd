@@ -92,6 +92,8 @@ int cfunc_request(lua_State *restrict L)
 	const char *username = lua_touserdata(L, 4);
 	const char *password = lua_touserdata(L, 5);
 	const struct ruleset_request_cb *in_cb = lua_touserdata(L, 6);
+	lua_settop(L, 0);
+
 	struct ruleset_state *restrict state =
 		lua_newuserdata(L, sizeof(struct ruleset_state));
 	*state = (struct ruleset_state){
@@ -103,27 +105,21 @@ int cfunc_request(lua_State *restrict L)
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-	lua_copy(L, -1, 1);
 
-	lua_State *restrict co = lua_newthread(L);
-	lua_copy(L, -1, 2);
+	lua_State *restrict co = aux_getthread(L);
+	lua_pushvalue(L, 1);
+	lua_pushcclosure(L, request_finish, 1);
+	lua_xmove(L, co, 1); /* finish */
 	(void)lua_getglobal(co, "ruleset");
 	(void)lua_getfield(co, -1, func);
-	lua_replace(co, -2);
 	lua_pushstring(co, request);
 	lua_pushstring(co, username);
 	lua_pushstring(co, password);
 
-	lua_settop(L, 2);
-	aux_getregtable(L, RIDX_ASYNC_ROUTINE);
-	lua_pushvalue(L, 2);
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, request_finish, 1);
-	lua_rawset(L, -3);
-
 	state->request = *in_cb;
 	*pstate = state;
-	aux_resume(L, 2, 3);
+	/* lua stack: state co; co stack: finish ? func request username password */
+	aux_resume(co, L, 6);
 	lua_settop(L, 1);
 	return 1;
 }
@@ -199,6 +195,8 @@ int cfunc_rpcall(lua_State *restrict L)
 	struct ruleset_state **pstate = lua_touserdata(L, 1);
 	struct stream *stream = lua_touserdata(L, 2);
 	const struct ruleset_rpcall_cb *in_cb = lua_touserdata(L, 3);
+	lua_settop(L, 0);
+
 	struct ruleset_state *restrict state =
 		lua_newuserdata(L, sizeof(struct ruleset_state));
 	*state = (struct ruleset_state){
@@ -210,34 +208,31 @@ int cfunc_rpcall(lua_State *restrict L)
 		lua_setfield(L, -2, "__gc");
 	}
 	lua_setmetatable(L, -2);
-	lua_copy(L, -1, 1);
-	lua_settop(L, 1);
 
-	lua_State *restrict co = lua_newthread(L);
+	lua_State *restrict co = aux_getthread(L);
+	lua_pushvalue(L, 1);
+	lua_pushcclosure(L, rpcall_finish, 1);
+	lua_pushnil(L);
+
 	if (lua_load(L, aux_reader, stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
 	lua_newtable(L);
 	aux_getregtable(L, LUA_RIDX_GLOBALS);
-	/* lua stack: state co chunk env mt _G */
+	/* lua stack: state co finish chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
 	CHECK(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	/* lua stack: state co finish chunk */
 
-	aux_getregtable(L, RIDX_ASYNC_ROUTINE);
-	lua_pushvalue(L, 2);
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, rpcall_finish, 1);
-	/* lua stack: state co chunk RIDX_ASYNC_ROUTINE co finish */
-	lua_rawset(L, -3);
-	lua_pop(L, 1);
-	lua_xmove(L, co, 1);
+	lua_xmove(L, co, 3);
+	/* lua stack: state co; co stack: finish ? chunk */
+
 	state->rpcall = *in_cb;
 	*pstate = state;
-	/* lua stack: state co; co stack: chunk */
-	aux_resume(L, 2, 0);
+	aux_resume(co, L, 3);
 	lua_settop(L, 1);
 	return 1;
 }

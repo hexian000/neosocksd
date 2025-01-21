@@ -41,8 +41,6 @@
 		}                                                              \
 	} while (0)
 
-#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
-
 /* [-0, +0, m] */
 static void context_pin(lua_State *restrict L, const void *p)
 {
@@ -119,7 +117,7 @@ static void sleep_finish_cb(
 static int
 await_sleep_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
-	CHECK(status == LUA_YIELD);
+	ASSERT(status == LUA_YIELD);
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	CLOSESLOT(await_sleep_close, base);
@@ -212,7 +210,7 @@ static void resolve_finish_cb(
 static int
 await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
-	CHECK(status == LUA_YIELD);
+	ASSERT(status == LUA_YIELD);
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	CLOSESLOT(await_resolve_close, base);
@@ -299,7 +297,7 @@ static void invoke_cb(
 static int
 await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
-	CHECK(status == LUA_YIELD);
+	ASSERT(status == LUA_YIELD);
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	CLOSESLOT(await_invoke_close, base);
@@ -312,11 +310,13 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	const char *errmsg = lua_touserdata(L, base + 2);
 	const size_t errlen = *(size_t *)lua_touserdata(L, base + 3);
 	struct stream *stream = lua_touserdata(L, base + 4);
-	lua_pushboolean(L, errmsg == NULL);
+	lua_settop(L, base);
 	if (errmsg != NULL) {
+		lua_pushboolean(L, 0);
 		lua_pushlstring(L, errmsg, errlen);
 		return 2;
 	}
+	lua_pushboolean(L, 1);
 	if (lua_load(L, aux_reader, (void *)stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
@@ -429,7 +429,7 @@ static void child_finish_cb(
 static int
 await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
-	CHECK(status == LUA_YIELD);
+	ASSERT(status == LUA_YIELD);
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, base);
@@ -517,14 +517,6 @@ static int await_execute(lua_State *restrict L)
 
 int luaopen_await(lua_State *restrict L)
 {
-	lua_newtable(L); /* async routine */
-	lua_newtable(L); /* mt */
-	lua_pushliteral(L, "k");
-	lua_setfield(L, -2, "__mode");
-	lua_setmetatable(L, -2);
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_ASYNC_ROUTINE);
-	lua_newtable(L); /* await context */
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
 	const luaL_Reg awaitlib[] = {
 		{ "execute", await_execute },
 		{ "invoke", await_invoke },

@@ -83,6 +83,7 @@ static int l_panic(lua_State *L)
 
 static int ruleset_luainit(lua_State *restrict L)
 {
+	/* init registry */
 	const char *strings[] = {
 		ERR_MEMORY,
 		ERR_BAD_REGISTRY,
@@ -96,6 +97,10 @@ static int ruleset_luainit(lua_State *restrict L)
 		lua_rawseti(L, -2, i + 1);
 	}
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_CONSTANT);
+	lua_newtable(L); /* await context */
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+	aux_newweaktable(L, "k"); /* idle threads */
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
 	/* load Lua libraries */
 	luaL_openlibs(L);
 	/* restrict package searcher */

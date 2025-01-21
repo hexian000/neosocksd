@@ -27,10 +27,10 @@ enum ruleset_ridx {
 	RIDX_CONSTANT = LUA_RIDX_LAST + 1,
 	/* last error */
 	RIDX_LASTERROR,
-	/* t[coroutine] = finish callback */
-	RIDX_ASYNC_ROUTINE,
-	/* t[lightuserdata] = coroutine */
+	/* t[lightuserdata] = thread */
 	RIDX_AWAIT_CONTEXT,
+	/* t[thread] = true */
+	RIDX_IDLE_THREAD,
 };
 
 #define ERR_MEMORY "out of memory"
@@ -38,10 +38,17 @@ enum ruleset_ridx {
 #define ERR_INVALID_INVOKE "invalid invocation target"
 #define ERR_NOT_ASYNC_ROUTINE "not in asynchronous routine"
 
+#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
+
 struct ruleset *aux_getruleset(lua_State *L);
+
+void aux_newweaktable(lua_State *L, const char *mode);
 
 /* [-0, +1, v] */
 void aux_getregtable(lua_State *L, int idx);
+
+/* [-0, +1, v] */
+lua_State *aux_getthread(lua_State *L);
 
 const char *aux_reader(lua_State *L, void *ud, size_t *sz);
 
@@ -53,7 +60,7 @@ bool aux_todialreq(lua_State *L, int n);
 
 int aux_traceback(lua_State *L);
 
-void aux_resume(lua_State *L, int tidx, int narg);
+int aux_resume(lua_State *L, lua_State *from, int narg);
 
 /* main routine */
 bool ruleset_pcall(

@@ -32,12 +32,96 @@ struct ruleset *aux_getruleset(lua_State *restrict L)
 	return ud;
 }
 
+void aux_newweaktable(lua_State *restrict L, const char *mode)
+{
+	lua_newtable(L);
+	lua_newtable(L);
+	lua_pushstring(L, mode);
+	lua_setfield(L, -2, "__mode");
+	lua_setmetatable(L, -2);
+}
+
 void aux_getregtable(lua_State *restrict L, const int idx)
 {
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, idx) != LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
 	}
+}
+
+static void aux_putthread(lua_State *restrict L)
+{
+	aux_getregtable(L, RIDX_IDLE_THREAD);
+	lua_pushthread(L);
+	lua_pushboolean(L, 1);
+	lua_rawset(L, -3);
+	lua_pop(L, 1);
+}
+
+static int thread_main_k(lua_State *L, int status, lua_KContext ctx);
+
+static int
+thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
+{
+	const int errfunc = (int)ctx;
+	/* lua stack: errfunc? finish ? ... */
+	const int n = lua_gettop(L);
+	const int nargs = n - (errfunc + 1);
+	ASSERT(nargs >= 1);
+	lua_pushboolean(L, (status == LUA_OK || status == LUA_YIELD));
+	lua_replace(L, errfunc + 2);
+	status = lua_pcall(L, nargs, 0, errfunc);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	}
+	aux_putthread(L);
+	return lua_yieldk(L, 0, ctx, thread_main_k);
+}
+
+static int
+thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
+{
+	ASSERT(status == LUA_YIELD);
+	const int errfunc = (int)ctx;
+	/* lua stack: errfunc? finish ? func ... */
+	const int n = lua_gettop(L);
+	const int nargs = n - (errfunc + 3);
+	ASSERT(nargs >= 0);
+	status = lua_pcallk(L, nargs, LUA_MULTRET, errfunc, ctx, thread_call_k);
+	return thread_call_k(L, status, ctx);
+}
+
+static int thread_main(lua_State *restrict L)
+{
+	lua_settop(L, 0);
+	int errfunc = 0;
+	if (G.conf->traceback) {
+		lua_pushcfunction(L, aux_traceback);
+		errfunc = lua_absindex(L, -1);
+	}
+	return lua_yieldk(L, 0, errfunc, thread_main_k);
+}
+
+/* [-0, +1, v] */
+lua_State *aux_getthread(lua_State *restrict L)
+{
+	lua_pushnil(L);
+	aux_getregtable(L, RIDX_IDLE_THREAD);
+	lua_pushnil(L);
+	if (lua_next(L, -2)) {
+		lua_copy(L, -2, -4);
+		lua_pop(L, 1);
+		lua_pushnil(L);
+		lua_rawset(L, -3);
+		lua_pop(L, 1);
+		return lua_tothread(L, -1);
+	}
+	lua_pop(L, 2);
+	lua_State *restrict co = lua_newthread(L);
+	lua_pushcfunction(co, thread_main);
+	const int status = aux_resume(co, NULL, 0);
+	ASSERT(status == LUA_YIELD);
+	return co;
 }
 
 const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
@@ -165,48 +249,15 @@ int aux_traceback(lua_State *restrict L)
 	return 1;
 }
 
-void aux_resume(lua_State *restrict L, const int tidx, const int narg)
+int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
 {
-	lua_State *restrict co = lua_tothread(L, tidx);
-	ASSERT(co != NULL);
 	int status, nres;
 #if LUA_VERSION_NUM >= 504
-	status = lua_resume(co, NULL, narg, &nres);
+	status = lua_resume(L, from, narg, &nres);
 #elif LUA_VERSION_NUM == 503
-	status = lua_resume(co, NULL, narg);
-	nres = lua_gettop(co);
+	status = lua_resume(L, from, narg);
 #endif
-	if (status == LUA_YIELD) {
-		return;
-	}
-	/* routine is finished */
-	aux_getregtable(L, RIDX_ASYNC_ROUTINE);
-	lua_pushvalue(L, tidx); /* co */
-	if (lua_rawget(L, -2) == LUA_TNIL) {
-		/* no finish function */
-		return;
-	}
-	lua_pushvalue(L, tidx);
-	lua_pushnil(L);
-	/* lua stack: ... RIDX_ASYNC_ROUTINE finish co nil */
-	lua_rawset(L, -4);
-	int errfunc = 0;
-	if (G.conf->traceback) {
-		errfunc = lua_absindex(L, -2);
-		lua_pushcfunction(L, aux_traceback);
-		lua_replace(L, errfunc);
-	}
-	/* lua stack: ... traceback? finish */
-	if (status != LUA_OK) {
-		nres = 1;
-	}
-	luaL_checkstack(L, 1 + nres, NULL);
-	lua_pushboolean(L, status == LUA_OK);
-	lua_xmove(co, L, nres);
-	/* call finish function */
-	if (lua_pcall(L, 1 + nres, 0, errfunc) != LUA_OK) {
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
-	}
+	return status;
 }
 
 static bool ruleset_pcallv(
@@ -268,5 +319,8 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}
 	va_end(args);
-	aux_resume(L, 1, narg);
+	const int status = aux_resume(co, NULL, narg);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	}
 }
