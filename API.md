@@ -503,8 +503,8 @@ This function is implemented in `libruleset.lua`.
 
 ```Lua
 async(function()
-    local status = await.execute("curl -sX POST http://example.com/v1/api")
-    if status ~= 0 then
+    local ok, what, stat = await.execute("curl -sX POST http://example.com/v1/api")
+    if not ok then
         -- ......
     end
 end)
@@ -512,7 +512,7 @@ end)
 
 **Description**
 
-Execute a shell command asynchronously.
+Execute a shell command asynchronously. Returns 3 values like `os.execute`.
 
 
 ### await.invoke

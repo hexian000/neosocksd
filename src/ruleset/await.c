@@ -19,6 +19,7 @@
 #include "lua.h"
 
 #include <ev.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <math.h>
@@ -432,7 +433,6 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, base);
-	const int rstatus = ud->w_child.rstatus;
 	CLOSESLOT(await_execute_close, base);
 	const char *err = lua_touserdata(L, base + 1);
 	if (err != NULL) {
@@ -440,8 +440,26 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 		return lua_error(L);
 	}
 	ASSERT(lua_gettop(L) == base + 1);
-	lua_pushinteger(L, rstatus);
-	return 0;
+	int stat = ud->w_child.rstatus;
+	if (WIFSIGNALED(stat)) {
+		lua_pushnil(L);
+		lua_pushliteral(L, "signal");
+		lua_pushinteger(L, WTERMSIG(stat));
+		return 3;
+	}
+	bool ok = false;
+	if (WIFEXITED(stat)) {
+		stat = WEXITSTATUS(stat);
+		ok = (stat == 0);
+	}
+	if (ok) {
+		lua_pushboolean(L, 1);
+	} else {
+		lua_pushnil(L);
+	}
+	lua_pushliteral(L, "exit");
+	lua_pushinteger(L, stat);
+	return 3;
 }
 
 /* status = await.execute(command) */
