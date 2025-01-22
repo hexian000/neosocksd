@@ -809,8 +809,9 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	const size_t cap =
 		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
 	char request[cap];
-	const int len = dialaddr_format(request, cap, addr);
-	CHECK(len >= 0 && (size_t)len < cap);
+	const int n = dialaddr_format(request, cap, addr);
+	ASSERT(n >= 0 && (size_t)n < cap);
+	UNUSED(n);
 	const char *username = ctx->auth.username;
 	const char *password = ctx->auth.password;
 	SOCKS_CTX_LOG_F(

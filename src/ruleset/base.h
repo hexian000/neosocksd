@@ -38,6 +38,7 @@ enum ruleset_ridx {
 #define ERR_INVALID_INVOKE "invalid invocation target"
 #define ERR_NOT_ASYNC_ROUTINE "not in asynchronous routine"
 
+#define HAVE_LUA_WARNING (LUA_VERSION_NUM >= 504)
 #define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
 
 struct ruleset *aux_getruleset(lua_State *L);

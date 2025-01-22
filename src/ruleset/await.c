@@ -332,8 +332,8 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
-	UNUSED(upvalue);
 	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	UNUSED(upvalue);
 	return 2;
 }
 

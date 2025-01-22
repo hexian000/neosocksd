@@ -8,6 +8,8 @@
 #include "utils/buffer.h"
 #include "utils/debug.h"
 
+#include "util.h"
+
 #include "lauxlib.h"
 #include "lua.h"
 
@@ -15,9 +17,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tgmath.h>
-
-#define HAVE_LUA_WARNING (LUA_VERSION_NUM >= 504)
-#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
 
 #define MT_MARSHAL_BUFFER "marshal_buffer"
 
@@ -270,7 +269,9 @@ int api_marshal(lua_State *restrict L)
 	lua_pushnil(L); /* IDX_MARSHAL */
 	lua_pushcclosure(L, marshal_value, 3);
 	lua_pushvalue(L, -1);
-	CHECK(lua_setupvalue(L, -2, 3) != NULL);
+	const char *upvalue = lua_setupvalue(L, -2, 3);
+	ASSERT(upvalue != NULL);
+	UNUSED(upvalue);
 	/* co stack: visited ... */
 	int i = 1;
 	for (; i < n; i++) {

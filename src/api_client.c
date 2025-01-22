@@ -179,7 +179,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		ret = snprintf(
 			buf, sizeof(buf), "%s %s %s", msg->rsp.version,
 			msg->rsp.code, msg->rsp.status);
-		CHECK(ret > 0);
+		ASSERT(ret > 0);
 		api_client_finish(loop, ctx, buf, (size_t)ret, NULL);
 		return;
 	}

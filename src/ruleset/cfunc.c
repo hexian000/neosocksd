@@ -161,8 +161,8 @@ int cfunc_invoke(lua_State *restrict L)
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
-	UNUSED(upvalue);
 	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	UNUSED(upvalue);
 	lua_call(L, 0, 0);
 	return 0;
 }
@@ -226,8 +226,8 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
-	UNUSED(upvalue);
 	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	UNUSED(upvalue);
 	lua_xmove(L, co, 3);
 	/* lua stack: state co; co stack: finish nil chunk */
 

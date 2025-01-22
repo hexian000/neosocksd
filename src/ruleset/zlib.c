@@ -19,8 +19,6 @@
 
 #define MT_STREAM_CONTEXT "stream_context"
 
-#define HAVE_LUA_TOCLOSE (LUA_VERSION_NUM >= 504)
-
 struct stream_context {
 	struct vbuffer *out;
 	struct stream *r, *w;
