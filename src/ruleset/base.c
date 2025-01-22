@@ -118,7 +118,7 @@ lua_State *aux_getthread(lua_State *restrict L)
 	lua_pop(L, 1);
 	lua_State *restrict co = lua_newthread(L);
 	lua_pushcfunction(co, thread_main);
-	const int status = aux_resume(co, NULL, 0);
+	const int status = aux_resume(co, L, 0);
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
 	return co;

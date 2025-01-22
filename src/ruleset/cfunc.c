@@ -120,7 +120,11 @@ int cfunc_request(lua_State *restrict L)
 
 	state->request = *in_cb;
 	*pstate = state;
-	aux_resume(co, L, 6);
+	const int status = aux_resume(co, L, 6);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_xmove(co, L, 1);
+		return lua_error(L);
+	}
 	lua_settop(L, 1);
 	return 1;
 }
@@ -232,7 +236,11 @@ int cfunc_rpcall(lua_State *restrict L)
 
 	state->rpcall = *in_cb;
 	*pstate = state;
-	aux_resume(co, L, 3);
+	const int status = aux_resume(co, L, 3);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_xmove(co, L, 1);
+		return lua_error(L);
+	}
 	lua_settop(L, 1);
 	return 1;
 }
