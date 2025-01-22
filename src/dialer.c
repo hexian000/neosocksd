@@ -1214,8 +1214,8 @@ static void resolve_cb(
 	const struct sockaddr *restrict sa)
 {
 	struct dialer *restrict d = ctx;
-	UNUSED(q);
 	ASSERT(q == d->resolve_query);
+	UNUSED(q);
 	d->resolve_query = NULL;
 
 	const struct dialaddr *restrict dialaddr =

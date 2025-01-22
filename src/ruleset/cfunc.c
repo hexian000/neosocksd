@@ -109,16 +109,18 @@ int cfunc_request(lua_State *restrict L)
 	lua_State *restrict co = aux_getthread(L);
 	lua_pushvalue(L, 1);
 	lua_pushcclosure(L, request_finish, 1);
-	lua_xmove(L, co, 1); /* finish */
-	(void)lua_getglobal(co, "ruleset");
-	(void)lua_getfield(co, -1, func);
-	lua_pushstring(co, request);
-	lua_pushstring(co, username);
-	lua_pushstring(co, password);
+	(void)lua_getglobal(L, "ruleset");
+	(void)lua_getfield(L, -1, func);
+	lua_pushnil(L);
+	lua_replace(L, -3);
+	lua_pushstring(L, request);
+	lua_pushstring(L, username);
+	lua_pushstring(L, password);
+	lua_xmove(L, co, 6);
+	/* lua stack: state co; co stack: finish nil func request username password */
 
 	state->request = *in_cb;
 	*pstate = state;
-	/* lua stack: state co; co stack: finish ? func request username password */
 	aux_resume(co, L, 6);
 	lua_settop(L, 1);
 	return 1;
@@ -159,7 +161,8 @@ int cfunc_invoke(lua_State *restrict L)
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
-	CHECK(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	UNUSED(upvalue);
+	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
 	lua_call(L, 0, 0);
 	return 0;
 }
@@ -213,22 +216,20 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_pushvalue(L, 1);
 	lua_pushcclosure(L, rpcall_finish, 1);
 	lua_pushnil(L);
-
 	if (lua_load(L, aux_reader, stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
 	lua_newtable(L);
 	lua_newtable(L);
 	aux_getregtable(L, LUA_RIDX_GLOBALS);
-	/* lua stack: state co finish chunk env mt _G */
+	/* lua stack: state co finish nil chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
-	CHECK(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
-	/* lua stack: state co finish chunk */
-
+	UNUSED(upvalue);
+	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
 	lua_xmove(L, co, 3);
-	/* lua stack: state co; co stack: finish ? chunk */
+	/* lua stack: state co; co stack: finish nil chunk */
 
 	state->rpcall = *in_cb;
 	*pstate = state;

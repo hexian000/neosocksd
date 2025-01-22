@@ -60,6 +60,7 @@ bool aux_todialreq(lua_State *L, int n);
 
 int aux_traceback(lua_State *L);
 
+/* co stack: finish ? func ...(narg) */
 int aux_resume(lua_State *L, lua_State *from, int narg);
 
 /* main routine */

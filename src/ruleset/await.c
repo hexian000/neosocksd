@@ -118,6 +118,7 @@ static int
 await_sleep_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
+	UNUSED(status);
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	CLOSESLOT(await_sleep_close, base);
@@ -192,6 +193,7 @@ static void resolve_cb(
 {
 	struct await_resolve_userdata *ud = data;
 	ASSERT(ud->query == q);
+	UNUSED(q);
 	ud->query = NULL;
 	copy_sa(&ud->sa.sa, sa);
 	ev_idle_start(loop, &ud->w_idle);
@@ -211,6 +213,7 @@ static int
 await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
+	UNUSED(status);
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	CLOSESLOT(await_resolve_close, base);
@@ -288,6 +291,7 @@ static void invoke_cb(
 	UNUSED(loop);
 	struct await_invoke_userdata *restrict ud = data;
 	ASSERT(ud->ctx == ctx);
+	UNUSED(ctx);
 	ud->ctx = NULL;
 	ruleset_resume(
 		ud->ruleset, ud, 4, NULL, (void *)err, (void *)&errlen,
@@ -298,6 +302,7 @@ static int
 await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
+	UNUSED(status);
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	CLOSESLOT(await_invoke_close, base);
@@ -327,7 +332,8 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
 	const char *upvalue = lua_setupvalue(L, -2, 1);
-	CHECK(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	UNUSED(upvalue);
+	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
 	return 2;
 }
 
@@ -430,6 +436,7 @@ static int
 await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
+	UNUSED(status);
 	const int base = (int)ctx;
 	ASSERT(lua_gettop(L) >= base + 1);
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, base);

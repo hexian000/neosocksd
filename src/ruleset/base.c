@@ -121,6 +121,7 @@ lua_State *aux_getthread(lua_State *restrict L)
 	lua_pushcfunction(co, thread_main);
 	const int status = aux_resume(co, NULL, 0);
 	ASSERT(status == LUA_YIELD);
+	UNUSED(status);
 	return co;
 }
 
