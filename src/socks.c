@@ -500,7 +500,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 static int socks5_req(struct socks_ctx *restrict ctx)
 {
 	ASSERT(ctx->state == STATE_HANDSHAKE3);
-	const unsigned char *hdr = ctx->next;
+	const unsigned char *restrict hdr = ctx->next;
 	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
 	size_t want = sizeof(struct socks5_hdr);
 	if (len < want) {

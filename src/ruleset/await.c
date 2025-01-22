@@ -177,7 +177,7 @@ struct await_resolve_userdata {
 
 static int await_resolve_close(lua_State *restrict L)
 {
-	struct await_resolve_userdata *ud = lua_touserdata(L, 1);
+	struct await_resolve_userdata *restrict ud = lua_touserdata(L, 1);
 	if (ud->query != NULL) {
 		resolve_cancel(ud->query);
 		ud->query = NULL;
@@ -189,9 +189,9 @@ static int await_resolve_close(lua_State *restrict L)
 
 static void resolve_cb(
 	struct resolve_query *q, struct ev_loop *loop, void *data,
-	const struct sockaddr *sa)
+	const struct sockaddr *restrict sa)
 {
-	struct await_resolve_userdata *ud = data;
+	struct await_resolve_userdata *restrict ud = data;
 	ASSERT(ud->query == q);
 	UNUSED(q);
 	ud->query = NULL;

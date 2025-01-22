@@ -192,7 +192,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 	ev_io_start(loop, &ctx->w_send);
 }
 
-static struct dialreq *make_dialreq(const char *addr_str)
+static struct dialreq *make_dialreq(const char *restrict addr_str)
 {
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {

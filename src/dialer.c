@@ -67,7 +67,8 @@ dialaddr_set(struct dialaddr *addr, const char *host, const uint16_t port)
 }
 
 bool dialaddr_parse(
-	struct dialaddr *restrict addr, const char *s, const size_t len)
+	struct dialaddr *restrict addr, const char *restrict s,
+	const size_t len)
 {
 	/* FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + 1 + 5) {
@@ -142,8 +143,8 @@ int dialaddr_format(
 }
 
 static bool proxy_set_credential(
-	struct proxyreq *restrict proxy, const char *username,
-	const char *password)
+	struct proxyreq *restrict proxy, const char *restrict username,
+	const char *restrict password)
 {
 	const size_t ulen = (username != NULL) ? strlen(username) + 1 : 0;
 	const size_t plen = (password != NULL) ? strlen(password) + 1 : 0;
@@ -162,7 +163,7 @@ static bool proxy_set_credential(
 }
 
 bool dialreq_addproxy(
-	struct dialreq *restrict req, const char *proxy_uri,
+	struct dialreq *restrict req, const char *restrict proxy_uri,
 	const size_t urilen)
 {
 	/* should be more than enough */
@@ -230,7 +231,8 @@ bool dialreq_addproxy(
 #define DIALREQ_NEW(n)                                                         \
 	(malloc(sizeof(struct dialreq) + sizeof(struct proxyreq) * (n)))
 
-struct dialreq *dialreq_parse(const char *addr, const char *csv)
+struct dialreq *
+dialreq_parse(const char *restrict addr, const char *restrict csv)
 {
 	size_t len = 0, n = 0;
 	if (csv != NULL) {
@@ -244,7 +246,7 @@ struct dialreq *dialreq_parse(const char *addr, const char *csv)
 			}
 		}
 	}
-	struct dialreq *req = DIALREQ_NEW(n);
+	struct dialreq *restrict req = DIALREQ_NEW(n);
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
@@ -1318,8 +1320,8 @@ void dialer_init(struct dialer *restrict d, const struct event_cb *cb)
 }
 
 void dialer_do(
-	struct dialer *restrict d, struct ev_loop *restrict loop,
-	const struct dialreq *restrict req)
+	struct dialer *restrict d, struct ev_loop *loop,
+	const struct dialreq *req)
 {
 	if (LOGLEVEL(VERBOSE)) {
 		char s[4096];

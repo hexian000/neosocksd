@@ -85,12 +85,12 @@ int cfunc_request(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 6);
-	struct ruleset_state **pstate = lua_touserdata(L, 1);
+	struct ruleset_state *restrict *restrict pstate = lua_touserdata(L, 1);
 	const char *func = lua_touserdata(L, 2);
 	const char *request = lua_touserdata(L, 3);
 	const char *username = lua_touserdata(L, 4);
 	const char *password = lua_touserdata(L, 5);
-	const struct ruleset_request_cb *in_cb = lua_touserdata(L, 6);
+	const struct ruleset_request_cb *restrict in_cb = lua_touserdata(L, 6);
 	lua_settop(L, 0);
 
 	struct ruleset_state *restrict state =
@@ -194,9 +194,9 @@ int cfunc_rpcall(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 3);
-	struct ruleset_state **pstate = lua_touserdata(L, 1);
+	struct ruleset_state *restrict *restrict pstate = lua_touserdata(L, 1);
 	struct stream *stream = lua_touserdata(L, 2);
-	const struct ruleset_rpcall_cb *in_cb = lua_touserdata(L, 3);
+	const struct ruleset_rpcall_cb *restrict in_cb = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
 	struct ruleset_state *restrict state =

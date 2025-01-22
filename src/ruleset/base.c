@@ -104,18 +104,18 @@ static int thread_main(lua_State *restrict L)
 /* [-0, +1, v] */
 lua_State *aux_getthread(lua_State *restrict L)
 {
-	lua_pushnil(L);
 	aux_getregtable(L, RIDX_IDLE_THREAD);
 	lua_pushnil(L);
 	if (lua_next(L, -2)) {
-		lua_copy(L, -2, -4);
 		lua_pop(L, 1);
+		lua_pushvalue(L, -1);
 		lua_pushnil(L);
-		lua_rawset(L, -3);
-		lua_pop(L, 1);
+		/* lua stack: RIDX_IDLE_THREAD co co nil */
+		lua_rawset(L, -4);
+		lua_replace(L, -2);
 		return lua_tothread(L, -1);
 	}
-	lua_pop(L, 2);
+	lua_pop(L, 1);
 	lua_State *restrict co = lua_newthread(L);
 	lua_pushcfunction(co, thread_main);
 	const int status = aux_resume(co, NULL, 0);
@@ -124,7 +124,7 @@ lua_State *aux_getthread(lua_State *restrict L)
 	return co;
 }
 
-const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
+const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 {
 	UNUSED(L);
 	struct stream *s = ud;
@@ -144,7 +144,7 @@ const char *aux_reader(lua_State *L, void *ud, size_t *restrict sz)
 int aux_format_addr(lua_State *restrict L)
 {
 	/* lua stack: ... sa */
-	const struct sockaddr *sa = lua_touserdata(L, -1);
+	const struct sockaddr *restrict sa = lua_touserdata(L, -1);
 	if (sa == NULL) {
 		return 0;
 	}
@@ -196,7 +196,7 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 	}
 	size_t len;
 	for (int i = 1; i < n; i++) {
-		const char *s = lua_tolstring(L, -i, &len);
+		const char *restrict s = lua_tolstring(L, -i, &len);
 		if (s == NULL) {
 			dialreq_free(req);
 			lua_pop(L, n);
@@ -208,7 +208,7 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 			return false;
 		}
 	}
-	const char *s = lua_tolstring(L, -n, &len);
+	const char *restrict s = lua_tolstring(L, -n, &len);
 	if (s == NULL) {
 		dialreq_free(req);
 		lua_pop(L, n);

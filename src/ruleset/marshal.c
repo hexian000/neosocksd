@@ -28,7 +28,8 @@ static int marshal_buffer_gc(lua_State *restrict L)
 }
 
 /* [-0, +0, -] */
-static void marshal_string(lua_State *L, struct vbuffer **pvbuf)
+static void
+marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 {
 	const int idx = 1;
 	size_t len;
@@ -57,7 +58,8 @@ static void marshal_string(lua_State *L, struct vbuffer **pvbuf)
 }
 
 /* [-0, +0, -] */
-static void marshal_number(lua_State *L, struct vbuffer **pvbuf)
+static void
+marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 {
 	const int idx = 1;
 	static const char prefix[3] = "-0x";
@@ -159,7 +161,8 @@ static void marshal_number(lua_State *L, struct vbuffer **pvbuf)
 #define IDX_MARSHAL (lua_upvalueindex(3))
 
 /* [-0, +0, m] */
-static void marshal_table(lua_State *L, struct vbuffer **pvbuf)
+static void
+marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 {
 	const int idx = 1;
 	/* check visited */
@@ -198,10 +201,11 @@ static void marshal_table(lua_State *L, struct vbuffer **pvbuf)
 }
 
 /* [-0, +0, v] */
-static int marshal_value(lua_State *L)
+static int marshal_value(lua_State *restrict L)
 {
 	const int idx = 1;
-	struct vbuffer **pvbuf = lua_touserdata(L, IDX_BUFFER);
+	struct vbuffer *restrict *restrict pvbuf =
+		lua_touserdata(L, IDX_BUFFER);
 	const int type = lua_type(L, idx);
 	switch (type) {
 	case LUA_TNIL:
@@ -252,7 +256,8 @@ int api_marshal(lua_State *restrict L)
 		lua_pushliteral(L, "");
 		return 1;
 	}
-	struct vbuffer **pvbuf = lua_newuserdata(L, sizeof(struct vbuffer *));
+	struct vbuffer *restrict *restrict pvbuf =
+		lua_newuserdata(L, sizeof(struct vbuffer *));
 	*pvbuf = VBUF_NEW(1024);
 	if (luaL_newmetatable(L, MT_MARSHAL_BUFFER)) {
 		lua_pushcfunction(L, marshal_buffer_gc);

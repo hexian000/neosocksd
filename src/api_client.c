@@ -217,7 +217,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const struct vbuffer *restrict cbuf = p->cbuf;
 		buf = cbuf->data + p->cpos;
 		len = cbuf->len - p->cpos;
-		err = socket_send(watcher->fd, buf, &len);
+		err = socket_send(fd, buf, &len);
 		if (err != 0) {
 			const char *msg = strerror(err);
 			api_client_finish(loop, ctx, msg, strlen(msg), NULL);

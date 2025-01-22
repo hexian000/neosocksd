@@ -194,8 +194,9 @@ void copy_sa(struct sockaddr *restrict dst, const struct sockaddr *restrict src)
 	FAILMSGF("unexpected af: %jd", (intmax_t)src->sa_family);
 }
 
-static int
-format_sa_inet(char *s, const size_t maxlen, const struct sockaddr_in *sa)
+static int format_sa_inet(
+	char *restrict s, const size_t maxlen,
+	const struct sockaddr_in *restrict sa)
 {
 	char buf[INET_ADDRSTRLEN];
 	if (inet_ntop(AF_INET, &(sa->sin_addr), buf, sizeof(buf)) == NULL) {
@@ -205,8 +206,9 @@ format_sa_inet(char *s, const size_t maxlen, const struct sockaddr_in *sa)
 	return snprintf(s, maxlen, "%s:%" PRIu16, buf, port);
 }
 
-static int
-format_sa_inet6(char *s, const size_t maxlen, const struct sockaddr_in6 *sa)
+static int format_sa_inet6(
+	char *restrict s, const size_t maxlen,
+	const struct sockaddr_in6 *restrict sa)
 {
 	char buf[INET6_ADDRSTRLEN];
 	if (inet_ntop(AF_INET6, &(sa->sin6_addr), buf, sizeof(buf)) == NULL) {
@@ -221,20 +223,25 @@ format_sa_inet6(char *s, const size_t maxlen, const struct sockaddr_in6 *sa)
 		s, maxlen, "[%s%%%" PRIu32 "]:%" PRIu16, buf, scope, port);
 }
 
-int format_sa(char *s, const size_t maxlen, const struct sockaddr *sa)
+int format_sa(
+	char *restrict s, const size_t maxlen,
+	const struct sockaddr *restrict sa)
 {
 	switch (sa->sa_family) {
 	case AF_INET:
-		return format_sa_inet(s, maxlen, (struct sockaddr_in *)sa);
+		return format_sa_inet(
+			s, maxlen, (struct sockaddr_in *restrict)sa);
 	case AF_INET6:
-		return format_sa_inet6(s, maxlen, (struct sockaddr_in6 *)sa);
+		return format_sa_inet6(
+			s, maxlen, (struct sockaddr_in6 *restrict)sa);
 	default:
 		break;
 	}
 	return snprintf(s, maxlen, "<af:%jd>", (intmax_t)sa->sa_family);
 }
 
-static bool find_addrinfo(union sockaddr_max *sa, const struct addrinfo *node)
+static bool find_addrinfo(
+	union sockaddr_max *restrict sa, const struct addrinfo *restrict node)
 {
 	for (const struct addrinfo *it = node; it != NULL; it = it->ai_next) {
 #define EXPECT_ADDRLEN(p, expected)                                            \
@@ -265,7 +272,7 @@ static bool find_addrinfo(union sockaddr_max *sa, const struct addrinfo *node)
 	return false;
 }
 
-bool parse_bindaddr(union sockaddr_max *sa, const char *s)
+bool parse_bindaddr(union sockaddr_max *restrict sa, const char *restrict s)
 {
 	const size_t addrlen = strlen(s);
 	char buf[FQDN_MAX_LENGTH + 1 + 5 + 1];
@@ -299,8 +306,8 @@ bool parse_bindaddr(union sockaddr_max *sa, const char *s)
 }
 
 bool resolve_addr(
-	union sockaddr_max *sa, const char *name, const char *service,
-	const int family)
+	union sockaddr_max *restrict sa, const char *restrict name,
+	const char *restrict service, const int family)
 {
 	struct addrinfo hints = {
 		.ai_family = family,
