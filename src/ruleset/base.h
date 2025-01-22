@@ -16,7 +16,10 @@
 struct ruleset {
 	struct ev_loop *loop;
 	struct ruleset_vmstats vmstats;
-	int memlimit_kb;
+	struct {
+		int memlimit_kb;
+		bool traceback;
+	} config;
 	lua_State *L;
 	struct ev_timer w_ticker;
 	struct ev_idle w_idle;

@@ -147,7 +147,8 @@ static int api_splithostport(lua_State *restrict L)
 static int api_config(lua_State *restrict L)
 {
 	const struct config *restrict conf = G.conf;
-	lua_createtable(L, 0, 8);
+	struct ruleset *restrict r = aux_getruleset(L);
+	lua_createtable(L, 0, 9);
 
 	lua_pushinteger(L, (lua_Integer)conf->log_level);
 	lua_setfield(L, -2, "loglevel");
@@ -155,7 +156,9 @@ static int api_config(lua_State *restrict L)
 	lua_setfield(L, -2, "timeout");
 	lua_pushboolean(L, conf->auth_required);
 	lua_setfield(L, -2, "auth_required");
-	lua_pushboolean(L, conf->traceback);
+	lua_pushboolean(L, r->config.memlimit_kb);
+	lua_setfield(L, -2, "memlimit");
+	lua_pushboolean(L, r->config.traceback);
 	lua_setfield(L, -2, "traceback");
 	lua_pushstring(L, conf->listen);
 	lua_setfield(L, -2, "listen");

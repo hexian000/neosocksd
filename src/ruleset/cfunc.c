@@ -48,7 +48,7 @@ static int ruleset_state_gc(lua_State *restrict L)
 static void check_memlimit(lua_State *restrict L)
 {
 	struct ruleset *restrict r = aux_getruleset(L);
-	const int memlimit_kb = r->memlimit_kb;
+	const int memlimit_kb = r->config.memlimit_kb;
 	if (memlimit_kb <= 0) {
 		return;
 	}

@@ -63,7 +63,8 @@ static int thread_main_k(lua_State *L, int status, lua_KContext ctx);
 static int
 thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
-	const int errfunc = (G.conf->traceback) ? 1 : 0;
+	struct ruleset *restrict r = aux_getruleset(L);
+	const int errfunc = (r->config.traceback) ? 1 : 0;
 	/* lua stack: finish ? ... */
 	const int base = (int)ctx;
 	const int n = lua_gettop(L) - base;
@@ -83,7 +84,8 @@ static int
 thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
-	const int errfunc = (G.conf->traceback) ? 1 : 0;
+	struct ruleset *restrict r = aux_getruleset(L);
+	const int errfunc = (r->config.traceback) ? 1 : 0;
 	/* lua stack: finish ? func ... */
 	const int base = (int)ctx;
 	const int n = lua_gettop(L) - base;
@@ -95,7 +97,8 @@ thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
 
 static int thread_main(lua_State *restrict L)
 {
-	if (G.conf->traceback) {
+	struct ruleset *restrict r = aux_getruleset(L);
+	if (r->config.traceback) {
 		lua_pushcfunction(L, aux_traceback);
 	}
 	return lua_yieldk(L, 0, lua_gettop(L), thread_main_k);
@@ -264,8 +267,9 @@ static bool ruleset_pcallv(
 	lua_State *restrict L, const lua_CFunction func, const int nargs,
 	const int nresults, va_list args)
 {
+	struct ruleset *restrict r = aux_getruleset(L);
 	int errfunc = 0;
-	if (G.conf->traceback) {
+	if (r->config.traceback) {
 		lua_pushcfunction(L, aux_traceback);
 		errfunc = 1;
 	}

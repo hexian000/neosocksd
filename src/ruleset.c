@@ -156,7 +156,8 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	r->loop = loop;
 	r->vmstats = (struct ruleset_vmstats){ 0 };
 	const int memlimit_mb = G.conf->memlimit;
-	r->memlimit_kb = (memlimit_mb > 0) ? (memlimit_mb << 10u) : 0;
+	r->config.memlimit_kb = (memlimit_mb > 0) ? (memlimit_mb << 10u) : 0;
+	r->config.traceback = !!G.conf->traceback;
 	lua_State *restrict L = lua_newstate(l_alloc, r);
 	if (L == NULL) {
 		ruleset_free(r);
