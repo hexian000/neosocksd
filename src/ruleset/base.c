@@ -63,13 +63,14 @@ static int thread_main_k(lua_State *L, int status, lua_KContext ctx);
 static int
 thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
-	const int errfunc = (int)ctx;
-	/* lua stack: errfunc? finish ? ... */
-	const int n = lua_gettop(L);
-	const int nargs = n - (errfunc + 1);
+	const int errfunc = (G.conf->traceback) ? 1 : 0;
+	/* lua stack: finish ? ... */
+	const int base = (int)ctx;
+	const int n = lua_gettop(L) - base;
+	const int nargs = n - 1;
 	ASSERT(nargs >= 1);
 	lua_pushboolean(L, (status == LUA_OK || status == LUA_YIELD));
-	lua_replace(L, errfunc + 2);
+	lua_replace(L, base + 2);
 	status = lua_pcall(L, nargs, 0, errfunc);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
@@ -82,10 +83,11 @@ static int
 thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
-	const int errfunc = (int)ctx;
-	/* lua stack: errfunc? finish ? func ... */
-	const int n = lua_gettop(L);
-	const int nargs = n - (errfunc + 3);
+	const int errfunc = (G.conf->traceback) ? 1 : 0;
+	/* lua stack: finish ? func ... */
+	const int base = (int)ctx;
+	const int n = lua_gettop(L) - base;
+	const int nargs = n - 3;
 	ASSERT(nargs >= 0);
 	status = lua_pcallk(L, nargs, LUA_MULTRET, errfunc, ctx, thread_call_k);
 	return thread_call_k(L, status, ctx);
@@ -93,13 +95,10 @@ thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
 
 static int thread_main(lua_State *restrict L)
 {
-	lua_settop(L, 0);
-	int errfunc = 0;
 	if (G.conf->traceback) {
 		lua_pushcfunction(L, aux_traceback);
-		errfunc = lua_absindex(L, -1);
 	}
-	return lua_yieldk(L, 0, errfunc, thread_main_k);
+	return lua_yieldk(L, 0, lua_gettop(L), thread_main_k);
 }
 
 /* [-0, +1, v] */

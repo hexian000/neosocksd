@@ -80,7 +80,6 @@ static int request_finish(lua_State *restrict L)
 	return 0;
 }
 
-struct dialreq;
 /* request(func, request, username, password) */
 int cfunc_request(lua_State *restrict L)
 {
