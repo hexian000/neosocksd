@@ -102,7 +102,7 @@ static void print_usage(const char *argv0)
 		"  -u, --user [user][:[group]]\n"
 		"                             run as the specified identity, e.g. `nobody:nogroup'\n"
 		"  -m, --max-sessions <n>     maximum number of concurrent connections\n"
-		"                             (default: 4096, 0: unlimited)\n"
+		"                             (default: unlimited)\n"
 		"  --max-startups <start:rate:full>\n"
 		"                             maximum number of concurrent halfopen connections\n"
 		"                             (default: unlimited)\n"

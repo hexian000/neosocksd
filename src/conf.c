@@ -29,7 +29,7 @@ struct config conf_default(void)
 		.tcp_fastopen_connect = false,
 #endif
 
-		.max_sessions = 16384,
+		.max_sessions = 0,
 		.startup_limit_start = 0,
 		.startup_limit_rate = 30,
 		.startup_limit_full = 0,
@@ -69,43 +69,47 @@ bool conf_check(const struct config *restrict conf)
 		LOGE("listen address is not specified");
 		return false;
 	}
-	int proto_flags_sepcified = 0;
+	bool auth_supported = true;
+	int proto_flags = 0;
 	if (conf->forward != NULL) {
-		proto_flags_sepcified++;
-	}
-	if (conf->http) {
-		proto_flags_sepcified++;
+		proto_flags |= 1;
+		auth_supported = false;
 	}
 #if WITH_TPROXY
 	if (conf->transparent) {
-		proto_flags_sepcified++;
+		proto_flags |= 2;
+		auth_supported = false;
 	}
 #endif
-	if (proto_flags_sepcified > 1) {
+	if (conf->http) {
+		proto_flags |= 4;
+	}
+	if (proto_flags != (proto_flags & -proto_flags)) {
 		LOGE("incompatible flags are specified");
 		return false;
 	}
 	if (conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 16384) {
-		LOGW("tcp send buffer is too small");
+		LOGW("tcp send buffer may be too small");
 	}
 	if (conf->tcp_rcvbuf > 0 && conf->tcp_rcvbuf < 16384) {
-		LOGW("tcp recv buffer is too small");
+		LOGW("tcp recv buffer may be too small");
 	}
+#if WITH_RULESET
+	if (conf->ruleset != NULL && conf->proxy != NULL) {
+		LOGW("the proxy will be overwritten by ruleset");
+	}
+#endif
 	if (conf->auth_required) {
+		if (!auth_supported) {
+			LOGE("authentication is not supported in current mode");
+			return false;
+		}
 #if WITH_RULESET
 		if (conf->ruleset == NULL) {
 			LOGE("ruleset must be enabled for authentication");
 			return false;
 		}
 #endif
-		if (conf->forward != NULL
-#if WITH_TPROXY
-		    || conf->transparent
-#endif
-		) {
-			LOGE("authentication is not supported in current mode");
-			return false;
-		}
 	}
 
 	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
