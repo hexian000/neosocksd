@@ -242,7 +242,7 @@ function rpc.probe(peername, ttl)
     end
     local connid = findconn(peername, ttl)
     if not connid then
-        error("peer not reachable")
+        error(string.format("%q->%q: peer not reachable", agent.peername, peername))
     end
     local ok, result = callbyconn(connid, "probe", peername, ttl)
     if not ok then

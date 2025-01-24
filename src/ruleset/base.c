@@ -244,7 +244,7 @@ int aux_traceback(lua_State *restrict L)
 			L, "(%s: %p)", lua_typename(L, type),
 			lua_topointer(L, 1));
 	}
-	LOG_STACK_F(WARNING, 0, "traceback: %s", err);
+	LOG_STACK_F(VERBOSE, 0, "traceback: %s", err);
 	luaL_traceback(L, L, err, 1);
 	size_t len;
 	const char *s = lua_tolstring(L, -1, &len);
