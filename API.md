@@ -514,6 +514,8 @@ end)
 
 Execute a shell command asynchronously. Returns 3 values like `os.execute`.
 
+This function depends on `/bin/sh`.
+
 
 ### await.invoke
 
