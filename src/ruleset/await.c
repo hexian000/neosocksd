@@ -513,7 +513,6 @@ static int await_execute(lua_State *restrict L)
 		FAILMSGF("execv: %s", strerror(errno));
 	}
 	ev_child_set(&ud->w_child, pid, 0);
-	ud->w_child.data = ud;
 	ev_child_start(r->loop, &ud->w_child);
 
 	context_pin(L, ud);

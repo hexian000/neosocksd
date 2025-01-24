@@ -416,7 +416,6 @@ static void rpcall_return(void *data, const char *result, size_t resultlen)
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
 		RESPHDR_CLENGTH(ctx->parser.wbuf, errlen);
 		RESPHDR_FINISH(ctx->parser.wbuf);
-		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 		BUF_APPEND(ctx->parser.wbuf, err, errlen);
 		return;
 	}
@@ -485,6 +484,7 @@ static void handle_ruleset_rpcall(
 	};
 	const bool ok = ruleset_rpcall(r, &ctx->rpcstate, reader, &callback);
 	stream_close(reader);
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		/* no callback */
 		ctx->state = STATE_RESPONSE;
@@ -495,7 +495,6 @@ static void handle_ruleset_rpcall(
 		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
 		RESPHDR_CLENGTH(ctx->parser.wbuf, len);
 		RESPHDR_FINISH(ctx->parser.wbuf);
-		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 		BUF_APPEND(ctx->parser.wbuf, err, len);
 		ctx->state = STATE_RESPONSE;
 		ev_io_start(loop, &ctx->w_send);
@@ -613,7 +612,6 @@ static void handle_ruleset_gc(
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 
 	FORMAT_BYTES(
 		freed_bytes,
