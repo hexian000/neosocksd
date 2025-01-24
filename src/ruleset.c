@@ -243,12 +243,7 @@ bool ruleset_rpcall(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	struct stream *code, const struct ruleset_rpcall_cb *callback)
 {
-	const bool ok =
-		ruleset_pcall(r, cfunc_rpcall, 3, 1, state, code, callback);
-	if (!ok) {
-		return NULL;
-	}
-	return lua_touserdata(r->L, -1);
+	return ruleset_pcall(r, cfunc_rpcall, 3, 1, state, code, callback);
 }
 
 bool ruleset_update(
@@ -268,7 +263,7 @@ bool ruleset_gc(struct ruleset *restrict r)
 	return ruleset_pcall(r, cfunc_gc, 0, 0);
 }
 
-static bool dispatch_req(
+static bool dispatch_request(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	const char *func, const char *request, const char *username,
 	const char *password, const struct ruleset_request_cb *callback)
@@ -290,7 +285,7 @@ bool ruleset_resolve(
 	const char *request, const char *username, const char *password,
 	const struct ruleset_request_cb *callback)
 {
-	return dispatch_req(
+	return dispatch_request(
 		r, state, "resolve", request, username, password, callback);
 }
 
@@ -299,7 +294,7 @@ bool ruleset_route(
 	const char *request, const char *username, const char *password,
 	const struct ruleset_request_cb *callback)
 {
-	return dispatch_req(
+	return dispatch_request(
 		r, state, "route", request, username, password, callback);
 }
 
@@ -308,7 +303,7 @@ bool ruleset_route6(
 	const char *request, const char *username, const char *password,
 	const struct ruleset_request_cb *callback)
 {
-	return dispatch_req(
+	return dispatch_request(
 		r, state, "route6", request, username, password, callback);
 }
 
