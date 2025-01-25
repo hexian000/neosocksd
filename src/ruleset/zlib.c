@@ -61,7 +61,6 @@ static int zlib_compress(lua_State *restrict L)
 {
 	size_t len;
 	const char *src = luaL_checklstring(L, 1, &len);
-	lua_settop(L, 1);
 	struct stream_context *restrict s =
 		lua_newuserdata(L, sizeof(struct stream_context));
 	s->out = NULL;
@@ -81,7 +80,7 @@ static int zlib_compress(lua_State *restrict L)
 		return luaL_error(L, "compress error: %d", err);
 	}
 	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
-	aux_close(L, 2);
+	aux_close(L, -2);
 	return 1;
 }
 
@@ -90,7 +89,6 @@ static int zlib_uncompress(lua_State *restrict L)
 {
 	size_t len;
 	const char *src = luaL_checklstring(L, 1, &len);
-	lua_settop(L, 1);
 	struct stream_context *restrict s =
 		lua_newuserdata(L, sizeof(struct stream_context));
 	s->out = NULL;
@@ -110,7 +108,7 @@ static int zlib_uncompress(lua_State *restrict L)
 		return luaL_error(L, "uncompress error: %d", err);
 	}
 	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
-	aux_close(L, 2);
+	aux_close(L, -2);
 	return 1;
 }
 

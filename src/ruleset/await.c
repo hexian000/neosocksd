@@ -94,7 +94,7 @@ static void sleep_finish_cb(
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct await_sleep_userdata *restrict ud = watcher->data;
-	ruleset_resume(ud->ruleset, ud, 1, NULL);
+	ruleset_resume(ud->ruleset, ud, 0);
 }
 
 static int
@@ -103,13 +103,8 @@ await_sleep_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
 	const int base = (int)ctx;
-	ASSERT(lua_gettop(L) >= base + 1);
+	ASSERT(lua_gettop(L) == base);
 	aux_close(L, base);
-	const char *err = lua_touserdata(L, base + 1);
-	if (err != NULL) {
-		lua_pushstring(L, err);
-		return lua_error(L);
-	}
 	return 0;
 }
 
@@ -180,7 +175,7 @@ static void resolve_finish_cb(
 	ev_idle_stop(loop, watcher);
 	struct await_resolve_userdata *restrict ud = watcher->data;
 	const struct sockaddr *sa = &ud->sa.sa;
-	ruleset_resume(ud->ruleset, ud, 2, NULL, (void *)sa);
+	ruleset_resume(ud->ruleset, ud, 1, (void *)sa);
 }
 
 static int
@@ -189,14 +184,8 @@ await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
 	const int base = (int)ctx;
-	ASSERT(lua_gettop(L) >= base + 1);
+	ASSERT(lua_gettop(L) == base + 1);
 	aux_close(L, base);
-	const char *err = lua_touserdata(L, base + 1);
-	if (err != NULL) {
-		lua_pushstring(L, err);
-		return lua_error(L);
-	}
-	ASSERT(lua_gettop(L) == base + 2);
 	return aux_format_addr(L);
 }
 
@@ -259,7 +248,7 @@ static void invoke_cb(
 	UNUSED(ctx);
 	ud->ctx = NULL;
 	ruleset_resume(
-		ud->ruleset, ud, 4, NULL, (void *)err, (void *)&errlen,
+		ud->ruleset, ud, 3, (void *)err, (void *)&errlen,
 		(void *)stream);
 }
 
@@ -269,17 +258,11 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
 	const int base = (int)ctx;
-	ASSERT(lua_gettop(L) >= base + 1);
+	ASSERT(lua_gettop(L) == base + 3);
 	aux_close(L, base);
-	const char *err = lua_touserdata(L, base + 1);
-	if (err != NULL) {
-		lua_pushstring(L, err);
-		return lua_error(L);
-	}
-	ASSERT(lua_gettop(L) == base + 4);
-	const char *errmsg = lua_touserdata(L, base + 2);
-	const size_t errlen = *(size_t *)lua_touserdata(L, base + 3);
-	struct stream *stream = lua_touserdata(L, base + 4);
+	const char *errmsg = lua_touserdata(L, base + 1);
+	const size_t errlen = *(size_t *)lua_touserdata(L, base + 2);
+	struct stream *stream = lua_touserdata(L, base + 3);
 	lua_settop(L, base);
 	if (errmsg != NULL) {
 		lua_pushboolean(L, 0);
@@ -385,7 +368,7 @@ static void child_finish_cb(
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct await_execute_userdata *restrict ud = watcher->data;
-	ruleset_resume(ud->ruleset, ud, 1, NULL);
+	ruleset_resume(ud->ruleset, ud, 0);
 }
 
 static int
@@ -394,16 +377,9 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
 	const int base = (int)ctx;
-	ASSERT(lua_gettop(L) >= base + 1);
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, base);
-	aux_close(L, base);
-	const char *err = lua_touserdata(L, base + 1);
-	if (err != NULL) {
-		lua_pushstring(L, err);
-		return lua_error(L);
-	}
-	ASSERT(lua_gettop(L) == base + 1);
 	int stat = ud->w_child.rstatus;
+	aux_close(L, base);
 	if (WIFSIGNALED(stat)) {
 		lua_pushnil(L);
 		lua_pushliteral(L, "signal");
