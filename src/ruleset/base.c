@@ -293,10 +293,21 @@ int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
 	int status, nres;
 #if LUA_VERSION_NUM >= 504
 	status = lua_resume(L, from, narg, &nres);
-#elif LUA_VERSION_NUM == 503
+#else
 	status = lua_resume(L, from, narg);
 #endif
 	return status;
+}
+
+int aux_async(
+	lua_State *restrict L, lua_State *restrict from, const int narg,
+	const int finishidx)
+{
+	lua_pushvalue(from, finishidx);
+	lua_xmove(from, L, 1);
+	lua_pushnil(L);
+	lua_xmove(from, L, 1 + narg);
+	return aux_resume(L, from, 3 + narg);
 }
 
 static bool ruleset_pcallv(

@@ -68,8 +68,11 @@ bool aux_todialreq(lua_State *L, int n);
 
 int aux_traceback(lua_State *L);
 
-/* co stack: finish ? func ...(narg) */
+/* [-narg, +0, -] */
 int aux_resume(lua_State *L, lua_State *from, int narg);
+
+/* [-(narg+1), +(0|1), -] */
+int aux_async(lua_State *L, lua_State *from, int narg, int finishidx);
 
 /* main routine */
 bool ruleset_pcall(

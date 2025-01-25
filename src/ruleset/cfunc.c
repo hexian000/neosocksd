@@ -110,17 +110,14 @@ int cfunc_request(lua_State *restrict L)
 	lua_pushcclosure(L, request_finish, 1);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
-	lua_pushnil(L);
-	lua_replace(L, -3);
 	lua_pushstring(L, request);
 	lua_pushstring(L, username);
 	lua_pushstring(L, password);
-	lua_xmove(L, co, 6);
-	/* lua stack: state co; co stack: finish nil func request username password */
+	/* lua stack: state co finish ruleset func request username password */
 
 	state->request = *in_cb;
 	*pstate = state;
-	const int status = aux_resume(co, L, 6);
+	const int status = aux_async(co, L, 3, -6);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_xmove(co, L, 1);
 		return lua_error(L);
@@ -218,7 +215,6 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_State *restrict co = aux_getthread(L);
 	lua_pushvalue(L, 1);
 	lua_pushcclosure(L, rpcall_finish, 1);
-	lua_pushnil(L);
 	if (lua_load(L, aux_reader, stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
@@ -231,12 +227,11 @@ int cfunc_rpcall(lua_State *restrict L)
 	const char *upvalue = lua_setupvalue(L, -2, 1);
 	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
 	UNUSED(upvalue);
-	lua_xmove(L, co, 3);
-	/* lua stack: state co; co stack: finish nil chunk */
+	/* lua stack: state co finish chunk */
 
 	state->rpcall = *in_cb;
 	*pstate = state;
-	const int status = aux_resume(co, L, 3);
+	const int status = aux_async(co, L, 0, -2);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_xmove(co, L, 1);
 		return lua_error(L);
