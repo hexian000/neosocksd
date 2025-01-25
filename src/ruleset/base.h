@@ -48,8 +48,12 @@ struct ruleset *aux_getruleset(lua_State *L);
 
 void aux_newweaktable(lua_State *L, const char *mode);
 
+void aux_toclose(lua_State *L, int idx, const char *tname, lua_CFunction close);
+
+void aux_close(lua_State *L, int idx);
+
 /* [-0, +1, v] */
-void aux_getregtable(lua_State *L, int idx);
+void aux_getregtable(lua_State *L, int ridx);
 
 /* [-0, +1, v] */
 lua_State *aux_getthread(lua_State *L);

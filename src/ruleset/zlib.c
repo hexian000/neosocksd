@@ -61,20 +61,14 @@ static int zlib_compress(lua_State *restrict L)
 {
 	size_t len;
 	const char *src = luaL_checklstring(L, 1, &len);
+	lua_settop(L, 1);
 	struct stream_context *restrict s =
 		lua_newuserdata(L, sizeof(struct stream_context));
-	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
-#if HAVE_LUA_TOCLOSE
-		lua_pushcfunction(L, stream_context_close);
-		lua_setfield(L, -2, "__close");
-#endif
-		lua_pushcfunction(L, stream_context_close);
-		lua_setfield(L, -2, "__gc");
-	}
-	lua_setmetatable(L, -2);
-#if HAVE_LUA_TOCLOSE
-	lua_toclose(L, -1);
-#endif
+	s->out = NULL;
+	s->r = NULL;
+	s->w = NULL;
+	aux_toclose(L, -1, MT_STREAM_CONTEXT, stream_context_close);
+
 	s->out = VBUF_NEW(IO_BUFSIZE);
 	s->r = io_memreader(src, len);
 	s->w = codec_zlib_writer(io_heapwriter(&s->out));
@@ -87,7 +81,7 @@ static int zlib_compress(lua_State *restrict L)
 		return luaL_error(L, "compress error: %d", err);
 	}
 	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
-	s->out = VBUF_FREE(s->out);
+	aux_close(L, 2);
 	return 1;
 }
 
@@ -96,20 +90,14 @@ static int zlib_uncompress(lua_State *restrict L)
 {
 	size_t len;
 	const char *src = luaL_checklstring(L, 1, &len);
+	lua_settop(L, 1);
 	struct stream_context *restrict s =
 		lua_newuserdata(L, sizeof(struct stream_context));
-	if (luaL_newmetatable(L, MT_STREAM_CONTEXT)) {
-#if HAVE_LUA_TOCLOSE
-		lua_pushcfunction(L, stream_context_close);
-		lua_setfield(L, -2, "__close");
-#endif
-		lua_pushcfunction(L, stream_context_close);
-		lua_setfield(L, -2, "__gc");
-	}
-	lua_setmetatable(L, -2);
-#if HAVE_LUA_TOCLOSE
-	lua_toclose(L, -1);
-#endif
+	s->out = NULL;
+	s->r = NULL;
+	s->w = NULL;
+	aux_toclose(L, -1, MT_STREAM_CONTEXT, stream_context_close);
+
 	s->out = VBUF_NEW(IO_BUFSIZE);
 	s->r = codec_zlib_reader(io_memreader(src, len));
 	s->w = io_heapwriter(&s->out);
@@ -122,7 +110,7 @@ static int zlib_uncompress(lua_State *restrict L)
 		return luaL_error(L, "uncompress error: %d", err);
 	}
 	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
-	s->out = VBUF_FREE(s->out);
+	aux_close(L, 2);
 	return 1;
 }
 

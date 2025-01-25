@@ -13,6 +13,7 @@
 #include "lauxlib.h"
 #include "lua.h"
 
+#include "utils/slog.h"
 #include <ctype.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -20,7 +21,7 @@
 
 #define MT_MARSHAL_BUFFER "marshal_buffer"
 
-static int marshal_buffer_gc(lua_State *restrict L)
+static int marshal_buffer_close(lua_State *restrict L)
 {
 	struct vbuffer **pvbuf = lua_touserdata(L, 1);
 	*pvbuf = VBUF_FREE(*pvbuf);
@@ -258,18 +259,17 @@ int api_marshal(lua_State *restrict L)
 	}
 	struct vbuffer *restrict *restrict pvbuf =
 		lua_newuserdata(L, sizeof(struct vbuffer *));
+	*pvbuf = NULL;
+	aux_toclose(L, -1, MT_MARSHAL_BUFFER, marshal_buffer_close);
+
 	*pvbuf = VBUF_NEW(1024);
-	if (luaL_newmetatable(L, MT_MARSHAL_BUFFER)) {
-		lua_pushcfunction(L, marshal_buffer_gc);
-		lua_setfield(L, -2, "__gc");
-	}
-	lua_setmetatable(L, -2);
 	if (*pvbuf == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
+	/* lua stack: args... buffer */
 	/* build closure */
-	/* lua stack: ... IDX_BUFFER */
+	lua_pushvalue(L, -1); /* IDX_BUFFER */
 	lua_createtable(L, 0, 16); /* IDX_VISITED */
 	lua_pushnil(L); /* IDX_MARSHAL */
 	lua_pushcclosure(L, marshal_value, 3);
@@ -290,7 +290,7 @@ int api_marshal(lua_State *restrict L)
 		lua_call(L, 1, 0);
 	}
 	lua_pushlstring(L, VBUF_DATA(*pvbuf), VBUF_LEN(*pvbuf));
-	*pvbuf = VBUF_FREE(*pvbuf);
+	aux_close(L, n + 1);
 	return 1;
 }
 

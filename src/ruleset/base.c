@@ -41,9 +41,45 @@ void aux_newweaktable(lua_State *restrict L, const char *mode)
 	lua_setmetatable(L, -2);
 }
 
-void aux_getregtable(lua_State *restrict L, const int idx)
+void aux_toclose(
+	lua_State *restrict L, int idx, const char *tname,
+	const lua_CFunction close)
 {
-	if (lua_rawgeti(L, LUA_REGISTRYINDEX, idx) != LUA_TTABLE) {
+	idx = lua_absindex(L, idx);
+	if (luaL_newmetatable(L, tname)) {
+		lua_pushcfunction(L, close);
+		lua_setfield(L, -2, "__close");
+		lua_pushcfunction(L, close);
+		lua_setfield(L, -2, "__gc");
+	}
+	lua_setmetatable(L, idx);
+#if HAVE_LUA_TOCLOSE
+	lua_toclose(L, idx);
+#endif
+}
+
+void aux_close(lua_State *restrict L, int idx)
+{
+#if HAVE_LUA_TOCLOSE
+	UNUSED(L);
+	UNUSED(idx);
+#else
+	idx = lua_absindex(L, idx);
+	if (!lua_getmetatable(L, idx)) {
+		return;
+	}
+	lua_getfield(L, -1, "__close");
+	lua_pushvalue(L, idx);
+	lua_call(L, 1, 0);
+	lua_pushnil(L);
+	lua_copy(L, -1, idx);
+	lua_pop(L, 2);
+#endif
+}
+
+void aux_getregtable(lua_State *restrict L, const int ridx)
+{
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, ridx) != LUA_TTABLE) {
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
 	}
