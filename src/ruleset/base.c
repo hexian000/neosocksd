@@ -101,16 +101,18 @@ thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
 	struct ruleset *restrict r = aux_getruleset(L);
 	const int errfunc = (r->config.traceback) ? 1 : 0;
-	/* lua stack: finish ? ... */
+	/* lua stack: ... finish ? ... */
 	const int base = (int)ctx;
 	const int n = lua_gettop(L) - base;
 	const int nargs = n - 1;
 	ASSERT(nargs >= 1);
 	lua_pushboolean(L, (status == LUA_OK || status == LUA_YIELD));
 	lua_replace(L, base + 2);
-	status = lua_pcall(L, nargs, 0, errfunc);
-	if (status != LUA_OK && status != LUA_YIELD) {
-		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	if (!lua_isnil(L, base + 1)) {
+		status = lua_pcall(L, nargs, 0, errfunc);
+		if (status != LUA_OK && status != LUA_YIELD) {
+			lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		}
 	}
 	aux_putthread(L);
 	return lua_yieldk(L, 0, ctx, thread_main_k);
@@ -122,7 +124,7 @@ thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
 	ASSERT(status == LUA_YIELD);
 	struct ruleset *restrict r = aux_getruleset(L);
 	const int errfunc = (r->config.traceback) ? 1 : 0;
-	/* lua stack: finish ? func ... */
+	/* lua stack: ... finish ? func ... */
 	const int base = (int)ctx;
 	const int n = lua_gettop(L) - base;
 	const int nargs = n - 3;
@@ -161,6 +163,28 @@ lua_State *aux_getthread(lua_State *restrict L)
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
 	return co;
+}
+
+int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
+{
+	int status, nres;
+#if LUA_VERSION_NUM >= 504
+	status = lua_resume(L, from, narg, &nres);
+#else
+	status = lua_resume(L, from, narg);
+#endif
+	return status;
+}
+
+int aux_async(
+	lua_State *restrict L, lua_State *restrict from, const int narg,
+	const int finishidx)
+{
+	lua_pushvalue(from, finishidx);
+	lua_xmove(from, L, 1);
+	lua_pushnil(L);
+	lua_xmove(from, L, 1 + narg);
+	return aux_resume(L, from, 3 + narg);
 }
 
 const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
@@ -286,28 +310,6 @@ int aux_traceback(lua_State *restrict L)
 	const char *s = lua_tolstring(L, -1, &len);
 	LOG_TXT_F(VERBOSE, s, len, "traceback: %s", err);
 	return 1;
-}
-
-int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
-{
-	int status, nres;
-#if LUA_VERSION_NUM >= 504
-	status = lua_resume(L, from, narg, &nres);
-#else
-	status = lua_resume(L, from, narg);
-#endif
-	return status;
-}
-
-int aux_async(
-	lua_State *restrict L, lua_State *restrict from, const int narg,
-	const int finishidx)
-{
-	lua_pushvalue(from, finishidx);
-	lua_xmove(from, L, 1);
-	lua_pushnil(L);
-	lua_xmove(from, L, 1 + narg);
-	return aux_resume(L, from, 3 + narg);
 }
 
 static bool ruleset_pcallv(

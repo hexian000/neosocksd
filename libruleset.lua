@@ -180,23 +180,12 @@ _G.rlist = rlist
 local thread = {}
 local thread_mt = { __name = "async", __index = thread }
 
-local function thread_main(t, f, ...)
-    if config.traceback then
-        t.result = table.pack(xpcall(f, neosocksd.traceback, ...))
-    else
-        t.result = table.pack(pcall(f, ...))
-    end
-    for co, _ in pairs(t.wakeup) do
-        t.wakeup[co] = nil
-        coroutine.resume(co)
-    end
-end
-
 function thread:wait()
     if self.result then
         return table.unpack(self.result)
     end
     local co = coroutine.running()
+    assert(coroutine.isyieldable(co))
     assert(self.co ~= co)
     self.wakeup[co] = true
     coroutine.yield()
@@ -204,9 +193,17 @@ function thread:wait()
 end
 
 function _G.async(f, ...)
-    local co = coroutine.create(thread_main)
-    local t = setmetatable({ co = co, wakeup = {} }, thread_mt)
-    coroutine.resume(co, t, f, ...)
+    local t = setmetatable({ wakeup = {} }, thread_mt)
+    local function finish(ok, ...)
+        t.result = table.pack(ok, ...)
+        for co, _ in pairs(t.wakeup) do
+            t.wakeup[co] = nil
+            coroutine.resume(co)
+        end
+    end
+    local co, err = neosocksd.async(finish, f, ...)
+    if not co then error(err) end
+    t.co = co
     return t
 end
 

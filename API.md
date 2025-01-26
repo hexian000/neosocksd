@@ -22,6 +22,7 @@ Version: dev
   - [neosocksd.parse\_ipv4](#neosocksdparse_ipv4)
   - [neosocksd.parse\_ipv6](#neosocksdparse_ipv6)
   - [neosocksd.setinterval](#neosocksdsetinterval)
+  - [neosocksd.async](#neosocksdasync)
   - [neosocksd.invoke](#neosocksdinvoke)
   - [neosocksd.stats](#neosocksdstats)
   - [neosocksd.now](#neosocksdnow)
@@ -345,6 +346,21 @@ Set the interval to call [ruleset.tick](#rulesettick) in seconds.
 The valid interval range is `[1e-3, 1e+9]`, use `setinterval(0)` to stop the timer tick.
 
 
+### neosocksd.async
+
+**Synopsis**
+
+```Lua
+local co, err = neosocksd.async(finish, func, ...)
+-- works like: finish(pcall(func, ...))
+-- func is yieldable, but finish is NOT
+```
+
+**Description**
+
+Low-level API to start an asynchronous routine. Asynchronous routines are based on Lua coroutines. I.e., they run concurrently, but not in parallel. This interface is usually not called directly by user scripts. See [_G.async](#_gasync).
+
+
 ### neosocksd.invoke
 
 **Synopsis**
@@ -484,13 +500,23 @@ To be symmetric, there is also `_G.unmarshal(s)` in `libruleset.lua`.
 
 ```Lua
 async(function(...)
-    -- routine
+    -- routine0
+    local t1 = async(function(...)
+        -- routine1
+        return "result1"
+    end, ...)
+    local t2 = async(function(...)
+        -- routine2
+        return "result2"
+    end, ...)
+    local ok, r1 = t1:wait()
+    local ok, r2 = t2:wait()
 end, ...)
 ```
 
 **Description**
 
-Start an asynchronous routine. Asynchronous routines are supported by Lua coroutines. Therefore, they run concurrently, but not in parallel. See [await.resolve](#awaitresolve) for a full example.
+Start an asynchronous routine and run it until the first `await.*` or the end. See [await.resolve](#awaitresolve) for a full example.
 
 This function is implemented in `libruleset.lua`.
 
@@ -542,7 +568,7 @@ end, "127.0.1.1:9080")
 
 **Description**
 
-Run Lua code on another neosocksd and return the result. On another neosocksd, the code runs in asynchronous routine. Therefore, you can call `await.*` functions in the code. `await.invoke` is likely to be less efficient than `neosocksd.invoke`.
+Low-level API to run Lua code on another neosocksd and return the result. On another neosocksd, the code runs in asynchronous routine. Therefore, you can call `await.*` functions in the remote code. `await.invoke` is likely to be less efficient than `neosocksd.invoke`.
 
 Tip: Please refer to `await.rpcall` in `libruleset.lua`.
 

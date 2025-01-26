@@ -25,6 +25,8 @@ _G.await = await
 
 local neosocksd = {}
 
+function neosocksd.async(finish, func, ...) return coroutine.create(func), nil end
+
 function neosocksd.config() return {} end
 
 function neosocksd.invoke(code, addr, ...) end

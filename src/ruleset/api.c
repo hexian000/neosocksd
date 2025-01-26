@@ -28,6 +28,23 @@
 #include <math.h>
 #include <stddef.h>
 
+/* co, err = neosocksd.async(finish, func, ...) */
+static int api_async(lua_State *restrict L)
+{
+	luaL_checktype(L, 1, LUA_TFUNCTION);
+	luaL_checkany(L, 2);
+	const int narg = lua_gettop(L) - 2;
+	lua_State *restrict co = aux_getthread(L);
+	lua_insert(L, 1);
+	const int status = aux_async(co, L, narg, 2);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_pushnil(L);
+		lua_xmove(co, L, 1);
+		return 2;
+	}
+	return 1;
+}
+
 /* neosocksd.invoke(code, addr, proxyN, ..., proxy1) */
 static int api_invoke(lua_State *restrict L)
 {
@@ -220,6 +237,7 @@ static int api_traceback(lua_State *restrict L)
 int luaopen_neosocksd(lua_State *restrict L)
 {
 	const luaL_Reg apilib[] = {
+		{ "async", api_async },
 		{ "config", api_config },
 		{ "invoke", api_invoke },
 		{ "now", api_now },
