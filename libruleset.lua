@@ -202,8 +202,11 @@ function _G.async(f, ...)
         end
     end
     local co, err = neosocksd.async(finish, f, ...)
-    if not co then error(err) end
-    t.co = co
+    if co then
+        t.co = co
+    else
+        t.result = { false, err }
+    end
     return t
 end
 
