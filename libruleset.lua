@@ -49,6 +49,25 @@ function table.get(t, ...)
     return v
 end
 
+function await.callback(f, ...)
+    local co = coroutine.running()
+    assert(coroutine.isyieldable(co))
+    local result
+    local callback = function(...)
+        if co == coroutine.running() then
+            result = { ... }
+            return
+        end
+        local ok, err = coroutine.resume(co, ...)
+        if not ok then error(err) end
+    end
+    f(callback, ...)
+    if result then
+        return table.unpack(result)
+    end
+    return coroutine.yield()
+end
+
 -- [[ list: linear list ]] --
 local list = {
     iter = ipairs,
