@@ -39,9 +39,7 @@
 enum api_state {
 	STATE_INIT,
 	STATE_REQUEST,
-#if WITH_RULESET
-	STATE_YIELD,
-#endif
+	STATE_PROCESS,
 	STATE_RESPONSE,
 };
 
@@ -54,6 +52,7 @@ struct api_ctx {
 	struct ev_timer w_timeout;
 	struct ev_io w_recv, w_send;
 #if WITH_RULESET
+	struct ev_idle w_ruleset;
 	struct ruleset_state *rpcstate;
 #endif
 	struct dialreq *dialreq;
@@ -404,7 +403,7 @@ static bool restapi_check(
 static void rpcall_return(void *data, const char *result, size_t resultlen)
 {
 	struct api_ctx *restrict ctx = data;
-	ASSERT(ctx->state == STATE_YIELD);
+	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->rpcstate = NULL;
 	ctx->state = STATE_RESPONSE;
 	ev_io_start(ctx->s->loop, &ctx->w_send);
@@ -478,7 +477,7 @@ static void handle_ruleset_rpcall(
 		ev_io_start(loop, &ctx->w_send);
 		return;
 	}
-	ctx->state = STATE_YIELD;
+	ctx->state = STATE_PROCESS;
 	const struct ruleset_rpcall_cb callback = {
 		.func = rpcall_return,
 		.data = ctx,
@@ -630,20 +629,14 @@ static void handle_ruleset_gc(
 	ev_io_start(loop, &ctx->w_send);
 }
 
-static void
-http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
+static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
-	struct ruleset *ruleset = G.ruleset;
-	if (ruleset == NULL) {
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPENDSTR(
-			ctx->parser.wbuf,
-			"ruleset not enabled, restart with -r\n");
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
-		return;
-	}
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct api_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
+	struct ruleset *r = G.ruleset;
+	ASSERT(r != NULL);
 
 	char *segment;
 	if (!url_path_segment(&ctx->uri.path, &segment)) {
@@ -658,7 +651,7 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			ev_io_start(loop, &ctx->w_send);
 			return;
 		}
-		handle_ruleset_rpcall(loop, ctx, ruleset);
+		handle_ruleset_rpcall(loop, ctx, r);
 		return;
 	}
 	if (strcmp(segment, "invoke") == 0) {
@@ -667,7 +660,7 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			ev_io_start(loop, &ctx->w_send);
 			return;
 		}
-		handle_ruleset_invoke(loop, ctx, ruleset);
+		handle_ruleset_invoke(loop, ctx, r);
 		return;
 	}
 	if (strcmp(segment, "update") == 0) {
@@ -693,7 +686,7 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 				chunkname = comp.value;
 			}
 		}
-		handle_ruleset_update(loop, ctx, ruleset, module, chunkname);
+		handle_ruleset_update(loop, ctx, r, module, chunkname);
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {
@@ -702,16 +695,32 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			ev_io_start(loop, &ctx->w_send);
 			return;
 		}
-		handle_ruleset_gc(loop, ctx, ruleset);
+		handle_ruleset_gc(loop, ctx, r);
 		return;
 	}
 
 	http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
 	ctx->state = STATE_RESPONSE;
 	ev_io_start(loop, &ctx->w_send);
-	return;
 }
-#endif
+
+static void
+http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
+{
+	if (G.ruleset == NULL) {
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		BUF_APPENDSTR(
+			ctx->parser.wbuf,
+			"ruleset not enabled, restart with -r\n");
+		ctx->state = STATE_RESPONSE;
+		ev_io_start(loop, &ctx->w_send);
+		return;
+	}
+
+	ev_idle_start(loop, &ctx->w_ruleset);
+}
+#endif /* WITH_RULESET */
 
 static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
@@ -775,16 +784,18 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	case STATE_INIT:
 		return;
 	case STATE_REQUEST:
+		ev_io_stop(loop, &ctx->w_recv);
+		break;
+	case STATE_PROCESS:
 #if WITH_RULESET
-	case STATE_YIELD:
+		ev_idle_stop(loop, &ctx->w_ruleset);
 		if (ctx->rpcstate != NULL) {
 			ruleset_cancel(ctx->rpcstate);
 			ctx->rpcstate = NULL;
 		}
 #endif
-		/* fallthrough */
+		break;
 	case STATE_RESPONSE:
-		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		break;
 	}
@@ -844,6 +855,8 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	default:
 		FAIL();
 	}
+
+	ctx->state = STATE_PROCESS;
 	api_handle(loop, ctx);
 }
 
@@ -971,6 +984,11 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 		w_send->data = ctx;
 	}
 #if WITH_RULESET
+	{
+		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
+		ev_idle_init(w_ruleset, idle_cb);
+		w_ruleset->data = ctx;
+	}
 	ctx->rpcstate = NULL;
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
