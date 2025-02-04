@@ -7,6 +7,8 @@
 
 A fast and lightweight proxy server that can run Lua script as rule set.
 
+Status: **Stable**
+
 - [Features](#features)
 - [Usage](#usage)
   - [Command Line Arguments](#command-line-arguments)
