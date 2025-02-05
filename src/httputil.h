@@ -217,6 +217,8 @@ parsehdr_content_encoding(struct http_parser *restrict p, char *value)
 
 void http_resp_errpage(struct http_parser *parser, uint16_t code);
 
+bool http_resp_established(struct http_parser *parser);
+
 struct stream *
 content_reader(const void *buf, size_t len, enum content_encodings encoding);
 

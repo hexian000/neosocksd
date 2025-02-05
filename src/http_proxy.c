@@ -192,28 +192,6 @@ http_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 	http_ctx_close(loop, ctx);
 }
 
-static void dialer_cb(struct ev_loop *loop, void *data)
-{
-	struct http_ctx *restrict ctx = data;
-	ASSERT(ctx->state == STATE_CONNECT);
-
-	const int fd = dialer_get(&ctx->dialer);
-	if (fd < 0) {
-		HTTP_CTX_LOG_F(
-			DEBUG, ctx, "unable to establish client connection: %s",
-			strerror(ctx->dialer.syserr));
-		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
-		return;
-	}
-	HTTP_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
-
-	ctx->dialed_fd = fd;
-	BUF_APPENDSTR(
-		ctx->parser.wbuf,
-		"HTTP/1.1 200 Connection established\r\n\r\n");
-	ev_io_start(loop, &ctx->w_send);
-}
-
 static struct dialreq *make_dialreq(const char *restrict addr_str)
 {
 	struct dialreq *req = dialreq_new(0);
@@ -440,7 +418,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct http_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_RESPONSE || ctx->state == STATE_CONNECT);
+	ASSERT(ctx->state == STATE_RESPONSE);
 
 	const int fd = watcher->fd;
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
@@ -471,12 +449,6 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			return;
 		}
 	}
-
-	if (ctx->state == STATE_CONNECT) {
-		/* CONNECT proxy */
-		http_ctx_hijack(loop, ctx);
-		return;
-	}
 	/* Connection: close */
 	http_ctx_close(loop, ctx);
 }
@@ -487,6 +459,30 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct http_ctx *restrict ctx = watcher->data;
 	http_ctx_close(loop, ctx);
+}
+
+static void dialer_cb(struct ev_loop *loop, void *data)
+{
+	struct http_ctx *restrict ctx = data;
+	ASSERT(ctx->state == STATE_CONNECT);
+
+	const int fd = dialer_get(&ctx->dialer);
+	if (fd < 0) {
+		HTTP_CTX_LOG_F(
+			DEBUG, ctx, "unable to establish client connection: %s",
+			strerror(ctx->dialer.syserr));
+		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
+		return;
+	}
+	HTTP_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
+	ctx->dialed_fd = fd;
+
+	/* CONNECT proxy */
+	if (!http_resp_established(&ctx->parser)) {
+		http_ctx_close(loop, ctx);
+		return;
+	}
+	http_ctx_hijack(loop, ctx);
 }
 
 static bool parse_header(void *data, const char *key, char *value)

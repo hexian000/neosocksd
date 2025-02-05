@@ -65,6 +65,12 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 	return true;
 }
 
+bool http_resp_established(struct http_parser *restrict p)
+{
+	const char msg[] = "HTTP/1.1 200 Connection established\r\n\r\n";
+	return reply_short(p, msg);
+}
+
 struct stream *content_reader(
 	const void *buf, size_t len, const enum content_encodings encoding)
 {
