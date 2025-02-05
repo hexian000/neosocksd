@@ -64,8 +64,7 @@ static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 			LOGE_F("accept: %s", strerror(err));
 			/* sleep until next timer, see timer_cb */
 			ev_io_stop(loop, watcher);
-			struct ev_timer *restrict w_timer = &s->l.w_timer;
-			ev_timer_start(loop, w_timer);
+			ev_timer_start(loop, &s->l.w_timer);
 			return;
 		}
 		lstats->num_accept++;

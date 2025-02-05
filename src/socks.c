@@ -41,7 +41,7 @@ enum socks_state {
 	STATE_HANDSHAKE1,
 	STATE_HANDSHAKE2,
 	STATE_HANDSHAKE3,
-	STATE_REQUEST,
+	STATE_PROCESS,
 	STATE_CONNECT,
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
@@ -128,7 +128,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		ev_io_stop(loop, &ctx->w_socket);
 		stats->num_halfopen--;
 		return;
-	case STATE_REQUEST:
+	case STATE_PROCESS:
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		if (ctx->ruleset_state != NULL) {
@@ -311,7 +311,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	case STATE_HANDSHAKE3:
 		SOCKS_CTX_LOG(WARNING, ctx, "handshake timeout");
 		break;
-	case STATE_REQUEST:
+	case STATE_PROCESS:
 	case STATE_CONNECT: {
 		const uint8_t version = read_uint8(ctx->rbuf.data);
 		if (version == SOCKS5) {
@@ -797,14 +797,16 @@ static void ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
 	socks_connect(loop, ctx);
 }
 
-static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+static void
+process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct ruleset *restrict ruleset = G.ruleset;
 	ASSERT(ruleset != NULL);
 	struct socks_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_REQUEST);
+	ASSERT(ctx->state == STATE_PROCESS);
+
 	const struct dialaddr *restrict addr = &ctx->addr;
 	const size_t cap =
 		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
@@ -877,10 +879,12 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	}
 
 	/* ignore further io events */
-	ev_io_stop(loop, &ctx->w_socket);
-	ctx->state = STATE_REQUEST;
-	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->num_request++;
+	ctx->state = STATE_PROCESS;
+	ev_io_stop(loop, watcher);
+	{
+		struct server_stats *restrict stats = &ctx->s->stats;
+		stats->num_request++;
+	}
 
 #if WITH_RULESET
 	struct ruleset *restrict ruleset = G.ruleset;
@@ -918,7 +922,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 #if WITH_RULESET
 	{
 		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
-		ev_idle_init(w_ruleset, idle_cb);
+		ev_idle_init(w_ruleset, process_cb);
 		w_ruleset->data = ctx;
 	}
 	ctx->ruleset_state = NULL;

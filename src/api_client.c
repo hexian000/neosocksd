@@ -17,14 +17,17 @@
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
+#include "utils/intbound.h"
 #include "utils/slog.h"
 
 #include <ev.h>
 #include <strings.h>
 
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +38,7 @@ enum api_client_state {
 	STATE_CLIENT_CONNECT,
 	STATE_CLIENT_REQUEST,
 	STATE_CLIENT_RESPONSE,
-	STATE_CLIENT_RULESET,
+	STATE_CLIENT_PROCESS,
 };
 
 struct api_client_ctx {
@@ -75,7 +78,7 @@ api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 	case STATE_CLIENT_RESPONSE:
 		ev_io_stop(loop, &ctx->w_socket);
 		break;
-	case STATE_CLIENT_RULESET:
+	case STATE_CLIENT_PROCESS:
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		break;
 	default:
@@ -114,11 +117,14 @@ api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 	api_client_close(loop, ctx);
 }
 
-static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+static void
+process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct api_client_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_CLIENT_PROCESS);
+
 	if (ctx->cb.func != NULL) {
 		ctx->cb.func(
 			ctx, loop, ctx->cb.data, ctx->result.errmsg,
@@ -140,7 +146,7 @@ static void api_client_finish(
 	ctx->result.stream = stream;
 
 	api_client_stop(loop, ctx);
-	ctx->state = STATE_CLIENT_RULESET;
+	ctx->state = STATE_CLIENT_PROCESS;
 	ev_idle_start(loop, &ctx->w_ruleset);
 }
 
@@ -162,12 +168,21 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		return;
 	}
 	const struct http_message *restrict msg = &ctx->parser.msg;
-	if (strcmp(msg->rsp.code, "200") == 0) {
+	uint16_t code = 0;
+	{
+		const uintmax_t status = strtoumax(msg->rsp.code, NULL, 10);
+		if (BOUNDCHECK_UINT(code, status)) {
+			code = status;
+		}
+	}
+	if (code == HTTP_OK) {
 		/* OK - get the results */
 		if (!check_rpcall_mime(ctx->parser.hdr.content.type)) {
 			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 		}
-	} else if (VBUF_LEN(ctx->parser.cbuf) > 0) {
+	} else if (
+		VBUF_LEN(ctx->parser.cbuf) > 0 &&
+		check_rpcall_mime(ctx->parser.hdr.content.type)) {
 		/* return content as error info */
 		api_client_finish(
 			loop, ctx, VBUF_DATA(ctx->parser.cbuf),
@@ -379,7 +394,7 @@ static bool api_client_do(
 	ctx->w_start.data = ctx;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
-	ev_idle_init(&ctx->w_ruleset, idle_cb);
+	ev_idle_init(&ctx->w_ruleset, process_cb);
 	ctx->w_ruleset.data = ctx;
 	ev_io_init(&ctx->w_socket, NULL, -1, EV_NONE);
 	ctx->w_socket.data = ctx;

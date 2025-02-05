@@ -35,6 +35,7 @@ struct http_ctx;
 enum http_state {
 	STATE_INIT,
 	STATE_REQUEST,
+	STATE_PROCESS,
 	STATE_RESPONSE,
 	STATE_CONNECT,
 	STATE_CONNECTED,
@@ -96,6 +97,25 @@ static int format_status(
 #define HTTP_CTX_LOG(level, ctx, message)                                      \
 	HTTP_CTX_LOG_F(level, ctx, "%s", message)
 
+static void send_response(
+	struct ev_loop *loop, struct http_ctx *restrict ctx, const bool ok)
+{
+	if (ok) {
+		ctx->s->stats.num_success++;
+	}
+	ctx->state = STATE_RESPONSE;
+	ev_io_start(loop, &ctx->w_send);
+}
+
+static void send_errpage(
+	struct ev_loop *loop, struct http_ctx *restrict ctx,
+	const uint16_t code)
+{
+	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
+	http_resp_errpage(&ctx->parser, code);
+	send_response(loop, ctx, false);
+}
+
 static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
@@ -105,6 +125,10 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	case STATE_INIT:
 		return;
 	case STATE_REQUEST:
+		ev_io_stop(loop, &ctx->w_recv);
+		stats->num_halfopen--;
+		return;
+	case STATE_PROCESS:
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		if (ctx->ruleset_state != NULL) {
@@ -112,9 +136,9 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 			ctx->ruleset_state = NULL;
 		}
 #endif
-		/* fallthrough */
+		stats->num_halfopen--;
+		return;
 	case STATE_RESPONSE:
-		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		stats->num_halfopen--;
 		return;
@@ -128,7 +152,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		transfer_stop(loop, &ctx->uplink);
 		transfer_stop(loop, &ctx->downlink);
 		stats->num_halfopen--;
-		break;
+		return;
 	case STATE_ESTABLISHED:
 		transfer_stop(loop, &ctx->uplink);
 		transfer_stop(loop, &ctx->downlink);
@@ -178,9 +202,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		HTTP_CTX_LOG_F(
 			DEBUG, ctx, "unable to establish client connection: %s",
 			strerror(ctx->dialer.syserr));
-		http_resp_errpage(&ctx->parser, HTTP_BAD_GATEWAY);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
 		return;
 	}
 	HTTP_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
@@ -209,9 +231,7 @@ static struct dialreq *make_dialreq(const char *restrict addr_str)
 static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	if (ctx->dialreq == NULL) {
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
@@ -255,13 +275,15 @@ static void parse_proxy_auth(
 	*password = sep + 1;
 }
 
-static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+static void
+process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct ruleset *restrict ruleset = G.ruleset;
 	ASSERT(ruleset != NULL);
 	struct http_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
 
 	unsigned char buf[512];
 	const char *username = NULL;
@@ -276,8 +298,7 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 		BUF_APPENDSTR(
 			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
 		RESPHDR_FINISH(ctx->parser.wbuf);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_response(loop, ctx, false);
 		return;
 	}
 
@@ -291,9 +312,7 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 		ruleset, &ctx->ruleset_state, addr_str, username, password,
 		&callback);
 	if (!ok) {
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 }
@@ -302,9 +321,7 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	/* not supported */
-	http_resp_errpage(&ctx->parser, HTTP_FORBIDDEN);
-	ctx->state = STATE_RESPONSE;
-	ev_io_start(loop, &ctx->w_send);
+	send_errpage(loop, ctx, HTTP_FORBIDDEN);
 }
 
 static void
@@ -401,20 +418,22 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	if (want > 0) {
 		return;
 	}
+	ctx->state = STATE_PROCESS;
+	ev_io_stop(loop, watcher);
+
 	switch (ctx->parser.state) {
 	case STATE_PARSE_OK: {
 		struct server_stats *restrict stats = &ctx->s->stats;
 		stats->num_request++;
-		http_proxy_handle(loop, ctx);
 	} break;
 	case STATE_PARSE_ERROR:
-		http_resp_errpage(&ctx->parser, ctx->parser.http_status);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
-		break;
+		send_errpage(loop, ctx, ctx->parser.http_status);
+		return;
 	default:
 		FAIL();
 	}
+
+	http_proxy_handle(loop, ctx);
 }
 
 static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -542,7 +561,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 #if WITH_RULESET
 	{
 		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
-		ev_idle_init(w_ruleset, idle_cb);
+		ev_idle_init(w_ruleset, process_cb);
 		w_ruleset->data = ctx;
 	}
 	ctx->ruleset_state = NULL;

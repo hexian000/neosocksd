@@ -248,6 +248,37 @@ static bool parse_bool(const char *s)
 }
 
 static void
+send_response(struct ev_loop *loop, struct api_ctx *restrict ctx, const bool ok)
+{
+	if (ok) {
+		ctx->s->stats.num_success++;
+	}
+	ctx->state = STATE_RESPONSE;
+	ev_io_start(loop, &ctx->w_send);
+}
+
+static void send_plaintext(
+	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code,
+	const char *msg, const size_t len)
+{
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	RESPHDR_BEGIN(ctx->parser.wbuf, code);
+	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	RESPHDR_FINISH(ctx->parser.wbuf);
+	BUF_APPEND(ctx->parser.wbuf, msg, len);
+	BUF_APPENDSTR(ctx->parser.wbuf, "\n");
+	send_response(loop, ctx, 1 <= (code / 100) && (code / 100) <= 3);
+}
+
+static void send_errpage(
+	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code)
+{
+	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
+	http_resp_errpage(&ctx->parser, code);
+	send_response(loop, ctx, false);
+}
+
+static void
 http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	bool nobanner = false;
@@ -258,9 +289,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	while (ctx->uri.query != NULL) {
 		struct url_query_component comp;
 		if (!url_query_component(&ctx->uri.query, &comp)) {
-			http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+			send_errpage(loop, ctx, HTTP_BAD_REQUEST);
 			return;
 		}
 		if (strcmp(comp.key, "nobanner") == 0) {
@@ -282,9 +311,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	} else if (strcmp(msg->req.method, "POST") == 0) {
 		stateless = false;
 	} else {
-		http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_METHOD_NOT_ALLOWED);
 		return;
 	}
 
@@ -295,9 +322,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	struct stream *w =
 		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, encoding);
 	if (w == NULL) {
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	/* borrow the read buffer */
@@ -326,10 +351,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		if (n < buf->len || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
 			       buf->len);
-			http_resp_errpage(
-				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
 	}
@@ -346,10 +368,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		int err = stream_write(w, s, &n);
 		if (n < len || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n, len);
-			http_resp_errpage(
-				&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
 	}
@@ -358,9 +377,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	int err = stream_close(w);
 	if (err != 0) {
 		LOGE_F("stream_close error: %d", err);
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 
@@ -375,48 +392,53 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
 	RESPHDR_FINISH(ctx->parser.wbuf);
-	ctx->state = STATE_RESPONSE;
-	ev_io_start(loop, &ctx->w_send);
+	send_response(loop, ctx, true);
 }
 
 static bool restapi_check(
-	struct api_ctx *restrict ctx, const char *method,
+	struct ev_loop *loop, struct api_ctx *restrict ctx, const char *method,
 	const bool require_content)
 {
 	if (ctx->uri.path != NULL) {
-		http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
+		send_errpage(loop, ctx, HTTP_NOT_FOUND);
 		return false;
 	}
 	const struct http_message *restrict msg = &ctx->parser.msg;
 	if (method != NULL && strcmp(msg->req.method, method) != 0) {
-		http_resp_errpage(&ctx->parser, HTTP_METHOD_NOT_ALLOWED);
+		send_errpage(loop, ctx, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
 	if (require_content && !ctx->parser.hdr.content.has_length) {
-		http_resp_errpage(&ctx->parser, HTTP_LENGTH_REQUIRED);
+		send_errpage(loop, ctx, HTTP_LENGTH_REQUIRED);
 		return false;
 	}
 	return true;
 }
 
 #if WITH_RULESET
+static void rpcall_error(
+	struct ev_loop *loop, struct api_ctx *restrict ctx, const char *err,
+	const size_t len)
+{
+	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
+	RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
+	RESPHDR_CLENGTH(ctx->parser.wbuf, len);
+	RESPHDR_FINISH(ctx->parser.wbuf);
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	BUF_APPEND(ctx->parser.wbuf, err, len);
+	send_response(loop, ctx, false);
+}
+
 static void rpcall_return(void *data, const char *result, size_t resultlen)
 {
 	struct api_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->rpcstate = NULL;
-	ctx->state = STATE_RESPONSE;
-	ev_io_start(ctx->s->loop, &ctx->w_send);
+	struct ev_loop *loop = ctx->s->loop;
 
 	if (result == NULL) {
 		const char err[] = "rpcall is closed";
-		const size_t errlen = sizeof(err) - 1;
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
-		RESPHDR_CLENGTH(ctx->parser.wbuf, errlen);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-		BUF_APPEND(ctx->parser.wbuf, err, errlen);
+		rpcall_error(loop, ctx, err, sizeof(err) - 1);
 		return;
 	}
 	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall_return");
@@ -428,20 +450,20 @@ static void rpcall_return(void *data, const char *result, size_t resultlen)
 		content_writer(&ctx->parser.cbuf, resultlen, encoding);
 	if (writer == NULL) {
 		LOGOOM();
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	size_t n = resultlen;
 	int err = stream_write(writer, result, &n);
 	if (err != 0) {
 		LOGW_F("stream_write: error %d, %zu/%zu", err, n, resultlen);
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	err = stream_close(writer);
 	if (err != 0) {
 		LOGW_F("stream_close: error %d", err);
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
@@ -452,19 +474,17 @@ static void rpcall_return(void *data, const char *result, size_t resultlen)
 	}
 	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
 	RESPHDR_FINISH(ctx->parser.wbuf);
+	send_response(loop, ctx, true);
 }
 
 static void handle_ruleset_rpcall(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, struct ruleset *r)
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	struct ruleset *ruleset)
 {
 	char *mime_type = ctx->parser.hdr.content.type;
 	if (!check_rpcall_mime(mime_type)) {
-		LOGD("rpcall: invalid content type");
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_BAD_REQUEST);
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		LOGD("rpcall: incompatible content type");
+		send_errpage(loop, ctx, HTTP_BAD_REQUEST);
 		return;
 	}
 	struct stream *reader = content_reader(
@@ -472,9 +492,7 @@ static void handle_ruleset_rpcall(
 		ctx->parser.hdr.content.encoding);
 	if (reader == NULL) {
 		LOGOOM();
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	ctx->state = STATE_PROCESS;
@@ -482,28 +500,22 @@ static void handle_ruleset_rpcall(
 		.func = rpcall_return,
 		.data = ctx,
 	};
-	const bool ok = ruleset_rpcall(r, &ctx->rpcstate, reader, &callback);
+	const bool ok =
+		ruleset_rpcall(ruleset, &ctx->rpcstate, reader, &callback);
 	stream_close(reader);
 	if (!ok) {
 		/* no callback */
-		ctx->state = STATE_RESPONSE;
 		size_t len;
-		const char *err = ruleset_geterror(r, &len);
+		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
-		RESPHDR_CLENGTH(ctx->parser.wbuf, len);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-		BUF_APPEND(ctx->parser.wbuf, err, len);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		rpcall_error(loop, ctx, err, len);
 		return;
 	}
 }
 
 static void handle_ruleset_invoke(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, struct ruleset *r)
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	struct ruleset *ruleset)
 {
 	const ev_tstamp start = ev_now(loop);
 	struct stream *reader = content_reader(
@@ -511,25 +523,17 @@ static void handle_ruleset_invoke(
 		ctx->parser.hdr.content.encoding);
 	if (reader == NULL) {
 		LOGOOM();
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	const bool ok = ruleset_invoke(r, reader);
+	const bool ok = ruleset_invoke(ruleset, reader);
 	stream_close(reader);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_geterror(r, &len);
+		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset invoke: %s", err);
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPEND(ctx->parser.wbuf, err, len);
-		BUF_APPENDSTR(ctx->parser.wbuf, "\n");
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_plaintext(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
@@ -538,13 +542,12 @@ static void handle_ruleset_invoke(
 	const ev_tstamp end = ev_time();
 	FORMAT_DURATION(timecost, make_duration(end - start));
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
-	ctx->state = STATE_RESPONSE;
-	ev_io_start(loop, &ctx->w_send);
+	send_response(loop, ctx, true);
 }
 
 static void handle_ruleset_update(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, struct ruleset *r,
-	const char *module, const char *chunkname)
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	struct ruleset *ruleset, const char *module, const char *chunkname)
 {
 	const ev_tstamp start = ev_now(loop);
 	struct stream *reader = content_reader(
@@ -552,25 +555,17 @@ static void handle_ruleset_update(
 		ctx->parser.hdr.content.encoding);
 	if (reader == NULL) {
 		LOGOOM();
-		http_resp_errpage(&ctx->parser, HTTP_INTERNAL_SERVER_ERROR);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	const bool ok = ruleset_update(r, module, chunkname, reader);
+	const bool ok = ruleset_update(ruleset, module, chunkname, reader);
 	stream_close(reader);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_geterror(r, &len);
+		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset update: %s", err);
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPEND(ctx->parser.wbuf, err, len);
-		BUF_APPENDSTR(ctx->parser.wbuf, "\n");
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_plaintext(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
@@ -579,32 +574,26 @@ static void handle_ruleset_update(
 	const ev_tstamp end = ev_time();
 	FORMAT_DURATION(timecost, make_duration(end - start));
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
-	ctx->state = STATE_RESPONSE;
-	ev_io_start(loop, &ctx->w_send);
+	send_response(loop, ctx, true);
 }
 
 static void handle_ruleset_gc(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, struct ruleset *r)
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	struct ruleset *ruleset)
 {
 	const ev_tstamp start = ev_now(loop);
 	struct ruleset_vmstats before;
-	ruleset_vmstats(r, &before);
-	const bool ok = ruleset_gc(r);
+	ruleset_vmstats(ruleset, &before);
+	const bool ok = ruleset_gc(ruleset);
 	if (!ok) {
 		size_t len;
-		const char *err = ruleset_geterror(r, &len);
+		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset gc: %s", err);
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPEND(ctx->parser.wbuf, err, len);
-		BUF_APPENDSTR(ctx->parser.wbuf, "\n");
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_plaintext(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
 	struct ruleset_vmstats vmstats;
-	ruleset_vmstats(r, &vmstats);
+	ruleset_vmstats(ruleset, &vmstats);
 	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
 	FORMAT_SI(objects, (double)vmstats.num_object);
 	const ev_tstamp end = ev_time();
@@ -625,48 +614,40 @@ static void handle_ruleset_gc(
 		freed_bytes, freed_objects);
 	append_memstats((struct buffer *)&ctx->parser.wbuf, &vmstats);
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
-	ctx->state = STATE_RESPONSE;
-	ev_io_start(loop, &ctx->w_send);
+	send_response(loop, ctx, true);
 }
 
-static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+static void
+process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
-	struct ruleset *r = G.ruleset;
-	ASSERT(r != NULL);
+	struct ruleset *ruleset = G.ruleset;
+	ASSERT(ruleset != NULL);
 
 	char *segment;
 	if (!url_path_segment(&ctx->uri.path, &segment)) {
-		http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_NOT_FOUND);
 		return;
 	}
 	if (strcmp(segment, "rpcall") == 0) {
-		if (!restapi_check(ctx, "POST", true)) {
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+		if (!restapi_check(loop, ctx, "POST", true)) {
 			return;
 		}
-		handle_ruleset_rpcall(loop, ctx, r);
+		handle_ruleset_rpcall(loop, ctx, ruleset);
 		return;
 	}
 	if (strcmp(segment, "invoke") == 0) {
-		if (!restapi_check(ctx, "POST", true)) {
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+		if (!restapi_check(loop, ctx, "POST", true)) {
 			return;
 		}
-		handle_ruleset_invoke(loop, ctx, r);
+		handle_ruleset_invoke(loop, ctx, ruleset);
 		return;
 	}
 	if (strcmp(segment, "update") == 0) {
-		if (!restapi_check(ctx, "POST", true)) {
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+		if (!restapi_check(loop, ctx, "POST", true)) {
 			return;
 		}
 		const char *module = NULL;
@@ -674,10 +655,7 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 		while (ctx->uri.query != NULL) {
 			struct url_query_component comp;
 			if (!url_query_component(&ctx->uri.query, &comp)) {
-				http_resp_errpage(
-					&ctx->parser, HTTP_BAD_REQUEST);
-				ctx->state = STATE_RESPONSE;
-				ev_io_start(loop, &ctx->w_send);
+				send_errpage(loop, ctx, HTTP_BAD_REQUEST);
 				return;
 			}
 			if (strcmp(comp.key, "module") == 0) {
@@ -686,35 +664,28 @@ static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 				chunkname = comp.value;
 			}
 		}
-		handle_ruleset_update(loop, ctx, r, module, chunkname);
+		handle_ruleset_update(loop, ctx, ruleset, module, chunkname);
 		return;
 	}
 	if (strcmp(segment, "gc") == 0) {
-		if (!restapi_check(ctx, "POST", false)) {
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+		if (!restapi_check(loop, ctx, "POST", false)) {
 			return;
 		}
-		handle_ruleset_gc(loop, ctx, r);
+		handle_ruleset_gc(loop, ctx, ruleset);
 		return;
 	}
 
-	http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
-	ctx->state = STATE_RESPONSE;
-	ev_io_start(loop, &ctx->w_send);
+	send_errpage(loop, ctx, HTTP_NOT_FOUND);
 }
 
 static void
 http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	if (G.ruleset == NULL) {
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPENDSTR(
-			ctx->parser.wbuf,
-			"ruleset not enabled, restart with -r\n");
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		const char msg[] = "ruleset not enabled, restart with -r";
+		send_plaintext(
+			loop, ctx, HTTP_INTERNAL_SERVER_ERROR, msg,
+			sizeof(msg) - 1);
 		return;
 	}
 
@@ -730,34 +701,25 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		ctx->parser.hdr.content.length);
 	if (!url_parse(msg->req.url, &ctx->uri)) {
 		API_CTX_LOG(WARNING, ctx, "failed parsing url");
-		http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_BAD_REQUEST);
 		return;
 	}
 	char *segment;
 	if (!url_path_segment(&ctx->uri.path, &segment)) {
-		http_resp_errpage(&ctx->parser, HTTP_BAD_REQUEST);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, HTTP_BAD_REQUEST);
 		return;
 	}
 	if (strcmp(segment, "healthy") == 0) {
-		if (!restapi_check(ctx, NULL, false)) {
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+		if (!restapi_check(loop, ctx, NULL, false)) {
 			return;
 		}
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 		RESPHDR_FINISH(ctx->parser.wbuf);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_response(loop, ctx, true);
 		return;
 	}
 	if (strcmp(segment, "stats") == 0) {
-		if (!restapi_check(ctx, NULL, false)) {
-			ctx->state = STATE_RESPONSE;
-			ev_io_start(loop, &ctx->w_send);
+		if (!restapi_check(loop, ctx, NULL, false)) {
 			return;
 		}
 		http_handle_stats(loop, ctx);
@@ -769,10 +731,7 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 #endif
-	http_resp_errpage(&ctx->parser, HTTP_NOT_FOUND);
-	ctx->state = STATE_RESPONSE;
-	ev_io_start(loop, &ctx->w_send);
-	return;
+	send_errpage(loop, ctx, HTTP_NOT_FOUND);
 }
 
 static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
@@ -841,22 +800,21 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	if (want > 0) {
 		return;
 	}
+	ctx->state = STATE_PROCESS;
 	ev_io_stop(loop, watcher);
-	ctx->s->stats.num_request++;
+
 	switch (ctx->parser.state) {
-	case STATE_PARSE_OK:
-		ctx->s->stats.num_success++;
-		break;
+	case STATE_PARSE_OK: {
+		struct server_stats *restrict stats = &ctx->s->stats;
+		stats->num_request++;
+	} break;
 	case STATE_PARSE_ERROR:
-		http_resp_errpage(&ctx->parser, ctx->parser.http_status);
-		ctx->state = STATE_RESPONSE;
-		ev_io_start(loop, &ctx->w_send);
+		send_errpage(loop, ctx, ctx->parser.http_status);
 		return;
 	default:
 		FAIL();
 	}
 
-	ctx->state = STATE_PROCESS;
 	api_handle(loop, ctx);
 }
 
@@ -986,7 +944,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 #if WITH_RULESET
 	{
 		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
-		ev_idle_init(w_ruleset, idle_cb);
+		ev_idle_init(w_ruleset, process_cb);
 		w_ruleset->data = ctx;
 	}
 	ctx->rpcstate = NULL;

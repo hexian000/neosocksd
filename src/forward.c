@@ -29,7 +29,7 @@
 /* never rollback */
 enum forward_state {
 	STATE_INIT,
-	STATE_REQUEST,
+	STATE_PROCESS,
 	STATE_CONNECT,
 	STATE_CONNECTED,
 	STATE_ESTABLISHED,
@@ -81,7 +81,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	switch (ctx->state) {
 	case STATE_INIT:
 		return;
-	case STATE_REQUEST:
+	case STATE_PROCESS:
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		if (ctx->ruleset_state != NULL) {
@@ -89,7 +89,8 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 			ctx->ruleset_state = NULL;
 		}
 #endif
-		/* fallthrough */
+		stats->num_halfopen--;
+		return;
 	case STATE_CONNECT:
 		dialer_cancel(&ctx->dialer, loop);
 		stats->num_halfopen--;
@@ -180,7 +181,7 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 
 	switch (ctx->state) {
 	case STATE_INIT:
-	case STATE_REQUEST:
+	case STATE_PROCESS:
 	case STATE_CONNECT:
 		FW_CTX_LOG(WARNING, ctx, "connection timeout");
 		break;
@@ -240,8 +241,6 @@ static void forward_ctx_start(
 	struct ev_loop *loop, struct forward_ctx *restrict ctx,
 	const struct dialreq *req)
 {
-	ev_timer_start(loop, &ctx->w_timeout);
-
 	FW_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
 	struct server_stats *restrict stats = &ctx->s->stats;
@@ -265,11 +264,12 @@ forward_ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
 }
 
 static void
-forward_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+forward_process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct forward_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
 	struct ruleset *restrict ruleset = G.ruleset;
 	ASSERT(ruleset != NULL);
 	const struct dialreq *restrict req = G.basereq;
@@ -360,11 +360,14 @@ void forward_serve(
 		return;
 	}
 	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
-	ctx->state = STATE_REQUEST;
+
+	ctx->state = STATE_PROCESS;
+	ev_timer_start(loop, &ctx->w_timeout);
+
 #if WITH_RULESET
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		ev_set_cb(&ctx->w_ruleset, forward_idle_cb);
+		ev_set_cb(&ctx->w_ruleset, forward_process_cb);
 		ev_idle_start(loop, &ctx->w_ruleset);
 		return;
 	}
@@ -503,7 +506,9 @@ void tproxy_serve(
 	}
 	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
 
-	ctx->state = STATE_REQUEST;
+	ctx->state = STATE_PROCESS;
+	ev_timer_start(loop, &ctx->w_timeout);
+
 #if WITH_RULESET
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
