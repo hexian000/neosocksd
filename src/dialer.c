@@ -393,7 +393,8 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 		CLOSE_FD(d->w_socket.fd);
 		ev_io_set(&d->w_socket, -1, EV_NONE);
 	}
-	ASSERT(!ev_is_active(&d->w_socket));
+	ASSERT(!ev_is_active(&d->w_socket) && !ev_is_pending(&d->w_socket));
+	ev_clear_pending(loop, &d->w_finish);
 	d->state = STATE_DONE;
 }
 
