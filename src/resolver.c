@@ -33,8 +33,8 @@ struct io_node {
 struct resolver {
 	struct ev_loop *loop;
 	struct resolver_stats stats;
-	bool async_enabled;
 #if WITH_CARES
+	bool async_enabled;
 	ares_channel channel;
 	struct ev_timer w_timeout;
 	size_t num_socket;
@@ -45,7 +45,7 @@ struct resolver {
 struct resolve_query {
 	struct resolver *resolver;
 	struct resolve_cb done_cb;
-	struct ev_watcher w_start;
+	struct ev_watcher w_finish;
 	bool ok : 1;
 	union sockaddr_max addr;
 	const char *name, *service;
@@ -54,8 +54,10 @@ struct resolve_query {
 };
 
 static void
-resolve_finish(struct resolve_query *restrict q, struct ev_loop *loop)
+finish_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
+	CHECK_REVENTS(revents, EV_CUSTOM);
+	struct resolve_query *restrict q = watcher->data;
 	LOGV_F("resolve %p: finished ok=%d", q, q->ok);
 	if (q->done_cb.func == NULL) { /* cancelled */
 		free(q);
@@ -70,12 +72,6 @@ resolve_finish(struct resolve_query *restrict q, struct ev_loop *loop)
 	q->done_cb.func(q, loop, q->done_cb.data, &q->addr.sa);
 	free(q);
 }
-
-#define RESOLVE_RETURN(q, loop)                                                \
-	do {                                                                   \
-		resolve_finish((q), (loop));                                   \
-		return;                                                        \
-	} while (0)
 
 #if WITH_CARES
 static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
@@ -230,7 +226,6 @@ addrinfo_cb(void *arg, int status, int timeouts, struct ares_addrinfo *info)
 {
 	UNUSED(timeouts);
 	struct resolve_query *restrict q = arg;
-	struct resolver *restrict r = q->resolver;
 	switch (status) {
 	case ARES_SUCCESS:
 		if (info != NULL) {
@@ -244,7 +239,7 @@ addrinfo_cb(void *arg, int status, int timeouts, struct ares_addrinfo *info)
 		LOGW_F("resolve: %s", ares_strerror(status));
 		break;
 	}
-	RESOLVE_RETURN(q, r->loop);
+	ev_invoke(q->resolver->loop, &q->w_finish, EV_CUSTOM);
 }
 #endif /* WITH_CARES */
 
@@ -271,20 +266,21 @@ void resolver_free(struct resolver *restrict r)
 	if (r == NULL) {
 		return;
 	}
-	if (r->async_enabled) {
 #if WITH_CARES
+	if (r->async_enabled) {
 		ares_destroy(r->channel);
 		(void)purge_watchers(r);
 		ASSERT(!ev_is_active(&r->sockets.watcher) &&
 		       r->sockets.next == NULL);
-#endif
 	}
+#endif
 	free(r);
 }
 
-bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
-{
 #if WITH_CARES
+static bool
+resolver_async_init(struct resolver *restrict r, const struct config *conf)
+{
 	int ret;
 	struct ares_options options;
 	options.sock_state_cb = sock_state_cb;
@@ -308,12 +304,8 @@ bool resolver_async_init(struct resolver *restrict r, const struct config *conf)
 		return true;
 	}
 	return true;
-#else
-	UNUSED(r);
-	UNUSED(conf);
-	return false;
-#endif /* WITH_CARES */
 }
+#endif /* WITH_CARES */
 
 struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf)
 {
@@ -330,8 +322,10 @@ struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf)
 		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
 		w_socket->data = r;
 	}
-#endif
 	r->async_enabled = resolver_async_init(r, conf);
+#else
+	UNUSED(conf);
+#endif
 	return r;
 }
 
@@ -340,14 +334,10 @@ const struct resolver_stats *resolver_stats(struct resolver *r)
 	return &r->stats;
 }
 
-static void
-start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+void resolve_start(struct resolver *r, struct resolve_query *restrict q)
 {
-	CHECK_REVENTS(revents, EV_CUSTOM);
-	struct resolve_query *restrict q = watcher->data;
 	LOGV_F("resolve %p: start name=`%s' service=%s pf=%d", (void *)q,
 	       q->name, q->service, q->family);
-	struct resolver *restrict r = q->resolver;
 	r->stats.num_query++;
 #if WITH_CARES
 	if (r->async_enabled) {
@@ -368,7 +358,7 @@ start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 	}
 #endif /* WITH_CARES */
 	q->ok = resolve_addr(&q->addr, q->name, q->service, q->family);
-	RESOLVE_RETURN(q, loop);
+	ev_feed_event(r->loop, &q->w_finish, EV_CUSTOM);
 }
 
 struct resolve_query *resolve_do(
@@ -385,6 +375,9 @@ struct resolve_query *resolve_do(
 	}
 	q->resolver = r;
 	q->done_cb = cb;
+	ev_init(&q->w_finish, finish_cb);
+	q->w_finish.data = q;
+	q->ok = false;
 	if (name != NULL) {
 		q->name = memcpy(q->buf, name, namelen);
 	} else {
@@ -396,10 +389,7 @@ struct resolve_query *resolve_do(
 		q->service = NULL;
 	}
 	q->family = family;
-	ev_init(&q->w_start, start_cb);
-	q->w_start.data = q;
-	q->ok = false;
-	ev_feed_event(r->loop, &q->w_start, EV_CUSTOM);
+	resolve_start(r, q);
 	return q;
 }
 
