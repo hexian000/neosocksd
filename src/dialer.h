@@ -79,6 +79,8 @@ struct dialer {
 	int state;
 	int syserr;
 	struct ev_io w_socket;
+	int socket_fd;
+	struct ev_watcher w_finish;
 	unsigned char *next;
 	struct {
 		BUFFER_HDR;
