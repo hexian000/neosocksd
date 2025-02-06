@@ -7,7 +7,6 @@
 
 #include "io/stream.h"
 #include "utils/debug.h"
-#include "utils/slog.h"
 
 #include "ruleset.h"
 #include "util.h"

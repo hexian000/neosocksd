@@ -11,7 +11,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-
 #include <sys/socket.h>
 
 #include <errno.h>

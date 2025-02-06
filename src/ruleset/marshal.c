@@ -13,7 +13,6 @@
 #include "lauxlib.h"
 #include "lua.h"
 
-#include "utils/slog.h"
 #include <ctype.h>
 #include <stddef.h>
 #include <stdint.h>

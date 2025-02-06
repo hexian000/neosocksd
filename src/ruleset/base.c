@@ -7,7 +7,6 @@
 #include "utils/debug.h"
 #include "utils/slog.h"
 
-#include "conf.h"
 #include "dialer.h"
 #include "util.h"
 

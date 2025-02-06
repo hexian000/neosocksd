@@ -27,6 +27,8 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
 
 /* co, err = neosocksd.async(finish, func, ...) */
 static int api_async(lua_State *restrict L)
