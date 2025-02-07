@@ -843,7 +843,7 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
 		buf = cbuf->data + ctx->parser.cpos;
 		len = cbuf->len - ctx->parser.cpos;
-		err = socket_send(watcher->fd, buf, &len);
+		err = socket_send(fd, buf, &len);
 		if (err != 0) {
 			API_CTX_LOG_F(
 				WARNING, ctx, "send: fd=%d %s", fd,

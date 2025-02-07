@@ -84,36 +84,31 @@ void aux_getregtable(lua_State *restrict L, const int ridx)
 	}
 }
 
-static void aux_putthread(lua_State *restrict L)
-{
-	aux_getregtable(L, RIDX_IDLE_THREAD);
-	lua_pushthread(L);
-	lua_pushboolean(L, 1);
-	lua_rawset(L, -3);
-	lua_pop(L, 1);
-}
-
 static int thread_main_k(lua_State *L, int status, lua_KContext ctx);
 
 static int
 thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
-	struct ruleset *restrict r = aux_getruleset(L);
-	const int errfunc = (r->config.traceback) ? 1 : 0;
-	/* lua stack: ... finish ? ... */
-	const int base = (int)ctx;
-	const int n = lua_gettop(L) - base;
-	const int nargs = n - 1;
+	/* lua stack: errfunc finish ? ... */
+	const int errfunc = lua_isfunction(L, 1) ? 1 : 0;
+	const int n = lua_gettop(L);
+	const int nargs = n - 2;
 	ASSERT(nargs >= 1);
 	lua_pushboolean(L, (status == LUA_OK || status == LUA_YIELD));
-	lua_replace(L, base + 2);
-	if (!lua_isnil(L, base + 1)) {
+	lua_replace(L, 3);
+	if (lua_isfunction(L, 2)) {
 		status = lua_pcall(L, nargs, 0, errfunc);
 		if (status != LUA_OK && status != LUA_YIELD) {
 			lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		}
 	}
-	aux_putthread(L);
+
+	/* cache the thread for reuse */
+	aux_getregtable(L, RIDX_IDLE_THREAD);
+	lua_pushthread(L);
+	lua_pushboolean(L, 1);
+	lua_rawset(L, -3);
+	lua_settop(L, 0);
 	return lua_yieldk(L, 0, ctx, thread_main_k);
 }
 
@@ -121,12 +116,10 @@ static int
 thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
-	struct ruleset *restrict r = aux_getruleset(L);
-	const int errfunc = (r->config.traceback) ? 1 : 0;
-	/* lua stack: ... finish ? func ... */
-	const int base = (int)ctx;
-	const int n = lua_gettop(L) - base;
-	const int nargs = n - 3;
+	/* lua stack: errfunc finish ? func ... */
+	const int errfunc = lua_isfunction(L, 1) ? 1 : 0;
+	const int n = lua_gettop(L);
+	const int nargs = n - 4;
 	ASSERT(nargs >= 0);
 	status = lua_pcallk(L, nargs, LUA_MULTRET, errfunc, ctx, thread_call_k);
 	return thread_call_k(L, status, ctx);
@@ -134,11 +127,7 @@ thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
 
 static int thread_main(lua_State *restrict L)
 {
-	struct ruleset *restrict r = aux_getruleset(L);
-	if (r->config.traceback) {
-		lua_pushcfunction(L, aux_traceback);
-	}
-	return lua_yieldk(L, 0, lua_gettop(L), thread_main_k);
+	return lua_yieldk(L, 0, 0, thread_main_k);
 }
 
 /* [-0, +1, v] */
@@ -179,11 +168,17 @@ int aux_async(
 	lua_State *restrict L, lua_State *restrict from, const int narg,
 	const int finishidx)
 {
+	struct ruleset *restrict r = aux_getruleset(L);
+	if (r->config.traceback) {
+		lua_pushcfunction(L, aux_traceback);
+	} else {
+		lua_pushnil(L);
+	}
 	lua_pushvalue(from, finishidx);
 	lua_xmove(from, L, 1);
 	lua_pushnil(L);
 	lua_xmove(from, L, 1 + narg);
-	return aux_resume(L, from, 3 + narg);
+	return aux_resume(L, from, 4 + narg);
 }
 
 const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
