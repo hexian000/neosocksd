@@ -22,7 +22,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-
 #include <netinet/in.h>
 #include <sys/socket.h>
 

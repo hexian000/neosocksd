@@ -334,7 +334,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 
 	/* hop-by-hop headers */
 	if (strcasecmp(key, "Connection") == 0) {
-		p->hdr.connection = strtrimspace(value);
+		p->hdr.connection = value;
 		return true;
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
@@ -346,7 +346,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		return parsehdr_content_length(p, value);
 	}
 	if (strcasecmp(key, "Content-Type") == 0) {
-		p->hdr.content.type = strtrimspace(value);
+		p->hdr.content.type = value;
 		return true;
 	}
 	if (strcasecmp(key, "Content-Encoding") == 0) {

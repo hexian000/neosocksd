@@ -875,7 +875,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 
 	/* hop-by-hop headers */
 	if (strcasecmp(key, "Connection") == 0) {
-		p->hdr.connection = strtrimspace(value);
+		p->hdr.connection = value;
 		return true;
 	}
 	if (strcasecmp(key, "TE") == 0) {
@@ -890,7 +890,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		return parsehdr_content_length(p, value);
 	}
 	if (strcasecmp(key, "Content-Type") == 0) {
-		p->hdr.content.type = strtrimspace(value);
+		p->hdr.content.type = value;
 		return true;
 	}
 	if (strcasecmp(key, "Content-Encoding") == 0) {
@@ -902,13 +902,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		return parsehdr_accept_encoding(p, value);
 	}
 	if (strcasecmp(key, "Expect") == 0) {
-		value = strtrimspace(value);
-		if (strcasecmp(value, "100-continue") != 0) {
-			p->http_status = HTTP_EXPECTATION_FAILED;
-			return false;
-		}
-		p->expect_continue = true;
-		return true;
+		return parsehdr_expect(p, value);
 	}
 
 	LOGV_F("unknown http header: `%s' = `%s'", key, value);

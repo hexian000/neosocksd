@@ -14,9 +14,11 @@
 #include "utils/debug.h"
 #include "utils/slog.h"
 
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -307,6 +309,121 @@ int http_parser_recv(struct http_parser *restrict p)
 			FAIL();
 		}
 	}
+}
+
+static char *strtrimleftspace(char *s)
+{
+	const unsigned char *restrict p = (unsigned char *)s;
+	while (*p && isspace(*p)) {
+		p++;
+	}
+	return (char *)p;
+}
+
+static char *strtrimrightspace(char *s)
+{
+	unsigned char *restrict e = (unsigned char *)s + strlen(s) - 1;
+	while ((unsigned char *)s < e && isspace(*e)) {
+		*e-- = '\0';
+	}
+	return s;
+}
+
+static char *strtrimspace(char *s)
+{
+	return strtrimrightspace(strtrimleftspace(s));
+}
+
+bool parsehdr_accept_te(struct http_parser *restrict p, char *value)
+{
+	value = strtrimspace(value);
+	if (value[0] == '\0') {
+		p->hdr.transfer.accept = TENCODING_NONE;
+		return true;
+	}
+	if (strcmp(value, "chunked") == 0) {
+		p->hdr.transfer.accept = TENCODING_CHUNKED;
+		return true;
+	}
+	return false;
+}
+
+bool parsehdr_transfer_encoding(struct http_parser *restrict p, char *value)
+{
+	value = strtrimspace(value);
+	if (value[0] == '\0') {
+		p->hdr.transfer.encoding = TENCODING_NONE;
+		return true;
+	}
+	if (strcmp(value, "chunked") == 0) {
+		p->hdr.transfer.encoding = TENCODING_CHUNKED;
+		return true;
+	}
+	return false;
+}
+
+bool parsehdr_accept_encoding(struct http_parser *restrict p, char *value)
+{
+	if (strcmp(value, "*") == 0) {
+		p->hdr.accept_encoding = CENCODING_DEFLATE;
+		return true;
+	}
+	const char *deflate = content_encoding_str[CENCODING_DEFLATE];
+	for (char *token = strtok(value, ","); token != NULL;
+	     token = strtok(NULL, ",")) {
+		char *q = strchr(token, ';');
+		if (q != NULL) {
+			*q = '\0';
+		}
+		token = strtrimspace(token);
+		if (strcasecmp(token, deflate) == 0) {
+			p->hdr.accept_encoding = CENCODING_DEFLATE;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool parsehdr_content_length(struct http_parser *restrict p, char *value)
+{
+	char *endptr;
+	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
+	if (*endptr || lenvalue > SIZE_MAX) {
+		return false;
+	}
+	const size_t content_length = (size_t)lenvalue;
+	if (strcmp(p->msg.req.method, "CONNECT") == 0) {
+		return false;
+	}
+	p->hdr.content.has_length = true;
+	p->hdr.content.length = content_length;
+	return true;
+}
+
+bool parsehdr_content_encoding(struct http_parser *restrict p, char *value)
+{
+	for (size_t i = 0; i < CENCODING_MAX; i++) {
+		if (content_encoding_str[i] == NULL) {
+			continue;
+		}
+		if (strcasecmp(value, content_encoding_str[i]) == 0) {
+			p->hdr.content.encoding = (enum content_encodings)i;
+			return true;
+		}
+	}
+	p->http_status = HTTP_UNSUPPORTED_MEDIA_TYPE;
+	return false;
+}
+
+bool parsehdr_expect(struct http_parser *restrict p, char *value)
+{
+	value = strtrimspace(value);
+	if (strcasecmp(value, "100-continue") != 0) {
+		p->http_status = HTTP_EXPECTATION_FAILED;
+		return false;
+	}
+	p->expect_continue = true;
+	return true;
 }
 
 void http_parser_init(

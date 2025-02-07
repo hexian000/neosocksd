@@ -12,7 +12,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-
 #if WITH_SPLICE
 #include <fcntl.h>
 #endif
