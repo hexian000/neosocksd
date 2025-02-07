@@ -197,12 +197,10 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	forward_ctx_close(loop, ctx);
 }
 
-static void dialer_cb(struct ev_loop *loop, void *data)
+static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 {
 	struct forward_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
-
-	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		FW_CTX_LOG_F(
 			DEBUG, ctx, "unable to establish client connection: %s",
@@ -223,7 +221,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		on_established(loop, ctx);
 	}
 
-	const struct event_cb cb = {
+	const struct transfer_state_cb cb = {
 		.func = xfer_state_cb,
 		.data = ctx,
 	};
@@ -340,7 +338,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 #endif
 
 	ctx->dialreq = NULL;
-	const struct event_cb cb = {
+	const struct dialer_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,
 	};

@@ -259,10 +259,10 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	ev_io_start(loop, watcher);
 }
 
-static void dialer_cb(struct ev_loop *loop, void *data)
+static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 {
 	struct api_client_ctx *restrict ctx = data;
-	const int fd = dialer_get(&ctx->dialer);
+	ASSERT(ctx->state == STATE_CLIENT_CONNECT);
 	if (fd < 0) {
 		const int err = ctx->dialer.syserr;
 		if (err != 0) {
@@ -401,7 +401,7 @@ static bool api_client_do(
 	ctx->result.errmsg = NULL;
 	ctx->result.errlen = 0;
 	ctx->result.stream = NULL;
-	const struct event_cb cb = {
+	const struct dialer_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,
 	};

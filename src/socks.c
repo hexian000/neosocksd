@@ -377,12 +377,10 @@ static void socks_senderr(struct socks_ctx *restrict ctx, const int err)
 	FAIL();
 }
 
-static void dialer_cb(struct ev_loop *loop, void *data)
+static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 {
 	struct socks_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
-
-	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		const int err = ctx->dialer.syserr;
 		if (err != 0) {
@@ -410,7 +408,7 @@ static void dialer_cb(struct ev_loop *loop, void *data)
 		on_established(loop, ctx);
 	}
 
-	const struct event_cb cb = {
+	const struct transfer_state_cb cb = {
 		.func = xfer_state_cb,
 		.data = ctx,
 	};
@@ -934,7 +932,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 	BUF_INIT(ctx->rbuf, 0);
 	ctx->next = ctx->rbuf.data;
 	ctx->dialreq = NULL;
-	const struct event_cb cb = {
+	const struct dialer_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,
 	};

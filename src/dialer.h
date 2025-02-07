@@ -71,8 +71,12 @@ void dialreq_free(struct dialreq *r);
 		    CONSTSTRLEN(":65535 HTTP/1.1\r\n\r\n"),                    \
 	    SOCKS_REQ_MAXLEN)
 
+struct dialer_cb {
+	void (*func)(struct ev_loop *loop, void *data, const int fd);
+	void *data;
+};
+
 struct dialer {
-	struct event_cb done_cb;
 	const struct dialreq *req;
 	struct resolve_query *resolve_query;
 	size_t jump;
@@ -81,6 +85,7 @@ struct dialer {
 	struct ev_io w_socket;
 	int socket_fd;
 	struct ev_watcher w_finish;
+	struct dialer_cb finish_cb;
 	unsigned char *next;
 	struct {
 		BUFFER_HDR;
@@ -88,13 +93,11 @@ struct dialer {
 	} rbuf;
 };
 
-void dialer_init(struct dialer *d, const struct event_cb *cb);
+void dialer_init(struct dialer *d, const struct dialer_cb *callback);
 
 void dialer_do(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req);
 
 void dialer_cancel(struct dialer *d, struct ev_loop *loop);
-
-int dialer_get(struct dialer *d);
 
 #endif /* DIALER_H */

@@ -21,11 +21,16 @@ enum transfer_state {
 	XFER_FINISHED,
 };
 
+struct transfer_state_cb {
+	void (*func)(struct ev_loop *loop, void *data);
+	void *data;
+};
+
 struct transfer {
 	enum transfer_state state;
 	int src_fd, dst_fd;
 	struct ev_io w_socket;
-	struct event_cb state_cb;
+	struct transfer_state_cb state_cb;
 	uintmax_t *byt_transferred;
 #if WITH_SPLICE
 	struct splice_pipe pipe;
@@ -38,8 +43,8 @@ struct transfer {
 };
 
 void transfer_init(
-	struct transfer *t, const struct event_cb *cb, int src_fd, int dst_fd,
-	uintmax_t *byt_transferred);
+	struct transfer *t, const struct transfer_state_cb *callback,
+	int src_fd, int dst_fd, uintmax_t *byt_transferred);
 
 void transfer_start(struct ev_loop *loop, struct transfer *t);
 

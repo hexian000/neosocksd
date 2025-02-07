@@ -50,11 +50,6 @@ extern struct globals {
 struct ev_loop;
 struct ev_io;
 
-struct event_cb {
-	void (*func)(struct ev_loop *loop, void *data);
-	void *data;
-};
-
 void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
 
 #define CHECK_REVENTS(revents, accept)                                         \

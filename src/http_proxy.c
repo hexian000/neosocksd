@@ -369,7 +369,7 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		on_established(loop, ctx);
 	}
 
-	const struct event_cb cb = {
+	const struct transfer_state_cb cb = {
 		.func = xfer_state_cb,
 		.data = ctx,
 	};
@@ -462,12 +462,10 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	http_ctx_close(loop, ctx);
 }
 
-static void dialer_cb(struct ev_loop *loop, void *data)
+static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 {
 	struct http_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
-
-	const int fd = dialer_get(&ctx->dialer);
 	if (fd < 0) {
 		HTTP_CTX_LOG_F(
 			DEBUG, ctx, "unable to establish client connection: %s",
@@ -564,7 +562,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	ctx->ruleset_state = NULL;
 #endif
 	ctx->dialreq = NULL;
-	const struct event_cb cb = {
+	const struct dialer_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,
 	};
