@@ -44,7 +44,7 @@ struct forward_ctx {
 	union sockaddr_max accepted_sa;
 	struct ev_timer w_timeout;
 	union {
-		/* connecting */
+		/* state < STATE_CONNECTED */
 		struct {
 #if WITH_RULESET
 			struct ev_idle w_ruleset;
@@ -53,7 +53,7 @@ struct forward_ctx {
 			struct dialreq *dialreq;
 			struct dialer dialer;
 		};
-		/* connected */
+		/* state >= STATE_CONNECTED */
 		struct {
 			struct transfer uplink, downlink;
 		};

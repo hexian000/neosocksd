@@ -53,6 +53,7 @@ struct http_ctx {
 	union sockaddr_max accepted_sa;
 	struct ev_timer w_timeout;
 	union {
+		/* state < STATE_CONNECTED */
 		struct {
 			struct ev_io w_recv, w_send;
 #if WITH_RULESET
@@ -63,7 +64,8 @@ struct http_ctx {
 			struct dialer dialer;
 			struct http_parser parser;
 		};
-		struct { /* connected */
+		/* state >= STATE_CONNECTED */
+		struct {
 			struct transfer uplink, downlink;
 		};
 	};

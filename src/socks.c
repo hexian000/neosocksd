@@ -56,7 +56,7 @@ struct socks_ctx {
 	struct dialaddr addr;
 	struct ev_timer w_timeout;
 	union {
-		/* during handshake */
+		/* state < STATE_CONNECTED */
 		struct {
 			struct ev_io w_socket;
 			struct {
@@ -76,7 +76,7 @@ struct socks_ctx {
 			struct dialreq *dialreq;
 			struct dialer dialer;
 		};
-		/* connected */
+		/* state >= STATE_CONNECTED */
 		struct {
 			struct transfer uplink, downlink;
 		};
