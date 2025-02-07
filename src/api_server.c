@@ -920,27 +920,15 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ctx->accepted_fd = fd;
 	ctx->dialed_fd = -1;
 
-	{
-		struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
-		w_timeout->data = ctx;
-	}
-	{
-		struct ev_io *restrict w_recv = &ctx->w_recv;
-		ev_io_init(w_recv, recv_cb, fd, EV_READ);
-		w_recv->data = ctx;
-	}
-	{
-		struct ev_io *restrict w_send = &ctx->w_send;
-		ev_io_init(w_send, send_cb, fd, EV_WRITE);
-		w_send->data = ctx;
-	}
+	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ctx->w_timeout.data = ctx;
+	ev_io_init(&ctx->w_recv, recv_cb, fd, EV_READ);
+	ctx->w_recv.data = ctx;
+	ev_io_init(&ctx->w_send, send_cb, fd, EV_WRITE);
+	ctx->w_send.data = ctx;
 #if WITH_RULESET
-	{
-		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
-		ev_idle_init(w_ruleset, process_cb);
-		w_ruleset->data = ctx;
-	}
+	ev_idle_init(&ctx->w_ruleset, process_cb);
+	ctx->w_ruleset.data = ctx;
 	ctx->rpcstate = NULL;
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };

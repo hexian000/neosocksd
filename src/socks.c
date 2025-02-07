@@ -8,7 +8,6 @@
 #include "proto/domain.h"
 #include "proto/socks.h"
 #include "ruleset.h"
-#include "ruleset/base.h"
 #include "server.h"
 #include "session.h"
 #include "sockutil.h"
@@ -335,14 +334,13 @@ static void socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 	case SOCKS4:
 		socks4_sendrsp(
 			ctx, ok ? SOCKS4RSP_GRANTED : SOCKS4RSP_REJECTED);
-		return;
+		break;
 	case SOCKS5:
 		socks5_sendrsp(ctx, ok ? SOCKS5RSP_SUCCEEDED : SOCKS5RSP_FAIL);
-		return;
-	default:
 		break;
+	default:
+		FAIL();
 	}
-	FAIL();
 }
 
 static uint8_t socks5_err2rsp(const int err)
@@ -366,14 +364,13 @@ static void socks_senderr(struct socks_ctx *restrict ctx, const int err)
 	switch (version) {
 	case SOCKS4:
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
-		return;
+		break;
 	case SOCKS5:
 		socks5_sendrsp(ctx, socks5_err2rsp(err));
-		return;
-	default:
 		break;
+	default:
+		FAIL();
 	}
-	FAIL();
 }
 
 static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
@@ -906,22 +903,13 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
 
-	{
-		struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
-		w_timeout->data = ctx;
-	}
-	{
-		struct ev_io *restrict w_socket = &ctx->w_socket;
-		ev_io_init(w_socket, recv_cb, accepted_fd, EV_READ);
-		w_socket->data = ctx;
-	}
+	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ctx->w_timeout.data = ctx;
+	ev_io_init(&ctx->w_socket, recv_cb, accepted_fd, EV_READ);
+	ctx->w_socket.data = ctx;
 #if WITH_RULESET
-	{
-		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
-		ev_idle_init(w_ruleset, process_cb);
-		w_ruleset->data = ctx;
-	}
+	ev_idle_init(&ctx->w_ruleset, process_cb);
+	ctx->w_ruleset.data = ctx;
 	ctx->ruleset_state = NULL;
 #endif
 

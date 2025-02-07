@@ -270,8 +270,9 @@ void resolver_free(struct resolver *restrict r)
 	if (r->async_enabled) {
 		ares_destroy(r->channel);
 		(void)purge_watchers(r);
-		ASSERT(!ev_is_active(&r->sockets.watcher) &&
-		       r->sockets.next == NULL);
+		ASSERT(!ev_is_active(&r->sockets.watcher));
+		ASSERT(!ev_is_pending(&r->sockets.watcher));
+		ASSERT(r->sockets.next == NULL);
 	}
 #endif
 	free(r);

@@ -160,20 +160,17 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	r->config.traceback = !!G.conf->traceback;
 	lua_State *restrict L = lua_newstate(l_alloc, r);
 	if (L == NULL) {
-		ruleset_free(r);
+		free(r);
 		return NULL;
 	}
 	(void)lua_atpanic(L, l_panic);
 	r->L = L;
-	{
-		/* initialize in advance to prevent undefined behavior */
-		struct ev_timer *restrict w_ticker = &r->w_ticker;
-		ev_timer_init(w_ticker, tick_cb, 1.0, 1.0);
-		w_ticker->data = r;
-		struct ev_idle *restrict w_idle = &r->w_idle;
-		ev_idle_init(w_idle, idle_cb);
-		w_idle->data = r;
-	}
+
+	/* initialize in advance to prevent undefined behavior */
+	ev_timer_init(&r->w_ticker, tick_cb, 1.0, 1.0);
+	r->w_ticker.data = r;
+	ev_idle_init(&r->w_idle, idle_cb);
+	r->w_idle.data = r;
 
 	lua_pushcfunction(L, ruleset_luainit);
 	switch (lua_pcall(L, 0, 0, 0)) {

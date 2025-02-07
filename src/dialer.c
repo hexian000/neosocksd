@@ -1327,17 +1327,11 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 	d->jump = 0;
 	d->state = STATE_INIT;
 	d->syserr = 0;
-	{
-		struct ev_io *restrict w_socket = &d->w_socket;
-		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
-		w_socket->data = d;
-	}
+	ev_io_init(&d->w_socket, socket_cb, -1, EV_NONE);
+	d->w_socket.data = d;
 	d->socket_fd = -1;
-	{
-		struct ev_watcher *restrict w_finish = &d->w_finish;
-		ev_init(w_finish, finish_cb);
-		w_finish->data = d;
-	}
+	ev_init(&d->w_finish, finish_cb);
+	d->w_finish.data = d;
 	d->finish_cb = *callback;
 	d->next = d->rbuf.data;
 	BUF_INIT(d->rbuf, 0);

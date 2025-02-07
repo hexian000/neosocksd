@@ -323,17 +323,11 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
 
-	{
-		struct ev_timer *restrict w_timeout = &ctx->w_timeout;
-		ev_timer_init(w_timeout, timeout_cb, G.conf->timeout, 0.0);
-		w_timeout->data = ctx;
-	}
+	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ctx->w_timeout.data = ctx;
 #if WITH_RULESET
-	{
-		struct ev_idle *restrict w_ruleset = &ctx->w_ruleset;
-		ev_idle_init(w_ruleset, NULL);
-		w_ruleset->data = ctx;
-	}
+	ev_idle_init(&ctx->w_ruleset, NULL);
+	ctx->w_ruleset.data = ctx;
 	ctx->ruleset_state = NULL;
 #endif
 
