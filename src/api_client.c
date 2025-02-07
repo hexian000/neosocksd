@@ -45,7 +45,6 @@ struct api_client_ctx {
 	struct session ss;
 	enum api_client_state state;
 	struct api_client_cb cb;
-	struct ev_watcher w_start;
 	struct ev_timer w_timeout;
 	struct ev_io w_socket;
 	struct ev_idle w_ruleset;
@@ -67,7 +66,6 @@ api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 
 	switch (ctx->state) {
 	case STATE_CLIENT_INIT:
-		ev_clear_pending(loop, &ctx->w_start);
 		break;
 	case STATE_CLIENT_CONNECT:
 		dialer_cancel(&ctx->dialer, loop);
@@ -357,16 +355,6 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	return true;
 }
 
-static void
-start_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
-{
-	CHECK_REVENTS(revents, EV_CUSTOM);
-	struct api_client_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_CLIENT_INIT);
-	ctx->state = STATE_CLIENT_CONNECT;
-	dialer_do(&ctx->dialer, loop, ctx->dialreq);
-}
-
 static bool api_client_do(
 	struct ev_loop *loop, struct api_client_ctx **pctx, struct dialreq *req,
 	const char *uri, const char *payload, const size_t len,
@@ -390,8 +378,6 @@ static bool api_client_do(
 		return false;
 	}
 	ctx->cb = *in_cb;
-	ev_init(&ctx->w_start, start_cb);
-	ctx->w_start.data = ctx;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 	ev_idle_init(&ctx->w_ruleset, process_cb);
@@ -416,10 +402,11 @@ static bool api_client_do(
 	}
 
 	ev_timer_start(loop, &ctx->w_timeout);
-	ev_feed_event(loop, &ctx->w_start, EV_CUSTOM);
 	if (pctx != NULL) {
 		*pctx = ctx;
 	}
+	ctx->state = STATE_CLIENT_CONNECT;
+	dialer_do(&ctx->dialer, loop, req);
 	return true;
 }
 
