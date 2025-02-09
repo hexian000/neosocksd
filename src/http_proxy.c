@@ -77,7 +77,7 @@ static int format_status(
 {
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
-	if ((ctx)->state != STATE_CONNECT) {
+	if (ctx->state != STATE_CONNECT) {
 		return snprintf(s, maxlen, "[%d] %s", ctx->accepted_fd, caddr);
 	}
 	return snprintf(
@@ -441,7 +441,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
 		buf = cbuf->data + ctx->parser.cpos;
 		len = cbuf->len - ctx->parser.cpos;
-		err = socket_send(watcher->fd, buf, &len);
+		err = socket_send(fd, buf, &len);
 		if (err != 0) {
 			HTTP_CTX_LOG_F(WARNING, ctx, "send: %s", strerror(err));
 			http_ctx_close(loop, ctx);

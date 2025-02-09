@@ -87,7 +87,7 @@ static int format_status(
 {
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
-	if ((ctx)->state != STATE_CONNECT) {
+	if (ctx->state != STATE_CONNECT) {
 		return snprintf(s, maxlen, "[%d] %s", ctx->accepted_fd, caddr);
 	}
 	char saddr[64];
