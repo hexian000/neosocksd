@@ -66,6 +66,7 @@ int aux_format_addr(lua_State *L);
 /* [-n, +(0|1), -] */
 bool aux_todialreq(lua_State *L, int n);
 
+/* [-0, +1, m] */
 int aux_traceback(lua_State *L);
 
 /* [-narg, +0, -] */

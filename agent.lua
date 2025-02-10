@@ -299,7 +299,9 @@ function agent.probe(peername)
         evlogf("probe: [%s] %q %s %.0fms", connid, peername,
             format_route(bestroute), minrtt * 1e+3)
     elseif errors[1] then
-        evlogf("probe failed: %q %s", peername, errors:sort():concat(", "))
+        evlogf("probe failed: %q %s", peername, errors:sort():map(function(err)
+            return string.match(err, "^(.-)\n") or err
+        end):concat(", "))
     end
 end
 

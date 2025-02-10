@@ -6,6 +6,7 @@
 #include "base.h"
 
 #include "net/addr.h"
+#include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/serialize.h"
 
@@ -231,6 +232,7 @@ static int api_now(lua_State *restrict L)
 	return 1;
 }
 
+/* neosocksd.traceback() */
 static int api_traceback(lua_State *restrict L)
 {
 	return aux_traceback(L);
