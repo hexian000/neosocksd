@@ -103,9 +103,10 @@ await_sleep_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
-	const int base = (int)ctx;
-	ASSERT(lua_gettop(L) == base);
-	aux_close(L, base);
+	UNUSED(ctx);
+	/* lua stack: ud */
+	ASSERT(lua_gettop(L) == 1);
+	aux_close(L, 1);
 	return 0;
 }
 
@@ -115,7 +116,8 @@ static int await_sleep(lua_State *restrict L)
 	AWAIT_CHECK_YIELDABLE(L);
 	lua_Number n = luaL_checknumber(L, 1);
 	luaL_argcheck(L, isfinite(n) && 0 <= n && n <= 1e+9, 1, NULL);
-	lua_settop(L, 1);
+	lua_settop(L, 0);
+
 	struct ruleset *restrict r = aux_getruleset(L);
 	struct await_sleep_userdata *restrict ud =
 		lua_newuserdata(L, sizeof(struct await_sleep_userdata));
@@ -133,7 +135,9 @@ static int await_sleep(lua_State *restrict L)
 	}
 
 	context_pin(L, ud);
-	lua_yieldk(L, 0, lua_gettop(L), await_sleep_k);
+	/* lua stack: ud */
+	ASSERT(lua_gettop(L) == 1);
+	lua_yieldk(L, 0, 0, await_sleep_k);
 	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 	return lua_error(L);
 }
@@ -184,9 +188,10 @@ await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
-	const int base = (int)ctx;
-	ASSERT(lua_gettop(L) == base + 1);
-	aux_close(L, base);
+	UNUSED(ctx);
+	/* lua stack: hostname ud sa */
+	ASSERT(lua_gettop(L) == 3);
+	aux_close(L, 2);
 	return aux_format_addr(L);
 }
 
@@ -217,7 +222,9 @@ static int await_resolve(lua_State *restrict L)
 	}
 
 	context_pin(L, ud);
-	lua_yieldk(L, 0, lua_gettop(L), await_resolve_k);
+	/* lua stack: hostname ud */
+	ASSERT(lua_gettop(L) == 2);
+	lua_yieldk(L, 0, 0, await_resolve_k);
 	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 	return lua_error(L);
 }
@@ -258,13 +265,15 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
-	const int base = (int)ctx;
-	ASSERT(lua_gettop(L) == base + 3);
-	aux_close(L, base);
-	const char *errmsg = lua_touserdata(L, base + 1);
-	const size_t errlen = *(size_t *)lua_touserdata(L, base + 2);
-	struct stream *stream = lua_touserdata(L, base + 3);
-	lua_settop(L, base);
+	UNUSED(ctx);
+	/* lua stack: code ud *err *errlen *stream */
+	ASSERT(lua_gettop(L) == 5);
+	aux_close(L, 2);
+	const char *errmsg = lua_touserdata(L, 3);
+	const size_t errlen = *(size_t *)lua_touserdata(L, 4);
+	struct stream *stream = lua_touserdata(L, 5);
+	lua_settop(L, 0);
+
 	if (errmsg != NULL) {
 		lua_pushboolean(L, 0);
 		lua_pushlstring(L, errmsg, errlen);
@@ -325,7 +334,9 @@ static int await_invoke(lua_State *restrict L)
 	}
 
 	context_pin(L, ud);
-	lua_yieldk(L, 0, lua_gettop(L), await_invoke_k);
+	/* lua stack: code ud */
+	ASSERT(lua_gettop(L) == 2);
+	lua_yieldk(L, 0, 0, await_invoke_k);
 	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 	return lua_error(L);
 }
@@ -377,10 +388,14 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
 	UNUSED(status);
-	const int base = (int)ctx;
-	struct await_execute_userdata *restrict ud = lua_touserdata(L, base);
+	UNUSED(ctx);
+	/* lua stack: command ud */
+	ASSERT(lua_gettop(L) == 2);
+	struct await_execute_userdata *restrict ud = lua_touserdata(L, 2);
 	int stat = ud->w_child.rstatus;
-	aux_close(L, base);
+	aux_close(L, 2);
+	lua_settop(L, 0);
+
 	if (WIFSIGNALED(stat)) {
 		lua_pushnil(L);
 		lua_pushliteral(L, "signal");
@@ -438,7 +453,9 @@ static int await_execute(lua_State *restrict L)
 	ev_child_start(r->loop, &ud->w_child);
 
 	context_pin(L, ud);
-	lua_yieldk(L, 0, lua_gettop(L), await_execute_k);
+	/* lua stack: command ud */
+	ASSERT(lua_gettop(L) == 2);
+	lua_yieldk(L, 0, 0, await_execute_k);
 	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
 	return lua_error(L);
 }
