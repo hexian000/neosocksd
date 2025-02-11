@@ -53,6 +53,7 @@ struct api_ctx {
 	struct ev_io w_recv, w_send;
 #if WITH_RULESET
 	struct ev_idle w_ruleset;
+	struct ruleset_callback rpcreturn;
 	struct ruleset_state *rpcstate;
 #endif
 	struct dialreq *dialreq;
@@ -429,15 +430,22 @@ static void rpcall_error(
 	send_response(loop, ctx, false);
 }
 
-static void rpcall_return(void *data, const char *result, size_t resultlen)
+static void
+rpcall_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	struct api_ctx *restrict ctx = data;
+	CHECK_REVENTS(revents, EV_CUSTOM);
+	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->rpcstate = NULL;
-	struct ev_loop *loop = ctx->s->loop;
-
+	if (!ctx->rpcreturn.ok) {
+		const char err[] = "rpcall did not return";
+		rpcall_error(loop, ctx, err, sizeof(err) - 1);
+		return;
+	}
+	const char *result = ctx->rpcreturn.rpcall.result;
+	size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
 	if (result == NULL) {
-		const char err[] = "rpcall is closed";
+		const char err[] = "rpcall is cancelled";
 		rpcall_error(loop, ctx, err, sizeof(err) - 1);
 		return;
 	}
@@ -496,12 +504,8 @@ static void handle_ruleset_rpcall(
 		return;
 	}
 	ctx->state = STATE_PROCESS;
-	const struct ruleset_rpcall_cb callback = {
-		.func = rpcall_return,
-		.data = ctx,
-	};
-	const bool ok =
-		ruleset_rpcall(ruleset, &ctx->rpcstate, reader, &callback);
+	const bool ok = ruleset_rpcall(
+		ruleset, &ctx->rpcstate, reader, &ctx->rpcreturn);
 	stream_close(reader);
 	if (!ok) {
 		/* no callback */
@@ -749,7 +753,7 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		if (ctx->rpcstate != NULL) {
-			ruleset_cancel(ctx->rpcstate);
+			ruleset_cancel(loop, ctx->rpcstate);
 			ctx->rpcstate = NULL;
 		}
 #endif
@@ -929,6 +933,8 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 #if WITH_RULESET
 	ev_idle_init(&ctx->w_ruleset, process_cb);
 	ctx->w_ruleset.data = ctx;
+	ev_init(&ctx->rpcreturn.w_finish, rpcall_cb);
+	ctx->rpcreturn.w_finish.data = ctx;
 	ctx->rpcstate = NULL;
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };

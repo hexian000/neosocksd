@@ -58,6 +58,7 @@ struct http_ctx {
 			struct ev_io w_recv, w_send;
 #if WITH_RULESET
 			struct ev_idle w_ruleset;
+			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
 			struct dialreq *dialreq;
@@ -135,7 +136,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		if (ctx->ruleset_state != NULL) {
-			ruleset_cancel(ctx->ruleset_state);
+			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
 		}
 #endif
@@ -221,11 +222,14 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 }
 
 #if WITH_RULESET
-static void ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
+static void
+ruleset_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	struct http_ctx *restrict ctx = data;
+	CHECK_REVENTS(revents, EV_CUSTOM);
+	struct http_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
+	ctx->dialreq = ctx->ruleset_callback.request.req;
 	ctx->ruleset_state = NULL;
-	ctx->dialreq = req;
 	http_connect(loop, ctx);
 }
 
@@ -284,14 +288,9 @@ process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	}
 
 	const char *addr_str = ctx->parser.msg.req.url;
-	const struct ruleset_request_cb callback = {
-		.func = ruleset_cb,
-		.loop = loop,
-		.data = ctx,
-	};
 	const bool ok = ruleset_resolve(
 		ruleset, &ctx->ruleset_state, addr_str, username, password,
-		&callback);
+		&ctx->ruleset_callback);
 	if (!ok) {
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
@@ -549,6 +548,8 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 #if WITH_RULESET
 	ev_idle_init(&ctx->w_ruleset, process_cb);
 	ctx->w_ruleset.data = ctx;
+	ev_init(&ctx->ruleset_callback.w_finish, ruleset_cb);
+	ctx->ruleset_callback.w_finish.data = ctx;
 	ctx->ruleset_state = NULL;
 #endif
 	ctx->dialreq = NULL;

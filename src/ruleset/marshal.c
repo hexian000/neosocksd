@@ -276,10 +276,10 @@ int api_marshal(lua_State *restrict L)
 	const char *upvalue = lua_setupvalue(L, -2, 3);
 	ASSERT(upvalue != NULL);
 	UNUSED(upvalue);
-	/* co stack: visited ... */
+	/* lua stack: args... buffer closure */
 	int i = 1;
 	for (; i < n; i++) {
-		lua_pushvalue(L, -1); /* the closure */
+		lua_pushvalue(L, -1);
 		lua_pushvalue(L, i);
 		lua_call(L, 1, 0);
 		*pvbuf = VBUF_APPENDSTR(*pvbuf, ",");

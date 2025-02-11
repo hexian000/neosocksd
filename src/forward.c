@@ -48,6 +48,7 @@ struct forward_ctx {
 		struct {
 #if WITH_RULESET
 			struct ev_idle w_ruleset;
+			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
 			struct dialreq *dialreq;
@@ -86,7 +87,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		if (ctx->ruleset_state != NULL) {
-			ruleset_cancel(ctx->ruleset_state);
+			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
 		}
 #endif
@@ -249,11 +250,14 @@ static void forward_ctx_start(
 }
 
 #if WITH_RULESET
-static void
-forward_ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
+static void forward_ruleset_cb(
+	struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	struct forward_ctx *restrict ctx = data;
+	CHECK_REVENTS(revents, EV_CUSTOM);
+	struct forward_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->ruleset_state = NULL;
+	struct dialreq *req = ctx->ruleset_callback.request.req;
 	if (req == NULL) {
 		forward_ctx_close(loop, ctx);
 		return;
@@ -279,27 +283,22 @@ forward_process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	char request[cap];
 	const int len = dialaddr_format(request, cap, addr);
 	CHECK(len >= 0 && (size_t)len < cap);
-	const struct ruleset_request_cb callback = {
-		.func = forward_ruleset_cb,
-		.loop = loop,
-		.data = ctx,
-	};
 	bool ok;
 	switch (addr->type) {
 	case ATYP_INET:
 		ok = ruleset_route(
 			ruleset, &ctx->ruleset_state, request, NULL, NULL,
-			&callback);
+			&ctx->ruleset_callback);
 		break;
 	case ATYP_INET6:
 		ok = ruleset_route6(
 			ruleset, &ctx->ruleset_state, request, NULL, NULL,
-			&callback);
+			&ctx->ruleset_callback);
 		break;
 	case ATYP_DOMAIN:
 		ok = ruleset_resolve(
 			ruleset, &ctx->ruleset_state, request, NULL, NULL,
-			&callback);
+			&ctx->ruleset_callback);
 		break;
 	default:
 		FAIL();
@@ -328,6 +327,8 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 #if WITH_RULESET
 	ev_idle_init(&ctx->w_ruleset, NULL);
 	ctx->w_ruleset.data = ctx;
+	ev_init(&ctx->ruleset_callback.w_finish, NULL);
+	ctx->ruleset_callback.w_finish.data = ctx;
 	ctx->ruleset_state = NULL;
 #endif
 
@@ -361,6 +362,7 @@ void forward_serve(
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
 		ev_set_cb(&ctx->w_ruleset, forward_process_cb);
+		ev_set_cb(&ctx->ruleset_callback.w_finish, forward_ruleset_cb);
 		ev_idle_start(loop, &ctx->w_ruleset);
 		return;
 	}
@@ -373,10 +375,13 @@ void forward_serve(
 
 #if WITH_RULESET
 static void
-tproxy_ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
+tproxy_ruleset_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	struct forward_ctx *restrict ctx = data;
+	CHECK_REVENTS(revents, EV_CUSTOM);
+	struct forward_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->ruleset_state = NULL;
+	struct dialreq *req = ctx->ruleset_callback.request.req;
 	if (req == NULL) {
 		forward_ctx_close(loop, ctx);
 		return;
@@ -418,22 +423,17 @@ tproxy_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 
 	char addr_str[64];
 	format_sa(addr_str, sizeof(addr_str), &dest.sa);
-	const struct ruleset_request_cb callback = {
-		.func = tproxy_ruleset_cb,
-		.loop = loop,
-		.data = ctx,
-	};
 	bool ok;
 	switch (dest.sa.sa_family) {
 	case AF_INET:
 		ok = ruleset_route(
 			ruleset, &ctx->ruleset_state, addr_str, NULL, NULL,
-			&callback);
+			&ctx->ruleset_callback);
 		break;
 	case AF_INET6:
 		ok = ruleset_route6(
 			ruleset, &ctx->ruleset_state, addr_str, NULL, NULL,
-			&callback);
+			&ctx->ruleset_callback);
 		break;
 	default:
 		FAIL();
@@ -506,6 +506,7 @@ void tproxy_serve(
 	struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
 		ev_set_cb(&ctx->w_ruleset, tproxy_idle_cb);
+		ev_set_cb(&ctx->ruleset_callback.w_finish, tproxy_ruleset_cb);
 		ev_idle_start(loop, &ctx->w_ruleset);
 		return;
 	}

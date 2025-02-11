@@ -69,6 +69,7 @@ struct socks_ctx {
 			unsigned char *next;
 #if WITH_RULESET
 			struct ev_idle w_ruleset;
+			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
 			struct dialreq *dialreq;
@@ -130,7 +131,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		if (ctx->ruleset_state != NULL) {
-			ruleset_cancel(ctx->ruleset_state);
+			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
 		}
 #endif
@@ -783,11 +784,14 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 }
 
 #if WITH_RULESET
-static void ruleset_cb(struct ev_loop *loop, void *data, struct dialreq *req)
+static void
+ruleset_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 {
-	struct socks_ctx *restrict ctx = data;
+	CHECK_REVENTS(revents, EV_CUSTOM);
+	struct socks_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
+	ctx->dialreq = ctx->ruleset_callback.request.req;
 	ctx->ruleset_state = NULL;
-	ctx->dialreq = req;
 	socks_connect(loop, ctx);
 }
 
@@ -812,27 +816,22 @@ process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 	const char *password = ctx->auth.password;
 	SOCKS_CTX_LOG_F(
 		VERBOSE, ctx, "request: username=%s `%s'", username, request);
-	const struct ruleset_request_cb callback = {
-		.func = ruleset_cb,
-		.loop = loop,
-		.data = ctx,
-	};
 	bool ok;
 	switch (addr->type) {
 	case ATYP_DOMAIN:
 		ok = ruleset_resolve(
 			ruleset, &ctx->ruleset_state, request, username,
-			password, &callback);
+			password, &ctx->ruleset_callback);
 		break;
 	case ATYP_INET:
 		ok = ruleset_route(
 			ruleset, &ctx->ruleset_state, request, username,
-			password, &callback);
+			password, &ctx->ruleset_callback);
 		break;
 	case ATYP_INET6:
 		ok = ruleset_route6(
 			ruleset, &ctx->ruleset_state, request, username,
-			password, &callback);
+			password, &ctx->ruleset_callback);
 		break;
 	default:
 		FAIL();
@@ -910,6 +909,8 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 #if WITH_RULESET
 	ev_idle_init(&ctx->w_ruleset, process_cb);
 	ctx->w_ruleset.data = ctx;
+	ev_init(&ctx->ruleset_callback.w_finish, ruleset_cb);
+	ctx->ruleset_callback.w_finish.data = ctx;
 	ctx->ruleset_state = NULL;
 #endif
 
