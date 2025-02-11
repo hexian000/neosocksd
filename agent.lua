@@ -291,7 +291,7 @@ function agent.probe(peername)
         local ok, err = r:wait()
         if not ok then error(err) end
         if err then
-            errors:insertf("[%s] %q", connid, err)
+            errors:insertf("[%s] %q", connid, err:match("^(.-)\n") or err)
         end
     end
     if #errors < #agent.conns then
@@ -299,9 +299,7 @@ function agent.probe(peername)
         evlogf("probe: [%s] %q %s %.0fms", connid, peername,
             format_route(bestroute), minrtt * 1e+3)
     elseif errors[1] then
-        evlogf("probe failed: %q %s", peername, errors:sort():map(function(err)
-            return string.match(err, "^(.-)\n") or err
-        end):concat(", "))
+        evlogf("probe failed: %q %s", peername, errors:sort():concat(", "))
     end
 end
 
