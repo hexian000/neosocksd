@@ -11,7 +11,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
 #define HTTP_MAX_ENTITY 8192
 #define HTTP_MAX_CONTENT 4194304

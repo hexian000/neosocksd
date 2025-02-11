@@ -162,7 +162,8 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	int ret = http_parser_recv(&ctx->parser);
 	if (ret < 0) {
 		API_RETURN_ERROR(loop, ctx, "error receiving response");
-	} else if (ret > 0) {
+	}
+	if (ret > 0) {
 		return;
 	}
 	const struct http_message *restrict msg = &ctx->parser.msg;

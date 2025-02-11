@@ -7,7 +7,6 @@
 
 #include "net/addr.h"
 #include "utils/debug.h"
-#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <arpa/inet.h>

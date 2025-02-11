@@ -17,7 +17,6 @@
 
 /* contrib */
 #include "utils/debug.h"
-#include "utils/minmax.h"
 #include "utils/slog.h"
 
 /* runtime */

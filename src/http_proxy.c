@@ -101,12 +101,8 @@ static int format_status(
 #define HTTP_CTX_LOG(level, ctx, message)                                      \
 	HTTP_CTX_LOG_F(level, ctx, "%s", message)
 
-static void send_response(
-	struct ev_loop *loop, struct http_ctx *restrict ctx, const bool ok)
+static void send_response(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	if (ok) {
-		ctx->s->stats.num_success++;
-	}
 	ctx->state = STATE_RESPONSE;
 	ev_io_start(loop, &ctx->w_send);
 }
@@ -117,7 +113,7 @@ static void send_errpage(
 {
 	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
 	http_resp_errpage(&ctx->parser, code);
-	send_response(loop, ctx, false);
+	send_response(loop, ctx);
 }
 
 static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
@@ -283,7 +279,7 @@ process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 		BUF_APPENDSTR(
 			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
 		RESPHDR_FINISH(ctx->parser.wbuf);
-		send_response(loop, ctx, false);
+		send_response(loop, ctx);
 		return;
 	}
 
@@ -482,6 +478,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		http_ctx_close(loop, ctx);
 		return;
 	}
+	ctx->s->stats.num_success++;
 	http_ctx_hijack(loop, ctx);
 }
 

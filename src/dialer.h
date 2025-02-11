@@ -61,10 +61,10 @@ struct dialreq {
 };
 
 struct dialreq *dialreq_new(size_t num_proxy);
-bool dialreq_addproxy(struct dialreq *r, const char *proxy_uri, size_t urilen);
+bool dialreq_addproxy(struct dialreq *req, const char *proxy_uri, size_t urilen);
 struct dialreq *dialreq_parse(const char *addr, const char *csv);
 int dialreq_format(char *s, size_t maxlen, const struct dialreq *r);
-void dialreq_free(struct dialreq *r);
+void dialreq_free(struct dialreq *req);
 
 #define DIALER_RBUF_SIZE                                                       \
 	MAX(CONSTSTRLEN("CONNECT ") + FQDN_MAX_LENGTH +                        \

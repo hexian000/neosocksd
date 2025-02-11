@@ -5,7 +5,6 @@
 #define UTIL_H
 
 #include "utils/debug.h"
-#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <sys/types.h>
@@ -14,7 +13,6 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdlib.h>
 #include <string.h>
 
 struct dialreq;
