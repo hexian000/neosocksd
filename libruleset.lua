@@ -49,25 +49,6 @@ function table.get(t, ...)
     return v
 end
 
-function await.callback(f, ...)
-    local co = coroutine.running()
-    assert(coroutine.isyieldable(co))
-    local result
-    local callback = function(...)
-        if co == coroutine.running() then
-            result = { ... }
-            return
-        end
-        local ok, err = coroutine.resume(co, ...)
-        if not ok then error(err) end
-    end
-    f(callback, ...)
-    if result then
-        return table.unpack(result)
-    end
-    return coroutine.yield()
-end
-
 -- [[ list: linear list ]] --
 local list = {
     iter = ipairs,
@@ -195,40 +176,6 @@ end
 
 _G.rlist = rlist
 
--- [[ thread: asynchronous routines ]] --
-local thread = {}
-local thread_mt = { __name = "async", __index = thread }
-
-function thread:wait()
-    if self.result then
-        return table.unpack(self.result)
-    end
-    local co = coroutine.running()
-    assert(coroutine.isyieldable(co))
-    assert(self.co ~= co)
-    self.wakeup[co] = true
-    coroutine.yield()
-    return table.unpack(self.result)
-end
-
-function _G.async(f, ...)
-    local t = setmetatable({ wakeup = {} }, thread_mt)
-    local function finish(ok, ...)
-        t.result = table.pack(ok, ...)
-        for co, _ in pairs(t.wakeup) do
-            t.wakeup[co] = nil
-            coroutine.resume(co)
-        end
-    end
-    local co, err = neosocksd.async(finish, f, ...)
-    if co then
-        t.co = co
-    else
-        t.result = { false, err }
-    end
-    return t
-end
-
 -- [[ logging utilities ]] --
 _G.recent_events = rlist:check(_G.recent_events) or rlist:new(100)
 local function evlog_(now, msg)
@@ -289,6 +236,7 @@ local function evlogf(s, ...)
 end
 _G.evlogf = evlogf
 
+-- [[ IP address utilities ]] --
 local splithostport = neosocksd.splithostport
 local parse_ipv4 = neosocksd.parse_ipv4
 local parse_ipv6 = neosocksd.parse_ipv6
@@ -331,6 +279,59 @@ local function parse_cidr6(s)
 end
 
 _G.parse_cidr6 = parse_cidr6
+
+-- [[ thread: asynchronous routines ]] --
+local thread = {}
+local thread_mt = { __name = "async", __index = thread }
+
+function thread:wait()
+    if self.result then
+        return table.unpack(self.result)
+    end
+    local co = coroutine.running()
+    assert(coroutine.isyieldable(co))
+    assert(self.co ~= co)
+    self.wakeup[co] = true
+    coroutine.yield()
+    return table.unpack(self.result)
+end
+
+function _G.async(f, ...)
+    local t = setmetatable({ wakeup = {} }, thread_mt)
+    local function finish(ok, ...)
+        t.result = table.pack(ok, ...)
+        for co, _ in pairs(t.wakeup) do
+            t.wakeup[co] = nil
+            coroutine.resume(co)
+        end
+    end
+    local co, err = neosocksd.async(finish, f, ...)
+    if co then
+        t.co = co
+    else
+        t.result = { false, err }
+    end
+    return t
+end
+
+function await.callback(f, ...)
+    local co = coroutine.running()
+    assert(coroutine.isyieldable(co))
+    local result
+    local callback = function(...)
+        if co == coroutine.running() then
+            result = { ... }
+            return
+        end
+        local ok, err = coroutine.resume(co, ...)
+        if not ok then error(err) end
+    end
+    f(callback, ...)
+    if result then
+        return table.unpack(result)
+    end
+    return coroutine.yield()
+end
 
 -- [[ RPC utilities ]] --
 function _G.unmarshal(s)
@@ -621,6 +622,17 @@ function composite.anyof(t)
     end
 end
 
+function composite.allof(t)
+    return function(...)
+        for _, matcher in ipairs(t) do
+            if not matcher(...) then
+                return false
+            end
+        end
+        return true
+    end
+end
+
 function composite.maybe(t, k)
     return function(...)
         local matcher = t[k]
@@ -723,6 +735,7 @@ function lb.roundrobin(t)
     end
 end
 
+-- interleaved weighted round robin
 function lb.iwrr(t, cyclesize)
     local max = 0
     for _, v in ipairs(t) do

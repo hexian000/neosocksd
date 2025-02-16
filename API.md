@@ -475,7 +475,7 @@ assert(s == s1)
 
 Data compression interface for zlib format (as declared in RFC 1950 and RFC 1951).
 
-Tip: [neosocksd.invoke](#neosocksdinvoke) and [await.invoke](#awaitinvoke) will compress the data internally.
+Tip: [neosocksd.invoke](#neosocksdinvoke) and [await.invoke](#awaitinvoke) is already compressed internally.
 
 
 ### _G.marshal
@@ -516,7 +516,7 @@ end, ...)
 
 **Description**
 
-Start an asynchronous routine and run it until the first `await.*` or the end. See [await.resolve](#awaitresolve) for a full example.
+Start an asynchronous routine and run it until the first await or the end. See [await.resolve](#awaitresolve) for a full example. Using `coroutine.*` to manipulate asynchronous routines is possible, but not recommended.
 
 This function is implemented in `libruleset.lua`.
 
@@ -529,7 +529,7 @@ This function is implemented in `libruleset.lua`.
 
 ```Lua
 async(function()
-    local ok, what, stat = await.execute("curl -sX POST http://example.com/v1/api")
+    local ok, what, stat = await.execute("curl -sX POST http://example.com/api/v1")
     if not ok then
         -- ......
     end

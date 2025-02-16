@@ -14,7 +14,6 @@ local function rebuild()
     for s, w in pairs(backends) do
         table.insert(t, { w, rule.redirect(s) })
     end
-    -- interleaved weighted round robin
     _G.route_default = { lb.iwrr(t) }
 end
 rebuild()
