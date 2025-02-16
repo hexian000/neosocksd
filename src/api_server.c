@@ -258,6 +258,15 @@ send_response(struct ev_loop *loop, struct api_ctx *restrict ctx, const bool ok)
 	ev_io_start(loop, &ctx->w_send);
 }
 
+static void send_errpage(
+	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code)
+{
+	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
+	http_resp_errpage(&ctx->parser, code);
+	send_response(loop, ctx, false);
+}
+
+#if WITH_RULESET
 static void send_plaintext(
 	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code,
 	const char *msg, const size_t len)
@@ -270,14 +279,7 @@ static void send_plaintext(
 	BUF_APPENDSTR(ctx->parser.wbuf, "\n");
 	send_response(loop, ctx, 1 <= (code / 100) && (code / 100) <= 3);
 }
-
-static void send_errpage(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code)
-{
-	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
-	http_resp_errpage(&ctx->parser, code);
-	send_response(loop, ctx, false);
-}
+#endif
 
 static void
 http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
