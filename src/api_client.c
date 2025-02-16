@@ -17,7 +17,7 @@
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
-#include "utils/intbound.h"
+#include "utils/intcast.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -170,7 +170,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	uint16_t code = 0;
 	{
 		const uintmax_t status = strtoumax(msg->rsp.code, NULL, 10);
-		if (BOUNDCHECK_UINT(code, status)) {
+		if (UINTCAST_CHECK(code, status)) {
 			code = status;
 		}
 	}

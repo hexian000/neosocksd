@@ -8,7 +8,7 @@
 #include "math/rand.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
-#include "utils/intbound.h"
+#include "utils/intcast.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -250,7 +250,7 @@ bool parse_user(struct user_ident *ident, const char *s)
 	if (user != NULL) {
 		char *endptr;
 		const intmax_t uidvalue = strtoimax(user, &endptr, 10);
-		if (*endptr || !BOUNDCHECK_INT(uid, uidvalue)) {
+		if (*endptr || !INTCAST_CHECK(uid, uidvalue)) {
 			/* search user database for user name */
 			pw = getpwnam(user);
 			if (pw == NULL) {
@@ -269,7 +269,7 @@ bool parse_user(struct user_ident *ident, const char *s)
 	if (group != NULL) {
 		char *endptr;
 		const intmax_t gidvalue = strtoimax(group, &endptr, 10);
-		if (*endptr || !BOUNDCHECK_INT(gid, gidvalue)) {
+		if (*endptr || !INTCAST_CHECK(gid, gidvalue)) {
 			/* search group database for group name */
 			const struct group *gr = getgrnam(group);
 			if (gr == NULL) {
