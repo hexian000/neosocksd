@@ -26,7 +26,7 @@ Status: **Stable**
 - Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (TCP only), HTTP CONNECT, transparent proxy (Linux).
 - High performance: transfer over 10 Gbps per x86 core on Linux. (with `--pipe`, 2024)
 - Lightweight: the executable is around 500KiB on most platforms\*.
-- Programmable: use Lua as the control plane language.
+- Programmable: run Lua scripts on the control plane.
 - Versatile: RPC facilities for scripting, see [scripting](#scripting).
 - Hot reloadable: RESTful API for monitoring and updating Lua modules.
 - Morden: full IPv6 support & horizontally scalable.
