@@ -413,22 +413,13 @@ static void send_errmsg(
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	BUF_APPEND(ctx->parser.wbuf, msg, len);
-	BUF_APPENDSTR(ctx->parser.wbuf, "\n");
 	send_response(loop, ctx, 1 <= (code / 100) && (code / 100) <= 3);
 }
 
-static void rpcall_error(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, const char *err,
-	const size_t len)
-{
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_INTERNAL_SERVER_ERROR);
-	RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
-	RESPHDR_CLENGTH(ctx->parser.wbuf, len);
-	RESPHDR_FINISH(ctx->parser.wbuf);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	BUF_APPEND(ctx->parser.wbuf, err, len);
-	send_response(loop, ctx, false);
-}
+#define SEND_ERRSTR(loop, ctx, str)                                            \
+	send_errmsg(                                                           \
+		(loop), (ctx), HTTP_INTERNAL_SERVER_ERROR, ("" str),           \
+		sizeof(str) - 1)
 
 static void
 rpcall_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
@@ -438,15 +429,13 @@ rpcall_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->rpcstate = NULL;
 	if (!ctx->rpcreturn.ok) {
-		const char err[] = "rpcall did not return";
-		rpcall_error(loop, ctx, err, sizeof(err) - 1);
+		SEND_ERRSTR(loop, ctx, "rpcall did not return");
 		return;
 	}
 	const char *result = ctx->rpcreturn.rpcall.result;
 	size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
 	if (result == NULL) {
-		const char err[] = "rpcall is cancelled";
-		rpcall_error(loop, ctx, err, sizeof(err) - 1);
+		SEND_ERRSTR(loop, ctx, "rpcall is cancelled");
 		return;
 	}
 	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall_return");
@@ -512,7 +501,7 @@ static void handle_ruleset_rpcall(
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
-		rpcall_error(loop, ctx, err, len);
+		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
 }
@@ -686,10 +675,7 @@ static void
 http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	if (G.ruleset == NULL) {
-		const char msg[] = "ruleset not enabled, restart with -r";
-		send_errmsg(
-			loop, ctx, HTTP_INTERNAL_SERVER_ERROR, msg,
-			sizeof(msg) - 1);
+		SEND_ERRSTR(loop, ctx, "ruleset is not enabled on the server");
 		return;
 	}
 
