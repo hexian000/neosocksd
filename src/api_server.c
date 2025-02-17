@@ -266,21 +266,6 @@ static void send_errpage(
 	send_response(loop, ctx, false);
 }
 
-#if WITH_RULESET
-static void send_plaintext(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code,
-	const char *msg, const size_t len)
-{
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	RESPHDR_BEGIN(ctx->parser.wbuf, code);
-	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-	RESPHDR_FINISH(ctx->parser.wbuf);
-	BUF_APPEND(ctx->parser.wbuf, msg, len);
-	BUF_APPENDSTR(ctx->parser.wbuf, "\n");
-	send_response(loop, ctx, 1 <= (code / 100) && (code / 100) <= 3);
-}
-#endif
-
 static void
 http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
@@ -419,6 +404,19 @@ static bool restapi_check(
 }
 
 #if WITH_RULESET
+static void send_errmsg(
+	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code,
+	const char *msg, const size_t len)
+{
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	RESPHDR_BEGIN(ctx->parser.wbuf, code);
+	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	RESPHDR_FINISH(ctx->parser.wbuf);
+	BUF_APPEND(ctx->parser.wbuf, msg, len);
+	BUF_APPENDSTR(ctx->parser.wbuf, "\n");
+	send_response(loop, ctx, 1 <= (code / 100) && (code / 100) <= 3);
+}
+
 static void rpcall_error(
 	struct ev_loop *loop, struct api_ctx *restrict ctx, const char *err,
 	const size_t len)
@@ -539,7 +537,7 @@ static void handle_ruleset_invoke(
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset invoke: %s", err);
-		send_plaintext(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
+		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
@@ -571,7 +569,7 @@ static void handle_ruleset_update(
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset update: %s", err);
-		send_plaintext(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
+		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
@@ -595,7 +593,7 @@ static void handle_ruleset_gc(
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset gc: %s", err);
-		send_plaintext(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
+		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
 	struct ruleset_vmstats vmstats;
@@ -689,7 +687,7 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	if (G.ruleset == NULL) {
 		const char msg[] = "ruleset not enabled, restart with -r";
-		send_plaintext(
+		send_errmsg(
 			loop, ctx, HTTP_INTERNAL_SERVER_ERROR, msg,
 			sizeof(msg) - 1);
 		return;
