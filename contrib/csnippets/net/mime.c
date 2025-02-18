@@ -10,38 +10,38 @@
 #define istspecial(c) (!!strchr("()<>@,;:\"/[]?=", (c)))
 #define istoken(c) (!iscntrl(c) && !istspecial(c))
 
-static inline char *strlower(char *s)
+static inline char *strlower(char *restrict s)
 {
-	for (unsigned char *restrict p = (unsigned char *)s; *p; p++) {
+	for (unsigned char *p = (unsigned char *)s; *p; p++) {
 		*p = tolower(*p);
 	}
 	return s;
 }
 
-static inline char *strtrimleftspace(char *s)
+static inline char *strtrimleftspace(char *restrict s)
 {
-	const unsigned char *restrict p = (unsigned char *)s;
+	const unsigned char *p = (unsigned char *)s;
 	while (*p && isspace(*p)) {
 		p++;
 	}
 	return (char *)p;
 }
 
-static inline char *strtrimrightspace(char *s)
+static inline char *strtrimrightspace(char *restrict s)
 {
-	unsigned char *restrict e = (unsigned char *)s + strlen(s) - 1;
+	unsigned char *e = (unsigned char *)s + strlen(s) - 1;
 	while ((unsigned char *)s < e && isspace(*e)) {
 		*e-- = '\0';
 	}
 	return s;
 }
 
-static inline char *strtrimspace(char *s)
+static inline char *strtrimspace(char *restrict s)
 {
 	return strtrimrightspace(strtrimleftspace(s));
 }
 
-char *mime_parse(char *s, char **type, char **subtype)
+char *mime_parse(char *s, char **restrict type, char **restrict subtype)
 {
 	char *next = strchr(s, ';');
 	if (next == NULL) {
@@ -60,15 +60,15 @@ char *mime_parse(char *s, char **type, char **subtype)
 	return next;
 }
 
-static char *next_token(char *s)
+static char *next_token(char *restrict s)
 {
-	char *restrict sep;
+	char *sep;
 	for (sep = s; *sep && istoken((unsigned char)*sep); sep++) {
 	}
 	return sep;
 }
 
-static char *parse_key(char *s, char **key)
+static char *parse_key(char *s, char **restrict key)
 {
 	*key = s;
 	s = next_token(s);
@@ -79,7 +79,7 @@ static char *parse_key(char *s, char **key)
 	return s + 1;
 }
 
-static char *parse_value(char *s, char **value)
+static char *parse_value(char *s, char **restrict value)
 {
 	if (*s != '\"') {
 		*value = s;

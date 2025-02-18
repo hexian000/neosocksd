@@ -5,12 +5,15 @@
 
 #include <stddef.h>
 
-int stream_direct_read(struct stream *s, const void **buf, size_t *len)
+int stream_direct_read(
+	struct stream *restrict s, const void **restrict buf,
+	size_t *restrict len)
 {
 	return s->vftable->direct_read(s, buf, len);
 }
 
-int stream_read(struct stream *s, void *buf, size_t *len)
+int stream_read(
+	struct stream *restrict s, void *restrict buf, size_t *restrict len)
 {
 	{
 		const io_reader read = s->vftable->read;
@@ -39,12 +42,14 @@ int stream_read(struct stream *s, void *buf, size_t *len)
 	return err;
 }
 
-int stream_write(struct stream *s, const void *buf, size_t *len)
+int stream_write(
+	struct stream *restrict s, const void *restrict buf,
+	size_t *restrict len)
 {
 	return s->vftable->write(s, buf, len);
 }
 
-int stream_flush(struct stream *s)
+int stream_flush(struct stream *restrict s)
 {
 	const io_flusher flush = s->vftable->flush;
 	if (flush == NULL) {
@@ -53,7 +58,7 @@ int stream_flush(struct stream *s)
 	return flush(s);
 }
 
-int stream_close(struct stream *s)
+int stream_close(struct stream *restrict s)
 {
 	const io_closer close = s->vftable->close;
 	if (close == NULL) {
@@ -64,7 +69,8 @@ int stream_close(struct stream *s)
 }
 
 int stream_copy(
-	struct stream *dst, struct stream *src, void *buf, const size_t bufsize)
+	struct stream *restrict dst, struct stream *restrict src,
+	void *restrict buf, const size_t bufsize)
 {
 	size_t len;
 	do {

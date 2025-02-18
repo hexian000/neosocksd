@@ -335,7 +335,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		}
 
 		size_t n = buf->len;
-		int err = stream_write(w, buf->data, &n);
+		const int err = stream_write(w, buf->data, &n);
 		if (n < buf->len || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
 			       buf->len);
@@ -353,7 +353,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			s = ruleset_geterror(ruleset, &len);
 		}
 		size_t n = len;
-		int err = stream_write(w, s, &n);
+		const int err = stream_write(w, s, &n);
 		if (n < len || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n, len);
 			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);

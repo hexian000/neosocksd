@@ -21,7 +21,8 @@ struct memory_stream {
 };
 ASSERT_SUPER(struct stream, struct memory_stream, s);
 
-static int mem_direct_read(void *p, const void **buf, size_t *restrict len)
+static int
+mem_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct memory_stream *restrict m = p;
 	size_t n = *len;
@@ -35,7 +36,7 @@ static int mem_direct_read(void *p, const void **buf, size_t *restrict len)
 	return 0;
 }
 
-static int mem_write(void *p, const void *buf, size_t *restrict len)
+static int mem_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct memory_stream *restrict m = p;
 	size_t n = *len;
@@ -95,7 +96,7 @@ struct stream *io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
 	return s;
 }
 
-static int heap_write(void *p, const void *buf, size_t *restrict len)
+static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct stream *restrict s = p;
 	struct vbuffer *restrict *restrict pvbuf = s->data;
@@ -111,7 +112,7 @@ static int heap_write(void *p, const void *buf, size_t *restrict len)
 static const struct stream_vftable vftable_heapwriter = {
 	.write = heap_write,
 };
-struct stream *io_heapwriter(struct vbuffer **pvbuf)
+struct stream *io_heapwriter(struct vbuffer **restrict pvbuf)
 {
 	if (pvbuf == NULL) {
 		return NULL;
@@ -124,7 +125,7 @@ struct stream *io_heapwriter(struct vbuffer **pvbuf)
 	return s;
 }
 
-int io_heapprintf(struct stream *s, const char *format, ...)
+int io_heapprintf(struct stream *restrict s, const char *restrict format, ...)
 {
 	assert(s->vftable == &vftable_heapwriter);
 	struct vbuffer *restrict *restrict pvbuf = s->data;
@@ -145,7 +146,8 @@ struct buffered_stream {
 };
 ASSERT_SUPER(struct stream, struct buffered_stream, s);
 
-static int buf_direct_read(void *p, const void **buf, size_t *restrict len)
+static int
+buf_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct buffered_stream *restrict b = p;
 	if (b->pos == b->len) {
@@ -165,7 +167,7 @@ static int buf_direct_read(void *p, const void **buf, size_t *restrict len)
 	return err;
 }
 
-static int buf_read(void *p, void *buf, size_t *restrict len)
+static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 {
 	struct buffered_stream *restrict b = p;
 	size_t nread = *len;
@@ -243,7 +245,7 @@ static int buf_flush(void *p)
 	return stream_flush(b->base);
 }
 
-static int buf_write(void *p, const void *buf, size_t *restrict len)
+static int buf_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct buffered_stream *restrict b = p;
 	const unsigned char *src = buf;
@@ -279,7 +281,7 @@ static int buf_write(void *p, const void *buf, size_t *restrict len)
 	return 0;
 }
 
-static int buf_vprintf(void *p, const char *format, va_list args)
+static int buf_vprintf(void *p, const char *restrict format, va_list args)
 {
 	struct buffered_stream *restrict b = DOWNCAST(
 		struct stream, struct buffered_stream, s, (struct stream *)p);
@@ -373,7 +375,7 @@ struct stream *io_bufwriter(struct stream *base, const size_t bufsize)
 	return s;
 }
 
-int io_bufprintf(struct stream *s, const char *format, ...)
+int io_bufprintf(struct stream *restrict s, const char *restrict format, ...)
 {
 	assert(s->vftable == &vftable_bufwriter);
 	va_list args;
@@ -390,7 +392,8 @@ struct metered_stream {
 };
 ASSERT_SUPER(struct stream, struct metered_stream, s);
 
-static int metered_direct_read(void *p, const void **buf, size_t *restrict len)
+static int
+metered_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct metered_stream *restrict m = p;
 	const int ret = stream_direct_read(m->base, buf, len);
@@ -400,7 +403,7 @@ static int metered_direct_read(void *p, const void **buf, size_t *restrict len)
 	return ret;
 }
 
-static int metered_read(void *p, void *buf, size_t *restrict len)
+static int metered_read(void *p, void *restrict buf, size_t *restrict len)
 {
 	struct metered_stream *restrict m = p;
 	const int ret = stream_read(m->base, buf, len);
@@ -410,7 +413,8 @@ static int metered_read(void *p, void *buf, size_t *restrict len)
 	return ret;
 }
 
-static int metered_write(void *p, const void *buf, size_t *restrict len)
+static int
+metered_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct metered_stream *restrict m = p;
 	const int ret = stream_write(m->base, buf, len);

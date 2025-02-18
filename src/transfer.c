@@ -80,11 +80,11 @@ static void set_state(
 
 static ssize_t transfer_recv(struct transfer *restrict t)
 {
-	const int fd = t->src_fd;
 	const size_t cap = t->buf.cap - t->buf.len;
 	if (cap == 0) {
 		return 0;
 	}
+	const int fd = t->src_fd;
 	unsigned char *data = t->buf.data + t->buf.len;
 	const ssize_t nrecv = recv(fd, data, cap, 0);
 	if (nrecv < 0) {
@@ -105,11 +105,11 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 
 static ssize_t transfer_send(struct transfer *restrict t)
 {
-	const int fd = t->dst_fd;
 	const size_t len = t->buf.len - t->pos;
 	if (len == 0) {
 		return 0;
 	}
+	const int fd = t->dst_fd;
 	const unsigned char *data = t->buf.data + t->pos;
 	const ssize_t nsend = send(fd, data, len, 0);
 	if (nsend < 0) {
@@ -217,7 +217,7 @@ static ssize_t splice_drain(struct splice_pipe *restrict pipe, const int fd)
 
 static ssize_t splice_pump(struct splice_pipe *restrict pipe, const int fd)
 {
-	size_t len = pipe->len;
+	const size_t len = pipe->len;
 	if (len == 0) {
 		return 0;
 	}
@@ -301,10 +301,9 @@ void transfer_init(
 	t->state = XFER_INIT;
 	t->src_fd = src_fd;
 	t->dst_fd = dst_fd;
-	struct ev_io *restrict w_socket = &t->w_socket;
-	ev_io_init(w_socket, transfer_cb, src_fd, EV_READ);
-	ev_set_priority(w_socket, EV_MINPRI);
-	w_socket->data = t;
+	ev_io_init(&t->w_socket, transfer_cb, src_fd, EV_READ);
+	ev_set_priority(&t->w_socket, EV_MINPRI);
+	t->w_socket.data = t;
 	t->state_cb = *callback;
 	t->byt_transferred = byt_transferred;
 
