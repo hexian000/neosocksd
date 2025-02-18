@@ -440,7 +440,8 @@ rpcall_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 	}
 	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall_return");
 	const enum content_encodings encoding =
-		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ?
+		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ||
+				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
 			CENCODING_NONE :
 			CENCODING_DEFLATE;
 	struct stream *writer =

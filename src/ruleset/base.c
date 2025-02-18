@@ -313,10 +313,11 @@ int aux_async(
 }
 
 static bool ruleset_pcallv(
-	lua_State *restrict L, const lua_CFunction func, const int nargs,
+	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
 	const int nresults, va_list args)
 {
-	struct ruleset *restrict r = aux_getruleset(L);
+	lua_State *restrict L = r->L;
+	lua_settop(L, 0);
 	int errfunc = 0;
 	if (r->config.traceback) {
 		lua_pushcfunction(L, aux_traceback);
@@ -338,11 +339,9 @@ bool ruleset_pcall(
 	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
 	const int nresults, ...)
 {
-	lua_State *restrict L = r->L;
-	lua_settop(L, 0);
 	va_list args;
 	va_start(args, nresults);
-	const bool result = ruleset_pcallv(L, func, nargs, nresults, args);
+	const bool result = ruleset_pcallv(r, func, nargs, nresults, args);
 	va_end(args);
 	return result;
 }

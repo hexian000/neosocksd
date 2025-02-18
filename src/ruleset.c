@@ -198,7 +198,7 @@ void ruleset_free(struct ruleset *restrict r)
 #define CONST_LSTRING(s, len)                                                  \
 	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
 
-const char *ruleset_geterror(struct ruleset *restrict r, size_t *len)
+const char *ruleset_geterror(struct ruleset *restrict r, size_t *restrict len)
 {
 	lua_State *restrict L = r->L;
 	const char *s = NULL;
