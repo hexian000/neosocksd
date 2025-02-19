@@ -262,13 +262,13 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 	};
 	unsigned char buf[SOCKS5_RSPLEN];
 
-	unsigned char *const hdr = buf;
+	unsigned char *const restrict hdr = buf;
 	write_uint8(hdr + offsetof(struct socks5_hdr, version), SOCKS5);
 	write_uint8(hdr + offsetof(struct socks5_hdr, command), rsp);
 	write_uint8(hdr + offsetof(struct socks5_hdr, reserved), 0);
 
 	size_t len = sizeof(struct socks5_hdr);
-	unsigned char *const addrbuf = buf + len;
+	unsigned char *const restrict addrbuf = buf + len;
 	switch (addr.sa.sa_family) {
 	case AF_INET: {
 		write_uint8(
@@ -276,7 +276,7 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 			SOCKS5ADDR_IPV4);
 		memcpy(addrbuf, &addr.in.sin_addr, sizeof(addr.in.sin_addr));
 		len += sizeof(addr.in.sin_addr);
-		unsigned char *const portbuf = buf + len;
+		unsigned char *const restrict portbuf = buf + len;
 		memcpy(portbuf, &addr.in.sin_port, sizeof(addr.in.sin_port));
 		len += sizeof(addr.in.sin_port);
 	} break;
@@ -287,7 +287,7 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 		memcpy(addrbuf, &addr.in6.sin6_addr,
 		       sizeof(addr.in6.sin6_addr));
 		len += sizeof(addr.in6.sin6_addr);
-		unsigned char *const portbuf = buf + len;
+		unsigned char *const restrict portbuf = buf + len;
 		memcpy(portbuf, &addr.in6.sin6_port,
 		       sizeof(addr.in6.sin6_port));
 		len += sizeof(addr.in6.sin6_port);
@@ -295,7 +295,7 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 	default:
 		FAIL();
 	}
-	(void)send_rsp(ctx, &buf, len);
+	(void)send_rsp(ctx, buf, len);
 }
 
 static void
@@ -590,7 +590,7 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	default:
 		FAIL();
 	}
-	const unsigned char *req = ctx->next;
+	const unsigned char *restrict req = ctx->next;
 	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
 	size_t want = 2;
 	if (len < want) {

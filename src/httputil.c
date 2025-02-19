@@ -311,30 +311,30 @@ int http_parser_recv(struct http_parser *restrict p)
 	}
 }
 
-static char *strtrimleftspace(char *s)
+static char *strtrimleftspace(char *restrict s)
 {
-	const unsigned char *restrict p = (unsigned char *)s;
+	const unsigned char *p = (unsigned char *)s;
 	while (*p && isspace(*p)) {
 		p++;
 	}
 	return (char *)p;
 }
 
-static char *strtrimrightspace(char *s)
+static char *strtrimrightspace(char *restrict s)
 {
-	unsigned char *restrict e = (unsigned char *)s + strlen(s) - 1;
+	unsigned char *e = (unsigned char *)s + strlen(s) - 1;
 	while ((unsigned char *)s < e && isspace(*e)) {
 		*e-- = '\0';
 	}
 	return s;
 }
 
-static char *strtrimspace(char *s)
+static char *strtrimspace(char *restrict s)
 {
 	return strtrimrightspace(strtrimleftspace(s));
 }
 
-bool parsehdr_accept_te(struct http_parser *restrict p, char *value)
+bool parsehdr_accept_te(struct http_parser *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 	if (value[0] == '\0') {
@@ -348,7 +348,8 @@ bool parsehdr_accept_te(struct http_parser *restrict p, char *value)
 	return false;
 }
 
-bool parsehdr_transfer_encoding(struct http_parser *restrict p, char *value)
+bool parsehdr_transfer_encoding(
+	struct http_parser *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 	if (value[0] == '\0') {
@@ -362,7 +363,8 @@ bool parsehdr_transfer_encoding(struct http_parser *restrict p, char *value)
 	return false;
 }
 
-bool parsehdr_accept_encoding(struct http_parser *restrict p, char *value)
+bool parsehdr_accept_encoding(
+	struct http_parser *restrict p, char *restrict value)
 {
 	if (strcmp(value, "*") == 0) {
 		p->hdr.accept_encoding = CENCODING_DEFLATE;
@@ -384,7 +386,8 @@ bool parsehdr_accept_encoding(struct http_parser *restrict p, char *value)
 	return false;
 }
 
-bool parsehdr_content_length(struct http_parser *restrict p, char *value)
+bool parsehdr_content_length(
+	struct http_parser *restrict p, char *restrict value)
 {
 	char *endptr;
 	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
@@ -400,7 +403,8 @@ bool parsehdr_content_length(struct http_parser *restrict p, char *value)
 	return true;
 }
 
-bool parsehdr_content_encoding(struct http_parser *restrict p, char *value)
+bool parsehdr_content_encoding(
+	struct http_parser *restrict p, char *restrict value)
 {
 	for (size_t i = 0; i < CENCODING_MAX; i++) {
 		if (content_encoding_str[i] == NULL) {
@@ -415,7 +419,7 @@ bool parsehdr_content_encoding(struct http_parser *restrict p, char *value)
 	return false;
 }
 
-bool parsehdr_expect(struct http_parser *restrict p, char *value)
+bool parsehdr_expect(struct http_parser *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 	if (strcasecmp(value, "100-continue") != 0) {
