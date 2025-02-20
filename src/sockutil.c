@@ -228,11 +228,9 @@ int format_sa(
 {
 	switch (sa->sa_family) {
 	case AF_INET:
-		return format_sa_inet(
-			s, maxlen, (struct sockaddr_in *restrict)sa);
+		return format_sa_inet(s, maxlen, (struct sockaddr_in *)sa);
 	case AF_INET6:
-		return format_sa_inet6(
-			s, maxlen, (struct sockaddr_in6 *restrict)sa);
+		return format_sa_inet6(s, maxlen, (struct sockaddr_in6 *)sa);
 	default:
 		break;
 	}

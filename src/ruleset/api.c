@@ -52,13 +52,13 @@ static int api_async(lua_State *restrict L)
 static int api_invoke(lua_State *restrict L)
 {
 	size_t len;
-	const char *code = luaL_checklstring(L, 1, &len);
+	const char *restrict code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L) - 1;
 	if (!aux_todialreq(L, n)) {
 		lua_pushliteral(L, ERR_INVALID_INVOKE);
 		return lua_error(L);
 	}
-	struct dialreq *req = lua_touserdata(L, -1);
+	struct dialreq *restrict req = lua_touserdata(L, -1);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_INVOKE);
 		return lua_error(L);
@@ -71,7 +71,7 @@ static int api_invoke(lua_State *restrict L)
 /* neosocksd.resolve(host) */
 static int api_resolve(lua_State *restrict L)
 {
-	const char *name = luaL_checkstring(L, 1);
+	const char *restrict name = luaL_checkstring(L, 1);
 	union sockaddr_max addr;
 	if (!resolve_addr(&addr, name, NULL, G.conf->resolve_pf)) {
 		return 0;
@@ -83,7 +83,7 @@ static int api_resolve(lua_State *restrict L)
 /* neosocksd.parse_ipv4(ipv4) */
 static int api_parse_ipv4(lua_State *restrict L)
 {
-	const char *s = lua_tostring(L, 1);
+	const char *restrict s = lua_tostring(L, 1);
 	if (s == NULL) {
 		return 0;
 	}
@@ -99,7 +99,7 @@ static int api_parse_ipv4(lua_State *restrict L)
 /* neosocksd.parse_ipv6(ipv6) */
 static int api_parse_ipv6(lua_State *restrict L)
 {
-	const char *s = lua_tostring(L, 1);
+	const char *restrict s = lua_tostring(L, 1);
 	if (s == NULL) {
 		return 0;
 	}
@@ -145,7 +145,7 @@ static int api_setinterval(lua_State *restrict L)
 static int api_splithostport(lua_State *restrict L)
 {
 	size_t len;
-	const char *s = luaL_checklstring(L, 1, &len);
+	const char *restrict s = luaL_checklstring(L, 1, &len);
 	/* FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + 1 + 5) {
 		(void)lua_pushfstring(L, "address too long: %zu bytes", len);

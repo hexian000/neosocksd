@@ -60,7 +60,7 @@ static int stream_copyall(struct stream_context *restrict s)
 static int zlib_compress(lua_State *restrict L)
 {
 	size_t len;
-	const char *src = luaL_checklstring(L, 1, &len);
+	const char *restrict src = luaL_checklstring(L, 1, &len);
 	struct stream_context *restrict s =
 		lua_newuserdata(L, sizeof(struct stream_context));
 	s->out = NULL;
@@ -88,7 +88,7 @@ static int zlib_compress(lua_State *restrict L)
 static int zlib_uncompress(lua_State *restrict L)
 {
 	size_t len;
-	const char *src = luaL_checklstring(L, 1, &len);
+	const char *restrict src = luaL_checklstring(L, 1, &len);
 	struct stream_context *restrict s =
 		lua_newuserdata(L, sizeof(struct stream_context));
 	s->out = NULL;

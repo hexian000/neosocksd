@@ -36,8 +36,8 @@ static size_t cstrpos(lua_Integer pos, size_t len)
 /* regex.compile(pattern) */
 static int regex_compile(lua_State *restrict L)
 {
-	const char *pattern = luaL_checkstring(L, 1);
-	regex_t *preg = lua_newuserdata(L, sizeof(regex_t));
+	const char *restrict pattern = luaL_checkstring(L, 1);
+	regex_t *restrict preg = lua_newuserdata(L, sizeof(regex_t));
 	const int err = regcomp(preg, pattern, REG_EXTENDED | REG_NEWLINE);
 	if (err != 0) {
 		char errbuf[256];
@@ -51,9 +51,9 @@ static int regex_compile(lua_State *restrict L)
 /* regex.find(reg, s [, init]) */
 static int regex_find(lua_State *restrict L)
 {
-	regex_t *preg = luaL_checkudata(L, 1, MT_REGEX);
+	regex_t *restrict preg = luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
-	const char *s = luaL_checklstring(L, 2, &len);
+	const char *restrict s = luaL_checklstring(L, 2, &len);
 	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
 	s += init;
 	regmatch_t match;
@@ -90,7 +90,7 @@ static int regex_match(lua_State *restrict L)
 {
 	const regex_t *restrict preg = luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
-	const char *s = luaL_checklstring(L, 2, &len);
+	const char *restrict s = luaL_checklstring(L, 2, &len);
 	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
 	s += init;
 	const size_t nmatch = preg->re_nsub + 1;
@@ -112,7 +112,7 @@ static int gmatch_aux(lua_State *restrict L)
 {
 	const regex_t *restrict preg = lua_touserdata(L, lua_upvalueindex(1));
 	size_t len;
-	const char *s = lua_tolstring(L, lua_upvalueindex(2), &len);
+	const char *restrict s = lua_tolstring(L, lua_upvalueindex(2), &len);
 	const size_t init = cstrpos(lua_tointeger(L, lua_upvalueindex(3)), len);
 	s += init;
 	const size_t nmatch = preg->re_nsub + 1;

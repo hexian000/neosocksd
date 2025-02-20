@@ -142,7 +142,7 @@ static void sock_state_cb(
 	const int events = (readable ? EV_READ : 0) | (writable ? EV_WRITE : 0);
 
 	/* find an active watcher on same fd or an inactive watcher to reuse */
-	struct io_node *node = NULL;
+	struct io_node *restrict node = NULL;
 	for (struct io_node *it = &r->sockets; it != NULL; it = it->next) {
 		if (it->watcher.fd == fd) {
 			node = it;
@@ -169,9 +169,8 @@ static void sock_state_cb(
 			LOGOOM();
 			return;
 		}
-		struct ev_io *restrict w_socket = &node->watcher;
-		ev_io_init(w_socket, socket_cb, fd, events);
-		w_socket->data = r;
+		ev_io_init(&node->watcher, socket_cb, fd, events);
+		node->watcher.data = r;
 		/* insert */
 		node->next = r->sockets.next;
 		r->sockets.next = node;
@@ -190,7 +189,7 @@ static void sock_state_cb(
 static bool
 find_addrinfo(union sockaddr_max *addr, const struct ares_addrinfo_node *node)
 {
-	for (const struct ares_addrinfo_node *it = node; it != NULL;
+	for (const struct ares_addrinfo_node *restrict it = node; it != NULL;
 	     it = it->ai_next) {
 #define EXPECT_ADDRLEN(p, expected)                                            \
 	do {                                                                   \
@@ -278,8 +277,8 @@ void resolver_free(struct resolver *restrict r)
 }
 
 #if WITH_CARES
-static bool
-resolver_async_init(struct resolver *restrict r, const struct config *conf)
+static bool resolver_async_init(
+	struct resolver *restrict r, const struct config *restrict conf)
 {
 	int ret;
 	struct ares_options options;
@@ -307,7 +306,8 @@ resolver_async_init(struct resolver *restrict r, const struct config *conf)
 }
 #endif /* WITH_CARES */
 
-struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf)
+struct resolver *
+resolver_new(struct ev_loop *loop, const struct config *restrict conf)
 {
 	struct resolver *restrict r = malloc(sizeof(struct resolver));
 	if (r == NULL) {
@@ -329,12 +329,12 @@ struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf)
 	return r;
 }
 
-const struct resolver_stats *resolver_stats(struct resolver *r)
+const struct resolver_stats *resolver_stats(struct resolver *restrict r)
 {
 	return &r->stats;
 }
 
-void resolve_start(struct resolver *r, struct resolve_query *restrict q)
+void resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
 {
 	LOGV_F("resolve %p: start name=`%s' service=%s pf=%d", (void *)q,
 	       q->name, q->service, q->family);
@@ -362,8 +362,9 @@ void resolve_start(struct resolver *r, struct resolve_query *restrict q)
 }
 
 struct resolve_query *resolve_do(
-	struct resolver *r, struct resolve_cb cb, const char *name,
-	const char *service, const int family)
+	struct resolver *restrict r, struct resolve_cb cb,
+	const char *restrict name, const char *restrict service,
+	const int family)
 {
 	const size_t namelen = (name != NULL) ? strlen(name) + 1 : 0;
 	const size_t servlen = (service != NULL) ? strlen(service) + 1 : 0;

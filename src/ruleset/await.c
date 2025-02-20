@@ -72,7 +72,7 @@ struct await_sleep_userdata {
 
 static int await_sleep_close(lua_State *restrict L)
 {
-	struct await_sleep_userdata *ud = lua_touserdata(L, 1);
+	struct await_sleep_userdata *restrict ud = lua_touserdata(L, 1);
 	struct ev_loop *loop = ud->ruleset->loop;
 	ev_timer_stop(loop, &ud->w_timer);
 	ev_idle_stop(loop, &ud->w_idle);
@@ -199,9 +199,9 @@ await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 static int await_resolve(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
-	const char *name = luaL_checkstring(L, 1);
+	const char *restrict name = luaL_checkstring(L, 1);
 	lua_settop(L, 1);
-	struct await_resolve_userdata *ud =
+	struct await_resolve_userdata *restrict ud =
 		lua_newuserdata(L, sizeof(struct await_resolve_userdata));
 	ud->ruleset = aux_getruleset(L);
 	ud->query = NULL;
@@ -300,7 +300,7 @@ static int await_invoke(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
 	size_t len;
-	const char *code = luaL_checklstring(L, 1, &len);
+	const char *restrict code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L) - 1;
 	if (!aux_todialreq(L, n)) {
 		lua_pushliteral(L, ERR_INVALID_INVOKE);

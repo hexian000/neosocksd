@@ -291,8 +291,8 @@ timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 }
 
 static bool make_request(
-	struct http_parser *restrict p, const char *uri, const char *content,
-	const size_t len)
+	struct http_parser *restrict p, const char *restrict uri,
+	const void *restrict content, const size_t len)
 {
 	const enum content_encodings encoding =
 		(len < RPCALL_COMPRESS_THRESHOLD) ? CENCODING_NONE :
@@ -359,9 +359,10 @@ static bool parse_header(void *ctx, const char *key, char *value)
 }
 
 static bool api_client_do(
-	struct ev_loop *loop, struct api_client_ctx **pctx, struct dialreq *req,
-	const char *uri, const char *payload, const size_t len,
-	const struct api_client_cb *in_cb)
+	struct ev_loop *loop, struct api_client_ctx **restrict pctx,
+	struct dialreq *restrict req, const char *restrict uri,
+	const void *restrict payload, const size_t len,
+	const struct api_client_cb *restrict in_cb)
 {
 	CHECK(len <= INT_MAX);
 	struct api_client_ctx *restrict ctx =
@@ -414,7 +415,7 @@ static bool api_client_do(
 }
 
 void api_client_invoke(
-	struct ev_loop *loop, struct dialreq *req, const char *payload,
+	struct ev_loop *loop, struct dialreq *req, const void *payload,
 	const size_t len)
 {
 	(void)api_client_do(
@@ -424,7 +425,7 @@ void api_client_invoke(
 
 bool api_client_rpcall(
 	struct ev_loop *loop, struct api_client_ctx **pctx, struct dialreq *req,
-	const char *payload, const size_t len, const struct api_client_cb *cb)
+	const void *payload, const size_t len, const struct api_client_cb *cb)
 {
 	ASSERT(cb->func != NULL);
 	return api_client_do(

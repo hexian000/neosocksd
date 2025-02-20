@@ -42,7 +42,8 @@ static bool is_startup_limited(struct server *restrict s)
 	return false;
 }
 
-static void accept_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void
+accept_cb(struct ev_loop *loop, struct ev_io *restrict watcher, int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 
@@ -96,8 +97,7 @@ timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 	CHECK_REVENTS(revents, EV_TIMER);
 	ev_timer_stop(loop, watcher);
 	struct listener *restrict l = watcher->data;
-	struct ev_io *restrict w_accept = &l->w_accept;
-	ev_io_start(loop, w_accept);
+	ev_io_start(loop, &l->w_accept);
 }
 
 void server_init(
@@ -112,7 +112,8 @@ void server_init(
 	};
 }
 
-bool server_start(struct server *s, const struct sockaddr *bindaddr)
+bool server_start(
+	struct server *restrict s, const struct sockaddr *restrict bindaddr)
 {
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {

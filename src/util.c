@@ -219,7 +219,7 @@ void modify_io_events(
 	}
 }
 
-bool parse_user(struct user_ident *ident, const char *s)
+bool parse_user(struct user_ident *restrict ident, const char *restrict s)
 {
 	const size_t len = strlen(s);
 	if (len >= 1024) {
@@ -331,7 +331,8 @@ void drop_privileges(const struct user_ident *restrict ident)
 }
 
 void daemonize(
-	const struct user_ident *ident, const bool nochdir, const bool noclose)
+	const struct user_ident *restrict ident, const bool nochdir,
+	const bool noclose)
 {
 	/* Create an anonymous pipe for communicating with daemon process. */
 	int fd[2];

@@ -20,12 +20,12 @@ struct api_client_cb {
 };
 
 void api_client_invoke(
-	struct ev_loop *loop, struct dialreq *req, const char *payload,
+	struct ev_loop *loop, struct dialreq *req, const void *payload,
 	size_t len);
 
 bool api_client_rpcall(
 	struct ev_loop *loop, struct api_client_ctx **pctx, struct dialreq *req,
-	const char *payload, size_t len, const struct api_client_cb *cb);
+	const void *payload, size_t len, const struct api_client_cb *cb);
 
 void api_client_cancel(struct ev_loop *loop, struct api_client_ctx *ctx);
 
