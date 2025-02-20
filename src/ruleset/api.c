@@ -6,7 +6,6 @@
 #include "base.h"
 
 #include "net/addr.h"
-#include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/serialize.h"
 
