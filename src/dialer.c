@@ -1186,7 +1186,6 @@ static bool connect_sa(
 		socket_set_fastopen_connect(fd, true);
 	}
 #endif
-	ev_io_set(&d->w_socket, fd, EV_NONE);
 	if (LOGLEVEL(VERBOSE)) {
 		char addr_str[64];
 		format_sa(addr_str, sizeof(addr_str), sa);
