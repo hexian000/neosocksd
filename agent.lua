@@ -288,7 +288,7 @@ function agent.probe(peername)
         t[connid] = async(probe_via, connid, peername)
     end
     for connid, r in pairs(t) do
-        local ok, err = r:wait()
+        local ok, err = r:get()
         if not ok then error(err) end
         if err then
             errors:insertf("[%s] %q", connid, err:match("^(.-)\n") or err)

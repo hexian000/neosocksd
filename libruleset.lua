@@ -280,11 +280,11 @@ end
 
 _G.parse_cidr6 = parse_cidr6
 
--- [[ thread: asynchronous routines ]] --
-local thread = {}
-local thread_mt = { __name = "async", __index = thread }
+-- [[ asynchronous routines ]] --
+local future = {}
+local future_mt = { __name = "future", __index = future }
 
-function thread:wait()
+function future:get()
     if self.result then
         return table.unpack(self.result)
     end
@@ -297,7 +297,7 @@ function thread:wait()
 end
 
 function _G.async(f, ...)
-    local t = setmetatable({ wakeup = {} }, thread_mt)
+    local t = setmetatable({ wakeup = {} }, future_mt)
     local function finish(ok, ...)
         t.result = table.pack(ok, ...)
         for co, _ in pairs(t.wakeup) do

@@ -360,6 +360,8 @@ local co, err = neosocksd.async(finish, func, ...)
 
 Low-level API to start an asynchronous routine. Asynchronous routines are based on Lua coroutines. I.e., they run concurrently, but not in parallel. This interface is usually not called directly by user scripts. See [_G.async](#_gasync).
 
+*Share the coroutine pool with request handlers for better performance.*
+
 
 ### neosocksd.invoke
 
@@ -501,16 +503,16 @@ To be symmetric, there is also `_G.unmarshal(s)` in `libruleset.lua`.
 ```Lua
 async(function(...)
     -- routine0
-    local t1 = async(function(...)
+    local future1 = async(function(...)
         -- routine1
         return "result1"
     end, ...)
-    local t2 = async(function(...)
+    local future2 = async(function(...)
         -- routine2
         return "result2"
     end, ...)
-    local ok, r1 = t1:wait()
-    local ok, r2 = t2:wait()
+    local ok1, r1 = future1:get()
+    local ok2, r2 = future2:get()
 end, ...)
 ```
 

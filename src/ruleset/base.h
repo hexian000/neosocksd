@@ -8,6 +8,8 @@
 
 #include "lua.h"
 
+_Static_assert(LUA_VERSION_NUM >= 503, "ruleset requires Lua >= 5.3");
+
 #include <ev.h>
 
 #include <stdbool.h>

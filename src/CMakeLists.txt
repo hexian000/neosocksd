@@ -112,16 +112,19 @@ endif()
 find_path(LUA_INCLUDE_DIR
     NAMES luaconf.h lua.h lualib.h lauxlib.h
     PATH_SUFFIXES
+    lua55 lua5.5 lua-5.5
     lua54 lua5.4 lua-5.4
     lua53 lua5.3 lua-5.3
     lua
 )
 find_library(LUA_LIBRARY
     NAMES
+    liblua55.a liblua5.5.a liblua-5.5.a
     liblua54.a liblua5.4.a liblua-5.4.a
     liblua53.a liblua5.3.a liblua-5.3.a
     liblua.a
     PATH_SUFFIXES
+    lua55 lua5.5 lua-5.5
     lua54 lua5.4 lua-5.4
     lua53 lua5.3 lua-5.3
     lua
@@ -129,34 +132,26 @@ find_library(LUA_LIBRARY
 if((NOT EXISTS ${LUA_LIBRARY}) AND (NOT BUILD_STATIC))
     find_library(LUA_LIBRARY
         NAMES
+        lua55 lua5.5 lua-5.5
         lua54 lua5.4 lua-5.4
         lua53 lua5.3 lua-5.3
         lua
         PATH_SUFFIXES
+        lua55 lua5.5 lua-5.5
         lua54 lua5.4 lua-5.4
         lua53 lua5.3 lua-5.3
         lua
     )
 endif()
-if(EXISTS "${LUA_INCLUDE_DIR}/lua.h")
-    file(READ "${LUA_INCLUDE_DIR}/lua.h" LUA_VERSION_STR)
-    string(REGEX MATCH "#define LUA_VERSION_MAJOR[ \t]+\"([^\n]*)\"" _ ${LUA_VERSION_STR})
-    set(LUA_VERSION_MAJOR ${CMAKE_MATCH_1})
-    string(REGEX MATCH "#define LUA_VERSION_MINOR[ \t]+\"([^\n]*)\"" _ ${LUA_VERSION_STR})
-    set(LUA_VERSION_MINOR ${CMAKE_MATCH_1})
-    string(REGEX MATCH "#define LUA_VERSION_RELEASE[ \t]+\"([^\n]*)\"" _ ${LUA_VERSION_STR})
-    set(LUA_VERSION_RELEASE ${CMAKE_MATCH_1})
-    set(LUA_VERSION "${LUA_VERSION_MAJOR}.${LUA_VERSION_MINOR}.${LUA_VERSION_RELEASE}")
-endif()
-if((${LUA_VERSION} VERSION_GREATER_EQUAL "5.3.0") AND (EXISTS ${LUA_LIBRARY}))
+if((EXISTS "${LUA_INCLUDE_DIR}/lua.h") AND (EXISTS ${LUA_LIBRARY}))
     set(WITH_LUA TRUE)
 endif()
 
 if(ENABLE_RULESET)
     if(NOT WITH_LUA)
-        message(FATAL_ERROR "Lua (>= 5.3) not found, ruleset is not available")
+        message(FATAL_ERROR "Lua not found, ruleset is not available")
     endif()
-    message(STATUS "Lua ${LUA_VERSION}: ${LUA_LIBRARY}")
+    message(STATUS "Lua: ${LUA_LIBRARY}")
     set(WITH_RULESET TRUE)
     target_include_directories(neosocksd SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
     target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})

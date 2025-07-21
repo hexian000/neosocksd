@@ -17,6 +17,7 @@
 #include "ruleset/time.h"
 #include "ruleset/zlib.h"
 
+#include "math/rand.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
@@ -158,7 +159,12 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	const int memlimit_mb = G.conf->memlimit;
 	r->config.memlimit_kb = (memlimit_mb > 0) ? (memlimit_mb << 10u) : 0;
 	r->config.traceback = !!G.conf->traceback;
-	lua_State *restrict L = lua_newstate(l_alloc, r);
+	lua_State *restrict L =
+#if LUA_VERSION_NUM >= 505
+		lua_newstate(l_alloc, r, (unsigned int)rand64());
+#else
+		lua_newstate(l_alloc, r);
+#endif
 	if (L == NULL) {
 		free(r);
 		return NULL;
