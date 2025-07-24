@@ -31,6 +31,7 @@ local TIMESTAMP_TOLERANCE = 600
 local PEERDB_EXPIRY_TIME = 3600
 
 agent.probettl = table.get(_G.agent, "probettl") or 2
+agent.verbose = table.get(_G.agent, "verbose")
 
 local function is_valid(t, expiry_time, now)
     local timestamp = t.timestamp
@@ -123,7 +124,11 @@ function rule.agent()
             addr = strformat("%s%s:%s", sub, domain, port)
             local connid = peers[peername]
             local conn = agent.conns[connid]
-            return addr, list:new(conn):reverse():unpack()
+            local proxies = list:new(conn):reverse()
+            if agent.verbose then
+                evlogf("relay: [%d] %s %s,%s", connid, peername, addr, proxies:concat(","))
+            end
+            return addr, proxies:unpack()
         end
         sub = subdomain(fqdn, INTERNAL_DOMAIN)
         assert(sub)
@@ -143,7 +148,11 @@ function rule.agent()
             addr = strformat("%s%s:%s", t:concat("."), RELAY_DOMAIN, port)
         end
         local conn = agent.conns[connid]
-        return addr, list:new(conn):reverse():unpack()
+        local proxies = list:new(conn):reverse()
+        if agent.verbose then
+            evlogf("forward: [%d] %s %s,%s", connid, peername, addr, proxies:concat(","))
+        end
+        return addr, proxies:unpack()
     end
 end
 
