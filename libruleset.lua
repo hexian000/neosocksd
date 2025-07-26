@@ -589,7 +589,10 @@ function match.regex(s)
             return not not reg:find(addr)
         end
     end
-    local regs = list:new(s):map(regex.compile):totable()
+    local regs = {}
+    for i, pat in ipairs(s) do
+        regs[i] = regex.compile(pat)
+    end
     return function(addr)
         for _, reg in pairs(regs) do
             if reg:find(addr) then
@@ -672,16 +675,16 @@ end
 
 function rule.redirect(dst, ...)
     local chain = list:new({ ... }):reverse()
-    local host, port = splithostport(dst)
+    local host, port, _ = splithostport(dst)
     if host == "" then
         return function(addr)
-            local host, _ = splithostport(addr)
+            host, _ = splithostport(addr)
             return strformat("%s:%s", host, port), chain:unpack()
         end
     end
     if port == "" then
         return function(addr)
-            local _, port = splithostport(addr)
+            _, port = splithostport(addr)
             return strformat("%s:%s", host, port), chain:unpack()
         end
     end
