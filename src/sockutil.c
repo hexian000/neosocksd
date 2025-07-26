@@ -241,29 +241,28 @@ static bool find_addrinfo(
 	union sockaddr_max *restrict sa, const struct addrinfo *restrict node)
 {
 	for (const struct addrinfo *it = node; it != NULL; it = it->ai_next) {
-#define EXPECT_ADDRLEN(p, expected)                                            \
-	do {                                                                   \
-		if ((p)->ai_addrlen != (expected)) {                           \
-			LOGE_F("getaddrinfo: invalid ai_addrlen %ju (af=%d)",  \
-			       (uintmax_t)(p)->ai_addrlen, (p)->ai_family);    \
-			continue;                                              \
-		}                                                              \
-	} while (0)
-
 		switch (it->ai_family) {
 		case AF_INET:
-			EXPECT_ADDRLEN(it, sizeof(struct sockaddr_in));
+			if (it->ai_addrlen != sizeof(struct sockaddr_in)) {
+				LOGE_F("getaddrinfo: invalid ai_addrlen %ju (af=%d)",
+				       (uintmax_t)it->ai_addrlen,
+				       it->ai_family);
+				continue;
+			}
 			sa->in = *(struct sockaddr_in *)it->ai_addr;
 			break;
 		case AF_INET6:
-			EXPECT_ADDRLEN(it, sizeof(struct sockaddr_in6));
+			if (it->ai_addrlen != sizeof(struct sockaddr_in6)) {
+				LOGE_F("getaddrinfo: invalid ai_addrlen %ju (af=%d)",
+				       (uintmax_t)it->ai_addrlen,
+				       it->ai_family);
+				continue;
+			}
 			sa->in6 = *(struct sockaddr_in6 *)it->ai_addr;
 			break;
 		default:
 			continue;
 		}
-
-#undef EXPECT_ADDRLEN
 		return true;
 	}
 	return false;
@@ -306,7 +305,7 @@ bool resolve_addr(
 	union sockaddr_max *restrict sa, const char *restrict name,
 	const char *restrict service, const int family)
 {
-	struct addrinfo hints = {
+	const struct addrinfo hints = {
 		.ai_family = family,
 		.ai_socktype = SOCK_STREAM,
 		.ai_protocol = IPPROTO_TCP,

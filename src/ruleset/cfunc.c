@@ -29,7 +29,7 @@ static int ruleset_state_gc(lua_State *restrict L)
 		return 0;
 	}
 	state->cb->ok = false;
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
 	state->cb = NULL;
 	return 0;
@@ -37,7 +37,7 @@ static int ruleset_state_gc(lua_State *restrict L)
 
 static void check_memlimit(lua_State *restrict L)
 {
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	const int memlimit_kb = r->config.memlimit_kb;
 	if (memlimit_kb <= 0) {
 		return;
@@ -66,7 +66,7 @@ static int request_finish(lua_State *restrict L)
 	}
 	state->cb->ok = true;
 	state->cb->request.req = req;
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
 	state->cb = NULL;
 	return 0;
@@ -176,7 +176,7 @@ static int rpcall_finish(lua_State *restrict L)
 	state->cb->ok = true;
 	state->cb->rpcall.result = s;
 	state->cb->rpcall.resultlen = len;
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
 	state->cb = NULL;
 	return 0;

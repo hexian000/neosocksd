@@ -9,6 +9,9 @@
 #include <stdbool.h>
 #include <time.h>
 
+#define PUSH_TIMESPEC(L, t)                                                    \
+	lua_pushnumber((L), (double)(t).tv_sec + (double)(t).tv_nsec * 1e-9)
+
 /* time.monotonic() */
 static int time_monotonic(lua_State *restrict L)
 {
@@ -17,7 +20,7 @@ static int time_monotonic(lua_State *restrict L)
 		lua_pushinteger(L, -1);
 		return 1;
 	}
-	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
+	PUSH_TIMESPEC(L, t);
 	return 1;
 }
 
@@ -29,7 +32,7 @@ static int time_process(lua_State *restrict L)
 		lua_pushinteger(L, -1);
 		return 1;
 	}
-	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
+	PUSH_TIMESPEC(L, t);
 	return 1;
 }
 
@@ -41,7 +44,7 @@ static int time_thread(lua_State *restrict L)
 		lua_pushinteger(L, -1);
 		return 1;
 	}
-	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
+	PUSH_TIMESPEC(L, t);
 	return 1;
 }
 
@@ -53,7 +56,7 @@ static int time_wall(lua_State *restrict L)
 		lua_pushinteger(L, -1);
 		return 1;
 	}
-	lua_pushnumber(L, t.tv_sec + t.tv_nsec * 1e-9);
+	PUSH_TIMESPEC(L, t);
 	return 1;
 }
 
@@ -77,7 +80,8 @@ static int time_measure(lua_State *restrict L)
 		return nres;
 	}
 	lua_pushnumber(
-		L, (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9);
+		L, (double)(t1.tv_sec - t0.tv_sec) +
+			   (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9);
 	lua_replace(L, 1);
 	return nres;
 }

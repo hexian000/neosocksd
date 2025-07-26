@@ -49,10 +49,10 @@ struct api_ctx {
 	enum api_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
-	struct ev_timer w_timeout;
-	struct ev_io w_recv, w_send;
+	ev_timer w_timeout;
+	ev_io w_recv, w_send;
 #if WITH_RULESET
-	struct ev_idle w_ruleset;
+	ev_idle w_ruleset;
 	struct ruleset_callback rpcreturn;
 	struct ruleset_state *rpcstate;
 #endif
@@ -362,7 +362,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 #endif
 
-	int err = stream_close(w);
+	const int err = stream_close(w);
 	if (err != 0) {
 		LOGE_F("stream_close error: %d", err);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -422,7 +422,7 @@ static void send_errmsg(
 		sizeof(str) - 1)
 
 static void
-rpcall_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct api_ctx *restrict ctx = watcher->data;
@@ -433,7 +433,7 @@ rpcall_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 		return;
 	}
 	const char *result = ctx->rpcreturn.rpcall.result;
-	size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
+	const size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
 	if (result == NULL) {
 		SEND_ERRSTR(loop, ctx, "rpcall is cancelled");
 		return;
@@ -612,7 +612,7 @@ static void handle_ruleset_gc(
 }
 
 static void
-process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+process_cb(struct ev_loop *loop, struct ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -729,7 +729,7 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
 
-	struct server_stats *restrict stats = &ctx->s->stats;
+	const struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
 	case STATE_INIT:
 		return;
@@ -778,7 +778,7 @@ api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 	api_ctx_close(loop, ctx);
 }
 
-void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+void recv_cb(struct ev_loop *loop, struct ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 	struct api_ctx *restrict ctx = watcher->data;
@@ -809,7 +809,7 @@ void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	api_handle(loop, ctx);
 }
 
-void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct api_ctx *restrict ctx = watcher->data;
@@ -853,7 +853,7 @@ void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 }
 
 static void
-timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct api_ctx *restrict ctx = watcher->data;

@@ -38,11 +38,11 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	while (len--) {
 		const unsigned char ch = *str;
 		if (ch == '"' || ch == '\\' || ch == '\n') {
-			char buf[2] = { '\\', ch };
+			const unsigned char buf[2] = { '\\', ch };
 			*pvbuf = VBUF_APPEND(*pvbuf, buf, sizeof(buf));
 		} else if (iscntrl(ch)) {
-			char buf[4];
-			char *s = &buf[sizeof(buf)];
+			unsigned char buf[4];
+			unsigned char *s = &buf[sizeof(buf)];
 			uint_fast8_t x = ch;
 			*--s = '0' + x % 10, x /= 10;
 			*--s = '0' + x % 10, x /= 10;
@@ -64,11 +64,11 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	const int idx = 1;
 	static const char prefix[3] = "-0x";
 	static const char xdigits[16] = "0123456789abcdef";
-	char buf[120];
+	unsigned char buf[120];
 	if (lua_isinteger(L, idx)) {
 		lua_Integer x = lua_tointeger(L, idx);
-		char *const bufend = &buf[sizeof(buf)];
-		char *s = bufend;
+		unsigned char *const bufend = &buf[sizeof(buf)];
+		unsigned char *s = bufend;
 		if (x == 0) {
 			*pvbuf = VBUF_APPENDSTR(*pvbuf, "0");
 			return;
@@ -116,7 +116,7 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	default:
 		break;
 	}
-	char *s = buf;
+	unsigned char *s = buf;
 	/* prefix */
 	const char *p = prefix;
 	const char *pend = prefix + sizeof(prefix);
@@ -131,8 +131,8 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	if (x) {
 		e2--;
 	}
-	char *const bufend = &buf[sizeof(buf)];
-	char *estr = bufend;
+	unsigned char *const bufend = &buf[sizeof(buf)];
+	unsigned char *estr = bufend;
 	for (int r = e2 < 0 ? -e2 : e2; r; r /= 10) {
 		*--estr = '0' + r % 10;
 	}
@@ -143,7 +143,7 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	*--estr = 'p';
 	/* mantissa */
 	do {
-		const int i = x;
+		const int i = (int)x;
 		*s++ = xdigits[i];
 		x = 16 * (x - i);
 		if (s - buf == 1 && x) {

@@ -62,7 +62,7 @@ static int api_invoke(lua_State *restrict L)
 		lua_pushliteral(L, ERR_INVALID_INVOKE);
 		return lua_error(L);
 	}
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	api_client_invoke(r->loop, req, code, len);
 	return 0;
 }
@@ -166,7 +166,7 @@ static int api_splithostport(lua_State *restrict L)
 static int api_config(lua_State *restrict L)
 {
 	const struct config *restrict conf = G.conf;
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	lua_createtable(L, 0, 9);
 
 	lua_pushinteger(L, (lua_Integer)conf->log_level);
@@ -193,7 +193,7 @@ static int api_config(lua_State *restrict L)
 /* neosocksd.stats() */
 static int api_stats(lua_State *restrict L)
 {
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	struct server_stats stats = { 0 };
 	{
 		const struct server *restrict s = G.server;
@@ -225,7 +225,7 @@ static int api_stats(lua_State *restrict L)
 /* neosocksd.now() */
 static int api_now(lua_State *restrict L)
 {
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	const ev_tstamp now = ev_now(r->loop);
 	lua_pushnumber(L, (lua_Number)now);
 	return 1;

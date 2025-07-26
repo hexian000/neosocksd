@@ -216,7 +216,7 @@ thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
 	/* lua stack: errfunc? finish ? ... */
 	int errfunc = 0;
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	if (r->config.traceback) {
 		lua_pushcfunction(L, aux_traceback);
 		lua_replace(L, 1);
@@ -299,7 +299,7 @@ int aux_async(
 	lua_State *restrict L, lua_State *restrict from, const int narg,
 	const int finishidx)
 {
-	struct ruleset *restrict r = aux_getruleset(L);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	if (r->config.traceback) {
 		lua_pushcfunction(L, aux_traceback);
 	} else {
@@ -313,8 +313,8 @@ int aux_async(
 }
 
 static bool ruleset_pcallv(
-	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
-	const int nresults, va_list args)
+	const struct ruleset *restrict r, const lua_CFunction func,
+	const int nargs, const int nresults, va_list args)
 {
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);

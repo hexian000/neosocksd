@@ -52,11 +52,11 @@ struct socks_ctx {
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
 	struct dialaddr addr;
-	struct ev_timer w_timeout;
+	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
 		struct {
-			struct ev_io w_socket;
+			ev_io w_socket;
 			struct {
 				uint8_t method;
 				const char *username;
@@ -68,7 +68,7 @@ struct socks_ctx {
 			} rbuf;
 			unsigned char *next;
 #if WITH_RULESET
-			struct ev_idle w_ruleset;
+			ev_idle w_ruleset;
 			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
@@ -84,7 +84,8 @@ struct socks_ctx {
 ASSERT_SUPER(struct session, struct socks_ctx, ss);
 
 static int format_status(
-	char *restrict s, size_t maxlen, const struct socks_ctx *restrict ctx)
+	char *restrict s, const size_t maxlen,
+	const struct socks_ctx *restrict ctx)
 {
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
@@ -218,8 +219,8 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 	}
 }
 
-static bool
-send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
+static bool send_rsp(
+	const struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 {
 	const int fd = ctx->accepted_fd;
 	LOG_BIN_F(VERYVERBOSE, buf, len, "[%d] send_rsp: %zu bytes", fd, len);
@@ -236,7 +237,8 @@ send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 	return true;
 }
 
-static void socks4_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
+static void
+socks4_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 {
 	unsigned char buf[sizeof(struct socks4_hdr)] = { 0 };
 	write_uint8(buf + offsetof(struct socks4_hdr, version), 0);
@@ -244,7 +246,8 @@ static void socks4_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 	(void)send_rsp(ctx, buf, sizeof(buf));
 }
 
-static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
+static void
+socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 {
 	union sockaddr_max addr = {
 		.sa.sa_family = AF_INET,
@@ -299,7 +302,7 @@ static void socks5_sendrsp(struct socks_ctx *restrict ctx, const uint8_t rsp)
 }
 
 static void
-timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 
@@ -359,7 +362,7 @@ static uint8_t socks5_err2rsp(const int err)
 	return SOCKS5RSP_FAIL;
 }
 
-static void socks_senderr(struct socks_ctx *restrict ctx, const int err)
+static void socks_senderr(const struct socks_ctx *restrict ctx, const int err)
 {
 	const uint8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
@@ -460,7 +463,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
 	}
-	char *userid = (char *)hdr + sizeof(struct socks4_hdr);
+	const char *userid = (char *)hdr + sizeof(struct socks4_hdr);
 	const size_t maxlen = ctx->rbuf.len - sizeof(struct socks4_hdr);
 	const size_t idlen = strnlen(userid, maxlen);
 	if (idlen >= 256) {
@@ -783,7 +786,7 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 
 #if WITH_RULESET
 static void
-ruleset_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct socks_ctx *restrict ctx = watcher->data;
@@ -794,7 +797,7 @@ ruleset_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 }
 
 static void
-process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -853,7 +856,7 @@ static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
 	return req;
 }
 
-static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 	struct socks_ctx *restrict ctx = watcher->data;

@@ -300,7 +300,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 	if (n < 10) {
 		return NULL;
 	}
-	struct {
+	const struct {
 		uint8_t id1, id2;
 		uint8_t cm, flg;
 		uint32_t mtime;
@@ -323,7 +323,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 		if (n < 2) {
 			return NULL;
 		}
-		uint16_t xlen = read_uint16_le(b);
+		const uint16_t xlen = read_uint16_le(b);
 		b += 2, n -= 2;
 		if (n < xlen) {
 			return NULL;
@@ -364,7 +364,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 		LOGD("gzip: short tailer");
 		return NULL;
 	}
-	struct {
+	const struct {
 		uint32_t crc, isize;
 	} tailer = {
 		.crc = read_uint32_le(b + n - 8),

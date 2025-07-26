@@ -37,7 +37,7 @@ static void update_watcher(
 	struct transfer *restrict t, struct ev_loop *loop, const int events)
 {
 	ASSERT(events == EV_READ || events == EV_WRITE);
-	struct ev_io *restrict watcher = &t->w_socket;
+	ev_io *restrict watcher = &t->w_socket;
 	const int ioevents = watcher->events & (EV_READ | EV_WRITE);
 	if (ioevents == events) {
 		return;
@@ -49,7 +49,8 @@ static void update_watcher(
 }
 
 static void update_stats(
-	struct transfer *restrict t, const size_t nbsend, const size_t buffered)
+	const struct transfer *restrict t, const size_t nbsend,
+	const size_t buffered)
 {
 	uintmax_t *restrict byt_transferred = t->byt_transferred;
 	if (byt_transferred != NULL) {
@@ -130,8 +131,7 @@ static ssize_t transfer_send(struct transfer *restrict t)
 	return nsend;
 }
 
-static void
-transfer_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
 
@@ -235,7 +235,8 @@ static ssize_t splice_pump(struct splice_pipe *restrict pipe, const int fd)
 	return nsend;
 }
 
-static void pipe_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void
+pipe_cb(struct ev_loop *loop, struct ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
 

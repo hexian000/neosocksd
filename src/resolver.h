@@ -23,7 +23,7 @@ void resolver_init(void);
 void resolver_cleanup(void);
 
 struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf);
-const struct resolver_stats *resolver_stats(struct resolver *r);
+const struct resolver_stats *resolver_stats(const struct resolver *r);
 void resolver_free(struct resolver *r);
 
 struct sockaddr;

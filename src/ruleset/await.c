@@ -114,7 +114,7 @@ await_sleep_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 static int await_sleep(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
-	lua_Number n = luaL_checknumber(L, 1);
+	const lua_Number n = luaL_checknumber(L, 1);
 	luaL_argcheck(L, isfinite(n) && 0 <= n && n <= 1e+9, 1, NULL);
 	lua_settop(L, 0);
 
@@ -145,7 +145,7 @@ static int await_sleep(lua_State *restrict L)
 struct await_resolve_userdata {
 	struct ruleset *ruleset;
 	struct resolve_query *query;
-	struct ev_idle w_idle;
+	ev_idle w_idle;
 	union sockaddr_max sa;
 };
 
@@ -238,7 +238,7 @@ static int await_invoke_close(lua_State *restrict L)
 {
 	struct await_invoke_userdata *restrict ud = lua_touserdata(L, 1);
 	if (ud->ctx != NULL) {
-		struct ruleset *restrict r = aux_getruleset(L);
+		const struct ruleset *restrict r = aux_getruleset(L);
 		api_client_cancel(r->loop, ud->ctx);
 		ud->ctx = NULL;
 	}
@@ -364,8 +364,7 @@ static int await_execute_close(lua_State *restrict L)
 	return 0;
 }
 
-static void
-child_cb(struct ev_loop *loop, struct ev_child *watcher, const int revents)
+static void child_cb(struct ev_loop *loop, ev_child *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CHILD);
 	ev_child_stop(loop, watcher);
@@ -374,8 +373,8 @@ child_cb(struct ev_loop *loop, struct ev_child *watcher, const int revents)
 	ev_idle_start(loop, &ud->w_idle);
 }
 
-static void child_finish_cb(
-	struct ev_loop *loop, struct ev_idle *watcher, const int revents)
+static void
+child_finish_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -391,7 +390,7 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	UNUSED(ctx);
 	/* lua stack: command ud */
 	ASSERT(lua_gettop(L) == 2);
-	struct await_execute_userdata *restrict ud = lua_touserdata(L, 2);
+	const struct await_execute_userdata *restrict ud = lua_touserdata(L, 2);
 	int stat = ud->w_child.rstatus;
 	aux_close(L, 2);
 	lua_settop(L, 0);

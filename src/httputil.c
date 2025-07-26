@@ -160,8 +160,8 @@ static int parse_message(struct http_parser *restrict p)
 	return 0;
 }
 
-static bool
-parse_header_kv(struct http_parser *restrict p, const char *key, char *value)
+static bool parse_header_kv(
+	const struct http_parser *restrict p, const char *key, char *value)
 {
 	LOGVV_F("http_header: \"%s: %s\"", key, value);
 	return p->on_header.func(p->on_header.ctx, key, value);
@@ -243,7 +243,7 @@ static bool recv_request(struct http_parser *restrict p)
 	return true;
 }
 
-static bool recv_content(struct http_parser *restrict p)
+static bool recv_content(const struct http_parser *restrict p)
 {
 	struct vbuffer *restrict cbuf = p->cbuf;
 	size_t n = cbuf->cap - cbuf->len;
@@ -387,7 +387,7 @@ bool parsehdr_accept_encoding(
 }
 
 bool parsehdr_content_length(
-	struct http_parser *restrict p, char *restrict value)
+	struct http_parser *restrict p, const char *restrict value)
 {
 	char *endptr;
 	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
@@ -404,7 +404,7 @@ bool parsehdr_content_length(
 }
 
 bool parsehdr_content_encoding(
-	struct http_parser *restrict p, char *restrict value)
+	struct http_parser *restrict p, const char *restrict value)
 {
 	for (size_t i = 0; i < CENCODING_MAX; i++) {
 		if (content_encoding_str[i] == NULL) {

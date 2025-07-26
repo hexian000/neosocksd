@@ -23,8 +23,8 @@ struct ruleset {
 		bool traceback;
 	} config;
 	lua_State *L;
-	struct ev_timer w_ticker;
-	struct ev_idle w_idle;
+	ev_timer w_ticker;
+	ev_idle w_idle;
 };
 
 enum ruleset_ridx {

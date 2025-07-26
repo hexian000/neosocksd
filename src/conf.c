@@ -13,7 +13,7 @@
 
 struct config conf_default(void)
 {
-	struct config conf = {
+	const struct config conf = {
 		.log_level = LOG_LEVEL_NOTICE,
 		.resolve_pf = PF_UNSPEC,
 		.timeout = 60.0,

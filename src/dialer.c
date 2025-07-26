@@ -42,7 +42,7 @@ const char *proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_SOCKS5] = "socks5",
 };
 
-static bool dialaddr_set(
+static bool dialaddr_sethostport(
 	struct dialaddr *restrict addr, const char *restrict host,
 	const uint16_t port)
 {
@@ -90,7 +90,33 @@ bool dialaddr_parse(
 		LOGE_F("unable to parse port number: `%s'", port);
 		return false;
 	}
-	return dialaddr_set(addr, host, (uint16_t)portvalue);
+	return dialaddr_sethostport(addr, host, (uint16_t)portvalue);
+}
+
+bool dialaddr_set(
+	struct dialaddr *restrict addr, const struct sockaddr *restrict sa,
+	const socklen_t len)
+{
+	switch (sa->sa_family) {
+	case AF_INET:
+		if (len < sizeof(struct sockaddr_in)) {
+			return false;
+		}
+		addr->type = ATYP_INET;
+		addr->in = ((struct sockaddr_in *)sa)->sin_addr;
+		addr->port = ntohs(((struct sockaddr_in *)sa)->sin_port);
+		return true;
+	case AF_INET6:
+		if (len < sizeof(struct sockaddr_in6)) {
+			return false;
+		}
+		addr->type = ATYP_INET6;
+		addr->in6 = ((struct sockaddr_in6 *)sa)->sin6_addr;
+		addr->port = ntohs(((struct sockaddr_in6 *)sa)->sin6_port);
+		return true;
+	default:;
+	}
+	return false;
 }
 
 void dialaddr_copy(
@@ -212,7 +238,7 @@ bool dialreq_addproxy(
 	}
 	struct proxyreq *restrict proxy = &req->proxy[req->num_proxy];
 	proxy->proto = protocol;
-	if (!dialaddr_set(&proxy->addr, host, (uint16_t)portvalue)) {
+	if (!dialaddr_sethostport(&proxy->addr, host, (uint16_t)portvalue)) {
 		return false;
 	}
 	proxy->username = NULL;
@@ -268,7 +294,7 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 	if (n > 0) {
 		char buf[len + 1];
 		(void)memcpy(buf, csv, len + 1);
-		for (char *tok = strtok(buf, ","); tok != NULL;
+		for (const char *tok = strtok(buf, ","); tok != NULL;
 		     tok = strtok(NULL, ",")) {
 			if (!dialreq_addproxy(req, tok, strlen(tok))) {
 				dialreq_free(req);
@@ -288,7 +314,8 @@ proxy_copy(struct proxyreq *restrict dst, const struct proxyreq *restrict src)
 }
 
 static int format_proxyreq(
-	char *restrict s, size_t maxlen, const struct proxyreq *restrict req)
+	char *restrict s, const size_t maxlen,
+	const struct proxyreq *restrict req)
 {
 	char host[FQDN_MAX_LENGTH + 1 + 5];
 	int nhost = dialaddr_format(host, sizeof(host), &req->addr);
@@ -329,7 +356,7 @@ int dialreq_format(
 			return n;
 		}
 	}
-	int ret = dialaddr_format(s, maxlen, &r->addr);
+	const int ret = dialaddr_format(s, maxlen, &r->addr);
 	ASSERT(ret > 0);
 	n += ret;
 	return n;
@@ -389,6 +416,7 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 		break;
 	case STATE_DONE:
 		break;
+	default:;
 	}
 	ASSERT(!ev_is_active(&d->w_socket) && !ev_is_pending(&d->w_socket));
 	if (d->socket_fd == -1 && d->w_socket.fd != -1) {
@@ -398,7 +426,7 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 }
 
 static void
-finish_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+finish_cb(struct ev_loop *loop, struct ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct dialer *restrict d = watcher->data;
@@ -408,8 +436,8 @@ finish_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 	d->finish_cb.func(loop, d->finish_cb.data, fd);
 }
 
-static int
-format_status(char *restrict s, size_t maxlen, const struct dialer *restrict d)
+static int format_status(
+	char *restrict s, const size_t maxlen, const struct dialer *restrict d)
 {
 	const size_t jump = d->jump;
 	const struct dialreq *restrict req = d->req;
@@ -601,11 +629,11 @@ static bool send_socks5_authmethod(
 {
 	ASSERT(d->state == STATE_HANDSHAKE1);
 	if (proxy->username == NULL) {
-		unsigned char buf[] = { SOCKS5, 0x01, SOCKS5AUTH_NOAUTH };
+		const unsigned char buf[] = { SOCKS5, 0x01, SOCKS5AUTH_NOAUTH };
 		return dialer_send(d, buf, sizeof(buf));
 	}
-	unsigned char buf[] = { SOCKS5, 0x02, SOCKS5AUTH_NOAUTH,
-				SOCKS5AUTH_USERPASS };
+	const unsigned char buf[] = { SOCKS5, 0x02, SOCKS5AUTH_NOAUTH,
+				      SOCKS5AUTH_USERPASS };
 	return dialer_send(d, buf, sizeof(buf));
 }
 
@@ -1084,7 +1112,8 @@ static int dialer_recv(struct dialer *restrict d)
 	return 1;
 }
 
-static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void
+socket_cb(struct ev_loop *loop, struct ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
 	struct dialer *restrict d = watcher->data;

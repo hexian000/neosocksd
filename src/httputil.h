@@ -92,18 +92,18 @@ void http_parser_init(
 	struct http_parser *p, int fd, enum http_parser_state mode,
 	struct http_parsehdr_cb on_header);
 
-int http_parser_recv(struct http_parser *parser);
+int http_parser_recv(struct http_parser *p);
 
-bool parsehdr_accept_te(struct http_parser *restrict p, char *value);
-bool parsehdr_transfer_encoding(struct http_parser *restrict p, char *value);
-bool parsehdr_accept_encoding(struct http_parser *restrict p, char *value);
-bool parsehdr_content_length(struct http_parser *restrict p, char *value);
-bool parsehdr_content_encoding(struct http_parser *restrict p, char *value);
-bool parsehdr_expect(struct http_parser *restrict p, char *value);
+bool parsehdr_accept_te(struct http_parser *p, char *value);
+bool parsehdr_transfer_encoding(struct http_parser *p, char *value);
+bool parsehdr_accept_encoding(struct http_parser *p, char *value);
+bool parsehdr_content_length(struct http_parser *p, const char *value);
+bool parsehdr_content_encoding(struct http_parser *p, const char *value);
+bool parsehdr_expect(struct http_parser *p, char *value);
 
-void http_resp_errpage(struct http_parser *parser, uint16_t code);
+void http_resp_errpage(struct http_parser *p, uint16_t code);
 
-bool http_resp_established(struct http_parser *parser);
+bool http_resp_established(struct http_parser *p);
 
 struct stream *
 content_reader(const void *buf, size_t len, enum content_encodings encoding);

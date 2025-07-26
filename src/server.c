@@ -18,7 +18,7 @@
 #include <stddef.h>
 #include <string.h>
 
-static bool is_startup_limited(struct server *restrict s)
+static bool is_startup_limited(const struct server *restrict s)
 {
 	const struct config *restrict conf = G.conf;
 	const struct server_stats *restrict stats = &s->stats;
@@ -43,7 +43,7 @@ static bool is_startup_limited(struct server *restrict s)
 }
 
 static void
-accept_cb(struct ev_loop *loop, struct ev_io *restrict watcher, int revents)
+accept_cb(struct ev_loop *loop, ev_io *restrict watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 
@@ -91,8 +91,7 @@ accept_cb(struct ev_loop *loop, struct ev_io *restrict watcher, int revents)
 	}
 }
 
-static void
-timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+static void timer_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	ev_timer_stop(loop, watcher);
@@ -101,7 +100,7 @@ timer_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
 }
 
 void server_init(
-	struct server *restrict s, struct ev_loop *loop, serve_fn serve,
+	struct server *restrict s, struct ev_loop *loop, const serve_fn serve,
 	void *data)
 {
 	*s = (struct server){
@@ -161,10 +160,10 @@ bool server_start(
 		return false;
 	}
 
-	struct ev_io *restrict w_accept = &s->l.w_accept;
+	ev_io *restrict w_accept = &s->l.w_accept;
 	ev_io_init(w_accept, accept_cb, fd, EV_READ);
 	w_accept->data = s;
-	struct ev_timer *restrict w_timer = &s->l.w_timer;
+	ev_timer *restrict w_timer = &s->l.w_timer;
 	ev_timer_init(w_timer, timer_cb, 0.5, 0.0);
 	w_timer->data = s;
 
@@ -180,10 +179,10 @@ void server_stop(struct server *restrict s)
 		return;
 	}
 	struct ev_loop *loop = s->loop;
-	struct ev_io *restrict w_accept = &s->l.w_accept;
+	ev_io *restrict w_accept = &s->l.w_accept;
 	ev_io_stop(loop, w_accept);
 	CLOSE_FD(w_accept->fd);
-	struct ev_timer *restrict w_timer = &s->l.w_timer;
+	ev_timer *restrict w_timer = &s->l.w_timer;
 	ev_timer_stop(loop, w_timer);
 	s->stats.started = TSTAMP_NIL;
 }

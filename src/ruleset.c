@@ -32,7 +32,8 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+static void *
+l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 {
 	struct ruleset *restrict r = ud;
 	if (nsize == 0) {
@@ -128,14 +129,14 @@ static int ruleset_luainit(lua_State *restrict L)
 	return 0;
 }
 
-static void tick_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+static void tick_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct ruleset *restrict r = watcher->data;
 	ev_idle_start(loop, &r->w_idle);
 }
 
-static void idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -204,7 +205,8 @@ void ruleset_free(struct ruleset *restrict r)
 #define CONST_LSTRING(s, len)                                                  \
 	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
 
-const char *ruleset_geterror(struct ruleset *restrict r, size_t *restrict len)
+const char *
+ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 {
 	lua_State *restrict L = r->L;
 	const char *s = NULL;

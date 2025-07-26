@@ -25,7 +25,7 @@
 #include <string.h>
 
 struct io_node {
-	struct ev_io watcher;
+	ev_io watcher;
 	struct io_node *next;
 };
 
@@ -35,7 +35,7 @@ struct resolver {
 #if WITH_CARES
 	bool async_enabled;
 	ares_channel channel;
-	struct ev_timer w_timeout;
+	ev_timer w_timeout;
 	size_t num_socket;
 	struct io_node sockets; /* linked list with the 1st element inlined */
 #endif
@@ -44,7 +44,7 @@ struct resolver {
 struct resolve_query {
 	struct resolver *resolver;
 	struct resolve_cb done_cb;
-	struct ev_watcher w_finish;
+	ev_watcher w_finish;
 	bool ok : 1;
 	union sockaddr_max addr;
 	const char *name, *service;
@@ -53,7 +53,7 @@ struct resolve_query {
 };
 
 static void
-finish_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct resolve_query *restrict q = watcher->data;
@@ -73,7 +73,7 @@ finish_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 }
 
 #if WITH_CARES
-static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
@@ -87,8 +87,7 @@ static void socket_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	ares_process_fd(r->channel, readable, writable);
 }
 
-static void
-sched_update(struct ev_loop *loop, struct ev_timer *restrict watcher)
+static void sched_update(struct ev_loop *loop, ev_timer *restrict watcher)
 {
 	struct resolver *restrict r = watcher->data;
 	struct timeval tv;
@@ -119,7 +118,7 @@ static size_t purge_watchers(struct resolver *restrict r)
 }
 
 static void
-timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct resolver *restrict r = watcher->data;
@@ -191,36 +190,36 @@ find_addrinfo(union sockaddr_max *addr, const struct ares_addrinfo_node *node)
 {
 	for (const struct ares_addrinfo_node *restrict it = node; it != NULL;
 	     it = it->ai_next) {
-#define EXPECT_ADDRLEN(p, expected)                                            \
-	do {                                                                   \
-		if ((p)->ai_addrlen != (expected)) {                           \
-			LOGE_F("resolve: invalid ai_addrlen %ju (af=%d)",      \
-			       (uintmax_t)(p)->ai_addrlen, (p)->ai_family);    \
-			continue;                                              \
-		}                                                              \
-	} while (0)
-
 		switch (it->ai_family) {
 		case AF_INET:
-			EXPECT_ADDRLEN(it, sizeof(struct sockaddr_in));
+			if (it->ai_addrlen != sizeof(struct sockaddr_in)) {
+				LOGE_F("resolve: invalid ai_addrlen %ju (af=%d)",
+				       (uintmax_t)it->ai_addrlen,
+				       it->ai_family);
+				continue;
+			}
 			addr->in = *(struct sockaddr_in *)it->ai_addr;
 			break;
 		case AF_INET6:
-			EXPECT_ADDRLEN(it, sizeof(struct sockaddr_in6));
+			if (it->ai_addrlen != sizeof(struct sockaddr_in6)) {
+				LOGE_F("resolve: invalid ai_addrlen %ju (af=%d)",
+				       (uintmax_t)it->ai_addrlen,
+				       it->ai_family);
+				continue;
+			}
 			addr->in6 = *(struct sockaddr_in6 *)it->ai_addr;
 			break;
 		default:
 			continue;
 		}
-
-#undef EXPECT_ADDRLEN
 		return true;
 	}
 	return false;
 }
 
-static void
-addrinfo_cb(void *arg, int status, int timeouts, struct ares_addrinfo *info)
+static void addrinfo_cb(
+	void *arg, const int status, const int timeouts,
+	struct ares_addrinfo *info)
 {
 	UNUSED(timeouts);
 	struct resolve_query *restrict q = arg;
@@ -318,7 +317,7 @@ resolver_new(struct ev_loop *loop, const struct config *restrict conf)
 	};
 #if WITH_CARES
 	{
-		struct ev_io *restrict w_socket = &r->sockets.watcher;
+		ev_io *restrict w_socket = &r->sockets.watcher;
 		ev_io_init(w_socket, socket_cb, -1, EV_NONE);
 		w_socket->data = r;
 	}
@@ -329,7 +328,7 @@ resolver_new(struct ev_loop *loop, const struct config *restrict conf)
 	return r;
 }
 
-const struct resolver_stats *resolver_stats(struct resolver *restrict r)
+const struct resolver_stats *resolver_stats(const struct resolver *restrict r)
 {
 	return &r->stats;
 }
@@ -362,7 +361,7 @@ void resolve_start(struct resolver *restrict r, struct resolve_query *restrict q
 }
 
 struct resolve_query *resolve_do(
-	struct resolver *restrict r, struct resolve_cb cb,
+	struct resolver *restrict r, const struct resolve_cb cb,
 	const char *restrict name, const char *restrict service,
 	const int family)
 {

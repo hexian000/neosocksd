@@ -38,9 +38,9 @@
 #include <string.h>
 
 static struct {
-	struct ev_signal w_sighup;
-	struct ev_signal w_sigint;
-	struct ev_signal w_sigterm;
+	ev_signal w_sighup;
+	ev_signal w_sigint;
+	ev_signal w_sigterm;
 
 	struct config conf;
 	struct server server;
@@ -48,7 +48,7 @@ static struct {
 } app = { 0 };
 
 static void
-signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents);
+signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents);
 
 static void print_usage(const char *argv0)
 {
@@ -443,15 +443,15 @@ int main(int argc, char **argv)
 
 	/* signal watchers */
 	{
-		struct ev_signal *restrict w_sighup = &app.w_sighup;
+		ev_signal *restrict w_sighup = &app.w_sighup;
 		ev_signal_init(w_sighup, signal_cb, SIGHUP);
 		ev_set_priority(w_sighup, EV_MAXPRI);
 		ev_signal_start(loop, w_sighup);
-		struct ev_signal *restrict w_sigint = &app.w_sigint;
+		ev_signal *restrict w_sigint = &app.w_sigint;
 		ev_signal_init(w_sigint, signal_cb, SIGINT);
 		ev_set_priority(w_sigint, EV_MAXPRI);
 		ev_signal_start(loop, w_sigint);
-		struct ev_signal *restrict w_sigterm = &app.w_sigterm;
+		ev_signal *restrict w_sigterm = &app.w_sigterm;
 		ev_signal_init(w_sigterm, signal_cb, SIGTERM);
 		ev_set_priority(w_sigterm, EV_MAXPRI);
 		ev_signal_start(loop, w_sigterm);
@@ -495,7 +495,7 @@ int main(int argc, char **argv)
 	return EXIT_SUCCESS;
 }
 
-void signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
+void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_SIGNAL);
 
@@ -533,5 +533,6 @@ void signal_cb(struct ev_loop *loop, struct ev_signal *watcher, int revents)
 #endif
 		ev_break(loop, EVBREAK_ALL);
 		break;
+	default:;
 	}
 }

@@ -193,7 +193,7 @@ void unloadlibs(void)
 }
 
 void modify_io_events(
-	struct ev_loop *loop, struct ev_io *restrict watcher, const int events)
+	struct ev_loop *loop, ev_io *restrict watcher, const int events)
 {
 	const int fd = watcher->fd;
 	ASSERT(fd != -1);

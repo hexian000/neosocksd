@@ -42,12 +42,12 @@ struct forward_ctx {
 	enum forward_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
-	struct ev_timer w_timeout;
+	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
 		struct {
 #if WITH_RULESET
-			struct ev_idle w_ruleset;
+			ev_idle w_ruleset;
 			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
@@ -176,7 +176,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 }
 
 static void
-timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct forward_ctx *restrict ctx = watcher->data;
@@ -250,8 +250,8 @@ static void forward_ctx_start(
 }
 
 #if WITH_RULESET
-static void forward_ruleset_cb(
-	struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+static void
+forward_ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct forward_ctx *restrict ctx = watcher->data;
@@ -267,7 +267,7 @@ static void forward_ruleset_cb(
 }
 
 static void
-forward_process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -359,7 +359,7 @@ void forward_serve(
 	ev_timer_start(loop, &ctx->w_timeout);
 
 #if WITH_RULESET
-	struct ruleset *ruleset = G.ruleset;
+	const struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
 		ev_set_cb(&ctx->w_ruleset, forward_process_cb);
 		ev_set_cb(&ctx->ruleset_callback.w_finish, forward_ruleset_cb);
@@ -375,7 +375,7 @@ void forward_serve(
 
 #if WITH_RULESET
 static void
-tproxy_ruleset_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+tproxy_ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct forward_ctx *restrict ctx = watcher->data;
@@ -391,7 +391,7 @@ tproxy_ruleset_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
 }
 
 static void
-tproxy_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+tproxy_idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -445,7 +445,7 @@ tproxy_idle_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
 }
 #endif
 
-static struct dialreq *tproxy_makereq(struct forward_ctx *restrict ctx)
+static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
 {
 	union sockaddr_max dest;
 	socklen_t len = sizeof(dest);
@@ -453,36 +453,17 @@ static struct dialreq *tproxy_makereq(struct forward_ctx *restrict ctx)
 		FW_CTX_LOG_F(ERROR, ctx, "getsockname: %s", strerror(errno));
 		return NULL;
 	}
-	switch (dest.sa.sa_family) {
-	case AF_INET:
-		CHECK(len >= sizeof(struct sockaddr_in));
-		break;
-	case AF_INET6:
-		CHECK(len >= sizeof(struct sockaddr_in6));
-		break;
-	default:
-		FW_CTX_LOG_F(
-			ERROR, ctx, "tproxy: unsupported af:%jd",
-			(intmax_t)dest.sa.sa_family);
-		return NULL;
-	}
-
 	struct dialreq *req = dialreq_new(0);
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
 	}
-	switch (dest.sa.sa_family) {
-	case AF_INET:
-		req->addr.type = ATYP_INET;
-		req->addr.in = dest.in.sin_addr;
-		req->addr.port = ntohs(dest.in.sin_port);
-		break;
-	case AF_INET6:
-		req->addr.type = ATYP_INET6;
-		req->addr.in6 = dest.in6.sin6_addr;
-		req->addr.port = ntohs(dest.in6.sin6_port);
-		break;
+	if (!dialaddr_set(&req->addr, &dest.sa, len)) {
+		FW_CTX_LOG_F(
+			ERROR, ctx, "tproxy: unsupported af:%jd",
+			(intmax_t)dest.sa.sa_family);
+		dialreq_free(req);
+		return NULL;
 	}
 	return req;
 }
@@ -503,7 +484,7 @@ void tproxy_serve(
 	ev_timer_start(loop, &ctx->w_timeout);
 
 #if WITH_RULESET
-	struct ruleset *ruleset = G.ruleset;
+	const struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
 		ev_set_cb(&ctx->w_ruleset, tproxy_idle_cb);
 		ev_set_cb(&ctx->ruleset_callback.w_finish, tproxy_ruleset_cb);

@@ -45,9 +45,9 @@ struct api_client_ctx {
 	struct session ss;
 	enum api_client_state state;
 	struct api_client_cb cb;
-	struct ev_timer w_timeout;
-	struct ev_io w_socket;
-	struct ev_idle w_ruleset;
+	ev_timer w_timeout;
+	ev_io w_socket;
+	ev_idle w_ruleset;
 	struct dialreq *dialreq;
 	struct dialer dialer;
 	struct http_parser parser;
@@ -71,8 +71,6 @@ api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 		dialer_cancel(&ctx->dialer, loop);
 		break;
 	case STATE_CLIENT_REQUEST:
-		ev_io_stop(loop, &ctx->w_socket);
-		break;
 	case STATE_CLIENT_RESPONSE:
 		ev_io_stop(loop, &ctx->w_socket);
 		break;
@@ -116,7 +114,7 @@ api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 }
 
 static void
-process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -155,7 +153,7 @@ static void api_client_finish(
 		return;                                                        \
 	} while (false)
 
-static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 	struct api_client_ctx *restrict ctx = watcher->data;
@@ -207,7 +205,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	api_client_finish(loop, ctx, NULL, 0, r);
 }
 
-static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	const int fd = watcher->fd;
@@ -275,7 +273,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	ctx->dialreq = NULL;
 
 	ctx->state = STATE_CLIENT_REQUEST;
-	struct ev_io *restrict w_send = &ctx->w_socket;
+	ev_io *restrict w_send = &ctx->w_socket;
 	ev_set_cb(w_send, send_cb);
 	w_send->data = ctx;
 	ev_io_set(w_send, fd, EV_WRITE);
@@ -283,7 +281,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 }
 
 static void
-timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct api_client_ctx *restrict ctx = watcher->data;

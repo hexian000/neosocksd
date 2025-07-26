@@ -17,8 +17,8 @@ struct listener_stats {
 
 /* the listener binds to an address and accepts incoming connections */
 struct listener {
-	struct ev_io w_accept;
-	struct ev_timer w_timer;
+	ev_io w_accept;
+	ev_timer w_timer;
 	struct listener_stats stats;
 };
 

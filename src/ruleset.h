@@ -20,17 +20,17 @@ struct ruleset_vmstats {
 };
 
 struct ruleset *ruleset_new(struct ev_loop *loop);
-void ruleset_free(struct ruleset *ruleset);
+void ruleset_free(struct ruleset *r);
 
-const char *ruleset_geterror(struct ruleset *ruleset, size_t *len);
+const char *ruleset_geterror(const struct ruleset *r, size_t *len);
 
-bool ruleset_invoke(struct ruleset *ruleset, struct stream *code);
+bool ruleset_invoke(struct ruleset *r, struct stream *code);
 
 struct ruleset_state;
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *state);
 
 struct ruleset_callback {
-	struct ev_watcher w_finish;
+	ev_watcher w_finish;
 	bool ok;
 	union {
 		struct {
@@ -44,31 +44,31 @@ struct ruleset_callback {
 };
 
 bool ruleset_rpcall(
-	struct ruleset *ruleset, struct ruleset_state **state,
-	struct stream *code, struct ruleset_callback *callback);
+	struct ruleset *r, struct ruleset_state **state, struct stream *code,
+	struct ruleset_callback *callback);
 
 bool ruleset_update(
-	struct ruleset *ruleset, const char *modname, const char *chunkname,
+	struct ruleset *r, const char *modname, const char *chunkname,
 	struct stream *code);
-bool ruleset_loadfile(struct ruleset *ruleset, const char *filename);
+bool ruleset_loadfile(struct ruleset *r, const char *filename);
 
-bool ruleset_gc(struct ruleset *ruleset);
+bool ruleset_gc(struct ruleset *r);
 
 bool ruleset_resolve(
-	struct ruleset *ruleset, struct ruleset_state **state,
-	const char *request, const char *username, const char *password,
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
 	struct ruleset_callback *callback);
 bool ruleset_route(
-	struct ruleset *ruleset, struct ruleset_state **state,
-	const char *request, const char *username, const char *password,
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
 	struct ruleset_callback *callback);
 bool ruleset_route6(
-	struct ruleset *ruleset, struct ruleset_state **state,
-	const char *request, const char *username, const char *password,
+	struct ruleset *r, struct ruleset_state **state, const char *request,
+	const char *username, const char *password,
 	struct ruleset_callback *callback);
 
-void ruleset_vmstats(const struct ruleset *ruleset, struct ruleset_vmstats *s);
-const char *ruleset_stats(
-	struct ruleset *ruleset, double dt, const char *query, size_t *len);
+void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
+const char *
+ruleset_stats(struct ruleset *r, double dt, const char *query, size_t *len);
 
 #endif /* RULESET_H */

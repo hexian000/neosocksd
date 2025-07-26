@@ -29,7 +29,7 @@ struct transfer_state_cb {
 struct transfer {
 	enum transfer_state state;
 	int src_fd, dst_fd;
-	struct ev_io w_socket;
+	ev_io w_socket;
 	struct transfer_state_cb state_cb;
 	uintmax_t *byt_transferred;
 #if WITH_SPLICE

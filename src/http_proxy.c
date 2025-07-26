@@ -51,13 +51,13 @@ struct http_ctx {
 	enum http_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
-	struct ev_timer w_timeout;
+	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
 		struct {
-			struct ev_io w_recv, w_send;
+			ev_io w_recv, w_send;
 #if WITH_RULESET
-			struct ev_idle w_ruleset;
+			ev_idle w_ruleset;
 			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
@@ -74,7 +74,8 @@ struct http_ctx {
 ASSERT_SUPER(struct session, struct http_ctx, ss);
 
 static int format_status(
-	char *restrict s, size_t maxlen, const struct http_ctx *restrict ctx)
+	char *restrict s, const size_t maxlen,
+	const struct http_ctx *restrict ctx)
 {
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
@@ -219,7 +220,7 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 #if WITH_RULESET
 static void
-ruleset_cb(struct ev_loop *loop, struct ev_watcher *watcher, int revents)
+ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct http_ctx *restrict ctx = watcher->data;
@@ -257,7 +258,7 @@ static void parse_proxy_auth(
 }
 
 static void
-process_cb(struct ev_loop *loop, struct ev_idle *watcher, int revents)
+process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -312,7 +313,7 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	const char *addr_str = ctx->parser.msg.req.url;
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "http: CONNECT `%s'", addr_str);
 #if WITH_RULESET
-	struct ruleset *restrict ruleset = G.ruleset;
+	const struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset != NULL) {
 		ev_idle_start(loop, &ctx->w_ruleset);
 		return;
@@ -381,7 +382,7 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	transfer_start(loop, &ctx->downlink);
 }
 
-static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 	struct http_ctx *restrict ctx = watcher->data;
@@ -412,7 +413,7 @@ static void recv_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 	http_proxy_handle(loop, ctx);
 }
 
-static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
+static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct http_ctx *restrict ctx = watcher->data;
@@ -452,7 +453,7 @@ static void send_cb(struct ev_loop *loop, struct ev_io *watcher, int revents)
 }
 
 static void
-timeout_cb(struct ev_loop *loop, struct ev_timer *watcher, int revents)
+timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct http_ctx *restrict ctx = watcher->data;
