@@ -127,7 +127,7 @@ static int api_setinterval(lua_State *restrict L)
 	double interval = lua_tonumber(L, 1);
 
 	struct ruleset *restrict r = aux_getruleset(L);
-	struct ev_timer *restrict w_ticker = &r->w_ticker;
+	ev_timer *restrict w_ticker = &r->w_ticker;
 	ev_timer_stop(r->loop, w_ticker);
 	if (!isnormal(interval)) {
 		return 0;

@@ -349,7 +349,7 @@ void resolve_start(struct resolver *restrict r, struct resolve_query *restrict q
 		ares_getaddrinfo(
 			r->channel, q->name, q->service, &hints, addrinfo_cb,
 			q);
-		struct ev_timer *restrict w_timeout = &r->w_timeout;
+		ev_timer *restrict w_timeout = &r->w_timeout;
 		if (!ev_is_active(w_timeout)) {
 			sched_update(r->loop, w_timeout);
 		}

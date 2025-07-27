@@ -426,7 +426,7 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 }
 
 static void
-finish_cb(struct ev_loop *loop, struct ev_watcher *watcher, const int revents)
+finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct dialer *restrict d = watcher->data;
