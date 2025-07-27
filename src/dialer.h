@@ -84,9 +84,9 @@ struct dialer {
 	size_t jump;
 	int state;
 	int syserr;
-	struct ev_io w_socket;
+	ev_io w_socket;
 	int socket_fd;
-	struct ev_watcher w_finish;
+	ev_watcher w_finish;
 	struct dialer_cb finish_cb;
 	unsigned char *next;
 	struct {

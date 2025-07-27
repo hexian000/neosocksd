@@ -612,7 +612,7 @@ static void handle_ruleset_gc(
 }
 
 static void
-process_cb(struct ev_loop *loop, struct ev_idle *watcher, const int revents)
+process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -778,7 +778,7 @@ api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
 	api_ctx_close(loop, ctx);
 }
 
-void recv_cb(struct ev_loop *loop, struct ev_io *watcher, const int revents)
+void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 	struct api_ctx *restrict ctx = watcher->data;

@@ -235,8 +235,7 @@ static ssize_t splice_pump(struct splice_pipe *restrict pipe, const int fd)
 	return nsend;
 }
 
-static void
-pipe_cb(struct ev_loop *loop, struct ev_io *watcher, const int revents)
+static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
 

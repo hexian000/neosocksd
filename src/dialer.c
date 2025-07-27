@@ -1112,8 +1112,7 @@ static int dialer_recv(struct dialer *restrict d)
 	return 1;
 }
 
-static void
-socket_cb(struct ev_loop *loop, struct ev_io *watcher, const int revents)
+static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
 	struct dialer *restrict d = watcher->data;

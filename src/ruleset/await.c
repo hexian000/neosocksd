@@ -6,7 +6,6 @@
 #include "base.h"
 
 #include "utils/debug.h"
-#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include "api_client.h"
@@ -66,8 +65,8 @@ static void context_unpin(lua_State *restrict L, const void *p)
 
 struct await_sleep_userdata {
 	struct ruleset *ruleset;
-	struct ev_timer w_timer;
-	struct ev_idle w_idle;
+	ev_timer w_timer;
+	ev_idle w_idle;
 };
 
 static int await_sleep_close(lua_State *restrict L)
@@ -80,8 +79,7 @@ static int await_sleep_close(lua_State *restrict L)
 	return 0;
 }
 
-static void
-sleep_cb(struct ev_loop *loop, struct ev_timer *watcher, const int revents)
+static void sleep_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	ev_timer_stop(loop, watcher);
@@ -89,8 +87,8 @@ sleep_cb(struct ev_loop *loop, struct ev_timer *watcher, const int revents)
 	ev_idle_start(loop, &ud->w_idle);
 }
 
-static void sleep_finish_cb(
-	struct ev_loop *loop, struct ev_idle *watcher, const int revents)
+static void
+sleep_finish_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -173,8 +171,8 @@ static void resolve_cb(
 	ev_idle_start(loop, &ud->w_idle);
 }
 
-static void resolve_finish_cb(
-	struct ev_loop *loop, struct ev_idle *watcher, const int revents)
+static void
+resolve_finish_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -343,8 +341,8 @@ static int await_invoke(lua_State *restrict L)
 
 struct await_execute_userdata {
 	struct ruleset *ruleset;
-	struct ev_child w_child;
-	struct ev_idle w_idle;
+	ev_child w_child;
+	ev_idle w_idle;
 };
 
 static int await_execute_close(lua_State *restrict L)
@@ -434,7 +432,7 @@ static int await_execute(lua_State *restrict L)
 	ud->w_idle.data = ud;
 	aux_toclose(L, -1, MT_AWAIT_EXECUTE, await_execute_close);
 
-	pid_t pid = fork();
+	const pid_t pid = fork();
 	if (pid < 0) {
 		const char *err = strerror(errno);
 		lua_pushstring(L, err);
