@@ -4,6 +4,8 @@
 #include "stream.h"
 
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 int stream_direct_read(
 	struct stream *restrict s, const void **restrict buf,

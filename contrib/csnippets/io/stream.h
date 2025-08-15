@@ -7,8 +7,6 @@
 #include "io.h"
 
 #include <stddef.h>
-#include <stdlib.h>
-#include <string.h>
 
 /**
  * @defgroup stream
@@ -31,6 +29,7 @@ struct stream {
 
 /**
  * @brief Read a stream directly from the internal buffer. (optional support)
+ * @param[in] s The stream.
  * @param[out] buf Pointer to the internal buffer.
  * @param[inout] len Max length / returned length.
  * @return Error code, 0 for OK.
@@ -40,6 +39,7 @@ int stream_direct_read(struct stream *s, const void **buf, size_t *len);
 
 /**
  * @brief Read from a stream.
+ * @param[in] s The stream.
  * @param[out] buf The read buffer.
  * @param[inout] len Buffer size / returned length.
  * @return Error code, 0 for OK.
@@ -50,6 +50,7 @@ int stream_read(struct stream *s, void *buf, size_t *len);
 
 /**
  * @brief Write to a stream.
+ * @param[in] s The stream.
  * @param[in] buf Data to write.
  * @param[inout] len Data length / consumed length.
  * @return Error code, 0 for OK.
@@ -60,6 +61,7 @@ int stream_write(struct stream *s, const void *buf, size_t *len);
 
 /**
  * @brief Flush a stream.
+ * @param[in] s The stream.
  * @return Error code, 0 for OK.
  * @details Base stream is flushed too. If error occurs,
  * stop flushing and return the error.
@@ -68,6 +70,7 @@ int stream_flush(struct stream *s);
 
 /**
  * @brief Close a stream.
+ * @param[in] s The stream.
  * @return Error code, 0 for OK.
  * @details Base stream is closed too. If error occurs,
  * still close all resources and return the first error.

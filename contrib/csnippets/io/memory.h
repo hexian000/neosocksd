@@ -44,6 +44,7 @@ struct stream *io_heapwriter(struct vbuffer **pvbuf);
  * @brief Print to a heapwriter.
  * @param[in] s If not a valid heapwriter, the behavior is undefined.
  * @param[in] format Same as printf.
+ * @param[in] ... Same as printf.
  * @return Error code, 0 for OK.
  * @details Stream internal buffer have a limited size.
  */
@@ -71,6 +72,7 @@ struct stream *io_bufwriter(struct stream *base, size_t bufsize);
  * @brief Print to a bufwriter.
  * @param[in] s If not a valid bufwriter, the behavior is undefined.
  * @param[in] format Same as printf.
+ * @param[in] ... Same as printf.
  * @return Error code, 0 for OK.
  * @details Any invocation writes all buffered data to the base stream.
  * The printed string is truncated to (bufsize - 1) silently.
