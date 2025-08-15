@@ -71,7 +71,6 @@ _G.route6        = {
 _G.route_default = { rule.proxy("socks5://user:pass@gateway.lan:1080"), "wan" }
 
 local function main(...)
-    pcall(collectgarbage, "generational")
     neosocksd.setinterval(60.0)
     return _G.libruleset
 end

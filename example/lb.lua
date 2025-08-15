@@ -35,7 +35,6 @@ function rpc.set_backends(t)
 end
 
 local function main(...)
-    pcall(collectgarbage, "generational")
     neosocksd.setinterval(60.0)
     return _G.libruleset
 end

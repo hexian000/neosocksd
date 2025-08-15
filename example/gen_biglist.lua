@@ -145,5 +145,4 @@ function main(args)
     return 0
 end
 
-pcall(collectgarbage, "generational")
 os.exit(main({ ... }))

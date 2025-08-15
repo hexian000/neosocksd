@@ -165,15 +165,7 @@ function ruleset.stats(dt, q)
     return w:concat("\n")
 end
 
-function ruleset.tick(now)
-    libruleset.tick(now)
-    if stat_requests:get(1) ~= stat_requests:get(2) then
-        collectgarbage("step")
-    end
-end
-
 local function main(...)
-    pcall(collectgarbage, "generational")
     neosocksd.setinterval(60)
     -- inherit undefined fields from libruleset
     return setmetatable(ruleset, {
