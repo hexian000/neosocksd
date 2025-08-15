@@ -419,7 +419,8 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 	default:;
 	}
 	ASSERT(!ev_is_active(&d->w_socket) && !ev_is_pending(&d->w_socket));
-	if (d->socket_fd == -1 && d->w_socket.fd != -1) {
+
+	if (d->dialed_fd == -1 && d->w_socket.fd != -1) {
 		CLOSE_FD(d->w_socket.fd);
 	}
 	d->state = STATE_DONE;
@@ -430,7 +431,7 @@ finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct dialer *restrict d = watcher->data;
-	const int fd = d->socket_fd;
+	const int fd = d->dialed_fd;
 	LOGV_F("dialer %p: finished fd=%d", (void *)d, fd);
 	dialer_stop(d, loop);
 	d->finish_cb.func(loop, d->finish_cb.data, fd);
@@ -1139,7 +1140,7 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		if (d->req->num_proxy == 0) {
-			d->socket_fd = fd;
+			d->dialed_fd = fd;
 			ev_invoke(loop, &d->w_finish, EV_CUSTOM);
 			return;
 		}
@@ -1170,7 +1171,7 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		d->next = d->rbuf.data;
 		d->jump++;
 		if (d->jump >= d->req->num_proxy) {
-			d->socket_fd = fd;
+			d->dialed_fd = fd;
 			ev_invoke(loop, &d->w_finish, EV_CUSTOM);
 			return;
 		}
@@ -1358,7 +1359,7 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 	d->syserr = 0;
 	ev_io_init(&d->w_socket, socket_cb, -1, EV_NONE);
 	d->w_socket.data = d;
-	d->socket_fd = -1;
+	d->dialed_fd = -1;
 	ev_init(&d->w_finish, finish_cb);
 	d->w_finish.data = d;
 	d->finish_cb = *callback;

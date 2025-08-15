@@ -47,9 +47,11 @@ void pipe_close(struct splice_pipe *restrict pipe)
 {
 	if (pipe->fd[0] != -1) {
 		CLOSE_FD(pipe->fd[0]);
+		pipe->fd[0] = -1;
 	}
 	if (pipe->fd[1] != -1) {
 		CLOSE_FD(pipe->fd[1]);
+		pipe->fd[1] = -1;
 	}
 }
 

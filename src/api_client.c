@@ -91,7 +91,6 @@ api_client_close(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 	ctx->dialreq = NULL;
 	if (ctx->w_socket.fd != -1) {
 		CLOSE_FD(ctx->w_socket.fd);
-		ev_io_set(&ctx->w_socket, -1, EV_NONE);
 	}
 	if (ctx->result.stream != NULL) {
 		stream_close(ctx->result.stream);
