@@ -40,8 +40,8 @@ extern struct globals {
 
 #define CLOSE_FD(fd)                                                           \
 	do {                                                                   \
-		if (close(fd) != 0) {                                          \
-			LOGW_F("close: %s", strerror(errno));                  \
+		if (close((fd)) != 0) {                                        \
+			LOGW_F("close: fd=%d %s", (fd), strerror(errno));      \
 		}                                                              \
 	} while (0)
 
