@@ -1384,6 +1384,9 @@ void dialer_do(
 
 void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 {
+	if (d->state == STATE_DONE) {
+		return;
+	}
 	LOGV_F("dialer %p: cancel", (void *)d);
 	ev_clear_pending(loop, &d->w_finish);
 	dialer_stop(d, loop);
