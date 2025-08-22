@@ -423,6 +423,15 @@ void daemonize(
 	slog_setoutput(SLOG_OUTPUT_SYSLOG, "neosocksd");
 }
 
+int_least64_t clock_monotonic(void)
+{
+	struct timespec monotime;
+	if (clock_gettime(CLOCK_MONOTONIC, &monotime)) {
+		return -1;
+	}
+	return monotime.tv_sec * INT64_C(1000000000) + monotime.tv_nsec;
+}
+
 double thread_load(void)
 {
 	static _Thread_local struct {

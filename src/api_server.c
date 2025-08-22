@@ -138,7 +138,7 @@ append_memstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 
 static void server_stats(
 	struct buffer *restrict buf, const struct server *restrict api,
-	const double uptime)
+	const int_least64_t uptime)
 {
 	const struct server_stats *restrict apistats = &api->stats;
 	const struct server *restrict s = api->data;
@@ -152,7 +152,7 @@ static void server_stats(
 	(void)strftime(
 		timestamp, sizeof(timestamp), "%FT%T%z",
 		localtime(&server_time));
-	FORMAT_DURATION(str_uptime, make_duration(uptime));
+	FORMAT_DURATION(str_uptime, make_duration_nanos(uptime));
 	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
 	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
 
@@ -324,9 +324,10 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 	const ev_tstamp now = ev_now(loop);
-	const double uptime = now - ctx->s->stats.started;
+	const int_least64_t uptime = clock_monotonic() - ctx->s->stats.started;
 	static ev_tstamp last = TSTAMP_NIL;
-	const double dt = (last == TSTAMP_NIL) ? uptime : now - last;
+	const double dt =
+		last == TSTAMP_NIL ? (double)uptime * 1e-9 : now - last;
 	if (server) {
 		server_stats(buf, ctx->s, uptime);
 		if (!stateless) {

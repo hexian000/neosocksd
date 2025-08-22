@@ -107,7 +107,7 @@ void server_init(
 		.loop = loop,
 		.serve = serve,
 		.data = data,
-		.stats = { .started = TSTAMP_NIL },
+		.stats = { .started = -1 },
 	};
 }
 
@@ -168,14 +168,14 @@ bool server_start(
 	w_timer->data = s;
 
 	struct ev_loop *loop = s->loop;
-	s->stats.started = ev_now(loop);
+	s->stats.started = clock_monotonic();
 	ev_io_start(loop, w_accept);
 	return true;
 }
 
 void server_stop(struct server *restrict s)
 {
-	if (s->stats.started == TSTAMP_NIL) {
+	if (s->stats.started == -1) {
 		return;
 	}
 	struct ev_loop *loop = s->loop;
@@ -184,5 +184,5 @@ void server_stop(struct server *restrict s)
 	CLOSE_FD(w_accept->fd);
 	ev_timer *restrict w_timer = &s->l.w_timer;
 	ev_timer_stop(loop, w_timer);
-	s->stats.started = TSTAMP_NIL;
+	s->stats.started = -1;
 }

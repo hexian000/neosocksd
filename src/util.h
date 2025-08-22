@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 struct dialreq;
@@ -94,6 +95,7 @@ bool parse_user(struct user_ident *ident, const char *s);
 void drop_privileges(const struct user_ident *ident);
 void daemonize(const struct user_ident *ident, bool nochdir, bool noclose);
 
+int_least64_t clock_monotonic(void);
 double thread_load(void);
 
 #endif /* UTIL_H */

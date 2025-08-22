@@ -28,7 +28,7 @@ struct server_stats {
 	uintmax_t num_request;
 	uintmax_t num_success;
 	uintmax_t byt_up, byt_down;
-	ev_tstamp started;
+	int_least64_t started;
 };
 
 struct sockaddr;
