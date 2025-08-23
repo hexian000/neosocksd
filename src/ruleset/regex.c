@@ -19,18 +19,22 @@ static int regex_gc(lua_State *restrict L)
 	return 0;
 }
 
-static size_t cstrpos(lua_Integer pos, size_t len)
+static size_t cstrpos(const lua_Integer pos, const size_t len)
 {
-	if (pos > 0) {
-		return (size_t)pos - 1;
-	}
-	if (pos == 0) {
+	if (pos == 0 || len == 0) {
 		return 0;
 	}
-	if ((size_t)(-pos) > len) {
-		return 0;
+	if (pos < 0) {
+		if ((size_t)-pos > len) {
+			return 0;
+		}
+		return len + (size_t)pos;
 	}
-	return len + (size_t)pos;
+	/* pos > 0 */
+	if ((size_t)pos > len) {
+		return len - 1;
+	}
+	return (size_t)pos - 1;
 }
 
 /* regex.compile(pattern) */
@@ -51,7 +55,7 @@ static int regex_compile(lua_State *restrict L)
 /* regex.find(reg, s [, init]) */
 static int regex_find(lua_State *restrict L)
 {
-	regex_t *restrict preg = luaL_checkudata(L, 1, MT_REGEX);
+	const regex_t *restrict preg = luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
 	const char *restrict s = luaL_checklstring(L, 2, &len);
 	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
@@ -67,22 +71,25 @@ static int regex_find(lua_State *restrict L)
 		lua_pushlstring(L, errbuf, n);
 		return lua_error(L);
 	}
-	lua_pushinteger(L, init + match.rm_so + 1);
-	lua_pushinteger(L, init + match.rm_eo);
+	lua_pushinteger(L, (lua_Integer)init + match.rm_so + 1);
+	lua_pushinteger(L, (lua_Integer)init + match.rm_eo);
 	return 2;
 }
 
 static int push_matches(
 	lua_State *restrict L, const char *s,
-	const regmatch_t *restrict matches, const size_t nmatch)
+	const regmatch_t *restrict matches, size_t nmatch)
 {
-	luaL_checkstack(L, nmatch, "too many subexpressions");
+	if (nmatch > INT_MAX) {
+		nmatch = INT_MAX;
+	}
+	luaL_checkstack(L, (int)nmatch, "too many subexpressions");
 	for (size_t i = 0; i < nmatch; i++) {
 		const char *match = s + matches[i].rm_so;
 		const size_t len = matches[i].rm_eo - matches[i].rm_so;
 		lua_pushlstring(L, match, len);
 	}
-	return nmatch;
+	return (int)nmatch;
 }
 
 /* regex.match(reg, s [, init]) */
@@ -127,7 +134,7 @@ static int gmatch_aux(lua_State *restrict L)
 		lua_pushlstring(L, errbuf, n);
 		return lua_error(L);
 	}
-	lua_pushinteger(L, init + matches[0].rm_eo + 1);
+	lua_pushinteger(L, (lua_Integer)init + matches[0].rm_eo + 1);
 	lua_copy(L, -1, lua_upvalueindex(3));
 	return push_matches(L, s, matches, nmatch);
 }
