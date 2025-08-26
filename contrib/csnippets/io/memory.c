@@ -162,6 +162,7 @@ buf_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 	}
 	*buf = b->buf + b->pos;
 	*len = b->len - b->pos;
+	b->pos = b->len = 0;
 	const int err = b->err;
 	b->err = 0;
 	return err;
