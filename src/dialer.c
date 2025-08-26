@@ -131,10 +131,11 @@ void dialaddr_copy(
 	case ATYP_INET6:
 		dst->in6 = src->in6;
 		break;
-	case ATYP_DOMAIN:
-		memcpy(dst->domain.name, src->domain.name,
-		       dst->domain.len = src->domain.len);
-		break;
+	case ATYP_DOMAIN: {
+		const uint8_t len = src->domain.len;
+		dst->domain.len = len;
+		memcpy(dst->domain.name, src->domain.name, len);
+	} break;
 	default:
 		FAIL();
 	}
