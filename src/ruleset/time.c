@@ -7,6 +7,7 @@
 #include "lua.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 
 #define PUSH_TIMESPEC(L, t)                                                    \
@@ -60,6 +61,10 @@ static int time_wall(lua_State *restrict L)
 	return 1;
 }
 
+#define READ_TIMESPEC(ts)                                                      \
+	((int_fast64_t)(ts).tv_sec * INT64_C(1000000000) +                     \
+	 (int_fast64_t)(ts).tv_nsec)
+
 /* cost, ... = time.measure(f, ...) */
 static int time_measure(lua_State *restrict L)
 {
@@ -67,12 +72,12 @@ static int time_measure(lua_State *restrict L)
 	lua_pushinteger(L, -1);
 	lua_insert(L, 1);
 	bool ok = true;
-	struct timespec t0, t1;
-	if (clock_gettime(CLOCK_MONOTONIC, &t0)) {
+	struct timespec ts0, ts1;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts0)) {
 		ok = false;
 	}
 	lua_call(L, nargs, LUA_MULTRET);
-	if (clock_gettime(CLOCK_MONOTONIC, &t1)) {
+	if (clock_gettime(CLOCK_MONOTONIC, &ts1)) {
 		ok = false;
 	}
 	const int nres = lua_gettop(L);
@@ -80,11 +85,12 @@ static int time_measure(lua_State *restrict L)
 		return nres;
 	}
 	lua_pushnumber(
-		L, (double)(t1.tv_sec - t0.tv_sec) +
-			   (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9);
+		L, (double)(READ_TIMESPEC(ts1) - READ_TIMESPEC(ts0)) * 1e-9);
 	lua_replace(L, 1);
 	return nres;
 }
+
+#undef READ_TIMESPEC
 
 int luaopen_time(lua_State *restrict L)
 {

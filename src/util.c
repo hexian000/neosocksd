@@ -9,6 +9,7 @@
 #include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/intcast.h"
+#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -423,13 +424,17 @@ void daemonize(
 	slog_setoutput(SLOG_OUTPUT_SYSLOG, "neosocksd");
 }
 
+#define READ_TIMESPEC(ts)                                                      \
+	((int_fast64_t)(ts).tv_sec * INT64_C(1000000000) +                     \
+	 (int_fast64_t)(ts).tv_nsec)
+
 int_least64_t clock_monotonic(void)
 {
 	struct timespec monotime;
 	if (clock_gettime(CLOCK_MONOTONIC, &monotime)) {
 		return -1;
 	}
-	return monotime.tv_sec * INT64_C(1000000000) + monotime.tv_nsec;
+	return (int_least64_t)READ_TIMESPEC(monotime);
 }
 
 double thread_load(void)
@@ -447,17 +452,18 @@ double thread_load(void)
 		return load;
 	}
 	if (last.set) {
-		const double total =
-			(double)(monotime.tv_sec - last.monotime.tv_sec) +
-			(double)(monotime.tv_nsec - last.monotime.tv_nsec) *
-				1e-9;
-		const double busy =
-			(double)(cputime.tv_sec - last.cputime.tv_sec) +
-			(double)(cputime.tv_nsec - last.cputime.tv_nsec) * 1e-9;
-		load = busy / total;
+		const int_fast64_t total =
+			READ_TIMESPEC(monotime) - READ_TIMESPEC(last.monotime);
+		const int_fast64_t busy =
+			READ_TIMESPEC(cputime) - READ_TIMESPEC(last.cputime);
+		if (busy > 0 && total > 0 && busy <= total) {
+			load = (double)busy / (double)total;
+		}
 	}
 	last.monotime = monotime;
 	last.cputime = cputime;
 	last.set = true;
 	return load;
 }
+
+#undef READ_TIMESPEC

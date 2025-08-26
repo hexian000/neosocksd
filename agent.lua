@@ -150,7 +150,7 @@ function rule.agent()
         local conn = agent.conns[connid]
         local proxies = list:new(conn):reverse()
         if agent.verbose then
-            evlogf("forward: [%d] %s %s,%s", connid, peername, addr, proxies:concat(","))
+            evlogf("agent: [%d] %s %s,%s", connid, peername, addr, proxies:concat(","))
         end
         return addr, proxies:unpack()
     end
