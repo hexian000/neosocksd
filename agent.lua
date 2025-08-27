@@ -14,10 +14,17 @@ agent.conns = table.get(_G.agent, "conns") or {}
 -- agent.hosts = { "host1", "host2", ... }
 agent.hosts = table.get(_G.agent, "hosts") or {}
 
+local function connid_of(v)
+    for id, conn in pairs(agent.conns) do
+        if conn == v then return tostring(id) end
+    end
+    return "?"
+end
+
 -- _G.peerdb[peername] = { hosts = { hostname, "host1" } }, timestamp = os.time() }
 _G.peerdb = _G.peerdb or {}
--- _G.conninfo[connid] = { [peername] = { route = { peername, "peer1" }, rtt = 0, timestamp = os.time() } }
-_G.conninfo = _G.conninfo or {}
+-- _G.conninfo[conn] = { [peername] = { route = { peername, "peer1" }, rtt = 0, timestamp = os.time() } }
+_G.conninfo = _G.conninfo or setmetatable({}, { __mode = "k" })
 
 local API_ENDPOINT = "api.neosocksd.internal:80"
 local INTERNAL_DOMAIN = ".internal"
@@ -48,20 +55,20 @@ local function is_valid(t, expiry_time, now)
 end
 
 local function build_index()
-    local peers, peer_rtt = {}, {}
+    local peers, peer_rtt = setmetatable({}, { __mode = "kv" }), {}
     if agent.peername then
         peer_rtt[agent.peername] = 0
     end
-    for connid, conn in pairs(_G.conninfo) do
-        for peername, info in pairs(conn) do
+    for conn, infomap in pairs(_G.conninfo) do
+        for peername, info in pairs(infomap) do
             local rtt = info.rtt or math.huge
             if not peer_rtt[peername] or rtt < peer_rtt[peername] then
                 peer_rtt[peername] = rtt
-                peers[peername] = connid
+                peers[peername] = conn
             end
         end
     end
-    local hosts, host_rtt = {}, {}
+    local hosts, host_rtt = setmetatable({}, { __mode = "kv" }), {}
     for peername, data in pairs(_G.peerdb) do
         for _, host in pairs(data.hosts or {}) do
             local rtt = peer_rtt[peername]
@@ -79,7 +86,7 @@ local function build_index()
     return hosts, peers
 end
 -- hosts[host] = peername
--- peers[peername] = connid
+-- peers[peername] = conn
 local hosts, peers = build_index()
 
 local function subdomain(host, domain)
@@ -122,11 +129,10 @@ function rule.agent()
                 domain = INTERNAL_DOMAIN
             end
             addr = strformat("%s%s:%s", sub, domain, port)
-            local connid = peers[peername]
-            local conn = agent.conns[connid]
+            local conn = peers[peername]
             local proxies = list:new(conn):reverse()
             if agent.verbose then
-                evlogf("relay: [%d] %s %s,%s", connid, peername, addr, proxies:concat(","))
+                evlogf("relay: [%s] %s %s,%s", connid_of(conn), peername, addr, proxies:concat(","))
             end
             return addr, proxies:unpack()
         end
@@ -134,23 +140,22 @@ function rule.agent()
         assert(sub)
         local peername = hosts[sub]
         assert(peername ~= nil and peername ~= agent.peername)
-        local connid = peers[peername]
-        local route = table.get(_G.conninfo, connid, peername, "route")
+        local conn = peers[peername]
+        local route = table.get(_G.conninfo, conn, peername, "route")
         if not route then
             evlogf("%q: peer not reachable", peername)
             return nil
         end
         local t = list:new():append(route)
         peername = t[#t]
-        connid = peers[peername]
+        conn = peers[peername]
         t[1], t[#t] = sub, nil
         if peername ~= hosts[sub] then
             addr = strformat("%s%s:%s", t:concat("."), RELAY_DOMAIN, port)
         end
-        local conn = agent.conns[connid]
         local proxies = list:new(conn):reverse()
         if agent.verbose then
-            evlogf("agent: [%d] %s %s,%s", connid, peername, addr, proxies:concat(","))
+            evlogf("agent: [%s] %s %s,%s", connid_of(conn), peername, addr, proxies:concat(","))
         end
         return addr, proxies:unpack()
     end
@@ -162,11 +167,11 @@ local function format_route(route)
     end):concat("->")
 end
 
-local function callbyconn(connid, func, ...)
+local function callbyconn(conn, func, ...)
     if not agent.running then
         error("cancelled")
     end
-    local target = list:new():append(agent.conns[connid])
+    local target = list:new():append(conn)
     target:insert(API_ENDPOINT)
     target = target:reverse():totable()
     return await.rpcall(target, func, ...)
@@ -196,42 +201,42 @@ function rpc.sync(peername, peerdb)
     return agent.peername, _G.peerdb
 end
 
-function agent.sync(connid)
-    assert(agent.conns[connid], strformat("unknown connid [%s]", connid))
-    local ok, r1, r2 = callbyconn(connid, "sync", agent.peername, _G.peerdb)
+function agent.sync(conn)
+    assert(type(conn) == "table", strformat("unknown conn [%s]", connid_of(conn)))
+    local ok, r1, r2 = callbyconn(conn, "sync", agent.peername, _G.peerdb)
     if not ok then
-        evlogf("sync failed: [%s] %s", connid, r1)
+        evlogf("sync failed: [%s] %s", connid_of(conn), r1)
         return
     end
     local peername, peerdb = r1, r2
-    local conn = _G.conninfo[connid] or {}
-    for peer, info in pairs(conn) do
+    local infomap = _G.conninfo[conn] or {}
+    for peer, info in pairs(infomap) do
         if info.route[#info.route] ~= peername then
-            conn[peer] = nil
-            evlogf("invalid route: [%s] %q %s", connid, peername, format_route(info.route))
+            infomap[peer] = nil
+            evlogf("invalid route: [%s] %q %s", connid_of(conn), peername, format_route(info.route))
         end
     end
-    if not conn[peername] then
-        conn[peername] = { route = { peername } }
+    if not infomap[peername] then
+        infomap[peername] = { route = { peername } }
     end
-    _G.conninfo[connid] = conn
+    _G.conninfo[conn] = infomap
     update_peerdb(peername, peerdb)
 end
 
 local function findconn(peername, ttl)
-    local connid, minrtt, bestroute
-    for id, _ in pairs(agent.conns) do
-        local info = table.get(_G.conninfo[id], peername)
+    local bestconn, minrtt, bestroute
+    for _, conn in pairs(agent.conns) do
+        local info = table.get(_G.conninfo, conn, peername)
         if info and #info.route <= ttl then
             local rtt = info.rtt or math.huge
             if not minrtt or rtt < minrtt then
                 minrtt = rtt
-                connid = id
+                bestconn = conn
                 bestroute = info.route
             end
         end
     end
-    return connid, minrtt, bestroute
+    return bestconn, minrtt, bestroute
 end
 
 function rpc.probe(peername, ttl)
@@ -249,11 +254,11 @@ function rpc.probe(peername, ttl)
     if ttl < 1 then
         error("ttl expired in transit")
     end
-    local connid = findconn(peername, ttl)
-    if not connid then
+    local conn = findconn(peername, ttl)
+    if not conn then
         error(string.format("%q->%q: peer not reachable", agent.peername, peername))
     end
-    local ok, result = callbyconn(connid, "probe", peername, ttl)
+    local ok, result = callbyconn(conn, "probe", peername, ttl)
     if not ok then
         error(result)
     end
@@ -261,12 +266,12 @@ function rpc.probe(peername, ttl)
     return result
 end
 
-local function probe_via(connid, peername)
+local function probe_via(conn, peername)
     local minrtt, bestroute, err
     for _ = 1, 4 do
         await.sleep(1)
         local probe_start = neosocksd.now()
-        local ok, result = callbyconn(connid, "probe", peername, agent.probettl)
+        local ok, result = callbyconn(conn, "probe", peername, agent.probettl)
         local probe_end = neosocksd.now()
         if ok then
             local rtt = probe_end - probe_start
@@ -282,9 +287,9 @@ local function probe_via(connid, peername)
         result = { route = bestroute, rtt = minrtt, timestamp = os.time() }
         err = nil
     end
-    local conn = _G.conninfo[connid] or {}
-    conn[peername] = result
-    _G.conninfo[connid] = conn
+    local infomap = _G.conninfo[conn] or {}
+    infomap[peername] = result
+    _G.conninfo[conn] = infomap
     hosts, peers = build_index()
     return err
 end
@@ -292,20 +297,21 @@ end
 function agent.probe(peername)
     assert(_G.peerdb[peername], strformat("unknown peer %q", peername))
     local errors = list:new()
-    local t = {}
-    for connid, _ in pairs(agent.conns) do
-        t[connid] = async(probe_via, connid, peername)
+    local t, n = {}, 0
+    for connid, conn in pairs(agent.conns) do
+        t[connid] = async(probe_via, conn, peername)
+        n = n + 1
     end
     for connid, r in pairs(t) do
         local ok, err = r:get()
         if not ok then error(err) end
         if err then
-            errors:insertf("[%s] %q", connid, err:match("^(.-)\n") or err)
+            errors:insertf("[%s] %q", tostring(connid), err:match("^(.-)\n") or err)
         end
     end
-    if #errors < #agent.conns then
-        local connid, minrtt, bestroute = findconn(peername, agent.probettl)
-        evlogf("probe: [%s] %q %s %.0fms", connid, peername,
+    if #errors < n then
+        local bestconn, minrtt, bestroute = findconn(peername, agent.probettl)
+        evlogf("probe: [%s] %q %s %.0fms", connid_of(bestconn), peername,
             format_route(bestroute), minrtt * 1e+3)
     elseif errors[1] then
         evlogf("probe failed: %q %s", peername, errors:sort():concat(", "))
@@ -321,8 +327,8 @@ function agent.maintenance()
         }
     end
     -- sync
-    for connid, _ in pairs(agent.conns) do
-        agent.sync(connid)
+    for _, conn in pairs(agent.conns) do
+        agent.sync(conn)
     end
     evlog("agent: sync finished")
     -- probe
@@ -364,18 +370,16 @@ function agent.stats(dt)
     for peername, data in pairs(_G.peerdb) do
         local tag = strformat("%q", peername)
         local timestamp = format_timestamp(data.timestamp)
-        local connid, conn, info = peers[peername], nil, nil
-        if connid then conn = _G.conninfo[connid] end
-        if conn then info = conn[peername] end
+        local conn = peers[peername]
+        local info = conn and table.get(_G.conninfo, conn, peername)
         if info and info.rtt then
-            w:insertf("%-16s: %s [%s] %4.0fms %s", tag, timestamp, connid,
+            w:insertf("%-16s: %s [%s] %4.0fms %s", tag, timestamp, connid_of(conn),
                 info.rtt * 1e+3, format_route(info.route))
         elseif peername ~= agent.peername then
             w:insertf("%-16s: %s no route", tag, timestamp)
         end
     end
-    w:sort():insert(1, "> Peers")
-    return w:concat("\n")
+    return "> Peers\n" .. w:sort():concat("\n")
 end
 
 function agent.stop()
