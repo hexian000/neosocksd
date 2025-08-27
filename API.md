@@ -42,6 +42,7 @@ Version: dev
 
 1. The RESTful API server runs `HTTP/1.1`.
 2. The content length limit for a single request is 4 MiB.
+3. Requests and responses may use `deflate` compression when the `Content-Encoding` (request) or `Accept-Encoding` (response) header is set accordingly.
 
 ### /healthy
 
@@ -75,9 +76,10 @@ Run the POSTed script.
 ### /ruleset/rpcall
 
 - **Method**: POST
-- **Content**: `application/x-neosocksd-rpc`
+- **Content**: `application/x-neosocksd-rpc; version=<n>`
 - **Status**: HTTP 200, HTTP 500
-- **Response**: Invocation results.
+- **Response Content-Type**: `application/x-neosocksd-rpc; version=<n>`
+- **Response**: Invocation results. The response may be `deflate`-compressed if the request includes `Accept-Encoding: deflate`.
 
 Internal API reserved for [await.invoke](#awaitinvoke).
 
@@ -101,6 +103,7 @@ Load the posted script and use it as follows:
 - **Method**: POST
 - **Content**: None
 - **Status**: HTTP 200
+- **Response**: Text report including reclaimed bytes/objects, current ruleset memory usage, and time cost.
 
 Trigger the garbage collector to free some memory.
 
