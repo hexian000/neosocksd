@@ -1,6 +1,27 @@
 /* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/**
+ * @file dialer.c
+ * @brief Implementation of network dialer with proxy chain support
+ * 
+ * This file implements an asynchronous network dialer that can establish
+ * connections through chains of proxy servers. The dialer uses a state machine
+ * approach to handle the complex handshake protocols required by different
+ * proxy types (HTTP CONNECT, SOCKS4A, SOCKS5).
+ * 
+ * State Machine Flow:
+ * 1. STATE_INIT -> STATE_RESOLVE (for domain names) or STATE_CONNECT (for IPs)
+ * 2. STATE_RESOLVE -> STATE_CONNECT (after DNS resolution)
+ * 3. STATE_CONNECT -> STATE_HANDSHAKE1 (connection established, start proxy handshake)
+ * 4. STATE_HANDSHAKE1 -> STATE_HANDSHAKE2 (SOCKS5 auth) or STATE_HANDSHAKE3 (direct to request)
+ * 5. STATE_HANDSHAKE2 -> STATE_HANDSHAKE3 (SOCKS5 after auth)
+ * 6. STATE_HANDSHAKE3 -> next proxy or STATE_DONE
+ * 
+ * The dialer can traverse multiple proxies in sequence, performing the appropriate
+ * handshake for each proxy protocol before moving to the next hop.
+ */
+
 #include "dialer.h"
 
 #include "conf.h"
@@ -36,25 +57,39 @@
 #include <stdlib.h>
 #include <string.h>
 
+/** @brief String names for each proxy protocol */
 const char *proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
 };
 
+/**
+ * @brief Set dialaddr from host string and port
+ * @param addr Output dialaddr structure
+ * @param host Host string (IPv4, IPv6, or domain name)
+ * @param port Port number in host byte order
+ * @return true on success, false if hostname too long
+ * 
+ * This function attempts to parse the host as an IP address first,
+ * falling back to treating it as a domain name if IP parsing fails.
+ */
 static bool dialaddr_sethostport(
 	struct dialaddr *restrict addr, const char *restrict host,
 	const uint16_t port)
 {
 	addr->port = port;
+	/* Try IPv4 first */
 	if (inet_pton(AF_INET, host, &addr->in) == 1) {
 		addr->type = ATYP_INET;
 		return true;
 	}
+	/* Try IPv6 next */
 	if (inet_pton(AF_INET6, host, &addr->in6) == 1) {
 		addr->type = ATYP_INET6;
 		return true;
 	}
+	/* Treat as domain name */
 	const size_t hostlen = strlen(host);
 	if (hostlen > FQDN_MAX_LENGTH) {
 		LOGE_F("hostname too long: `%s'", host);
@@ -67,23 +102,35 @@ static bool dialaddr_sethostport(
 	return true;
 }
 
+/**
+ * @brief Parse string address in "host:port" format
+ * 
+ * Parses an address string and populates a dialaddr structure.
+ * The input string should be in "host:port" format where host
+ * can be an IPv4 address, IPv6 address, or domain name.
+ */
 bool dialaddr_parse(
 	struct dialaddr *restrict addr, const char *restrict s,
 	const size_t len)
 {
-	/* FQDN + ':' + port */
+	/* Check maximum possible length: FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + 1 + 5) {
 		LOG_TXT_F(ERROR, s, len, "address too long: %zu bytes", len);
 		return false;
 	}
+	/* Create null-terminated copy for parsing */
 	char buf[len + 1];
 	memcpy(buf, s, len);
 	buf[len] = '\0';
+
+	/* Split into host and port components */
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
 		LOGE_F("invalid address: `%s'", s);
 		return false;
 	}
+
+	/* Parse port number */
 	char *endptr;
 	const uintmax_t portvalue = strtoumax(port, &endptr, 10);
 	if (*endptr || portvalue > UINT16_MAX) {
@@ -93,6 +140,12 @@ bool dialaddr_parse(
 	return dialaddr_sethostport(addr, host, (uint16_t)portvalue);
 }
 
+/**
+ * @brief Convert sockaddr structure to dialaddr
+ * 
+ * Extracts address and port information from a sockaddr structure
+ * and stores it in a dialaddr structure.
+ */
 bool dialaddr_set(
 	struct dialaddr *restrict addr, const struct sockaddr *restrict sa,
 	const socklen_t len)
@@ -119,6 +172,12 @@ bool dialaddr_set(
 	return false;
 }
 
+/**
+ * @brief Copy dialaddr structure
+ * 
+ * Performs a deep copy of a dialaddr structure, handling the
+ * different address types appropriately.
+ */
 void dialaddr_copy(
 	struct dialaddr *restrict dst, const struct dialaddr *restrict src)
 {
@@ -387,23 +446,34 @@ void dialreq_free(struct dialreq *req)
 	free(req);
 }
 
-/* never rollback */
+/**
+ * @brief Dialer state machine states
+ */
 enum dialer_state {
-	STATE_INIT,
-	STATE_RESOLVE,
-	STATE_CONNECT,
-	STATE_HANDSHAKE1,
-	STATE_HANDSHAKE2,
-	STATE_HANDSHAKE3,
-	STATE_DONE,
+	STATE_INIT, /**< Initial state, not yet started */
+	STATE_RESOLVE, /**< Resolving domain name to IP address */
+	STATE_CONNECT, /**< Establishing TCP connection */
+	STATE_HANDSHAKE1, /**< First phase of proxy handshake */
+	STATE_HANDSHAKE2, /**< Second phase */
+	STATE_HANDSHAKE3, /**< Third phase */
+	STATE_DONE, /**< Connection established or failed */
 };
 
+/**
+ * @brief Stop the dialer and clean up resources
+ * 
+ * This function is called to halt an ongoing dial operation and clean up
+ * any associated resources (DNS queries, socket watchers, file descriptors).
+ * It handles cleanup differently depending on the current state.
+ */
 static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 {
 	switch (d->state) {
 	case STATE_INIT:
+		/* Nothing to clean up */
 		break;
 	case STATE_RESOLVE:
+		/* Cancel ongoing DNS resolution */
 		if (d->resolve_query != NULL) {
 			resolve_cancel(d->resolve_query);
 			d->resolve_query = NULL;
@@ -413,20 +483,30 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 	case STATE_HANDSHAKE1:
 	case STATE_HANDSHAKE2:
 	case STATE_HANDSHAKE3:
+		/* Stop socket I/O watcher */
 		ev_io_stop(loop, &d->w_socket);
 		break;
 	case STATE_DONE:
+		/* Already stopped */
 		break;
 	default:;
 	}
 	ASSERT(!ev_is_active(&d->w_socket) && !ev_is_pending(&d->w_socket));
 
+	/* Close socket if connection wasn't successful */
 	if (d->dialed_fd == -1 && d->w_socket.fd != -1) {
 		CLOSE_FD(d->w_socket.fd);
 	}
 	d->state = STATE_DONE;
 }
 
+/**
+ * @brief Completion callback for dialer operations
+ * 
+ * This callback is invoked when a dial operation completes (successfully
+ * or with an error). It cleans up the dialer state and calls the user's
+ * completion callback with the result.
+ */
 static void
 finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
@@ -435,6 +515,7 @@ finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	const int fd = d->dialed_fd;
 	LOGV_F("dialer %p: finished fd=%d", (void *)d, fd);
 	dialer_stop(d, loop);
+	/* Call user's completion callback with the result */
 	d->finish_cb.func(loop, d->finish_cb.data, fd);
 }
 
@@ -1114,16 +1195,25 @@ static int dialer_recv(struct dialer *restrict d)
 	return 1;
 }
 
+/**
+ * @brief Main socket I/O callback for the dialer state machine
+ * 
+ * This is the core of the dialer state machine. It handles both connection
+ * establishment (EV_WRITE) and proxy protocol handshakes (EV_READ).
+ * The function manages transitions between different states and proxy hops.
+ */
 static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
 	struct dialer *restrict d = watcher->data;
 	const int fd = watcher->fd;
 
+	/* Handle connection establishment */
 	if (revents & EV_WRITE) {
 		ASSERT(d->state == STATE_CONNECT);
 		const int sockerr = socket_get_error(fd);
 		if (sockerr != 0) {
+			/* Connection failed */
 			if (LOGLEVEL(WARNING)) {
 				const struct dialreq *restrict req = d->req;
 				const struct dialaddr *restrict addr =
@@ -1140,11 +1230,16 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			ev_invoke(loop, &d->w_finish, EV_CUSTOM);
 			return;
 		}
+
+		/* Connection successful */
 		if (d->req->num_proxy == 0) {
+			/* Direct connection, we're done */
 			d->dialed_fd = fd;
 			ev_invoke(loop, &d->w_finish, EV_CUSTOM);
 			return;
 		}
+
+		/* Start proxy handshake */
 		d->state = STATE_HANDSHAKE1;
 		if (!send_dispatch(d)) {
 			ev_invoke(loop, &d->w_finish, EV_CUSTOM);
@@ -1153,30 +1248,36 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		modify_io_events(loop, watcher, EV_READ);
 	}
 
+	/* Handle proxy protocol handshakes */
 	if (revents & EV_READ) {
 		ASSERT(d->state == STATE_HANDSHAKE1 ||
 		       d->state == STATE_HANDSHAKE2 ||
 		       d->state == STATE_HANDSHAKE3);
 		const int ret = dialer_recv(d);
 		if (ret < 0) {
+			/* Protocol error */
 			ev_invoke(loop, &d->w_finish, EV_CUSTOM);
 			return;
 		}
 		if (ret > 0) {
-			/* want more data */
+			/* Need more data */
 			return;
 		}
 
-		/* clear buffer for next jump */
+		/* Current proxy handshake completed successfully */
+		/* Clear buffer for next proxy hop */
 		d->rbuf.len = 0;
 		d->next = d->rbuf.data;
 		d->jump++;
+
 		if (d->jump >= d->req->num_proxy) {
+			/* All proxies traversed, connection established */
 			d->dialed_fd = fd;
 			ev_invoke(loop, &d->w_finish, EV_CUSTOM);
 			return;
 		}
 
+		/* Start handshake with next proxy in chain */
 		d->state = STATE_HANDSHAKE1;
 		if (!send_dispatch(d)) {
 			ev_invoke(loop, &d->w_finish, EV_CUSTOM);
@@ -1185,10 +1286,17 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 }
 
+/**
+ * @brief Establish TCP connection to a sockaddr
+ * 
+ * Creates a socket and initiates a non-blocking connection to the specified
+ * address. Configures socket options and starts the appropriate libev watcher.
+ */
 static bool connect_sa(
 	struct dialer *restrict d, struct ev_loop *loop,
 	const struct sockaddr *restrict sa)
 {
+	/* Create socket */
 	const int fd = socket(sa->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
@@ -1196,6 +1304,8 @@ static bool connect_sa(
 		d->syserr = err;
 		return false;
 	}
+
+	/* Configure non-blocking mode */
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
 		LOGE_F("fcntl: %s", strerror(err));
@@ -1256,6 +1366,12 @@ static bool connect_sa(
 	return true;
 }
 
+/**
+ * @brief DNS resolution callback
+ * 
+ * Called when DNS resolution completes (successfully or with failure).
+ * On success, initiates TCP connection to the resolved address.
+ */
 static void resolve_cb(
 	struct resolve_query *q, struct ev_loop *loop, void *ctx,
 	const struct sockaddr *restrict sa)
@@ -1268,6 +1384,7 @@ static void resolve_cb(
 	const struct dialaddr *restrict dialaddr =
 		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
 	if (sa == NULL) {
+		/* DNS resolution failed */
 		LOGW_F("name resolution failed: \"%.*s\"",
 		       (int)dialaddr->domain.len, dialaddr->domain.name);
 		return;
@@ -1300,13 +1417,23 @@ static void resolve_cb(
 	}
 }
 
+/**
+ * @brief Start the dialer state machine
+ * 
+ * Initiates the connection process by determining the first address to connect to
+ * (either the first proxy or the final destination) and starting either DNS
+ * resolution or direct TCP connection as appropriate.
+ */
 static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 {
 	const struct dialreq *restrict req = d->req;
+	/* Determine first address to connect to */
 	const struct dialaddr *restrict addr =
 		req->num_proxy > 0 ? &req->proxy[0].addr : &req->addr;
+
 	switch (addr->type) {
 	case ATYP_INET: {
+		/* Direct IPv4 connection */
 		struct sockaddr_in in = {
 			.sin_family = AF_INET,
 			.sin_addr = addr->in,
@@ -1318,8 +1445,9 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 		}
 	} break;
 	case ATYP_INET6: {
+		/* Direct IPv6 connection */
 		struct sockaddr_in6 in6 = {
-			.sin6_family = AF_INET,
+			.sin6_family = AF_INET6,
 			.sin6_addr = addr->in6,
 			.sin6_port = htons(addr->port),
 		};
@@ -1329,6 +1457,7 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 		}
 	} break;
 	case ATYP_DOMAIN: {
+		/* Need DNS resolution first */
 		char host[FQDN_MAX_LENGTH + 1];
 		memcpy(host, addr->domain.name, addr->domain.len);
 		host[addr->domain.len] = '\0';
@@ -1351,44 +1480,75 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 	}
 }
 
+/**
+ * @brief Initialize dialer structure
+ * 
+ * Sets up a dialer structure with initial values and configures libev watchers.
+ * Must be called before using dialer_do().
+ */
 void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 {
+	/* Initialize state */
 	d->req = NULL;
 	d->resolve_query = NULL;
 	d->jump = 0;
 	d->state = STATE_INIT;
 	d->syserr = 0;
+
+	/* Initialize libev watchers */
 	ev_io_init(&d->w_socket, socket_cb, -1, EV_NONE);
 	d->w_socket.data = d;
 	d->dialed_fd = -1;
 	ev_init(&d->w_finish, finish_cb);
 	d->w_finish.data = d;
+
+	/* Store callback and initialize buffer */
 	d->finish_cb = *callback;
 	d->next = d->rbuf.data;
 	BUF_INIT(d->rbuf, 0);
 }
 
+/**
+ * @brief Start a dial operation
+ * 
+ * Begins the asynchronous process of establishing a connection according to
+ * the provided dial request. The completion callback will be invoked when
+ * the operation finishes (successfully or with an error).
+ */
 void dialer_do(
 	struct dialer *restrict d, struct ev_loop *loop,
 	const struct dialreq *restrict req)
 {
+	/* Log the dial request for debugging */
 	if (LOGLEVEL(VERBOSE)) {
 		char s[4096];
 		int r = dialreq_format(s, sizeof(s), req);
 		ASSERT(r > 0);
 		LOG_F(VERBOSE, "dialer %p: start, `%.*s'", (void *)d, r, s);
 	}
+
+	/* Store request and start the state machine */
 	d->req = req;
 	d->syserr = 0;
 	dialer_start(d, loop);
 }
 
+/**
+ * @brief Cancel an ongoing dial operation
+ * 
+ * Stops the dialer state machine and cleans up all resources. Safe to call
+ * multiple times or on an already completed dialer. The completion callback
+ * will not be invoked after cancellation.
+ */
 void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 {
 	if (d->state == STATE_DONE) {
+		/* Already finished or cancelled */
 		return;
 	}
 	LOGV_F("dialer %p: cancel", (void *)d);
+
+	/* Clear any pending completion callback and stop the dialer */
 	ev_clear_pending(loop, &d->w_finish);
 	dialer_stop(d, loop);
 }

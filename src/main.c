@@ -1,6 +1,11 @@
 /* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/**
+ * @file main.c
+ * @brief Main entry point for neosocksd
+ */
+
 /* internal */
 #include "api_server.h"
 #include "conf.h"
@@ -37,19 +42,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+/**
+ * @brief Global application state structure
+ * 
+ * Contains all the main components of the neosocksd application:
+ * - Signal watchers for graceful shutdown and configuration reload
+ * - Configuration settings parsed from command line
+ * - Main proxy server instance
+ * - Optional REST API server instance
+ */
 static struct {
 	ev_signal w_sighup;
 	ev_signal w_sigint;
 	ev_signal w_sigterm;
 
-	struct config conf;
-	struct server server;
-	struct server apiserver;
+	struct config conf; /**< Parsed configuration from command line */
+	struct server server; /**< Main proxy server instance */
+	struct server apiserver; /**< Optional REST API server instance */
 } app = { 0 };
 
+/**
+ * @brief Signal handler callback
+ * @param loop Event loop instance
+ * @param watcher Signal watcher that triggered
+ * @param revents Event flags (should be EV_SIGNAL)
+ */
 static void
 signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents);
 
+/**
+ * @brief Print command line usage information and examples
+ * @param argv0 Program name from argv[0]
+ */
 static void print_usage(const char *argv0)
 {
 	(void)fprintf(
@@ -116,6 +140,15 @@ static void print_usage(const char *argv0)
 	(void)fflush(stderr);
 }
 
+/**
+ * @brief Parse command line arguments and populate configuration
+ * @param argc Number of command line arguments
+ * @param argv Array of command line argument strings
+ * 
+ * Parses all supported command line options and stores the configuration
+ * in the global app.conf structure. Exits the program on invalid arguments
+ * or when help is requested.
+ */
 static void parse_args(const int argc, char *const *const restrict argv)
 {
 #define OPT_REQUIRE_ARG(argc, argv, i)                                         \
@@ -129,7 +162,8 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 #define OPT_ARG_ERROR(argv, i)                                                 \
 	do {                                                                   \
-		LOGF_F("argument error: %s `%s'", (argv)[(i)-1], (argv)[(i)]); \
+		LOGF_F("argument error: %s `%s'", (argv)[(i) - 1],             \
+		       (argv)[(i)]);                                           \
 		exit(EXIT_FAILURE);                                            \
 	} while (false)
 
@@ -342,8 +376,11 @@ static void parse_args(const int argc, char *const *const restrict argv)
 
 int main(int argc, char **argv)
 {
+	/* Initialize application and parse command line arguments */
 	init(argc, argv);
 	parse_args(argc, argv);
+
+	/* Validate configuration */
 	const struct config *restrict conf = &app.conf;
 	if (!conf_check(conf)) {
 		LOGF_F("configuration check failed, try \"%s --help\" for more information",
@@ -353,18 +390,22 @@ int main(int argc, char **argv)
 	G.conf = conf;
 	loadlibs();
 
+	/* Parse and validate outbound connection configuration */
 	G.basereq = dialreq_parse(conf->forward, conf->proxy);
 	if (G.basereq == NULL) {
 		LOGF("unable to parse outbound configuration");
 		exit(EXIT_FAILURE);
 	}
 
+	/* Initialize the main event loop */
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);
 
+	/* Initialize DNS resolver */
 	G.resolver = resolver_new(loop, conf);
 	CHECKOOM(G.resolver);
 
+	/* Initialize Lua ruleset if specified */
 #if WITH_RULESET
 	if (conf->ruleset != NULL) {
 		G.ruleset = ruleset_new(loop);
@@ -379,23 +420,27 @@ int main(int argc, char **argv)
 	}
 #endif
 
+	/* Initialize and configure the main proxy server */
 	struct server *restrict s = &app.server;
 	server_init(s, loop, NULL, NULL);
+
+	/* Select the appropriate protocol handler based on configuration */
 	if (conf->forward != NULL) {
-		s->serve = forward_serve;
+		s->serve = forward_serve; /* TCP port forwarding */
 	}
 #if WITH_TPROXY
 	else if (conf->transparent) {
-		s->serve = tproxy_serve;
+		s->serve = tproxy_serve; /* Transparent proxy */
 	}
 #endif
 	else if (conf->http) {
-		s->serve = http_proxy_serve;
+		s->serve = http_proxy_serve; /* HTTP CONNECT proxy */
 	} else {
 		/* default to SOCKS server */
-		s->serve = socks_serve;
+		s->serve = socks_serve; /* SOCKS4/4a/5 proxy */
 	}
 
+	/* Parse listen address and start the main server */
 	{
 		union sockaddr_max bindaddr;
 		if (!parse_bindaddr(&bindaddr, conf->listen)) {
@@ -409,6 +454,7 @@ int main(int argc, char **argv)
 		G.server = s;
 	}
 
+	/* Start optional REST API server if configured */
 	struct server *api = NULL;
 	if (conf->restapi != NULL) {
 		union sockaddr_max apiaddr;
@@ -424,6 +470,7 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* Handle user identity changes and daemonization */
 	{
 		struct user_ident ident, *pident = NULL;
 		if (conf->user_name != NULL) {
@@ -441,16 +488,21 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* signal watchers */
+	/* Set up signal watchers for graceful shutdown and configuration reload */
 	{
+		/* SIGHUP: reload configuration */
 		ev_signal *restrict w_sighup = &app.w_sighup;
 		ev_signal_init(w_sighup, signal_cb, SIGHUP);
 		ev_set_priority(w_sighup, EV_MAXPRI);
 		ev_signal_start(loop, w_sighup);
+
+		/* SIGINT: graceful shutdown (Ctrl+C) */
 		ev_signal *restrict w_sigint = &app.w_sigint;
 		ev_signal_init(w_sigint, signal_cb, SIGINT);
 		ev_set_priority(w_sigint, EV_MAXPRI);
 		ev_signal_start(loop, w_sigint);
+
+		/* SIGTERM: graceful shutdown (service stop) */
 		ev_signal *restrict w_sigterm = &app.w_sigterm;
 		ev_signal_init(w_sigterm, signal_cb, SIGTERM);
 		ev_set_priority(w_sigterm, EV_MAXPRI);
@@ -460,10 +512,12 @@ int main(int argc, char **argv)
 #if WITH_SYSTEMD
 	(void)sd_notify(0, "READY=1");
 #endif
-	/* start event loop */
+
+	/* Start the main event loop - this blocks until shutdown */
 	LOGN("server start");
 	ev_run(loop, 0);
 
+	/* Graceful shutdown sequence */
 	if (api != NULL) {
 		server_stop(api);
 		api = NULL;
@@ -472,6 +526,7 @@ int main(int argc, char **argv)
 	G.server = NULL;
 	LOGN("server shutdown gracefully");
 
+	/* Clean up global resources */
 #if WITH_RULESET
 	if (G.ruleset != NULL) {
 		ruleset_free(G.ruleset);
@@ -487,9 +542,10 @@ int main(int argc, char **argv)
 		G.basereq = NULL;
 	}
 
-	session_closeall(loop);
-	ev_loop_destroy(loop);
-	unloadlibs();
+	/* Final cleanup and exit */
+	session_closeall(loop); /* Close any remaining sessions */
+	ev_loop_destroy(loop); /* Destroy the event loop */
+	unloadlibs(); /* Unload dynamic libraries */
 
 	LOGD("program terminated normally");
 	return EXIT_SUCCESS;
@@ -511,6 +567,7 @@ void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 			       watcher->signum);
 			break;
 		}
+		/* Attempt to reload the Lua ruleset */
 		const bool ok = ruleset_loadfile(G.ruleset, conf->ruleset);
 		if (!ok) {
 			LOGW_F("failed to reload ruleset: %s",
@@ -531,8 +588,11 @@ void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 #if WITH_SYSTEMD
 		(void)sd_notify(0, "STOPPING=1");
 #endif
+		/* Break out of the main event loop to initiate graceful shutdown */
 		ev_break(loop, EVBREAK_ALL);
 		break;
-	default:;
+	default:
+		/* Ignore other signals */
+		break;
 	}
 }

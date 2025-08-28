@@ -10,6 +10,7 @@
 #include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
+#include "utils/ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
@@ -18,7 +19,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -309,29 +309,6 @@ int http_parser_recv(struct http_parser *restrict p)
 			FAIL();
 		}
 	}
-}
-
-static char *strtrimleftspace(char *restrict s)
-{
-	const unsigned char *p = (unsigned char *)s;
-	while (*p && isspace(*p)) {
-		p++;
-	}
-	return (char *)p;
-}
-
-static char *strtrimrightspace(char *restrict s)
-{
-	unsigned char *e = (unsigned char *)s + strlen(s) - 1;
-	while ((unsigned char *)s < e && isspace(*e)) {
-		*e-- = '\0';
-	}
-	return s;
-}
-
-static char *strtrimspace(char *restrict s)
-{
-	return strtrimrightspace(strtrimleftspace(s));
 }
 
 bool parsehdr_accept_te(struct http_parser *restrict p, char *restrict value)

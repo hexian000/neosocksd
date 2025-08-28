@@ -1,6 +1,17 @@
 /* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/**
+ * @file transfer.c
+ * @brief Implementation of non-blocking data transfer helpers.
+ *
+ * The core logic is driven by an `ev_io` watcher and a small state machine.
+ * Data is copied from a source file descriptor to a destination file
+ * descriptor using `recv(2)`/`send(2)` with an intermediate buffer. When
+ * compiled with `WITH_SPLICE` and enabled at runtime, a pipe and `splice(2)`
+ * are used to reduce user-space copies.
+ */
+
 #include "transfer.h"
 
 #include "conf.h"
@@ -33,6 +44,16 @@
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
 
+/**
+ * @brief Reconfigure and restart the internal watcher for the next step.
+ *
+ * Switches the watcher between EV_READ and EV_WRITE depending on whether
+ * we need to read from the source or write to the destination.
+ *
+ * @param t Transfer context.
+ * @param loop Event loop.
+ * @param events One of EV_READ or EV_WRITE.
+ */
 static void update_watcher(
 	struct transfer *restrict t, struct ev_loop *loop, const int events)
 {
@@ -48,6 +69,13 @@ static void update_watcher(
 	ev_io_start(loop, watcher);
 }
 
+/**
+ * @brief Update optional byte counter and emit verbose logs.
+ *
+ * @param t Transfer context.
+ * @param nbsend Number of bytes just sent to destination.
+ * @param buffered Remaining buffered bytes pending send.
+ */
 static void update_stats(
 	const struct transfer *restrict t, const size_t nbsend,
 	const size_t buffered)
@@ -67,6 +95,15 @@ static void update_stats(
 		VERYVERBOSE, t, "%zu bytes transmitted", nbsend, buffered);
 }
 
+/**
+ * @brief Transition to a new state and notify the callback.
+ *
+ * No-op if the state remains unchanged.
+ *
+ * @param t Transfer context.
+ * @param loop Event loop.
+ * @param state New state value.
+ */
 static void set_state(
 	struct transfer *restrict t, struct ev_loop *loop,
 	const enum transfer_state state)
@@ -79,6 +116,12 @@ static void set_state(
 	t->state_cb.func(loop, t->state_cb.data);
 }
 
+/**
+ * @brief Read bytes from source fd into the internal buffer.
+ *
+ * @param t Transfer context.
+ * @return >0 on bytes read, 0 on EAGAIN or no capacity, -1 on EOF/error.
+ */
 static ssize_t transfer_recv(struct transfer *restrict t)
 {
 	const size_t cap = t->buf.cap - t->buf.len;
@@ -104,6 +147,12 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 	return nrecv;
 }
 
+/**
+ * @brief Send buffered bytes from the internal buffer to destination fd.
+ *
+ * @param t Transfer context.
+ * @return >0 on bytes sent, 0 on EAGAIN or no data, -1 on fatal error.
+ */
 static ssize_t transfer_send(struct transfer *restrict t)
 {
 	const size_t len = t->buf.len - t->pos;
@@ -131,6 +180,12 @@ static ssize_t transfer_send(struct transfer *restrict t)
 	return nsend;
 }
 
+/**
+ * @brief libev callback that drives the transfer state machine.
+ *
+ * Reads from the source when possible and writes to the destination when
+ * there is buffered data. Handles state transitions on EOF or errors.
+ */
 static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
@@ -191,6 +246,11 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 }
 
 #if WITH_SPLICE
+
+/**
+ * @brief Drain from `fd` into the pipe using `splice(2)`.
+ * @return >0 on bytes spliced, 0 on EAGAIN or full pipe, -1 on EOF/error.
+ */
 static ssize_t splice_drain(struct splice_pipe *restrict pipe, const int fd)
 {
 	const size_t cap = pipe->cap - pipe->len;
@@ -215,6 +275,10 @@ static ssize_t splice_drain(struct splice_pipe *restrict pipe, const int fd)
 	return nrecv;
 }
 
+/**
+ * @brief Pump from the pipe into `fd` using `splice(2)`.
+ * @return >0 on bytes spliced out, 0 on EAGAIN or empty pipe, -1 on error.
+ */
 static ssize_t splice_pump(struct splice_pipe *restrict pipe, const int fd)
 {
 	const size_t len = pipe->len;
@@ -235,6 +299,9 @@ static ssize_t splice_pump(struct splice_pipe *restrict pipe, const int fd)
 	return nsend;
 }
 
+/**
+ * @brief libev callback variant that uses a splice pipe for zero-copy.
+ */
 static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);

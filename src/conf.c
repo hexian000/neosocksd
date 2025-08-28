@@ -59,9 +59,8 @@ static bool range_check_double(
 }
 
 #define RANGE_CHECK(key, value, lbound, ubound)                                \
-	_Generic(value, int                                                    \
-		 : range_check_int, double                                     \
-		 : range_check_double)(key, value, lbound, ubound)
+	_Generic(value, int: range_check_int, double: range_check_double)(     \
+		key, value, lbound, ubound)
 
 bool conf_check(const struct config *restrict conf)
 {

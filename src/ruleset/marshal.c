@@ -5,6 +5,7 @@
 
 #include "base.h"
 
+#include "utils/ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 
@@ -13,7 +14,6 @@
 #include "lauxlib.h"
 #include "lua.h"
 
-#include <ctype.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <tgmath.h>

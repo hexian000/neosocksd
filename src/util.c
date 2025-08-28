@@ -1,6 +1,14 @@
 /* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/**
+ * @file util.c
+ * @brief Implementation of utility routines and globals for neosocksd.
+ *
+ * Contains initialization/teardown helpers, libev watcher utilities,
+ * privilege and daemon helpers, optional splice-based pipe cache utilities,
+ * and basic timing/load measurement functions.
+ */
 #include "util.h"
 
 #include "resolver.h"
@@ -39,6 +47,7 @@
 #include <string.h>
 #include <time.h>
 
+/** Global instance of process-wide state declared in `util.h`. */
 struct globals G = { 0 };
 
 #if WITH_SPLICE
@@ -106,6 +115,7 @@ static struct {
 	{ SIGSYS, { .sa_handler = SIG_DFL } },
 };
 
+/** Minimal crash handler to log stack then re-raise the signal. */
 static void crash_handler(const int signo)
 {
 	LOG_STACK_F(FATAL, 2, "FATAL ERROR: %s", strsignal(signo));
@@ -125,6 +135,7 @@ static void crash_handler(const int signo)
 	}
 }
 
+/** Install crash handlers for fatal signals when enabled. */
 static void set_crash_handler(void)
 {
 	struct sigaction act = {
@@ -309,6 +320,7 @@ bool parse_user(struct user_ident *restrict ident, const char *restrict s)
 	return true;
 }
 
+/** Drop real and effective privileges to the specified identifiers. */
 void drop_privileges(const struct user_ident *restrict ident)
 {
 #if _BSD_SOURCE || _GNU_SOURCE
@@ -333,6 +345,7 @@ void drop_privileges(const struct user_ident *restrict ident)
 	}
 }
 
+/** Daemonize the current process using the double-fork pattern. */
 void daemonize(
 	const struct user_ident *restrict ident, const bool nochdir,
 	const bool noclose)
@@ -424,6 +437,7 @@ void daemonize(
 	slog_setoutput(SLOG_OUTPUT_SYSLOG, "neosocksd");
 }
 
+/** Read a timespec as signed 64-bit nanoseconds. */
 #define READ_TIMESPEC(ts)                                                      \
 	((int_fast64_t)(ts).tv_sec * INT64_C(1000000000) +                     \
 	 (int_fast64_t)(ts).tv_nsec)

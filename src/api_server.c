@@ -599,11 +599,11 @@ static void handle_ruleset_gc(
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 
 	FORMAT_BYTES(
-		freed_bytes,
-		(double)((intmax_t)vmstats.byt_allocated - (intmax_t)before.byt_allocated));
+		freed_bytes, (double)((intmax_t)vmstats.byt_allocated -
+				      (intmax_t)before.byt_allocated));
 	FORMAT_SI(
-		freed_objects,
-		(double)((intmax_t)vmstats.num_object - (intmax_t)before.num_object));
+		freed_objects, (double)((intmax_t)vmstats.num_object -
+					(intmax_t)before.num_object));
 	BUF_APPENDF(
 		ctx->parser.wbuf, "%-20s: %s (%s objects)\n", "Difference",
 		freed_bytes, freed_objects);
