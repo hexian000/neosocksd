@@ -2,44 +2,13 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "mime.h"
+#include "utils/ascii.h"
 
-#include <ctype.h>
 #include <string.h>
 
 /* RFC 2045 */
 #define istspecial(c) (!!strchr("()<>@,;:\"/[]?=", (c)))
-#define istoken(c) (!iscntrl(c) && !istspecial(c))
-
-static inline char *strlower(char *restrict s)
-{
-	for (unsigned char *p = (unsigned char *)s; *p; p++) {
-		*p = tolower(*p);
-	}
-	return s;
-}
-
-static inline char *strtrimleftspace(char *restrict s)
-{
-	const unsigned char *p = (unsigned char *)s;
-	while (*p && isspace(*p)) {
-		p++;
-	}
-	return (char *)p;
-}
-
-static inline char *strtrimrightspace(char *restrict s)
-{
-	unsigned char *e = (unsigned char *)s + strlen(s) - 1;
-	while ((unsigned char *)s < e && isspace(*e)) {
-		*e-- = '\0';
-	}
-	return s;
-}
-
-static inline char *strtrimspace(char *restrict s)
-{
-	return strtrimrightspace(strtrimleftspace(s));
-}
+#define istoken(c) ((unsigned char)(c) > 32u && !istspecial(c))
 
 char *mime_parse(char *s, char **restrict type, char **restrict subtype)
 {
