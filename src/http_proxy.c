@@ -166,12 +166,9 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	HTTP_CTX_LOG_F(
-		VERBOSE, ctx, "close state=%d", ctx->accepted_fd, ctx->state);
-	http_ctx_stop(loop, ctx);
+		VERBOSE, ctx, "closing state=%d", ctx->accepted_fd, ctx->state);
 
-	if (ctx->state < STATE_CONNECTED) {
-		dialreq_free(ctx->dialreq);
-	}
+	http_ctx_stop(loop, ctx);
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -180,8 +177,12 @@ static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+
 	session_del(&ctx->ss);
+	if (ctx->state < STATE_CONNECTED) {
+		dialreq_free(ctx->dialreq);
+	}
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	free(ctx);
 }
 

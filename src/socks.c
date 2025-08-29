@@ -162,11 +162,8 @@ static void
 socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 {
 	SOCKS_CTX_LOG_F(VERBOSE, ctx, "close, state=%d", ctx->state);
-	socks_ctx_stop(loop, ctx);
 
-	if (ctx->state < STATE_CONNECTED) {
-		dialreq_free(ctx->dialreq);
-	}
+	socks_ctx_stop(loop, ctx);
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -175,7 +172,11 @@ socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
+
 	session_del(&ctx->ss);
+	if (ctx->state < STATE_CONNECTED) {
+		dialreq_free(ctx->dialreq);
+	}
 	free(ctx);
 }
 

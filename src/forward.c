@@ -116,12 +116,9 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 static void
 forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
-	FW_CTX_LOG_F(VERBOSE, ctx, "close, state=%d", ctx->state);
-	forward_ctx_stop(loop, ctx);
+	FW_CTX_LOG_F(VERBOSE, ctx, "closing, state=%d", ctx->state);
 
-	if (ctx->state < STATE_CONNECTED) {
-		dialreq_free(ctx->dialreq);
-	}
+	forward_ctx_stop(loop, ctx);
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -130,7 +127,11 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
+
 	session_del(&ctx->ss);
+	if (ctx->state < STATE_CONNECTED) {
+		dialreq_free(ctx->dialreq);
+	}
 	free(ctx);
 }
 

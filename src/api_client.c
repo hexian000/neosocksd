@@ -86,9 +86,6 @@ static void
 api_client_close(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 {
 	api_client_stop(loop, ctx);
-
-	dialreq_free(ctx->dialreq);
-	ctx->dialreq = NULL;
 	if (ctx->w_socket.fd != -1) {
 		CLOSE_FD(ctx->w_socket.fd);
 	}
@@ -96,10 +93,12 @@ api_client_close(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 		stream_close(ctx->result.stream);
 		ctx->result.stream = NULL;
 	}
+
 	if (ctx->ss.close != NULL) {
 		/* managed by session */
 		session_del(&ctx->ss);
 	}
+	dialreq_free(ctx->dialreq);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	free(ctx);
 }
