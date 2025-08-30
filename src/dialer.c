@@ -4,12 +4,12 @@
 /**
  * @file dialer.c
  * @brief Implementation of network dialer with proxy chain support
- * 
+ *
  * This file implements an asynchronous network dialer that can establish
  * connections through chains of proxy servers. The dialer uses a state machine
  * approach to handle the complex handshake protocols required by different
  * proxy types (HTTP CONNECT, SOCKS4A, SOCKS5).
- * 
+ *
  * State Machine Flow:
  * 1. STATE_INIT -> STATE_RESOLVE (for domain names) or STATE_CONNECT (for IPs)
  * 2. STATE_RESOLVE -> STATE_CONNECT (after DNS resolution)
@@ -17,7 +17,7 @@
  * 4. STATE_HANDSHAKE1 -> STATE_HANDSHAKE2 (SOCKS5 auth) or STATE_HANDSHAKE3 (direct to request)
  * 5. STATE_HANDSHAKE2 -> STATE_HANDSHAKE3 (SOCKS5 after auth)
  * 6. STATE_HANDSHAKE3 -> next proxy or STATE_DONE
- * 
+ *
  * The dialer can traverse multiple proxies in sequence, performing the appropriate
  * handshake for each proxy protocol before moving to the next hop.
  */
@@ -70,7 +70,7 @@ const char *proxy_protocol_str[PROTO_MAX] = {
  * @param host Host string (IPv4, IPv6, or domain name)
  * @param port Port number in host byte order
  * @return true on success, false if hostname too long
- * 
+ *
  * This function attempts to parse the host as an IP address first,
  * falling back to treating it as a domain name if IP parsing fails.
  */
@@ -104,7 +104,7 @@ static bool dialaddr_sethostport(
 
 /**
  * @brief Parse string address in "host:port" format
- * 
+ *
  * Parses an address string and populates a dialaddr structure.
  * The input string should be in "host:port" format where host
  * can be an IPv4 address, IPv6 address, or domain name.
@@ -142,7 +142,7 @@ bool dialaddr_parse(
 
 /**
  * @brief Convert sockaddr structure to dialaddr
- * 
+ *
  * Extracts address and port information from a sockaddr structure
  * and stores it in a dialaddr structure.
  */
@@ -174,7 +174,7 @@ bool dialaddr_set(
 
 /**
  * @brief Copy dialaddr structure
- * 
+ *
  * Performs a deep copy of a dialaddr structure, handling the
  * different address types appropriately.
  */
@@ -461,7 +461,7 @@ enum dialer_state {
 
 /**
  * @brief Stop the dialer and clean up resources
- * 
+ *
  * This function is called to halt an ongoing dial operation and clean up
  * any associated resources (DNS queries, socket watchers, file descriptors).
  * It handles cleanup differently depending on the current state.
@@ -502,7 +502,7 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 
 /**
  * @brief Completion callback for dialer operations
- * 
+ *
  * This callback is invoked when a dial operation completes (successfully
  * or with an error). It cleans up the dialer state and calls the user's
  * completion callback with the result.
@@ -1197,7 +1197,7 @@ static int dialer_recv(struct dialer *restrict d)
 
 /**
  * @brief Main socket I/O callback for the dialer state machine
- * 
+ *
  * This is the core of the dialer state machine. It handles both connection
  * establishment (EV_WRITE) and proxy protocol handshakes (EV_READ).
  * The function manages transitions between different states and proxy hops.
@@ -1288,7 +1288,7 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 /**
  * @brief Establish TCP connection to a sockaddr
- * 
+ *
  * Creates a socket and initiates a non-blocking connection to the specified
  * address. Configures socket options and starts the appropriate libev watcher.
  */
@@ -1368,7 +1368,7 @@ static bool connect_sa(
 
 /**
  * @brief DNS resolution callback
- * 
+ *
  * Called when DNS resolution completes (successfully or with failure).
  * On success, initiates TCP connection to the resolved address.
  */
@@ -1419,7 +1419,7 @@ static void resolve_cb(
 
 /**
  * @brief Start the dialer state machine
- * 
+ *
  * Initiates the connection process by determining the first address to connect to
  * (either the first proxy or the final destination) and starting either DNS
  * resolution or direct TCP connection as appropriate.
@@ -1482,7 +1482,7 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 
 /**
  * @brief Initialize dialer structure
- * 
+ *
  * Sets up a dialer structure with initial values and configures libev watchers.
  * Must be called before using dialer_do().
  */
@@ -1510,7 +1510,7 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 
 /**
  * @brief Start a dial operation
- * 
+ *
  * Begins the asynchronous process of establishing a connection according to
  * the provided dial request. The completion callback will be invoked when
  * the operation finishes (successfully or with an error).
@@ -1535,7 +1535,7 @@ void dialer_do(
 
 /**
  * @brief Cancel an ongoing dial operation
- * 
+ *
  * Stops the dialer state machine and cleans up all resources. Safe to call
  * multiple times or on an already completed dialer. The completion callback
  * will not be invoked after cancellation.

@@ -32,7 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* never rollback */
+/* State machine progression - never rollback to previous states */
 enum api_client_state {
 	STATE_CLIENT_INIT,
 	STATE_CLIENT_CONNECT,
@@ -171,20 +171,20 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		}
 	}
 	if (code == HTTP_OK) {
-		/* OK - get the results */
+		/* Success - validate content type for RPC response */
 		if (!check_rpcall_mime(ctx->parser.hdr.content.type)) {
 			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 		}
 	} else if (
 		VBUF_LEN(ctx->parser.cbuf) > 0 &&
 		check_rpcall_mime(ctx->parser.hdr.content.type)) {
-		/* return content as error info */
+		/* Server returned structured error in RPC format */
 		api_client_finish(
 			loop, ctx, VBUF_DATA(ctx->parser.cbuf),
 			VBUF_LEN(ctx->parser.cbuf), NULL);
 		return;
 	} else {
-		/* HTTP error info */
+		/* Generic HTTP error response */
 		char buf[64];
 		ret = snprintf(
 			buf, sizeof(buf), "%s %s %s", msg->rsp.version,
@@ -223,6 +223,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		return;
 	}
 
+	/* Send request body after headers are fully sent */
 	if (p->cbuf != NULL) {
 		const struct vbuffer *restrict cbuf = p->cbuf;
 		buf = cbuf->data + p->cpos;
@@ -242,11 +243,13 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 
 	if (ctx->cb.func == NULL) {
+		/* It's a fire-and-forget invoke call - no response expected */
 		api_client_close(loop, ctx);
 		return;
 	}
 	ev_io_stop(loop, watcher);
 
+	/* Switch to receiving response */
 	ctx->state = STATE_CLIENT_RESPONSE;
 	p->fd = fd;
 	ev_set_cb(watcher, recv_cb);
@@ -290,6 +293,7 @@ static bool make_request(
 	struct http_parser *restrict p, const char *restrict uri,
 	const void *restrict content, const size_t len)
 {
+	/* Compress large payloads to reduce bandwidth */
 	const enum content_encodings encoding =
 		(len < RPCALL_COMPRESS_THRESHOLD) ? CENCODING_NONE :
 						    CENCODING_DEFLATE;
@@ -393,10 +397,10 @@ static bool api_client_do(
 	};
 	dialer_init(&ctx->dialer, &cb);
 	if (ctx->cb.func != NULL) {
-		/* managed by ruleset */
+		/* RPC call - lifecycle managed by ruleset callback */
 		ctx->ss.close = NULL;
 	} else {
-		/* managed by session */
+		/* Invoke call - lifecycle managed by session system */
 		ctx->ss.close = api_ss_close;
 		session_add(&ctx->ss);
 	}

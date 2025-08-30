@@ -35,7 +35,7 @@
 #include <string.h>
 #include <time.h>
 
-/* never rollback */
+/* State machine progression - never rollback to previous states */
 enum api_state {
 	STATE_INIT,
 	STATE_REQUEST,
@@ -194,6 +194,7 @@ static void server_stats_stateful(
 	const struct server_stats *restrict stats = &s->stats;
 	const struct listener_stats *restrict lstats = &s->l.stats;
 
+	/* Static counters for rate calculation between calls */
 	static struct {
 		uintmax_t xfer_up, xfer_down;
 		uintmax_t num_accept;
@@ -303,6 +304,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 
+	/* Use compression if client supports it */
 	const enum content_encodings encoding =
 		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
 			CENCODING_DEFLATE :
@@ -313,7 +315,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	/* borrow the read buffer */
+	/* Reuse parser's read buffer for stats output to save memory */
 	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
 	buf->len = 0;
 
@@ -325,6 +327,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	const ev_tstamp now = ev_now(loop);
 	const int_least64_t uptime = clock_monotonic() - ctx->s->stats.started;
+	/* Track time between stateful requests for rate calculations */
 	static ev_tstamp last = TSTAMP_NIL;
 	const double dt =
 		last == TSTAMP_NIL ? (double)uptime * 1e-9 : now - last;
@@ -422,6 +425,7 @@ static void send_errmsg(
 		(loop), (ctx), HTTP_INTERNAL_SERVER_ERROR, ("" str),           \
 		sizeof(str) - 1)
 
+/* Asynchronous callback for RPC call completion */
 static void
 rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
@@ -440,6 +444,7 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		return;
 	}
 	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall_return");
+	/* Compress response if client supports it and payload is large enough */
 	const enum content_encodings encoding =
 		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ||
 				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
@@ -499,7 +504,7 @@ static void handle_ruleset_rpcall(
 		ruleset, &ctx->rpcstate, reader, &ctx->rpcreturn);
 	stream_close(reader);
 	if (!ok) {
-		/* no callback */
+		/* Synchronous error - no async callback will be invoked */
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
@@ -832,6 +837,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		return;
 	}
 
+	/* Send response body after headers are fully sent */
 	if (ctx->parser.cbuf != NULL) {
 		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
 		buf = cbuf->data + ctx->parser.cpos;

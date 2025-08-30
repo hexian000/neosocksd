@@ -1,6 +1,11 @@
 /* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/**
+ * @file ruleset.c
+ * @brief Implementation of Lua-based ruleset engine
+ */
+
 #include "ruleset.h"
 
 #if WITH_RULESET
@@ -32,6 +37,19 @@
 #include <stddef.h>
 #include <stdlib.h>
 
+/**
+ * @brief Custom memory allocator for Lua virtual machine
+ *
+ * This allocator tracks memory usage statistics and provides memory
+ * accounting for the ruleset engine. It wraps standard malloc/free/realloc
+ * functions while maintaining counters for allocated objects and bytes.
+ *
+ * @param ud User data (ruleset instance)
+ * @param ptr Pointer to existing memory block (NULL for allocation)
+ * @param osize Old size of memory block
+ * @param nsize New size of memory block (0 for deallocation)
+ * @return Pointer to allocated/reallocated memory, or NULL
+ */
 static void *
 l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 {
@@ -65,6 +83,16 @@ l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 	return ret;
 }
 
+/**
+ * @brief Lua panic handler
+ *
+ * This function is called when Lua encounters an unrecoverable error.
+ * It logs the error details and returns control to Lua to abort execution.
+ * The panic handler should not return normally.
+ *
+ * @param L Lua state
+ * @return Always returns 0 (tells Lua to abort)
+ */
 static int l_panic(lua_State *L)
 {
 	const int type = lua_type(L, -1);
@@ -83,6 +111,20 @@ static int l_panic(lua_State *L)
 	return 0; /* return to Lua to abort */
 }
 
+/**
+ * @brief Initialize Lua environment for ruleset
+ *
+ * Sets up the Lua virtual machine with necessary registry tables,
+ * standard libraries, and built-in extensions. This includes:
+ * - Constant strings table for error messages
+ * - Await context table for asynchronous operations
+ * - Idle thread table for thread management
+ * - Standard Lua libraries with restricted package paths
+ * - Built-in extension libraries (await, marshal, regex, etc.)
+ *
+ * @param L Lua state to initialize
+ * @return Always returns 0 (success)
+ */
 static int ruleset_luainit(lua_State *restrict L)
 {
 	/* init registry */
@@ -129,6 +171,17 @@ static int ruleset_luainit(lua_State *restrict L)
 	return 0;
 }
 
+/**
+ * @brief Timer callback for periodic ruleset operations
+ *
+ * This callback is invoked periodically (every second) to trigger
+ * maintenance operations in the Lua ruleset. It starts an idle watcher
+ * to defer the actual work to avoid blocking the event loop.
+ *
+ * @param loop Event loop
+ * @param watcher Timer watcher that triggered
+ * @param revents Event flags (should be EV_TIMER)
+ */
 static void tick_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
@@ -136,6 +189,17 @@ static void tick_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	ev_idle_start(loop, &r->w_idle);
 }
 
+/**
+ * @brief Idle callback for deferred ruleset tick processing
+ *
+ * This callback performs the actual periodic maintenance work for the
+ * ruleset. It calls the Lua ruleset.tick() function with the current
+ * timestamp, allowing the script to perform housekeeping tasks.
+ *
+ * @param loop Event loop
+ * @param watcher Idle watcher that triggered
+ * @param revents Event flags (should be EV_IDLE)
+ */
 static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
@@ -202,6 +266,12 @@ void ruleset_free(struct ruleset *restrict r)
 	free(r);
 }
 
+/**
+ * @brief Macro to create constant length string
+ *
+ * Helper macro that returns a constant string and optionally sets its length.
+ * Used for efficient string literals with known lengths.
+ */
 #define CONST_LSTRING(s, len)                                                  \
 	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
 

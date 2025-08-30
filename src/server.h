@@ -37,7 +37,7 @@ struct server;
 
 /**
  * @brief Function pointer type for serving connections
- * 
+ *
  * @param s The server instance
  * @param loop The event loop
  * @param accepted_fd File descriptor of the accepted connection

@@ -4,11 +4,11 @@
 /**
  * @file codec.c
  * @brief Implementation of compression and decompression codecs
- * 
+ *
  * This file implements stream-based compression and decompression using the
  * miniz library. It provides DEFLATE/zlib compression writers and inflation
  * readers, as well as gzip header parsing functionality.
- * 
+ *
  * The implementation uses a streaming approach where:
  * - Writers accept uncompressed data and output compressed data
  * - Readers accept compressed data and output uncompressed data
@@ -35,7 +35,7 @@
 
 /**
  * @brief DEFLATE compression stream implementation
- * 
+ *
  * This structure wraps a base stream to provide DEFLATE compression.
  * It maintains internal buffers and state for the compression process.
  */
@@ -55,7 +55,7 @@ ASSERT_SUPER(struct stream, struct deflate_stream, s);
  * @param buf Input data to compress
  * @param len Pointer to input length; updated with bytes consumed on return
  * @return 0 on success, error code on failure
- * 
+ *
  * This function compresses input data using DEFLATE and writes the compressed
  * output to the base stream. It handles partial writes and internal buffering.
  * The compression is done incrementally - not all input may be consumed in
@@ -112,7 +112,7 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
  * @param z Pointer to deflate_stream structure
  * @param flush Type of flush operation to perform
  * @return 0 on success, error code on failure
- * 
+ *
  * This function flushes any pending compressed data from the compressor
  * to the base stream. Different flush modes control how the compressor
  * handles remaining data (sync flush vs final finish).
@@ -153,7 +153,7 @@ deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
  * @brief Flush DEFLATE stream (sync flush)
  * @param p Pointer to deflate_stream structure
  * @return 0 on success, error code on failure
- * 
+ *
  * Performs a synchronization flush, ensuring all pending input is
  * compressed and written while maintaining the ability to continue
  * compression.
@@ -168,7 +168,7 @@ static int deflate_flush(void *p)
  * @brief Close DEFLATE stream and clean up resources
  * @param p Pointer to deflate_stream structure
  * @return 0 on success, error code on failure
- * 
+ *
  * Finishes the compression process, flushes all remaining data,
  * closes the base stream, and frees allocated memory.
  */
@@ -186,7 +186,7 @@ static int deflate_close(void *p)
  * @param base Base stream to write compressed data to
  * @param zlib Whether to use zlib format (true) or raw DEFLATE (false)
  * @return New compression stream, or NULL on error
- * 
+ *
  * This internal function creates either a zlib or raw DEFLATE compression
  * stream. The zlib format includes headers and checksums, while raw DEFLATE
  * contains only the compressed data blocks.
@@ -242,7 +242,7 @@ struct stream *codec_deflate_writer(struct stream *base)
 
 /**
  * @brief DEFLATE decompression stream implementation
- * 
+ *
  * This structure wraps a base stream to provide DEFLATE decompression.
  * It maintains internal buffers for both input and output data, managing
  * the decompression process incrementally.
@@ -268,7 +268,7 @@ ASSERT_SUPER(struct stream, struct deflate_stream, s);
  * @param buf Pointer to buffer pointer; set to point to available data
  * @param len Pointer to length; updated with available data length
  * @return 0 on success, error code on failure
- * 
+ *
  * This function provides direct access to decompressed data without copying.
  * It manages the decompression pipeline: reading compressed data, decompressing
  * it, and providing pointers to the decompressed output buffer.
@@ -346,7 +346,7 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
  * @brief Close inflate stream and clean up resources
  * @param p Pointer to inflate_stream structure
  * @return 0 on success, error code on failure
- * 
+ *
  * Closes the base stream and frees allocated memory.
  */
 static int inflate_close(void *p)
@@ -362,7 +362,7 @@ static int inflate_close(void *p)
  * @param base Base stream to read compressed data from
  * @param zlib Whether to expect zlib format (true) or raw DEFLATE (false)
  * @return New decompression stream, or NULL on error
- * 
+ *
  * This internal function creates either a zlib or raw DEFLATE decompression
  * stream. The zlib format includes headers and checksums, while raw DEFLATE
  * contains only the compressed data blocks.
@@ -424,7 +424,7 @@ struct stream *codec_inflate_reader(struct stream *base)
 
 /**
  * @brief gzip header flag bits (RFC 1952)
- * 
+ *
  * These flags indicate which optional fields are present in the gzip header.
  */
 enum gzip_flags {

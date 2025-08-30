@@ -44,12 +44,6 @@
 
 /**
  * @brief Global application state structure
- * 
- * Contains all the main components of the neosocksd application:
- * - Signal watchers for graceful shutdown and configuration reload
- * - Configuration settings parsed from command line
- * - Main proxy server instance
- * - Optional REST API server instance
  */
 static struct {
 	ev_signal w_sighup;
@@ -144,7 +138,7 @@ static void print_usage(const char *argv0)
  * @brief Parse command line arguments and populate configuration
  * @param argc Number of command line arguments
  * @param argv Array of command line argument strings
- * 
+ *
  * Parses all supported command line options and stores the configuration
  * in the global app.conf structure. Exits the program on invalid arguments
  * or when help is requested.

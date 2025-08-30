@@ -61,8 +61,6 @@ accept_cb(struct ev_loop *loop, ev_io *restrict watcher, const int revents)
 	for (;;) {
 		union sockaddr_max addr;
 		socklen_t addrlen = sizeof(addr);
-
-		/* Accept client request */
 		const int fd = accept(watcher->fd, &addr.sa, &addrlen);
 		if (fd < 0) {
 			const int err = errno;

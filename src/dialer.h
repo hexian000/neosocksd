@@ -4,11 +4,11 @@
 /**
  * @file dialer.h
  * @brief Network dialer for establishing connections through proxy chains
- * 
+ *
  * This module provides functionality for establishing network connections
  * either directly or through a chain of proxy servers. It supports multiple
  * proxy protocols including HTTP CONNECT, SOCKS4A, and SOCKS5.
- * 
+ *
  * The dialer uses an asynchronous state machine to handle connection
  * establishment and proxy handshakes, integrating with libev for event-driven
  * operation.
@@ -176,7 +176,7 @@ struct dialer_cb {
 
 /**
  * @brief Dialer state machine structure
- * 
+ *
  * This structure maintains the state of an ongoing dial operation,
  * including proxy chain traversal and protocol handshakes.
  */
