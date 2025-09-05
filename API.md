@@ -40,30 +40,30 @@ Version: dev
 
 ## RESTful API
 
-1. The RESTful API server runs `HTTP/1.1`.
-2. The content length limit for a single request is 4 MiB.
-3. Requests and responses may use `deflate` compression when the `Content-Encoding` (request) or `Accept-Encoding` (response) header is set accordingly.
+1. The REST API uses `HTTP/1.1`.
+2. The maximum request body size is 4 MiB.
+3. Requests and responses support `deflate` compression when the appropriate headers are present (`Content-Encoding` for requests, `Accept-Encoding` for responses).
 
 ### /healthy
 
 - **Method**: Any
 - **Status**: HTTP 200
 
-Check server liveness.
+Health check.
 
 ### /stats
 
 - **Method**: GET, POST
 - **Query**:
-  - `nobanner`: omit the banner, default to 0.
-  - `server`: show server statistics, default to 1.
-  - `q`: argument for [ruleset.stats](#rulesetstats).
+  - `nobanner`: omit the banner. Default: 0.
+  - `server`: include server statistics. Default: 1.
+  - `q`: argument passed to [ruleset.stats](#rulesetstats).
 - **Status**: HTTP 200
-- **Response**: Server statistics in `text/plain`.
+- **Response**: Server statistics (`text/plain`).
 
-GET: Get the stateless server statistics.
+GET: Returns stateless server statistics.
 
-POST: Calculate server statistics since the last request.
+POST: Returns server statistics accumulated since the previous request.
 
 ### /ruleset/invoke
 
@@ -71,7 +71,7 @@ POST: Calculate server statistics since the last request.
 - **Content**: Lua script
 - **Status**: HTTP 200, HTTP 500
 
-Run the POSTed script.
+Executes the provided script.
 
 ### /ruleset/rpcall
 
@@ -81,31 +81,31 @@ Run the POSTed script.
 - **Response Content-Type**: `application/x-neosocksd-rpc; version=<n>`
 - **Response**: Invocation results. The response may be `deflate`-compressed if the request includes `Accept-Encoding: deflate`.
 
-Internal API reserved for [await.invoke](#awaitinvoke).
+Reserved for internal use by [await.invoke](#awaitinvoke).
 
 ### /ruleset/update
 
 - **Method**: POST
 - **Query**:
-  - `module`: replace a loaded Lua module, like `libruleset`.
-  - `chunkname`: chunk name for stack traceback, like `%40libruleset.lua`.
+  - `module`: replace a loaded Lua module (e.g., `libruleset`).
+  - `chunkname`: chunk name for stack tracebacks (e.g., `%40libruleset.lua`).
 - **Content**: Lua ruleset script or Lua module script
 - **Status**: HTTP 200, HTTP 500
 
-Load the posted script and use it as follows:
+Loads the posted script and applies it as follows:
 
-1. If module name is not specified, replace the ruleset.
-2. If module name is specified, replace the named Lua module.
-3. If the field `_G.name` refers to the named module, update it.
+1. If `module` is not specified, replace the active ruleset.
+2. If `module` is specified, replace the named Lua module.
+3. If the `_G.module` refers to the named module, update it.
 
 ### /ruleset/gc
 
 - **Method**: POST
 - **Content**: None
 - **Status**: HTTP 200
-- **Response**: Text report including reclaimed bytes/objects, current ruleset memory usage, and time cost.
+- **Response**: Text report including reclaimed bytes/objects, current ruleset memory usage, and elapsed time.
 
-Trigger the garbage collector to free some memory.
+Triggers garbage collection.
 
 
 ## Ruleset Callbacks
@@ -121,26 +121,26 @@ end
 
 **Description**
 
-Process a host name request. Specifically:
-- Any HTTP CONNECT
-- SOCKS5 with host name (a.k.a. "socks5h")
-- Any SOCKS4A
+Handles a hostname request. Specifically:
+- Any HTTP CONNECT request
+- SOCKS5 with a hostname (a.k.a. "socks5h")
+- Any SOCKS4A request
 
 *This callback is called from an asynchronous routine.*
 
 **Params**
 
-- `domain`: full qualified domain name and port, like `"www.example.org:80"`
+- `domain`: fully qualified domain name and port (e.g., `"www.example.org:80"`)
 
 **Returns**
 
-- `addr`: replace the request
-- `addr, proxy`: forward the request through another proxy
-- `addr, proxyN, ..., proxy1`: forward the request through proxy chain
-- `nil`: reject the request
+- `addr`: replaces the request
+- `addr, proxy`: forwards the request through another proxy
+- `addr, proxyN, ..., proxy1`: forwards the request through a proxy chain
+- `nil`: rejects the request
 
-The proxy addresses are specified in URI format, supported scheme:
-- `socks4a://example.org:1080`: SOCKS4A server. The implementation is SOCKS4 compatible when requesting IPv4 address.
+Proxy addresses are specified in URI format. Supported schemes:
+- `socks4a://example.org:1080`: SOCKS4A server. The implementation is SOCKS4‑compatible when requesting an IPv4 address.
 - `socks5://example.org:1080`: SOCKS5 server.
 - `http://example.org:8080`: HTTP/1.1 CONNECT server.
 
@@ -157,15 +157,15 @@ end
 
 **Description**
 
-Process an IPv4 request. Specifically:
-- SOCKS5 with IPv4 address
-- Any SOCKS4
+Handles an IPv4 request. Specifically:
+- SOCKS5 with an IPv4 address
+- Any SOCKS4 request
 
 *This callback is called from an asynchronous routine.*
 
 **Params**
 
-- `addr`: address and port, like `"203.0.113.1:80"`
+- `addr`: address and port (e.g., `"203.0.113.1:80"`)
 
 **Returns**
 
@@ -184,15 +184,15 @@ end
 
 **Description**
 
-Process an IPv6 request. Specifically:
+Handles an IPv6 request. Specifically:
 
-- SOCKS5 with IPv6 address
+- SOCKS5 with an IPv6 address
 
 *This callback is called from an asynchronous routine.*
 
 **Params**
 
-- `addr`: address and port, like `"[2001:DB8::1]:80"`
+- `addr`: address and port (e.g., `"[2001:DB8::1]:80"`)
 
 **Returns**
 
@@ -221,7 +221,7 @@ Periodic timer callback. See [neosocksd.setinterval](#neosocksdsetinterval).
 
 **Returns**
 
-Ignored
+Ignored.
 
 
 ### ruleset.stats
@@ -238,17 +238,17 @@ end
 
 **Description**
 
-Generate custom information to be provided in the API `/stats`. See also [stats](#stats).
+Generates custom information for the `/stats` API. See also [stats](#stats).
 
 *This callback is NOT called from an asynchronous routine.*
 
 **Params**
 
-- `dt`: seconds elapsed since last call
+- `dt`: seconds elapsed since the last call
 
 **Returns**
 
-Custom information in a string.
+Custom information as a string.
 
 
 ## Lua API
@@ -266,7 +266,7 @@ end
 
 **Description**
 
-Returns a table of server configurations.
+Returns a table of server configuration values.
 
 
 ### neosocksd.resolve
@@ -279,9 +279,9 @@ local addr = neosocksd.resolve("www.example.com")
 
 **Description**
 
-(Deprecated) consider using [await.resolve](#awaitresolve) instead.
+Deprecated. Consider using [await.resolve](#awaitresolve) instead.
 
-Resolves a host name locally and blocks the whole server until resolution is finished or times out.
+Resolves a hostname locally and blocks the entire server until completion or timeout.
 
 
 ### neosocksd.splithostport
@@ -294,7 +294,7 @@ local host, port = neosocksd.splithostport("example.com:80")
 
 **Description**
 
-Split address string into host and port. Raises an error on failure.
+Splits an address string into host and port. Raises an error on failure.
 
 
 ### neosocksd.parse_ipv4
@@ -312,7 +312,7 @@ end
 
 **Description**
 
-Parses an IPv4 address into integers. Returns nil on failure.
+Parses an IPv4 address into an integer. Returns nil on failure.
 
 
 ### neosocksd.parse_ipv6
@@ -331,7 +331,7 @@ end
 
 **Description**
 
-Parses an IPv6 address into integers. Returns nil on failure.
+Parses an IPv6 address into two integers. Returns nil on failure.
 
 
 ### neosocksd.setinterval
@@ -344,9 +344,9 @@ neosocksd.setinterval(1.5)
 
 **Description**
 
-Set the interval to call [ruleset.tick](#rulesettick) in seconds.
+Sets the interval to call [ruleset.tick](#rulesettick), in seconds.
 
-The valid interval range is `[1e-3, 1e+9]`, use `setinterval(0)` to stop the timer tick.
+Valid range: `[1e-3, 1e+9]`. Use `setinterval(0)` to stop the timer tick.
 
 
 ### neosocksd.async
@@ -361,9 +361,9 @@ local co, err = neosocksd.async(finish, func, ...)
 
 **Description**
 
-Low-level API to start an asynchronous routine. Asynchronous routines are based on Lua coroutines. I.e., they run concurrently, but not in parallel. This interface is usually not called directly by user scripts. See [_G.async](#_gasync).
+Low-level API for starting an asynchronous routine. Asynchronous routines use Lua coroutines; they run concurrently, but not in parallel. User scripts typically do not call this directly; see [_G.async](#_gasync).
 
-*Share the coroutine pool with request handlers for better performance.*
+*Shares the coroutine pool with request handlers for better performance.*
 
 
 ### neosocksd.invoke
@@ -377,9 +377,9 @@ neosocksd.invoke([[log("test rpc")]], "api.neosocksd.internal:80", "socks4a://12
 
 **Description**
 
-Run Lua code on another neosocksd. This function returns immediately. In case of failure, the invocation is lost.
+Runs Lua code on another neosocksd. Returns immediately. On failure, the invocation is dropped.
 
-Tip: Please refer to `neosocksd.sendmsg` in `libruleset.lua`.
+Note: See `neosocksd.sendmsg` in `libruleset.lua`.
 
 
 ### neosocksd.stats
@@ -392,7 +392,7 @@ local t = neosocksd.stats()
 
 **Description**
 
-Return a table of raw statistics. If called during the initial loading phase, unavailable data will be set to zero.
+Returns a table of raw statistics. During the initial loading phase, unavailable fields are set to zero.
 
 
 ### neosocksd.now
@@ -405,7 +405,7 @@ local now = neosocksd.now()
 
 **Description**
 
-Formally, get the timestamp of the latest event in seconds.
+Returns the timestamp of the latest event in seconds.
 
 - Any ruleset callback must be invoked by an event.
 - Any asynchronous routine must be resumed by an event.
@@ -421,7 +421,7 @@ local ok, result = xpcall(f, neosocksd.traceback, ...)
 
 **Description**
 
-In supported builds, log both Lua and C traceback.
+In supported builds, logs both Lua and C tracebacks.
 
 
 ### regex.compile
@@ -463,7 +463,7 @@ local t, ... = time.measure(f, ...)
 
 **Description**
 
-Lua interface for POSIX function [clock_gettime()](https://pubs.opengroup.org/onlinepubs/9699919799/functions/clock_gettime.html).
+Lua interface for the POSIX function [clock_gettime()](https://pubs.opengroup.org/onlinepubs/9699919799/functions/clock_gettime.html).
 
 
 ### zlib.compress
@@ -478,9 +478,9 @@ assert(s == s1)
 
 **Description**
 
-Data compression interface for zlib format (as declared in RFC 1950 and RFC 1951).
+Data compression interface for the zlib format (RFC 1950 and RFC 1951).
 
-Tip: [neosocksd.invoke](#neosocksdinvoke) and [await.invoke](#awaitinvoke) is already compressed internally.
+Note: [`neosocksd.invoke`](#neosocksdinvoke) and [`await.invoke`](#awaitinvoke) already compress payloads internally.
 
 
 ### _G.marshal
@@ -494,9 +494,9 @@ log(s) -- "a",{"b",["c"]="d"}
 
 **Description**
 
-Marshal all parameters in Lua syntax.
+Serializes all parameters into Lua syntax.
 
-To be symmetric, there is also `_G.unmarshal(s)` in `libruleset.lua`.
+The complementary `_G.unmarshal(s)` is defined in `libruleset.lua`.
 
 
 ### _G.async
@@ -521,7 +521,7 @@ end, ...)
 
 **Description**
 
-Start an asynchronous routine and run it until the first await or the end. See [await.resolve](#awaitresolve) for a full example. Using `coroutine.*` to manipulate asynchronous routines is possible, but not recommended.
+Starts an asynchronous routine and runs it until the first await or completion. See [await.resolve](#awaitresolve) for a full example. Although possible, using `coroutine.*` directly to manipulate asynchronous routines is not recommended.
 
 This function is implemented in `libruleset.lua`.
 
@@ -543,9 +543,9 @@ end)
 
 **Description**
 
-Execute a shell command asynchronously. Returns 3 values like `os.execute`.
+Executes a shell command asynchronously. Returns three values, similar to `os.execute`.
 
-This function depends on `/bin/sh`.
+Requires `/bin/sh`.
 
 
 ### await.invoke
@@ -573,9 +573,9 @@ end, "127.0.1.1:9080")
 
 **Description**
 
-Low-level API to run Lua code on another neosocksd and return the result. On another neosocksd, the code runs in asynchronous routine. Therefore, you can call `await.*` functions in the remote code. `await.invoke` is likely to be less efficient than `neosocksd.invoke`.
+Low-level API for running Lua code on another neosocksd and returning the result. On the remote neosocksd, the code runs in an asynchronous routine, so you can call `await.*` functions in the remote code. `await.invoke` is typically less efficient than `neosocksd.invoke`.
 
-Tip: Please refer to `await.rpcall` in `libruleset.lua`.
+Note: See `await.rpcall` in `libruleset.lua`.
 
 
 ### await.resolve
@@ -593,11 +593,11 @@ end)
 
 **Description**
 
-Resolves a host name asynchronously. If asynchronous name resolution is not supported, `await.resolve` behaves the same as `neosocksd.resolve`.
+Resolves a hostname asynchronously. If asynchronous name resolution is not supported, `await.resolve` behaves the same as `neosocksd.resolve`.
 
-IPv4/IPv6 preference depends on command line argument `-4`/`-6`.
+IPv4/IPv6 preference depends on the `-4`/`-6` command-line flag.
 
-Tip: To reduce delays caused by name resolution. It's recommended to set up a local DNS cache, such as systemd-resolved or dnsmasq.
+Tip: To reduce delays caused by name resolution, set up a local DNS cache (e.g., systemd-resolved or dnsmasq).
 
 
 ### await.sleep
@@ -612,6 +612,6 @@ end)
 
 **Description**
 
-Pause an asynchronous routine for at least specified interval in seconds.
+Pauses an asynchronous routine for at least the specified interval, in seconds.
 
 The interval must be in the range `[0, 1e+9]`.

@@ -5,13 +5,13 @@
 [![Downloads](https://img.shields.io/github/downloads/hexian000/neosocksd/total.svg)](https://github.com/hexian000/neosocksd/releases)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-A fast and lightweight proxy server that can run Lua script as rule set.
+A fast, lightweight proxy server with a Lua-powered rules engine.
 
 Status: **Stable**
 
 - [Features](#features)
 - [Usage](#usage)
-  - [Command Line Arguments](#command-line-arguments)
+  - [Command-line arguments](#command-line-arguments)
   - [Scripting](#scripting)
 - [Observability](#observability)
 - [Runtime Dependencies](#runtime-dependencies)
@@ -23,22 +23,22 @@ Status: **Stable**
 
 ## Features
 
-- Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (TCP only), HTTP CONNECT, transparent proxy (Linux).
-- High performance: transfer over 10 Gbps per x86 core on Linux. (with `--pipe`, 2024)
-- Lightweight: the executable is around 500KiB on most platforms\*.
-- Programmable: run Lua scripts on the control plane.
-- Versatile: RPC facilities for scripting, see [scripting](#scripting).
-- Hot reloadable: RESTful API for monitoring and updating Lua modules.
-- Morden: full IPv6 support & horizontally scalable.
-- Conforming to: ISO C11, POSIX.1-2008. Additional features may be available on certain platforms.
+- Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (TCP only), HTTP CONNECT, and transparent proxy (Linux).
+- High performance: 10+ Gbps per x86 core on Linux (with `--pipe`, 2024).
+- Lightweight: ~500 KiB executable on most platforms\*.
+- Programmable: Lua scripting on the control plane.
+- Versatile: rich RPC facilities for scripting; see [Scripting](#scripting).
+- Hot-reloadable: REST API for monitoring and updating Lua modules.
+- Modern: full IPv6 support and horizontal scalability.
+- Standards-compliant: ISO C11 and POSIX.1-2008. Additional features may be available on certain platforms.
 
 *\* Some required libraries are dynamically linked, see runtime dependencies below. Statically linked executable can be larger due to these libraries.*
 
-neosocksd only supports basic authentication (plain text username and password) and does not natively support any encryption. Feel free to use with other transport layer utilities, such as [tlswrapper](https://github.com/hexian000/tlswrapper) or [kcptun-libev](https://github.com/hexian000/kcptun-libev).
+neosocksd supports only basic authentication (plain-text username and password) and does not provide built-in encryption. For transport security, pair it with tools such as [tlswrapper](https://github.com/hexian000/tlswrapper) or [kcptun-libev](https://github.com/hexian000/kcptun-libev).
 
 
 ## Usage
-### Command Line Arguments
+### Command-line arguments
 
 ```sh
 ./neosocksd -l 0.0.0.0:1080               # Just a SOCKS server
@@ -61,50 +61,50 @@ sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 --max-startups 60:30:
 ./neosocksd -d -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua
 ```
 
-See `./neosocksd --help` for more details.
+See `./neosocksd --help` for the full list of options.
 
 ### Scripting
 
-First, deploy neosocksd with `libruleset.lua`. (For binary releases, check `neosocksd.noarch.tar.gz`)
+First, deploy `neosocksd` alongside `libruleset.lua`. (For binary releases, see `neosocksd.noarch.tar.gz`.)
 
-If a proxy rule table is all you need, see the self explaining [ruleset_simple.lua](example/ruleset_simple.lua).
+If a proxy rule table is sufficient, see the well-documented [ruleset_simple.lua](example/ruleset_simple.lua).
 
-More examples are available in [example](example).
+More examples are available in the [`example`](example) directory.
 
 Other resources:
 
-- [agent.lua](agent.lua) implements peer discovery and connection relay based on RPC.
-- [libruleset.lua](libruleset.lua) provides rule set and RPC facilities.
+- [agent.lua](agent.lua) implements RPC-based peer discovery and connection relaying.
+- [libruleset.lua](libruleset.lua) provides the ruleset framework and RPC utilities.
 - [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference)
 - [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 
-Use the following command to start the server with the Lua scripts in current directory:
+Start the server with the Lua scripts from the current directory:
 
 ```sh
-# Print rule set logs and error traceback
+# Print ruleset logs and error tracebacks
 ./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua --traceback --loglevel 6
 
-# Start a transparent proxy to route TCP traffic by ruleset
+# Start a transparent proxy that routes TCP traffic according to the ruleset
 sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
     --max-startups 60:30:100 --max-sessions 0 -u nobody: -d
 ```
 
-Use the following command to update rule set on remote instance without restarting:
+Update the ruleset on a running instance without restarting:
 
 ```sh
-# Update the rule set, optionally specify the chunk name to be displayed in the stack traceback
+# Update the ruleset. Optionally specify a chunk name to appear in stack tracebacks
 curl "http://127.0.1.1:9080/ruleset/update?chunkname=%40ruleset.lua" \
     --data-binary @ruleset.lua
 
-# Update a module
+# Update a library module
 curl "http://127.0.1.1:9080/ruleset/update?module=libruleset&chunkname=%40libruleset.lua" \
     --data-binary @libruleset.lua
 
-# Load gzip compressed data chunk
+# Load a gzip-compressed data chunk
 curl "http://127.0.1.1:9080/ruleset/invoke" \
     -H "Content-Encoding: gzip" --data-binary @biglist.lua.gz
 
-# Run any script on the server
+# Execute an arbitrary script on the server
 curl "http://127.0.1.1:9080/ruleset/invoke" -d "_G.some_switch = true"
 curl "http://127.0.1.1:9080/ruleset/invoke" --data-binary @patch.lua
 ```
@@ -112,12 +112,12 @@ curl "http://127.0.1.1:9080/ruleset/invoke" --data-binary @patch.lua
 
 ## Observability
 
-The builtin RESTful API server can be used for monitoring service status.
+The built-in REST API can be used to monitor service status.
 
 ```sh
-# stateless
+# Stateless
 watch curl -s http://127.0.1.1:9080/stats
-# stateful, will call rule set stats function if available
+# Stateful: calls the ruleset stats function if available
 watch curl -sX POST http://127.0.1.1:9080/stats
 ```
 
@@ -126,14 +126,14 @@ See [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Re
 
 ## Runtime Dependencies
 
-**Simple solution**: Download a `-static` build in the [Releases](https://github.com/hexian000/neosocksd/releases) section so no dependencies need to be installed.
+**Easiest option**: Download a `-static` build from [Releases](https://github.com/hexian000/neosocksd/releases); no runtime dependencies are required.
 
 ```sh
 # Debian / Ubuntu
 sudo apt install libev4 libc-ares2
 # Alpine Linux
 apk add libev c-ares
-# OpenWRT
+# OpenWrt
 opkg install libev libcares
 ```
 
@@ -143,11 +143,11 @@ opkg install libev libcares
 ## Building from Source
 ### Dependencies
 
-| Name   | Version   | Required | Feature                    |
-| ------ | --------- | -------- | -------------------------- |
-| libev  | >= 4.31   | yes      |                            |
-| Lua    | >= 5.3    | no       | rule set                   |
-| c-ares | >= 1.16.0 | no       | asynchronous name resolves |
+| Name   | Version   | Required | Feature                      |
+| ------ | --------- | -------- | ---------------------------- |
+| libev  | >= 4.31   | yes      |                              |
+| Lua    | >= 5.3    | no       | rule set                     |
+| c-ares | >= 1.16.0 | no       | asynchronous name resolution |
 
 ```sh
 # Debian / Ubuntu
@@ -166,7 +166,7 @@ cmake -DCMAKE_BUILD_TYPE="Release" \
 cmake --build . --parallel
 ```
 
-See [m.sh](m.sh) for more information about cross compiling support.
+See [m.sh](m.sh) for cross-compilation support.
 
 
 ## Credits
