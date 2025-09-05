@@ -182,7 +182,7 @@ static int rpcall_finish(lua_State *restrict L)
 	return 0;
 }
 
-/* rpcall(codestream, callback, data) */
+/* rpcall(state, codestream, callback) */
 int cfunc_rpcall(lua_State *restrict L)
 {
 	check_memlimit(L);
