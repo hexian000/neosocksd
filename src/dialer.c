@@ -152,7 +152,7 @@ bool dialaddr_set(
 {
 	switch (sa->sa_family) {
 	case AF_INET:
-		if (len < sizeof(struct sockaddr_in)) {
+		if ((size_t)len < sizeof(struct sockaddr_in)) {
 			return false;
 		}
 		addr->type = ATYP_INET;
@@ -160,7 +160,7 @@ bool dialaddr_set(
 		addr->port = ntohs(((struct sockaddr_in *)sa)->sin_port);
 		return true;
 	case AF_INET6:
-		if (len < sizeof(struct sockaddr_in6)) {
+		if ((size_t)len < sizeof(struct sockaddr_in6)) {
 			return false;
 		}
 		addr->type = ATYP_INET6;
