@@ -132,8 +132,8 @@ static void
 marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 {
 	const int idx = 1;
-	static const char prefix[3] = "-0x";
-	static const char xdigits[16] = "0123456789abcdef";
+	static const char prefix[] = "-0x";
+	static const char xdigits[] = "0123456789abcdef";
 	unsigned char buf[120];
 
 	/* Handle integer values */

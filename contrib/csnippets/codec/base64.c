@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-static const unsigned char encoding_table[64] =
+static const unsigned char encoding_table[] =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 bool base64_encode(
