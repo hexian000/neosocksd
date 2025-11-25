@@ -522,7 +522,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 		return NULL;
 	}
 
-	/* Parse trailer fields (not validated here - caller's responsibility) */
+	/* Parse trailer fields (not validated) */
 	const struct {
 		uint32_t crc; /**< CRC32 of uncompressed data */
 		uint32_t isize; /**< Size of uncompressed data modulo 2^32 */

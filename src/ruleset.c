@@ -22,7 +22,6 @@
 #include "ruleset/time.h"
 #include "ruleset/zlib.h"
 
-#include "math/rand.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
@@ -85,29 +84,17 @@ l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 
 /**
  * @brief Lua panic handler
- *
- * This function is called when Lua encounters an unrecoverable error.
- * It logs the error details and returns control to Lua to abort execution.
- * The panic handler should not return normally.
- *
  * @param L Lua state
- * @return Always returns 0 (tells Lua to abort)
+ * @return Always returns 0
  */
 static int l_panic(lua_State *L)
 {
-	const int type = lua_type(L, -1);
-	switch (type) {
-	case LUA_TNIL:
-		LOG_STACK(FATAL, 0, "panic: (nil)");
-		break;
-	case LUA_TSTRING:
-		LOG_STACK_F(FATAL, 0, "panic: %s", lua_tostring(L, -1));
-		break;
-	default:
-		LOG_STACK_F(
-			FATAL, 0, "panic: (%s: %p)", lua_typename(L, type),
-			lua_topointer(L, -1));
-	}
+	const char *msg = (lua_type(L, -1) == LUA_TSTRING) ?
+				  lua_tostring(L, -1) :
+				  "error object is not a string";
+	LOG_STACK_F(
+		FATAL, 0, "PANIC: unprotected error in call to Lua API (%s)",
+		msg);
 	return 0; /* return to Lua to abort */
 }
 
@@ -123,7 +110,7 @@ static int l_panic(lua_State *L)
  * - Built-in extension libraries (await, marshal, regex, etc.)
  *
  * @param L Lua state to initialize
- * @return Always returns 0 (success)
+ * @return Always returns 0
  */
 static int ruleset_luainit(lua_State *restrict L)
 {
@@ -226,7 +213,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	r->config.traceback = !!G.conf->traceback;
 	lua_State *restrict L =
 #if LUA_VERSION_NUM >= 505
-		lua_newstate(l_alloc, r, (unsigned int)rand64());
+		lua_newstate(l_alloc, r, luaL_makeseed(NULL));
 #else
 		lua_newstate(l_alloc, r);
 #endif
