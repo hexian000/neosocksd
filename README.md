@@ -31,6 +31,7 @@ Status: **Stable**
 - Hot-reloadable: REST API for monitoring and updating Lua modules.
 - Modern: full IPv6 support and horizontal scalability.
 - Standards-compliant: ISO C11 and POSIX.1-2008. Additional features may be available on certain platforms.
+- Long-Term Supported: Follow the latest releases of the dependent projects. Even if we don't make any changes, the binary release will be rebuilt at least once a year.
 
 *\* Some required libraries are dynamically linked, see runtime dependencies below. Statically linked executable can be larger due to these libraries.*
 
@@ -126,7 +127,9 @@ See [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Re
 
 ## Runtime Dependencies
 
-**Easiest option**: Download a `-static` build from [Releases](https://github.com/hexian000/neosocksd/releases); no runtime dependencies are required.
+**Statically-linked setup**: Download a `-static` build from the [Releases](https://github.com/hexian000/neosocksd/releases) section — no additional runtime dependencies are needed.
+
+**Dynamically-linked setup**: The following dependencies should be installed.
 
 ```sh
 # Debian / Ubuntu
@@ -137,7 +140,7 @@ apk add libev c-ares
 opkg install libev libcares
 ```
 
-*Lua is linked statically.*
+*Note: Lua is always linked statically.*
 
 
 ## Building from Source
