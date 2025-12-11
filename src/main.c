@@ -123,6 +123,8 @@ static void print_usage(const char *argv0)
 		"  --max-startups <start:rate:full>\n"
 		"                             maximum number of concurrent halfopen connections\n"
 		"                             (default: unlimited)\n"
+		"  --ingress                  block connections to non-local addresses\n"
+		"  --egress                   block connections to local addresses\n"
 		"\n"
 		"example:\n"
 		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
@@ -314,6 +316,14 @@ static void parse_args(const int argc, char *const *const restrict argv)
 		if (strcmp(argv[i], "-d") == 0 ||
 		    strcmp(argv[i], "--daemonize") == 0) {
 			conf->daemonize = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--ingress") == 0) {
+			conf->ingress = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--egress") == 0) {
+			conf->egress = true;
 			continue;
 		}
 		if (strcmp(argv[i], "-m") == 0 ||

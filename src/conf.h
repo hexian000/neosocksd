@@ -52,6 +52,8 @@ struct config {
 	bool traceback : 1;
 #endif
 	bool daemonize : 1;
+	bool ingress : 1;
+	bool egress : 1;
 
 	int tcp_sndbuf, tcp_rcvbuf;
 

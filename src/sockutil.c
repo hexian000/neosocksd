@@ -237,6 +237,98 @@ int format_sa(
 	return snprintf(s, maxlen, "<af:%jd>", (intmax_t)sa->sa_family);
 }
 
+bool is_unspecified_sa(const struct sockaddr *sa)
+{
+	switch (sa->sa_family) {
+	case AF_INET: {
+		const in_addr_t addr = ntohl(
+			((const struct sockaddr_in *)sa)->sin_addr.s_addr);
+		return addr == INADDR_ANY;
+	}
+	case AF_INET6: {
+		const struct in6_addr *addr =
+			&((const struct sockaddr_in6 *)sa)->sin6_addr;
+		return IN6_IS_ADDR_UNSPECIFIED(addr);
+	}
+	default:
+		break;
+	}
+	return false;
+}
+
+bool is_multicast_sa(const struct sockaddr *sa)
+{
+	switch (sa->sa_family) {
+	case AF_INET: {
+		const in_addr_t addr = ntohl(
+			((const struct sockaddr_in *)sa)->sin_addr.s_addr);
+		switch (addr & ((in_addr_t)0xf0000000)) {
+		case 0xe0000000: /* 224.0.0.0/4 */
+			return false;
+		}
+		switch (addr) {
+		case INADDR_BROADCAST: /* 255.255.255.255/32 */
+			return false;
+		}
+		return false;
+	}
+	case AF_INET6: {
+		const struct in6_addr *addr =
+			&((const struct sockaddr_in6 *)sa)->sin6_addr;
+		return IN6_IS_ADDR_MULTICAST(addr);
+	}
+	default:
+		break;
+	}
+	return false;
+}
+
+bool is_local_sa(const struct sockaddr *sa)
+{
+	switch (sa->sa_family) {
+	case AF_INET: {
+		const in_addr_t addr = ntohl(
+			((const struct sockaddr_in *)sa)->sin_addr.s_addr);
+		switch (addr & ((in_addr_t)0xff000000)) {
+		case 0x00000000: /* 0.0.0.0/8 */
+		case 0x0a000000: /* 10.0.0.0/8 */
+		case 0x7f000000: /* 127.0.0.0/8 */
+			return true;
+		}
+		switch (addr & ((in_addr_t)0xfff00000)) {
+		case 0xac100000: /* 172.16.0.0/12 */
+			return true;
+		}
+		switch (addr & ((in_addr_t)0xffff0000)) {
+		case 0xa9fe0000: /* 169.254.0.0/16 */
+		case 0xc0a80000: /* 192.168.0.0/16 */
+			return true;
+		}
+		switch (addr & ((in_addr_t)0xffffff00)) {
+		case 0xc0000000: /* 192.0.0.0/24 */
+			return true;
+		}
+		return false;
+	}
+	case AF_INET6: {
+		const struct in6_addr *addr =
+			&((const struct sockaddr_in6 *)sa)->sin6_addr;
+		if (IN6_IS_ADDR_LINKLOCAL(addr) ||
+		    IN6_IS_ADDR_SITELOCAL(addr)) {
+			return true;
+		}
+		if (IN6_IS_ADDR_UNSPECIFIED(addr) ||
+		    IN6_IS_ADDR_LOOPBACK(addr)) {
+			return true;
+		}
+		return false;
+	}
+	default:
+		break;
+	}
+	return false;
+}
+
 static bool find_addrinfo(
 	union sockaddr_max *restrict sa, const struct addrinfo *restrict node)
 {

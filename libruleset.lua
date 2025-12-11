@@ -673,6 +673,24 @@ function rule.default()
     end
 end
 
+function rule.resolve()
+    return function(addr)
+        local ruleset = table.get(_G, "ruleset")
+        if not ruleset then
+            return nil
+        end
+        addr = await.resolve(addr)
+        local host, _ = splithostport(addr)
+        if parse_ipv4(host) then
+            return ruleset.route(addr)
+        end
+        if parse_ipv6(host) then
+            return ruleset.route6(addr)
+        end
+        return ruleset.resolve(addr)
+    end
+end
+
 function rule.redirect(dst, ...)
     local chain = list:new({ ... }):reverse()
     local host, port, _ = splithostport(dst)

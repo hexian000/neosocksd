@@ -12,6 +12,11 @@ agent.conns = {
 -- route "peer0.internal" to current peer
 agent.hosts = { "peer0" }
 
+-- [[ basic authentication, pass --auth-required to enforce ]] --
+_G.secrets = {
+    ["lamer"] = "secret",
+}
+
 -- [[ configurations ]] --
 local ruleset = {}
 

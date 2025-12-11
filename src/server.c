@@ -129,6 +129,10 @@ void server_init(
 bool server_start(
 	struct server *restrict s, const struct sockaddr *restrict bindaddr)
 {
+	if (is_unspecified_sa(bindaddr)) {
+		LOGW("binding to wildcard address may be insecure");
+	}
+
 	/* Create TCP socket */
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {

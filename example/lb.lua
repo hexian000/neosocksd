@@ -39,5 +39,5 @@ local function main(...)
     return _G.libruleset
 end
 
-logf("ruleset loaded, interpreter: %s", _VERSION)
+evlogf("ruleset loaded, interpreter: %s", _VERSION)
 return main(...)

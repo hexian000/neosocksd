@@ -87,6 +87,10 @@ bool conf_check(const struct config *restrict conf)
 		LOGE("incompatible flags are specified");
 		return false;
 	}
+	if (conf->ingress && conf->egress) {
+		LOGE("incompatible outbound policies are specified");
+		return false;
+	}
 	if (conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 16384) {
 		LOGW("tcp send buffer may be too small");
 	}

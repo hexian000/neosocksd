@@ -1296,6 +1296,21 @@ static bool connect_sa(
 	struct dialer *restrict d, struct ev_loop *loop,
 	const struct sockaddr *restrict sa)
 {
+	/* Enforce gateway restrictions */
+	if (G.conf->ingress && !is_local_sa(sa)) {
+		char addr_str[64];
+		format_sa(addr_str, sizeof(addr_str), sa);
+		LOG_F(VERBOSE, "dialer: blocked non-local address %s",
+		      addr_str);
+		return false;
+	}
+	if (G.conf->egress && is_local_sa(sa)) {
+		char addr_str[64];
+		format_sa(addr_str, sizeof(addr_str), sa);
+		LOG_F(VERBOSE, "dialer: blocked local address %s", addr_str);
+		return false;
+	}
+
 	/* Create socket */
 	const int fd = socket(sa->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
