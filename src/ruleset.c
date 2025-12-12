@@ -211,6 +211,13 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	const int memlimit_mb = G.conf->memlimit;
 	r->config.memlimit_kb = (memlimit_mb > 0) ? (memlimit_mb << 10u) : 0;
 	r->config.traceback = !!G.conf->traceback;
+
+	/* initialize in advance to prevent undefined behavior */
+	ev_timer_init(&r->w_ticker, tick_cb, 1.0, 1.0);
+	r->w_ticker.data = r;
+	ev_idle_init(&r->w_idle, idle_cb);
+	r->w_idle.data = r;
+
 	lua_State *restrict L =
 #if LUA_VERSION_NUM >= 505
 		lua_newstate(l_alloc, r, luaL_makeseed(NULL));
@@ -224,12 +231,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	(void)lua_atpanic(L, l_panic);
 	r->L = L;
 
-	/* initialize in advance to prevent undefined behavior */
-	ev_timer_init(&r->w_ticker, tick_cb, 1.0, 1.0);
-	r->w_ticker.data = r;
-	ev_idle_init(&r->w_idle, idle_cb);
-	r->w_idle.data = r;
-
+	lua_gc(L, LUA_GCSTOP, 0);
 	lua_pushcfunction(L, ruleset_luainit);
 	switch (lua_pcall(L, 0, 0, 0)) {
 	case LUA_OK:
@@ -240,6 +242,10 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 	default:
 		FAILMSGF("ruleset init: %s", lua_tostring(L, -1));
 	}
+	lua_gc(L, LUA_GCRESTART, 0);
+#if LUA_VERSION_NUM >= 504
+	lua_gc(L, LUA_GCGEN, 0, 0);
+#endif
 	return r;
 }
 
