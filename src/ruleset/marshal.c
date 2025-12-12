@@ -149,7 +149,7 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 
 		/* Determine sign and prefix */
 		const char *p = prefix;
-		const char *pend = prefix + sizeof(prefix);
+		const char *pend = prefix + sizeof(prefix) - 1;
 		if (x < 0 && x != LUA_MININTEGER) {
 			x = -x; /* Make positive, keep negative prefix */
 		} else {
@@ -206,7 +206,7 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 
 	/* Handle sign prefix */
 	const char *p = prefix;
-	const char *pend = prefix + sizeof(prefix);
+	const char *pend = prefix + sizeof(prefix) - 1;
 	if (signbit(x)) {
 		x = -x; /* Make positive, keep negative prefix */
 	} else {
