@@ -55,6 +55,10 @@ local function is_valid(t, expiry_time, now)
 end
 
 local function build_index()
+    local conns = {}
+    for _, conn in pairs(agent.conns) do
+        conns[conn] = true
+    end
     local peers, peer_rtt = setmetatable({}, { __mode = "kv" }), {}
     if agent.peername then
         peer_rtt[agent.peername] = 0
@@ -62,7 +66,8 @@ local function build_index()
     for conn, infomap in pairs(_G.conninfo) do
         for peername, info in pairs(infomap) do
             local rtt = info.rtt or math.huge
-            if not peer_rtt[peername] or rtt < peer_rtt[peername] then
+            if not peer_rtt[peername] or rtt < peer_rtt[peername] or
+                (conns[conn] and not conns[peers[peername]]) then
                 peer_rtt[peername] = rtt
                 peers[peername] = conn
             end
@@ -346,10 +351,10 @@ function agent.maintenance()
             _G.peerdb[peername] = nil
         end
     end
-    for _, conn in pairs(_G.conninfo) do
-        for peername, _ in pairs(conn) do
+    for _, infomap in pairs(_G.conninfo) do
+        for peername, _ in pairs(infomap) do
             if not _G.peerdb[peername] then
-                conn[peername] = nil
+                infomap[peername] = nil
             end
         end
     end
