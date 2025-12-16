@@ -213,7 +213,7 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "byt_up");
 	lua_pushinteger(L, (lua_Integer)stats.byt_down);
 	lua_setfield(L, -2, "byt_down");
-	lua_pushnumber(L, (lua_Number)(ev_now(r->loop) - stats.started));
+	lua_pushnumber(L, (lua_Number)(clock_monotonic() - stats.started));
 	lua_setfield(L, -2, "uptime");
 	lua_pushinteger(L, (lua_Integer)r->vmstats.byt_allocated);
 	lua_setfield(L, -2, "bytes_allocated");
