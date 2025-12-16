@@ -275,9 +275,9 @@ local function probe_via(conn, peername)
     local minrtt, bestroute, err
     for _ = 1, 4 do
         await.sleep(1)
-        local probe_start = neosocksd.now()
+        local probe_start = time.monotonic()
         local ok, result = callbyconn(conn, "probe", peername, agent.probettl)
-        local probe_end = neosocksd.now()
+        local probe_end = time.monotonic()
         if ok then
             local rtt = probe_end - probe_start
             if not minrtt or rtt < minrtt then
