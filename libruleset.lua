@@ -973,7 +973,7 @@ ruleset.resolve = with_authenticate(resolve_)
 ruleset.route = with_authenticate(route_)
 ruleset.route6 = with_authenticate(route6_)
 
-function ruleset.tick(now)
+function ruleset.tick()
     stat_requests:push(num_requests)
 end
 

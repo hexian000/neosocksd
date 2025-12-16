@@ -329,19 +329,15 @@ int cfunc_stats(lua_State *restrict L)
 	return 1;
 }
 
-/* tick(now) */
+/* tick() */
 int cfunc_tick(lua_State *restrict L)
 {
 	check_memlimit(L);
-	ASSERT(lua_gettop(L) == 1);
-	const ev_tstamp now = *(ev_tstamp *)lua_touserdata(L, 1);
+	ASSERT(lua_gettop(L) == 0);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, "tick");
-	lua_copy(L, -1, 1);
-	lua_settop(L, 1);
-
-	lua_pushnumber(L, now);
-	lua_call(L, 1, 0);
+	lua_replace(L, 1);
+	lua_call(L, 0, 0);
 	return 0;
 }
 

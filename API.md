@@ -204,7 +204,7 @@ See [ruleset.resolve](#rulesetresolve)
 **Synopsis**
 
 ```Lua
-function ruleset.tick(now)
+function ruleset.tick()
     -- ......
 end
 ```
@@ -214,14 +214,6 @@ end
 Periodic timer callback. See [neosocksd.setinterval](#neosocksdsetinterval).
 
 *This callback is NOT called from an asynchronous routine.*
-
-**Params**
-
-- `now`: current timestamp in seconds
-
-**Returns**
-
-Ignored.
 
 
 ### ruleset.stats

@@ -192,8 +192,7 @@ static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct ruleset *restrict r = watcher->data;
-	const ev_tstamp now = ev_now(loop);
-	const bool ok = ruleset_pcall(r, cfunc_tick, 1, 0, &now);
+	const bool ok = ruleset_pcall(r, cfunc_tick, 0, 0);
 	if (!ok) {
 		LOGW_F("ruleset.tick: %s", ruleset_geterror(r, NULL));
 		return;
