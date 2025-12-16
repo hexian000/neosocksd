@@ -902,6 +902,7 @@ local function resolve_(addr)
 end
 
 local function render_(w)
+    local total = 0
     local requests, n = list:new(), 0
     local last_requests
     for i = stat_requests.len, 1, -1 do
@@ -909,12 +910,16 @@ local function render_(w)
         if last_requests then
             local delta = v - last_requests
             requests:insert(delta)
+            total = total + delta
             n = n + 1
         end
         last_requests = v
     end
-    requests:insert(num_requests - last_requests)
-    local peak = math.max(0, requests:unpack())
+    last_requests = num_requests - last_requests
+    requests:insert(last_requests)
+    local avg, peak = last_requests, math.max(0, requests:unpack())
+    if n > 0 then avg = total / n end
+    w:insertf("> Request Stats (avg=%.1f/min, max=%d)", avg, peak)
     local q = math.max(1, peak)
     for i, v in requests:iter() do
         requests[i] = math.floor(v / q * 5.0 + 0.5)
@@ -930,7 +935,7 @@ local function render_(w)
         end
         w:insert(line:concat())
     end
-    w:insertf("%s* (peak=%d)", string.rep("-", n), peak)
+    w:insertf("%s*", string.rep("-", n))
 end
 
 -- [[ ruleset callbacks, see API.md for details ]] --
@@ -990,7 +995,6 @@ function ruleset.stats(dt)
             w:insertf("%s %s (x%d)", tstamp, entry.msg, entry.count)
         end
     end
-    w:insert("> Request Stats")
     render_(w)
     return w:concat("\n")
 end
