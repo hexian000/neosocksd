@@ -55,10 +55,6 @@ local function is_valid(t, expiry_time, now)
 end
 
 local function build_index()
-    local conns = {}
-    for _, conn in pairs(agent.conns) do
-        conns[conn] = true
-    end
     local peers, peer_rtt = setmetatable({}, { __mode = "kv" }), {}
     if agent.peername then
         peer_rtt[agent.peername] = 0
@@ -66,8 +62,7 @@ local function build_index()
     for conn, infomap in pairs(_G.conninfo) do
         for peername, info in pairs(infomap) do
             local rtt = info.rtt or math.huge
-            if not peer_rtt[peername] or rtt < peer_rtt[peername] or
-                (conns[conn] and not conns[peers[peername]]) then
+            if not peer_rtt[peername] or rtt < peer_rtt[peername] then
                 peer_rtt[peername] = rtt
                 peers[peername] = conn
             end
@@ -211,7 +206,7 @@ function agent.sync(conn)
     local ok, r1, r2 = callbyconn(conn, "sync", agent.peername, _G.peerdb)
     if not ok then
         evlogf("sync failed: [%s] %s", connid_of(conn), r1)
-        return
+        return false
     end
     local peername, peerdb = r1, r2
     local infomap = _G.conninfo[conn] or {}
@@ -226,6 +221,7 @@ function agent.sync(conn)
     end
     _G.conninfo[conn] = infomap
     update_peerdb(peername, peerdb)
+    return true
 end
 
 local function findconn(peername, ttl)
@@ -332,8 +328,11 @@ function agent.maintenance()
         }
     end
     -- sync
+    local conns = {}
     for _, conn in pairs(agent.conns) do
-        agent.sync(conn)
+        if agent.sync(conn) then
+            conns[conn] = true
+        end
     end
     evlog("agent: sync finished")
     -- probe
@@ -351,11 +350,15 @@ function agent.maintenance()
             _G.peerdb[peername] = nil
         end
     end
-    for _, infomap in pairs(_G.conninfo) do
-        for peername, _ in pairs(infomap) do
-            if not _G.peerdb[peername] then
-                infomap[peername] = nil
+    for conn, infomap in pairs(_G.conninfo) do
+        if conns[conn] then
+            for peername, _ in pairs(infomap) do
+                if not _G.peerdb[peername] then
+                    infomap[peername] = nil
+                end
             end
+        else
+            _G.conninfo[conn] = nil
         end
     end
     hosts, peers = build_index()
