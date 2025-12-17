@@ -19,7 +19,6 @@ _G.secrets = {
 
 -- [[ configurations ]] --
 local ruleset = {}
-ruleset.running = true
 ruleset.enable_until = nil
 local function is_disabled()
     local now = os.time()
@@ -170,24 +169,28 @@ function ruleset.stats(dt, q)
     return w:concat("\n")
 end
 
-function rpc.update()
+function rpc.update(timestamp)
+    if timestamp and timestamp == table.get(_G, "ruleset_data", "timestamp") then
+        return nil
+    end
     return ruleset_data
 end
 
 function ruleset.update()
     -- fetch updated ruleset from central server
     local target = { "central.internal:9080", "socks4a://127.0.0.1:1080" }
-    local ok, data = await.rpcall(target, "update")
+    local ok, data = await.rpcall(target, "update", ruleset.last_updated)
     if not ok then
         evlogf("ruleset update: %s", data)
         return
     end
+    if not data then return end
     ruleset.last_updated = data.timestamp
     if data.biglist_raw then
         _G.biglist = inet.subnet(data.biglist_raw.cidr)
         _G.biglist6 = inet6.subnet(data.biglist_raw.cidr6)
         _G.biglist_name = composite.anyof({
-            match.domaintree(data.biglist_raw.domain),
+            match.domain(data.biglist_raw.domain),
             match.host(data.biglist_raw.host),
             match.regex(data.biglist_raw.regex) })
     end
@@ -195,25 +198,8 @@ function ruleset.update()
     evlog("ruleset update: success")
 end
 
-function ruleset.stop()
-    ruleset.running = false
-end
-
 local function main(...)
     neosocksd.setinterval(60)
-    local stop = table.get(_G, "ruleset", "stop")
-    if stop then
-        local ok, err = pcall(stop)
-        if not ok then
-            evlogf("ruleset.stop: %s", err)
-        end
-    end
-    async(function()
-        while ruleset.running do
-            pcall(ruleset.update)
-            await.sleep(86400 + math.random(7200))
-        end
-    end)
     -- inherit undefined fields from libruleset
     return setmetatable(ruleset, {
         __index = function(_, k)

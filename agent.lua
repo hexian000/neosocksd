@@ -24,7 +24,7 @@ end
 -- _G.peerdb[peername] = { hosts = { hostname, "host1" } }, timestamp = os.time() }
 _G.peerdb = _G.peerdb or {}
 -- _G.conninfo[conn] = { [peername] = { route = { peername, "peer1" }, rtt = 0, timestamp = os.time() } }
-_G.conninfo = _G.conninfo or setmetatable({}, { __mode = "k" })
+_G.conninfo = _G.conninfo or {}
 
 local API_ENDPOINT = "api.neosocksd.internal:80"
 local INTERNAL_DOMAIN = ".internal"
@@ -201,7 +201,7 @@ function rpc.sync(peername, peerdb)
     return agent.peername, _G.peerdb
 end
 
-function agent.sync(conn)
+local function sync(conn)
     assert(type(conn) == "table", strformat("unknown conn [%s]", connid_of(conn)))
     local ok, r1, r2 = callbyconn(conn, "sync", agent.peername, _G.peerdb)
     if not ok then
@@ -295,11 +295,11 @@ local function probe_via(conn, peername)
     return err
 end
 
-function agent.probe(peername)
+function agent.probe(conns, peername)
     assert(_G.peerdb[peername], strformat("unknown peer %q", peername))
     local errors = list:new()
     local t, n = {}, 0
-    for connid, conn in pairs(agent.conns) do
+    for conn, connid in pairs(conns) do
         t[connid] = async(probe_via, conn, peername)
         n = n + 1
     end
@@ -319,6 +319,19 @@ function agent.probe(peername)
     end
 end
 
+function agent.sync()
+    local conns, t = {}, {}
+    for connid, conn in pairs(agent.conns) do
+        t[connid] = async(sync, conn)
+    end
+    for connid, r in pairs(t) do
+        if r:get() then
+            conns[agent.conns[connid]] = connid
+        end
+    end
+    return conns
+end
+
 function agent.maintenance()
     -- update self
     if agent.peername then
@@ -328,17 +341,12 @@ function agent.maintenance()
         }
     end
     -- sync
-    local conns = {}
-    for _, conn in pairs(agent.conns) do
-        if agent.sync(conn) then
-            conns[conn] = true
-        end
-    end
+    local conns = agent.sync()
     evlog("agent: sync finished")
     -- probe
     for peername, _ in pairs(_G.peerdb) do
         if peername ~= agent.peername then
-            agent.probe(peername)
+            agent.probe(conns, peername)
         end
     end
     evlog("agent: probe finished")
@@ -362,6 +370,14 @@ function agent.maintenance()
         end
     end
     hosts, peers = build_index()
+
+    local update = table.get(_G, "ruleset", "update")
+    if update then
+        local ok, err = pcall(update)
+        if not ok then
+            evlogf("ruleset.update: %s", err)
+        end
+    end
 end
 
 local function mainloop()

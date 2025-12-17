@@ -113,22 +113,7 @@ local function parse_list(filename)
             table.insert(domain, line)
         end
     end
-    local tree = {}
-    for _, v in pairs(domain) do
-        local path, n = {}, 0
-        for seg in v:gmatch("[^.]+") do
-            n = n + 1
-            path[n] = seg
-        end
-        local t = tree
-        for i = n, 2, -1 do
-            local seg = path[i]
-            t[seg] = t[seg] or {}
-            t = t[seg]
-        end
-        t[path[1]] = true
-    end
-    return tree, host, regex
+    return domain, host, regex
 end
 
 function main(args)
