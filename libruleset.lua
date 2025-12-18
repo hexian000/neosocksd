@@ -365,6 +365,23 @@ function neosocksd.sendmsg(target, func, ...)
     return neosocksd.invoke(code, table.unpack(target))
 end
 
+-- [[ process a rule chain ]] --
+local function runchain_(t, ...)
+    for _, item in ipairs(t) do
+        local matcher, action, tag = table.unpack(item)
+        if action then
+            if matcher(...) then
+                return action, tag
+            end
+        else
+            action, tag = matcher(...)
+            if action then return action, tag end
+        end
+    end
+    return nil
+end
+
+
 -- [[ _G.route table matchers ]] --
 local inet = {}
 
@@ -646,6 +663,15 @@ function composite.maybe(t, k)
     end
 end
 
+function composite.subchain(t, k)
+    return function(...)
+        local chain = t[k]
+        if chain then
+            return runchain_(chain, ...)
+        end
+    end
+end
+
 _G.composite = composite
 
 -- [[ rule actions ]] --
@@ -785,16 +811,6 @@ _G.num_requests = _G.num_requests or 0
 _G.num_authorized = _G.num_authorized or 0
 _G.stat_requests = rlist:check(_G.stat_requests) or rlist:new(60, { _G.num_requests })
 
-local function matchtab_(t, ...)
-    for _, item in ipairs(t) do
-        local matcher, action, tag = table.unpack(item)
-        if matcher(...) then
-            return action, tag
-        end
-    end
-    return nil
-end
-
 local function default_(addr)
     local route = _G.route_default
     if route then
@@ -813,7 +829,7 @@ local function route_(addr)
     -- check redirect table
     local redirtab = _G.redirect
     if redirtab then
-        local action, tag = matchtab_(redirtab, addr)
+        local action, tag = runchain_(redirtab, addr)
         if action then
             if tag then
                 evlogf("[%s] %q", tag, addr)
@@ -826,7 +842,7 @@ local function route_(addr)
     if routetab then
         local host, _ = splithostport(addr)
         local ip = parse_ipv4(host)
-        local action, tag = matchtab_(routetab, ip)
+        local action, tag = runchain_(routetab, ip)
         if action then
             if tag then
                 evlogf("[%s] %q", tag, addr)
@@ -842,7 +858,7 @@ local function route6_(addr)
     -- check redirect table
     local redirtab = _G.redirect6
     if redirtab then
-        local action, tag = matchtab_(redirtab, addr)
+        local action, tag = runchain_(redirtab, addr)
         if action then
             if tag then
                 evlogf("[%s] %q", tag, addr)
@@ -855,7 +871,7 @@ local function route6_(addr)
     if routetab then
         local host, _ = splithostport(addr)
         local ip1, ip2 = parse_ipv6(host)
-        local action, tag = matchtab_(routetab, ip1, ip2)
+        local action, tag = runchain_(routetab, ip1, ip2)
         if action then
             if tag then
                 evlogf("[%s] %q", tag, addr)
@@ -871,7 +887,7 @@ local function resolve_(addr)
     -- check redirect table
     local redirtab = _G.redirect_name
     if redirtab then
-        local action, tag = matchtab_(redirtab, addr)
+        local action, tag = runchain_(redirtab, addr)
         if action then
             if tag then
                 evlogf("[%s] %q", tag, addr)
