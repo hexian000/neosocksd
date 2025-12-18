@@ -547,7 +547,7 @@ Requires `/bin/sh`.
 ```Lua
 async(function(addr)
     local begin = neosocksd.now()
-    local ok, result = await.invoke([[await.idle(); return "ok"]], addr)
+    local ok, result = await.invoke([[await.sleep(1); return "ok"]], addr)
     if not ok then
         -- on failure, the result is string
         error("invocation failed: " .. result)
