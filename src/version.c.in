@@ -1,0 +1,5 @@
+
+const char *neosocksd_version(void)
+{
+	return "@PROJECT_VERSION_STRING@";
+}

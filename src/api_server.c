@@ -320,9 +320,9 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	buf->len = 0;
 
 	if (!nobanner) {
-		BUF_APPENDSTR(
-			*buf, PROJECT_NAME " " PROJECT_VER "\n"
-					   "  " PROJECT_HOMEPAGE "\n\n");
+		BUF_APPENDF(
+			*buf, "%s %s\n  %s\n\n", PROJECT_NAME, PROJECT_VER,
+			PROJECT_HOMEPAGE);
 	}
 
 	const int_least64_t now = clock_monotonic();
