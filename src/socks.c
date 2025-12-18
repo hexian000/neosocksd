@@ -155,7 +155,8 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 	default:
 		FAIL();
 	}
-	SOCKS_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
+	SOCKS_CTX_LOG_F(
+		VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
 
 static void

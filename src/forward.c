@@ -110,7 +110,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	default:
 		FAIL();
 	}
-	FW_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
+	FW_CTX_LOG_F(VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
 
 static void

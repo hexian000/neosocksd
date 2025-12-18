@@ -759,7 +759,7 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		ev_io_stop(loop, &ctx->w_send);
 		break;
 	}
-	API_CTX_LOG_F(DEBUG, ctx, "closed, %zu active", stats->num_sessions);
+	API_CTX_LOG_F(VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
 
 static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
