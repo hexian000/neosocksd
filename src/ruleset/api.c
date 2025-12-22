@@ -127,16 +127,19 @@ static int api_setinterval(lua_State *restrict L)
 	double interval = lua_tonumber(L, 1);
 
 	struct ruleset *restrict r = aux_getruleset(L);
-	ev_timer *restrict w_ticker = &r->w_ticker;
-	ev_timer_stop(r->loop, w_ticker);
+	ev_timer_stop(r->loop, &r->w_ticker);
+	ev_idle_stop(r->loop, &r->w_idle);
 	if (!isnormal(interval)) {
 		return 0;
 	}
 
-	interval = CLAMP(interval, 1e-3, 1e+9);
-	ev_timer_set(w_ticker, interval, interval);
-	w_ticker->data = r;
-	ev_timer_start(r->loop, w_ticker);
+	if (interval < 0) {
+		ev_timer_set(&r->w_ticker, 0.0, 0.0);
+		ev_idle_start(r->loop, &r->w_idle);
+		return 0;
+	}
+	ev_timer_set(&r->w_ticker, interval, interval);
+	ev_timer_start(r->loop, &r->w_ticker);
 	return 0;
 }
 

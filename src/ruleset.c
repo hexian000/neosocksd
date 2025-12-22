@@ -190,8 +190,10 @@ static void tick_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
-	ev_idle_stop(loop, watcher);
 	struct ruleset *restrict r = watcher->data;
+	if (r->w_ticker.repeat > 0) {
+		ev_idle_stop(loop, watcher);
+	}
 	const bool ok = ruleset_pcall(r, cfunc_tick, 0, 0);
 	if (!ok) {
 		LOGW_F("ruleset.tick: %s", ruleset_geterror(r, NULL));
@@ -254,6 +256,7 @@ void ruleset_free(struct ruleset *restrict r)
 		return;
 	}
 	ev_timer_stop(r->loop, &r->w_ticker);
+	ev_idle_stop(r->loop, &r->w_idle);
 	lua_close(r->L);
 	free(r);
 }
