@@ -18,6 +18,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct ev_loop;
 struct stream;
@@ -27,6 +28,7 @@ struct dialreq;
 struct ruleset_vmstats {
 	size_t num_object; /**< Number of allocated Lua objects */
 	size_t byt_allocated; /**< Total bytes allocated by Lua VM */
+	uintmax_t time_used; /**< Time used by Lua VM in nanoseconds */
 };
 
 /**

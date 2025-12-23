@@ -116,8 +116,9 @@ bool check_rpcall_mime(char *s)
 	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
 }
 
-static void
-append_memstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
+static void append_vmstats(
+	struct buffer *restrict buf, const struct ruleset_vmstats *vm,
+	const int_least64_t uptime)
 {
 	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
 	FORMAT_SI(objects, (double)vm->num_object);
@@ -133,57 +134,12 @@ append_memstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 			*buf, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
 			allocated, objects);
 	}
-}
-#endif
-
-static void server_stats(
-	struct buffer *restrict buf, const struct server *restrict api,
-	const int_least64_t uptime)
-{
-	const struct server_stats *restrict apistats = &api->stats;
-	const struct server *restrict s = api->data;
-	const struct server_stats *restrict stats = &s->stats;
-	const struct listener_stats *restrict lstats = &s->l.stats;
-	const struct resolver_stats *restrict resolv_stats =
-		resolver_stats(G.resolver);
-	const time_t server_time = time(NULL);
-
-	char timestamp[32];
-	(void)strftime(
-		timestamp, sizeof(timestamp), "%FT%T%z",
-		localtime(&server_time));
-	FORMAT_DURATION(str_uptime, make_duration_nanos(uptime));
-	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
-	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
 
 	BUF_APPENDF(
-		*buf,
-		"Server Time         : %s\n"
-		"Uptime              : %s\n"
-		"Num Sessions        : %zu (+%zu)\n"
-		"Conn Accepts        : %ju (+%ju)\n"
-		"Requests            : %ju (+%ju)\n"
-		"API Requests        : %ju (+%ju)\n"
-		"Name Resolves       : %ju (+%ju)\n"
-		"Traffic             : Up %s, Down %s\n",
-		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
-		lstats->num_serve, lstats->num_accept - lstats->num_serve,
-		stats->num_success, stats->num_request - stats->num_success,
-		apistats->num_success,
-		apistats->num_request - apistats->num_success,
-		resolv_stats->num_success,
-		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
-		xfer_down);
-
-#if WITH_RULESET
-	const struct ruleset *ruleset = G.ruleset;
-	if (ruleset != NULL) {
-		struct ruleset_vmstats vmstats;
-		ruleset_vmstats(ruleset, &vmstats);
-		append_memstats(buf, &vmstats);
-	}
-#endif
+		*buf, "%-20s: %.07f%%\n", "Lua CPU Fraction",
+		(double)vm->time_used / (double)uptime * 1e+2);
 }
+#endif
 
 static void server_stats_stateful(
 	struct buffer *restrict buf, const struct server *restrict api,
@@ -227,8 +183,7 @@ static void server_stats_stateful(
 	BUF_APPENDF(
 		*buf,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
-		"Request Rate        : %.1f/s\n"
-		"API Request Rate    : %.1f/s\n"
+		"Request Rate        : %.1f/s (API%+.1f/s)\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n"
 		"Server Load         : %s\n",
 		accept_rate, reject_rate, request_rate, api_request_rate,
@@ -240,6 +195,59 @@ static void server_stats_stateful(
 	last.num_reject = num_reject;
 	last.num_request = stats->num_request;
 	last.num_api_request = apistats->num_request;
+}
+
+static void server_stats(
+	struct buffer *restrict buf, const struct server *restrict api,
+	const int_least64_t uptime, const double dt)
+{
+	const struct server_stats *restrict apistats = &api->stats;
+	const struct server *restrict s = api->data;
+	const struct server_stats *restrict stats = &s->stats;
+	const struct listener_stats *restrict lstats = &s->l.stats;
+	const struct resolver_stats *restrict resolv_stats =
+		resolver_stats(G.resolver);
+	const time_t server_time = time(NULL);
+
+	char timestamp[32];
+	(void)strftime(
+		timestamp, sizeof(timestamp), "%FT%T%z",
+		localtime(&server_time));
+	FORMAT_DURATION(str_uptime, make_duration_nanos(uptime));
+	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
+	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
+
+	BUF_APPENDF(
+		*buf,
+		"Server Time         : %s\n"
+		"Uptime              : %s\n"
+		"Num Sessions        : %zu (+%zu)\n"
+		"Conn Accepts        : %ju (+%ju)\n"
+		"Requests            : %ju (+%ju)\n"
+		"API Requests        : %ju (+%ju)\n"
+		"Name Resolves       : %ju (+%ju)\n"
+		"Traffic             : Up %s, Down %s\n",
+		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
+		lstats->num_serve, lstats->num_accept - lstats->num_serve,
+		stats->num_success, stats->num_request - stats->num_success,
+		apistats->num_success,
+		apistats->num_request - apistats->num_success,
+		resolv_stats->num_success,
+		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
+		xfer_down);
+
+#if WITH_RULESET
+	const struct ruleset *ruleset = G.ruleset;
+	if (ruleset != NULL) {
+		struct ruleset_vmstats vmstats;
+		ruleset_vmstats(ruleset, &vmstats);
+		append_vmstats(buf, &vmstats, uptime);
+	}
+#endif
+
+	if (dt > 0) {
+		server_stats_stateful(buf, api, dt);
+	}
 }
 
 static bool parse_bool(const char *s)
@@ -332,15 +340,14 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		int_least64_t tstamp;
 		bool is_set : 1;
 	} last = { .is_set = false };
-	const double dt =
-		(double)(last.is_set ? now - last.tstamp : uptime) * 1e-9;
+	double dt = 0.0;
+	if (!stateless) {
+		dt = (double)(last.is_set ? now - last.tstamp : uptime) * 1e-9;
+		last.is_set = true;
+		last.tstamp = now;
+	}
 	if (server) {
-		server_stats(buf, ctx->s, uptime);
-		if (!stateless) {
-			last.is_set = true;
-			last.tstamp = now;
-			server_stats_stateful(buf, ctx->s, dt);
-		}
+		server_stats(buf, ctx->s, uptime, dt);
 
 		size_t n = buf->len;
 		const int err = stream_write(w, buf->data, &n);
@@ -585,9 +592,9 @@ static void handle_ruleset_gc(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset)
 {
-	const int_least64_t start = clock_monotonic();
 	struct ruleset_vmstats before;
 	ruleset_vmstats(ruleset, &before);
+	const int_least64_t start = clock_monotonic();
 	const bool ok = ruleset_gc(ruleset);
 	if (!ok) {
 		size_t len;
@@ -596,11 +603,12 @@ static void handle_ruleset_gc(
 		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
+	const int_least64_t end = clock_monotonic();
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
+
 	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
 	FORMAT_SI(objects, (double)vmstats.num_object);
-	const int_least64_t end = clock_monotonic();
 	FORMAT_DURATION(timecost, make_duration_nanos(end - start));
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
@@ -616,7 +624,9 @@ static void handle_ruleset_gc(
 	BUF_APPENDF(
 		ctx->parser.wbuf, "%-20s: %s (%s objects)\n", "Difference",
 		freed_bytes, freed_objects);
-	append_memstats((struct buffer *)&ctx->parser.wbuf, &vmstats);
+
+	const int_least64_t uptime = end - ctx->s->stats.started;
+	append_vmstats((struct buffer *)&ctx->parser.wbuf, &vmstats, uptime);
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	send_response(loop, ctx, true);
 }
