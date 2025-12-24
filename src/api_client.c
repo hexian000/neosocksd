@@ -293,7 +293,7 @@ static bool make_request(
 	struct http_parser *restrict p, const char *restrict uri,
 	const void *restrict content, const size_t len)
 {
-	/* Compress large payloads to reduce bandwidth */
+	/* Compress large payloads to reduce traffic */
 	const enum content_encodings encoding =
 		(len < RPCALL_COMPRESS_THRESHOLD) ? CENCODING_NONE :
 						    CENCODING_DEFLATE;
