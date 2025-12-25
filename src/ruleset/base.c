@@ -4,6 +4,7 @@
 #include "base.h"
 
 #include "io/stream.h"
+#include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
@@ -312,6 +313,17 @@ int aux_async(
 	return aux_resume(L, from, 4 + narg);
 }
 
+static void record_event_time(
+	struct ruleset *restrict r, const int_least64_t time_used,
+	const int_least64_t time_end)
+{
+	const size_t idx =
+		r->vmstats.num_events++ % ARRAY_SIZE(r->vmstats.event_ns);
+	r->vmstats.event_ns[idx] = time_used;
+	r->vmstats.event_end[idx] = time_end;
+	r->vmstats.time_total += (uintmax_t)time_used;
+}
+
 static bool ruleset_pcallv(
 	const struct ruleset *restrict r, const lua_CFunction func,
 	const int nargs, const int nresults, va_list args)
@@ -339,19 +351,19 @@ bool ruleset_pcall(
 	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
 	const int nresults, ...)
 {
-	const int_least64_t enter_time = clock_monotonic();
+	const int_least64_t time_begin = clock_monotonic();
 	va_list args;
 	va_start(args, nresults);
 	const bool result = ruleset_pcallv(r, func, nargs, nresults, args);
 	va_end(args);
-	const int_least64_t leave_time = clock_monotonic();
-	r->vmstats.time_used += (uintmax_t)(leave_time - enter_time);
+	const int_least64_t time_end = clock_monotonic();
+	record_event_time(r, time_end - time_begin, time_end);
 	return result;
 }
 
 void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 {
-	const int_least64_t enter_time = clock_monotonic();
+	const int_least64_t time_begin = clock_monotonic();
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
@@ -379,6 +391,6 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	}
-	const int_least64_t leave_time = clock_monotonic();
-	r->vmstats.time_used += (uintmax_t)(leave_time - enter_time);
+	const int_least64_t time_end = clock_monotonic();
+	record_event_time(r, time_end - time_begin, time_end);
 }

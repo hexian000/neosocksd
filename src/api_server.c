@@ -18,15 +18,18 @@
 #include "net/http.h"
 #include "net/mime.h"
 #include "net/url.h"
+#include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/formats.h"
+#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <ev.h>
 #include <strings.h>
 
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -116,9 +119,21 @@ bool check_rpcall_mime(char *s)
 	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
 }
 
-static void append_vmstats(
-	struct buffer *restrict buf, const struct ruleset_vmstats *vm,
-	const int_least64_t uptime)
+static int comp_timestamp(const void *a, const void *b)
+{
+	const int_least64_t va = *(const int_least64_t *)a;
+	const int_least64_t vb = *(const int_least64_t *)b;
+	if (va < vb) {
+		return -1;
+	}
+	if (va > vb) {
+		return 1;
+	}
+	return 0;
+}
+
+static void
+append_vmstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 {
 	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
 	FORMAT_SI(objects, (double)vm->num_object);
@@ -135,9 +150,39 @@ static void append_vmstats(
 			allocated, objects);
 	}
 
+	if (vm->num_events == 0) {
+		BUF_APPENDF(*buf, "%-20s: %s\n", "Ruleset Events", "(never)");
+		return;
+	}
+
+	const size_t num_stats = ARRAY_SIZE(vm->event_ns);
+	const size_t num_events = MIN(vm->num_events, num_stats);
+	int_least64_t p50, p90, p99, pmax;
+	{
+		int_least64_t events[num_stats];
+		for (size_t i = 0; i < num_events; i++) {
+			const size_t idx =
+				(vm->num_events + (num_stats - 1) - i) %
+				num_stats;
+			events[i] = vm->event_ns[idx];
+		}
+		qsort(events, num_events, sizeof(int_least64_t),
+		      comp_timestamp);
+		const int i50 = (int)floor((double)num_events * 0.50);
+		const int i90 = (int)floor((double)num_events * 0.90);
+		const int i99 = (int)floor((double)num_events * 0.99);
+		p50 = events[i50];
+		p90 = events[i90];
+		p99 = events[i99];
+		pmax = events[num_events - 1];
+	}
+	FORMAT_DURATION(p50_str, make_duration_nanos(p50));
+	FORMAT_DURATION(p90_str, make_duration_nanos(p90));
+	FORMAT_DURATION(p99_str, make_duration_nanos(p99));
+	FORMAT_DURATION(pmax_str, make_duration_nanos(pmax));
 	BUF_APPENDF(
-		*buf, "%-20s: %.07f%%\n", "Lua CPU Fraction",
-		(double)vm->time_used / (double)uptime * 1e+2);
+		*buf, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Ruleset Events",
+		p50_str, p90_str, p99_str, pmax_str);
 }
 #endif
 
@@ -241,7 +286,7 @@ static void server_stats(
 	if (ruleset != NULL) {
 		struct ruleset_vmstats vmstats;
 		ruleset_vmstats(ruleset, &vmstats);
-		append_vmstats(buf, &vmstats, uptime);
+		append_vmstats(buf, &vmstats);
 	}
 #endif
 
@@ -625,8 +670,7 @@ static void handle_ruleset_gc(
 		ctx->parser.wbuf, "%-20s: %s (%s objects)\n", "Difference",
 		freed_bytes, freed_objects);
 
-	const int_least64_t uptime = end - ctx->s->stats.started;
-	append_vmstats((struct buffer *)&ctx->parser.wbuf, &vmstats, uptime);
+	append_vmstats((struct buffer *)&ctx->parser.wbuf, &vmstats);
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	send_response(loop, ctx, true);
 }

@@ -203,6 +203,7 @@ static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 
 struct ruleset *ruleset_new(struct ev_loop *loop)
 {
+	const int_least64_t time_begin = clock_monotonic();
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
 	if (r == NULL) {
 		return NULL;
@@ -247,6 +248,9 @@ struct ruleset *ruleset_new(struct ev_loop *loop)
 #if LUA_VERSION_NUM >= 504
 	lua_gc(L, LUA_GCGEN, 0, 0);
 #endif
+
+	const int_least64_t time_end = clock_monotonic();
+	r->vmstats.time_total += (uintmax_t)(time_end - time_begin);
 	return r;
 }
 
