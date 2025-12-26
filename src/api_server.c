@@ -159,7 +159,7 @@ append_vmstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 	const size_t num_events = MIN(vm->num_events, num_stats);
 	int_least64_t p50, p90, p99, pmax;
 	{
-		int_least64_t events[num_stats];
+		int_least64_t events[num_events];
 		for (size_t i = 0; i < num_events; i++) {
 			const size_t idx =
 				(vm->num_events + (num_stats - 1) - i) %
@@ -244,7 +244,7 @@ static void server_stats_stateful(
 
 static void server_stats(
 	struct buffer *restrict buf, const struct server *restrict api,
-	const int_least64_t uptime, const double dt)
+	const int_least64_t uptime, const double dt, const bool runtime)
 {
 	const struct server_stats *restrict apistats = &api->stats;
 	const struct server *restrict s = api->data;
@@ -283,7 +283,7 @@ static void server_stats(
 
 #if WITH_RULESET
 	const struct ruleset *ruleset = G.ruleset;
-	if (ruleset != NULL) {
+	if (ruleset != NULL && runtime) {
 		struct ruleset_vmstats vmstats;
 		ruleset_vmstats(ruleset, &vmstats);
 		append_vmstats(buf, &vmstats);
@@ -323,8 +323,11 @@ static void send_errpage(
 static void
 http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	bool nobanner = false;
-	bool server = true;
+	struct {
+		bool nobanner : 1;
+		bool server : 1;
+		bool runtime : 1;
+	} opt = { false, true, false };
 #if WITH_RULESET
 	const char *query = NULL;
 #endif
@@ -335,9 +338,11 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			return;
 		}
 		if (strcmp(comp.key, "nobanner") == 0) {
-			nobanner = parse_bool(comp.value);
+			opt.nobanner = parse_bool(comp.value);
 		} else if (strcmp(comp.key, "server") == 0) {
-			server = parse_bool(comp.value);
+			opt.server = parse_bool(comp.value);
+		} else if (strcmp(comp.key, "runtime") == 0) {
+			opt.runtime = parse_bool(comp.value);
 		}
 #if WITH_RULESET
 		else if (strcmp(comp.key, "q") == 0) {
@@ -372,7 +377,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
 	buf->len = 0;
 
-	if (!nobanner) {
+	if (!opt.nobanner) {
 		BUF_APPENDF(
 			*buf, "%s %s\n  %s\n\n", PROJECT_NAME, PROJECT_VER,
 			PROJECT_HOMEPAGE);
@@ -391,8 +396,8 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		last.is_set = true;
 		last.tstamp = now;
 	}
-	if (server) {
-		server_stats(buf, ctx->s, uptime, dt);
+	if (opt.server) {
+		server_stats(buf, ctx->s, uptime, dt, opt.runtime);
 
 		size_t n = buf->len;
 		const int err = stream_write(w, buf->data, &n);
