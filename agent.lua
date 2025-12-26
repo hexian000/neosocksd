@@ -341,6 +341,9 @@ local function probe_all()
 end
 
 function agent.maintenance()
+    -- sync to pull latest data
+    sync_all()
+    evlog("agent: sync finished")
     -- probe
     probe_all()
     evlog("agent: probe finished")
@@ -352,9 +355,8 @@ function agent.maintenance()
         info.timestamp = os.time()
         _G.peerdb[agent.peername] = info
     end
-    -- sync
+    -- sync again to publish updates
     sync_all()
-    evlog("agent: sync finished")
     -- remove stale data
     local now = os.time()
     for peername, data in pairs(_G.peerdb) do
@@ -364,6 +366,7 @@ function agent.maintenance()
         end
     end
     hosts, routes = build_index()
+    evlog("agent: maintenance finished")
 end
 
 local function mainloop()
