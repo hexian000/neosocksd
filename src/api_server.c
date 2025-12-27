@@ -161,10 +161,7 @@ append_vmstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 	{
 		int_least64_t events[num_events];
 		for (size_t i = 0; i < num_events; i++) {
-			const size_t idx =
-				(vm->num_events + (num_stats - 1) - i) %
-				num_stats;
-			events[i] = vm->event_ns[idx];
+			events[i] = vm->event_ns[i];
 		}
 		qsort(events, num_events, sizeof(int_least64_t),
 		      comp_timestamp);

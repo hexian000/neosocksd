@@ -398,7 +398,11 @@ function agent.stats(dt)
             w:insertf("%-16s: %s (unreachable)", tag, timestamp)
         end
     end
-    return "> Peers\n" .. w:sort():concat("\n")
+    local title = "> Peers"
+    if agent.peername then
+        title = title .. string.format(" (self=%q)", agent.peername)
+    end
+    return title .. "\n" .. w:sort():concat("\n")
 end
 
 function agent.stop()
