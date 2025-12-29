@@ -1,4 +1,4 @@
-/* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
+/* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "api_server.h"
@@ -161,7 +161,10 @@ append_vmstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 	{
 		int_least64_t events[num_events];
 		for (size_t i = 0; i < num_events; i++) {
-			events[i] = vm->event_ns[i];
+			const size_t idx =
+				(vm->num_events + (num_stats - 1) - i) %
+				num_stats;
+			events[i] = vm->event_ns[idx];
 		}
 		qsort(events, num_events, sizeof(int_least64_t),
 		      comp_timestamp);

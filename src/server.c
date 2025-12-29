@@ -1,4 +1,4 @@
-/* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
+/* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "server.h"
@@ -129,10 +129,6 @@ void server_init(
 bool server_start(
 	struct server *restrict s, const struct sockaddr *restrict bindaddr)
 {
-	if (is_unspecified_sa(bindaddr)) {
-		LOGW("binding to wildcard address may be insecure");
-	}
-
 	/* Create TCP socket */
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {

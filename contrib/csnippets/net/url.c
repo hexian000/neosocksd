@@ -1,4 +1,4 @@
-/* csnippets (c) 2019-2025 He Xian <hexian000@outlook.com>
+/* csnippets (c) 2019-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "url.h"
@@ -377,6 +377,9 @@ bool url_parse(char *raw, struct url *restrict url)
 bool url_path_segment(char **restrict path, char **restrict segment)
 {
 	char *s = *path;
+	if (s == NULL) {
+		return false;
+	}
 	while (*s == '/') {
 		s++;
 	}
@@ -397,6 +400,9 @@ bool url_query_component(
 	char **restrict query, struct url_query_component *restrict comp)
 {
 	char *s = *query;
+	if (s == NULL) {
+		return false;
+	}
 	char *next = strchr(s, '&');
 	if (next != NULL) {
 		*next = '\0';

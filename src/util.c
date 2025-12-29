@@ -1,4 +1,4 @@
-/* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
+/* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 /**
@@ -28,6 +28,7 @@
 #include <grp.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -442,11 +443,19 @@ void daemonize(
 	((int_fast64_t)(ts).tv_sec * INT64_C(1000000000) +                     \
 	 (int_fast64_t)(ts).tv_nsec)
 
+/** Read a timespec as signed 64-bit nanoseconds. */
+#define READ_TIMEVAL(tv)                                                       \
+	((int_fast64_t)(tv).tv_sec * INT64_C(1000000000) +                     \
+	 (int_fast64_t)(tv).tv_usec * INT64_C(1000))
+
 int_least64_t clock_monotonic(void)
 {
 	struct timespec monotime;
 	if (clock_gettime(CLOCK_MONOTONIC, &monotime)) {
-		return -1;
+		/* failsafe */
+		struct timeval tv;
+		(void)gettimeofday(&tv, NULL);
+		return READ_TIMEVAL(tv);
 	}
 	return (int_least64_t)READ_TIMESPEC(monotime);
 }
@@ -481,3 +490,4 @@ double thread_load(void)
 }
 
 #undef READ_TIMESPEC
+#undef READ_TIMEVAL

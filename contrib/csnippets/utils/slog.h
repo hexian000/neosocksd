@@ -1,4 +1,4 @@
-/* csnippets (c) 2019-2025 He Xian <hexian000@outlook.com>
+/* csnippets (c) 2019-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #ifndef UTILS_SLOG_H
@@ -31,6 +31,7 @@ void slog_setlevel(int level);
 
 enum {
 	SLOG_OUTPUT_DISCARD,
+	SLOG_OUTPUT_TERMINAL,
 	SLOG_OUTPUT_FILE,
 	SLOG_OUTPUT_SYSLOG,
 };

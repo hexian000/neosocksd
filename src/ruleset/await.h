@@ -1,4 +1,4 @@
-/* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
+/* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #ifndef RULESET_AWAIT_H

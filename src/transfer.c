@@ -1,4 +1,4 @@
-/* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
+/* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 /**
@@ -91,8 +91,7 @@ static void update_stats(
 			buffered);
 		return;
 	}
-	XFER_CTX_LOG_F(
-		VERYVERBOSE, t, "%zu bytes transmitted", nbsend, buffered);
+	XFER_CTX_LOG_F(VERYVERBOSE, t, "%zu bytes transmitted", nbsend);
 }
 
 /**

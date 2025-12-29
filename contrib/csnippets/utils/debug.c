@@ -1,4 +1,4 @@
-/* csnippets (c) 2019-2025 He Xian <hexian000@outlook.com>
+/* csnippets (c) 2019-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "debug.h"
@@ -114,6 +114,7 @@ void slog_extra_txt(FILE *restrict f, void *restrict data)
 		buf.len = 0;
 	}
 	if (n > 0) {
+		/* omit bytes after the null terminator or undecodable code point */
 		(void)fprintf(f, INDENT " ... (omitting %zu bytes)\n", n);
 	}
 }

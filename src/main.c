@@ -1,4 +1,4 @@
-/* neosocksd (c) 2023-2025 He Xian <hexian000@outlook.com>
+/* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 /**
@@ -114,6 +114,7 @@ static void print_usage(const char *argv0)
 		"                             bidirectional traffic\n"
 		"  --loglevel <level>         0-8 are Silence, Fatal, Error, Warning, Notice, Info,\n"
 		"                             Debug, Verbose, VeryVerbose respectively (default: 4)\n"
+		"  -C, --color                colorized log output using ANSI escape sequences\n"
 		"  -d, --daemonize            run in background and write logs to syslog\n"
 		"  -u, --user [user][:[group]]\n"
 		"                             run as the specified identity, e.g. `nobody:nogroup'\n"
@@ -312,6 +313,11 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			conf->log_level = (int)value;
 			continue;
 		}
+		if (strcmp(argv[i], "-C") == 0 ||
+		    strcmp(argv[i], "--color") == 0) {
+			slog_setoutput(SLOG_OUTPUT_TERMINAL, stdout);
+			continue;
+		}
 		if (strcmp(argv[i], "-d") == 0 ||
 		    strcmp(argv[i], "--daemonize") == 0) {
 			conf->daemonize = true;
@@ -450,6 +456,9 @@ int main(int argc, char **argv)
 			LOGF_F("unable to parse address: %s", conf->listen);
 			exit(EXIT_FAILURE);
 		}
+		if (is_unspecified_sa(&bindaddr.sa)) {
+			LOGW("binding to wildcard address may be insecure");
+		}
 		if (!server_start(s, &bindaddr.sa)) {
 			LOGF("failed to start server");
 			exit(EXIT_FAILURE);
@@ -464,6 +473,10 @@ int main(int argc, char **argv)
 		if (!parse_bindaddr(&apiaddr, conf->restapi)) {
 			LOGF_F("unable to parse address: %s", conf->restapi);
 			exit(EXIT_FAILURE);
+		}
+		if (is_unspecified_sa(&apiaddr.sa) ||
+		    !is_local_sa(&apiaddr.sa)) {
+			LOGW("binding API server to non-local address may be insecure");
 		}
 		api = &app.apiserver;
 		server_init(api, loop, api_serve, s);

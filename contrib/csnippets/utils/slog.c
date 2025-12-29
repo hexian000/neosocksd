@@ -1,4 +1,4 @@
-/* csnippets (c) 2019-2025 He Xian <hexian000@outlook.com>
+/* csnippets (c) 2019-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "slog.h"
@@ -26,6 +26,11 @@ typedef void (*slog_writer_fn)(
 
 static const unsigned char slog_level_char[] = {
 	'-', 'F', 'E', 'W', 'I', 'I', 'D', 'V', 'V',
+};
+
+/* ANSI color codes */
+static const char *slog_level_color[] = {
+	"92", "37;41", "91", "93", "97", "37", "32", "94", "94",
 };
 
 FILE *slog_output;
@@ -127,6 +132,44 @@ static const char *slog_filename(const char *restrict file)
 	return s;
 }
 
+static void slog_write_terminal(
+	const int level, const char *restrict file, const int line,
+	const struct slog_extra *restrict extra, const char *restrict format,
+	va_list args)
+{
+	BUF_INIT(slog_buffer, 0);
+	BUF_APPENDF(
+		slog_buffer, "\033[;%sm%c ", slog_level_color[level],
+		slog_level_char[level]);
+	time_t now;
+	(void)time(&now);
+	slog_buffer.len += slog_timestamp(
+		(char *)slog_buffer.data + slog_buffer.len,
+		slog_buffer.cap - slog_buffer.len, &now);
+	BUF_APPENDF(
+		slog_buffer, " \033[4;%sm%s:%d\033[0;%sm ",
+		slog_level_color[level], slog_filename(file), line,
+		slog_level_color[level]);
+	const int ret = BUF_VAPPENDF(slog_buffer, format, args);
+	if (ret < 0) {
+		BUF_APPENDF(
+			slog_buffer, "\033[4;%sm(log format error)",
+			slog_level_color[level]);
+	}
+	/* overwritting the null terminator is not an issue */
+	BUF_APPENDSTR(slog_buffer, "\033[0m\n");
+
+	MTX_LOCK(&slog_output_mu);
+	(void)fwrite(
+		slog_buffer.data, sizeof(slog_buffer.data[0]), slog_buffer.len,
+		slog_output);
+	if (extra != NULL) {
+		extra->func(slog_output, extra->data);
+	}
+	(void)fflush(slog_output);
+	MTX_UNLOCK(&slog_output_mu);
+}
+
 static void slog_write_file(
 	const int level, const char *restrict file, const int line,
 	const struct slog_extra *restrict extra, const char *restrict format,
@@ -200,6 +243,13 @@ void slog_setoutput(const int type, ...)
 	switch (type) {
 	case SLOG_OUTPUT_DISCARD: {
 		ATOMIC_STORE(&slog_writer, NULL);
+	} break;
+	case SLOG_OUTPUT_TERMINAL: {
+		FILE *stream = va_arg(args, FILE *);
+		MTX_LOCK(&slog_output_mu);
+		slog_output = stream;
+		MTX_UNLOCK(&slog_output_mu);
+		ATOMIC_STORE(&slog_writer, slog_write_terminal);
 	} break;
 	case SLOG_OUTPUT_FILE: {
 		FILE *stream = va_arg(args, FILE *);
