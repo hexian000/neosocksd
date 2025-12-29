@@ -28,7 +28,8 @@ static int ruleset_state_gc(lua_State *restrict L)
 	if (state->cb == NULL) {
 		return 0;
 	}
-	state->cb->ok = false;
+	state->cb->rpcall.result = NULL;
+	state->cb->rpcall.resultlen = 0;
 	const struct ruleset *restrict r = aux_getruleset(L);
 	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
 	state->cb = NULL;
@@ -64,7 +65,6 @@ static int request_finish(lua_State *restrict L)
 	if (lua_toboolean(L, 1) && n > 0 && aux_todialreq(L, n)) {
 		req = lua_touserdata(L, -1);
 	}
-	state->cb->ok = true;
 	state->cb->request.req = req;
 	const struct ruleset *restrict r = aux_getruleset(L);
 	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
@@ -173,7 +173,6 @@ static int rpcall_finish(lua_State *restrict L)
 	lua_concat(L, 2);
 	size_t len;
 	const char *s = lua_tolstring(L, 1, &len);
-	state->cb->ok = true;
 	state->cb->rpcall.result = s;
 	state->cb->rpcall.resultlen = len;
 	const struct ruleset *restrict r = aux_getruleset(L);

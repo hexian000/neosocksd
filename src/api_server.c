@@ -494,17 +494,13 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->rpcstate = NULL;
-	if (!ctx->rpcreturn.ok) {
+	if (ctx->rpcreturn.rpcall.result == NULL) {
 		SEND_ERRSTR(loop, ctx, "rpcall did not return");
 		return;
 	}
 	const char *result = ctx->rpcreturn.rpcall.result;
 	const size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
-	if (result == NULL) {
-		SEND_ERRSTR(loop, ctx, "rpcall is cancelled");
-		return;
-	}
-	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall_return");
+	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall result:");
 	/* Compress response if client supports it and payload is large enough */
 	const enum content_encodings encoding =
 		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ||

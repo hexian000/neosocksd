@@ -105,7 +105,6 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *state);
  */
 struct ruleset_callback {
 	ev_watcher w_finish;
-	bool ok;
 	union {
 		struct {
 			struct dialreq *req;
