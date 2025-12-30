@@ -653,9 +653,9 @@ function composite.allof(t)
     end
 end
 
-function composite.maybe(t, k)
+function composite.maybe(t, ...)
     return function(...)
-        local matcher = t[k]
+        local matcher = table.get(t, ...)
         if matcher then
             return matcher(...)
         end

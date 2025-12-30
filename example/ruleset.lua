@@ -32,9 +32,6 @@ local function is_disabled()
     return not (9 <= date.hour and date.hour < 18)
 end
 
-local API_ENDPOINT = "api.neosocksd.internal:80"
-local INTERNAL_DOMAIN = ".internal"
-
 -- 1. _G.redirect*: handle requests as a string
 -- in {matcher, action, optional log tag}
 -- matching stops after a match is found
@@ -48,10 +45,10 @@ _G.redirect_name = {
     -- access local sites directly
     { match.domain({ ".lan", ".local" }),  rule.direct(),                          "lan" },
     -- ".internal" assignment
-    { match.exact(API_ENDPOINT),           rule.redirect("127.0.1.1:9080") },
+    { match.exact(agent.API_ENDPOINT),     rule.redirect("127.0.1.1:9080") },
     { match.agent(),                       rule.agent() }, -- agent relay
     { match.exact("peer0.internal:22"),    rule.redirect("host-gateway:22"),       "ssh" },
-    { match.domain(INTERNAL_DOMAIN),       rule.reject(),                          "unknown" },
+    { match.domain(agent.INTERNAL_DOMAIN), rule.reject(),                          "unknown" },
     -- global condition
     { is_disabled,                         rule.reject(),                          "off" },
     -- dynamically loaded big domains list, rule.proxy(proxy1, proxy2, ...)

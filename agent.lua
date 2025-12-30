@@ -24,16 +24,16 @@ end
 -- _G.peerdb[peername] = { hosts = { hostname, "host1" }, conns = { [id] = { peername = "peer1", rtt = 0 } }, timestamp = os.time() }
 _G.peerdb = _G.peerdb or {}
 
-local API_ENDPOINT = "api.neosocksd.internal:80"
-local INTERNAL_DOMAIN = ".internal"
+agent.API_ENDPOINT = "api.neosocksd.internal:80"
+agent.INTERNAL_DOMAIN = ".internal"
 -- <host>.peerN.peer2.peer1.relay.neosocksd.internal
-local RELAY_DOMAIN = ".relay.neosocksd.internal"
+agent.RELAY_DOMAIN = ".relay.neosocksd.internal"
 
-local BOOTSTRAP_DELAY = 10
-local SYNC_INTERVAL_BASE = 600
-local SYNC_INTERVAL_RANDOM = 600
-local TIMESTAMP_TOLERANCE = 600
-local PEERDB_EXPIRY_TIME = 3600
+agent.BOOTSTRAP_DELAY = 10
+agent.SYNC_INTERVAL_BASE = 600
+agent.SYNC_INTERVAL_RANDOM = 600
+agent.TIMESTAMP_TOLERANCE = 600
+agent.PEERDB_EXPIRY_TIME = 3600
 
 agent.verbose = table.get(_G.agent, "verbose")
 
@@ -42,7 +42,7 @@ local function is_valid(t, expiry_time, now)
     if not timestamp then
         return t
     end
-    if now < timestamp - TIMESTAMP_TOLERANCE then
+    if now < timestamp - agent.TIMESTAMP_TOLERANCE then
         return nil
     end
     if timestamp + expiry_time < now then
@@ -161,10 +161,10 @@ local splithostport = neosocksd.splithostport
 function match.agent()
     return function(addr)
         local fqdn, _ = splithostport(addr)
-        if fqdn:endswith(RELAY_DOMAIN) then
+        if fqdn:endswith(agent.RELAY_DOMAIN) then
             return true
         end
-        local sub = subdomain(fqdn, INTERNAL_DOMAIN)
+        local sub = subdomain(fqdn, agent.INTERNAL_DOMAIN)
         if not sub then
             return false
         end
@@ -177,16 +177,16 @@ local strformat = string.format
 function rule.agent()
     return function(addr)
         local fqdn, port = splithostport(addr)
-        local sub = subdomain(fqdn, RELAY_DOMAIN)
+        local sub = subdomain(fqdn, agent.RELAY_DOMAIN)
         if sub then
             local remain, peername = sub:match("^(.+)%.([^.]+)$")
             local domain
             if remain then
                 sub = remain
-                domain = RELAY_DOMAIN
+                domain = agent.RELAY_DOMAIN
             else
                 peername = hosts[sub]
-                domain = INTERNAL_DOMAIN
+                domain = agent.INTERNAL_DOMAIN
             end
             local route = routes[peername]
             local conn = route and route.conn
@@ -201,7 +201,7 @@ function rule.agent()
             end
             return addr, proxies:unpack()
         end
-        sub = subdomain(fqdn, INTERNAL_DOMAIN)
+        sub = subdomain(fqdn, agent.INTERNAL_DOMAIN)
         assert(sub)
         local peername = hosts[sub]
         assert(peername ~= nil and peername ~= agent.peername)
@@ -215,7 +215,7 @@ function rule.agent()
         local conn = route.conn
         t[1], t[#t] = sub, nil
         if peername ~= hosts[sub] then
-            addr = strformat("%s%s:%s", t:concat("."), RELAY_DOMAIN, port)
+            addr = strformat("%s%s:%s", t:concat("."), agent.RELAY_DOMAIN, port)
         end
         local proxies = list:new(conn):reverse()
         if agent.verbose then
@@ -236,7 +236,7 @@ local function callbyconn(conn, func, ...)
         error("cancelled")
     end
     local target = list:new():append(conn)
-    target:insert(API_ENDPOINT)
+    target:insert(agent.API_ENDPOINT)
     target = target:reverse():totable()
     return await.rpcall(target, func, ...)
 end
@@ -246,7 +246,7 @@ local function update_peerdb(peername, peerdb)
     for peer, data in pairs(peerdb) do
         if peer == peername then
             _G.peerdb[peer] = peerdb[peer]
-        elseif is_valid(data, PEERDB_EXPIRY_TIME, now) then
+        elseif is_valid(data, agent.PEERDB_EXPIRY_TIME, now) then
             local old = _G.peerdb[peer]
             if not old or data.timestamp > old.timestamp then
                 _G.peerdb[peer] = data
@@ -360,7 +360,7 @@ function agent.maintenance()
     -- remove stale data
     local now = os.time()
     for peername, data in pairs(_G.peerdb) do
-        if not is_valid(data, PEERDB_EXPIRY_TIME, now) then
+        if not is_valid(data, agent.PEERDB_EXPIRY_TIME, now) then
             evlogf("peer expired: %q (time=%d)", peername, data.timestamp - now)
             _G.peerdb[peername] = nil
         end
@@ -370,7 +370,7 @@ function agent.maintenance()
 end
 
 local function mainloop()
-    await.sleep(BOOTSTRAP_DELAY)
+    await.sleep(agent.BOOTSTRAP_DELAY)
     while agent.running do
         agent.maintenance()
         local update = table.get(_G, "ruleset", "update")
@@ -380,7 +380,7 @@ local function mainloop()
                 evlogf("ruleset.update: %s", err)
             end
         end
-        await.sleep(SYNC_INTERVAL_BASE + math.random(SYNC_INTERVAL_RANDOM))
+        await.sleep(agent.SYNC_INTERVAL_BASE + math.random(agent.SYNC_INTERVAL_RANDOM))
     end
 end
 
