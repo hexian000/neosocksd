@@ -258,11 +258,19 @@ local function update_peerdb(peername, peerdb)
 end
 
 function rpc.sync(peername, peerdb)
-    if type(peername) == "string" and type(peerdb) == "table" then
-        update_peerdb(peername, peerdb)
-        hosts, routes = build_index()
+    if type(peername) ~= "string" or type(peerdb) ~= "table" then
+        return agent.peername, _G.peerdb
     end
-    return agent.peername, _G.peerdb
+    update_peerdb(peername, peerdb)
+    hosts, routes = build_index()
+    local result = {}
+    for name, info in pairs(_G.peerdb) do
+        local known = peerdb[name]
+        if not known or known.timestamp ~= info.timestamp then
+            result[name] = info
+        end
+    end
+    return agent.peername, result
 end
 
 local function sync_via(conn)
