@@ -663,9 +663,9 @@ function composite.maybe(t, ...)
     end
 end
 
-function composite.subchain(t, k)
+function composite.subchain(t, ...)
     return function(...)
-        local chain = t[k]
+        local chain = table.get(t, ...)
         if chain then
             return runchain_(chain, ...)
         end
