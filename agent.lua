@@ -174,7 +174,35 @@ function match.agent()
 end
 
 local strformat = string.format
-function rule.agent()
+local function rule_relay(fqdn, port)
+    local sub = subdomain(fqdn, agent.INTERNAL_DOMAIN)
+    assert(sub)
+    local peername = hosts[sub]
+    assert(peername ~= nil and peername ~= agent.peername)
+    local route = routes[peername]
+    if not route then
+        evlogf("peer %q is not reachable", peername)
+        return nil
+    end
+    local t = list:new():append(route)
+    peername = t[#t]
+    local conn = route.conn
+    t[1], t[#t] = sub, nil
+    if peername ~= hosts[sub] then
+        addr = strformat("%s%s:%s", t:concat("."), agent.RELAY_DOMAIN, port)
+    end
+    local proxies = list:new(conn):reverse()
+    if agent.verbose then
+        evlogf("agent: [%s] %s %s,%s", connid_of(conn), peername, addr, proxies:concat(","))
+    end
+    return addr, proxies:unpack()
+end
+
+function rule.agent(agentaddr)
+    if agentaddr then
+        local fqdn, port = splithostport(agentaddr)
+        return rule_relay(fqdn, port)
+    end
     return function(addr)
         local fqdn, port = splithostport(addr)
         local sub = subdomain(fqdn, agent.RELAY_DOMAIN)
@@ -201,27 +229,7 @@ function rule.agent()
             end
             return addr, proxies:unpack()
         end
-        sub = subdomain(fqdn, agent.INTERNAL_DOMAIN)
-        assert(sub)
-        local peername = hosts[sub]
-        assert(peername ~= nil and peername ~= agent.peername)
-        local route = routes[peername]
-        if not route then
-            evlogf("peer %q is not reachable", peername)
-            return nil
-        end
-        local t = list:new():append(route)
-        peername = t[#t]
-        local conn = route.conn
-        t[1], t[#t] = sub, nil
-        if peername ~= hosts[sub] then
-            addr = strformat("%s%s:%s", t:concat("."), agent.RELAY_DOMAIN, port)
-        end
-        local proxies = list:new(conn):reverse()
-        if agent.verbose then
-            evlogf("agent: [%s] %s %s,%s", connid_of(conn), peername, addr, proxies:concat(","))
-        end
-        return addr, proxies:unpack()
+        return rule_relay(fqdn, port)
     end
 end
 
