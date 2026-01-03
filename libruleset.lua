@@ -370,10 +370,12 @@ local function runchain_(t, ...)
     for _, item in ipairs(t) do
         local matcher, action, tag = table.unpack(item)
         if action then
+            -- { matcher, action, tag }
             if matcher(...) then
                 return action, tag
             end
         else
+            -- { functional matcher }
             action, tag = matcher(...)
             if action then return action, tag end
         end
@@ -653,9 +655,9 @@ function composite.allof(t)
     end
 end
 
-function composite.maybe(t, ...)
+function composite.maybe(t, k)
     return function(...)
-        local matcher = table.get(t, ...)
+        local matcher = t[k]
         if matcher then
             return matcher(...)
         end
@@ -663,9 +665,9 @@ function composite.maybe(t, ...)
     end
 end
 
-function composite.subchain(t, ...)
+function composite.subchain(t, k)
     return function(...)
-        local chain = table.get(t, ...)
+        local chain = t[k]
         if chain then
             return runchain_(chain, ...)
         end

@@ -2,6 +2,7 @@
 _G.libruleset = require("libruleset")
 _G.agent = require("agent")
 
+agent.api_endpoint = "127.0.1.1:9080"
 agent.peername = "peer0"
 agent.conns = {
     -- "api.neosocksd.internal:80" should be available over { proxy1, proxy2, ... }
@@ -45,10 +46,8 @@ _G.redirect_name = {
     -- access local sites directly
     { match.domain({ ".lan", ".local" }),  rule.direct(),                          "lan" },
     -- ".internal" assignment
-    { match.exact(agent.API_ENDPOINT),     rule.redirect("127.0.1.1:9080") },
     { match.exact("peer0.internal:22"),    rule.redirect("host-gateway:22"),       "ssh" },
-    { match.agent(),                       rule.agent() }, -- agent relay
-    { match.domain(agent.INTERNAL_DOMAIN), rule.reject(),                          "unknown" },
+    { composite.subchain(agent, "chain") },
     -- global condition
     { is_disabled,                         rule.reject(),                          "off" },
     -- dynamically loaded big domains list, rule.proxy(proxy1, proxy2, ...)
@@ -140,8 +139,7 @@ end
 
 function ruleset.update()
     -- fetch updated ruleset from central server
-    local target = { "central.internal:9080", "socks4a://127.0.0.1:1080" }
-    local ok, data = await.rpcall(target, "update", ruleset.last_updated)
+    local ok, data = agent.rpcall("socks4a://central.internal:1080", "update", ruleset.last_updated)
     if not ok then
         evlogf("ruleset update: %s", data)
         return
