@@ -46,8 +46,8 @@ _G.redirect_name = {
     { match.domain({ ".lan", ".local" }),  rule.direct(),                          "lan" },
     -- ".internal" assignment
     { match.exact(agent.API_ENDPOINT),     rule.redirect("127.0.1.1:9080") },
-    { match.agent(),                       rule.agent() }, -- agent relay
     { match.exact("peer0.internal:22"),    rule.redirect("host-gateway:22"),       "ssh" },
+    { match.agent(),                       rule.agent() }, -- agent relay
     { match.domain(agent.INTERNAL_DOMAIN), rule.reject(),                          "unknown" },
     -- global condition
     { is_disabled,                         rule.reject(),                          "off" },
