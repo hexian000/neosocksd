@@ -30,7 +30,7 @@ static const unsigned char slog_level_char[] = {
 
 /* ANSI color codes */
 static const char *slog_level_color[] = {
-	"92", "37;41", "91", "93", "97", "37", "32", "94", "94",
+	"96", "97;41", "91", "93", "92", "92", "96", "97", "37",
 };
 
 FILE *slog_output;
@@ -146,15 +146,10 @@ static void slog_write_terminal(
 	slog_buffer.len += slog_timestamp(
 		(char *)slog_buffer.data + slog_buffer.len,
 		slog_buffer.cap - slog_buffer.len, &now);
-	BUF_APPENDF(
-		slog_buffer, " \033[4;%sm%s:%d\033[0;%sm ",
-		slog_level_color[level], slog_filename(file), line,
-		slog_level_color[level]);
+	BUF_APPENDF(slog_buffer, " %s:%d ", slog_filename(file), line);
 	const int ret = BUF_VAPPENDF(slog_buffer, format, args);
 	if (ret < 0) {
-		BUF_APPENDF(
-			slog_buffer, "\033[4;%sm(log format error)",
-			slog_level_color[level]);
+		BUF_APPENDSTR(slog_buffer, "(log format error)");
 	}
 	/* overwritting the null terminator is not an issue */
 	BUF_APPENDSTR(slog_buffer, "\033[0m\n");
