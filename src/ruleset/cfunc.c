@@ -14,6 +14,7 @@
 #include "lauxlib.h"
 #include "lua.h"
 
+#include "utils/slog.h"
 #include <ev.h>
 
 #include <stdbool.h>
@@ -57,16 +58,17 @@ static int request_finish(lua_State *restrict L)
 	if (state->cb == NULL) {
 		return 0;
 	}
-	if (!lua_toboolean(L, 1)) {
-		return 0;
-	}
-	const int n = lua_gettop(L) - 1;
+	const struct ruleset *restrict r = aux_getruleset(L);
 	struct dialreq *req = NULL;
-	if (lua_toboolean(L, 1) && n > 0 && aux_todialreq(L, n)) {
-		req = lua_touserdata(L, -1);
+	if (lua_toboolean(L, 1)) {
+		const int n = lua_gettop(L) - 1;
+		if (n > 0 && aux_todialreq(L, n)) {
+			req = lua_touserdata(L, -1);
+		}
+	} else {
+		LOGW_F("ruleset error: %s", lua_tostring(L, 2));
 	}
 	state->cb->request.req = req;
-	const struct ruleset *restrict r = aux_getruleset(L);
 	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
 	state->cb = NULL;
 	return 0;
