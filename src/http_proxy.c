@@ -466,9 +466,10 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	struct http_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
 	if (fd < 0) {
-		HTTP_CTX_LOG_F(
-			DEBUG, ctx, "unable to establish client connection: %s",
-			strerror(ctx->dialer.syserr));
+		const int err = ctx->dialer.syserr;
+		if (err != 0) {
+			HTTP_CTX_LOG_F(ERROR, ctx, "dialer: %s", strerror(err));
+		}
 		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
 		return;
 	}

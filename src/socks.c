@@ -387,9 +387,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const int err = ctx->dialer.syserr;
 		if (err != 0) {
 			SOCKS_CTX_LOG_F(
-				DEBUG, ctx,
-				"unable to establish client connection: %s",
-				strerror(err));
+				ERROR, ctx, "dialer: %s", strerror(err));
 		}
 		socks_senderr(ctx, err);
 		socks_ctx_close(loop, ctx);

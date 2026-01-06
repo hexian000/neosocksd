@@ -264,10 +264,9 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	if (fd < 0) {
 		const int err = ctx->dialer.syserr;
 		if (err != 0) {
-			LOGD_F("unable to establish client connection: %s",
-			       strerror(err));
+			LOGE_F("dialer: %s", strerror(err));
 		}
-		API_RETURN_ERROR(loop, ctx, "failed connecting to server");
+		API_RETURN_ERROR(loop, ctx, "connection failed");
 	}
 	ASSERT(ctx->dialreq != NULL);
 	dialreq_free(ctx->dialreq);
