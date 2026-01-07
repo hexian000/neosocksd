@@ -5,7 +5,7 @@
 [![Downloads](https://img.shields.io/github/downloads/hexian000/neosocksd/total.svg)](https://github.com/hexian000/neosocksd/releases)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-A fast, lightweight proxy server with a Lua-powered rules engine.
+> neosocksd is a fast and lightweight proxy server written in C, featuring a Lua-powered rules engine. Additionally, it provides an out-of-the-box example for establishing an autonomous virtual network that interconnects multiple LANs, allowing seamless cross-network access through a unified proxy.
 
 Status: **Stable**
 
@@ -23,15 +23,15 @@ Status: **Stable**
 
 ## Features
 
-- Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (TCP only), HTTP CONNECT, and transparent proxy (Linux).
-- High performance: 10+ Gbps per x86 core on Linux (with `--pipe`, 2024).
+- This is a TCP forward proxy.
+- Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (CONNECT only), HTTP (CONNECT only), and transparent proxy (Linux).
+- High performance: transfer 10+ Gbps per x86 core on Linux (with `--pipe`, 2024).
 - Lightweight: ~500 KiB executable on most platforms\*.
-- Programmable: Lua scripting on the control plane.
-- Versatile: rich RPC facilities for scripting; see [Scripting](#scripting).
+- Versatile: Lua scripting on the control plane.
+- Programmable: rich RPC facilities for scripting; see [Scripting](#scripting).
 - Hot-reloadable: REST API for monitoring and updating Lua modules.
 - Modern: full IPv6 support and horizontal scalability.
 - Standards-compliant: ISO C11 and POSIX.1-2008. Additional features may be available on certain platforms.
-- Long-Term Supported: Follow the latest releases of the dependent projects. Even if we don't make any changes, the binary release will be rebuilt at least once a year.
 
 *\* Some required libraries are dynamically linked, see runtime dependencies below. Statically linked executable can be larger due to these libraries.*
 
@@ -58,7 +58,7 @@ neosocksd supports only basic authentication (plain-text username and password) 
 sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 --max-startups 60:30:100 \
     --proto-timeout -t 15 -l :80 -f : -r lb.lua --api 127.0.1.1:9080
 
-# Start a rule set powered SOCKS4 / SOCKS4A / SOCKS5 server
+# Start a ruleset powered SOCKS4 / SOCKS4A / SOCKS5 server
 ./neosocksd -d -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua
 ```
 
@@ -149,7 +149,7 @@ opkg install libev libcares
 | Name   | Version   | Required | Feature                      |
 | ------ | --------- | -------- | ---------------------------- |
 | libev  | >= 4.31   | yes      |                              |
-| Lua    | >= 5.3    | no       | rule set                     |
+| Lua    | >= 5.3    | no       | ruleset                      |
 | c-ares | >= 1.16.0 | no       | asynchronous name resolution |
 
 ```sh

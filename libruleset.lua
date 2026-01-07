@@ -1,7 +1,7 @@
 -- neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
 -- This code is licensed under MIT license (see LICENSE for details)
 
--- [[ libruleset.lua: rule set and RPC facilities ]] --
+-- [[ libruleset.lua: ruleset and RPC facilities ]] --
 _G.config = neosocksd.config()
 
 -- [[ useful library routines ]] --
@@ -998,10 +998,11 @@ function ruleset.tick()
     stat_requests:push(num_requests)
 end
 
+_G.RECENT_EVENTS_STATS = _G.RECENT_EVENTS_STATS or 10
 function ruleset.stats(dt)
     local w = list:new()
     w:insert("> Recent Events")
-    for i = 1, 10 do
+    for i = 1, _G.RECENT_EVENTS_STATS do
         local entry = recent_events:get(i)
         if not entry then break end
         local tstamp = format_timestamp(entry.tstamp)
