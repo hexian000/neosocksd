@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "api_client.h"
+#include "utils/formats.h"
 
 #if WITH_RULESET
 
@@ -58,6 +59,10 @@ struct api_client_ctx {
 	} result;
 };
 ASSERT_SUPER(struct session, struct api_client_ctx, ss);
+
+#define FORMAT_BYTES(name, value)                                              \
+	char name[16];                                                         \
+	(void)format_iec_bytes(name, sizeof(name), (value))
 
 static void
 api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
@@ -193,6 +198,12 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		api_client_finish(loop, ctx, buf, (size_t)ret, NULL);
 		return;
 	}
+
+	if (LOGLEVEL(VERBOSE)) {
+		FORMAT_BYTES(clen, VBUF_LEN(ctx->parser.cbuf));
+		LOGV_F("response: content %s", clen);
+	}
+
 	struct stream *r = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
@@ -218,7 +229,6 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		return;
 	}
 	p->wpos += len;
-	LOGV_F("send: fd=%d %zu/%zu bytes", fd, p->wpos, p->wbuf.len);
 	if (p->wpos < p->wbuf.len) {
 		return;
 	}
@@ -235,12 +245,16 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		p->cpos += len;
-		LOGV_F("send: fd=%d %zu/%zu bytes", fd, p->cpos, p->cbuf->len);
 		if (p->cpos < cbuf->len) {
 			return;
 		}
-		p->cbuf = VBUF_FREE(p->cbuf);
 	}
+
+	if (LOGLEVEL(VERBOSE)) {
+		FORMAT_BYTES(clen, VBUF_LEN(p->cbuf));
+		LOGV_F("request: content %s", clen);
+	}
+	p->cbuf = VBUF_FREE(p->cbuf);
 
 	if (ctx->cb.func == NULL) {
 		/* It's a fire-and-forget invoke call - no response expected */
@@ -353,7 +367,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		return parsehdr_content_encoding(p, value);
 	}
 
-	LOGV_F("unknown http header: `%s' = `%s'", key, value);
+	LOGVV_F("unknown http header: `%s' = `%s'", key, value);
 	return true;
 }
 

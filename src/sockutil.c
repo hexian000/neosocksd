@@ -37,16 +37,21 @@ void socket_set_reuseport(const int fd, const bool reuseport)
 {
 	int val = 1;
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val))) {
-		LOGW_F("SO_REUSEADDR: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] SO_REUSEADDR: [%d] %s", fd, err,
+		       strerror(err));
 	}
 #ifdef SO_REUSEPORT
 	val = reuseport ? 1 : 0;
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &val, sizeof(val))) {
-		LOGW_F("SO_REUSEPORT: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] SO_REUSEPORT: [%d] %s", fd, err,
+		       strerror(err));
 	}
 #else
 	if (reuseport) {
-		LOGW_F("SO_REUSEPORT: %s", "not supported in current build");
+		LOGW_F("socket [%d] SO_REUSEPORT: %s", fd,
+		       "not supported in current build");
 	}
 #endif
 }
@@ -56,11 +61,15 @@ void socket_set_tcp(const int fd, const bool nodelay, const bool keepalive)
 	int val;
 	val = nodelay ? 1 : 0;
 	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val))) {
-		LOGW_F("TCP_NODELAY: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] TCP_NODELAY: [%d] %s", fd, err,
+		       strerror(err));
 	}
 	val = keepalive ? 1 : 0;
 	if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val))) {
-		LOGW_F("SO_KEEPALIVE: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] SO_KEEPALIVE: [%d] %s", fd, err,
+		       strerror(err));
 	}
 }
 
@@ -69,12 +78,15 @@ void socket_set_fastopen(const int fd, const int backlog)
 #ifdef TCP_FASTOPEN
 	if (setsockopt(
 		    fd, IPPROTO_TCP, TCP_FASTOPEN, &backlog, sizeof(backlog))) {
-		LOGW_F("TCP_FASTOPEN: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] TCP_FASTOPEN: [%d] %s", fd, err,
+		       strerror(err));
 	}
 #else
 	(void)fd;
 	if (backlog > 0) {
-		LOGW_F("TCP_FASTOPEN: %s", "not supported in current build");
+		LOGW_F("socket [%d] TCP_FASTOPEN: %s", fd,
+		       "not supported in current build");
 	}
 #endif
 }
@@ -85,12 +97,14 @@ void socket_set_fastopen_connect(const int fd, const bool enabled)
 	int val = enabled ? 1 : 0;
 	if (setsockopt(
 		    fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &val, sizeof(val))) {
-		LOGW_F("TCP_FASTOPEN_CONNECT: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] TCP_FASTOPEN_CONNECT: [%d] %s", fd, err,
+		       strerror(err));
 	}
 #else
 	(void)fd;
 	if (enabled) {
-		LOGW_F("TCP_FASTOPEN_CONNECT: %s",
+		LOGW_F("socket [%d] TCP_FASTOPEN_CONNECT: %s", fd,
 		       "not supported in current build");
 	}
 #endif
@@ -100,12 +114,16 @@ void socket_set_buffer(const int fd, int send, int recv)
 {
 	if (send > 0) {
 		if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send, sizeof(send))) {
-			LOGW_F("SO_SNDBUF: %s", strerror(errno));
+			const int err = errno;
+			LOGW_F("socket [%d] SO_SNDBUF: [%d] %s", fd, err,
+			       strerror(err));
 		}
 	}
 	if (recv > 0) {
 		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &recv, sizeof(recv))) {
-			LOGW_F("SO_RCVBUF: %s", strerror(errno));
+			const int err = errno;
+			LOGW_F("socket [%d] SO_RCVBUF: [%d] %s", fd, err,
+			       strerror(err));
 		}
 	}
 }
@@ -118,7 +136,9 @@ void socket_bind_netdev(const int fd, const char *netdev)
 	ifname[sizeof(ifname) - 1] = '\0';
 	if (setsockopt(
 		    fd, SOL_SOCKET, SO_BINDTODEVICE, ifname, sizeof(ifname))) {
-		LOGW_F("SO_BINDTODEVICE: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] SO_BINDTODEVICE: [%d] %s", fd, err,
+		       strerror(err));
 	}
 #else
 	(void)fd;
@@ -135,7 +155,7 @@ void socket_set_transparent(const int fd, const bool tproxy)
 	if (setsockopt(fd, SOL_IP, IP_TRANSPARENT, &val, sizeof(val))) {
 		/* this is a fatal error */
 		const int err = errno;
-		FAILMSGF("IP_TRANSPARENT: %s", strerror(err));
+		FAILMSGF("IP_TRANSPARENT: [%d] %s", err, strerror(err));
 	}
 #else
 	(void)fd;
@@ -151,7 +171,9 @@ void socket_rcvlowat(const int fd, const size_t bytes)
 	const int value = (int)bytes;
 	socklen_t len = sizeof(value);
 	if (setsockopt(fd, SOL_SOCKET, SO_RCVLOWAT, &value, len)) {
-		LOGW_F("SO_RCVLOWAT: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] SO_RCVLOWAT: [%d] %s", fd, err,
+		       strerror(err));
 	}
 }
 
@@ -160,7 +182,8 @@ int socket_get_error(const int fd)
 	int value = 0;
 	socklen_t len = sizeof(value);
 	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &value, &len)) {
-		LOGW_F("SO_ERROR: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("socket [%d] SO_ERROR: [%d] %s", fd, err, strerror(err));
 	}
 	return value;
 }

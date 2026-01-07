@@ -500,7 +500,11 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	}
 	const char *result = ctx->rpcreturn.rpcall.result;
 	const size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
-	LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall result:");
+	if (LOGLEVEL(VERBOSE)) {
+		FORMAT_BYTES(clen, ctx->rpcreturn.rpcall.resultlen);
+		API_CTX_LOG_F(VERBOSE, ctx, "api response: content %s", clen);
+		LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall result:");
+	}
 	/* Compress response if client supports it and payload is large enough */
 	const enum content_encodings encoding =
 		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ||
@@ -752,9 +756,12 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	const struct http_message *restrict msg = &ctx->parser.msg;
-	API_CTX_LOG_F(
-		DEBUG, ctx, "http: api `%s', content %zu bytes", msg->req.url,
-		ctx->parser.hdr.content.length);
+	if (LOGLEVEL(VERBOSE)) {
+		FORMAT_BYTES(clen, ctx->parser.hdr.content.length);
+		API_CTX_LOG_F(
+			VERBOSE, ctx, "api request `%s': content %s",
+			msg->req.url, clen);
+	}
 	if (!url_parse(msg->req.url, &ctx->uri)) {
 		API_CTX_LOG(WARNING, ctx, "failed parsing url");
 		send_errpage(loop, ctx, HTTP_BAD_REQUEST);
@@ -963,7 +970,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		return parsehdr_expect(p, value);
 	}
 
-	LOGV_F("unknown http header: `%s' = `%s'", key, value);
+	LOGVV_F("unknown http header: `%s' = `%s'", key, value);
 	return true;
 }
 
