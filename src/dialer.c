@@ -241,10 +241,14 @@ static bool proxy_set_credential(
 	if (username != NULL) {
 		proxy->username = proxy->credential;
 		memcpy(proxy->username, username, ulen);
+	} else {
+		proxy->username = NULL;
 	}
 	if (password != NULL) {
 		proxy->password = proxy->credential + ulen;
 		memcpy(proxy->password, password, plen);
+	} else {
+		proxy->password = NULL;
 	}
 	return true;
 }
@@ -724,6 +728,7 @@ static bool send_socks5_auth(
 	struct dialer *restrict d, const struct proxyreq *restrict proxy)
 {
 	ASSERT(d->state == STATE_HANDSHAKE2);
+	ASSERT(proxy->username == proxy->credential);
 	const size_t ulen = strlen(proxy->username);
 	const size_t plen =
 		(proxy->password != NULL) ? strlen(proxy->password) : 0;
@@ -1110,11 +1115,16 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 			return -1;
 		}
 		return recv_socks5_auth(d);
+	case SOCKS5AUTH_NOACCEPTABLE:
+		DIALER_LOG(ERROR, d, "SOCKS5 auth: method negotiation failed");
+		return -1;
 	default:
 		break;
 	}
 	DIALER_LOG_F(
-		ERROR, d, "unsupported SOCKS5 auth method: %" PRIu8, method);
+		ERROR, d,
+		"SOCKS5: unexpected auth method %" PRIu8 " (protocol error?)",
+		method);
 	return -1;
 }
 
