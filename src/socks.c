@@ -467,6 +467,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 	const size_t maxlen = ctx->rbuf.len - sizeof(struct socks4_hdr);
 	const size_t idlen = strnlen(userid, maxlen);
 	if (idlen >= 256) {
+		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
 	}
 	if (idlen == maxlen) {
@@ -750,7 +751,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 	}
 	if (nrecv == 0) {
 		/* connection is not established yet, we do not expect EOF here */
-		SOCKS_CTX_LOG(WARNING, ctx, "recv: early EOF");
+		SOCKS_CTX_LOG(DEBUG, ctx, "recv: early EOF");
 		return -1;
 	}
 	ctx->rbuf.len += (size_t)nrecv;
