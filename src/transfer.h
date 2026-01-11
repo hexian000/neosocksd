@@ -26,14 +26,10 @@
 #include <stdint.h>
 
 enum transfer_state {
-	/**< Initial state before any I/O is performed. */
-	XFER_INIT,
-	/**< I/O loop is active and data is being transferred. */
-	XFER_CONNECTED,
-	/**< Read side hit EOF or error; draining any buffered data. */
-	XFER_LINGER,
-	/**< Transfer is done; watcher has been stopped. */
-	XFER_FINISHED,
+	XFER_INIT, /**< Initial state before any I/O is performed. */
+	XFER_CONNECTED, /**< I/O loop is active and data is being transferred. */
+	XFER_LINGER, /**< Read side hit EOF or error; draining any buffered data. */
+	XFER_FINISHED, /**< Transfer is done; watcher has been stopped. */
 };
 
 /**

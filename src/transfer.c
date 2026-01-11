@@ -135,11 +135,11 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		LOGD_F("recv: fd=%d %s", fd, strerror(err));
+		XFER_CTX_LOG_F(DEBUG, t, "recv: %s", strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
-		LOGV_F("recv: fd=%d EOF", fd);
+		XFER_CTX_LOG(VERBOSE, t, "recv: EOF");
 		return -1;
 	}
 	t->buf.len += (size_t)nrecv;
@@ -211,8 +211,7 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			break;
 		}
 	}
-	const bool has_work = (nbsend > 0);
-	if (has_work) {
+	if (nbsend > 0) {
 		update_stats(t, nbsend, t->buf.len);
 	}
 
@@ -224,7 +223,7 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	case XFER_CONNECTED: {
 		if (has_data) {
 			update_watcher(t, loop, EV_WRITE);
-		} else if (!has_work) {
+		} else {
 			update_watcher(t, loop, EV_READ);
 		}
 	} break;
@@ -250,8 +249,10 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
  * @brief Drain from `fd` into the pipe using `splice(2)`.
  * @return >0 on bytes spliced, 0 on EAGAIN or full pipe, -1 on EOF/error.
  */
-static ssize_t splice_drain(struct splice_pipe *restrict pipe, const int fd)
+static ssize_t splice_drain(struct transfer *restrict t, const int fd)
 {
+	struct splice_pipe *restrict pipe = &t->pipe;
+	ASSERT(pipe->len <= pipe->cap);
 	const size_t cap = pipe->cap - pipe->len;
 	if (cap == 0) {
 		return 0;
@@ -263,11 +264,11 @@ static ssize_t splice_drain(struct splice_pipe *restrict pipe, const int fd)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		LOGD_F("pipe: recv fd=%d %s", fd, strerror(err));
+		XFER_CTX_LOG_F(DEBUG, t, "pipe: recv %s", strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
-		LOGV_F("pipe: recv fd=%d EOF", fd);
+		XFER_CTX_LOG(VERBOSE, t, "pipe: recv EOF");
 		return -1;
 	}
 	pipe->len += (size_t)nrecv;
@@ -278,8 +279,9 @@ static ssize_t splice_drain(struct splice_pipe *restrict pipe, const int fd)
  * @brief Pump from the pipe into `fd` using `splice(2)`.
  * @return >0 on bytes spliced out, 0 on EAGAIN or empty pipe, -1 on error.
  */
-static ssize_t splice_pump(struct splice_pipe *restrict pipe, const int fd)
+static ssize_t splice_pump(struct transfer *restrict t, const int fd)
 {
+	struct splice_pipe *restrict pipe = &t->pipe;
 	const size_t len = pipe->len;
 	if (len == 0) {
 		return 0;
@@ -291,7 +293,7 @@ static ssize_t splice_pump(struct splice_pipe *restrict pipe, const int fd)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		LOGD_F("pipe: send fd=%d %s", fd, strerror(err));
+		XFER_CTX_LOG_F(DEBUG, t, "pipe: send %s", strerror(err));
 		return -1;
 	}
 	pipe->len -= (size_t)nsend;
@@ -311,12 +313,12 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	while (state <= XFER_LINGER) {
 		ssize_t nrecv = 0;
 		if (state <= XFER_CONNECTED) {
-			nrecv = splice_drain(&t->pipe, t->src_fd);
+			nrecv = splice_drain(t, t->src_fd);
 			if (nrecv < 0) {
 				state = XFER_LINGER;
 			}
 		}
-		ssize_t nsend = splice_pump(&t->pipe, t->dst_fd);
+		ssize_t nsend = splice_pump(t, t->dst_fd);
 		if (nsend < 0) {
 			state = XFER_FINISHED;
 		} else {
