@@ -228,27 +228,27 @@ static bool send_rsp(
 	LOG_BIN_F(VERYVERBOSE, buf, len, "[%d] send_rsp: %zu bytes", fd, len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
-		SOCKS_CTX_LOG_F(WARNING, ctx, "send: %s", strerror(errno));
+		SOCKS_CTX_LOG_F(DEBUG, ctx, "send: %s", strerror(errno));
 		return false;
 	}
 	if ((size_t)nsend != len) {
 		SOCKS_CTX_LOG_F(
-			WARNING, ctx, "send: %zu < %zu", (size_t)nsend, len);
+			DEBUG, ctx, "send: %zu < %zu", (size_t)nsend, len);
 		return false;
 	}
 	return true;
 }
 
-static void
+static bool
 socks4_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 {
 	unsigned char buf[sizeof(struct socks4_hdr)] = { 0 };
 	write_uint8(buf + offsetof(struct socks4_hdr, version), 0);
 	write_uint8(buf + offsetof(struct socks4_hdr, command), rsp);
-	(void)send_rsp(ctx, buf, sizeof(buf));
+	return send_rsp(ctx, buf, sizeof(buf));
 }
 
-static void
+static bool
 socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 {
 	union sockaddr_max addr = {
@@ -300,7 +300,7 @@ socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 	default:
 		FAIL();
 	}
-	(void)send_rsp(ctx, buf, len);
+	return send_rsp(ctx, buf, len);
 }
 
 static void
@@ -333,20 +333,20 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	socks_ctx_close(loop, ctx);
 }
 
-static void socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
+static bool socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 {
 	const uint8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
 	case SOCKS4:
-		socks4_sendrsp(
+		return socks4_sendrsp(
 			ctx, ok ? SOCKS4RSP_GRANTED : SOCKS4RSP_REJECTED);
-		break;
 	case SOCKS5:
-		socks5_sendrsp(ctx, ok ? SOCKS5RSP_SUCCEEDED : SOCKS5RSP_FAIL);
-		break;
+		return socks5_sendrsp(
+			ctx, ok ? SOCKS5RSP_SUCCEEDED : SOCKS5RSP_FAIL);
 	default:
-		FAIL();
+		break;
 	}
+	FAIL();
 }
 
 static uint8_t socks5_err2rsp(const int err)
@@ -425,7 +425,10 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		return;
 	}
 	ctx->dialed_fd = fd;
-	socks_sendrsp(ctx, true);
+	if (!socks_sendrsp(ctx, true)) {
+		socks_ctx_close(loop, ctx);
+		return;
+	}
 
 	SOCKS_CTX_LOG_F(VERBOSE, ctx, "connected, fd=%d", fd);
 	/* cleanup before state change */
@@ -489,7 +492,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 		read_uint8(hdr + offsetof(struct socks4_hdr, command));
 	if (command != SOCKS4CMD_CONNECT) {
 		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "SOCKS4 command not supported: %" PRIu8,
+			WARNING, ctx, "SOCKS4 command not supported: %" PRIu8,
 			command);
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
@@ -539,7 +542,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		read_uint8(hdr + offsetof(struct socks5_hdr, version));
 	if (version != SOCKS5) {
 		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "SOCKS5: unsupported version %" PRIu8,
+			WARNING, ctx, "SOCKS5: unsupported version %" PRIu8,
 			version);
 		return -1;
 	}
@@ -777,7 +780,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 1;
 		}
-		SOCKS_CTX_LOG_F(WARNING, ctx, "recv: %s", strerror(err));
+		SOCKS_CTX_LOG_F(DEBUG, ctx, "recv: %s", strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
@@ -806,7 +809,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
 	if (ctx->dialreq == NULL) {
-		socks_sendrsp(ctx, false);
+		(void)socks_sendrsp(ctx, false);
 		socks_ctx_close(loop, ctx);
 		return;
 	}
@@ -870,7 +873,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		FAIL();
 	}
 	if (!ok) {
-		socks_sendrsp(ctx, false);
+		(void)socks_sendrsp(ctx, false);
 		socks_ctx_close(loop, ctx);
 		return;
 	}

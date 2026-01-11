@@ -463,7 +463,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 
 	/* Validate gzip magic numbers and compression method */
 	if (header.id1 != 0x1f || header.id2 != 0x8b || header.cm != 0x08) {
-		LOGD("gzip: unsupported header");
+		LOGD("gzip: invalid magic");
 		return NULL;
 	}
 	b += 10, n -= 10;

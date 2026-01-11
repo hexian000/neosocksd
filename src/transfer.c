@@ -166,7 +166,7 @@ static ssize_t transfer_send(struct transfer *restrict t)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		LOGD_F("send: fd=%d %s", fd, strerror(err));
+		XFER_CTX_LOG_F(DEBUG, t, "send: %s", strerror(err));
 		return -1;
 	}
 	if (nsend == 0) {

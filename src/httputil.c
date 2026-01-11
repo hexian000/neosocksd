@@ -349,11 +349,11 @@ static bool recv_request(struct http_parser *restrict p)
 	/* Receive data from socket */
 	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
 	if (err != 0) {
-		LOGW_F("recv: fd=%d %s", p->fd, strerror(err));
+		LOGD_F("recv: fd=%d %s", p->fd, strerror(err));
 		return false;
 	}
 	if (n == 0) {
-		LOGW_F("recv: fd=%d early EOF", p->fd);
+		LOGD_F("recv: fd=%d early EOF", p->fd);
 		return false;
 	}
 

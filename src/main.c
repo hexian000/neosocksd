@@ -530,7 +530,7 @@ int main(int argc, char **argv)
 #endif
 
 	/* Start the main event loop - this blocks until shutdown */
-	LOGN("server start");
+	LOGD("starting the main event loop");
 	ev_run(loop, 0);
 
 	/* Graceful shutdown sequence */

@@ -165,8 +165,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	HTTP_CTX_LOG_F(
-		VERBOSE, ctx, "closing state=%d", ctx->accepted_fd, ctx->state);
+	HTTP_CTX_LOG_F(VERBOSE, ctx, "closing state=%d", ctx->state);
 
 	http_ctx_stop(loop, ctx);
 	if (ctx->accepted_fd != -1) {
