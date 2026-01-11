@@ -276,9 +276,13 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	struct api_client_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CLIENT_CONNECT);
 	if (fd < 0) {
-		const int err = ctx->dialer.syserr;
-		if (err != 0) {
-			LOGE_F("dialer: %s", strerror(err));
+		const enum dialer_error err = ctx->dialer.err;
+		const int syserr = ctx->dialer.syserr;
+		if (syserr != 0) {
+			LOGE_F("dialer: %s (%s)", dialer_strerror(err),
+			       strerror(syserr));
+		} else {
+			LOGE_F("dialer: %s", dialer_strerror(err));
 		}
 		API_RETURN_ERROR(loop, ctx, "connection failed");
 	}

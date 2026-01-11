@@ -204,9 +204,15 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	struct forward_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
 	if (fd < 0) {
-		const int err = ctx->dialer.syserr;
-		if (err != 0) {
-			FW_CTX_LOG_F(ERROR, ctx, "dialer: %s", strerror(err));
+		const enum dialer_error err = ctx->dialer.err;
+		const int syserr = ctx->dialer.syserr;
+		if (syserr != 0) {
+			FW_CTX_LOG_F(
+				ERROR, ctx, "dialer: %s (%s)",
+				dialer_strerror(err), strerror(syserr));
+		} else {
+			FW_CTX_LOG_F(
+				ERROR, ctx, "dialer: %s", dialer_strerror(err));
 		}
 		forward_ctx_close(loop, ctx);
 		return;

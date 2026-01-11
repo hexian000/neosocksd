@@ -99,6 +99,35 @@ enum proxy_protocol {
 	PROTO_MAX,
 };
 
+/**
+ * @brief Dialer error codes for detailed error reporting
+ *
+ * These error codes provide more granular information about connection
+ * failures than a simple system errno. Use dialer_error_str() to get
+ * a human-readable description.
+ */
+enum dialer_error {
+	DIALER_OK = 0, /**< No error, operation successful */
+	DIALER_ERR_SYSTEM, /**< System error, check syserr for errno */
+	DIALER_ERR_RESOLVE, /**< DNS resolution failed */
+	DIALER_ERR_CONNECT, /**< TCP connection failed */
+	DIALER_ERR_PROXY_PROTO, /**< Proxy protocol error (malformed response) */
+	DIALER_ERR_PROXY_AUTH, /**< Proxy authentication failed */
+	DIALER_ERR_PROXY_REFUSED, /**< Proxy refused the connection request */
+	DIALER_ERR_PROXY_REJECT, /**< Request rejected by proxy (e.g., blocked by rules) */
+	DIALER_ERR_EOF, /**< Unexpected end of connection */
+	DIALER_ERR_BLOCKED, /**< Connection blocked by local policy */
+
+	DIALER_ERR_MAX,
+};
+
+/**
+ * @brief Get human-readable error description
+ * @param err Dialer error code
+ * @return Static string describing the error
+ */
+const char *dialer_strerror(enum dialer_error err);
+
 /** @brief String names for proxy protocols */
 extern const char *proxy_protocol_str[PROTO_MAX];
 
@@ -185,7 +214,8 @@ struct dialer {
 	struct resolve_query *resolve_query;
 	size_t jump;
 	int state;
-	int syserr;
+	enum dialer_error err; /**< High-level error code */
+	int syserr; /**< System errno (valid when err == DIALER_ERR_SYSTEM) */
 	ev_io w_socket;
 	int dialed_fd;
 	ev_watcher w_finish;

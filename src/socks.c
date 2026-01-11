@@ -364,7 +364,33 @@ static uint8_t socks5_err2rsp(const int err)
 	return SOCKS5RSP_FAIL;
 }
 
-static void socks_senderr(const struct socks_ctx *restrict ctx, const int err)
+static uint8_t socks5_dialerr2rsp(const enum dialer_error err, const int syserr)
+{
+	switch (err) {
+	case DIALER_OK:
+		return SOCKS5RSP_SUCCEEDED;
+	case DIALER_ERR_SYSTEM:
+		return socks5_err2rsp(syserr);
+	case DIALER_ERR_RESOLVE:
+		return SOCKS5RSP_HOSTUNREACH;
+	case DIALER_ERR_CONNECT:
+		return socks5_err2rsp(syserr);
+	case DIALER_ERR_PROXY_AUTH:
+	case DIALER_ERR_PROXY_REJECT:
+		return SOCKS5RSP_NOALLOWED;
+	case DIALER_ERR_PROXY_REFUSED:
+		return SOCKS5RSP_CONNREFUSED;
+	case DIALER_ERR_BLOCKED:
+		return SOCKS5RSP_NOALLOWED;
+	default:
+		break;
+	}
+	return SOCKS5RSP_FAIL;
+}
+
+static void socks_senderr(
+	const struct socks_ctx *restrict ctx, const enum dialer_error err,
+	const int syserr)
 {
 	const uint8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
@@ -372,7 +398,7 @@ static void socks_senderr(const struct socks_ctx *restrict ctx, const int err)
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		break;
 	case SOCKS5:
-		socks5_sendrsp(ctx, socks5_err2rsp(err));
+		socks5_sendrsp(ctx, socks5_dialerr2rsp(err, syserr));
 		break;
 	default:
 		FAIL();
@@ -384,12 +410,17 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	struct socks_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
 	if (fd < 0) {
-		const int err = ctx->dialer.syserr;
-		if (err != 0) {
+		const enum dialer_error err = ctx->dialer.err;
+		const int syserr = ctx->dialer.syserr;
+		if (syserr != 0) {
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s", strerror(err));
+				ERROR, ctx, "dialer: %s (%s)",
+				dialer_strerror(err), strerror(syserr));
+		} else {
+			SOCKS_CTX_LOG_F(
+				ERROR, ctx, "dialer: %s", dialer_strerror(err));
 		}
-		socks_senderr(ctx, err);
+		socks_senderr(ctx, err, syserr);
 		socks_ctx_close(loop, ctx);
 		return;
 	}
