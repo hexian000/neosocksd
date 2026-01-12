@@ -300,6 +300,8 @@ local function update_peerdb(peername, peerdb)
                 evlogf("peerdb: updated peer %q (time=%d)",
                     peer, data.timestamp - now)
             end
+        elseif peer == agent.peername then
+            -- ignore updates to self
         elseif is_valid(data, now) then
             local old = _G.peerdb[peer]
             if not old or data.timestamp > old.timestamp then
@@ -320,9 +322,11 @@ function rpc.sync(peername, peerdb)
 
     local peerdiff = {}
     for name, info in pairs(_G.peerdb) do
-        local known = peerdb[name]
-        if not known or known.timestamp ~= info.timestamp then
-            peerdiff[name] = info
+        if name ~= peername then
+            local known = peerdb[name]
+            if not known or known.timestamp ~= info.timestamp then
+                peerdiff[name] = info
+            end
         end
     end
     peerdiff[agent.peername] = _G.peerdb[agent.peername]
