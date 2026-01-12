@@ -8,7 +8,9 @@
 
 /* RFC 2045 */
 #define istspecial(c) (!!strchr("()<>@,;:\"/[]?=", (c)))
-#define istoken(c) ((unsigned char)(c) > 32u && !istspecial(c))
+#define istoken(c)                                                             \
+	(32u < (unsigned char)(c) && (unsigned char)(c) < 127u &&              \
+	 !istspecial(c))
 
 char *mime_parse(char *s, char **restrict type, char **restrict subtype)
 {
@@ -32,7 +34,7 @@ char *mime_parse(char *s, char **restrict type, char **restrict subtype)
 static char *next_token(char *restrict s)
 {
 	char *sep;
-	for (sep = s; *sep && istoken((unsigned char)*sep); sep++) {
+	for (sep = s; *sep && istoken(*sep); sep++) {
 	}
 	return sep;
 }
@@ -76,9 +78,9 @@ static char *parse_value(char *s, char **restrict value)
 			*value = s;
 			return r;
 		case '\\':
-			ch = *(r + 1);
-			if (ch && istspecial(ch)) {
+			if (*(r + 1)) {
 				r++;
+				ch = *r;
 			}
 			break;
 		case '\r':
@@ -110,7 +112,6 @@ static char *parse_param(char *s, char **restrict key, char **restrict value)
 	if (next == NULL) {
 		return NULL;
 	}
-	*value = strlower(*value);
 	return next;
 }
 

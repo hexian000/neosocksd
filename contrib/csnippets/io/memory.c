@@ -153,15 +153,12 @@ buf_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 	if (b->pos == b->len) {
 		size_t n = b->bufsize;
 		b->err = stream_read(b->base, b->buf, &n);
-		if (n == 0) {
-			*len = 0;
-			const int err = b->err;
-			b->err = 0;
-			return err;
-		}
+		*buf = b->buf;
+		*len = n;
+	} else {
+		*buf = b->buf + b->pos;
+		*len = b->len - b->pos;
 	}
-	*buf = b->buf + b->pos;
-	*len = b->len - b->pos;
 	b->pos = b->len = 0;
 	const int err = b->err;
 	b->err = 0;
@@ -188,7 +185,7 @@ static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 			return err;
 		}
 		if (nread >= b->bufsize) {
-			return stream_read(b->base, b->buf, len);
+			return stream_read(b->base, buf, len);
 		}
 		b->pos = b->len = 0;
 		nread = b->bufsize;
@@ -425,6 +422,20 @@ metered_write(void *p, const void *restrict buf, size_t *restrict len)
 	return ret;
 }
 
+static int metered_flush(void *p)
+{
+	struct metered_stream *restrict m = p;
+	return stream_flush(m->base);
+}
+
+static int metered_close(void *p)
+{
+	struct metered_stream *restrict m = p;
+	const int ret = stream_close(m->base);
+	free(m);
+	return ret;
+}
+
 struct stream *io_metered(struct stream *base, size_t *meter)
 {
 	if (base == NULL) {
@@ -439,6 +450,8 @@ struct stream *io_metered(struct stream *base, size_t *meter)
 		.direct_read = metered_direct_read,
 		.read = metered_read,
 		.write = metered_write,
+		.flush = metered_flush,
+		.close = metered_close,
 	};
 	m->s = (struct stream){ &vftable, NULL };
 	m->base = base;

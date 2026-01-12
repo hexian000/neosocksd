@@ -158,6 +158,9 @@ size_t url_escape_path(char *buf, const size_t buf_size, const char *path)
 
 size_t url_escape_query(char *buf, size_t buf_size, const char *query)
 {
+	if (*query == '\0') {
+		return 0;
+	}
 	const size_t cap = buf_size;
 	for (;;) {
 		const char *next = strchr(query, '&');
