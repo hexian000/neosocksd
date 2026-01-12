@@ -108,6 +108,7 @@ enum proxy_protocol {
  */
 enum dialer_error {
 	DIALER_OK = 0, /**< No error, operation successful */
+	DIALER_CANCELLED, /**< Operation cancelled by user */
 	DIALER_ERR_SYSTEM, /**< System error, check syserr for errno */
 	DIALER_ERR_RESOLVE, /**< DNS resolution failed */
 	DIALER_ERR_CONNECT, /**< TCP connection failed */

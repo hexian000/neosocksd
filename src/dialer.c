@@ -67,6 +67,7 @@ const char *proxy_protocol_str[PROTO_MAX] = {
 /** @brief Human-readable error descriptions */
 static const char *dialer_error_strs[DIALER_ERR_MAX] = {
 	[DIALER_OK] = "success",
+	[DIALER_CANCELLED] = "operation cancelled",
 	[DIALER_ERR_SYSTEM] = "system error",
 	[DIALER_ERR_RESOLVE] = "name resolution failed",
 	[DIALER_ERR_CONNECT] = "connection failed",
@@ -584,19 +585,6 @@ static int format_status(
 	} while (0)
 #define DIALER_LOG(level, d, message) DIALER_LOG_F(level, d, "%s", message)
 
-/* Helper macros for setting dialer errors */
-#define DIALER_SET_ERR(d, e)                                                   \
-	do {                                                                   \
-		(d)->err = (e);                                                \
-		(d)->syserr = 0;                                               \
-	} while (0)
-
-#define DIALER_SET_SYSERR(d, e)                                                \
-	do {                                                                   \
-		(d)->err = DIALER_ERR_SYSTEM;                                  \
-		(d)->syserr = (e);                                             \
-	} while (0)
-
 static bool dialer_send(
 	struct dialer *restrict d, const unsigned char *restrict buf,
 	const size_t len)
@@ -607,14 +595,16 @@ static bool dialer_send(
 	if (nsend < 0) {
 		const int err = errno;
 		DIALER_LOG_F(DEBUG, d, "send: fd=%d %s", fd, strerror(err));
-		DIALER_SET_SYSERR(d, err);
+		d->err = DIALER_ERR_SYSTEM;
+		d->syserr = err;
 		return false;
 	}
 	if ((size_t)nsend != len) {
 		DIALER_LOG_F(
 			DEBUG, d, "send: fd=%d short send %zu < %zu", fd,
 			(size_t)nsend, len);
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return false;
 	}
 	return true;
@@ -726,7 +716,10 @@ static bool send_socks4a_req(
 		char *restrict b = (char *)buf + len;
 		if (inet_ntop(AF_INET6, &addr->in6, b, INET6_ADDRSTRLEN) ==
 		    NULL) {
-			LOGE_F("inet_ntop: %s", strerror(errno));
+			const int err = errno;
+			DIALER_LOG_F(DEBUG, d, "inet_ntop: %s", strerror(err));
+			d->err = DIALER_ERR_SYSTEM;
+			d->syserr = err;
 			return false;
 		}
 		len += strlen(b) + 1;
@@ -943,7 +936,8 @@ static int recv_http_rsp(struct dialer *restrict d)
 		d->rbuf.cap);
 	if (d->rbuf.len >= d->rbuf.cap) {
 		DIALER_LOG(DEBUG, d, "http: response too long");
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	d->rbuf.data[d->rbuf.len] = '\0';
@@ -956,7 +950,8 @@ static int recv_http_rsp(struct dialer *restrict d)
 	char *next = http_parse(buf, &msg);
 	if (next == NULL) {
 		DIALER_LOG(DEBUG, d, "http_parse: failed");
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	if (next == buf) {
@@ -967,7 +962,8 @@ static int recv_http_rsp(struct dialer *restrict d)
 		DIALER_LOG_F(
 			DEBUG, d, "unsupported HTTP version: %s",
 			msg.rsp.version);
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	if (strcmp(msg.rsp.code, "200") != 0) {
@@ -975,16 +971,17 @@ static int recv_http_rsp(struct dialer *restrict d)
 			DEBUG, d, "HTTP: %s %s", msg.rsp.code, msg.rsp.status);
 		/* Distinguish different HTTP error codes */
 		if (strcmp(msg.rsp.code, "407") == 0) {
-			DIALER_SET_ERR(d, DIALER_ERR_PROXY_AUTH);
+			d->err = DIALER_ERR_PROXY_AUTH;
 		} else if (strcmp(msg.rsp.code, "403") == 0) {
-			DIALER_SET_ERR(d, DIALER_ERR_PROXY_REJECT);
+			d->err = DIALER_ERR_PROXY_REJECT;
 		} else if (
 			strcmp(msg.rsp.code, "502") == 0 ||
 			strcmp(msg.rsp.code, "503") == 0) {
-			DIALER_SET_ERR(d, DIALER_ERR_PROXY_REFUSED);
+			d->err = DIALER_ERR_PROXY_REFUSED;
 		} else {
-			DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+			d->err = DIALER_ERR_PROXY_PROTO;
 		}
+		d->syserr = 0;
 		return -1;
 	}
 
@@ -1009,7 +1006,8 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 		DIALER_LOG_F(
 			DEBUG, d, "unexpected SOCKS4 response version: %" PRIu8,
 			version);
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	const uint8_t command =
@@ -1019,13 +1017,15 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 		break;
 	case SOCKS4RSP_REJECTED:
 		DIALER_LOG(DEBUG, d, "SOCKS4 request rejected or failed");
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_REFUSED);
+		d->err = DIALER_ERR_PROXY_REFUSED;
+		d->syserr = 0;
 		return -1;
 	default:
 		DIALER_LOG_F(
 			DEBUG, d, "unsupported SOCKS4 command: %" PRIu8,
 			command);
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	/* protocol finished, remove header */
@@ -1063,7 +1063,8 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		DIALER_LOG_F(
 			DEBUG, d, "unexpected SOCKS5 response version: %" PRIu8,
 			version);
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	const uint8_t command =
@@ -1081,15 +1082,16 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		/* Map SOCKS5 error codes to dialer errors */
 		switch (command) {
 		case SOCKS5RSP_NOALLOWED:
-			DIALER_SET_ERR(d, DIALER_ERR_PROXY_REJECT);
+			d->err = DIALER_ERR_PROXY_REJECT;
 			break;
 		case SOCKS5RSP_CONNREFUSED:
-			DIALER_SET_ERR(d, DIALER_ERR_PROXY_REFUSED);
+			d->err = DIALER_ERR_PROXY_REFUSED;
 			break;
 		default:
-			DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+			d->err = DIALER_ERR_PROXY_PROTO;
 			break;
 		}
+		d->syserr = 0;
 		return -1;
 	}
 	const uint8_t addrtype =
@@ -1105,7 +1107,8 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		DIALER_LOG_F(
 			DEBUG, d, "unexpected SOCKS5 addrtype: %" PRIu8,
 			addrtype);
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	if (len < want) {
@@ -1135,7 +1138,8 @@ static int recv_socks5_auth(struct dialer *restrict d)
 			"authenticate failed: version=0x%02" PRIx8
 			" status=0x%02" PRIx8,
 			version, status);
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_AUTH);
+		d->err = DIALER_ERR_PROXY_AUTH;
+		d->syserr = 0;
 		return -1;
 	}
 	if (!consume_rcvbuf(d, want)) {
@@ -1163,7 +1167,8 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 		DIALER_LOG_F(
 			DEBUG, d, "unsupported SOCKS5 version: %" PRIu8,
 			version);
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	const uint8_t method =
@@ -1187,7 +1192,8 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 		return recv_socks5_auth(d);
 	case SOCKS5AUTH_NOACCEPTABLE:
 		DIALER_LOG(DEBUG, d, "SOCKS5 auth: method negotiation failed");
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_AUTH);
+		d->err = DIALER_ERR_PROXY_AUTH;
+		d->syserr = 0;
 		return -1;
 	default:
 		break;
@@ -1196,7 +1202,8 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 		DEBUG, d,
 		"SOCKS5: unexpected auth method %" PRIu8 " (protocol error?)",
 		method);
-	DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+	d->err = DIALER_ERR_PROXY_PROTO;
+	d->syserr = 0;
 	return -1;
 }
 
@@ -1238,12 +1245,14 @@ static int dialer_recv(struct dialer *restrict d)
 			return 1;
 		}
 		DIALER_LOG_F(DEBUG, d, "recv: fd=%d %s", fd, strerror(err));
-		DIALER_SET_SYSERR(d, err);
+		d->err = DIALER_ERR_SYSTEM;
+		d->syserr = err;
 		return -1;
 	}
 	if (nrecv == 0) {
 		DIALER_LOG_F(DEBUG, d, "recv: fd=%d early EOF", fd);
-		DIALER_SET_ERR(d, DIALER_ERR_EOF);
+		d->err = DIALER_ERR_EOF;
+		d->syserr = 0;
 		return -1;
 	}
 	const int sockerr = socket_get_error(fd);
@@ -1252,7 +1261,8 @@ static int dialer_recv(struct dialer *restrict d)
 			return 1;
 		}
 		DIALER_LOG_F(DEBUG, d, "recv: fd=%d %s", fd, strerror(sockerr));
-		DIALER_SET_SYSERR(d, sockerr);
+		d->err = DIALER_ERR_SYSTEM;
+		d->syserr = sockerr;
 		return -1;
 	}
 	d->rbuf.len += (size_t)nrecv;
@@ -1272,7 +1282,8 @@ static int dialer_recv(struct dialer *restrict d)
 	const size_t want = (d->rbuf.data + d->rbuf.len) - d->next + ret;
 	if (want > d->rbuf.cap) {
 		DIALER_LOG(DEBUG, d, "recv: header too long");
-		DIALER_SET_ERR(d, DIALER_ERR_PROXY_PROTO);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return -1;
 	}
 	socket_rcvlowat(fd, want);
@@ -1385,16 +1396,17 @@ static bool connect_sa(
 	if (G.conf->ingress && !is_local_sa(sa)) {
 		char addr_str[64];
 		format_sa(addr_str, sizeof(addr_str), sa);
-		LOG_F(VERBOSE, "dialer: blocked non-local address %s",
-		      addr_str);
-		DIALER_SET_ERR(d, DIALER_ERR_BLOCKED);
+		LOGD_F("blocked non-local address %s", addr_str);
+		d->err = DIALER_ERR_BLOCKED;
+		d->syserr = 0;
 		return false;
 	}
 	if (G.conf->egress && is_local_sa(sa)) {
 		char addr_str[64];
 		format_sa(addr_str, sizeof(addr_str), sa);
-		LOG_F(VERBOSE, "dialer: blocked local address %s", addr_str);
-		DIALER_SET_ERR(d, DIALER_ERR_BLOCKED);
+		LOGD_F("blocked local address %s", addr_str);
+		d->err = DIALER_ERR_BLOCKED;
+		d->syserr = 0;
 		return false;
 	}
 
@@ -1402,17 +1414,19 @@ static bool connect_sa(
 	const int fd = socket(sa->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
-		LOGE_F("socket: %s", strerror(err));
-		DIALER_SET_SYSERR(d, err);
+		LOGD_F("socket: %s", strerror(err));
+		d->err = DIALER_ERR_SYSTEM;
+		d->syserr = err;
 		return false;
 	}
 
 	/* Configure non-blocking mode */
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
-		LOGE_F("fcntl: %s", strerror(err));
+		LOGD_F("fcntl: %s", strerror(err));
 		CLOSE_FD(fd);
-		DIALER_SET_SYSERR(d, err);
+		d->err = DIALER_ERR_SYSTEM;
+		d->syserr = err;
 		return false;
 	}
 	const struct config *restrict conf = G.conf;
@@ -1488,9 +1502,10 @@ static void resolve_cb(
 		d->req->num_proxy > 0 ? &d->req->proxy[0].addr : &d->req->addr;
 	if (sa == NULL) {
 		/* DNS resolution failed */
-		LOGW_F("name resolution failed: \"%.*s\"",
+		LOGD_F("name resolution failed: \"%.*s\"",
 		       (int)dialaddr->domain.len, dialaddr->domain.name);
-		DIALER_SET_ERR(d, DIALER_ERR_RESOLVE);
+		d->err = DIALER_ERR_RESOLVE;
+		d->syserr = 0;
 		ev_invoke(loop, &d->w_finish, EV_CUSTOM);
 		return;
 	}
@@ -1653,9 +1668,10 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 		/* Already finished or cancelled */
 		return;
 	}
-	LOGV_F("dialer %p: cancel", (void *)d);
+	LOGD_F("dialer %p: cancel", (void *)d);
 
-	/* Clear any pending completion callback and stop the dialer */
-	ev_clear_pending(loop, &d->w_finish);
+	d->err = DIALER_CANCELLED;
+	d->syserr = 0;
 	dialer_stop(d, loop);
+	ev_clear_pending(loop, &d->w_finish);
 }
