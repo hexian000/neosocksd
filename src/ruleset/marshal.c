@@ -85,7 +85,7 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			unsigned char *s = &buf[sizeof(buf)];
 			uint_fast8_t x = ch;
 
-			/* Build octal representation backwards: \ddd */
+			/* Build decimal representation backwards: \ddd */
 			*--s = '0' + x % 10, x /= 10;
 			*--s = '0' + x % 10, x /= 10;
 			*--s = '0' + x % 10;
