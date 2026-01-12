@@ -83,7 +83,7 @@ api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 		ev_idle_stop(loop, &ctx->w_ruleset);
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected state: %d", ctx->state);
 	}
 }
 

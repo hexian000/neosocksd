@@ -118,7 +118,7 @@ struct stream *content_reader(
 		r = codec_inflate_reader(io_memreader(p, len));
 	} break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected content encoding: %d", encoding);
 	}
 	if (r == NULL) {
 		return NULL;
@@ -147,7 +147,7 @@ struct stream *content_writer(
 	default:
 		break;
 	}
-	FAIL();
+	FAILMSGF("unexpected content encoding: %d", encoding);
 }
 
 /**
@@ -201,7 +201,7 @@ static int parse_message(struct http_parser *restrict p)
 		version = msg->rsp.version;
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected http parser state: %d", p->state);
 	}
 	if (strncmp(version, "HTTP/1.", 7) != 0) {
 		LOGD_F("http: unsupported protocol `%s'", version);
@@ -462,7 +462,7 @@ int http_parser_recv(struct http_parser *restrict p)
 			/* Parsing finished (success or error) */
 			return 0;
 		default:
-			FAIL();
+			FAILMSGF("unexpected http parser state: %d", p->state);
 		}
 	}
 }

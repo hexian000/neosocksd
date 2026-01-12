@@ -218,7 +218,7 @@ void dialaddr_copy(
 		memcpy(dst->domain.name, src->domain.name, len);
 	} break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address type: %d", src->type);
 	}
 }
 
@@ -248,7 +248,7 @@ int dialaddr_format(
 	default:
 		break;
 	}
-	FAIL();
+	FAILMSGF("unexpected address type: %d", addr->type);
 }
 
 static bool proxy_set_credential(
@@ -702,7 +702,7 @@ static bool send_socks4a_req(
 		cap += addr->domain.len + 1;
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address type: %d", addr->type);
 	}
 	unsigned char buf[cap];
 	write_uint8(buf + offsetof(struct socks4_hdr, version), SOCKS4);
@@ -806,7 +806,7 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		cap += 1 + addr->domain.len + sizeof(in_port_t);
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address type: %d", addr->type);
 	}
 	unsigned char buf[cap];
 	write_uint8(buf + offsetof(struct socks5_hdr, version), SOCKS5);
@@ -883,7 +883,7 @@ static bool send_dispatch(struct dialer *restrict d)
 	default:
 		break;
 	}
-	FAIL();
+	FAILMSGF("unexpected protocol/state: %d/%d", proxy->proto, d->state);
 }
 
 static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
@@ -1223,7 +1223,7 @@ recv_dispatch(struct dialer *restrict d, const struct proxyreq *restrict proxy)
 	default:
 		break;
 	}
-	FAIL();
+	FAILMSGF("unexpected protocol/state: %d/%d", proxy->proto, d->state);
 }
 
 static int dialer_recv(struct dialer *restrict d)
@@ -1505,7 +1505,7 @@ static void resolve_cb(
 		addr.in6.sin6_port = htons(dialaddr->port);
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address family: %d", sa->sa_family);
 	}
 
 	if (LOGLEVEL(DEBUG)) {
@@ -1581,7 +1581,7 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 		d->resolve_query = q;
 	} break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address type: %d", addr->type);
 	}
 }
 

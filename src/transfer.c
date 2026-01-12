@@ -238,7 +238,7 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		ev_io_stop(loop, &t->w_socket);
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected state: %d", state);
 	}
 	set_state(t, loop, state);
 }
@@ -356,7 +356,7 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		ev_io_stop(loop, &t->w_socket);
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected state: %d", state);
 	}
 	set_state(t, loop, state);
 }

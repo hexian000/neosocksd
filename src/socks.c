@@ -153,7 +153,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		stats->num_sessions--;
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected state: %d", ctx->state);
 	}
 	SOCKS_CTX_LOG_F(
 		VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
@@ -298,7 +298,7 @@ socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 		len += sizeof(addr.in6.sin6_port);
 	} break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address family: %d", addr.sa.sa_family);
 	}
 	return send_rsp(ctx, buf, len);
 }
@@ -328,7 +328,7 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	case STATE_ESTABLISHED:
 		return;
 	default:
-		FAIL();
+		FAILMSGF("unexpected socks_ctx state: %d", ctx->state);
 	}
 	socks_ctx_close(loop, ctx);
 }
@@ -346,7 +346,7 @@ static bool socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 	default:
 		break;
 	}
-	FAIL();
+	FAILMSGF("unexpected socks version: %d", version);
 }
 
 static uint8_t socks5_err2rsp(const int err)
@@ -401,7 +401,7 @@ static void socks_senderr(
 		socks5_sendrsp(ctx, socks5_dialerr2rsp(err, syserr));
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected socks version: %d", version);
 	}
 }
 
@@ -607,7 +607,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		ctx->addr.port = read_uint16(rawaddr + addrlen);
 	} break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected socks5 address type: %d", addrtype);
 	}
 
 	/* protocol finished */
@@ -624,7 +624,7 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	case SOCKS5AUTH_USERPASS:
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected socks5 auth method: %d", ctx->auth.method);
 	}
 	const unsigned char *restrict req = ctx->next;
 	const size_t len = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
@@ -748,7 +748,7 @@ static int socks5_dispatch(struct socks_ctx *restrict ctx)
 	default:
 		break;
 	}
-	FAIL();
+	FAILMSGF("unexpected socks5 state: %d", ctx->state);
 }
 
 static int socks_dispatch(struct socks_ctx *restrict ctx)
@@ -870,7 +870,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 			password, &ctx->ruleset_callback);
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address type: %d", ctx->addr.type);
 	}
 	if (!ok) {
 		(void)socks_sendrsp(ctx, false);

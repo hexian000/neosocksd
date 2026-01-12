@@ -876,7 +876,7 @@ void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		send_errpage(loop, ctx, ctx->parser.http_status);
 		return;
 	default:
-		FAIL();
+		FAILMSGF("unexpected http parser state: %d", ctx->parser.state);
 	}
 
 	api_handle(loop, ctx);

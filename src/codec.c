@@ -260,7 +260,7 @@ struct inflate_stream {
 	size_t dstpos, dstlen;
 	unsigned char dstbuf[TINFL_LZ_DICT_SIZE];
 };
-ASSERT_SUPER(struct stream, struct deflate_stream, s);
+ASSERT_SUPER(struct stream, struct inflate_stream, s);
 
 /**
  * @brief Direct read from DEFLATE decompression stream

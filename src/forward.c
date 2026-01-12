@@ -108,7 +108,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		stats->num_sessions--;
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected state: %d", ctx->state);
 	}
 	FW_CTX_LOG_F(VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
@@ -194,7 +194,7 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	case STATE_ESTABLISHED:
 		return;
 	default:
-		FAIL();
+		FAILMSGF("unexpected state: %d", ctx->state);
 	}
 	forward_ctx_close(loop, ctx);
 }
@@ -309,7 +309,7 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 			&ctx->ruleset_callback);
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address type: %d", addr->type);
 	}
 	if (!ok) {
 		forward_ctx_close(loop, ctx);
@@ -444,7 +444,7 @@ tproxy_idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 			&ctx->ruleset_callback);
 		break;
 	default:
-		FAIL();
+		FAILMSGF("unexpected address family: %d", dest.sa.sa_family);
 	}
 	if (!ok) {
 		forward_ctx_close(loop, ctx);
