@@ -421,7 +421,8 @@ In supported builds, logs both Lua and C tracebacks.
 **Synopsis**
 
 ```Lua
-local reg = regex.compile([[\.example\.(com|org)$]])
+-- the default flags are regex.EXTENDED | regex.NEWLINE
+local reg = regex.compile([[\.example\.(com|org)$]], regex.EXTENDED | regex.ICASE)
 local s, e = reg:find(host)
 if s then
     -- ......
@@ -437,7 +438,7 @@ end
 
 **Description**
 
-Lua interface for [POSIX Extended Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html#tag_09_04).
+Lua interface for [POSIX Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html#tag_09).
 
 
 ### time.\*

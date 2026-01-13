@@ -50,7 +50,12 @@ function neosocksd.traceback(s) return debug.traceback(s) end
 _G.neosocksd = neosocksd
 
 
-local regex = {}
+local regex = {
+    EXTENDED = 1,
+    ICASE = (1 << 1),
+    NEWLINE = (1 << 2),
+    NOSUB = (1 << 3),
+}
 
 function regex:find(s, init)
     return 0, 0
@@ -68,7 +73,7 @@ function regex:gmatch(s, init)
 end
 
 local regex_mt = { __index = regex }
-function regex.compile(pattern)
+function regex.compile(pattern, cflags)
     return setmetatable({}, regex_mt)
 end
 

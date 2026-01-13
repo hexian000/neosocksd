@@ -28,13 +28,16 @@ static size_t cstrpos(const lua_Integer pos, const size_t len)
 	if (len == 0) {
 		return 0;
 	}
-	if (pos <= 0) {
-		/* non-positive index: 0 = start, -1 = last, -2 = second last, etc. */
+	if (pos < 0) {
+		/* negative index: -1 = last, -2 = second last, etc. */
 		const lua_Integer adjusted = (lua_Integer)len + pos;
 		if (adjusted < 0) {
 			return 0; /* underflow: clamp to start */
 		}
 		return (size_t)adjusted;
+	}
+	if (pos == 0) {
+		return 0; /* 0 = start */
 	}
 	/* pos > 0: positive index (1-based) */
 	if ((lua_Integer)len < pos) {
@@ -56,12 +59,14 @@ regex_error(lua_State *restrict L, int err, const regex_t *restrict preg)
 	return lua_error(L);
 }
 
-/* regex.compile(pattern) */
+/* regex.compile(pattern [, cflags]) */
 static int regex_compile(lua_State *restrict L)
 {
 	const char *restrict pattern = luaL_checkstring(L, 1);
+	const int cflags =
+		(int)luaL_optinteger(L, 2, REG_EXTENDED | REG_NEWLINE);
 	regex_t *restrict preg = lua_newuserdata(L, sizeof(regex_t));
-	const int err = regcomp(preg, pattern, REG_EXTENDED | REG_NEWLINE);
+	const int err = regcomp(preg, pattern, cflags);
 	if (err != 0) {
 		return regex_error(L, err, preg);
 	}
@@ -183,6 +188,15 @@ int luaopen_regex(lua_State *restrict L)
 		{ NULL, NULL },
 	};
 	luaL_newlib(L, regexlib);
+	lua_pushinteger(L, REG_EXTENDED);
+	lua_setfield(L, -2, "EXTENDED");
+	lua_pushinteger(L, REG_ICASE);
+	lua_setfield(L, -2, "ICASE");
+	lua_pushinteger(L, REG_NEWLINE);
+	lua_setfield(L, -2, "NEWLINE");
+	lua_pushinteger(L, REG_NOSUB);
+	lua_setfield(L, -2, "NOSUB");
+
 	if (luaL_newmetatable(L, MT_REGEX)) {
 		lua_pushliteral(L, "regex");
 		lua_setfield(L, -2, "__name");

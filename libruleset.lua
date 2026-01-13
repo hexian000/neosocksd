@@ -601,16 +601,37 @@ function match.pattern(s)
     end
 end
 
+-- provide basic compatibility for widely-used escape sequences
+local escape_replacement = {
+    ["\\d"] = "[0-9]",
+    ["\\D"] = "[^0-9]",
+    ["\\w"] = "[a-zA-Z0-9_]",
+    ["\\W"] = "[^a-zA-Z0-9_]",
+    ["\\s"] = "[[:space:]]",
+    ["\\S"] = "[^[:space:]]",
+}
+function regex.compat(s)
+    s = s:gsub("\\.", function(esc)
+        return escape_replacement[esc] or esc
+    end)
+    return s
+end
+
 function match.regex(s)
     if type(s) ~= "table" then
-        local reg = regex.compile(s)
+        local reg = regex.compile(regex.compat(s))
         return function(addr)
             return not not reg:find(addr)
         end
     end
     local regs = {}
-    for i, pat in ipairs(s) do
-        regs[i] = regex.compile(pat)
+    for _, pat in pairs(s) do
+        local ok, ret = pcall(regex.compile, regex.compat(pat))
+        if ok then
+            table.insert(regs, ret)
+        else
+            logf("%s: %q", ret, pat)
+        end
     end
     return function(addr)
         for _, reg in pairs(regs) do
