@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* RFC 4648 standard Base64 alphabet */
 static const unsigned char encoding_table[] =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -13,21 +14,20 @@ bool base64_encode(
 	unsigned char *dst, size_t *dstlen, const unsigned char *src,
 	const size_t srclen)
 {
-	assert(dst != src);
+	assert(dst == NULL || dst != src);
 	const size_t outlen = 4 * ((srclen + 2) / 3);
 	if (outlen < srclen) {
 		*dstlen = 0;
 		return false;
 	}
-	if (*dstlen < outlen) {
+	if (dst == NULL || *dstlen < outlen) {
 		*dstlen = outlen;
-		return false;
+		return dst == NULL;
 	}
 
 	size_t r = 0, w = 0;
 	while (r < srclen) {
-		const uint_fast32_t octet_a = r < srclen ? src[r] : 0;
-		r++;
+		const uint_fast32_t octet_a = src[r++];
 		const uint_fast32_t octet_b = r < srclen ? src[r] : 0;
 		r++;
 		const uint_fast32_t octet_c = r < srclen ? src[r] : 0;
@@ -49,13 +49,18 @@ bool base64_encode(
 	return true;
 }
 
+/*
+ * Decoding table: maps ASCII characters to 6-bit values.
+ * Valid Base64 characters map to 0x00-0x3F.
+ * Invalid characters (including '=') map to 0x80 for error detection.
+ */
 static const unsigned char decoding_table[] = {
 	0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
 	0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
 	0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
 	0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x3E, 0x80, 0x80, 0x80, 0x3F,
 	0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x80, 0x80,
-	0x80, 0x00, 0x80, 0x80, 0x80, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+	0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
 	0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12,
 	0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x80, 0x80, 0x80, 0x80, 0x80,
 	0x80, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24,
@@ -78,6 +83,8 @@ bool base64_decode(
 	unsigned char *dst, size_t *dstlen, const unsigned char *src,
 	const size_t srclen)
 {
+	assert(dst == NULL || dst == src || dst + *dstlen <= src ||
+	       src + srclen <= dst);
 	if (srclen == 0) {
 		*dstlen = 0;
 		return true;
@@ -87,40 +94,52 @@ bool base64_decode(
 		return false;
 	}
 
-	size_t outlen = srclen / 4 * 3;
-	if (src[srclen - 1] == '=') {
-		outlen--;
-	}
-	if (src[srclen - 2] == '=') {
-		outlen--;
-	}
-	if (*dstlen < outlen) {
+	const size_t npad = (src[srclen - 1] == '=') + (src[srclen - 2] == '=');
+	const size_t outlen = srclen / 4 * 3 - npad;
+	if (dst == NULL || *dstlen < outlen) {
 		*dstlen = outlen;
-		return false;
+		return dst == NULL;
 	}
+	const size_t mainlen = srclen - 4; /* process all but last group */
 
 	size_t r = 0, w = 0;
-	while (r < srclen) {
+	while (r < mainlen) {
 		const uint_fast32_t sextet_a = decoding_table[src[r++]];
 		const uint_fast32_t sextet_b = decoding_table[src[r++]];
 		const uint_fast32_t sextet_c = decoding_table[src[r++]];
 		const uint_fast32_t sextet_d = decoding_table[src[r++]];
 		if ((sextet_a | sextet_b | sextet_c | sextet_d) & 0x80) {
-			*dstlen = outlen;
+			*dstlen = 0;
 			return false;
 		}
-
 		const uint_fast32_t triple =
 			(sextet_a << 3 * 6) + (sextet_b << 2 * 6) +
 			(sextet_c << 1 * 6) + (sextet_d << 0 * 6);
+		dst[w++] = (triple >> 2 * 8) & 0xFF;
+		dst[w++] = (triple >> 1 * 8) & 0xFF;
+		dst[w++] = (triple >> 0 * 8) & 0xFF;
+	}
 
-		if (w < outlen) {
-			dst[w++] = (triple >> 2 * 8) & 0xFF;
+	/* process last group with possible padding */
+	{
+		const uint_fast32_t sextet_a = decoding_table[src[r++]];
+		const uint_fast32_t sextet_b = decoding_table[src[r++]];
+		const uint_fast32_t sextet_c =
+			npad < 2 ? decoding_table[src[r++]] : 0;
+		const uint_fast32_t sextet_d =
+			npad < 1 ? decoding_table[src[r++]] : 0;
+		if ((sextet_a | sextet_b | sextet_c | sextet_d) & 0x80) {
+			*dstlen = 0;
+			return false;
 		}
-		if (w < outlen) {
+		const uint_fast32_t triple =
+			(sextet_a << 3 * 6) + (sextet_b << 2 * 6) +
+			(sextet_c << 1 * 6) + (sextet_d << 0 * 6);
+		dst[w++] = (triple >> 2 * 8) & 0xFF;
+		if (npad < 2) {
 			dst[w++] = (triple >> 1 * 8) & 0xFF;
 		}
-		if (w < outlen) {
+		if (npad < 1) {
 			dst[w++] = (triple >> 0 * 8) & 0xFF;
 		}
 	}
