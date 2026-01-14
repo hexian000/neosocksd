@@ -414,9 +414,11 @@ static int format_proxyreq(
 		.scheme = (char *)proxy_protocol_str[req->proto],
 		.host = host,
 	};
-	const size_t n = url_build(s, maxlen - 1, &u);
-	s[n] = '\0';
-	return (int)n;
+	const int n = url_build(s, maxlen, &u);
+	if (n < 0 || (size_t)n >= maxlen) {
+		return -1;
+	}
+	return n;
 }
 
 int dialreq_format(
