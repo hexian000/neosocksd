@@ -259,7 +259,7 @@ static void forward_ctx_start(
 
 #if WITH_RULESET
 static void
-forward_ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
+ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct forward_ctx *restrict ctx = watcher->data;
@@ -273,7 +273,9 @@ forward_ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ctx->dialreq = req;
 	forward_ctx_start(loop, ctx, req);
 }
+#endif /* WITH_RULESET */
 
+#if WITH_RULESET
 static void
 forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
@@ -316,7 +318,7 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		return;
 	}
 }
-#endif
+#endif /* WITH_RULESET */
 
 static struct forward_ctx *
 forward_ctx_new(struct server *restrict s, const int accepted_fd)
@@ -370,7 +372,7 @@ void forward_serve(
 	const struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
 		ev_set_cb(&ctx->w_ruleset, forward_process_cb);
-		ev_set_cb(&ctx->ruleset_callback.w_finish, forward_ruleset_cb);
+		ev_set_cb(&ctx->ruleset_callback.w_finish, ruleset_cb);
 		ev_idle_start(loop, &ctx->w_ruleset);
 		return;
 	}
@@ -383,23 +385,7 @@ void forward_serve(
 
 #if WITH_RULESET
 static void
-tproxy_ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_CUSTOM);
-	struct forward_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_PROCESS);
-	ctx->ruleset_state = NULL;
-	struct dialreq *req = ctx->ruleset_callback.request.req;
-	if (req == NULL) {
-		forward_ctx_close(loop, ctx);
-		return;
-	}
-	ctx->dialreq = req;
-	forward_ctx_start(loop, ctx, req);
-}
-
-static void
-tproxy_idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
+tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -451,7 +437,7 @@ tproxy_idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		return;
 	}
 }
-#endif
+#endif /* WITH_RULESET */
 
 static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
 {
@@ -494,8 +480,8 @@ void tproxy_serve(
 #if WITH_RULESET
 	const struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		ev_set_cb(&ctx->w_ruleset, tproxy_idle_cb);
-		ev_set_cb(&ctx->ruleset_callback.w_finish, tproxy_ruleset_cb);
+		ev_set_cb(&ctx->w_ruleset, tproxy_process_cb);
+		ev_set_cb(&ctx->ruleset_callback.w_finish, ruleset_cb);
 		ev_idle_start(loop, &ctx->w_ruleset);
 		return;
 	}

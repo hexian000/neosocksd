@@ -44,8 +44,12 @@
 /**
  * @brief I/O watcher node for c-ares socket management
  *
- * Represents a single socket watcher in a linked list. Used to manage
- * multiple sockets that c-ares may create for DNS queries.
+ * Represents a single socket watcher in a singly-linked list. Used to manage
+ * multiple sockets that c-ares may create for DNS queries. Inactive watchers
+ * are kept in the list for reuse and periodically purged by purge_watchers().
+ *
+ * The head node (resolver.sockets) is embedded in the resolver struct and
+ * serves as both a list sentinel and a reusable watcher node.
  */
 struct io_node {
 	ev_io watcher;
@@ -56,6 +60,7 @@ struct io_node {
  * @brief DNS resolver instance
  *
  * Contains the resolver state, statistics, and c-ares integration data.
+ * The resolver maintains a linked list of socket watchers for c-ares I/O.
  */
 struct resolver {
 	struct ev_loop *loop;
@@ -73,7 +78,8 @@ struct resolver {
  * @brief DNS query context
  *
  * Represents a single DNS resolution request with its completion callback
- * and result storage.
+ * and result storage. Uses a flexible array member to store the hostname
+ * and service strings contiguously with the structure.
  */
 struct resolve_query {
 	struct resolver *resolver;
@@ -101,7 +107,13 @@ finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct resolve_query *restrict q = watcher->data;
-	LOGV_F("resolve %p: finished ok=%d", q, q->ok);
+	if (q->ok) {
+		char addr[64];
+		format_sa(addr, sizeof(addr), &q->addr.sa);
+		LOGD_F("resolve `%s:%s': %s", q->name, q->service, addr);
+	} else {
+		LOGD_F("resolve `%s:%s': failed", q->name, q->service);
+	}
 
 	/* Check if query was cancelled */
 	if (q->done_cb.func == NULL) {
@@ -172,7 +184,7 @@ static void sched_update(struct ev_loop *loop, ev_timer *restrict watcher)
 
 	/* Convert timeval to seconds and schedule timer */
 	const double next = (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
-	LOGD_F("timeout: next check after %.3fs", next);
+	LOGV_F("timeout: next check after %.3fs", next);
 	watcher->repeat = next;
 	ev_timer_again(loop, watcher);
 }
@@ -511,18 +523,20 @@ const struct resolver_stats *resolver_stats(const struct resolver *restrict r)
 }
 
 /**
- * @brief Start DNS resolution for a query
+ * @brief Start DNS resolution for a query (internal)
  *
  * Initiates DNS resolution using either c-ares (if available and enabled)
- * or synchronous getaddrinfo(). Updates statistics and schedules completion.
+ * or synchronous getaddrinfo(). Updates statistics.
+ *
+ * For c-ares: schedules async resolution and returns immediately.
+ * For sync: blocks until resolution completes, then feeds completion event.
  *
  * @param r Resolver instance
- * @param q Query to start resolving
+ * @param q Query to start resolving (must be fully initialized)
  */
 void resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
 {
-	LOGV_F("resolve %p: start name=`%s' service=%s pf=%d", (void *)q,
-	       q->name, q->service, q->family);
+	LOGD_F("resolve `%s:%s': start pf=%d", q->name, q->service, q->family);
 	r->stats.num_query++;
 
 #if WITH_CARES
@@ -596,7 +610,10 @@ struct resolve_query *resolve_do(
 
 void resolve_cancel(struct resolve_query *q)
 {
-	LOGV_F("resolve %p: cancel", q);
+	if (q == NULL) {
+		return;
+	}
+	LOGD_F("resolve `%s:%s': cancel", q->name, q->service);
 
 	/* Clear the callback to indicate cancellation */
 	q->done_cb = (struct resolve_cb){
