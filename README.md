@@ -5,7 +5,7 @@
 [![Downloads](https://img.shields.io/github/downloads/hexian000/neosocksd/total.svg)](https://github.com/hexian000/neosocksd/releases)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-neosocksd is a fast and lightweight proxy server written in C, featuring a Lua-powered rules engine. Additionally, it provides an out-of-the-box example for establishing an autonomous virtual network that interconnects multiple LANs, allowing seamless cross-network access through a unified proxy.
+neosocksd is a fast and lightweight proxy server written in C, featuring a Lua-powered rules engine. As an imaginative example, it provides an out-of-the-box agent module (in Lua) for establishing an autonomous virtual network that interconnects multiple LANs, allowing seamless cross-network access through a unified proxy.
 
 Status: **Stable**
 
