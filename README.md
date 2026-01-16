@@ -29,7 +29,7 @@ Status: **Stable**
 - Lightweight: ~500 KiB executable on most platforms\*.
 - Versatile: Lua scripting on the control plane.
 - Programmable: rich RPC facilities for scripting; see [Scripting](#scripting).
-- Hot-reloadable: REST API for monitoring and updating Lua modules.
+- Hot-reloadable: RESTful API for monitoring and updating Lua modules.
 - Modern: full IPv6 support and horizontal scalability.
 - Standards-compliant: ISO C11 and POSIX.1-2008. Additional features may be available on certain platforms.
 
@@ -90,7 +90,7 @@ sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
     --max-startups 60:30:100 --max-sessions 0 -u nobody: -d
 ```
 
-Update the ruleset on a running instance without restarting:
+Update the ruleset without service interruption:
 
 ```sh
 # Update the ruleset. Optionally specify a chunk name to appear in stack tracebacks
@@ -113,7 +113,7 @@ curl "http://127.0.1.1:9080/ruleset/invoke" --data-binary @patch.lua
 
 ## Observability
 
-The built-in REST API can be used to monitor service status.
+The built-in RESTful API can be used to monitor service status.
 
 ```sh
 # Stateless
