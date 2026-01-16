@@ -5,7 +5,7 @@
 [![Downloads](https://img.shields.io/github/downloads/hexian000/neosocksd/total.svg)](https://github.com/hexian000/neosocksd/releases)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-neosocksd is a fast and lightweight proxy server written in C, featuring a Lua-powered rules engine. As an imaginative example, it provides an out-of-the-box agent module (in Lua) for establishing an autonomous virtual network that interconnects multiple LANs, allowing seamless cross-network access through a unified proxy.
+neosocksd is a fast and lightweight proxy server written in C, featuring a Lua-powered rules engine. As an illustrative example, it includes an out-of-the-box agent module (in Lua) that establishes an autonomous virtual network interconnecting multiple LANs, allowing seamless cross-network access through a unified proxy.
 
 Status: **Stable**
 
@@ -23,19 +23,19 @@ Status: **Stable**
 
 ## Features
 
-- This is a TCP forward proxy.
+- This is a TCP forwarding proxy.
 - Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (CONNECT only), HTTP (CONNECT only), and transparent proxy (Linux).
-- High performance: transfer 10+ Gbps per x86 core on Linux (with `--pipe`, 2024).
+- High performance: transfers 10+ Gbps per x86 core on Linux (with `--pipe`, 2024).
 - Lightweight: ~500 KiB executable on most platforms\*.
 - Versatile: Lua scripting on the control plane.
 - Programmable: rich RPC facilities for scripting; see [Scripting](#scripting).
-- Hot-reloadable: RESTful API for monitoring and updating Lua modules.
+- Hot-reloadable: a set of RESTful API for monitoring and updating Lua modules.
 - Modern: full IPv6 support and horizontal scalability.
-- Standards-compliant: ISO C11 and POSIX.1-2008. Additional features may be available on certain platforms.
+- Standards-compliant: ISO C11 and POSIX.1-2008; additional features may be available on certain platforms.
 
 *\* Some required libraries are dynamically linked, see runtime dependencies below. Statically linked executable can be larger due to these libraries.*
 
-neosocksd supports only basic authentication (plain-text username and password) and does not provide built-in encryption. For transport security, pair it with tools such as [tlswrapper](https://github.com/hexian000/tlswrapper) or [kcptun-libev](https://github.com/hexian000/kcptun-libev).
+neosocksd supports only basic authentication (plain text username and password) and does not provide built-in encryption. For transport security, pair it with tools such as [tlswrapper](https://github.com/hexian000/tlswrapper) or [kcptun-libev](https://github.com/hexian000/kcptun-libev).
 
 
 ## Usage
