@@ -65,8 +65,11 @@ static int request_finish(lua_State *restrict L)
 		if (n > 0 && aux_todialreq(L, n)) {
 			req = lua_touserdata(L, -1);
 		}
+		if (req == NULL) {
+			LOGE_F("ruleset: %s", ERR_INVALID_ADDR);
+		}
 	} else {
-		LOGW_F("ruleset error: %s", lua_tostring(L, 2));
+		LOGE_F("ruleset error: %s", lua_tostring(L, 2));
 	}
 	state->cb->request.req = req;
 	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);

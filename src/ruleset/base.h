@@ -52,7 +52,7 @@ enum ruleset_ridx {
 
 #define ERR_MEMORY "out of memory"
 #define ERR_BAD_REGISTRY "Lua registry is corrupted"
-#define ERR_INVALID_INVOKE "invalid invocation target"
+#define ERR_INVALID_ADDR "invalid address"
 #define ERR_NOT_ASYNC_ROUTINE "not in asynchronous routine"
 
 /** @brief Feature check: Lua to-be-closed variables (Lua 5.4+) */

@@ -54,12 +54,12 @@ static int api_invoke(lua_State *restrict L)
 	const char *restrict code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L) - 1;
 	if (!aux_todialreq(L, n)) {
-		lua_pushliteral(L, ERR_INVALID_INVOKE);
+		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
 	struct dialreq *restrict req = lua_touserdata(L, -1);
 	if (req == NULL) {
-		lua_pushliteral(L, ERR_INVALID_INVOKE);
+		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
 	const struct ruleset *restrict r = aux_getruleset(L);
