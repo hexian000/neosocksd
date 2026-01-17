@@ -154,7 +154,7 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 		size_t len;
 	} addr[n];
 	for (int i = 0; i < n; i++) {
-		addr[i].s = lua_tolstring(L, -n - i, &addr[i].len);
+		addr[i].s = lua_tolstring(L, i - n, &addr[i].len);
 		if (addr[i].s == NULL || addr[i].len > 1024) {
 			lua_pop(L, n);
 			return false;
