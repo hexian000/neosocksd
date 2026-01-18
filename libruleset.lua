@@ -767,6 +767,13 @@ function rule.proxy(...)
     end
 end
 
+function rule.maybe(t, k)
+    return function(addr)
+        local action = t[k]
+        return action and action(addr)
+    end
+end
+
 function rule.rewrite(pattern, repl, ...)
     local chain = list:new({ ... }):reverse()
     return function(addr)
