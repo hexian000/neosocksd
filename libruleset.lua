@@ -770,7 +770,10 @@ end
 function rule.maybe(t, k)
     return function(addr)
         local action = t[k]
-        return action and action(addr)
+        if action then
+            return action(addr)
+        end
+        return nil
     end
 end
 
