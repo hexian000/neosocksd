@@ -225,7 +225,8 @@ static bool send_rsp(
 	const struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 {
 	const int fd = ctx->accepted_fd;
-	LOG_BIN_F(VERYVERBOSE, buf, len, "[%d] send_rsp: %zu bytes", fd, len);
+	LOG_BIN_F(
+		VERYVERBOSE, buf, len, 0, "[%d] send_rsp: %zu bytes", fd, len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
 		SOCKS_CTX_LOG_F(DEBUG, ctx, "send: %s", strerror(errno));
@@ -790,7 +791,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 	}
 	ctx->rbuf.len += (size_t)nrecv;
 	LOG_BIN_F(
-		VERYVERBOSE, ctx->rbuf.data, ctx->rbuf.len,
+		VERYVERBOSE, ctx->rbuf.data, ctx->rbuf.len, 0,
 		"[%d] recv: %zu bytes", fd, ctx->rbuf.len);
 	const int want = socks_dispatch(ctx);
 	if (want < 0) {

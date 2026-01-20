@@ -138,7 +138,7 @@ bool dialaddr_parse(
 {
 	/* Check maximum possible length: FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + 1 + 5) {
-		LOG_TXT_F(ERROR, s, len, "address too long: %zu bytes", len);
+		LOG_TXT_F(ERROR, s, len, 0, "address too long: %zu bytes", len);
 		return false;
 	}
 	/* Create null-terminated copy for parsing */
@@ -592,7 +592,7 @@ static bool dialer_send(
 	const size_t len)
 {
 	const int fd = d->w_socket.fd;
-	LOG_BIN_F(VERYVERBOSE, buf, len, "send: fd=%d %zu bytes", fd, len);
+	LOG_BIN_F(VERYVERBOSE, buf, len, 0, "send: fd=%d %zu bytes", fd, len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
@@ -1269,7 +1269,7 @@ static int dialer_recv(struct dialer *restrict d)
 	}
 	d->rbuf.len += (size_t)nrecv;
 	LOG_BIN_F(
-		VERYVERBOSE, buf, (size_t)nrecv, "recv: %zu bytes",
+		VERYVERBOSE, buf, (size_t)nrecv, 0, "recv: %zu bytes",
 		(size_t)nrecv);
 
 	const int ret = recv_dispatch(d, &d->req->proxy[d->jump]);

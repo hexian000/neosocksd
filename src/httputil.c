@@ -77,7 +77,7 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 {
 	const size_t n = strlen(s);
 	ASSERT(n < 256);
-	LOG_BIN_F(VERBOSE, s, n, "reply_short: fd=%d %zu bytes", p->fd, n);
+	LOG_BIN_F(VERBOSE, s, n, 0, "reply_short: fd=%d %zu bytes", p->fd, n);
 
 	/* Send message directly to socket */
 	const ssize_t nsend = send(p->fd, s, n, 0);

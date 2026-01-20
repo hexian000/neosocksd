@@ -43,19 +43,18 @@ struct slog_extra {
 	void (*func)(FILE *f, void *data);
 	void *data;
 };
-void slog_vwrite(
+void slog_vprintf(
 	int level, const char *file, int line, const struct slog_extra *extra,
 	const char *format, va_list args);
-void slog_write(
+void slog_printf(
 	int level, const char *file, int line, const struct slog_extra *extra,
 	const char *format, ...);
 
-/* LOG: Log a message unconditionally. */
+/* LOG_F: Internal macro to log a message unconditionally. This is not a part of supported API. */
 #define LOG_F(level, format, ...)                                              \
-	slog_write(                                                            \
+	slog_printf(                                                           \
 		(LOG_LEVEL_##level), __FILE__, __LINE__, NULL, (format),       \
 		__VA_ARGS__)
-#define LOG(level, message) LOG_F(level, "%s", message)
 
 #if SLOG_MT_SAFE
 #define LOGLEVEL(level)                                                        \

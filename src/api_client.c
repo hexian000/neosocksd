@@ -337,10 +337,10 @@ static bool make_request(
 	}
 	BUF_APPENDSTR(p->wbuf, "\r\n");
 	LOG_TXT_F(
-		VERYVERBOSE, (const char *)p->wbuf.data, p->wbuf.len,
+		VERYVERBOSE, (const char *)p->wbuf.data, p->wbuf.len, 0,
 		"request header: %zu bytes", p->wbuf.len);
 	LOG_BIN_F(
-		VERYVERBOSE, VBUF_DATA(p->cbuf), VBUF_LEN(p->cbuf),
+		VERYVERBOSE, VBUF_DATA(p->cbuf), VBUF_LEN(p->cbuf), 0,
 		"request content: %zu bytes", VBUF_LEN(p->cbuf));
 	return true;
 }

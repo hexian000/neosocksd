@@ -206,7 +206,7 @@ int aux_traceback(lua_State *restrict L)
 	luaL_traceback(L, L, err, 1);
 	size_t len;
 	const char *s = lua_tolstring(L, -1, &len);
-	LOG_TXT_F(VERBOSE, s, len, "traceback: %s", err);
+	LOG_TXT_F(VERBOSE, s, len, 0, "traceback: %s", err);
 	return 1;
 }
 
