@@ -224,15 +224,16 @@ static void server_stats_stateful(
 		(void)snprintf(
 			load_str, sizeof(load_str), "%.03f%%", load * 100);
 	}
+	FORMAT_DURATION(dt_str, make_duration(dt));
 
 	BUF_APPENDF(
 		*buf,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
 		"Request Rate        : %.1f/s (API%+.1f/s)\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n"
-		"Server Load         : %s\n",
+		"Server Load         : %s (last %s)\n",
 		accept_rate, reject_rate, request_rate, api_request_rate,
-		xfer_rate_up, xfer_rate_down, load_str);
+		xfer_rate_up, xfer_rate_down, load_str, dt_str);
 
 	last.xfer_up = stats->byt_up;
 	last.xfer_down = stats->byt_down;

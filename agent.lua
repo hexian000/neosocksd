@@ -238,7 +238,11 @@ local function matcher(addr)
             error(strformat("%s: %s", fqdn, result))
         end
         if agent.verbose then
-            evlogf("agent [%s]: %s -> %s", connid_of(conn), addr, result)
+            if addr == result then
+                evlogf("agent [%s]: %s (passthrough)", connid_of(conn), addr)
+            else
+                evlogf("agent [%s]: %s -> %s", connid_of(conn), addr, result)
+            end
         end
         local proxies = list:new():append(conn):reverse()
         return function()
