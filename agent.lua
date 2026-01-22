@@ -33,6 +33,7 @@ agent.INTERNAL_DOMAIN = ".internal"
 agent.RELAY_DOMAIN = ".relay.neosocksd.internal"
 
 agent.BOOTSTRAP_DELAY = 10
+agent.GOSSIP_TARGET_COUNT = 2
 agent.SYNC_INTERVAL_BASE = 600
 agent.SYNC_INTERVAL_RANDOM = 600
 agent.TIMESTAMP_TOLERANCE = 600
@@ -287,6 +288,7 @@ local function callbyconn(conn, func, ...)
 end
 
 local function update_peerdb(peername, peerdb)
+    local updated = false
     local now = os.time()
     -- remove stale data
     for peer, data in pairs(_G.peerdb) do
@@ -299,25 +301,82 @@ local function update_peerdb(peername, peerdb)
     for peer, data in pairs(peerdb) do
         if peer == peername then
             -- direct update from peer
+            local old = _G.peerdb[peer]
+            if not old or data.timestamp ~= old.timestamp then
+                updated = true
+            end
             _G.peerdb[peer] = data
         elseif peer == agent.peername then
             -- ignore updates to self
         elseif is_valid(data, now) then
             local old = _G.peerdb[peer]
             if not old or data.timestamp > old.timestamp then
-                _G.peerdb[peer] = data
+                updated = true
                 evlogf("peerdb: updated peer %q from %q (time=%d)",
                     peer, peername, data.timestamp - now)
+                _G.peerdb[peer] = data
             end
         end
     end
+    return updated
+end
+
+local function sync_via(conn)
+    local ok, r1, r2 = callbyconn(conn, "sync", agent.peername, _G.peerdb)
+    if ok then
+        local peername, peerdb = r1, r2
+        update_peerdb(peername, peerdb)
+    end
+    return ok, r1
+end
+
+local function gossip(peername)
+    -- randomly pick up to 2 connections to gossip (excluding the source)
+    local candidates = {}
+    for connid, conn in pairs(agent.conns) do
+        -- find the peername for this connection
+        local selfinfo = _G.peerdb[agent.peername]
+        if selfinfo and selfinfo.conns then
+            local conninfo = selfinfo.conns[connid]
+            if conninfo and conninfo.peername ~= peername then
+                table.insert(candidates, { connid = connid, conn = conn })
+            end
+        end
+    end
+    local n = #candidates
+    if n == 0 then
+        return -- no one to gossip to
+    end
+    -- shuffle candidates
+    for i = n, 2, -1 do
+        local j = math.random(i)
+        candidates[i], candidates[j] = candidates[j], candidates[i]
+    end
+    local n = 0
+    for _, target in pairs(candidates) do
+        if n >= agent.GOSSIP_TARGET_COUNT then break end
+        local ok, r1 = sync_via(target.conn)
+        if ok then
+            if agent.verbose then
+                evlogf("gossip: [%s] propagated update from %q to %q",
+                    connid_of(target.conn), peername, r1)
+            end
+            n = n + 1
+        else
+            evlogf("gossip error: [%s] %s", connid_of(target.conn), r1)
+        end
+    end
+    hosts, routes = build_index(_G.peerdb)
 end
 
 function rpc.sync(peername, peerdb)
     if type(peername) ~= "string" or type(peerdb) ~= "table" then
         return agent.peername, _G.peerdb
     end
-    update_peerdb(peername, peerdb)
+    local updated = update_peerdb(peername, peerdb)
+    if updated then
+        async(gossip, peername)
+    end
     hosts, routes = build_index(_G.peerdb)
 
     local peerdiff = {}
@@ -334,15 +393,6 @@ function rpc.sync(peername, peerdb)
     return agent.peername, peerdiff
 end
 
-local function sync_via(conn)
-    local ok, r1, r2 = callbyconn(conn, "sync", agent.peername, _G.peerdb)
-    if not ok then
-        error(r1)
-    end
-    local peername, peerdb = r1, r2
-    update_peerdb(peername, peerdb)
-end
-
 function rpc.probe()
     if not agent.peername then
         error("peer is not available for relay")
@@ -351,7 +401,7 @@ function rpc.probe()
 end
 
 local function probe_via(conn)
-    sync_via(conn)
+    assert(sync_via(conn))
     local minrtt, peername
     for _ = 1, 4 do
         await.sleep(1)
@@ -402,7 +452,7 @@ function agent.maintenance()
     evlog("agent: probe finished")
     -- sync
     parallel_for("sync", agent.conns, function(_, conn)
-        sync_via(conn)
+        assert(sync_via(conn))
     end)
     evlog("agent: sync finished")
     hosts, routes = build_index(_G.peerdb)
