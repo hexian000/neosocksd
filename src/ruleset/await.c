@@ -354,7 +354,7 @@ static int await_execute_close(lua_State *restrict L)
 	ev_idle_stop(loop, &ud->w_idle);
 	if (pid > 0) {
 		if (kill(pid, SIGKILL) != 0) {
-			LOGE_F("kill: %s", strerror(errno));
+			LOG_PERROR("kill");
 		}
 		ud->w_child.pid = 0;
 	}
