@@ -596,7 +596,9 @@ static bool dialer_send(
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
-		DIALER_LOG_F(DEBUG, d, "send: fd=%d %s", fd, strerror(err));
+		DIALER_LOG_F(
+			DEBUG, d, "send: fd=%d [%d] %s", fd, err,
+			strerror(err));
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = err;
 		return false;
@@ -719,7 +721,9 @@ static bool send_socks4a_req(
 		if (inet_ntop(AF_INET6, &addr->in6, b, INET6_ADDRSTRLEN) ==
 		    NULL) {
 			const int err = errno;
-			DIALER_LOG_F(DEBUG, d, "inet_ntop: %s", strerror(err));
+			DIALER_LOG_F(
+				DEBUG, d, "inet_ntop: [%d] %s", err,
+				strerror(err));
 			d->err = DIALER_ERR_SYSTEM;
 			d->syserr = err;
 			return false;
@@ -888,7 +892,9 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 	const ssize_t nrecv = recv(fd, d->next, n, 0);
 	if (nrecv < 0) {
 		const int err = errno;
-		DIALER_LOG_F(DEBUG, d, "recv: fd=%d %s", fd, strerror(err));
+		DIALER_LOG_F(
+			DEBUG, d, "recv: fd=%d [%d] %s", fd, err,
+			strerror(err));
 		return false;
 	}
 	if ((size_t)nrecv != n) {
@@ -1246,7 +1252,9 @@ static int dialer_recv(struct dialer *restrict d)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 1;
 		}
-		DIALER_LOG_F(DEBUG, d, "recv: fd=%d %s", fd, strerror(err));
+		DIALER_LOG_F(
+			DEBUG, d, "recv: fd=%d [%d] %s", fd, err,
+			strerror(err));
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = err;
 		return -1;
@@ -1262,7 +1270,9 @@ static int dialer_recv(struct dialer *restrict d)
 		if (IS_TRANSIENT_ERROR(sockerr)) {
 			return 1;
 		}
-		DIALER_LOG_F(DEBUG, d, "recv: fd=%d %s", fd, strerror(sockerr));
+		DIALER_LOG_F(
+			DEBUG, d, "recv: fd=%d [%d] %s", fd, sockerr,
+			strerror(sockerr));
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = sockerr;
 		return -1;
@@ -1320,8 +1330,8 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 				char addr_str[64];
 				dialaddr_format(
 					addr_str, sizeof(addr_str), addr);
-				LOG_F(WARNING, "connect `%s': %s", addr_str,
-				      strerror(sockerr));
+				LOG_F(WARNING, "connect `%s': [%d] %s",
+				      addr_str, sockerr, strerror(sockerr));
 			}
 			d->err = DIALER_ERR_CONNECT;
 			d->syserr = sockerr;
@@ -1416,7 +1426,7 @@ static bool connect_sa(
 	const int fd = socket(sa->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
-		LOGD_F("socket: %s", strerror(err));
+		LOGD_F("socket: [%d] %s", err, strerror(err));
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = err;
 		return false;
@@ -1425,7 +1435,7 @@ static bool connect_sa(
 	/* Configure non-blocking mode */
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
-		LOGD_F("fcntl: %s", strerror(err));
+		LOGD_F("fcntl: [%d] %s", err, strerror(err));
 		CLOSE_FD(fd);
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = err;
@@ -1456,8 +1466,8 @@ static bool connect_sa(
 			if (LOGLEVEL(WARNING)) {
 				char addr_str[64];
 				format_sa(addr_str, sizeof(addr_str), sa);
-				LOG_F(WARNING, "connect %s: %s", addr_str,
-				      strerror(err));
+				LOG_F(WARNING, "connect %s: [%d] %s", addr_str,
+				      err, strerror(err));
 			}
 			d->err = DIALER_ERR_CONNECT;
 			d->syserr = err;

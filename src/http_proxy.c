@@ -339,7 +339,7 @@ static void on_established(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
 	struct http_ctx *restrict ctx = data;
-	if (ctx->uplink.state == XFER_FINISHED ||
+	if (ctx->uplink.state == XFER_FINISHED &&
 	    ctx->downlink.state == XFER_FINISHED) {
 		http_ctx_close(loop, ctx);
 		return;
@@ -378,6 +378,12 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
 		&stats->byt_down);
+
+	HTTP_CTX_LOG_F(
+		DEBUG, ctx,
+		"transfer start: uplink [%d->%d], downlink [%d->%d]",
+		ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
+		ctx->accepted_fd);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
 }
@@ -424,7 +430,8 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
 	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
-		HTTP_CTX_LOG_F(WARNING, ctx, "send: %s", fd, strerror(err));
+		HTTP_CTX_LOG_F(
+			WARNING, ctx, "send: [%d] %s", err, strerror(err));
 		http_ctx_close(loop, ctx);
 		return;
 	}
@@ -439,7 +446,9 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		len = cbuf->len - ctx->parser.cpos;
 		err = socket_send(fd, buf, &len);
 		if (err != 0) {
-			HTTP_CTX_LOG_F(WARNING, ctx, "send: %s", strerror(err));
+			HTTP_CTX_LOG_F(
+				WARNING, ctx, "send: [%d] %s", err,
+				strerror(err));
 			http_ctx_close(loop, ctx);
 			return;
 		}
@@ -469,8 +478,8 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
 			HTTP_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s (%s)",
-				dialer_strerror(err), strerror(syserr));
+				ERROR, ctx, "dialer: %s ([%d] %s)",
+				dialer_strerror(err), syserr, strerror(syserr));
 		} else {
 			HTTP_CTX_LOG_F(
 				ERROR, ctx, "dialer: %s", dialer_strerror(err));
@@ -478,7 +487,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
 		return;
 	}
-	HTTP_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
+	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, fd=%d", fd);
 	ctx->dialed_fd = fd;
 
 	/* CONNECT proxy */

@@ -26,19 +26,17 @@
 #include <stdint.h>
 
 enum transfer_state {
-	XFER_INIT, /**< Initial state before any I/O is performed. */
-	XFER_CONNECTED, /**< I/O loop is active and data is being transferred. */
-	XFER_LINGER, /**< Read side hit EOF or error; draining any buffered data. */
-	XFER_FINISHED, /**< Transfer is done; watcher has been stopped. */
+	XFER_INIT,
+	XFER_CONNECTED,
+	XFER_LINGER,
+	XFER_FINISHED,
 };
 
 /**
  * @brief Callback invoked when a transfer state change occurs.
  */
 struct transfer_state_cb {
-	/** Callback function. */
 	void (*func)(struct ev_loop *loop, void *data);
-	/** Opaque user data passed back to the callback. */
 	void *data;
 };
 
@@ -46,18 +44,18 @@ struct transfer_state_cb {
  * @brief Transfer context and buffers for non-blocking copy between fds.
  */
 struct transfer {
-	enum transfer_state state; /**< Current state of the state machine. */
-	int src_fd, dst_fd; /**< Source and destination file descriptors. */
-	ev_io w_socket; /**< libev watcher driving the transfer. */
-	struct transfer_state_cb state_cb; /**< State change callback. */
-	uintmax_t *byt_transferred; /**< Optional cumulative byte counter. */
+	enum transfer_state state;
+	int src_fd, dst_fd;
+	ev_io w_socket;
+	struct transfer_state_cb state_cb;
+	uintmax_t *byt_transferred;
 #if WITH_SPLICE
-	struct splice_pipe pipe; /**< Kernel pipe for `splice(2)` fast-path. */
+	struct splice_pipe pipe;
 #endif
-	size_t pos; /**< Current read buffer send position. */
+	size_t pos;
 	struct {
 		BUFFER_HDR;
-		unsigned char data[IO_BUFSIZE]; /**< I/O buffer storage. */
+		unsigned char data[IO_BUFSIZE];
 	} buf;
 };
 

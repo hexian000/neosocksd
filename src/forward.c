@@ -162,7 +162,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 	ASSERT(ctx->state == STATE_CONNECTED ||
 	       ctx->state == STATE_ESTABLISHED);
 
-	if (ctx->uplink.state == XFER_FINISHED ||
+	if (ctx->uplink.state == XFER_FINISHED &&
 	    ctx->downlink.state == XFER_FINISHED) {
 		forward_ctx_close(loop, ctx);
 		return;
@@ -208,8 +208,8 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
 			FW_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s (%s)",
-				dialer_strerror(err), strerror(syserr));
+				ERROR, ctx, "dialer: %s ([%d] %s)",
+				dialer_strerror(err), syserr, strerror(syserr));
 		} else {
 			FW_CTX_LOG_F(
 				ERROR, ctx, "dialer: %s", dialer_strerror(err));
@@ -219,7 +219,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	}
 	ctx->dialed_fd = fd;
 
-	FW_CTX_LOG_F(DEBUG, ctx, "connected, fd=%d", fd);
+	FW_CTX_LOG_F(VERBOSE, ctx, "connected, fd=%d", fd);
 	/* cleanup before state change */
 	dialreq_free(ctx->dialreq);
 
@@ -241,6 +241,12 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
 		&stats->byt_down);
+
+	FW_CTX_LOG_F(
+		DEBUG, ctx,
+		"transfer start: uplink [%d->%d], downlink [%d->%d]",
+		ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
+		ctx->accepted_fd);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
 }
@@ -396,7 +402,9 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	union sockaddr_max dest;
 	socklen_t len = sizeof(dest);
 	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
-		FW_CTX_LOG_F(ERROR, ctx, "getsockname: %s", strerror(errno));
+		const int err = errno;
+		FW_CTX_LOG_F(
+			ERROR, ctx, "getsockname: [%d] %s", err, strerror(err));
 		forward_ctx_close(loop, ctx);
 		return;
 	}
@@ -444,7 +452,9 @@ static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
 	union sockaddr_max dest;
 	socklen_t len = sizeof(dest);
 	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
-		FW_CTX_LOG_F(ERROR, ctx, "getsockname: %s", strerror(errno));
+		const int err = errno;
+		FW_CTX_LOG_F(
+			ERROR, ctx, "getsockname: [%d] %s", err, strerror(err));
 		return NULL;
 	}
 	struct dialreq *req = dialreq_new(0);

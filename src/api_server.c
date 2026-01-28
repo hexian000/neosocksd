@@ -658,6 +658,11 @@ static void handle_ruleset_gc(
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
 
+#if WITH_SPLICE
+	/* Shrink the splice pipe cache too */
+	pipe_shrink(SIZE_MAX);
+#endif
+
 	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
 	FORMAT_SI(objects, (double)vmstats.num_object);
 	FORMAT_DURATION(timecost, make_duration_nanos(end - start));
@@ -895,7 +900,8 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
 		API_CTX_LOG_F(
-			WARNING, ctx, "send: fd=%d %s", fd, strerror(err));
+			WARNING, ctx, "send: fd=%d [%d] %s", fd, err,
+			strerror(err));
 		api_ctx_close(loop, ctx);
 		return;
 	}
@@ -912,7 +918,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		err = socket_send(fd, buf, &len);
 		if (err != 0) {
 			API_CTX_LOG_F(
-				WARNING, ctx, "send: fd=%d %s", fd,
+				WARNING, ctx, "send: fd=%d [%d] %s", fd, err,
 				strerror(err));
 			api_ctx_close(loop, ctx);
 			return;

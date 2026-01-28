@@ -207,7 +207,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 	ASSERT(ctx->state == STATE_CONNECTED ||
 	       ctx->state == STATE_ESTABLISHED);
 
-	if (ctx->uplink.state == XFER_FINISHED ||
+	if (ctx->uplink.state == XFER_FINISHED &&
 	    ctx->downlink.state == XFER_FINISHED) {
 		socks_ctx_close(loop, ctx);
 		return;
@@ -229,7 +229,9 @@ static bool send_rsp(
 		VERYVERBOSE, buf, len, 0, "[%d] send_rsp: %zu bytes", fd, len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
-		SOCKS_CTX_LOG_F(DEBUG, ctx, "send: %s", strerror(errno));
+		const int err = errno;
+		SOCKS_CTX_LOG_F(
+			DEBUG, ctx, "send: [%d] %s", err, strerror(err));
 		return false;
 	}
 	if ((size_t)nsend != len) {
@@ -258,8 +260,10 @@ socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 	socklen_t addrlen = sizeof(addr);
 	if (ctx->dialed_fd != -1) {
 		if (getsockname(ctx->dialed_fd, &addr.sa, &addrlen) != 0) {
+			const int err = errno;
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "getsockname: %s", strerror(errno));
+				ERROR, ctx, "getsockname: [%d] %s", err,
+				strerror(err));
 		}
 	}
 	enum {
@@ -415,8 +419,8 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s (%s)",
-				dialer_strerror(err), strerror(syserr));
+				ERROR, ctx, "dialer: %s ([%d] %s)",
+				dialer_strerror(err), syserr, strerror(syserr));
 		} else {
 			SOCKS_CTX_LOG_F(
 				ERROR, ctx, "dialer: %s", dialer_strerror(err));
@@ -454,6 +458,12 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
 		&stats->byt_down);
+
+	SOCKS_CTX_LOG_F(
+		DEBUG, ctx,
+		"transfer start: uplink [%d->%d], downlink [%d->%d]",
+		ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
+		ctx->accepted_fd);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
 }
@@ -781,7 +791,8 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 1;
 		}
-		SOCKS_CTX_LOG_F(DEBUG, ctx, "recv: %s", strerror(err));
+		SOCKS_CTX_LOG_F(
+			DEBUG, ctx, "recv: [%d] %s", err, strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {

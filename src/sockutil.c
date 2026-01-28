@@ -408,7 +408,8 @@ bool parse_bindaddr(union sockaddr_max *restrict sa, const char *restrict s)
 	struct addrinfo *result = NULL;
 	const int err = getaddrinfo(hoststr, portstr, &hints, &result);
 	if (err != 0) {
-		LOGE_F("resolve: %s", gai_strerror(err));
+		LOGE_F("getaddrinfo: resolve error: [%d] %s", err,
+		       gai_strerror(err));
 		return false;
 	}
 	const bool ok = find_addrinfo(sa, result);
@@ -429,7 +430,8 @@ bool resolve_addr(
 	struct addrinfo *result = NULL;
 	const int err = getaddrinfo(name, service, &hints, &result);
 	if (err != 0) {
-		LOGE_F("resolve: %s", gai_strerror(err));
+		LOGE_F("getaddrinfo: resolve error: [%d] %s", err,
+		       gai_strerror(err));
 		return false;
 	}
 	const bool ok = find_addrinfo(sa, result);

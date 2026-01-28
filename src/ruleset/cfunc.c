@@ -66,7 +66,7 @@ static int request_finish(lua_State *restrict L)
 			req = lua_touserdata(L, -1);
 		}
 		if (req == NULL) {
-			LOGE_F("ruleset: %s", ERR_INVALID_ADDR);
+			LOGD("ruleset: request rejected");
 		}
 	} else {
 		LOGE_F("ruleset error: %s", lua_tostring(L, 2));

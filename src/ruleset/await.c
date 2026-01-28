@@ -434,17 +434,21 @@ static int await_execute(lua_State *restrict L)
 
 	const pid_t pid = fork();
 	if (pid < 0) {
-		const char *err = strerror(errno);
-		lua_pushstring(L, err);
+		const int err = errno;
+		const char *errmsg = strerror(err);
+		LOGW_F("fork: [%d] %s", err, strerror(err));
+		lua_pushstring(L, errmsg);
 		return lua_error(L);
 	}
 	if (pid == 0) {
 		if (setsid() < 0) {
-			LOGW_F("setsid: %s", strerror(errno));
+			const int err = errno;
+			LOGW_F("setsid: [%d] %s", err, strerror(err));
 		}
 		const char *argv[] = { "sh", "-c", command, NULL };
 		execv("/bin/sh", (char **)argv);
-		FAILMSGF("execv: %s", strerror(errno));
+		const int err = errno;
+		FAILMSGF("execv: [%d] %s", err, strerror(err));
 	}
 	ev_child_set(&ud->w_child, pid, 0);
 	ev_child_start(r->loop, &ud->w_child);

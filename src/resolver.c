@@ -393,7 +393,8 @@ static void addrinfo_cb(
 		/* c-ares channel is being destroyed, don't process */
 		return;
 	default:
-		LOGW_F("resolve: %s", ares_strerror(status));
+		LOGW_F("c-ares: resolve error: [%d] %s", status,
+		       ares_strerror(status));
 		break;
 	}
 
@@ -409,7 +410,9 @@ void resolver_init(void)
 #if CARES_HAVE_ARES_LIBRARY_INIT
 	/* Initialize c-ares library if available */
 	const int ret = ares_library_init(ARES_LIB_INIT_ALL);
-	CHECKMSGF(ret == ARES_SUCCESS, "c-ares: %s", ares_strerror(ret));
+	CHECKMSGF(
+		ret == ARES_SUCCESS, "c-ares: [%d] %s", ret,
+		ares_strerror(ret));
 #endif
 #endif
 }
@@ -464,7 +467,7 @@ static bool resolver_async_init(
 	options.sock_state_cb_data = r;
 	ret = ares_init_options(&r->channel, &options, ARES_OPT_SOCK_STATE_CB);
 	if (ret != ARES_SUCCESS) {
-		LOGE_F("ares: %s", ares_strerror(ret));
+		LOGE_F("c-ares: [%d] %s", ret, ares_strerror(ret));
 		return false;
 	}
 
@@ -479,8 +482,8 @@ static bool resolver_async_init(
 	}
 	ret = ares_set_servers_ports_csv(r->channel, nameserver);
 	if (ret != ARES_SUCCESS) {
-		LOGE_F("failed to set nameserver `%s': %s", nameserver,
-		       ares_strerror(ret));
+		LOGE_F("c-ares: failed to set nameserver `%s': [%d] %s",
+		       nameserver, ret, ares_strerror(ret));
 		/* Continue with default nameservers */
 		return true;
 	}

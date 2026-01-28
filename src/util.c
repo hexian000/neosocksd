@@ -71,12 +71,14 @@ void pipe_close(struct splice_pipe *restrict pipe)
 bool pipe_new(struct splice_pipe *restrict pipe)
 {
 	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
-		LOGW_F("pipe2: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("pipe2: [%d] %s", err, strerror(err));
 		return false;
 	}
 	const int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, PIPE_BUFSIZE);
 	if (pipe_cap < 0) {
-		LOGW_F("fcntl: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("fcntl: [%d] %s", err, strerror(err));
 		pipe_close(pipe);
 		return false;
 	}
@@ -180,7 +182,7 @@ void init(int argc, char **argv)
 	};
 	if (sigaction(SIGPIPE, &ignore, NULL) != 0) {
 		const int err = errno;
-		FAILMSGF("sigaction: %s", strerror(err));
+		FAILMSGF("sigaction: [%d] %s", err, strerror(err));
 	}
 #if WITH_CRASH_HANDLER
 	set_crash_handler();
@@ -326,22 +328,25 @@ void drop_privileges(const struct user_ident *restrict ident)
 {
 #if _BSD_SOURCE || _GNU_SOURCE
 	if (setgroups(0, NULL) != 0) {
-		LOGW_F("unable to drop supplementary group privileges: %s",
-		       strerror(errno));
+		const int err = errno;
+		LOGW_F("unable to drop supplementary group privileges: [%d] %s",
+		       err, strerror(err));
 	}
 #endif
 	if (ident->gid != (gid_t)-1) {
 		LOGD_F("setgid: %jd", (intmax_t)ident->gid);
 		if (setgid(ident->gid) != 0 || setegid(ident->gid) != 0) {
-			LOGW_F("unable to drop group privileges: %s",
-			       strerror(errno));
+			const int err = errno;
+			LOGW_F("unable to drop group privileges: [%d] %s", err,
+			       strerror(err));
 		}
 	}
 	if (ident->uid != (uid_t)-1) {
 		LOGD_F("setuid: %jd", (intmax_t)ident->uid);
 		if (setuid(ident->uid) != 0 || seteuid(ident->uid) != 0) {
-			LOGW_F("unable to drop user privileges: %s",
-			       strerror(errno));
+			const int err = errno;
+			LOGW_F("unable to drop user privileges: [%d] %s", err,
+			       strerror(err));
 		}
 	}
 }
@@ -355,14 +360,14 @@ void daemonize(
 	int fd[2];
 	if (pipe(fd) == -1) {
 		const int err = errno;
-		FAILMSGF("pipe: %s", strerror(err));
+		FAILMSGF("pipe: [%d] %s", err, strerror(err));
 	}
 	/* First fork(). */
 	{
 		const pid_t pid = fork();
 		if (pid < 0) {
 			const int err = errno;
-			FAILMSGF("fork: %s", strerror(err));
+			FAILMSGF("fork: [%d] %s", err, strerror(err));
 		} else if (pid > 0) {
 			CLOSE_FD(fd[1]);
 			char buf[256];
@@ -378,14 +383,15 @@ void daemonize(
 	}
 	/* In the child, call setsid(). */
 	if (setsid() < 0) {
-		LOGW_F("setsid: %s", strerror(errno));
+		const int err = errno;
+		LOGW_F("setsid: [%d] %s", err, strerror(err));
 	}
 	/* In the child, call fork() again. */
 	{
 		const pid_t pid = fork();
 		if (pid < 0) {
 			const int err = errno;
-			FAILMSGF("fork: %s", strerror(err));
+			FAILMSGF("fork: [%d] %s", err, strerror(err));
 		} else if (pid > 0) {
 			/* Call exit() in the first child. */
 			exit(EXIT_SUCCESS);
@@ -411,7 +417,8 @@ void daemonize(
            involuntarily blocks mount points from being unmounted. */
 	if (!nochdir) {
 		if (chdir("/") != 0) {
-			LOGW_F("chdir: %s", strerror(errno));
+			const int err = errno;
+			LOGW_F("chdir: [%d] %s", err, strerror(err));
 		}
 	}
 	/* In the daemon process, drop privileges */

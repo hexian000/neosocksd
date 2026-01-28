@@ -117,7 +117,9 @@ int aux_format_addr(lua_State *restrict L)
 			af, &((const struct sockaddr_in *)sa)->sin_addr, buf,
 			sizeof(buf));
 		if (addr_str == NULL) {
-			return luaL_error(L, "inet_ntop: %s", strerror(errno));
+			const int err = errno;
+			return luaL_error(
+				L, "inet_ntop: [%d] %s", err, strerror(err));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -127,7 +129,9 @@ int aux_format_addr(lua_State *restrict L)
 			af, &((const struct sockaddr_in6 *)sa)->sin6_addr, buf,
 			sizeof(buf));
 		if (addr_str == NULL) {
-			return luaL_error(L, "inet_ntop: %s", strerror(errno));
+			const int err = errno;
+			return luaL_error(
+				L, "inet_ntop: [%d] %s", err, strerror(err));
 		}
 		lua_pushstring(L, addr_str);
 	} break;

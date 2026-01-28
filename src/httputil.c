@@ -82,7 +82,8 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 	/* Send message directly to socket */
 	const ssize_t nsend = send(p->fd, s, n, 0);
 	if (nsend < 0) {
-		LOGW_F("send: fd=%d %s", p->fd, strerror(errno));
+		const int err = errno;
+		LOGW_F("send: fd=%d [%d] %s", p->fd, err, strerror(err));
 		return false;
 	}
 	if ((size_t)nsend != n) {
@@ -349,7 +350,7 @@ static bool recv_request(struct http_parser *restrict p)
 	/* Receive data from socket */
 	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
 	if (err != 0) {
-		LOGD_F("recv: fd=%d %s", p->fd, strerror(err));
+		LOGD_F("recv: fd=%d [%d] %s", p->fd, err, strerror(err));
 		return false;
 	}
 	if (n == 0) {
@@ -383,7 +384,7 @@ static bool recv_content(const struct http_parser *restrict p)
 	/* Receive data directly into content buffer */
 	const int err = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
 	if (err != 0) {
-		LOGW_F("recv: fd=%d %s", p->fd, strerror(err));
+		LOGW_F("recv: fd=%d [%d] %s", p->fd, err, strerror(err));
 		return false;
 	}
 	if (n == 0) {

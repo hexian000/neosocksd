@@ -67,7 +67,7 @@ accept_cb(struct ev_loop *loop, ev_io *restrict watcher, const int revents)
 			if (IS_TRANSIENT_ERROR(err)) {
 				break; /* No more connections to accept */
 			}
-			LOGE_F("accept: %s", strerror(err));
+			LOGE_F("accept: [%d] %s", err, strerror(err));
 			/* Sleep until next timer, see timer_cb */
 			ev_io_stop(loop, watcher);
 			ev_timer_start(loop, &s->l.w_timer);
@@ -92,7 +92,8 @@ accept_cb(struct ev_loop *loop, ev_io *restrict watcher, const int revents)
 
 		/* Configure the accepted socket */
 		if (!socket_set_nonblock(fd)) {
-			LOGE_F("fcntl: %s", strerror(errno));
+			const int err = errno;
+			LOGE_F("fcntl: [%d] %s", err, strerror(err));
 			CLOSE_FD(fd);
 			return;
 		}
@@ -132,13 +133,15 @@ bool server_start(
 	/* Create TCP socket */
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
-		LOGE_F("socket: %s", strerror(errno));
+		const int err = errno;
+		LOGE_F("socket: [%d] %s", err, strerror(err));
 		return false;
 	}
 
 	/* Set socket to non-blocking mode */
 	if (!socket_set_nonblock(fd)) {
-		LOGE_F("fcntl: %s", strerror(errno));
+		const int err = errno;
+		LOGE_F("fcntl: [%d] %s", err, strerror(err));
 		CLOSE_FD(fd);
 		return false;
 	}
@@ -174,14 +177,16 @@ bool server_start(
 
 	/* Bind socket to address */
 	if (bind(fd, bindaddr, getsocklen(bindaddr)) != 0) {
-		LOGE_F("bind error: %s", strerror(errno));
+		const int err = errno;
+		LOGE_F("bind: [%d] %s", err, strerror(err));
 		CLOSE_FD(fd);
 		return false;
 	}
 
 	/* Start listening for connections */
 	if (listen(fd, backlog)) {
-		LOGE_F("listen error: %s", strerror(errno));
+		const int err = errno;
+		LOGE_F("listen: [%d] %s", err, strerror(err));
 		CLOSE_FD(fd);
 		return false;
 	}

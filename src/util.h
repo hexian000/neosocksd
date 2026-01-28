@@ -69,7 +69,9 @@ extern struct globals {
 #define CLOSE_FD(fd)                                                           \
 	do {                                                                   \
 		if (close((fd)) != 0) {                                        \
-			LOGW_F("close: fd=%d %s", (fd), strerror(errno));      \
+			const int err = errno;                                 \
+			LOGW_F("close: fd=%d [%d] %s", (fd), err,              \
+			       strerror(err));                                 \
 		}                                                              \
 	} while (0)
 
@@ -113,7 +115,7 @@ struct splice_pipe {
 	size_t cap, len;
 };
 
-#define PIPE_MAXCACHED 16
+#define PIPE_MAXCACHED 8
 
 /**
  * @brief Global cache of reusable pipes.

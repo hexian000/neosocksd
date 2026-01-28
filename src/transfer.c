@@ -39,10 +39,26 @@
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		LOG_F(level, "%d -> %d: " format, (t)->src_fd, (t)->dst_fd,    \
+		LOG_F(level, "[%d->%d] " format, (t)->src_fd, (t)->dst_fd,     \
 		      __VA_ARGS__);                                            \
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
+
+#define SHUTDOWN_WR(fd)                                                        \
+	do {                                                                   \
+		if (shutdown((fd), SHUT_WR) != 0) {                            \
+			const int err = errno;                                 \
+			LOGW_F("shutdown: fd=%d [%d] %s", (fd), err,           \
+			       strerror(err));                                 \
+		}                                                              \
+	} while (0)
+
+static const char *xfer_state_str[] = {
+	[XFER_INIT] = "CONNECT",
+	[XFER_CONNECTED] = "ESTABLISHED",
+	[XFER_LINGER] = "LINGER",
+	[XFER_FINISHED] = "FINISHED",
+};
 
 /**
  * @brief Reconfigure and restart the internal watcher for the next step.
@@ -110,7 +126,9 @@ static void set_state(
 	if (t->state == state) {
 		return;
 	}
-	XFER_CTX_LOG_F(VERBOSE, t, "state %d changed to %d", t->state, state);
+	XFER_CTX_LOG_F(
+		VERBOSE, t, "state changed: %s -> %s", xfer_state_str[t->state],
+		xfer_state_str[state]);
 	t->state = state;
 	t->state_cb.func(loop, t->state_cb.data);
 }
@@ -135,7 +153,7 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		XFER_CTX_LOG_F(DEBUG, t, "recv: %s", strerror(err));
+		XFER_CTX_LOG_F(DEBUG, t, "recv: [%d] %s", err, strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
@@ -166,7 +184,7 @@ static ssize_t transfer_send(struct transfer *restrict t)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		XFER_CTX_LOG_F(DEBUG, t, "send: %s", strerror(err));
+		XFER_CTX_LOG_F(DEBUG, t, "send: [%d] %s", err, strerror(err));
 		return -1;
 	}
 	if (nsend == 0) {
@@ -232,6 +250,9 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			update_watcher(t, loop, EV_WRITE);
 			break;
 		}
+		/* Forward EOF to destination after all data sent */
+		SHUTDOWN_WR(t->dst_fd);
+		XFER_CTX_LOG(VERBOSE, t, "forwarded EOF");
 		state = XFER_FINISHED;
 		/* fallthrough */
 	case XFER_FINISHED:
@@ -264,7 +285,8 @@ static ssize_t splice_drain(struct transfer *restrict t, const int fd)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		XFER_CTX_LOG_F(DEBUG, t, "pipe: recv %s", strerror(err));
+		XFER_CTX_LOG_F(
+			DEBUG, t, "pipe: recv [%d] %s", err, strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
@@ -293,7 +315,8 @@ static ssize_t splice_pump(struct transfer *restrict t, const int fd)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		XFER_CTX_LOG_F(DEBUG, t, "pipe: send %s", strerror(err));
+		XFER_CTX_LOG_F(
+			DEBUG, t, "pipe: send [%d] %s", err, strerror(err));
 		return -1;
 	}
 	pipe->len -= (size_t)nsend;
@@ -350,6 +373,9 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			update_watcher(t, loop, EV_WRITE);
 			break;
 		}
+		/* Forward EOF to destination after all data sent */
+		SHUTDOWN_WR(t->dst_fd);
+		XFER_CTX_LOG(VERBOSE, t, "forwarded EOF");
 		state = XFER_FINISHED;
 		/* fallthrough */
 	case XFER_FINISHED:
@@ -408,7 +434,6 @@ static void pipe_put(struct splice_pipe *restrict pipe)
 
 void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
 {
-	XFER_CTX_LOG(VERBOSE, t, "start");
 #if WITH_SPLICE
 	if (G.conf->pipe) {
 		struct splice_pipe pipe;
