@@ -30,7 +30,7 @@ struct config {
 
 	bool http : 1;
 	bool auth_required : 1;
-	bool proto_timeout : 1;
+	bool bidir_timeout : 1;
 #if WITH_SPLICE
 	bool pipe : 1;
 #endif

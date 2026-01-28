@@ -56,7 +56,7 @@ neosocksd supports only basic authentication (plain text username and password) 
 
 # Start a hardened load balancer in the background
 sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 --max-startups 60:30:100 \
-    --proto-timeout -t 15 -l :80 -f : -r lb.lua --api 127.0.1.1:9080
+    --bidir-timeout -t 15 -l :80 -f : -r lb.lua --api 127.0.1.1:9080
 
 # Start a ruleset powered SOCKS4 / SOCKS4A / SOCKS5 server
 ./neosocksd -d -l [::]:1080 --api 127.0.1.1:9080 -r ruleset_simple.lua

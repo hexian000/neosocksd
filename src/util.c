@@ -440,9 +440,6 @@ void daemonize(
 	}
 	/* Close the anonymous pipe. */
 	CLOSE_FD(fd[1]);
-
-	/* Set logging output to syslog. */
-	slog_setoutput(SLOG_OUTPUT_SYSLOG, "neosocksd");
 }
 
 /** Read a timespec as signed 64-bit nanoseconds. */

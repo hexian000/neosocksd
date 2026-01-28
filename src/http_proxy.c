@@ -39,8 +39,8 @@ enum http_state {
 	STATE_PROCESS,
 	STATE_RESPONSE,
 	STATE_CONNECT,
-	STATE_CONNECTED,
 	STATE_ESTABLISHED,
+	STATE_BIDIRECTIONAL,
 };
 
 struct server;
@@ -149,12 +149,12 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		dialer_cancel(&ctx->dialer, loop);
 		stats->num_halfopen--;
 		return;
-	case STATE_CONNECTED:
+	case STATE_ESTABLISHED:
 		transfer_stop(loop, &ctx->uplink);
 		transfer_stop(loop, &ctx->downlink);
 		stats->num_halfopen--;
 		return;
-	case STATE_ESTABLISHED:
+	case STATE_BIDIRECTIONAL:
 		transfer_stop(loop, &ctx->uplink);
 		transfer_stop(loop, &ctx->downlink);
 		stats->num_sessions--;
@@ -178,7 +178,7 @@ static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 
 	session_del(&ctx->ss);
-	if (ctx->state < STATE_CONNECTED) {
+	if (ctx->state < STATE_ESTABLISHED) {
 		dialreq_free(ctx->dialreq);
 	}
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
@@ -324,8 +324,9 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	http_connect(loop, ctx);
 }
 
-static void on_established(struct ev_loop *loop, struct http_ctx *restrict ctx)
+static void mark_ready(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
+	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
 
 	struct server_stats *restrict stats = &ctx->s->stats;
@@ -333,7 +334,7 @@ static void on_established(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	stats->num_sessions++;
 	stats->num_success++;
 	HTTP_CTX_LOG_F(
-		DEBUG, ctx, "established, %zu active", stats->num_sessions);
+		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
 }
 
 static void xfer_state_cb(struct ev_loop *loop, void *data)
@@ -344,11 +345,10 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 		http_ctx_close(loop, ctx);
 		return;
 	}
-	if (ctx->state == STATE_CONNECTED &&
+	if (ctx->state == STATE_ESTABLISHED &&
 	    ctx->uplink.state == XFER_CONNECTED &&
 	    ctx->downlink.state == XFER_CONNECTED) {
-		ctx->state = STATE_ESTABLISHED;
-		on_established(loop, ctx);
+		mark_ready(loop, ctx);
 		return;
 	}
 }
@@ -360,11 +360,10 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_stop(loop, &ctx->w_send);
 	dialreq_free(ctx->dialreq);
 
-	if (G.conf->proto_timeout) {
-		ctx->state = STATE_CONNECTED;
-	} else {
+	if (G.conf->bidir_timeout) {
 		ctx->state = STATE_ESTABLISHED;
-		on_established(loop, ctx);
+	} else {
+		mark_ready(loop, ctx);
 	}
 
 	const struct transfer_state_cb cb = {

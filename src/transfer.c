@@ -54,8 +54,8 @@
 	} while (0)
 
 static const char *xfer_state_str[] = {
-	[XFER_INIT] = "CONNECT",
-	[XFER_CONNECTED] = "ESTABLISHED",
+	[XFER_INIT] = "ESTABLISHED",
+	[XFER_CONNECTED] = "TRANSFERRING",
 	[XFER_LINGER] = "LINGER",
 	[XFER_FINISHED] = "FINISHED",
 };
@@ -157,7 +157,7 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 		return -1;
 	}
 	if (nrecv == 0) {
-		XFER_CTX_LOG(VERBOSE, t, "recv: EOF");
+		XFER_CTX_LOG(VERYVERBOSE, t, "recv: EOF");
 		return -1;
 	}
 	t->buf.len += (size_t)nrecv;
@@ -252,7 +252,7 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		}
 		/* Forward EOF to destination after all data sent */
 		SHUTDOWN_WR(t->dst_fd);
-		XFER_CTX_LOG(VERBOSE, t, "forwarded EOF");
+		XFER_CTX_LOG(VERYVERBOSE, t, "forwarded EOF");
 		state = XFER_FINISHED;
 		/* fallthrough */
 	case XFER_FINISHED:
@@ -290,7 +290,7 @@ static ssize_t splice_drain(struct transfer *restrict t, const int fd)
 		return -1;
 	}
 	if (nrecv == 0) {
-		XFER_CTX_LOG(VERBOSE, t, "pipe: recv EOF");
+		XFER_CTX_LOG(VERYVERBOSE, t, "pipe: recv EOF");
 		return -1;
 	}
 	pipe->len += (size_t)nrecv;
@@ -375,7 +375,7 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		}
 		/* Forward EOF to destination after all data sent */
 		SHUTDOWN_WR(t->dst_fd);
-		XFER_CTX_LOG(VERBOSE, t, "forwarded EOF");
+		XFER_CTX_LOG(VERYVERBOSE, t, "forwarded EOF");
 		state = XFER_FINISHED;
 		/* fallthrough */
 	case XFER_FINISHED:

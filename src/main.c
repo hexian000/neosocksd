@@ -110,8 +110,8 @@ static void print_usage(const char *argv0)
 		"  --api <bind_address>       RESTful API listen address\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
-		"  --proto-timeout            keep the session in halfopen state until there is\n"
-		"                             bidirectional traffic\n"
+		"  --bidir-timeout            continue counting timeout before bidirectional\n"
+		"                             traffic is established\n"
 		"  --loglevel <level>         0-8 are Silence, Fatal, Error, Warning, Notice, Info,\n"
 		"                             Debug, Verbose, VeryVerbose respectively (default: 4)\n"
 		"  -C, --color                colorized log output using ANSI escape sequences\n"
@@ -367,7 +367,12 @@ static void parse_args(const int argc, char *const *const restrict argv)
 			continue;
 		}
 		if (strcmp(argv[i], "--proto-timeout") == 0) {
-			conf->proto_timeout = true;
+			LOGW("`--proto-timeout' is deprecated, use `--bidir-timeout' instead");
+			conf->bidir_timeout = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--bidir-timeout") == 0) {
+			conf->bidir_timeout = true;
 			continue;
 		}
 		if (strcmp(argv[i], "--") == 0) {
@@ -499,6 +504,7 @@ int main(int argc, char **argv)
 		}
 		if (conf->daemonize) {
 			daemonize(pident, true, false);
+			slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME);
 		} else if (pident != NULL) {
 			drop_privileges(pident);
 		}
