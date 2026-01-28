@@ -162,7 +162,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 static void
 socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 {
-	SOCKS_CTX_LOG_F(VERBOSE, ctx, "close, state=%d", ctx->state);
+	SOCKS_CTX_LOG_F(VERBOSE, ctx, "closing, state=%d", ctx->state);
 
 	socks_ctx_stop(loop, ctx);
 	if (ctx->accepted_fd != -1) {

@@ -76,11 +76,10 @@ accept_cb(struct ev_loop *loop, ev_io *restrict watcher, const int revents)
 
 		lstats->num_accept++;
 
-		/* Log accepted connection if verbose logging is enabled */
-		if (LOGLEVEL(VERBOSE)) {
+		if (LOGLEVEL(VERYVERBOSE)) {
 			char addr_str[64];
 			format_sa(addr_str, sizeof(addr_str), &addr.sa);
-			LOG_F(VERBOSE, "accept from listener %d: [%d] %s",
+			LOG_F(VERYVERBOSE, "accepted from listener %d: [%d] %s",
 			      watcher->fd, fd, addr_str);
 		}
 

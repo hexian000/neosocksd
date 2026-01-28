@@ -44,15 +44,6 @@
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
 
-#define SHUTDOWN_WR(fd)                                                        \
-	do {                                                                   \
-		if (shutdown((fd), SHUT_WR) != 0) {                            \
-			const int err = errno;                                 \
-			LOGW_F("shutdown: fd=%d [%d] %s", (fd), err,           \
-			       strerror(err));                                 \
-		}                                                              \
-	} while (0)
-
 static const char *xfer_state_str[] = {
 	[XFER_INIT] = "ESTABLISHED",
 	[XFER_CONNECTED] = "TRANSFERRING",
@@ -197,6 +188,17 @@ static ssize_t transfer_send(struct transfer *restrict t)
 	return nsend;
 }
 
+static void send_eof(struct transfer *restrict t)
+{
+	if (shutdown(t->dst_fd, SHUT_WR) != 0) {
+		const int err = errno;
+		XFER_CTX_LOG_F(
+			WARNING, t, "shutdown: [%d] %s", err, strerror(err));
+		return;
+	}
+	XFER_CTX_LOG(VERYVERBOSE, t, "forwarded EOF");
+}
+
 /**
  * @brief libev callback that drives the transfer state machine.
  *
@@ -250,9 +252,7 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			update_watcher(t, loop, EV_WRITE);
 			break;
 		}
-		/* Forward EOF to destination after all data sent */
-		SHUTDOWN_WR(t->dst_fd);
-		XFER_CTX_LOG(VERYVERBOSE, t, "forwarded EOF");
+		send_eof(t);
 		state = XFER_FINISHED;
 		/* fallthrough */
 	case XFER_FINISHED:
@@ -373,9 +373,7 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			update_watcher(t, loop, EV_WRITE);
 			break;
 		}
-		/* Forward EOF to destination after all data sent */
-		SHUTDOWN_WR(t->dst_fd);
-		XFER_CTX_LOG(VERYVERBOSE, t, "forwarded EOF");
+		send_eof(t);
 		state = XFER_FINISHED;
 		/* fallthrough */
 	case XFER_FINISHED:
