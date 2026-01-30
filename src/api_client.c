@@ -226,7 +226,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	if (err != 0) {
 		const int err = errno;
 		const char *errmsg = strerror(err);
-		LOGW_F("send: [%d] %s", err, errmsg);
+		LOGW_F("send: (%d) %s", err, errmsg);
 		api_client_finish(loop, ctx, errmsg, strlen(errmsg), NULL);
 		return;
 	}
@@ -244,7 +244,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		if (err != 0) {
 			const int err = errno;
 			const char *errmsg = strerror(err);
-			LOGW_F("send: [%d] %s", err, errmsg);
+			LOGW_F("send: (%d) %s", err, errmsg);
 			api_client_finish(
 				loop, ctx, errmsg, strlen(errmsg), NULL);
 			return;
@@ -284,7 +284,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const enum dialer_error err = ctx->dialer.err;
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
-			LOGE_F("dialer: %s ([%d] %s)", dialer_strerror(err),
+			LOGE_F("dialer: %s ((%d) %s)", dialer_strerror(err),
 			       syserr, strerror(syserr));
 		} else {
 			LOGE_F("dialer: %s", dialer_strerror(err));

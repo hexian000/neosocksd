@@ -39,8 +39,8 @@
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		LOG_F(level, "[%d->%d] " format, (t)->src_fd, (t)->dst_fd,     \
-		      __VA_ARGS__);                                            \
+		LOG_F(level, "[fd:%d]->[fd:%d] " format, (t)->src_fd,          \
+		      (t)->dst_fd, __VA_ARGS__);                               \
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
 
@@ -144,7 +144,7 @@ static ssize_t transfer_recv(struct transfer *restrict t)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		XFER_CTX_LOG_F(DEBUG, t, "recv: [%d] %s", err, strerror(err));
+		XFER_CTX_LOG_F(DEBUG, t, "recv: (%d) %s", err, strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
@@ -175,7 +175,7 @@ static ssize_t transfer_send(struct transfer *restrict t)
 		if (IS_TRANSIENT_ERROR(err)) {
 			return 0;
 		}
-		XFER_CTX_LOG_F(DEBUG, t, "send: [%d] %s", err, strerror(err));
+		XFER_CTX_LOG_F(DEBUG, t, "send: (%d) %s", err, strerror(err));
 		return -1;
 	}
 	if (nsend == 0) {
@@ -193,10 +193,10 @@ static void send_eof(struct transfer *restrict t)
 	if (shutdown(t->dst_fd, SHUT_WR) != 0) {
 		const int err = errno;
 		XFER_CTX_LOG_F(
-			WARNING, t, "shutdown: [%d] %s", err, strerror(err));
+			WARNING, t, "shutdown: (%d) %s", err, strerror(err));
 		return;
 	}
-	XFER_CTX_LOG(VERYVERBOSE, t, "forwarded EOF");
+	XFER_CTX_LOG(VERYVERBOSE, t, "shutdown: send operations disabled");
 }
 
 /**
@@ -286,7 +286,7 @@ static ssize_t splice_drain(struct transfer *restrict t, const int fd)
 			return 0;
 		}
 		XFER_CTX_LOG_F(
-			DEBUG, t, "pipe: recv [%d] %s", err, strerror(err));
+			DEBUG, t, "pipe: recv (%d) %s", err, strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
@@ -316,7 +316,7 @@ static ssize_t splice_pump(struct transfer *restrict t, const int fd)
 			return 0;
 		}
 		XFER_CTX_LOG_F(
-			DEBUG, t, "pipe: send [%d] %s", err, strerror(err));
+			DEBUG, t, "pipe: send (%d) %s", err, strerror(err));
 		return -1;
 	}
 	pipe->len -= (size_t)nsend;

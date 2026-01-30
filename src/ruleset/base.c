@@ -119,7 +119,7 @@ int aux_format_addr(lua_State *restrict L)
 		if (addr_str == NULL) {
 			const int err = errno;
 			return luaL_error(
-				L, "inet_ntop: [%d] %s", err, strerror(err));
+				L, "inet_ntop: (%d) %s", err, strerror(err));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -131,7 +131,7 @@ int aux_format_addr(lua_State *restrict L)
 		if (addr_str == NULL) {
 			const int err = errno;
 			return luaL_error(
-				L, "inet_ntop: [%d] %s", err, strerror(err));
+				L, "inet_ntop: (%d) %s", err, strerror(err));
 		}
 		lua_pushstring(L, addr_str);
 	} break;
@@ -291,8 +291,9 @@ lua_State *aux_getthread(lua_State *restrict L)
 
 int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
 {
-	int status, nres;
+	int status;
 #if LUA_VERSION_NUM >= 504
+	int nres;
 	status = lua_resume(L, from, narg, &nres);
 #else
 	status = lua_resume(L, from, narg);

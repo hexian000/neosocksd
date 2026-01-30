@@ -72,7 +72,7 @@ ASSERT_SUPER(struct session, struct api_ctx, ss);
 		}                                                              \
 		char caddr[64];                                                \
 		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
-		LOG_F(level, "[%d] %s: " format, (ctx)->accepted_fd, caddr,    \
+		LOG_F(level, "[fd:%d] %s: " format, (ctx)->accepted_fd, caddr, \
 		      __VA_ARGS__);                                            \
 	} while (0)
 #define API_CTX_LOG(level, ctx, message)                                       \
@@ -902,7 +902,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
 		API_CTX_LOG_F(
-			WARNING, ctx, "send: fd=%d [%d] %s", fd, err,
+			WARNING, ctx, "send: [fd:%d] (%d) %s", fd, err,
 			strerror(err));
 		api_ctx_close(loop, ctx);
 		return;
@@ -920,7 +920,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		err = socket_send(fd, buf, &len);
 		if (err != 0) {
 			API_CTX_LOG_F(
-				WARNING, ctx, "send: fd=%d [%d] %s", fd, err,
+				WARNING, ctx, "send: [fd:%d] (%d) %s", fd, err,
 				strerror(err));
 			api_ctx_close(loop, ctx);
 			return;

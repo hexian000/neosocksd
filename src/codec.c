@@ -199,6 +199,7 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 
 	struct deflate_stream *z = malloc(sizeof(struct deflate_stream));
 	if (z == NULL) {
+		LOGOOM();
 		stream_close(base);
 		return NULL;
 	}
@@ -383,6 +384,7 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 
 	struct inflate_stream *z = malloc(sizeof(struct inflate_stream));
 	if (z == NULL) {
+		LOGOOM();
 		stream_close(base);
 		return NULL;
 	}

@@ -80,10 +80,11 @@ static int format_status(
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if (ctx->state != STATE_CONNECT) {
-		return snprintf(s, maxlen, "[%d] %s", ctx->accepted_fd, caddr);
+		return snprintf(
+			s, maxlen, "[fd:%d] %s", ctx->accepted_fd, caddr);
 	}
 	return snprintf(
-		s, maxlen, "[%d] %s -> `%s'", ctx->accepted_fd, caddr,
+		s, maxlen, "[fd:%d] %s -> `%s'", ctx->accepted_fd, caddr,
 		ctx->parser.msg.req.url);
 }
 
@@ -430,7 +431,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	int err = socket_send(fd, buf, &len);
 	if (err != 0) {
 		HTTP_CTX_LOG_F(
-			WARNING, ctx, "send: [%d] %s", err, strerror(err));
+			WARNING, ctx, "send: (%d) %s", err, strerror(err));
 		http_ctx_close(loop, ctx);
 		return;
 	}
@@ -446,7 +447,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		err = socket_send(fd, buf, &len);
 		if (err != 0) {
 			HTTP_CTX_LOG_F(
-				WARNING, ctx, "send: [%d] %s", err,
+				WARNING, ctx, "send: (%d) %s", err,
 				strerror(err));
 			http_ctx_close(loop, ctx);
 			return;
@@ -477,7 +478,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
 			HTTP_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s ([%d] %s)",
+				ERROR, ctx, "dialer: %s ((%d) %s)",
 				dialer_strerror(err), syserr, strerror(syserr));
 		} else {
 			HTTP_CTX_LOG_F(
@@ -486,7 +487,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
 		return;
 	}
-	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, fd=%d", fd);
+	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
 	ctx->dialed_fd = fd;
 
 	/* CONNECT proxy */

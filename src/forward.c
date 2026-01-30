@@ -69,7 +69,7 @@ ASSERT_SUPER(struct session, struct forward_ctx, ss);
 		}                                                              \
 		char caddr[64];                                                \
 		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
-		LOG_F(level, "[%d] %s: " format, (ctx)->accepted_fd, caddr,    \
+		LOG_F(level, "[fd:%d] %s: " format, (ctx)->accepted_fd, caddr, \
 		      __VA_ARGS__);                                            \
 	} while (0)
 #define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
@@ -207,7 +207,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
 			FW_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s ([%d] %s)",
+				ERROR, ctx, "dialer: %s ((%d) %s)",
 				dialer_strerror(err), syserr, strerror(syserr));
 		} else {
 			FW_CTX_LOG_F(
@@ -218,7 +218,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	}
 	ctx->dialed_fd = fd;
 
-	FW_CTX_LOG_F(VERBOSE, ctx, "connected, fd=%d", fd);
+	FW_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
 	/* cleanup before state change */
 	dialreq_free(ctx->dialreq);
 
@@ -402,7 +402,7 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
 		const int err = errno;
 		FW_CTX_LOG_F(
-			ERROR, ctx, "getsockname: [%d] %s", err, strerror(err));
+			ERROR, ctx, "getsockname: (%d) %s", err, strerror(err));
 		forward_ctx_close(loop, ctx);
 		return;
 	}
@@ -452,7 +452,7 @@ static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
 	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
 		const int err = errno;
 		FW_CTX_LOG_F(
-			ERROR, ctx, "getsockname: [%d] %s", err, strerror(err));
+			ERROR, ctx, "getsockname: (%d) %s", err, strerror(err));
 		return NULL;
 	}
 	struct dialreq *req = dialreq_new(0);

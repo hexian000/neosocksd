@@ -70,7 +70,7 @@ extern struct globals {
 	do {                                                                   \
 		if (close((fd)) != 0) {                                        \
 			const int err = errno;                                 \
-			LOGW_F("close: fd=%d [%d] %s", (fd), err,              \
+			LOGW_F("close [fd:%d]: (%d) %s", (fd), err,            \
 			       strerror(err));                                 \
 		}                                                              \
 	} while (0)
@@ -100,8 +100,7 @@ void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
 	do {                                                                   \
 		if (((revents) & EV_ERROR) != 0) {                             \
 			const int err = errno;                                 \
-			LOGE_F("error event: [errno=%d] %s", err,              \
-			       strerror(err));                                 \
+			LOGE_F("io error: (%d) %s", err, strerror(err));       \
 		}                                                              \
 		ASSERT(((revents) & ((accept) | EV_ERROR)) == (revents));      \
 		if (((revents) & (accept)) == 0) {                             \

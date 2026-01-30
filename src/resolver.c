@@ -158,7 +158,7 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	const ares_socket_t writable =
 		(revents & EV_WRITE) ? fd : ARES_SOCKET_BAD;
 
-	LOGV_F("io: fd=%d revents=0x%x", fd, revents);
+	LOGV_F("io: [fd:%d] revents=0x%x", fd, revents);
 	ares_process_fd(r->channel, readable, writable);
 }
 
@@ -288,7 +288,7 @@ static void sock_state_cb(
 			/* Not currently watching, nothing to do */
 			return;
 		}
-		LOGV_F("io: stop fd=%d num_socket=%zu", fd, --r->num_socket);
+		LOGV_F("io: stop [fd:%d] num_socket=%zu", fd, --r->num_socket);
 		ev_io_stop(r->loop, &node->watcher);
 		return;
 	}
@@ -313,7 +313,7 @@ static void sock_state_cb(
 	}
 
 	/* Start the watcher */
-	LOGV_F("io: fd=%d events=0x%x num_socket=%zu", fd, events,
+	LOGV_F("io: [fd:%d] events=0x%x num_socket=%zu", fd, events,
 	       ++r->num_socket);
 	ev_io_start(r->loop, &node->watcher);
 }
@@ -393,7 +393,7 @@ static void addrinfo_cb(
 		/* c-ares channel is being destroyed, don't process */
 		return;
 	default:
-		LOGW_F("c-ares: resolve error: [%d] %s", status,
+		LOGW_F("c-ares: resolve error: (%d) %s", status,
 		       ares_strerror(status));
 		break;
 	}
@@ -411,7 +411,7 @@ void resolver_init(void)
 	/* Initialize c-ares library if available */
 	const int ret = ares_library_init(ARES_LIB_INIT_ALL);
 	CHECKMSGF(
-		ret == ARES_SUCCESS, "c-ares: [%d] %s", ret,
+		ret == ARES_SUCCESS, "c-ares: (%d) %s", ret,
 		ares_strerror(ret));
 #endif
 #endif
@@ -467,7 +467,7 @@ static bool resolver_async_init(
 	options.sock_state_cb_data = r;
 	ret = ares_init_options(&r->channel, &options, ARES_OPT_SOCK_STATE_CB);
 	if (ret != ARES_SUCCESS) {
-		LOGE_F("c-ares: [%d] %s", ret, ares_strerror(ret));
+		LOGE_F("c-ares: (%d) %s", ret, ares_strerror(ret));
 		return false;
 	}
 
@@ -482,7 +482,7 @@ static bool resolver_async_init(
 	}
 	ret = ares_set_servers_ports_csv(r->channel, nameserver);
 	if (ret != ARES_SUCCESS) {
-		LOGE_F("c-ares: failed to set nameserver `%s': [%d] %s",
+		LOGE_F("c-ares: failed to set nameserver `%s': (%d) %s",
 		       nameserver, ret, ares_strerror(ret));
 		/* Continue with default nameservers */
 		return true;

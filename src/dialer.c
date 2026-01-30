@@ -542,7 +542,7 @@ finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct dialer *restrict d = watcher->data;
 	const int fd = d->dialed_fd;
-	LOGV_F("dialer %p: finished fd=%d", (void *)d, fd);
+	LOGV_F("dialer [%p]: request finished [fd:%d]", (void *)d->req, fd);
 	dialer_stop(d, loop);
 	/* Call user's completion callback with the result */
 	d->finish_cb.func(loop, d->finish_cb.data, fd);
@@ -592,12 +592,12 @@ static bool dialer_send(
 	const size_t len)
 {
 	const int fd = d->w_socket.fd;
-	LOG_BIN_F(VERYVERBOSE, buf, len, 0, "send: fd=%d %zu bytes", fd, len);
+	LOG_BIN_F(VERYVERBOSE, buf, len, 0, "send: [fd:%d] %zu bytes", fd, len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
 		DIALER_LOG_F(
-			DEBUG, d, "send: fd=%d [%d] %s", fd, err,
+			DEBUG, d, "send: [fd:%d] (%d) %s", fd, err,
 			strerror(err));
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = err;
@@ -605,7 +605,7 @@ static bool dialer_send(
 	}
 	if ((size_t)nsend != len) {
 		DIALER_LOG_F(
-			DEBUG, d, "send: fd=%d short send %zu < %zu", fd,
+			DEBUG, d, "send: [fd:%d] short send %zu < %zu", fd,
 			(size_t)nsend, len);
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
@@ -722,7 +722,7 @@ static bool send_socks4a_req(
 		    NULL) {
 			const int err = errno;
 			DIALER_LOG_F(
-				DEBUG, d, "inet_ntop: [%d] %s", err,
+				DEBUG, d, "inet_ntop: (%d) %s", err,
 				strerror(err));
 			d->err = DIALER_ERR_SYSTEM;
 			d->syserr = err;
@@ -893,12 +893,12 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 	if (nrecv < 0) {
 		const int err = errno;
 		DIALER_LOG_F(
-			DEBUG, d, "recv: fd=%d [%d] %s", fd, err,
+			DEBUG, d, "recv: [fd:%d] (%d) %s", fd, err,
 			strerror(err));
 		return false;
 	}
 	if ((size_t)nrecv != n) {
-		DIALER_LOG_F(DEBUG, d, "recv: fd=%d early EOF", fd);
+		DIALER_LOG_F(DEBUG, d, "recv: [fd:%d] early EOF", fd);
 		return false;
 	}
 	d->next += n;
@@ -1253,14 +1253,14 @@ static int dialer_recv(struct dialer *restrict d)
 			return 1;
 		}
 		DIALER_LOG_F(
-			DEBUG, d, "recv: fd=%d [%d] %s", fd, err,
+			DEBUG, d, "recv: [fd:%d] (%d) %s", fd, err,
 			strerror(err));
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = err;
 		return -1;
 	}
 	if (nrecv == 0) {
-		DIALER_LOG_F(DEBUG, d, "recv: fd=%d early EOF", fd);
+		DIALER_LOG_F(DEBUG, d, "recv: [fd:%d] early EOF", fd);
 		d->err = DIALER_ERR_EOF;
 		d->syserr = 0;
 		return -1;
@@ -1271,7 +1271,7 @@ static int dialer_recv(struct dialer *restrict d)
 			return 1;
 		}
 		DIALER_LOG_F(
-			DEBUG, d, "recv: fd=%d [%d] %s", fd, sockerr,
+			DEBUG, d, "recv: [fd:%d] (%d) %s", fd, sockerr,
 			strerror(sockerr));
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = sockerr;
@@ -1330,7 +1330,7 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 				char addr_str[64];
 				dialaddr_format(
 					addr_str, sizeof(addr_str), addr);
-				LOG_F(WARNING, "connect `%s': [%d] %s",
+				LOG_F(WARNING, "connect `%s': (%d) %s",
 				      addr_str, sockerr, strerror(sockerr));
 			}
 			d->err = DIALER_ERR_CONNECT;
@@ -1426,7 +1426,7 @@ static bool connect_sa(
 	const int fd = socket(sa->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
-		LOGD_F("socket: [%d] %s", err, strerror(err));
+		LOGD_F("socket: (%d) %s", err, strerror(err));
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = err;
 		return false;
@@ -1435,7 +1435,7 @@ static bool connect_sa(
 	/* Configure non-blocking mode */
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
-		LOGD_F("fcntl: [%d] %s", err, strerror(err));
+		LOGD_F("fcntl: (%d) %s", err, strerror(err));
 		CLOSE_FD(fd);
 		d->err = DIALER_ERR_SYSTEM;
 		d->syserr = err;
@@ -1466,7 +1466,7 @@ static bool connect_sa(
 			if (LOGLEVEL(WARNING)) {
 				char addr_str[64];
 				format_sa(addr_str, sizeof(addr_str), sa);
-				LOG_F(WARNING, "connect %s: [%d] %s", addr_str,
+				LOG_F(WARNING, "connect %s: (%d) %s", addr_str,
 				      err, strerror(err));
 			}
 			d->err = DIALER_ERR_CONNECT;
@@ -1657,7 +1657,8 @@ void dialer_do(
 		char s[4096];
 		int r = dialreq_format(s, sizeof(s), req);
 		ASSERT(r > 0);
-		LOG_F(VERBOSE, "dialer %p: start, `%.*s'", (void *)d, r, s);
+		LOG_F(VERBOSE, "dialer [%p]: request start, `%.*s'",
+		      (void *)req, r, s);
 	}
 
 	/* Store request and start the state machine */
@@ -1680,7 +1681,7 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
 		/* Already finished or cancelled */
 		return;
 	}
-	LOGD_F("dialer %p: cancel", (void *)d);
+	LOGD_F("dialer [%p]: request cancelled", (void *)d->req);
 
 	d->err = DIALER_CANCELLED;
 	d->syserr = 0;

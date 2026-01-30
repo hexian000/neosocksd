@@ -72,13 +72,13 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 {
 	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
 		const int err = errno;
-		LOGW_F("pipe2: [%d] %s", err, strerror(err));
+		LOGW_F("pipe2: (%d) %s", err, strerror(err));
 		return false;
 	}
 	const int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, PIPE_BUFSIZE);
 	if (pipe_cap < 0) {
 		const int err = errno;
-		LOGW_F("fcntl: [%d] %s", err, strerror(err));
+		LOGW_F("fcntl: (%d) %s", err, strerror(err));
 		pipe_close(pipe);
 		return false;
 	}
@@ -182,7 +182,7 @@ void init(int argc, char **argv)
 	};
 	if (sigaction(SIGPIPE, &ignore, NULL) != 0) {
 		const int err = errno;
-		FAILMSGF("sigaction: [%d] %s", err, strerror(err));
+		FAILMSGF("sigaction: (%d) %s", err, strerror(err));
 	}
 #if WITH_CRASH_HANDLER
 	set_crash_handler();
@@ -217,7 +217,7 @@ void modify_io_events(
 	const int ioevents = events & (EV_READ | EV_WRITE);
 	if (ioevents == EV_NONE) {
 		if (ev_is_active(watcher)) {
-			LOGV_F("io: fd=%d stop", fd);
+			LOGV_F("io: [fd:%d] stop", fd);
 			ev_io_stop(loop, watcher);
 		}
 		return;
@@ -231,7 +231,7 @@ void modify_io_events(
 #endif
 	}
 	if (!ev_is_active(watcher)) {
-		LOGV_F("io: fd=%d events=0x%x", fd, ioevents);
+		LOGV_F("io: [fd:%d] events=0x%x", fd, ioevents);
 		ev_io_start(loop, watcher);
 	}
 }
@@ -329,7 +329,7 @@ void drop_privileges(const struct user_ident *restrict ident)
 #if _BSD_SOURCE || _GNU_SOURCE
 	if (setgroups(0, NULL) != 0) {
 		const int err = errno;
-		LOGW_F("unable to drop supplementary group privileges: [%d] %s",
+		LOGW_F("unable to drop supplementary group privileges: (%d) %s",
 		       err, strerror(err));
 	}
 #endif
@@ -337,7 +337,7 @@ void drop_privileges(const struct user_ident *restrict ident)
 		LOGD_F("setgid: %jd", (intmax_t)ident->gid);
 		if (setgid(ident->gid) != 0 || setegid(ident->gid) != 0) {
 			const int err = errno;
-			LOGW_F("unable to drop group privileges: [%d] %s", err,
+			LOGW_F("unable to drop group privileges: (%d) %s", err,
 			       strerror(err));
 		}
 	}
@@ -345,7 +345,7 @@ void drop_privileges(const struct user_ident *restrict ident)
 		LOGD_F("setuid: %jd", (intmax_t)ident->uid);
 		if (setuid(ident->uid) != 0 || seteuid(ident->uid) != 0) {
 			const int err = errno;
-			LOGW_F("unable to drop user privileges: [%d] %s", err,
+			LOGW_F("unable to drop user privileges: (%d) %s", err,
 			       strerror(err));
 		}
 	}
@@ -360,14 +360,14 @@ void daemonize(
 	int fd[2];
 	if (pipe(fd) == -1) {
 		const int err = errno;
-		FAILMSGF("pipe: [%d] %s", err, strerror(err));
+		FAILMSGF("pipe: (%d) %s", err, strerror(err));
 	}
 	/* First fork(). */
 	{
 		const pid_t pid = fork();
 		if (pid < 0) {
 			const int err = errno;
-			FAILMSGF("fork: [%d] %s", err, strerror(err));
+			FAILMSGF("fork: (%d) %s", err, strerror(err));
 		} else if (pid > 0) {
 			CLOSE_FD(fd[1]);
 			char buf[256];
@@ -384,14 +384,14 @@ void daemonize(
 	/* In the child, call setsid(). */
 	if (setsid() < 0) {
 		const int err = errno;
-		LOGW_F("setsid: [%d] %s", err, strerror(err));
+		LOGW_F("setsid: (%d) %s", err, strerror(err));
 	}
 	/* In the child, call fork() again. */
 	{
 		const pid_t pid = fork();
 		if (pid < 0) {
 			const int err = errno;
-			FAILMSGF("fork: [%d] %s", err, strerror(err));
+			FAILMSGF("fork: (%d) %s", err, strerror(err));
 		} else if (pid > 0) {
 			/* Call exit() in the first child. */
 			exit(EXIT_SUCCESS);
@@ -418,7 +418,7 @@ void daemonize(
 	if (!nochdir) {
 		if (chdir("/") != 0) {
 			const int err = errno;
-			LOGW_F("chdir: [%d] %s", err, strerror(err));
+			LOGW_F("chdir: (%d) %s", err, strerror(err));
 		}
 	}
 	/* In the daemon process, drop privileges */

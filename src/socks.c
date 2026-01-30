@@ -90,12 +90,14 @@ static int format_status(
 	char caddr[64];
 	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if (ctx->state != STATE_CONNECT) {
-		return snprintf(s, maxlen, "[%d] %s", ctx->accepted_fd, caddr);
+		return snprintf(
+			s, maxlen, "[fd:%d] %s", ctx->accepted_fd, caddr);
 	}
 	char saddr[64];
 	dialaddr_format(saddr, sizeof(saddr), &ctx->addr);
 	return snprintf(
-		s, maxlen, "[%d] %s -> `%s'", ctx->accepted_fd, caddr, saddr);
+		s, maxlen, "[fd:%d] %s -> `%s'", ctx->accepted_fd, caddr,
+		saddr);
 }
 
 #define SOCKS_CTX_LOG_F(level, ctx, format, ...)                               \
@@ -226,12 +228,13 @@ static bool send_rsp(
 {
 	const int fd = ctx->accepted_fd;
 	LOG_BIN_F(
-		VERYVERBOSE, buf, len, 0, "[%d] send_rsp: %zu bytes", fd, len);
+		VERYVERBOSE, buf, len, 0, "[fd:%d] send_rsp: %zu bytes", fd,
+		len);
 	const ssize_t nsend = send(fd, buf, len, 0);
 	if (nsend < 0) {
 		const int err = errno;
 		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "send: [%d] %s", err, strerror(err));
+			DEBUG, ctx, "send: (%d) %s", err, strerror(err));
 		return false;
 	}
 	if ((size_t)nsend != len) {
@@ -262,7 +265,7 @@ socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 		if (getsockname(ctx->dialed_fd, &addr.sa, &addrlen) != 0) {
 			const int err = errno;
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "getsockname: [%d] %s", err,
+				ERROR, ctx, "getsockname: (%d) %s", err,
 				strerror(err));
 		}
 	}
@@ -419,7 +422,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s ([%d] %s)",
+				ERROR, ctx, "dialer: %s: (%d) %s",
 				dialer_strerror(err), syserr, strerror(syserr));
 		} else {
 			SOCKS_CTX_LOG_F(
@@ -435,7 +438,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		return;
 	}
 
-	SOCKS_CTX_LOG_F(VERBOSE, ctx, "connected, fd=%d", fd);
+	SOCKS_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
 	/* cleanup before state change */
 	ev_io_stop(loop, &ctx->w_socket);
 	dialreq_free(ctx->dialreq);
@@ -791,7 +794,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 			return 1;
 		}
 		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "recv: [%d] %s", err, strerror(err));
+			DEBUG, ctx, "recv: (%d) %s", err, strerror(err));
 		return -1;
 	}
 	if (nrecv == 0) {
@@ -802,7 +805,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 	ctx->rbuf.len += (size_t)nrecv;
 	LOG_BIN_F(
 		VERYVERBOSE, ctx->rbuf.data, ctx->rbuf.len, 0,
-		"[%d] recv: %zu bytes", fd, ctx->rbuf.len);
+		"[fd:%d] recv: %zu bytes", fd, ctx->rbuf.len);
 	const int want = socks_dispatch(ctx);
 	if (want < 0) {
 		return want;

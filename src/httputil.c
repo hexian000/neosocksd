@@ -77,18 +77,18 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 {
 	const size_t n = strlen(s);
 	ASSERT(n < 256);
-	LOG_BIN_F(VERBOSE, s, n, 0, "reply_short: fd=%d %zu bytes", p->fd, n);
+	LOG_BIN_F(VERBOSE, s, n, 0, "reply_short: [fd:%d] %zu bytes", p->fd, n);
 
 	/* Send message directly to socket */
 	const ssize_t nsend = send(p->fd, s, n, 0);
 	if (nsend < 0) {
 		const int err = errno;
-		LOGW_F("send: fd=%d [%d] %s", p->fd, err, strerror(err));
+		LOGW_F("send: [fd:%d] (%d) %s", p->fd, err, strerror(err));
 		return false;
 	}
 	if ((size_t)nsend != n) {
-		LOGW_F("send: fd=%d short send %zu < %zu", p->fd, (size_t)nsend,
-		       n);
+		LOGW_F("send: [fd:%d] short send %zu < %zu", p->fd,
+		       (size_t)nsend, n);
 		return false;
 	}
 	return true;
@@ -350,11 +350,11 @@ static bool recv_request(struct http_parser *restrict p)
 	/* Receive data from socket */
 	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
 	if (err != 0) {
-		LOGD_F("recv: fd=%d [%d] %s", p->fd, err, strerror(err));
+		LOGD_F("recv: [fd:%d] (%d) %s", p->fd, err, strerror(err));
 		return false;
 	}
 	if (n == 0) {
-		LOGD_F("recv: fd=%d early EOF", p->fd);
+		LOGD_F("recv: [fd:%d] early EOF", p->fd);
 		return false;
 	}
 
@@ -384,11 +384,11 @@ static bool recv_content(const struct http_parser *restrict p)
 	/* Receive data directly into content buffer */
 	const int err = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
 	if (err != 0) {
-		LOGW_F("recv: fd=%d [%d] %s", p->fd, err, strerror(err));
+		LOGW_F("recv: [fd:%d] (%d) %s", p->fd, err, strerror(err));
 		return false;
 	}
 	if (n == 0) {
-		LOGW_F("recv: fd=%d early EOF", p->fd);
+		LOGW_F("recv: [fd:%d] early EOF", p->fd);
 		return false;
 	}
 
