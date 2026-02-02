@@ -201,7 +201,7 @@ static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	}
 }
 
-struct ruleset *ruleset_new(struct ev_loop *loop)
+struct ruleset *ruleset_new(struct ev_loop *restrict loop)
 {
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
 	if (r == NULL) {
@@ -311,13 +311,13 @@ bool ruleset_rpcall(
 }
 
 bool ruleset_update(
-	struct ruleset *restrict r, const char *modname, const char *chunkname,
-	struct stream *code)
+	struct ruleset *restrict r, const char *restrict modname,
+	const char *restrict chunkname, struct stream *code)
 {
 	return ruleset_pcall(r, cfunc_update, 3, 0, modname, chunkname, code);
 }
 
-bool ruleset_loadfile(struct ruleset *restrict r, const char *filename)
+bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 {
 	return ruleset_pcall(r, cfunc_loadfile, 1, 0, filename);
 }
@@ -329,8 +329,9 @@ bool ruleset_gc(struct ruleset *restrict r)
 
 static bool dispatch_request(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *func, const char *request, const char *username,
-	const char *password, struct ruleset_callback *callback)
+	const char *restrict func, const char *restrict request,
+	const char *restrict username, const char *restrict password,
+	struct ruleset_callback *callback)
 {
 	lua_State *restrict L = r->L;
 	const bool ok = ruleset_pcall(
@@ -378,7 +379,7 @@ void ruleset_vmstats(
 }
 
 const char *ruleset_stats(
-	struct ruleset *restrict r, const double dt, const char *query,
+	struct ruleset *restrict r, const double dt, const char *restrict query,
 	size_t *len)
 {
 	lua_State *restrict L = r->L;

@@ -9,7 +9,6 @@
 #include "conf.h"
 #include "dialer.h"
 #include "httputil.h"
-#include "session.h"
 #include "sockutil.h"
 #include "util.h"
 
@@ -43,7 +42,7 @@ enum api_client_state {
 };
 
 struct api_client_ctx {
-	struct session ss;
+	struct gcobj gcbase;
 	enum api_client_state state;
 	struct api_client_cb cb;
 	ev_timer w_timeout;
@@ -58,7 +57,7 @@ struct api_client_ctx {
 		struct stream *stream;
 	} result;
 };
-ASSERT_SUPER(struct session, struct api_client_ctx, ss);
+ASSERT_SUPER(struct gcobj, struct api_client_ctx, gcbase);
 
 #define FORMAT_BYTES(name, value)                                              \
 	char name[16];                                                         \
@@ -99,9 +98,9 @@ api_client_close(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 		ctx->result.stream = NULL;
 	}
 
-	if (ctx->ss.close != NULL) {
+	if (ctx->gcbase.finalize != NULL) {
 		/* managed by session */
-		session_del(&ctx->ss);
+		gc_unregister(&ctx->gcbase);
 	}
 	dialreq_free(ctx->dialreq);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
@@ -109,10 +108,10 @@ api_client_close(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 }
 
 static void
-api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+api_client_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
 {
 	struct api_client_ctx *restrict ctx =
-		DOWNCAST(struct session, struct api_client_ctx, ss, ss);
+		DOWNCAST(struct gcobj, struct api_client_ctx, gcbase, obj);
 	api_client_close(loop, ctx);
 }
 
@@ -420,11 +419,11 @@ static bool api_client_do(
 	dialer_init(&ctx->dialer, &cb);
 	if (ctx->cb.func != NULL) {
 		/* RPC call - lifecycle managed by ruleset callback */
-		ctx->ss.close = NULL;
+		ctx->gcbase.finalize = NULL;
 	} else {
 		/* Invoke call - lifecycle managed by session system */
-		ctx->ss.close = api_ss_close;
-		session_add(&ctx->ss);
+		ctx->gcbase.finalize = api_client_finalize;
+		gc_register(&ctx->gcbase);
 	}
 
 	ev_timer_start(loop, &ctx->w_timeout);

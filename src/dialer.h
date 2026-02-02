@@ -60,7 +60,8 @@ struct dialaddr {
  * @param len Length of input string
  * @return true on success, false on parse error
  */
-bool dialaddr_parse(struct dialaddr *addr, const char *s, size_t len);
+bool dialaddr_parse(
+	struct dialaddr *restrict addr, const char *restrict s, size_t len);
 
 /**
  * @brief Set dialaddr from a sockaddr structure
@@ -70,14 +71,16 @@ bool dialaddr_parse(struct dialaddr *addr, const char *s, size_t len);
  * @return true on success, false if unsupported address family
  */
 bool dialaddr_set(
-	struct dialaddr *addr, const struct sockaddr *sa, socklen_t len);
+	struct dialaddr *restrict addr, const struct sockaddr *restrict sa,
+	socklen_t len);
 
 /**
  * @brief Copy dialaddr structure
  * @param dst Destination dialaddr
  * @param src Source dialaddr
  */
-void dialaddr_copy(struct dialaddr *dst, const struct dialaddr *src);
+void dialaddr_copy(
+	struct dialaddr *restrict dst, const struct dialaddr *restrict src);
 
 /**
  * @brief Format dialaddr as string
@@ -86,7 +89,8 @@ void dialaddr_copy(struct dialaddr *dst, const struct dialaddr *src);
  * @param addr Input dialaddr structure
  * @return Number of characters written, or -1 on error
  */
-int dialaddr_format(char *s, size_t maxlen, const struct dialaddr *addr);
+int dialaddr_format(
+	char *restrict s, size_t maxlen, const struct dialaddr *restrict addr);
 
 /**
  * @brief Supported proxy protocols
@@ -165,7 +169,9 @@ struct dialreq *dialreq_new(size_t num_proxy);
  * @param urilen Length of proxy URI string
  * @return true on success, false on parse error
  */
-bool dialreq_addproxy(struct dialreq *req, const char *proxy_uri, size_t urilen);
+bool dialreq_addproxy(
+	struct dialreq *restrict req, const char *restrict proxy_uri,
+	size_t urilen);
 
 /**
  * @brief Parse address and proxy chain from strings
@@ -182,7 +188,8 @@ struct dialreq *dialreq_parse(const char *addr, const char *csv);
  * @param r Dial request to format
  * @return Number of characters written
  */
-int dialreq_format(char *s, size_t maxlen, const struct dialreq *r);
+int dialreq_format(
+	char *restrict s, size_t maxlen, const struct dialreq *restrict r);
 
 /**
  * @brief Free a dial request structure
@@ -249,6 +256,6 @@ void dialer_do(
  * @param d Active dialer structure
  * @param loop libev event loop
  */
-void dialer_cancel(struct dialer *d, struct ev_loop *loop);
+void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop);
 
 #endif /* DIALER_H */

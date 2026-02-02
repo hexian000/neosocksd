@@ -433,7 +433,7 @@ bool resolve_addr(
 	return ok;
 }
 
-int socket_send(const int fd, const void *buf, size_t *len)
+int socket_send(const int fd, const void *restrict buf, size_t *restrict len)
 {
 	const unsigned char *b = buf;
 	size_t nbsend = 0;
@@ -459,7 +459,7 @@ int socket_send(const int fd, const void *buf, size_t *len)
 	return 0;
 }
 
-int socket_recv(const int fd, void *buf, size_t *len)
+int socket_recv(const int fd, void *restrict buf, size_t *restrict len)
 {
 	unsigned char *b = buf;
 	size_t nbrecv = 0;

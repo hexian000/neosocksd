@@ -59,7 +59,8 @@ struct server {
 void server_init(
 	struct server *s, struct ev_loop *loop, serve_fn serve, void *data);
 
-bool server_start(struct server *s, const struct sockaddr *bindaddr);
+bool server_start(
+	struct server *restrict s, const struct sockaddr *restrict bindaddr);
 
 void server_stop(struct server *s);
 

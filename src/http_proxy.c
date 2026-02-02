@@ -8,7 +8,6 @@
 #include "httputil.h"
 #include "ruleset.h"
 #include "server.h"
-#include "session.h"
 #include "sockutil.h"
 #include "transfer.h"
 #include "util.h"
@@ -46,7 +45,7 @@ enum http_state {
 struct server;
 
 struct http_ctx {
-	struct session ss;
+	struct gcobj gcbase;
 	struct server *s;
 	enum http_state state;
 	int accepted_fd, dialed_fd;
@@ -71,7 +70,7 @@ struct http_ctx {
 		};
 	};
 };
-ASSERT_SUPER(struct session, struct http_ctx, ss);
+ASSERT_SUPER(struct gcobj, struct http_ctx, gcbase);
 
 static int format_status(
 	char *restrict s, const size_t maxlen,
@@ -178,7 +177,7 @@ static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ctx->dialed_fd = -1;
 	}
 
-	session_del(&ctx->ss);
+	gc_unregister(&ctx->gcbase);
 	if (ctx->state < STATE_ESTABLISHED) {
 		dialreq_free(ctx->dialreq);
 	}
@@ -187,10 +186,10 @@ static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 }
 
 static void
-http_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+http_ctx_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
 {
 	struct http_ctx *restrict ctx =
-		DOWNCAST(struct session, struct http_ctx, ss, ss);
+		DOWNCAST(struct gcobj, struct http_ctx, gcbase, obj);
 	http_ctx_close(loop, ctx);
 }
 
@@ -575,8 +574,8 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
 
-	ctx->ss.close = http_ss_close;
-	session_add(&ctx->ss);
+	ctx->gcbase.finalize = http_ctx_finalize;
+	gc_register(&ctx->gcbase);
 	return ctx;
 }
 

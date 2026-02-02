@@ -160,7 +160,7 @@ static void set_crash_handler(void)
 #define PATH_SEPARATOR '/'
 #endif
 
-void init(int argc, char **argv)
+void init(int argc, char *const restrict argv[])
 {
 	UNUSED(argc);
 	UNUSED(argv);
@@ -210,7 +210,8 @@ void unloadlibs(void)
 }
 
 void modify_io_events(
-	struct ev_loop *loop, ev_io *restrict watcher, const int events)
+	struct ev_loop *restrict loop, ev_io *restrict watcher,
+	const int events)
 {
 	const int fd = watcher->fd;
 	ASSERT(fd != -1);
@@ -495,3 +496,37 @@ double thread_load(void)
 
 #undef READ_TIMESPEC
 #undef READ_TIMEVAL
+
+void gc_register(struct gcobj *restrict obj)
+{
+	obj->prev = NULL;
+	obj->next = G.gcroot;
+	if (G.gcroot != NULL) {
+		G.gcroot->prev = obj;
+	}
+	G.gcroot = obj;
+}
+
+void gc_unregister(struct gcobj *restrict obj)
+{
+	struct gcobj *restrict prev = obj->prev;
+	struct gcobj *restrict next = obj->next;
+	if (prev != NULL) {
+		prev->next = next;
+	} else {
+		G.gcroot = next;
+	}
+	if (next != NULL) {
+		next->prev = prev;
+	}
+}
+
+void gc_finalizeall(struct ev_loop *restrict loop)
+{
+	size_t num = 0;
+	for (struct gcobj *obj = G.gcroot; obj != NULL; obj = G.gcroot) {
+		obj->finalize(loop, obj);
+		num++;
+	}
+	LOGI_F("gc: %zu objects finalized", num);
+}

@@ -48,8 +48,9 @@ static bool is_startup_limited(const struct server *restrict s)
 	return false;
 }
 
-static void
-accept_cb(struct ev_loop *loop, ev_io *restrict watcher, const int revents)
+static void accept_cb(
+	struct ev_loop *restrict loop, ev_io *restrict watcher,
+	const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 
@@ -106,7 +107,8 @@ accept_cb(struct ev_loop *loop, ev_io *restrict watcher, const int revents)
 }
 
 /* This callback is used to restart the accept I/O watcher after a temporary error condition. */
-static void timer_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+static void
+timer_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	ev_timer_stop(loop, watcher);

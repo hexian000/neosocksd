@@ -9,7 +9,6 @@
 #include "proto/socks.h"
 #include "ruleset.h"
 #include "server.h"
-#include "session.h"
 #include "sockutil.h"
 #include "transfer.h"
 #include "util.h"
@@ -46,7 +45,7 @@ enum socks_state {
 };
 
 struct socks_ctx {
-	struct session ss;
+	struct gcobj gcbase;
 	struct server *s;
 	enum socks_state state;
 	int accepted_fd, dialed_fd;
@@ -81,7 +80,7 @@ struct socks_ctx {
 		};
 	};
 };
-ASSERT_SUPER(struct session, struct socks_ctx, ss);
+ASSERT_SUPER(struct gcobj, struct socks_ctx, gcbase);
 
 static int format_status(
 	char *restrict s, const size_t maxlen,
@@ -176,7 +175,7 @@ socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		ctx->dialed_fd = -1;
 	}
 
-	session_del(&ctx->ss);
+	gc_unregister(&ctx->gcbase);
 	if (ctx->state < STATE_ESTABLISHED) {
 		dialreq_free(ctx->dialreq);
 	}
@@ -184,10 +183,10 @@ socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 }
 
 static void
-socks_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+socks_ctx_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
 {
 	struct socks_ctx *restrict ctx =
-		DOWNCAST(struct session, struct socks_ctx, ss, ss);
+		DOWNCAST(struct gcobj, struct socks_ctx, gcbase, obj);
 	socks_ctx_close(loop, ctx);
 }
 
@@ -204,7 +203,7 @@ static void mark_ready(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
 }
 
-static void xfer_state_cb(struct ev_loop *loop, void *data)
+static void xfer_state_cb(struct ev_loop *restrict loop, void *data)
 {
 	struct socks_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_ESTABLISHED ||
@@ -312,7 +311,7 @@ socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 }
 
 static void
-timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 
@@ -413,7 +412,7 @@ static void socks_senderr(
 	}
 }
 
-static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
+static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
 {
 	struct socks_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
@@ -834,8 +833,8 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 }
 
 #if WITH_RULESET
-static void
-ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
+static void ruleset_cb(
+	struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct socks_ctx *restrict ctx = watcher->data;
@@ -846,7 +845,7 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 }
 
 static void
-process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
+process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
@@ -975,8 +974,8 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, &cb);
-	ctx->ss.close = socks_ss_close;
-	session_add(&ctx->ss);
+	ctx->gcbase.finalize = socks_ctx_finalize;
+	gc_register(&ctx->gcbase);
 	return ctx;
 }
 

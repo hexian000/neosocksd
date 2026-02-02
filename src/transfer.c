@@ -430,7 +430,7 @@ static void pipe_put(struct splice_pipe *restrict pipe)
 }
 #endif
 
-void transfer_start(struct ev_loop *loop, struct transfer *restrict t)
+void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)
 {
 #if WITH_SPLICE
 	if (G.conf->pipe) {

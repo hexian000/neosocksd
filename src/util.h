@@ -25,7 +25,7 @@ struct dialreq;
 struct resolver;
 struct ruleset;
 struct server;
-struct session;
+struct gcobj;
 
 /**
  * @brief Process-global state shared across subsystems.
@@ -41,7 +41,7 @@ extern struct globals {
 	struct ruleset *ruleset;
 #endif
 	struct server *server;
-	struct session *sessions;
+	struct gcobj *gcroot;
 	struct dialreq *basereq;
 } G;
 
@@ -136,7 +136,7 @@ void pipe_shrink(size_t count);
 #endif
 
 /** Process-level initializations. */
-void init(int argc, char **argv);
+void init(int argc, char *const restrict argv[]);
 
 /** Load libraries and initialize global subsystems. */
 void loadlibs(void);
@@ -183,5 +183,45 @@ int_least64_t clock_monotonic(void);
  * @return Fraction in [0,1] when available, or -1 when unavailable.
  */
 double thread_load(void);
+
+/**
+ * @brief Garbage collection finalizer function type.
+ *
+ * Called to finalize and free a registered object during shutdown.
+ *
+ * @param loop Event loop.
+ * @param obj Object to finalize.
+ */
+typedef void (*gc_finalizer)(struct ev_loop *loop, struct gcobj *obj);
+
+/**
+ * @brief Garbage-collected object header.
+ *
+ * Embed this at the start of any structure that should be tracked and
+ * finalized during shutdown.
+ */
+struct gcobj {
+	struct gcobj *prev;
+	struct gcobj *next;
+	gc_finalizer finalize;
+};
+
+/**
+ * @brief Register an object for garbage collection.
+ * @param obj Object to register.
+ */
+void gc_register(struct gcobj *obj);
+
+/**
+ * @brief Unregister an object from garbage collection.
+ * @param obj Object to unregister.
+ */
+void gc_unregister(struct gcobj *obj);
+
+/**
+ * @brief Finalize all registered objects.
+ * @param loop Event loop to pass to finalizers.
+ */
+void gc_finalizeall(struct ev_loop *loop);
 
 #endif /* UTIL_H */

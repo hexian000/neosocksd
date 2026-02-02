@@ -39,18 +39,19 @@ int socket_get_error(int fd);
 
 socklen_t getsocklen(const struct sockaddr *sa);
 void copy_sa(struct sockaddr *dst, const struct sockaddr *src);
-int format_sa(char *s, size_t maxlen, const struct sockaddr *sa);
+int format_sa(
+	char *restrict s, size_t maxlen, const struct sockaddr *restrict sa);
 
 bool is_unspecified_sa(const struct sockaddr *sa);
 bool is_multicast_sa(const struct sockaddr *sa);
 bool is_local_sa(const struct sockaddr *sa);
 
-bool parse_bindaddr(union sockaddr_max *sa, const char *s);
+bool parse_bindaddr(union sockaddr_max *restrict sa, const char *restrict s);
 bool resolve_addr(
-	union sockaddr_max *sa, const char *name, const char *service,
-	int family);
+	union sockaddr_max *restrict sa, const char *restrict name,
+	const char *restrict service, int family);
 
-int socket_send(int fd, const void *buf, size_t *len);
-int socket_recv(int fd, void *buf, size_t *len);
+int socket_send(int fd, const void *restrict buf, size_t *restrict len);
+int socket_recv(int fd, void *restrict buf, size_t *restrict len);
 
 #endif /* SOCKUTIL_H */

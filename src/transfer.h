@@ -83,7 +83,7 @@ void transfer_init(
  * @param loop Event loop.
  * @param t Transfer context previously initialized with transfer_init().
  */
-void transfer_start(struct ev_loop *loop, struct transfer *t);
+void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t);
 
 /**
  * @brief Stop the transfer watcher and finalize state.

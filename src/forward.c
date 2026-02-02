@@ -7,7 +7,6 @@
 #include "dialer.h"
 #include "ruleset.h"
 #include "server.h"
-#include "session.h"
 #include "sockutil.h"
 #include "transfer.h"
 #include "util.h"
@@ -37,7 +36,7 @@ enum forward_state {
 };
 
 struct forward_ctx {
-	struct session ss;
+	struct gcobj gcbase;
 	struct server *s;
 	enum forward_state state;
 	int accepted_fd, dialed_fd;
@@ -60,7 +59,7 @@ struct forward_ctx {
 		};
 	};
 };
-ASSERT_SUPER(struct session, struct forward_ctx, ss);
+ASSERT_SUPER(struct gcobj, struct forward_ctx, gcbase);
 
 #define FW_CTX_LOG_F(level, ctx, format, ...)                                  \
 	do {                                                                   \
@@ -128,7 +127,7 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		ctx->dialed_fd = -1;
 	}
 
-	session_del(&ctx->ss);
+	gc_unregister(&ctx->gcbase);
 	if (ctx->state < STATE_ESTABLISHED) {
 		dialreq_free(ctx->dialreq);
 	}
@@ -136,10 +135,10 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 }
 
 static void
-forward_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+forward_ctx_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
 {
 	struct forward_ctx *restrict ctx =
-		DOWNCAST(struct session, struct forward_ctx, ss, ss);
+		DOWNCAST(struct gcobj, struct forward_ctx, gcbase, obj);
 	forward_ctx_close(loop, ctx);
 }
 
@@ -352,8 +351,8 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, &cb);
-	ctx->ss.close = forward_ss_close;
-	session_add(&ctx->ss);
+	ctx->gcbase.finalize = forward_ctx_finalize;
+	gc_register(&ctx->gcbase);
 	return ctx;
 }
 

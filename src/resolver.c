@@ -103,7 +103,7 @@ struct resolve_query {
  * @param revents Event flags (should be EV_CUSTOM)
  */
 static void
-finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
+finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct resolve_query *restrict q = watcher->data;
@@ -145,7 +145,8 @@ finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
  * @param watcher The I/O watcher that triggered
  * @param revents Event flags (EV_READ and/or EV_WRITE)
  */
-static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+static void
+socket_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 {
 	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
@@ -171,7 +172,8 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
  * @param loop Event loop
  * @param watcher The timeout timer watcher
  */
-static void sched_update(struct ev_loop *loop, ev_timer *restrict watcher)
+static void
+sched_update(struct ev_loop *restrict loop, ev_timer *restrict watcher)
 {
 	struct resolver *restrict r = watcher->data;
 	struct timeval tv;
@@ -230,7 +232,7 @@ static size_t purge_watchers(struct resolver *restrict r)
  * @param revents Event flags (should be EV_TIMER)
  */
 static void
-timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct resolver *restrict r = watcher->data;
@@ -328,8 +330,9 @@ static void sock_state_cb(
  * @param node Head of the address info linked list
  * @return true if a valid address was found and copied, false otherwise
  */
-static bool
-find_addrinfo(union sockaddr_max *addr, const struct ares_addrinfo_node *node)
+static bool find_addrinfo(
+	union sockaddr_max *restrict addr,
+	const struct ares_addrinfo_node *restrict node)
 {
 	for (const struct ares_addrinfo_node *restrict it = node; it != NULL;
 	     it = it->ai_next) {
@@ -492,7 +495,7 @@ static bool resolver_async_init(
 #endif /* WITH_CARES */
 
 struct resolver *
-resolver_new(struct ev_loop *loop, const struct config *restrict conf)
+resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf)
 {
 	struct resolver *restrict r = malloc(sizeof(struct resolver));
 	if (r == NULL) {
@@ -611,7 +614,7 @@ struct resolve_query *resolve_do(
 	return q;
 }
 
-void resolve_cancel(struct resolve_query *q)
+void resolve_cancel(struct resolve_query *restrict q)
 {
 	if (q == NULL) {
 		return;

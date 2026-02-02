@@ -15,7 +15,6 @@
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
-#include "session.h"
 #include "socks.h"
 #include "sockutil.h"
 #include "util.h"
@@ -145,7 +144,7 @@ static void print_usage(const char *argv0)
  * in the global app.conf structure. Exits the program on invalid arguments
  * or when help is requested.
  */
-static void parse_args(const int argc, char *const *const restrict argv)
+static void parse_args(const int argc, char *const restrict argv[])
 {
 #define OPT_REQUIRE_ARG(argc, argv, i)                                         \
 	do {                                                                   \
@@ -565,7 +564,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Final cleanup and exit */
-	session_closeall(loop); /* Close any remaining sessions */
+	gc_finalizeall(loop); /* Close any remaining sessions */
 	ev_loop_destroy(loop); /* Destroy the event loop */
 	unloadlibs(); /* Unload dynamic libraries */
 

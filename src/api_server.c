@@ -9,7 +9,6 @@
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
-#include "session.h"
 #include "sockutil.h"
 #include "util.h"
 
@@ -47,7 +46,7 @@ enum api_state {
 };
 
 struct api_ctx {
-	struct session ss;
+	struct gcobj gcbase;
 	struct server *s;
 	enum api_state state;
 	int accepted_fd, dialed_fd;
@@ -63,7 +62,7 @@ struct api_ctx {
 	struct http_parser parser;
 	struct url uri;
 };
-ASSERT_SUPER(struct session, struct api_ctx, ss);
+ASSERT_SUPER(struct gcobj, struct api_ctx, gcbase);
 
 #define API_CTX_LOG_F(level, ctx, format, ...)                                 \
 	do {                                                                   \
@@ -847,15 +846,15 @@ static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	session_del(&ctx->ss);
+	gc_unregister(&ctx->gcbase);
 	free(ctx);
 }
 
 static void
-api_ss_close(struct ev_loop *restrict loop, struct session *restrict ss)
+api_ctx_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
 {
 	struct api_ctx *restrict ctx =
-		DOWNCAST(struct session, struct api_ctx, ss, ss);
+		DOWNCAST(struct gcobj, struct api_ctx, gcbase, obj);
 	api_ctx_close(loop, ctx);
 }
 
@@ -1009,8 +1008,8 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
-	ctx->ss.close = api_ss_close;
-	session_add(&ctx->ss);
+	ctx->gcbase.finalize = api_ctx_finalize;
+	gc_register(&ctx->gcbase);
 	return ctx;
 }
 

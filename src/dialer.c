@@ -470,7 +470,7 @@ struct dialreq *dialreq_new(const size_t num_proxy)
 	return req;
 }
 
-void dialreq_free(struct dialreq *req)
+void dialreq_free(struct dialreq *restrict req)
 {
 	free(req);
 }
@@ -1675,7 +1675,7 @@ void dialer_do(
  * multiple times or on an already completed dialer. The completion callback
  * will not be invoked after cancellation.
  */
-void dialer_cancel(struct dialer *restrict d, struct ev_loop *loop)
+void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 {
 	if (d->state == STATE_DONE) {
 		/* Already finished or cancelled */

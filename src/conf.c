@@ -38,7 +38,8 @@ struct config conf_default(void)
 }
 
 static bool range_check_int(
-	const char *key, const int value, const int lbound, const int ubound)
+	const char *restrict key, const int value, const int lbound,
+	const int ubound)
 {
 	if (!(lbound <= value && value <= ubound)) {
 		LOGE_F("%s is out of range (%d - %d)", key, lbound, ubound);
@@ -48,7 +49,7 @@ static bool range_check_int(
 }
 
 static bool range_check_double(
-	const char *key, const double value, const double lbound,
+	const char *restrict key, const double value, const double lbound,
 	const double ubound)
 {
 	if (!(lbound <= value && value <= ubound)) {

@@ -7,11 +7,11 @@ target_sources(csnippets
     PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/arraysize.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/ascii.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/intcast.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/class.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/buffer.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/debug.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/formats.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/intcast.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/minmax.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/slog.h"
 )

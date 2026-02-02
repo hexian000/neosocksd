@@ -7,7 +7,6 @@ add_executable(neosocksd
     codec.c codec.h
     ruleset.c ruleset.h
     transfer.c transfer.h
-    session.c session.h
     forward.c forward.h
     socks.c socks.h
     httputil.c httputil.h
