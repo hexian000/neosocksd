@@ -373,10 +373,10 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
 		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up);
+		&stats->byt_up, true);
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down);
+		&stats->byt_down, false);
 
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx,

@@ -49,6 +49,9 @@ struct transfer {
 	ev_io w_socket;
 	struct transfer_state_cb state_cb;
 	uintmax_t *byt_transferred;
+
+	bool is_uplink : 1;
+
 #if WITH_SPLICE
 	struct splice_pipe pipe;
 #endif
@@ -72,10 +75,11 @@ struct transfer {
  * @param dst_fd Destination file descriptor to write to (non-blocking).
  * @param byt_transferred Optional pointer to a counter to accumulate the
  *        number of bytes successfully sent. May be NULL.
+ * @param is_uplink true if this transfer is for uplink (client to server).
  */
 void transfer_init(
 	struct transfer *t, const struct transfer_state_cb *callback,
-	int src_fd, int dst_fd, uintmax_t *byt_transferred);
+	int src_fd, int dst_fd, uintmax_t *byt_transferred, bool is_uplink);
 
 /**
  * @brief Start the transfer by starting its watcher on the given loop.

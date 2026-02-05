@@ -39,8 +39,13 @@
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		LOG_F(level, "[fd:%d]->[fd:%d] " format, (t)->src_fd,          \
-		      (t)->dst_fd, __VA_ARGS__);                               \
+		if ((t)->is_uplink) {                                          \
+			LOG_F(level, "[fd:%d]<-[fd:%d] " format, (t)->dst_fd,  \
+			      (t)->src_fd, __VA_ARGS__);                       \
+		} else {                                                       \
+			LOG_F(level, "[fd:%d]->[fd:%d] " format, (t)->src_fd,  \
+			      (t)->dst_fd, __VA_ARGS__);                       \
+		}                                                              \
 	} while (0)
 #define XFER_CTX_LOG(level, t, message) XFER_CTX_LOG_F(level, t, "%s", message)
 
@@ -388,7 +393,8 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	const int src_fd, const int dst_fd, uintmax_t *byt_transferred)
+	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
+	const bool is_uplink)
 {
 	t->state = XFER_INIT;
 	t->src_fd = src_fd;
@@ -398,6 +404,7 @@ void transfer_init(
 	t->w_socket.data = t;
 	t->state_cb = *callback;
 	t->byt_transferred = byt_transferred;
+	t->is_uplink = is_uplink;
 
 #if WITH_SPLICE
 	t->pipe = (struct splice_pipe){

@@ -455,10 +455,10 @@ static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
 		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up);
+		&stats->byt_up, true);
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down);
+		&stats->byt_down, false);
 
 	SOCKS_CTX_LOG_F(
 		DEBUG, ctx,
