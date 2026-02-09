@@ -80,7 +80,7 @@ static void accept_cb(
 		if (LOGLEVEL(VERYVERBOSE)) {
 			char addr_str[64];
 			format_sa(addr_str, sizeof(addr_str), &addr.sa);
-			LOG_F(VERYVERBOSE, "accepted from listener %d: (%d) %s",
+			LOG_F(VERYVERBOSE, "accepted from [fd:%d]: [fd:%d] %s",
 			      watcher->fd, fd, addr_str);
 		}
 
