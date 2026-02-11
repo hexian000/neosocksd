@@ -15,9 +15,9 @@
 #include "transfer.h"
 
 #include "conf.h"
-#include "sockutil.h"
 #include "util.h"
 
+#include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"

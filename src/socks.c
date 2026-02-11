@@ -9,13 +9,14 @@
 #include "proto/socks.h"
 #include "ruleset.h"
 #include "server.h"
-#include "sockutil.h"
 #include "transfer.h"
 #include "util.h"
 
+#include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
+#include "utils/gc.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
 
@@ -45,7 +46,7 @@ enum socks_state {
 };
 
 struct socks_ctx {
-	struct gcobj gcbase;
+	struct gcbase gcbase;
 	struct server *s;
 	enum socks_state state;
 	int accepted_fd, dialed_fd;
@@ -80,14 +81,14 @@ struct socks_ctx {
 		};
 	};
 };
-ASSERT_SUPER(struct gcobj, struct socks_ctx, gcbase);
+ASSERT_SUPER(struct gcbase, struct socks_ctx, gcbase);
 
 static int format_status(
 	char *restrict s, const size_t maxlen,
 	const struct socks_ctx *restrict ctx)
 {
 	char caddr[64];
-	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
+	sa_format(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if (ctx->state != STATE_CONNECT) {
 		return snprintf(
 			s, maxlen, "[fd:%d] %s", ctx->accepted_fd, caddr);
@@ -160,12 +161,13 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void
-socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
+static void socks_ctx_finalize(struct gcbase *restrict obj)
 {
+	struct socks_ctx *restrict ctx =
+		DOWNCAST(struct gcbase, struct socks_ctx, gcbase, obj);
 	SOCKS_CTX_LOG_F(VERBOSE, ctx, "closing, state=%d", ctx->state);
 
-	socks_ctx_stop(loop, ctx);
+	socks_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -175,19 +177,9 @@ socks_ctx_close(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		ctx->dialed_fd = -1;
 	}
 
-	gc_unregister(&ctx->gcbase);
 	if (ctx->state < STATE_ESTABLISHED) {
 		dialreq_free(ctx->dialreq);
 	}
-	free(ctx);
-}
-
-static void
-socks_ctx_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
-{
-	struct socks_ctx *restrict ctx =
-		DOWNCAST(struct gcobj, struct socks_ctx, gcbase, obj);
-	socks_ctx_close(loop, ctx);
 }
 
 static void mark_ready(struct ev_loop *loop, struct socks_ctx *restrict ctx)
@@ -211,7 +203,7 @@ static void xfer_state_cb(struct ev_loop *restrict loop, void *data)
 
 	if (ctx->uplink.state == XFER_FINISHED &&
 	    ctx->downlink.state == XFER_FINISHED) {
-		socks_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	if (ctx->state == STATE_ESTABLISHED &&
@@ -313,6 +305,7 @@ socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 static void
 timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 {
+	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_TIMER);
 
 	struct socks_ctx *restrict ctx = watcher->data;
@@ -337,7 +330,7 @@ timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 	default:
 		FAILMSGF("unexpected socks_ctx state: %d", ctx->state);
 	}
-	socks_ctx_close(loop, ctx);
+	gc_unref(&ctx->gcbase);
 }
 
 static bool socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
@@ -428,12 +421,12 @@ static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
 				ERROR, ctx, "dialer: %s", dialer_strerror(err));
 		}
 		socks_senderr(ctx, err, syserr);
-		socks_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	ctx->dialed_fd = fd;
 	if (!socks_sendrsp(ctx, true)) {
-		socks_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 
@@ -823,7 +816,7 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
 	if (ctx->dialreq == NULL) {
 		(void)socks_sendrsp(ctx, false);
-		socks_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 
@@ -887,7 +880,7 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 	}
 	if (!ok) {
 		(void)socks_sendrsp(ctx, false);
-		socks_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 }
@@ -912,7 +905,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	const int ret = socks_recv(ctx, watcher->fd);
 	if (ret < 0) {
 		/* error */
-		socks_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	if (ret > 0) {
@@ -974,8 +967,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, &cb);
-	ctx->gcbase.finalize = socks_ctx_finalize;
-	gc_register(&ctx->gcbase);
+	gc_register(&ctx->gcbase, socks_ctx_finalize);
 	return ctx;
 }
 
@@ -1000,6 +992,6 @@ void socks_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
+	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
 	socks_ctx_start(loop, ctx);
 }

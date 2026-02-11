@@ -1,6 +1,8 @@
 /* csnippets (c) 2019-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+#include "base64.h"
+
 #include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>

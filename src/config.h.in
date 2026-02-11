@@ -18,7 +18,5 @@ const char *neosocksd_version(void);
 #cmakedefine01 WITH_TCP_FASTOPEN_CONNECT
 #cmakedefine01 WITH_CARES
 #cmakedefine01 WITH_RULESET
-#cmakedefine01 WITH_SYSTEMD
-#cmakedefine01 WITH_CRASH_HANDLER
 
 #endif /* CONFIG_H */

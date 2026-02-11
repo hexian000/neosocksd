@@ -5,7 +5,6 @@
 #define IO_IO_H
 
 #include <stddef.h>
-#include <stdio.h>
 
 #define IO_BUFSIZE 4096
 

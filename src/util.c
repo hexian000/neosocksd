@@ -11,12 +11,13 @@
  */
 #include "util.h"
 
+#include "os/clock.h"
 #include "resolver.h"
 
 #include "math/rand.h"
-#include "utils/arraysize.h"
+#include "os/signal.h"
+#include "os/socket.h"
 #include "utils/debug.h"
-#include "utils/intcast.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
@@ -26,7 +27,10 @@
 #include <fcntl.h>
 #endif
 #include <grp.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <pwd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -103,57 +107,6 @@ void pipe_shrink(const size_t count)
 }
 #endif
 
-#if WITH_CRASH_HANDLER
-static struct {
-	int signo;
-	struct sigaction oact;
-} sighandlers[] = {
-	{ SIGQUIT, { .sa_handler = SIG_DFL } },
-	{ SIGILL, { .sa_handler = SIG_DFL } },
-	{ SIGTRAP, { .sa_handler = SIG_DFL } },
-	{ SIGABRT, { .sa_handler = SIG_DFL } },
-	{ SIGBUS, { .sa_handler = SIG_DFL } },
-	{ SIGFPE, { .sa_handler = SIG_DFL } },
-	{ SIGSEGV, { .sa_handler = SIG_DFL } },
-	{ SIGSYS, { .sa_handler = SIG_DFL } },
-};
-
-/** Minimal crash handler to log stack then re-raise the signal. */
-static void crash_handler(const int signo)
-{
-	LOG_STACK_F(FATAL, 2, "FATAL ERROR: %s", strsignal(signo));
-	struct sigaction *act = NULL;
-	for (size_t i = 0; i < ARRAY_SIZE(sighandlers); i++) {
-		if (sighandlers[i].signo == signo) {
-			act = &sighandlers[i].oact;
-			break;
-		}
-	}
-	if (sigaction(signo, act, NULL) != 0) {
-		LOG_PERROR("sigaction");
-		_Exit(EXIT_FAILURE);
-	}
-	if (raise(signo)) {
-		_Exit(EXIT_FAILURE);
-	}
-}
-
-/** Install crash handlers for fatal signals when enabled. */
-static void set_crash_handler(void)
-{
-	struct sigaction act = {
-		.sa_handler = crash_handler,
-	};
-	for (size_t i = 0; i < ARRAY_SIZE(sighandlers); i++) {
-		const int signo = sighandlers[i].signo;
-		struct sigaction *oact = &sighandlers[i].oact;
-		if (sigaction(signo, &act, oact) != 0) {
-			LOG_PERROR("sigaction");
-		}
-	}
-}
-#endif /* WITH_CRASH_HANDLER */
-
 #if defined(WIN32)
 #define PATH_SEPARATOR '\\'
 #else
@@ -185,7 +138,7 @@ void init(int argc, char *const restrict argv[])
 		FAILMSGF("sigaction: (%d) %s", err, strerror(err));
 	}
 #if WITH_CRASH_HANDLER
-	set_crash_handler();
+	crashhandler_install();
 #endif
 }
 
@@ -237,234 +190,6 @@ void modify_io_events(
 	}
 }
 
-bool parse_user(struct user_ident *restrict ident, const char *restrict s)
-{
-	const size_t len = strlen(s);
-	if (len >= 1024) {
-		LOGE_F("user name is too long: `%s'", s);
-		return false;
-	}
-	char buf[len + 1];
-	memcpy(buf, s, len + 1);
-
-	const char *user = NULL, *group = NULL;
-	char *const colon = strchr(buf, ':');
-	if (colon != NULL) {
-		if (colon != buf) {
-			user = buf;
-		}
-		*colon = '\0';
-		if (colon[1] != '\0') {
-			group = &colon[1];
-		}
-	} else {
-		user = buf;
-		group = NULL;
-	}
-
-	uid_t uid = (uid_t)-1;
-	gid_t gid = (gid_t)-1;
-	const struct passwd *pw = NULL;
-	if (user != NULL) {
-		char *endptr;
-		const intmax_t uidvalue = strtoimax(user, &endptr, 10);
-		if (*endptr || !INTCAST_CHECK(uid, uidvalue)) {
-			/* search user database for user name */
-			pw = getpwnam(user);
-			if (pw == NULL) {
-				LOGE_F("passwd: name `%s' does not exist",
-				       user);
-				return false;
-			}
-			LOGD_F("passwd: `%s' uid=%jd gid=%jd", user,
-			       (intmax_t)pw->pw_uid, (intmax_t)pw->pw_gid);
-			uid = pw->pw_uid;
-		} else {
-			uid = (uid_t)uidvalue;
-		}
-	}
-
-	if (group != NULL) {
-		char *endptr;
-		const intmax_t gidvalue = strtoimax(group, &endptr, 10);
-		if (*endptr || !INTCAST_CHECK(gid, gidvalue)) {
-			/* search group database for group name */
-			const struct group *gr = getgrnam(group);
-			if (gr == NULL) {
-				LOGE_F("group: name `%s' does not exist",
-				       group);
-				return false;
-			}
-			LOGD_F("group: `%s' gid=%jd", group,
-			       (intmax_t)gr->gr_gid);
-			gid = gr->gr_gid;
-		} else {
-			gid = (gid_t)gidvalue;
-		}
-	} else if (user != NULL && colon != NULL) {
-		/* group is not specified, search from user database */
-		if (pw == NULL) {
-			pw = getpwuid(uid);
-			if (pw == NULL) {
-				LOGE_F("passwd: user `%s' does not exist",
-				       user);
-				return false;
-			}
-			LOGD_F("passwd: `%s' uid=%jd gid=%jd", user,
-			       (intmax_t)pw->pw_uid, (intmax_t)pw->pw_gid);
-		}
-		gid = pw->pw_gid;
-	}
-	if (ident != NULL) {
-		*ident = (struct user_ident){
-			.uid = uid,
-			.gid = gid,
-		};
-	}
-	return true;
-}
-
-/** Drop real and effective privileges to the specified identifiers. */
-void drop_privileges(const struct user_ident *restrict ident)
-{
-#if _BSD_SOURCE || _GNU_SOURCE
-	if (setgroups(0, NULL) != 0) {
-		const int err = errno;
-		LOGW_F("unable to drop supplementary group privileges: (%d) %s",
-		       err, strerror(err));
-	}
-#endif
-	if (ident->gid != (gid_t)-1) {
-		LOGD_F("setgid: %jd", (intmax_t)ident->gid);
-		if (setgid(ident->gid) != 0 || setegid(ident->gid) != 0) {
-			const int err = errno;
-			LOGW_F("unable to drop group privileges: (%d) %s", err,
-			       strerror(err));
-		}
-	}
-	if (ident->uid != (uid_t)-1) {
-		LOGD_F("setuid: %jd", (intmax_t)ident->uid);
-		if (setuid(ident->uid) != 0 || seteuid(ident->uid) != 0) {
-			const int err = errno;
-			LOGW_F("unable to drop user privileges: (%d) %s", err,
-			       strerror(err));
-		}
-	}
-}
-
-/** Daemonize the current process using the double-fork pattern. */
-void daemonize(
-	const struct user_ident *restrict ident, const bool nochdir,
-	const bool noclose)
-{
-	/* Create an anonymous pipe for communicating with daemon process. */
-	int fd[2];
-	if (pipe(fd) == -1) {
-		const int err = errno;
-		FAILMSGF("pipe: (%d) %s", err, strerror(err));
-	}
-	/* First fork(). */
-	{
-		const pid_t pid = fork();
-		if (pid < 0) {
-			const int err = errno;
-			FAILMSGF("fork: (%d) %s", err, strerror(err));
-		} else if (pid > 0) {
-			CLOSE_FD(fd[1]);
-			char buf[256];
-			/* Wait for the daemon process to be started. */
-			const ssize_t nread = read(fd[0], buf, sizeof(buf));
-			CHECK(nread > 0);
-			LOGI_F("%.*s", (int)nread, buf);
-			/* Finally, call exit() in the original process. */
-			exit(EXIT_SUCCESS);
-		} else {
-			CLOSE_FD(fd[0]);
-		}
-	}
-	/* In the child, call setsid(). */
-	if (setsid() < 0) {
-		const int err = errno;
-		LOGW_F("setsid: (%d) %s", err, strerror(err));
-	}
-	/* In the child, call fork() again. */
-	{
-		const pid_t pid = fork();
-		if (pid < 0) {
-			const int err = errno;
-			FAILMSGF("fork: (%d) %s", err, strerror(err));
-		} else if (pid > 0) {
-			/* Call exit() in the first child. */
-			exit(EXIT_SUCCESS);
-		}
-	}
-	/* In the daemon process, connect /dev/null to standard input, output, and error. */
-	if (!noclose) {
-		FILE *f;
-		f = freopen("/dev/null", "r", stdin);
-		ASSERT(f == stdin);
-		UNUSED(f);
-		f = freopen("/dev/null", "w", stdout);
-		ASSERT(f == stdout);
-		UNUSED(f);
-		f = freopen("/dev/null", "w", stderr);
-		ASSERT(f == stderr);
-		UNUSED(f);
-	}
-	/* In the daemon process, reset the umask to 0. */
-	(void)umask(0);
-	/* In the daemon process, change the current directory to the
-           root directory (/), in order to avoid that the daemon
-           involuntarily blocks mount points from being unmounted. */
-	if (!nochdir) {
-		if (chdir("/") != 0) {
-			const int err = errno;
-			LOGW_F("chdir: (%d) %s", err, strerror(err));
-		}
-	}
-	/* In the daemon process, drop privileges */
-	if (ident != NULL) {
-		drop_privileges(ident);
-	}
-	/* From the daemon process, notify the original process started
-           that initialization is complete. */
-	{
-		char buf[256];
-		const int n = snprintf(
-			buf, sizeof(buf),
-			"daemon process has started with pid %jd",
-			(intmax_t)getpid());
-		ASSERT(n > 0 && (size_t)n < sizeof(buf));
-		const ssize_t nwritten = write(fd[1], buf, n);
-		ASSERT(nwritten == n);
-		UNUSED(nwritten);
-	}
-	/* Close the anonymous pipe. */
-	CLOSE_FD(fd[1]);
-}
-
-/** Read a timespec as signed 64-bit nanoseconds. */
-#define READ_TIMESPEC(ts)                                                      \
-	((int_fast64_t)(ts).tv_sec * INT64_C(1000000000) +                     \
-	 (int_fast64_t)(ts).tv_nsec)
-
-/** Read a timespec as signed 64-bit nanoseconds. */
-#define READ_TIMEVAL(tv)                                                       \
-	((int_fast64_t)(tv).tv_sec * INT64_C(1000000000) +                     \
-	 (int_fast64_t)(tv).tv_usec * INT64_C(1000))
-
-int_least64_t clock_monotonic(void)
-{
-	struct timespec monotime;
-	if (clock_gettime(CLOCK_MONOTONIC, &monotime)) {
-		/* failsafe */
-		struct timeval tv;
-		(void)gettimeofday(&tv, NULL);
-		return READ_TIMEVAL(tv);
-	}
-	return (int_least64_t)READ_TIMESPEC(monotime);
-}
-
 double thread_load(void)
 {
 	static _Thread_local struct {
@@ -473,17 +198,17 @@ double thread_load(void)
 	} last = { .set = false };
 	double load = -1;
 	struct timespec monotime, cputime;
-	if (clock_gettime(CLOCK_MONOTONIC, &monotime)) {
+	if (!clock_monotonic(&monotime)) {
 		return load;
 	}
-	if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cputime)) {
+	if (!clock_thread(&cputime)) {
 		return load;
 	}
 	if (last.set) {
-		const int_fast64_t total =
-			READ_TIMESPEC(monotime) - READ_TIMESPEC(last.monotime);
+		const int_fast64_t total = timespec2nano(&monotime) -
+					   timespec2nano(&last.monotime);
 		const int_fast64_t busy =
-			READ_TIMESPEC(cputime) - READ_TIMESPEC(last.cputime);
+			timespec2nano(&cputime) - timespec2nano(&last.cputime);
 		if (busy > 0 && total > 0 && busy <= total) {
 			load = (double)busy / (double)total;
 		}
@@ -494,39 +219,39 @@ double thread_load(void)
 	return load;
 }
 
-#undef READ_TIMESPEC
-#undef READ_TIMEVAL
-
-void gc_register(struct gcobj *restrict obj)
+void socket_bind_netdev(const int fd, const char *netdev)
 {
-	obj->prev = NULL;
-	obj->next = G.gcroot;
-	if (G.gcroot != NULL) {
-		G.gcroot->prev = obj;
+#ifdef SO_BINDTODEVICE
+	char ifname[IFNAMSIZ];
+	(void)strncpy(ifname, netdev, sizeof(ifname) - 1);
+	ifname[sizeof(ifname) - 1] = '\0';
+	if (setsockopt(
+		    fd, SOL_SOCKET, SO_BINDTODEVICE, ifname, sizeof(ifname))) {
+		const int err = errno;
+		LOGW_F("[fd:%d] SO_BINDTODEVICE: (%d) %s", fd, err,
+		       strerror(err));
 	}
-	G.gcroot = obj;
+#else
+	(void)fd;
+	if (netdev[0] != '\0') {
+		LOGW_F("SO_BINDTODEVICE: %s", "not supported in current build");
+	}
+#endif
 }
 
-void gc_unregister(struct gcobj *restrict obj)
+void socket_set_transparent(const int fd, const bool tproxy)
 {
-	struct gcobj *restrict prev = obj->prev;
-	struct gcobj *restrict next = obj->next;
-	if (prev != NULL) {
-		prev->next = next;
-	} else {
-		G.gcroot = next;
+#ifdef IP_TRANSPARENT
+	int val = tproxy ? 1 : 0;
+	if (setsockopt(fd, SOL_IP, IP_TRANSPARENT, &val, sizeof(val))) {
+		/* this is a fatal error */
+		const int err = errno;
+		FAILMSGF("IP_TRANSPARENT: (%d) %s", err, strerror(err));
 	}
-	if (next != NULL) {
-		next->prev = prev;
-	}
-}
-
-void gc_finalizeall(struct ev_loop *restrict loop)
-{
-	size_t num = 0;
-	for (struct gcobj *obj = G.gcroot; obj != NULL; obj = G.gcroot) {
-		obj->finalize(loop, obj);
-		num++;
-	}
-	LOGI_F("gc: %zu objects finalized", num);
+#else
+	(void)fd;
+	CHECKMSGF(
+		!tproxy, "IP_TRANSPARENT: %s",
+		"not supported in current build");
+#endif
 }

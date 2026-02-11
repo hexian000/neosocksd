@@ -1,7 +1,6 @@
 add_executable(neosocksd
     util.c util.h
     conf.c conf.h
-    sockutil.c sockutil.h
     dialer.c dialer.h
     resolver.c resolver.h
     codec.c codec.h
@@ -27,7 +26,6 @@ else()
 endif()
 
 include(CheckSymbolExists)
-check_symbol_exists(clock_gettime "time.h" HAVE_CLOCK_GETTIME)
 check_symbol_exists(pipe2 "unistd.h" HAVE_PIPE2)
 check_symbol_exists(splice "fcntl.h" HAVE_SPLICE)
 check_symbol_exists(IP_TRANSPARENT "netinet/in.h" HAVE_IP_TRANSPARENT)
@@ -155,24 +153,6 @@ if(ENABLE_RULESET)
     target_include_directories(neosocksd SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
     target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
     add_subdirectory(ruleset)
-endif()
-
-# find systemd
-if(ENABLE_SYSTEMD)
-    find_path(SYSTEMD_INCLUDE_DIR NAMES systemd/sd-daemon.h)
-    find_library(SYSTEMD_LIBRARY NAMES systemd)
-    if((EXISTS ${SYSTEMD_INCLUDE_DIR}) AND (EXISTS ${SYSTEMD_LIBRARY}))
-        message(STATUS "systemd: ${SYSTEMD_LIBRARY}")
-        set(WITH_SYSTEMD TRUE)
-        target_include_directories(neosocksd SYSTEM PRIVATE ${SYSTEMD_INCLUDE_DIR})
-        target_link_libraries(neosocksd PRIVATE ${SYSTEMD_LIBRARY})
-    else()
-        message(WARNING "systemd not found")
-    endif()
-endif()
-
-if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    set(WITH_CRASH_HANDLER TRUE)
 endif()
 
 if(ENABLE_MIMALLOC)

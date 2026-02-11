@@ -9,7 +9,6 @@
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
-#include "sockutil.h"
 #include "util.h"
 
 #include "io/io.h"
@@ -17,11 +16,14 @@
 #include "net/http.h"
 #include "net/mime.h"
 #include "net/url.h"
+#include "os/clock.h"
+#include "os/socket.h"
 #include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/formats.h"
+#include "utils/gc.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
@@ -46,7 +48,7 @@ enum api_state {
 };
 
 struct api_ctx {
-	struct gcobj gcbase;
+	struct gcbase gcbase;
 	struct server *s;
 	enum api_state state;
 	int accepted_fd, dialed_fd;
@@ -62,7 +64,7 @@ struct api_ctx {
 	struct http_parser parser;
 	struct url uri;
 };
-ASSERT_SUPER(struct gcobj, struct api_ctx, gcbase);
+ASSERT_SUPER(struct gcbase, struct api_ctx, gcbase);
 
 #define API_CTX_LOG_F(level, ctx, format, ...)                                 \
 	do {                                                                   \
@@ -70,7 +72,7 @@ ASSERT_SUPER(struct gcobj, struct api_ctx, gcbase);
 			break;                                                 \
 		}                                                              \
 		char caddr[64];                                                \
-		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
+		sa_format(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
 		LOG_F(level, "[fd:%d] %s: " format, (ctx)->accepted_fd, caddr, \
 		      __VA_ARGS__);                                            \
 	} while (0)
@@ -383,7 +385,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			PROJECT_HOMEPAGE);
 	}
 
-	const int_least64_t now = clock_monotonic();
+	const int_least64_t now = clock_monotonic_ns();
 	const int_least64_t uptime = now - ctx->s->stats.started;
 	/* Track time between stateful requests for rate calculations */
 	static struct {
@@ -578,7 +580,7 @@ static void handle_ruleset_invoke(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset)
 {
-	const int_least64_t start = clock_monotonic();
+	const int_least64_t start = clock_monotonic_ns();
 	struct stream *reader = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
@@ -600,7 +602,7 @@ static void handle_ruleset_invoke(
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
-	const int_least64_t end = clock_monotonic();
+	const int_least64_t end = clock_monotonic_ns();
 	FORMAT_DURATION(timecost, make_duration_nanos(end - start));
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	send_response(loop, ctx, true);
@@ -610,7 +612,7 @@ static void handle_ruleset_update(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset, const char *module, const char *chunkname)
 {
-	const int_least64_t start = clock_monotonic();
+	const int_least64_t start = clock_monotonic_ns();
 	struct stream *reader = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
@@ -632,7 +634,7 @@ static void handle_ruleset_update(
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	RESPHDR_FINISH(ctx->parser.wbuf);
-	const int_least64_t end = clock_monotonic();
+	const int_least64_t end = clock_monotonic_ns();
 	FORMAT_DURATION(timecost, make_duration_nanos(end - start));
 	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	send_response(loop, ctx, true);
@@ -644,7 +646,7 @@ static void handle_ruleset_gc(
 {
 	struct ruleset_vmstats before;
 	ruleset_vmstats(ruleset, &before);
-	const int_least64_t start = clock_monotonic();
+	const int_least64_t start = clock_monotonic_ns();
 	const bool ok = ruleset_gc(ruleset);
 	if (!ok) {
 		size_t len;
@@ -653,7 +655,7 @@ static void handle_ruleset_gc(
 		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
-	const int_least64_t end = clock_monotonic();
+	const int_least64_t end = clock_monotonic_ns();
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
 
@@ -831,11 +833,13 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		stats->num_sessions);
 }
 
-static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
+static void api_ctx_finalize(struct gcbase *restrict obj)
 {
+	struct api_ctx *restrict ctx =
+		DOWNCAST(struct gcbase, struct api_ctx, gcbase, obj);
 	API_CTX_LOG_F(VERYVERBOSE, ctx, "closing, state=%d", ctx->state);
 
-	api_ctx_stop(loop, ctx);
+	api_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -846,16 +850,6 @@ static void api_ctx_close(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	gc_unregister(&ctx->gcbase);
-	free(ctx);
-}
-
-static void
-api_ctx_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
-{
-	struct api_ctx *restrict ctx =
-		DOWNCAST(struct gcobj, struct api_ctx, gcbase, obj);
-	api_ctx_close(loop, ctx);
 }
 
 void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
@@ -865,7 +859,7 @@ void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	const int want = http_parser_recv(&ctx->parser);
 	if (want < 0) {
-		api_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	if (want > 0) {
@@ -891,6 +885,7 @@ void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
+	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RESPONSE);
@@ -898,12 +893,10 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	const int fd = watcher->fd;
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
-	int err = socket_send(fd, buf, &len);
-	if (err != 0) {
-		API_CTX_LOG_F(
-			WARNING, ctx, "send: [fd:%d] (%d) %s", fd, err,
-			strerror(err));
-		api_ctx_close(loop, ctx);
+	int ret = socket_send(fd, buf, &len);
+	if (ret != 0) {
+		API_CTX_LOG_F(WARNING, ctx, "socket_send: error %d", ret);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	ctx->parser.wpos += len;
@@ -916,12 +909,11 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
 		buf = cbuf->data + ctx->parser.cpos;
 		len = cbuf->len - ctx->parser.cpos;
-		err = socket_send(fd, buf, &len);
-		if (err != 0) {
+		ret = socket_send(fd, buf, &len);
+		if (ret != 0) {
 			API_CTX_LOG_F(
-				WARNING, ctx, "send: [fd:%d] (%d) %s", fd, err,
-				strerror(err));
-			api_ctx_close(loop, ctx);
+				WARNING, ctx, "socket_send: error %d", ret);
+			gc_unref(&ctx->gcbase);
 			return;
 		}
 		ctx->parser.cpos += len;
@@ -931,15 +923,16 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 
 	/* Connection: close */
-	api_ctx_close(loop, ctx);
+	gc_unref(&ctx->gcbase);
 }
 
 static void
 timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
+	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct api_ctx *restrict ctx = watcher->data;
-	api_ctx_close(loop, ctx);
+	gc_unref(&ctx->gcbase);
 }
 
 static bool parse_header(void *ctx, const char *key, char *value)
@@ -1008,8 +1001,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
-	ctx->gcbase.finalize = api_ctx_finalize;
-	gc_register(&ctx->gcbase);
+	gc_register(&ctx->gcbase, api_ctx_finalize);
 	return ctx;
 }
 
@@ -1031,6 +1023,6 @@ void api_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
+	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
 	api_ctx_start(loop, ctx);
 }

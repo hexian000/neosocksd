@@ -4,10 +4,11 @@
 #include "server.h"
 
 #include "conf.h"
-#include "sockutil.h"
 #include "util.h"
 
 #include "math/rand.h"
+#include "os/clock.h"
+#include "os/socket.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -79,7 +80,7 @@ static void accept_cb(
 
 		if (LOGLEVEL(VERYVERBOSE)) {
 			char addr_str[64];
-			format_sa(addr_str, sizeof(addr_str), &addr.sa);
+			sa_format(addr_str, sizeof(addr_str), &addr.sa);
 			LOG_F(VERYVERBOSE, "accepted from [fd:%d]: [fd:%d] %s",
 			      watcher->fd, fd, addr_str);
 		}
@@ -172,12 +173,12 @@ bool server_start(
 	/* Log bind address if notice logging is enabled */
 	if (LOGLEVEL(NOTICE)) {
 		char addr_str[64];
-		format_sa(addr_str, sizeof(addr_str), bindaddr);
+		sa_format(addr_str, sizeof(addr_str), bindaddr);
 		LOG_F(NOTICE, "listen: %s", addr_str);
 	}
 
 	/* Bind socket to address */
-	if (bind(fd, bindaddr, getsocklen(bindaddr)) != 0) {
+	if (bind(fd, bindaddr, sa_len(bindaddr)) != 0) {
 		const int err = errno;
 		LOGE_F("bind: (%d) %s", err, strerror(err));
 		CLOSE_FD(fd);
@@ -202,7 +203,7 @@ bool server_start(
 
 	/* Start the server and record start time */
 	struct ev_loop *loop = s->loop;
-	s->stats.started = clock_monotonic();
+	s->stats.started = clock_monotonic_ns();
 	ev_io_start(loop, w_accept);
 	return true;
 }

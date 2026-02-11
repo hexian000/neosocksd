@@ -19,13 +19,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
 struct dialreq;
 struct resolver;
 struct ruleset;
 struct server;
-struct gcobj;
 
 /**
  * @brief Process-global state shared across subsystems.
@@ -41,7 +39,6 @@ extern struct globals {
 	struct ruleset *ruleset;
 #endif
 	struct server *server;
-	struct gcobj *gcroot;
 	struct dialreq *basereq;
 } G;
 
@@ -49,7 +46,7 @@ extern struct globals {
  * @brief Compile-time length of a string literal excluding the null terminator.
  * @param s String literal.
  */
-#define CONSTSTRLEN(s) (sizeof(s) - 1)
+#define CONSTSTRLEN(s) (sizeof(s "") - sizeof(""))
 
 /**
  * @brief Mark a variable as intentionally unused and silence compiler warnings.
@@ -61,19 +58,6 @@ extern struct globals {
  * @brief Sentinel value representing an invalid or unavailable timestamp.
  */
 #define TSTAMP_NIL (-1.0)
-
-/**
- * @brief Close a file descriptor and log a warning on failure.
- * @param fd File descriptor to close.
- */
-#define CLOSE_FD(fd)                                                           \
-	do {                                                                   \
-		if (close((fd)) != 0) {                                        \
-			const int err = errno;                                 \
-			LOGW_F("close [fd:%d]: (%d) %s", (fd), err,            \
-			       strerror(err));                                 \
-		}                                                              \
-	} while (0)
 
 struct ev_loop;
 struct ev_io;
@@ -144,84 +128,14 @@ void loadlibs(void);
 /** Clean up and unload global subsystems and resources. */
 void unloadlibs(void);
 
-/** User and group identifiers. */
-struct user_ident {
-	uid_t uid;
-	gid_t gid;
-};
-
-/** Parse a "[user][:[group]]" spec into numeric IDs using passwd/group DBs. */
-bool parse_user(struct user_ident *ident, const char *s);
-
-/**
- * @brief Drop real and effective privileges to the specified identifiers.
- * @param ident Target user and group IDs. Unspecified fields may be -1.
- */
-void drop_privileges(const struct user_ident *ident);
-
-/**
- * @brief Daemonize the current process using the double-fork pattern.
- *
- * Optionally avoid changing directory and/or closing stdio, then drop
- * privileges if `ident` is provided. On success, the parent exits after
- * receiving a readiness message from the daemon.
- *
- * @param ident Optional identifiers to drop to after daemonizing.
- * @param nochdir Do not chdir to "/" when true.
- * @param noclose Do not redirect stdio to /dev/null when true.
- */
-void daemonize(const struct user_ident *ident, bool nochdir, bool noclose);
-
-/**
- * @brief Monotonic clock in nanoseconds.
- * @return Nanoseconds since an unspecified epoch, or -1 on error.
- */
-int_least64_t clock_monotonic(void);
-
 /**
  * @brief Per-thread CPU load since the previous call.
  * @return Fraction in [0,1] when available, or -1 when unavailable.
  */
 double thread_load(void);
 
-/**
- * @brief Garbage collection finalizer function type.
- *
- * Called to finalize and free a registered object during shutdown.
- *
- * @param loop Event loop.
- * @param obj Object to finalize.
- */
-typedef void (*gc_finalizer)(struct ev_loop *loop, struct gcobj *obj);
-
-/**
- * @brief Garbage-collected object header.
- *
- * Embed this at the start of any structure that should be tracked and
- * finalized during shutdown.
- */
-struct gcobj {
-	struct gcobj *prev;
-	struct gcobj *next;
-	gc_finalizer finalize;
-};
-
-/**
- * @brief Register an object for garbage collection.
- * @param obj Object to register.
- */
-void gc_register(struct gcobj *obj);
-
-/**
- * @brief Unregister an object from garbage collection.
- * @param obj Object to unregister.
- */
-void gc_unregister(struct gcobj *obj);
-
-/**
- * @brief Finalize all registered objects.
- * @param loop Event loop to pass to finalizers.
- */
-void gc_finalizeall(struct ev_loop *loop);
+/* socket utilities */
+void socket_bind_netdev(int fd, const char *netdev);
+void socket_set_transparent(int fd, bool tproxy);
 
 #endif /* UTIL_H */

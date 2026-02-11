@@ -21,9 +21,9 @@
 #include "resolver.h"
 
 #include "conf.h"
-#include "sockutil.h"
 #include "util.h"
 
+#include "os/socket.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
@@ -109,7 +109,7 @@ finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 	struct resolve_query *restrict q = watcher->data;
 	if (q->ok) {
 		char addr[64];
-		format_sa(addr, sizeof(addr), &q->addr.sa);
+		sa_format(addr, sizeof(addr), &q->addr.sa);
 		LOGD_F("resolve `%s:%s': %s", q->name, q->service, addr);
 	} else {
 		LOGD_F("resolve `%s:%s': failed", q->name, q->service);
@@ -568,7 +568,7 @@ void resolve_start(struct resolver *restrict r, struct resolve_query *restrict q
 #endif /* WITH_CARES */
 
 	/* Fall back to synchronous resolution */
-	q->ok = resolve_addr(&q->addr, q->name, q->service, q->family);
+	q->ok = sa_resolve_tcp(&q->addr, q->name, q->service, q->family);
 	ev_feed_event(r->loop, &q->w_finish, EV_CUSTOM);
 }
 

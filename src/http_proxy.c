@@ -8,15 +8,16 @@
 #include "httputil.h"
 #include "ruleset.h"
 #include "server.h"
-#include "sockutil.h"
 #include "transfer.h"
 #include "util.h"
 
 #include "codec/base64.h"
 #include "net/http.h"
+#include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
+#include "utils/gc.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -45,7 +46,7 @@ enum http_state {
 struct server;
 
 struct http_ctx {
-	struct gcobj gcbase;
+	struct gcbase gcbase;
 	struct server *s;
 	enum http_state state;
 	int accepted_fd, dialed_fd;
@@ -70,14 +71,14 @@ struct http_ctx {
 		};
 	};
 };
-ASSERT_SUPER(struct gcobj, struct http_ctx, gcbase);
+ASSERT_SUPER(struct gcbase, struct http_ctx, gcbase);
 
 static int format_status(
 	char *restrict s, const size_t maxlen,
 	const struct http_ctx *restrict ctx)
 {
 	char caddr[64];
-	format_sa(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
+	sa_format(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if (ctx->state != STATE_CONNECT) {
 		return snprintf(
 			s, maxlen, "[fd:%d] %s", ctx->accepted_fd, caddr);
@@ -163,11 +164,13 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
+static void http_ctx_finalize(struct gcbase *restrict obj)
 {
+	struct http_ctx *restrict ctx =
+		DOWNCAST(struct gcbase, struct http_ctx, gcbase, obj);
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "closing state=%d", ctx->state);
 
-	http_ctx_stop(loop, ctx);
+	http_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -177,20 +180,10 @@ static void http_ctx_close(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ctx->dialed_fd = -1;
 	}
 
-	gc_unregister(&ctx->gcbase);
 	if (ctx->state < STATE_ESTABLISHED) {
 		dialreq_free(ctx->dialreq);
 	}
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	free(ctx);
-}
-
-static void
-http_ctx_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
-{
-	struct http_ctx *restrict ctx =
-		DOWNCAST(struct gcobj, struct http_ctx, gcbase, obj);
-	http_ctx_close(loop, ctx);
 }
 
 static struct dialreq *make_dialreq(const char *restrict addr_str)
@@ -342,7 +335,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 	struct http_ctx *restrict ctx = data;
 	if (ctx->uplink.state == XFER_FINISHED &&
 	    ctx->downlink.state == XFER_FINISHED) {
-		http_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	if (ctx->state == STATE_ESTABLISHED &&
@@ -394,7 +387,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	const int want = http_parser_recv(&ctx->parser);
 	if (want < 0) {
-		http_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	if (want > 0) {
@@ -420,6 +413,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
+	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct http_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RESPONSE);
@@ -427,11 +421,10 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	const int fd = watcher->fd;
 	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
 	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
-	int err = socket_send(fd, buf, &len);
-	if (err != 0) {
-		HTTP_CTX_LOG_F(
-			WARNING, ctx, "send: (%d) %s", err, strerror(err));
-		http_ctx_close(loop, ctx);
+	int ret = socket_send(fd, buf, &len);
+	if (ret != 0) {
+		HTTP_CTX_LOG_F(WARNING, ctx, "socket_send: error %d", ret);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	ctx->parser.wpos += len;
@@ -443,12 +436,11 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
 		buf = cbuf->data + ctx->parser.cpos;
 		len = cbuf->len - ctx->parser.cpos;
-		err = socket_send(fd, buf, &len);
-		if (err != 0) {
+		ret = socket_send(fd, buf, &len);
+		if (ret != 0) {
 			HTTP_CTX_LOG_F(
-				WARNING, ctx, "send: (%d) %s", err,
-				strerror(err));
-			http_ctx_close(loop, ctx);
+				WARNING, ctx, "socket_send: error %d", ret);
+			gc_unref(&ctx->gcbase);
 			return;
 		}
 		ctx->parser.cpos += len;
@@ -457,15 +449,16 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		}
 	}
 	/* Connection: close */
-	http_ctx_close(loop, ctx);
+	gc_unref(&ctx->gcbase);
 }
 
 static void
 timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
+	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct http_ctx *restrict ctx = watcher->data;
-	http_ctx_close(loop, ctx);
+	gc_unref(&ctx->gcbase);
 }
 
 static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
@@ -491,7 +484,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 
 	/* CONNECT proxy */
 	if (!http_resp_established(&ctx->parser)) {
-		http_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	ctx->s->stats.num_success++;
@@ -574,8 +567,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
 
-	ctx->gcbase.finalize = http_ctx_finalize;
-	gc_register(&ctx->gcbase);
+	gc_register(&ctx->gcbase, http_ctx_finalize);
 	return ctx;
 }
 
@@ -599,6 +591,6 @@ void http_proxy_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
+	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
 	http_ctx_start(loop, ctx);
 }

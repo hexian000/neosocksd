@@ -7,12 +7,13 @@
 #include "dialer.h"
 #include "ruleset.h"
 #include "server.h"
-#include "sockutil.h"
 #include "transfer.h"
 #include "util.h"
 
+#include "os/socket.h"
 #include "utils/class.h"
 #include "utils/debug.h"
+#include "utils/gc.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -36,7 +37,7 @@ enum forward_state {
 };
 
 struct forward_ctx {
-	struct gcobj gcbase;
+	struct gcbase gcbase;
 	struct server *s;
 	enum forward_state state;
 	int accepted_fd, dialed_fd;
@@ -59,7 +60,7 @@ struct forward_ctx {
 		};
 	};
 };
-ASSERT_SUPER(struct gcobj, struct forward_ctx, gcbase);
+ASSERT_SUPER(struct gcbase, struct forward_ctx, gcbase);
 
 #define FW_CTX_LOG_F(level, ctx, format, ...)                                  \
 	do {                                                                   \
@@ -67,7 +68,7 @@ ASSERT_SUPER(struct gcobj, struct forward_ctx, gcbase);
 			break;                                                 \
 		}                                                              \
 		char caddr[64];                                                \
-		format_sa(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
+		sa_format(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
 		LOG_F(level, "[fd:%d] %s: " format, (ctx)->accepted_fd, caddr, \
 		      __VA_ARGS__);                                            \
 	} while (0)
@@ -112,12 +113,13 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	FW_CTX_LOG_F(VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void
-forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
+static void forward_ctx_finalize(struct gcbase *restrict obj)
 {
+	struct forward_ctx *restrict ctx =
+		DOWNCAST(struct gcbase, struct forward_ctx, gcbase, obj);
 	FW_CTX_LOG_F(VERBOSE, ctx, "closing, state=%d", ctx->state);
 
-	forward_ctx_stop(loop, ctx);
+	forward_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
 		CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
@@ -127,19 +129,9 @@ forward_ctx_close(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		ctx->dialed_fd = -1;
 	}
 
-	gc_unregister(&ctx->gcbase);
 	if (ctx->state < STATE_ESTABLISHED) {
 		dialreq_free(ctx->dialreq);
 	}
-	free(ctx);
-}
-
-static void
-forward_ctx_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
-{
-	struct forward_ctx *restrict ctx =
-		DOWNCAST(struct gcobj, struct forward_ctx, gcbase, obj);
-	forward_ctx_close(loop, ctx);
 }
 
 static void mark_ready(struct ev_loop *loop, struct forward_ctx *restrict ctx)
@@ -163,7 +155,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 
 	if (ctx->uplink.state == XFER_FINISHED &&
 	    ctx->downlink.state == XFER_FINISHED) {
-		forward_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	if (ctx->state == STATE_ESTABLISHED &&
@@ -177,6 +169,7 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 static void
 timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
+	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct forward_ctx *restrict ctx = watcher->data;
 
@@ -194,7 +187,7 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	default:
 		FAILMSGF("unexpected state: %d", ctx->state);
 	}
-	forward_ctx_close(loop, ctx);
+	gc_unref(&ctx->gcbase);
 }
 
 static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
@@ -212,7 +205,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 			FW_CTX_LOG_F(
 				ERROR, ctx, "dialer: %s", dialer_strerror(err));
 		}
-		forward_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	ctx->dialed_fd = fd;
@@ -270,7 +263,7 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ctx->ruleset_state = NULL;
 	struct dialreq *req = ctx->ruleset_callback.request.req;
 	if (req == NULL) {
-		forward_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	ctx->dialreq = req;
@@ -317,7 +310,7 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		FAILMSGF("unexpected address type: %d", addr->type);
 	}
 	if (!ok) {
-		forward_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 }
@@ -351,8 +344,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, &cb);
-	ctx->gcbase.finalize = forward_ctx_finalize;
-	gc_register(&ctx->gcbase);
+	gc_register(&ctx->gcbase, forward_ctx_finalize);
 	return ctx;
 }
 
@@ -366,7 +358,7 @@ void forward_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
+	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
 
 	ctx->state = STATE_PROCESS;
 	ev_timer_start(loop, &ctx->w_timeout);
@@ -402,7 +394,7 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		const int err = errno;
 		FW_CTX_LOG_F(
 			ERROR, ctx, "getsockname: (%d) %s", err, strerror(err));
-		forward_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	switch (dest.sa.sa_family) {
@@ -416,12 +408,12 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		FW_CTX_LOG_F(
 			ERROR, ctx, "tproxy: unsupported af:%jd",
 			(intmax_t)dest.sa.sa_family);
-		forward_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 
 	char addr_str[64];
-	format_sa(addr_str, sizeof(addr_str), &dest.sa);
+	sa_format(addr_str, sizeof(addr_str), &dest.sa);
 	bool ok;
 	switch (dest.sa.sa_family) {
 	case AF_INET:
@@ -438,7 +430,7 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		FAILMSGF("unexpected address family: %d", dest.sa.sa_family);
 	}
 	if (!ok) {
-		forward_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 }
@@ -479,7 +471,7 @@ void tproxy_serve(
 		CLOSE_FD(accepted_fd);
 		return;
 	}
-	copy_sa(&ctx->accepted_sa.sa, accepted_sa);
+	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
 
 	ctx->state = STATE_PROCESS;
 	ev_timer_start(loop, &ctx->w_timeout);
@@ -496,7 +488,7 @@ void tproxy_serve(
 
 	struct dialreq *req = tproxy_makereq(ctx);
 	if (req == NULL) {
-		forward_ctx_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	ctx->dialreq = req;

@@ -11,11 +11,11 @@
 #include "api_client.h"
 #include "conf.h"
 #include "resolver.h"
-#include "sockutil.h"
 #include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
+#include "os/socket.h"
 
 #include <ev.h>
 #include <unistd.h>
@@ -167,7 +167,7 @@ static void resolve_cb(
 	ASSERT(ud->query == q);
 	UNUSED(q);
 	ud->query = NULL;
-	copy_sa(&ud->sa.sa, sa);
+	sa_copy(&ud->sa.sa, sa);
 	ev_idle_start(loop, &ud->w_idle);
 }
 

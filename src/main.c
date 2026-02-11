@@ -16,19 +16,19 @@
 #include "ruleset.h"
 #include "server.h"
 #include "socks.h"
-#include "sockutil.h"
 #include "util.h"
 
 /* contrib */
+#include "net/addr.h"
+#include "os/daemon.h"
+#include "os/socket.h"
 #include "utils/debug.h"
+#include "utils/gc.h"
 #include "utils/slog.h"
 
 /* runtime */
 #include <ev.h>
 #include <sys/socket.h>
-#if WITH_SYSTEMD
-#include <systemd/sd-daemon.h>
-#endif
 
 /* std */
 #include <inttypes.h>
@@ -456,11 +456,22 @@ int main(int argc, char **argv)
 	/* Parse listen address and start the main server */
 	{
 		union sockaddr_max bindaddr;
-		if (!parse_bindaddr(&bindaddr, conf->listen)) {
+		char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
+		if (strlen(conf->listen) >= sizeof(buf)) {
+			LOGF_F("address too long: %s", conf->listen);
+			exit(EXIT_FAILURE);
+		}
+		strcpy(buf, conf->listen);
+		char *host, *port;
+		if (!splithostport(buf, &host, &port)) {
 			LOGF_F("unable to parse address: %s", conf->listen);
 			exit(EXIT_FAILURE);
 		}
-		if (is_unspecified_sa(&bindaddr.sa)) {
+		if (!sa_resolve_tcpbind(&bindaddr, host, port)) {
+			LOGF_F("unable to resolve address: %s", conf->listen);
+			exit(EXIT_FAILURE);
+		}
+		if (sa_is_unspecified(&bindaddr.sa)) {
 			LOGW("binding to wildcard address may be insecure");
 		}
 		if (!server_start(s, &bindaddr.sa)) {
@@ -474,12 +485,23 @@ int main(int argc, char **argv)
 	struct server *api = NULL;
 	if (conf->restapi != NULL) {
 		union sockaddr_max apiaddr;
-		if (!parse_bindaddr(&apiaddr, conf->restapi)) {
+		char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
+		if (strlen(conf->restapi) >= sizeof(buf)) {
+			LOGF_F("address too long: %s", conf->restapi);
+			exit(EXIT_FAILURE);
+		}
+		strcpy(buf, conf->restapi);
+		char *host, *port;
+		if (!splithostport(buf, &host, &port)) {
 			LOGF_F("unable to parse address: %s", conf->restapi);
 			exit(EXIT_FAILURE);
 		}
-		if (is_unspecified_sa(&apiaddr.sa) ||
-		    !is_local_sa(&apiaddr.sa)) {
+		if (!sa_resolve_tcpbind(&apiaddr, host, port)) {
+			LOGF_F("unable to resolve address: %s", conf->restapi);
+			exit(EXIT_FAILURE);
+		}
+		if (sa_is_unspecified(&apiaddr.sa) ||
+		    !sa_is_local(&apiaddr.sa)) {
 			LOGW("binding API server to non-local address may be insecure");
 		}
 		api = &app.apiserver;
@@ -492,20 +514,11 @@ int main(int argc, char **argv)
 
 	/* Handle user identity changes and daemonization */
 	{
-		struct user_ident ident, *pident = NULL;
-		if (conf->user_name != NULL) {
-			if (!parse_user(&ident, conf->user_name)) {
-				LOGF_F("failed to parse user ident: `%s'",
-				       conf->user_name);
-				exit(EXIT_FAILURE);
-			}
-			pident = &ident;
-		}
 		if (conf->daemonize) {
-			daemonize(pident, true, false);
+			daemonize(conf->user_name, true, false);
 			slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME);
-		} else if (pident != NULL) {
-			drop_privileges(pident);
+		} else if (conf->user_name != NULL) {
+			drop_privileges(conf->user_name);
 		}
 	}
 
@@ -530,9 +543,7 @@ int main(int argc, char **argv)
 		ev_signal_start(loop, w_sigterm);
 	}
 
-#if WITH_SYSTEMD
-	(void)sd_notify(0, "READY=1");
-#endif
+	(void)systemd_notify(SYSTEMD_STATE_READY);
 
 	/* Start the main event loop - this blocks until shutdown */
 	LOGD("starting the main event loop");
@@ -563,8 +574,11 @@ int main(int argc, char **argv)
 		G.basereq = NULL;
 	}
 
-	/* Final cleanup and exit */
-	gc_finalizeall(loop); /* Close any remaining sessions */
+	/* Close any remaining sessions */
+	{
+		const size_t num = gc_finalizeall();
+		LOGD_F("%zu objects finalized", num);
+	}
 	ev_loop_destroy(loop); /* Destroy the event loop */
 	unloadlibs(); /* Unload dynamic libraries */
 
@@ -579,9 +593,7 @@ void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 	switch (watcher->signum) {
 	case SIGHUP: {
 #if WITH_RULESET
-#if WITH_SYSTEMD
-		(void)sd_notify(0, "RELOADING=1");
-#endif
+		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
 		const struct config *restrict conf = G.conf;
 		if (conf->ruleset == NULL || G.ruleset == NULL) {
 			LOGE_F("signal %d received, but ruleset not loaded",
@@ -596,9 +608,7 @@ void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 			break;
 		}
 		LOGN("ruleset successfully reloaded");
-#if WITH_SYSTEMD
-		(void)sd_notify(0, "READY=1");
-#endif
+		(void)systemd_notify(SYSTEMD_STATE_READY);
 #else
 		LOGW("reload is not supported in current build");
 #endif
@@ -606,9 +616,7 @@ void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 	case SIGINT:
 	case SIGTERM:
 		LOGD_F("signal %d received, breaking", watcher->signum);
-#if WITH_SYSTEMD
-		(void)sd_notify(0, "STOPPING=1");
-#endif
+		(void)systemd_notify(SYSTEMD_STATE_STOPPING);
 		/* Break out of the main event loop to initiate graceful shutdown */
 		ev_break(loop, EVBREAK_ALL);
 		break;

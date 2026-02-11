@@ -12,13 +12,12 @@
 
 #include "httputil.h"
 
-#include "sockutil.h"
-
 #include "codec.h"
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
+#include "os/socket.h"
 #include "utils/ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
@@ -348,13 +347,9 @@ static bool recv_request(struct http_parser *restrict p)
 	size_t n = p->rbuf.cap - p->rbuf.len - 1;
 
 	/* Receive data from socket */
-	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
-	if (err != 0) {
-		LOGD_F("recv: [fd:%d] (%d) %s", p->fd, err, strerror(err));
-		return false;
-	}
-	if (n == 0) {
-		LOGD_F("recv: [fd:%d] early EOF", p->fd);
+	const int ret = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
+	if (ret != 0) {
+		LOGD_F("socket_recv: error %d", ret);
 		return false;
 	}
 
@@ -382,13 +377,9 @@ static bool recv_content(const struct http_parser *restrict p)
 	size_t n = cbuf->cap - cbuf->len;
 
 	/* Receive data directly into content buffer */
-	const int err = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
-	if (err != 0) {
-		LOGW_F("recv: [fd:%d] (%d) %s", p->fd, err, strerror(err));
-		return false;
-	}
-	if (n == 0) {
-		LOGW_F("recv: [fd:%d] early EOF", p->fd);
+	const int ret = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
+	if (ret != 0 && ret != 1) {
+		LOGD_F("socket_recv: error %d", ret);
 		return false;
 	}
 

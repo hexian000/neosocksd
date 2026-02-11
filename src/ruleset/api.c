@@ -3,25 +3,23 @@
 
 #include "api.h"
 
-#include "base.h"
-
-#include "net/addr.h"
-#include "utils/minmax.h"
-#include "utils/serialize.h"
-
 #include "api_client.h"
+#include "base.h"
 #include "conf.h"
 #include "proto/domain.h"
 #include "server.h"
-#include "sockutil.h"
 #include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
-
-#include <ev.h>
+#include "net/addr.h"
+#include "os/clock.h"
+#include "os/socket.h"
+#include "utils/minmax.h"
+#include "utils/serialize.h"
 
 #include <arpa/inet.h>
+#include <ev.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
@@ -72,7 +70,7 @@ static int api_resolve(lua_State *restrict L)
 {
 	const char *restrict name = luaL_checkstring(L, 1);
 	union sockaddr_max addr;
-	if (!resolve_addr(&addr, name, NULL, G.conf->resolve_pf)) {
+	if (!sa_resolve_tcp(&addr, name, NULL, G.conf->resolve_pf)) {
 		return 0;
 	}
 	lua_pushlightuserdata(L, &addr.sa);
@@ -149,7 +147,7 @@ static int api_splithostport(lua_State *restrict L)
 	size_t len;
 	const char *restrict s = luaL_checklstring(L, 1, &len);
 	/* FQDN + ':' + port */
-	if (len > FQDN_MAX_LENGTH + 1 + 5) {
+	if (len > FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")) {
 		(void)lua_pushfstring(L, "address too long: %zu bytes", len);
 		return lua_error(L);
 	}
@@ -216,7 +214,7 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "byt_up");
 	lua_pushinteger(L, (lua_Integer)stats.byt_down);
 	lua_setfield(L, -2, "byt_down");
-	lua_pushnumber(L, (lua_Number)(clock_monotonic() - stats.started));
+	lua_pushnumber(L, (lua_Number)(clock_monotonic_ns() - stats.started));
 	lua_setfield(L, -2, "uptime");
 	lua_pushinteger(L, (lua_Integer)r->vmstats.byt_allocated);
 	lua_setfield(L, -2, "bytes_allocated");

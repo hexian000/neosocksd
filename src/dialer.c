@@ -28,13 +28,13 @@
 #include "proto/domain.h"
 #include "proto/socks.h"
 #include "resolver.h"
-#include "sockutil.h"
 #include "util.h"
 
 #include "codec/base64.h"
 #include "net/addr.h"
 #include "net/http.h"
 #include "net/url.h"
+#include "os/socket.h"
 #include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
@@ -137,7 +137,7 @@ bool dialaddr_parse(
 	const size_t len)
 {
 	/* Check maximum possible length: FQDN + ':' + port */
-	if (len > FQDN_MAX_LENGTH + 1 + 5) {
+	if (len > FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")) {
 		LOG_TXT_F(ERROR, s, len, 0, "address too long: %zu bytes", len);
 		return false;
 	}
@@ -404,7 +404,7 @@ static int format_proxyreq(
 	char *restrict s, const size_t maxlen,
 	const struct proxyreq *restrict req)
 {
-	char host[FQDN_MAX_LENGTH + 1 + 5];
+	char host[FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")];
 	int nhost = dialaddr_format(host, sizeof(host), &req->addr);
 	ASSERT(nhost > 0);
 	if (maxlen < (size_t)(nhost + 1)) {
@@ -1405,17 +1405,17 @@ static bool connect_sa(
 	const struct sockaddr *restrict sa)
 {
 	/* Enforce gateway restrictions */
-	if (G.conf->ingress && !is_local_sa(sa)) {
+	if (G.conf->ingress && !sa_is_local(sa)) {
 		char addr_str[64];
-		format_sa(addr_str, sizeof(addr_str), sa);
+		sa_format(addr_str, sizeof(addr_str), sa);
 		LOGD_F("blocked non-local address %s", addr_str);
 		d->err = DIALER_ERR_BLOCKED;
 		d->syserr = 0;
 		return false;
 	}
-	if (G.conf->egress && is_local_sa(sa)) {
+	if (G.conf->egress && sa_is_local(sa)) {
 		char addr_str[64];
-		format_sa(addr_str, sizeof(addr_str), sa);
+		sa_format(addr_str, sizeof(addr_str), sa);
 		LOGD_F("blocked local address %s", addr_str);
 		d->err = DIALER_ERR_BLOCKED;
 		d->syserr = 0;
@@ -1456,16 +1456,16 @@ static bool connect_sa(
 #endif
 	if (LOGLEVEL(VERBOSE)) {
 		char addr_str[64];
-		format_sa(addr_str, sizeof(addr_str), sa);
+		sa_format(addr_str, sizeof(addr_str), sa);
 		LOG_F(VERBOSE, "dialer: connect %s", addr_str);
 	}
 	d->state = STATE_CONNECT;
-	if (connect(fd, sa, getsocklen(sa)) != 0) {
+	if (connect(fd, sa, sa_len(sa)) != 0) {
 		const int err = errno;
 		if (err != EINTR && err != EINPROGRESS) {
 			if (LOGLEVEL(WARNING)) {
 				char addr_str[64];
-				format_sa(addr_str, sizeof(addr_str), sa);
+				sa_format(addr_str, sizeof(addr_str), sa);
 				LOG_F(WARNING, "connect %s: (%d) %s", addr_str,
 				      err, strerror(err));
 			}
@@ -1523,7 +1523,7 @@ static void resolve_cb(
 	}
 
 	union sockaddr_max addr;
-	copy_sa(&addr.sa, sa);
+	sa_copy(&addr.sa, sa);
 	switch (sa->sa_family) {
 	case AF_INET:
 		addr.in.sin_port = htons(dialaddr->port);
@@ -1536,10 +1536,10 @@ static void resolve_cb(
 	}
 
 	if (LOGLEVEL(DEBUG)) {
-		char node_str[dialaddr->domain.len + 1 + 5 + 1];
+		char node_str[dialaddr->domain.len + sizeof(":65535")];
 		dialaddr_format(node_str, sizeof(node_str), dialaddr);
 		char addr_str[64];
-		format_sa(addr_str, sizeof(addr_str), &addr.sa);
+		sa_format(addr_str, sizeof(addr_str), &addr.sa);
 		LOG_F(DEBUG, "resolve: `%s' is %s", node_str, addr_str);
 	}
 

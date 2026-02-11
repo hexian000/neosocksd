@@ -3,16 +3,15 @@
 
 #include "base.h"
 
+#include "dialer.h"
+
 #include "io/stream.h"
+#include "lauxlib.h"
+#include "lua.h"
+#include "os/clock.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
-
-#include "dialer.h"
-#include "util.h"
-
-#include "lauxlib.h"
-#include "lua.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -356,19 +355,19 @@ bool ruleset_pcall(
 	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
 	const int nresults, ...)
 {
-	const int_least64_t time_begin = clock_monotonic();
+	const int_least64_t time_begin = clock_monotonic_ns();
 	va_list args;
 	va_start(args, nresults);
 	const bool result = ruleset_pcallv(r, func, nargs, nresults, args);
 	va_end(args);
-	const int_least64_t time_end = clock_monotonic();
+	const int_least64_t time_end = clock_monotonic_ns();
 	record_event_time(r, time_end - time_begin, time_end);
 	return result;
 }
 
 void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 {
-	const int_least64_t time_begin = clock_monotonic();
+	const int_least64_t time_begin = clock_monotonic_ns();
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
@@ -396,6 +395,6 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	}
-	const int_least64_t time_end = clock_monotonic();
+	const int_least64_t time_end = clock_monotonic_ns();
 	record_event_time(r, time_end - time_begin, time_end);
 }

@@ -2,21 +2,22 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "api_client.h"
-#include "utils/formats.h"
 
 #if WITH_RULESET
 
 #include "conf.h"
 #include "dialer.h"
 #include "httputil.h"
-#include "sockutil.h"
 #include "util.h"
 
 #include "io/stream.h"
 #include "net/http.h"
+#include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
+#include "utils/formats.h"
+#include "utils/gc.h"
 #include "utils/intcast.h"
 #include "utils/slog.h"
 
@@ -42,7 +43,8 @@ enum api_client_state {
 };
 
 struct api_client_ctx {
-	struct gcobj gcbase;
+	struct gcbase gcbase;
+	struct ev_loop *loop;
 	enum api_client_state state;
 	struct api_client_cb cb;
 	ev_timer w_timeout;
@@ -57,7 +59,7 @@ struct api_client_ctx {
 		struct stream *stream;
 	} result;
 };
-ASSERT_SUPER(struct gcobj, struct api_client_ctx, gcbase);
+ASSERT_SUPER(struct gcbase, struct api_client_ctx, gcbase);
 
 #define FORMAT_BYTES(name, value)                                              \
 	char name[16];                                                         \
@@ -86,10 +88,12 @@ api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 	}
 }
 
-static void
-api_client_close(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
+static void api_client_finalize(struct gcbase *restrict obj)
 {
-	api_client_stop(loop, ctx);
+	struct api_client_ctx *restrict ctx =
+		DOWNCAST(struct gcbase, struct api_client_ctx, gcbase, obj);
+
+	api_client_stop(ctx->loop, ctx);
 	if (ctx->w_socket.fd != -1) {
 		CLOSE_FD(ctx->w_socket.fd);
 	}
@@ -98,21 +102,8 @@ api_client_close(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 		ctx->result.stream = NULL;
 	}
 
-	if (ctx->gcbase.finalize != NULL) {
-		/* managed by session */
-		gc_unregister(&ctx->gcbase);
-	}
 	dialreq_free(ctx->dialreq);
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-	free(ctx);
-}
-
-static void
-api_client_finalize(struct ev_loop *restrict loop, struct gcobj *restrict obj)
-{
-	struct api_client_ctx *restrict ctx =
-		DOWNCAST(struct gcobj, struct api_client_ctx, gcbase, obj);
-	api_client_close(loop, ctx);
 }
 
 static void
@@ -132,7 +123,8 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		stream_close(ctx->result.stream);
 		ctx->result.stream = NULL;
 	}
-	api_client_close(loop, ctx);
+
+	gc_unref(&ctx->gcbase);
 }
 
 static void api_client_finish(
@@ -221,11 +213,11 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	struct http_parser *restrict p = &ctx->parser;
 	const unsigned char *buf = p->wbuf.data + p->wpos;
 	size_t len = p->wbuf.len - p->wpos;
-	int err = socket_send(fd, buf, &len);
-	if (err != 0) {
+	int ret = socket_send(fd, buf, &len);
+	if (ret != 0) {
+		LOGW_F("socket_send: error %d", ret);
 		const int err = errno;
 		const char *errmsg = strerror(err);
-		LOGW_F("send: (%d) %s", err, errmsg);
 		api_client_finish(loop, ctx, errmsg, strlen(errmsg), NULL);
 		return;
 	}
@@ -239,11 +231,11 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		const struct vbuffer *restrict cbuf = p->cbuf;
 		buf = cbuf->data + p->cpos;
 		len = cbuf->len - p->cpos;
-		err = socket_send(fd, buf, &len);
-		if (err != 0) {
+		ret = socket_send(fd, buf, &len);
+		if (ret != 0) {
+			LOGW_F("socket_send: error %d", ret);
 			const int err = errno;
 			const char *errmsg = strerror(err);
-			LOGW_F("send: (%d) %s", err, errmsg);
 			api_client_finish(
 				loop, ctx, errmsg, strlen(errmsg), NULL);
 			return;
@@ -262,7 +254,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	if (ctx->cb.func == NULL) {
 		/* It's a fire-and-forget invoke call - no response expected */
-		api_client_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return;
 	}
 	ev_io_stop(loop, watcher);
@@ -399,7 +391,7 @@ static bool api_client_do(
 	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, on_header);
 	if (!make_request(&ctx->parser, uri, payload, len)) {
 		LOGOOM();
-		api_client_close(loop, ctx);
+		gc_unref(&ctx->gcbase);
 		return false;
 	}
 	ctx->cb = *in_cb;
@@ -417,14 +409,7 @@ static bool api_client_do(
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, &cb);
-	if (ctx->cb.func != NULL) {
-		/* RPC call - lifecycle managed by ruleset callback */
-		ctx->gcbase.finalize = NULL;
-	} else {
-		/* Invoke call - lifecycle managed by session system */
-		ctx->gcbase.finalize = api_client_finalize;
-		gc_register(&ctx->gcbase);
-	}
+	gc_register(&ctx->gcbase, api_client_finalize);
 
 	ev_timer_start(loop, &ctx->w_timeout);
 	if (pctx != NULL) {
@@ -455,7 +440,8 @@ bool api_client_rpcall(
 
 void api_client_cancel(struct ev_loop *loop, struct api_client_ctx *ctx)
 {
-	api_client_close(loop, ctx);
+	UNUSED(loop);
+	gc_unref(&ctx->gcbase);
 }
 
 #endif /* WITH_RULESET */
