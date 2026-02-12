@@ -205,10 +205,8 @@ double thread_load(void)
 		return load;
 	}
 	if (last.set) {
-		const int_fast64_t total = timespec2nano(&monotime) -
-					   timespec2nano(&last.monotime);
-		const int_fast64_t busy =
-			timespec2nano(&cputime) - timespec2nano(&last.cputime);
+		const intmax_t total = TIMESPEC_DIFF(monotime, last.monotime);
+		const intmax_t busy = TIMESPEC_DIFF(cputime, last.cputime);
 		if (busy > 0 && total > 0 && busy <= total) {
 			load = (double)busy / (double)total;
 		}

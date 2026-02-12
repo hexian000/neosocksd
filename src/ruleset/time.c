@@ -3,6 +3,8 @@
 
 #include "time.h"
 
+#include "os/clock.h"
+
 #include "lauxlib.h"
 #include "lua.h"
 
@@ -17,7 +19,7 @@
 static int time_monotonic(lua_State *restrict L)
 {
 	struct timespec t;
-	if (clock_gettime(CLOCK_MONOTONIC, &t)) {
+	if (clock_monotonic(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
@@ -29,7 +31,7 @@ static int time_monotonic(lua_State *restrict L)
 static int time_process(lua_State *restrict L)
 {
 	struct timespec t;
-	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t)) {
+	if (clock_process(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
@@ -41,7 +43,7 @@ static int time_process(lua_State *restrict L)
 static int time_thread(lua_State *restrict L)
 {
 	struct timespec t;
-	if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t)) {
+	if (clock_thread(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
@@ -53,17 +55,13 @@ static int time_thread(lua_State *restrict L)
 static int time_wall(lua_State *restrict L)
 {
 	struct timespec t;
-	if (clock_gettime(CLOCK_REALTIME, &t)) {
+	if (clock_realtime(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
 	PUSH_TIMESPEC(L, t);
 	return 1;
 }
-
-#define READ_TIMESPEC(ts)                                                      \
-	((int_fast64_t)(ts).tv_sec * INT64_C(1000000000) +                     \
-	 (int_fast64_t)(ts).tv_nsec)
 
 /* cost, ... = time.measure(f, ...) */
 static int time_measure(lua_State *restrict L)
@@ -73,11 +71,11 @@ static int time_measure(lua_State *restrict L)
 	lua_insert(L, 1);
 	bool ok = true;
 	struct timespec ts0, ts1;
-	if (clock_gettime(CLOCK_MONOTONIC, &ts0)) {
+	if (clock_monotonic(&ts0)) {
 		ok = false;
 	}
 	lua_call(L, nargs, LUA_MULTRET);
-	if (clock_gettime(CLOCK_MONOTONIC, &ts1)) {
+	if (clock_monotonic(&ts1)) {
 		ok = false;
 	}
 	const int nres = lua_gettop(L);
@@ -85,7 +83,8 @@ static int time_measure(lua_State *restrict L)
 		return nres;
 	}
 	lua_pushnumber(
-		L, (double)(READ_TIMESPEC(ts1) - READ_TIMESPEC(ts0)) * 1e-9);
+		L, (double)(ts1.tv_sec - ts0.tv_sec) +
+			   (double)(ts1.tv_nsec - ts0.tv_nsec) * 1e-9);
 	lua_replace(L, 1);
 	return nres;
 }

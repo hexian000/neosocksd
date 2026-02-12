@@ -348,8 +348,12 @@ static bool recv_request(struct http_parser *restrict p)
 
 	/* Receive data from socket */
 	const int ret = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
-	if (ret != 0) {
+	if (ret < 0) {
 		LOGD_F("socket_recv: error %d", ret);
+		return false;
+	}
+	if (ret == 1 && n == 0) {
+		LOGD("socket_recv: early EOF");
 		return false;
 	}
 
@@ -378,8 +382,12 @@ static bool recv_content(const struct http_parser *restrict p)
 
 	/* Receive data directly into content buffer */
 	const int ret = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
-	if (ret != 0 && ret != 1) {
+	if (ret < 0) {
 		LOGD_F("socket_recv: error %d", ret);
+		return false;
+	}
+	if (ret == 1 && n == 0) {
+		LOGD("socket_recv: early EOF");
 		return false;
 	}
 
