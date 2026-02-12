@@ -12,18 +12,15 @@
 #include <stdint.h>
 #include <time.h>
 
-#define PUSH_TIMESPEC(L, t)                                                    \
-	lua_pushnumber((L), (double)(t).tv_sec + (double)(t).tv_nsec * 1e-9)
-
 /* time.monotonic() */
 static int time_monotonic(lua_State *restrict L)
 {
 	struct timespec t;
-	if (clock_monotonic(&t)) {
+	if (!clock_monotonic(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
-	PUSH_TIMESPEC(L, t);
+	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
 	return 1;
 }
 
@@ -31,11 +28,11 @@ static int time_monotonic(lua_State *restrict L)
 static int time_process(lua_State *restrict L)
 {
 	struct timespec t;
-	if (clock_process(&t)) {
+	if (!clock_process(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
-	PUSH_TIMESPEC(L, t);
+	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
 	return 1;
 }
 
@@ -43,11 +40,11 @@ static int time_process(lua_State *restrict L)
 static int time_thread(lua_State *restrict L)
 {
 	struct timespec t;
-	if (clock_thread(&t)) {
+	if (!clock_thread(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
-	PUSH_TIMESPEC(L, t);
+	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
 	return 1;
 }
 
@@ -55,11 +52,11 @@ static int time_thread(lua_State *restrict L)
 static int time_wall(lua_State *restrict L)
 {
 	struct timespec t;
-	if (clock_realtime(&t)) {
+	if (!clock_realtime(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
-	PUSH_TIMESPEC(L, t);
+	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
 	return 1;
 }
 
@@ -71,20 +68,18 @@ static int time_measure(lua_State *restrict L)
 	lua_insert(L, 1);
 	bool ok = true;
 	struct timespec ts0, ts1;
-	if (clock_monotonic(&ts0)) {
+	if (!clock_monotonic(&ts0)) {
 		ok = false;
 	}
 	lua_call(L, nargs, LUA_MULTRET);
-	if (clock_monotonic(&ts1)) {
+	if (!clock_monotonic(&ts1)) {
 		ok = false;
 	}
 	const int nres = lua_gettop(L);
 	if (!ok) {
 		return nres;
 	}
-	lua_pushnumber(
-		L, (double)(ts1.tv_sec - ts0.tv_sec) +
-			   (double)(ts1.tv_nsec - ts0.tv_nsec) * 1e-9);
+	lua_pushnumber(L, TIMESPEC_DIFF(ts0, ts1) * 1e-9);
 	lua_replace(L, 1);
 	return nres;
 }
