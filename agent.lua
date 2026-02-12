@@ -402,7 +402,7 @@ end
 
 local function probe_via(conn)
     assert(sync_via(conn))
-    local minrtt, peername
+    local minrtt, peername, err
     for _ = 1, 4 do
         await.sleep(1)
         local probe_start = time.monotonic()
@@ -415,9 +415,10 @@ local function probe_via(conn)
             end
             peername = result
         else
-            error(result)
+            err = result
         end
     end
+    if not peername then error(err) end
     evlogf("probe: [%s] %q %.0fms", connid_of(conn), peername, minrtt * 1e+3)
     return { peername = peername, rtt = minrtt }
 end
