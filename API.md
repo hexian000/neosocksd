@@ -449,7 +449,7 @@ Lua interface for [POSIX Regular Expressions](https://pubs.opengroup.org/onlinep
 local t0 = time.monotonic() -- CLOCK_MONOTONIC
 local t1 = time.process()   -- CLOCK_PROCESS_CPUTIME_ID
 local t2 = time.thread()    -- CLOCK_THREAD_CPUTIME_ID
-local t3 = time.wall()      -- CLOCK_REALTIME
+local t3 = time.unix()      -- CLOCK_REALTIME
 -- measure function time with monotonic clock
 local t, ... = time.measure(f, ...)
 ```

@@ -48,11 +48,11 @@ static int time_thread(lua_State *restrict L)
 	return 1;
 }
 
-/* time.wall() */
-static int time_wall(lua_State *restrict L)
+/* time.unix() */
+static int time_unix(lua_State *restrict L)
 {
 	struct timespec t;
-	if (!clock_realtime(&t)) {
+	if (!clock_unix(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
@@ -92,7 +92,7 @@ int luaopen_time(lua_State *restrict L)
 		{ "monotonic", time_monotonic },
 		{ "process", time_process },
 		{ "thread", time_thread },
-		{ "wall", time_wall },
+		{ "unix", time_unix },
 
 		{ "measure", time_measure }, /* uses monotonic time */
 		{ NULL, NULL },
