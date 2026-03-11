@@ -138,16 +138,19 @@ local function build_index(peerdb)
     local peers = {}
     local selfinfo = peerdb[agent.peername] or {}
     for connid, conninfo in pairs(selfinfo.conns or {}) do
-        peers[conninfo.peername] = agent.conns[connid]
+        local existing = peers[conninfo.peername]
+        if not existing or conninfo.rtt < existing.rtt then
+            peers[conninfo.peername] = { conn = agent.conns[connid], rtt = conninfo.rtt }
+        end
     end
     local routes = {}
     local paths = dijkstra(peerdb, agent.peername)
     for dest, info in pairs(paths) do
         local path     = info.path
         local peername = path[#path]
-        local conn     = peername and peers[peername]
-        if conn then
-            routes[dest] = { conn = conn, path = path, rtt = info.rtt }
+        local entry    = peername and peers[peername]
+        if entry then
+            routes[dest] = { conn = entry.conn, path = path, rtt = info.rtt }
         end
     end
     return hosts, routes
