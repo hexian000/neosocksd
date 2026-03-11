@@ -12,18 +12,16 @@
  * string escaping.
  */
 
-#include "marshal.h"
+#include "ruleset/marshal.h"
 
-#include "base.h"
-
-#include "utils/ascii.h"
-#include "utils/buffer.h"
-#include "utils/debug.h"
-
+#include "ruleset/base.h"
 #include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
+#include "utils/ascii.h"
+#include "utils/buffer.h"
+#include "utils/debug.h"
 
 #include <stddef.h>
 #include <stdint.h>

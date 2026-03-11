@@ -1,21 +1,19 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "await.h"
-
-#include "base.h"
-
-#include "utils/debug.h"
-#include "utils/slog.h"
+#include "ruleset/await.h"
 
 #include "api_client.h"
 #include "conf.h"
 #include "resolver.h"
+#include "ruleset/base.h"
 #include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
 #include "os/socket.h"
+#include "utils/debug.h"
+#include "utils/slog.h"
 
 #include <ev.h>
 #include <unistd.h>

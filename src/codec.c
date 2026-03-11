@@ -20,11 +20,10 @@
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
+#include "miniz.h"
 #include "utils/class.h"
 #include "utils/serialize.h"
 #include "utils/slog.h"
-
-#include "miniz.h"
 
 #include <inttypes.h>
 #include <stdbool.h>

@@ -1,20 +1,18 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "cfunc.h"
-
-#include "base.h"
-
-#include "io/stream.h"
-#include "utils/debug.h"
+#include "ruleset/cfunc.h"
 
 #include "ruleset.h"
+#include "ruleset/base.h"
 #include "util.h"
 
+#include "io/stream.h"
 #include "lauxlib.h"
 #include "lua.h"
-
+#include "utils/debug.h"
 #include "utils/slog.h"
+
 #include <ev.h>
 
 #include <stdbool.h>

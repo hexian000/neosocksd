@@ -6,7 +6,6 @@
  * @brief Main entry point for neosocksd
  */
 
-/* internal */
 #include "api_server.h"
 #include "conf.h"
 #include "dialer.h"
@@ -18,7 +17,6 @@
 #include "socks.h"
 #include "util.h"
 
-/* contrib */
 #include "net/addr.h"
 #include "os/daemon.h"
 #include "os/socket.h"
@@ -26,11 +24,9 @@
 #include "utils/gc.h"
 #include "utils/slog.h"
 
-/* runtime */
 #include <ev.h>
 #include <sys/socket.h>
 
-/* std */
 #include <inttypes.h>
 #include <limits.h>
 #include <signal.h>

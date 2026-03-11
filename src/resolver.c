@@ -27,11 +27,10 @@
 #include "utils/debug.h"
 #include "utils/slog.h"
 
-#include <ev.h>
 #if WITH_CARES
 #include <ares.h>
 #endif
-
+#include <ev.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 

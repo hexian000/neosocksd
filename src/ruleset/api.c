@@ -1,12 +1,12 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "api.h"
+#include "ruleset/api.h"
 
 #include "api_client.h"
-#include "base.h"
 #include "conf.h"
 #include "proto/domain.h"
+#include "ruleset/base.h"
 #include "server.h"
 #include "util.h"
 

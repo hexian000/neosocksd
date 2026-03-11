@@ -11,8 +11,6 @@
 #if WITH_RULESET
 
 #include "conf.h"
-#include "util.h"
-
 #include "ruleset/api.h"
 #include "ruleset/await.h"
 #include "ruleset/base.h"
@@ -21,14 +19,14 @@
 #include "ruleset/regex.h"
 #include "ruleset/time.h"
 #include "ruleset/zlib.h"
-
-#include "utils/arraysize.h"
-#include "utils/debug.h"
-#include "utils/slog.h"
+#include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
 #include "lualib.h"
+#include "utils/arraysize.h"
+#include "utils/debug.h"
+#include "utils/slog.h"
 
 #include <ev.h>
 

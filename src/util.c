@@ -11,10 +11,13 @@
  */
 #include "util.h"
 
-#include "os/clock.h"
 #include "resolver.h"
 
+#if WITH_RULESET
+#include "lua.h"
+#endif
 #include "math/rand.h"
+#include "os/clock.h"
 #include "os/signal.h"
 #include "os/socket.h"
 #include "utils/debug.h"
@@ -22,7 +25,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-
 #if WITH_SPLICE
 #include <fcntl.h>
 #endif
@@ -35,10 +37,6 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
-
-#if WITH_RULESET
-#include "lua.h"
-#endif
 
 #include <errno.h>
 #include <inttypes.h>
