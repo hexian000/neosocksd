@@ -23,7 +23,7 @@ Status: **Stable**
 
 ## Features
 
-- This is a TCP forwarding proxy.
+- This is a TCP forwarding proxy WITHOUT encryption.
 - Supported protocols: SOCKS4, SOCKS4A, SOCKS5 (CONNECT only), HTTP (CONNECT only), and transparent proxy (Linux).
 - High performance: transfers 10+ Gbps per x86 core on Linux (with `--pipe`, 2024).
 - Lightweight: ~500 KiB executable on most platforms\*.
