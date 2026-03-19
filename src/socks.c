@@ -414,7 +414,7 @@ static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s: (%d) %s",
+				ERROR, ctx, "dialer: %s (%d) %s",
 				dialer_strerror(err), syserr, strerror(syserr));
 		} else {
 			SOCKS_CTX_LOG_F(

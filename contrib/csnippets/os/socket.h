@@ -33,13 +33,14 @@
 	 (err) == ENOBUFS || (err) == ENOMEM)
 
 /**
- * @def SHUTDOWN_FD(fd)
+ * @def SHUTDOWN_FD(fd, dir)
  * @brief Shuts down the write end of the socket and logs any errors.
  * @param fd The socket file descriptor.
+ * @param dir The shutdown direction (RD, WR, RDWR).
  */
-#define SHUTDOWN_FD(fd)                                                        \
+#define SHUTDOWN_FD(fd, dir)                                                   \
 	do {                                                                   \
-		if (shutdown((fd), SHUT_WR) != 0) {                            \
+		if (shutdown((fd), SHUT_##dir) != 0) {                         \
 			const int err = errno;                                 \
 			LOGW_F("shutdown [fd:%d]: (%d) %s", (fd), err,         \
 			       strerror(err));                                 \
@@ -104,6 +105,15 @@ void socket_set_reuseport(int fd, bool reuseport);
  * @note POSIX version: POSIX.1-2001
  */
 void socket_set_tcp(int fd, bool nodelay, bool keepalive);
+
+/**
+ * @brief Sets SO_LINGER behavior for close() on the socket.
+ * @param fd The socket file descriptor.
+ * @param enabled If true, enables linger behavior.
+ * @param seconds Linger timeout in seconds when enabled.
+ * @note POSIX version: POSIX.1-2001
+ */
+void socket_set_linger(int fd, bool enabled, int seconds);
 
 /**
  * @brief Enables TCP Fast Open for server-side.

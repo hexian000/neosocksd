@@ -199,7 +199,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
 			FW_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s ((%d) %s)",
+				ERROR, ctx, "dialer: %s (%d) %s",
 				dialer_strerror(err), syserr, strerror(syserr));
 		} else {
 			FW_CTX_LOG_F(

@@ -275,7 +275,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		const enum dialer_error err = ctx->dialer.err;
 		const int syserr = ctx->dialer.syserr;
 		if (syserr != 0) {
-			LOGE_F("dialer: %s ((%d) %s)", dialer_strerror(err),
+			LOGE_F("dialer: %s (%d) %s", dialer_strerror(err),
 			       syserr, strerror(syserr));
 		} else {
 			LOGE_F("dialer: %s", dialer_strerror(err));
@@ -386,6 +386,7 @@ static bool api_client_do(
 		return false;
 	}
 	ctx->state = STATE_CLIENT_INIT;
+	ctx->loop = loop;
 	ctx->dialreq = req;
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, on_header);

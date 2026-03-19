@@ -109,6 +109,19 @@ void socket_set_tcp(const int fd, const bool nodelay, const bool keepalive)
 	}
 }
 
+void socket_set_linger(const int fd, const bool enabled, const int seconds)
+{
+	const struct linger val = {
+		.l_onoff = enabled ? 1 : 0,
+		.l_linger = seconds,
+	};
+	if (setsockopt(fd, SOL_SOCKET, SO_LINGER, &val, sizeof(val)) != 0) {
+		const int err = errno;
+		LOGW_F("setsockopt [fd:%d]: SO_LINGER (%d) %s", fd, err,
+		       strerror(err));
+	}
+}
+
 void socket_set_fastopen(const int fd, const int backlog)
 {
 #if WITH_TCP_FASTOPEN
@@ -229,8 +242,9 @@ int socket_recv(const int fd, void *restrict buf, size_t *restrict len)
 			return -1;
 		}
 		if (nrecv == 0) {
+			/* EOF */
 			*len = nbrecv;
-			return 1; /* EOF */
+			return 0;
 		}
 		b += nrecv;
 		n -= nrecv;

@@ -400,8 +400,9 @@ static void addrinfo_cb(
 		break;
 	}
 
-	/* Trigger query completion callback */
-	ev_invoke(q->resolver->loop, &q->w_finish, EV_CUSTOM);
+	/* Trigger query completion callback (deferred, matching the synchronous
+	 * path, so callers can reliably set their query pointer before it fires) */
+	ev_feed_event(q->resolver->loop, &q->w_finish, EV_CUSTOM);
 }
 #endif /* WITH_CARES */
 
