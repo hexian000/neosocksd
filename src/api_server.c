@@ -63,6 +63,7 @@ struct api_ctx {
 	struct dialreq *dialreq;
 	struct http_parser parser;
 	struct url uri;
+	bool keepalive : 1;
 };
 ASSERT_SUPER(struct gcbase, struct api_ctx, gcbase);
 
@@ -318,6 +319,7 @@ static void send_errpage(
 	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code)
 {
 	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
+	ctx->keepalive = false;
 	http_resp_errpage(&ctx->parser, code);
 	send_response(loop, ctx, false);
 }
@@ -437,6 +439,11 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	if (ctx->keepalive) {
+		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+	} else {
+		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+	}
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
 	if (stateless) {
 		RESPHDR_NOCACHE(ctx->parser.wbuf);
@@ -477,7 +484,13 @@ static void send_errmsg(
 {
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	RESPHDR_BEGIN(ctx->parser.wbuf, code);
+	if (ctx->keepalive) {
+		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+	} else {
+		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+	}
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	RESPHDR_CLENGTH(ctx->parser.wbuf, len);
 	RESPHDR_FINISH(ctx->parser.wbuf);
 	BUF_APPEND(ctx->parser.wbuf, msg, len);
 	send_response(loop, ctx, 1 <= (code / 100) && (code / 100) <= 3);
@@ -534,6 +547,11 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	if (ctx->keepalive) {
+		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+	} else {
+		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+	}
 	RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
 	const char *encoding_str = content_encoding_str[encoding];
 	if (encoding_str != NULL) {
@@ -580,7 +598,6 @@ static void handle_ruleset_invoke(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset)
 {
-	const int_least64_t start = clock_monotonic_ns();
 	struct stream *reader = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
@@ -600,11 +617,13 @@ static void handle_ruleset_invoke(
 		return;
 	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
-	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	if (ctx->keepalive) {
+		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+	} else {
+		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+	}
+	RESPHDR_CLENGTH(ctx->parser.wbuf, 0);
 	RESPHDR_FINISH(ctx->parser.wbuf);
-	const int_least64_t end = clock_monotonic_ns();
-	FORMAT_DURATION(timecost, make_duration_nanos(end - start));
-	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	send_response(loop, ctx, true);
 }
 
@@ -631,12 +650,24 @@ static void handle_ruleset_update(
 		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
-	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-	RESPHDR_FINISH(ctx->parser.wbuf);
 	const int_least64_t end = clock_monotonic_ns();
-	FORMAT_DURATION(timecost, make_duration_nanos(end - start));
-	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
+	{
+		FORMAT_DURATION(timecost, make_duration_nanos(end - start));
+		char body[64];
+		const int bodylen = snprintf(
+			body, sizeof(body), "Time Cost           : %s\n",
+			timecost);
+		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+		if (ctx->keepalive) {
+			RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+		} else {
+			RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+		}
+		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+		RESPHDR_CLENGTH(ctx->parser.wbuf, (size_t)bodylen);
+		RESPHDR_FINISH(ctx->parser.wbuf);
+		BUF_APPEND(ctx->parser.wbuf, body, (size_t)bodylen);
+	}
 	send_response(loop, ctx, true);
 }
 
@@ -664,26 +695,57 @@ static void handle_ruleset_gc(
 	pipe_shrink(SIZE_MAX);
 #endif
 
-	FORMAT_BYTES(allocated, (double)vmstats.byt_allocated);
-	FORMAT_SI(objects, (double)vmstats.num_object);
-	FORMAT_DURATION(timecost, make_duration_nanos(end - start));
+	struct stream *w =
+		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, CENCODING_NONE);
+	if (w == NULL) {
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
+	buf->len = 0;
+	{
+		FORMAT_BYTES(
+			freed_bytes, (double)((intmax_t)vmstats.byt_allocated -
+					      (intmax_t)before.byt_allocated));
+		FORMAT_SI(
+			freed_objects, (double)((intmax_t)vmstats.num_object -
+						(intmax_t)before.num_object));
+		BUF_APPENDF(
+			*buf, "%-20s: %s (%s objects)\n", "Difference",
+			freed_bytes, freed_objects);
+	}
+	append_vmstats(buf, &vmstats);
+	{
+		FORMAT_DURATION(timecost, make_duration_nanos(end - start));
+		BUF_APPENDF(*buf, "Time Cost           : %s\n", timecost);
+	}
+	{
+		size_t n = buf->len;
+		const int err = stream_write(w, buf->data, &n);
+		if (n < buf->len || err != 0) {
+			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
+			       buf->len);
+			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+	}
+	{
+		const int err = stream_close(w);
+		if (err != 0) {
+			LOGE_F("stream_close error: %d", err);
+			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+	}
 	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	if (ctx->keepalive) {
+		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+	} else {
+		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+	}
 	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
 	RESPHDR_FINISH(ctx->parser.wbuf);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-
-	FORMAT_BYTES(
-		freed_bytes, (double)((intmax_t)vmstats.byt_allocated -
-				      (intmax_t)before.byt_allocated));
-	FORMAT_SI(
-		freed_objects, (double)((intmax_t)vmstats.num_object -
-					(intmax_t)before.num_object));
-	BUF_APPENDF(
-		ctx->parser.wbuf, "%-20s: %s (%s objects)\n", "Difference",
-		freed_bytes, freed_objects);
-
-	append_vmstats((struct buffer *)&ctx->parser.wbuf, &vmstats);
-	BUF_APPENDF(ctx->parser.wbuf, "Time Cost           : %s\n", timecost);
 	send_response(loop, ctx, true);
 }
 
@@ -784,6 +846,12 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			return;
 		}
 		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+		if (ctx->keepalive) {
+			RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+		} else {
+			RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+		}
+		RESPHDR_CLENGTH(ctx->parser.wbuf, 0);
 		RESPHDR_FINISH(ctx->parser.wbuf);
 		send_response(loop, ctx, true);
 		return;
@@ -852,89 +920,6 @@ static void api_ctx_finalize(struct gcbase *restrict obj)
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 }
 
-void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_READ);
-	struct api_ctx *restrict ctx = watcher->data;
-
-	const int want = http_parser_recv(&ctx->parser);
-	if (want < 0) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (want > 0) {
-		return;
-	}
-	ctx->state = STATE_PROCESS;
-	ev_io_stop(loop, watcher);
-
-	switch (ctx->parser.state) {
-	case STATE_PARSE_OK: {
-		struct server_stats *restrict stats = &ctx->s->stats;
-		stats->num_request++;
-	} break;
-	case STATE_PARSE_ERROR:
-		send_errpage(loop, ctx, ctx->parser.http_status);
-		return;
-	default:
-		FAILMSGF("unexpected http parser state: %d", ctx->parser.state);
-	}
-
-	api_handle(loop, ctx);
-}
-
-void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	UNUSED(loop);
-	CHECK_REVENTS(revents, EV_WRITE);
-	struct api_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_RESPONSE);
-
-	const int fd = watcher->fd;
-	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
-	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
-	int ret = socket_send(fd, buf, &len);
-	if (ret != 0) {
-		API_CTX_LOG_F(WARNING, ctx, "socket_send: error %d", ret);
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	ctx->parser.wpos += len;
-	if (ctx->parser.wpos < ctx->parser.wbuf.len) {
-		return;
-	}
-
-	/* Send response body after headers are fully sent */
-	if (ctx->parser.cbuf != NULL) {
-		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
-		buf = cbuf->data + ctx->parser.cpos;
-		len = cbuf->len - ctx->parser.cpos;
-		ret = socket_send(fd, buf, &len);
-		if (ret != 0) {
-			API_CTX_LOG_F(
-				WARNING, ctx, "socket_send: error %d", ret);
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		ctx->parser.cpos += len;
-		if (ctx->parser.cpos < cbuf->len) {
-			return;
-		}
-	}
-
-	/* Connection: close */
-	gc_unref(&ctx->gcbase);
-}
-
-static void
-timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
-{
-	UNUSED(loop);
-	CHECK_REVENTS(revents, EV_TIMER);
-	struct api_ctx *restrict ctx = watcher->data;
-	gc_unref(&ctx->gcbase);
-}
-
 static bool parse_header(void *ctx, const char *key, char *value)
 {
 	struct http_parser *restrict p = &((struct api_ctx *)ctx)->parser;
@@ -973,6 +958,121 @@ static bool parse_header(void *ctx, const char *key, char *value)
 
 	LOGVV_F("unknown http header: `%s' = `%s'", key, value);
 	return true;
+}
+
+/* Returns true when HTTP/1.1 and the client did not request Connection: close */
+static bool api_should_keepalive(const struct api_ctx *restrict ctx)
+{
+	const char *version = ctx->parser.msg.req.version;
+	if (strncmp(version, "HTTP/1.1", 8) != 0) {
+		return false;
+	}
+	const char *conn = ctx->parser.hdr.connection;
+	return conn == NULL || strcasecmp(conn, "close") != 0;
+}
+
+/* Reset parser and state machine for reuse on the same TCP connection */
+static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
+{
+	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	const struct http_parsehdr_cb on_header = { parse_header, ctx };
+	http_parser_init(
+		&ctx->parser, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header);
+	ctx->uri = (struct url){ 0 };
+	ctx->keepalive = false;
+	ctx->state = STATE_REQUEST;
+	ev_timer_stop(loop, &ctx->w_timeout);
+	ev_timer_set(&ctx->w_timeout, G.conf->timeout, 0.0);
+	ev_timer_start(loop, &ctx->w_timeout);
+	ev_io_start(loop, &ctx->w_recv);
+}
+
+void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_READ);
+	struct api_ctx *restrict ctx = watcher->data;
+
+	const int want = http_parser_recv(&ctx->parser);
+	if (want < 0) {
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (want > 0) {
+		return;
+	}
+	ctx->state = STATE_PROCESS;
+	ev_io_stop(loop, watcher);
+
+	switch (ctx->parser.state) {
+	case STATE_PARSE_OK: {
+		struct server_stats *restrict stats = &ctx->s->stats;
+		stats->num_request++;
+		ctx->keepalive = api_should_keepalive(ctx);
+	} break;
+	case STATE_PARSE_ERROR:
+		send_errpage(loop, ctx, ctx->parser.http_status);
+		return;
+	default:
+		FAILMSGF("unexpected http parser state: %d", ctx->parser.state);
+	}
+
+	api_handle(loop, ctx);
+}
+
+void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_WRITE);
+	struct api_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_RESPONSE);
+
+	const int fd = watcher->fd;
+	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
+	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
+	int ret = socket_send(fd, buf, &len);
+	if (ret != 0) {
+		API_CTX_LOG_F(WARNING, ctx, "socket_send: error %d", ret);
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	ctx->parser.wpos += len;
+	if (ctx->parser.wpos < ctx->parser.wbuf.len) {
+		return;
+	}
+
+	/* Send response body after headers are fully sent */
+	if (ctx->parser.cbuf != NULL) {
+		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
+		buf = cbuf->data + ctx->parser.cpos;
+		len = cbuf->len - ctx->parser.cpos;
+		ret = socket_send(fd, buf, &len);
+		if (ret != 0) {
+			API_CTX_LOG_F(
+				WARNING, ctx, "socket_send: error %d", ret);
+			gc_unref(&ctx->gcbase);
+			return;
+		}
+		ctx->parser.cpos += len;
+		if (ctx->parser.cpos < cbuf->len) {
+			return;
+		}
+	}
+
+	/* Reuse or close the connection based on keep-alive negotiation */
+	if (ctx->keepalive) {
+		ev_io_stop(loop, watcher);
+		api_ctx_reset(loop, ctx);
+		return;
+	}
+	gc_unref(&ctx->gcbase);
+}
+
+static void
+timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+{
+	UNUSED(loop);
+	CHECK_REVENTS(revents, EV_TIMER);
+	struct api_ctx *restrict ctx = watcher->data;
+	gc_unref(&ctx->gcbase);
 }
 
 static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)

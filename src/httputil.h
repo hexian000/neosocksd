@@ -279,8 +279,7 @@ struct stream *content_writer(
 		BUF_APPENDF(                                                   \
 			(buf),                                                 \
 			"HTTP/1.1 %" PRIu16 " %s\r\n"                          \
-			"Date: %.*s\r\n"                                       \
-			"Connection: close\r\n",                               \
+			"Date: %.*s\r\n",                                      \
 			(code), status ? status : "", (int)date_len,           \
 			date_str);                                             \
 	} while (0)
@@ -305,6 +304,13 @@ struct stream *content_writer(
 
 /** @brief Add no-cache headers */
 #define RESPHDR_NOCACHE(buf) BUF_APPENDSTR((buf), "Cache-Control: no-store\r\n")
+
+/** @brief Add Connection: close header */
+#define RESPHDR_CONN_CLOSE(buf) BUF_APPENDSTR((buf), "Connection: close\r\n")
+
+/** @brief Add Connection: keep-alive header */
+#define RESPHDR_CONN_KEEPALIVE(buf)                                            \
+	BUF_APPENDSTR((buf), "Connection: keep-alive\r\n")
 
 /** @brief Finish HTTP response headers */
 #define RESPHDR_FINISH(buf) BUF_APPENDSTR(buf, "\r\n")

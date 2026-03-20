@@ -55,6 +55,7 @@ void http_resp_errpage(struct http_parser *restrict p, const uint16_t code)
 	if (len <= 0) {
 		/* Can't generate error page, reply with code only */
 		RESPHDR_BEGIN(p->wbuf, code);
+		RESPHDR_CONN_CLOSE(p->wbuf);
 		RESPHDR_FINISH(p->wbuf);
 		return;
 	}

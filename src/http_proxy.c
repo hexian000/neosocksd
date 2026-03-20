@@ -270,6 +270,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	if (G.conf->auth_required && (username == NULL || password == NULL)) {
 		RESPHDR_BEGIN(
 			ctx->parser.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
+		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
 		BUF_APPENDSTR(
 			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
 		RESPHDR_FINISH(ctx->parser.wbuf);
