@@ -285,6 +285,7 @@ static void server_stats(
 		xfer_down);
 
 #if WITH_RULESET
+	BUF_APPENDF(*buf, "%-20s: %zu\n", "API Conn Cache", conn_cache.len);
 	const struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL && runtime) {
 		struct ruleset_vmstats vmstats;
@@ -482,6 +483,9 @@ static void send_errmsg(
 	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code,
 	const char *msg, const size_t len)
 {
+	if ((code / 100) >= 4) {
+		ctx->keepalive = false;
+	}
 	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
 	RESPHDR_BEGIN(ctx->parser.wbuf, code);
 	if (ctx->keepalive) {

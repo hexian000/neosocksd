@@ -77,10 +77,11 @@ int url_escape_query_component(
 
 /**
  * @brief Build a URL string from structured data.
- * @param[out] buf Out buffer.
- * @param buf_size Buffer size in bytes.
+ * @param[out] buf Out buffer. Can be NULL if buf_size is 0.
+ * @param buf_size Buffer size in bytes. If 0, no output is written.
  * @param[in] url URL struct.
  * @return Number of characters that would have been written (excluding null terminator), or negative on error.
+ * @note When buf is NULL and buf_size is 0, returns the required buffer size (excluding null terminator), like snprintf.
  * @see struct url
  */
 int url_build(char *buf, size_t buf_size, const struct url *url);

@@ -84,10 +84,10 @@ void dialaddr_copy(
 
 /**
  * @brief Format dialaddr as string
- * @param s Output buffer
- * @param maxlen Maximum buffer size
+ * @param s Output buffer (may be NULL if maxlen is 0)
+ * @param maxlen Maximum buffer size (0 to compute length only)
  * @param addr Input dialaddr structure
- * @return Number of characters written, or -1 on error
+ * @return Number of characters that would be written, or -1 on error
  */
 int dialaddr_format(
 	char *restrict s, size_t maxlen, const struct dialaddr *restrict addr);
@@ -183,10 +183,10 @@ struct dialreq *dialreq_parse(const char *addr, const char *csv);
 
 /**
  * @brief Format dial request as human-readable string
- * @param s Output buffer
- * @param maxlen Maximum buffer size
+ * @param s Output buffer (may be NULL if maxlen is 0)
+ * @param maxlen Maximum buffer size (0 to compute length only)
  * @param r Dial request to format
- * @return Number of characters written
+ * @return Number of characters that would be written, or -1 on error
  */
 int dialreq_format(
 	char *restrict s, size_t maxlen, const struct dialreq *restrict r);

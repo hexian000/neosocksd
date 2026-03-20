@@ -404,48 +404,50 @@ static int format_proxyreq(
 	const struct proxyreq *restrict req)
 {
 	char host[FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")];
-	int nhost = dialaddr_format(host, sizeof(host), &req->addr);
-	ASSERT(nhost > 0);
-	if (maxlen < (size_t)(nhost + 1)) {
-		return -1;
+	const int nhost = dialaddr_format(host, sizeof(host), &req->addr);
+	if (nhost < 0) {
+		return nhost;
 	}
 	const struct url u = {
 		.scheme = (char *)proxy_protocol_str[req->proto],
 		.host = host,
 	};
-	const int n = url_build(s, maxlen, &u);
-	if (n < 0 || (size_t)n >= maxlen) {
-		return -1;
-	}
-	return n;
+	return url_build(s, maxlen, &u);
 }
 
 int dialreq_format(
 	char *restrict s, size_t maxlen, const struct dialreq *restrict r)
 {
-	if (maxlen == 0) {
-		return 0;
-	}
-	if (maxlen > INT_MAX) {
-		maxlen = INT_MAX;
-	}
 	int n = 0;
 	for (size_t i = 0; i < r->num_proxy; i++) {
-		int ret = format_proxyreq(s, maxlen, &r->proxy[i]);
-		s += ret;
-		maxlen -= ret;
-		n += ret;
-		ret = snprintf(s, maxlen, "->");
-		ASSERT(ret > 0);
-		s += ret;
-		maxlen -= ret;
-		n += ret;
-		if (maxlen <= 1) {
-			return n;
+		{
+			const size_t avail = (s != NULL && (size_t)n < maxlen) ?
+						     maxlen - (size_t)n :
+						     0;
+			const int ret = format_proxyreq(
+				avail > 0 ? s + n : NULL, avail, &r->proxy[i]);
+			if (ret < 0) {
+				return ret;
+			}
+			n += ret;
+		}
+		{
+			const size_t avail = (s != NULL && (size_t)n < maxlen) ?
+						     maxlen - (size_t)n :
+						     0;
+			const int ret =
+				snprintf(avail > 0 ? s + n : NULL, avail, "->");
+			ASSERT(ret > 0);
+			n += ret;
 		}
 	}
-	const int ret = dialaddr_format(s, maxlen, &r->addr);
-	ASSERT(ret > 0);
+	const size_t avail =
+		(s != NULL && (size_t)n < maxlen) ? maxlen - (size_t)n : 0;
+	const int ret =
+		dialaddr_format(avail > 0 ? s + n : NULL, avail, &r->addr);
+	if (ret < 0) {
+		return ret;
+	}
 	n += ret;
 	return n;
 }

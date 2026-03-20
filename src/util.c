@@ -14,12 +14,18 @@
 #include "resolver.h"
 
 #if WITH_RULESET
+#include "dialer.h"
+#endif
+
+#if WITH_RULESET
+#include "algo/luahash.h"
 #include "lua.h"
 #endif
 #include "math/rand.h"
 #include "os/clock.h"
 #include "os/signal.h"
 #include "os/socket.h"
+#include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
@@ -105,6 +111,139 @@ void pipe_shrink(const size_t count)
 }
 #endif
 
+#if WITH_RULESET
+struct conn_cache conn_cache = { .len = 0 };
+
+static void conn_cache_init(void)
+{
+	conn_cache.len = 0;
+	conn_cache.freelist = 0;
+	for (size_t i = 0; i < CONN_CACHE_CAPACITY; i++) {
+		conn_cache.buckets[i] = CONN_CACHE_NIL;
+		conn_cache.entries[i] = (struct conn_cache_entry){
+			.fd = -1,
+			.bucket = CONN_CACHE_NIL,
+			.next = (i + 1 < CONN_CACHE_CAPACITY) ? i + 1 :
+								CONN_CACHE_NIL,
+		};
+	}
+}
+
+static int
+conn_cache_take(struct ev_loop *loop, struct conn_cache_entry *restrict entry)
+{
+	ev_io_stop(loop, &entry->w_close);
+	ev_timer_stop(loop, &entry->w_expire);
+	ASSERT(entry->bucket != CONN_CACHE_NIL);
+	ASSERT(entry >= conn_cache.entries);
+	ASSERT(entry < conn_cache.entries + ARRAY_SIZE(conn_cache.entries));
+	const size_t index = (size_t)(entry - conn_cache.entries);
+	size_t *last_next = &conn_cache.buckets[entry->bucket];
+	while (*last_next != CONN_CACHE_NIL) {
+		if (*last_next == index) {
+			*last_next = entry->next;
+			entry->bucket = CONN_CACHE_NIL;
+			entry->next = CONN_CACHE_NIL;
+			break;
+		}
+		last_next = &conn_cache.entries[*last_next].next;
+	}
+	const int fd = entry->fd;
+	entry->fd = -1;
+	entry->hash = 0;
+	entry->key[0] = '\0';
+	conn_cache.len--;
+	entry->next = conn_cache.freelist;
+	conn_cache.freelist = index;
+	return fd;
+}
+
+static void
+conn_cache_idle_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_READ);
+	struct conn_cache_entry *restrict entry = watcher->data;
+	LOGV_F("conn_cache: [fd:%d] server closed idle `%s'", entry->fd,
+	       entry->key);
+	const int fd = conn_cache_take(loop, entry);
+	CLOSE_FD(fd);
+}
+
+static void
+conn_cache_expire_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_TIMER);
+	struct conn_cache_entry *restrict entry = watcher->data;
+	LOGV_F("conn_cache: [fd:%d] expire `%s'", entry->fd, entry->key);
+	const int fd = conn_cache_take(loop, entry);
+	CLOSE_FD(fd);
+}
+
+void conn_cache_put(
+	struct ev_loop *loop, const int fd,
+	const struct dialreq *restrict dialreq)
+{
+	if (conn_cache.len >= CONN_CACHE_CAPACITY) {
+		LOGV_F("conn_cache: [fd:%d] full, discarding", fd);
+		CLOSE_FD(fd);
+		return;
+	}
+	ASSERT(conn_cache.freelist != CONN_CACHE_NIL);
+	const size_t index = conn_cache.freelist;
+	struct conn_cache_entry *restrict entry = &conn_cache.entries[index];
+	const int nkey =
+		dialreq_format(entry->key, sizeof(entry->key), dialreq);
+	if (nkey < 0 || (size_t)nkey >= sizeof(entry->key)) {
+		LOGV_F("conn_cache: [fd:%d] key too long, discarding", fd);
+		CLOSE_FD(fd);
+		return;
+	}
+	conn_cache.freelist = entry->next;
+	entry->hash = luahash(entry->key, (size_t)nkey, 0);
+	entry->fd = fd;
+	const size_t bucket =
+		(size_t)entry->hash % ARRAY_SIZE(conn_cache.buckets);
+	entry->bucket = bucket;
+	entry->next = conn_cache.buckets[bucket];
+	conn_cache.buckets[bucket] = index;
+	ev_io_init(&entry->w_close, conn_cache_idle_cb, fd, EV_READ);
+	entry->w_close.data = entry;
+	ev_timer_init(
+		&entry->w_expire, conn_cache_expire_cb, CONN_CACHE_TIMEOUT,
+		0.0);
+	entry->w_expire.data = entry;
+	ev_io_start(loop, &entry->w_close);
+	ev_timer_start(loop, &entry->w_expire);
+	conn_cache.len++;
+	LOGV_F("conn_cache: [fd:%d] put `%s' num=%zu", fd, entry->key,
+	       conn_cache.len);
+}
+
+int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
+{
+	char key[256];
+	const int nkey = dialreq_format(key, sizeof(key), req);
+	if (nkey < 0 || (size_t)nkey >= sizeof(key)) {
+		return -1;
+	}
+	const unsigned hash = luahash(key, (size_t)nkey, 0);
+	const size_t bucket = (size_t)hash % ARRAY_SIZE(conn_cache.buckets);
+	for (size_t i = conn_cache.buckets[bucket]; i != CONN_CACHE_NIL;
+	     i = conn_cache.entries[i].next) {
+		struct conn_cache_entry *restrict entry =
+			&conn_cache.entries[i];
+		if (entry->hash != hash || strcmp(entry->key, key) != 0) {
+			continue;
+		}
+		const int fd = conn_cache_take(loop, entry);
+		LOGV_F("conn_cache: [fd:%d] get `%s' num=%zu", fd, key,
+		       conn_cache.len);
+		return fd;
+	}
+	return -1;
+}
+#endif /* WITH_RULESET */
+
 #if defined(WIN32)
 #define PATH_SEPARATOR '\\'
 #else
@@ -148,6 +287,7 @@ void loadlibs(void)
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
 	resolver_init();
 #if WITH_RULESET
+	conn_cache_init();
 	LOGD("ruleset interpreter: " LUA_RELEASE);
 #endif
 }

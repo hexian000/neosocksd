@@ -65,113 +65,6 @@ ASSERT_SUPER(struct gcbase, struct api_client_ctx, gcbase);
 	char name[16];                                                         \
 	(void)format_iec_bytes(name, sizeof(name), (value))
 
-/* Maximum number of idle connections kept in the pool */
-#define API_CONN_POOL_CAPACITY 20
-/* Seconds before an idle pooled connection is discarded */
-#define API_CONN_POOL_TIMEOUT 60.0
-
-/* One slot in the connection pool */
-struct api_conn_entry {
-	int fd;
-	ev_io w_close; /* EV_READ: detect server-side close */
-	ev_timer w_expire; /* idle eviction */
-	char key[256]; /* dialreq_format key */
-};
-
-static struct {
-	struct api_conn_entry slots[API_CONN_POOL_CAPACITY];
-	size_t len;
-} g_conn_pool;
-
-static void
-conn_pool_discard(struct ev_loop *loop, struct api_conn_entry *restrict entry)
-{
-	ev_io_stop(loop, &entry->w_close);
-	ev_timer_stop(loop, &entry->w_expire);
-	CLOSE_FD(entry->fd);
-	entry->fd = -1;
-	g_conn_pool.len--;
-}
-
-static void
-conn_pool_idle_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_READ);
-	struct api_conn_entry *restrict entry = watcher->data;
-	LOGV_F("api_conn_pool: server closed idle [fd:%d]", entry->fd);
-	conn_pool_discard(loop, entry);
-}
-
-static void
-conn_pool_expire_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_TIMER);
-	struct api_conn_entry *restrict entry = watcher->data;
-	LOGV_F("api_conn_pool: expire [fd:%d]", entry->fd);
-	conn_pool_discard(loop, entry);
-}
-
-static void conn_pool_init(void)
-{
-	for (size_t i = 0; i < API_CONN_POOL_CAPACITY; i++) {
-		g_conn_pool.slots[i].fd = -1;
-	}
-}
-
-static void conn_pool_put(
-	struct ev_loop *loop, const int fd,
-	const struct dialreq *restrict dialreq)
-{
-	if (g_conn_pool.len >= API_CONN_POOL_CAPACITY) {
-		LOGV_F("api_conn_pool: full, discarding [fd:%d]", fd);
-		CLOSE_FD(fd);
-		return;
-	}
-	struct api_conn_entry *restrict entry = NULL;
-	for (size_t i = 0; i < API_CONN_POOL_CAPACITY; i++) {
-		if (g_conn_pool.slots[i].fd == -1) {
-			entry = &g_conn_pool.slots[i];
-			break;
-		}
-	}
-	ASSERT(entry != NULL);
-	(void)dialreq_format(entry->key, sizeof(entry->key), dialreq);
-	entry->fd = fd;
-	ev_io_init(&entry->w_close, conn_pool_idle_cb, fd, EV_READ);
-	entry->w_close.data = entry;
-	ev_timer_init(
-		&entry->w_expire, conn_pool_expire_cb, API_CONN_POOL_TIMEOUT,
-		0.0);
-	entry->w_expire.data = entry;
-	ev_io_start(loop, &entry->w_close);
-	ev_timer_start(loop, &entry->w_expire);
-	g_conn_pool.len++;
-	LOGV_F("api_conn_pool: put [fd:%d] len=%zu", fd, g_conn_pool.len);
-}
-
-/* Returns a matching fd from the pool, or -1 if none available */
-static int
-conn_pool_get(struct ev_loop *loop, const struct dialreq *restrict req)
-{
-	char key[256];
-	(void)dialreq_format(key, sizeof(key), req);
-	for (size_t i = 0; i < API_CONN_POOL_CAPACITY; i++) {
-		struct api_conn_entry *restrict entry = &g_conn_pool.slots[i];
-		if (entry->fd == -1 || strcmp(entry->key, key) != 0) {
-			continue;
-		}
-		ev_io_stop(loop, &entry->w_close);
-		ev_timer_stop(loop, &entry->w_expire);
-		const int fd = entry->fd;
-		entry->fd = -1;
-		g_conn_pool.len--;
-		LOGV_F("api_conn_pool: get [fd:%d] len=%zu", fd,
-		       g_conn_pool.len);
-		return fd;
-	}
-	return -1;
-}
-
 static void
 api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 {
@@ -225,6 +118,9 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		ctx->cb.func(
 			ctx, loop, ctx->cb.data, ctx->result.errmsg,
 			ctx->result.errlen, ctx->result.stream);
+	} else if (ctx->result.errmsg != NULL) {
+		LOGW_F("api invoke: %.*s", (int)ctx->result.errlen,
+		       ctx->result.errmsg);
 	}
 	if (ctx->result.stream != NULL) {
 		stream_close(ctx->result.stream);
@@ -254,6 +150,21 @@ static void api_client_finish(
 		return;                                                        \
 	} while (false)
 
+static void
+recycle_conn(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
+{
+	const char *conn = ctx->parser.hdr.connection;
+	if (ctx->dialreq == NULL ||
+	    (conn != NULL && strcasecmp(conn, "close") == 0)) {
+		LOGV("server wants to close the connection, skip caching");
+		return;
+	}
+	ev_io_stop(loop, &ctx->w_socket);
+	const int fd = ctx->w_socket.fd;
+	ctx->w_socket.fd = -1;
+	conn_cache_put(loop, fd, ctx->dialreq);
+}
+
 static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
@@ -274,8 +185,16 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		}
 	}
 	if (code == HTTP_OK) {
-		/* Success - validate content type for RPC response */
+		/* invoke: 200 with empty body and no Content-Type is success */
+		if (ctx->cb.func == NULL &&
+		    ctx->parser.hdr.content.type == NULL) {
+			recycle_conn(loop, ctx);
+			api_client_finish(loop, ctx, NULL, 0, NULL);
+			return;
+		}
+		/* rpcall: validate content type */
 		if (!check_rpcall_mime(ctx->parser.hdr.content.type)) {
+			recycle_conn(loop, ctx);
 			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 		}
 	} else if (
@@ -288,12 +207,27 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		return;
 	} else {
 		/* Generic HTTP error response */
-		char buf[64];
-		ret = snprintf(
-			buf, sizeof(buf), "%s %s %s", msg->rsp.version,
-			msg->rsp.code, msg->rsp.status);
-		ASSERT(ret > 0);
-		api_client_finish(loop, ctx, buf, (size_t)ret, NULL);
+		{
+			char buf[64];
+			ret = snprintf(
+				buf, sizeof(buf), "%s %s %s", msg->rsp.version,
+				msg->rsp.code, msg->rsp.status);
+			ASSERT(ret > 0);
+			ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+			struct vbuffer *restrict cbuf = VBUF_NEW((size_t)ret);
+			if (cbuf != NULL) {
+				cbuf = VBUF_APPEND(cbuf, buf, (size_t)ret);
+			}
+			ctx->parser.cbuf = cbuf;
+		}
+		if (ctx->parser.cbuf == NULL) {
+			LOGOOM();
+			api_client_finish(loop, ctx, NULL, 0, NULL);
+			return;
+		}
+		api_client_finish(
+			loop, ctx, VBUF_DATA(ctx->parser.cbuf),
+			VBUF_LEN(ctx->parser.cbuf), NULL);
 		return;
 	}
 
@@ -311,16 +245,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 
 	/* Return connection to pool when server allows keep-alive */
-	{
-		const char *conn = ctx->parser.hdr.connection;
-		if (ctx->dialreq != NULL &&
-		    (conn == NULL || strcasecmp(conn, "close") != 0)) {
-			ev_io_stop(loop, &ctx->w_socket);
-			const int fd = ctx->w_socket.fd;
-			ctx->w_socket.fd = -1;
-			conn_pool_put(loop, fd, ctx->dialreq);
-		}
-	}
+	recycle_conn(loop, ctx);
 	api_client_finish(loop, ctx, NULL, 0, r);
 }
 
@@ -371,11 +296,6 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 	p->cbuf = VBUF_FREE(p->cbuf);
 
-	if (ctx->cb.func == NULL) {
-		/* It's a fire-and-forget invoke call - no response expected */
-		gc_unref(&ctx->gcbase);
-		return;
-	}
 	ev_io_stop(loop, watcher);
 
 	/* Switch to receiving response */
@@ -495,13 +415,6 @@ static bool api_client_do(
 	const void *restrict payload, const size_t len,
 	const struct api_client_cb *restrict in_cb)
 {
-	{
-		static bool pool_initialized = false;
-		if (!pool_initialized) {
-			conn_pool_init();
-			pool_initialized = true;
-		}
-	}
 	CHECK(len <= INT_MAX);
 	struct api_client_ctx *restrict ctx =
 		malloc(sizeof(struct api_client_ctx));
@@ -541,13 +454,12 @@ static bool api_client_do(
 	if (pctx != NULL) {
 		*pctx = ctx;
 	}
-	const int pooled_fd = conn_pool_get(loop, req);
-	if (pooled_fd != -1) {
-		LOGV_F("api_client: reusing pooled connection [fd:%d]",
-		       pooled_fd);
-		ctx->parser.fd = pooled_fd;
+	const int fd = conn_cache_get(loop, req);
+	if (fd != -1) {
+		LOGV_F("api_client: reusing pooled connection [fd:%d]", fd);
+		ctx->parser.fd = fd;
 		ctx->state = STATE_CLIENT_REQUEST;
-		ev_io_init(&ctx->w_socket, send_cb, pooled_fd, EV_WRITE);
+		ev_io_init(&ctx->w_socket, send_cb, fd, EV_WRITE);
 		ctx->w_socket.data = ctx;
 		ev_io_start(loop, &ctx->w_socket);
 	} else {
