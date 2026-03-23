@@ -125,7 +125,7 @@ struct http_parser {
  * @param on_header Callback for processing headers
  */
 void http_parser_init(
-	struct http_parser *p, int fd, enum http_parser_state mode,
+	struct http_parser *restrict p, int fd, enum http_parser_state mode,
 	struct http_parsehdr_cb on_header);
 
 /**
@@ -134,7 +134,7 @@ void http_parser_init(
  * @param p Parser instance
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
-int http_parser_recv(struct http_parser *p);
+int http_parser_recv(struct http_parser *restrict p);
 
 /**
  * @brief Parse Accept-TE header
@@ -147,7 +147,7 @@ int http_parser_recv(struct http_parser *p);
  * @param value Header value to parse
  * @return true if parsed successfully
  */
-bool parsehdr_accept_te(struct http_parser *p, char *value);
+bool parsehdr_accept_te(struct http_parser *restrict p, char *restrict value);
 
 /**
  * @brief Parse Transfer-Encoding header
@@ -160,7 +160,8 @@ bool parsehdr_accept_te(struct http_parser *p, char *value);
  * @param value Header value to parse
  * @return true if parsed successfully
  */
-bool parsehdr_transfer_encoding(struct http_parser *p, char *value);
+bool parsehdr_transfer_encoding(
+	struct http_parser *restrict p, char *restrict value);
 
 /**
  * @brief Parse Accept-Encoding header
@@ -173,7 +174,8 @@ bool parsehdr_transfer_encoding(struct http_parser *p, char *value);
  * @param value Header value to parse
  * @return true if at least one supported encoding found
  */
-bool parsehdr_accept_encoding(struct http_parser *p, char *value);
+bool parsehdr_accept_encoding(
+	struct http_parser *restrict p, char *restrict value);
 
 /**
  * @brief Parse Content-Length header
@@ -185,7 +187,8 @@ bool parsehdr_accept_encoding(struct http_parser *p, char *value);
  * @param value Header value to parse
  * @return true if parsed and valid
  */
-bool parsehdr_content_length(struct http_parser *p, const char *value);
+bool parsehdr_content_length(
+	struct http_parser *restrict p, const char *restrict value);
 
 /**
  * @brief Parse Content-Encoding header
@@ -198,7 +201,8 @@ bool parsehdr_content_length(struct http_parser *p, const char *value);
  * @param value Header value to parse
  * @return true if encoding is supported
  */
-bool parsehdr_content_encoding(struct http_parser *p, const char *value);
+bool parsehdr_content_encoding(
+	struct http_parser *restrict p, const char *restrict value);
 
 /**
  * @brief Parse Expect header
@@ -211,7 +215,7 @@ bool parsehdr_content_encoding(struct http_parser *p, const char *value);
  * @param value Header value to parse
  * @return true if expectation is supported
  */
-bool parsehdr_expect(struct http_parser *p, char *value);
+bool parsehdr_expect(struct http_parser *restrict p, char *restrict value);
 
 /**
  * @brief Generate HTTP error response page
@@ -219,7 +223,7 @@ bool parsehdr_expect(struct http_parser *p, char *value);
  * @param p Parser instance
  * @param code HTTP status code
  */
-void http_resp_errpage(struct http_parser *p, uint16_t code);
+void http_resp_errpage(struct http_parser *restrict p, uint_fast16_t code);
 
 /**
  * @brief Send HTTP 200 Connection established response
@@ -229,7 +233,7 @@ void http_resp_errpage(struct http_parser *p, uint16_t code);
  * @param p Parser instance
  * @return true if response sent successfully
  */
-bool http_resp_established(struct http_parser *p);
+bool http_resp_established(struct http_parser *restrict p);
 
 /**
  * @brief Create content reader stream with decompression
@@ -243,8 +247,8 @@ bool http_resp_established(struct http_parser *p);
  * @param encoding Content encoding type
  * @return Stream for reading decoded content, or NULL on error
  */
-struct stream *
-content_reader(const void *buf, size_t len, enum content_encodings encoding);
+struct stream *content_reader(
+	const void *restrict buf, size_t len, enum content_encodings encoding);
 
 /**
  * @brief Create content writer stream with compression

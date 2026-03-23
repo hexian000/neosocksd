@@ -119,15 +119,14 @@ void pipe_shrink(size_t count);
 
 #if WITH_RULESET
 #define CONN_CACHE_CAPACITY 8
-#define CONN_CACHE_NIL SIZE_MAX
 /* Seconds before an idle cached connection is discarded */
 #define CONN_CACHE_TIMEOUT 60.0
 
 struct conn_cache_entry {
 	int fd;
 	unsigned hash;
-	size_t bucket;
-	size_t next;
+	int bucket;
+	int next;
 	ev_io w_close;
 	ev_timer w_expire;
 	char key[256];
@@ -136,8 +135,9 @@ struct conn_cache_entry {
 /** @brief Global cache of reusable API connections. */
 extern struct conn_cache {
 	size_t len;
-	size_t freelist;
-	size_t buckets[CONN_CACHE_CAPACITY];
+	unsigned seed;
+	int freelist;
+	int buckets[CONN_CACHE_CAPACITY];
 	struct conn_cache_entry entries[CONN_CACHE_CAPACITY];
 } conn_cache;
 

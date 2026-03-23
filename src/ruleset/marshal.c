@@ -40,7 +40,7 @@
 static int marshal_buffer_close(lua_State *restrict L)
 {
 	struct vbuffer **pvbuf = lua_touserdata(L, 1);
-	*pvbuf = VBUF_FREE(*pvbuf);
+	VBUF_FREE(*pvbuf);
 	return 0;
 }
 
@@ -66,7 +66,7 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	const char *restrict str = lua_tolstring(L, idx, &len);
 
 	/* Start with opening quote */
-	*pvbuf = VBUF_APPENDSTR(*pvbuf, "\"");
+	VBUF_APPENDSTR(*pvbuf, "\"");
 
 	/* Process each character */
 	while (len--) {
@@ -75,7 +75,7 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		/* Handle special characters that need backslash escaping */
 		if (ch == '"' || ch == '\\' || ch == '\n') {
 			const unsigned char buf[2] = { '\\', ch };
-			*pvbuf = VBUF_APPEND(*pvbuf, buf, sizeof(buf));
+			VBUF_APPEND(*pvbuf, buf, sizeof(buf));
 		}
 		/* Convert control characters to octal escape sequences */
 		else if (iscntrl(ch)) {
@@ -89,17 +89,17 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			*--s = '0' + x % 10;
 			*--s = '\\'; /* escape prefix */
 
-			*pvbuf = VBUF_APPEND(*pvbuf, buf, sizeof(buf));
+			VBUF_APPEND(*pvbuf, buf, sizeof(buf));
 		}
 		/* Regular characters pass through unchanged */
 		else {
-			*pvbuf = VBUF_APPEND(*pvbuf, &ch, sizeof(ch));
+			VBUF_APPEND(*pvbuf, &ch, sizeof(ch));
 		}
 		str++;
 	}
 
 	/* End with closing quote */
-	*pvbuf = VBUF_APPENDSTR(*pvbuf, "\"");
+	VBUF_APPENDSTR(*pvbuf, "\"");
 }
 
 /**
@@ -141,7 +141,7 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		unsigned char *s = bufend;
 
 		if (x == 0) {
-			*pvbuf = VBUF_APPENDSTR(*pvbuf, "0");
+			VBUF_APPENDSTR(*pvbuf, "0");
 			return;
 		}
 
@@ -172,8 +172,8 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			} while (y);
 		}
 
-		*pvbuf = VBUF_APPEND(*pvbuf, p, pend - p);
-		*pvbuf = VBUF_APPEND(*pvbuf, s, bufend - s);
+		VBUF_APPEND(*pvbuf, p, pend - p);
+		VBUF_APPEND(*pvbuf, s, bufend - s);
 		return;
 	}
 
@@ -183,17 +183,17 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	/* Handle special floating point values */
 	switch (fpclassify(x)) {
 	case FP_NAN:
-		*pvbuf = VBUF_APPENDSTR(*pvbuf, "0/0");
+		VBUF_APPENDSTR(*pvbuf, "0/0");
 		return;
 	case FP_INFINITE:
 		if (signbit(x)) {
-			*pvbuf = VBUF_APPENDSTR(*pvbuf, "-1/0");
+			VBUF_APPENDSTR(*pvbuf, "-1/0");
 			return;
 		}
-		*pvbuf = VBUF_APPENDSTR(*pvbuf, "1/0");
+		VBUF_APPENDSTR(*pvbuf, "1/0");
 		return;
 	case FP_ZERO:
-		*pvbuf = VBUF_APPENDSTR(*pvbuf, "0");
+		VBUF_APPENDSTR(*pvbuf, "0");
 		return;
 	default:
 		break;
@@ -243,9 +243,9 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	} while (x);
 
 	/* Combine all parts: prefix + mantissa + exponent */
-	*pvbuf = VBUF_APPEND(*pvbuf, p, pend - p);
-	*pvbuf = VBUF_APPEND(*pvbuf, buf, s - buf);
-	*pvbuf = VBUF_APPEND(*pvbuf, estr, bufend - estr);
+	VBUF_APPEND(*pvbuf, p, pend - p);
+	VBUF_APPEND(*pvbuf, buf, s - buf);
+	VBUF_APPEND(*pvbuf, estr, bufend - estr);
 }
 
 #define IDX_BUFFER (lua_upvalueindex(1))
@@ -291,7 +291,7 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	lua_rawset(L, IDX_VISITED);
 
 	/* Start table constructor */
-	*pvbuf = VBUF_APPENDSTR(*pvbuf, "{");
+	VBUF_APPENDSTR(*pvbuf, "{");
 
 	/* Track consecutive integer indices starting from 1 */
 	lua_Integer i = 1;
@@ -304,14 +304,14 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			i = luaL_intop(+, i, 1); /* Increment expected index */
 		} else {
 			/* Use explicit key syntax: [key]=value */
-			*pvbuf = VBUF_APPENDSTR(*pvbuf, "[");
+			VBUF_APPENDSTR(*pvbuf, "[");
 
 			/* Marshal the key */
 			lua_pushvalue(L, IDX_MARSHAL);
 			lua_pushvalue(L, -3); /* Push key */
 			lua_call(L, 1, 0);
 
-			*pvbuf = VBUF_APPENDSTR(*pvbuf, "]=");
+			VBUF_APPENDSTR(*pvbuf, "]=");
 		}
 
 		/* Marshal the value */
@@ -319,12 +319,12 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		lua_pushvalue(L, -2); /* Push value */
 		lua_call(L, 1, 0);
 
-		*pvbuf = VBUF_APPENDSTR(*pvbuf, ",");
+		VBUF_APPENDSTR(*pvbuf, ",");
 		lua_pop(L, 1); /* Remove value, keep key for next iteration */
 	}
 
 	/* End table constructor */
-	*pvbuf = VBUF_APPENDSTR(*pvbuf, "}");
+	VBUF_APPENDSTR(*pvbuf, "}");
 }
 
 /**
@@ -356,14 +356,14 @@ static int marshal_value(lua_State *restrict L)
 
 	switch (type) {
 	case LUA_TNIL:
-		*pvbuf = VBUF_APPENDSTR(*pvbuf, "nil");
+		VBUF_APPENDSTR(*pvbuf, "nil");
 		break;
 
 	case LUA_TBOOLEAN:
 		if (lua_toboolean(L, idx)) {
-			*pvbuf = VBUF_APPENDSTR(*pvbuf, "true");
+			VBUF_APPENDSTR(*pvbuf, "true");
 		} else {
-			*pvbuf = VBUF_APPENDSTR(*pvbuf, "false");
+			VBUF_APPENDSTR(*pvbuf, "false");
 		}
 		break;
 
@@ -396,8 +396,7 @@ static int marshal_value(lua_State *restrict L)
 	}
 
 	/* Check for memory allocation failure */
-	/* VBUF_APPEND* will always reserve 1 extra byte */
-	if (VBUF_REMAINING(*pvbuf) == 0) {
+	if (VBUF_HAS_OOM(*pvbuf)) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
@@ -473,7 +472,7 @@ int api_marshal(lua_State *restrict L)
 		lua_call(L, 1, 0);
 
 		/* Add comma separator */
-		*pvbuf = VBUF_APPENDSTR(*pvbuf, ",");
+		VBUF_APPENDSTR(*pvbuf, ",");
 	}
 
 	/* Marshal final argument without trailing comma */

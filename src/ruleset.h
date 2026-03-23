@@ -45,7 +45,7 @@ struct ruleset_vmstats {
  * @param loop Event loop for asynchronous operations
  * @return New ruleset instance, or NULL on failure
  */
-struct ruleset *ruleset_new(struct ev_loop *loop);
+struct ruleset *ruleset_new(struct ev_loop *restrict loop);
 
 /**
  * @brief Free a ruleset instance
@@ -55,7 +55,7 @@ struct ruleset *ruleset_new(struct ev_loop *loop);
  *
  * @param r Ruleset instance to free (may be NULL)
  */
-void ruleset_free(struct ruleset *r);
+void ruleset_free(struct ruleset *restrict r);
 
 /**
  * @brief Get the last error message from the ruleset
@@ -67,7 +67,8 @@ void ruleset_free(struct ruleset *r);
  * @param len Optional output parameter for message length
  * @return Error message string, or "(nil)" if no error
  */
-const char *ruleset_geterror(const struct ruleset *r, size_t *len);
+const char *
+ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len);
 
 /**
  * @brief Execute Lua code synchronously
@@ -79,7 +80,7 @@ const char *ruleset_geterror(const struct ruleset *r, size_t *len);
  * @param code Stream containing Lua script code
  * @return true on success, false on error
  */
-bool ruleset_invoke(struct ruleset *r, struct stream *code);
+bool ruleset_invoke(struct ruleset *restrict r, struct stream *code);
 
 /**
  * @brief Opaque structure representing asynchronous ruleset operation state
@@ -95,7 +96,7 @@ struct ruleset_state;
  * @param loop Event loop
  * @param state Operation state to cancel
  */
-void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *state);
+void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state);
 
 /**
  * @brief Callback structure for asynchronous ruleset operations
@@ -129,8 +130,8 @@ struct ruleset_callback {
  * @return true if operation started successfully, false on immediate error
  */
 bool ruleset_rpcall(
-	struct ruleset *r, struct ruleset_state **state, struct stream *code,
-	struct ruleset_callback *callback);
+	struct ruleset *restrict r, struct ruleset_state **state,
+	struct stream *code, struct ruleset_callback *callback);
 
 /**
  * @brief Update or load a Lua module
@@ -145,8 +146,8 @@ bool ruleset_rpcall(
  * @return true on success, false on error
  */
 bool ruleset_update(
-	struct ruleset *r, const char *modname, const char *chunkname,
-	struct stream *code);
+	struct ruleset *restrict r, const char *restrict modname,
+	const char *restrict chunkname, struct stream *code);
 
 /**
  * @brief Load ruleset from file
@@ -158,7 +159,7 @@ bool ruleset_update(
  * @param filename Path to Lua file
  * @return true on success, false on error
  */
-bool ruleset_loadfile(struct ruleset *r, const char *filename);
+bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename);
 
 /**
  * @brief Trigger garbage collection
@@ -169,7 +170,7 @@ bool ruleset_loadfile(struct ruleset *r, const char *filename);
  * @param r Ruleset instance
  * @return true on success, false on error
  */
-bool ruleset_gc(struct ruleset *r);
+bool ruleset_gc(struct ruleset *restrict r);
 
 /**
  * @brief Resolve domain name asynchronously
@@ -186,9 +187,9 @@ bool ruleset_gc(struct ruleset *r);
  * @return true if operation started successfully, false on immediate error
  */
 bool ruleset_resolve(
-	struct ruleset *r, struct ruleset_state **state, const char *request,
-	const char *username, const char *password,
-	struct ruleset_callback *callback);
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *restrict request, const char *restrict username,
+	const char *restrict password, struct ruleset_callback *callback);
 
 /**
  * @brief Route IPv4 address asynchronously
@@ -205,9 +206,9 @@ bool ruleset_resolve(
  * @return true if operation started successfully, false on immediate error
  */
 bool ruleset_route(
-	struct ruleset *r, struct ruleset_state **state, const char *request,
-	const char *username, const char *password,
-	struct ruleset_callback *callback);
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *restrict request, const char *restrict username,
+	const char *restrict password, struct ruleset_callback *callback);
 
 /**
  * @brief Route IPv6 address asynchronously
@@ -224,9 +225,9 @@ bool ruleset_route(
  * @return true if operation started successfully, false on immediate error
  */
 bool ruleset_route6(
-	struct ruleset *r, struct ruleset_state **state, const char *request,
-	const char *username, const char *password,
-	struct ruleset_callback *callback);
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *restrict request, const char *restrict username,
+	const char *restrict password, struct ruleset_callback *callback);
 
 /**
  * @brief Get virtual machine statistics
@@ -236,7 +237,8 @@ bool ruleset_route6(
  * @param r Ruleset instance
  * @param s Output parameter for statistics
  */
-void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
+void ruleset_vmstats(
+	const struct ruleset *restrict r, struct ruleset_vmstats *restrict s);
 
 /**
  * @brief Get ruleset statistics
@@ -251,7 +253,8 @@ void ruleset_vmstats(const struct ruleset *r, struct ruleset_vmstats *s);
  * @param len Output parameter for result length
  * @return Statistics string, or NULL on error
  */
-const char *
-ruleset_stats(struct ruleset *r, double dt, const char *query, size_t *len);
+const char *ruleset_stats(
+	struct ruleset *restrict r, double dt, const char *restrict query,
+	size_t *len);
 
 #endif /* RULESET_H */

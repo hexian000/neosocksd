@@ -11,6 +11,7 @@
  */
 #include "util.h"
 
+#include "conf.h"
 #include "resolver.h"
 
 #if WITH_RULESET
@@ -23,7 +24,9 @@
 #endif
 #include "math/rand.h"
 #include "os/clock.h"
+#if WITH_CRASH_HANDLER
 #include "os/signal.h"
+#endif
 #include "os/socket.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
@@ -117,14 +120,14 @@ struct conn_cache conn_cache = { .len = 0 };
 static void conn_cache_init(void)
 {
 	conn_cache.len = 0;
+	conn_cache.seed = 0xbf16972e;
 	conn_cache.freelist = 0;
-	for (size_t i = 0; i < CONN_CACHE_CAPACITY; i++) {
-		conn_cache.buckets[i] = CONN_CACHE_NIL;
+	for (int i = 0; i < CONN_CACHE_CAPACITY; i++) {
+		conn_cache.buckets[i] = -1;
 		conn_cache.entries[i] = (struct conn_cache_entry){
 			.fd = -1,
-			.bucket = CONN_CACHE_NIL,
-			.next = (i + 1 < CONN_CACHE_CAPACITY) ? i + 1 :
-								CONN_CACHE_NIL,
+			.bucket = -1,
+			.next = (i + 1 < CONN_CACHE_CAPACITY) ? i + 1 : -1,
 		};
 	}
 }
@@ -134,16 +137,16 @@ conn_cache_take(struct ev_loop *loop, struct conn_cache_entry *restrict entry)
 {
 	ev_io_stop(loop, &entry->w_close);
 	ev_timer_stop(loop, &entry->w_expire);
-	ASSERT(entry->bucket != CONN_CACHE_NIL);
+	ASSERT(entry->bucket != -1);
 	ASSERT(entry >= conn_cache.entries);
 	ASSERT(entry < conn_cache.entries + ARRAY_SIZE(conn_cache.entries));
-	const size_t index = (size_t)(entry - conn_cache.entries);
-	size_t *last_next = &conn_cache.buckets[entry->bucket];
-	while (*last_next != CONN_CACHE_NIL) {
+	const int index = (int)(entry - conn_cache.entries);
+	int *last_next = &conn_cache.buckets[entry->bucket];
+	while (*last_next != -1) {
 		if (*last_next == index) {
 			*last_next = entry->next;
-			entry->bucket = CONN_CACHE_NIL;
-			entry->next = CONN_CACHE_NIL;
+			entry->bucket = -1;
+			entry->next = -1;
 			break;
 		}
 		last_next = &conn_cache.entries[*last_next].next;
@@ -179,17 +182,24 @@ conn_cache_expire_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	CLOSE_FD(fd);
 }
 
+#define GET_HASH(s, n) (luahash((s), (n), conn_cache.seed))
+
 void conn_cache_put(
 	struct ev_loop *loop, const int fd,
 	const struct dialreq *restrict dialreq)
 {
+	if (G.conf != NULL && !G.conf->conn_cache) {
+		LOGV_F("conn_cache: [fd:%d] disabled, closing", fd);
+		CLOSE_FD(fd);
+		return;
+	}
 	if (conn_cache.len >= CONN_CACHE_CAPACITY) {
 		LOGV_F("conn_cache: [fd:%d] full, discarding", fd);
 		CLOSE_FD(fd);
 		return;
 	}
-	ASSERT(conn_cache.freelist != CONN_CACHE_NIL);
-	const size_t index = conn_cache.freelist;
+	ASSERT(conn_cache.freelist != -1);
+	const int index = conn_cache.freelist;
 	struct conn_cache_entry *restrict entry = &conn_cache.entries[index];
 	const int nkey =
 		dialreq_format(entry->key, sizeof(entry->key), dialreq);
@@ -199,10 +209,9 @@ void conn_cache_put(
 		return;
 	}
 	conn_cache.freelist = entry->next;
-	entry->hash = luahash(entry->key, (size_t)nkey, 0);
+	entry->hash = GET_HASH(entry->key, (size_t)nkey);
 	entry->fd = fd;
-	const size_t bucket =
-		(size_t)entry->hash % ARRAY_SIZE(conn_cache.buckets);
+	const int bucket = (int)(entry->hash % ARRAY_SIZE(conn_cache.buckets));
 	entry->bucket = bucket;
 	entry->next = conn_cache.buckets[bucket];
 	conn_cache.buckets[bucket] = index;
@@ -221,14 +230,17 @@ void conn_cache_put(
 
 int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
 {
+	if (G.conf != NULL && !G.conf->conn_cache) {
+		return -1;
+	}
 	char key[256];
 	const int nkey = dialreq_format(key, sizeof(key), req);
 	if (nkey < 0 || (size_t)nkey >= sizeof(key)) {
 		return -1;
 	}
-	const unsigned hash = luahash(key, (size_t)nkey, 0);
-	const size_t bucket = (size_t)hash % ARRAY_SIZE(conn_cache.buckets);
-	for (size_t i = conn_cache.buckets[bucket]; i != CONN_CACHE_NIL;
+	const unsigned hash = GET_HASH(key, (size_t)nkey);
+	const int bucket = (int)(hash % ARRAY_SIZE(conn_cache.buckets));
+	for (int i = conn_cache.buckets[bucket]; i != -1;
 	     i = conn_cache.entries[i].next) {
 		struct conn_cache_entry *restrict entry =
 			&conn_cache.entries[i];
@@ -281,7 +293,7 @@ void init(int argc, char *const restrict argv[])
 
 void loadlibs(void)
 {
-	srand64((uint64_t)time(NULL));
+	srand64((uint_fast64_t)time(NULL));
 
 	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());

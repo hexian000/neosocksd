@@ -50,6 +50,7 @@ struct config {
 #endif
 #if WITH_RULESET
 	bool traceback : 1;
+	bool conn_cache : 1;
 #endif
 	bool daemonize : 1;
 	bool ingress : 1;

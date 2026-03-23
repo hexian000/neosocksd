@@ -20,13 +20,15 @@ struct api_client_cb {
 };
 
 void api_client_invoke(
-	struct ev_loop *loop, struct dialreq *req, const void *payload,
-	size_t len);
+	struct ev_loop *restrict loop, struct dialreq *restrict req,
+	const void *restrict payload, size_t len);
 
 bool api_client_rpcall(
-	struct ev_loop *loop, struct api_client_ctx **pctx, struct dialreq *req,
-	const void *payload, size_t len, const struct api_client_cb *cb);
+	struct ev_loop *restrict loop, struct api_client_ctx **restrict pctx,
+	struct dialreq *restrict req, const void *restrict payload, size_t len,
+	const struct api_client_cb *restrict cb);
 
-void api_client_cancel(struct ev_loop *loop, struct api_client_ctx *ctx);
+void api_client_cancel(
+	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx);
 
 #endif /* API_CLIENT_H */

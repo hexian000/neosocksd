@@ -100,6 +100,7 @@ static void print_usage(const char *argv0)
 #if WITH_RULESET
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --traceback                print ruleset error traceback (for debugging)\n"
+		"  --no-conn-cache            disable ruleset API client connection cache\n"
 		"  --memlimit <size>          set a soft limit on the total Lua object size in MiB\n"
 #endif
 		"  --api <bind_address>       RESTful API listen address\n"
@@ -241,12 +242,9 @@ static void parse_args(const int argc, char *const restrict argv[])
 		}
 #endif
 #if WITH_TCP_FASTOPEN_CONNECT
-		/* If "--fastopen-connect" is specified:
-		 * 1. "--pipe" may not work
-		 * 2. server first protocols may not work
-		 * This option will not appear in "--help" */
 		if (strcmp(argv[i], "--fastopen-connect") == 0) {
 			conf->tcp_fastopen_connect = true;
+			LOGW("the undocumented `--fastopen-connect' may cause issues with `--pipe' and server first protocols");
 			continue;
 		}
 #endif
@@ -264,6 +262,10 @@ static void parse_args(const int argc, char *const restrict argv[])
 		}
 		if (strcmp(argv[i], "--traceback") == 0) {
 			conf->traceback = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--no-conn-cache") == 0) {
+			conf->conn_cache = false;
 			continue;
 		}
 		if (strcmp(argv[i], "--memlimit") == 0) {

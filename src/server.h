@@ -57,11 +57,12 @@ struct server {
 };
 
 void server_init(
-	struct server *s, struct ev_loop *loop, serve_fn serve, void *data);
+	struct server *restrict s, struct ev_loop *loop, serve_fn serve,
+	void *data);
 
 bool server_start(
 	struct server *restrict s, const struct sockaddr *restrict bindaddr);
 
-void server_stop(struct server *s);
+void server_stop(struct server *restrict s);
 
 #endif /* SERVER_H */

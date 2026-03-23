@@ -49,7 +49,7 @@ struct api_client_ctx {
 	struct api_client_cb cb;
 	ev_timer w_timeout;
 	ev_io w_socket;
-	ev_idle w_ruleset;
+	ev_idle w_process;
 	struct dialreq *dialreq;
 	struct dialer dialer;
 	struct http_parser parser;
@@ -81,7 +81,7 @@ api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 		ev_io_stop(loop, &ctx->w_socket);
 		break;
 	case STATE_CLIENT_PROCESS:
-		ev_idle_stop(loop, &ctx->w_ruleset);
+		ev_idle_stop(loop, &ctx->w_process);
 		break;
 	default:
 		FAILMSGF("unexpected state: %d", ctx->state);
@@ -103,7 +103,7 @@ static void api_client_finalize(struct gcbase *restrict obj)
 	}
 
 	dialreq_free(ctx->dialreq);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->parser.cbuf);
 }
 
 static void
@@ -140,7 +140,7 @@ static void api_client_finish(
 
 	api_client_stop(loop, ctx);
 	ctx->state = STATE_CLIENT_PROCESS;
-	ev_idle_start(loop, &ctx->w_ruleset);
+	ev_idle_start(loop, &ctx->w_process);
 }
 
 #define API_RETURN_ERROR(loop, ctx, msg)                                       \
@@ -184,10 +184,10 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			code = status;
 		}
 	}
-	if (code == HTTP_OK) {
-		/* invoke: 200 with empty body and no Content-Type is success */
-		if (ctx->cb.func == NULL &&
-		    ctx->parser.hdr.content.type == NULL) {
+	if (BETWEEN(code, 200, 299)) {
+		/* invoke: 2xx with empty body is success */
+		if (ctx->cb.func == NULL && (ctx->parser.cbuf == NULL ||
+					     VBUF_LEN(ctx->parser.cbuf) == 0)) {
 			recycle_conn(loop, ctx);
 			api_client_finish(loop, ctx, NULL, 0, NULL);
 			return;
@@ -198,7 +198,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 		}
 	} else if (
-		VBUF_LEN(ctx->parser.cbuf) > 0 &&
+		ctx->parser.cbuf != NULL && VBUF_LEN(ctx->parser.cbuf) > 0 &&
 		check_rpcall_mime(ctx->parser.hdr.content.type)) {
 		/* Server returned structured error in RPC format */
 		api_client_finish(
@@ -207,20 +207,17 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		return;
 	} else {
 		/* Generic HTTP error response */
-		{
-			char buf[64];
-			ret = snprintf(
-				buf, sizeof(buf), "%s %s %s", msg->rsp.version,
-				msg->rsp.code, msg->rsp.status);
-			ASSERT(ret > 0);
-			ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
-			struct vbuffer *restrict cbuf = VBUF_NEW((size_t)ret);
-			if (cbuf != NULL) {
-				cbuf = VBUF_APPEND(cbuf, buf, (size_t)ret);
-			}
-			ctx->parser.cbuf = cbuf;
-		}
+		VBUF_RESERVE(ctx->parser.cbuf, 64);
 		if (ctx->parser.cbuf == NULL) {
+			LOGOOM();
+			api_client_finish(loop, ctx, NULL, 0, NULL);
+			return;
+		}
+		VBUF_RESET(ctx->parser.cbuf);
+		VBUF_APPENDF(
+			ctx->parser.cbuf, "%s %s %s", msg->rsp.version,
+			msg->rsp.code, msg->rsp.status);
+		if (VBUF_HAS_OOM(ctx->parser.cbuf)) {
 			LOGOOM();
 			api_client_finish(loop, ctx, NULL, 0, NULL);
 			return;
@@ -244,7 +241,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		API_RETURN_ERROR(loop, ctx, "out of memory");
 	}
 
-	/* Return connection to pool when server allows keep-alive */
+	/* Return connection to cache when server allows keep-alive */
 	recycle_conn(loop, ctx);
 	api_client_finish(loop, ctx, NULL, 0, r);
 }
@@ -272,9 +269,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	/* Send request body after headers are fully sent */
 	if (p->cbuf != NULL) {
-		const struct vbuffer *restrict cbuf = p->cbuf;
-		buf = cbuf->data + p->cpos;
-		len = cbuf->len - p->cpos;
+		VBUF_VIEW(buf, len, p->cbuf, p->cpos);
 		ret = socket_send(fd, buf, &len);
 		if (ret != 0) {
 			LOGW_F("socket_send: error %d", ret);
@@ -285,7 +280,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		p->cpos += len;
-		if (p->cpos < cbuf->len) {
+		if (p->cpos < VBUF_LEN(p->cbuf)) {
 			return;
 		}
 	}
@@ -294,7 +289,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		FORMAT_BYTES(clen, VBUF_LEN(p->cbuf));
 		LOGV_F("request: content %s", clen);
 	}
-	p->cbuf = VBUF_FREE(p->cbuf);
+	VBUF_FREE(p->cbuf);
 
 	ev_io_stop(loop, watcher);
 
@@ -436,8 +431,8 @@ static bool api_client_do(
 	ctx->cb = *in_cb;
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
-	ev_idle_init(&ctx->w_ruleset, process_cb);
-	ctx->w_ruleset.data = ctx;
+	ev_idle_init(&ctx->w_process, process_cb);
+	ctx->w_process.data = ctx;
 	ev_io_init(&ctx->w_socket, NULL, -1, EV_NONE);
 	ctx->w_socket.data = ctx;
 	ctx->result.errmsg = NULL;
@@ -456,7 +451,7 @@ static bool api_client_do(
 	}
 	const int fd = conn_cache_get(loop, req);
 	if (fd != -1) {
-		LOGV_F("api_client: reusing pooled connection [fd:%d]", fd);
+		LOGV_F("api_client: reusing cached connection [fd:%d]", fd);
 		ctx->parser.fd = fd;
 		ctx->state = STATE_CLIENT_REQUEST;
 		ev_io_init(&ctx->w_socket, send_cb, fd, EV_WRITE);
@@ -470,8 +465,8 @@ static bool api_client_do(
 }
 
 void api_client_invoke(
-	struct ev_loop *loop, struct dialreq *req, const void *payload,
-	const size_t len)
+	struct ev_loop *restrict loop, struct dialreq *restrict req,
+	const void *restrict payload, const size_t len)
 {
 	(void)api_client_do(
 		loop, NULL, req, "/ruleset/invoke", payload, len,
@@ -479,15 +474,17 @@ void api_client_invoke(
 }
 
 bool api_client_rpcall(
-	struct ev_loop *loop, struct api_client_ctx **pctx, struct dialreq *req,
-	const void *payload, const size_t len, const struct api_client_cb *cb)
+	struct ev_loop *restrict loop, struct api_client_ctx **restrict pctx,
+	struct dialreq *restrict req, const void *restrict payload,
+	const size_t len, const struct api_client_cb *restrict cb)
 {
 	ASSERT(cb->func != NULL);
 	return api_client_do(
 		loop, pctx, req, "/ruleset/rpcall", payload, len, cb);
 }
 
-void api_client_cancel(struct ev_loop *loop, struct api_client_ctx *ctx)
+void api_client_cancel(
+	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx)
 {
 	UNUSED(loop);
 	gc_unref(&ctx->gcbase);

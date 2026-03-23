@@ -98,7 +98,7 @@ const char *dialer_strerror(const enum dialer_error err)
  */
 static bool dialaddr_sethostport(
 	struct dialaddr *restrict addr, const char *restrict host,
-	const uint16_t port)
+	const uint_fast16_t port)
 {
 	addr->port = port;
 	/* Try IPv4 first */
@@ -119,7 +119,7 @@ static bool dialaddr_sethostport(
 	}
 	struct domain_name *restrict domain = &addr->domain;
 	memcpy(domain->name, host, hostlen);
-	domain->len = (uint8_t)hostlen;
+	domain->len = (uint_least8_t)hostlen;
 	addr->type = ATYP_DOMAIN;
 	return true;
 }
@@ -159,7 +159,7 @@ bool dialaddr_parse(
 		LOGE_F("unable to parse port number: `%s'", port);
 		return false;
 	}
-	return dialaddr_sethostport(addr, host, (uint16_t)portvalue);
+	return dialaddr_sethostport(addr, host, (uint_fast16_t)portvalue);
 }
 
 /**
@@ -213,7 +213,7 @@ void dialaddr_copy(
 		dst->in6 = src->in6;
 		break;
 	case ATYP_DOMAIN: {
-		const uint8_t len = src->domain.len;
+		const uint_fast8_t len = src->domain.len;
 		dst->domain.len = len;
 		memcpy(dst->domain.name, src->domain.name, len);
 	} break;
@@ -232,18 +232,19 @@ int dialaddr_format(
 		if (inet_ntop(AF_INET, &addr->in, buf, sizeof(buf)) == NULL) {
 			return -1;
 		}
-		return snprintf(s, maxlen, "%s:%" PRIu16, buf, addr->port);
+		return snprintf(s, maxlen, "%s:%" PRIuLEAST16, buf, addr->port);
 	}
 	case ATYP_INET6: {
 		char buf[INET6_ADDRSTRLEN];
 		if (inet_ntop(AF_INET6, &addr->in6, buf, sizeof(buf)) == NULL) {
 			return -1;
 		}
-		return snprintf(s, maxlen, "[%s]:%" PRIu16, buf, addr->port);
+		return snprintf(
+			s, maxlen, "[%s]:%" PRIuLEAST16, buf, addr->port);
 	}
 	case ATYP_DOMAIN:
 		return snprintf(
-			s, maxlen, "%.*s:%" PRIu16, (int)addr->domain.len,
+			s, maxlen, "%.*s:%" PRIuLEAST16, (int)addr->domain.len,
 			addr->domain.name, addr->port);
 	default:
 		break;
@@ -324,7 +325,8 @@ bool dialreq_addproxy(
 	}
 	struct proxyreq *restrict proxy = &req->proxy[req->num_proxy];
 	proxy->proto = protocol;
-	if (!dialaddr_sethostport(&proxy->addr, host, (uint16_t)portvalue)) {
+	if (!dialaddr_sethostport(
+		    &proxy->addr, host, (uint_fast16_t)portvalue)) {
 		return false;
 	}
 	proxy->username = NULL;
@@ -824,7 +826,7 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		len += sizeof(addr->in);
 		unsigned char *restrict portbuf = buf + len;
 		write_uint16(portbuf, addr->port);
-		len += sizeof(uint16_t);
+		len += sizeof(in_port_t);
 	} break;
 	case ATYP_INET6: {
 		write_uint8(addrtype, SOCKS5ADDR_IPV6);
@@ -833,19 +835,19 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		len += sizeof(addr->in6);
 		unsigned char *restrict portbuf = buf + len;
 		write_uint16(portbuf, addr->port);
-		len += sizeof(uint16_t);
+		len += sizeof(in_port_t);
 	} break;
 	case ATYP_DOMAIN: {
 		write_uint8(addrtype, SOCKS5ADDR_DOMAIN);
 		unsigned char *restrict lenbuf = buf + len;
 		write_uint8(lenbuf, addr->domain.len);
-		len += sizeof(uint8_t);
+		len += 1;
 		unsigned char *restrict addrbuf = buf + len;
 		memcpy(addrbuf, &addr->domain.name, addr->domain.len);
 		len += addr->domain.len;
 		unsigned char *restrict portbuf = buf + len;
 		write_uint16(portbuf, addr->port);
-		len += sizeof(uint16_t);
+		len += sizeof(in_port_t);
 	} break;
 	}
 	if (!dialer_send(d, buf, len)) {
@@ -1009,17 +1011,18 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint8_t version =
+	const uint_fast8_t version =
 		read_uint8(hdr + offsetof(struct socks4_hdr, version));
 	if (version != UINT8_C(0)) {
 		DIALER_LOG_F(
-			DEBUG, d, "unexpected SOCKS4 response version: %" PRIu8,
+			DEBUG, d,
+			"unexpected SOCKS4 response version: %" PRIuFAST8,
 			version);
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
 		return -1;
 	}
-	const uint8_t command =
+	const uint_fast8_t command =
 		read_uint8(hdr + offsetof(struct socks4_hdr, command));
 	switch (command) {
 	case SOCKS4RSP_GRANTED:
@@ -1031,7 +1034,7 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 		return -1;
 	default:
 		DIALER_LOG_F(
-			DEBUG, d, "unsupported SOCKS4 command: %" PRIu8,
+			DEBUG, d, "unsupported SOCKS4 command: %" PRIuFAST8,
 			command);
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
@@ -1066,17 +1069,18 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		return (int)(want - len) + 1;
 	}
 
-	const uint8_t version =
+	const uint_fast8_t version =
 		read_uint8(hdr + offsetof(struct socks5_hdr, version));
 	if (version != SOCKS5) {
 		DIALER_LOG_F(
-			DEBUG, d, "unexpected SOCKS5 response version: %" PRIu8,
+			DEBUG, d,
+			"unexpected SOCKS5 response version: %" PRIuFAST8,
 			version);
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
 		return -1;
 	}
-	const uint8_t command =
+	const uint_fast8_t command =
 		read_uint8(hdr + offsetof(struct socks5_hdr, command));
 	if (command != SOCKS5RSP_SUCCEEDED) {
 		if (command < ARRAY_SIZE(socks5_errorstr)) {
@@ -1085,7 +1089,8 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 				socks5_errorstr[command]);
 		} else {
 			DIALER_LOG_F(
-				DEBUG, d, "unsupported SOCKS5 command: %" PRIu8,
+				DEBUG, d,
+				"unsupported SOCKS5 command: %" PRIuFAST8,
 				command);
 		}
 		/* Map SOCKS5 error codes to dialer errors */
@@ -1103,7 +1108,7 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		d->syserr = 0;
 		return -1;
 	}
-	const uint8_t addrtype =
+	const uint_fast8_t addrtype =
 		read_uint8(hdr + offsetof(struct socks5_hdr, addrtype));
 	switch (addrtype) {
 	case SOCKS5ADDR_IPV4:
@@ -1114,7 +1119,7 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		break;
 	default:
 		DIALER_LOG_F(
-			DEBUG, d, "unexpected SOCKS5 addrtype: %" PRIu8,
+			DEBUG, d, "unexpected SOCKS5 addrtype: %" PRIuFAST8,
 			addrtype);
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
@@ -1139,13 +1144,13 @@ static int recv_socks5_auth(struct dialer *restrict d)
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint8_t version = read_uint8(hdr + 0);
-	const uint8_t status = read_uint8(hdr + 1);
+	const uint_fast8_t version = read_uint8(hdr + 0);
+	const uint_fast8_t status = read_uint8(hdr + 1);
 	if (version != 0x01 || status != 0x00) {
 		DIALER_LOG_F(
 			DEBUG, d,
-			"authenticate failed: version=0x%02" PRIx8
-			" status=0x%02" PRIx8,
+			"authenticate failed: version=0x%02" PRIxFAST8
+			" status=0x%02" PRIxFAST8,
 			version, status);
 		d->err = DIALER_ERR_PROXY_AUTH;
 		d->syserr = 0;
@@ -1170,17 +1175,17 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint8_t version =
+	const uint_fast8_t version =
 		read_uint8(hdr + offsetof(struct socks5_auth_rsp, version));
 	if (version != SOCKS5) {
 		DIALER_LOG_F(
-			DEBUG, d, "unsupported SOCKS5 version: %" PRIu8,
+			DEBUG, d, "unsupported SOCKS5 version: %" PRIuFAST8,
 			version);
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
 		return -1;
 	}
-	const uint8_t method =
+	const uint_fast8_t method =
 		read_uint8(hdr + offsetof(struct socks5_auth_rsp, method));
 
 	if (!consume_rcvbuf(d, want)) {
@@ -1209,7 +1214,8 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 	}
 	DIALER_LOG_F(
 		DEBUG, d,
-		"SOCKS5: unexpected auth method %" PRIu8 " (protocol error?)",
+		"SOCKS5: unexpected auth method %" PRIuFAST8
+		" (protocol error?)",
 		method);
 	d->err = DIALER_ERR_PROXY_PROTO;
 	d->syserr = 0;

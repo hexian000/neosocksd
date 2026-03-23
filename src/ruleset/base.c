@@ -318,8 +318,8 @@ int aux_async(
 }
 
 static void record_event_time(
-	struct ruleset *restrict r, const int_least64_t time_used,
-	const int_least64_t time_end)
+	struct ruleset *restrict r, const int_fast64_t time_used,
+	const int_fast64_t time_end)
 {
 	const size_t idx =
 		r->vmstats.num_events++ % ARRAY_SIZE(r->vmstats.event_ns);
@@ -355,19 +355,19 @@ bool ruleset_pcall(
 	struct ruleset *restrict r, const lua_CFunction func, const int nargs,
 	const int nresults, ...)
 {
-	const int_least64_t time_begin = clock_monotonic_ns();
+	const int_fast64_t time_begin = clock_monotonic_ns();
 	va_list args;
 	va_start(args, nresults);
 	const bool result = ruleset_pcallv(r, func, nargs, nresults, args);
 	va_end(args);
-	const int_least64_t time_end = clock_monotonic_ns();
+	const int_fast64_t time_end = clock_monotonic_ns();
 	record_event_time(r, time_end - time_begin, time_end);
 	return result;
 }
 
 void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 {
-	const int_least64_t time_begin = clock_monotonic_ns();
+	const int_fast64_t time_begin = clock_monotonic_ns();
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
@@ -395,6 +395,6 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	}
-	const int_least64_t time_end = clock_monotonic_ns();
+	const int_fast64_t time_end = clock_monotonic_ns();
 	record_event_time(r, time_end - time_begin, time_end);
 }

@@ -448,10 +448,10 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 
 	/* Parse fixed gzip header fields */
 	const struct {
-		uint8_t id1, id2; /**< Magic numbers (0x1f, 0x8b) */
-		uint8_t cm, flg; /**< Compression method and flags */
-		uint32_t mtime; /**< Modification time */
-		uint8_t xfl, os; /**< Extra flags and OS identifier */
+		uint_least8_t id1, id2; /**< Magic numbers (0x1f, 0x8b) */
+		uint_least8_t cm, flg; /**< Compression method and flags */
+		uint_least32_t mtime; /**< Modification time */
+		uint_least8_t xfl, os; /**< Extra flags and OS identifier */
 	} header = {
 		.id1 = read_uint8(b + 0),
 		.id2 = read_uint8(b + 1),
@@ -473,7 +473,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 		if (n < 2) {
 			return NULL;
 		}
-		const uint16_t xlen = read_uint16_le(b);
+		const uint_fast16_t xlen = read_uint16_le(b);
 		b += 2, n -= 2;
 		if (n < xlen) {
 			return NULL;
@@ -509,7 +509,7 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 			return NULL;
 		}
 		const size_t hlen = *len - n;
-		const uint16_t hcrc = read_uint16_le(b);
+		const uint_fast16_t hcrc = read_uint16_le(b);
 		b += 2, n -= 2;
 		if (hcrc != (uint16_t)mz_crc32(0, p, hlen)) {
 			LOGD("gzip: HCRC mismatch");
@@ -525,13 +525,14 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 
 	/* Parse trailer fields (not validated) */
 	const struct {
-		uint32_t crc; /**< CRC32 of uncompressed data */
-		uint32_t isize; /**< Size of uncompressed data modulo 2^32 */
+		uint_least32_t crc; /**< CRC32 of uncompressed data */
+		uint_least32_t
+			isize; /**< Size of uncompressed data modulo 2^32 */
 	} tailer = {
 		.crc = read_uint32_le(b + n - 8),
 		.isize = read_uint32_le(b + n - 4),
 	};
-	LOGD_F("gzip: original size %" PRIu32 " bytes", tailer.isize);
+	LOGD_F("gzip: original size %" PRIuLEAST32 " bytes", tailer.isize);
 
 	/* Return pointer to DEFLATE data and update length */
 	*len = n - 8;

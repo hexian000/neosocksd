@@ -78,7 +78,7 @@ struct transfer {
  * @param is_uplink true if this transfer is for uplink (client to server).
  */
 void transfer_init(
-	struct transfer *t, const struct transfer_state_cb *callback,
+	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	int src_fd, int dst_fd, uintmax_t *byt_transferred, bool is_uplink);
 
 /**
@@ -98,6 +98,6 @@ void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t);
  * @param loop Event loop.
  * @param t Transfer context.
  */
-void transfer_stop(struct ev_loop *loop, struct transfer *t);
+void transfer_stop(struct ev_loop *loop, struct transfer *restrict t);
 
 #endif /* TRANSFER_H */

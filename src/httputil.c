@@ -42,11 +42,11 @@ const char *content_encoding_str[] = {
 	[CENCODING_GZIP] = "gzip",
 };
 
-void http_resp_errpage(struct http_parser *restrict p, const uint16_t code)
+void http_resp_errpage(struct http_parser *restrict p, const uint_fast16_t code)
 {
 	/* Reset buffers for error response */
 	p->wbuf.len = 0;
-	p->cbuf = VBUF_FREE(p->cbuf);
+	VBUF_FREE(p->cbuf);
 
 	/* Try to generate full error page */
 	const size_t cap = p->wbuf.cap - p->wbuf.len;
@@ -138,7 +138,11 @@ struct stream *content_writer(
 	const enum content_encodings encoding)
 {
 	/* Ensure buffer has adequate initial size */
-	*pvbuf = VBUF_RESIZE(*pvbuf, bufsize);
+	VBUF_RESERVE(*pvbuf, bufsize);
+	if (*pvbuf == NULL) {
+		return NULL;
+	}
+	VBUF_RESET(*pvbuf);
 
 	/* Create appropriate writer based on encoding */
 	switch (encoding) {
@@ -298,6 +302,9 @@ static int parse_content(struct http_parser *restrict p)
 	}
 
 	const size_t content_length = p->hdr.content.length;
+	if (content_length == 0) {
+		return 0;
+	}
 
 	/* Check content size limits */
 	if (content_length > HTTP_MAX_CONTENT) {
@@ -317,7 +324,7 @@ static int parse_content(struct http_parser *restrict p)
 		/* Copy any content already in read buffer */
 		const size_t pos = (unsigned char *)p->next - p->rbuf.data;
 		const size_t len = p->rbuf.len - pos;
-		p->cbuf = VBUF_APPEND(p->cbuf, p->next, len);
+		VBUF_APPEND(p->cbuf, p->next, len);
 
 		/* Send 100-Continue if client expects it */
 		if (p->expect_continue) {
@@ -378,13 +385,13 @@ static bool recv_request(struct http_parser *restrict p)
  */
 static bool recv_content(const struct http_parser *restrict p)
 {
-	struct vbuffer *restrict cbuf = p->cbuf;
-
 	/* Calculate available space in content buffer */
-	size_t n = cbuf->cap - cbuf->len;
+	unsigned char *b;
+	size_t n;
+	VBUF_SPACE(b, n, p->cbuf);
 
 	/* Receive data directly into content buffer */
-	const int ret = socket_recv(p->fd, cbuf->data + cbuf->len, &n);
+	const int ret = socket_recv(p->fd, b, &n);
 	if (ret != 0) {
 		/* Discard data on error */
 		LOGD_F("socket_recv: error %d", ret);
@@ -396,7 +403,7 @@ static bool recv_content(const struct http_parser *restrict p)
 	}
 
 	/* Update content buffer length */
-	cbuf->len += n;
+	p->cbuf->len += n;
 	return true;
 }
 

@@ -11,7 +11,7 @@
 #define FQDN_MAX_LENGTH ((size_t)(255))
 
 struct domain_name {
-	uint8_t len;
+	uint_least8_t len;
 	char name[FQDN_MAX_LENGTH];
 };
 

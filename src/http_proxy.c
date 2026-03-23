@@ -57,7 +57,7 @@ struct http_ctx {
 		struct {
 			ev_io w_recv, w_send;
 #if WITH_RULESET
-			ev_idle w_ruleset;
+			ev_idle w_process;
 			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
@@ -111,7 +111,7 @@ static void send_response(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 static void send_errpage(
 	struct ev_loop *loop, struct http_ctx *restrict ctx,
-	const uint16_t code)
+	const uint_fast16_t code)
 {
 	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
 	http_resp_errpage(&ctx->parser, code);
@@ -132,7 +132,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	case STATE_PROCESS:
 #if WITH_RULESET
-		ev_idle_stop(loop, &ctx->w_ruleset);
+		ev_idle_stop(loop, &ctx->w_process);
 		if (ctx->ruleset_state != NULL) {
 			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
@@ -183,7 +183,7 @@ static void http_ctx_finalize(struct gcbase *restrict obj)
 	if (ctx->state < STATE_ESTABLISHED) {
 		dialreq_free(ctx->dialreq);
 	}
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->parser.cbuf);
 }
 
 static struct dialreq *make_dialreq(const char *restrict addr_str)
@@ -309,7 +309,7 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 #if WITH_RULESET
 	const struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		ev_idle_start(loop, &ctx->w_ruleset);
+		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
 #endif
@@ -434,9 +434,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 
 	if (ctx->parser.cbuf != NULL) {
-		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
-		buf = cbuf->data + ctx->parser.cpos;
-		len = cbuf->len - ctx->parser.cpos;
+		VBUF_VIEW(buf, len, ctx->parser.cbuf, ctx->parser.cpos);
 		ret = socket_send(fd, buf, &len);
 		if (ret != 0) {
 			HTTP_CTX_LOG_F(
@@ -445,7 +443,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		ctx->parser.cpos += len;
-		if (ctx->parser.cpos < cbuf->len) {
+		if (ctx->parser.cpos < VBUF_LEN(ctx->parser.cbuf)) {
 			return;
 		}
 	}
@@ -553,8 +551,8 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	ev_io_init(&ctx->w_send, send_cb, fd, EV_WRITE);
 	ctx->w_send.data = ctx;
 #if WITH_RULESET
-	ev_idle_init(&ctx->w_ruleset, process_cb);
-	ctx->w_ruleset.data = ctx;
+	ev_idle_init(&ctx->w_process, process_cb);
+	ctx->w_process.data = ctx;
 	ev_init(&ctx->ruleset_callback.w_finish, ruleset_cb);
 	ctx->ruleset_callback.w_finish.data = ctx;
 	ctx->ruleset_state = NULL;

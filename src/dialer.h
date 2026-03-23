@@ -45,7 +45,7 @@ enum dialaddr_type {
  */
 struct dialaddr {
 	enum dialaddr_type type;
-	uint16_t port;
+	uint_least16_t port;
 	union {
 		struct in_addr in;
 		struct in6_addr in6;
@@ -179,7 +179,8 @@ bool dialreq_addproxy(
  * @param csv Comma-separated list of proxy URIs (may be NULL for direct connection)
  * @return Allocated dialreq structure, or NULL on error
  */
-struct dialreq *dialreq_parse(const char *addr, const char *csv);
+struct dialreq *
+dialreq_parse(const char *restrict addr, const char *restrict csv);
 
 /**
  * @brief Format dial request as human-readable string
@@ -240,7 +241,7 @@ struct dialer {
  * @param d Dialer structure to initialize
  * @param callback Completion callback configuration
  */
-void dialer_init(struct dialer *d, const struct dialer_cb *callback);
+void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback);
 
 /**
  * @brief Start a dial operation

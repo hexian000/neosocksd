@@ -58,7 +58,7 @@ struct socks_ctx {
 		struct {
 			ev_io w_socket;
 			struct {
-				uint8_t method;
+				uint_least8_t method;
 				const char *username;
 				const char *password;
 			} auth;
@@ -68,7 +68,7 @@ struct socks_ctx {
 			} rbuf;
 			unsigned char *next;
 #if WITH_RULESET
-			ev_idle w_ruleset;
+			ev_idle w_process;
 			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
@@ -132,7 +132,7 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		return;
 	case STATE_PROCESS:
 #if WITH_RULESET
-		ev_idle_stop(loop, &ctx->w_ruleset);
+		ev_idle_stop(loop, &ctx->w_process);
 		if (ctx->ruleset_state != NULL) {
 			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
@@ -237,7 +237,7 @@ static bool send_rsp(
 }
 
 static bool
-socks4_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
+socks4_sendrsp(const struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 {
 	unsigned char buf[sizeof(struct socks4_hdr)] = { 0 };
 	write_uint8(buf + offsetof(struct socks4_hdr, version), 0);
@@ -246,7 +246,7 @@ socks4_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
 }
 
 static bool
-socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint8_t rsp)
+socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 {
 	union sockaddr_max addr = {
 		.sa.sa_family = AF_INET,
@@ -317,7 +317,7 @@ timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 		break;
 	case STATE_PROCESS:
 	case STATE_CONNECT: {
-		const uint8_t version = read_uint8(ctx->rbuf.data);
+		const uint_fast8_t version = read_uint8(ctx->rbuf.data);
 		if (version == SOCKS5) {
 			socks5_sendrsp(ctx, SOCKS5RSP_TTLEXPIRED);
 		}
@@ -335,7 +335,7 @@ timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 
 static bool socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 {
-	const uint8_t version = read_uint8(ctx->rbuf.data);
+	const uint_fast8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
 	case SOCKS4:
 		return socks4_sendrsp(
@@ -349,7 +349,7 @@ static bool socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 	FAILMSGF("unexpected socks version: %d", version);
 }
 
-static uint8_t socks5_err2rsp(const int err)
+static uint_fast8_t socks5_err2rsp(const int err)
 {
 	switch (err) {
 	case ENETUNREACH:
@@ -364,7 +364,8 @@ static uint8_t socks5_err2rsp(const int err)
 	return SOCKS5RSP_FAIL;
 }
 
-static uint8_t socks5_dialerr2rsp(const enum dialer_error err, const int syserr)
+static uint_fast8_t
+socks5_dialerr2rsp(const enum dialer_error err, const int syserr)
 {
 	switch (err) {
 	case DIALER_OK:
@@ -392,7 +393,7 @@ static void socks_senderr(
 	const struct socks_ctx *restrict ctx, const enum dialer_error err,
 	const int syserr)
 {
-	const uint8_t version = read_uint8(ctx->rbuf.data);
+	const uint_fast8_t version = read_uint8(ctx->rbuf.data);
 	switch (version) {
 	case SOCKS4:
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
@@ -476,7 +477,7 @@ static int socks4a_req(struct socks_ctx *restrict ctx)
 
 	ctx->addr.type = ATYP_DOMAIN;
 	struct domain_name *restrict domain = &ctx->addr.domain;
-	domain->len = (uint8_t)namelen;
+	domain->len = (uint_least8_t)namelen;
 	memcpy(domain->name, name, namelen);
 
 	/* protocol finished */
@@ -493,12 +494,12 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint8_t command =
+	const uint_fast8_t command =
 		read_uint8(hdr + offsetof(struct socks4_hdr, command));
 	if (command != SOCKS4CMD_CONNECT) {
 		SOCKS_CTX_LOG_F(
-			WARNING, ctx, "SOCKS4 command not supported: %" PRIu8,
-			command);
+			WARNING, ctx,
+			"SOCKS4 command not supported: %" PRIuFAST8, command);
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
 	}
@@ -516,9 +517,9 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 	ctx->auth.password = NULL;
 	ctx->addr.port = read_uint16(hdr + offsetof(struct socks4_hdr, port));
 
-	const uint32_t ip =
+	const uint_fast32_t ip =
 		read_uint32(hdr + offsetof(struct socks4_hdr, address));
-	const uint32_t mask = UINT32_C(0xFFFFFF00);
+	const uint_fast32_t mask = UINT32_C(0xFFFFFF00);
 	if (!(ip & mask) && (ip & ~mask)) {
 		/* SOCKS 4A */
 		ctx->next += sizeof(struct socks4_hdr) + idlen + 1;
@@ -543,24 +544,24 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		return (int)(want - len);
 	}
 
-	const uint8_t version =
+	const uint_fast8_t version =
 		read_uint8(hdr + offsetof(struct socks5_hdr, version));
 	if (version != SOCKS5) {
 		SOCKS_CTX_LOG_F(
-			WARNING, ctx, "SOCKS5: unsupported version %" PRIu8,
+			WARNING, ctx, "SOCKS5: unsupported version %" PRIuFAST8,
 			version);
 		return -1;
 	}
-	const uint8_t command =
+	const uint_fast8_t command =
 		read_uint8(hdr + offsetof(struct socks5_hdr, command));
 	if (command != SOCKS5CMD_CONNECT) {
 		socks5_sendrsp(ctx, SOCKS5RSP_CMDNOSUPPORT);
 		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "SOCKS5: unsupported command %" PRIu8,
+			ERROR, ctx, "SOCKS5: unsupported command %" PRIuFAST8,
 			command);
 		return -1;
 	}
-	const uint8_t addrtype =
+	const uint_fast8_t addrtype =
 		read_uint8(hdr + offsetof(struct socks5_hdr, addrtype));
 	switch (addrtype) {
 	case SOCKS5ADDR_IPV4:
@@ -574,14 +575,14 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		if (len < want) {
 			return (int)(want - len);
 		}
-		const uint8_t addrlen =
+		const uint_fast8_t addrlen =
 			read_uint8(hdr + sizeof(struct socks5_hdr));
 		want += (size_t)addrlen + sizeof(in_port_t);
 	} break;
 	default:
 		socks5_sendrsp(ctx, SOCKS5RSP_ATYPNOSUPPORT);
 		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "SOCKS5: unsupported addrtype: %" PRIu8,
+			ERROR, ctx, "SOCKS5: unsupported addrtype: %" PRIuFAST8,
 			addrtype);
 		return -1;
 	}
@@ -603,7 +604,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		ctx->addr.port = read_uint16(rawaddr);
 	} break;
 	case SOCKS5ADDR_DOMAIN: {
-		const uint8_t addrlen = read_uint8(rawaddr);
+		const uint_fast8_t addrlen = read_uint8(rawaddr);
 		rawaddr++;
 		ctx->addr.type = ATYP_DOMAIN;
 		struct domain_name *restrict domain = &ctx->addr.domain;
@@ -637,19 +638,19 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint8_t ver = read_uint8(req + 0);
+	const uint_fast8_t ver = read_uint8(req + 0);
 	if (ver != 0x01) {
 		SOCKS_CTX_LOG(
 			ERROR, ctx,
 			"SOCKS5: incompatible authentication version");
 		return -1;
 	}
-	const uint8_t ulen = read_uint8(req + 1);
+	const uint_fast8_t ulen = read_uint8(req + 1);
 	want += ulen + 1;
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint8_t plen = read_uint8(req + 2 + ulen);
+	const uint_fast8_t plen = read_uint8(req + 2 + ulen);
 	want += plen;
 	if (len < want) {
 		return (int)(want - len);
@@ -698,15 +699,16 @@ static int socks5_authmethod(struct socks_ctx *restrict ctx)
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint8_t n =
+	const uint_fast8_t n =
 		read_uint8(req + offsetof(struct socks5_auth_req, nmethods));
 	want += n;
 	if (len < want) {
 		return (int)(want - len);
 	}
 	const bool auth_required = G.conf->auth_required;
-	uint8_t method = SOCKS5AUTH_NOACCEPTABLE;
-	const uint8_t *restrict methods = req + sizeof(struct socks5_auth_req);
+	uint_fast8_t method = SOCKS5AUTH_NOACCEPTABLE;
+	const unsigned char *restrict methods =
+		req + sizeof(struct socks5_auth_req);
 	for (size_t i = 0; i < n; i++) {
 		switch (methods[i]) {
 		case SOCKS5AUTH_NOAUTH:
@@ -924,7 +926,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 #if WITH_RULESET
 	struct ruleset *restrict ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		ev_idle_start(loop, &ctx->w_ruleset);
+		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
 #endif
@@ -949,8 +951,8 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 	ev_io_init(&ctx->w_socket, recv_cb, accepted_fd, EV_READ);
 	ctx->w_socket.data = ctx;
 #if WITH_RULESET
-	ev_idle_init(&ctx->w_ruleset, process_cb);
-	ctx->w_ruleset.data = ctx;
+	ev_idle_init(&ctx->w_process, process_cb);
+	ctx->w_process.data = ctx;
 	ev_init(&ctx->ruleset_callback.w_finish, ruleset_cb);
 	ctx->ruleset_callback.w_finish.data = ctx;
 	ctx->ruleset_state = NULL;

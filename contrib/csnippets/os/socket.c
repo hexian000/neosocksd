@@ -280,8 +280,8 @@ static int sa_format_inet(
 	if (inet_ntop(AF_INET, &(sa->sin_addr), buf, sizeof(buf)) == NULL) {
 		return -1;
 	}
-	const uint16_t port = ntohs(sa->sin_port);
-	return snprintf(s, maxlen, "%s:%" PRIu16, buf, port);
+	const uint_fast16_t port = ntohs(sa->sin_port);
+	return snprintf(s, maxlen, "%s:%" PRIuFAST16, buf, port);
 }
 
 static int sa_format_inet6(
@@ -292,13 +292,14 @@ static int sa_format_inet6(
 	if (inet_ntop(AF_INET6, &(sa->sin6_addr), buf, sizeof(buf)) == NULL) {
 		return -1;
 	}
-	const uint16_t port = ntohs(sa->sin6_port);
-	const uint32_t scope = sa->sin6_scope_id;
+	const uint_fast16_t port = ntohs(sa->sin6_port);
+	const uint_fast32_t scope = sa->sin6_scope_id;
 	if (scope == 0) {
-		return snprintf(s, maxlen, "[%s]:%" PRIu16, buf, port);
+		return snprintf(s, maxlen, "[%s]:%" PRIuFAST16, buf, port);
 	}
 	return snprintf(
-		s, maxlen, "[%s%%%" PRIu32 "]:%" PRIu16, buf, scope, port);
+		s, maxlen, "[%s%%%" PRIuFAST32 "]:%" PRIuFAST16, buf, scope,
+		port);
 }
 
 int sa_format(

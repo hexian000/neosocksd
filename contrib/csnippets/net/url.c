@@ -114,7 +114,9 @@ static int escape_fragment(
 	return escape(buf, maxlen, fragment, len, S_PCHAR "/?", false);
 }
 
-int url_escape_userinfo(char *buf, size_t maxlen, char *username, char *password)
+int url_escape_userinfo(
+	char *restrict buf, size_t maxlen, const char *restrict username,
+	const char *restrict password)
 {
 	size_t written = 0;
 
@@ -152,12 +154,14 @@ int url_escape_userinfo(char *buf, size_t maxlen, char *username, char *password
 	return (int)written;
 }
 
-int url_escape_path(char *buf, const size_t maxlen, const char *path)
+int url_escape_path(
+	char *restrict buf, const size_t maxlen, const char *restrict path)
 {
 	return escape(buf, maxlen, path, strlen(path), "-_.~$&+,/:;=@", false);
 }
 
-int url_escape_query(char *buf, size_t maxlen, const char *query)
+int url_escape_query(
+	char *restrict buf, size_t maxlen, const char *restrict query)
 {
 	if (*query == '\0') {
 		if (maxlen > 0) {
@@ -207,19 +211,20 @@ int url_escape_query(char *buf, size_t maxlen, const char *query)
 	return (int)written;
 }
 
-int url_escape_path_segment(char *buf, const size_t maxlen, const char *segment)
+int url_escape_path_segment(
+	char *restrict buf, const size_t maxlen, const char *restrict segment)
 {
 	return escape(
 		buf, maxlen, segment, strlen(segment), "-_.~$&+:=@", false);
 }
 
 int url_escape_query_component(
-	char *buf, const size_t maxlen, const char *component)
+	char *restrict buf, const size_t maxlen, const char *restrict component)
 {
 	return escape_query(buf, maxlen, component, strlen(component));
 }
 
-int url_build(char *buf, size_t maxlen, const struct url *url)
+int url_build(char *restrict buf, size_t maxlen, const struct url *restrict url)
 {
 	size_t written = 0;
 

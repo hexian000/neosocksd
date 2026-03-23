@@ -47,7 +47,7 @@ struct forward_ctx {
 		/* state < STATE_CONNECTED */
 		struct {
 #if WITH_RULESET
-			ev_idle w_ruleset;
+			ev_idle w_process;
 			struct ruleset_callback ruleset_callback;
 			struct ruleset_state *ruleset_state;
 #endif
@@ -85,7 +85,7 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 		return;
 	case STATE_PROCESS:
 #if WITH_RULESET
-		ev_idle_stop(loop, &ctx->w_ruleset);
+		ev_idle_stop(loop, &ctx->w_process);
 		if (ctx->ruleset_state != NULL) {
 			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
@@ -331,8 +331,8 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 #if WITH_RULESET
-	ev_idle_init(&ctx->w_ruleset, NULL);
-	ctx->w_ruleset.data = ctx;
+	ev_idle_init(&ctx->w_process, NULL);
+	ctx->w_process.data = ctx;
 	ev_init(&ctx->ruleset_callback.w_finish, NULL);
 	ctx->ruleset_callback.w_finish.data = ctx;
 	ctx->ruleset_state = NULL;
@@ -366,9 +366,9 @@ void forward_serve(
 #if WITH_RULESET
 	const struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		ev_set_cb(&ctx->w_ruleset, forward_process_cb);
+		ev_set_cb(&ctx->w_process, forward_process_cb);
 		ev_set_cb(&ctx->ruleset_callback.w_finish, ruleset_cb);
-		ev_idle_start(loop, &ctx->w_ruleset);
+		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
 #endif
@@ -479,9 +479,9 @@ void tproxy_serve(
 #if WITH_RULESET
 	const struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL) {
-		ev_set_cb(&ctx->w_ruleset, tproxy_process_cb);
+		ev_set_cb(&ctx->w_process, tproxy_process_cb);
 		ev_set_cb(&ctx->ruleset_callback.w_finish, ruleset_cb);
-		ev_idle_start(loop, &ctx->w_ruleset);
+		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
 #endif

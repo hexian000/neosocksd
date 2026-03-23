@@ -34,7 +34,7 @@ static int stream_context_close(lua_State *restrict L)
 		(void)stream_close(s->w);
 		s->w = NULL;
 	}
-	s->out = VBUF_FREE(s->out);
+	VBUF_FREE(s->out);
 	return 0;
 }
 

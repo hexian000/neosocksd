@@ -345,8 +345,8 @@ static bool dispatch_request(
 
 bool ruleset_resolve(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *request, const char *username, const char *password,
-	struct ruleset_callback *callback)
+	const char *restrict request, const char *restrict username,
+	const char *restrict password, struct ruleset_callback *callback)
 {
 	return dispatch_request(
 		r, state, "resolve", request, username, password, callback);
@@ -354,8 +354,8 @@ bool ruleset_resolve(
 
 bool ruleset_route(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *request, const char *username, const char *password,
-	struct ruleset_callback *callback)
+	const char *restrict request, const char *restrict username,
+	const char *restrict password, struct ruleset_callback *callback)
 {
 	return dispatch_request(
 		r, state, "route", request, username, password, callback);
@@ -363,8 +363,8 @@ bool ruleset_route(
 
 bool ruleset_route6(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *request, const char *username, const char *password,
-	struct ruleset_callback *callback)
+	const char *restrict request, const char *restrict username,
+	const char *restrict password, struct ruleset_callback *callback)
 {
 	return dispatch_request(
 		r, state, "route6", request, username, password, callback);

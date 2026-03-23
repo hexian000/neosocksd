@@ -71,7 +71,8 @@ void resolver_cleanup(void);
  *
  * @note The caller is responsible for freeing with resolver_free()
  */
-struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf);
+struct resolver *
+resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf);
 
 /**
  * @brief Get resolver statistics
@@ -79,7 +80,7 @@ struct resolver *resolver_new(struct ev_loop *loop, const struct config *conf);
  * @param r Resolver instance
  * @return Pointer to statistics structure (valid until resolver is freed)
  */
-const struct resolver_stats *resolver_stats(const struct resolver *r);
+const struct resolver_stats *resolver_stats(const struct resolver *restrict r);
 
 /**
  * @brief Free a resolver instance
@@ -89,7 +90,7 @@ const struct resolver_stats *resolver_stats(const struct resolver *r);
  *
  * @param r Resolver instance (safe to pass NULL)
  */
-void resolver_free(struct resolver *r);
+void resolver_free(struct resolver *restrict r);
 
 struct sockaddr;
 
@@ -143,8 +144,8 @@ struct resolve_cb {
  *       Do not free the query handle manually.
  */
 struct resolve_query *resolve_do(
-	struct resolver *r, struct resolve_cb cb, const char *name,
-	const char *service, int family);
+	struct resolver *restrict r, struct resolve_cb cb,
+	const char *restrict name, const char *restrict service, int family);
 
 /**
  * @brief Cancel a pending DNS query

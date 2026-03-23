@@ -6,6 +6,7 @@
 #include "conf.h"
 #include "dialer.h"
 #include "httputil.h"
+#include "io/memory.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
@@ -56,7 +57,7 @@ struct api_ctx {
 	ev_timer w_timeout;
 	ev_io w_recv, w_send;
 #if WITH_RULESET
-	ev_idle w_ruleset;
+	ev_idle w_process;
 	struct ruleset_callback rpcreturn;
 	struct ruleset_state *rpcstate;
 #endif
@@ -123,8 +124,8 @@ bool check_rpcall_mime(char *s)
 
 static int comp_timestamp(const void *a, const void *b)
 {
-	const int_least64_t va = *(const int_least64_t *)a;
-	const int_least64_t vb = *(const int_least64_t *)b;
+	const int_fast64_t va = *(const int_least64_t *)a;
+	const int_fast64_t vb = *(const int_least64_t *)b;
 	if (va < vb) {
 		return -1;
 	}
@@ -135,7 +136,7 @@ static int comp_timestamp(const void *a, const void *b)
 }
 
 static void
-append_vmstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
+append_vmstats(struct stream *restrict w, const struct ruleset_vmstats *vm)
 {
 	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
 	FORMAT_SI(objects, (double)vm->num_object);
@@ -143,23 +144,24 @@ append_vmstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 	const int memlimit_mb = G.conf->memlimit;
 	if (memlimit_mb > 0) {
 		FORMAT_BYTES(memlimit, ((double)memlimit_mb) * 0x1p20);
-		BUF_APPENDF(
-			*buf, "%-20s: %s < %s (%s objects)\n",
-			"Ruleset Allocated", allocated, memlimit, objects);
+		(void)io_bufprintf(
+			w, "%-20s: %s < %s (%s objects)\n", "Ruleset Allocated",
+			allocated, memlimit, objects);
 	} else {
-		BUF_APPENDF(
-			*buf, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
+		(void)io_bufprintf(
+			w, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
 			allocated, objects);
 	}
 
 	if (vm->num_events == 0) {
-		BUF_APPENDF(*buf, "%-20s: %s\n", "Ruleset Events", "(never)");
+		(void)io_bufprintf(
+			w, "%-20s: %s\n", "Ruleset Events", "(never)");
 		return;
 	}
 
 	const size_t num_stats = ARRAY_SIZE(vm->event_ns);
 	const size_t num_events = MIN(vm->num_events, num_stats);
-	int_least64_t p50, p90, p99, pmax;
+	int_fast64_t p50, p90, p99, pmax;
 	{
 		int_least64_t events[num_events];
 		for (size_t i = 0; i < num_events; i++) {
@@ -182,14 +184,15 @@ append_vmstats(struct buffer *restrict buf, const struct ruleset_vmstats *vm)
 	FORMAT_DURATION(p90_str, make_duration_nanos(p90));
 	FORMAT_DURATION(p99_str, make_duration_nanos(p99));
 	FORMAT_DURATION(pmax_str, make_duration_nanos(pmax));
-	BUF_APPENDF(
-		*buf, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Ruleset Events",
+	(void)io_bufprintf(
+		w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Ruleset Events",
 		p50_str, p90_str, p99_str, pmax_str);
 }
+
 #endif
 
 static void server_stats_stateful(
-	struct buffer *restrict buf, const struct server *restrict api,
+	struct stream *restrict w, const struct server *restrict api,
 	const double dt)
 {
 	const struct server_stats *restrict apistats = &api->stats;
@@ -228,8 +231,8 @@ static void server_stats_stateful(
 	}
 	FORMAT_DURATION(dt_str, make_duration(dt));
 
-	BUF_APPENDF(
-		*buf,
+	(void)io_bufprintf(
+		w,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
 		"Request Rate        : %.1f/s (API%+.1f/s)\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n"
@@ -246,8 +249,8 @@ static void server_stats_stateful(
 }
 
 static void server_stats(
-	struct buffer *restrict buf, const struct server *restrict api,
-	const int_least64_t uptime, const double dt, const bool runtime)
+	struct stream *restrict w, const struct server *restrict api,
+	const int_fast64_t uptime, const double dt, const bool runtime)
 {
 	const struct server_stats *restrict apistats = &api->stats;
 	const struct server *restrict s = api->data;
@@ -265,8 +268,8 @@ static void server_stats(
 	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
 	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
 
-	BUF_APPENDF(
-		*buf,
+	(void)io_bufprintf(
+		w,
 		"Server Time         : %s\n"
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu)\n"
@@ -285,17 +288,17 @@ static void server_stats(
 		xfer_down);
 
 #if WITH_RULESET
-	BUF_APPENDF(*buf, "%-20s: %zu\n", "API Conn Cache", conn_cache.len);
+	(void)io_bufprintf(w, "%-20s: %zu\n", "API Conn Cache", conn_cache.len);
 	const struct ruleset *ruleset = G.ruleset;
 	if (ruleset != NULL && runtime) {
 		struct ruleset_vmstats vmstats;
 		ruleset_vmstats(ruleset, &vmstats);
-		append_vmstats(buf, &vmstats);
+		append_vmstats(w, &vmstats);
 	}
 #endif
 
 	if (dt > 0) {
-		server_stats_stateful(buf, api, dt);
+		server_stats_stateful(w, api, dt);
 	}
 }
 
@@ -317,7 +320,8 @@ send_response(struct ev_loop *loop, struct api_ctx *restrict ctx, const bool ok)
 }
 
 static void send_errpage(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code)
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	const uint_fast16_t code)
 {
 	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
 	ctx->keepalive = false;
@@ -372,24 +376,22 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
 			CENCODING_DEFLATE :
 			CENCODING_NONE;
-	struct stream *w =
-		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, encoding);
+	struct stream *w = io_bufwriter(
+		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, encoding),
+		IO_BUFSIZE);
 	if (w == NULL) {
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	/* Reuse parser's read buffer for stats output to save memory */
-	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
-	buf->len = 0;
 
 	if (!opt.nobanner) {
-		BUF_APPENDF(
-			*buf, "%s %s\n  %s\n\n", PROJECT_NAME, PROJECT_VER,
+		(void)io_bufprintf(
+			w, "%s %s\n  %s\n\n", PROJECT_NAME, PROJECT_VER,
 			PROJECT_HOMEPAGE);
 	}
 
-	const int_least64_t now = clock_monotonic_ns();
-	const int_least64_t uptime = now - ctx->s->stats.started;
+	const int_fast64_t now = clock_monotonic_ns();
+	const int_fast64_t uptime = now - ctx->s->stats.started;
 	/* Track time between stateful requests for rate calculations */
 	static struct {
 		int_least64_t tstamp;
@@ -402,16 +404,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		last.tstamp = now;
 	}
 	if (opt.server) {
-		server_stats(buf, ctx->s, uptime, dt, opt.runtime);
-
-		size_t n = buf->len;
-		const int err = stream_write(w, buf->data, &n);
-		if (n < buf->len || err != 0) {
-			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
-			       buf->len);
-			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-			return;
-		}
+		server_stats(w, ctx->s, uptime, dt, opt.runtime);
 	}
 
 #if WITH_RULESET
@@ -426,6 +419,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		const int err = stream_write(w, s, &n);
 		if (n < len || err != 0) {
 			LOGE_F("stream_write error: %d, %zu/%zu", err, n, len);
+			(void)stream_close(w);
 			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
@@ -480,13 +474,13 @@ static bool restapi_check(
 
 #if WITH_RULESET
 static void send_errmsg(
-	struct ev_loop *loop, struct api_ctx *restrict ctx, const uint16_t code,
-	const char *msg, const size_t len)
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	const uint_fast16_t code, const char *msg, const size_t len)
 {
 	if ((code / 100) >= 4) {
 		ctx->keepalive = false;
 	}
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->parser.cbuf);
 	RESPHDR_BEGIN(ctx->parser.wbuf, code);
 	if (ctx->keepalive) {
 		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
@@ -612,7 +606,7 @@ static void handle_ruleset_invoke(
 	}
 	const bool ok = ruleset_invoke(ruleset, reader);
 	stream_close(reader);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
@@ -635,7 +629,7 @@ static void handle_ruleset_update(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset, const char *module, const char *chunkname)
 {
-	const int_least64_t start = clock_monotonic_ns();
+	const int_fast64_t start = clock_monotonic_ns();
 	struct stream *reader = content_reader(
 		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
 		ctx->parser.hdr.content.encoding);
@@ -646,7 +640,7 @@ static void handle_ruleset_update(
 	}
 	const bool ok = ruleset_update(ruleset, module, chunkname, reader);
 	stream_close(reader);
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->parser.cbuf);
 	if (!ok) {
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
@@ -654,7 +648,7 @@ static void handle_ruleset_update(
 		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
-	const int_least64_t end = clock_monotonic_ns();
+	const int_fast64_t end = clock_monotonic_ns();
 	{
 		FORMAT_DURATION(timecost, make_duration_nanos(end - start));
 		char body[64];
@@ -681,7 +675,7 @@ static void handle_ruleset_gc(
 {
 	struct ruleset_vmstats before;
 	ruleset_vmstats(ruleset, &before);
-	const int_least64_t start = clock_monotonic_ns();
+	const int_fast64_t start = clock_monotonic_ns();
 	const bool ok = ruleset_gc(ruleset);
 	if (!ok) {
 		size_t len;
@@ -690,7 +684,7 @@ static void handle_ruleset_gc(
 		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
-	const int_least64_t end = clock_monotonic_ns();
+	const int_fast64_t end = clock_monotonic_ns();
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
 
@@ -699,14 +693,13 @@ static void handle_ruleset_gc(
 	pipe_shrink(SIZE_MAX);
 #endif
 
-	struct stream *w =
-		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, CENCODING_NONE);
+	struct stream *w = io_bufwriter(
+		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, CENCODING_NONE),
+		IO_BUFSIZE);
 	if (w == NULL) {
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	struct buffer *restrict buf = (struct buffer *)&ctx->parser.rbuf;
-	buf->len = 0;
 	{
 		FORMAT_BYTES(
 			freed_bytes, (double)((intmax_t)vmstats.byt_allocated -
@@ -714,24 +707,14 @@ static void handle_ruleset_gc(
 		FORMAT_SI(
 			freed_objects, (double)((intmax_t)vmstats.num_object -
 						(intmax_t)before.num_object));
-		BUF_APPENDF(
-			*buf, "%-20s: %s (%s objects)\n", "Difference",
+		(void)io_bufprintf(
+			w, "%-20s: %s (%s objects)\n", "Difference",
 			freed_bytes, freed_objects);
 	}
-	append_vmstats(buf, &vmstats);
+	append_vmstats(w, &vmstats);
 	{
 		FORMAT_DURATION(timecost, make_duration_nanos(end - start));
-		BUF_APPENDF(*buf, "Time Cost           : %s\n", timecost);
-	}
-	{
-		size_t n = buf->len;
-		const int err = stream_write(w, buf->data, &n);
-		if (n < buf->len || err != 0) {
-			LOGE_F("stream_write error: %d, %zu/%zu", err, n,
-			       buf->len);
-			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-			return;
-		}
+		(void)io_bufprintf(w, "Time Cost           : %s\n", timecost);
 	}
 	{
 		const int err = stream_close(w);
@@ -822,7 +805,7 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 
-	ev_idle_start(loop, &ctx->w_ruleset);
+	ev_idle_start(loop, &ctx->w_process);
 }
 #endif /* WITH_RULESET */
 
@@ -889,7 +872,7 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		break;
 	case STATE_PROCESS:
 #if WITH_RULESET
-		ev_idle_stop(loop, &ctx->w_ruleset);
+		ev_idle_stop(loop, &ctx->w_process);
 		if (ctx->rpcstate != NULL) {
 			ruleset_cancel(loop, ctx->rpcstate);
 			ctx->rpcstate = NULL;
@@ -921,7 +904,7 @@ static void api_ctx_finalize(struct gcbase *restrict obj)
 		ctx->dialed_fd = -1;
 	}
 
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->parser.cbuf);
 }
 
 static bool parse_header(void *ctx, const char *key, char *value)
@@ -978,7 +961,7 @@ static bool api_should_keepalive(const struct api_ctx *restrict ctx)
 /* Reset parser and state machine for reuse on the same TCP connection */
 static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	ctx->parser.cbuf = VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->parser.cbuf);
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(
 		&ctx->parser, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header);
@@ -1045,9 +1028,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	/* Send response body after headers are fully sent */
 	if (ctx->parser.cbuf != NULL) {
-		const struct vbuffer *restrict cbuf = ctx->parser.cbuf;
-		buf = cbuf->data + ctx->parser.cpos;
-		len = cbuf->len - ctx->parser.cpos;
+		VBUF_VIEW(buf, len, ctx->parser.cbuf, ctx->parser.cpos);
 		ret = socket_send(fd, buf, &len);
 		if (ret != 0) {
 			API_CTX_LOG_F(
@@ -1056,7 +1037,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		ctx->parser.cpos += len;
-		if (ctx->parser.cpos < cbuf->len) {
+		if (ctx->parser.cpos < VBUF_LEN(ctx->parser.cbuf)) {
 			return;
 		}
 	}
@@ -1097,8 +1078,8 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ev_io_init(&ctx->w_send, send_cb, fd, EV_WRITE);
 	ctx->w_send.data = ctx;
 #if WITH_RULESET
-	ev_idle_init(&ctx->w_ruleset, process_cb);
-	ctx->w_ruleset.data = ctx;
+	ev_idle_init(&ctx->w_process, process_cb);
+	ctx->w_process.data = ctx;
 	ev_init(&ctx->rpcreturn.w_finish, rpcall_cb);
 	ctx->rpcreturn.w_finish.data = ctx;
 	ctx->rpcstate = NULL;

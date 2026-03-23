@@ -102,7 +102,7 @@ static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
 	struct vbuffer *restrict *restrict pvbuf = s->data;
 	const size_t n = *len;
 	const size_t expected = VBUF_LEN(*pvbuf) + n;
-	(*pvbuf) = VBUF_APPEND(*pvbuf, buf, n);
+	VBUF_APPEND(*pvbuf, buf, n);
 	if (VBUF_LEN(*pvbuf) != expected) {
 		return -1;
 	}
@@ -131,7 +131,7 @@ int io_heapprintf(struct stream *restrict s, const char *restrict format, ...)
 	struct vbuffer *restrict *restrict pvbuf = s->data;
 	va_list args;
 	va_start(args, format);
-	(*pvbuf) = VBUF_VAPPENDF(*pvbuf, format, args);
+	VBUF_VAPPENDF(*pvbuf, format, args);
 	va_end(args);
 	return 0;
 }
