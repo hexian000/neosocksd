@@ -181,3 +181,39 @@ target_sources(neosocksd
     "${CMAKE_CURRENT_BINARY_DIR}/config.h"
     "${CMAKE_CURRENT_BINARY_DIR}/version.c"
 )
+
+add_executable(socks_test
+    socks_test.c
+    socks.c
+)
+target_include_directories(socks_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(socks_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(socks_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(socks_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+
+if(FORCE_POSIX)
+    target_compile_definitions(socks_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(socks_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME socks_test COMMAND socks_test)
+
+add_executable(http_proxy_test
+    http_proxy_test.c
+    http_proxy.c
+    httputil.c
+    codec.c
+)
+target_include_directories(http_proxy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(http_proxy_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(http_proxy_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(http_proxy_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+
+if(FORCE_POSIX)
+    target_compile_definitions(http_proxy_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(http_proxy_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME http_proxy_test COMMAND http_proxy_test)

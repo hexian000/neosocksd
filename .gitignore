@@ -7,5 +7,6 @@
 
 /cmake-*
 /build
+/build-gcov
 /xbuild
 /compile_commands.json

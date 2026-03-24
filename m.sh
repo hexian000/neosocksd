@@ -161,6 +161,7 @@ case "$1" in
         ..
     cp compile_commands.json ../
     cmake --build .
+    ctest
     ls -lh bin/neosocksd
     ;;
 *)
