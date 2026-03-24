@@ -281,6 +281,7 @@ bool ruleset_resolve(
 	if (!S.ruleset_resolve_ok) {
 		return false;
 	}
+	callback->request.req = NULL;
 	if (S.ruleset_reply_with_req) {
 		callback->request.req = dialreq_new(0);
 	}
