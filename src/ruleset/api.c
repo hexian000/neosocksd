@@ -61,7 +61,7 @@ static int api_invoke(lua_State *restrict L)
 		return lua_error(L);
 	}
 	const struct ruleset *restrict r = aux_getruleset(L);
-	api_client_invoke(r->loop, req, code, len);
+	api_client_invoke(r->loop, req, code, len, r->conf, r->resolver);
 	return 0;
 }
 
@@ -69,8 +69,9 @@ static int api_invoke(lua_State *restrict L)
 static int api_resolve(lua_State *restrict L)
 {
 	const char *restrict name = luaL_checkstring(L, 1);
+	const struct ruleset *restrict r = aux_getruleset(L);
 	union sockaddr_max addr;
-	if (!sa_resolve_tcp(&addr, name, NULL, G.conf->resolve_pf)) {
+	if (!sa_resolve_tcp(&addr, name, NULL, r->conf->resolve_pf)) {
 		return 0;
 	}
 	lua_pushlightuserdata(L, &addr.sa);
@@ -166,8 +167,8 @@ static int api_splithostport(lua_State *restrict L)
 /* neosocksd.config() */
 static int api_config(lua_State *restrict L)
 {
-	const struct config *restrict conf = G.conf;
 	const struct ruleset *restrict r = aux_getruleset(L);
+	const struct config *restrict conf = r->conf;
 	lua_createtable(L, 0, 9);
 
 	lua_pushinteger(L, (lua_Integer)conf->log_level);
@@ -197,7 +198,7 @@ static int api_stats(lua_State *restrict L)
 	const struct ruleset *restrict r = aux_getruleset(L);
 	struct server_stats stats = { 0 };
 	{
-		const struct server *restrict s = G.server;
+		const struct server *restrict s = r->server;
 		if (s != NULL) {
 			stats = s->stats;
 		}

@@ -145,20 +145,20 @@ struct testing_ctx {
 		(ctx_).current = #name_;                                       \
 		(ctx_).case_failed = false;                                    \
 		(ctx_).case_skipped = false;                                   \
-		(void)fprintf((ctx_).out, ">>> RUN   %s\n", #name_);           \
+		(void)fprintf((ctx_).out, "=== RUN   %s\n", #name_);           \
 		(void)fflush((ctx_).out);                                      \
 		if (setjmp((ctx_).case_jmp) == 0) {                            \
 			_testcase_##name_##_(&(ctx_));                         \
 		}                                                              \
 		if ((ctx_).case_failed) {                                      \
 			(ctx_).failed++;                                       \
-			(void)fprintf((ctx_).out, "<<< FAIL  %s\n", #name_);   \
+			(void)fprintf((ctx_).out, "--- FAIL  %s\n", #name_);   \
 		} else if ((ctx_).case_skipped) {                              \
 			(ctx_).skipped++;                                      \
-			(void)fprintf((ctx_).out, "<<< SKIP  %s\n", #name_);   \
+			(void)fprintf((ctx_).out, "--- SKIP  %s\n", #name_);   \
 		} else {                                                       \
 			(ctx_).passed++;                                       \
-			(void)fprintf((ctx_).out, "<<< PASS  %s\n", #name_);   \
+			(void)fprintf((ctx_).out, "--- PASS  %s\n", #name_);   \
 		}                                                              \
 		(void)fflush((ctx_).out);                                      \
 	} while (0)

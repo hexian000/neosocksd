@@ -206,12 +206,12 @@ static int await_resolve(lua_State *restrict L)
 	aux_toclose(L, -1, MT_AWAIT_RESOLVE, await_resolve_close);
 
 	ud->query = resolve_do(
-		G.resolver,
+		ud->ruleset->resolver,
 		(struct resolve_cb){
 			.func = resolve_cb,
 			.data = ud,
 		},
-		name, NULL, G.conf->resolve_pf);
+		name, NULL, ud->ruleset->conf->resolve_pf);
 	if (ud->query == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
@@ -322,8 +322,8 @@ static int await_invoke(lua_State *restrict L)
 		.func = invoke_cb,
 		.data = ud,
 	};
-	const bool ok =
-		api_client_rpcall(r->loop, &ud->ctx, req, code, len, &cb);
+	const bool ok = api_client_rpcall(
+		r->loop, &ud->ctx, req, code, len, &cb, r->conf, r->resolver);
 	if (!ok) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);

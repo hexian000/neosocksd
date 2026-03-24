@@ -21,7 +21,7 @@
 
 static bool is_startup_limited(const struct server *restrict s)
 {
-	const struct config *restrict conf = G.conf;
+	const struct config *restrict conf = s->conf;
 	const struct server_stats *restrict stats = &s->stats;
 
 	/* Check maximum session limit */
@@ -56,7 +56,7 @@ static void accept_cb(
 	CHECK_REVENTS(revents, EV_READ);
 
 	struct server *restrict s = watcher->data;
-	const struct config *restrict conf = G.conf;
+	const struct config *restrict conf = s->conf;
 	struct listener_stats *restrict lstats = &s->l.stats;
 
 	/* Accept connections in a loop until no more are available */
@@ -148,7 +148,7 @@ bool server_start(
 		return false;
 	}
 
-	const struct config *restrict conf = G.conf;
+	const struct config *restrict conf = s->conf;
 
 	/* Apply socket options based on configuration */
 #if WITH_REUSEPORT

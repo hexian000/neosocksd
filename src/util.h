@@ -22,26 +22,6 @@
 #include <stdint.h>
 
 struct dialreq;
-struct resolver;
-struct ruleset;
-struct server;
-
-/**
- * @brief Process-global state shared across subsystems.
- *
- * The instance is defined in `util.c` as `G` and holds pointers to major
- * services and singleton data structures that are initialized at startup and
- * cleaned up at shutdown.
- */
-extern struct globals {
-	const struct config *conf;
-	struct resolver *resolver;
-#if WITH_RULESET
-	struct ruleset *ruleset;
-#endif
-	struct server *server;
-	struct dialreq *basereq;
-} G;
 
 /**
  * @brief Compile-time length of a string literal excluding the null terminator.
@@ -142,8 +122,11 @@ extern struct conn_cache {
 } conn_cache;
 
 void conn_cache_put(
-	struct ev_loop *loop, int fd, const struct dialreq *restrict dialreq);
-int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req);
+	struct ev_loop *loop, int fd, const struct dialreq *restrict dialreq,
+	bool enable_conn_cache);
+int conn_cache_get(
+	struct ev_loop *loop, const struct dialreq *restrict req,
+	bool enable_conn_cache);
 #endif
 
 /** Process-level initializations. */

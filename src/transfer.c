@@ -14,7 +14,6 @@
 
 #include "transfer.h"
 
-#include "conf.h"
 #include "util.h"
 
 #include "os/socket.h"
@@ -394,7 +393,7 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink)
+	const bool is_uplink, const bool use_splice)
 {
 	t->state = XFER_INIT;
 	t->src_fd = src_fd;
@@ -407,11 +406,14 @@ void transfer_init(
 	t->is_uplink = is_uplink;
 
 #if WITH_SPLICE
+	t->use_splice = use_splice;
 	t->pipe = (struct splice_pipe){
 		.fd = { -1, -1 },
 		.cap = 0,
 		.len = 0,
 	};
+#else
+	(void)use_splice;
 #endif
 	t->pos = 0;
 	BUF_INIT(t->buf, 0);
@@ -440,7 +442,7 @@ static void pipe_put(struct splice_pipe *restrict pipe)
 void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)
 {
 #if WITH_SPLICE
-	if (G.conf->pipe) {
+	if (t->use_splice) {
 		struct splice_pipe pipe;
 		if (pipe_get(&pipe)) {
 			ev_set_cb(&t->w_socket, pipe_cb);

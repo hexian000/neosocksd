@@ -214,7 +214,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	/* cleanup before state change */
 	dialreq_free(ctx->dialreq);
 
-	if (G.conf->bidir_timeout) {
+	if (ctx->s->conf->bidir_timeout) {
 		ctx->state = STATE_ESTABLISHED;
 	} else {
 		mark_ready(loop, ctx);
@@ -227,10 +227,10 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
 		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true);
+		&stats->byt_up, true, ctx->s->conf->pipe);
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false);
+		&stats->byt_down, false, ctx->s->conf->pipe);
 
 	FW_CTX_LOG_F(
 		DEBUG, ctx,
@@ -250,7 +250,7 @@ static void forward_ctx_start(
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_request++;
 	stats->num_halfopen++;
-	dialer_do(&ctx->dialer, loop, req);
+	dialer_do(&ctx->dialer, loop, req, ctx->s->conf, ctx->s->resolver);
 }
 
 #if WITH_RULESET
@@ -279,9 +279,9 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	ev_idle_stop(loop, watcher);
 	struct forward_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
-	struct ruleset *restrict ruleset = G.ruleset;
+	struct ruleset *restrict ruleset = ctx->s->ruleset;
 	ASSERT(ruleset != NULL);
-	const struct dialreq *restrict req = G.basereq;
+	const struct dialreq *restrict req = ctx->s->basereq;
 	const struct dialaddr *restrict addr = &req->addr;
 
 	const size_t cap =
@@ -328,7 +328,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
 
-	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ev_timer_init(&ctx->w_timeout, timeout_cb, s->conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 #if WITH_RULESET
 	ev_idle_init(&ctx->w_process, NULL);
@@ -364,7 +364,7 @@ void forward_serve(
 	ev_timer_start(loop, &ctx->w_timeout);
 
 #if WITH_RULESET
-	const struct ruleset *ruleset = G.ruleset;
+	const struct ruleset *ruleset = ctx->s->ruleset;
 	if (ruleset != NULL) {
 		ev_set_cb(&ctx->w_process, forward_process_cb);
 		ev_set_cb(&ctx->ruleset_callback.w_finish, ruleset_cb);
@@ -372,7 +372,7 @@ void forward_serve(
 		return;
 	}
 #endif
-	const struct dialreq *req = G.basereq;
+	const struct dialreq *req = ctx->s->basereq;
 	forward_ctx_start(loop, ctx, req);
 }
 
@@ -385,7 +385,7 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct forward_ctx *restrict ctx = watcher->data;
-	struct ruleset *restrict ruleset = G.ruleset;
+	struct ruleset *restrict ruleset = ctx->s->ruleset;
 	ASSERT(ruleset != NULL);
 
 	union sockaddr_max dest;
@@ -446,7 +446,7 @@ static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
 			ERROR, ctx, "getsockname: (%d) %s", err, strerror(err));
 		return NULL;
 	}
-	struct dialreq *req = dialreq_new(0);
+	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
@@ -477,7 +477,7 @@ void tproxy_serve(
 	ev_timer_start(loop, &ctx->w_timeout);
 
 #if WITH_RULESET
-	const struct ruleset *ruleset = G.ruleset;
+	const struct ruleset *ruleset = ctx->s->ruleset;
 	if (ruleset != NULL) {
 		ev_set_cb(&ctx->w_process, tproxy_process_cb);
 		ev_set_cb(&ctx->ruleset_callback.w_finish, ruleset_cb);

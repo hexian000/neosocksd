@@ -436,7 +436,7 @@ static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
 	ev_io_stop(loop, &ctx->w_socket);
 	dialreq_free(ctx->dialreq);
 
-	if (G.conf->bidir_timeout) {
+	if (ctx->s->conf->bidir_timeout) {
 		ctx->state = STATE_ESTABLISHED;
 	} else {
 		mark_ready(loop, ctx);
@@ -449,10 +449,10 @@ static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
 		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true);
+		&stats->byt_up, true, ctx->s->conf->pipe);
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false);
+		&stats->byt_down, false, ctx->s->conf->pipe);
 
 	SOCKS_CTX_LOG_F(
 		DEBUG, ctx,
@@ -705,7 +705,7 @@ static int socks5_authmethod(struct socks_ctx *restrict ctx)
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const bool auth_required = G.conf->auth_required;
+	const bool auth_required = ctx->s->conf->auth_required;
 	uint_fast8_t method = SOCKS5AUTH_NOACCEPTABLE;
 	const unsigned char *restrict methods =
 		req + sizeof(struct socks5_auth_req);
@@ -824,7 +824,9 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 
 	SOCKS_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
-	dialer_do(&ctx->dialer, loop, ctx->dialreq);
+	dialer_do(
+		&ctx->dialer, loop, ctx->dialreq, ctx->s->conf,
+		ctx->s->resolver);
 }
 
 #if WITH_RULESET
@@ -844,9 +846,9 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
-	struct ruleset *restrict ruleset = G.ruleset;
-	ASSERT(ruleset != NULL);
 	struct socks_ctx *restrict ctx = watcher->data;
+	struct ruleset *restrict ruleset = ctx->s->ruleset;
+	ASSERT(ruleset != NULL);
 	ASSERT(ctx->state == STATE_PROCESS);
 
 	const struct dialaddr *restrict addr = &ctx->addr;
@@ -888,9 +890,10 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 }
 #endif
 
-static struct dialreq *make_dialreq(const struct dialaddr *restrict addr)
+static struct dialreq *make_dialreq(
+	struct socks_ctx *restrict ctx, const struct dialaddr *restrict addr)
 {
-	struct dialreq *req = dialreq_new(0);
+	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
@@ -924,13 +927,13 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 
 #if WITH_RULESET
-	struct ruleset *restrict ruleset = G.ruleset;
+	struct ruleset *restrict ruleset = ctx->s->ruleset;
 	if (ruleset != NULL) {
 		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
 #endif
-	ctx->dialreq = make_dialreq(&ctx->addr);
+	ctx->dialreq = make_dialreq(ctx, &ctx->addr);
 	socks_connect(loop, ctx);
 }
 
@@ -946,7 +949,7 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->accepted_fd = accepted_fd;
 	ctx->dialed_fd = -1;
 
-	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ev_timer_init(&ctx->w_timeout, timeout_cb, s->conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 	ev_io_init(&ctx->w_socket, recv_cb, accepted_fd, EV_READ);
 	ctx->w_socket.data = ctx;

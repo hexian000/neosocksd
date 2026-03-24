@@ -11,6 +11,8 @@
 #if WITH_RULESET
 
 #include "conf.h"
+#include "dialer.h"
+#include "resolver.h"
 #include "ruleset/api.h"
 #include "ruleset/await.h"
 #include "ruleset/base.h"
@@ -19,7 +21,6 @@
 #include "ruleset/regex.h"
 #include "ruleset/time.h"
 #include "ruleset/zlib.h"
-#include "util.h"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -199,7 +200,9 @@ static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	}
 }
 
-struct ruleset *ruleset_new(struct ev_loop *restrict loop)
+struct ruleset *ruleset_new(
+	struct ev_loop *restrict loop, const struct config *restrict conf,
+	struct resolver *restrict resolver, struct dialreq *restrict basereq)
 {
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
 	if (r == NULL) {
@@ -207,9 +210,13 @@ struct ruleset *ruleset_new(struct ev_loop *restrict loop)
 	}
 	r->loop = loop;
 	r->vmstats = (struct ruleset_vmstats){ 0 };
-	const int memlimit_mb = G.conf->memlimit;
+	const int memlimit_mb = conf->memlimit;
 	r->config.memlimit_kb = (memlimit_mb > 0) ? (memlimit_mb << 10u) : 0;
-	r->config.traceback = !!G.conf->traceback;
+	r->config.traceback = !!conf->traceback;
+	r->conf = conf;
+	r->resolver = resolver;
+	r->server = NULL;
+	r->basereq = basereq;
 
 	/* initialize in advance to prevent undefined behavior */
 	ev_timer_init(&r->w_ticker, tick_cb, 1.0, 1.0);
@@ -257,6 +264,11 @@ void ruleset_free(struct ruleset *restrict r)
 	ev_idle_stop(r->loop, &r->w_idle);
 	lua_close(r->L);
 	free(r);
+}
+
+void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s)
+{
+	r->server = s;
 }
 
 /**

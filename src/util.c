@@ -11,7 +11,6 @@
  */
 #include "util.h"
 
-#include "conf.h"
 #include "resolver.h"
 
 #if WITH_RULESET
@@ -58,9 +57,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-/** Global instance of process-wide state declared in `util.h`. */
-struct globals G = { 0 };
 
 #if WITH_SPLICE
 struct pipe_cache pipe_cache = { .cap = PIPE_MAXCACHED, .len = 0 };
@@ -186,9 +182,9 @@ conn_cache_expire_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 
 void conn_cache_put(
 	struct ev_loop *loop, const int fd,
-	const struct dialreq *restrict dialreq)
+	const struct dialreq *restrict dialreq, const bool enable_conn_cache)
 {
-	if (G.conf != NULL && !G.conf->conn_cache) {
+	if (!enable_conn_cache) {
 		LOGV_F("conn_cache: [fd:%d] disabled, closing", fd);
 		CLOSE_FD(fd);
 		return;
@@ -228,9 +224,11 @@ void conn_cache_put(
 	       conn_cache.len);
 }
 
-int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
+int conn_cache_get(
+	struct ev_loop *loop, const struct dialreq *restrict req,
+	const bool enable_conn_cache)
 {
-	if (G.conf != NULL && !G.conf->conn_cache) {
+	if (!enable_conn_cache) {
 		return -1;
 	}
 	char key[256];

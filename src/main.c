@@ -398,12 +398,11 @@ int main(int argc, char **argv)
 		       argv[0]);
 		exit(EXIT_FAILURE);
 	}
-	G.conf = conf;
 	loadlibs();
 
 	/* Parse and validate outbound connection configuration */
-	G.basereq = dialreq_parse(conf->forward, conf->proxy);
-	if (G.basereq == NULL) {
+	struct dialreq *basereq = dialreq_parse(conf->forward, conf->proxy);
+	if (basereq == NULL) {
 		LOGF("unable to parse outbound configuration");
 		exit(EXIT_FAILURE);
 	}
@@ -413,27 +412,36 @@ int main(int argc, char **argv)
 	CHECK(loop != NULL);
 
 	/* Initialize DNS resolver */
-	G.resolver = resolver_new(loop, conf);
-	CHECKOOM(G.resolver);
+	struct resolver *resolver = resolver_new(loop, conf);
+	CHECKOOM(resolver);
 
 	/* Initialize Lua ruleset if specified */
 #if WITH_RULESET
+	struct ruleset *ruleset = NULL;
 	if (conf->ruleset != NULL) {
-		G.ruleset = ruleset_new(loop);
-		CHECKOOM(G.ruleset);
-		const bool ok = ruleset_loadfile(G.ruleset, conf->ruleset);
+		ruleset = ruleset_new(loop, conf, resolver, basereq);
+		CHECKOOM(ruleset);
+		const bool ok = ruleset_loadfile(ruleset, conf->ruleset);
 		if (!ok) {
 			LOGE_F("ruleset load: %s",
-			       ruleset_geterror(G.ruleset, NULL));
+			       ruleset_geterror(ruleset, NULL));
 			LOGF_F("unable to load ruleset: %s", conf->ruleset);
 			exit(EXIT_FAILURE);
 		}
 	}
+#else
+	struct ruleset *ruleset = NULL;
 #endif
 
 	/* Initialize and configure the main proxy server */
 	struct server *restrict s = &app.server;
 	server_init(s, loop, NULL, NULL);
+	s->conf = conf;
+	s->resolver = resolver;
+	s->basereq = basereq;
+#if WITH_RULESET
+	s->ruleset = ruleset;
+#endif
 
 	/* Select the appropriate protocol handler based on configuration */
 	if (conf->forward != NULL) {
@@ -476,8 +484,12 @@ int main(int argc, char **argv)
 			LOGF("failed to start server");
 			exit(EXIT_FAILURE);
 		}
-		G.server = s;
 	}
+#if WITH_RULESET
+	if (ruleset != NULL) {
+		ruleset_setserver(ruleset, s);
+	}
+#endif
 
 	/* Start optional REST API server if configured */
 	struct server *api = NULL;
@@ -504,6 +516,12 @@ int main(int argc, char **argv)
 		}
 		api = &app.apiserver;
 		server_init(api, loop, api_serve, s);
+		api->conf = conf;
+		api->resolver = resolver;
+		api->basereq = basereq;
+#if WITH_RULESET
+		api->ruleset = ruleset;
+#endif
 		if (!server_start(api, &apiaddr.sa)) {
 			LOGF("failed to start api server");
 			exit(EXIT_FAILURE);
@@ -553,23 +571,22 @@ int main(int argc, char **argv)
 		api = NULL;
 	}
 	server_stop(s);
-	G.server = NULL;
 	LOGN("server shutdown gracefully");
 
 	/* Clean up global resources */
 #if WITH_RULESET
-	if (G.ruleset != NULL) {
-		ruleset_free(G.ruleset);
-		G.ruleset = NULL;
+	if (ruleset != NULL) {
+		ruleset_free(ruleset);
+		ruleset = NULL;
 	}
 #endif
-	if (G.resolver != NULL) {
-		resolver_free(G.resolver);
-		G.resolver = NULL;
+	if (resolver != NULL) {
+		resolver_free(resolver);
+		resolver = NULL;
 	}
-	if (G.basereq != NULL) {
-		dialreq_free(G.basereq);
-		G.basereq = NULL;
+	if (basereq != NULL) {
+		dialreq_free(basereq);
+		basereq = NULL;
 	}
 
 	/* Close any remaining sessions */
@@ -592,17 +609,18 @@ void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 	case SIGHUP: {
 #if WITH_RULESET
 		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
-		const struct config *restrict conf = G.conf;
-		if (conf->ruleset == NULL || G.ruleset == NULL) {
+		const struct config *restrict conf = &app.conf;
+		struct ruleset *ruleset = app.server.ruleset;
+		if (conf->ruleset == NULL || ruleset == NULL) {
 			LOGE_F("signal %d received, but ruleset not loaded",
 			       watcher->signum);
 			break;
 		}
 		/* Attempt to reload the Lua ruleset */
-		const bool ok = ruleset_loadfile(G.ruleset, conf->ruleset);
+		const bool ok = ruleset_loadfile(ruleset, conf->ruleset);
 		if (!ok) {
 			LOGW_F("failed to reload ruleset: %s",
-			       ruleset_geterror(G.ruleset, NULL));
+			       ruleset_geterror(ruleset, NULL));
 			break;
 		}
 		LOGN("ruleset successfully reloaded");

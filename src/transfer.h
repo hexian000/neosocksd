@@ -51,8 +51,8 @@ struct transfer {
 	uintmax_t *byt_transferred;
 
 	bool is_uplink : 1;
-
 #if WITH_SPLICE
+	bool use_splice : 1;
 	struct splice_pipe pipe;
 #endif
 	size_t pos;
@@ -76,10 +76,12 @@ struct transfer {
  * @param byt_transferred Optional pointer to a counter to accumulate the
  *        number of bytes successfully sent. May be NULL.
  * @param is_uplink true if this transfer is for uplink (client to server).
+ * @param use_splice true if splice(2) is preferred for this transfer.
  */
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	int src_fd, int dst_fd, uintmax_t *byt_transferred, bool is_uplink);
+	int src_fd, int dst_fd, uintmax_t *byt_transferred, bool is_uplink,
+	bool use_splice);
 
 /**
  * @brief Start the transfer by starting its watcher on the given loop.

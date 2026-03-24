@@ -21,6 +21,9 @@
 #include "proto/socks.h"
 #include "util.h"
 
+struct config;
+struct resolver;
+
 #include "utils/buffer.h"
 #include "utils/minmax.h"
 
@@ -157,10 +160,11 @@ struct dialreq {
 
 /**
  * @brief Create a new dial request structure
- * @param num_proxy Number of proxy slots to allocate
+ * @param base Base dial request to copy proxies from (may be NULL)
+ * @param num_proxy Number of additional proxy slots to allocate
  * @return Allocated dialreq structure, or NULL on memory allocation failure
  */
-struct dialreq *dialreq_new(size_t num_proxy);
+struct dialreq *dialreq_new(const struct dialreq *base, size_t num_proxy);
 
 /**
  * @brief Add a proxy to a dial request
@@ -220,6 +224,8 @@ struct dialer_cb {
  */
 struct dialer {
 	const struct dialreq *req;
+	const struct config *conf;
+	struct resolver *resolver;
 	struct resolve_query *resolve_query;
 	size_t jump;
 	int state;
@@ -248,9 +254,12 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback);
  * @param d Initialized dialer structure
  * @param loop libev event loop
  * @param req Dial request specifying target and proxy chain
+ * @param conf Configuration (ingress/egress policy, socket options, etc.)
+ * @param resolver DNS resolver
  */
 void dialer_do(
-	struct dialer *d, struct ev_loop *loop, const struct dialreq *req);
+	struct dialer *d, struct ev_loop *loop, const struct dialreq *req,
+	const struct config *conf, struct resolver *resolver);
 
 /**
  * @brief Cancel an ongoing dial operation

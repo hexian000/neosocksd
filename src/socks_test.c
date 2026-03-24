@@ -33,6 +33,19 @@
  * dialing and transfer are stubbed so parser behavior can be asserted in
  * isolation.
  */
+
+/**
+ * Test-only definition of struct globals (removed from util.h during refactoring).
+ * Used to stub G.conf and G.ruleset for test initialization.
+ */
+struct globals {
+	const struct config *conf;
+	struct resolver *resolver;
+	struct ruleset *ruleset;
+	struct server *server;
+	struct dialreq *basereq;
+};
+
 struct globals G = { 0 };
 
 static struct config test_conf = {
@@ -107,6 +120,18 @@ static void stub_reset(void)
 	G.ruleset = NULL;
 }
 
+/**
+ * Initialize server struct for testing.
+ * Sets minimal required fields so production code can access conf/resolver/etc.
+ */
+static void test_server_init(struct server *restrict s)
+{
+	s->conf = &test_conf;
+	s->resolver = NULL;
+	s->ruleset = G.ruleset;
+	s->basereq = NULL;
+}
+
 static void finish_ruleset(struct ev_loop *loop)
 {
 	if (STUB.ruleset_pending_cb == NULL) {
@@ -122,8 +147,9 @@ const char *dialer_strerror(const enum dialer_error err)
 	return "stub";
 }
 
-struct dialreq *dialreq_new(const size_t num_proxy)
+struct dialreq *dialreq_new(const struct dialreq *base, const size_t num_proxy)
 {
+	(void)base;
 	if (!STUB.dialreq_available) {
 		return NULL;
 	}
@@ -214,9 +240,13 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 	d->syserr = 0;
 }
 
-void dialer_do(struct dialer *d, struct ev_loop *loop, const struct dialreq *req)
+void dialer_do(
+	struct dialer *d, struct ev_loop *loop, const struct dialreq *req,
+	const struct config *conf, struct resolver *resolver)
 {
 	(void)req;
+	(void)conf;
+	(void)resolver;
 
 	switch (STUB.dialer_mode) {
 	case STUB_DIALER_NONE:
@@ -257,7 +287,7 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink)
+	const bool is_uplink, const bool use_splice)
 {
 	t->state = XFER_INIT;
 	t->state_cb = *callback;
@@ -265,6 +295,7 @@ void transfer_init(
 	t->dst_fd = dst_fd;
 	t->byt_transferred = byt_transferred;
 	t->is_uplink = is_uplink;
+	t->use_splice = use_splice;
 }
 
 void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)
@@ -307,7 +338,7 @@ static bool ruleset_stub_resolve(
 		return false;
 	}
 
-	callback->request.req = dialreq_new(0);
+	callback->request.req = dialreq_new(NULL, 0);
 	if (callback->request.req == NULL) {
 		return false;
 	}
@@ -457,7 +488,7 @@ T_DECLARE_CASE(invalid_version_rejected)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -485,7 +516,7 @@ T_DECLARE_CASE(socks5_unsupported_command_rsp)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -516,7 +547,7 @@ T_DECLARE_CASE(socks5_unsupported_atyp_rsp)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -547,7 +578,7 @@ T_DECLARE_CASE(socks5_userpass_empty_username_fails)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = true;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -580,7 +611,7 @@ T_DECLARE_CASE(socks5_no_acceptable_auth_method)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = true;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -610,7 +641,7 @@ T_DECLARE_CASE(socks5_valid_ipv4_request_connect_fail_rsp)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -643,7 +674,7 @@ T_DECLARE_CASE(socks5_userpass_domain_request_connect_fail_rsp)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = true;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -678,7 +709,7 @@ T_DECLARE_CASE(socks5_valid_ipv6_request_connect_fail_rsp)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -707,7 +738,7 @@ T_DECLARE_CASE(socks4_long_userid_rejected)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	memset(req, 'A', sizeof(req));
 	req[0] = SOCKS4;
@@ -752,7 +783,7 @@ T_DECLARE_CASE(socks4_valid_connect_rejected_when_dialreq_unavailable)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -795,7 +826,7 @@ T_DECLARE_CASE(socks4a_domain_connect_dialer_fail_rejected)
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -834,7 +865,7 @@ T_DECLARE_CASE(socks5_split_payload_connect_fail_rsp)
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload_split(
 		loop, &s, part1, sizeof(part1), part2, sizeof(part2), &peer_fd);
@@ -872,7 +903,7 @@ T_DECLARE_CASE(socks5_connect_timeout_rsp_ttl_expired)
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 0.02;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop_n(loop, 128, 2000);
@@ -910,7 +941,8 @@ T_DECLARE_CASE(socks5_ruleset_reject_rsp_fail)
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
-	G.conf = &test_conf;
+	test_server_init(&s);
+	s.ruleset = (struct ruleset *)&test_conf;
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -946,13 +978,13 @@ T_DECLARE_CASE(socks5_ruleset_async_then_dialer_fail_noallowed)
 	STUB.dialer_mode = STUB_DIALER_FAIL;
 	STUB.dialer_err = DIALER_ERR_PROXY_AUTH;
 	STUB.dialer_syserr = 0;
-	G.ruleset = (struct ruleset *)&test_conf;
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
-	G.conf = &test_conf;
+	test_server_init(&s);
+	s.ruleset = (struct ruleset *)&test_conf;
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -994,7 +1026,7 @@ T_DECLARE_CASE(socks5_dialer_system_error_netunreach)
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -1033,7 +1065,7 @@ T_DECLARE_CASE(socks5_dialer_success_transfer_finished)
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
 	test_conf.bidir_timeout = true;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -1073,7 +1105,7 @@ T_DECLARE_CASE(socks5_dialer_success_connected_transition)
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
 	test_conf.bidir_timeout = true;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);

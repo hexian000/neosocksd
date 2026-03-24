@@ -45,6 +45,8 @@ enum api_client_state {
 struct api_client_ctx {
 	struct gcbase gcbase;
 	struct ev_loop *loop;
+	const struct config *conf;
+	struct resolver *resolver;
 	enum api_client_state state;
 	struct api_client_cb cb;
 	ev_timer w_timeout;
@@ -162,7 +164,7 @@ recycle_conn(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 	ev_io_stop(loop, &ctx->w_socket);
 	const int fd = ctx->w_socket.fd;
 	ctx->w_socket.fd = -1;
-	conn_cache_put(loop, fd, ctx->dialreq);
+	conn_cache_put(loop, fd, ctx->dialreq, ctx->conf->conn_cache);
 }
 
 static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
@@ -408,7 +410,8 @@ static bool api_client_do(
 	struct ev_loop *loop, struct api_client_ctx **restrict pctx,
 	struct dialreq *restrict req, const char *restrict uri,
 	const void *restrict payload, const size_t len,
-	const struct api_client_cb *restrict in_cb)
+	const struct api_client_cb *restrict in_cb,
+	const struct config *restrict conf, struct resolver *restrict resolver)
 {
 	CHECK(len <= INT_MAX);
 	struct api_client_ctx *restrict ctx =
@@ -420,6 +423,8 @@ static bool api_client_do(
 	}
 	ctx->state = STATE_CLIENT_INIT;
 	ctx->loop = loop;
+	ctx->conf = conf;
+	ctx->resolver = resolver;
 	ctx->dialreq = req;
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, on_header);
@@ -429,7 +434,7 @@ static bool api_client_do(
 		return false;
 	}
 	ctx->cb = *in_cb;
-	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ev_timer_init(&ctx->w_timeout, timeout_cb, ctx->conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 	ev_idle_init(&ctx->w_process, process_cb);
 	ctx->w_process.data = ctx;
@@ -449,7 +454,7 @@ static bool api_client_do(
 	if (pctx != NULL) {
 		*pctx = ctx;
 	}
-	const int fd = conn_cache_get(loop, req);
+	const int fd = conn_cache_get(loop, req, conf->conn_cache);
 	if (fd != -1) {
 		LOGV_F("api_client: reusing cached connection [fd:%d]", fd);
 		ctx->parser.fd = fd;
@@ -459,28 +464,31 @@ static bool api_client_do(
 		ev_io_start(loop, &ctx->w_socket);
 	} else {
 		ctx->state = STATE_CLIENT_CONNECT;
-		dialer_do(&ctx->dialer, loop, req);
+		dialer_do(&ctx->dialer, loop, req, ctx->conf, ctx->resolver);
 	}
 	return true;
 }
 
 void api_client_invoke(
 	struct ev_loop *restrict loop, struct dialreq *restrict req,
-	const void *restrict payload, const size_t len)
+	const void *restrict payload, const size_t len,
+	const struct config *restrict conf, struct resolver *restrict resolver)
 {
 	(void)api_client_do(
 		loop, NULL, req, "/ruleset/invoke", payload, len,
-		&(struct api_client_cb){ NULL, NULL });
+		&(struct api_client_cb){ NULL, NULL }, conf, resolver);
 }
 
 bool api_client_rpcall(
 	struct ev_loop *restrict loop, struct api_client_ctx **restrict pctx,
 	struct dialreq *restrict req, const void *restrict payload,
-	const size_t len, const struct api_client_cb *restrict cb)
+	const size_t len, const struct api_client_cb *restrict cb,
+	const struct config *restrict conf, struct resolver *restrict resolver)
 {
 	ASSERT(cb->func != NULL);
 	return api_client_do(
-		loop, pctx, req, "/ruleset/rpcall", payload, len, cb);
+		loop, pctx, req, "/ruleset/rpcall", payload, len, cb, conf,
+		resolver);
 }
 
 void api_client_cancel(

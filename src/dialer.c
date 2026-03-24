@@ -454,9 +454,9 @@ int dialreq_format(
 	return n;
 }
 
-struct dialreq *dialreq_new(const size_t num_proxy)
+struct dialreq *
+dialreq_new(const struct dialreq *restrict base, const size_t num_proxy)
 {
-	struct dialreq *restrict base = G.basereq;
 	const size_t num_base_proxy = (base != NULL) ? base->num_proxy : 0;
 	struct dialreq *restrict req = DIALREQ_NEW(num_base_proxy + num_proxy);
 	if (req == NULL) {
@@ -1412,7 +1412,7 @@ static bool connect_sa(
 	const struct sockaddr *restrict sa)
 {
 	/* Enforce gateway restrictions */
-	if (G.conf->ingress && !sa_is_local(sa)) {
+	if (d->conf->ingress && !sa_is_local(sa)) {
 		char addr_str[64];
 		sa_format(addr_str, sizeof(addr_str), sa);
 		LOGD_F("blocked non-local address %s", addr_str);
@@ -1420,7 +1420,7 @@ static bool connect_sa(
 		d->syserr = 0;
 		return false;
 	}
-	if (G.conf->egress && sa_is_local(sa)) {
+	if (d->conf->egress && sa_is_local(sa)) {
 		char addr_str[64];
 		sa_format(addr_str, sizeof(addr_str), sa);
 		LOGD_F("blocked local address %s", addr_str);
@@ -1448,7 +1448,7 @@ static bool connect_sa(
 		d->syserr = err;
 		return false;
 	}
-	const struct config *restrict conf = G.conf;
+	const struct config *restrict conf = d->conf;
 #if WITH_NETDEVICE
 	if (conf->netdev != NULL) {
 		socket_bind_netdev(fd, conf->netdev);
@@ -1602,12 +1602,12 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 		host[addr->domain.len] = '\0';
 		d->state = STATE_RESOLVE;
 		struct resolve_query *restrict q = resolve_do(
-			G.resolver,
+			d->resolver,
 			(struct resolve_cb){
 				.func = resolve_cb,
 				.data = d,
 			},
-			host, NULL, G.conf->resolve_pf);
+			host, NULL, d->conf->resolve_pf);
 		if (q == NULL) {
 			ev_feed_event(loop, &d->w_finish, EV_CUSTOM);
 			return;
@@ -1657,7 +1657,8 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
  */
 void dialer_do(
 	struct dialer *restrict d, struct ev_loop *loop,
-	const struct dialreq *restrict req)
+	const struct dialreq *restrict req, const struct config *restrict conf,
+	struct resolver *restrict resolver)
 {
 	/* Log the dial request for debugging */
 	if (LOGLEVEL(VERBOSE)) {
@@ -1670,6 +1671,8 @@ void dialer_do(
 
 	/* Store request and start the state machine */
 	d->req = req;
+	d->conf = conf;
+	d->resolver = resolver;
 	d->err = DIALER_OK;
 	d->syserr = 0;
 	dialer_start(d, loop);

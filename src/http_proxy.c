@@ -186,9 +186,10 @@ static void http_ctx_finalize(struct gcbase *restrict obj)
 	VBUF_FREE(ctx->parser.cbuf);
 }
 
-static struct dialreq *make_dialreq(const char *restrict addr_str)
+static struct dialreq *
+make_dialreq(struct http_ctx *restrict ctx, const char *restrict addr_str)
 {
-	struct dialreq *req = dialreq_new(0);
+	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
 	if (req == NULL) {
 		LOGOOM();
 		return NULL;
@@ -208,7 +209,9 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
-	dialer_do(&ctx->dialer, loop, ctx->dialreq);
+	dialer_do(
+		&ctx->dialer, loop, ctx->dialreq, ctx->s->conf,
+		ctx->s->resolver);
 }
 
 #if WITH_RULESET
@@ -255,9 +258,9 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
-	struct ruleset *restrict ruleset = G.ruleset;
-	ASSERT(ruleset != NULL);
 	struct http_ctx *restrict ctx = watcher->data;
+	struct ruleset *restrict ruleset = ctx->s->ruleset;
+	ASSERT(ruleset != NULL);
 	ASSERT(ctx->state == STATE_PROCESS);
 
 	unsigned char buf[512];
@@ -267,7 +270,8 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		buf, sizeof(buf), &username, &password,
 		ctx->parser.hdr.proxy_authorization.type,
 		ctx->parser.hdr.proxy_authorization.credentials);
-	if (G.conf->auth_required && (username == NULL || password == NULL)) {
+	if (ctx->s->conf->auth_required &&
+	    (username == NULL || password == NULL)) {
 		RESPHDR_BEGIN(
 			ctx->parser.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
 		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
@@ -307,14 +311,14 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	const char *addr_str = ctx->parser.msg.req.url;
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "http: CONNECT `%s'", addr_str);
 #if WITH_RULESET
-	const struct ruleset *restrict ruleset = G.ruleset;
+	const struct ruleset *restrict ruleset = ctx->s->ruleset;
 	if (ruleset != NULL) {
 		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
 #endif
 
-	ctx->dialreq = make_dialreq(addr_str);
+	ctx->dialreq = make_dialreq(ctx, addr_str);
 	http_connect(loop, ctx);
 }
 
@@ -354,7 +358,7 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_stop(loop, &ctx->w_send);
 	dialreq_free(ctx->dialreq);
 
-	if (G.conf->bidir_timeout) {
+	if (ctx->s->conf->bidir_timeout) {
 		ctx->state = STATE_ESTABLISHED;
 	} else {
 		mark_ready(loop, ctx);
@@ -367,10 +371,10 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	transfer_init(
 		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true);
+		&stats->byt_up, true, ctx->s->conf->pipe);
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false);
+		&stats->byt_down, false, ctx->s->conf->pipe);
 
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx,
@@ -544,7 +548,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	ctx->accepted_fd = fd;
 	ctx->dialed_fd = -1;
 
-	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ev_timer_init(&ctx->w_timeout, timeout_cb, s->conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 	ev_io_init(&ctx->w_recv, recv_cb, fd, EV_READ);
 	ctx->w_recv.data = ctx;

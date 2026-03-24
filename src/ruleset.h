@@ -23,7 +23,10 @@
 struct ev_loop;
 struct stream;
 struct ruleset;
+struct config;
 struct dialreq;
+struct resolver;
+struct server;
 
 struct ruleset_vmstats {
 	size_t num_object; /**< Number of allocated Lua objects */
@@ -43,9 +46,25 @@ struct ruleset_vmstats {
  * memory tracking capabilities.
  *
  * @param loop Event loop for asynchronous operations
+ * @param conf Configuration for the ruleset
+ * @param resolver DNS resolver for name resolution
+ * @param basereq Base dial request prepended to all outbound connections
  * @return New ruleset instance, or NULL on failure
  */
-struct ruleset *ruleset_new(struct ev_loop *restrict loop);
+struct ruleset *ruleset_new(
+	struct ev_loop *restrict loop, const struct config *restrict conf,
+	struct resolver *restrict resolver, struct dialreq *restrict basereq);
+
+/**
+ * @brief Attach the proxy server instance to the ruleset.
+ *
+ * Must be called after the main server is started so that Lua statistics
+ * queries (neosocksd.stats()) can return live session counters.
+ *
+ * @param r Ruleset instance
+ * @param s Main proxy server (may be NULL to detach)
+ */
+void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s);
 
 /**
  * @brief Free a ruleset instance

@@ -135,13 +135,14 @@ static int comp_timestamp(const void *a, const void *b)
 	return 0;
 }
 
-static void
-append_vmstats(struct stream *restrict w, const struct ruleset_vmstats *vm)
+static void append_vmstats(
+	struct stream *restrict w, const struct ruleset_vmstats *vm,
+	const struct config *restrict conf)
 {
 	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
 	FORMAT_SI(objects, (double)vm->num_object);
 
-	const int memlimit_mb = G.conf->memlimit;
+	const int memlimit_mb = conf->memlimit;
 	if (memlimit_mb > 0) {
 		FORMAT_BYTES(memlimit, ((double)memlimit_mb) * 0x1p20);
 		(void)io_bufprintf(
@@ -257,7 +258,7 @@ static void server_stats(
 	const struct server_stats *restrict stats = &s->stats;
 	const struct listener_stats *restrict lstats = &s->l.stats;
 	const struct resolver_stats *restrict resolv_stats =
-		resolver_stats(G.resolver);
+		resolver_stats(s->resolver);
 	const time_t server_time = time(NULL);
 
 	char timestamp[32];
@@ -289,11 +290,11 @@ static void server_stats(
 
 #if WITH_RULESET
 	(void)io_bufprintf(w, "%-20s: %zu\n", "API Conn Cache", conn_cache.len);
-	const struct ruleset *ruleset = G.ruleset;
+	const struct ruleset *ruleset = s->ruleset;
 	if (ruleset != NULL && runtime) {
 		struct ruleset_vmstats vmstats;
 		ruleset_vmstats(ruleset, &vmstats);
-		append_vmstats(w, &vmstats);
+		append_vmstats(w, &vmstats, s->conf);
 	}
 #endif
 
@@ -408,7 +409,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 #if WITH_RULESET
-	struct ruleset *ruleset = G.ruleset;
+	struct ruleset *ruleset = ctx->s->ruleset;
 	if (!stateless && ruleset != NULL) {
 		size_t len;
 		const char *s = ruleset_stats(ruleset, dt, query, &len);
@@ -711,7 +712,7 @@ static void handle_ruleset_gc(
 			w, "%-20s: %s (%s objects)\n", "Difference",
 			freed_bytes, freed_objects);
 	}
-	append_vmstats(w, &vmstats);
+	append_vmstats(w, &vmstats, ctx->s->conf);
 	{
 		FORMAT_DURATION(timecost, make_duration_nanos(end - start));
 		(void)io_bufprintf(w, "Time Cost           : %s\n", timecost);
@@ -743,7 +744,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	ev_idle_stop(loop, watcher);
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
-	struct ruleset *ruleset = G.ruleset;
+	struct ruleset *ruleset = ctx->s->ruleset;
 	ASSERT(ruleset != NULL);
 
 	char *segment;
@@ -800,7 +801,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 static void
 http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	if (G.ruleset == NULL) {
+	if (ctx->s->ruleset == NULL) {
 		SEND_ERRSTR(loop, ctx, "ruleset is not enabled on the server");
 		return;
 	}
@@ -969,7 +970,7 @@ static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	ctx->keepalive = false;
 	ctx->state = STATE_REQUEST;
 	ev_timer_stop(loop, &ctx->w_timeout);
-	ev_timer_set(&ctx->w_timeout, G.conf->timeout, 0.0);
+	ev_timer_set(&ctx->w_timeout, ctx->s->conf->timeout, 0.0);
 	ev_timer_start(loop, &ctx->w_timeout);
 	ev_io_start(loop, &ctx->w_recv);
 }
@@ -1071,7 +1072,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ctx->accepted_fd = fd;
 	ctx->dialed_fd = -1;
 
-	ev_timer_init(&ctx->w_timeout, timeout_cb, G.conf->timeout, 0.0);
+	ev_timer_init(&ctx->w_timeout, timeout_cb, s->conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
 	ev_io_init(&ctx->w_recv, recv_cb, fd, EV_READ);
 	ctx->w_recv.data = ctx;

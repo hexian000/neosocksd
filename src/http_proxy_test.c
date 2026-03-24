@@ -32,6 +32,19 @@
  * Dialer, transfer and ruleset are stubbed so the tests can isolate protocol
  * parsing and error response paths.
  */
+
+/**
+ * Test-only definition of struct globals (removed from util.h during refactoring).
+ * Used to stub G.conf and G.ruleset for test initialization.
+ */
+struct globals {
+	const struct config *conf;
+	struct resolver *resolver;
+	struct ruleset *ruleset;
+	struct server *server;
+	struct dialreq *basereq;
+};
+
 struct globals G = { 0 };
 
 static struct config test_conf = {
@@ -84,6 +97,18 @@ static struct stub_state S = {
 
 static int_least32_t ruleset_state_token = 0;
 
+/**
+ * Initialize server struct for testing.
+ * Sets minimal required fields so production code can access conf/resolver/etc.
+ */
+static void test_server_init(struct server *restrict s)
+{
+	s->conf = &test_conf;
+	s->resolver = NULL;
+	s->ruleset = G.ruleset;
+	s->basereq = NULL;
+}
+
 static void reset_stub_state(void)
 {
 	S.dialreq_new_ok = false;
@@ -105,7 +130,6 @@ static void reset_stub_state(void)
 	test_conf.auth_required = false;
 	test_conf.bidir_timeout = false;
 	G.ruleset = NULL;
-	G.conf = &test_conf;
 }
 
 const char *dialer_strerror(const enum dialer_error err)
@@ -114,8 +138,9 @@ const char *dialer_strerror(const enum dialer_error err)
 	return "stub";
 }
 
-struct dialreq *dialreq_new(const size_t num_proxy)
+struct dialreq *dialreq_new(const struct dialreq *base, const size_t num_proxy)
 {
+	(void)base;
 	(void)num_proxy;
 	if (!S.dialreq_new_ok) {
 		return NULL;
@@ -206,10 +231,14 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 	d->syserr = 0;
 }
 
-void dialer_do(struct dialer *d, struct ev_loop *loop, const struct dialreq *req)
+void dialer_do(
+	struct dialer *d, struct ev_loop *loop, const struct dialreq *req,
+	const struct config *conf, struct resolver *resolver)
 {
 	d->req = req;
 	(void)loop;
+	(void)conf;
+	(void)resolver;
 	d->err = S.dialer_err;
 	d->syserr = S.dialer_syserr;
 	if (!S.dialer_invoke_now) {
@@ -228,7 +257,7 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink)
+	const bool is_uplink, const bool use_splice)
 {
 	t->state = XFER_INIT;
 	t->state_cb = *callback;
@@ -236,6 +265,7 @@ void transfer_init(
 	(void)dst_fd;
 	t->byt_transferred = byt_transferred;
 	(void)is_uplink;
+	(void)use_splice;
 }
 
 void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)
@@ -283,7 +313,7 @@ bool ruleset_resolve(
 	}
 	callback->request.req = NULL;
 	if (S.ruleset_reply_with_req) {
-		callback->request.req = dialreq_new(0);
+		callback->request.req = dialreq_new(NULL, 0);
 	}
 	if (S.ruleset_finish_now && S.ruleset_loop != NULL) {
 		callback->w_finish.cb(
@@ -423,7 +453,7 @@ static void init_server(struct ev_loop **loop, struct server *restrict s)
 	*loop = ev_loop_new(0);
 	T_CHECK(*loop != NULL);
 	s->loop = *loop;
-	G.conf = &test_conf;
+	test_server_init(s);
 }
 
 static void start_serve(
@@ -472,7 +502,7 @@ T_DECLARE_CASE(non_connect_returns_403)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
@@ -521,7 +551,7 @@ T_DECLARE_CASE(malformed_proxy_authorization_returns_400)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
@@ -549,7 +579,7 @@ T_DECLARE_CASE(invalid_te_returns_400)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
@@ -577,7 +607,7 @@ T_DECLARE_CASE(connect_with_invalid_target_returns_500)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
-	G.conf = &test_conf;
+	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);

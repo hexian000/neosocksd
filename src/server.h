@@ -10,6 +10,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct config;
+struct dialreq;
+struct resolver;
+struct ruleset;
+
 struct listener_stats {
 	uintmax_t num_accept;
 	uintmax_t num_serve;
@@ -52,6 +57,13 @@ struct server {
 	struct listener l;
 	struct server_stats stats;
 	void *data;
+
+	const struct config *conf;
+	struct resolver *resolver;
+	struct dialreq *basereq;
+#if WITH_RULESET
+	struct ruleset *ruleset;
+#endif
 
 	serve_fn serve;
 };

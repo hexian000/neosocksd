@@ -15,6 +15,11 @@ _Static_assert(LUA_VERSION_NUM >= 503, "ruleset requires Lua >= 5.3");
 #include <stdbool.h>
 #include <stddef.h>
 
+struct config;
+struct dialreq;
+struct resolver;
+struct server;
+
 /**
  * @brief Main ruleset structure
  *
@@ -28,6 +33,10 @@ struct ruleset {
 		int memlimit_kb;
 		bool traceback;
 	} config;
+	const struct config *conf;
+	struct resolver *resolver;
+	struct server *server;
+	struct dialreq *basereq;
 	lua_State *L;
 	ev_timer w_ticker;
 	ev_idle w_idle;

@@ -165,7 +165,8 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 	}
 
 	/* no lua errors now */
-	struct dialreq *restrict req = dialreq_new((size_t)(n - 1));
+	struct ruleset *restrict r = aux_getruleset(L);
+	struct dialreq *restrict req = dialreq_new(r->basereq, (size_t)(n - 1));
 	if (req == NULL) {
 		LOGOOM();
 		lua_pop(L, n);
