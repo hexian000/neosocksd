@@ -165,8 +165,8 @@ struct testing_ctx {
 
 /*
  * T_RESULT(ctx)
- *   Evaluates to EXIT_SUCCESS when ctx recorded no failures, EXIT_FAILURE
- *   otherwise.  Intended as the return value of main().
+ *   Evaluates to true when ctx recorded no failures, false otherwise.
+ *   Intended for boolean success checks.
  */
 #define T_RESULT(ctx_) ((ctx_).failed == 0)
 

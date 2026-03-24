@@ -34,9 +34,9 @@ agent.RELAY_DOMAIN = ".relay.neosocksd.internal"
 
 agent.BOOTSTRAP_DELAY = 10
 agent.GOSSIP_TARGET_COUNT = 2
-agent.SYNC_INTERVAL_BASE = 600
-agent.SYNC_INTERVAL_RANDOM = 600
-agent.TIMESTAMP_TOLERANCE = 600
+agent.SYNC_INTERVAL_BASE = 300
+agent.SYNC_INTERVAL_RANDOM = 300
+agent.TIMESTAMP_TOLERANCE = 300
 agent.PEERDB_EXPIRY_TIME = 7200
 
 agent.verbose = table.get(_G.agent, "verbose")
@@ -334,7 +334,7 @@ local function sync_via(conn)
 end
 
 local function gossip(peername)
-    -- randomly pick up to 2 connections to gossip (excluding the source)
+    -- randomly pick connections to gossip (excluding the source)
     local candidates = {}
     for connid, conn in pairs(agent.conns) do
         -- find the peername for this connection
