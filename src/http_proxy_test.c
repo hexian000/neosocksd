@@ -53,6 +53,10 @@ static struct config test_conf = {
 	.bidir_timeout = false,
 };
 
+static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
+static const ev_tstamp TEST_WAIT_RECV_SEC = 0.256;
+static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 1.0;
+
 const char *proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
@@ -370,45 +374,68 @@ static int write_all(const int fd, const void *buf, size_t len)
 	return 0;
 }
 
+struct test_watchdog {
+	bool fired;
+};
+
+static void
+test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+{
+	struct test_watchdog *const watchdog = w->data;
+	(void)revents;
+	watchdog->fired = true;
+	ev_break(loop, EVBREAK_ONE);
+}
+
+static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
+{
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	while (!watchdog.fired) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	ev_timer_stop(loop, &w_timeout);
+}
+
 static void drive_loop(struct ev_loop *loop)
 {
-	for (size_t i = 0; i < 64; i++) {
-		ev_run(loop, EVRUN_NOWAIT);
-		(void)usleep(1000);
-	}
+	test_run_for(loop, TEST_WAIT_SHORT_SEC);
 }
 
 static ssize_t recv_all_with_timeout(
-	const int fd, unsigned char *restrict buf, const size_t cap)
+	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
+	const size_t cap)
 {
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
 	size_t off = 0;
-	/*
-	 * Poll non-blocking reads for a short window to avoid test hangs when
-	 * peer closure timing varies across platforms.
-	 */
-	size_t idle_rounds = 0;
-	const size_t idle_rounds_max = 200;
-	while (off < cap) {
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_RECV_SEC, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	while (!watchdog.fired && off < cap) {
 		const ssize_t n = recv(fd, buf + off, cap - off, MSG_DONTWAIT);
 		if (n < 0) {
 			if (errno == EINTR) {
 				continue;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				if (idle_rounds++ >= idle_rounds_max) {
-					break;
-				}
-				(void)usleep(1000);
+				ev_run(loop, EVRUN_ONCE);
 				continue;
 			}
+			ev_timer_stop(loop, &w_timeout);
 			return -1;
 		}
 		if (n == 0) {
 			break;
 		}
 		off += (size_t)n;
-		idle_rounds = 0;
 	}
+	ev_timer_stop(loop, &w_timeout);
 	return (ssize_t)off;
 }
 
@@ -472,11 +499,12 @@ static void start_serve(
 	*peer_fd = sv[1];
 }
 
-static bool
-assert_response_status(const int peer_fd, const char *restrict status)
+static bool assert_response_status(
+	struct ev_loop *loop, const int peer_fd, const char *restrict status)
 {
 	unsigned char rsp[1024];
-	const ssize_t n = recv_all_with_timeout(peer_fd, rsp, sizeof(rsp));
+	const ssize_t n =
+		recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
 	if (n <= 0) {
 		return false;
 	}
@@ -510,7 +538,7 @@ T_DECLARE_CASE(non_connect_returns_403)
 	{
 		unsigned char rsp[1024];
 		const ssize_t n =
-			recv_all_with_timeout(peer_fd, rsp, sizeof(rsp));
+			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
 		T_EXPECT(n > 0);
 		T_EXPECT(has_http_status(rsp, (size_t)n, "403"));
 	}
@@ -534,7 +562,7 @@ T_DECLARE_CASE(split_request_is_parsed_incrementally)
 	T_CHECK(write_all(peer_fd, "ample\r\n\r\n", 9) == 0);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "403"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "403"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -559,7 +587,7 @@ T_DECLARE_CASE(malformed_proxy_authorization_returns_400)
 	{
 		unsigned char rsp[1024];
 		const ssize_t n =
-			recv_all_with_timeout(peer_fd, rsp, sizeof(rsp));
+			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
 		T_EXPECT(n > 0);
 		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
 	}
@@ -587,7 +615,7 @@ T_DECLARE_CASE(invalid_te_returns_400)
 	{
 		unsigned char rsp[1024];
 		const ssize_t n =
-			recv_all_with_timeout(peer_fd, rsp, sizeof(rsp));
+			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
 		T_EXPECT(n > 0);
 		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
 	}
@@ -615,7 +643,7 @@ T_DECLARE_CASE(connect_with_invalid_target_returns_500)
 	{
 		unsigned char rsp[1024];
 		const ssize_t n =
-			recv_all_with_timeout(peer_fd, rsp, sizeof(rsp));
+			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
 		T_EXPECT(n > 0);
 		T_EXPECT(has_http_status(rsp, (size_t)n, "500"));
 	}
@@ -644,7 +672,7 @@ T_DECLARE_CASE(valid_connect_dialer_error_returns_502)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "502"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -676,7 +704,7 @@ T_DECLARE_CASE(valid_connect_established_with_hijack)
 
 	{
 		const ssize_t n =
-			recv_all_with_timeout(peer_fd, rsp, sizeof(rsp));
+			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
 		T_EXPECT(n > 0);
 		T_EXPECT(
 			memmem(rsp, (size_t)n, "200 Connection established",
@@ -709,7 +737,7 @@ T_DECLARE_CASE(connect_with_transfer_encoding_chunked_is_accepted)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "502"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -729,7 +757,7 @@ T_DECLARE_CASE(authorization_header_without_space_returns_400)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "400"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "400"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -753,7 +781,7 @@ T_DECLARE_CASE(ruleset_auth_required_without_basic_credentials_returns_407)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "407"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "407"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -777,7 +805,7 @@ T_DECLARE_CASE(ruleset_auth_required_with_invalid_basic_returns_407)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "407"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "407"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -802,7 +830,7 @@ T_DECLARE_CASE(ruleset_resolve_failure_returns_500)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "500"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -827,7 +855,7 @@ T_DECLARE_CASE(ruleset_finish_without_req_returns_500)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "500"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -855,7 +883,7 @@ T_DECLARE_CASE(ruleset_finish_with_req_and_dialer_error_returns_502)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(peer_fd, "502"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -881,10 +909,7 @@ T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
 
-	for (size_t i = 0; i < 1000; i++) {
-		ev_run(loop, EVRUN_NOWAIT);
-		(void)usleep(1000);
-	}
+	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
 
 	T_EXPECT(S.ruleset_cancel_calls > 0);
 
@@ -909,10 +934,7 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
 
-	for (size_t i = 0; i < 1000; i++) {
-		ev_run(loop, EVRUN_NOWAIT);
-		(void)usleep(1000);
-	}
+	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
 
 	T_EXPECT(S.dialer_cancel_calls > 0);
 
@@ -942,5 +964,5 @@ int main(void)
 	T_RUN_CASE(t, timeout_in_process_state_cancels_ruleset);
 	T_RUN_CASE(t, timeout_in_connect_state_cancels_dialer);
 
-	return T_RESULT(t) ? 0 : 1;
+	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

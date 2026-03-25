@@ -54,6 +54,9 @@ static struct config test_conf = {
 	.bidir_timeout = false,
 };
 
+static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
+static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 0.256;
+
 const char *proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
@@ -414,23 +417,36 @@ static ssize_t recv_nowait(const int fd, void *buf, const size_t len)
 	}
 }
 
-static void drive_loop(struct ev_loop *loop)
-{
-	for (size_t i = 0; i < 64; i++) {
-		ev_run(loop, EVRUN_NOWAIT);
-		(void)usleep(1000);
-	}
-}
+struct test_watchdog {
+	bool fired;
+};
 
 static void
-drive_loop_n(struct ev_loop *loop, const size_t n, const useconds_t us)
+test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 {
-	for (size_t i = 0; i < n; i++) {
-		ev_run(loop, EVRUN_NOWAIT);
-		if (us != 0) {
-			(void)usleep(us);
-		}
+	struct test_watchdog *const watchdog = w->data;
+	(void)revents;
+	watchdog->fired = true;
+	ev_break(loop, EVBREAK_ONE);
+}
+
+static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
+{
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	while (!watchdog.fired) {
+		ev_run(loop, EVRUN_ONCE);
 	}
+	ev_timer_stop(loop, &w_timeout);
+}
+
+static void drive_loop(struct ev_loop *loop)
+{
+	test_run_for(loop, TEST_WAIT_SHORT_SEC);
 }
 
 static void serve_payload(
@@ -906,7 +922,7 @@ T_DECLARE_CASE(socks5_connect_timeout_rsp_ttl_expired)
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
-	drive_loop_n(loop, 128, 2000);
+	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
 
 	{
 		unsigned char rsp[32];
@@ -1147,5 +1163,5 @@ int main(void)
 	T_RUN_CASE(t, socks5_dialer_success_transfer_finished);
 	T_RUN_CASE(t, socks5_dialer_success_connected_transition);
 
-	return T_RESULT(t) ? 0 : 1;
+	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

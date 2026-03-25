@@ -32,7 +32,7 @@ case "$1" in
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -DCMAKE_SKIP_RPATH=ON \
         ..
-    cmake --build .
+    cmake --build . -t neosocksd
     ls -lh bin/neosocksd
     ;;
 "vanilla")
@@ -44,7 +44,7 @@ case "$1" in
         -DENABLE_RULESET=OFF \
         ..
     cp compile_commands.json ../
-    cmake --build .
+    cmake --build . -t neosocksd
     ls -lh bin/neosocksd
     ;;
 "posix")
@@ -56,7 +56,7 @@ case "$1" in
         -DFORCE_POSIX=ON \
         ..
     cp compile_commands.json ../
-    cmake --build .
+    cmake --build . -t neosocksd
     ls -lh bin/neosocksd
     ;;
 "clang")
@@ -68,7 +68,7 @@ case "$1" in
         -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld --rtlib=compiler-rt" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         ..
-    cmake --build .
+    cmake --build . -t neosocksd
     (cd bin && llvm-objdump -drwS neosocksd >neosocksd.S)
     ls -lh bin/neosocksd
     ;;
@@ -79,7 +79,7 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" \
         ..
-    cmake --build .
+    cmake --build . -t neosocksd
     HOST="$(cc -dumpmachine)"
     zip -9j "neosocksd-win32.${HOST}.zip" \
         "/usr/bin/msys-2.0.dll" \
@@ -100,7 +100,7 @@ case "$1" in
         -DENABLE_MIMALLOC=ON \
         -DLINK_STATIC_LIBS=ON \
         ..
-    cmake --build .
+    cmake --build . -t neosocksd
     ls -lh bin/neosocksd
     ;;
 "san")
@@ -113,7 +113,7 @@ case "$1" in
         -DENABLE_SANITIZERS=ON \
         ..
     cp compile_commands.json ../
-    cmake --build .
+    cmake --build . -t neosocksd
     ls -lh bin/neosocksd
     ;;
 "min")
@@ -123,7 +123,7 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="MinSizeRel" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         ..
-    cmake --build .
+    cmake --build . -t neosocksd
     ls -lh bin/neosocksd
     ;;
 "p")
@@ -133,7 +133,7 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         ..
-    cmake --build .
+    cmake --build . -t neosocksd
     (cd bin && objdump -drwS neosocksd >neosocksd.S)
     ls -lh bin/neosocksd
     ;;
@@ -145,7 +145,7 @@ case "$1" in
         -DCMAKE_BUILD_TYPE="Release" \
         ..
     cp compile_commands.json ../
-    cmake --build .
+    cmake --build . -t neosocksd
     ls -lh bin/neosocksd
     ;;
 "d")

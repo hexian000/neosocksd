@@ -166,7 +166,7 @@ if(ENABLE_MIMALLOC)
 endif()
 
 include(CheckLibraryExists)
-check_library_exists(m ldexp "" LIBM)
+check_library_exists(m floor "" LIBM)
 if(LIBM)
     target_link_libraries(neosocksd PRIVATE m)
 endif()
@@ -182,6 +182,8 @@ target_sources(neosocksd
     "${CMAKE_CURRENT_BINARY_DIR}/version.c"
 )
 
+# --- tests ---
+
 add_executable(socks_test
     socks_test.c
     socks.c
@@ -190,6 +192,9 @@ target_include_directories(socks_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(socks_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 target_compile_options(socks_test PRIVATE -pedantic -Wall -Wextra -Werror)
 target_link_libraries(socks_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(socks_test PRIVATE m)
+endif()
 
 if(FORCE_POSIX)
     target_compile_definitions(socks_test PRIVATE _POSIX_C_SOURCE=200809L)
@@ -209,6 +214,9 @@ target_include_directories(http_proxy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(http_proxy_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 target_compile_options(http_proxy_test PRIVATE -pedantic -Wall -Wextra -Werror)
 target_link_libraries(http_proxy_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(http_proxy_test PRIVATE m)
+endif()
 
 if(FORCE_POSIX)
     target_compile_definitions(http_proxy_test PRIVATE _POSIX_C_SOURCE=200809L)
@@ -217,3 +225,266 @@ else()
 endif()
 
 add_test(NAME http_proxy_test COMMAND http_proxy_test)
+
+add_executable(api_server_test
+    api_server_test.c
+    api_server.c
+    httputil.c
+    codec.c
+    "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+)
+target_include_directories(api_server_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(api_server_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(api_server_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(api_server_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(api_server_test PRIVATE m)
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(api_server_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(api_server_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME api_server_test COMMAND api_server_test)
+
+add_executable(api_client_test
+    api_client_test.c
+    api_client.c
+    httputil.c
+    codec.c
+)
+target_include_directories(api_client_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(api_client_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(api_client_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(api_client_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(api_client_test PRIVATE m)
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(api_client_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(api_client_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME api_client_test COMMAND api_client_test)
+
+add_executable(forward_test
+    forward_test.c
+    forward.c
+)
+target_include_directories(forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(forward_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(forward_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(forward_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(forward_test PRIVATE m)
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(forward_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(forward_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME forward_test COMMAND forward_test)
+
+add_executable(httputil_test
+    httputil_test.c
+    httputil.c
+    codec.c
+)
+target_include_directories(httputil_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(httputil_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(httputil_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(httputil_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(httputil_test PRIVATE m)
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(httputil_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(httputil_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME httputil_test COMMAND httputil_test)
+
+add_executable(codec_test
+    codec_test.c
+    codec.c
+)
+target_include_directories(codec_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(codec_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(codec_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(codec_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(codec_test PRIVATE m)
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(codec_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(codec_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME codec_test COMMAND codec_test)
+
+add_executable(dialer_test
+    dialer_test.c
+    dialer.c
+    util.c
+    resolver.c
+    "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+)
+target_include_directories(dialer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(dialer_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(dialer_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(dialer_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(dialer_test PRIVATE m)
+endif()
+
+if(WITH_CARES)
+    target_include_directories(dialer_test SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
+    target_link_libraries(dialer_test PRIVATE ${LIBCARES_LIBRARY})
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(dialer_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(dialer_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME dialer_test COMMAND dialer_test)
+
+if(WITH_LUA)
+    add_executable(regex_test
+        ruleset/regex_test.c
+        ruleset/regex.c
+    )
+    target_include_directories(regex_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(regex_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+    target_compile_options(regex_test PRIVATE -pedantic -Wall -Wextra -Werror)
+    target_link_libraries(regex_test PRIVATE csnippets miniz ${LUA_LIBRARY})
+    if(LIBM)
+        target_link_libraries(regex_test PRIVATE m)
+    endif()
+
+    if(FORCE_POSIX)
+        target_compile_definitions(regex_test PRIVATE _POSIX_C_SOURCE=200809L)
+    else()
+        target_compile_definitions(regex_test PRIVATE _GNU_SOURCE)
+    endif()
+
+    add_test(NAME regex_test COMMAND regex_test)
+
+    add_executable(time_test
+        ruleset/time_test.c
+        ruleset/time.c
+    )
+    target_include_directories(time_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(time_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+    target_compile_options(time_test PRIVATE -pedantic -Wall -Wextra -Werror)
+    target_link_libraries(time_test PRIVATE csnippets miniz ${LUA_LIBRARY})
+    if(LIBM)
+        target_link_libraries(time_test PRIVATE m)
+    endif()
+
+    if(FORCE_POSIX)
+        target_compile_definitions(time_test PRIVATE _POSIX_C_SOURCE=200809L)
+    else()
+        target_compile_definitions(time_test PRIVATE _GNU_SOURCE)
+    endif()
+
+    add_test(NAME time_test COMMAND time_test)
+
+    add_executable(base_test
+        ruleset/base_test.c
+        ruleset/base.c
+        util.c
+        dialer.c
+        resolver.c
+        "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    )
+    target_include_directories(base_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(base_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+    target_compile_options(base_test PRIVATE -pedantic -Wall -Wextra -Werror)
+    target_link_libraries(base_test PRIVATE csnippets miniz ${LIBEV_LIBRARY} ${LUA_LIBRARY})
+    if(LIBM)
+        target_link_libraries(base_test PRIVATE m)
+    endif()
+    if(WITH_CARES)
+        target_include_directories(base_test SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
+        target_link_libraries(base_test PRIVATE ${LIBCARES_LIBRARY})
+    endif()
+
+    if(FORCE_POSIX)
+        target_compile_definitions(base_test PRIVATE _POSIX_C_SOURCE=200809L)
+    else()
+        target_compile_definitions(base_test PRIVATE _GNU_SOURCE)
+    endif()
+
+    add_test(NAME base_test COMMAND base_test)
+
+    add_executable(marshal_test
+        ruleset/marshal_test.c
+        ruleset/marshal.c
+        ruleset/base.c
+        util.c
+        dialer.c
+        resolver.c
+        "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    )
+    target_include_directories(marshal_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(marshal_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+    target_compile_options(marshal_test PRIVATE -pedantic -Wall -Wextra -Werror)
+    target_link_libraries(marshal_test PRIVATE csnippets miniz ${LIBEV_LIBRARY} ${LUA_LIBRARY})
+    if(LIBM)
+        target_link_libraries(marshal_test PRIVATE m)
+    endif()
+    if(WITH_CARES)
+        target_include_directories(marshal_test SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
+        target_link_libraries(marshal_test PRIVATE ${LIBCARES_LIBRARY})
+    endif()
+
+    if(FORCE_POSIX)
+        target_compile_definitions(marshal_test PRIVATE _POSIX_C_SOURCE=200809L)
+    else()
+        target_compile_definitions(marshal_test PRIVATE _GNU_SOURCE)
+    endif()
+
+    add_test(NAME marshal_test COMMAND marshal_test)
+
+    add_executable(zlib_test
+        ruleset/zlib_test.c
+        ruleset/zlib.c
+        ruleset/base.c
+        codec.c
+        util.c
+        dialer.c
+        resolver.c
+        "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    )
+    target_include_directories(zlib_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(zlib_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+    target_compile_options(zlib_test PRIVATE -pedantic -Wall -Wextra -Werror)
+    target_link_libraries(zlib_test PRIVATE csnippets miniz ${LIBEV_LIBRARY} ${LUA_LIBRARY})
+    if(LIBM)
+        target_link_libraries(zlib_test PRIVATE m)
+    endif()
+    if(WITH_CARES)
+        target_include_directories(zlib_test SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
+        target_link_libraries(zlib_test PRIVATE ${LIBCARES_LIBRARY})
+    endif()
+
+    if(FORCE_POSIX)
+        target_compile_definitions(zlib_test PRIVATE _POSIX_C_SOURCE=200809L)
+    else()
+        target_compile_definitions(zlib_test PRIVATE _GNU_SOURCE)
+    endif()
+
+    add_test(NAME zlib_test COMMAND zlib_test)
+endif()

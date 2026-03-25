@@ -453,12 +453,16 @@ function agent.maintenance()
         info.timestamp = os.time()
         _G.peerdb[agent.peername] = info
     end
-    evlog("agent: probe finished")
+    if agent.verbose then
+        evlog("agent: probe finished")
+    end
     -- sync
     parallel_for("sync", agent.conns, function(_, conn)
         assert(sync_via(conn))
     end)
-    evlog("agent: sync finished")
+    if agent.verbose then
+        evlog("agent: sync finished")
+    end
     hosts, routes = build_index(_G.peerdb)
     evlog("agent: maintenance finished")
 end
