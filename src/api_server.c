@@ -259,12 +259,13 @@ static void server_stats(
 	const struct listener_stats *restrict lstats = &s->l.stats;
 	const struct resolver_stats *restrict resolv_stats =
 		resolver_stats(s->resolver);
-	const time_t server_time = time(NULL);
 
-	char timestamp[32];
-	(void)strftime(
-		timestamp, sizeof(timestamp), "%FT%T%z",
-		localtime(&server_time));
+	const time_t server_time = time(NULL);
+	char timestamp[32] = "(unknown)";
+	if (server_time != (time_t)-1) {
+		(void)format_rfc3339(
+			timestamp, sizeof(timestamp), server_time, false);
+	}
 	FORMAT_DURATION(str_uptime, make_duration_nanos(uptime));
 	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
 	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
