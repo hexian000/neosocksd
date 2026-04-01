@@ -13,7 +13,6 @@
 
 #include "io/stream.h"
 #include "net/http.h"
-#include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
@@ -38,8 +37,7 @@ struct api_client_ctx {
 	const struct config *conf;
 	struct api_client_cb cb;
 	ev_idle w_process;
-	struct http_client_ctx *hctx;
-	struct dialreq *dialreq;
+	struct http_client_ctx hctx;
 	struct {
 		const char *errmsg;
 		size_t errlen;
@@ -56,9 +54,8 @@ ASSERT_SUPER(struct gcbase, struct api_client_ctx, gcbase);
 static void
 api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 {
-	if (ctx->hctx != NULL) {
-		http_client_cancel(loop, ctx->hctx);
-		ctx->hctx = NULL;
+	if (ctx->hctx.state != STATE_CLIENT_INIT) {
+		http_client_cancel(loop, &ctx->hctx);
 	}
 	ev_idle_stop(loop, &ctx->w_process);
 }
@@ -74,8 +71,6 @@ static void api_client_finalize(struct gcbase *restrict obj)
 		ctx->result.stream = NULL;
 	}
 	VBUF_FREE(ctx->result.content);
-
-	dialreq_free(ctx->dialreq);
 }
 
 static void
@@ -121,26 +116,11 @@ static void api_client_finish(
 		return;                                                        \
 	} while (false)
 
-static void recycle_conn(
-	struct ev_loop *loop, struct api_client_ctx *restrict ctx,
-	const struct http_parser *restrict parser, const int fd)
-{
-	const char *conn = parser->hdr.connection;
-	if (ctx->dialreq == NULL ||
-	    (conn != NULL && strcasecmp(conn, "close") == 0)) {
-		LOGV("server wants to close the connection, skip caching");
-		CLOSE_FD(fd);
-		return;
-	}
-	conn_cache_put(loop, fd, ctx->dialreq, ctx->conf->conn_cache);
-}
-
 static void on_http_client_done(
 	struct ev_loop *loop, void *data, const char *errmsg,
-	const size_t errlen, struct http_parser *parser, const int fd)
+	const size_t errlen, struct http_parser *parser)
 {
 	struct api_client_ctx *restrict ctx = data;
-	ctx->hctx = NULL;
 
 	if (errmsg != NULL) {
 		api_client_finish(loop, ctx, errmsg, errlen, NULL);
@@ -162,13 +142,11 @@ static void on_http_client_done(
 		/* invoke: 2xx with empty body is success */
 		if (ctx->cb.func == NULL &&
 		    (content == NULL || VBUF_LEN(content) == 0)) {
-			recycle_conn(loop, ctx, parser, fd);
 			api_client_finish(loop, ctx, NULL, 0, NULL);
 			return;
 		}
 		/* rpcall: validate content type */
 		if (!check_rpcall_mime(parser->hdr.content.type)) {
-			recycle_conn(loop, ctx, parser, fd);
 			VBUF_FREE(content);
 			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 		}
@@ -179,7 +157,6 @@ static void on_http_client_done(
 		ctx->result.content = content;
 		api_client_finish(
 			loop, ctx, VBUF_DATA(content), VBUF_LEN(content), NULL);
-		CLOSE_FD(fd);
 		return;
 	} else {
 		/* Generic HTTP error response */
@@ -203,7 +180,6 @@ static void on_http_client_done(
 		ctx->result.content = content;
 		api_client_finish(
 			loop, ctx, VBUF_DATA(content), VBUF_LEN(content), NULL);
-		CLOSE_FD(fd);
 		return;
 	}
 
@@ -218,13 +194,10 @@ static void on_http_client_done(
 	if (r == NULL) {
 		LOGOOM();
 		VBUF_FREE(content);
-		CLOSE_FD(fd);
 		API_RETURN_ERROR(loop, ctx, "out of memory");
 	}
 
-	/* Return connection to cache when server allows keep-alive */
 	ctx->result.content = content;
-	recycle_conn(loop, ctx, parser, fd);
 	api_client_finish(loop, ctx, NULL, 0, r);
 }
 
@@ -271,14 +244,10 @@ static bool make_request(
 static bool parse_header(void *ctx, const char *key, char *value)
 {
 	struct api_client_ctx *restrict c = ctx;
-	ASSERT(c->hctx != NULL);
-	struct http_parser *restrict p = http_client_parser(c->hctx);
+	ASSERT(c->hctx.state != STATE_CLIENT_INIT);
+	struct http_parser *restrict p = &c->hctx.parser;
 
 	/* hop-by-hop headers */
-	if (strcasecmp(key, "Connection") == 0) {
-		p->hdr.connection = value;
-		return true;
-	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
 		return parsehdr_transfer_encoding(p, value);
 	}
@@ -315,8 +284,6 @@ static bool api_client_do(
 	}
 	ctx->loop = loop;
 	ctx->conf = conf;
-	ctx->dialreq = req;
-	ctx->hctx = NULL;
 	ctx->result.errmsg = NULL;
 	ctx->result.errlen = 0;
 	ctx->result.stream = NULL;
@@ -326,15 +293,9 @@ static bool api_client_do(
 		.func = on_http_client_done,
 		.data = ctx,
 	};
-	ctx->hctx = http_client_new(loop, on_header, &hcb, conf, resolver);
-	if (ctx->hctx == NULL) {
-		dialreq_free(req);
-		free(ctx);
-		return false;
-	}
-	if (!make_request(http_client_parser(ctx->hctx), uri, payload, len)) {
+	http_client_init(&ctx->hctx, loop, on_header, &hcb, conf, resolver);
+	if (!make_request(&ctx->hctx.parser, uri, payload, len)) {
 		LOGOOM();
-		http_client_cancel(loop, ctx->hctx);
 		dialreq_free(req);
 		free(ctx);
 		return false;
@@ -346,13 +307,7 @@ static bool api_client_do(
 	if (pctx != NULL) {
 		*pctx = ctx;
 	}
-	const int fd = conn_cache_get(loop, req, conf->conn_cache);
-	if (fd != -1) {
-		LOGV_F("api_client: reusing cached connection [fd:%d]", fd);
-		http_client_start_fd(loop, ctx->hctx, fd);
-	} else {
-		http_client_start(loop, ctx->hctx, req);
-	}
+	http_client_do(loop, &ctx->hctx, req);
 	return true;
 }
 

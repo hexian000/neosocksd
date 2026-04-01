@@ -11,11 +11,8 @@
  */
 #include "util.h"
 
-#include "resolver.h"
-
-#if WITH_RULESET
 #include "dialer.h"
-#endif
+#include "resolver.h"
 
 #if WITH_RULESET
 #include "algo/luahash.h"
@@ -110,7 +107,6 @@ void pipe_shrink(const size_t count)
 }
 #endif
 
-#if WITH_RULESET
 struct conn_cache conn_cache = { .len = 0 };
 
 static void conn_cache_init(void)
@@ -252,7 +248,6 @@ int conn_cache_get(
 	}
 	return -1;
 }
-#endif /* WITH_RULESET */
 
 #if defined(WIN32)
 #define PATH_SEPARATOR '\\'
@@ -296,8 +291,8 @@ void loadlibs(void)
 	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
 	resolver_init();
-#if WITH_RULESET
 	conn_cache_init();
+#if WITH_RULESET
 	LOGD("ruleset interpreter: " LUA_RELEASE);
 #endif
 }

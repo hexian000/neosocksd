@@ -8,38 +8,15 @@
 #include "util.h"
 
 #include "os/socket.h"
-#include "utils/class.h"
 #include "utils/debug.h"
-#include "utils/gc.h"
 #include "utils/slog.h"
 
 #include <ev.h>
 
 #include <errno.h>
 #include <stddef.h>
-#include <stdlib.h>
 #include <string.h>
-
-enum http_client_state {
-	STATE_CLIENT_INIT,
-	STATE_CLIENT_CONNECT,
-	STATE_CLIENT_REQUEST,
-	STATE_CLIENT_RESPONSE,
-};
-
-struct http_client_ctx {
-	struct gcbase gcbase;
-	struct ev_loop *loop;
-	const struct config *conf;
-	struct resolver *resolver;
-	enum http_client_state state;
-	struct http_client_cb cb;
-	ev_timer w_timeout;
-	ev_io w_socket;
-	struct dialer dialer;
-	struct http_parser parser;
-};
-ASSERT_SUPER(struct gcbase, struct http_client_ctx, gcbase);
+#include <strings.h>
 
 static void
 http_client_stop(struct ev_loop *loop, struct http_client_ctx *restrict ctx)
@@ -61,27 +38,29 @@ http_client_stop(struct ev_loop *loop, struct http_client_ctx *restrict ctx)
 	}
 }
 
-static void http_client_finalize(struct gcbase *restrict obj)
+static void http_client_cleanup(struct http_client_ctx *restrict ctx)
 {
-	struct http_client_ctx *restrict ctx =
-		DOWNCAST(struct gcbase, struct http_client_ctx, gcbase, obj);
-
 	http_client_stop(ctx->loop, ctx);
+	dialreq_free(ctx->dialreq);
+	ctx->dialreq = NULL;
 	if (ctx->w_socket.fd != -1) {
 		CLOSE_FD(ctx->w_socket.fd);
 		ctx->w_socket.fd = -1;
 	}
 	VBUF_FREE(ctx->parser.cbuf);
+	ctx->state = STATE_CLIENT_INIT;
 }
 
 static void finish_error(
 	struct http_client_ctx *restrict ctx, const char *errmsg,
 	const size_t errlen)
 {
-	if (ctx->cb.func != NULL) {
-		ctx->cb.func(ctx->loop, ctx->cb.data, errmsg, errlen, NULL, -1);
+	struct ev_loop *const loop = ctx->loop;
+	const struct http_client_cb cb = ctx->cb;
+	http_client_cleanup(ctx);
+	if (cb.func != NULL) {
+		cb.func(loop, cb.data, errmsg, errlen, NULL);
 	}
-	gc_unref(&ctx->gcbase);
 }
 
 static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
@@ -111,10 +90,21 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	int fd = watcher->fd;
 	watcher->fd = -1;
-	if (ctx->cb.func != NULL) {
-		ctx->cb.func(loop, ctx->cb.data, NULL, 0, &ctx->parser, fd);
+	const char *conn = ctx->parser.hdr.connection;
+	if (ctx->dialreq != NULL &&
+	    (conn == NULL || strcasecmp(conn, "close") != 0)) {
+		conn_cache_put(loop, fd, ctx->dialreq, ctx->conf->conn_cache);
+	} else {
+		if (ctx->dialreq != NULL && conn != NULL) {
+			LOGV("server wants to close the connection, skip caching");
+		}
+		CLOSE_FD(fd);
 	}
-	gc_unref(&ctx->gcbase);
+	const struct http_client_cb cb = ctx->cb;
+	if (cb.func != NULL) {
+		cb.func(loop, cb.data, NULL, 0, &ctx->parser);
+	}
+	http_client_cleanup(ctx);
 }
 
 static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
@@ -176,22 +166,33 @@ static void http_client_timeout_cb(
 	finish_error(ctx, "timeout", sizeof("timeout") - 1);
 }
 
-struct http_client_ctx *http_client_new(
-	struct ev_loop *loop, const struct http_parsehdr_cb on_header,
-	const struct http_client_cb *cb, const struct config *conf,
+static bool http_client_on_header(void *data, const char *key, char *value)
+{
+	struct http_client_ctx *restrict ctx = data;
+	if (strcasecmp(key, "Connection") == 0) {
+		ctx->parser.hdr.connection = value;
+		return true;
+	}
+	if (ctx->user_on_header.func != NULL) {
+		return ctx->user_on_header.func(
+			ctx->user_on_header.ctx, key, value);
+	}
+	return true;
+}
+
+void http_client_init(
+	struct http_client_ctx *restrict ctx, struct ev_loop *loop,
+	const struct http_parsehdr_cb on_header,
+	const struct http_client_cb *restrict cb, const struct config *conf,
 	struct resolver *resolver)
 {
-	struct http_client_ctx *restrict ctx =
-		malloc(sizeof(struct http_client_ctx));
-	if (ctx == NULL) {
-		LOGOOM();
-		return NULL;
-	}
 	ctx->loop = loop;
 	ctx->conf = conf;
 	ctx->resolver = resolver;
+	ctx->dialreq = NULL;
 	ctx->state = STATE_CLIENT_INIT;
 	ctx->cb = *cb;
+	ctx->user_on_header = on_header;
 	ev_timer_init(
 		&ctx->w_timeout, http_client_timeout_cb, conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
@@ -202,27 +203,11 @@ struct http_client_ctx *http_client_new(
 		.data = ctx,
 	};
 	dialer_init(&ctx->dialer, &dialer_cb_conf);
-	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, on_header);
-	gc_register(&ctx->gcbase, http_client_finalize);
-	return ctx;
+	const struct http_parsehdr_cb hdr_cb = { http_client_on_header, ctx };
+	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, hdr_cb);
 }
 
-struct http_parser *http_client_parser(struct http_client_ctx *ctx)
-{
-	return &ctx->parser;
-}
-
-void http_client_start(
-	struct ev_loop *loop, struct http_client_ctx *ctx,
-	const struct dialreq *req)
-{
-	ASSERT(ctx->state == STATE_CLIENT_INIT);
-	ctx->state = STATE_CLIENT_CONNECT;
-	ev_timer_start(loop, &ctx->w_timeout);
-	dialer_do(&ctx->dialer, loop, req, ctx->conf, ctx->resolver);
-}
-
-void http_client_start_fd(
+static void http_client_start_fd(
 	struct ev_loop *loop, struct http_client_ctx *ctx, const int fd)
 {
 	ASSERT(ctx->state == STATE_CLIENT_INIT);
@@ -234,8 +219,25 @@ void http_client_start_fd(
 	ev_io_start(loop, &ctx->w_socket);
 }
 
+void http_client_do(
+	struct ev_loop *loop, struct http_client_ctx *ctx,
+	struct dialreq *restrict req)
+{
+	ASSERT(ctx->state == STATE_CLIENT_INIT);
+	ctx->dialreq = req;
+	const int fd = conn_cache_get(loop, req, ctx->conf->conn_cache);
+	if (fd != -1) {
+		LOGV_F("http_client: reusing cached connection [fd:%d]", fd);
+		http_client_start_fd(loop, ctx, fd);
+		return;
+	}
+	ctx->state = STATE_CLIENT_CONNECT;
+	ev_timer_start(loop, &ctx->w_timeout);
+	dialer_do(&ctx->dialer, loop, req, ctx->conf, ctx->resolver);
+}
+
 void http_client_cancel(struct ev_loop *loop, struct http_client_ctx *ctx)
 {
 	UNUSED(loop);
-	gc_unref(&ctx->gcbase);
+	http_client_cleanup(ctx);
 }
