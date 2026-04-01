@@ -14,8 +14,8 @@
 #include "dialer.h"
 #include "resolver.h"
 
-#if WITH_RULESET
 #include "algo/luahash.h"
+#if WITH_RULESET
 #include "lua.h"
 #endif
 #include "math/rand.h"
@@ -178,13 +178,8 @@ conn_cache_expire_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 
 void conn_cache_put(
 	struct ev_loop *loop, const int fd,
-	const struct dialreq *restrict dialreq, const bool enable_conn_cache)
+	const struct dialreq *restrict dialreq)
 {
-	if (!enable_conn_cache) {
-		LOGV_F("conn_cache: [fd:%d] disabled, closing", fd);
-		CLOSE_FD(fd);
-		return;
-	}
 	if (conn_cache.len >= CONN_CACHE_CAPACITY) {
 		LOGV_F("conn_cache: [fd:%d] full, discarding", fd);
 		CLOSE_FD(fd);
@@ -220,13 +215,8 @@ void conn_cache_put(
 	       conn_cache.len);
 }
 
-int conn_cache_get(
-	struct ev_loop *loop, const struct dialreq *restrict req,
-	const bool enable_conn_cache)
+int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
 {
-	if (!enable_conn_cache) {
-		return -1;
-	}
 	char key[256];
 	const int nkey = dialreq_format(key, sizeof(key), req);
 	if (nkey < 0 || (size_t)nkey >= sizeof(key)) {

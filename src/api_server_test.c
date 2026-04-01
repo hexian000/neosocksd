@@ -51,7 +51,6 @@ double thread_load(void)
 	return -1.0;
 }
 
-#if WITH_RULESET
 struct conn_cache conn_cache = { 0 };
 
 #if WITH_SPLICE
@@ -61,6 +60,7 @@ void pipe_shrink(size_t count)
 }
 #endif
 
+#if WITH_RULESET
 static struct {
 	bool invoke_ok;
 	bool update_ok;

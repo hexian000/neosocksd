@@ -97,7 +97,7 @@ void pipe_close(struct splice_pipe *pipe);
 void pipe_shrink(size_t count);
 #endif
 
-#define CONN_CACHE_CAPACITY 8
+#define CONN_CACHE_CAPACITY 32
 /* Seconds before an idle cached connection is discarded */
 #define CONN_CACHE_TIMEOUT 60.0
 
@@ -121,11 +121,8 @@ extern struct conn_cache {
 } conn_cache;
 
 void conn_cache_put(
-	struct ev_loop *loop, int fd, const struct dialreq *restrict dialreq,
-	bool enable_conn_cache);
-int conn_cache_get(
-	struct ev_loop *loop, const struct dialreq *restrict req,
-	bool enable_conn_cache);
+	struct ev_loop *loop, int fd, const struct dialreq *restrict dialreq);
+int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req);
 
 /** Process-level initializations. */
 void init(int argc, char *const restrict argv[]);

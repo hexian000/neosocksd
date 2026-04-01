@@ -790,8 +790,7 @@ static int socks5_authmethod(struct socks_ctx *restrict ctx)
 	}
 	const bool auth_required = ctx->s->conf->auth_required;
 	uint_fast8_t method = SOCKS5AUTH_NOACCEPTABLE;
-	const unsigned char *restrict methods =
-		(const unsigned char *)req + SOCKS5_AUTH_REQ_FIXED_LEN;
+	const unsigned char *restrict methods = req + SOCKS5_AUTH_REQ_FIXED_LEN;
 	for (size_t i = 0; i < n; i++) {
 		switch (methods[i]) {
 		case SOCKS5AUTH_NOAUTH:

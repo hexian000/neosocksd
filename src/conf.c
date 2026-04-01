@@ -28,9 +28,7 @@ struct config conf_default(void)
 #if WITH_TCP_FASTOPEN_CONNECT
 		.tcp_fastopen_connect = false,
 #endif
-#if WITH_RULESET
 		.conn_cache = true,
-#endif
 
 		.max_sessions = 0,
 		.startup_limit_start = 0,

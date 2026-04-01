@@ -354,6 +354,22 @@ bool ruleset_route6(
 	return false;
 }
 
+void conn_cache_put(
+	struct ev_loop *loop, const int fd,
+	const struct dialreq *restrict dialreq)
+{
+	(void)loop;
+	(void)dialreq;
+	close(fd);
+}
+
+int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
+{
+	(void)loop;
+	(void)req;
+	return -1;
+}
+
 static int write_all(const int fd, const void *buf, size_t len)
 {
 	const unsigned char *p = buf;
@@ -521,11 +537,12 @@ static void make_fd_pair(int *restrict a, int *restrict b)
 	*b = sv[1];
 }
 
-T_DECLARE_CASE(non_connect_returns_403)
+T_DECLARE_CASE(plain_http_origin_form_no_dialreq_returns_500)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
 	int peer_fd = -1;
+	/* origin-form URL; Host header used as fallback target */
 	const char req[] = "GET / HTTP/1.1\r\nHost: example\r\n\r\n";
 
 	T_CHECK(loop != NULL);
@@ -540,7 +557,8 @@ T_DECLARE_CASE(non_connect_returns_403)
 		const ssize_t n =
 			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
 		T_EXPECT(n > 0);
-		T_EXPECT(has_http_status(rsp, (size_t)n, "403"));
+		/* dialreq_new_ok=false -> make_dialreq returns NULL -> 500 */
+		T_EXPECT(has_http_status(rsp, (size_t)n, "500"));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -562,7 +580,8 @@ T_DECLARE_CASE(split_request_is_parsed_incrementally)
 	T_CHECK(write_all(peer_fd, "ample\r\n\r\n", 9) == 0);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(loop, peer_fd, "403"));
+	/* dialreq_new_ok=false -> make_dialreq returns NULL -> 500 */
+	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -626,16 +645,15 @@ T_DECLARE_CASE(invalid_te_returns_400)
 
 T_DECLARE_CASE(connect_with_invalid_target_returns_500)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
 	const char req[] = "CONNECT not-a-valid-hostport HTTP/1.1\r\n"
 			   "Host: ignored\r\n"
 			   "\r\n";
 
-	T_CHECK(loop != NULL);
-	s.loop = loop;
-	test_server_init(&s);
+	reset_stub_state();
+	init_server(&loop, &s);
 
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
@@ -942,18 +960,422 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(plain_http_absolute_url_no_dialreq_returns_500)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = false;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_absolute_url_no_host_returns_400)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* non-http:// URL with no Host header -> 400 */
+	const char req[] = "GET /path HTTP/1.1\r\n\r\n";
+
+	reset_stub_state();
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT(assert_response_status(loop, peer_fd, "400"));
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_absolute_url_dialer_error_returns_502)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	S.dialer_result_fd = -1;
+	S.dialer_err = DIALER_ERR_CONNECT;
+	S.dialer_syserr = ECONNREFUSED;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_absolute_url_established)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* The request is forwarded; the connection should close after transfer */
+	{
+		unsigned char buf[4096];
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		/* upstream receives the forwarded request */
+		T_EXPECT(n > 0);
+		T_EXPECT(memmem(buf, (size_t)n, "GET / HTTP/1.1", 14) != NULL);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "Connection: close", 17) !=
+			NULL);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_post_with_body_forwarded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] = "POST http://example.com/submit HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Content-Type: application/x-www-form-urlencoded\r\n"
+			   "Content-Length: 7\r\n"
+			   "\r\n"
+			   "a=b&c=d";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char buf[4096];
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "POST /submit HTTP/1.1", 21) !=
+			NULL);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "Content-Length: 7", 17) !=
+			NULL);
+		/* body forwarded */
+		T_EXPECT(memmem(buf, (size_t)n, "a=b&c=d", 7) != NULL);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Verify that the HTTP version from the client request is preserved in the
+ * forwarded request line, not hard-coded to HTTP/1.1. */
+T_DECLARE_CASE(plain_http_version_preserved_in_forwarded_request)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] = "GET http://example.com/page HTTP/1.0\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char buf[4096];
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "GET /page HTTP/1.0", 18) !=
+			NULL);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* For proxy_pass requests, Transfer-Encoding: chunked must be forwarded so
+ * the upstream knows how to read the request body. */
+T_DECLARE_CASE(plain_http_te_chunked_forwarded_to_upstream)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] = "POST http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Transfer-Encoding: chunked\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char buf[4096];
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "Transfer-Encoding: chunked",
+			       26) != NULL);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* RFC 7230 §6.1: headers listed in the Connection field are hop-by-hop and
+ * must not be forwarded, even if they are not in the static list. */
+T_DECLARE_CASE(plain_http_dynamic_hop_by_hop_not_forwarded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Connection: X-Hop\r\n"
+			   "X-Hop: secret-value\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char buf[4096];
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		T_EXPECT(n > 0);
+		/* dynamic hop-by-hop header must not reach upstream */
+		T_EXPECT(memmem(buf, (size_t)n, "X-Hop", 5) == NULL);
+		/* end-to-end headers must still be forwarded */
+		T_EXPECT(
+			memmem(buf, (size_t)n, "Host: example.com", 17) !=
+			NULL);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Proxy-Authorization is consumed by the proxy and must not be leaked to the
+ * upstream server in the forwarded plain HTTP request. */
+T_DECLARE_CASE(plain_http_proxy_authorization_not_forwarded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	/* dXNlcjpwYXNz = base64("user:pass") */
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char buf[4096];
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "Proxy-Authorization", 19) ==
+			NULL);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A successful plain HTTP forward must count exactly one success, and
+ * establish a bidirectional relay between client and upstream. */
+T_DECLARE_CASE(plain_http_forward_success_counted_once)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT(s.stats.num_success == 1);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A successful CONNECT tunnel must count exactly one success (dialer_cb must
+ * not double-increment before mark_ready). */
+T_DECLARE_CASE(connect_success_counted_once)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT(s.stats.num_success == 1);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
 	reset_stub_state();
-	T_RUN_CASE(t, non_connect_returns_403);
+	T_RUN_CASE(t, plain_http_origin_form_no_dialreq_returns_500);
 	T_RUN_CASE(t, split_request_is_parsed_incrementally);
+	T_RUN_CASE(t, plain_http_absolute_url_no_dialreq_returns_500);
+	T_RUN_CASE(t, plain_http_absolute_url_no_host_returns_400);
+	T_RUN_CASE(t, plain_http_absolute_url_dialer_error_returns_502);
+	T_RUN_CASE(t, plain_http_absolute_url_established);
+	T_RUN_CASE(t, plain_http_post_with_body_forwarded);
+	T_RUN_CASE(t, plain_http_version_preserved_in_forwarded_request);
+	T_RUN_CASE(t, plain_http_te_chunked_forwarded_to_upstream);
+	T_RUN_CASE(t, plain_http_dynamic_hop_by_hop_not_forwarded);
+	T_RUN_CASE(t, plain_http_proxy_authorization_not_forwarded);
+	T_RUN_CASE(t, plain_http_forward_success_counted_once);
 	T_RUN_CASE(t, malformed_proxy_authorization_returns_400);
 	T_RUN_CASE(t, invalid_te_returns_400);
 	T_RUN_CASE(t, connect_with_invalid_target_returns_500);
 	T_RUN_CASE(t, valid_connect_dialer_error_returns_502);
 	T_RUN_CASE(t, valid_connect_established_with_hijack);
 	T_RUN_CASE(t, connect_with_transfer_encoding_chunked_is_accepted);
+	T_RUN_CASE(t, connect_success_counted_once);
 	T_RUN_CASE(t, authorization_header_without_space_returns_400);
 	T_RUN_CASE(
 		t, ruleset_auth_required_without_basic_credentials_returns_407);

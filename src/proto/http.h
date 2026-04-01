@@ -62,6 +62,7 @@ struct http_headers {
 	/* request headers */
 	struct {
 		enum content_encodings accept_encoding;
+		char *host;
 		struct {
 			char *type;
 			char *credentials;
@@ -227,6 +228,35 @@ bool parsehdr_content_encoding(
  * @return true if expectation is supported
  */
 bool parsehdr_expect(struct http_parser *restrict p, char *restrict value);
+
+/**
+ * @brief Parse Connection header
+ *
+ * Records the Connection header value for hop-by-hop token lookup.
+ *
+ * @param p Parser instance
+ * @param value Header value to parse
+ * @return true always
+ */
+bool parsehdr_connection(struct http_parser *restrict p, char *restrict value);
+
+/**
+ * @brief Iterate over comma-separated tokens in a Connection header value.
+ *
+ * Models the same iterator pattern as http_parsehdr(): the caller passes
+ * the current position and receives the next one on each call.  Skips OWS
+ * and comma separators between tokens per RFC 7230 token-list ABNF.
+ *
+ * @param p  Current parse position; NULL is accepted and causes immediate
+ *           termination.
+ * @param tok  Set to the start of the next token, or NULL when no tokens
+ *             remain.  The pointed-to memory is within the original string.
+ * @param toklen  Set to the byte length of the token.
+ * @return  New parse position to pass on the next call.
+ */
+const char *parsehdr_connection_token(
+	const char *restrict p, const char **restrict tok,
+	size_t *restrict toklen);
 
 /**
  * @brief Generate HTTP error response page

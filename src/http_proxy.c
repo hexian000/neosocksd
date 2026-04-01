@@ -5,6 +5,7 @@
 
 #include "conf.h"
 #include "dialer.h"
+#include "proto/domain.h"
 #include "proto/http.h"
 #include "ruleset.h"
 #include "server.h"
@@ -13,6 +14,7 @@
 
 #include "codec/base64.h"
 #include "net/http.h"
+#include "net/url.h"
 #include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
@@ -40,6 +42,10 @@ enum http_state {
 	STATE_PROCESS,
 	STATE_RESPONSE,
 	STATE_CONNECT,
+	STATE_FORWARD,
+	/* relaying upstream HTTP response before returning conn to cache */
+	STATE_RELAY_HDR,
+	STATE_RELAY_BODY,
 	STATE_ESTABLISHED,
 	STATE_BIDIRECTIONAL,
 };
@@ -65,6 +71,9 @@ struct http_ctx {
 			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct http_parser parser;
+			size_t relay_content_length; /* SIZE_MAX = unknown */
+			size_t relay_body_read;
+			bool relay_can_cache : 1;
 		};
 		/* state >= STATE_CONNECTED */
 		struct {
@@ -80,7 +89,7 @@ static int format_status(
 {
 	char caddr[64];
 	sa_format(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
-	if (ctx->state != STATE_CONNECT) {
+	if (ctx->state != STATE_CONNECT && ctx->state != STATE_FORWARD) {
 		return snprintf(
 			s, maxlen, "[fd:%d] %s", ctx->accepted_fd, caddr);
 	}
@@ -151,6 +160,16 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		dialer_cancel(&ctx->dialer, loop);
 		stats->num_halfopen--;
 		return;
+	case STATE_FORWARD:
+		ev_io_stop(loop, &ctx->w_send);
+		stats->num_halfopen--;
+		return;
+	case STATE_RELAY_HDR:
+	case STATE_RELAY_BODY:
+		ev_io_stop(loop, &ctx->w_recv);
+		ev_io_stop(loop, &ctx->w_send);
+		stats->num_halfopen--;
+		return;
 	case STATE_ESTABLISHED:
 		transfer_stop(loop, &ctx->uplink);
 		transfer_stop(loop, &ctx->downlink);
@@ -181,10 +200,38 @@ static void http_ctx_finalize(struct gcbase *restrict obj)
 		ctx->dialed_fd = -1;
 	}
 
-	if (ctx->state < STATE_ESTABLISHED) {
-		dialreq_free(ctx->dialreq);
-	}
+	dialreq_free(ctx->dialreq);
+	ctx->dialreq = NULL;
 	VBUF_FREE(ctx->parser.cbuf);
+}
+
+/* Parse "host:port" from an absolute HTTP URL into buf.
+ * Port defaults to 80 when absent.  Returns false on failure. */
+static bool parse_hostport(
+	char *restrict buf, const size_t bufcap, const char *restrict url)
+{
+	const size_t urllen = strlen(url);
+	if (urllen >= bufcap) {
+		return false;
+	}
+	memcpy(buf, url, urllen + 1);
+	struct url parsed;
+	if (!url_parse(buf, &parsed) || parsed.scheme == NULL ||
+	    strcmp(parsed.scheme, "http") != 0 || parsed.host == NULL ||
+	    parsed.host[0] == '\0') {
+		return false;
+	}
+	const size_t hlen = strlen(parsed.host);
+	memmove(buf, parsed.host, hlen + 1);
+	/* append :80 if port absent */
+	const char *portcheck = (buf[0] == '[') ? strchr(buf, ']') : buf;
+	if (portcheck == NULL || strchr(portcheck, ':') == NULL) {
+		if (hlen + 3 >= bufcap) {
+			return false;
+		}
+		memcpy(buf + hlen, ":80", 4);
+	}
+	return true;
 }
 
 static struct dialreq *
@@ -215,6 +262,446 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ctx->s->resolver);
 }
 
+/* Parse the target host:port for a plain HTTP request.
+ * Tries the absolute URL first, then falls back to the Host header. */
+static bool parse_req_target(
+	char *restrict buf, const size_t bufcap,
+	const struct http_ctx *restrict ctx)
+{
+	const char *url = ctx->parser.msg.req.url;
+	if (parse_hostport(buf, bufcap, url)) {
+		return true;
+	}
+	/* fall back to Host header */
+	const char *host = ctx->parser.hdr.host;
+	if (host == NULL) {
+		return false;
+	}
+	const size_t hlen = strlen(host);
+	if (hlen >= bufcap) {
+		return false;
+	}
+	memcpy(buf, host, hlen + 1);
+	/* append :80 if port absent */
+	const char *portcheck = (buf[0] == '[') ? strchr(buf, ']') : buf;
+	if (portcheck == NULL || strchr(portcheck, ':') == NULL) {
+		if (hlen + 3 >= bufcap) {
+			return false;
+		}
+		memcpy(buf + hlen, ":80", 4);
+	}
+	return true;
+}
+
+static void mark_ready(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	ctx->state = STATE_BIDIRECTIONAL;
+	ev_timer_stop(loop, &ctx->w_timeout);
+
+	struct server_stats *restrict stats = &ctx->s->stats;
+	stats->num_halfopen--;
+	stats->num_sessions++;
+	stats->num_success++;
+	HTTP_CTX_LOG_F(
+		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
+}
+
+static void xfer_state_cb(struct ev_loop *loop, void *data)
+{
+	struct http_ctx *restrict ctx = data;
+	if (ctx->uplink.state == XFER_FINISHED &&
+	    ctx->downlink.state == XFER_FINISHED) {
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (ctx->state == STATE_ESTABLISHED &&
+	    ctx->uplink.state == XFER_CONNECTED &&
+	    ctx->downlink.state == XFER_CONNECTED) {
+		mark_ready(loop, ctx);
+		return;
+	}
+}
+
+static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	/* cleanup before state change */
+	ev_io_stop(loop, &ctx->w_recv);
+	ev_io_stop(loop, &ctx->w_send);
+	dialreq_free(ctx->dialreq);
+	ctx->dialreq = NULL;
+
+	if (ctx->s->conf->bidir_timeout) {
+		ctx->state = STATE_ESTABLISHED;
+	} else {
+		mark_ready(loop, ctx);
+	}
+
+	const struct transfer_state_cb cb = {
+		.func = xfer_state_cb,
+		.data = ctx,
+	};
+	struct server_stats *restrict stats = &ctx->s->stats;
+	transfer_init(
+		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
+		&stats->byt_up, true, ctx->s->conf->pipe);
+	transfer_init(
+		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
+		&stats->byt_down, false, ctx->s->conf->pipe);
+
+	HTTP_CTX_LOG_F(
+		DEBUG, ctx,
+		"transfer start: uplink [%d->%d], downlink [%d->%d]",
+		ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
+		ctx->accepted_fd);
+	transfer_start(loop, &ctx->uplink);
+	transfer_start(loop, &ctx->downlink);
+}
+
+/* Scan raw header bytes for Content-Length and Connection header values.
+ * `hdr_end` points just past the \r\n\r\n separator.
+ * On return, `*out_len` is the parsed Content-Length (SIZE_MAX if absent),
+ * and `*out_can_cache` is true unless "Connection: close" was found. */
+static void scan_relay_headers(
+	const char *restrict hdr_end, const char *restrict data, size_t datalen,
+	size_t *restrict out_len, bool *restrict out_can_cache)
+{
+	*out_len = SIZE_MAX;
+	*out_can_cache = true;
+
+	/* skip the response status line */
+	const char *p = (const char *)memchr(data, '\n', datalen);
+	if (p == NULL) {
+		return;
+	}
+	p++;
+
+	while (p < hdr_end) {
+		const char *eol =
+			(const char *)memchr(p, '\n', (size_t)(hdr_end - p));
+		if (eol == NULL) {
+			break;
+		}
+		const char *colon =
+			(const char *)memchr(p, ':', (size_t)(eol - p));
+		if (colon == NULL) {
+			p = eol + 1;
+			continue;
+		}
+		const size_t klen = (size_t)(colon - p);
+		const char *val = colon + 1;
+		while (val < eol && (*val == ' ' || *val == '\t')) {
+			val++;
+		}
+		/* strip trailing \r */
+		const char *vend = eol;
+		if (vend > val && *(vend - 1) == '\r') {
+			vend--;
+		}
+		const size_t vlen = (size_t)(vend - val);
+
+		if (klen == CONSTSTRLEN("Content-Length") &&
+		    strncasecmp(p, "Content-Length", klen) == 0) {
+			char tmp[32];
+			if (vlen < sizeof(tmp)) {
+				memcpy(tmp, val, vlen);
+				tmp[vlen] = '\0';
+				char *end;
+				const uintmax_t v = strtoumax(tmp, &end, 10);
+				if (*end == '\0' && v <= SIZE_MAX) {
+					*out_len = (size_t)v;
+				}
+			}
+		} else if (
+			klen == CONSTSTRLEN("Connection") &&
+			strncasecmp(p, "Connection", klen) == 0 &&
+			vlen == CONSTSTRLEN("close") &&
+			strncasecmp(val, "close", vlen) == 0) {
+			*out_can_cache = false;
+		}
+
+		p = eol + 1;
+	}
+}
+
+static void relay_finish(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	ev_io_stop(loop, &ctx->w_recv);
+	ev_io_stop(loop, &ctx->w_send);
+	if (ctx->relay_can_cache) {
+		if (ctx->s->conf->conn_cache) {
+			conn_cache_put(loop, ctx->dialed_fd, ctx->dialreq);
+		} else {
+			CLOSE_FD(ctx->dialed_fd);
+		}
+		ctx->dialed_fd = -1;
+	}
+	dialreq_free(ctx->dialreq);
+	ctx->dialreq = NULL;
+	gc_unref(&ctx->gcbase);
+}
+
+static void
+relay_recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_READ);
+	struct http_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_RELAY_HDR || ctx->state == STATE_RELAY_BODY);
+
+	struct http_parser *restrict p = &ctx->parser;
+	/* read into rbuf from dialed_fd */
+	const size_t space = p->rbuf.cap - p->rbuf.len;
+	if (space == 0) {
+		/* buffer full; flush wbuf first by waiting for send */
+		ev_io_stop(loop, watcher);
+		return;
+	}
+	size_t n = space;
+	const int ret =
+		socket_recv(ctx->dialed_fd, p->rbuf.data + p->rbuf.len, &n);
+	if (ret != 0) {
+		const int err = errno;
+		HTTP_CTX_LOG_F(
+			WARNING, ctx, "relay recv: (%d) %s", err,
+			strerror(err));
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (n == 0) {
+		/* upstream EOF */
+		if (ctx->state == STATE_RELAY_HDR) {
+			/* headers never completed */
+			gc_unref(&ctx->gcbase);
+			return;
+		}
+		/* upstream EOF: flush any remaining rbuf bytes to client */
+		if (p->rbuf.len > 0) {
+			BUF_APPEND(p->wbuf, p->rbuf.data, p->rbuf.len);
+			BUF_RESET(p->rbuf);
+		}
+		if (p->wbuf.len > p->wpos) {
+			ev_io_start(loop, &ctx->w_send);
+		}
+		/* stop reading; relay_send_cb will call relay_finish */
+		ev_io_stop(loop, watcher);
+		ctx->relay_can_cache = false;
+		ctx->state = STATE_RELAY_BODY; /* sentinel: trigger finish */
+		/* If nothing left to send, finish immediately */
+		if (p->wbuf.len == p->wpos) {
+			relay_finish(loop, ctx);
+		}
+		return;
+	}
+
+	p->rbuf.len += n;
+
+	if (ctx->state == STATE_RELAY_HDR) {
+		/* Search for end-of-headers marker */
+		const char *raw = (const char *)p->rbuf.data;
+		const size_t rawlen = p->rbuf.len;
+		const char *hdr_end = NULL;
+		for (size_t i = 0; i + 3 < rawlen; i++) {
+			if (raw[i] == '\r' && raw[i + 1] == '\n' &&
+			    raw[i + 2] == '\r' && raw[i + 3] == '\n') {
+				hdr_end = raw + i + 4;
+				break;
+			}
+		}
+		if (hdr_end == NULL) {
+			/* headers incomplete; forward what we have */
+			BUF_APPEND(p->wbuf, p->rbuf.data, p->rbuf.len);
+			p->rbuf.len = 0;
+			BUF_RESET(p->rbuf);
+			if (p->wbuf.len > p->wpos) {
+				ev_io_start(loop, &ctx->w_send);
+			}
+			return;
+		}
+		/* headers complete: scan for Content-Length / Connection */
+		size_t content_length;
+		bool can_cache;
+		scan_relay_headers(
+			hdr_end, raw, rawlen, &content_length, &can_cache);
+		ctx->relay_content_length = content_length;
+		ctx->relay_can_cache = can_cache;
+
+		/* count body bytes already buffered */
+		const size_t body_so_far = rawlen - (size_t)(hdr_end - raw);
+		ctx->relay_body_read = body_so_far;
+
+		/* forward everything in rbuf to client */
+		BUF_APPEND(p->wbuf, p->rbuf.data, rawlen);
+		BUF_RESET(p->rbuf);
+		if (p->wbuf.len > p->wpos) {
+			ev_io_start(loop, &ctx->w_send);
+		}
+
+		if (content_length != SIZE_MAX &&
+		    body_so_far >= content_length) {
+			/* body already complete */
+			ev_io_stop(loop, watcher);
+			if (p->wbuf.len == p->wpos) {
+				relay_finish(loop, ctx);
+			}
+			/* else relay_send_cb will finish when wbuf drained */
+			return;
+		}
+		ctx->state = STATE_RELAY_BODY;
+		return;
+	}
+
+	/* STATE_RELAY_BODY: forward newly received bytes */
+	const size_t chunk = p->rbuf.len;
+	ctx->relay_body_read += chunk;
+	BUF_APPEND(p->wbuf, p->rbuf.data, chunk);
+	BUF_RESET(p->rbuf);
+	if (p->wbuf.len > p->wpos) {
+		ev_io_start(loop, &ctx->w_send);
+	}
+
+	const size_t clen = ctx->relay_content_length;
+	if (clen != SIZE_MAX && ctx->relay_body_read >= clen) {
+		/* body complete */
+		ev_io_stop(loop, watcher);
+		if (p->wbuf.len == p->wpos) {
+			relay_finish(loop, ctx);
+		}
+		/* else relay_send_cb will finish */
+	}
+}
+
+static void
+relay_send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_WRITE);
+	struct http_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_RELAY_HDR || ctx->state == STATE_RELAY_BODY);
+
+	struct http_parser *restrict p = &ctx->parser;
+	const unsigned char *buf = p->wbuf.data + p->wpos;
+	size_t len = p->wbuf.len - p->wpos;
+	const int ret = socket_send(ctx->accepted_fd, buf, &len);
+	if (ret != 0) {
+		const int err = errno;
+		HTTP_CTX_LOG_F(
+			WARNING, ctx, "relay send: (%d) %s", err,
+			strerror(err));
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	p->wpos += len;
+	if (p->wpos < p->wbuf.len) {
+		return;
+	}
+	/* wbuf fully sent; reset positions */
+	BUF_RESET(p->wbuf);
+	p->wpos = 0;
+	ev_io_stop(loop, watcher);
+
+	/* If recv is still active, wbuf was just drained between two recv
+	 * callbacks — nothing to do, wait for more data. */
+	if (ev_is_active(&ctx->w_recv)) {
+		return;
+	}
+	/* recv is not active; determine why */
+	const size_t clen = ctx->relay_content_length;
+	if (clen != SIZE_MAX && ctx->relay_body_read >= clen) {
+		/* body complete */
+		relay_finish(loop, ctx);
+		return;
+	}
+	if (!ctx->relay_can_cache) {
+		/* upstream closed the connection (EOF) */
+		relay_finish(loop, ctx);
+		return;
+	}
+	/* recv was paused because rbuf was full; resume reading */
+	ev_io_start(loop, &ctx->w_recv);
+}
+
+static void
+http_ctx_relay_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	struct http_parser *restrict p = &ctx->parser;
+	BUF_RESET(p->rbuf);
+	BUF_RESET(p->wbuf);
+	p->wpos = 0;
+
+	ctx->relay_content_length = SIZE_MAX;
+	ctx->relay_body_read = 0;
+	ctx->relay_can_cache = true; /* updated after header scan */
+	ctx->state = STATE_RELAY_HDR;
+
+	ev_io_init(&ctx->w_recv, relay_recv_cb, ctx->dialed_fd, EV_READ);
+	ctx->w_recv.data = ctx;
+	ev_io_init(&ctx->w_send, relay_send_cb, ctx->accepted_fd, EV_WRITE);
+	ctx->w_send.data = ctx;
+	ev_io_start(loop, &ctx->w_recv);
+}
+
+static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_WRITE);
+	struct http_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_RESPONSE || ctx->state == STATE_FORWARD);
+
+	const int ret = http_parser_send(&ctx->parser, watcher->fd);
+	if (ret < 0) {
+		const int err = errno;
+		HTTP_CTX_LOG_F(
+			WARNING, ctx, "socket_send: (%d) %s", err,
+			strerror(err));
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (ret > 0) {
+		return;
+	}
+	if (ctx->state == STATE_FORWARD) {
+		/* request fully forwarded */
+		ev_io_stop(loop, &ctx->w_send);
+		if (ctx->s->conf->conn_cache) {
+			/* relay the upstream response, then maybe cache conn */
+			http_ctx_relay_start(loop, ctx);
+			return;
+		}
+		dialreq_free(ctx->dialreq);
+		ctx->dialreq = NULL;
+		mark_ready(loop, ctx);
+		const struct transfer_state_cb cb = {
+			.func = xfer_state_cb,
+			.data = ctx,
+		};
+		struct server_stats *restrict stats = &ctx->s->stats;
+		transfer_init(
+			&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
+			&stats->byt_up, true, ctx->s->conf->pipe);
+		transfer_init(
+			&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
+			&stats->byt_down, false, ctx->s->conf->pipe);
+		HTTP_CTX_LOG_F(
+			DEBUG, ctx,
+			"transfer start: uplink [%d->%d], downlink [%d->%d]",
+			ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
+			ctx->accepted_fd);
+		transfer_start(loop, &ctx->uplink);
+		transfer_start(loop, &ctx->downlink);
+		return;
+	}
+	/* Connection: close */
+	gc_unref(&ctx->gcbase);
+}
+
+/* After a successful dial for a proxy_pass request, wire w_send to the
+ * upstream fd and start draining the buffered forwarded request. */
+static void
+http_ctx_forward(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	ctx->state = STATE_FORWARD;
+	ev_io_init(&ctx->w_send, send_cb, ctx->dialed_fd, EV_WRITE);
+	ctx->w_send.data = ctx;
+	ev_io_start(loop, &ctx->w_send);
+}
+
 #if WITH_RULESET
 static void
 ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
@@ -224,6 +711,17 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->dialreq = ctx->ruleset_callback.request.req;
 	ctx->ruleset_state = NULL;
+	if (strcmp(ctx->parser.msg.req.method, "CONNECT") != 0 &&
+	    ctx->s->conf->conn_cache) {
+		const int fd = conn_cache_get(loop, ctx->dialreq);
+		if (fd != -1) {
+			LOGV_F("http_proxy: reusing cached connection [fd:%d]",
+			       fd);
+			ctx->dialed_fd = fd;
+			http_ctx_forward(loop, ctx);
+			return;
+		}
+	}
 	http_connect(loop, ctx);
 }
 
@@ -283,7 +781,17 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		return;
 	}
 
-	const char *addr_str = ctx->parser.msg.req.url;
+	const char *addr_str;
+	char hostport[FQDN_MAX_LENGTH + sizeof(":65535")];
+	if (strcmp(ctx->parser.msg.req.method, "CONNECT") == 0) {
+		addr_str = ctx->parser.msg.req.url;
+	} else {
+		if (!parse_req_target(hostport, sizeof(hostport), ctx)) {
+			send_errpage(loop, ctx, HTTP_BAD_REQUEST);
+			return;
+		}
+		addr_str = hostport;
+	}
 	const bool ok = ruleset_resolve(
 		ruleset, &ctx->ruleset_state, addr_str, username, password,
 		&ctx->ruleset_callback);
@@ -294,10 +802,91 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 }
 #endif
 
+/* For proxy_pass requests: write the forwarded request line into wbuf
+ * on the first header callback (before any header is forwarded). */
+static void build_pass_req(struct http_parser *restrict p)
+{
+	const char *method = p->msg.req.method;
+	const char *version = p->msg.req.version;
+	const size_t urllen = strlen(p->msg.req.url);
+	if (urllen + 1 < HTTP_MAX_ENTITY) {
+		char urlbuf[urllen + 1];
+		memcpy(urlbuf, p->msg.req.url, sizeof(urlbuf));
+		struct url parsed;
+		if (url_parse(urlbuf, &parsed) && parsed.scheme != NULL &&
+		    strcmp(parsed.scheme, "http") == 0) {
+			(void)BUF_APPENDF(p->wbuf, "%s /", method);
+			if (parsed.path != NULL && *parsed.path != '\0') {
+				(void)BUF_APPENDF(p->wbuf, "%s", parsed.path);
+			}
+			if (parsed.query != NULL) {
+				(void)BUF_APPENDF(p->wbuf, "?%s", parsed.query);
+			}
+			(void)BUF_APPENDF(p->wbuf, " %s\r\n", version);
+			return;
+		}
+	}
+	/* fallback: forward URL as-is */
+	(void)BUF_APPENDF(
+		p->wbuf, "%s %s %s\r\n", method, p->msg.req.url, version);
+}
+
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	/* not supported */
-	send_errpage(loop, ctx, HTTP_FORBIDDEN);
+	struct http_parser *restrict p = &ctx->parser;
+
+	/* ensure the request line was written (no headers case) */
+	if (p->wbuf.len == 0) {
+		build_pass_req(p);
+	}
+	/* keep upstream connection alive when conn_cache is enabled
+	 * so we can return it to the cache after the response */
+	if (ctx->s->conf->conn_cache) {
+		BUF_APPENDSTR(p->wbuf, "\r\n");
+	} else {
+		BUF_APPENDSTR(p->wbuf, "Connection: close\r\n\r\n");
+	}
+
+	/* forward any body bytes already buffered in rbuf */
+	{
+		const size_t overread =
+			p->rbuf.len -
+			(size_t)((unsigned char *)p->next - p->rbuf.data);
+		if (overread > 0) {
+			BUF_APPEND(p->wbuf, (unsigned char *)p->next, overread);
+		}
+	}
+
+	HTTP_CTX_LOG_F(
+		VERBOSE, ctx, "http: %s `%s'", p->msg.req.method,
+		p->msg.req.url);
+
+#if WITH_RULESET
+	const struct ruleset *restrict ruleset = ctx->s->ruleset;
+	if (ruleset != NULL) {
+		ev_idle_start(loop, &ctx->w_process);
+		return;
+	}
+#endif
+	{
+		char hostport[FQDN_MAX_LENGTH + sizeof(":65535")];
+		if (!parse_req_target(hostport, sizeof(hostport), ctx)) {
+			send_errpage(loop, ctx, HTTP_BAD_REQUEST);
+			return;
+		}
+		ctx->dialreq = make_dialreq(ctx, hostport);
+	}
+	if (ctx->dialreq != NULL && ctx->s->conf->conn_cache) {
+		const int fd = conn_cache_get(loop, ctx->dialreq);
+		if (fd != -1) {
+			LOGV_F("http_proxy: reusing cached connection [fd:%d]",
+			       fd);
+			ctx->dialed_fd = fd;
+			http_ctx_forward(loop, ctx);
+			return;
+		}
+	}
+	http_connect(loop, ctx);
 }
 
 static void
@@ -321,69 +910,6 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 	ctx->dialreq = make_dialreq(ctx, addr_str);
 	http_connect(loop, ctx);
-}
-
-static void mark_ready(struct ev_loop *loop, struct http_ctx *restrict ctx)
-{
-	ctx->state = STATE_BIDIRECTIONAL;
-	ev_timer_stop(loop, &ctx->w_timeout);
-
-	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->num_halfopen--;
-	stats->num_sessions++;
-	stats->num_success++;
-	HTTP_CTX_LOG_F(
-		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
-}
-
-static void xfer_state_cb(struct ev_loop *loop, void *data)
-{
-	struct http_ctx *restrict ctx = data;
-	if (ctx->uplink.state == XFER_FINISHED &&
-	    ctx->downlink.state == XFER_FINISHED) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (ctx->state == STATE_ESTABLISHED &&
-	    ctx->uplink.state == XFER_CONNECTED &&
-	    ctx->downlink.state == XFER_CONNECTED) {
-		mark_ready(loop, ctx);
-		return;
-	}
-}
-
-static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
-{
-	/* cleanup before state change */
-	ev_io_stop(loop, &ctx->w_recv);
-	ev_io_stop(loop, &ctx->w_send);
-	dialreq_free(ctx->dialreq);
-
-	if (ctx->s->conf->bidir_timeout) {
-		ctx->state = STATE_ESTABLISHED;
-	} else {
-		mark_ready(loop, ctx);
-	}
-
-	const struct transfer_state_cb cb = {
-		.func = xfer_state_cb,
-		.data = ctx,
-	};
-	struct server_stats *restrict stats = &ctx->s->stats;
-	transfer_init(
-		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true, ctx->s->conf->pipe);
-	transfer_init(
-		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false, ctx->s->conf->pipe);
-
-	HTTP_CTX_LOG_F(
-		DEBUG, ctx,
-		"transfer start: uplink [%d->%d], downlink [%d->%d]",
-		ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
-		ctx->accepted_fd);
-	transfer_start(loop, &ctx->uplink);
-	transfer_start(loop, &ctx->downlink);
 }
 
 static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
@@ -417,29 +943,6 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	http_proxy_handle(loop, ctx);
 }
 
-static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	UNUSED(loop);
-	CHECK_REVENTS(revents, EV_WRITE);
-	struct http_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_RESPONSE);
-
-	const int ret = http_parser_send(&ctx->parser, watcher->fd);
-	if (ret < 0) {
-		const int err = errno;
-		HTTP_CTX_LOG_F(
-			WARNING, ctx, "socket_send: (%d) %s", err,
-			strerror(err));
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (ret > 0) {
-		return;
-	}
-	/* Connection: close */
-	gc_unref(&ctx->gcbase);
-}
-
 static void
 timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
@@ -470,36 +973,30 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
 	ctx->dialed_fd = fd;
 
-	/* CONNECT proxy */
-	if (!http_resp_established(&ctx->parser)) {
-		gc_unref(&ctx->gcbase);
-		return;
+	if (strcmp(ctx->parser.msg.req.method, "CONNECT") == 0) {
+		/* CONNECT tunnel: send 200 and hijack the connection */
+		if (!http_resp_established(&ctx->parser)) {
+			gc_unref(&ctx->gcbase);
+			return;
+		}
+		http_ctx_hijack(loop, ctx);
+	} else {
+		/* plain HTTP: forward the buffered request to upstream */
+		http_ctx_forward(loop, ctx);
 	}
-	ctx->s->stats.num_success++;
-	http_ctx_hijack(loop, ctx);
 }
 
 static bool parse_header(void *data, const char *key, char *value)
 {
 	struct http_ctx *restrict ctx = (struct http_ctx *)data;
 	struct http_parser *restrict p = &ctx->parser;
+	const bool is_connect = (strcmp(p->msg.req.method, "CONNECT") == 0);
 
-	/* hop-by-hop headers */
+	/* hop-by-hop headers: handle but never forward */
 	if (strcasecmp(key, "Connection") == 0) {
-		p->hdr.connection = value;
-		return true;
+		return parsehdr_connection(p, value);
 	}
 	if (strcasecmp(key, "Keep-Alive") == 0) {
-		return true;
-	}
-	if (strcasecmp(key, "Authorization") == 0) {
-		char *sep = strchr(value, ' ');
-		if (sep == NULL) {
-			return false;
-		}
-		*sep = '\0';
-		p->hdr.authorization.type = value;
-		p->hdr.authorization.credentials = sep + 1;
 		return true;
 	}
 	if (strcasecmp(key, "Proxy-Authorization") == 0) {
@@ -512,13 +1009,98 @@ static bool parse_header(void *data, const char *key, char *value)
 		p->hdr.proxy_authorization.credentials = sep + 1;
 		return true;
 	}
+	if (strcasecmp(key, "Proxy-Connection") == 0) {
+		return true;
+	}
 	if (strcasecmp(key, "TE") == 0) {
 		return parsehdr_accept_te(p, value);
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		return parsehdr_transfer_encoding(p, value);
+		if (!parsehdr_transfer_encoding(p, value)) {
+			return false;
+		}
+		if (!is_connect &&
+		    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
+			if (p->wbuf.len == 0) {
+				build_pass_req(p);
+			}
+			BUF_APPENDSTR(
+				p->wbuf, "Transfer-Encoding: chunked\r\n");
+		}
+		return true;
 	}
-	/* ignore other headers */
+	if (strcasecmp(key, "Upgrade") == 0) {
+		return true;
+	}
+	if (strcasecmp(key, "Trailers") == 0) {
+		return true;
+	}
+
+	if (is_connect) {
+		/* CONNECT: only parse Authorization for auth check; ignore rest */
+		if (strcasecmp(key, "Authorization") == 0) {
+			char *sep = strchr(value, ' ');
+			if (sep == NULL) {
+				return false;
+			}
+			*sep = '\0';
+			p->hdr.authorization.type = value;
+			p->hdr.authorization.credentials = sep + 1;
+		}
+		return true;
+	}
+
+	/* proxy_pass: build forwarded request in wbuf */
+	/* skip headers listed in Connection (dynamic hop-by-hop) */
+	{
+		const size_t keylen = strlen(key);
+		const char *tok;
+		size_t toklen;
+		for (const char *next = parsehdr_connection_token(
+			     p->hdr.connection, &tok, &toklen);
+		     tok != NULL;
+		     next = parsehdr_connection_token(next, &tok, &toklen)) {
+			if (toklen == keylen &&
+			    strncasecmp(tok, key, keylen) == 0) {
+				return true;
+			}
+		}
+	}
+	if (p->wbuf.len == 0) {
+		build_pass_req(p);
+	}
+
+	if (strcasecmp(key, "Host") == 0) {
+		p->hdr.host = value;
+		(void)BUF_APPENDF(p->wbuf, "Host: %s\r\n", value);
+		return true;
+	}
+	if (strcasecmp(key, "Authorization") == 0) {
+		char *sep = strchr(value, ' ');
+		if (sep == NULL) {
+			return false;
+		}
+		*sep = '\0';
+		p->hdr.authorization.type = value;
+		p->hdr.authorization.credentials = sep + 1;
+		/* reconstruct for forwarding */
+		(void)BUF_APPENDF(
+			p->wbuf, "Authorization: %s %s\r\n",
+			p->hdr.authorization.type,
+			p->hdr.authorization.credentials);
+		return true;
+	}
+	if (strcasecmp(key, "Content-Length") == 0) {
+		(void)BUF_APPENDF(p->wbuf, "Content-Length: %s\r\n", value);
+		return true;
+	}
+	if (strcasecmp(key, "Content-Type") == 0) {
+		p->hdr.content.type = value;
+		(void)BUF_APPENDF(p->wbuf, "Content-Type: %s\r\n", value);
+		return true;
+	}
+	/* forward all other end-to-end headers */
+	(void)BUF_APPENDF(p->wbuf, "%s: %s\r\n", key, value);
 	return true;
 }
 

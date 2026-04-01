@@ -92,8 +92,9 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	watcher->fd = -1;
 	const char *conn = ctx->parser.hdr.connection;
 	if (ctx->dialreq != NULL &&
-	    (conn == NULL || strcasecmp(conn, "close") != 0)) {
-		conn_cache_put(loop, fd, ctx->dialreq, ctx->conf->conn_cache);
+	    (conn == NULL || strcasecmp(conn, "close") != 0) &&
+	    ctx->conf->conn_cache) {
+		conn_cache_put(loop, fd, ctx->dialreq);
 	} else {
 		if (ctx->dialreq != NULL && conn != NULL) {
 			LOGV("server wants to close the connection, skip caching");
@@ -225,11 +226,14 @@ void http_client_do(
 {
 	ASSERT(ctx->state == STATE_CLIENT_INIT);
 	ctx->dialreq = req;
-	const int fd = conn_cache_get(loop, req, ctx->conf->conn_cache);
-	if (fd != -1) {
-		LOGV_F("http_client: reusing cached connection [fd:%d]", fd);
-		http_client_start_fd(loop, ctx, fd);
-		return;
+	if (ctx->conf->conn_cache) {
+		const int fd = conn_cache_get(loop, req);
+		if (fd != -1) {
+			LOGV_F("http_client: reusing cached connection [fd:%d]",
+			       fd);
+			http_client_start_fd(loop, ctx, fd);
+			return;
+		}
 	}
 	ctx->state = STATE_CLIENT_CONNECT;
 	ev_timer_start(loop, &ctx->w_timeout);

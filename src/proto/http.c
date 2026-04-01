@@ -637,6 +637,38 @@ bool parsehdr_expect(struct http_parser *restrict p, char *restrict value)
 	return true;
 }
 
+bool parsehdr_connection(struct http_parser *restrict p, char *restrict value)
+{
+	p->hdr.connection = value;
+	return true;
+}
+
+const char *parsehdr_connection_token(
+	const char *restrict p, const char **restrict tok,
+	size_t *restrict toklen)
+{
+	*tok = NULL;
+	*toklen = 0;
+	if (p == NULL) {
+		return NULL;
+	}
+	/* skip OWS and comma separators (RFC 7230 token-list) */
+	while (*p == ' ' || *p == '\t' || *p == ',') {
+		p++;
+	}
+	if (*p == '\0') {
+		return p;
+	}
+	/* locate end of token */
+	const char *const start = p;
+	while (*p != '\0' && *p != ',' && *p != ' ' && *p != '\t') {
+		p++;
+	}
+	*tok = start;
+	*toklen = (size_t)(p - start);
+	return p;
+}
+
 void http_parser_init(
 	struct http_parser *restrict p, const int fd,
 	const enum http_parser_state mode,

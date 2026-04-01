@@ -50,8 +50,8 @@ struct config {
 #endif
 #if WITH_RULESET
 	bool traceback : 1;
-	bool conn_cache : 1;
 #endif
+	bool conn_cache : 1;
 	bool socks5_enable_bind : 1;
 	bool socks5_enable_udp : 1;
 	bool daemonize : 1;

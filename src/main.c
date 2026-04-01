@@ -266,10 +266,6 @@ static void parse_args(const int argc, char *const restrict argv[])
 			conf->traceback = true;
 			continue;
 		}
-		if (strcmp(argv[i], "--no-conn-cache") == 0) {
-			conf->conn_cache = false;
-			continue;
-		}
 		if (strcmp(argv[i], "--memlimit") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			char *s = argv[++i];
@@ -283,6 +279,10 @@ static void parse_args(const int argc, char *const restrict argv[])
 			continue;
 		}
 #endif
+		if (strcmp(argv[i], "--no-conn-cache") == 0) {
+			conf->conn_cache = false;
+			continue;
+		}
 		if (strcmp(argv[i], "-u") == 0 ||
 		    strcmp(argv[i], "--user") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);

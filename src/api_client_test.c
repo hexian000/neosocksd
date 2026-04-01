@@ -374,23 +374,19 @@ void dialreq_free(struct dialreq *req)
 	free(req);
 }
 
-int conn_cache_get(
-	struct ev_loop *loop, const struct dialreq *restrict req,
-	const bool enable_conn_cache)
+int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
 {
 	(void)loop;
 	(void)req;
-	(void)enable_conn_cache;
 	S.conn_cache_get_calls++;
 	return S.conn_cache_get_fd;
 }
 
 void conn_cache_put(
 	struct ev_loop *loop, const int fd,
-	const struct dialreq *restrict dialreq, const bool enable_conn_cache)
+	const struct dialreq *restrict dialreq)
 {
 	(void)loop;
-	(void)enable_conn_cache;
 	S.conn_cache_put_calls++;
 	S.conn_cache_put_fd = fd;
 	S.conn_cache_put_req = dialreq;
