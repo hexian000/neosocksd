@@ -5,8 +5,8 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "httputil.h"
 #include "io/memory.h"
+#include "proto/http.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"

@@ -5,7 +5,7 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "httputil.h"
+#include "proto/http.h"
 #include "util.h"
 
 #include "io/stream.h"

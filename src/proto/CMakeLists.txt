@@ -1,5 +1,7 @@
 target_sources(neosocksd
     PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/codec.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/domain.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/http.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/socks.h"
 )

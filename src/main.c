@@ -103,6 +103,8 @@ static void print_usage(const char *argv0)
 		"  --no-conn-cache            disable ruleset API client connection cache\n"
 		"  --memlimit <size>          set a soft limit on the total Lua object size in MiB\n"
 #endif
+		"  --socks5-enable-bind       enable SOCKS5 BIND command (incompatible with -r/-x)\n"
+		"  --socks5-enable-udp        enable SOCKS5 UDP ASSOCIATE command (incompatible with -r/-x)\n"
 		"  --api <bind_address>       RESTful API listen address\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
@@ -370,6 +372,14 @@ static void parse_args(const int argc, char *const restrict argv[])
 		}
 		if (strcmp(argv[i], "--bidir-timeout") == 0) {
 			conf->bidir_timeout = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--socks5-enable-bind") == 0) {
+			conf->socks5_enable_bind = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--socks5-enable-udp") == 0) {
+			conf->socks5_enable_udp = true;
 			continue;
 		}
 		if (strcmp(argv[i], "--") == 0) {

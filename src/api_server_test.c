@@ -4,7 +4,7 @@
 #include "api_server.h"
 
 #include "conf.h"
-#include "httputil.h"
+#include "proto/http.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"

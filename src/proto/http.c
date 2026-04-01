@@ -2,7 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 /**
- * @file httputil.c
+ * @file http.c
  * @brief HTTP parsing and utility functions implementation
  *
  * Implements streaming HTTP parser with support for content encoding,
@@ -10,7 +10,7 @@
  * in phases: message line, headers, and content body.
  */
 
-#include "httputil.h"
+#include "http.h"
 
 #include "codec.h"
 
@@ -476,6 +476,37 @@ int http_parser_recv(struct http_parser *restrict p)
 			FAILMSGF("unexpected http parser state: %d", p->state);
 		}
 	}
+}
+
+int http_parser_send(struct http_parser *restrict p, const int fd)
+{
+	const unsigned char *buf = p->wbuf.data + p->wpos;
+	size_t len = p->wbuf.len - p->wpos;
+	int ret = socket_send(fd, buf, &len);
+	if (ret != 0) {
+		return -1;
+	}
+	p->wpos += len;
+	if (p->wpos < p->wbuf.len) {
+		return 1;
+	}
+
+	if (p->cbuf == NULL) {
+		return 0;
+	}
+
+	VBUF_VIEW(buf, len, p->cbuf, p->cpos);
+	ret = socket_send(fd, buf, &len);
+	if (ret != 0) {
+		return -1;
+	}
+	p->cpos += len;
+	if (p->cpos < VBUF_LEN(p->cbuf)) {
+		return 1;
+	}
+
+	VBUF_FREE(p->cbuf);
+	return 0;
 }
 
 bool parsehdr_accept_te(struct http_parser *restrict p, char *restrict value)

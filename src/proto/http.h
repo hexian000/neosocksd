@@ -2,12 +2,12 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 /**
- * @file httputil.h
+ * @file http.h
  * @brief HTTP parsing and utility functions
  */
 
-#ifndef HTTP_PARSER_H
-#define HTTP_PARSER_H
+#ifndef PROTO_HTTP_H
+#define PROTO_HTTP_H
 
 #include "net/http.h"
 #include "utils/buffer.h"
@@ -135,6 +135,17 @@ void http_parser_init(
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
 int http_parser_recv(struct http_parser *restrict p);
+
+/**
+ * @brief Send pending HTTP data from parser buffers
+ *
+ * Drains response/request header buffer first, then optional content buffer.
+ *
+ * @param p Parser instance
+ * @param fd Socket file descriptor
+ * @return 0 on completion, 1 if more data needed, -1 on error
+ */
+int http_parser_send(struct http_parser *restrict p, int fd);
 
 /**
  * @brief Parse Accept-TE header
@@ -342,4 +353,4 @@ bool check_rpcall_mime(char *mime_type);
 #define RPCALL_COMPRESS_THRESHOLD 256
 #endif /* WITH_RULESET */
 
-#endif /* HTTP_PARSER_H */
+#endif /* PROTO_HTTP_H */

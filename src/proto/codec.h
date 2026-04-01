@@ -1,8 +1,8 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#ifndef CODEC_H
-#define CODEC_H
+#ifndef PROTO_CODEC_H
+#define PROTO_CODEC_H
 
 #include <stddef.h>
 
@@ -83,4 +83,4 @@ struct stream *codec_inflate_reader(struct stream *base);
  */
 const void *gzip_unbox(const void *p, size_t *len);
 
-#endif /* CODEC_H */
+#endif /* PROTO_CODEC_H */

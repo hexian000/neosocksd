@@ -68,7 +68,10 @@ return function(T, api_target)
             string.format("expected address string, got %q", tostring(addr)))
     end)
 
-    -- Throughput benchmarks: results are printed but do not affect pass/fail.
+    -- Throughput benchmarks: only run when all tests pass.
+    if T.failed ~= 0 then
+        return
+    end
 
     T:bench("neosocksd.sendmsg", 200 * 100, function()
         local m, n    = 200, 100

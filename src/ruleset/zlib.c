@@ -3,7 +3,7 @@
 
 #include "ruleset/zlib.h"
 
-#include "codec.h"
+#include "proto/codec.h"
 #include "ruleset/base.h"
 
 #include "io/io.h"

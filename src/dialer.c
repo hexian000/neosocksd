@@ -50,7 +50,6 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -685,7 +684,7 @@ static bool send_socks4a_req(
 	struct dialer *restrict d, const struct proxyreq *restrict proxy,
 	const struct dialaddr *restrict addr)
 {
-	size_t cap = sizeof(struct socks4_hdr);
+	size_t cap = SOCKS4_HDR_LEN;
 	const size_t idlen =
 		(proxy->username != NULL) ? strlen(proxy->username) : 0;
 	cap += idlen + 1;
@@ -702,24 +701,24 @@ static bool send_socks4a_req(
 		FAILMSGF("unexpected address type: %d", addr->type);
 	}
 	unsigned char buf[cap];
-	write_uint8(buf + offsetof(struct socks4_hdr, version), SOCKS4);
-	write_uint8(
-		buf + offsetof(struct socks4_hdr, command), SOCKS4CMD_CONNECT);
-	write_uint16(buf + offsetof(struct socks4_hdr, port), addr->port);
-	unsigned char *address = buf + offsetof(struct socks4_hdr, address);
-	unsigned char *userid = buf + sizeof(struct socks4_hdr);
+	struct socks4_hdr h = {
+		.version = SOCKS4,
+		.command = SOCKS4CMD_CONNECT,
+		.port = addr->port,
+	};
+	unsigned char *userid = buf + SOCKS4_HDR_LEN;
 	if (idlen > 0) {
 		memcpy(userid, proxy->username, idlen + 1);
 	} else {
 		userid[0] = '\0';
 	}
-	size_t len = sizeof(struct socks4_hdr) + idlen + 1;
+	size_t len = SOCKS4_HDR_LEN + idlen + 1;
 	switch (addr->type) {
 	case ATYP_INET:
-		memcpy(address, &addr->in, sizeof(addr->in));
+		h.address = read_uint32(&addr->in);
 		break;
 	case ATYP_INET6: {
-		write_uint32(address, UINT32_C(0x000000FF));
+		h.address = UINT32_C(0x000000FF);
 		char *restrict b = (char *)buf + len;
 		if (inet_ntop(AF_INET6, &addr->in6, b, INET6_ADDRSTRLEN) ==
 		    NULL) {
@@ -734,7 +733,7 @@ static bool send_socks4a_req(
 		len += strlen(b) + 1;
 	} break;
 	case ATYP_DOMAIN: {
-		write_uint32(address, UINT32_C(0x000000FF));
+		h.address = UINT32_C(0x000000FF);
 		unsigned char *restrict b = buf + len;
 		const size_t n = addr->domain.len;
 		memcpy(b, addr->domain.name, n);
@@ -742,6 +741,7 @@ static bool send_socks4a_req(
 		len += n + 1;
 	} break;
 	}
+	socks4hdr_write(buf, &h);
 	if (!dialer_send(d, buf, len)) {
 		return false;
 	}
@@ -796,7 +796,7 @@ static bool
 send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 {
 	ASSERT(d->state == STATE_HANDSHAKE3);
-	size_t cap = sizeof(struct socks5_hdr);
+	size_t cap = SOCKS5_HDR_LEN;
 	switch (addr->type) {
 	case ATYP_INET:
 		cap += sizeof(struct in_addr) + sizeof(in_port_t);
@@ -811,16 +811,15 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		FAILMSGF("unexpected address type: %d", addr->type);
 	}
 	unsigned char buf[cap];
-	write_uint8(buf + offsetof(struct socks5_hdr, version), SOCKS5);
-	write_uint8(
-		buf + offsetof(struct socks5_hdr, command), SOCKS5CMD_CONNECT);
-	write_uint8(buf + offsetof(struct socks5_hdr, reserved), 0);
-	unsigned char *restrict addrtype =
-		buf + offsetof(struct socks5_hdr, addrtype);
-	size_t len = sizeof(struct socks5_hdr);
+	struct socks5_hdr h = {
+		.version = SOCKS5,
+		.command = SOCKS5CMD_CONNECT,
+		.reserved = 0,
+	};
+	size_t len = SOCKS5_HDR_LEN;
 	switch (addr->type) {
 	case ATYP_INET: {
-		write_uint8(addrtype, SOCKS5ADDR_IPV4);
+		h.addrtype = SOCKS5ADDR_IPV4;
 		unsigned char *restrict addrbuf = buf + len;
 		memcpy(addrbuf, &addr->in, sizeof(addr->in));
 		len += sizeof(addr->in);
@@ -829,7 +828,7 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		len += sizeof(in_port_t);
 	} break;
 	case ATYP_INET6: {
-		write_uint8(addrtype, SOCKS5ADDR_IPV6);
+		h.addrtype = SOCKS5ADDR_IPV6;
 		unsigned char *restrict addrbuf = buf + len;
 		memcpy(addrbuf, &addr->in6, sizeof(addr->in6));
 		len += sizeof(addr->in6);
@@ -838,7 +837,7 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		len += sizeof(in_port_t);
 	} break;
 	case ATYP_DOMAIN: {
-		write_uint8(addrtype, SOCKS5ADDR_DOMAIN);
+		h.addrtype = SOCKS5ADDR_DOMAIN;
 		unsigned char *restrict lenbuf = buf + len;
 		write_uint8(lenbuf, addr->domain.len);
 		len += 1;
@@ -850,6 +849,7 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 		len += sizeof(in_port_t);
 	} break;
 	}
+	socks5hdr_write(buf, &h);
 	if (!dialer_send(d, buf, len)) {
 		return false;
 	}
@@ -1007,12 +1007,13 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 	ASSERT(d->state == STATE_HANDSHAKE1);
 	const unsigned char *restrict hdr = d->next;
 	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
-	const size_t want = sizeof(struct socks4_hdr);
+	const size_t want = SOCKS4_HDR_LEN;
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint_fast8_t version =
-		read_uint8(hdr + offsetof(struct socks4_hdr, version));
+	struct socks4_hdr h;
+	socks4hdr_read(&h, hdr);
+	const uint_fast8_t version = h.version;
 	if (version != UINT8_C(0)) {
 		DIALER_LOG_F(
 			DEBUG, d,
@@ -1022,8 +1023,7 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 		d->syserr = 0;
 		return -1;
 	}
-	const uint_fast8_t command =
-		read_uint8(hdr + offsetof(struct socks4_hdr, command));
+	const uint_fast8_t command = h.command;
 	switch (command) {
 	case SOCKS4RSP_GRANTED:
 		break;
@@ -1064,13 +1064,14 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 	ASSERT(d->state == STATE_HANDSHAKE3);
 	const unsigned char *restrict hdr = d->next;
 	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
-	size_t want = sizeof(struct socks5_hdr);
+	size_t want = SOCKS5_HDR_LEN;
 	if (len < want) {
 		return (int)(want - len) + 1;
 	}
 
-	const uint_fast8_t version =
-		read_uint8(hdr + offsetof(struct socks5_hdr, version));
+	struct socks5_hdr h;
+	socks5hdr_read(&h, hdr);
+	const uint_fast8_t version = h.version;
 	if (version != SOCKS5) {
 		DIALER_LOG_F(
 			DEBUG, d,
@@ -1080,8 +1081,7 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		d->syserr = 0;
 		return -1;
 	}
-	const uint_fast8_t command =
-		read_uint8(hdr + offsetof(struct socks5_hdr, command));
+	const uint_fast8_t command = h.command;
 	if (command != SOCKS5RSP_SUCCEEDED) {
 		if (command < ARRAY_SIZE(socks5_errorstr)) {
 			DIALER_LOG_F(
@@ -1108,8 +1108,7 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 		d->syserr = 0;
 		return -1;
 	}
-	const uint_fast8_t addrtype =
-		read_uint8(hdr + offsetof(struct socks5_hdr, addrtype));
+	const uint_fast8_t addrtype = h.addrtype;
 	switch (addrtype) {
 	case SOCKS5ADDR_IPV4:
 		want += sizeof(struct in_addr) + sizeof(in_port_t);
@@ -1171,12 +1170,13 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 	ASSERT(d->state == STATE_HANDSHAKE1);
 	const unsigned char *restrict hdr = d->next;
 	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
-	size_t want = sizeof(struct socks5_auth_rsp);
+	size_t want = SOCKS5_AUTH_RSP_LEN;
 	if (len < want) {
 		return (int)(want - len);
 	}
-	const uint_fast8_t version =
-		read_uint8(hdr + offsetof(struct socks5_auth_rsp, version));
+	struct socks5_auth_rsp ar;
+	socks5authrsp_read(&ar, hdr);
+	const uint_fast8_t version = ar.version;
 	if (version != SOCKS5) {
 		DIALER_LOG_F(
 			DEBUG, d, "unsupported SOCKS5 version: %" PRIuFAST8,
@@ -1185,8 +1185,7 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 		d->syserr = 0;
 		return -1;
 	}
-	const uint_fast8_t method =
-		read_uint8(hdr + offsetof(struct socks5_auth_rsp, method));
+	const uint_fast8_t method = ar.method;
 
 	if (!consume_rcvbuf(d, want)) {
 		return -1;

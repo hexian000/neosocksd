@@ -3,12 +3,13 @@ add_executable(neosocksd
     conf.c conf.h
     dialer.c dialer.h
     resolver.c resolver.h
-    codec.c codec.h
+    proto/codec.c proto/codec.h
     ruleset.c ruleset.h
     transfer.c transfer.h
+    http_client.c http_client.h
     forward.c forward.h
     socks.c socks.h
-    httputil.c httputil.h
+    proto/http.c proto/http.h
     http_proxy.c http_proxy.h
     api_server.c api_server.h
     api_client.c api_client.h
@@ -207,8 +208,8 @@ add_test(NAME socks_test COMMAND socks_test)
 add_executable(http_proxy_test
     http_proxy_test.c
     http_proxy.c
-    httputil.c
-    codec.c
+    proto/http.c
+    proto/codec.c
 )
 target_include_directories(http_proxy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(http_proxy_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
@@ -229,8 +230,8 @@ add_test(NAME http_proxy_test COMMAND http_proxy_test)
 add_executable(api_server_test
     api_server_test.c
     api_server.c
-    httputil.c
-    codec.c
+    proto/http.c
+    proto/codec.c
     "${CMAKE_CURRENT_BINARY_DIR}/version.c"
 )
 target_include_directories(api_server_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -252,8 +253,9 @@ add_test(NAME api_server_test COMMAND api_server_test)
 add_executable(api_client_test
     api_client_test.c
     api_client.c
-    httputil.c
-    codec.c
+    http_client.c
+    proto/http.c
+    proto/codec.c
 )
 target_include_directories(api_client_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(api_client_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
@@ -291,30 +293,30 @@ endif()
 
 add_test(NAME forward_test COMMAND forward_test)
 
-add_executable(httputil_test
-    httputil_test.c
-    httputil.c
-    codec.c
+add_executable(http_test
+    proto/http_test.c
+    proto/http.c
+    proto/codec.c
 )
-target_include_directories(httputil_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(httputil_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
-target_compile_options(httputil_test PRIVATE -pedantic -Wall -Wextra -Werror)
-target_link_libraries(httputil_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+target_include_directories(http_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(http_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(http_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(http_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
 if(LIBM)
-    target_link_libraries(httputil_test PRIVATE m)
+    target_link_libraries(http_test PRIVATE m)
 endif()
 
 if(FORCE_POSIX)
-    target_compile_definitions(httputil_test PRIVATE _POSIX_C_SOURCE=200809L)
+    target_compile_definitions(http_test PRIVATE _POSIX_C_SOURCE=200809L)
 else()
-    target_compile_definitions(httputil_test PRIVATE _GNU_SOURCE)
+    target_compile_definitions(http_test PRIVATE _GNU_SOURCE)
 endif()
 
-add_test(NAME httputil_test COMMAND httputil_test)
+add_test(NAME http_test COMMAND http_test)
 
 add_executable(codec_test
-    codec_test.c
-    codec.c
+    proto/codec_test.c
+    proto/codec.c
 )
 target_include_directories(codec_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(codec_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
@@ -462,7 +464,7 @@ if(WITH_LUA)
         ruleset/zlib_test.c
         ruleset/zlib.c
         ruleset/base.c
-        codec.c
+        proto/codec.c
         util.c
         dialer.c
         resolver.c

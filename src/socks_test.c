@@ -749,7 +749,7 @@ T_DECLARE_CASE(socks4_long_userid_rejected)
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
 	int peer_fd = -1;
-	unsigned char req[sizeof(struct socks4_hdr) + 300];
+	unsigned char req[SOCKS4_HDR_LEN + 300];
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
@@ -772,7 +772,7 @@ T_DECLARE_CASE(socks4_long_userid_rejected)
 	{
 		unsigned char rsp[16];
 		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n >= (ssize_t)sizeof(struct socks4_hdr));
+		T_EXPECT(n >= (ssize_t)SOCKS4_HDR_LEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
 	}
@@ -807,7 +807,7 @@ T_DECLARE_CASE(socks4_valid_connect_rejected_when_dialreq_unavailable)
 	{
 		unsigned char rsp[16];
 		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n >= (ssize_t)sizeof(struct socks4_hdr));
+		T_EXPECT(n >= (ssize_t)SOCKS4_HDR_LEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
 	}
@@ -850,7 +850,7 @@ T_DECLARE_CASE(socks4a_domain_connect_dialer_fail_rejected)
 	{
 		unsigned char rsp[16];
 		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n >= (ssize_t)sizeof(struct socks4_hdr));
+		T_EXPECT(n >= (ssize_t)SOCKS4_HDR_LEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
 	}
@@ -1141,6 +1141,638 @@ T_DECLARE_CASE(socks5_dialer_success_connected_transition)
 	test_conf.bidir_timeout = false;
 }
 
+T_DECLARE_CASE(socks5_bind_disabled_cmdnosupport)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* auth + BIND request (IPv4 0.0.0.0:0) */
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_BIND, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00, 0x00,		0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_bind = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[32];
+		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
+		T_EXPECT(n >= 4);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_CMDNOSUPPORT);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(socks5_udp_disabled_cmdnosupport)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* auth + UDP ASSOCIATE request (IPv4 0.0.0.0:0) */
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_udp = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[32];
+		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
+		T_EXPECT(n >= 4);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_CMDNOSUPPORT);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(socks5_bind_first_reply_succeeded)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_BIND, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00, 0x00,		0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_bind = true;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
+		/* auth(2) + BIND first reply: hdr(4) + IPv4(4) + port(2) = 12 */
+		T_EXPECT(n >= 12);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+		T_EXPECT_EQ(rsp[4], 0x00); /* reserved */
+		T_EXPECT_EQ(rsp[5], SOCKS5ADDR_IPV4);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_enable_bind = false;
+}
+
+T_DECLARE_CASE(socks5_bind_full_flow)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int connector_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_BIND, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00, 0x00,		0x00,
+	};
+
+	stub_reset();
+	STUB.transfer_mode = STUB_TRANSFER_FINISHED;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_bind = true;
+	test_conf.timeout = 1.0;
+	test_conf.bidir_timeout = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	/* auth(2) + BIND first reply hdr(4) + IPv4(4) + port(2) = 12 bytes */
+	unsigned char rsp[64];
+	ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
+	T_EXPECT(n >= 12);
+	T_EXPECT_EQ(rsp[2], SOCKS5);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	T_EXPECT_EQ(rsp[5], SOCKS5ADDR_IPV4);
+
+	/* Extract the port from the first BIND response (big-endian at rsp[10]) */
+	in_port_t bind_port;
+	memcpy(&bind_port, rsp + 10, sizeof(bind_port));
+
+	connector_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(connector_fd >= 0);
+	{
+		struct sockaddr_in sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = bind_port,
+		};
+		T_CHECK(connect(connector_fd, (const struct sockaddr *)&sa,
+				sizeof(sa)) == 0);
+	}
+
+	drive_loop(loop);
+
+	/* BIND second reply: hdr(4) + IPv4(4) + port(2) = 10 bytes */
+	unsigned char rsp2[32];
+	const ssize_t n2 = recv_nowait(peer_fd, rsp2, sizeof(rsp2));
+	T_EXPECT(n2 >= 10);
+	T_EXPECT_EQ(rsp2[0], SOCKS5);
+	T_EXPECT_EQ(rsp2[1], SOCKS5RSP_SUCCEEDED);
+	T_EXPECT_EQ(rsp2[3], SOCKS5ADDR_IPV4);
+
+	T_CHECK(close(connector_fd) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_enable_bind = false;
+	test_conf.bidir_timeout = false;
+}
+
+T_DECLARE_CASE(socks5_bind_timeout_ttlexpired)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_BIND, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00, 0x00,		0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_bind = true;
+	test_conf.timeout = 0.02;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
+		T_EXPECT(n >= 14);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		/* First BIND reply: SUCCEEDED */
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+		/* Timeout reply: TTLEXPIRED */
+		T_EXPECT_EQ(rsp[12], SOCKS5);
+		T_EXPECT_EQ(rsp[13], SOCKS5RSP_TTLEXPIRED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_enable_bind = false;
+	test_conf.timeout = 1.0;
+}
+
+T_DECLARE_CASE(socks5_udp_first_reply_succeeded)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_udp = true;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
+		/* auth(2) + UDP reply: hdr(4) + IPv4(4) + port(2) = 12 */
+		T_EXPECT(n >= 12);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+		T_EXPECT_EQ(rsp[4], 0x00); /* reserved */
+		T_EXPECT_EQ(rsp[5], SOCKS5ADDR_IPV4);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_enable_udp = false;
+}
+
+T_DECLARE_CASE(socks5_udp_relay_roundtrip)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_udp = true;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	/* Read UDP relay port from the SOCKS5 response */
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_nowait(peer_fd, rsp, sizeof(rsp));
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+
+	/* Create a target UDP socket bound to 127.0.0.1:0 */
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	{
+		struct sockaddr_in target_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(target_udp, (const struct sockaddr *)&target_sa,
+			     sizeof(target_sa)) == 0);
+	}
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	/* Create client UDP socket bound to 127.0.0.1:0 */
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	{
+		struct sockaddr_in cli_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(client_udp, (const struct sockaddr *)&cli_sa,
+			     sizeof(cli_sa)) == 0);
+	}
+
+	/* Build SOCKS5 UDP packet: RSV(2)+FRAG(1)+ATYP(1)+IPv4(4)+port(2)+data */
+	unsigned char udp_pkt[10 + 5]; /* header + "hello" */
+	udp_pkt[0] = 0;
+	udp_pkt[1] = 0; /* RSV */
+	udp_pkt[2] = 0; /* FRAG */
+	udp_pkt[3] = SOCKS5ADDR_IPV4;
+	memcpy(udp_pkt + 4, &target_bound.sin_addr, 4);
+	memcpy(udp_pkt + 8, &target_bound.sin_port, 2);
+	memcpy(udp_pkt + 10, "hello", 5);
+
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+	T_CHECK(sendto(client_udp, udp_pkt, sizeof(udp_pkt), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(udp_pkt));
+
+	drive_loop(loop);
+
+	/* Check that target received the raw data "hello" */
+	{
+		unsigned char buf[32];
+		const ssize_t n =
+			recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		T_EXPECT(n == 5);
+		T_EXPECT(memcmp(buf, "hello", 5) == 0);
+	}
+
+	/* Target sends reply "world" back to relay */
+	T_CHECK(sendto(target_udp, "world", 5, 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == 5);
+
+	drive_loop(loop);
+
+	/* Client should receive SOCKS5-wrapped "world" */
+	{
+		unsigned char buf[32];
+		const ssize_t n =
+			recv(client_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		/* RSV(2)+FRAG(1)+ATYP(1)+IPv4(4)+port(2)+data(5) = 15 */
+		T_EXPECT(n == 15);
+		T_EXPECT_EQ(buf[0], 0x00);
+		T_EXPECT_EQ(buf[1], 0x00);
+		T_EXPECT_EQ(buf[2], 0x00);
+		T_EXPECT_EQ(buf[3], SOCKS5ADDR_IPV4);
+		T_EXPECT(memcmp(buf + 10, "world", 5) == 0);
+	}
+
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_enable_udp = false;
+}
+
+T_DECLARE_CASE(socks5_udp_tcp_close_teardown)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_udp = true;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
+		T_EXPECT(n >= 12);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	}
+
+	/* Closing the TCP control connection should tear down the relay */
+	T_CHECK(close(peer_fd) == 0);
+	drive_loop(loop);
+
+	/* Verify that the server session counter is back to zero */
+	T_EXPECT(s.stats.num_sessions == 0);
+
+	ev_loop_destroy(loop);
+	test_conf.socks5_enable_udp = false;
+}
+
+T_DECLARE_CASE(socks5_udp_frag_two_parts)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_udp = true;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_nowait(peer_fd, rsp, sizeof(rsp));
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+
+	/* Bind a target UDP socket */
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	{
+		struct sockaddr_in target_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(target_udp, (const struct sockaddr *)&target_sa,
+			     sizeof(target_sa)) == 0);
+	}
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	/* Bind a client UDP socket */
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	{
+		struct sockaddr_in cli_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(client_udp, (const struct sockaddr *)&cli_sa,
+			     sizeof(cli_sa)) == 0);
+	}
+
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	/* Fragment 1 (FRAG=0x01): "Hello " */
+	unsigned char frag1[10 + 6];
+	frag1[0] = 0;
+	frag1[1] = 0; /* RSV */
+	frag1[2] = 0x01; /* FRAG: first, more to come */
+	frag1[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag1 + 4, &target_bound.sin_addr, 4);
+	memcpy(frag1 + 8, &target_bound.sin_port, 2);
+	memcpy(frag1 + 10, "Hello ", 6);
+	T_CHECK(sendto(client_udp, frag1, sizeof(frag1), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag1));
+
+	drive_loop(loop);
+
+	/* Target should have received nothing yet */
+	{
+		unsigned char buf[32];
+		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+	}
+
+	/* Fragment 2 (FRAG=0x82): "World" — last fragment */
+	unsigned char frag2[10 + 5];
+	frag2[0] = 0;
+	frag2[1] = 0; /* RSV */
+	frag2[2] = 0x82; /* FRAG: pos=2, last */
+	frag2[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag2 + 4, &target_bound.sin_addr, 4);
+	memcpy(frag2 + 8, &target_bound.sin_port, 2);
+	memcpy(frag2 + 10, "World", 5);
+	T_CHECK(sendto(client_udp, frag2, sizeof(frag2), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag2));
+
+	drive_loop(loop);
+
+	/* Target must now receive the reassembled payload "Hello World" */
+	{
+		unsigned char buf[32];
+		const ssize_t n =
+			recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		T_EXPECT(n == 11);
+		T_EXPECT(memcmp(buf, "Hello World", 11) == 0);
+	}
+
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_enable_udp = false;
+}
+
+T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_enable_udp = true;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_nowait(peer_fd, rsp, sizeof(rsp));
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	{
+		struct sockaddr_in target_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(target_udp, (const struct sockaddr *)&target_sa,
+			     sizeof(target_sa)) == 0);
+	}
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	{
+		struct sockaddr_in cli_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(client_udp, (const struct sockaddr *)&cli_sa,
+			     sizeof(cli_sa)) == 0);
+	}
+
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	/* Send FRAG=2 without a preceding FRAG=1: out-of-order, must discard */
+	unsigned char frag2[10 + 5];
+	frag2[0] = 0;
+	frag2[1] = 0; /* RSV */
+	frag2[2] = 0x82; /* FRAG: pos=2, last */
+	frag2[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag2 + 4, &target_bound.sin_addr, 4);
+	memcpy(frag2 + 8, &target_bound.sin_port, 2);
+	memcpy(frag2 + 10, "oops!", 5);
+	T_CHECK(sendto(client_udp, frag2, sizeof(frag2), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag2));
+
+	drive_loop(loop);
+
+	/* Target must receive nothing */
+	{
+		unsigned char buf[32];
+		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+	}
+
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_enable_udp = false;
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -1162,6 +1794,16 @@ int main(void)
 	T_RUN_CASE(t, socks5_dialer_system_error_netunreach);
 	T_RUN_CASE(t, socks5_dialer_success_transfer_finished);
 	T_RUN_CASE(t, socks5_dialer_success_connected_transition);
+	T_RUN_CASE(t, socks5_bind_disabled_cmdnosupport);
+	T_RUN_CASE(t, socks5_udp_disabled_cmdnosupport);
+	T_RUN_CASE(t, socks5_bind_first_reply_succeeded);
+	T_RUN_CASE(t, socks5_bind_full_flow);
+	T_RUN_CASE(t, socks5_bind_timeout_ttlexpired);
+	T_RUN_CASE(t, socks5_udp_first_reply_succeeded);
+	T_RUN_CASE(t, socks5_udp_relay_roundtrip);
+	T_RUN_CASE(t, socks5_udp_tcp_close_teardown);
+	T_RUN_CASE(t, socks5_udp_frag_two_parts);
+	T_RUN_CASE(t, socks5_udp_frag_discard_out_of_order);
 
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

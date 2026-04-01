@@ -106,6 +106,28 @@ bool conf_check(const struct config *restrict conf)
 		LOGW("the proxy will be overwritten by ruleset");
 	}
 #endif
+	if (conf->proxy != NULL) {
+		if (conf->socks5_enable_bind) {
+			LOGE("--socks5-enable-bind is incompatible with -x");
+			return false;
+		}
+		if (conf->socks5_enable_udp) {
+			LOGE("--socks5-enable-udp is incompatible with -x");
+			return false;
+		}
+	}
+#if WITH_RULESET
+	if (conf->ruleset != NULL) {
+		if (conf->socks5_enable_bind) {
+			LOGE("--socks5-enable-bind is incompatible with -r");
+			return false;
+		}
+		if (conf->socks5_enable_udp) {
+			LOGE("--socks5-enable-udp is incompatible with -r");
+			return false;
+		}
+	}
+#endif
 	if (conf->auth_required) {
 		if (!auth_supported) {
 			LOGE("authentication is not supported in current mode");

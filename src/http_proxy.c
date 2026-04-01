@@ -5,7 +5,7 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "httputil.h"
+#include "proto/http.h"
 #include "ruleset.h"
 #include "server.h"
 #include "transfer.h"
@@ -23,6 +23,7 @@
 #include <ev.h>
 #include <strings.h>
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -423,33 +424,17 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	struct http_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RESPONSE);
 
-	const int fd = watcher->fd;
-	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
-	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
-	int ret = socket_send(fd, buf, &len);
-	if (ret != 0) {
-		HTTP_CTX_LOG_F(WARNING, ctx, "socket_send: error %d", ret);
+	const int ret = http_parser_send(&ctx->parser, watcher->fd);
+	if (ret < 0) {
+		const int err = errno;
+		HTTP_CTX_LOG_F(
+			WARNING, ctx, "socket_send: (%d) %s", err,
+			strerror(err));
 		gc_unref(&ctx->gcbase);
 		return;
 	}
-	ctx->parser.wpos += len;
-	if (ctx->parser.wpos < ctx->parser.wbuf.len) {
+	if (ret > 0) {
 		return;
-	}
-
-	if (ctx->parser.cbuf != NULL) {
-		VBUF_VIEW(buf, len, ctx->parser.cbuf, ctx->parser.cpos);
-		ret = socket_send(fd, buf, &len);
-		if (ret != 0) {
-			HTTP_CTX_LOG_F(
-				WARNING, ctx, "socket_send: error %d", ret);
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		ctx->parser.cpos += len;
-		if (ctx->parser.cpos < VBUF_LEN(ctx->parser.cbuf)) {
-			return;
-		}
 	}
 	/* Connection: close */
 	gc_unref(&ctx->gcbase);
