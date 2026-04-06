@@ -118,7 +118,7 @@ static void api_client_finish(
 
 static void on_http_client_done(
 	struct ev_loop *loop, void *data, const char *errmsg,
-	const size_t errlen, struct http_parser *parser)
+	const size_t errlen, struct http_conn *conn)
 {
 	struct api_client_ctx *restrict ctx = data;
 
@@ -126,11 +126,11 @@ static void on_http_client_done(
 		api_client_finish(loop, ctx, errmsg, errlen, NULL);
 		return;
 	}
-	ASSERT(parser != NULL);
-	struct vbuffer *content = parser->cbuf;
-	parser->cbuf = NULL;
+	ASSERT(conn != NULL);
+	struct vbuffer *content = conn->cbuf;
+	conn->cbuf = NULL;
 
-	const struct http_message *restrict msg = &parser->msg;
+	const struct http_message *restrict msg = &conn->msg;
 	uint16_t code = 0;
 	{
 		const uintmax_t status = strtoumax(msg->rsp.code, NULL, 10);
@@ -146,13 +146,13 @@ static void on_http_client_done(
 			return;
 		}
 		/* rpcall: validate content type */
-		if (!check_rpcall_mime(parser->hdr.content.type)) {
+		if (!check_rpcall_mime(conn->hdr.content.type)) {
 			VBUF_FREE(content);
 			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 		}
 	} else if (
 		content != NULL && VBUF_LEN(content) > 0 &&
-		check_rpcall_mime(parser->hdr.content.type)) {
+		check_rpcall_mime(conn->hdr.content.type)) {
 		/* Server returned structured error in RPC format */
 		ctx->result.content = content;
 		api_client_finish(
@@ -190,7 +190,7 @@ static void on_http_client_done(
 
 	struct stream *r = content_reader(
 		VBUF_DATA(content), VBUF_LEN(content),
-		parser->hdr.content.encoding);
+		conn->hdr.content.encoding);
 	if (r == NULL) {
 		LOGOOM();
 		VBUF_FREE(content);
@@ -202,7 +202,7 @@ static void on_http_client_done(
 }
 
 static bool make_request(
-	struct http_parser *restrict p, const char *restrict uri,
+	struct http_conn *restrict p, const char *restrict uri,
 	const void *restrict content, const size_t len)
 {
 	/* Compress large payloads to reduce traffic */
@@ -245,7 +245,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 {
 	struct api_client_ctx *restrict c = ctx;
 	ASSERT(c->hctx.state != STATE_CLIENT_INIT);
-	struct http_parser *restrict p = &c->hctx.parser;
+	struct http_conn *restrict p = &c->hctx.conn;
 
 	/* hop-by-hop headers */
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
@@ -294,7 +294,7 @@ static bool api_client_do(
 		.data = ctx,
 	};
 	http_client_init(&ctx->hctx, loop, on_header, &hcb, conf, resolver);
-	if (!make_request(&ctx->hctx.parser, uri, payload, len)) {
+	if (!make_request(&ctx->hctx.conn, uri, payload, len)) {
 		LOGOOM();
 		dialreq_free(req);
 		free(ctx);

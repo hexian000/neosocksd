@@ -6,6 +6,7 @@
 #include "api_client.h"
 #include "conf.h"
 #include "proto/domain.h"
+#include "resolver.h"
 #include "ruleset/base.h"
 #include "server.h"
 #include "util.h"
@@ -197,13 +198,22 @@ static int api_stats(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
 	struct server_stats stats = { 0 };
+	struct listener_stats lstats = { 0 };
+	uintmax_t num_dns_query = 0, num_dns_success = 0;
 	{
 		const struct server *restrict s = r->server;
 		if (s != NULL) {
 			stats = s->stats;
+			lstats = s->l.stats;
+			if (s->resolver != NULL) {
+				const struct resolver_stats *restrict rs =
+					resolver_stats(s->resolver);
+				num_dns_query = rs->num_query;
+				num_dns_success = rs->num_success;
+			}
 		}
 	}
-	lua_createtable(L, 0, 9);
+	lua_createtable(L, 0, 20);
 
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	lua_setfield(L, -2, "lasterror");
@@ -211,6 +221,18 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "num_halfopen");
 	lua_pushinteger(L, (lua_Integer)stats.num_sessions);
 	lua_setfield(L, -2, "num_sessions");
+	lua_pushinteger(L, (lua_Integer)stats.num_sessions_peak);
+	lua_setfield(L, -2, "num_sessions_peak");
+	lua_pushinteger(L, (lua_Integer)stats.num_request);
+	lua_setfield(L, -2, "num_request");
+	lua_pushinteger(L, (lua_Integer)stats.num_success);
+	lua_setfield(L, -2, "num_success");
+	lua_pushinteger(L, (lua_Integer)stats.num_reject_ruleset);
+	lua_setfield(L, -2, "num_reject_ruleset");
+	lua_pushinteger(L, (lua_Integer)stats.num_reject_timeout);
+	lua_setfield(L, -2, "num_reject_timeout");
+	lua_pushinteger(L, (lua_Integer)stats.num_reject_upstream);
+	lua_setfield(L, -2, "num_reject_upstream");
 	lua_pushinteger(L, (lua_Integer)stats.byt_up);
 	lua_setfield(L, -2, "byt_up");
 	lua_pushinteger(L, (lua_Integer)stats.byt_down);
@@ -221,6 +243,14 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "bytes_allocated");
 	lua_pushinteger(L, (lua_Integer)r->vmstats.num_object);
 	lua_setfield(L, -2, "num_object");
+	lua_pushinteger(L, (lua_Integer)lstats.num_accept);
+	lua_setfield(L, -2, "num_accept");
+	lua_pushinteger(L, (lua_Integer)lstats.num_serve);
+	lua_setfield(L, -2, "num_serve");
+	lua_pushinteger(L, (lua_Integer)num_dns_query);
+	lua_setfield(L, -2, "num_dns_query");
+	lua_pushinteger(L, (lua_Integer)num_dns_success);
+	lua_setfield(L, -2, "num_dns_success");
 	return 1;
 }
 

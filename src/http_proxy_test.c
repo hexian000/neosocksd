@@ -854,7 +854,7 @@ T_DECLARE_CASE(ruleset_resolve_failure_returns_500)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(ruleset_finish_without_req_returns_500)
+T_DECLARE_CASE(ruleset_finish_without_req_returns_403)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
@@ -873,7 +873,7 @@ T_DECLARE_CASE(ruleset_finish_without_req_returns_500)
 	serve_payload(loop, &s, req, &peer_fd);
 	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
+	T_EXPECT(assert_response_status(loop, peer_fd, "403"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -1381,7 +1381,7 @@ int main(void)
 		t, ruleset_auth_required_without_basic_credentials_returns_407);
 	T_RUN_CASE(t, ruleset_auth_required_with_invalid_basic_returns_407);
 	T_RUN_CASE(t, ruleset_resolve_failure_returns_500);
-	T_RUN_CASE(t, ruleset_finish_without_req_returns_500);
+	T_RUN_CASE(t, ruleset_finish_without_req_returns_403);
 	T_RUN_CASE(t, ruleset_finish_with_req_and_dialer_error_returns_502);
 	T_RUN_CASE(t, timeout_in_process_state_cancels_ruleset);
 	T_RUN_CASE(t, timeout_in_connect_state_cancels_dialer);

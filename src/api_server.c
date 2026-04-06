@@ -62,7 +62,7 @@ struct api_ctx {
 	struct ruleset_state *rpcstate;
 #endif
 	struct dialreq *dialreq;
-	struct http_parser parser;
+	struct http_conn conn;
 	struct url uri;
 	bool keepalive : 1;
 };
@@ -121,6 +121,7 @@ bool check_rpcall_mime(char *s)
 	}
 	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
 }
+#endif
 
 static int comp_timestamp(const void *a, const void *b)
 {
@@ -135,6 +136,45 @@ static int comp_timestamp(const void *a, const void *b)
 	return 0;
 }
 
+static void append_connect_latency(
+	struct stream *restrict w, const struct server_stats *restrict stats)
+{
+	if (stats->num_connects == 0) {
+		(void)io_bufprintf(
+			w, "%-20s: %s\n", "Connect Latency", "(never)");
+		return;
+	}
+	const size_t num_stats = CONNECT_HIST_SIZE;
+	const size_t num_samples = MIN(stats->num_connects, num_stats);
+	int_fast64_t p50, p90, p99, pmax;
+	{
+		int_least64_t samples[num_samples];
+		for (size_t i = 0; i < num_samples; i++) {
+			const size_t idx =
+				(stats->num_connects + (num_stats - 1) - i) %
+				num_stats;
+			samples[i] = stats->connect_ns[idx];
+		}
+		qsort(samples, num_samples, sizeof(int_least64_t),
+		      comp_timestamp);
+		const int i50 = (int)floor((double)num_samples * 0.50);
+		const int i90 = (int)floor((double)num_samples * 0.90);
+		const int i99 = (int)floor((double)num_samples * 0.99);
+		p50 = samples[i50];
+		p90 = samples[i90];
+		p99 = samples[i99];
+		pmax = samples[num_samples - 1];
+	}
+	FORMAT_DURATION(p50_str, make_duration_nanos(p50));
+	FORMAT_DURATION(p90_str, make_duration_nanos(p90));
+	FORMAT_DURATION(p99_str, make_duration_nanos(p99));
+	FORMAT_DURATION(pmax_str, make_duration_nanos(pmax));
+	(void)io_bufprintf(
+		w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Connect Latency",
+		p50_str, p90_str, p99_str, pmax_str);
+}
+
+#if WITH_RULESET
 static void append_vmstats(
 	struct stream *restrict w, const struct ruleset_vmstats *vm,
 	const struct config *restrict conf)
@@ -208,6 +248,8 @@ static void server_stats_stateful(
 		uintmax_t num_reject;
 		uintmax_t num_request;
 		uintmax_t num_api_request;
+		uintmax_t num_reject_timeout;
+		uintmax_t num_reject_upstream;
 	} last = { 0 };
 
 	FORMAT_BYTES(xfer_rate_up, (double)(stats->byt_up - last.xfer_up) / dt);
@@ -223,6 +265,13 @@ static void server_stats_stateful(
 		(double)(stats->num_request - last.num_request) / dt;
 	const double api_request_rate =
 		(double)(apistats->num_request - last.num_api_request) / dt;
+	const double reject_timeout_rate =
+		(double)(stats->num_reject_timeout - last.num_reject_timeout) /
+		dt;
+	const double reject_upstream_rate =
+		(double)(stats->num_reject_upstream -
+			 last.num_reject_upstream) /
+		dt;
 
 	char load_str[16] = "(unknown)";
 	const double load = thread_load();
@@ -236,10 +285,12 @@ static void server_stats_stateful(
 		w,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
 		"Request Rate        : %.1f/s (API%+.1f/s)\n"
+		"Reject Rate         : timeout=%.1f/s, upstream=%.1f/s\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n"
 		"Server Load         : %s (last %s)\n",
 		accept_rate, reject_rate, request_rate, api_request_rate,
-		xfer_rate_up, xfer_rate_down, load_str, dt_str);
+		reject_timeout_rate, reject_upstream_rate, xfer_rate_up,
+		xfer_rate_down, load_str, dt_str);
 
 	last.xfer_up = stats->byt_up;
 	last.xfer_down = stats->byt_down;
@@ -247,6 +298,8 @@ static void server_stats_stateful(
 	last.num_reject = num_reject;
 	last.num_request = stats->num_request;
 	last.num_api_request = apistats->num_request;
+	last.num_reject_timeout = stats->num_reject_timeout;
+	last.num_reject_upstream = stats->num_reject_upstream;
 }
 
 static void server_stats(
@@ -288,6 +341,12 @@ static void server_stats(
 		resolv_stats->num_success,
 		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
 		xfer_down);
+	(void)io_bufprintf(
+		w,
+		"Sessions Peak       : %zu\n"
+		"Rejected            : ruleset=%ju, timeout=%ju, upstream=%ju\n",
+		stats->num_sessions_peak, stats->num_reject_ruleset,
+		stats->num_reject_timeout, stats->num_reject_upstream);
 
 #if WITH_RULESET
 	(void)io_bufprintf(w, "%-20s: %zu\n", "API Conn Cache", conn_cache.len);
@@ -298,6 +357,8 @@ static void server_stats(
 		append_vmstats(w, &vmstats, s->conf);
 	}
 #endif
+
+	append_connect_latency(w, stats);
 
 	if (dt > 0) {
 		server_stats_stateful(w, api, dt);
@@ -327,7 +388,7 @@ static void send_errpage(
 {
 	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
 	ctx->keepalive = false;
-	http_resp_errpage(&ctx->parser, code);
+	http_resp_errpage(&ctx->conn, code);
 	send_response(loop, ctx, false);
 }
 
@@ -362,7 +423,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 #endif
 	}
 
-	const struct http_message *restrict msg = &ctx->parser.msg;
+	const struct http_message *restrict msg = &ctx->conn.msg;
 	bool stateless;
 	if (strcmp(msg->req.method, "GET") == 0) {
 		stateless = true;
@@ -375,11 +436,11 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	/* Use compression if client supports it */
 	const enum content_encodings encoding =
-		(ctx->parser.hdr.accept_encoding == CENCODING_DEFLATE) ?
+		(ctx->conn.hdr.accept_encoding == CENCODING_DEFLATE) ?
 			CENCODING_DEFLATE :
 			CENCODING_NONE;
 	struct stream *w = io_bufwriter(
-		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, encoding),
+		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, encoding),
 		IO_BUFSIZE);
 	if (w == NULL) {
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -435,22 +496,22 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
 	} else {
-		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 	}
-	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
+	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
 	if (stateless) {
-		RESPHDR_NOCACHE(ctx->parser.wbuf);
+		RESPHDR_NOCACHE(ctx->conn.wbuf);
 	}
 	const char *encoding_str = content_encoding_str[encoding];
 	if (encoding_str != NULL) {
-		RESPHDR_CENCODING(ctx->parser.wbuf, encoding_str);
+		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
 	}
-	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
-	RESPHDR_FINISH(ctx->parser.wbuf);
+	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
+	RESPHDR_FINISH(ctx->conn.wbuf);
 	send_response(loop, ctx, true);
 }
 
@@ -462,12 +523,12 @@ static bool restapi_check(
 		send_errpage(loop, ctx, HTTP_NOT_FOUND);
 		return false;
 	}
-	const struct http_message *restrict msg = &ctx->parser.msg;
+	const struct http_message *restrict msg = &ctx->conn.msg;
 	if (method != NULL && strcmp(msg->req.method, method) != 0) {
 		send_errpage(loop, ctx, HTTP_METHOD_NOT_ALLOWED);
 		return false;
 	}
-	if (require_content && !ctx->parser.hdr.content.has_length) {
+	if (require_content && !ctx->conn.hdr.content.has_length) {
 		send_errpage(loop, ctx, HTTP_LENGTH_REQUIRED);
 		return false;
 	}
@@ -482,17 +543,17 @@ static void send_errmsg(
 	if ((code / 100) >= 4) {
 		ctx->keepalive = false;
 	}
-	VBUF_FREE(ctx->parser.cbuf);
-	RESPHDR_BEGIN(ctx->parser.wbuf, code);
+	VBUF_FREE(ctx->conn.cbuf);
+	RESPHDR_BEGIN(ctx->conn.wbuf, code);
 	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
 	} else {
-		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 	}
-	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-	RESPHDR_CLENGTH(ctx->parser.wbuf, len);
-	RESPHDR_FINISH(ctx->parser.wbuf);
-	BUF_APPEND(ctx->parser.wbuf, msg, len);
+	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
+	RESPHDR_CLENGTH(ctx->conn.wbuf, len);
+	RESPHDR_FINISH(ctx->conn.wbuf);
+	BUF_APPEND(ctx->conn.wbuf, msg, len);
 	send_response(loop, ctx, 1 <= (code / 100) && (code / 100) <= 3);
 }
 
@@ -522,12 +583,12 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	}
 	/* Compress response if client supports it and payload is large enough */
 	const enum content_encodings encoding =
-		(ctx->parser.hdr.accept_encoding != CENCODING_DEFLATE) ||
+		(ctx->conn.hdr.accept_encoding != CENCODING_DEFLATE) ||
 				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
 			CENCODING_NONE :
 			CENCODING_DEFLATE;
 	struct stream *writer =
-		content_writer(&ctx->parser.cbuf, resultlen, encoding);
+		content_writer(&ctx->conn.cbuf, resultlen, encoding);
 	if (writer == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -546,19 +607,19 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
 	} else {
-		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 	}
-	RESPHDR_CTYPE(ctx->parser.wbuf, MIME_RPCALL);
+	RESPHDR_CTYPE(ctx->conn.wbuf, MIME_RPCALL);
 	const char *encoding_str = content_encoding_str[encoding];
 	if (encoding_str != NULL) {
-		RESPHDR_CENCODING(ctx->parser.wbuf, encoding_str);
+		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
 	}
-	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
-	RESPHDR_FINISH(ctx->parser.wbuf);
+	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
+	RESPHDR_FINISH(ctx->conn.wbuf);
 	send_response(loop, ctx, true);
 }
 
@@ -566,15 +627,15 @@ static void handle_ruleset_rpcall(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset)
 {
-	char *mime_type = ctx->parser.hdr.content.type;
+	char *mime_type = ctx->conn.hdr.content.type;
 	if (!check_rpcall_mime(mime_type)) {
 		LOGD("rpcall: incompatible content type");
 		send_errpage(loop, ctx, HTTP_BAD_REQUEST);
 		return;
 	}
 	struct stream *reader = content_reader(
-		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
-		ctx->parser.hdr.content.encoding);
+		VBUF_DATA(ctx->conn.cbuf), VBUF_LEN(ctx->conn.cbuf),
+		ctx->conn.hdr.content.encoding);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -599,8 +660,8 @@ static void handle_ruleset_invoke(
 	struct ruleset *ruleset)
 {
 	struct stream *reader = content_reader(
-		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
-		ctx->parser.hdr.content.encoding);
+		VBUF_DATA(ctx->conn.cbuf), VBUF_LEN(ctx->conn.cbuf),
+		ctx->conn.hdr.content.encoding);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -608,7 +669,7 @@ static void handle_ruleset_invoke(
 	}
 	const bool ok = ruleset_invoke(ruleset, reader);
 	stream_close(reader);
-	VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->conn.cbuf);
 	if (!ok) {
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
@@ -616,14 +677,14 @@ static void handle_ruleset_invoke(
 		send_errmsg(loop, ctx, HTTP_INTERNAL_SERVER_ERROR, err, len);
 		return;
 	}
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
 	} else {
-		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 	}
-	RESPHDR_CLENGTH(ctx->parser.wbuf, 0);
-	RESPHDR_FINISH(ctx->parser.wbuf);
+	RESPHDR_CLENGTH(ctx->conn.wbuf, 0);
+	RESPHDR_FINISH(ctx->conn.wbuf);
 	send_response(loop, ctx, true);
 }
 
@@ -633,8 +694,8 @@ static void handle_ruleset_update(
 {
 	const int_fast64_t start = clock_monotonic_ns();
 	struct stream *reader = content_reader(
-		VBUF_DATA(ctx->parser.cbuf), VBUF_LEN(ctx->parser.cbuf),
-		ctx->parser.hdr.content.encoding);
+		VBUF_DATA(ctx->conn.cbuf), VBUF_LEN(ctx->conn.cbuf),
+		ctx->conn.hdr.content.encoding);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -642,7 +703,7 @@ static void handle_ruleset_update(
 	}
 	const bool ok = ruleset_update(ruleset, module, chunkname, reader);
 	stream_close(reader);
-	VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->conn.cbuf);
 	if (!ok) {
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
@@ -657,16 +718,16 @@ static void handle_ruleset_update(
 		const int bodylen = snprintf(
 			body, sizeof(body), "Time Cost           : %s\n",
 			timecost);
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+		RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 		if (ctx->keepalive) {
-			RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+			RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
 		} else {
-			RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+			RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 		}
-		RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-		RESPHDR_CLENGTH(ctx->parser.wbuf, (size_t)bodylen);
-		RESPHDR_FINISH(ctx->parser.wbuf);
-		BUF_APPEND(ctx->parser.wbuf, body, (size_t)bodylen);
+		RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
+		RESPHDR_CLENGTH(ctx->conn.wbuf, (size_t)bodylen);
+		RESPHDR_FINISH(ctx->conn.wbuf);
+		BUF_APPEND(ctx->conn.wbuf, body, (size_t)bodylen);
 	}
 	send_response(loop, ctx, true);
 }
@@ -696,7 +757,7 @@ static void handle_ruleset_gc(
 #endif
 
 	struct stream *w = io_bufwriter(
-		content_writer(&ctx->parser.cbuf, IO_BUFSIZE, CENCODING_NONE),
+		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, CENCODING_NONE),
 		IO_BUFSIZE);
 	if (w == NULL) {
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -726,15 +787,15 @@ static void handle_ruleset_gc(
 			return;
 		}
 	}
-	RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
 	} else {
-		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 	}
-	RESPHDR_CPLAINTEXT(ctx->parser.wbuf);
-	RESPHDR_CLENGTH(ctx->parser.wbuf, VBUF_LEN(ctx->parser.cbuf));
-	RESPHDR_FINISH(ctx->parser.wbuf);
+	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
+	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
+	RESPHDR_FINISH(ctx->conn.wbuf);
 	send_response(loop, ctx, true);
 }
 
@@ -811,11 +872,190 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 }
 #endif /* WITH_RULESET */
 
+static void
+http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
+{
+	const struct http_message *restrict msg = &ctx->conn.msg;
+	if (strcmp(msg->req.method, "GET") != 0) {
+		send_errpage(loop, ctx, HTTP_METHOD_NOT_ALLOWED);
+		return;
+	}
+
+	const struct server_stats *restrict apistats = &ctx->s->stats;
+	const struct server *restrict s = ctx->s->data;
+	const struct server_stats *restrict stats = &s->stats;
+	const struct listener_stats *restrict lstats = &s->l.stats;
+	const struct resolver_stats *restrict resolv_stats =
+		resolver_stats(s->resolver);
+
+	const double uptime =
+		(double)(clock_monotonic_ns() - ctx->s->stats.started) * 1e-9;
+
+	const enum content_encodings encoding =
+		(ctx->conn.hdr.accept_encoding == CENCODING_DEFLATE) ?
+			CENCODING_DEFLATE :
+			CENCODING_NONE;
+	struct stream *w = io_bufwriter(
+		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, encoding),
+		IO_BUFSIZE);
+	if (w == NULL) {
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+
+	/* Gauges */
+	(void)io_bufprintf(
+		w,
+		"# HELP neosocksd_sessions_active Number of active proxy sessions.\n"
+		"# TYPE neosocksd_sessions_active gauge\n"
+		"neosocksd_sessions_active %zu\n"
+		"# HELP neosocksd_sessions_peak Peak concurrent proxy sessions since start.\n"
+		"# TYPE neosocksd_sessions_peak gauge\n"
+		"neosocksd_sessions_peak %zu\n"
+		"# HELP neosocksd_halfopen_connections Connections in handshake/ruleset/dial phase.\n"
+		"# TYPE neosocksd_halfopen_connections gauge\n"
+		"neosocksd_halfopen_connections %zu\n"
+		"# HELP neosocksd_uptime_seconds Seconds since server start.\n"
+		"# TYPE neosocksd_uptime_seconds gauge\n"
+		"neosocksd_uptime_seconds %g\n",
+		stats->num_sessions, stats->num_sessions_peak,
+		stats->num_halfopen, uptime);
+
+	/* Counters */
+	(void)io_bufprintf(
+		w,
+		"# HELP neosocksd_connections_accepted_total Connections accepted by the listener.\n"
+		"# TYPE neosocksd_connections_accepted_total counter\n"
+		"neosocksd_connections_accepted_total %ju\n"
+		"# HELP neosocksd_connections_served_total Connections upgraded to proxy sessions.\n"
+		"# TYPE neosocksd_connections_served_total counter\n"
+		"neosocksd_connections_served_total %ju\n"
+		"# HELP neosocksd_requests_total Total proxy requests processed.\n"
+		"# TYPE neosocksd_requests_total counter\n"
+		"neosocksd_requests_total %ju\n"
+		"# HELP neosocksd_requests_success_total Proxy requests completed successfully.\n"
+		"# TYPE neosocksd_requests_success_total counter\n"
+		"neosocksd_requests_success_total %ju\n"
+		"# HELP neosocksd_rejects_ruleset_total Connections rejected by the ruleset.\n"
+		"# TYPE neosocksd_rejects_ruleset_total counter\n"
+		"neosocksd_rejects_ruleset_total %ju\n"
+		"# HELP neosocksd_rejects_timeout_total Connections timed out before becoming active.\n"
+		"# TYPE neosocksd_rejects_timeout_total counter\n"
+		"neosocksd_rejects_timeout_total %ju\n"
+		"# HELP neosocksd_rejects_upstream_total Connections failed during upstream dial.\n"
+		"# TYPE neosocksd_rejects_upstream_total counter\n"
+		"neosocksd_rejects_upstream_total %ju\n"
+		"# HELP neosocksd_bytes_up_total Bytes sent upstream.\n"
+		"# TYPE neosocksd_bytes_up_total counter\n"
+		"neosocksd_bytes_up_total %ju\n"
+		"# HELP neosocksd_bytes_down_total Bytes received downstream.\n"
+		"# TYPE neosocksd_bytes_down_total counter\n"
+		"neosocksd_bytes_down_total %ju\n"
+		"# HELP neosocksd_dns_queries_total DNS queries issued.\n"
+		"# TYPE neosocksd_dns_queries_total counter\n"
+		"neosocksd_dns_queries_total %ju\n"
+		"# HELP neosocksd_dns_success_total DNS queries resolved successfully.\n"
+		"# TYPE neosocksd_dns_success_total counter\n"
+		"neosocksd_dns_success_total %ju\n"
+		"# HELP neosocksd_api_requests_total API requests received.\n"
+		"# TYPE neosocksd_api_requests_total counter\n"
+		"neosocksd_api_requests_total %ju\n"
+		"# HELP neosocksd_api_requests_success_total API requests completed successfully.\n"
+		"# TYPE neosocksd_api_requests_success_total counter\n"
+		"neosocksd_api_requests_success_total %ju\n",
+		lstats->num_accept, lstats->num_serve, stats->num_request,
+		stats->num_success, stats->num_reject_ruleset,
+		stats->num_reject_timeout, stats->num_reject_upstream,
+		stats->byt_up, stats->byt_down, resolv_stats->num_query,
+		resolv_stats->num_success, apistats->num_request,
+		apistats->num_success);
+
+	/* Connect latency summary */
+	if (stats->num_connects > 0) {
+		const size_t num_stats = CONNECT_HIST_SIZE;
+		const size_t num_samples = MIN(stats->num_connects, num_stats);
+		double p50, p90, p99;
+		{
+			int_least64_t samples[num_samples];
+			for (size_t i = 0; i < num_samples; i++) {
+				const size_t idx = (stats->num_connects +
+						    (num_stats - 1) - i) %
+						   num_stats;
+				samples[i] = stats->connect_ns[idx];
+			}
+			qsort(samples, num_samples, sizeof(int_least64_t),
+			      comp_timestamp);
+			const int i50 = (int)floor((double)num_samples * 0.50);
+			const int i90 = (int)floor((double)num_samples * 0.90);
+			const int i99 = (int)floor((double)num_samples * 0.99);
+			p50 = (double)samples[i50] * 1e-9;
+			p90 = (double)samples[i90] * 1e-9;
+			p99 = (double)samples[i99] * 1e-9;
+		}
+		(void)io_bufprintf(
+			w,
+			"# HELP neosocksd_connect_latency_seconds Connection establishment latency.\n"
+			"# TYPE neosocksd_connect_latency_seconds summary\n"
+			"neosocksd_connect_latency_seconds{quantile=\"0.5\"} %g\n"
+			"neosocksd_connect_latency_seconds{quantile=\"0.9\"} %g\n"
+			"neosocksd_connect_latency_seconds{quantile=\"0.99\"} %g\n"
+			"neosocksd_connect_latency_seconds_count %zu\n",
+			p50, p90, p99, stats->num_connects);
+	}
+
+#if WITH_RULESET
+	{
+		struct ruleset_vmstats vmstats = { 0 };
+		const struct ruleset *restrict ruleset = s->ruleset;
+		if (ruleset != NULL) {
+			ruleset_vmstats(ruleset, &vmstats);
+		}
+		(void)io_bufprintf(
+			w,
+			"# HELP neosocksd_lua_memory_bytes Bytes allocated by the Lua VM.\n"
+			"# TYPE neosocksd_lua_memory_bytes gauge\n"
+			"neosocksd_lua_memory_bytes %zu\n"
+			"# HELP neosocksd_lua_objects Number of live Lua objects.\n"
+			"# TYPE neosocksd_lua_objects gauge\n"
+			"neosocksd_lua_objects %zu\n"
+			"# HELP neosocksd_api_conn_cache_size Number of cached upstream connections.\n"
+			"# TYPE neosocksd_api_conn_cache_size gauge\n"
+			"neosocksd_api_conn_cache_size %zu\n",
+			vmstats.byt_allocated, vmstats.num_object,
+			conn_cache.len);
+	}
+#endif
+
+	const int err = stream_close(w);
+	if (err != 0) {
+		LOGE_F("stream_close error: %d", err);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+
+	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
+	if (ctx->keepalive) {
+		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
+	} else {
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
+	}
+	RESPHDR_NOCACHE(ctx->conn.wbuf);
+	RESPHDR_CTYPE(
+		ctx->conn.wbuf, "text/plain; version=0.0.4; charset=utf-8");
+	const char *encoding_str = content_encoding_str[encoding];
+	if (encoding_str != NULL) {
+		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
+	}
+	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
+	RESPHDR_FINISH(ctx->conn.wbuf);
+	send_response(loop, ctx, true);
+}
+
 static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	const struct http_message *restrict msg = &ctx->parser.msg;
+	const struct http_message *restrict msg = &ctx->conn.msg;
 	if (LOGLEVEL(VERBOSE)) {
-		FORMAT_BYTES(clen, ctx->parser.hdr.content.length);
+		FORMAT_BYTES(clen, ctx->conn.hdr.content.length);
 		API_CTX_LOG_F(
 			VERBOSE, ctx, "api request `%s': content %s",
 			msg->req.url, clen);
@@ -834,14 +1074,14 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		if (!restapi_check(loop, ctx, NULL, false)) {
 			return;
 		}
-		RESPHDR_BEGIN(ctx->parser.wbuf, HTTP_OK);
+		RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 		if (ctx->keepalive) {
-			RESPHDR_CONN_KEEPALIVE(ctx->parser.wbuf);
+			RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
 		} else {
-			RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
+			RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 		}
-		RESPHDR_CLENGTH(ctx->parser.wbuf, 0);
-		RESPHDR_FINISH(ctx->parser.wbuf);
+		RESPHDR_CLENGTH(ctx->conn.wbuf, 0);
+		RESPHDR_FINISH(ctx->conn.wbuf);
 		send_response(loop, ctx, true);
 		return;
 	}
@@ -850,6 +1090,13 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			return;
 		}
 		http_handle_stats(loop, ctx);
+		return;
+	}
+	if (strcmp(segment, "metrics") == 0) {
+		if (!restapi_check(loop, ctx, NULL, false)) {
+			return;
+		}
+		http_handle_metrics(loop, ctx);
 		return;
 	}
 #if WITH_RULESET
@@ -906,12 +1153,12 @@ static void api_ctx_finalize(struct gcbase *restrict obj)
 		ctx->dialed_fd = -1;
 	}
 
-	VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->conn.cbuf);
 }
 
 static bool parse_header(void *ctx, const char *key, char *value)
 {
-	struct http_parser *restrict p = &((struct api_ctx *)ctx)->parser;
+	struct http_conn *restrict p = &((struct api_ctx *)ctx)->conn;
 
 	/* hop-by-hop headers */
 	if (strcasecmp(key, "Connection") == 0) {
@@ -952,21 +1199,21 @@ static bool parse_header(void *ctx, const char *key, char *value)
 /* Returns true when HTTP/1.1 and the client did not request Connection: close */
 static bool api_should_keepalive(const struct api_ctx *restrict ctx)
 {
-	const char *version = ctx->parser.msg.req.version;
+	const char *version = ctx->conn.msg.req.version;
 	if (strncmp(version, "HTTP/1.1", 8) != 0) {
 		return false;
 	}
-	const char *conn = ctx->parser.hdr.connection;
+	const char *conn = ctx->conn.hdr.connection;
 	return conn == NULL || strcasecmp(conn, "close") != 0;
 }
 
 /* Reset parser and state machine for reuse on the same TCP connection */
 static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->conn.cbuf);
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
-	http_parser_init(
-		&ctx->parser, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header);
+	http_conn_init(
+		&ctx->conn, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header);
 	ctx->uri = (struct url){ 0 };
 	ctx->keepalive = false;
 	ctx->state = STATE_REQUEST;
@@ -981,7 +1228,7 @@ void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	CHECK_REVENTS(revents, EV_READ);
 	struct api_ctx *restrict ctx = watcher->data;
 
-	const int want = http_parser_recv(&ctx->parser);
+	const int want = http_conn_recv(&ctx->conn);
 	if (want < 0) {
 		gc_unref(&ctx->gcbase);
 		return;
@@ -992,17 +1239,17 @@ void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	ctx->state = STATE_PROCESS;
 	ev_io_stop(loop, watcher);
 
-	switch (ctx->parser.state) {
+	switch (ctx->conn.state) {
 	case STATE_PARSE_OK: {
 		struct server_stats *restrict stats = &ctx->s->stats;
 		stats->num_request++;
 		ctx->keepalive = api_should_keepalive(ctx);
 	} break;
 	case STATE_PARSE_ERROR:
-		send_errpage(loop, ctx, ctx->parser.http_status);
+		send_errpage(loop, ctx, ctx->conn.http_status);
 		return;
 	default:
-		FAILMSGF("unexpected http parser state: %d", ctx->parser.state);
+		FAILMSGF("unexpected http parser state: %d", ctx->conn.state);
 	}
 
 	api_handle(loop, ctx);
@@ -1015,22 +1262,22 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	ASSERT(ctx->state == STATE_RESPONSE);
 
 	const int fd = watcher->fd;
-	const unsigned char *buf = ctx->parser.wbuf.data + ctx->parser.wpos;
-	size_t len = ctx->parser.wbuf.len - ctx->parser.wpos;
+	const unsigned char *buf = ctx->conn.wbuf.data + ctx->conn.wpos;
+	size_t len = ctx->conn.wbuf.len - ctx->conn.wpos;
 	int ret = socket_send(fd, buf, &len);
 	if (ret != 0) {
 		API_CTX_LOG_F(WARNING, ctx, "socket_send: error %d", ret);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
-	ctx->parser.wpos += len;
-	if (ctx->parser.wpos < ctx->parser.wbuf.len) {
+	ctx->conn.wpos += len;
+	if (ctx->conn.wpos < ctx->conn.wbuf.len) {
 		return;
 	}
 
 	/* Send response body after headers are fully sent */
-	if (ctx->parser.cbuf != NULL) {
-		VBUF_VIEW(buf, len, ctx->parser.cbuf, ctx->parser.cpos);
+	if (ctx->conn.cbuf != NULL) {
+		VBUF_VIEW(buf, len, ctx->conn.cbuf, ctx->conn.cpos);
 		ret = socket_send(fd, buf, &len);
 		if (ret != 0) {
 			API_CTX_LOG_F(
@@ -1038,8 +1285,8 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			gc_unref(&ctx->gcbase);
 			return;
 		}
-		ctx->parser.cpos += len;
-		if (ctx->parser.cpos < VBUF_LEN(ctx->parser.cbuf)) {
+		ctx->conn.cpos += len;
+		if (ctx->conn.cpos < VBUF_LEN(ctx->conn.cbuf)) {
 			return;
 		}
 	}
@@ -1087,7 +1334,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ctx->rpcstate = NULL;
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
-	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
+	http_conn_init(&ctx->conn, fd, STATE_PARSE_REQUEST, on_header);
 	gc_register(&ctx->gcbase, api_ctx_finalize);
 	return ctx;
 }

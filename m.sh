@@ -160,8 +160,8 @@ case "$1" in
         -DENABLE_SANITIZERS=ON \
         ..
     cp compile_commands.json ../
-    cmake --build .
-    ctest
+    cmake --build . -j"$(nproc)"
+    ctest -j"$(nproc)"
     ls -lh bin/neosocksd
     ;;
 *)

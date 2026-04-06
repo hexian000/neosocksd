@@ -42,7 +42,7 @@ const char *content_encoding_str[] = {
 	[CENCODING_GZIP] = "gzip",
 };
 
-void http_resp_errpage(struct http_parser *restrict p, const uint_fast16_t code)
+void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 {
 	/* Reset buffers for error response */
 	p->wbuf.len = 0;
@@ -74,7 +74,7 @@ void http_resp_errpage(struct http_parser *restrict p, const uint_fast16_t code)
  * @param s String message to send
  * @return true if message sent successfully
  */
-static bool reply_short(struct http_parser *restrict p, const char *s)
+static bool reply_short(struct http_conn *restrict p, const char *s)
 {
 	const size_t n = strlen(s);
 	ASSERT(n < 256);
@@ -95,7 +95,7 @@ static bool reply_short(struct http_parser *restrict p, const char *s)
 	return true;
 }
 
-bool http_resp_established(struct http_parser *restrict p)
+bool http_resp_established(struct http_conn *restrict p)
 {
 	const char msg[] = "HTTP/1.1 200 Connection established\r\n\r\n";
 	return reply_short(p, msg);
@@ -166,7 +166,7 @@ struct stream *content_writer(
  * @param p Parser instance
  * @return 0 on success, 1 if more data needed, -1 on error
  */
-static int parse_message(struct http_parser *restrict p)
+static int parse_message(struct http_conn *restrict p)
 {
 	/* Initialize parsing position if needed */
 	char *next = p->next;
@@ -232,7 +232,7 @@ static int parse_message(struct http_parser *restrict p)
  * @return true if header processed successfully
  */
 static bool parse_header_kv(
-	const struct http_parser *restrict p, const char *key, char *value)
+	const struct http_conn *restrict p, const char *key, char *value)
 {
 	LOGVV_F("http_header: \"%s: %s\"", key, value);
 	return p->on_header.func(p->on_header.ctx, key, value);
@@ -249,7 +249,7 @@ static bool parse_header_kv(
  * @param p Parser instance
  * @return 0 on success, 1 if more data needed, -1 on error
  */
-static int parse_header(struct http_parser *restrict p)
+static int parse_header(struct http_conn *restrict p)
 {
 	char *next = p->next;
 	char *key, *value;
@@ -293,7 +293,7 @@ static int parse_header(struct http_parser *restrict p)
  * @param p Parser instance
  * @return 0 when complete, 1 if more data needed, -1 on error
  */
-static int parse_content(struct http_parser *restrict p)
+static int parse_content(struct http_conn *restrict p)
 {
 	/* Only handle Content-Length based content for now */
 	if (!p->hdr.content.has_length) {
@@ -350,7 +350,7 @@ static int parse_content(struct http_parser *restrict p)
  * @param p Parser instance
  * @return true if data received successfully
  */
-static bool recv_request(struct http_parser *restrict p)
+static bool recv_request(struct http_conn *restrict p)
 {
 	/* Calculate available space (reserve 1 byte for null terminator) */
 	size_t n = p->rbuf.cap - p->rbuf.len - 1;
@@ -383,7 +383,7 @@ static bool recv_request(struct http_parser *restrict p)
  * @param p Parser instance
  * @return true if data received successfully
  */
-static bool recv_content(const struct http_parser *restrict p)
+static bool recv_content(const struct http_conn *restrict p)
 {
 	/* Calculate available space in content buffer */
 	unsigned char *b;
@@ -418,7 +418,7 @@ static bool recv_content(const struct http_parser *restrict p)
  * @param p Parser instance
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
-int http_parser_recv(struct http_parser *restrict p)
+int http_conn_recv(struct http_conn *restrict p)
 {
 	/* Receive data based on current parsing phase */
 	switch (p->state) {
@@ -478,7 +478,7 @@ int http_parser_recv(struct http_parser *restrict p)
 	}
 }
 
-int http_parser_send(struct http_parser *restrict p, const int fd)
+int http_conn_send(struct http_conn *restrict p, const int fd)
 {
 	const unsigned char *buf = p->wbuf.data + p->wpos;
 	size_t len = p->wbuf.len - p->wpos;
@@ -509,7 +509,7 @@ int http_parser_send(struct http_parser *restrict p, const int fd)
 	return 0;
 }
 
-bool parsehdr_accept_te(struct http_parser *restrict p, char *restrict value)
+bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 
@@ -529,7 +529,7 @@ bool parsehdr_accept_te(struct http_parser *restrict p, char *restrict value)
 }
 
 bool parsehdr_transfer_encoding(
-	struct http_parser *restrict p, char *restrict value)
+	struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 
@@ -548,8 +548,7 @@ bool parsehdr_transfer_encoding(
 	return false;
 }
 
-bool parsehdr_accept_encoding(
-	struct http_parser *restrict p, char *restrict value)
+bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value)
 {
 	/* Wildcard accepts deflate encoding */
 	if (strcmp(value, "*") == 0) {
@@ -579,7 +578,7 @@ bool parsehdr_accept_encoding(
 }
 
 bool parsehdr_content_length(
-	struct http_parser *restrict p, const char *restrict value)
+	struct http_conn *restrict p, const char *restrict value)
 {
 	/* Parse numeric value */
 	char *endptr;
@@ -604,7 +603,7 @@ bool parsehdr_content_length(
 }
 
 bool parsehdr_content_encoding(
-	struct http_parser *restrict p, const char *restrict value)
+	struct http_conn *restrict p, const char *restrict value)
 {
 	/* Check against all supported encodings */
 	for (size_t i = 0; i < CENCODING_MAX; i++) {
@@ -622,7 +621,7 @@ bool parsehdr_content_encoding(
 	return false;
 }
 
-bool parsehdr_expect(struct http_parser *restrict p, char *restrict value)
+bool parsehdr_expect(struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 
@@ -637,7 +636,7 @@ bool parsehdr_expect(struct http_parser *restrict p, char *restrict value)
 	return true;
 }
 
-bool parsehdr_connection(struct http_parser *restrict p, char *restrict value)
+bool parsehdr_connection(struct http_conn *restrict p, char *restrict value)
 {
 	p->hdr.connection = value;
 	return true;
@@ -669,9 +668,9 @@ const char *parsehdr_connection_token(
 	return p;
 }
 
-void http_parser_init(
-	struct http_parser *restrict p, const int fd,
-	const enum http_parser_state mode,
+void http_conn_init(
+	struct http_conn *restrict p, const int fd,
+	const enum http_conn_state mode,
 	const struct http_parsehdr_cb on_header)
 {
 	/* Initialize parser state */

@@ -25,7 +25,7 @@ enum http_client_state {
 struct http_client_cb {
 	void (*func)(
 		struct ev_loop *loop, void *data, const char *errmsg,
-		size_t errlen, struct http_parser *parser);
+		size_t errlen, struct http_conn *conn);
 	void *data;
 };
 
@@ -40,7 +40,7 @@ struct http_client_ctx {
 	ev_timer w_timeout;
 	ev_io w_socket;
 	struct dialer dialer;
-	struct http_parser parser;
+	struct http_conn conn;
 };
 
 void http_client_init(

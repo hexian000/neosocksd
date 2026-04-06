@@ -15,6 +15,7 @@
 #include "codec/base64.h"
 #include "net/http.h"
 #include "net/url.h"
+#include "os/clock.h"
 #include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
@@ -58,6 +59,7 @@ struct http_ctx {
 	enum http_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
+	int_least64_t accepted_ns;
 	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
@@ -70,7 +72,7 @@ struct http_ctx {
 #endif
 			struct dialreq *dialreq;
 			struct dialer dialer;
-			struct http_parser parser;
+			struct http_conn conn;
 			size_t relay_content_length; /* SIZE_MAX = unknown */
 			size_t relay_body_read;
 			bool relay_can_cache : 1;
@@ -95,7 +97,7 @@ static int format_status(
 	}
 	return snprintf(
 		s, maxlen, "[fd:%d] %s -> `%s'", ctx->accepted_fd, caddr,
-		ctx->parser.msg.req.url);
+		ctx->conn.msg.req.url);
 }
 
 #define HTTP_CTX_LOG_F(level, ctx, format, ...)                                \
@@ -124,7 +126,7 @@ static void send_errpage(
 	const uint_fast16_t code)
 {
 	ASSERT(4 <= (code / 100) && (code / 100) <= 5);
-	http_resp_errpage(&ctx->parser, code);
+	http_resp_errpage(&ctx->conn, code);
 	send_response(loop, ctx);
 }
 
@@ -202,7 +204,7 @@ static void http_ctx_finalize(struct gcbase *restrict obj)
 
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
-	VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->conn.cbuf);
 }
 
 /* Parse "host:port" from an absolute HTTP URL into buf.
@@ -268,12 +270,12 @@ static bool parse_req_target(
 	char *restrict buf, const size_t bufcap,
 	const struct http_ctx *restrict ctx)
 {
-	const char *url = ctx->parser.msg.req.url;
+	const char *url = ctx->conn.msg.req.url;
 	if (parse_hostport(buf, bufcap, url)) {
 		return true;
 	}
 	/* fall back to Host header */
-	const char *host = ctx->parser.hdr.host;
+	const char *host = ctx->conn.hdr.host;
 	if (host == NULL) {
 		return false;
 	}
@@ -301,7 +303,17 @@ static void mark_ready(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen--;
 	stats->num_sessions++;
+	if (stats->num_sessions > stats->num_sessions_peak) {
+		stats->num_sessions_peak = stats->num_sessions;
+	}
 	stats->num_success++;
+	{
+		const int_fast64_t elapsed =
+			clock_monotonic_ns() - ctx->accepted_ns;
+		stats->connect_ns[stats->num_connects % CONNECT_HIST_SIZE] =
+			elapsed;
+		stats->num_connects++;
+	}
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
 }
@@ -447,7 +459,7 @@ relay_recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	struct http_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RELAY_HDR || ctx->state == STATE_RELAY_BODY);
 
-	struct http_parser *restrict p = &ctx->parser;
+	struct http_conn *restrict p = &ctx->conn;
 	/* read into rbuf from dialed_fd */
 	const size_t space = p->rbuf.cap - p->rbuf.len;
 	if (space == 0) {
@@ -576,7 +588,7 @@ relay_send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	struct http_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RELAY_HDR || ctx->state == STATE_RELAY_BODY);
 
-	struct http_parser *restrict p = &ctx->parser;
+	struct http_conn *restrict p = &ctx->conn;
 	const unsigned char *buf = p->wbuf.data + p->wpos;
 	size_t len = p->wbuf.len - p->wpos;
 	const int ret = socket_send(ctx->accepted_fd, buf, &len);
@@ -621,7 +633,7 @@ relay_send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 static void
 http_ctx_relay_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	struct http_parser *restrict p = &ctx->parser;
+	struct http_conn *restrict p = &ctx->conn;
 	BUF_RESET(p->rbuf);
 	BUF_RESET(p->wbuf);
 	p->wpos = 0;
@@ -644,7 +656,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	struct http_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RESPONSE || ctx->state == STATE_FORWARD);
 
-	const int ret = http_parser_send(&ctx->parser, watcher->fd);
+	const int ret = http_conn_send(&ctx->conn, watcher->fd);
 	if (ret < 0) {
 		const int err = errno;
 		HTTP_CTX_LOG_F(
@@ -711,7 +723,12 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->dialreq = ctx->ruleset_callback.request.req;
 	ctx->ruleset_state = NULL;
-	if (strcmp(ctx->parser.msg.req.method, "CONNECT") != 0 &&
+	if (ctx->dialreq == NULL) {
+		ctx->s->stats.num_reject_ruleset++;
+		send_errpage(loop, ctx, HTTP_FORBIDDEN);
+		return;
+	}
+	if (strcmp(ctx->conn.msg.req.method, "CONNECT") != 0 &&
 	    ctx->s->conf->conn_cache) {
 		const int fd = conn_cache_get(loop, ctx->dialreq);
 		if (fd != -1) {
@@ -767,24 +784,23 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	const char *password = NULL;
 	parse_proxy_auth(
 		buf, sizeof(buf), &username, &password,
-		ctx->parser.hdr.proxy_authorization.type,
-		ctx->parser.hdr.proxy_authorization.credentials);
+		ctx->conn.hdr.proxy_authorization.type,
+		ctx->conn.hdr.proxy_authorization.credentials);
 	if (ctx->s->conf->auth_required &&
 	    (username == NULL || password == NULL)) {
 		RESPHDR_BEGIN(
-			ctx->parser.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
-		RESPHDR_CONN_CLOSE(ctx->parser.wbuf);
-		BUF_APPENDSTR(
-			ctx->parser.wbuf, "Proxy-Authenticate: Basic\r\n");
-		RESPHDR_FINISH(ctx->parser.wbuf);
+			ctx->conn.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
+		BUF_APPENDSTR(ctx->conn.wbuf, "Proxy-Authenticate: Basic\r\n");
+		RESPHDR_FINISH(ctx->conn.wbuf);
 		send_response(loop, ctx);
 		return;
 	}
 
 	const char *addr_str;
 	char hostport[FQDN_MAX_LENGTH + sizeof(":65535")];
-	if (strcmp(ctx->parser.msg.req.method, "CONNECT") == 0) {
-		addr_str = ctx->parser.msg.req.url;
+	if (strcmp(ctx->conn.msg.req.method, "CONNECT") == 0) {
+		addr_str = ctx->conn.msg.req.url;
 	} else {
 		if (!parse_req_target(hostport, sizeof(hostport), ctx)) {
 			send_errpage(loop, ctx, HTTP_BAD_REQUEST);
@@ -804,7 +820,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 
 /* For proxy_pass requests: write the forwarded request line into wbuf
  * on the first header callback (before any header is forwarded). */
-static void build_pass_req(struct http_parser *restrict p)
+static void build_pass_req(struct http_conn *restrict p)
 {
 	const char *method = p->msg.req.method;
 	const char *version = p->msg.req.version;
@@ -833,7 +849,7 @@ static void build_pass_req(struct http_parser *restrict p)
 
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	struct http_parser *restrict p = &ctx->parser;
+	struct http_conn *restrict p = &ctx->conn;
 
 	/* ensure the request line was written (no headers case) */
 	if (p->wbuf.len == 0) {
@@ -892,13 +908,13 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void
 http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	const struct http_message *restrict msg = &ctx->parser.msg;
+	const struct http_message *restrict msg = &ctx->conn.msg;
 	if (strcmp(msg->req.method, "CONNECT") != 0) {
 		http_proxy_pass(loop, ctx);
 		return;
 	}
 
-	const char *addr_str = ctx->parser.msg.req.url;
+	const char *addr_str = ctx->conn.msg.req.url;
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "http: CONNECT `%s'", addr_str);
 #if WITH_RULESET
 	const struct ruleset *restrict ruleset = ctx->s->ruleset;
@@ -917,7 +933,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	CHECK_REVENTS(revents, EV_READ);
 	struct http_ctx *restrict ctx = watcher->data;
 
-	const int want = http_parser_recv(&ctx->parser);
+	const int want = http_conn_recv(&ctx->conn);
 	if (want < 0) {
 		gc_unref(&ctx->gcbase);
 		return;
@@ -928,16 +944,16 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	ctx->state = STATE_PROCESS;
 	ev_io_stop(loop, watcher);
 
-	switch (ctx->parser.state) {
+	switch (ctx->conn.state) {
 	case STATE_PARSE_OK: {
 		struct server_stats *restrict stats = &ctx->s->stats;
 		stats->num_request++;
 	} break;
 	case STATE_PARSE_ERROR:
-		send_errpage(loop, ctx, ctx->parser.http_status);
+		send_errpage(loop, ctx, ctx->conn.http_status);
 		return;
 	default:
-		FAILMSGF("unexpected http parser state: %d", ctx->parser.state);
+		FAILMSGF("unexpected http parser state: %d", ctx->conn.state);
 	}
 
 	http_proxy_handle(loop, ctx);
@@ -949,6 +965,7 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	UNUSED(loop);
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct http_ctx *restrict ctx = watcher->data;
+	ctx->s->stats.num_reject_timeout++;
 	gc_unref(&ctx->gcbase);
 }
 
@@ -967,15 +984,16 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 			HTTP_CTX_LOG_F(
 				ERROR, ctx, "dialer: %s", dialer_strerror(err));
 		}
+		ctx->s->stats.num_reject_upstream++;
 		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
 		return;
 	}
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
 	ctx->dialed_fd = fd;
 
-	if (strcmp(ctx->parser.msg.req.method, "CONNECT") == 0) {
+	if (strcmp(ctx->conn.msg.req.method, "CONNECT") == 0) {
 		/* CONNECT tunnel: send 200 and hijack the connection */
-		if (!http_resp_established(&ctx->parser)) {
+		if (!http_resp_established(&ctx->conn)) {
 			gc_unref(&ctx->gcbase);
 			return;
 		}
@@ -989,7 +1007,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 static bool parse_header(void *data, const char *key, char *value)
 {
 	struct http_ctx *restrict ctx = (struct http_ctx *)data;
-	struct http_parser *restrict p = &ctx->parser;
+	struct http_conn *restrict p = &ctx->conn;
 	const bool is_connect = (strcmp(p->msg.req.method, "CONNECT") == 0);
 
 	/* hop-by-hop headers: handle but never forward */
@@ -1135,7 +1153,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	};
 	dialer_init(&ctx->dialer, &cb);
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
-	http_parser_init(&ctx->parser, fd, STATE_PARSE_REQUEST, on_header);
+	http_conn_init(&ctx->conn, fd, STATE_PARSE_REQUEST, on_header);
 
 	gc_register(&ctx->gcbase, http_ctx_finalize);
 	return ctx;
@@ -1146,6 +1164,7 @@ static void http_ctx_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_recv);
 	ev_timer_start(loop, &ctx->w_timeout);
 
+	ctx->accepted_ns = clock_monotonic_ns();
 	ctx->state = STATE_REQUEST;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen++;

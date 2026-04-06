@@ -47,7 +47,7 @@ static void http_client_cleanup(struct http_client_ctx *restrict ctx)
 		CLOSE_FD(ctx->w_socket.fd);
 		ctx->w_socket.fd = -1;
 	}
-	VBUF_FREE(ctx->parser.cbuf);
+	VBUF_FREE(ctx->conn.cbuf);
 	ctx->state = STATE_CLIENT_INIT;
 }
 
@@ -67,7 +67,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 	struct http_client_ctx *restrict ctx = watcher->data;
-	const int ret = http_parser_recv(&ctx->parser);
+	const int ret = http_conn_recv(&ctx->conn);
 	if (ret < 0) {
 		finish_error(
 			ctx, "error receiving response",
@@ -78,7 +78,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		return;
 	}
 
-	if (ctx->parser.state != STATE_PARSE_OK) {
+	if (ctx->conn.state != STATE_PARSE_OK) {
 		finish_error(
 			ctx, "error parsing response",
 			sizeof("error parsing response") - 1);
@@ -90,7 +90,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	int fd = watcher->fd;
 	watcher->fd = -1;
-	const char *conn = ctx->parser.hdr.connection;
+	const char *conn = ctx->conn.hdr.connection;
 	if (ctx->dialreq != NULL &&
 	    (conn == NULL || strcasecmp(conn, "close") != 0) &&
 	    ctx->conf->conn_cache) {
@@ -103,7 +103,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 	const struct http_client_cb cb = ctx->cb;
 	if (cb.func != NULL) {
-		cb.func(loop, cb.data, NULL, 0, &ctx->parser);
+		cb.func(loop, cb.data, NULL, 0, &ctx->conn);
 	}
 	http_client_cleanup(ctx);
 }
@@ -112,7 +112,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct http_client_ctx *restrict ctx = watcher->data;
-	const int ret = http_parser_send(&ctx->parser, watcher->fd);
+	const int ret = http_conn_send(&ctx->conn, watcher->fd);
 	if (ret < 0) {
 		const int err = errno;
 		const char *errmsg = strerror(err);
@@ -125,7 +125,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	ev_io_stop(loop, watcher);
 	ctx->state = STATE_CLIENT_RESPONSE;
-	ctx->parser.fd = watcher->fd;
+	ctx->conn.fd = watcher->fd;
 	ev_set_cb(watcher, recv_cb);
 	ev_io_set(watcher, watcher->fd, EV_READ);
 	ev_io_start(loop, watcher);
@@ -171,7 +171,7 @@ static bool http_client_on_header(void *data, const char *key, char *value)
 {
 	struct http_client_ctx *restrict ctx = data;
 	if (strcasecmp(key, "Connection") == 0) {
-		ctx->parser.hdr.connection = value;
+		ctx->conn.hdr.connection = value;
 		return true;
 	}
 	if (ctx->user_on_header.func != NULL) {
@@ -205,14 +205,14 @@ void http_client_init(
 	};
 	dialer_init(&ctx->dialer, &dialer_cb_conf);
 	const struct http_parsehdr_cb hdr_cb = { http_client_on_header, ctx };
-	http_parser_init(&ctx->parser, -1, STATE_PARSE_RESPONSE, hdr_cb);
+	http_conn_init(&ctx->conn, -1, STATE_PARSE_RESPONSE, hdr_cb);
 }
 
 static void http_client_start_fd(
 	struct ev_loop *loop, struct http_client_ctx *ctx, const int fd)
 {
 	ASSERT(ctx->state == STATE_CLIENT_INIT);
-	ctx->parser.fd = fd;
+	ctx->conn.fd = fd;
 	ctx->state = STATE_CLIENT_REQUEST;
 	ev_timer_start(loop, &ctx->w_timeout);
 	ev_io_init(&ctx->w_socket, send_cb, fd, EV_WRITE);

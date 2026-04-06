@@ -10,6 +10,7 @@
 #include "transfer.h"
 #include "util.h"
 
+#include "os/clock.h"
 #include "os/socket.h"
 #include "utils/class.h"
 #include "utils/debug.h"
@@ -42,6 +43,7 @@ struct forward_ctx {
 	enum forward_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
+	int_least64_t accepted_ns;
 	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
@@ -142,7 +144,17 @@ static void mark_ready(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen--;
 	stats->num_sessions++;
+	if (stats->num_sessions > stats->num_sessions_peak) {
+		stats->num_sessions_peak = stats->num_sessions;
+	}
 	stats->num_success++;
+	{
+		const int_fast64_t elapsed =
+			clock_monotonic_ns() - ctx->accepted_ns;
+		stats->connect_ns[stats->num_connects % CONNECT_HIST_SIZE] =
+			elapsed;
+		stats->num_connects++;
+	}
 	FW_CTX_LOG_F(
 		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
 }
@@ -187,6 +199,7 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	default:
 		FAILMSGF("unexpected state: %d", ctx->state);
 	}
+	ctx->s->stats.num_reject_timeout++;
 	gc_unref(&ctx->gcbase);
 }
 
@@ -205,6 +218,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 			FW_CTX_LOG_F(
 				ERROR, ctx, "dialer: %s", dialer_strerror(err));
 		}
+		ctx->s->stats.num_reject_upstream++;
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -263,6 +277,7 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ctx->ruleset_state = NULL;
 	struct dialreq *req = ctx->ruleset_callback.request.req;
 	if (req == NULL) {
+		ctx->s->stats.num_reject_ruleset++;
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -359,6 +374,7 @@ void forward_serve(
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
+	ctx->accepted_ns = clock_monotonic_ns();
 
 	ctx->state = STATE_PROCESS;
 	ev_timer_start(loop, &ctx->w_timeout);
@@ -472,6 +488,7 @@ void tproxy_serve(
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
+	ctx->accepted_ns = clock_monotonic_ns();
 
 	ctx->state = STATE_PROCESS;
 	ev_timer_start(loop, &ctx->w_timeout);

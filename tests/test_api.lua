@@ -124,9 +124,13 @@ return function(T)
         local s = neosocksd.stats()
         assert(type(s) == "table", "expected table")
         local numeric_fields = {
-            "num_halfopen", "num_sessions",
+            "num_halfopen", "num_sessions", "num_sessions_peak",
+            "num_request", "num_success",
+            "num_reject_ruleset", "num_reject_timeout", "num_reject_upstream",
             "byt_up", "byt_down", "uptime",
             "bytes_allocated", "num_object",
+            "num_accept", "num_serve",
+            "num_dns_query", "num_dns_success",
         }
         for _, k in ipairs(numeric_fields) do
             local v = s[k]

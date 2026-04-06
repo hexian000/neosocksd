@@ -74,8 +74,8 @@ struct http_headers {
 	};
 };
 
-/** HTTP parser state machine states */
-enum http_parser_state {
+/** HTTP connection state machine states */
+enum http_conn_state {
 	STATE_PARSE_REQUEST,
 	STATE_PARSE_RESPONSE,
 	STATE_PARSE_HEADER,
@@ -95,13 +95,13 @@ struct http_parsehdr_cb {
 };
 
 /**
- * @brief HTTP parser state and buffers
+ * @brief HTTP connection state and buffers
  *
- * Main parser structure containing all state needed for streaming
+ * Main connection structure containing all state needed for streaming
  * HTTP message parsing. Supports both request and response parsing.
  */
-struct http_parser {
-	enum http_parser_state state;
+struct http_conn {
+	enum http_conn_state state;
 	int http_status;
 	int fd;
 	struct http_message msg;
@@ -118,35 +118,35 @@ struct http_parser {
 };
 
 /**
- * @brief Initialize HTTP parser
+ * @brief Initialize HTTP connection
  *
- * @param p Parser instance to initialize
+ * @param p Connection instance to initialize
  * @param fd Socket file descriptor
- * @param mode Initial parser state (request or response)
+ * @param mode Initial connection state (request or response)
  * @param on_header Callback for processing headers
  */
-void http_parser_init(
-	struct http_parser *restrict p, int fd, enum http_parser_state mode,
+void http_conn_init(
+	struct http_conn *restrict p, int fd, enum http_conn_state mode,
 	struct http_parsehdr_cb on_header);
 
 /**
  * @brief Receive and parse HTTP data
  *
- * @param p Parser instance
+ * @param p Connection instance
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
-int http_parser_recv(struct http_parser *restrict p);
+int http_conn_recv(struct http_conn *restrict p);
 
 /**
- * @brief Send pending HTTP data from parser buffers
+ * @brief Send pending HTTP data from connection buffers
  *
  * Drains response/request header buffer first, then optional content buffer.
  *
- * @param p Parser instance
+ * @param p Connection instance
  * @param fd Socket file descriptor
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
-int http_parser_send(struct http_parser *restrict p, int fd);
+int http_conn_send(struct http_conn *restrict p, int fd);
 
 /**
  * @brief Parse Accept-TE header
@@ -159,7 +159,7 @@ int http_parser_send(struct http_parser *restrict p, int fd);
  * @param value Header value to parse
  * @return true if parsed successfully
  */
-bool parsehdr_accept_te(struct http_parser *restrict p, char *restrict value);
+bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value);
 
 /**
  * @brief Parse Transfer-Encoding header
@@ -173,7 +173,7 @@ bool parsehdr_accept_te(struct http_parser *restrict p, char *restrict value);
  * @return true if parsed successfully
  */
 bool parsehdr_transfer_encoding(
-	struct http_parser *restrict p, char *restrict value);
+	struct http_conn *restrict p, char *restrict value);
 
 /**
  * @brief Parse Accept-Encoding header
@@ -187,7 +187,7 @@ bool parsehdr_transfer_encoding(
  * @return true if at least one supported encoding found
  */
 bool parsehdr_accept_encoding(
-	struct http_parser *restrict p, char *restrict value);
+	struct http_conn *restrict p, char *restrict value);
 
 /**
  * @brief Parse Content-Length header
@@ -200,7 +200,7 @@ bool parsehdr_accept_encoding(
  * @return true if parsed and valid
  */
 bool parsehdr_content_length(
-	struct http_parser *restrict p, const char *restrict value);
+	struct http_conn *restrict p, const char *restrict value);
 
 /**
  * @brief Parse Content-Encoding header
@@ -214,7 +214,7 @@ bool parsehdr_content_length(
  * @return true if encoding is supported
  */
 bool parsehdr_content_encoding(
-	struct http_parser *restrict p, const char *restrict value);
+	struct http_conn *restrict p, const char *restrict value);
 
 /**
  * @brief Parse Expect header
@@ -227,7 +227,7 @@ bool parsehdr_content_encoding(
  * @param value Header value to parse
  * @return true if expectation is supported
  */
-bool parsehdr_expect(struct http_parser *restrict p, char *restrict value);
+bool parsehdr_expect(struct http_conn *restrict p, char *restrict value);
 
 /**
  * @brief Parse Connection header
@@ -238,7 +238,7 @@ bool parsehdr_expect(struct http_parser *restrict p, char *restrict value);
  * @param value Header value to parse
  * @return true always
  */
-bool parsehdr_connection(struct http_parser *restrict p, char *restrict value);
+bool parsehdr_connection(struct http_conn *restrict p, char *restrict value);
 
 /**
  * @brief Iterate over comma-separated tokens in a Connection header value.
@@ -264,7 +264,7 @@ const char *parsehdr_connection_token(
  * @param p Parser instance
  * @param code HTTP status code
  */
-void http_resp_errpage(struct http_parser *restrict p, uint_fast16_t code);
+void http_resp_errpage(struct http_conn *restrict p, uint_fast16_t code);
 
 /**
  * @brief Send HTTP 200 Connection established response
@@ -274,7 +274,7 @@ void http_resp_errpage(struct http_parser *restrict p, uint_fast16_t code);
  * @param p Parser instance
  * @return true if response sent successfully
  */
-bool http_resp_established(struct http_parser *restrict p);
+bool http_resp_established(struct http_conn *restrict p);
 
 /**
  * @brief Create content reader stream with decompression

@@ -13,6 +13,7 @@
 #include "util.h"
 
 #include "io/io.h"
+#include "os/clock.h"
 #include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
@@ -54,6 +55,7 @@ struct socks_ctx {
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
 	struct dialaddr addr;
+	int_least64_t accepted_ns;
 	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
@@ -221,7 +223,17 @@ static void mark_ready(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen--;
 	stats->num_sessions++;
+	if (stats->num_sessions > stats->num_sessions_peak) {
+		stats->num_sessions_peak = stats->num_sessions;
+	}
 	stats->num_success++;
+	{
+		const int_fast64_t elapsed =
+			clock_monotonic_ns() - ctx->accepted_ns;
+		stats->connect_ns[stats->num_connects % CONNECT_HIST_SIZE] =
+			elapsed;
+		stats->num_connects++;
+	}
 	SOCKS_CTX_LOG_F(
 		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
 }
@@ -388,6 +400,7 @@ timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 	default:
 		FAILMSGF("unexpected socks_ctx state: %d", ctx->state);
 	}
+	ctx->s->stats.num_reject_timeout++;
 	gc_unref(&ctx->gcbase);
 }
 
@@ -507,6 +520,7 @@ static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
 			SOCKS_CTX_LOG_F(
 				ERROR, ctx, "dialer: %s", dialer_strerror(err));
 		}
+		ctx->s->stats.num_reject_upstream++;
 		socks_senderr(ctx, err, syserr);
 		gc_unref(&ctx->gcbase);
 		return;
@@ -921,6 +935,9 @@ static void ruleset_cb(
 	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->dialreq = ctx->ruleset_callback.request.req;
 	ctx->ruleset_state = NULL;
+	if (ctx->dialreq == NULL) {
+		ctx->s->stats.num_reject_ruleset++;
+	}
 	socks_connect(loop, ctx);
 }
 
@@ -1468,6 +1485,9 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ev_timer_stop(loop, &ctx->w_timeout);
 	stats->num_halfopen--;
 	stats->num_sessions++;
+	if (stats->num_sessions > stats->num_sessions_peak) {
+		stats->num_sessions_peak = stats->num_sessions;
+	}
 	stats->num_success++;
 	ctx->udp_peer_known = false;
 	udp_frag_reset(ctx);
@@ -1576,6 +1596,7 @@ socks_ctx_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_socket);
 	ev_timer_start(loop, &ctx->w_timeout);
 
+	ctx->accepted_ns = clock_monotonic_ns();
 	ctx->state = STATE_HANDSHAKE1;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen++;
