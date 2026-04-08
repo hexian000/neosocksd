@@ -448,10 +448,14 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 
 	/* Parse fixed gzip header fields */
 	const struct {
-		uint_least8_t id1, id2; /**< Magic numbers (0x1f, 0x8b) */
-		uint_least8_t cm, flg; /**< Compression method and flags */
-		uint_least32_t mtime; /**< Modification time */
-		uint_least8_t xfl, os; /**< Extra flags and OS identifier */
+		/* Magic numbers (0x1f, 0x8b) */
+		uint_least8_t id1, id2;
+		/* Compression method and flags */
+		uint_least8_t cm, flg;
+		/* Modification time */
+		uint_least32_t mtime;
+		/* Extra flags and OS identifier */
+		uint_least8_t xfl, os;
 	} header = {
 		.id1 = read_uint8(b + 0),
 		.id2 = read_uint8(b + 1),
@@ -525,9 +529,10 @@ const void *gzip_unbox(const void *p, size_t *restrict len)
 
 	/* Parse trailer fields (not validated) */
 	const struct {
-		uint_least32_t crc; /**< CRC32 of uncompressed data */
-		uint_least32_t
-			isize; /**< Size of uncompressed data modulo 2^32 */
+		/* CRC32 of uncompressed data */
+		uint_least32_t crc;
+		/* Size of uncompressed data modulo 2^32 */
+		uint_least32_t isize;
 	} tailer = {
 		.crc = read_uint32_le(b + n - 8),
 		.isize = read_uint32_le(b + n - 4),

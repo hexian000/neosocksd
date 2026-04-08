@@ -146,7 +146,8 @@ struct proxyreq {
 	enum proxy_protocol proto;
 	struct dialaddr addr;
 	char *username, *password;
-	char credential[512]; /**< Storage for credential strings */
+	/* Storage for credential strings */
+	char credential[512];
 };
 
 /**
@@ -229,8 +230,10 @@ struct dialer {
 	struct resolve_query *resolve_query;
 	size_t jump;
 	int state;
-	enum dialer_error err; /**< High-level error code */
-	int syserr; /**< System errno (valid when err == DIALER_ERR_SYSTEM) */
+	/* High-level error code */
+	enum dialer_error err;
+	/* System errno (valid when err == DIALER_ERR_SYSTEM) */
+	int syserr;
 	ev_io w_socket;
 	int dialed_fd;
 	ev_watcher w_finish;

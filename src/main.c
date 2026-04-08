@@ -45,9 +45,12 @@ static struct {
 	ev_signal w_sigint;
 	ev_signal w_sigterm;
 
-	struct config conf; /**< Parsed configuration from command line */
-	struct server server; /**< Main proxy server instance */
-	struct server apiserver; /**< Optional REST API server instance */
+	/* Parsed configuration from command line */
+	struct config conf;
+	/* Main proxy server instance */
+	struct server server;
+	/* Optional REST API server instance */
+	struct server apiserver;
 } app = { 0 };
 
 /**

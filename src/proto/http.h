@@ -110,7 +110,8 @@ struct http_conn {
 	struct http_headers hdr;
 	struct http_parsehdr_cb on_header;
 	size_t wpos, cpos;
-	struct vbuffer *cbuf; /* content buffer */
+	/* content buffer */
+	struct vbuffer *cbuf;
 	struct {
 		BUFFER_HDR;
 		unsigned char data[HTTP_MAX_ENTITY];

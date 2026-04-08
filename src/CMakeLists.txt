@@ -339,6 +339,12 @@ add_executable(dialer_test
     dialer.c
     util.c
     resolver.c
+    server.c server.h
+    socks.c socks.h
+    http_proxy.c http_proxy.h
+    transfer.c transfer.h
+    proto/http.c proto/http.h
+    proto/codec.c proto/codec.h
     "${CMAKE_CURRENT_BINARY_DIR}/version.c"
 )
 target_include_directories(dialer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -361,6 +367,31 @@ else()
 endif()
 
 add_test(NAME dialer_test COMMAND dialer_test)
+
+add_executable(resolver_test
+    resolver_test.c
+    resolver.c
+)
+target_include_directories(resolver_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(resolver_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(resolver_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(resolver_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(resolver_test PRIVATE m)
+endif()
+
+if(WITH_CARES)
+    target_include_directories(resolver_test SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
+    target_link_libraries(resolver_test PRIVATE ${LIBCARES_LIBRARY})
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(resolver_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(resolver_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME resolver_test COMMAND resolver_test)
 
 if(WITH_LUA)
     add_executable(regex_test

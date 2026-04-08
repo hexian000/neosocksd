@@ -29,13 +29,19 @@ struct resolver;
 struct server;
 
 struct ruleset_vmstats {
-	size_t num_object; /**< Number of allocated Lua objects */
-	size_t byt_allocated; /**< Total bytes allocated by Lua VM */
+	/* Number of allocated Lua objects */
+	size_t num_object;
+	/* Total bytes allocated by Lua VM */
+	size_t byt_allocated;
 
-	uintmax_t time_total; /**< Total time used by ruleset in nanoseconds */
-	size_t num_events; /**< Number of completed events */
-	int_least64_t event_ns[1024]; /**< A circular buffer of recent events */
-	int_least64_t event_end[1024]; /**< A circular buffer of recent events */
+	/* Total time used by ruleset in nanoseconds */
+	uintmax_t time_total;
+	/* Number of completed events */
+	size_t num_events;
+	/* A circular buffer of recent event timestamps (ns) */
+	intmax_t event_ns[1024];
+	/* A circular buffer of recent event end timestamps (ns) */
+	intmax_t event_end[1024];
 };
 
 /**

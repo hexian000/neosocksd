@@ -515,6 +515,43 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(stats_output_format_has_no_raw_specifiers)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET /stats HTTP/1.1\r\n\r\n"));
+	drive_loop(loop);
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Server Time         : "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Uptime              : "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Num Sessions        : "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Num Rejected        : "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Conn Accepts        : "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Requests            : "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "API Requests        : "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Name Resolves       : "));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n, "Traffic             : Up "));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "%ju"));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "%zu"));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "%s"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(stats_post_ok_without_nocache)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -955,6 +992,7 @@ int main(void)
 	T_RUN_CASE(t, healthy_keepalive_reuse_connection);
 	T_RUN_CASE(t, healthy_connection_close_header);
 	T_RUN_CASE(t, stats_get_ok_with_nocache);
+	T_RUN_CASE(t, stats_output_format_has_no_raw_specifiers);
 	T_RUN_CASE(t, stats_post_ok_without_nocache);
 	T_RUN_CASE(t, stats_bad_method_405);
 	T_RUN_CASE(t, stats_bad_query_400);

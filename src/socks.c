@@ -15,6 +15,7 @@
 #include "io/io.h"
 #include "os/clock.h"
 #include "os/socket.h"
+#include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
@@ -55,7 +56,7 @@ struct socks_ctx {
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
 	struct dialaddr addr;
-	int_least64_t accepted_ns;
+	intmax_t accepted_ns;
 	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
@@ -85,8 +86,10 @@ struct socks_ctx {
 		};
 		/* state == STATE_UDP_RELAY */
 		struct {
-			ev_io w_udp; /* watches dialed_fd UDP socket */
-			ev_io w_tcp; /* watches accepted_fd for TCP close */
+			/* watches dialed_fd UDP socket */
+			ev_io w_udp;
+			/* watches accepted_fd for TCP close */
+			ev_io w_tcp;
 			union sockaddr_max udp_peer;
 			bool udp_peer_known;
 			struct {
@@ -94,8 +97,8 @@ struct socks_ctx {
 				unsigned char data[IO_BUFSIZE];
 			} ubuf;
 			/* fragment reassembly state */
-			uint_least8_t
-				frag_next; /* 0=idle, else next expected # */
+			/* 0=idle, else next expected # */
+			uint_least8_t frag_next;
 			struct {
 				BUFFER_HDR;
 				unsigned char data[IO_BUFSIZE];
@@ -230,7 +233,8 @@ static void mark_ready(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	{
 		const int_fast64_t elapsed =
 			clock_monotonic_ns() - ctx->accepted_ns;
-		stats->connect_ns[stats->num_connects % CONNECT_HIST_SIZE] =
+		stats->connect_ns
+			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
 			elapsed;
 		stats->num_connects++;
 	}

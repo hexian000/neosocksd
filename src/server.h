@@ -27,23 +27,33 @@ struct listener {
 	struct listener_stats stats;
 };
 
-#define CONNECT_HIST_SIZE 1024
-
 struct server_stats {
-	size_t num_halfopen; /**< Number of half-open connections */
-	size_t num_sessions; /**< Number of active sessions */
-	size_t num_sessions_peak; /**< Peak concurrent sessions */
-	uintmax_t num_request; /**< Total number of requests processed */
-	uintmax_t num_success; /**< Number of successful requests */
-	uintmax_t num_reject_ruleset; /**< Connections rejected by ruleset */
-	uintmax_t num_reject_timeout; /**< Connections timed out before ready */
-	uintmax_t num_reject_upstream; /**< Connections failed during upstream dial */
-	uintmax_t byt_up; /**< Bytes uploaded */
-	uintmax_t byt_down; /**< Bytes downloaded */
-	size_t num_connects; /**< Successful connection count (histogram index) */
-	int_least64_t connect_ns
-		[CONNECT_HIST_SIZE]; /**< Connection latency ring buffer (ns) */
-	int_least64_t started; /**< Server start timestamp */
+	/* Number of half-open connections */
+	size_t num_halfopen;
+	/* Number of active sessions */
+	size_t num_sessions;
+	/* Peak concurrent sessions */
+	size_t num_sessions_peak;
+	/* Total number of requests processed */
+	uintmax_t num_request;
+	/* Number of successful requests */
+	uintmax_t num_success;
+	/* Connections rejected by ruleset */
+	uintmax_t num_reject_ruleset;
+	/* Connections timed out before ready */
+	uintmax_t num_reject_timeout;
+	/* Connections failed during upstream dial */
+	uintmax_t num_reject_upstream;
+	/* Bytes uploaded */
+	uintmax_t byt_up;
+	/* Bytes downloaded */
+	uintmax_t byt_down;
+	/* Successful connection count (histogram index) */
+	size_t num_connects;
+	/* Connection latency ring buffer (ns) */
+	intmax_t connect_ns[1024];
+	/* Server start timestamp */
+	intmax_t started;
 };
 
 struct sockaddr;

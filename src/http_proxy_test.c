@@ -70,6 +70,8 @@ struct stub_state {
 	int dialer_result_fd;
 	enum dialer_error dialer_err;
 	int dialer_syserr;
+	int_least32_t dialreq_free_calls;
+	int_least32_t dialreq_invalid_free_calls;
 	bool transfer_auto_finish;
 	bool ruleset_resolve_ok;
 	bool ruleset_reply_with_req;
@@ -100,6 +102,36 @@ static struct stub_state S = {
 };
 
 static int_least32_t ruleset_state_token = 0;
+static struct dialreq *dialreq_allocations[32];
+static size_t num_dialreq_allocations = 0;
+
+static void reset_dialreq_allocations(void)
+{
+	num_dialreq_allocations = 0;
+	memset(dialreq_allocations, 0, sizeof(dialreq_allocations));
+}
+
+static void track_dialreq_allocation(struct dialreq *restrict req)
+{
+	T_CHECK(num_dialreq_allocations <
+		(sizeof(dialreq_allocations) / sizeof(dialreq_allocations[0])));
+	dialreq_allocations[num_dialreq_allocations++] = req;
+}
+
+static bool untrack_dialreq_allocation(struct dialreq *restrict req)
+{
+	for (size_t i = 0; i < num_dialreq_allocations; i++) {
+		if (dialreq_allocations[i] != req) {
+			continue;
+		}
+		num_dialreq_allocations--;
+		dialreq_allocations[i] =
+			dialreq_allocations[num_dialreq_allocations];
+		dialreq_allocations[num_dialreq_allocations] = NULL;
+		return true;
+	}
+	return false;
+}
 
 /**
  * Initialize server struct for testing.
@@ -121,6 +153,8 @@ static void reset_stub_state(void)
 	S.dialer_result_fd = -1;
 	S.dialer_err = DIALER_ERR_CONNECT;
 	S.dialer_syserr = ECONNREFUSED;
+	S.dialreq_free_calls = 0;
+	S.dialreq_invalid_free_calls = 0;
 	S.transfer_auto_finish = true;
 	S.ruleset_resolve_ok = false;
 	S.ruleset_reply_with_req = false;
@@ -130,6 +164,7 @@ static void reset_stub_state(void)
 	S.ruleset_state_ptr = NULL;
 	S.ruleset_cancel_calls = 0;
 	S.dialer_cancel_calls = 0;
+	reset_dialreq_allocations();
 	test_conf.timeout = 1.0;
 	test_conf.auth_required = false;
 	test_conf.bidir_timeout = false;
@@ -149,7 +184,11 @@ struct dialreq *dialreq_new(const struct dialreq *base, const size_t num_proxy)
 	if (!S.dialreq_new_ok) {
 		return NULL;
 	}
-	return calloc(1, sizeof(struct dialreq));
+	struct dialreq *restrict req = calloc(1, sizeof(struct dialreq));
+	if (req != NULL) {
+		track_dialreq_allocation(req);
+	}
+	return req;
 }
 
 bool dialreq_addproxy(
@@ -181,6 +220,14 @@ int dialreq_format(
 
 void dialreq_free(struct dialreq *req)
 {
+	if (req == NULL) {
+		return;
+	}
+	if (!untrack_dialreq_allocation(req)) {
+		S.dialreq_invalid_free_calls++;
+		return;
+	}
+	S.dialreq_free_calls++;
 	free(req);
 }
 
@@ -263,10 +310,11 @@ void transfer_init(
 	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
 	const bool is_uplink, const bool use_splice)
 {
+	memset(t, 0xA5, sizeof(*t));
 	t->state = XFER_INIT;
+	t->src_fd = src_fd;
+	t->dst_fd = dst_fd;
 	t->state_cb = *callback;
-	(void)src_fd;
-	(void)dst_fd;
 	t->byt_transferred = byt_transferred;
 	(void)is_uplink;
 	(void)use_splice;
@@ -728,6 +776,47 @@ T_DECLARE_CASE(valid_connect_established_with_hijack)
 			memmem(rsp, (size_t)n, "200 Connection established",
 			       26) != NULL);
 	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char rsp[1024];
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+			   "Host: ignored\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	S.transfer_auto_finish = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		const ssize_t n =
+			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "200 Connection established",
+			       26) != NULL);
+	}
+	T_EXPECT_EQ(S.dialreq_free_calls, 1);
+	T_EXPECT_EQ(S.dialreq_invalid_free_calls, 0);
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -1374,6 +1463,8 @@ int main(void)
 	T_RUN_CASE(t, connect_with_invalid_target_returns_500);
 	T_RUN_CASE(t, valid_connect_dialer_error_returns_502);
 	T_RUN_CASE(t, valid_connect_established_with_hijack);
+	T_RUN_CASE(
+		t, connect_hijack_finalize_does_not_touch_overwritten_dialreq);
 	T_RUN_CASE(t, connect_with_transfer_encoding_chunked_is_accepted);
 	T_RUN_CASE(t, connect_success_counted_once);
 	T_RUN_CASE(t, authorization_header_without_space_returns_400);

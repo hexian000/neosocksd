@@ -17,6 +17,7 @@
 #include "net/url.h"
 #include "os/clock.h"
 #include "os/socket.h"
+#include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
@@ -59,7 +60,7 @@ struct http_ctx {
 	enum http_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
-	int_least64_t accepted_ns;
+	intmax_t accepted_ns;
 	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
@@ -73,7 +74,8 @@ struct http_ctx {
 			struct dialreq *dialreq;
 			struct dialer dialer;
 			struct http_conn conn;
-			size_t relay_content_length; /* SIZE_MAX = unknown */
+			/* SIZE_MAX = unknown */
+			size_t relay_content_length;
 			size_t relay_body_read;
 			bool relay_can_cache : 1;
 		};
@@ -202,9 +204,11 @@ static void http_ctx_finalize(struct gcbase *restrict obj)
 		ctx->dialed_fd = -1;
 	}
 
-	dialreq_free(ctx->dialreq);
-	ctx->dialreq = NULL;
-	VBUF_FREE(ctx->conn.cbuf);
+	if (ctx->state < STATE_ESTABLISHED) {
+		dialreq_free(ctx->dialreq);
+		ctx->dialreq = NULL;
+		VBUF_FREE(ctx->conn.cbuf);
+	}
 }
 
 /* Parse "host:port" from an absolute HTTP URL into buf.
@@ -310,7 +314,8 @@ static void mark_ready(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	{
 		const int_fast64_t elapsed =
 			clock_monotonic_ns() - ctx->accepted_ns;
-		stats->connect_ns[stats->num_connects % CONNECT_HIST_SIZE] =
+		stats->connect_ns
+			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
 			elapsed;
 		stats->num_connects++;
 	}

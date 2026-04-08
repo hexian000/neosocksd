@@ -123,10 +123,10 @@ bool check_rpcall_mime(char *s)
 }
 #endif
 
-static int comp_timestamp(const void *a, const void *b)
+static int comp_intmax(const void *a, const void *b)
 {
-	const int_fast64_t va = *(const int_least64_t *)a;
-	const int_fast64_t vb = *(const int_least64_t *)b;
+	const intmax_t va = *(const intmax_t *)a;
+	const intmax_t vb = *(const intmax_t *)b;
 	if (va < vb) {
 		return -1;
 	}
@@ -134,6 +134,32 @@ static int comp_timestamp(const void *a, const void *b)
 		return 1;
 	}
 	return 0;
+}
+
+struct percentiles {
+	intmax_t p50, p90, p99, pmax;
+};
+
+static struct percentiles calc_percentiles(
+	const size_t num_stats, const size_t num_samples, const intmax_t *stats)
+{
+	const size_t n = MIN(num_stats, num_samples);
+	intmax_t samples[n];
+	for (size_t i = 0; i < n; i++) {
+		const size_t idx =
+			(num_samples + num_stats - i - 1) % num_stats;
+		samples[i] = stats[idx];
+	}
+	qsort(samples, n, sizeof(intmax_t), comp_intmax);
+	const int i50 = (int)floor((double)n * 0.50);
+	const int i90 = (int)floor((double)n * 0.90);
+	const int i99 = (int)floor((double)n * 0.99);
+	return (struct percentiles){
+		.p50 = samples[i50],
+		.p90 = samples[i90],
+		.p99 = samples[i99],
+		.pmax = samples[n - 1],
+	};
 }
 
 static void append_connect_latency(
@@ -144,31 +170,13 @@ static void append_connect_latency(
 			w, "%-20s: %s\n", "Connect Latency", "(never)");
 		return;
 	}
-	const size_t num_stats = CONNECT_HIST_SIZE;
-	const size_t num_samples = MIN(stats->num_connects, num_stats);
-	int_fast64_t p50, p90, p99, pmax;
-	{
-		int_least64_t samples[num_samples];
-		for (size_t i = 0; i < num_samples; i++) {
-			const size_t idx =
-				(stats->num_connects + (num_stats - 1) - i) %
-				num_stats;
-			samples[i] = stats->connect_ns[idx];
-		}
-		qsort(samples, num_samples, sizeof(int_least64_t),
-		      comp_timestamp);
-		const int i50 = (int)floor((double)num_samples * 0.50);
-		const int i90 = (int)floor((double)num_samples * 0.90);
-		const int i99 = (int)floor((double)num_samples * 0.99);
-		p50 = samples[i50];
-		p90 = samples[i90];
-		p99 = samples[i99];
-		pmax = samples[num_samples - 1];
-	}
-	FORMAT_DURATION(p50_str, make_duration_nanos(p50));
-	FORMAT_DURATION(p90_str, make_duration_nanos(p90));
-	FORMAT_DURATION(p99_str, make_duration_nanos(p99));
-	FORMAT_DURATION(pmax_str, make_duration_nanos(pmax));
+	const struct percentiles p = calc_percentiles(
+		ARRAY_SIZE(stats->connect_ns), stats->num_connects,
+		stats->connect_ns);
+	FORMAT_DURATION(p50_str, make_duration_nanos(p.p50));
+	FORMAT_DURATION(p90_str, make_duration_nanos(p.p90));
+	FORMAT_DURATION(p99_str, make_duration_nanos(p.p99));
+	FORMAT_DURATION(pmax_str, make_duration_nanos(p.pmax));
 	(void)io_bufprintf(
 		w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Connect Latency",
 		p50_str, p90_str, p99_str, pmax_str);
@@ -200,31 +208,12 @@ static void append_vmstats(
 		return;
 	}
 
-	const size_t num_stats = ARRAY_SIZE(vm->event_ns);
-	const size_t num_events = MIN(vm->num_events, num_stats);
-	int_fast64_t p50, p90, p99, pmax;
-	{
-		int_least64_t events[num_events];
-		for (size_t i = 0; i < num_events; i++) {
-			const size_t idx =
-				(vm->num_events + (num_stats - 1) - i) %
-				num_stats;
-			events[i] = vm->event_ns[idx];
-		}
-		qsort(events, num_events, sizeof(int_least64_t),
-		      comp_timestamp);
-		const int i50 = (int)floor((double)num_events * 0.50);
-		const int i90 = (int)floor((double)num_events * 0.90);
-		const int i99 = (int)floor((double)num_events * 0.99);
-		p50 = events[i50];
-		p90 = events[i90];
-		p99 = events[i99];
-		pmax = events[num_events - 1];
-	}
-	FORMAT_DURATION(p50_str, make_duration_nanos(p50));
-	FORMAT_DURATION(p90_str, make_duration_nanos(p90));
-	FORMAT_DURATION(p99_str, make_duration_nanos(p99));
-	FORMAT_DURATION(pmax_str, make_duration_nanos(pmax));
+	const struct percentiles p = calc_percentiles(
+		ARRAY_SIZE(vm->event_ns), vm->num_events, vm->event_ns);
+	FORMAT_DURATION(p50_str, make_duration_nanos(p.p50));
+	FORMAT_DURATION(p90_str, make_duration_nanos(p.p90));
+	FORMAT_DURATION(p99_str, make_duration_nanos(p.p99));
+	FORMAT_DURATION(pmax_str, make_duration_nanos(p.pmax));
 	(void)io_bufprintf(
 		w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Ruleset Events",
 		p50_str, p90_str, p99_str, pmax_str);
@@ -248,6 +237,7 @@ static void server_stats_stateful(
 		uintmax_t num_reject;
 		uintmax_t num_request;
 		uintmax_t num_api_request;
+		uintmax_t num_reject_ruleset;
 		uintmax_t num_reject_timeout;
 		uintmax_t num_reject_upstream;
 	} last = { 0 };
@@ -265,6 +255,9 @@ static void server_stats_stateful(
 		(double)(stats->num_request - last.num_request) / dt;
 	const double api_request_rate =
 		(double)(apistats->num_request - last.num_api_request) / dt;
+	const double reject_ruleset_rate =
+		(double)(stats->num_reject_ruleset - last.num_reject_ruleset) /
+		dt;
 	const double reject_timeout_rate =
 		(double)(stats->num_reject_timeout - last.num_reject_timeout) /
 		dt;
@@ -285,12 +278,12 @@ static void server_stats_stateful(
 		w,
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
 		"Request Rate        : %.1f/s (API%+.1f/s)\n"
-		"Reject Rate         : timeout=%.1f/s, upstream=%.1f/s\n"
+		"Reject Rate         : ruleset=%.1f/s, timeout=%.1f/s, upstream=%.1f/s\n"
 		"Bandwidth           : Up %s/s, Down %s/s\n"
 		"Server Load         : %s (last %s)\n",
 		accept_rate, reject_rate, request_rate, api_request_rate,
-		reject_timeout_rate, reject_upstream_rate, xfer_rate_up,
-		xfer_rate_down, load_str, dt_str);
+		reject_ruleset_rate, reject_timeout_rate, reject_upstream_rate,
+		xfer_rate_up, xfer_rate_down, load_str, dt_str);
 
 	last.xfer_up = stats->byt_up;
 	last.xfer_down = stats->byt_down;
@@ -298,6 +291,7 @@ static void server_stats_stateful(
 	last.num_reject = num_reject;
 	last.num_request = stats->num_request;
 	last.num_api_request = apistats->num_request;
+	last.num_reject_ruleset = stats->num_reject_ruleset;
 	last.num_reject_timeout = stats->num_reject_timeout;
 	last.num_reject_upstream = stats->num_reject_upstream;
 }
@@ -327,13 +321,16 @@ static void server_stats(
 		w,
 		"Server Time         : %s\n"
 		"Uptime              : %s\n"
-		"Num Sessions        : %zu (+%zu)\n"
+		"Num Sessions        : %zu (+%zu) peak=%zu\n"
+		"Num Rejected        : ruleset=%ju, timeout=%ju, upstream=%ju\n"
 		"Conn Accepts        : %ju (+%ju)\n"
 		"Requests            : %ju (+%ju)\n"
 		"API Requests        : %ju (+%ju)\n"
 		"Name Resolves       : %ju (+%ju)\n"
 		"Traffic             : Up %s, Down %s\n",
 		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
+		stats->num_sessions_peak, stats->num_reject_ruleset,
+		stats->num_reject_timeout, stats->num_reject_upstream,
 		lstats->num_serve, lstats->num_accept - lstats->num_serve,
 		stats->num_success, stats->num_request - stats->num_success,
 		apistats->num_success,
@@ -341,15 +338,9 @@ static void server_stats(
 		resolv_stats->num_success,
 		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
 		xfer_down);
-	(void)io_bufprintf(
-		w,
-		"Sessions Peak       : %zu\n"
-		"Rejected            : ruleset=%ju, timeout=%ju, upstream=%ju\n",
-		stats->num_sessions_peak, stats->num_reject_ruleset,
-		stats->num_reject_timeout, stats->num_reject_upstream);
 
 #if WITH_RULESET
-	(void)io_bufprintf(w, "%-20s: %zu\n", "API Conn Cache", conn_cache.len);
+	(void)io_bufprintf(w, "%-20s: %zu\n", "Conn Cache", conn_cache.len);
 	const struct ruleset *ruleset = s->ruleset;
 	if (ruleset != NULL && runtime) {
 		struct ruleset_vmstats vmstats;
@@ -453,11 +444,11 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			PROJECT_HOMEPAGE);
 	}
 
-	const int_fast64_t now = clock_monotonic_ns();
-	const int_fast64_t uptime = now - ctx->s->stats.started;
+	const intmax_t now = clock_monotonic_ns();
+	const intmax_t uptime = now - ctx->s->stats.started;
 	/* Track time between stateful requests for rate calculations */
 	static struct {
-		int_least64_t tstamp;
+		intmax_t tstamp;
 		bool is_set : 1;
 	} last = { .is_set = false };
 	double dt = 0.0;
@@ -972,26 +963,9 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	/* Connect latency summary */
 	if (stats->num_connects > 0) {
-		const size_t num_stats = CONNECT_HIST_SIZE;
-		const size_t num_samples = MIN(stats->num_connects, num_stats);
-		double p50, p90, p99;
-		{
-			int_least64_t samples[num_samples];
-			for (size_t i = 0; i < num_samples; i++) {
-				const size_t idx = (stats->num_connects +
-						    (num_stats - 1) - i) %
-						   num_stats;
-				samples[i] = stats->connect_ns[idx];
-			}
-			qsort(samples, num_samples, sizeof(int_least64_t),
-			      comp_timestamp);
-			const int i50 = (int)floor((double)num_samples * 0.50);
-			const int i90 = (int)floor((double)num_samples * 0.90);
-			const int i99 = (int)floor((double)num_samples * 0.99);
-			p50 = (double)samples[i50] * 1e-9;
-			p90 = (double)samples[i90] * 1e-9;
-			p99 = (double)samples[i99] * 1e-9;
-		}
+		const struct percentiles p = calc_percentiles(
+			ARRAY_SIZE(stats->connect_ns), stats->num_connects,
+			stats->connect_ns);
 		(void)io_bufprintf(
 			w,
 			"# HELP neosocksd_connect_latency_seconds Connection establishment latency.\n"
@@ -1000,7 +974,8 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			"neosocksd_connect_latency_seconds{quantile=\"0.9\"} %g\n"
 			"neosocksd_connect_latency_seconds{quantile=\"0.99\"} %g\n"
 			"neosocksd_connect_latency_seconds_count %zu\n",
-			p50, p90, p99, stats->num_connects);
+			(double)p.p50 * 1e-9, (double)p.p90 * 1e-9,
+			(double)p.p99 * 1e-9, stats->num_connects);
 	}
 
 #if WITH_RULESET

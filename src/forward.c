@@ -12,6 +12,7 @@
 
 #include "os/clock.h"
 #include "os/socket.h"
+#include "utils/arraysize.h"
 #include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
@@ -43,7 +44,7 @@ struct forward_ctx {
 	enum forward_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
-	int_least64_t accepted_ns;
+	intmax_t accepted_ns;
 	ev_timer w_timeout;
 	union {
 		/* state < STATE_CONNECTED */
@@ -151,7 +152,8 @@ static void mark_ready(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	{
 		const int_fast64_t elapsed =
 			clock_monotonic_ns() - ctx->accepted_ns;
-		stats->connect_ns[stats->num_connects % CONNECT_HIST_SIZE] =
+		stats->connect_ns
+			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
 			elapsed;
 		stats->num_connects++;
 	}

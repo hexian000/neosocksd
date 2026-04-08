@@ -5,6 +5,7 @@
 
 #include "utils/debug.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 
 static struct gcbase *gcroot = NULL;
@@ -48,6 +49,7 @@ static void gc_finalize(struct gcbase *restrict obj)
 
 void gc_ref(struct gcbase *restrict obj)
 {
+	ASSERT(obj->refs < SIZE_MAX);
 	obj->refs++;
 }
 
