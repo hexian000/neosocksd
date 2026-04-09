@@ -1156,7 +1156,7 @@ T_DECLARE_CASE(socks5_bind_disabled_cmdnosupport)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_bind = false;
+	test_conf.socks5_bind = false;
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
@@ -1192,7 +1192,7 @@ T_DECLARE_CASE(socks5_udp_disabled_cmdnosupport)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_udp = false;
+	test_conf.socks5_udp = false;
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
@@ -1226,7 +1226,7 @@ T_DECLARE_CASE(socks5_bind_first_reply_succeeded)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_bind = true;
+	test_conf.socks5_bind = true;
 	test_conf.timeout = 1.0;
 	test_server_init(&s);
 
@@ -1248,7 +1248,7 @@ T_DECLARE_CASE(socks5_bind_first_reply_succeeded)
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.socks5_enable_bind = false;
+	test_conf.socks5_bind = false;
 }
 
 T_DECLARE_CASE(socks5_bind_full_flow)
@@ -1268,7 +1268,7 @@ T_DECLARE_CASE(socks5_bind_full_flow)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_bind = true;
+	test_conf.socks5_bind = true;
 	test_conf.timeout = 1.0;
 	test_conf.bidir_timeout = false;
 	test_server_init(&s);
@@ -1313,7 +1313,70 @@ T_DECLARE_CASE(socks5_bind_full_flow)
 	T_CHECK(close(connector_fd) == 0);
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.socks5_enable_bind = false;
+	test_conf.socks5_bind = false;
+	test_conf.bidir_timeout = false;
+}
+
+T_DECLARE_CASE(socks5_bind_mismatch_allows)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int connector_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_BIND, 0x00, 0x01,
+		127,  0,    0,	  2,	0x00,		0x00,
+	};
+
+	stub_reset();
+	STUB.transfer_mode = STUB_TRANSFER_FINISHED;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_bind = true;
+	test_conf.timeout = 1.0;
+	test_conf.bidir_timeout = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	ssize_t n = recv_nowait(peer_fd, rsp, sizeof(rsp));
+	T_EXPECT(n >= 12);
+	T_EXPECT_EQ(rsp[2], SOCKS5);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	T_EXPECT_EQ(rsp[5], SOCKS5ADDR_IPV4);
+
+	in_port_t bind_port;
+	memcpy(&bind_port, rsp + 10, sizeof(bind_port));
+
+	connector_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(connector_fd >= 0);
+	{
+		struct sockaddr_in sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = bind_port,
+		};
+		T_CHECK(connect(connector_fd, (const struct sockaddr *)&sa,
+				sizeof(sa)) == 0);
+	}
+
+	drive_loop(loop);
+
+	unsigned char rsp2[32];
+	const ssize_t n2 = recv_nowait(peer_fd, rsp2, sizeof(rsp2));
+	T_EXPECT(n2 >= 10);
+	T_EXPECT_EQ(rsp2[0], SOCKS5);
+	T_EXPECT_EQ(rsp2[1], SOCKS5RSP_SUCCEEDED);
+	T_EXPECT_EQ(rsp2[3], SOCKS5ADDR_IPV4);
+
+	T_CHECK(close(connector_fd) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_bind = false;
 	test_conf.bidir_timeout = false;
 }
 
@@ -1331,7 +1394,7 @@ T_DECLARE_CASE(socks5_bind_timeout_ttlexpired)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_bind = true;
+	test_conf.socks5_bind = true;
 	test_conf.timeout = 0.02;
 	test_server_init(&s);
 
@@ -1354,7 +1417,7 @@ T_DECLARE_CASE(socks5_bind_timeout_ttlexpired)
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.socks5_enable_bind = false;
+	test_conf.socks5_bind = false;
 	test_conf.timeout = 1.0;
 }
 
@@ -1373,7 +1436,7 @@ T_DECLARE_CASE(socks5_udp_first_reply_succeeded)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_udp = true;
+	test_conf.socks5_udp = true;
 	test_conf.timeout = 1.0;
 	test_server_init(&s);
 
@@ -1395,7 +1458,7 @@ T_DECLARE_CASE(socks5_udp_first_reply_succeeded)
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.socks5_enable_udp = false;
+	test_conf.socks5_udp = false;
 }
 
 T_DECLARE_CASE(socks5_udp_relay_roundtrip)
@@ -1415,7 +1478,7 @@ T_DECLARE_CASE(socks5_udp_relay_roundtrip)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_udp = true;
+	test_conf.socks5_udp = true;
 	test_conf.timeout = 1.0;
 	test_server_init(&s);
 
@@ -1516,7 +1579,7 @@ T_DECLARE_CASE(socks5_udp_relay_roundtrip)
 	T_CHECK(close(target_udp) == 0);
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.socks5_enable_udp = false;
+	test_conf.socks5_udp = false;
 }
 
 T_DECLARE_CASE(socks5_udp_tcp_close_teardown)
@@ -1534,7 +1597,7 @@ T_DECLARE_CASE(socks5_udp_tcp_close_teardown)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_udp = true;
+	test_conf.socks5_udp = true;
 	test_conf.timeout = 1.0;
 	test_server_init(&s);
 
@@ -1556,7 +1619,7 @@ T_DECLARE_CASE(socks5_udp_tcp_close_teardown)
 	T_EXPECT(s.stats.num_sessions == 0);
 
 	ev_loop_destroy(loop);
-	test_conf.socks5_enable_udp = false;
+	test_conf.socks5_udp = false;
 }
 
 T_DECLARE_CASE(socks5_udp_frag_two_parts)
@@ -1576,7 +1639,7 @@ T_DECLARE_CASE(socks5_udp_frag_two_parts)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_udp = true;
+	test_conf.socks5_udp = true;
 	test_conf.timeout = 1.0;
 	test_server_init(&s);
 
@@ -1676,7 +1739,7 @@ T_DECLARE_CASE(socks5_udp_frag_two_parts)
 	T_CHECK(close(target_udp) == 0);
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.socks5_enable_udp = false;
+	test_conf.socks5_udp = false;
 }
 
 T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
@@ -1696,7 +1759,7 @@ T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
-	test_conf.socks5_enable_udp = true;
+	test_conf.socks5_udp = true;
 	test_conf.timeout = 1.0;
 	test_server_init(&s);
 
@@ -1770,7 +1833,7 @@ T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
 	T_CHECK(close(target_udp) == 0);
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.socks5_enable_udp = false;
+	test_conf.socks5_udp = false;
 }
 
 int main(void)
@@ -1798,6 +1861,7 @@ int main(void)
 	T_RUN_CASE(t, socks5_udp_disabled_cmdnosupport);
 	T_RUN_CASE(t, socks5_bind_first_reply_succeeded);
 	T_RUN_CASE(t, socks5_bind_full_flow);
+	T_RUN_CASE(t, socks5_bind_mismatch_allows);
 	T_RUN_CASE(t, socks5_bind_timeout_ttlexpired);
 	T_RUN_CASE(t, socks5_udp_first_reply_succeeded);
 	T_RUN_CASE(t, socks5_udp_relay_roundtrip);

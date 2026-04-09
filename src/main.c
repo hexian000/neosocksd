@@ -77,7 +77,7 @@ static void print_usage(const char *argv0)
 		"  -h, --help                 show usage and exit\n"
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
-		"  --http                     run a HTTP CONNECT server instead of SOCKS\n"
+		"  --http                     run a HTTP proxy instead of SOCKS\n"
 		"  --auth-required            require basic authentication\n"
 		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
 		"  -x, --proxy proxy1[,...[,proxyN]]\n"
@@ -106,8 +106,8 @@ static void print_usage(const char *argv0)
 		"  --no-conn-cache            disable ruleset API client connection cache\n"
 		"  --memlimit <size>          set a soft limit on the total Lua object size in MiB\n"
 #endif
-		"  --socks5-enable-bind       enable SOCKS5 BIND command (incompatible with -r/-x)\n"
-		"  --socks5-enable-udp        enable SOCKS5 UDP ASSOCIATE command (incompatible with -r/-x)\n"
+		"  --enable-socks5-bind       enable SOCKS5 BIND command (incompatible with -r/-x)\n"
+		"  --enable-socks5-udp        enable SOCKS5 UDP ASSOCIATE command (incompatible with -r/-x)\n"
 		"  --api <bind_address>       RESTful API listen address\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
@@ -124,8 +124,11 @@ static void print_usage(const char *argv0)
 		"  --max-startups <start:rate:full>\n"
 		"                             maximum number of concurrent halfopen connections\n"
 		"                             (default: unlimited)\n"
-		"  --ingress                  block connections to non-local addresses\n"
-		"  --egress                   block connections to local addresses\n"
+		"  --block-outbound <list>    block outbound address classes in comma-separated\n"
+		"                             list: loopback,multicast,local,global\n"
+		"                             (default: multicast)\n"
+		"  --ingress                  equivalent to --block-outbound=multicast,global\n"
+		"  --egress                   equivalent to --block-outbound=loopback,multicast,local\n"
 		"\n"
 		"example:\n"
 		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
@@ -325,13 +328,40 @@ static void parse_args(const int argc, char *const restrict argv[])
 			conf->daemonize = true;
 			continue;
 		}
-		if (strcmp(argv[i], "--ingress") == 0) {
-			conf->ingress = true;
+		if (strcmp(argv[i], "--block-outbound") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			conf->block_loopback = false;
+			conf->block_multicast = false;
+			conf->block_local = false;
+			conf->block_global = false;
+			for (char *tok = strtok(argv[i], ","); tok != NULL;
+			     tok = strtok(NULL, ",")) {
+				if (strcmp(tok, "loopback") == 0) {
+					conf->block_loopback = true;
+				} else if (strcmp(tok, "multicast") == 0) {
+					conf->block_multicast = true;
+				} else if (strcmp(tok, "local") == 0) {
+					conf->block_local = true;
+				} else if (strcmp(tok, "global") == 0) {
+					conf->block_global = true;
+				} else {
+					OPT_ARG_ERROR(argv, i);
+				}
+			}
 			continue;
 		}
+		if (strcmp(argv[i], "--ingress") == 0) {
+			conf->block_loopback = false;
+			conf->block_multicast = true;
+			conf->block_local = false;
+			conf->block_global = true;
+		}
 		if (strcmp(argv[i], "--egress") == 0) {
-			conf->egress = true;
-			continue;
+			conf->block_loopback = true;
+			conf->block_multicast = true;
+			conf->block_local = true;
+			conf->block_global = false;
 		}
 		if (strcmp(argv[i], "-m") == 0 ||
 		    strcmp(argv[i], "--max-sessions") == 0) {
@@ -377,12 +407,12 @@ static void parse_args(const int argc, char *const restrict argv[])
 			conf->bidir_timeout = true;
 			continue;
 		}
-		if (strcmp(argv[i], "--socks5-enable-bind") == 0) {
-			conf->socks5_enable_bind = true;
+		if (strcmp(argv[i], "--enable-socks5-bind") == 0) {
+			conf->socks5_bind = true;
 			continue;
 		}
-		if (strcmp(argv[i], "--socks5-enable-udp") == 0) {
-			conf->socks5_enable_udp = true;
+		if (strcmp(argv[i], "--enable-socks5-udp") == 0) {
+			conf->socks5_udp = true;
 			continue;
 		}
 		if (strcmp(argv[i], "--") == 0) {
@@ -490,7 +520,7 @@ int main(int argc, char **argv)
 			LOGF_F("unable to resolve address: %s", conf->listen);
 			exit(EXIT_FAILURE);
 		}
-		if (sa_is_unspecified(&bindaddr.sa)) {
+		if (sa_ipclassify(&bindaddr.sa) == IPCLASS_UNSPECIFIED) {
 			LOGW("binding to wildcard address may be insecure");
 		}
 		if (!server_start(s, &bindaddr.sa)) {
@@ -523,8 +553,9 @@ int main(int argc, char **argv)
 			LOGF_F("unable to resolve address: %s", conf->restapi);
 			exit(EXIT_FAILURE);
 		}
-		if (sa_is_unspecified(&apiaddr.sa) ||
-		    !sa_is_local(&apiaddr.sa)) {
+		const enum ipclass cls = sa_ipclassify(&apiaddr.sa);
+		if (cls != IPCLASS_LOOPBACK && cls != IPCLASS_LINKLOCAL &&
+		    cls != IPCLASS_SITELOCAL) {
 			LOGW("binding API server to non-local address may be insecure");
 		}
 		api = &app.apiserver;

@@ -9,27 +9,6 @@
 #include <stdint.h>
 #include <string.h>
 
-static void hex(char *restrict p, const uint_fast8_t c)
-{
-	static const char hex[] = "0123456789ABCDEF";
-	p[1] = hex[c & UINT8_C(0xF)];
-	p[0] = hex[(c >> 4u) & UINT8_C(0xF)];
-}
-
-static int unhex(const unsigned char c)
-{
-	if (isdigit(c)) {
-		return c - '0';
-	}
-	if ('A' <= c && c <= 'F') {
-		return c - 'A' + 10;
-	}
-	if ('a' <= c && c <= 'f') {
-		return c - 'a' + 10;
-	}
-	return -1;
-}
-
 #define APPEND_STR(str)                                                        \
 	do {                                                                   \
 		size_t n = strlen(str);                                        \
@@ -70,7 +49,7 @@ escape(char *buf, size_t maxlen, const char *str, const size_t len,
 			buf[written] = '%';
 		}
 		if (written + 1 < maxlen) {
-			hex(buf + written + 1, (uint_fast8_t)(ch));
+			tohex(buf + written + 1, ch);
 		}
 		written += 3;
 	}

@@ -42,6 +42,202 @@ const char *content_encoding_str[] = {
 	[CENCODING_GZIP] = "gzip",
 };
 
+static int hex_digit(const unsigned char c)
+{
+	if ('0' <= c && c <= '9') {
+		return c - '0';
+	}
+	if ('a' <= c && c <= 'f') {
+		return 10 + (c - 'a');
+	}
+	if ('A' <= c && c <= 'F') {
+		return 10 + (c - 'A');
+	}
+	return -1;
+}
+
+static bool
+parse_chunk_size_line(const char *restrict line, size_t *restrict out_size)
+{
+	uintmax_t v = 0;
+	bool has_digit = false;
+	const unsigned char *p = (const unsigned char *)line;
+	while (*p != '\0') {
+		const int d = hex_digit(*p);
+		if (d < 0) {
+			break;
+		}
+		has_digit = true;
+		if (v > (uintmax_t)(SIZE_MAX - (uintmax_t)d) / 16u) {
+			return false;
+		}
+		v = v * 16u + (uintmax_t)d;
+		p++;
+	}
+	if (!has_digit) {
+		return false;
+	}
+	while (*p == ' ' || *p == '\t') {
+		p++;
+	}
+	if (*p != '\0' && *p != ';') {
+		return false;
+	}
+	*out_size = (size_t)v;
+	return true;
+}
+
+void http_body_init(
+	struct http_body *restrict d, const enum http_body_mode mode,
+	const size_t content_length)
+{
+	*d = (struct http_body){
+		.mode = mode,
+	};
+	switch (mode) {
+	case HTTP_BODY_NONE:
+		d->done = true;
+		return;
+	case HTTP_BODY_CONTENT_LENGTH:
+		d->content_length = content_length;
+		d->done = (content_length == 0);
+		return;
+	case HTTP_BODY_CHUNKED:
+		d->chunk_state = HTTP_BODY_CHUNK_SIZE_LINE;
+		return;
+	case HTTP_BODY_EOF:
+		return;
+	}
+	FAILMSG("unexpected http body mode");
+}
+
+bool http_body_consume(
+	struct http_body *restrict d, const unsigned char *restrict data,
+	const size_t len, const struct http_body_data_cb on_data)
+{
+	if (len == 0) {
+		return true;
+	}
+	switch (d->mode) {
+	case HTTP_BODY_NONE:
+		return false;
+	case HTTP_BODY_CONTENT_LENGTH: {
+		if (d->done) {
+			return false;
+		}
+		const size_t remain = d->content_length - d->consumed;
+		if (len > remain) {
+			return false;
+		}
+		if (!on_data.func(on_data.ctx, data, len)) {
+			return false;
+		}
+		d->consumed += len;
+		if (d->consumed == d->content_length) {
+			d->done = true;
+		}
+		return true;
+	}
+	case HTTP_BODY_EOF:
+		if (!on_data.func(on_data.ctx, data, len)) {
+			return false;
+		}
+		d->consumed += len;
+		return true;
+	case HTTP_BODY_CHUNKED:
+		break;
+	}
+
+	for (size_t i = 0; i < len; i++) {
+		const unsigned char c = data[i];
+		switch (d->chunk_state) {
+		case HTTP_BODY_CHUNK_SIZE_LINE:
+		case HTTP_BODY_CHUNK_TRAILER_LINE:
+			if (c == '\r') {
+				continue;
+			}
+			if (c != '\n') {
+				if (d->line_len + 1 >= sizeof(d->line)) {
+					return false;
+				}
+				d->line[d->line_len++] = (char)c;
+				continue;
+			}
+			d->line[d->line_len] = '\0';
+			if (d->chunk_state == HTTP_BODY_CHUNK_SIZE_LINE) {
+				size_t sz;
+				if (!parse_chunk_size_line(d->line, &sz)) {
+					return false;
+				}
+				d->chunk_left = sz;
+				d->line_len = 0;
+				if (sz == 0) {
+					d->chunk_state =
+						HTTP_BODY_CHUNK_TRAILER_LINE;
+				} else {
+					d->chunk_state = HTTP_BODY_CHUNK_DATA;
+				}
+				continue;
+			}
+			if (d->line_len == 0) {
+				d->chunk_state = HTTP_BODY_CHUNK_DONE;
+				d->done = true;
+				return (i + 1 == len);
+			}
+			d->line_len = 0;
+			continue;
+		case HTTP_BODY_CHUNK_DATA: {
+			const size_t remain = len - i;
+			size_t n = d->chunk_left;
+			if (n > remain) {
+				n = remain;
+			}
+			if (!on_data.func(on_data.ctx, data + i, n)) {
+				return false;
+			}
+			d->consumed += n;
+			d->chunk_left -= n;
+			i += n - 1;
+			if (d->chunk_left == 0) {
+				d->chunk_state = HTTP_BODY_CHUNK_DATA_CR;
+			}
+		}
+			continue;
+		case HTTP_BODY_CHUNK_DATA_CR:
+			if (c != '\r') {
+				return false;
+			}
+			d->chunk_state = HTTP_BODY_CHUNK_DATA_LF;
+			continue;
+		case HTTP_BODY_CHUNK_DATA_LF:
+			if (c != '\n') {
+				return false;
+			}
+			d->chunk_state = HTTP_BODY_CHUNK_SIZE_LINE;
+			continue;
+		case HTTP_BODY_CHUNK_DONE:
+			return false;
+		}
+	}
+	return true;
+}
+
+bool http_body_finish(struct http_body *restrict d)
+{
+	switch (d->mode) {
+	case HTTP_BODY_NONE:
+		return true;
+	case HTTP_BODY_CONTENT_LENGTH:
+		return d->done;
+	case HTTP_BODY_CHUNKED:
+		return d->done;
+	case HTTP_BODY_EOF:
+		d->done = true;
+		return true;
+	}
+	FAILMSG("unexpected http body mode");
+}
+
 void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 {
 	/* Reset buffers for error response */

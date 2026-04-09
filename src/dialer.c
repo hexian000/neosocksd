@@ -1400,6 +1400,53 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 }
 
+#define LOG_BLOCKED(level, what, sa)                                           \
+	do {                                                                   \
+		if (LOGLEVEL(level)) {                                         \
+			char addr_str[64];                                     \
+			sa_format(addr_str, sizeof(addr_str), sa);             \
+			LOG_F(level, "blocked %s address: %s", what,           \
+			      addr_str);                                       \
+			return false;                                          \
+		}                                                              \
+	} while (0)
+
+static bool
+check_outbound_sa(struct dialer *restrict d, const struct sockaddr *restrict sa)
+{
+	switch (sa_ipclassify(sa)) {
+	case IPCLASS_LOOPBACK:
+		if (d->conf->block_loopback) {
+			LOG_BLOCKED(DEBUG, "loopback", sa);
+			return false;
+		}
+		break;
+	case IPCLASS_MULTICAST:
+		if (d->conf->block_multicast) {
+			LOG_BLOCKED(DEBUG, "multicast", sa);
+			return false;
+		}
+		break;
+	case IPCLASS_LINKLOCAL:
+	case IPCLASS_SITELOCAL:
+		if (d->conf->block_local) {
+			LOG_BLOCKED(DEBUG, "local", sa);
+			return false;
+		}
+		break;
+	case IPCLASS_GLOBAL:
+		if (d->conf->block_global) {
+			LOG_BLOCKED(DEBUG, "non-local", sa);
+			return false;
+		}
+		break;
+	default:
+		LOG_BLOCKED(ERROR, "invalid", sa);
+		return false;
+	}
+	return true;
+}
+
 /**
  * @brief Establish TCP connection to a sockaddr
  *
@@ -1410,19 +1457,7 @@ static bool connect_sa(
 	struct dialer *restrict d, struct ev_loop *loop,
 	const struct sockaddr *restrict sa)
 {
-	/* Enforce gateway restrictions */
-	if (d->conf->ingress && !sa_is_local(sa)) {
-		char addr_str[64];
-		sa_format(addr_str, sizeof(addr_str), sa);
-		LOGD_F("blocked non-local address %s", addr_str);
-		d->err = DIALER_ERR_BLOCKED;
-		d->syserr = 0;
-		return false;
-	}
-	if (d->conf->egress && sa_is_local(sa)) {
-		char addr_str[64];
-		sa_format(addr_str, sizeof(addr_str), sa);
-		LOGD_F("blocked local address %s", addr_str);
+	if (!check_outbound_sa(d, sa)) {
 		d->err = DIALER_ERR_BLOCKED;
 		d->syserr = 0;
 		return false;

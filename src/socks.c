@@ -197,27 +197,6 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
 
-static void socks_ctx_finalize(struct gcbase *restrict obj)
-{
-	struct socks_ctx *restrict ctx =
-		DOWNCAST(struct gcbase, struct socks_ctx, gcbase, obj);
-	SOCKS_CTX_LOG_F(VERBOSE, ctx, "closing, state=%d", ctx->state);
-
-	socks_ctx_stop(ctx->s->loop, ctx);
-	if (ctx->accepted_fd != -1) {
-		CLOSE_FD(ctx->accepted_fd);
-		ctx->accepted_fd = -1;
-	}
-	if (ctx->dialed_fd != -1) {
-		CLOSE_FD(ctx->dialed_fd);
-		ctx->dialed_fd = -1;
-	}
-
-	if (ctx->state < STATE_ESTABLISHED) {
-		dialreq_free(ctx->dialreq);
-	}
-}
-
 static void mark_ready(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
 	ctx->state = STATE_BIDIRECTIONAL;
@@ -240,25 +219,6 @@ static void mark_ready(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	}
 	SOCKS_CTX_LOG_F(
 		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
-}
-
-static void xfer_state_cb(struct ev_loop *restrict loop, void *data)
-{
-	struct socks_ctx *restrict ctx = data;
-	ASSERT(ctx->state == STATE_ESTABLISHED ||
-	       ctx->state == STATE_BIDIRECTIONAL);
-
-	if (ctx->uplink.state == XFER_FINISHED &&
-	    ctx->downlink.state == XFER_FINISHED) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (ctx->state == STATE_ESTABLISHED &&
-	    ctx->uplink.state == XFER_CONNECTED &&
-	    ctx->downlink.state == XFER_CONNECTED) {
-		mark_ready(loop, ctx);
-		return;
-	}
 }
 
 static bool send_rsp(
@@ -339,75 +299,6 @@ socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 	return send_rsp(ctx, buf, len);
 }
 
-static bool socks5_sendrsp_addr(
-	const struct socks_ctx *restrict ctx, const uint_fast8_t rsp,
-	const union sockaddr_max *restrict addr)
-{
-	unsigned char buf[SOCKS5_RSP_MAXLEN];
-	struct socks5_hdr h = { .version = SOCKS5,
-				.command = rsp,
-				.reserved = 0 };
-	size_t len = SOCKS5_HDR_LEN;
-	unsigned char *const restrict addrbuf = buf + len;
-	switch (addr->sa.sa_family) {
-	case AF_INET: {
-		h.addrtype = SOCKS5ADDR_IPV4;
-		memcpy(addrbuf, &addr->in.sin_addr, sizeof(addr->in.sin_addr));
-		len += sizeof(addr->in.sin_addr);
-		memcpy(buf + len, &addr->in.sin_port,
-		       sizeof(addr->in.sin_port));
-		len += sizeof(addr->in.sin_port);
-	} break;
-	case AF_INET6: {
-		h.addrtype = SOCKS5ADDR_IPV6;
-		memcpy(addrbuf, &addr->in6.sin6_addr,
-		       sizeof(addr->in6.sin6_addr));
-		len += sizeof(addr->in6.sin6_addr);
-		memcpy(buf + len, &addr->in6.sin6_port,
-		       sizeof(addr->in6.sin6_port));
-		len += sizeof(addr->in6.sin6_port);
-	} break;
-	default:
-		FAILMSGF("unexpected address family: %d", addr->sa.sa_family);
-	}
-	socks5hdr_write(buf, &h);
-	return send_rsp(ctx, buf, len);
-}
-
-static void
-timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
-{
-	UNUSED(loop);
-	CHECK_REVENTS(revents, EV_TIMER);
-
-	struct socks_ctx *restrict ctx = watcher->data;
-	switch (ctx->state) {
-	case STATE_HANDSHAKE1:
-	case STATE_HANDSHAKE2:
-	case STATE_HANDSHAKE3:
-		SOCKS_CTX_LOG(WARNING, ctx, "handshake timeout");
-		break;
-	case STATE_PROCESS:
-	case STATE_CONNECT:
-	case STATE_BIND: {
-		const uint_fast8_t version = read_uint8(ctx->rbuf.data);
-		if (version == SOCKS5) {
-			socks5_sendrsp(ctx, SOCKS5RSP_TTLEXPIRED);
-		}
-	} break;
-	case STATE_ESTABLISHED:
-		SOCKS_CTX_LOG(WARNING, ctx, "protocol timeout");
-		break;
-	case STATE_BIDIRECTIONAL:
-	case STATE_UDP_RELAY:
-		return;
-	default:
-		FAILMSGF("unexpected socks_ctx state: %d", ctx->state);
-	}
-	ctx->s->stats.num_reject_timeout++;
-	gc_unref(&ctx->gcbase);
-}
-
 static bool socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 {
 	const uint_fast8_t version = read_uint8(ctx->rbuf.data);
@@ -481,6 +372,25 @@ static void socks_senderr(
 	}
 }
 
+static void xfer_state_cb(struct ev_loop *restrict loop, void *data)
+{
+	struct socks_ctx *restrict ctx = data;
+	ASSERT(ctx->state == STATE_ESTABLISHED ||
+	       ctx->state == STATE_BIDIRECTIONAL);
+
+	if (ctx->uplink.state == XFER_FINISHED &&
+	    ctx->downlink.state == XFER_FINISHED) {
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (ctx->state == STATE_ESTABLISHED &&
+	    ctx->uplink.state == XFER_CONNECTED &&
+	    ctx->downlink.state == XFER_CONNECTED) {
+		mark_ready(loop, ctx);
+		return;
+	}
+}
+
 static void
 socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
@@ -507,40 +417,6 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		ctx->accepted_fd);
 	transfer_start(loop, &ctx->uplink);
 	transfer_start(loop, &ctx->downlink);
-}
-
-static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
-{
-	struct socks_ctx *restrict ctx = data;
-	ASSERT(ctx->state == STATE_CONNECT);
-	if (fd < 0) {
-		const enum dialer_error err = ctx->dialer.err;
-		const int syserr = ctx->dialer.syserr;
-		if (syserr != 0) {
-			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s (%d) %s",
-				dialer_strerror(err), syserr, strerror(syserr));
-		} else {
-			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s", dialer_strerror(err));
-		}
-		ctx->s->stats.num_reject_upstream++;
-		socks_senderr(ctx, err, syserr);
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	ctx->dialed_fd = fd;
-	if (!socks_sendrsp(ctx, true)) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-
-	SOCKS_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
-	/* cleanup before state change */
-	ev_io_stop(loop, &ctx->w_socket);
-	dialreq_free(ctx->dialreq);
-
-	socks_start_transfer(loop, ctx);
 }
 
 static int socks4a_req(struct socks_ctx *restrict ctx)
@@ -637,7 +513,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 	case SOCKS5CMD_CONNECT:
 		break;
 	case SOCKS5CMD_BIND:
-		if (!ctx->s->conf->socks5_enable_bind) {
+		if (!ctx->s->conf->socks5_bind) {
 			socks5_sendrsp(ctx, SOCKS5RSP_CMDNOSUPPORT);
 			SOCKS_CTX_LOG_F(
 				WARNING, ctx,
@@ -647,7 +523,7 @@ static int socks5_req(struct socks_ctx *restrict ctx)
 		}
 		break;
 	case SOCKS5CMD_UDPASSOCIATE:
-		if (!ctx->s->conf->socks5_enable_udp) {
+		if (!ctx->s->conf->socks5_udp) {
 			socks5_sendrsp(ctx, SOCKS5RSP_CMDNOSUPPORT);
 			SOCKS_CTX_LOG_F(
 				WARNING, ctx,
@@ -930,80 +806,79 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		ctx->s->resolver);
 }
 
-#if WITH_RULESET
-static void ruleset_cb(
-	struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
+static bool socks5_sendrsp_addr(
+	const struct socks_ctx *restrict ctx, const uint_fast8_t rsp,
+	const union sockaddr_max *restrict addr)
 {
-	CHECK_REVENTS(revents, EV_CUSTOM);
-	struct socks_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_PROCESS);
-	ctx->dialreq = ctx->ruleset_callback.request.req;
-	ctx->ruleset_state = NULL;
-	if (ctx->dialreq == NULL) {
-		ctx->s->stats.num_reject_ruleset++;
-	}
-	socks_connect(loop, ctx);
-}
-
-static void
-process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_IDLE);
-	ev_idle_stop(loop, watcher);
-	struct socks_ctx *restrict ctx = watcher->data;
-	struct ruleset *restrict ruleset = ctx->s->ruleset;
-	ASSERT(ruleset != NULL);
-	ASSERT(ctx->state == STATE_PROCESS);
-
-	const struct dialaddr *restrict addr = &ctx->addr;
-	const size_t cap =
-		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
-	char request[cap];
-	const int n = dialaddr_format(request, cap, addr);
-	ASSERT(n >= 0 && (size_t)n < cap);
-	UNUSED(n);
-	const char *username = ctx->auth.username;
-	const char *password = ctx->auth.password;
-	SOCKS_CTX_LOG_F(
-		VERBOSE, ctx, "request: username=%s `%s'", username, request);
-	bool ok;
-	switch (addr->type) {
-	case ATYP_DOMAIN:
-		ok = ruleset_resolve(
-			ruleset, &ctx->ruleset_state, request, username,
-			password, &ctx->ruleset_callback);
-		break;
-	case ATYP_INET:
-		ok = ruleset_route(
-			ruleset, &ctx->ruleset_state, request, username,
-			password, &ctx->ruleset_callback);
-		break;
-	case ATYP_INET6:
-		ok = ruleset_route6(
-			ruleset, &ctx->ruleset_state, request, username,
-			password, &ctx->ruleset_callback);
-		break;
+	unsigned char buf[SOCKS5_RSP_MAXLEN];
+	struct socks5_hdr h = { .version = SOCKS5,
+				.command = rsp,
+				.reserved = 0 };
+	size_t len = SOCKS5_HDR_LEN;
+	unsigned char *const restrict addrbuf = buf + len;
+	switch (addr->sa.sa_family) {
+	case AF_INET: {
+		h.addrtype = SOCKS5ADDR_IPV4;
+		memcpy(addrbuf, &addr->in.sin_addr, sizeof(addr->in.sin_addr));
+		len += sizeof(addr->in.sin_addr);
+		memcpy(buf + len, &addr->in.sin_port,
+		       sizeof(addr->in.sin_port));
+		len += sizeof(addr->in.sin_port);
+	} break;
+	case AF_INET6: {
+		h.addrtype = SOCKS5ADDR_IPV6;
+		memcpy(addrbuf, &addr->in6.sin6_addr,
+		       sizeof(addr->in6.sin6_addr));
+		len += sizeof(addr->in6.sin6_addr);
+		memcpy(buf + len, &addr->in6.sin6_port,
+		       sizeof(addr->in6.sin6_port));
+		len += sizeof(addr->in6.sin6_port);
+	} break;
 	default:
-		FAILMSGF("unexpected address type: %d", ctx->addr.type);
+		FAILMSGF("unexpected address family: %d", addr->sa.sa_family);
 	}
-	if (!ok) {
-		(void)socks_sendrsp(ctx, false);
-		gc_unref(&ctx->gcbase);
-		return;
-	}
+	socks5hdr_write(buf, &h);
+	return send_rsp(ctx, buf, len);
 }
-#endif
 
-static struct dialreq *make_dialreq(
-	struct socks_ctx *restrict ctx, const struct dialaddr *restrict addr)
+static bool bind_peer_matches_request(
+	const struct socks_ctx *restrict ctx,
+	const union sockaddr_max *restrict peer_sa)
 {
-	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
-	if (req == NULL) {
-		LOGOOM();
-		return NULL;
+	const uint_least16_t req_port = ctx->addr.port;
+	switch (ctx->addr.type) {
+	case ATYP_INET: {
+		struct sockaddr_in in = {
+			.sin_family = AF_INET,
+			.sin_port = htons(req_port),
+			.sin_addr = ctx->addr.in,
+		};
+		return sa_matches((struct sockaddr *)&in, &peer_sa->sa);
 	}
-	dialaddr_copy(&req->addr, addr);
-	return req;
+	case ATYP_INET6: {
+		struct sockaddr_in6 in6 = {
+			.sin6_family = AF_INET6,
+			.sin6_port = htons(req_port),
+			.sin6_addr = ctx->addr.in6,
+		};
+		return sa_matches((struct sockaddr *)&in6, &peer_sa->sa);
+	}
+	case ATYP_DOMAIN:
+		if (req_port == 0) {
+			return true;
+		}
+		switch (peer_sa->sa.sa_family) {
+		case AF_INET:
+			return peer_sa->in.sin_port == htons(req_port);
+		case AF_INET6:
+			return peer_sa->in6.sin6_port == htons(req_port);
+		default:
+			return false;
+		}
+	default:
+		break;
+	}
+	FAILMSGF("unexpected address type: %d", ctx->addr.type);
 }
 
 static void
@@ -1028,6 +903,16 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		return;
 	}
 	SOCKS_CTX_LOG_F(VERBOSE, ctx, "BIND: accepted [fd:%d]", conn_fd);
+	if (!bind_peer_matches_request(ctx, &peer_sa)) {
+		char peer_str[64];
+		sa_format(peer_str, sizeof(peer_str), &peer_sa.sa);
+		char expect_str[64];
+		dialaddr_format(expect_str, sizeof(expect_str), &ctx->addr);
+		SOCKS_CTX_LOG_F(
+			WARNING, ctx,
+			"BIND peer mismatch (expected `%s', got `%s'), allowing",
+			expect_str, peer_str);
+	}
 	if (!socket_set_nonblock(conn_fd)) {
 		CLOSE_FD(conn_fd);
 		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
@@ -1110,33 +995,6 @@ socks_bind_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ev_io_init(&ctx->w_socket, bind_accept_cb, listen_fd, EV_READ);
 	ctx->w_socket.data = ctx;
 	ev_io_start(loop, &ctx->w_socket);
-}
-
-static void
-tcp_monitor_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_READ);
-	struct socks_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_UDP_RELAY);
-	/* Any readable event: check for EOF on the TCP control connection */
-	unsigned char discard_buf[64];
-	const ssize_t n =
-		recv(ctx->accepted_fd, discard_buf, sizeof(discard_buf), 0);
-	if (n < 0) {
-		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
-			return;
-		}
-		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "TCP control: recv: (%d) %s", err,
-			strerror(err));
-	} else if (n > 0) {
-		/* Unexpected data on TCP control connection; ignore */
-		return;
-	}
-	SOCKS_CTX_LOG(VERBOSE, ctx, "UDP ASSOCIATE: TCP control closed");
-	gc_unref(&ctx->gcbase);
-	UNUSED(loop);
 }
 
 /* Returns the total UDP header length for the given datagram buffer, or -1 if
@@ -1434,6 +1292,33 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 }
 
 static void
+tcp_monitor_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_READ);
+	struct socks_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_UDP_RELAY);
+	/* Any readable event: check for EOF on the TCP control connection */
+	unsigned char discard_buf[64];
+	const ssize_t n =
+		recv(ctx->accepted_fd, discard_buf, sizeof(discard_buf), 0);
+	if (n < 0) {
+		const int err = errno;
+		if (IS_TRANSIENT_ERROR(err)) {
+			return;
+		}
+		SOCKS_CTX_LOG_F(
+			ERROR, ctx, "TCP control: recv: (%d) %s", err,
+			strerror(err));
+	} else if (n > 0) {
+		/* Unexpected data on TCP control connection; ignore */
+		return;
+	}
+	SOCKS_CTX_LOG(VERBOSE, ctx, "UDP ASSOCIATE: TCP control closed");
+	gc_unref(&ctx->gcbase);
+	UNUSED(loop);
+}
+
+static void
 socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
 	ASSERT(ctx->state == STATE_PROCESS);
@@ -1507,6 +1392,18 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		stats->num_sessions);
 }
 
+static struct dialreq *make_dialreq(
+	struct socks_ctx *restrict ctx, const struct dialaddr *restrict addr)
+{
+	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	dialaddr_copy(&req->addr, addr);
+	return req;
+}
+
 static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
@@ -1553,6 +1450,159 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 	ctx->dialreq = make_dialreq(ctx, &ctx->addr);
 	socks_connect(loop, ctx);
+}
+
+static void
+timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
+{
+	UNUSED(loop);
+	CHECK_REVENTS(revents, EV_TIMER);
+
+	struct socks_ctx *restrict ctx = watcher->data;
+	switch (ctx->state) {
+	case STATE_HANDSHAKE1:
+	case STATE_HANDSHAKE2:
+	case STATE_HANDSHAKE3:
+		SOCKS_CTX_LOG(WARNING, ctx, "handshake timeout");
+		break;
+	case STATE_PROCESS:
+	case STATE_CONNECT:
+	case STATE_BIND: {
+		const uint_fast8_t version = read_uint8(ctx->rbuf.data);
+		if (version == SOCKS5) {
+			socks5_sendrsp(ctx, SOCKS5RSP_TTLEXPIRED);
+		}
+	} break;
+	case STATE_ESTABLISHED:
+		SOCKS_CTX_LOG(WARNING, ctx, "protocol timeout");
+		break;
+	case STATE_BIDIRECTIONAL:
+	case STATE_UDP_RELAY:
+		return;
+	default:
+		FAILMSGF("unexpected socks_ctx state: %d", ctx->state);
+	}
+	ctx->s->stats.num_reject_timeout++;
+	gc_unref(&ctx->gcbase);
+}
+
+static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
+{
+	struct socks_ctx *restrict ctx = data;
+	ASSERT(ctx->state == STATE_CONNECT);
+	if (fd < 0) {
+		const enum dialer_error err = ctx->dialer.err;
+		const int syserr = ctx->dialer.syserr;
+		if (syserr != 0) {
+			SOCKS_CTX_LOG_F(
+				ERROR, ctx, "dialer: %s (%d) %s",
+				dialer_strerror(err), syserr, strerror(syserr));
+		} else {
+			SOCKS_CTX_LOG_F(
+				ERROR, ctx, "dialer: %s", dialer_strerror(err));
+		}
+		ctx->s->stats.num_reject_upstream++;
+		socks_senderr(ctx, err, syserr);
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	ctx->dialed_fd = fd;
+	if (!socks_sendrsp(ctx, true)) {
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+
+	SOCKS_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
+	/* cleanup before state change */
+	ev_io_stop(loop, &ctx->w_socket);
+	dialreq_free(ctx->dialreq);
+
+	socks_start_transfer(loop, ctx);
+}
+
+#if WITH_RULESET
+static void ruleset_cb(
+	struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_CUSTOM);
+	struct socks_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
+	ctx->dialreq = ctx->ruleset_callback.request.req;
+	ctx->ruleset_state = NULL;
+	if (ctx->dialreq == NULL) {
+		ctx->s->stats.num_reject_ruleset++;
+	}
+	socks_connect(loop, ctx);
+}
+
+static void
+process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct socks_ctx *restrict ctx = watcher->data;
+	struct ruleset *restrict ruleset = ctx->s->ruleset;
+	ASSERT(ruleset != NULL);
+	ASSERT(ctx->state == STATE_PROCESS);
+
+	const struct dialaddr *restrict addr = &ctx->addr;
+	const size_t cap =
+		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
+	char request[cap];
+	const int n = dialaddr_format(request, cap, addr);
+	ASSERT(n >= 0 && (size_t)n < cap);
+	UNUSED(n);
+	const char *username = ctx->auth.username;
+	const char *password = ctx->auth.password;
+	SOCKS_CTX_LOG_F(
+		VERBOSE, ctx, "request: username=%s `%s'", username, request);
+	bool ok;
+	switch (addr->type) {
+	case ATYP_DOMAIN:
+		ok = ruleset_resolve(
+			ruleset, &ctx->ruleset_state, request, username,
+			password, &ctx->ruleset_callback);
+		break;
+	case ATYP_INET:
+		ok = ruleset_route(
+			ruleset, &ctx->ruleset_state, request, username,
+			password, &ctx->ruleset_callback);
+		break;
+	case ATYP_INET6:
+		ok = ruleset_route6(
+			ruleset, &ctx->ruleset_state, request, username,
+			password, &ctx->ruleset_callback);
+		break;
+	default:
+		FAILMSGF("unexpected address type: %d", ctx->addr.type);
+	}
+	if (!ok) {
+		(void)socks_sendrsp(ctx, false);
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+}
+#endif
+
+static void socks_ctx_finalize(struct gcbase *restrict obj)
+{
+	struct socks_ctx *restrict ctx =
+		DOWNCAST(struct gcbase, struct socks_ctx, gcbase, obj);
+	SOCKS_CTX_LOG_F(VERBOSE, ctx, "closing, state=%d", ctx->state);
+
+	socks_ctx_stop(ctx->s->loop, ctx);
+	if (ctx->accepted_fd != -1) {
+		CLOSE_FD(ctx->accepted_fd);
+		ctx->accepted_fd = -1;
+	}
+	if (ctx->dialed_fd != -1) {
+		CLOSE_FD(ctx->dialed_fd);
+		ctx->dialed_fd = -1;
+	}
+
+	if (ctx->state < STATE_ESTABLISHED) {
+		dialreq_free(ctx->dialreq);
+	}
 }
 
 static struct socks_ctx *

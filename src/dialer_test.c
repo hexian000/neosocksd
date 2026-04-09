@@ -438,13 +438,13 @@ T_DECLARE_CASE(local_address_blocked_by_egress_policy)
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
 	struct dialer d;
-	struct dialreq *req = dialreq_parse("127.0.0.1:9", NULL);
+	struct dialreq *req = dialreq_parse("10.0.0.1:9", NULL);
 	bool completed;
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
 	T_CHECK(req != NULL);
-	conf.egress = true;
+	conf.block_local = true;
 	dialer_init(
 		&d, &(struct dialer_cb){
 			    .func = dialer_finish_cb,

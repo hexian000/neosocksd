@@ -94,6 +94,38 @@ struct http_parsehdr_cb {
 	void *ctx;
 };
 
+enum http_body_mode {
+	HTTP_BODY_NONE,
+	HTTP_BODY_CONTENT_LENGTH,
+	HTTP_BODY_CHUNKED,
+	HTTP_BODY_EOF,
+};
+
+enum http_body_chunk_state {
+	HTTP_BODY_CHUNK_SIZE_LINE,
+	HTTP_BODY_CHUNK_DATA,
+	HTTP_BODY_CHUNK_DATA_CR,
+	HTTP_BODY_CHUNK_DATA_LF,
+	HTTP_BODY_CHUNK_TRAILER_LINE,
+	HTTP_BODY_CHUNK_DONE,
+};
+
+struct http_body {
+	enum http_body_mode mode;
+	size_t content_length;
+	size_t consumed;
+	size_t chunk_left;
+	size_t line_len;
+	char line[128];
+	enum http_body_chunk_state chunk_state;
+	bool done : 1;
+};
+
+struct http_body_data_cb {
+	bool (*func)(void *ctx, const unsigned char *data, size_t len);
+	void *ctx;
+};
+
 /**
  * @brief HTTP connection state and buffers
  *
@@ -148,6 +180,16 @@ int http_conn_recv(struct http_conn *restrict p);
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
 int http_conn_send(struct http_conn *restrict p, int fd);
+
+void http_body_init(
+	struct http_body *restrict d, enum http_body_mode mode,
+	size_t content_length);
+
+bool http_body_consume(
+	struct http_body *restrict d, const unsigned char *restrict data,
+	size_t len, struct http_body_data_cb on_data);
+
+bool http_body_finish(struct http_body *restrict d);
 
 /**
  * @brief Parse Accept-TE header

@@ -52,11 +52,13 @@ struct config {
 	bool traceback : 1;
 #endif
 	bool conn_cache : 1;
-	bool socks5_enable_bind : 1;
-	bool socks5_enable_udp : 1;
+	bool socks5_bind : 1;
+	bool socks5_udp : 1;
 	bool daemonize : 1;
-	bool ingress : 1;
-	bool egress : 1;
+	bool block_loopback : 1;
+	bool block_multicast : 1;
+	bool block_local : 1;
+	bool block_global : 1;
 
 	int tcp_sndbuf, tcp_rcvbuf;
 

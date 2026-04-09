@@ -229,29 +229,22 @@ bool sa_equals(const struct sockaddr *a, const struct sockaddr *b);
  */
 bool sa_matches(const struct sockaddr *bind, const struct sockaddr *dest);
 
-/**
- * @brief Checks if the sockaddr represents an unspecified address.
- * @param sa The sockaddr.
- * @return True if unspecified.
- * @note POSIX version: POSIX.1-2001
- */
-bool sa_is_unspecified(const struct sockaddr *sa);
+enum ipclass {
+	IPCLASS_UNSPECIFIED = 0,
+	IPCLASS_LOOPBACK,
+	IPCLASS_LINKLOCAL,
+	IPCLASS_SITELOCAL,
+	IPCLASS_MULTICAST,
+	IPCLASS_GLOBAL,
+};
 
 /**
- * @brief Checks if the sockaddr represents a multicast address.
- * @param sa The sockaddr.
- * @return True if multicast.
+ * @brief Classifies the IP address of a sockaddr into an address class.
+ * @param sa The sockaddr to classify.
+ * @return The address class; IPCLASS_GLOBAL for unknown address families.
  * @note POSIX version: POSIX.1-2001
  */
-bool sa_is_multicast(const struct sockaddr *sa);
-
-/**
- * @brief Checks if the sockaddr represents a local (private) address.
- * @param sa The sockaddr.
- * @return True if local.
- * @note POSIX version: POSIX.1-2001
- */
-bool sa_is_local(const struct sockaddr *sa);
+enum ipclass sa_ipclassify(const struct sockaddr *sa);
 
 /**
  * @brief Resolves a hostname and service into a TCP sockaddr.

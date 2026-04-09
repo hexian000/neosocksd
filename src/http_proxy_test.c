@@ -5,6 +5,7 @@
 
 #include "conf.h"
 #include "dialer.h"
+#include "proto/http.h"
 #include "ruleset.h"
 #include "server.h"
 #include "transfer.h"
@@ -51,6 +52,7 @@ static struct config test_conf = {
 	.timeout = 1.0,
 	.auth_required = false,
 	.bidir_timeout = false,
+	.conn_cache = false,
 };
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
@@ -81,6 +83,9 @@ struct stub_state {
 	struct ruleset_state *ruleset_state_ptr;
 	int_least32_t ruleset_cancel_calls;
 	int_least32_t dialer_cancel_calls;
+	int conn_cache_fd;
+	int_least32_t conn_cache_get_calls;
+	int_least32_t conn_cache_put_calls;
 };
 
 static struct stub_state S = {
@@ -99,6 +104,9 @@ static struct stub_state S = {
 	.ruleset_state_ptr = NULL,
 	.ruleset_cancel_calls = 0,
 	.dialer_cancel_calls = 0,
+	.conn_cache_fd = -1,
+	.conn_cache_get_calls = 0,
+	.conn_cache_put_calls = 0,
 };
 
 static int_least32_t ruleset_state_token = 0;
@@ -147,6 +155,9 @@ static void test_server_init(struct server *restrict s)
 
 static void reset_stub_state(void)
 {
+	if (S.conn_cache_fd != -1) {
+		close(S.conn_cache_fd);
+	}
 	S.dialreq_new_ok = false;
 	S.dialaddr_parse_ok = false;
 	S.dialer_invoke_now = true;
@@ -164,10 +175,14 @@ static void reset_stub_state(void)
 	S.ruleset_state_ptr = NULL;
 	S.ruleset_cancel_calls = 0;
 	S.dialer_cancel_calls = 0;
+	S.conn_cache_fd = -1;
+	S.conn_cache_get_calls = 0;
+	S.conn_cache_put_calls = 0;
 	reset_dialreq_allocations();
 	test_conf.timeout = 1.0;
 	test_conf.auth_required = false;
 	test_conf.bidir_timeout = false;
+	test_conf.conn_cache = false;
 	G.ruleset = NULL;
 }
 
@@ -408,14 +423,24 @@ void conn_cache_put(
 {
 	(void)loop;
 	(void)dialreq;
-	close(fd);
+	S.conn_cache_put_calls++;
+	if (S.conn_cache_fd != -1 && S.conn_cache_fd != fd) {
+		close(S.conn_cache_fd);
+	}
+	S.conn_cache_fd = fd;
 }
 
 int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
 {
 	(void)loop;
 	(void)req;
-	return -1;
+	S.conn_cache_get_calls++;
+	if (S.conn_cache_fd == -1) {
+		return -1;
+	}
+	const int fd = S.conn_cache_fd;
+	S.conn_cache_fd = -1;
+	return fd;
 }
 
 static int write_all(const int fd, const void *buf, size_t len)
@@ -536,6 +561,59 @@ static bool has_http_status(
 	if (memmem(rsp, n, code_str, code_len) == NULL) {
 		return false;
 	}
+	return true;
+}
+
+struct collect_body_ctx {
+	unsigned char *buf;
+	size_t cap;
+	size_t len;
+};
+
+static bool collect_body_cb(
+	void *restrict data, const unsigned char *restrict chunk,
+	const size_t len)
+{
+	struct collect_body_ctx *restrict ctx = data;
+	if (ctx->cap - ctx->len < len) {
+		return false;
+	}
+	memcpy(ctx->buf + ctx->len, chunk, len);
+	ctx->len += len;
+	return true;
+}
+
+static bool decode_chunked_response_body(
+	const unsigned char *restrict rsp, const size_t rsp_len,
+	unsigned char *restrict out, const size_t out_cap,
+	size_t *restrict out_len)
+{
+	const unsigned char *hdr_end =
+		memmem(rsp, rsp_len, "\r\n\r\n", CONSTSTRLEN("\r\n\r\n"));
+	if (hdr_end == NULL) {
+		return false;
+	}
+	const unsigned char *body = hdr_end + CONSTSTRLEN("\r\n\r\n");
+	const size_t body_len = rsp_len - (size_t)(body - rsp);
+
+	struct collect_body_ctx ctx = {
+		.buf = out,
+		.cap = out_cap,
+		.len = 0,
+	};
+	const struct http_body_data_cb cb = {
+		.func = collect_body_cb,
+		.ctx = &ctx,
+	};
+	struct http_body d;
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+	if (!http_body_consume(&d, body, body_len, cb)) {
+		return false;
+	}
+	if (!http_body_finish(&d)) {
+		return false;
+	}
+	*out_len = ctx.len;
 	return true;
 }
 
@@ -1378,6 +1456,391 @@ T_DECLARE_CASE(plain_http_proxy_authorization_not_forwarded)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(plain_http_response_content_length_preserved)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char buf[4096];
+	unsigned char rsp[4096];
+	const char req[] = "GET http://example.com/data HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	const char upstream_rsp[] = "HTTP/1.1 200 OK\r\n"
+				    "Content-Length: 5\r\n"
+				    "\r\n"
+				    "hello";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	test_conf.conn_cache = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "GET /data HTTP/1.1", 18) !=
+			NULL);
+	}
+	T_CHECK(write_all(upstream_fd, upstream_rsp, strlen(upstream_rsp)) ==
+		0);
+	drive_loop(loop);
+
+	{
+		const ssize_t n =
+			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Content-Length: 5", 17) !=
+			NULL);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Transfer-Encoding", 17) ==
+			NULL);
+		T_EXPECT(memmem(rsp, (size_t)n, "hello", 5) != NULL);
+	}
+	T_EXPECT_EQ(S.conn_cache_put_calls, 1);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	reset_stub_state();
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_response_conn_close_large_body_complete)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char reqbuf[4096];
+	const char req[] = "GET http://example.com/data HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	const size_t body_len = 32768;
+	unsigned char *body = NULL;
+	unsigned char *rsp = NULL;
+	char hdr[256];
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	test_conf.conn_cache = true;
+
+	body = malloc(body_len);
+	T_CHECK(body != NULL);
+	for (size_t i = 0; i < body_len; i++) {
+		body[i] = (unsigned char)('a' + (char)(i % 26));
+	}
+	rsp = malloc(body_len + sizeof(hdr) + 512u);
+	T_CHECK(rsp != NULL);
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, reqbuf, sizeof(reqbuf));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(reqbuf, (size_t)n, "GET /data HTTP/1.1", 18) !=
+			NULL);
+	}
+
+	{
+		const int n = snprintf(
+			hdr, sizeof(hdr),
+			"HTTP/1.1 200 OK\r\n"
+			"Connection: close\r\n"
+			"Content-Length: %zu\r\n"
+			"\r\n",
+			body_len);
+		T_CHECK(n > 0 && (size_t)n < sizeof(hdr));
+	}
+	T_CHECK(write_all(upstream_fd, hdr, strlen(hdr)) == 0);
+	T_CHECK(write_all(upstream_fd, body, body_len) == 0);
+	drive_loop(loop);
+
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, body_len + sizeof(hdr) + 512u);
+		const unsigned char *body_start;
+		const unsigned char *hdr_end;
+		size_t body_recv;
+		T_EXPECT(n > 0);
+		hdr_end = memmem(rsp, (size_t)n, "\r\n\r\n", 4);
+		T_EXPECT(hdr_end != NULL);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Content-Length: ", 16) != NULL);
+		body_start = hdr_end + 4;
+		body_recv = (size_t)n - (size_t)(body_start - rsp);
+		T_EXPECT_EQ(body_recv, body_len);
+		T_EXPECT(memcmp(body_start, body, body_len) == 0);
+	}
+
+	free(rsp);
+	free(body);
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	reset_stub_state();
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_response_chunked_strips_content_length)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char reqbuf[4096];
+	unsigned char rsp[4096];
+	const char req[] = "GET http://example.com/data HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	const char upstream_rsp[] = "HTTP/1.1 200 OK\r\n"
+				    "Transfer-Encoding: chunked\r\n"
+				    "Content-Length: 1\r\n"
+				    "\r\n"
+				    "5\r\n"
+				    "hello\r\n"
+				    "0\r\n"
+				    "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	test_conf.conn_cache = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, reqbuf, sizeof(reqbuf));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(reqbuf, (size_t)n, "GET /data HTTP/1.1", 18) !=
+			NULL);
+	}
+
+	T_CHECK(write_all(upstream_fd, upstream_rsp, strlen(upstream_rsp)) ==
+		0);
+	drive_loop(loop);
+
+	{
+		const ssize_t n =
+			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Transfer-Encoding: chunked",
+			       26) != NULL);
+		T_EXPECT(memmem(rsp, (size_t)n, "Content-Length:", 15) == NULL);
+		T_EXPECT(memmem(rsp, (size_t)n, "hello", 5) != NULL);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	reset_stub_state();
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_response_eof_framed_large_body_complete)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char reqbuf[4096];
+	const char req[] = "GET http://example.com/stream HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	const char upstream_hdr[] = "HTTP/1.1 200 OK\r\n"
+				    "Connection: close\r\n"
+				    "\r\n";
+	const size_t body_len = 12288;
+	unsigned char body[body_len];
+	unsigned char rsp[body_len + 16384u];
+	unsigned char decoded[body_len];
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	test_conf.conn_cache = true;
+
+	for (size_t i = 0; i < body_len; i++) {
+		body[i] = (unsigned char)('a' + (char)(i % 26));
+	}
+	body[0] = 'B';
+	body[1] = 'E';
+	body[2] = 'G';
+	body[3] = 'I';
+	body[4] = 'N';
+	body[body_len - 5] = 'E';
+	body[body_len - 4] = 'N';
+	body[body_len - 3] = 'D';
+	body[body_len - 2] = '!';
+	body[body_len - 1] = '!';
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, reqbuf, sizeof(reqbuf));
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(reqbuf, (size_t)n, "GET /stream HTTP/1.1", 20) !=
+			NULL);
+	}
+
+	T_CHECK(write_all(upstream_fd, upstream_hdr, strlen(upstream_hdr)) ==
+		0);
+	T_CHECK(write_all(upstream_fd, body, body_len) == 0);
+	T_CHECK(shutdown(upstream_fd, SHUT_WR) == 0);
+	for (int i = 0; i < 3; i++) {
+		test_run_for(loop, TEST_WAIT_RECV_SEC);
+	}
+
+	{
+		ssize_t n = 0;
+		size_t off = 0;
+		size_t decoded_len = 0;
+		for (int i = 0; i < 12 && off < body_len + 16384u; i++) {
+			const ssize_t got = recv_all_with_timeout(
+				loop, peer_fd, rsp + off,
+				(body_len + 16384u) - off);
+			T_EXPECT(got >= 0);
+			off += (size_t)got;
+			if (got == 0) {
+				break;
+			}
+		}
+		n = (ssize_t)off;
+		T_EXPECT(n > 0);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Transfer-Encoding: chunked",
+			       26) != NULL);
+		T_EXPECT(memmem(rsp, (size_t)n, "Content-Length:", 15) == NULL);
+		T_EXPECT(decode_chunked_response_body(
+			rsp, (size_t)n, decoded, sizeof(decoded),
+			&decoded_len));
+		T_EXPECT_EQ(decoded_len, body_len);
+		T_EXPECT(memcmp(decoded, body, body_len) == 0);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	reset_stub_state();
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_reuses_cached_upstream_connection)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd1 = -1;
+	int peer_fd2 = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char buf[4096];
+	unsigned char rsp[4096];
+	const char req1[] = "GET http://example.com/one HTTP/1.1\r\n"
+			    "Host: example.com\r\n"
+			    "\r\n";
+	const char req2[] = "GET http://example.com/two HTTP/1.1\r\n"
+			    "Host: example.com\r\n"
+			    "\r\n";
+	const char rsp1[] = "HTTP/1.1 200 OK\r\n"
+			    "Content-Length: 3\r\n"
+			    "\r\n"
+			    "one";
+	const char rsp2[] = "HTTP/1.1 200 OK\r\n"
+			    "Content-Length: 3\r\n"
+			    "\r\n"
+			    "two";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	test_conf.conn_cache = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req1, &peer_fd1);
+	drive_loop(loop);
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		T_EXPECT(n > 0);
+		T_EXPECT(memmem(buf, (size_t)n, "/one HTTP/1.1", 13) != NULL);
+	}
+	T_CHECK(write_all(upstream_fd, rsp1, strlen(rsp1)) == 0);
+	drive_loop(loop);
+	{
+		const ssize_t n =
+			recv_all_with_timeout(loop, peer_fd1, rsp, sizeof(rsp));
+		T_EXPECT(n > 0);
+		T_EXPECT(memmem(rsp, (size_t)n, "one", 3) != NULL);
+	}
+	T_CHECK(close(peer_fd1) == 0);
+
+	S.dialer_result_fd = -1;
+	serve_payload(loop, &s, req2, &peer_fd2);
+	drive_loop(loop);
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, upstream_fd, buf, sizeof(buf));
+		T_EXPECT(n > 0);
+		T_EXPECT(memmem(buf, (size_t)n, "/two HTTP/1.1", 13) != NULL);
+	}
+	T_CHECK(write_all(upstream_fd, rsp2, strlen(rsp2)) == 0);
+	drive_loop(loop);
+	{
+		const ssize_t n =
+			recv_all_with_timeout(loop, peer_fd2, rsp, sizeof(rsp));
+		T_EXPECT(n > 0);
+		T_EXPECT(memmem(rsp, (size_t)n, "two", 3) != NULL);
+	}
+	T_EXPECT_EQ(S.conn_cache_get_calls, 2);
+	T_EXPECT_EQ(S.conn_cache_put_calls, 2);
+
+	T_CHECK(close(peer_fd2) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	reset_stub_state();
+	ev_loop_destroy(loop);
+}
+
 /* A successful plain HTTP forward must count exactly one success, and
  * establish a bidirectional relay between client and upstream. */
 T_DECLARE_CASE(plain_http_forward_success_counted_once)
@@ -1457,6 +1920,11 @@ int main(void)
 	T_RUN_CASE(t, plain_http_te_chunked_forwarded_to_upstream);
 	T_RUN_CASE(t, plain_http_dynamic_hop_by_hop_not_forwarded);
 	T_RUN_CASE(t, plain_http_proxy_authorization_not_forwarded);
+	T_RUN_CASE(t, plain_http_response_content_length_preserved);
+	T_RUN_CASE(t, plain_http_response_conn_close_large_body_complete);
+	T_RUN_CASE(t, plain_http_response_chunked_strips_content_length);
+	T_RUN_CASE(t, plain_http_response_eof_framed_large_body_complete);
+	T_RUN_CASE(t, plain_http_reuses_cached_upstream_connection);
 	T_RUN_CASE(t, plain_http_forward_success_counted_once);
 	T_RUN_CASE(t, malformed_proxy_authorization_returns_400);
 	T_RUN_CASE(t, invalid_te_returns_400);
