@@ -276,7 +276,7 @@ static void parse_args(const int argc, char *const restrict argv[])
 			OPT_REQUIRE_ARG(argc, argv, i);
 			char *s = argv[++i];
 			intmax_t soft = strtoimax(s, &s, 10);
-			if (soft > INT_MAX) {
+			if (soft > INT_MAX / 1024) {
 				OPT_ARG_ERROR(argv, i);
 			} else if (soft < 0) {
 				soft = 0;
@@ -356,12 +356,14 @@ static void parse_args(const int argc, char *const restrict argv[])
 			conf->block_multicast = true;
 			conf->block_local = false;
 			conf->block_global = true;
+			continue;
 		}
 		if (strcmp(argv[i], "--egress") == 0) {
 			conf->block_loopback = true;
 			conf->block_multicast = true;
 			conf->block_local = true;
 			conf->block_global = false;
+			continue;
 		}
 		if (strcmp(argv[i], "-m") == 0 ||
 		    strcmp(argv[i], "--max-sessions") == 0) {

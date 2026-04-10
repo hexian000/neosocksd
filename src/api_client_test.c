@@ -36,7 +36,6 @@ static struct config test_conf = {
 };
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
-static const ev_tstamp TEST_WAIT_MEDIUM_SEC = 0.128;
 static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 0.256;
 static const ev_tstamp TEST_WAIT_LONG_SEC = 0.512;
 
@@ -205,20 +204,6 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
-static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
-{
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired) {
-		ev_run(loop, EVRUN_ONCE);
-	}
-	ev_timer_stop(loop, &w_timeout);
-}
-
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *data,
 	const ev_tstamp timeout_sec)
@@ -240,6 +225,26 @@ static bool cb_called_predicate(void *data)
 {
 	const struct cb_result *const r = data;
 	return r->called;
+}
+
+struct fd_closed_ctx {
+	int fd;
+};
+
+static bool fd_closed_predicate(void *data)
+{
+	struct fd_closed_ctx *const ctx = data;
+	unsigned char ch;
+	const ssize_t n = recv_nowait(ctx->fd, &ch, sizeof(ch));
+
+	if (n == 0) {
+		return true;
+	}
+	if (n < 0 &&
+	    (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+		return false;
+	}
+	return false;
 }
 
 static bool read_request_headers(
@@ -431,7 +436,6 @@ T_DECLARE_CASE(rpcall_success_returns_stream)
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
 		NULL));
 	T_CHECK(ctx != NULL);
-	test_run_for(loop, TEST_WAIT_SHORT_SEC);
 	T_CHECK(read_request_headers(
 		loop, sv[1], reqbuf, sizeof(reqbuf), TEST_WAIT_RESPONSE_SEC));
 	T_EXPECT(strstr(reqbuf, "POST /ruleset/rpcall HTTP/1.1") != NULL);
@@ -456,6 +460,7 @@ T_DECLARE_CASE(invoke_uses_invoke_path)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialreq *req = NULL;
+	struct fd_closed_ctx closed_ctx = { 0 };
 	int sv[2] = { -1, -1 };
 	char reqbuf[512] = { 0 };
 	static const char payload[] = "{}";
@@ -471,12 +476,14 @@ T_DECLARE_CASE(invoke_uses_invoke_path)
 
 	api_client_invoke(
 		loop, req, payload, sizeof(payload) - 1, &test_conf, NULL);
-	test_run_for(loop, TEST_WAIT_SHORT_SEC);
 	T_CHECK(read_request_headers(
 		loop, sv[1], reqbuf, sizeof(reqbuf), TEST_WAIT_RESPONSE_SEC));
 	T_EXPECT(strstr(reqbuf, "POST /ruleset/invoke HTTP/1.1") != NULL);
 	T_CHECK(send_response(sv[1], "204 No Content", NULL, "close", NULL, 0));
-	test_run_for(loop, TEST_WAIT_MEDIUM_SEC);
+	closed_ctx.fd = sv[1];
+	T_CHECK(test_wait_until(
+		loop, fd_closed_predicate, &closed_ctx,
+		TEST_WAIT_RESPONSE_SEC));
 	T_EXPECT_EQ(S.conn_cache_put_calls, 0);
 
 	T_CHECK(close(sv[1]) == 0);

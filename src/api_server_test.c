@@ -31,7 +31,6 @@ static struct config test_conf = {
 	.timeout = 1.0,
 };
 
-static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
 static const ev_tstamp TEST_WAIT_CLOSE_SEC = 0.032;
 static const ev_tstamp TEST_WAIT_RECV_SEC = 0.256;
 
@@ -325,6 +324,29 @@ static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
 	ev_timer_stop(loop, &w_timeout);
 }
 
+static bool test_wait_until(
+	struct ev_loop *loop, bool (*predicate)(void *), void *data,
+	const ev_tstamp timeout_sec)
+{
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	while (!watchdog.fired && !predicate(data)) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	ev_timer_stop(loop, &w_timeout);
+	return predicate(data);
+}
+
+static bool ruleset_rpcall_pending(void *data)
+{
+	(void)data;
+	return RS.pending_rpcall != NULL;
+}
+
 static ssize_t recv_all_with_timeout(
 	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
 	const size_t cap, const ev_tstamp timeout_sec)
@@ -332,6 +354,7 @@ static ssize_t recv_all_with_timeout(
 	struct test_watchdog watchdog = { 0 };
 	struct ev_timer w_timeout;
 	size_t off = 0;
+	int_fast32_t idle_after_data = 0;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
@@ -343,6 +366,12 @@ static ssize_t recv_all_with_timeout(
 				continue;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				if (off > 0) {
+					idle_after_data++;
+					if (idle_after_data >= 2) {
+						break;
+					}
+				}
 				ev_run(loop, EVRUN_ONCE);
 				continue;
 			}
@@ -353,14 +382,10 @@ static ssize_t recv_all_with_timeout(
 			break;
 		}
 		off += (size_t)n;
+		idle_after_data = 0;
 	}
 	ev_timer_stop(loop, &w_timeout);
 	return (ssize_t)off;
-}
-
-static void drive_loop(struct ev_loop *loop)
-{
-	test_run_for(loop, TEST_WAIT_SHORT_SEC);
 }
 
 static void init_server_pair(
@@ -427,7 +452,6 @@ T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -438,7 +462,6 @@ T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 	}
 
 	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -464,7 +487,6 @@ T_DECLARE_CASE(healthy_connection_close_header)
 	T_CHECK(send_request(
 		peer_fd, "GET /healthy HTTP/1.1\r\n"
 			 "Connection: close\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -497,7 +519,6 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(peer_fd, "GET /stats HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -527,7 +548,6 @@ T_DECLARE_CASE(stats_output_format_has_no_raw_specifiers)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(peer_fd, "GET /stats HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -565,7 +585,6 @@ T_DECLARE_CASE(stats_post_ok_without_nocache)
 
 	T_CHECK(send_request(
 		peer_fd, "POST /stats HTTP/1.1\r\nContent-Length: 0\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -591,7 +610,6 @@ T_DECLARE_CASE(stats_bad_method_405)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(peer_fd, "PUT /stats HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -615,7 +633,6 @@ T_DECLARE_CASE(stats_bad_query_400)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(peer_fd, "GET /stats?% HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -641,7 +658,6 @@ T_DECLARE_CASE(stats_deflate_response_header)
 	T_CHECK(send_request(
 		peer_fd, "GET /stats HTTP/1.1\r\n"
 			 "Accept-Encoding: deflate\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -667,7 +683,6 @@ T_DECLARE_CASE(not_found_404)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(peer_fd, "GET /notfound HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -700,7 +715,6 @@ T_DECLARE_CASE(stats_post_with_ruleset_q)
 	T_CHECK(send_request(
 		peer_fd,
 		"POST /stats?q=abc HTTP/1.1\r\nContent-Length: 0\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -730,7 +744,6 @@ T_DECLARE_CASE(ruleset_disabled_returns_500)
 		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n"
 			 "Content-Length: 1\r\n\r\n"
 			 "x"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -765,7 +778,6 @@ T_DECLARE_CASE(ruleset_invoke_ok_200)
 		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n"
 			 "Content-Length: 1\r\n\r\n"
 			 "x"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -793,7 +805,6 @@ T_DECLARE_CASE(ruleset_invoke_length_required_411)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -826,7 +837,6 @@ T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 		"POST /ruleset/update?module=libruleset&chunkname=%40x.lua HTTP/1.1\r\n"
 		"Content-Length: 1\r\n\r\n"
 		"x"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -856,7 +866,6 @@ T_DECLARE_CASE(ruleset_gc_ok_contains_report)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(peer_fd, "POST /ruleset/gc HTTP/1.1\r\n\r\n"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -890,7 +899,6 @@ T_DECLARE_CASE(ruleset_rpcall_bad_mime_400)
 			 "Content-Length: 1\r\n"
 			 "Content-Type: text/plain\r\n\r\n"
 			 "x"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -930,9 +938,9 @@ T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 			 "Content-Length: 1\r\n"
 			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
 			 "x"));
-	drive_loop(loop);
+	T_CHECK(test_wait_until(
+		loop, ruleset_rpcall_pending, NULL, TEST_WAIT_RECV_SEC));
 	finish_rpcall(loop);
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -971,7 +979,6 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 			 "Content-Length: 1\r\n"
 			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
 			 "x"));
-	drive_loop(loop);
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);

@@ -162,26 +162,6 @@ static struct percentiles calc_percentiles(
 	};
 }
 
-static void append_connect_latency(
-	struct stream *restrict w, const struct server_stats *restrict stats)
-{
-	if (stats->num_connects == 0) {
-		(void)io_bufprintf(
-			w, "%-20s: %s\n", "Connect Latency", "(never)");
-		return;
-	}
-	const struct percentiles p = calc_percentiles(
-		ARRAY_SIZE(stats->connect_ns), stats->num_connects,
-		stats->connect_ns);
-	FORMAT_DURATION(p50_str, make_duration_nanos(p.p50));
-	FORMAT_DURATION(p90_str, make_duration_nanos(p.p90));
-	FORMAT_DURATION(p99_str, make_duration_nanos(p.p99));
-	FORMAT_DURATION(pmax_str, make_duration_nanos(p.pmax));
-	(void)io_bufprintf(
-		w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Connect Latency",
-		p50_str, p90_str, p99_str, pmax_str);
-}
-
 #if WITH_RULESET
 static void append_vmstats(
 	struct stream *restrict w, const struct ruleset_vmstats *vm,
@@ -349,7 +329,21 @@ static void server_stats(
 	}
 #endif
 
-	append_connect_latency(w, stats);
+	if (stats->num_connects > 0) {
+		const struct percentiles p = calc_percentiles(
+			ARRAY_SIZE(stats->connect_ns), stats->num_connects,
+			stats->connect_ns);
+		FORMAT_DURATION(p50_str, make_duration_nanos(p.p50));
+		FORMAT_DURATION(p90_str, make_duration_nanos(p.p90));
+		FORMAT_DURATION(p99_str, make_duration_nanos(p.p99));
+		FORMAT_DURATION(pmax_str, make_duration_nanos(p.pmax));
+		(void)io_bufprintf(
+			w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n",
+			"Connect Latency", p50_str, p90_str, p99_str, pmax_str);
+	} else {
+		(void)io_bufprintf(
+			w, "%-20s: %s\n", "Connect Latency", "(never)");
+	}
 
 	if (dt > 0) {
 		server_stats_stateful(w, api, dt);

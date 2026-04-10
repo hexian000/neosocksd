@@ -35,6 +35,19 @@ static int ruleset_state_gc(lua_State *restrict L)
 	return 0;
 }
 
+static struct ruleset_state *new_ruleset_state(lua_State *restrict L)
+{
+	struct ruleset_state *restrict state =
+		lua_newuserdata(L, sizeof(struct ruleset_state));
+	*state = (struct ruleset_state){ 0 };
+	if (luaL_newmetatable(L, MT_RULESET_STATE)) {
+		lua_pushcfunction(L, ruleset_state_gc);
+		lua_setfield(L, -2, "__gc");
+	}
+	lua_setmetatable(L, -2);
+	return state;
+}
+
 static void check_memlimit(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
@@ -88,14 +101,7 @@ int cfunc_request(lua_State *restrict L)
 	struct ruleset_callback *restrict in_cb = lua_touserdata(L, 6);
 	lua_settop(L, 0);
 
-	struct ruleset_state *restrict state =
-		lua_newuserdata(L, sizeof(struct ruleset_state));
-	*state = (struct ruleset_state){ 0 };
-	if (luaL_newmetatable(L, MT_RULESET_STATE)) {
-		lua_pushcfunction(L, ruleset_state_gc);
-		lua_setfield(L, -2, "__gc");
-	}
-	lua_setmetatable(L, -2);
+	struct ruleset_state *restrict state = new_ruleset_state(L);
 
 	lua_State *restrict co = aux_getthread(L);
 	lua_pushvalue(L, 1);
@@ -194,14 +200,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	struct ruleset_callback *restrict in_cb = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
-	struct ruleset_state *restrict state =
-		lua_newuserdata(L, sizeof(struct ruleset_state));
-	*state = (struct ruleset_state){ 0 };
-	if (luaL_newmetatable(L, MT_RULESET_STATE)) {
-		lua_pushcfunction(L, ruleset_state_gc);
-		lua_setfield(L, -2, "__gc");
-	}
-	lua_setmetatable(L, -2);
+	struct ruleset_state *restrict state = new_ruleset_state(L);
 
 	lua_State *restrict co = aux_getthread(L);
 	lua_pushvalue(L, 1);
@@ -324,7 +323,6 @@ int cfunc_stats(lua_State *restrict L)
 	lua_copy(L, -1, 1);
 	lua_settop(L, 1);
 
-	lua_replace(L, -2);
 	lua_pushnumber(L, dt);
 	lua_pushstring(L, query);
 	lua_call(L, 2, 1);

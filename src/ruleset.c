@@ -307,6 +307,9 @@ bool ruleset_invoke(struct ruleset *restrict r, struct stream *code)
 
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 {
+	if (state == NULL) {
+		return;
+	}
 	if (state->cb != NULL) {
 		ev_clear_pending(loop, &state->cb->w_finish);
 	}
@@ -343,16 +346,15 @@ static bool dispatch_request(
 	const char *restrict username, const char *restrict password,
 	struct ruleset_callback *callback)
 {
-	lua_State *restrict L = r->L;
 	const bool ok = ruleset_pcall(
 		r, cfunc_request, 6, 1, (void *)state, (void *)func,
 		(void *)request, (void *)username, (void *)password,
 		(void *)callback);
 	if (!ok) {
 		LOGW_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
-		return NULL;
+		return false;
 	}
-	return lua_touserdata(L, -1);
+	return true;
 }
 
 bool ruleset_resolve(

@@ -293,6 +293,67 @@ endif()
 
 add_test(NAME forward_test COMMAND forward_test)
 
+add_executable(conf_test
+    conf_test.c
+    conf.c
+)
+target_include_directories(conf_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(conf_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(conf_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(conf_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(conf_test PRIVATE m)
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(conf_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(conf_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME conf_test COMMAND conf_test)
+
+add_executable(transfer_test
+    transfer_test.c
+    transfer.c
+)
+target_include_directories(transfer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(transfer_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(transfer_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(transfer_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(transfer_test PRIVATE m)
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(transfer_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(transfer_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME transfer_test COMMAND transfer_test)
+
+add_executable(server_test
+    server_test.c
+    server.c
+    conf.c
+)
+target_include_directories(server_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(server_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+target_compile_options(server_test PRIVATE -pedantic -Wall -Wextra -Werror)
+target_link_libraries(server_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(LIBM)
+    target_link_libraries(server_test PRIVATE m)
+endif()
+
+if(FORCE_POSIX)
+    target_compile_definitions(server_test PRIVATE _POSIX_C_SOURCE=200809L)
+else()
+    target_compile_definitions(server_test PRIVATE _GNU_SOURCE)
+endif()
+
+add_test(NAME server_test COMMAND server_test)
+
 add_executable(http_test
     proto/http_test.c
     proto/http.c
@@ -520,4 +581,23 @@ if(WITH_LUA)
     endif()
 
     add_test(NAME zlib_test COMMAND zlib_test)
+
+    add_executable(ruleset_test
+        ruleset_test.c
+    )
+    target_include_directories(ruleset_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(ruleset_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
+    target_compile_options(ruleset_test PRIVATE -pedantic -Wall -Wextra -Werror)
+    target_link_libraries(ruleset_test PRIVATE csnippets miniz ${LIBEV_LIBRARY} ${LUA_LIBRARY})
+    if(LIBM)
+        target_link_libraries(ruleset_test PRIVATE m)
+    endif()
+
+    if(FORCE_POSIX)
+        target_compile_definitions(ruleset_test PRIVATE _POSIX_C_SOURCE=200809L)
+    else()
+        target_compile_definitions(ruleset_test PRIVATE _GNU_SOURCE)
+    endif()
+
+    add_test(NAME ruleset_test COMMAND ruleset_test)
 endif()

@@ -57,13 +57,13 @@ Health check.
 - **Query**:
   - `nobanner`: omit the banner. Default: 0.
   - `server`: include server statistics. Default: 1.
-  - `q`: argument passed to [ruleset.stats](#rulesetstats).
 - **Status**: HTTP 200
 - **Response**: Server statistics (`text/plain`).
 
 GET: Returns stateless server statistics.
 
-POST: Returns server statistics accumulated since the previous request.
+POST: Returns server statistics accumulated since the previous request. Also invokes [ruleset.stats](#rulesetstats) if a ruleset is active.
+- `q`: passed to [ruleset.stats](#rulesetstats) as the second argument. Default: nil.
 
 ### /ruleset/invoke
 
@@ -236,7 +236,8 @@ Generates custom information for the `/stats` API. See also [stats](#stats).
 
 **Params**
 
-- `dt`: seconds elapsed since the last call
+- `dt`: seconds elapsed since the previous POST `/stats` request.
+- `q`: the `q` query parameter from the POST `/stats` request, or `nil` if absent.
 
 **Returns**
 
@@ -338,7 +339,11 @@ neosocksd.setinterval(1.5)
 
 Sets the interval to call [ruleset.tick](#rulesettick), in seconds.
 
-Valid range: `[1e-3, 1e+9]`. Use `setinterval(0)` to stop the timer tick.
+Behavior by input value:
+
+- positive normal number: start periodic tick with that interval.
+- negative normal number: invoke [ruleset.tick](#rulesettick) whenever the event loop is idle.
+- non-normal number (`0`, `NaN`, `+Inf`, `-Inf`, subnormal): stop ticking.
 
 
 ### neosocksd.async

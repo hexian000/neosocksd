@@ -720,21 +720,6 @@ static int socks5_authmethod(struct socks_ctx *restrict ctx)
 	return socks5_auth(ctx);
 }
 
-static int socks5_dispatch(struct socks_ctx *restrict ctx)
-{
-	switch (ctx->state) {
-	case STATE_HANDSHAKE1:
-		return socks5_authmethod(ctx);
-	case STATE_HANDSHAKE2:
-		return socks5_auth(ctx);
-	case STATE_HANDSHAKE3:
-		return socks5_req(ctx);
-	default:
-		break;
-	}
-	FAILMSGF("unexpected socks5 state: %d", ctx->state);
-}
-
 static int socks_dispatch(struct socks_ctx *restrict ctx)
 {
 	if (ctx->rbuf.len < 1) {
@@ -745,7 +730,17 @@ static int socks_dispatch(struct socks_ctx *restrict ctx)
 	case SOCKS4:
 		return socks4_req(ctx);
 	case SOCKS5:
-		return socks5_dispatch(ctx);
+		switch (ctx->state) {
+		case STATE_HANDSHAKE1:
+			return socks5_authmethod(ctx);
+		case STATE_HANDSHAKE2:
+			return socks5_auth(ctx);
+		case STATE_HANDSHAKE3:
+			return socks5_req(ctx);
+		default:
+			break;
+		}
+		FAILMSGF("unexpected socks5 state: %d", ctx->state);
 	default:
 		break;
 	}
@@ -1431,6 +1426,10 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 #if WITH_RULESET
 	struct ruleset *restrict ruleset = ctx->s->ruleset;
 	if (ruleset != NULL) {
+		/* BIND and UDP ASSOCIATE are not supported with a ruleset.
+		 * All commands are routed uniformly through the ruleset and
+		 * then dialed as TCP CONNECT; the special-case dispatch below
+		 * is intentionally skipped. */
 		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}

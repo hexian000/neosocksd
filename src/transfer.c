@@ -230,8 +230,7 @@ static void transfer_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		} else {
 			nbsend += (size_t)nsend;
 		}
-		if (nrecv <= 0 && nsend <= 0) {
-			/* no progress */
+		if ((t->pos < t->buf.len) || (nrecv <= 0 && nsend <= 0)) {
 			break;
 		}
 	}
@@ -368,7 +367,7 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	case XFER_CONNECTED: {
 		if (has_data) {
 			update_watcher(t, loop, EV_WRITE);
-		} else if (!has_work) {
+		} else {
 			update_watcher(t, loop, EV_READ);
 		}
 	} break;

@@ -90,8 +90,7 @@ static int api_parse_ipv4(lua_State *restrict L)
 	if (inet_pton(AF_INET, s, &in) != 1) {
 		return 0;
 	}
-	const uint32_t *addr = (void *)&in;
-	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[0]));
+	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&in));
 	return 1;
 }
 
@@ -106,16 +105,16 @@ static int api_parse_ipv6(lua_State *restrict L)
 	if (inet_pton(AF_INET6, s, &in6) != 1) {
 		return 0;
 	}
-	const lua_Integer *addr = (void *)&in6;
+	const uint_least8_t *addr = (const void *)&in6;
 #if LUA_32BITS
-	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[0]));
-	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[1]));
-	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[2]));
-	lua_pushinteger(L, (lua_Integer)read_uint32((const void *)&addr[3]));
+	lua_pushinteger(L, (lua_Integer)read_uint32(addr));
+	lua_pushinteger(L, (lua_Integer)read_uint32(addr + 4));
+	lua_pushinteger(L, (lua_Integer)read_uint32(addr + 8));
+	lua_pushinteger(L, (lua_Integer)read_uint32(addr + 12));
 	return 4;
 #else
-	lua_pushinteger(L, (lua_Integer)read_uint64((const void *)&addr[0]));
-	lua_pushinteger(L, (lua_Integer)read_uint64((const void *)&addr[1]));
+	lua_pushinteger(L, (lua_Integer)read_uint64(addr));
+	lua_pushinteger(L, (lua_Integer)read_uint64(addr + 8));
 	return 2;
 #endif
 }
@@ -178,7 +177,7 @@ static int api_config(lua_State *restrict L)
 	lua_setfield(L, -2, "timeout");
 	lua_pushboolean(L, conf->auth_required);
 	lua_setfield(L, -2, "auth_required");
-	lua_pushboolean(L, r->config.memlimit_kb);
+	lua_pushinteger(L, (lua_Integer)conf->memlimit);
 	lua_setfield(L, -2, "memlimit");
 	lua_pushboolean(L, r->config.traceback);
 	lua_setfield(L, -2, "traceback");

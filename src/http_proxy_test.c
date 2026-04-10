@@ -490,14 +490,63 @@ static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
 	ev_timer_stop(loop, &w_timeout);
 }
 
-static void drive_loop(struct ev_loop *loop)
+static bool
+test_step_timed_out(struct ev_loop *loop, const ev_tstamp timeout_sec)
 {
-	test_run_for(loop, TEST_WAIT_SHORT_SEC);
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	ev_run(loop, EVRUN_ONCE);
+	ev_timer_stop(loop, &w_timeout);
+	return watchdog.fired;
 }
 
-static ssize_t recv_all_with_timeout(
+static bool test_wait_until(
+	struct ev_loop *loop, bool (*predicate)(void *), void *data,
+	const ev_tstamp timeout_sec)
+{
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	while (!watchdog.fired && !predicate(data)) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	ev_timer_stop(loop, &w_timeout);
+	return predicate(data);
+}
+
+struct server_success_wait_ctx {
+	const struct server *s;
+	int_fast32_t expected;
+};
+
+static bool server_success_reached(void *data)
+{
+	const struct server_success_wait_ctx *const ctx = data;
+	return (int_fast32_t)ctx->s->stats.num_success >= ctx->expected;
+}
+
+static void drive_loop(struct ev_loop *loop)
+{
+	for (int_fast32_t i = 0; i < 16; i++) {
+		if (test_step_timed_out(loop, TEST_WAIT_SHORT_SEC)) {
+			break;
+		}
+	}
+}
+
+/* Receive at least min_bytes from fd, up to cap bytes.
+ * Returns number of bytes received, or -1 on error.
+ * Exits early if at least min_bytes received and no more data available. */
+static ssize_t recv_at_least(
 	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
-	const size_t cap)
+	const size_t cap, const size_t min_bytes)
 {
 	struct test_watchdog watchdog = { 0 };
 	struct ev_timer w_timeout;
@@ -513,6 +562,10 @@ static ssize_t recv_all_with_timeout(
 				continue;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/* Exit early if minimum met; otherwise wait for more */
+				if (off >= min_bytes) {
+					break;
+				}
 				ev_run(loop, EVRUN_ONCE);
 				continue;
 			}
@@ -645,11 +698,13 @@ static bool assert_response_status(
 	struct ev_loop *loop, const int peer_fd, const char *restrict status)
 {
 	unsigned char rsp[1024];
-	const ssize_t n =
-		recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
+	/* Expect at least: "HTTP/1.1 200 OK\r\n\r\n" (17 bytes minimum) */
+	const ssize_t n = recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
 	if (n <= 0) {
 		return false;
 	}
+	/* Gracefully close: SHUT_WR prevents further recv, verifies no trailing data */
+	(void)shutdown(peer_fd, SHUT_WR);
 	return has_http_status(rsp, (size_t)n, status);
 }
 
@@ -681,10 +736,11 @@ T_DECLARE_CASE(plain_http_origin_form_no_dialreq_returns_500)
 	{
 		unsigned char rsp[1024];
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
 		/* dialreq_new_ok=false -> make_dialreq returns NULL -> 500 */
 		T_EXPECT(has_http_status(rsp, (size_t)n, "500"));
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -732,9 +788,10 @@ T_DECLARE_CASE(malformed_proxy_authorization_returns_400)
 	{
 		unsigned char rsp[1024];
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
 		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -760,9 +817,10 @@ T_DECLARE_CASE(invalid_te_returns_400)
 	{
 		unsigned char rsp[1024];
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
 		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -787,9 +845,10 @@ T_DECLARE_CASE(connect_with_invalid_target_returns_500)
 	{
 		unsigned char rsp[1024];
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
 		T_EXPECT(has_http_status(rsp, (size_t)n, "500"));
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -814,7 +873,6 @@ T_DECLARE_CASE(valid_connect_dialer_error_returns_502)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
@@ -848,11 +906,12 @@ T_DECLARE_CASE(valid_connect_established_with_hijack)
 
 	{
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 30);
+		T_EXPECT(n >= 30);
 		T_EXPECT(
 			memmem(rsp, (size_t)n, "200 Connection established",
 			       26) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -887,11 +946,12 @@ T_DECLARE_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq)
 
 	{
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 30);
+		T_EXPECT(n >= 30);
 		T_EXPECT(
 			memmem(rsp, (size_t)n, "200 Connection established",
 			       26) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 	T_EXPECT_EQ(S.dialreq_free_calls, 1);
 	T_EXPECT_EQ(S.dialreq_invalid_free_calls, 0);
@@ -920,7 +980,6 @@ T_DECLARE_CASE(connect_with_transfer_encoding_chunked_is_accepted)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
@@ -940,7 +999,6 @@ T_DECLARE_CASE(authorization_header_without_space_returns_400)
 	reset_stub_state();
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "400"));
 
@@ -964,7 +1022,6 @@ T_DECLARE_CASE(ruleset_auth_required_without_basic_credentials_returns_407)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "407"));
 
@@ -988,7 +1045,6 @@ T_DECLARE_CASE(ruleset_auth_required_with_invalid_basic_returns_407)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "407"));
 
@@ -1013,7 +1069,6 @@ T_DECLARE_CASE(ruleset_resolve_failure_returns_500)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
 
@@ -1038,7 +1093,6 @@ T_DECLARE_CASE(ruleset_finish_without_req_returns_403)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "403"));
 
@@ -1066,7 +1120,6 @@ T_DECLARE_CASE(ruleset_finish_with_req_and_dialer_error_returns_502)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
@@ -1141,7 +1194,6 @@ T_DECLARE_CASE(plain_http_absolute_url_no_dialreq_returns_500)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
 
@@ -1161,7 +1213,6 @@ T_DECLARE_CASE(plain_http_absolute_url_no_host_returns_400)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "400"));
 
@@ -1187,7 +1238,6 @@ T_DECLARE_CASE(plain_http_absolute_url_dialer_error_returns_502)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
@@ -1222,14 +1272,15 @@ T_DECLARE_CASE(plain_http_absolute_url_established)
 	/* The request is forwarded; the connection should close after transfer */
 	{
 		unsigned char buf[4096];
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 20);
 		/* upstream receives the forwarded request */
-		T_EXPECT(n > 0);
+		T_EXPECT(n >= 20);
 		T_EXPECT(memmem(buf, (size_t)n, "GET / HTTP/1.1", 14) != NULL);
 		T_EXPECT(
 			memmem(buf, (size_t)n, "Connection: close", 17) !=
 			NULL);
+		(void)shutdown(upstream_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1244,6 +1295,7 @@ T_DECLARE_CASE(plain_http_post_with_body_forwarded)
 	int peer_fd = -1;
 	int upstream_fd = -1;
 	int dialed_fd = -1;
+	unsigned char buf[4096];
 	const char req[] = "POST http://example.com/submit HTTP/1.1\r\n"
 			   "Host: example.com\r\n"
 			   "Content-Type: application/x-www-form-urlencoded\r\n"
@@ -1262,13 +1314,11 @@ T_DECLARE_CASE(plain_http_post_with_body_forwarded)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		unsigned char buf[4096];
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
-		T_EXPECT(n > 0);
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 25);
+		T_EXPECT(n >= 25);
 		T_EXPECT(
 			memmem(buf, (size_t)n, "POST /submit HTTP/1.1", 21) !=
 			NULL);
@@ -1277,6 +1327,7 @@ T_DECLARE_CASE(plain_http_post_with_body_forwarded)
 			NULL);
 		/* body forwarded */
 		T_EXPECT(memmem(buf, (size_t)n, "a=b&c=d", 7) != NULL);
+		(void)shutdown(upstream_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1293,6 +1344,7 @@ T_DECLARE_CASE(plain_http_version_preserved_in_forwarded_request)
 	int peer_fd = -1;
 	int upstream_fd = -1;
 	int dialed_fd = -1;
+	unsigned char buf[4096];
 	const char req[] = "GET http://example.com/page HTTP/1.0\r\n"
 			   "Host: example.com\r\n"
 			   "\r\n";
@@ -1308,16 +1360,15 @@ T_DECLARE_CASE(plain_http_version_preserved_in_forwarded_request)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		unsigned char buf[4096];
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
-		T_EXPECT(n > 0);
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 25);
+		T_EXPECT(n >= 25);
 		T_EXPECT(
 			memmem(buf, (size_t)n, "GET /page HTTP/1.0", 18) !=
 			NULL);
+		(void)shutdown(upstream_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1334,6 +1385,7 @@ T_DECLARE_CASE(plain_http_te_chunked_forwarded_to_upstream)
 	int peer_fd = -1;
 	int upstream_fd = -1;
 	int dialed_fd = -1;
+	unsigned char buf[4096];
 	const char req[] = "POST http://example.com/ HTTP/1.1\r\n"
 			   "Host: example.com\r\n"
 			   "Transfer-Encoding: chunked\r\n"
@@ -1350,16 +1402,16 @@ T_DECLARE_CASE(plain_http_te_chunked_forwarded_to_upstream)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		unsigned char buf[4096];
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
-		T_EXPECT(n > 0);
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 30);
+		T_EXPECT(n >= 30);
+		T_EXPECT(memmem(buf, (size_t)n, "POST / HTTP/1.1", 15) != NULL);
 		T_EXPECT(
 			memmem(buf, (size_t)n, "Transfer-Encoding: chunked",
 			       26) != NULL);
+		(void)shutdown(upstream_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1376,6 +1428,7 @@ T_DECLARE_CASE(plain_http_dynamic_hop_by_hop_not_forwarded)
 	int peer_fd = -1;
 	int upstream_fd = -1;
 	int dialed_fd = -1;
+	unsigned char buf[4096];
 	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
 			   "Host: example.com\r\n"
 			   "Connection: X-Hop\r\n"
@@ -1393,19 +1446,18 @@ T_DECLARE_CASE(plain_http_dynamic_hop_by_hop_not_forwarded)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		unsigned char buf[4096];
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
-		T_EXPECT(n > 0);
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 25);
+		T_EXPECT(n >= 25);
 		/* dynamic hop-by-hop header must not reach upstream */
 		T_EXPECT(memmem(buf, (size_t)n, "X-Hop", 5) == NULL);
 		/* end-to-end headers must still be forwarded */
 		T_EXPECT(
 			memmem(buf, (size_t)n, "Host: example.com", 17) !=
 			NULL);
+		(void)shutdown(upstream_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1422,6 +1474,7 @@ T_DECLARE_CASE(plain_http_proxy_authorization_not_forwarded)
 	int peer_fd = -1;
 	int upstream_fd = -1;
 	int dialed_fd = -1;
+	unsigned char buf[4096];
 	/* dXNlcjpwYXNz = base64("user:pass") */
 	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
 			   "Host: example.com\r\n"
@@ -1439,16 +1492,15 @@ T_DECLARE_CASE(plain_http_proxy_authorization_not_forwarded)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		unsigned char buf[4096];
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
-		T_EXPECT(n > 0);
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 25);
+		T_EXPECT(n >= 25);
 		T_EXPECT(
 			memmem(buf, (size_t)n, "Proxy-Authorization", 19) ==
 			NULL);
+		(void)shutdown(upstream_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1484,12 +1536,11 @@ T_DECLARE_CASE(plain_http_response_content_length_preserved)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
-		T_EXPECT(n > 0);
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 18);
+		T_EXPECT(n >= 18);
 		T_EXPECT(
 			memmem(buf, (size_t)n, "GET /data HTTP/1.1", 18) !=
 			NULL);
@@ -1500,8 +1551,8 @@ T_DECLARE_CASE(plain_http_response_content_length_preserved)
 
 	{
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 50);
+		T_EXPECT(n >= 50);
 		T_EXPECT(
 			memmem(rsp, (size_t)n, "Content-Length: 5", 17) !=
 			NULL);
@@ -1509,6 +1560,7 @@ T_DECLARE_CASE(plain_http_response_content_length_preserved)
 			memmem(rsp, (size_t)n, "Transfer-Encoding", 17) ==
 			NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "hello", 5) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 	T_EXPECT_EQ(S.conn_cache_put_calls, 1);
 
@@ -1530,9 +1582,9 @@ T_DECLARE_CASE(plain_http_response_conn_close_large_body_complete)
 			   "Host: example.com\r\n"
 			   "\r\n";
 	const size_t body_len = 32768;
-	unsigned char *body = NULL;
-	unsigned char *rsp = NULL;
+	unsigned char body[body_len];
 	char hdr[256];
+	unsigned char rsp[body_len + sizeof(hdr) + 512u];
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
@@ -1543,22 +1595,17 @@ T_DECLARE_CASE(plain_http_response_conn_close_large_body_complete)
 	S.dialer_syserr = 0;
 	test_conf.conn_cache = true;
 
-	body = malloc(body_len);
-	T_CHECK(body != NULL);
 	for (size_t i = 0; i < body_len; i++) {
 		body[i] = (unsigned char)('a' + (char)(i % 26));
 	}
-	rsp = malloc(body_len + sizeof(hdr) + 512u);
-	T_CHECK(rsp != NULL);
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, reqbuf, sizeof(reqbuf));
-		T_EXPECT(n > 0);
+		const ssize_t n = recv_at_least(
+			loop, upstream_fd, reqbuf, sizeof(reqbuf), 18);
+		T_EXPECT(n >= 18);
 		T_EXPECT(
 			memmem(reqbuf, (size_t)n, "GET /data HTTP/1.1", 18) !=
 			NULL);
@@ -1576,27 +1623,46 @@ T_DECLARE_CASE(plain_http_response_conn_close_large_body_complete)
 	}
 	T_CHECK(write_all(upstream_fd, hdr, strlen(hdr)) == 0);
 	T_CHECK(write_all(upstream_fd, body, body_len) == 0);
-	drive_loop(loop);
 
 	{
-		const ssize_t n = recv_all_with_timeout(
-			loop, peer_fd, rsp, body_len + sizeof(hdr) + 512u);
-		const unsigned char *body_start;
-		const unsigned char *hdr_end;
-		size_t body_recv;
-		T_EXPECT(n > 0);
-		hdr_end = memmem(rsp, (size_t)n, "\r\n\r\n", 4);
+		ssize_t n = recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 64);
+		const unsigned char *body_start = NULL;
+		const unsigned char *hdr_end = NULL;
+		size_t off;
+		size_t body_recv = 0;
+
+		T_EXPECT(n >= 64);
+		off = (size_t)n;
+		while (hdr_end == NULL && off < sizeof(rsp)) {
+			hdr_end = memmem(rsp, off, "\r\n\r\n", 4);
+			if (hdr_end != NULL) {
+				break;
+			}
+			n = recv_at_least(
+				loop, peer_fd, rsp + off, sizeof(rsp) - off, 1);
+			T_EXPECT(n > 0);
+			off += (size_t)n;
+		}
 		T_EXPECT(hdr_end != NULL);
-		T_EXPECT(
-			memmem(rsp, (size_t)n, "Content-Length: ", 16) != NULL);
+		T_EXPECT(memmem(rsp, off, "Content-Length: ", 16) != NULL);
 		body_start = hdr_end + 4;
-		body_recv = (size_t)n - (size_t)(body_start - rsp);
+		body_recv = off - (size_t)(body_start - rsp);
+		while (body_recv < body_len && off < sizeof(rsp)) {
+			const size_t remain = body_len - body_recv;
+			const size_t want = remain < 4096u ? remain : 4096u;
+
+			n = recv_at_least(
+				loop, peer_fd, rsp + off, sizeof(rsp) - off,
+				want);
+			T_EXPECT(n > 0);
+			off += (size_t)n;
+			body_recv = off - (size_t)(body_start - rsp);
+		}
 		T_EXPECT_EQ(body_recv, body_len);
 		T_EXPECT(memcmp(body_start, body, body_len) == 0);
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
-	free(rsp);
-	free(body);
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
 	reset_stub_state();
@@ -1635,12 +1701,11 @@ T_DECLARE_CASE(plain_http_response_chunked_strips_content_length)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, reqbuf, sizeof(reqbuf));
-		T_EXPECT(n > 0);
+		const ssize_t n = recv_at_least(
+			loop, upstream_fd, reqbuf, sizeof(reqbuf), 18);
+		T_EXPECT(n >= 18);
 		T_EXPECT(
 			memmem(reqbuf, (size_t)n, "GET /data HTTP/1.1", 18) !=
 			NULL);
@@ -1652,13 +1717,14 @@ T_DECLARE_CASE(plain_http_response_chunked_strips_content_length)
 
 	{
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 50);
+		T_EXPECT(n >= 50);
 		T_EXPECT(
 			memmem(rsp, (size_t)n, "Transfer-Encoding: chunked",
 			       26) != NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "Content-Length:", 15) == NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "hello", 5) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1710,12 +1776,11 @@ T_DECLARE_CASE(plain_http_response_eof_framed_large_body_complete)
 	body[body_len - 1] = '!';
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
 	{
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, reqbuf, sizeof(reqbuf));
-		T_EXPECT(n > 0);
+		const ssize_t n = recv_at_least(
+			loop, upstream_fd, reqbuf, sizeof(reqbuf), 20);
+		T_EXPECT(n >= 20);
 		T_EXPECT(
 			memmem(reqbuf, (size_t)n, "GET /stream HTTP/1.1", 20) !=
 			NULL);
@@ -1734,9 +1799,9 @@ T_DECLARE_CASE(plain_http_response_eof_framed_large_body_complete)
 		size_t off = 0;
 		size_t decoded_len = 0;
 		for (int i = 0; i < 12 && off < body_len + 16384u; i++) {
-			const ssize_t got = recv_all_with_timeout(
+			const ssize_t got = recv_at_least(
 				loop, peer_fd, rsp + off,
-				(body_len + 16384u) - off);
+				(body_len + 16384u) - off, 512);
 			T_EXPECT(got >= 0);
 			off += (size_t)got;
 			if (got == 0) {
@@ -1754,6 +1819,7 @@ T_DECLARE_CASE(plain_http_response_eof_framed_large_body_complete)
 			&decoded_len));
 		T_EXPECT_EQ(decoded_len, body_len);
 		T_EXPECT(memcmp(decoded, body, body_len) == 0);
+		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1800,18 +1866,19 @@ T_DECLARE_CASE(plain_http_reuses_cached_upstream_connection)
 	serve_payload(loop, &s, req1, &peer_fd1);
 	drive_loop(loop);
 	{
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
-		T_EXPECT(n > 0);
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 18);
+		T_EXPECT(n >= 18);
 		T_EXPECT(memmem(buf, (size_t)n, "/one HTTP/1.1", 13) != NULL);
 	}
 	T_CHECK(write_all(upstream_fd, rsp1, strlen(rsp1)) == 0);
 	drive_loop(loop);
 	{
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd1, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd1, rsp, sizeof(rsp), 30);
+		T_EXPECT(n >= 30);
 		T_EXPECT(memmem(rsp, (size_t)n, "one", 3) != NULL);
+		(void)shutdown(peer_fd1, SHUT_WR);
 	}
 	T_CHECK(close(peer_fd1) == 0);
 
@@ -1819,18 +1886,19 @@ T_DECLARE_CASE(plain_http_reuses_cached_upstream_connection)
 	serve_payload(loop, &s, req2, &peer_fd2);
 	drive_loop(loop);
 	{
-		const ssize_t n = recv_all_with_timeout(
-			loop, upstream_fd, buf, sizeof(buf));
-		T_EXPECT(n > 0);
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 18);
+		T_EXPECT(n >= 18);
 		T_EXPECT(memmem(buf, (size_t)n, "/two HTTP/1.1", 13) != NULL);
 	}
 	T_CHECK(write_all(upstream_fd, rsp2, strlen(rsp2)) == 0);
 	drive_loop(loop);
 	{
 		const ssize_t n =
-			recv_all_with_timeout(loop, peer_fd2, rsp, sizeof(rsp));
-		T_EXPECT(n > 0);
+			recv_at_least(loop, peer_fd2, rsp, sizeof(rsp), 30);
+		T_EXPECT(n >= 30);
 		T_EXPECT(memmem(rsp, (size_t)n, "two", 3) != NULL);
+		(void)shutdown(peer_fd2, SHUT_WR);
 	}
 	T_EXPECT_EQ(S.conn_cache_get_calls, 2);
 	T_EXPECT_EQ(S.conn_cache_put_calls, 2);
@@ -1841,12 +1909,130 @@ T_DECLARE_CASE(plain_http_reuses_cached_upstream_connection)
 	ev_loop_destroy(loop);
 }
 
+/* Verify that response headers arriving in two separate recv calls are
+ * correctly reassembled before parsing. This exercises the multi-recv
+ * header accumulation path in relay_recv_cb. */
+T_DECLARE_CASE(plain_http_response_header_split_across_recvs)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	/* split in the middle of a header name across two recv calls */
+	const char rsp_part1[] = "HTTP/1.1 200 OK\r\nContent-Leng";
+	const char rsp_part2[] = "th: 5\r\n\r\nhello";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	test_conf.conn_cache = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	{
+		unsigned char buf[4096];
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 18);
+		T_EXPECT(n >= 18);
+	}
+	T_CHECK(write_all(upstream_fd, rsp_part1, strlen(rsp_part1)) == 0);
+	drive_loop(loop);
+	T_CHECK(write_all(upstream_fd, rsp_part2, strlen(rsp_part2)) == 0);
+	drive_loop(loop);
+	{
+		unsigned char rsp[4096];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 50);
+		T_EXPECT(n >= 50);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Content-Length: 5", 17) !=
+			NULL);
+		T_EXPECT(memmem(rsp, (size_t)n, "hello", 5) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Verify that Transfer-Encoding header values are compared case-insensitively,
+ * so "Chunked" is treated identically to the canonical lowercase "chunked". */
+T_DECLARE_CASE(plain_http_response_transfer_encoding_case_insensitive)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char decoded[64];
+	size_t decoded_len = 0;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	const char upstream_rsp[] = "HTTP/1.1 200 OK\r\n"
+				    "Transfer-Encoding: Chunked\r\n"
+				    "\r\n"
+				    "5\r\nhello\r\n0\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	test_conf.conn_cache = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	{
+		unsigned char buf[4096];
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 18);
+		T_EXPECT(n >= 18);
+	}
+	T_CHECK(write_all(upstream_fd, upstream_rsp, strlen(upstream_rsp)) ==
+		0);
+	drive_loop(loop);
+	{
+		unsigned char rsp[4096];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 50);
+		T_EXPECT(n >= 50);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Transfer-Encoding: chunked",
+			       26) != NULL);
+		T_EXPECT(decode_chunked_response_body(
+			rsp, (size_t)n, decoded, sizeof(decoded),
+			&decoded_len));
+		T_EXPECT(decoded_len == 5);
+		T_EXPECT(memcmp(decoded, "hello", 5) == 0);
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 /* A successful plain HTTP forward must count exactly one success, and
  * establish a bidirectional relay between client and upstream. */
 T_DECLARE_CASE(plain_http_forward_success_counted_once)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
 	int peer_fd = -1;
 	int upstream_fd = -1;
 	int dialed_fd = -1;
@@ -1865,7 +2051,10 @@ T_DECLARE_CASE(plain_http_forward_success_counted_once)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	T_EXPECT(test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC));
 
 	T_EXPECT(s.stats.num_success == 1);
 
@@ -1880,6 +2069,7 @@ T_DECLARE_CASE(connect_success_counted_once)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
 	int peer_fd = -1;
 	int upstream_fd = -1;
 	int dialed_fd = -1;
@@ -1896,7 +2086,10 @@ T_DECLARE_CASE(connect_success_counted_once)
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	T_EXPECT(test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC));
 
 	T_EXPECT(s.stats.num_success == 1);
 
@@ -1925,6 +2118,8 @@ int main(void)
 	T_RUN_CASE(t, plain_http_response_chunked_strips_content_length);
 	T_RUN_CASE(t, plain_http_response_eof_framed_large_body_complete);
 	T_RUN_CASE(t, plain_http_reuses_cached_upstream_connection);
+	T_RUN_CASE(t, plain_http_response_header_split_across_recvs);
+	T_RUN_CASE(t, plain_http_response_transfer_encoding_case_insensitive);
 	T_RUN_CASE(t, plain_http_forward_success_counted_once);
 	T_RUN_CASE(t, malformed_proxy_authorization_returns_400);
 	T_RUN_CASE(t, invalid_te_returns_400);

@@ -186,6 +186,18 @@ static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
 	ev_timer_stop(loop, &w_timeout);
 }
 
+static void test_drive_once(struct ev_loop *loop, const ev_tstamp timeout_sec)
+{
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	ev_run(loop, EVRUN_ONCE);
+	ev_timer_stop(loop, &w_timeout);
+}
+
 static void make_socketpair(int *restrict left_fd, int *restrict right_fd)
 {
 	int sv[2] = { -1, -1 };
@@ -530,7 +542,7 @@ static void complete_pending_ruleset(struct ev_loop *loop)
 	T_CHECK(STUB.ruleset_pending_cb != NULL);
 	ev_feed_event(loop, &STUB.ruleset_pending_cb->w_finish, EV_CUSTOM);
 	STUB.ruleset_pending_cb = NULL;
-	test_run_for(loop, TEST_WAIT_SHORT_SEC);
+	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
 }
 #endif
 
@@ -688,7 +700,7 @@ T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 
 	forward_serve(
 		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
-	test_run_for(loop, TEST_WAIT_SHORT_SEC);
+	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
 
 	T_EXPECT_EQ(STUB.ruleset_resolve_calls, 1);
 	T_EXPECT(STUB.ruleset_pending_cb != NULL);

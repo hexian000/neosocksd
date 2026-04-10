@@ -187,6 +187,8 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		transfer_stop(loop, &ctx->downlink);
 		stats->num_sessions--;
 		break;
+	default:
+		FAILMSGF("unexpected state: %d", ctx->state);
 	}
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
 }
@@ -333,6 +335,8 @@ static void mark_ready(struct ev_loop *loop, struct http_ctx *restrict ctx)
 static void xfer_state_cb(struct ev_loop *loop, void *data)
 {
 	struct http_ctx *restrict ctx = data;
+	ASSERT(ctx->state == STATE_ESTABLISHED ||
+	       ctx->state == STATE_BIDIRECTIONAL);
 	if (ctx->uplink.state == XFER_FINISHED &&
 	    ctx->downlink.state == XFER_FINISHED) {
 		gc_unref(&ctx->gcbase);
@@ -344,6 +348,29 @@ static void xfer_state_cb(struct ev_loop *loop, void *data)
 		mark_ready(loop, ctx);
 		return;
 	}
+}
+
+static void http_ctx_start_bidi_transfer(
+	struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	const struct transfer_state_cb cb = {
+		.func = xfer_state_cb,
+		.data = ctx,
+	};
+	struct server_stats *restrict stats = &ctx->s->stats;
+	transfer_init(
+		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
+		&stats->byt_up, true, ctx->s->conf->pipe);
+	transfer_init(
+		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
+		&stats->byt_down, false, ctx->s->conf->pipe);
+	HTTP_CTX_LOG_F(
+		DEBUG, ctx,
+		"transfer start: uplink [%d->%d], downlink [%d->%d]",
+		ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
+		ctx->accepted_fd);
+	transfer_start(loop, &ctx->uplink);
+	transfer_start(loop, &ctx->downlink);
 }
 
 static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
@@ -360,25 +387,7 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		mark_ready(loop, ctx);
 	}
 
-	const struct transfer_state_cb cb = {
-		.func = xfer_state_cb,
-		.data = ctx,
-	};
-	struct server_stats *restrict stats = &ctx->s->stats;
-	transfer_init(
-		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true, ctx->s->conf->pipe);
-	transfer_init(
-		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false, ctx->s->conf->pipe);
-
-	HTTP_CTX_LOG_F(
-		DEBUG, ctx,
-		"transfer start: uplink [%d->%d], downlink [%d->%d]",
-		ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
-		ctx->accepted_fd);
-	transfer_start(loop, &ctx->uplink);
-	transfer_start(loop, &ctx->downlink);
+	http_ctx_start_bidi_transfer(loop, ctx);
 }
 
 static bool append_encoded_body(
@@ -483,6 +492,13 @@ static bool relay_setup_headers(
 			if (vlen < sizeof(tmp)) {
 				memcpy(tmp, val, vlen);
 				tmp[vlen] = '\0';
+				for (size_t i = 0; i < vlen; i++) {
+					const unsigned char c =
+						(unsigned char)tmp[i];
+					if (c >= 'A' && c <= 'Z') {
+						tmp[i] = (char)(c | 0x20u);
+					}
+				}
 				if (strstr(tmp, "chunked") != NULL) {
 					has_upstream_chunked = true;
 				}
@@ -615,11 +631,17 @@ relay_recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		ev_io_stop(loop, watcher);
 		return;
 	}
-	size_t n = p->rbuf.cap;
+	size_t n = p->rbuf.cap - p->rbuf.len;
+	if (n == 0) {
+		/* response headers exceed buffer capacity */
+		gc_unref(&ctx->gcbase);
+		return;
+	}
 	if (n > free - 64u) {
 		n = free - 64u;
 	}
-	const int ret = socket_recv(ctx->dialed_fd, p->rbuf.data, &n);
+	const int ret =
+		socket_recv(ctx->dialed_fd, p->rbuf.data + p->rbuf.len, &n);
 	if (ret != 0) {
 		const int err = errno;
 		HTTP_CTX_LOG_F(
@@ -692,9 +714,6 @@ relay_recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		}
 		ctx->relay_hdr_scanned = rawlen;
 		if (hdr_end == NULL) {
-			if (p->rbuf.len == p->rbuf.cap) {
-				gc_unref(&ctx->gcbase);
-			}
 			return;
 		}
 
@@ -1028,24 +1047,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		dialreq_free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		mark_ready(loop, ctx);
-		const struct transfer_state_cb cb = {
-			.func = xfer_state_cb,
-			.data = ctx,
-		};
-		struct server_stats *restrict stats = &ctx->s->stats;
-		transfer_init(
-			&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-			&stats->byt_up, true, ctx->s->conf->pipe);
-		transfer_init(
-			&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-			&stats->byt_down, false, ctx->s->conf->pipe);
-		HTTP_CTX_LOG_F(
-			DEBUG, ctx,
-			"transfer start: uplink [%d->%d], downlink [%d->%d]",
-			ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
-			ctx->accepted_fd);
-		transfer_start(loop, &ctx->uplink);
-		transfer_start(loop, &ctx->downlink);
+		http_ctx_start_bidi_transfer(loop, ctx);
 		return;
 	}
 	/* Connection: close */
@@ -1106,7 +1108,7 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		return;
 	}
 	if (strcmp(ctx->conn.msg.req.method, "CONNECT") != 0 &&
-	    ctx->s->conf->conn_cache && ctx->req_conn_cache_capable) {
+	    ctx->req_conn_cache_capable) {
 		const int fd = conn_cache_get(loop, ctx->dialreq);
 		if (fd != -1) {
 			LOGV_F("http_proxy: reusing cached connection [fd:%d]",
