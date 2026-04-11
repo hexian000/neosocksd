@@ -47,8 +47,10 @@ static struct {
 
 	/* Parsed configuration from command line */
 	struct config conf;
-	/* Main proxy server instance */
+	/* Main SOCKS/forward/tproxy server instance */
 	struct server server;
+	/* Optional HTTP proxy server instance */
+	struct server httpserver;
 	/* Optional REST API server instance */
 	struct server apiserver;
 } app = { 0 };
@@ -77,7 +79,7 @@ static void print_usage(const char *argv0)
 		"  -h, --help                 show usage and exit\n"
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
-		"  --http                     run a HTTP proxy instead of SOCKS\n"
+		"  --http [address]           run an HTTP proxy; if address is omitted, use -l\n"
 		"  --auth-required            require basic authentication\n"
 		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
 		"  -x, --proxy proxy1[,...[,proxyN]]\n"
@@ -136,6 +138,7 @@ static void print_usage(const char *argv0)
 		"  neosocksd -l 127.0.0.1:1080 -x socks5://user:pass@gate.internal:1080\n"
 		"  neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua\n"
 		"  neosocksd -l 0.0.0.0:10500 -f : -r lb.lua\n"
+		"  neosocksd -l 0.0.0.0:1080 --http 0.0.0.0:8080  # SOCKS and HTTP proxy\n"
 		"\n");
 	(void)fflush(stderr);
 }
@@ -169,6 +172,7 @@ static void parse_args(const int argc, char *const restrict argv[])
 
 	struct config *restrict conf = &app.conf;
 	*conf = conf_default();
+	bool http_only = false;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-h") == 0 ||
 		    strcmp(argv[i], "--help") == 0) {
@@ -209,7 +213,11 @@ static void parse_args(const int argc, char *const restrict argv[])
 		}
 #endif
 		if (strcmp(argv[i], "--http") == 0) {
-			conf->http = true;
+			if (i + 1 < argc && argv[i + 1][0] != '-') {
+				conf->http_listen = argv[++i];
+			} else {
+				http_only = true;
+			}
 			continue;
 		}
 		if (strcmp(argv[i], "--auth-required") == 0) {
@@ -427,6 +435,10 @@ static void parse_args(const int argc, char *const restrict argv[])
 
 #undef OPT_REQUIRE_ARG
 #undef OPT_ARG_ERROR
+	if (http_only) {
+		conf->http_listen = conf->listen;
+		conf->listen = NULL;
+	}
 	slog_setlevel(conf->log_level);
 }
 
@@ -478,61 +490,102 @@ int main(int argc, char **argv)
 	struct ruleset *ruleset = NULL;
 #endif
 
-	/* Initialize and configure the main proxy server */
-	struct server *restrict s = &app.server;
-	server_init(s, loop, NULL, NULL);
-	s->conf = conf;
-	s->resolver = resolver;
-	s->basereq = basereq;
+	/* Initialize and start the main SOCKS/forward/tproxy server */
+	struct server *s = NULL;
+	if (conf->listen != NULL) {
+		s = &app.server;
+		server_init(s, loop, NULL, NULL);
+		s->conf = conf;
+		s->resolver = resolver;
+		s->basereq = basereq;
 #if WITH_RULESET
-	s->ruleset = ruleset;
+		s->ruleset = ruleset;
 #endif
 
-	/* Select the appropriate protocol handler based on configuration */
-	if (conf->forward != NULL) {
-		s->serve = forward_serve; /* TCP port forwarding */
-	}
+		/* Select the appropriate protocol handler based on configuration */
+		if (conf->forward != NULL) {
+			s->serve = forward_serve; /* TCP port forwarding */
+		}
 #if WITH_TPROXY
-	else if (conf->transparent) {
-		s->serve = tproxy_serve; /* Transparent proxy */
-	}
+		else if (conf->transparent) {
+			s->serve = tproxy_serve; /* Transparent proxy */
+		}
 #endif
-	else if (conf->http) {
-		s->serve = http_proxy_serve; /* HTTP CONNECT proxy */
-	} else {
-		/* default to SOCKS server */
-		s->serve = socks_serve; /* SOCKS4/4a/5 proxy */
+		else {
+			/* default to SOCKS server */
+			s->serve = socks_serve; /* SOCKS4/4a/5 proxy */
+		}
+
+		{
+			union sockaddr_max bindaddr;
+			char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
+			if (strlen(conf->listen) >= sizeof(buf)) {
+				LOGF_F("address too long: %s", conf->listen);
+				exit(EXIT_FAILURE);
+			}
+			strcpy(buf, conf->listen);
+			char *host, *port;
+			if (!splithostport(buf, &host, &port)) {
+				LOGF_F("unable to parse address: %s",
+				       conf->listen);
+				exit(EXIT_FAILURE);
+			}
+			if (!sa_resolve_tcpbind(&bindaddr, host, port)) {
+				LOGF_F("unable to resolve address: %s",
+				       conf->listen);
+				exit(EXIT_FAILURE);
+			}
+			if (sa_ipclassify(&bindaddr.sa) ==
+			    IPCLASS_UNSPECIFIED) {
+				LOGW("binding to wildcard address may be insecure");
+			}
+			if (!server_start(s, &bindaddr.sa)) {
+				LOGF("failed to start server");
+				exit(EXIT_FAILURE);
+			}
+		}
 	}
 
-	/* Parse listen address and start the main server */
-	{
-		union sockaddr_max bindaddr;
+	/* Start optional HTTP proxy server if configured */
+	struct server *http = NULL;
+	if (conf->http_listen != NULL) {
+		union sockaddr_max httpaddr;
 		char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
-		if (strlen(conf->listen) >= sizeof(buf)) {
-			LOGF_F("address too long: %s", conf->listen);
+		if (strlen(conf->http_listen) >= sizeof(buf)) {
+			LOGF_F("address too long: %s", conf->http_listen);
 			exit(EXIT_FAILURE);
 		}
-		strcpy(buf, conf->listen);
+		strcpy(buf, conf->http_listen);
 		char *host, *port;
 		if (!splithostport(buf, &host, &port)) {
-			LOGF_F("unable to parse address: %s", conf->listen);
+			LOGF_F("unable to parse address: %s",
+			       conf->http_listen);
 			exit(EXIT_FAILURE);
 		}
-		if (!sa_resolve_tcpbind(&bindaddr, host, port)) {
-			LOGF_F("unable to resolve address: %s", conf->listen);
+		if (!sa_resolve_tcpbind(&httpaddr, host, port)) {
+			LOGF_F("unable to resolve address: %s",
+			       conf->http_listen);
 			exit(EXIT_FAILURE);
 		}
-		if (sa_ipclassify(&bindaddr.sa) == IPCLASS_UNSPECIFIED) {
+		if (sa_ipclassify(&httpaddr.sa) == IPCLASS_UNSPECIFIED) {
 			LOGW("binding to wildcard address may be insecure");
 		}
-		if (!server_start(s, &bindaddr.sa)) {
-			LOGF("failed to start server");
+		http = &app.httpserver;
+		server_init(http, loop, http_proxy_serve, NULL);
+		http->conf = conf;
+		http->resolver = resolver;
+		http->basereq = basereq;
+#if WITH_RULESET
+		http->ruleset = ruleset;
+#endif
+		if (!server_start(http, &httpaddr.sa)) {
+			LOGF("failed to start HTTP server");
 			exit(EXIT_FAILURE);
 		}
 	}
 #if WITH_RULESET
 	if (ruleset != NULL) {
-		ruleset_setserver(ruleset, s);
+		ruleset_setserver(ruleset, s != NULL ? s : http);
 	}
 #endif
 
@@ -616,7 +669,12 @@ int main(int argc, char **argv)
 		server_stop(api);
 		api = NULL;
 	}
-	server_stop(s);
+	if (http != NULL) {
+		server_stop(http);
+	}
+	if (s != NULL) {
+		server_stop(s);
+	}
 	LOGN("server shutdown gracefully");
 
 	/* Clean up global resources */
@@ -657,6 +715,9 @@ void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
 		const struct config *restrict conf = &app.conf;
 		struct ruleset *ruleset = app.server.ruleset;
+		if (ruleset == NULL) {
+			ruleset = app.httpserver.ruleset;
+		}
 		if (conf->ruleset == NULL || ruleset == NULL) {
 			LOGE_F("signal %d received, but ruleset not loaded",
 			       watcher->signum);

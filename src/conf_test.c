@@ -37,6 +37,8 @@ T_DECLARE_CASE(test_conf_requires_listen)
 
 	conf.listen = NULL;
 	T_EXPECT(!conf_check(&conf));
+	conf.http_listen = "127.0.0.1:8080";
+	T_EXPECT(conf_check(&conf));
 }
 
 T_DECLARE_CASE(test_conf_rejects_incompatible_modes)
@@ -44,7 +46,7 @@ T_DECLARE_CASE(test_conf_rejects_incompatible_modes)
 	struct config conf = make_valid_conf();
 
 	conf.forward = "127.0.0.1:8080";
-	conf.http = true;
+	conf.http_listen = "127.0.0.1:8081";
 	T_EXPECT(!conf_check(&conf));
 }
 

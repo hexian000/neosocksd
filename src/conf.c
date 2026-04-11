@@ -67,29 +67,25 @@ static bool range_check_double(
 
 bool conf_check(const struct config *restrict conf)
 {
-	if (conf->listen == NULL) {
+	if (conf->listen == NULL && conf->http_listen == NULL) {
 		LOGE("listen address is not specified");
 		return false;
 	}
-	bool auth_supported = true;
-	int proto_flags = 0;
-	if (conf->forward != NULL) {
-		proto_flags |= 1;
-		auth_supported = false;
+	if (conf->http_listen != NULL && conf->forward != NULL) {
+		LOGE("--http is incompatible with -f");
+		return false;
 	}
 #if WITH_TPROXY
-	if (conf->transparent) {
-		proto_flags |= 2;
-		auth_supported = false;
+	if (conf->http_listen != NULL && conf->transparent) {
+		LOGE("--http is incompatible with --tproxy");
+		return false;
 	}
-#endif
-	if (conf->http) {
-		proto_flags |= 4;
-	}
-	if (proto_flags != (proto_flags & -proto_flags)) {
+	if (conf->forward != NULL && conf->transparent) {
 		LOGE("incompatible flags are specified");
 		return false;
 	}
+#endif
+	const bool auth_supported = conf->http_listen != NULL;
 	if (conf->block_global && conf->block_local) {
 		LOGE("incompatible outbound policies are specified");
 		return false;
@@ -107,22 +103,26 @@ bool conf_check(const struct config *restrict conf)
 #endif
 	if (conf->proxy != NULL) {
 		if (conf->socks5_bind) {
-			LOGE("--socks5-enable-bind is incompatible with -x");
+			LOGE_F("%s is incompatible with forwarding proxy",
+			       "SOCKS5 BIND");
 			return false;
 		}
 		if (conf->socks5_udp) {
-			LOGE("--socks5-enable-udp is incompatible with -x");
+			LOGE_F("%s is incompatible with forwarding proxy",
+			       "SOCKS5 UDPASSOCIATE");
 			return false;
 		}
 	}
 #if WITH_RULESET
 	if (conf->ruleset != NULL) {
 		if (conf->socks5_bind) {
-			LOGE("--socks5-enable-bind is incompatible with -r");
+			LOGE_F("%s is incompatible with ruleset",
+			       "SOCKS5 BIND");
 			return false;
 		}
 		if (conf->socks5_udp) {
-			LOGE("--socks5-enable-udp is incompatible with -r");
+			LOGE_F("%s is incompatible with ruleset",
+			       "SOCKS5 UDPASSOCIATE");
 			return false;
 		}
 	}

@@ -11,6 +11,7 @@ struct config {
 	const char *forward;
 	const char *proxy;
 	const char *restapi;
+	const char *http_listen;
 #if WITH_RULESET
 	const char *ruleset;
 #endif
@@ -28,7 +29,6 @@ struct config {
 	int memlimit;
 #endif
 
-	bool http : 1;
 	bool auth_required : 1;
 	bool bidir_timeout : 1;
 #if WITH_SPLICE
