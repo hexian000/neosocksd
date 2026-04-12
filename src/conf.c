@@ -84,8 +84,11 @@ bool conf_check(const struct config *restrict conf)
 		LOGE("incompatible flags are specified");
 		return false;
 	}
+	const bool auth_supported =
+		(conf->forward == NULL && !conf->transparent);
+#else
+	const bool auth_supported = (conf->forward == NULL);
 #endif
-	const bool auth_supported = conf->http_listen != NULL;
 	if (conf->block_global && conf->block_local) {
 		LOGE("incompatible outbound policies are specified");
 		return false;
