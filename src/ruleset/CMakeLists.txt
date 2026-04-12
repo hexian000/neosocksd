@@ -24,6 +24,7 @@ if(WITH_LUA)
         cfunc_test.c
     )
     target_include_directories(cfunc_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    target_include_directories(cfunc_test SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
     target_compile_options(cfunc_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/../config.h")
     target_compile_options(cfunc_test PRIVATE -pedantic -Wall -Wextra -Werror)
     target_link_libraries(cfunc_test PRIVATE csnippets miniz ${LIBEV_LIBRARY} ${LUA_LIBRARY})
