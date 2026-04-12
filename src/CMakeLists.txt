@@ -153,6 +153,15 @@ if(ENABLE_RULESET)
     set(WITH_RULESET TRUE)
     target_include_directories(neosocksd SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
     target_link_libraries(neosocksd PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
+endif()
+
+include(CheckLibraryExists)
+check_library_exists(m floor "" LIBM)
+if(LIBM)
+    target_link_libraries(neosocksd PRIVATE m)
+endif()
+
+if(ENABLE_RULESET)
     add_subdirectory(ruleset)
 endif()
 
@@ -164,12 +173,6 @@ if(ENABLE_MIMALLOC)
     else()
         message(WARNING "mimalloc not found")
     endif()
-endif()
-
-include(CheckLibraryExists)
-check_library_exists(m floor "" LIBM)
-if(LIBM)
-    target_link_libraries(neosocksd PRIVATE m)
 endif()
 
 install(TARGETS neosocksd DESTINATION bin)
