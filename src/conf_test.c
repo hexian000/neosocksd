@@ -9,6 +9,10 @@
 #include <sys/socket.h>
 
 #include <stdlib.h>
+#if WITH_LUA
+#include <string.h>
+#include <unistd.h>
+#endif
 
 static struct config make_valid_conf(void)
 {
@@ -100,6 +104,136 @@ T_DECLARE_CASE(test_conf_accepts_valid_configuration)
 	T_EXPECT(conf_check(&conf));
 }
 
+#if WITH_LUA
+/* Write content to a temporary file and return the fd; caller owns fd. */
+static int write_tempfile(char *restrict tmpl, const char *restrict content)
+{
+	const int fd = mkstemp(tmpl);
+	if (fd < 0) {
+		return -1;
+	}
+	const size_t len = strlen(content);
+	if ((size_t)write(fd, content, len) != len) {
+		close(fd);
+		unlink(tmpl);
+		return -1;
+	}
+	close(fd);
+	return 0;
+}
+
+T_DECLARE_CASE(test_boot_overrides_string_field)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:9999' }") ==
+		0);
+	struct config conf = conf_default();
+	conf.listen = "old:1080";
+	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	T_EXPECT_STREQ(conf.listen, "0.0.0.0:9999");
+	free((void *)conf.listen);
+	unlink(path);
+}
+
+T_DECLARE_CASE(test_boot_nil_field_preserves_cli_value)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:1080' }") ==
+		0);
+	struct config conf = conf_default();
+	conf.forward = "kept:8080";
+	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	T_EXPECT_STREQ(conf.forward, "kept:8080");
+	free((void *)conf.listen);
+	unlink(path);
+}
+
+T_DECLARE_CASE(test_boot_unknown_fields_ignored)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(
+			path,
+			"return { listen = '0.0.0.0:1080', _unknown_ = true }") ==
+		0);
+	struct config conf = conf_default();
+	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	T_EXPECT_STREQ(conf.listen, "0.0.0.0:1080");
+	free((void *)conf.listen);
+	unlink(path);
+}
+
+T_DECLARE_CASE(test_boot_type_error_fails)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(path, "return { listen = 42 }") == 0);
+	struct config conf = conf_default();
+	T_EXPECT(!conf_loadfile(path, 0, NULL, &conf));
+	unlink(path);
+}
+
+T_DECLARE_CASE(test_boot_returns_nontable_fails)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(path, "return 'oops'") == 0);
+	struct config conf = conf_default();
+	T_EXPECT(!conf_loadfile(path, 0, NULL, &conf));
+	unlink(path);
+}
+
+T_DECLARE_CASE(test_boot_runtime_error_fails)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(path, "error('intentional')") == 0);
+	struct config conf = conf_default();
+	T_EXPECT(!conf_loadfile(path, 0, NULL, &conf));
+	unlink(path);
+}
+
+T_DECLARE_CASE(test_boot_arg_table_visible)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(
+			path, "assert(arg[1] == '-l', 'arg[1]')\n"
+			      "assert(arg[2] == '0.0.0.0:1080', 'arg[2]')\n"
+			      "assert(arg.n == 2, 'arg.n')\n"
+			      "return { listen = arg[2] }") == 0);
+	struct config conf = conf_default();
+	const char *args[] = { "-l", "0.0.0.0:1080" };
+	T_EXPECT(conf_loadfile(path, 2, args, &conf));
+	T_EXPECT_STREQ(conf.listen, "0.0.0.0:1080");
+	free((void *)conf.listen);
+	unlink(path);
+}
+
+T_DECLARE_CASE(test_boot_overrides_numeric_fields)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(
+			path, "return { log_level = 3, timeout = 120.0,"
+			      " max_sessions = 512 }") == 0);
+	struct config conf = conf_default();
+	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	T_EXPECT_EQ(conf.log_level, 3);
+	T_EXPECT_EQ(conf.timeout, 120.0);
+	T_EXPECT_EQ(conf.max_sessions, 512);
+	unlink(path);
+}
+
+T_DECLARE_CASE(test_boot_overrides_bool_fields)
+{
+	char path[] = "/tmp/boot_conf_test_XXXXXX";
+	T_CHECK(write_tempfile(
+			path,
+			"return { daemonize = true, conn_cache = false }") ==
+		0);
+	struct config conf = conf_default();
+	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	T_EXPECT(conf.daemonize);
+	T_EXPECT(!conf.conn_cache);
+	unlink(path);
+}
+#endif /* WITH_LUA */
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -111,5 +245,16 @@ int main(void)
 	T_RUN_CASE(t, test_conf_rejects_startup_limits_out_of_range);
 	T_RUN_CASE(t, test_conf_rejects_proxy_with_socks5_extensions);
 	T_RUN_CASE(t, test_conf_accepts_valid_configuration);
+#if WITH_LUA
+	T_RUN_CASE(t, test_boot_overrides_string_field);
+	T_RUN_CASE(t, test_boot_nil_field_preserves_cli_value);
+	T_RUN_CASE(t, test_boot_unknown_fields_ignored);
+	T_RUN_CASE(t, test_boot_type_error_fails);
+	T_RUN_CASE(t, test_boot_returns_nontable_fails);
+	T_RUN_CASE(t, test_boot_runtime_error_fails);
+	T_RUN_CASE(t, test_boot_arg_table_visible);
+	T_RUN_CASE(t, test_boot_overrides_numeric_fields);
+	T_RUN_CASE(t, test_boot_overrides_bool_fields);
+#endif
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

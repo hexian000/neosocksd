@@ -205,10 +205,9 @@ static void server_stats_stateful(
 	struct stream *restrict w, const struct server *restrict api,
 	const double dt)
 {
-	const struct server_stats *restrict apistats = &api->stats;
 	const struct server *restrict s = api->data;
-	const struct server_stats *restrict stats = &s->stats;
-	const struct listener_stats *restrict lstats = &s->l.stats;
+	struct server_stats agg;
+	server_stats(s, &agg);
 
 	/* Static counters for rate calculation between calls */
 	static struct {
@@ -222,28 +221,25 @@ static void server_stats_stateful(
 		uintmax_t num_reject_upstream;
 	} last = { 0 };
 
-	FORMAT_BYTES(xfer_rate_up, (double)(stats->byt_up - last.xfer_up) / dt);
+	FORMAT_BYTES(xfer_rate_up, (double)(agg.byt_up - last.xfer_up) / dt);
 	FORMAT_BYTES(
-		xfer_rate_down,
-		(double)(stats->byt_down - last.xfer_down) / dt);
+		xfer_rate_down, (double)(agg.byt_down - last.xfer_down) / dt);
 
-	const uintmax_t num_reject = lstats->num_accept - lstats->num_serve;
+	const uintmax_t num_reject = agg.num_accept - agg.num_serve;
 	const double accept_rate =
-		(double)(lstats->num_accept - last.num_accept) / dt;
+		(double)(agg.num_accept - last.num_accept) / dt;
 	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
 	const double request_rate =
-		(double)(stats->num_request - last.num_request) / dt;
+		(double)(agg.num_request - last.num_request) / dt;
 	const double api_request_rate =
-		(double)(apistats->num_request - last.num_api_request) / dt;
+		(double)(api->stats.num_api_request - last.num_api_request) /
+		dt;
 	const double reject_ruleset_rate =
-		(double)(stats->num_reject_ruleset - last.num_reject_ruleset) /
-		dt;
+		(double)(agg.num_reject_ruleset - last.num_reject_ruleset) / dt;
 	const double reject_timeout_rate =
-		(double)(stats->num_reject_timeout - last.num_reject_timeout) /
-		dt;
+		(double)(agg.num_reject_timeout - last.num_reject_timeout) / dt;
 	const double reject_upstream_rate =
-		(double)(stats->num_reject_upstream -
-			 last.num_reject_upstream) /
+		(double)(agg.num_reject_upstream - last.num_reject_upstream) /
 		dt;
 
 	char load_str[16] = "(unknown)";
@@ -265,25 +261,25 @@ static void server_stats_stateful(
 		reject_ruleset_rate, reject_timeout_rate, reject_upstream_rate,
 		xfer_rate_up, xfer_rate_down, load_str, dt_str);
 
-	last.xfer_up = stats->byt_up;
-	last.xfer_down = stats->byt_down;
-	last.num_accept = lstats->num_accept;
+	last.xfer_up = agg.byt_up;
+	last.xfer_down = agg.byt_down;
+	last.num_accept = agg.num_accept;
 	last.num_reject = num_reject;
-	last.num_request = stats->num_request;
-	last.num_api_request = apistats->num_request;
-	last.num_reject_ruleset = stats->num_reject_ruleset;
-	last.num_reject_timeout = stats->num_reject_timeout;
-	last.num_reject_upstream = stats->num_reject_upstream;
+	last.num_request = agg.num_request;
+	last.num_api_request = api->stats.num_api_request;
+	last.num_reject_ruleset = agg.num_reject_ruleset;
+	last.num_reject_timeout = agg.num_reject_timeout;
+	last.num_reject_upstream = agg.num_reject_upstream;
 }
 
-static void server_stats(
+static void append_server_stats(
 	struct stream *restrict w, const struct server *restrict api,
 	const int_fast64_t uptime, const double dt, const bool runtime)
 {
 	const struct server_stats *restrict apistats = &api->stats;
 	const struct server *restrict s = api->data;
-	const struct server_stats *restrict stats = &s->stats;
-	const struct listener_stats *restrict lstats = &s->l.stats;
+	struct server_stats agg;
+	server_stats(s, &agg);
 	const struct resolver_stats *restrict resolv_stats =
 		resolver_stats(s->resolver);
 
@@ -294,8 +290,8 @@ static void server_stats(
 			timestamp, sizeof(timestamp), server_time, false);
 	}
 	FORMAT_DURATION(str_uptime, make_duration_nanos(uptime));
-	FORMAT_BYTES(xfer_up, (double)stats->byt_up);
-	FORMAT_BYTES(xfer_down, (double)stats->byt_down);
+	FORMAT_BYTES(xfer_up, (double)agg.byt_up);
+	FORMAT_BYTES(xfer_down, (double)agg.byt_down);
 
 	(void)io_bufprintf(
 		w,
@@ -308,19 +304,19 @@ static void server_stats(
 		"API Requests        : %ju (+%ju)\n"
 		"Name Resolves       : %ju (+%ju)\n"
 		"Traffic             : Up %s, Down %s\n",
-		timestamp, str_uptime, stats->num_sessions, stats->num_halfopen,
-		stats->num_sessions_peak, stats->num_reject_ruleset,
-		stats->num_reject_timeout, stats->num_reject_upstream,
-		lstats->num_serve, lstats->num_accept - lstats->num_serve,
-		stats->num_success, stats->num_request - stats->num_success,
-		apistats->num_success,
-		apistats->num_request - apistats->num_success,
+		timestamp, str_uptime, agg.num_sessions, agg.num_halfopen,
+		agg.num_sessions_peak, agg.num_reject_ruleset,
+		agg.num_reject_timeout, agg.num_reject_upstream, agg.num_serve,
+		agg.num_accept - agg.num_serve, agg.num_success,
+		agg.num_request - agg.num_success, apistats->num_api_success,
+		apistats->num_api_request - apistats->num_api_success,
 		resolv_stats->num_success,
 		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
 		xfer_down);
 
-#if WITH_RULESET
 	(void)io_bufprintf(w, "%-20s: %zu\n", "Conn Cache", conn_cache.len);
+
+#if WITH_RULESET
 	const struct ruleset *ruleset = s->ruleset;
 	if (ruleset != NULL && runtime) {
 		struct ruleset_vmstats vmstats;
@@ -329,10 +325,10 @@ static void server_stats(
 	}
 #endif
 
-	if (stats->num_connects > 0) {
+	if (agg.num_connects > 0) {
 		const struct percentiles p = calc_percentiles(
-			ARRAY_SIZE(stats->connect_ns), stats->num_connects,
-			stats->connect_ns);
+			ARRAY_SIZE(agg.connect_ns), agg.num_connects,
+			agg.connect_ns);
 		FORMAT_DURATION(p50_str, make_duration_nanos(p.p50));
 		FORMAT_DURATION(p90_str, make_duration_nanos(p.p90));
 		FORMAT_DURATION(p99_str, make_duration_nanos(p.p99));
@@ -361,7 +357,7 @@ static void
 send_response(struct ev_loop *loop, struct api_ctx *restrict ctx, const bool ok)
 {
 	if (ok) {
-		ctx->s->stats.num_success++;
+		ctx->s->stats.num_api_success++;
 	}
 	ctx->state = STATE_RESPONSE;
 	ev_io_start(loop, &ctx->w_send);
@@ -452,7 +448,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		last.tstamp = now;
 	}
 	if (opt.server) {
-		server_stats(w, ctx->s, uptime, dt, opt.runtime);
+		append_server_stats(w, ctx->s, uptime, dt, opt.runtime);
 	}
 
 #if WITH_RULESET
@@ -868,8 +864,8 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	const struct server_stats *restrict apistats = &ctx->s->stats;
 	const struct server *restrict s = ctx->s->data;
-	const struct server_stats *restrict stats = &s->stats;
-	const struct listener_stats *restrict lstats = &s->l.stats;
+	struct server_stats agg;
+	server_stats(s, &agg);
 	const struct resolver_stats *restrict resolv_stats =
 		resolver_stats(s->resolver);
 
@@ -903,8 +899,8 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		"# HELP neosocksd_uptime_seconds Seconds since server start.\n"
 		"# TYPE neosocksd_uptime_seconds gauge\n"
 		"neosocksd_uptime_seconds %g\n",
-		stats->num_sessions, stats->num_sessions_peak,
-		stats->num_halfopen, uptime);
+		agg.num_sessions, agg.num_sessions_peak, agg.num_halfopen,
+		uptime);
 
 	/* Counters */
 	(void)io_bufprintf(
@@ -948,18 +944,17 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		"# HELP neosocksd_api_requests_success_total API requests completed successfully.\n"
 		"# TYPE neosocksd_api_requests_success_total counter\n"
 		"neosocksd_api_requests_success_total %ju\n",
-		lstats->num_accept, lstats->num_serve, stats->num_request,
-		stats->num_success, stats->num_reject_ruleset,
-		stats->num_reject_timeout, stats->num_reject_upstream,
-		stats->byt_up, stats->byt_down, resolv_stats->num_query,
-		resolv_stats->num_success, apistats->num_request,
-		apistats->num_success);
+		agg.num_accept, agg.num_serve, agg.num_request, agg.num_success,
+		agg.num_reject_ruleset, agg.num_reject_timeout,
+		agg.num_reject_upstream, agg.byt_up, agg.byt_down,
+		resolv_stats->num_query, resolv_stats->num_success,
+		apistats->num_api_request, apistats->num_api_success);
 
 	/* Connect latency summary */
-	if (stats->num_connects > 0) {
+	if (agg.num_connects > 0) {
 		const struct percentiles p = calc_percentiles(
-			ARRAY_SIZE(stats->connect_ns), stats->num_connects,
-			stats->connect_ns);
+			ARRAY_SIZE(agg.connect_ns), agg.num_connects,
+			agg.connect_ns);
 		(void)io_bufprintf(
 			w,
 			"# HELP neosocksd_connect_latency_seconds Connection establishment latency.\n"
@@ -969,8 +964,15 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			"neosocksd_connect_latency_seconds{quantile=\"0.99\"} %g\n"
 			"neosocksd_connect_latency_seconds_count %zu\n",
 			(double)p.p50 * 1e-9, (double)p.p90 * 1e-9,
-			(double)p.p99 * 1e-9, stats->num_connects);
+			(double)p.p99 * 1e-9, agg.num_connects);
 	}
+
+	(void)io_bufprintf(
+		w,
+		"# HELP neosocksd_api_conn_cache_size Number of cached upstream connections.\n"
+		"# TYPE neosocksd_api_conn_cache_size gauge\n"
+		"neosocksd_api_conn_cache_size %zu\n",
+		conn_cache.len);
 
 #if WITH_RULESET
 	{
@@ -986,12 +988,8 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			"neosocksd_lua_memory_bytes %zu\n"
 			"# HELP neosocksd_lua_objects Number of live Lua objects.\n"
 			"# TYPE neosocksd_lua_objects gauge\n"
-			"neosocksd_lua_objects %zu\n"
-			"# HELP neosocksd_api_conn_cache_size Number of cached upstream connections.\n"
-			"# TYPE neosocksd_api_conn_cache_size gauge\n"
-			"neosocksd_api_conn_cache_size %zu\n",
-			vmstats.byt_allocated, vmstats.num_object,
-			conn_cache.len);
+			"neosocksd_lua_objects %zu\n",
+			vmstats.byt_allocated, vmstats.num_object);
 	}
 #endif
 
@@ -1211,7 +1209,7 @@ void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	switch (ctx->conn.state) {
 	case STATE_PARSE_OK: {
 		struct server_stats *restrict stats = &ctx->s->stats;
-		stats->num_request++;
+		stats->num_api_request++;
 		ctx->keepalive = api_should_keepalive(ctx);
 	} break;
 	case STATE_PARSE_ERROR:

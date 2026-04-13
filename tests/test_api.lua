@@ -130,6 +130,7 @@ return function(T)
             "byt_up", "byt_down", "uptime",
             "bytes_allocated", "num_object",
             "num_accept", "num_serve",
+            "num_api_request", "num_api_success",
             "num_dns_query", "num_dns_success",
         }
         for _, k in ipairs(numeric_fields) do
@@ -137,6 +138,26 @@ return function(T)
             assert(type(v) == "number",
                 string.format("stats.%s: expected number, got %s", k, type(v)))
         end
+    end)
+
+    T:atest("neosocksd.stats keeps proxy and API counters separate", function()
+        local before = neosocksd.stats()
+        local target = { neosocksd.config().api }
+        local ok, ret = await.rpcall(target, "echo", "stats-semantics")
+        assert(ok, "rpcall failed: " .. tostring(ret))
+        assert(ret == "stats-semantics",
+            string.format("expected %q, got %q", "stats-semantics", tostring(ret)))
+
+        local after = neosocksd.stats()
+        assert(after.num_request == before.num_request,
+            string.format("proxy num_request changed unexpectedly: %d -> %d",
+                before.num_request, after.num_request))
+        assert(after.num_api_request >= before.num_api_request + 1,
+            string.format("expected num_api_request to increase: %d -> %d",
+                before.num_api_request, after.num_api_request))
+        assert(after.num_api_success >= before.num_api_success + 1,
+            string.format("expected num_api_success to increase: %d -> %d",
+                before.num_api_success, after.num_api_success))
     end)
 
     -- neosocksd.traceback --

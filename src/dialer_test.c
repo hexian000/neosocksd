@@ -629,12 +629,12 @@ static uint_least16_t start_proxy(
 	struct sockaddr_in bound_addr;
 	socklen_t len = sizeof(bound_addr);
 
-	server_init(s, loop, serve, NULL);
+	server_init(s, loop);
 	s->conf = conf;
-	T_CHECK(server_start(s, (const struct sockaddr *)&addr));
+	T_CHECK(server_add_listener(s, (const struct sockaddr *)&addr, serve));
 	T_CHECK(getsockname(
-			s->l.w_accept.fd, (struct sockaddr *)&bound_addr,
-			&len) == 0);
+			s->listeners[0].w_accept.fd,
+			(struct sockaddr *)&bound_addr, &len) == 0);
 	return ntohs(bound_addr.sin_port);
 }
 

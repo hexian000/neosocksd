@@ -91,6 +91,8 @@ struct http_ctx {
 			bool req_has_body : 1;
 			/* Connection header contains "close" token */
 			bool req_conn_token_close : 1;
+			/* true when current forward uses a cached upstream fd */
+			bool fwd_cached_fd : 1;
 		};
 		/* state >= STATE_CONNECTED */
 		struct {
@@ -1022,6 +1024,25 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	const int ret = http_conn_send(&ctx->conn, watcher->fd);
 	if (ret < 0) {
 		const int err = errno;
+		if (ctx->state == STATE_FORWARD && ctx->fwd_cached_fd &&
+		    is_stale_conn_err(err)) {
+			ctx->fwd_cached_fd = false;
+			ev_io_stop(loop, &ctx->w_send);
+			ev_io_set(&ctx->w_send, -1, EV_NONE);
+			if (ctx->dialed_fd != -1) {
+				CLOSE_FD(ctx->dialed_fd);
+				ctx->dialed_fd = -1;
+			}
+			if (ctx->dialreq == NULL) {
+				gc_unref(&ctx->gcbase);
+				return;
+			}
+			ctx->state = STATE_CONNECT;
+			dialer_do(
+				&ctx->dialer, loop, ctx->dialreq, ctx->s->conf,
+				ctx->s->resolver);
+			return;
+		}
 		HTTP_CTX_LOG_F(
 			WARNING, ctx, "socket_send: (%d) %s", err,
 			strerror(err));
@@ -1114,6 +1135,7 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 			LOGV_F("http_proxy: reusing cached connection [fd:%d]",
 			       fd);
 			ctx->dialed_fd = fd;
+			ctx->fwd_cached_fd = true;
 			http_ctx_forward(loop, ctx);
 			return;
 		}
@@ -1371,6 +1393,7 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 			LOGV_F("http_proxy: reusing cached connection [fd:%d]",
 			       fd);
 			ctx->dialed_fd = fd;
+			ctx->fwd_cached_fd = true;
 			http_ctx_forward(loop, ctx);
 			return;
 		}
@@ -1685,6 +1708,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	ctx->req_client_keep_alive = false;
 	ctx->req_has_body = false;
 	ctx->req_conn_token_close = false;
+	ctx->fwd_cached_fd = false;
 	ctx->req_target[0] = '\0';
 	ctx->relay_hdr_scanned = 0;
 	const struct dialer_cb cb = {

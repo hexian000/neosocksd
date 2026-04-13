@@ -52,6 +52,20 @@ double thread_load(void)
 
 struct conn_cache conn_cache = { 0 };
 
+void server_stats(
+	const struct server *restrict s, struct server_stats *restrict out)
+{
+	*out = s->stats;
+	out->num_accept = 0;
+	out->num_serve = 0;
+	for (size_t i = 0; i < s->num_listeners; i++) {
+		const struct listener_stats *restrict lst =
+			&s->listeners[i].stats;
+		out->num_accept += lst->num_accept;
+		out->num_serve += lst->num_serve;
+	}
+}
+
 #if WITH_SPLICE
 void pipe_shrink(size_t count)
 {
@@ -401,8 +415,9 @@ static void init_server_pair(
 	core->conf = &test_conf;
 	core->resolver = (struct resolver *)&resolver_stub_stats;
 	core->stats.started = api->stats.started;
-	core->l.stats.num_accept = 9;
-	core->l.stats.num_serve = 8;
+	core->num_listeners = 1;
+	core->listeners[0].stats.num_accept = 9;
+	core->listeners[0].stats.num_serve = 8;
 	core->stats.num_request = 13;
 	core->stats.num_success = 11;
 	core->stats.byt_up = 4096;
@@ -410,6 +425,26 @@ static void init_server_pair(
 #if WITH_RULESET
 	api->ruleset = NULL;
 	core->ruleset = NULL;
+#endif
+}
+
+static void init_unified_server(struct server *restrict s, struct ev_loop *loop)
+{
+	*s = (struct server){ 0 };
+	s->loop = loop;
+	s->conf = &test_conf;
+	s->data = s;
+	s->resolver = (struct resolver *)&resolver_stub_stats;
+	s->stats.started = clock_monotonic_ns() - 500000000;
+	s->num_listeners = 1;
+	s->listeners[0].stats.num_accept = 9;
+	s->listeners[0].stats.num_serve = 8;
+	s->stats.num_request = 13;
+	s->stats.num_success = 11;
+	s->stats.byt_up = 4096;
+	s->stats.byt_down = 8192;
+#if WITH_RULESET
+	s->ruleset = NULL;
 #endif
 }
 
@@ -507,6 +542,69 @@ T_DECLARE_CASE(healthy_connection_close_header)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+
+	T_CHECK(loop != NULL);
+	init_unified_server(&s, loop);
+	start_api(&s, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+	}
+
+	T_EXPECT_EQ(s.stats.num_request, 13);
+	T_EXPECT_EQ(s.stats.num_success, 11);
+	T_EXPECT_EQ(s.stats.num_api_request, 1);
+	T_EXPECT_EQ(s.stats.num_api_success, 1);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+
+	T_CHECK(loop != NULL);
+	init_unified_server(&s, loop);
+	start_api(&s, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+	}
+
+	T_CHECK(send_request(peer_fd, "GET /metrics HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n, "neosocksd_requests_total 13\n"));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n, "neosocksd_api_requests_total 2\n"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(stats_get_ok_with_nocache)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -515,6 +613,7 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
+	conn_cache.len = 7;
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
@@ -530,7 +629,10 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "Cache-Control: no-store\r\n"));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Server Time"));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n, "Conn Cache          : 7\n"));
 	}
+	conn_cache.len = 0;
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -998,6 +1100,8 @@ int main(void)
 
 	T_RUN_CASE(t, healthy_keepalive_reuse_connection);
 	T_RUN_CASE(t, healthy_connection_close_header);
+	T_RUN_CASE(t, api_stats_do_not_pollute_proxy_stats_in_unified_server);
+	T_RUN_CASE(t, metrics_keep_proxy_and_api_request_totals_separate);
 	T_RUN_CASE(t, stats_get_ok_with_nocache);
 	T_RUN_CASE(t, stats_output_format_has_no_raw_specifiers);
 	T_RUN_CASE(t, stats_post_ok_without_nocache);

@@ -47,12 +47,11 @@ static struct {
 
 	/* Parsed configuration from command line */
 	struct config conf;
-	/* Main SOCKS/forward/tproxy server instance */
+#if WITH_LUA
+	bool dump_config;
+#endif
+	/* Global unified server instance */
 	struct server server;
-	/* Optional HTTP proxy server instance */
-	struct server httpserver;
-	/* Optional REST API server instance */
-	struct server apiserver;
 } app = { 0 };
 
 /**
@@ -77,6 +76,10 @@ static void print_usage(const char *argv0)
 	(void)fprintf(
 		stderr, "%s",
 		"  -h, --help                 show usage and exit\n"
+#if WITH_LUA
+		"  -c, --config <boot.lua>    load configuration from Lua script\n"
+		"  --dump-config              dump effective configuration as Lua and exit\n"
+#endif
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http [address]           run an HTTP proxy; if address is omitted, use -l\n"
@@ -105,9 +108,9 @@ static void print_usage(const char *argv0)
 #if WITH_RULESET
 		"  -r, --ruleset <file>       load ruleset from Lua file\n"
 		"  --traceback                print ruleset error traceback (for debugging)\n"
-		"  --no-conn-cache            disable ruleset API client connection cache\n"
 		"  --memlimit <size>          set a soft limit on the total Lua object size in MiB\n"
 #endif
+		"  --no-conn-cache            disable upstream connection cache\n"
 		"  --enable-socks5-bind       enable SOCKS5 BIND command (incompatible with -r/-x)\n"
 		"  --enable-socks5-udp        enable SOCKS5 UDP ASSOCIATE command (incompatible with -r/-x)\n"
 		"  --api <bind_address>       RESTful API listen address\n"
@@ -152,7 +155,8 @@ static void print_usage(const char *argv0)
  * in the global app.conf structure. Exits the program on invalid arguments
  * or when help is requested.
  */
-static void parse_args(const int argc, char *const restrict argv[])
+static void
+parse_args(const int argc, const char *const restrict argv[const restrict])
 {
 #define OPT_REQUIRE_ARG(argc, argv, i)                                         \
 	do {                                                                   \
@@ -173,12 +177,27 @@ static void parse_args(const int argc, char *const restrict argv[])
 	struct config *restrict conf = &app.conf;
 	*conf = conf_default();
 	bool http_only = false;
+#if WITH_LUA
+	const char *config_file = NULL;
+#endif
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-h") == 0 ||
 		    strcmp(argv[i], "--help") == 0) {
 			print_usage(argv[0]);
 			exit(EXIT_FAILURE);
 		}
+#if WITH_LUA
+		if (strcmp(argv[i], "-c") == 0 ||
+		    strcmp(argv[i], "--config") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			config_file = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "--dump-config") == 0) {
+			app.dump_config = true;
+			continue;
+		}
+#endif
 		if (strcmp(argv[i], "-4") == 0) {
 			conf->resolve_pf = PF_INET;
 			continue;
@@ -282,8 +301,9 @@ static void parse_args(const int argc, char *const restrict argv[])
 		}
 		if (strcmp(argv[i], "--memlimit") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			char *s = argv[++i];
-			intmax_t soft = strtoimax(s, &s, 10);
+			++i;
+			char *endptr = NULL;
+			intmax_t soft = strtoimax(argv[i], &endptr, 10);
 			if (soft > INT_MAX / 1024) {
 				OPT_ARG_ERROR(argv, i);
 			} else if (soft < 0) {
@@ -328,7 +348,7 @@ static void parse_args(const int argc, char *const restrict argv[])
 		}
 		if (strcmp(argv[i], "-C") == 0 ||
 		    strcmp(argv[i], "--color") == 0) {
-			slog_setoutput(SLOG_OUTPUT_TERMINAL, stdout);
+			slog_setoutput(SLOG_OUTPUT_TERMINAL, stderr);
 			continue;
 		}
 		if (strcmp(argv[i], "-d") == 0 ||
@@ -339,11 +359,17 @@ static void parse_args(const int argc, char *const restrict argv[])
 		if (strcmp(argv[i], "--block-outbound") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
+			const size_t n = strlen(argv[i]);
+			if (n > 255) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			char list[n + 1];
+			memcpy(list, argv[i], n + 1);
 			conf->block_loopback = false;
 			conf->block_multicast = false;
 			conf->block_local = false;
 			conf->block_global = false;
-			for (char *tok = strtok(argv[i], ","); tok != NULL;
+			for (char *tok = strtok(list, ","); tok != NULL;
 			     tok = strtok(NULL, ",")) {
 				if (strcmp(tok, "loopback") == 0) {
 					conf->block_loopback = true;
@@ -388,19 +414,20 @@ static void parse_args(const int argc, char *const restrict argv[])
 		if (strcmp(argv[i], "--max-startups") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			char *nptr = argv[i];
-			const uintmax_t start = strtoumax(nptr, &nptr, 10);
-			if (*nptr != ':' || start > INT_MAX) {
+			const char *nptr = argv[i];
+			char *endptr = NULL;
+			const uintmax_t start = strtoumax(nptr, &endptr, 10);
+			if (*endptr != ':' || start > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
-			nptr++;
-			const uintmax_t rate = strtoumax(nptr, &nptr, 10);
-			if (*nptr != ':' || rate > INT_MAX) {
+			nptr = endptr + 1;
+			const uintmax_t rate = strtoumax(nptr, &endptr, 10);
+			if (*endptr != ':' || rate > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
-			nptr++;
-			const uintmax_t full = strtoumax(nptr, &nptr, 10);
-			if (*nptr != '\0' || full > INT_MAX) {
+			nptr = endptr + 1;
+			const uintmax_t full = strtoumax(nptr, &endptr, 10);
+			if (*endptr != '\0' || full > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			conf->startup_limit_start = (int)start;
@@ -439,6 +466,13 @@ static void parse_args(const int argc, char *const restrict argv[])
 		conf->http_listen = conf->listen;
 		conf->listen = NULL;
 	}
+#if WITH_LUA
+	if (config_file != NULL) {
+		if (!conf_loadfile(config_file, argc - 1, argv + 1, conf)) {
+			exit(EXIT_FAILURE);
+		}
+	}
+#endif
 	slog_setlevel(conf->log_level);
 }
 
@@ -446,7 +480,16 @@ int main(int argc, char **argv)
 {
 	/* Initialize application and parse command line arguments */
 	init(argc, argv);
-	parse_args(argc, argv);
+	parse_args(argc, (const char *const restrict *)argv);
+
+#if WITH_LUA
+	if (app.dump_config) {
+		if (!conf_print(&app.conf)) {
+			exit(EXIT_FAILURE);
+		}
+		exit(EXIT_SUCCESS);
+	}
+#endif
 
 	/* Validate configuration */
 	const struct config *restrict conf = &app.conf;
@@ -490,30 +533,33 @@ int main(int argc, char **argv)
 	struct ruleset *ruleset = NULL;
 #endif
 
-	/* Initialize and start the main SOCKS/forward/tproxy server */
-	struct server *s = NULL;
-	if (conf->listen != NULL) {
-		s = &app.server;
-		server_init(s, loop, NULL, NULL);
-		s->conf = conf;
-		s->resolver = resolver;
-		s->basereq = basereq;
+	/* Initialize the global server */
+	struct server *s = &app.server;
+	server_init(s, loop);
+	s->conf = conf;
+	s->resolver = resolver;
+	s->basereq = basereq;
 #if WITH_RULESET
-		s->ruleset = ruleset;
+	s->ruleset = ruleset;
 #endif
+	/* API handler reads core proxy stats via s->data; since we now have a
+	 * single server, point data back to the server itself. */
+	s->data = s;
 
+	/* Add the main SOCKS/forward/tproxy listener if configured */
+	if (conf->listen != NULL) {
 		/* Select the appropriate protocol handler based on configuration */
+		serve_fn proxy_serve;
 		if (conf->forward != NULL) {
-			s->serve = forward_serve; /* TCP port forwarding */
+			proxy_serve = forward_serve; /* TCP port forwarding */
 		}
 #if WITH_TPROXY
 		else if (conf->transparent) {
-			s->serve = tproxy_serve; /* Transparent proxy */
+			proxy_serve = tproxy_serve; /* Transparent proxy */
 		}
 #endif
 		else {
-			/* default to SOCKS server */
-			s->serve = socks_serve; /* SOCKS4/4a/5 proxy */
+			proxy_serve = socks_serve; /* SOCKS4/4a/5 proxy */
 		}
 
 		{
@@ -539,15 +585,14 @@ int main(int argc, char **argv)
 			    IPCLASS_UNSPECIFIED) {
 				LOGW("binding to wildcard address may be insecure");
 			}
-			if (!server_start(s, &bindaddr.sa)) {
+			if (!server_add_listener(s, &bindaddr.sa, proxy_serve)) {
 				LOGF("failed to start server");
 				exit(EXIT_FAILURE);
 			}
 		}
 	}
 
-	/* Start optional HTTP proxy server if configured */
-	struct server *http = NULL;
+	/* Add the HTTP proxy listener if configured */
 	if (conf->http_listen != NULL) {
 		union sockaddr_max httpaddr;
 		char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
@@ -570,27 +615,18 @@ int main(int argc, char **argv)
 		if (sa_ipclassify(&httpaddr.sa) == IPCLASS_UNSPECIFIED) {
 			LOGW("binding to wildcard address may be insecure");
 		}
-		http = &app.httpserver;
-		server_init(http, loop, http_proxy_serve, NULL);
-		http->conf = conf;
-		http->resolver = resolver;
-		http->basereq = basereq;
-#if WITH_RULESET
-		http->ruleset = ruleset;
-#endif
-		if (!server_start(http, &httpaddr.sa)) {
+		if (!server_add_listener(s, &httpaddr.sa, http_proxy_serve)) {
 			LOGF("failed to start HTTP server");
 			exit(EXIT_FAILURE);
 		}
 	}
 #if WITH_RULESET
 	if (ruleset != NULL) {
-		ruleset_setserver(ruleset, s != NULL ? s : http);
+		ruleset_setserver(ruleset, s);
 	}
 #endif
 
-	/* Start optional REST API server if configured */
-	struct server *api = NULL;
+	/* Add the REST API listener if configured */
 	if (conf->restapi != NULL) {
 		union sockaddr_max apiaddr;
 		char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
@@ -613,15 +649,7 @@ int main(int argc, char **argv)
 		    cls != IPCLASS_SITELOCAL) {
 			LOGW("binding API server to non-local address may be insecure");
 		}
-		api = &app.apiserver;
-		server_init(api, loop, api_serve, s);
-		api->conf = conf;
-		api->resolver = resolver;
-		api->basereq = basereq;
-#if WITH_RULESET
-		api->ruleset = ruleset;
-#endif
-		if (!server_start(api, &apiaddr.sa)) {
+		if (!server_add_listener(s, &apiaddr.sa, api_serve)) {
 			LOGF("failed to start api server");
 			exit(EXIT_FAILURE);
 		}
@@ -665,16 +693,7 @@ int main(int argc, char **argv)
 	ev_run(loop, 0);
 
 	/* Graceful shutdown sequence */
-	if (api != NULL) {
-		server_stop(api);
-		api = NULL;
-	}
-	if (http != NULL) {
-		server_stop(http);
-	}
-	if (s != NULL) {
-		server_stop(s);
-	}
+	server_stop(s);
 	LOGN("server shutdown gracefully");
 
 	/* Clean up global resources */
@@ -712,25 +731,22 @@ void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 	switch (watcher->signum) {
 	case SIGHUP: {
 #if WITH_RULESET
-		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
 		const struct config *restrict conf = &app.conf;
-		struct ruleset *ruleset = app.server.ruleset;
-		if (ruleset == NULL) {
-			ruleset = app.httpserver.ruleset;
-		}
+		struct ruleset *restrict ruleset = app.server.ruleset;
 		if (conf->ruleset == NULL || ruleset == NULL) {
 			LOGE_F("signal %d received, but ruleset not loaded",
 			       watcher->signum);
 			break;
 		}
 		/* Attempt to reload the Lua ruleset */
+		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
 		const bool ok = ruleset_loadfile(ruleset, conf->ruleset);
-		if (!ok) {
+		if (ok) {
+			LOGN("ruleset successfully reloaded");
+		} else {
 			LOGW_F("failed to reload ruleset: %s",
 			       ruleset_geterror(ruleset, NULL));
-			break;
 		}
-		LOGN("ruleset successfully reloaded");
 		(void)systemd_notify(SYSTEMD_STATE_READY);
 #else
 		LOGW("reload is not supported in current build");

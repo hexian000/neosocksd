@@ -777,6 +777,59 @@ T_DECLARE_CASE(connection_close_not_recycled)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(stale_cached_connection_fallback_redial)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct cb_result out = { 0 };
+	struct api_client_ctx *ctx = NULL;
+	struct dialreq *req = NULL;
+	int stale_fd = -1;
+	int fresh[2] = { -1, -1 };
+	char reqbuf[512] = { 0 };
+	static const char payload[] = "{}";
+	static const char rsp_body[] = "ok";
+	const struct api_client_cb cb = {
+		.func = capture_cb,
+		.data = &out,
+	};
+
+	T_CHECK(loop != NULL);
+	reset_stub_state();
+	stale_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	T_CHECK(stale_fd >= 0);
+	T_CHECK(fd_set_nonblock(stale_fd));
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fresh) == 0);
+	T_CHECK(fd_set_nonblock(fresh[0]));
+	T_CHECK(fd_set_nonblock(fresh[1]));
+
+	S.conn_cache_get_fd = stale_fd;
+	S.dialer_result_fd = fresh[0];
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	req = new_test_dialreq();
+	T_CHECK(req != NULL);
+
+	T_CHECK(api_client_rpcall(
+		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
+		NULL));
+	T_CHECK(read_request_headers(
+		loop, fresh[1], reqbuf, sizeof(reqbuf),
+		TEST_WAIT_RESPONSE_SEC));
+	T_EXPECT(strstr(reqbuf, "POST /ruleset/rpcall HTTP/1.1") != NULL);
+	T_CHECK(send_response(
+		fresh[1], "200 OK", MIME_RPCALL, "keep-alive", rsp_body,
+		sizeof(rsp_body) - 1));
+	T_CHECK(test_wait_until(
+		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
+
+	T_EXPECT(out.called);
+	T_EXPECT_EQ(S.conn_cache_get_calls, 1);
+	T_EXPECT_EQ(S.dialer_do_calls, 1);
+
+	T_CHECK(close(fresh[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -790,6 +843,7 @@ int main(void)
 	T_RUN_CASE(t, cancel_during_connect_calls_dialer_cancel);
 	T_RUN_CASE(t, connection_keep_alive_recycled);
 	T_RUN_CASE(t, connection_close_not_recycled);
+	T_RUN_CASE(t, stale_cached_connection_fallback_redial);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 

@@ -111,7 +111,7 @@ struct conn_cache_entry {
 	char key[256];
 };
 
-/** @brief Global cache of reusable API connections. */
+/** @brief Global cache of reusable upstream connections. */
 extern struct conn_cache {
 	size_t len;
 	unsigned seed;
@@ -123,6 +123,13 @@ extern struct conn_cache {
 void conn_cache_put(
 	struct ev_loop *loop, int fd, const struct dialreq *restrict dialreq);
 int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req);
+
+/* Returns true if err indicates a cached connection has gone stale. */
+static inline bool is_stale_conn_err(const int err)
+{
+	return err == ECONNRESET || err == EPIPE || err == ECONNABORTED ||
+	       err == ENOTCONN || err == EBADF;
+}
 
 /** Process-level initializations. */
 void init(int argc, char *const restrict argv[]);

@@ -115,6 +115,21 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	const int ret = http_conn_send(&ctx->conn, watcher->fd);
 	if (ret < 0) {
 		const int err = errno;
+		if (ctx->state == STATE_CLIENT_REQUEST && !ctx->cache_retried &&
+		    is_stale_conn_err(err)) {
+			ctx->cache_retried = true;
+			ev_io_stop(loop, watcher);
+			const int stale_fd = watcher->fd;
+			ev_io_set(watcher, -1, EV_NONE);
+			if (stale_fd != -1) {
+				CLOSE_FD(stale_fd);
+			}
+			ctx->state = STATE_CLIENT_CONNECT;
+			dialer_do(
+				&ctx->dialer, loop, ctx->dialreq, ctx->conf,
+				ctx->resolver);
+			return;
+		}
 		const char *errmsg = strerror(err);
 		finish_error(ctx, errmsg, strlen(errmsg));
 		return;
@@ -191,6 +206,7 @@ void http_client_init(
 	ctx->conf = conf;
 	ctx->resolver = resolver;
 	ctx->dialreq = NULL;
+	ctx->cache_retried = false;
 	ctx->state = STATE_CLIENT_INIT;
 	ctx->cb = *cb;
 	ctx->user_on_header = on_header;
@@ -226,6 +242,7 @@ void http_client_do(
 {
 	ASSERT(ctx->state == STATE_CLIENT_INIT);
 	ctx->dialreq = req;
+	ctx->cache_retried = false;
 	if (ctx->conf->conn_cache) {
 		const int fd = conn_cache_get(loop, req);
 		if (fd != -1) {

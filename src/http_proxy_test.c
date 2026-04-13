@@ -83,6 +83,7 @@ struct stub_state {
 	struct ruleset_state *ruleset_state_ptr;
 	int_least32_t ruleset_cancel_calls;
 	int_least32_t dialer_cancel_calls;
+	int_least32_t dialer_do_calls;
 	int conn_cache_fd;
 	int_least32_t conn_cache_get_calls;
 	int_least32_t conn_cache_put_calls;
@@ -104,6 +105,7 @@ static struct stub_state S = {
 	.ruleset_state_ptr = NULL,
 	.ruleset_cancel_calls = 0,
 	.dialer_cancel_calls = 0,
+	.dialer_do_calls = 0,
 	.conn_cache_fd = -1,
 	.conn_cache_get_calls = 0,
 	.conn_cache_put_calls = 0,
@@ -175,6 +177,7 @@ static void reset_stub_state(void)
 	S.ruleset_state_ptr = NULL;
 	S.ruleset_cancel_calls = 0;
 	S.dialer_cancel_calls = 0;
+	S.dialer_do_calls = 0;
 	S.conn_cache_fd = -1;
 	S.conn_cache_get_calls = 0;
 	S.conn_cache_put_calls = 0;
@@ -302,6 +305,7 @@ void dialer_do(
 	const struct config *conf, struct resolver *resolver)
 {
 	d->req = req;
+	S.dialer_do_calls++;
 	(void)loop;
 	(void)conf;
 	(void)resolver;
@@ -1909,6 +1913,110 @@ T_DECLARE_CASE(plain_http_reuses_cached_upstream_connection)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(plain_http_stale_cached_fd_falls_back_to_redial)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int stale_cached_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char reqbuf[4096];
+	unsigned char rsp[4096];
+	const char req[] = "GET http://example.com/fallback HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	const char upstream_rsp[] = "HTTP/1.1 200 OK\r\n"
+				    "Content-Length: 2\r\n"
+				    "\r\n"
+				    "ok";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	test_conf.conn_cache = true;
+
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	stale_cached_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	T_CHECK(stale_cached_fd >= 0);
+	T_CHECK(socket_set_nonblock(stale_cached_fd));
+	S.conn_cache_fd = stale_cached_fd;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		const ssize_t n = recv_at_least(
+			loop, upstream_fd, reqbuf, sizeof(reqbuf), 22);
+		T_EXPECT(n >= 22);
+		T_EXPECT(
+			memmem(reqbuf, (size_t)n, "/fallback HTTP/1.1", 18) !=
+			NULL);
+	}
+	T_CHECK(write_all(upstream_fd, upstream_rsp, strlen(upstream_rsp)) ==
+		0);
+	drive_loop(loop);
+
+	{
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 30);
+		T_EXPECT(n >= 30);
+		T_EXPECT(memmem(rsp, (size_t)n, "ok", 2) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+	T_EXPECT_EQ(S.conn_cache_get_calls, 1);
+	T_EXPECT_EQ(S.dialer_do_calls, 1);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	reset_stub_state();
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(plain_http_non_stale_cached_fd_error_no_redial)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int pipefd[2] = { -1, -1 };
+	const char req[] = "GET http://example.com/no-retry HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	unsigned char rsp[256];
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	test_conf.conn_cache = true;
+
+	T_CHECK(pipe(pipefd) == 0);
+	S.conn_cache_fd = pipefd[1];
+	S.dialer_result_fd = -1;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	test_run_for(loop, TEST_WAIT_RECV_SEC);
+
+	T_EXPECT_EQ(S.conn_cache_get_calls, 1);
+	T_EXPECT_EQ(S.dialer_do_calls, 0);
+	{
+		const ssize_t n = recv(peer_fd, rsp, sizeof(rsp), MSG_DONTWAIT);
+		T_EXPECT(
+			n == 0 ||
+			(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(pipefd[0]) == 0);
+	reset_stub_state();
+	ev_loop_destroy(loop);
+}
+
 /* Verify that response headers arriving in two separate recv calls are
  * correctly reassembled before parsing. This exercises the multi-recv
  * header accumulation path in relay_recv_cb. */
@@ -2118,6 +2226,8 @@ int main(void)
 	T_RUN_CASE(t, plain_http_response_chunked_strips_content_length);
 	T_RUN_CASE(t, plain_http_response_eof_framed_large_body_complete);
 	T_RUN_CASE(t, plain_http_reuses_cached_upstream_connection);
+	T_RUN_CASE(t, plain_http_stale_cached_fd_falls_back_to_redial);
+	T_RUN_CASE(t, plain_http_non_stale_cached_fd_error_no_redial);
 	T_RUN_CASE(t, plain_http_response_header_split_across_recvs);
 	T_RUN_CASE(t, plain_http_response_transfer_encoding_case_insensitive);
 	T_RUN_CASE(t, plain_http_forward_success_counted_once);

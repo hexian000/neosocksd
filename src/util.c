@@ -250,8 +250,8 @@ void init(int argc, char *const restrict argv[])
 	UNUSED(argc);
 	UNUSED(argv);
 	(void)setlocale(LC_ALL, "");
-	(void)setvbuf(stdout, NULL, _IONBF, 0);
-	slog_setoutput(SLOG_OUTPUT_FILE, stdout);
+	(void)setvbuf(stderr, NULL, _IONBF, 0);
+	slog_setoutput(SLOG_OUTPUT_FILE, stderr);
 	{
 		static char prefix[] = __FILE__;
 		char *s = strrchr(prefix, PATH_SEPARATOR);

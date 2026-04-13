@@ -55,9 +55,9 @@ static void accept_cb(
 {
 	CHECK_REVENTS(revents, EV_READ);
 
-	struct server *restrict s = watcher->data;
+	struct listener *restrict l = watcher->data;
+	struct server *restrict s = l->server;
 	const struct config *restrict conf = s->conf;
-	struct listener_stats *restrict lstats = &s->l.stats;
 
 	/* Accept connections in a loop until no more are available */
 	for (;;) {
@@ -72,11 +72,11 @@ static void accept_cb(
 			LOGE_F("accept: (%d) %s", err, strerror(err));
 			/* Sleep until next timer, see timer_cb */
 			ev_io_stop(loop, watcher);
-			ev_timer_start(loop, &s->l.w_timer);
+			ev_timer_start(loop, &l->w_timer);
 			return;
 		}
 
-		lstats->num_accept++;
+		l->stats.num_accept++;
 
 		if (LOGLEVEL(VERYVERBOSE)) {
 			char addr_str[64];
@@ -101,9 +101,9 @@ static void accept_cb(
 		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
 		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 
-		lstats->num_serve++;
-		/* Delegate to user-defined serve function */
-		s->serve(s, loop, fd, &addr.sa);
+		l->stats.num_serve++;
+		/* Delegate to listener-specific serve function */
+		l->serve(s, loop, fd, (const struct sockaddr *)&addr.sa);
 	}
 }
 
@@ -117,21 +117,25 @@ timer_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 	ev_io_start(loop, &l->w_accept);
 }
 
-void server_init(
-	struct server *restrict s, struct ev_loop *loop, const serve_fn serve,
-	void *data)
+void server_init(struct server *restrict s, struct ev_loop *loop)
 {
 	*s = (struct server){
 		.loop = loop,
-		.serve = serve,
-		.data = data,
 		.stats = { .started = -1 },
 	};
 }
 
-bool server_start(
-	struct server *restrict s, const struct sockaddr *restrict bindaddr)
+bool server_add_listener(
+	struct server *restrict s, const struct sockaddr *restrict bindaddr,
+	serve_fn serve)
 {
+	/* Check if server is full */
+	if (s->num_listeners >= SERVER_LISTENERS_MAX) {
+		LOGE_F("cannot add listener: max %d listeners reached",
+		       SERVER_LISTENERS_MAX);
+		return false;
+	}
+
 	/* Create TCP socket */
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
@@ -193,18 +197,24 @@ bool server_start(
 		return false;
 	}
 
-	/* Initialize libev watchers */
-	ev_io *restrict w_accept = &s->l.w_accept;
-	ev_io_init(w_accept, accept_cb, fd, EV_READ);
-	w_accept->data = s;
-	ev_timer *restrict w_timer = &s->l.w_timer;
-	ev_timer_init(w_timer, timer_cb, 0.5, 0.0);
-	w_timer->data = s;
+	/* Get the next available listener slot */
+	struct listener *restrict l = &s->listeners[s->num_listeners];
+	l->server = s;
+	l->serve = serve;
 
-	/* Start the server and record start time */
+	/* Initialize libev watchers */
+	ev_io_init(&l->w_accept, accept_cb, fd, EV_READ);
+	l->w_accept.data = l;
+	ev_timer_init(&l->w_timer, timer_cb, 0.5, 0.0);
+	l->w_timer.data = l;
+
+	/* Start the listener and record start time if this is the first one */
 	struct ev_loop *loop = s->loop;
-	s->stats.started = clock_monotonic_ns();
-	ev_io_start(loop, w_accept);
+	if (s->num_listeners == 0) {
+		s->stats.started = clock_monotonic_ns();
+	}
+	ev_io_start(loop, &l->w_accept);
+	s->num_listeners++;
 	return true;
 }
 
@@ -217,15 +227,32 @@ void server_stop(struct server *restrict s)
 
 	struct ev_loop *loop = s->loop;
 
-	/* Stop accept watcher and close listening socket */
-	ev_io *restrict w_accept = &s->l.w_accept;
-	ev_io_stop(loop, w_accept);
-	CLOSE_FD(w_accept->fd);
+	/* Stop all listeners */
+	for (size_t i = 0; i < s->num_listeners; i++) {
+		struct listener *restrict l = &s->listeners[i];
 
-	/* Stop timer watcher */
-	ev_timer *restrict w_timer = &s->l.w_timer;
-	ev_timer_stop(loop, w_timer);
+		/* Stop accept watcher and close listening socket */
+		ev_io_stop(loop, &l->w_accept);
+		CLOSE_FD(l->w_accept.fd);
 
-	/* Mark server as stopped */
+		/* Stop timer watcher */
+		ev_timer_stop(loop, &l->w_timer);
+	}
+
+	/* Mark server as stopped only after all listeners are down */
 	s->stats.started = -1;
+}
+
+void server_stats(
+	const struct server *restrict s, struct server_stats *restrict out)
+{
+	*out = s->stats;
+	out->num_accept = 0;
+	out->num_serve = 0;
+	for (size_t i = 0; i < s->num_listeners; i++) {
+		const struct listener_stats *restrict lst =
+			&s->listeners[i].stats;
+		out->num_accept += lst->num_accept;
+		out->num_serve += lst->num_serve;
+	}
 }

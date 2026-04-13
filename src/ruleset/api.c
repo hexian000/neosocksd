@@ -197,13 +197,11 @@ static int api_stats(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
 	struct server_stats stats = { 0 };
-	struct listener_stats lstats = { 0 };
 	uintmax_t num_dns_query = 0, num_dns_success = 0;
 	{
 		const struct server *restrict s = r->server;
 		if (s != NULL) {
-			stats = s->stats;
-			lstats = s->l.stats;
+			server_stats(s, &stats);
 			if (s->resolver != NULL) {
 				const struct resolver_stats *restrict rs =
 					resolver_stats(s->resolver);
@@ -242,10 +240,14 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "bytes_allocated");
 	lua_pushinteger(L, (lua_Integer)r->vmstats.num_object);
 	lua_setfield(L, -2, "num_object");
-	lua_pushinteger(L, (lua_Integer)lstats.num_accept);
+	lua_pushinteger(L, (lua_Integer)stats.num_accept);
 	lua_setfield(L, -2, "num_accept");
-	lua_pushinteger(L, (lua_Integer)lstats.num_serve);
+	lua_pushinteger(L, (lua_Integer)stats.num_serve);
 	lua_setfield(L, -2, "num_serve");
+	lua_pushinteger(L, (lua_Integer)stats.num_api_request);
+	lua_setfield(L, -2, "num_api_request");
+	lua_pushinteger(L, (lua_Integer)stats.num_api_success);
+	lua_setfield(L, -2, "num_api_success");
 	lua_pushinteger(L, (lua_Integer)num_dns_query);
 	lua_setfield(L, -2, "num_dns_query");
 	lua_pushinteger(L, (lua_Integer)num_dns_success);

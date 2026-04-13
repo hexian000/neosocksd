@@ -29,36 +29,36 @@ struct config {
 	int memlimit;
 #endif
 
-	bool auth_required : 1;
-	bool bidir_timeout : 1;
+	bool auth_required;
+	bool bidir_timeout;
 #if WITH_SPLICE
-	bool pipe : 1;
+	bool pipe;
 #endif
 #if WITH_REUSEPORT
-	bool reuseport : 1;
+	bool reuseport;
 #endif
 #if WITH_TCP_FASTOPEN
-	bool tcp_fastopen : 1;
+	bool tcp_fastopen;
 #endif
 #if WITH_TCP_FASTOPEN_CONNECT
-	bool tcp_fastopen_connect : 1;
+	bool tcp_fastopen_connect;
 #endif
-	bool tcp_nodelay : 1;
-	bool tcp_keepalive : 1;
+	bool tcp_nodelay;
+	bool tcp_keepalive;
 #if WITH_TPROXY
-	bool transparent : 1;
+	bool transparent;
 #endif
 #if WITH_RULESET
-	bool traceback : 1;
+	bool traceback;
 #endif
-	bool conn_cache : 1;
-	bool socks5_bind : 1;
-	bool socks5_udp : 1;
-	bool daemonize : 1;
-	bool block_loopback : 1;
-	bool block_multicast : 1;
-	bool block_local : 1;
-	bool block_global : 1;
+	bool conn_cache;
+	bool socks5_bind;
+	bool socks5_udp;
+	bool daemonize;
+	bool block_loopback;
+	bool block_multicast;
+	bool block_local;
+	bool block_global;
 
 	int tcp_sndbuf, tcp_rcvbuf;
 
@@ -71,5 +71,39 @@ struct config {
 struct config conf_default(void);
 
 bool conf_check(const struct config *conf);
+
+#if WITH_LUA
+#include <stddef.h>
+
+/* Tag for a struct config field's C type. */
+enum conf_type {
+	CONF_STRING, /* const char * */
+	CONF_INT, /* int */
+	CONF_DOUBLE, /* double */
+	CONF_BOOL, /* bool */
+};
+
+/* Descriptor for one named field of struct config.
+ * Used to drive both conf_loadfile and conf_savefile. */
+struct metaconfig {
+	const char *key; /* Lua table key */
+	enum conf_type type;
+	size_t offset; /* offsetof(struct config, <field>) */
+};
+
+/* Load configuration from a Lua boot script.
+ * The script receives the command-line arguments (excluding argv[0])
+ * as a global `arg` table (1-indexed, with arg.n = argc).
+ * Fields in the returned table overwrite the corresponding fields in *conf.
+ * Unknown fields are silently ignored. Returns false on error. */
+bool conf_loadfile(
+	const char *restrict path, int argc,
+	const char *const restrict argv[const restrict],
+	struct config *restrict conf);
+
+/* Print the current configuration as a pretty-printed Lua table to stdout.
+ * Returns false on write error. */
+bool conf_print(const struct config *restrict conf);
+#endif /* WITH_LUA */
 
 #endif /* CONF_H */

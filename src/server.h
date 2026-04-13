@@ -14,29 +14,19 @@ struct config;
 struct dialreq;
 struct resolver;
 struct ruleset;
-
-struct listener_stats {
-	uintmax_t num_accept;
-	uintmax_t num_serve;
-};
-
-/* The listener binds to an address and accepts incoming connections */
-struct listener {
-	ev_io w_accept;
-	ev_timer w_timer;
-	struct listener_stats stats;
-};
+struct sockaddr;
+struct server;
 
 struct server_stats {
-	/* Number of half-open connections */
+	/* Proxy service stats */
 	size_t num_halfopen;
 	/* Number of active sessions */
 	size_t num_sessions;
 	/* Peak concurrent sessions */
 	size_t num_sessions_peak;
-	/* Total number of requests processed */
+	/* Total proxy requests processed */
 	uintmax_t num_request;
-	/* Number of successful requests */
+	/* Successful proxy requests */
 	uintmax_t num_success;
 	/* Connections rejected by ruleset */
 	uintmax_t num_reject_ruleset;
@@ -52,12 +42,26 @@ struct server_stats {
 	size_t num_connects;
 	/* Connection latency ring buffer (ns) */
 	intmax_t connect_ns[1024];
+
+	/* Aggregated listener accept/serve stats (filled by server_stats()) */
+	uintmax_t num_accept;
+	uintmax_t num_serve;
+
+	/* API server stats */
+	uintmax_t num_api_request;
+	uintmax_t num_api_success;
+
 	/* Server start timestamp */
 	intmax_t started;
 };
 
-struct sockaddr;
-struct server;
+/* Per-listener connection accept/serve counters */
+struct listener_stats {
+	/* Total connections accepted at TCP level */
+	uintmax_t num_accept;
+	/* Connections forwarded to handler after rate-limit check */
+	uintmax_t num_serve;
+};
 
 /**
  * @brief Function pointer type for serving connections
@@ -71,9 +75,20 @@ typedef void (*serve_fn)(
 	struct server *s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa);
 
+/* The listener binds to an address and accepts incoming connections */
+struct listener {
+	struct server *server;
+	serve_fn serve;
+	ev_io w_accept;
+	ev_timer w_timer;
+	struct listener_stats stats;
+};
+
+/* Maximum listeners per server */
+#define SERVER_LISTENERS_MAX 3
+
 struct server {
 	struct ev_loop *loop;
-	struct listener l;
 	struct server_stats stats;
 	void *data;
 
@@ -84,16 +99,26 @@ struct server {
 	struct ruleset *ruleset;
 #endif
 
-	serve_fn serve;
+	struct listener listeners[SERVER_LISTENERS_MAX];
+	size_t num_listeners;
 };
 
-void server_init(
-	struct server *restrict s, struct ev_loop *loop, serve_fn serve,
-	void *data);
+void server_init(struct server *restrict s, struct ev_loop *loop);
 
-bool server_start(
-	struct server *restrict s, const struct sockaddr *restrict bindaddr);
+bool server_add_listener(
+	struct server *restrict s, const struct sockaddr *restrict bindaddr,
+	serve_fn serve);
 
 void server_stop(struct server *restrict s);
+
+/**
+ * @brief Aggregate per-listener stats and server-level stats into @p out.
+ *
+ * Callers should use this instead of reading @c s->stats directly whenever
+ * @c num_accept or @c num_serve are needed, as those counters live on the
+ * individual listeners.
+ */
+void server_stats(
+	const struct server *restrict s, struct server_stats *restrict out);
 
 #endif /* SERVER_H */

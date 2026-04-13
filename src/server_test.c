@@ -113,7 +113,7 @@ static bool served_once(void *data)
 static bool accepted_once(void *data)
 {
 	const struct server *s = data;
-	return s->l.stats.num_accept == 1;
+	return s->listeners[0].stats.num_accept == 1;
 }
 
 static void serve_cb(
@@ -139,16 +139,18 @@ T_DECLARE_CASE(test_server_start_accept_and_stop)
 	int client_fd = -1;
 
 	set_loopback_addr(&bindaddr);
-	server_init(&s, loop, serve_cb, &serve_ctx);
+	server_init(&s, loop);
 	s.conf = &conf;
+	s.data = &serve_ctx;
 
-	T_EXPECT(server_start(&s, (const struct sockaddr *)&bindaddr));
-	port = bound_port(s.l.w_accept.fd);
+	T_EXPECT(server_add_listener(
+		&s, (const struct sockaddr *)&bindaddr, serve_cb));
+	port = bound_port(s.listeners[0].w_accept.fd);
 	client_fd = connect_loopback(port);
 
 	T_EXPECT(test_wait_until(loop, served_once, &serve_ctx, 0.5));
-	T_EXPECT_EQ(s.l.stats.num_accept, 1);
-	T_EXPECT_EQ(s.l.stats.num_serve, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 	T_EXPECT(s.stats.started != -1);
 
 	CLOSE_FD(client_fd);
@@ -168,17 +170,19 @@ T_DECLARE_CASE(test_server_rejects_when_session_limit_exceeded)
 
 	set_loopback_addr(&bindaddr);
 	conf.max_sessions = 1;
-	server_init(&s, loop, serve_cb, &serve_ctx);
+	server_init(&s, loop);
 	s.conf = &conf;
+	s.data = &serve_ctx;
 	s.stats.num_sessions = 2;
 
-	T_EXPECT(server_start(&s, (const struct sockaddr *)&bindaddr));
-	port = bound_port(s.l.w_accept.fd);
+	T_EXPECT(server_add_listener(
+		&s, (const struct sockaddr *)&bindaddr, serve_cb));
+	port = bound_port(s.listeners[0].w_accept.fd);
 	client_fd = connect_loopback(port);
 
 	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
-	T_EXPECT_EQ(s.l.stats.num_accept, 1);
-	T_EXPECT_EQ(s.l.stats.num_serve, 0);
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
 	T_EXPECT_EQ(serve_ctx.calls, 0);
 
 	CLOSE_FD(client_fd);
