@@ -3,18 +3,29 @@
 
 #include "server.h"
 
+#include "api_server.h"
 #include "conf.h"
+#include "forward.h"
+#include "http_proxy.h"
+#if WITH_RULESET
+#include "ruleset.h"
+#endif
+#include "socks.h"
 #include "util.h"
 
 #include "math/rand.h"
+#include "net/addr.h"
 #include "os/clock.h"
+#include "os/daemon.h"
 #include "os/socket.h"
+#include "proto/domain.h"
 #include "utils/slog.h"
 
 #include <ev.h>
 #include <sys/socket.h>
 
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
@@ -117,15 +128,7 @@ timer_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 	ev_io_start(loop, &l->w_accept);
 }
 
-void server_init(struct server *restrict s, struct ev_loop *loop)
-{
-	*s = (struct server){
-		.loop = loop,
-		.stats = { .started = -1 },
-	};
-}
-
-bool server_add_listener(
+static bool add_listener(
 	struct server *restrict s, const struct sockaddr *restrict bindaddr,
 	serve_fn serve)
 {
@@ -218,6 +221,173 @@ bool server_add_listener(
 	return true;
 }
 
+static void
+signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_SIGNAL);
+
+	struct server *restrict s = watcher->data;
+	switch (watcher->signum) {
+	case SIGHUP: {
+#if WITH_LUA
+		if (s->config_file == NULL) {
+			LOGW_F("reload: but no config file loaded",
+			       watcher->signum);
+			break;
+		}
+		/* Reload the -c config file */
+		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
+		if (!conf_loadfile(s->config_file, 0, NULL, s->conf)) {
+			LOGW("reload: config reload failed");
+			(void)systemd_notify(SYSTEMD_STATE_READY);
+			break;
+		}
+		LOGN("reload: config successfully reloaded");
+		slog_setlevel(s->conf->log_level);
+#if WITH_RULESET
+		struct ruleset *restrict ruleset = s->ruleset;
+		if (s->conf->ruleset != NULL && ruleset != NULL) {
+			const bool ok =
+				ruleset_loadfile(ruleset, s->conf->ruleset);
+			if (ok) {
+				LOGN("reload: ruleset successfully reloaded");
+			} else {
+				LOGW_F("reload: ruleset error: %s",
+				       ruleset_geterror(ruleset, NULL));
+			}
+		}
+#endif
+		(void)systemd_notify(SYSTEMD_STATE_READY);
+#else
+		LOGW("reload: not supported in current build");
+#endif
+	} break;
+	case SIGINT:
+	case SIGTERM:
+		LOGD_F("signal %d received, breaking", watcher->signum);
+		(void)systemd_notify(SYSTEMD_STATE_STOPPING);
+		/* Break out of the main event loop to initiate graceful shutdown */
+		ev_break(loop, EVBREAK_ALL);
+		break;
+	default:
+		/* Ignore other signals */
+		break;
+	}
+}
+
+static bool
+resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
+{
+	const size_t bufsize = FQDN_MAX_LENGTH + sizeof(":65535");
+	if (strlen(addrstr) >= bufsize) {
+		LOGF_F("address too long: %s", addrstr);
+		return false;
+	}
+	char buf[bufsize];
+	strcpy(buf, addrstr);
+	char *host, *port;
+	if (!splithostport(buf, &host, &port)) {
+		LOGF_F("unable to parse address: %s", addrstr);
+		return false;
+	}
+	if (!sa_resolve_tcpbind(out, host, port)) {
+		LOGF_F("unable to resolve address: %s", addrstr);
+		return false;
+	}
+	return true;
+}
+
+bool server_init(
+	struct server *restrict s, struct ev_loop *loop,
+	struct config *restrict conf, struct resolver *resolver,
+	struct dialreq *basereq, struct ruleset *ruleset,
+	const char *config_file)
+{
+	*s = (struct server){
+		.loop = loop,
+		.conf = conf,
+#if WITH_LUA
+		.config_file = config_file,
+#endif
+		.resolver = resolver,
+		.basereq = basereq,
+#if WITH_RULESET
+		.ruleset = ruleset,
+#endif
+		.stats = { .started = -1 },
+	};
+	s->data = s;
+
+	if (conf->listen != NULL) {
+		serve_fn proxy_serve;
+		if (conf->forward != NULL) {
+			proxy_serve = forward_serve;
+		}
+#if WITH_TPROXY
+		else if (conf->transparent) {
+			proxy_serve = tproxy_serve;
+		}
+#endif
+		else {
+			proxy_serve = socks_serve;
+		}
+		union sockaddr_max bindaddr;
+		if (!resolve_addr(conf->listen, &bindaddr)) {
+			return false;
+		}
+		if (sa_ipclassify(&bindaddr.sa) == IPCLASS_UNSPECIFIED) {
+			LOGW("binding to wildcard address may be insecure");
+		}
+		if (!add_listener(s, &bindaddr.sa, proxy_serve)) {
+			return false;
+		}
+	}
+	if (conf->http_listen != NULL) {
+		union sockaddr_max httpaddr;
+		if (!resolve_addr(conf->http_listen, &httpaddr)) {
+			return false;
+		}
+		if (sa_ipclassify(&httpaddr.sa) == IPCLASS_UNSPECIFIED) {
+			LOGW("binding to wildcard address may be insecure");
+		}
+		if (!add_listener(s, &httpaddr.sa, http_proxy_serve)) {
+			return false;
+		}
+	}
+	if (conf->restapi != NULL) {
+		union sockaddr_max apiaddr;
+		if (!resolve_addr(conf->restapi, &apiaddr)) {
+			return false;
+		}
+		const enum ipclass cls = sa_ipclassify(&apiaddr.sa);
+		if (cls != IPCLASS_LOOPBACK && cls != IPCLASS_LINKLOCAL &&
+		    cls != IPCLASS_SITELOCAL) {
+			LOGW("binding API server to non-local address may be insecure");
+		}
+		if (!add_listener(s, &apiaddr.sa, api_serve)) {
+			return false;
+		}
+	}
+
+	/* Set up signal watchers */
+	ev_signal_init(&s->w_sighup, signal_cb, SIGHUP);
+	s->w_sighup.data = s;
+	ev_set_priority(&s->w_sighup, EV_MAXPRI);
+	ev_signal_start(loop, &s->w_sighup);
+
+	ev_signal_init(&s->w_sigint, signal_cb, SIGINT);
+	s->w_sigint.data = s;
+	ev_set_priority(&s->w_sigint, EV_MAXPRI);
+	ev_signal_start(loop, &s->w_sigint);
+
+	ev_signal_init(&s->w_sigterm, signal_cb, SIGTERM);
+	s->w_sigterm.data = s;
+	ev_set_priority(&s->w_sigterm, EV_MAXPRI);
+	ev_signal_start(loop, &s->w_sigterm);
+
+	return true;
+}
+
 void server_stop(struct server *restrict s)
 {
 	/* Check if server is running */
@@ -226,6 +396,11 @@ void server_stop(struct server *restrict s)
 	}
 
 	struct ev_loop *loop = s->loop;
+
+	/* Stop signal watchers */
+	ev_signal_stop(loop, &s->w_sighup);
+	ev_signal_stop(loop, &s->w_sigint);
+	ev_signal_stop(loop, &s->w_sigterm);
 
 	/* Stop all listeners */
 	for (size_t i = 0; i < s->num_listeners; i++) {

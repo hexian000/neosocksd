@@ -392,7 +392,7 @@ static bool conf_field_print(
 	const struct config *restrict conf)
 {
 	const void *const ptr = (const char *)conf + field->offset;
-	if (fprintf(stdout, "  %s = ", field->key) < 0) {
+	if (fprintf(stdout, "    %s = ", field->key) < 0) {
 		return false;
 	}
 	switch (field->type) {

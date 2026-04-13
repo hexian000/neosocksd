@@ -6,20 +6,14 @@
  * @brief Main entry point for neosocksd
  */
 
-#include "api_server.h"
 #include "conf.h"
 #include "dialer.h"
-#include "forward.h"
-#include "http_proxy.h"
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
-#include "socks.h"
 #include "util.h"
 
-#include "net/addr.h"
 #include "os/daemon.h"
-#include "os/socket.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
 #include "utils/slog.h"
@@ -29,7 +23,6 @@
 
 #include <inttypes.h>
 #include <limits.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -41,27 +34,15 @@
  * @brief Global application state structure
  */
 static struct {
-	ev_signal w_sighup;
-	ev_signal w_sigint;
-	ev_signal w_sigterm;
-
 	/* Parsed configuration from command line */
 	struct config conf;
 #if WITH_LUA
 	bool dump_config;
+	const char *config_file;
 #endif
 	/* Global unified server instance */
 	struct server server;
 } app = { 0 };
-
-/**
- * @brief Signal handler callback
- * @param loop Event loop instance
- * @param watcher Signal watcher that triggered
- * @param revents Event flags (should be EV_SIGNAL)
- */
-static void
-signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents);
 
 /**
  * @brief Print command line usage information and examples
@@ -178,7 +159,7 @@ parse_args(const int argc, const char *const restrict argv[const restrict])
 	*conf = conf_default();
 	bool http_only = false;
 #if WITH_LUA
-	const char *config_file = NULL;
+	app.config_file = NULL;
 #endif
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-h") == 0 ||
@@ -190,7 +171,7 @@ parse_args(const int argc, const char *const restrict argv[const restrict])
 		if (strcmp(argv[i], "-c") == 0 ||
 		    strcmp(argv[i], "--config") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			config_file = argv[++i];
+			app.config_file = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "--dump-config") == 0) {
@@ -467,8 +448,8 @@ parse_args(const int argc, const char *const restrict argv[const restrict])
 		conf->listen = NULL;
 	}
 #if WITH_LUA
-	if (config_file != NULL) {
-		if (!conf_loadfile(config_file, argc - 1, argv + 1, conf)) {
+	if (app.config_file != NULL) {
+		if (!conf_loadfile(app.config_file, argc - 1, argv + 1, conf)) {
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -492,7 +473,7 @@ int main(int argc, char **argv)
 #endif
 
 	/* Validate configuration */
-	const struct config *restrict conf = &app.conf;
+	struct config *restrict conf = &app.conf;
 	if (!conf_check(conf)) {
 		LOGF_F("configuration check failed, try \"%s --help\" for more information",
 		       argv[0]);
@@ -533,127 +514,24 @@ int main(int argc, char **argv)
 	struct ruleset *ruleset = NULL;
 #endif
 
-	/* Initialize the global server */
+	/* Initialize the global server and bind all listeners */
 	struct server *s = &app.server;
-	server_init(s, loop);
-	s->conf = conf;
-	s->resolver = resolver;
-	s->basereq = basereq;
-#if WITH_RULESET
-	s->ruleset = ruleset;
+	if (!server_init(
+		    s, loop, conf, resolver, basereq, ruleset,
+#if WITH_LUA
+		    app.config_file
+#else
+		    NULL
 #endif
-	/* API handler reads core proxy stats via s->data; since we now have a
-	 * single server, point data back to the server itself. */
-	s->data = s;
-
-	/* Add the main SOCKS/forward/tproxy listener if configured */
-	if (conf->listen != NULL) {
-		/* Select the appropriate protocol handler based on configuration */
-		serve_fn proxy_serve;
-		if (conf->forward != NULL) {
-			proxy_serve = forward_serve; /* TCP port forwarding */
-		}
-#if WITH_TPROXY
-		else if (conf->transparent) {
-			proxy_serve = tproxy_serve; /* Transparent proxy */
-		}
-#endif
-		else {
-			proxy_serve = socks_serve; /* SOCKS4/4a/5 proxy */
-		}
-
-		{
-			union sockaddr_max bindaddr;
-			char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
-			if (strlen(conf->listen) >= sizeof(buf)) {
-				LOGF_F("address too long: %s", conf->listen);
-				exit(EXIT_FAILURE);
-			}
-			strcpy(buf, conf->listen);
-			char *host, *port;
-			if (!splithostport(buf, &host, &port)) {
-				LOGF_F("unable to parse address: %s",
-				       conf->listen);
-				exit(EXIT_FAILURE);
-			}
-			if (!sa_resolve_tcpbind(&bindaddr, host, port)) {
-				LOGF_F("unable to resolve address: %s",
-				       conf->listen);
-				exit(EXIT_FAILURE);
-			}
-			if (sa_ipclassify(&bindaddr.sa) ==
-			    IPCLASS_UNSPECIFIED) {
-				LOGW("binding to wildcard address may be insecure");
-			}
-			if (!server_add_listener(s, &bindaddr.sa, proxy_serve)) {
-				LOGF("failed to start server");
-				exit(EXIT_FAILURE);
-			}
-		}
-	}
-
-	/* Add the HTTP proxy listener if configured */
-	if (conf->http_listen != NULL) {
-		union sockaddr_max httpaddr;
-		char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
-		if (strlen(conf->http_listen) >= sizeof(buf)) {
-			LOGF_F("address too long: %s", conf->http_listen);
-			exit(EXIT_FAILURE);
-		}
-		strcpy(buf, conf->http_listen);
-		char *host, *port;
-		if (!splithostport(buf, &host, &port)) {
-			LOGF_F("unable to parse address: %s",
-			       conf->http_listen);
-			exit(EXIT_FAILURE);
-		}
-		if (!sa_resolve_tcpbind(&httpaddr, host, port)) {
-			LOGF_F("unable to resolve address: %s",
-			       conf->http_listen);
-			exit(EXIT_FAILURE);
-		}
-		if (sa_ipclassify(&httpaddr.sa) == IPCLASS_UNSPECIFIED) {
-			LOGW("binding to wildcard address may be insecure");
-		}
-		if (!server_add_listener(s, &httpaddr.sa, http_proxy_serve)) {
-			LOGF("failed to start HTTP server");
-			exit(EXIT_FAILURE);
-		}
+		    )) {
+		LOGF("failed to start server");
+		exit(EXIT_FAILURE);
 	}
 #if WITH_RULESET
 	if (ruleset != NULL) {
 		ruleset_setserver(ruleset, s);
 	}
 #endif
-
-	/* Add the REST API listener if configured */
-	if (conf->restapi != NULL) {
-		union sockaddr_max apiaddr;
-		char buf[FQDN_MAX_LENGTH + sizeof(":65535")];
-		if (strlen(conf->restapi) >= sizeof(buf)) {
-			LOGF_F("address too long: %s", conf->restapi);
-			exit(EXIT_FAILURE);
-		}
-		strcpy(buf, conf->restapi);
-		char *host, *port;
-		if (!splithostport(buf, &host, &port)) {
-			LOGF_F("unable to parse address: %s", conf->restapi);
-			exit(EXIT_FAILURE);
-		}
-		if (!sa_resolve_tcpbind(&apiaddr, host, port)) {
-			LOGF_F("unable to resolve address: %s", conf->restapi);
-			exit(EXIT_FAILURE);
-		}
-		const enum ipclass cls = sa_ipclassify(&apiaddr.sa);
-		if (cls != IPCLASS_LOOPBACK && cls != IPCLASS_LINKLOCAL &&
-		    cls != IPCLASS_SITELOCAL) {
-			LOGW("binding API server to non-local address may be insecure");
-		}
-		if (!server_add_listener(s, &apiaddr.sa, api_serve)) {
-			LOGF("failed to start api server");
-			exit(EXIT_FAILURE);
-		}
-	}
 
 	/* Handle user identity changes and daemonization */
 	{
@@ -663,27 +541,6 @@ int main(int argc, char **argv)
 		} else if (conf->user_name != NULL) {
 			drop_privileges(conf->user_name);
 		}
-	}
-
-	/* Set up signal watchers for graceful shutdown and configuration reload */
-	{
-		/* SIGHUP: reload configuration */
-		ev_signal *restrict w_sighup = &app.w_sighup;
-		ev_signal_init(w_sighup, signal_cb, SIGHUP);
-		ev_set_priority(w_sighup, EV_MAXPRI);
-		ev_signal_start(loop, w_sighup);
-
-		/* SIGINT: graceful shutdown (Ctrl+C) */
-		ev_signal *restrict w_sigint = &app.w_sigint;
-		ev_signal_init(w_sigint, signal_cb, SIGINT);
-		ev_set_priority(w_sigint, EV_MAXPRI);
-		ev_signal_start(loop, w_sigint);
-
-		/* SIGTERM: graceful shutdown (service stop) */
-		ev_signal *restrict w_sigterm = &app.w_sigterm;
-		ev_signal_init(w_sigterm, signal_cb, SIGTERM);
-		ev_set_priority(w_sigterm, EV_MAXPRI);
-		ev_signal_start(loop, w_sigterm);
 	}
 
 	(void)systemd_notify(SYSTEMD_STATE_READY);
@@ -722,45 +579,4 @@ int main(int argc, char **argv)
 
 	LOGD("program terminated normally");
 	return EXIT_SUCCESS;
-}
-
-void signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_SIGNAL);
-
-	switch (watcher->signum) {
-	case SIGHUP: {
-#if WITH_RULESET
-		const struct config *restrict conf = &app.conf;
-		struct ruleset *restrict ruleset = app.server.ruleset;
-		if (conf->ruleset == NULL || ruleset == NULL) {
-			LOGE_F("signal %d received, but ruleset not loaded",
-			       watcher->signum);
-			break;
-		}
-		/* Attempt to reload the Lua ruleset */
-		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
-		const bool ok = ruleset_loadfile(ruleset, conf->ruleset);
-		if (ok) {
-			LOGN("ruleset successfully reloaded");
-		} else {
-			LOGW_F("failed to reload ruleset: %s",
-			       ruleset_geterror(ruleset, NULL));
-		}
-		(void)systemd_notify(SYSTEMD_STATE_READY);
-#else
-		LOGW("reload is not supported in current build");
-#endif
-	} break;
-	case SIGINT:
-	case SIGTERM:
-		LOGD_F("signal %d received, breaking", watcher->signum);
-		(void)systemd_notify(SYSTEMD_STATE_STOPPING);
-		/* Break out of the main event loop to initiate graceful shutdown */
-		ev_break(loop, EVBREAK_ALL);
-		break;
-	default:
-		/* Ignore other signals */
-		break;
-	}
 }

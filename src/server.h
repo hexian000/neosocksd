@@ -92,7 +92,16 @@ struct server {
 	struct server_stats stats;
 	void *data;
 
-	const struct config *conf;
+	/* Signal watchers */
+	ev_signal w_sighup;
+	ev_signal w_sigint;
+	ev_signal w_sigterm;
+
+	struct config *conf;
+#if WITH_LUA
+	/* Path to the -c config file, or NULL if not specified */
+	const char *config_file;
+#endif
 	struct resolver *resolver;
 	struct dialreq *basereq;
 #if WITH_RULESET
@@ -103,11 +112,11 @@ struct server {
 	size_t num_listeners;
 };
 
-void server_init(struct server *restrict s, struct ev_loop *loop);
-
-bool server_add_listener(
-	struct server *restrict s, const struct sockaddr *restrict bindaddr,
-	serve_fn serve);
+bool server_init(
+	struct server *restrict s, struct ev_loop *loop,
+	struct config *restrict conf, struct resolver *resolver,
+	struct dialreq *basereq, struct ruleset *ruleset,
+	const char *config_file);
 
 void server_stop(struct server *restrict s);
 

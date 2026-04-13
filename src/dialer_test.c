@@ -3,13 +3,13 @@
 
 #include "dialer.h"
 
+#include "api_server.h"
 #include "conf.h"
-#include "http_proxy.h"
+#include "forward.h"
 #if WITH_RULESET
 #include "ruleset.h"
 #endif
 #include "server.h"
-#include "socks.h"
 #include "transfer.h"
 
 #include "utils/testing.h"
@@ -36,6 +36,38 @@ static struct config test_conf = {
 static struct config proxy_conf = {
 	.timeout = 0.5,
 };
+
+void api_serve(
+	struct server *s, struct ev_loop *loop, int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	(void)s;
+	(void)loop;
+	(void)accepted_sa;
+	(void)close(accepted_fd);
+}
+
+void forward_serve(
+	struct server *s, struct ev_loop *loop, int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	(void)s;
+	(void)loop;
+	(void)accepted_sa;
+	(void)close(accepted_fd);
+}
+
+#if WITH_TPROXY
+void tproxy_serve(
+	struct server *s, struct ev_loop *loop, int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	(void)s;
+	(void)loop;
+	(void)accepted_sa;
+	(void)close(accepted_fd);
+}
+#endif /* WITH_TPROXY */
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
 static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 0.256;
@@ -614,24 +646,57 @@ bool ruleset_route6(
 	(void)callback;
 	return false;
 }
+
+bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
+{
+	(void)r;
+	(void)filename;
+	return false;
+}
+
+const char *
+ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
+{
+	(void)r;
+	if (len != NULL) {
+		*len = 0;
+	}
+	return "(nil)";
+}
 #endif /* WITH_RULESET */
 
-/* Start a proxy server on an ephemeral loopback port and return that port. */
+#if WITH_LUA
+bool conf_loadfile(
+	const char *restrict path, const int argc,
+	const char *const restrict argv[const restrict],
+	struct config *restrict conf)
+{
+	(void)path;
+	(void)argc;
+	(void)argv;
+	(void)conf;
+	return false;
+}
+#endif /* WITH_LUA */
+
+/* Start a proxy server on an ephemeral loopback port and return that port.
+ * Sets conf->listen or conf->http_listen to "127.0.0.1:0" depending on
+ * use_http; conf must outlive the server. */
 static uint_least16_t start_proxy(
 	struct server *restrict s, struct ev_loop *restrict loop,
-	const serve_fn serve, const struct config *restrict conf)
+	const bool use_http, struct config *restrict conf)
 {
-	const struct sockaddr_in addr = {
-		.sin_family = AF_INET,
-		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
-		.sin_port = 0,
-	};
+	if (use_http) {
+		conf->listen = NULL;
+		conf->http_listen = "127.0.0.1:0";
+	} else {
+		conf->listen = "127.0.0.1:0";
+		conf->http_listen = NULL;
+	}
 	struct sockaddr_in bound_addr;
 	socklen_t len = sizeof(bound_addr);
 
-	server_init(s, loop);
-	s->conf = conf;
-	T_CHECK(server_add_listener(s, (const struct sockaddr *)&addr, serve));
+	T_CHECK(server_init(s, loop, conf, NULL, NULL, NULL, NULL));
 	T_CHECK(getsockname(
 			s->listeners[0].w_accept.fd,
 			(struct sockaddr *)&bound_addr, &len) == 0);
@@ -681,7 +746,7 @@ T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, socks_serve, &proxy_conf);
+	proxy_port = start_proxy(&proxy_s, loop, false, &proxy_conf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
@@ -733,7 +798,7 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, socks_serve, &proxy_conf);
+	proxy_port = start_proxy(&proxy_s, loop, false, &proxy_conf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)closed_port) > 0);
@@ -778,7 +843,7 @@ T_DECLARE_CASE(socks5_noauth_rejected_when_auth_required)
 
 	auth_conf.auth_required = true;
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, socks_serve, &auth_conf);
+	proxy_port = start_proxy(&proxy_s, loop, false, &auth_conf);
 	T_CHECK(snprintf(
 			proxy_uri, sizeof(proxy_uri), "socks5://127.0.0.1:%u",
 			(unsigned)proxy_port) > 0);
@@ -826,7 +891,7 @@ T_DECLARE_CASE(socks5_credentials_accepted_when_auth_required)
 
 	auth_conf.auth_required = true;
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, socks_serve, &auth_conf);
+	proxy_port = start_proxy(&proxy_s, loop, false, &auth_conf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
@@ -883,7 +948,7 @@ T_DECLARE_CASE(socks4a_connect_success_via_real_proxy)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, socks_serve, &proxy_conf);
+	proxy_port = start_proxy(&proxy_s, loop, false, &proxy_conf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
@@ -939,7 +1004,7 @@ T_DECLARE_CASE(http_proxy_connect_success_via_real_proxy)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, http_proxy_serve, &proxy_conf);
+	proxy_port = start_proxy(&proxy_s, loop, true, &proxy_conf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
@@ -991,7 +1056,7 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, http_proxy_serve, &proxy_conf);
+	proxy_port = start_proxy(&proxy_s, loop, true, &proxy_conf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)closed_port) > 0);

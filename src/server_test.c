@@ -3,7 +3,14 @@
 
 #include "server.h"
 
+#include "api_server.h"
 #include "conf.h"
+#include "forward.h"
+#include "http_proxy.h"
+#if WITH_RULESET
+#include "ruleset.h"
+#endif
+#include "socks.h"
 #include "os/socket.h"
 #include "utils/testing.h"
 
@@ -23,9 +30,81 @@ void socket_set_transparent(const int fd, const bool tproxy)
 	(void)tproxy;
 }
 
-static struct config make_conf(void)
+void api_serve(
+	struct server *s, struct ev_loop *loop, int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	(void)s;
+	(void)loop;
+	(void)accepted_sa;
+	(void)close(accepted_fd);
+}
+
+void forward_serve(
+	struct server *s, struct ev_loop *loop, int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	(void)s;
+	(void)loop;
+	(void)accepted_sa;
+	(void)close(accepted_fd);
+}
+
+void http_proxy_serve(
+	struct server *s, struct ev_loop *loop, int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	(void)s;
+	(void)loop;
+	(void)accepted_sa;
+	(void)close(accepted_fd);
+}
+
+void socks_serve(
+	struct server *s, struct ev_loop *loop, int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	(void)s;
+	(void)loop;
+	(void)accepted_sa;
+	(void)close(accepted_fd);
+}
+
+#if WITH_TPROXY
+void tproxy_serve(
+	struct server *s, struct ev_loop *loop, int accepted_fd,
+	const struct sockaddr *accepted_sa)
+{
+	(void)s;
+	(void)loop;
+	(void)accepted_sa;
+	(void)close(accepted_fd);
+}
+#endif /* WITH_TPROXY */
+
+#if WITH_RULESET
+bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
+{
+	(void)r;
+	(void)filename;
+	return false;
+}
+
+const char *
+ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
+{
+	(void)r;
+	if (len != NULL) {
+		*len = 0;
+	}
+	return "(nil)";
+}
+#endif /* WITH_RULESET */
+
+static struct config make_conf(const char *listen)
 {
 	return (struct config){
+		.listen = listen,
 		.timeout = 1.0,
 		.tcp_nodelay = true,
 		.tcp_keepalive = true,
@@ -34,10 +113,6 @@ static struct config make_conf(void)
 
 struct test_watchdog {
 	bool fired;
-};
-
-struct serve_ctx {
-	int calls;
 };
 
 static void
@@ -71,15 +146,6 @@ static bool test_wait_until(
 	return predicate(data);
 }
 
-static void set_loopback_addr(struct sockaddr_in *restrict addr)
-{
-	*addr = (struct sockaddr_in){
-		.sin_family = AF_INET,
-		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
-		.sin_port = 0,
-	};
-}
-
 static uint16_t bound_port(const int fd)
 {
 	struct sockaddr_in addr;
@@ -106,8 +172,8 @@ static int connect_loopback(const uint16_t port)
 
 static bool served_once(void *data)
 {
-	const struct serve_ctx *ctx = data;
-	return ctx->calls == 1;
+	const struct server *s = data;
+	return s->listeners[0].stats.num_serve == 1;
 }
 
 static bool accepted_once(void *data)
@@ -116,39 +182,19 @@ static bool accepted_once(void *data)
 	return s->listeners[0].stats.num_accept == 1;
 }
 
-static void serve_cb(
-	struct server *s, struct ev_loop *loop, const int accepted_fd,
-	const struct sockaddr *accepted_sa)
-{
-	struct serve_ctx *ctx = s->data;
-
-	(void)loop;
-	(void)accepted_sa;
-	ctx->calls++;
-	CLOSE_FD(accepted_fd);
-}
-
 T_DECLARE_CASE(test_server_start_accept_and_stop)
 {
 	struct ev_loop *loop = EV_DEFAULT;
-	struct config conf = make_conf();
-	struct serve_ctx serve_ctx = { 0 };
+	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	struct sockaddr_in bindaddr;
 	uint16_t port;
 	int client_fd = -1;
 
-	set_loopback_addr(&bindaddr);
-	server_init(&s, loop);
-	s.conf = &conf;
-	s.data = &serve_ctx;
-
-	T_EXPECT(server_add_listener(
-		&s, (const struct sockaddr *)&bindaddr, serve_cb));
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
 	port = bound_port(s.listeners[0].w_accept.fd);
 	client_fd = connect_loopback(port);
 
-	T_EXPECT(test_wait_until(loop, served_once, &serve_ctx, 0.5));
+	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 	T_EXPECT(s.stats.started != -1);
@@ -161,29 +207,20 @@ T_DECLARE_CASE(test_server_start_accept_and_stop)
 T_DECLARE_CASE(test_server_rejects_when_session_limit_exceeded)
 {
 	struct ev_loop *loop = EV_DEFAULT;
-	struct config conf = make_conf();
-	struct serve_ctx serve_ctx = { 0 };
+	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	struct sockaddr_in bindaddr;
 	uint16_t port;
 	int client_fd = -1;
 
-	set_loopback_addr(&bindaddr);
 	conf.max_sessions = 1;
-	server_init(&s, loop);
-	s.conf = &conf;
-	s.data = &serve_ctx;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
 	s.stats.num_sessions = 2;
-
-	T_EXPECT(server_add_listener(
-		&s, (const struct sockaddr *)&bindaddr, serve_cb));
 	port = bound_port(s.listeners[0].w_accept.fd);
 	client_fd = connect_loopback(port);
 
 	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
-	T_EXPECT_EQ(serve_ctx.calls, 0);
 
 	CLOSE_FD(client_fd);
 	server_stop(&s);
