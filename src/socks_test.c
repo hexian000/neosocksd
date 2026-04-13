@@ -54,8 +54,17 @@ static struct config test_conf = {
 	.bidir_timeout = false,
 };
 
-static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
-static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 0.256;
+static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.016;
+static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 0.128;
+
+static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
+{
+	ev_tstamp wait_sec = timeout_sec * 4.0;
+	if (wait_sec < TEST_WAIT_SHORT_SEC) {
+		wait_sec = TEST_WAIT_SHORT_SEC;
+	}
+	return wait_sec;
+}
 
 const char *proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
@@ -966,7 +975,7 @@ T_DECLARE_CASE(socks5_connect_timeout_rsp_ttl_expired)
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
-	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
+	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
 
 	{
 		unsigned char rsp[32];
@@ -1450,7 +1459,7 @@ T_DECLARE_CASE(socks5_bind_timeout_ttlexpired)
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
-	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
+	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
 
 	{
 		unsigned char rsp[64];

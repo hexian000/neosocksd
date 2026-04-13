@@ -31,8 +31,8 @@ static struct config test_conf = {
 	.timeout = 1.0,
 };
 
-static const ev_tstamp TEST_WAIT_CLOSE_SEC = 0.032;
-static const ev_tstamp TEST_WAIT_RECV_SEC = 0.256;
+static const ev_tstamp TEST_WAIT_CLOSE_SEC = 0.016;
+static const ev_tstamp TEST_WAIT_RECV_SEC = 0.128;
 
 static struct resolver_stats resolver_stub_stats = {
 	.num_query = 7,

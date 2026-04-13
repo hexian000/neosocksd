@@ -55,9 +55,17 @@ static struct config test_conf = {
 	.conn_cache = false,
 };
 
-static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
-static const ev_tstamp TEST_WAIT_RECV_SEC = 0.256;
-static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 1.0;
+static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.016;
+static const ev_tstamp TEST_WAIT_RECV_SEC = 0.128;
+
+static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
+{
+	ev_tstamp wait_sec = timeout_sec * 4.0;
+	if (wait_sec < TEST_WAIT_SHORT_SEC) {
+		wait_sec = TEST_WAIT_SHORT_SEC;
+	}
+	return wait_sec;
+}
 
 const char *proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
@@ -1151,7 +1159,7 @@ T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
 
-	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
+	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
 
 	T_EXPECT(S.ruleset_cancel_calls > 0);
 
@@ -1176,7 +1184,7 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
 
-	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
+	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
 
 	T_EXPECT(S.dialer_cancel_calls > 0);
 
