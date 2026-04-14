@@ -113,8 +113,6 @@ static void print_usage(const char *argv0)
 		"  --block-outbound <list>    block outbound address classes in comma-separated\n"
 		"                             list: loopback,multicast,local,global\n"
 		"                             (default: multicast)\n"
-		"  --ingress                  equivalent to --block-outbound=multicast,global\n"
-		"  --egress                   equivalent to --block-outbound=loopback,multicast,local\n"
 		"\n"
 		"example:\n"
 		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
@@ -364,20 +362,6 @@ parse_args(const int argc, const char *const restrict argv[const restrict])
 					OPT_ARG_ERROR(argv, i);
 				}
 			}
-			continue;
-		}
-		if (strcmp(argv[i], "--ingress") == 0) {
-			conf->block_loopback = false;
-			conf->block_multicast = true;
-			conf->block_local = false;
-			conf->block_global = true;
-			continue;
-		}
-		if (strcmp(argv[i], "--egress") == 0) {
-			conf->block_loopback = true;
-			conf->block_multicast = true;
-			conf->block_local = true;
-			conf->block_global = false;
 			continue;
 		}
 		if (strcmp(argv[i], "-m") == 0 ||

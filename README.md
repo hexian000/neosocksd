@@ -68,7 +68,7 @@ When static forwarding is not enough, enable the Lua control plane.
 
 Deploy `neosocksd` alongside `libruleset.lua`; binary releases include `neosocksd.noarch.tar.gz` with all Lua scripts.
 
-Start with `example/ruleset_simple.lua` if you only need a rule table. For advanced logic and RPC integration, use `ruleset.lua` and `libruleset.lua`.
+Start with `example/ruleset_simple.lua` if you only need a rule table. For advanced logic and RPC integration, use `example/ruleset.lua` and `libruleset.lua`.
 
 Start a ruleset-powered server:
 
@@ -97,7 +97,11 @@ Key scripts and references:
 
 - [agent.lua](agent.lua): RPC-based peer discovery and relay.
 - [libruleset.lua](libruleset.lua): ruleset framework and RPC utilities.
-- [example](example): practical script examples.
+- [example/ruleset_simple.lua](example/ruleset_simple.lua): minimal ruleset with domain and IP rule tables; the recommended starting point.
+- [example/ruleset.lua](example/ruleset.lua): full-featured ruleset integrating `agent.lua`, schedule-based enable/disable logic, and RPC support.
+- [example/ruleset_egress.lua](example/ruleset_egress.lua): egress-side ruleset that blocks private addresses, downloads and maintains an external IP/domain biglist, and routes all remaining traffic directly outbound.
+- [example/ruleset_ingress.lua](example/ruleset_ingress.lua): ingress-side ruleset that authenticates clients, routes biglist-matched traffic directly, and forwards everything else through an upstream (egress) proxy; syncs the biglist from the egress peer via RPC.
+- [example/lb.lua](example/lb.lua): weighted load balancer using IWRR across multiple backends, with RPC endpoints to update weights at runtime.
 - [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference)
 - [Lua 5.4 Reference Manual (external)](https://www.lua.org/manual/5.4/manual.html)
 

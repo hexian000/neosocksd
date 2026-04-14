@@ -88,9 +88,15 @@ local proxy_region2 = rule.proxy("socks4a://192.168.32.1:1080", "socks4a://192.1
 
 -- 3. _G.route*: Handle requests by IP address (to match subnet efficiently)
 _G.route = {
-    -- reject loopback or link-local
+    -- reject unspecified, multicast, loopback or local
+    { inet.subnet("224.0.0.0/4"),     rule.reject() },
+    { inet.subnet("0.0.0.0/8"),       rule.reject() },
     { inet.subnet("127.0.0.0/8"),     rule.reject() },
+    { inet.subnet("10.0.0.0/8"),      rule.reject() },
+    { inet.subnet("172.16.0.0/12"),   rule.reject() },
     { inet.subnet("169.254.0.0/16"),  rule.reject() },
+    { inet.subnet("192.168.0.0/16"),  rule.reject() },
+    { inet.subnet("192.0.0.0/24"),    rule.reject() },
     -- region1 proxy
     { inet.subnet("192.168.32.0/24"), rule.proxy("socks4a://192.168.32.1:1080"), "region1" },
     -- region2 proxy
@@ -103,13 +109,15 @@ _G.route = {
 }
 
 _G.route6 = {
-    -- reject loopback or link-local
-    { inet6.subnet("::1/128"),                rule.reject() },
-    { inet6.subnet("fe80::/10"),              rule.reject() },
-    { inet6.subnet("::ffff:127.0.0.0/104"),   rule.reject() },
-    { inet6.subnet("::ffff:169.254.0.0/112"), rule.reject() },
+    -- reject unspecified, multicast, loopback, local or v4-mapped
+    { inet6.subnet("::/128"),          rule.reject() },
+    { inet6.subnet("::1/128"),         rule.reject() },
+    { inet6.subnet("fe80::/10"),       rule.reject() },
+    { inet6.subnet("fc00::/7"),        rule.reject() },
+    { inet6.subnet("ff::/8"),          rule.reject() },
+    { inet6.subnet("::ffff:0:0/96"),   rule.reject() },
     -- dynamically loaded big IP ranges list
-    { composite.maybe(_G, "biglist6"),        rule.direct(), "biglist" },
+    { composite.maybe(_G, "biglist6"), rule.direct(), "biglist" },
     -- go to _G.route_default
 }
 
@@ -128,34 +136,6 @@ function ruleset.stats(dt, q)
     w:insert(agent.stats(dt))
     w:insert("")
     return w:concat("\n")
-end
-
-function rpc.update(timestamp)
-    if timestamp and timestamp == table.get(_G, "ruleset_data", "timestamp") then
-        return nil
-    end
-    return ruleset_data
-end
-
-function ruleset.update()
-    -- fetch updated ruleset from central server
-    local ok, data = agent.rpcall("socks4a://central.internal:1080", "update", ruleset.last_updated)
-    if not ok then
-        evlogf("ruleset update: %s", data)
-        return
-    end
-    if not data then return end
-    ruleset.last_updated = data.timestamp
-    if data.biglist_raw then
-        _G.biglist = inet.subnet(data.biglist_raw.cidr)
-        _G.biglist6 = inet6.subnet(data.biglist_raw.cidr6)
-        _G.biglist_name = composite.anyof({
-            match.domain(data.biglist_raw.domain),
-            match.host(data.biglist_raw.host),
-            match.regex(data.biglist_raw.regex) })
-    end
-    _G.ruleset_data = data
-    evlog("ruleset update: success")
 end
 
 local function main(...)
