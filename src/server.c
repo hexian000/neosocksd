@@ -28,6 +28,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 static bool is_startup_limited(const struct server *restrict s)
@@ -52,7 +53,7 @@ static bool is_startup_limited(const struct server *restrict s)
 	/* Check probabilistic startup limit */
 	if (conf->startup_limit_start > 0 &&
 	    stats->num_halfopen > (size_t)conf->startup_limit_start) {
-		if (frand() < conf->startup_limit_rate) {
+		if ((frand() * 100.0) < (double)conf->startup_limit_rate) {
 			LOGVV("startup limit reached, rejecting new connection");
 			return true;
 		}
@@ -229,38 +230,26 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 	struct server *restrict s = watcher->data;
 	switch (watcher->signum) {
 	case SIGHUP: {
-#if WITH_LUA
-		if (s->config_file == NULL) {
-			LOGW_F("reload: but no config file loaded",
-			       watcher->signum);
-			break;
-		}
-		/* Reload the -c config file */
 		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
-		if (!conf_loadfile(s->config_file, 0, NULL, s->conf)) {
-			LOGW("reload: config reload failed");
+		if (!conf_reload(s->conf)) {
 			(void)systemd_notify(SYSTEMD_STATE_READY);
 			break;
 		}
-		LOGN("reload: config successfully reloaded");
-		slog_setlevel(s->conf->log_level);
 #if WITH_RULESET
 		struct ruleset *restrict ruleset = s->ruleset;
 		if (s->conf->ruleset != NULL && ruleset != NULL) {
 			const bool ok =
 				ruleset_loadfile(ruleset, s->conf->ruleset);
-			if (ok) {
-				LOGN("reload: ruleset successfully reloaded");
-			} else {
+			if (!ok) {
 				LOGW_F("reload: ruleset error: %s",
 				       ruleset_geterror(ruleset, NULL));
+				(void)systemd_notify(SYSTEMD_STATE_READY);
+				break;
 			}
 		}
 #endif
+		LOGN("reload: config successfully reloaded");
 		(void)systemd_notify(SYSTEMD_STATE_READY);
-#else
-		LOGW("reload: not supported in current build");
-#endif
 	} break;
 	case SIGINT:
 	case SIGTERM:
@@ -300,15 +289,11 @@ resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
 bool server_init(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,
-	struct dialreq *basereq, struct ruleset *ruleset,
-	const char *config_file)
+	struct dialreq *basereq, struct ruleset *ruleset)
 {
 	*s = (struct server){
 		.loop = loop,
 		.conf = conf,
-#if WITH_LUA
-		.config_file = config_file,
-#endif
 		.resolver = resolver,
 		.basereq = basereq,
 #if WITH_RULESET

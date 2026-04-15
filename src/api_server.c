@@ -356,6 +356,7 @@ static bool parse_bool(const char *s)
 static void
 send_response(struct ev_loop *loop, struct api_ctx *restrict ctx, const bool ok)
 {
+	ASSERT(ctx->conn.wbuf.len > 0);
 	if (ok) {
 		ctx->s->stats.num_api_success++;
 	}

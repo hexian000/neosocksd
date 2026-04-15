@@ -336,6 +336,9 @@ int cfunc_tick(lua_State *restrict L)
 	ASSERT(lua_gettop(L) == 0);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, "tick");
+	if (!lua_isfunction(L, -1)) {
+		return 0;
+	}
 	lua_replace(L, 1);
 	lua_call(L, 0, 0);
 	return 0;

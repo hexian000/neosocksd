@@ -190,6 +190,10 @@ static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
 	struct ruleset *restrict r = watcher->data;
+	/*
+	 * Negative interval intentionally keeps idle watcher active so
+	 * ruleset.tick runs on each idle iteration.
+	 */
 	if (r->w_ticker.repeat > 0) {
 		ev_idle_stop(loop, watcher);
 	}

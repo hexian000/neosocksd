@@ -679,6 +679,12 @@ bool conf_loadfile(
 }
 #endif /* WITH_LUA */
 
+bool conf_reload(struct config *restrict conf)
+{
+	(void)conf;
+	return false;
+}
+
 /* Start a proxy server on an ephemeral loopback port and return that port.
  * Sets conf->listen or conf->http_listen to "127.0.0.1:0" depending on
  * use_http; conf must outlive the server. */
@@ -696,7 +702,7 @@ static uint_least16_t start_proxy(
 	struct sockaddr_in bound_addr;
 	socklen_t len = sizeof(bound_addr);
 
-	T_CHECK(server_init(s, loop, conf, NULL, NULL, NULL, NULL));
+	T_CHECK(server_init(s, loop, conf, NULL, NULL, NULL));
 	T_CHECK(getsockname(
 			s->listeners[0].w_accept.fd,
 			(struct sockaddr *)&bound_addr, &len) == 0);

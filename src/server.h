@@ -98,10 +98,6 @@ struct server {
 	ev_signal w_sigterm;
 
 	struct config *conf;
-#if WITH_LUA
-	/* Path to the -c config file, or NULL if not specified */
-	const char *config_file;
-#endif
 	struct resolver *resolver;
 	struct dialreq *basereq;
 #if WITH_RULESET
@@ -115,8 +111,7 @@ struct server {
 bool server_init(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,
-	struct dialreq *basereq, struct ruleset *ruleset,
-	const char *config_file);
+	struct dialreq *basereq, struct ruleset *ruleset);
 
 void server_stop(struct server *restrict s);
 

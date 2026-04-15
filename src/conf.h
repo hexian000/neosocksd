@@ -7,6 +7,11 @@
 #include <stdbool.h>
 
 struct config {
+	/* Heap block owning a subset of the string data referenced by const
+	 * char * fields below. Other fields may point into argv[] or literals.
+	 * Always call free(conf.strings) when discarding a config. */
+	char *strings;
+
 	const char *listen;
 	const char *forward;
 	const char *proxy;
@@ -22,7 +27,7 @@ struct config {
 #if WITH_NETDEVICE
 	const char *netdev;
 #endif
-	int log_level;
+	int loglevel;
 	int resolve_pf;
 	double timeout;
 #if WITH_RULESET
@@ -64,7 +69,7 @@ struct config {
 
 	int max_sessions;
 	int startup_limit_start;
-	double startup_limit_rate;
+	int startup_limit_rate;
 	int startup_limit_full;
 };
 
@@ -72,38 +77,16 @@ struct config conf_default(void);
 
 bool conf_check(const struct config *conf);
 
-#if WITH_LUA
-#include <stddef.h>
+/* Parse command line arguments into *conf. Stores argc and argv internally
+ * for later use by conf_reload(). Loads the -c Lua config file if specified.
+ * On error, logs a message and returns false; the caller should exit. */
+bool conf_parseargs(struct config *restrict conf, int argc, char *argv[]);
 
-/* Tag for a struct config field's C type. */
-enum conf_type {
-	CONF_STRING, /* const char * */
-	CONF_INT, /* int */
-	CONF_DOUBLE, /* double */
-	CONF_BOOL, /* bool */
-};
-
-/* Descriptor for one named field of struct config.
- * Used to drive both conf_loadfile and conf_savefile. */
-struct metaconfig {
-	const char *key; /* Lua table key */
-	enum conf_type type;
-	size_t offset; /* offsetof(struct config, <field>) */
-};
-
-/* Load configuration from a Lua boot script.
- * The script receives the command-line arguments (excluding argv[0])
- * as a global `arg` table (1-indexed, with arg.n = argc).
- * Fields in the returned table overwrite the corresponding fields in *conf.
- * Unknown fields are silently ignored. Returns false on error. */
-bool conf_loadfile(
-	const char *restrict path, int argc,
-	const char *const restrict argv[const restrict],
-	struct config *restrict conf);
-
-/* Print the current configuration as a pretty-printed Lua table to stdout.
- * Returns false on write error. */
-bool conf_print(const struct config *restrict conf);
-#endif /* WITH_LUA */
+/* Reload *conf from the Lua file specified via -c in conf_parseargs().
+ * Resets string fields to their argv-parsed baseline before applying the
+ * new Lua values (nil fields revert to command-line originals). Logs
+ * appropriate messages. Returns false if no config file was specified or
+ * loading failed; conf is unchanged on failure. */
+bool conf_reload(struct config *restrict conf);
 
 #endif /* CONF_H */

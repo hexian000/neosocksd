@@ -25,14 +25,14 @@ T_DECLARE_CASE(test_conf_default_has_expected_values)
 {
 	const struct config conf = conf_default();
 
-	T_EXPECT_EQ(conf.log_level, LOG_LEVEL_NOTICE);
+	T_EXPECT_EQ(conf.loglevel, LOG_LEVEL_NOTICE);
 	T_EXPECT_EQ(conf.resolve_pf, PF_UNSPEC);
 	T_EXPECT_EQ(conf.timeout, 60.0);
 	T_EXPECT(conf.tcp_nodelay);
 	T_EXPECT(conf.tcp_keepalive);
 	T_EXPECT(conf.conn_cache);
 	T_EXPECT(conf.block_multicast);
-	T_EXPECT_EQ(conf.startup_limit_rate, 30.0);
+	T_EXPECT_EQ(conf.startup_limit_rate, 30);
 }
 
 T_DECLARE_CASE(test_conf_requires_listen)
@@ -73,7 +73,7 @@ T_DECLARE_CASE(test_conf_rejects_startup_limits_out_of_range)
 	T_EXPECT(!conf_check(&conf));
 
 	conf = make_valid_conf();
-	conf.startup_limit_rate = 101.0;
+	conf.startup_limit_rate = 101;
 	T_EXPECT(!conf_check(&conf));
 }
 
@@ -97,7 +97,7 @@ T_DECLARE_CASE(test_conf_accepts_valid_configuration)
 
 	conf.max_sessions = 1024;
 	conf.startup_limit_start = 64;
-	conf.startup_limit_rate = 25.0;
+	conf.startup_limit_rate = 25;
 	conf.startup_limit_full = 128;
 	conf.tcp_sndbuf = 32768;
 	conf.tcp_rcvbuf = 32768;
@@ -128,10 +128,12 @@ T_DECLARE_CASE(test_boot_overrides_string_field)
 	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:9999' }") ==
 		0);
 	struct config conf = conf_default();
-	conf.listen = "old:1080";
-	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	char *argv[] = {
+		"conf_test", "-c", path, "-l", "old:1080",
+	};
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
 	T_EXPECT_STREQ(conf.listen, "0.0.0.0:9999");
-	free((void *)conf.listen);
+	free(conf.strings);
 	unlink(path);
 }
 
@@ -141,10 +143,12 @@ T_DECLARE_CASE(test_boot_nil_field_preserves_cli_value)
 	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:1080' }") ==
 		0);
 	struct config conf = conf_default();
-	conf.forward = "kept:8080";
-	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	char *argv[] = {
+		"conf_test", "-c", path, "-f", "kept:8080",
+	};
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
 	T_EXPECT_STREQ(conf.forward, "kept:8080");
-	free((void *)conf.listen);
+	free(conf.strings);
 	unlink(path);
 }
 
@@ -156,9 +160,14 @@ T_DECLARE_CASE(test_boot_unknown_fields_ignored)
 			"return { listen = '0.0.0.0:1080', _unknown_ = true }") ==
 		0);
 	struct config conf = conf_default();
-	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	char *argv[] = {
+		"conf_test",
+		"-c",
+		path,
+	};
+	T_EXPECT(conf_parseargs(&conf, 3, argv));
 	T_EXPECT_STREQ(conf.listen, "0.0.0.0:1080");
-	free((void *)conf.listen);
+	free(conf.strings);
 	unlink(path);
 }
 
@@ -167,7 +176,12 @@ T_DECLARE_CASE(test_boot_type_error_fails)
 	char path[] = "/tmp/boot_conf_test_XXXXXX";
 	T_CHECK(write_tempfile(path, "return { listen = 42 }") == 0);
 	struct config conf = conf_default();
-	T_EXPECT(!conf_loadfile(path, 0, NULL, &conf));
+	char *argv[] = {
+		"conf_test",
+		"-c",
+		path,
+	};
+	T_EXPECT(!conf_parseargs(&conf, 3, argv));
 	unlink(path);
 }
 
@@ -176,7 +190,12 @@ T_DECLARE_CASE(test_boot_returns_nontable_fails)
 	char path[] = "/tmp/boot_conf_test_XXXXXX";
 	T_CHECK(write_tempfile(path, "return 'oops'") == 0);
 	struct config conf = conf_default();
-	T_EXPECT(!conf_loadfile(path, 0, NULL, &conf));
+	char *argv[] = {
+		"conf_test",
+		"-c",
+		path,
+	};
+	T_EXPECT(!conf_parseargs(&conf, 3, argv));
 	unlink(path);
 }
 
@@ -185,7 +204,12 @@ T_DECLARE_CASE(test_boot_runtime_error_fails)
 	char path[] = "/tmp/boot_conf_test_XXXXXX";
 	T_CHECK(write_tempfile(path, "error('intentional')") == 0);
 	struct config conf = conf_default();
-	T_EXPECT(!conf_loadfile(path, 0, NULL, &conf));
+	char *argv[] = {
+		"conf_test",
+		"-c",
+		path,
+	};
+	T_EXPECT(!conf_parseargs(&conf, 3, argv));
 	unlink(path);
 }
 
@@ -193,15 +217,18 @@ T_DECLARE_CASE(test_boot_arg_table_visible)
 {
 	char path[] = "/tmp/boot_conf_test_XXXXXX";
 	T_CHECK(write_tempfile(
-			path, "assert(arg[1] == '-l', 'arg[1]')\n"
-			      "assert(arg[2] == '0.0.0.0:1080', 'arg[2]')\n"
-			      "assert(arg.n == 2, 'arg.n')\n"
-			      "return { listen = arg[2] }") == 0);
+			path, "assert(arg[1] == '-c', 'arg[1]')\n"
+			      "assert(arg[3] == '-l', 'arg[3]')\n"
+			      "assert(arg[4] == '0.0.0.0:1080', 'arg[4]')\n"
+			      "assert(arg.n == 4, 'arg.n')\n"
+			      "return { listen = arg[4] }") == 0);
 	struct config conf = conf_default();
-	const char *args[] = { "-l", "0.0.0.0:1080" };
-	T_EXPECT(conf_loadfile(path, 2, args, &conf));
+	char *argv[] = {
+		"conf_test", "-c", path, "-l", "0.0.0.0:1080",
+	};
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
 	T_EXPECT_STREQ(conf.listen, "0.0.0.0:1080");
-	free((void *)conf.listen);
+	free(conf.strings);
 	unlink(path);
 }
 
@@ -209,11 +236,16 @@ T_DECLARE_CASE(test_boot_overrides_numeric_fields)
 {
 	char path[] = "/tmp/boot_conf_test_XXXXXX";
 	T_CHECK(write_tempfile(
-			path, "return { log_level = 3, timeout = 120.0,"
+			path, "return { loglevel = 3, timeout = 120.0,"
 			      " max_sessions = 512 }") == 0);
 	struct config conf = conf_default();
-	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
-	T_EXPECT_EQ(conf.log_level, 3);
+	char *argv[] = {
+		"conf_test",
+		"-c",
+		path,
+	};
+	T_EXPECT(conf_parseargs(&conf, 3, argv));
+	T_EXPECT_EQ(conf.loglevel, 3);
 	T_EXPECT_EQ(conf.timeout, 120.0);
 	T_EXPECT_EQ(conf.max_sessions, 512);
 	unlink(path);
@@ -227,7 +259,12 @@ T_DECLARE_CASE(test_boot_overrides_bool_fields)
 			"return { daemonize = true, conn_cache = false }") ==
 		0);
 	struct config conf = conf_default();
-	T_EXPECT(conf_loadfile(path, 0, NULL, &conf));
+	char *argv[] = {
+		"conf_test",
+		"-c",
+		path,
+	};
+	T_EXPECT(conf_parseargs(&conf, 3, argv));
 	T_EXPECT(conf.daemonize);
 	T_EXPECT(!conf.conn_cache);
 	unlink(path);

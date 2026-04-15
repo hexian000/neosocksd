@@ -13,19 +13,47 @@
 
 #include <sys/socket.h>
 
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
-#if WITH_LUA
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Module-level state for conf_parseargs / conf_reload */
+static struct {
+	int argc;
+	char **argv;
+} args;
+
+#if WITH_LUA
+/* Tag for a struct config field's C type. */
+enum conf_type {
+	CONF_STRING, /* const char * */
+	CONF_INT, /* int */
+	CONF_DOUBLE, /* double */
+	CONF_BOOL, /* bool */
+};
+
+/* Descriptor for one named field of struct config. */
+struct metaconfig {
+	const char *key;
+	enum conf_type type;
+	size_t offset;
+};
+
+/* Pointer into conf_argv[i]; valid for the process lifetime */
+static const char *bootfile;
+/* The baseline config produced by pure argv parsing (strings == NULL).
+ * conf_reload resets to this before applying the Lua file. */
+static struct config baseconf;
 #endif
 
 struct config conf_default(void)
 {
 	const struct config conf = {
-		.log_level = LOG_LEVEL_NOTICE,
+		.loglevel = LOG_LEVEL_NOTICE,
 		.resolve_pf = PF_UNSPEC,
 		.timeout = 60.0,
 
@@ -167,20 +195,84 @@ bool conf_check(const struct config *restrict conf)
 		       conf->max_sessions > 0 ? conf->max_sessions : INT_MAX);
 }
 
-#if WITH_LUA
-/* Copy a Lua string at stack index idx into a heap allocation. */
-static const char *lutil_strdup(lua_State *restrict L, const int idx)
+static void print_usage(void)
 {
-	size_t len;
-	const char *restrict s = lua_tolstring(L, idx, &len);
-	char *restrict copy = malloc(len + 1);
-	if (copy == NULL) {
-		return NULL;
-	}
-	memcpy(copy, s, len + 1);
-	return copy;
+	(void)fprintf(
+		stderr, "%s %s\n  %s\n\n", PROJECT_NAME, PROJECT_VER,
+		PROJECT_HOMEPAGE);
+	(void)fprintf(stderr, "usage: %s <option>... \n", args.argv[0]);
+	(void)fprintf(
+		stderr, "%s",
+		"  -h, --help                 show usage and exit\n"
+#if WITH_LUA
+		"  -c, --config <boot.lua>    load configuration from Lua script\n"
+		"  --dump-config              dump effective configuration as Lua and exit\n"
+#endif
+		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
+		"  -l, --listen <address>     proxy listen address\n"
+		"  --http [address]           run an HTTP proxy; if address is omitted, use -l\n"
+		"  --auth-required            require basic authentication\n"
+		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
+		"  -x, --proxy proxy1[,...[,proxyN]]\n"
+		"                             forward outbound connection over proxy chain\n"
+#if WITH_CARES
+		"  --nameserver <address>     use specified nameserver instead of resolv.conf\n"
+#endif
+#if WITH_NETDEVICE
+		"  -i, --netdev <name>        bind outgoing connections to network device\n"
+#endif
+#if WITH_REUSEPORT
+		"  --reuseport                allow multiple instances to listen on the same port\n"
+#endif
+#if WITH_SPLICE
+		"  --pipe                     use pipes to transfer data between connections\n"
+#endif
+#if WITH_TCP_FASTOPEN
+		"  --no-fastopen              disable server-side TCP fast open (RFC 7413)\n"
+#endif
+#if WITH_TPROXY
+		"  --tproxy                   operate as a transparent proxy\n"
+#endif
+#if WITH_RULESET
+		"  -r, --ruleset <file>       load ruleset from Lua file\n"
+		"  --traceback                print ruleset error traceback (for debugging)\n"
+		"  --memlimit <size>          set a soft limit on the total Lua object size in MiB\n"
+#endif
+		"  --no-conn-cache            disable upstream connection cache\n"
+		"  --enable-socks5-bind       enable SOCKS5 BIND command (incompatible with -r/-x)\n"
+		"  --enable-socks5-udp        enable SOCKS5 UDP ASSOCIATE command (incompatible with -r/-x)\n"
+		"  --api <bind_address>       RESTful API listen address\n"
+		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
+		"                             can take (default: 60.0)\n"
+		"  --bidir-timeout            continue counting timeout before bidirectional\n"
+		"                             traffic is established\n"
+		"  --loglevel <level>         0-8 are Silence, Fatal, Error, Warning, Notice, Info,\n"
+		"                             Debug, Verbose, VeryVerbose respectively (default: 4)\n"
+		"  -C, --color                colorized log output using ANSI escape sequences\n"
+		"  -d, --daemonize            run in background and write logs to syslog\n"
+		"  -u, --user [user][:[group]]\n"
+		"                             run as the specified identity, e.g. `nobody:nogroup'\n"
+		"  -m, --max-sessions <n>     maximum number of concurrent connections\n"
+		"                             (default: unlimited)\n"
+		"  --max-startups <start:rate:full>\n"
+		"                             maximum number of concurrent halfopen connections\n"
+		"                             (default: unlimited)\n"
+		"  --block-outbound <list>    block outbound address classes in comma-separated\n"
+		"                             list: loopback,multicast,local,global\n"
+		"                             (default: multicast)\n"
+		"\n"
+		"example:\n"
+		"  neosocksd -l 0.0.0.0:1080                  # start a SOCKS 4/4a/5 server\n"
+		"  neosocksd -l 0.0.0.0:80 -f 127.0.0.1:8080  # forward port 80 to 8080\n"
+		"  neosocksd -l 127.0.0.1:1080 -x socks5://user:pass@gate.internal:1080\n"
+		"  neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 -r ruleset.lua\n"
+		"  neosocksd -l 0.0.0.0:10500 -f : -r lb.lua\n"
+		"  neosocksd -l 0.0.0.0:1080 --http 0.0.0.0:8080  # SOCKS and HTTP proxy\n"
+		"\n");
+	(void)fflush(stderr);
 }
 
+#if WITH_LUA
 /* Descriptor table: one entry per struct config field, terminated by key=NULL. */
 static const struct metaconfig conf_fields[] = {
 	{ "listen", CONF_STRING, offsetof(struct config, listen) },
@@ -198,7 +290,7 @@ static const struct metaconfig conf_fields[] = {
 #if WITH_NETDEVICE
 	{ "netdev", CONF_STRING, offsetof(struct config, netdev) },
 #endif
-	{ "log_level", CONF_INT, offsetof(struct config, log_level) },
+	{ "loglevel", CONF_INT, offsetof(struct config, loglevel) },
 	{ "resolve_pf", CONF_INT, offsetof(struct config, resolve_pf) },
 	{ "timeout", CONF_DOUBLE, offsetof(struct config, timeout) },
 #if WITH_RULESET
@@ -242,16 +334,16 @@ static const struct metaconfig conf_fields[] = {
 	{ "max_sessions", CONF_INT, offsetof(struct config, max_sessions) },
 	{ "startup_limit_start", CONF_INT,
 	  offsetof(struct config, startup_limit_start) },
-	{ "startup_limit_rate", CONF_DOUBLE,
+	{ "startup_limit_rate", CONF_INT,
 	  offsetof(struct config, startup_limit_rate) },
 	{ "startup_limit_full", CONF_INT,
 	  offsetof(struct config, startup_limit_full) },
 	{ NULL, 0, 0 },
 };
 
-/* Load one field from the Lua table at stack top into *conf.
- * Returns false on type error. */
-static bool conf_field_load(
+/* Load one non-string field from the Lua table at stack top into *conf.
+ * Must not be called for CONF_STRING fields. Returns false on type error. */
+static bool lutil_loadfield(
 	lua_State *restrict L, const struct metaconfig *restrict f,
 	struct config *restrict conf)
 {
@@ -261,19 +353,7 @@ static bool conf_field_load(
 	bool ok = true;
 	switch (f->type) {
 	case CONF_STRING:
-		if (!isnil && lua_type(L, -1) != LUA_TSTRING) {
-			LOGE_F("boot: field `%s' must be a string", f->key);
-			ok = false;
-		} else if (!isnil) {
-			const char *restrict s = lutil_strdup(L, -1);
-			if (s == NULL) {
-				LOGE("boot: out of memory");
-				ok = false;
-			} else {
-				*(const char **)field = s;
-			}
-		}
-		break;
+		break; /* handled separately in conf_loadfile */
 	case CONF_INT:
 		if (!isnil && !lua_isinteger(L, -1)) {
 			LOGE_F("boot: field `%s' must be an integer", f->key);
@@ -311,9 +391,8 @@ static bool conf_field_load(
 	return ok;
 }
 
-bool conf_loadfile(
-	const char *restrict path, const int argc,
-	const char *const restrict argv[const restrict],
+static bool conf_loadfile(
+	const char *restrict path, const int argc, char *argv[],
 	struct config *restrict conf)
 {
 	lua_State *restrict L = luaL_newstate();
@@ -350,19 +429,74 @@ bool conf_loadfile(
 		return false;
 	}
 
-	/* iterate descriptor table; apply only fields present in Lua table */
-	bool ok = true;
+	/* Load non-string fields directly */
 	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
-		if (!conf_field_load(L, f, conf)) {
-			ok = false;
+		if (f->type == CONF_STRING) {
+			continue;
+		}
+		if (!lutil_loadfield(L, f, conf)) {
+			lua_close(L);
+			return false;
 		}
 	}
+
+	/* Pass 1: measure the block size for Lua-provided string fields only.
+	 * Nil fields keep their existing pointer; only type errors abort. */
+	size_t total = 0;
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		if (f->type != CONF_STRING) {
+			continue;
+		}
+		lua_getfield(L, -1, f->key);
+		if (lua_isnil(L, -1)) {
+			/* existing pointer preserved; no allocation needed */
+		} else if (lua_type(L, -1) == LUA_TSTRING) {
+			size_t len;
+			lua_tolstring(L, -1, &len);
+			total += len + 1;
+		} else {
+			LOGE_F("boot: field `%s' must be a string", f->key);
+			lua_pop(L, 1);
+			lua_close(L);
+			return false;
+		}
+		lua_pop(L, 1);
+	}
+
+	/* Allocate single block for all strings */
+	char *restrict block = (total > 0) ? malloc(total) : NULL;
+	if (total > 0 && block == NULL) {
+		LOGE("boot: out of memory");
+		lua_close(L);
+		return false;
+	}
+
+	/* Pass 2: copy Lua-provided strings into block; nil fields unchanged */
+	char *pos = block;
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		if (f->type != CONF_STRING) {
+			continue;
+		}
+		const char **fptr = (const char **)((char *)conf + f->offset);
+		lua_getfield(L, -1, f->key);
+		if (!lua_isnil(L, -1)) {
+			size_t len;
+			const char *restrict s = lua_tolstring(L, -1, &len);
+			memcpy(pos, s, len + 1);
+			*fptr = pos;
+			pos += len + 1;
+		}
+		lua_pop(L, 1);
+	}
+
 	lua_close(L);
-	return ok;
+	free(conf->strings);
+	conf->strings = block;
+	return true;
 }
 
 /* Write a Lua double-quoted string literal for s. */
-static bool conf_write_string(const char *restrict s)
+static bool lutil_printstring(const char *restrict s)
 {
 	if (fputc('"', stdout) == EOF) {
 		return false;
@@ -387,7 +521,7 @@ static bool conf_write_string(const char *restrict s)
 }
 
 /* Print one config field as a Lua table entry. */
-static bool conf_field_print(
+static bool lutil_printfield(
 	const struct metaconfig *restrict field,
 	const struct config *restrict conf)
 {
@@ -402,7 +536,7 @@ static bool conf_field_print(
 			if (fputs("nil", stdout) == EOF) {
 				return false;
 			}
-		} else if (!conf_write_string(s)) {
+		} else if (!lutil_printstring(s)) {
 			return false;
 		}
 	} break;
@@ -426,12 +560,12 @@ static bool conf_field_print(
 	return fputs(",\n", stdout) != EOF;
 }
 
-bool conf_print(const struct config *restrict conf)
+static bool conf_print(const struct config *restrict conf)
 {
 	bool ok = fputs("return {\n", stdout) != EOF;
 	for (const struct metaconfig *field = conf_fields;
 	     ok && field->key != NULL; field++) {
-		ok = conf_field_print(field, conf);
+		ok = lutil_printfield(field, conf);
 	}
 	if (ok) {
 		ok = fputs("}\n", stdout) != EOF;
@@ -439,3 +573,345 @@ bool conf_print(const struct config *restrict conf)
 	return ok;
 }
 #endif /* WITH_LUA */
+
+bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
+{
+#define OPT_REQUIRE_ARG(argc, argv, i)                                         \
+	do {                                                                   \
+		if ((i) + 1 >= (argc)) {                                       \
+			LOGF_F("option `%s' requires an argument",             \
+			       (argv)[(i)]);                                   \
+			return false;                                          \
+		}                                                              \
+	} while (false)
+
+#define OPT_ARG_ERROR(argv, i)                                                 \
+	do {                                                                   \
+		LOGF_F("argument error: %s `%s'", (argv)[(i) - 1],             \
+		       (argv)[(i)]);                                           \
+		return false;                                                  \
+	} while (false)
+
+	args.argc = argc;
+	args.argv = argv;
+	*conf = conf_default();
+	bool http_only = false;
+#if WITH_LUA
+	bool dump_config = false;
+	bootfile = NULL;
+#endif
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "-h") == 0 ||
+		    strcmp(argv[i], "--help") == 0) {
+			print_usage();
+			return false;
+		}
+#if WITH_LUA
+		if (strcmp(argv[i], "-c") == 0 ||
+		    strcmp(argv[i], "--config") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			bootfile = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "--dump-config") == 0) {
+			dump_config = true;
+			continue;
+		}
+#endif
+		if (strcmp(argv[i], "-4") == 0) {
+			conf->resolve_pf = PF_INET;
+			continue;
+		}
+		if (strcmp(argv[i], "-6") == 0) {
+			conf->resolve_pf = PF_INET6;
+			continue;
+		}
+		if (strcmp(argv[i], "-l") == 0 ||
+		    strcmp(argv[i], "--listen") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->listen = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "-f") == 0 ||
+		    strcmp(argv[i], "--forward") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->forward = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "-x") == 0 ||
+		    strcmp(argv[i], "--proxy") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->proxy = argv[++i];
+			continue;
+		}
+#if WITH_CARES
+		if (strcmp(argv[i], "--nameserver") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->nameserver = argv[++i];
+			continue;
+		}
+#endif
+		if (strcmp(argv[i], "--http") == 0) {
+			if (i + 1 < argc && argv[i + 1][0] != '-') {
+				conf->http_listen = argv[++i];
+			} else {
+				http_only = true;
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--auth-required") == 0) {
+			conf->auth_required = true;
+			continue;
+		}
+#if WITH_TPROXY
+		if (strcmp(argv[i], "--tproxy") == 0) {
+			conf->transparent = true;
+			continue;
+		}
+#endif
+#if WITH_NETDEVICE
+		if (strcmp(argv[i], "-i") == 0 ||
+		    strcmp(argv[i], "--netdev") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->netdev = argv[++i];
+			continue;
+		}
+#endif
+#if WITH_REUSEPORT
+		if (strcmp(argv[i], "--reuseport") == 0) {
+			conf->reuseport = true;
+			continue;
+		}
+#endif
+#if WITH_SPLICE
+		if (strcmp(argv[i], "--pipe") == 0) {
+			conf->pipe = true;
+			continue;
+		}
+#endif
+#if WITH_TCP_FASTOPEN
+		if (strcmp(argv[i], "--no-fastopen") == 0) {
+			conf->tcp_fastopen = false;
+			continue;
+		}
+#endif
+#if WITH_TCP_FASTOPEN_CONNECT
+		if (strcmp(argv[i], "--fastopen-connect") == 0) {
+			conf->tcp_fastopen_connect = true;
+			LOGW("the undocumented `--fastopen-connect' may cause issues with `--pipe' and server first protocols");
+			continue;
+		}
+#endif
+		if (strcmp(argv[i], "--api") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->restapi = argv[++i];
+			continue;
+		}
+#if WITH_RULESET
+		if (strcmp(argv[i], "-r") == 0 ||
+		    strcmp(argv[i], "--ruleset") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->ruleset = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "--traceback") == 0) {
+			conf->traceback = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--memlimit") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			char *endptr = NULL;
+			intmax_t soft = strtoimax(argv[i], &endptr, 10);
+			if (soft > INT_MAX / 1024) {
+				OPT_ARG_ERROR(argv, i);
+			} else if (soft < 0) {
+				soft = 0;
+			}
+			conf->memlimit = (int)soft;
+			continue;
+		}
+#endif
+		if (strcmp(argv[i], "--no-conn-cache") == 0) {
+			conf->conn_cache = false;
+			continue;
+		}
+		if (strcmp(argv[i], "-u") == 0 ||
+		    strcmp(argv[i], "--user") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			conf->user_name = argv[++i];
+			continue;
+		}
+		if (strcmp(argv[i], "-t") == 0 ||
+		    strcmp(argv[i], "--timeout") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			const size_t n = strlen(argv[i]);
+			char *endptr = NULL;
+			conf->timeout = strtod(argv[i], &endptr);
+			if (argv[i] + n != endptr) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "--loglevel") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			char *endptr;
+			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
+			if (*endptr || value > INT_MAX) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			conf->loglevel = (int)value;
+			continue;
+		}
+		if (strcmp(argv[i], "-C") == 0 ||
+		    strcmp(argv[i], "--color") == 0) {
+			slog_setoutput(SLOG_OUTPUT_TERMINAL, stderr);
+			continue;
+		}
+		if (strcmp(argv[i], "-d") == 0 ||
+		    strcmp(argv[i], "--daemonize") == 0) {
+			conf->daemonize = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--block-outbound") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			const size_t n = strlen(argv[i]);
+			if (n > 255) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			char list[n + 1];
+			memcpy(list, argv[i], n + 1);
+			conf->block_loopback = false;
+			conf->block_multicast = false;
+			conf->block_local = false;
+			conf->block_global = false;
+			for (char *tok = strtok(list, ","); tok != NULL;
+			     tok = strtok(NULL, ",")) {
+				if (strcmp(tok, "loopback") == 0) {
+					conf->block_loopback = true;
+				} else if (strcmp(tok, "multicast") == 0) {
+					conf->block_multicast = true;
+				} else if (strcmp(tok, "local") == 0) {
+					conf->block_local = true;
+				} else if (strcmp(tok, "global") == 0) {
+					conf->block_global = true;
+				} else {
+					OPT_ARG_ERROR(argv, i);
+				}
+			}
+			continue;
+		}
+		if (strcmp(argv[i], "-m") == 0 ||
+		    strcmp(argv[i], "--max-sessions") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			char *endptr;
+			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
+			if (*endptr || value > INT_MAX) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			conf->max_sessions = (int)value;
+			continue;
+		}
+		if (strcmp(argv[i], "--max-startups") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			const char *nptr = argv[i];
+			char *endptr = NULL;
+			const uintmax_t start = strtoumax(nptr, &endptr, 10);
+			if (*endptr != ':' || start > INT_MAX) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			nptr = endptr + 1;
+			const uintmax_t rate = strtoumax(nptr, &endptr, 10);
+			if (*endptr != ':' || rate > INT_MAX) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			nptr = endptr + 1;
+			const uintmax_t full = strtoumax(nptr, &endptr, 10);
+			if (*endptr != '\0' || full > INT_MAX) {
+				OPT_ARG_ERROR(argv, i);
+			}
+			conf->startup_limit_start = (int)start;
+			conf->startup_limit_rate = (int)rate;
+			conf->startup_limit_full = (int)full;
+			continue;
+		}
+		if (strcmp(argv[i], "--proto-timeout") == 0) {
+			LOGW("`--proto-timeout' is deprecated, use `--bidir-timeout' instead");
+			conf->bidir_timeout = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--bidir-timeout") == 0) {
+			conf->bidir_timeout = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--enable-socks5-bind") == 0) {
+			conf->socks5_bind = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--enable-socks5-udp") == 0) {
+			conf->socks5_udp = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--") == 0) {
+			break;
+		}
+		LOGF_F("unknown argument: `%s', try \"%s --help\" for more information",
+		       argv[i], argv[0]);
+		return false;
+	}
+
+#undef OPT_REQUIRE_ARG
+#undef OPT_ARG_ERROR
+	if (http_only) {
+		conf->http_listen = conf->listen;
+		conf->listen = NULL;
+	}
+#if WITH_LUA
+	/* Save baseline before Lua overrides: all strings point into argv[] */
+	baseconf = *conf;
+	if (bootfile != NULL) {
+		if (!conf_loadfile(bootfile, argc - 1, argv + 1, conf)) {
+			return false;
+		}
+	}
+	if (dump_config) {
+		if (!conf_print(conf)) {
+			return false;
+		}
+		return true;
+	}
+#endif
+	slog_setlevel(conf->loglevel);
+	return true;
+}
+
+bool conf_reload(struct config *restrict conf)
+{
+#if WITH_LUA
+	if (bootfile == NULL) {
+		LOGW("reload: no config file loaded");
+		return false;
+	}
+	/* Load into a temporary built from the argv baseline; this ensures nil
+	 * Lua fields revert to command-line values rather than keeping stale
+	 * values from the previous reload. */
+	struct config new_conf = baseconf;
+	if (!conf_loadfile(bootfile, 0, NULL, &new_conf)) {
+		LOGW("reload: config reload failed");
+		return false;
+	}
+	free(conf->strings);
+	*conf = new_conf;
+	LOGN("reload: config successfully reloaded");
+	slog_setlevel(conf->loglevel);
+	return true;
+#else
+	LOGW("reload: not supported in current build");
+	return false;
+#endif
+}

@@ -189,7 +189,9 @@ target_sources(neosocksd
     "${CMAKE_CURRENT_BINARY_DIR}/version.c"
 )
 
-# --- tests ---
+# =============================================================================
+# tests
+# =============================================================================
 
 if(WITH_RULESET)
     add_executable(socks_test
@@ -304,6 +306,7 @@ add_test(NAME forward_test COMMAND forward_test)
 add_executable(conf_test
     conf_test.c
     conf.c
+    "${CMAKE_CURRENT_BINARY_DIR}/version.c"
 )
 target_include_directories(conf_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(conf_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
@@ -349,6 +352,7 @@ add_executable(server_test
     server_test.c
     server.c
     conf.c
+    "${CMAKE_CURRENT_BINARY_DIR}/version.c"
 )
 target_include_directories(server_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(server_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")

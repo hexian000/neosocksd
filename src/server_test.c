@@ -190,7 +190,7 @@ T_DECLARE_CASE(test_server_start_accept_and_stop)
 	uint16_t port;
 	int client_fd = -1;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL));
 	port = bound_port(s.listeners[0].w_accept.fd);
 	client_fd = connect_loopback(port);
 
@@ -213,7 +213,7 @@ T_DECLARE_CASE(test_server_rejects_when_session_limit_exceeded)
 	int client_fd = -1;
 
 	conf.max_sessions = 1;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL));
 	s.stats.num_sessions = 2;
 	port = bound_port(s.listeners[0].w_accept.fd);
 	client_fd = connect_loopback(port);

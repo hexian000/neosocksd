@@ -169,26 +169,105 @@ static int api_config(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
 	const struct config *restrict conf = r->conf;
-	lua_createtable(L, 0, 9);
+	lua_createtable(L, 0, 40);
 
-	lua_pushinteger(L, (lua_Integer)conf->log_level);
-	lua_setfield(L, -2, "loglevel");
-	lua_pushnumber(L, (lua_Number)conf->timeout);
-	lua_setfield(L, -2, "timeout");
-	lua_pushboolean(L, conf->auth_required);
-	lua_setfield(L, -2, "auth_required");
-	lua_pushinteger(L, (lua_Integer)conf->memlimit);
-	lua_setfield(L, -2, "memlimit");
-	lua_pushboolean(L, r->config.traceback);
-	lua_setfield(L, -2, "traceback");
 	lua_pushstring(L, conf->listen);
 	lua_setfield(L, -2, "listen");
-	lua_pushstring(L, conf->restapi);
-	lua_setfield(L, -2, "api");
-	lua_pushstring(L, conf->proxy);
-	lua_setfield(L, -2, "proxy");
 	lua_pushstring(L, conf->forward);
 	lua_setfield(L, -2, "forward");
+	lua_pushstring(L, conf->proxy);
+	lua_setfield(L, -2, "proxy");
+	lua_pushstring(L, conf->restapi);
+	lua_setfield(L, -2, "restapi");
+	lua_pushstring(L, conf->http_listen);
+	lua_setfield(L, -2, "http_listen");
+#if WITH_RULESET
+	lua_pushstring(L, conf->ruleset);
+	lua_setfield(L, -2, "ruleset");
+#endif
+	lua_pushstring(L, conf->user_name);
+	lua_setfield(L, -2, "user_name");
+#if WITH_CARES
+	lua_pushstring(L, conf->nameserver);
+	lua_setfield(L, -2, "nameserver");
+#endif
+#if WITH_NETDEVICE
+	lua_pushstring(L, conf->netdev);
+	lua_setfield(L, -2, "netdev");
+#endif
+
+	lua_pushinteger(L, (lua_Integer)conf->loglevel);
+	lua_setfield(L, -2, "loglevel");
+	lua_pushinteger(L, (lua_Integer)conf->resolve_pf);
+	lua_setfield(L, -2, "resolve_pf");
+	lua_pushnumber(L, (lua_Number)conf->timeout);
+	lua_setfield(L, -2, "timeout");
+#if WITH_RULESET
+	lua_pushinteger(L, (lua_Integer)conf->memlimit);
+	lua_setfield(L, -2, "memlimit");
+#endif
+
+	lua_pushboolean(L, conf->auth_required);
+	lua_setfield(L, -2, "auth_required");
+	lua_pushboolean(L, conf->bidir_timeout);
+	lua_setfield(L, -2, "bidir_timeout");
+#if WITH_SPLICE
+	lua_pushboolean(L, conf->pipe);
+	lua_setfield(L, -2, "pipe");
+#endif
+#if WITH_REUSEPORT
+	lua_pushboolean(L, conf->reuseport);
+	lua_setfield(L, -2, "reuseport");
+#endif
+#if WITH_TCP_FASTOPEN
+	lua_pushboolean(L, conf->tcp_fastopen);
+	lua_setfield(L, -2, "tcp_fastopen");
+#endif
+#if WITH_TCP_FASTOPEN_CONNECT
+	lua_pushboolean(L, conf->tcp_fastopen_connect);
+	lua_setfield(L, -2, "tcp_fastopen_connect");
+#endif
+	lua_pushboolean(L, conf->tcp_nodelay);
+	lua_setfield(L, -2, "tcp_nodelay");
+	lua_pushboolean(L, conf->tcp_keepalive);
+	lua_setfield(L, -2, "tcp_keepalive");
+#if WITH_TPROXY
+	lua_pushboolean(L, conf->transparent);
+	lua_setfield(L, -2, "transparent");
+#endif
+#if WITH_RULESET
+	lua_pushboolean(L, conf->traceback);
+	lua_setfield(L, -2, "traceback");
+#endif
+	lua_pushboolean(L, conf->conn_cache);
+	lua_setfield(L, -2, "conn_cache");
+	lua_pushboolean(L, conf->socks5_bind);
+	lua_setfield(L, -2, "socks5_bind");
+	lua_pushboolean(L, conf->socks5_udp);
+	lua_setfield(L, -2, "socks5_udp");
+	lua_pushboolean(L, conf->daemonize);
+	lua_setfield(L, -2, "daemonize");
+	lua_pushboolean(L, conf->block_loopback);
+	lua_setfield(L, -2, "block_loopback");
+	lua_pushboolean(L, conf->block_multicast);
+	lua_setfield(L, -2, "block_multicast");
+	lua_pushboolean(L, conf->block_local);
+	lua_setfield(L, -2, "block_local");
+	lua_pushboolean(L, conf->block_global);
+	lua_setfield(L, -2, "block_global");
+
+	lua_pushinteger(L, (lua_Integer)conf->tcp_sndbuf);
+	lua_setfield(L, -2, "tcp_sndbuf");
+	lua_pushinteger(L, (lua_Integer)conf->tcp_rcvbuf);
+	lua_setfield(L, -2, "tcp_rcvbuf");
+	lua_pushinteger(L, (lua_Integer)conf->max_sessions);
+	lua_setfield(L, -2, "max_sessions");
+	lua_pushinteger(L, (lua_Integer)conf->startup_limit_start);
+	lua_setfield(L, -2, "startup_limit_start");
+	lua_pushinteger(L, (lua_Integer)conf->startup_limit_rate);
+	lua_setfield(L, -2, "startup_limit_rate");
+	lua_pushinteger(L, (lua_Integer)conf->startup_limit_full);
+	lua_setfield(L, -2, "startup_limit_full");
 	return 1;
 }
 
