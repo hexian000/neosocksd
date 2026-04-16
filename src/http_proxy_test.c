@@ -28,6 +28,29 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_GNU_SOURCE)
+static void *test_memmem(
+	const void *haystack, const size_t haystack_len, const void *needle,
+	const size_t needle_len)
+{
+	if (needle_len == 0) {
+		return (void *)haystack;
+	}
+	if (haystack_len < needle_len) {
+		return NULL;
+	}
+	const unsigned char *const h = haystack;
+	const unsigned char *const n = needle;
+	for (size_t i = 0; i + needle_len <= haystack_len; i++) {
+		if (h[i] == n[0] && memcmp(h + i, n, needle_len) == 0) {
+			return (void *)(h + i);
+		}
+	}
+	return NULL;
+}
+#define memmem test_memmem
+#endif
+
 /*
  * These tests focus on HTTP parser/proxy request handling in http_proxy.c.
  * Dialer, transfer and ruleset are stubbed so the tests can isolate protocol
@@ -332,6 +355,7 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 	S.dialer_cancel_calls++;
 }
 
+#if WITH_SPLICE
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
@@ -346,6 +370,21 @@ void transfer_init(
 	(void)is_uplink;
 	(void)use_splice;
 }
+#else
+void transfer_init(
+	struct transfer *restrict t, const struct transfer_state_cb *callback,
+	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
+	const bool is_uplink)
+{
+	memset(t, 0xA5, sizeof(*t));
+	t->state = XFER_INIT;
+	t->src_fd = src_fd;
+	t->dst_fd = dst_fd;
+	t->state_cb = *callback;
+	t->byt_transferred = byt_transferred;
+	(void)is_uplink;
+}
+#endif
 
 void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)
 {

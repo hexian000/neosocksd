@@ -268,12 +268,13 @@ static bool
 resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
 {
 	const size_t bufsize = FQDN_MAX_LENGTH + sizeof(":65535");
-	if (strlen(addrstr) >= bufsize) {
+	const size_t addrlen = strlen(addrstr);
+	if (addrlen >= bufsize) {
 		LOGF_F("address too long: %s", addrstr);
 		return false;
 	}
 	char buf[bufsize];
-	strcpy(buf, addrstr);
+	memcpy(buf, addrstr, addrlen + 1);
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
 		LOGF_F("unable to parse address: %s", addrstr);
@@ -291,6 +292,7 @@ bool server_init(
 	struct config *restrict conf, struct resolver *resolver,
 	struct dialreq *basereq, struct ruleset *ruleset)
 {
+	UNUSED(ruleset);
 	*s = (struct server){
 		.loop = loop,
 		.conf = conf,

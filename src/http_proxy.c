@@ -360,12 +360,22 @@ static void http_ctx_start_bidi_transfer(
 		.data = ctx,
 	};
 	struct server_stats *restrict stats = &ctx->s->stats;
+#if WITH_SPLICE
+	bool use_splice = ctx->s->conf->pipe;
 	transfer_init(
 		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true, ctx->s->conf->pipe);
+		&stats->byt_up, true, use_splice);
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false, ctx->s->conf->pipe);
+		&stats->byt_down, false, use_splice);
+#else
+	transfer_init(
+		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
+		&stats->byt_up, true);
+	transfer_init(
+		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
+		&stats->byt_down, false);
+#endif
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx,
 		"transfer start: uplink [%d->%d], downlink [%d->%d]",

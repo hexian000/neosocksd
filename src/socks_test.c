@@ -296,6 +296,7 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 	STUB.dialer_cancel_count++;
 }
 
+#if WITH_SPLICE
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
@@ -307,7 +308,20 @@ void transfer_init(
 	t->dst_fd = dst_fd;
 	t->byt_transferred = byt_transferred;
 	t->is_uplink = is_uplink;
-	t->use_splice = use_splice;
+	UNUSED(use_splice);
+#else
+void transfer_init(
+	struct transfer *restrict t, const struct transfer_state_cb *callback,
+	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
+	const bool is_uplink)
+{
+	t->state = XFER_INIT;
+	t->state_cb = *callback;
+	t->src_fd = src_fd;
+	t->dst_fd = dst_fd;
+	t->byt_transferred = byt_transferred;
+	t->is_uplink = is_uplink;
+#endif
 }
 
 void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)

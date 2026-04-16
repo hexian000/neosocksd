@@ -276,6 +276,7 @@ static void append_server_stats(
 	struct stream *restrict w, const struct server *restrict api,
 	const int_fast64_t uptime, const double dt, const bool runtime)
 {
+	UNUSED(runtime);
 	const struct server_stats *restrict apistats = &api->stats;
 	const struct server *restrict s = api->data;
 	struct server_stats agg;

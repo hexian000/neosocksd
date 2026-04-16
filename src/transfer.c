@@ -389,10 +389,17 @@ static void pipe_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 }
 #endif
 
+#if WITH_SPLICE
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
 	const bool is_uplink, const bool use_splice)
+#else
+void transfer_init(
+	struct transfer *restrict t, const struct transfer_state_cb *callback,
+	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
+	const bool is_uplink)
+#endif
 {
 	t->state = XFER_INIT;
 	t->src_fd = src_fd;
@@ -411,8 +418,6 @@ void transfer_init(
 		.cap = 0,
 		.len = 0,
 	};
-#else
-	(void)use_splice;
 #endif
 	t->pos = 0;
 	BUF_INIT(t->buf, 0);

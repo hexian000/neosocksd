@@ -19,6 +19,29 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_GNU_SOURCE)
+static void *test_memmem(
+	const void *haystack, const size_t haystack_len, const void *needle,
+	const size_t needle_len)
+{
+	if (needle_len == 0) {
+		return (void *)haystack;
+	}
+	if (haystack_len < needle_len) {
+		return NULL;
+	}
+	const unsigned char *const h = haystack;
+	const unsigned char *const n = needle;
+	for (size_t i = 0; i + needle_len <= haystack_len; i++) {
+		if (h[i] == n[0] && memcmp(h + i, n, needle_len) == 0) {
+			return (void *)(h + i);
+		}
+	}
+	return NULL;
+}
+#define memmem test_memmem
+#endif
+
 struct header_cb_ctx {
 	struct http_conn *p;
 	bool reject;

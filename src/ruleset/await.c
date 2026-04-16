@@ -434,7 +434,7 @@ static int await_execute(lua_State *restrict L)
 	if (pid < 0) {
 		const int err = errno;
 		const char *errmsg = strerror(err);
-		LOGW_F("fork: (%d) %s", err, strerror(err));
+		LOGW_F("fork: (%d) %s", err, errmsg);
 		lua_pushstring(L, errmsg);
 		return lua_error(L);
 	}

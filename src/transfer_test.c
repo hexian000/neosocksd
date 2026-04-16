@@ -142,7 +142,11 @@ T_DECLARE_CASE(test_transfer_moves_payload_and_finishes_on_eof)
 	set_nonblock(src_read);
 	set_nonblock(dst_write);
 
+#if WITH_SPLICE
 	transfer_init(&t, &cb, src_read, dst_write, &bytes, true, false);
+#else
+	transfer_init(&t, &cb, src_read, dst_write, &bytes, true);
+#endif
 	T_CHECK(send(src_write, payload, sizeof(payload), 0) ==
 		(ssize_t)sizeof(payload));
 	T_CHECK(shutdown(src_write, SHUT_WR) == 0);
@@ -192,7 +196,11 @@ T_DECLARE_CASE(test_transfer_stop_marks_finished)
 	set_nonblock(src_read);
 	set_nonblock(dst_write);
 
+#if WITH_SPLICE
 	transfer_init(&t, &cb, src_read, dst_write, &bytes, false, false);
+#else
+	transfer_init(&t, &cb, src_read, dst_write, &bytes, false);
+#endif
 	transfer_start(loop, &t);
 	transfer_stop(loop, &t);
 

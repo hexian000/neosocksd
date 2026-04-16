@@ -130,8 +130,11 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 				ctx->resolver);
 			return;
 		}
-		const char *errmsg = strerror(err);
-		finish_error(ctx, errmsg, strlen(errmsg));
+		const char *strerr = strerror(err);
+		const size_t errlen = strlen(strerr);
+		char errmsg[errlen + 1];
+		memcpy(errmsg, strerr, errlen + 1);
+		finish_error(ctx, errmsg, errlen);
 		return;
 	}
 	if (ret > 0) {

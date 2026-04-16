@@ -241,12 +241,22 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		.data = ctx,
 	};
 	struct server_stats *restrict stats = &ctx->s->stats;
+#if WITH_SPLICE
+	bool use_splice = ctx->s->conf->pipe;
 	transfer_init(
 		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true, ctx->s->conf->pipe);
+		&stats->byt_up, true, use_splice);
 	transfer_init(
 		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false, ctx->s->conf->pipe);
+		&stats->byt_down, false, use_splice);
+#else
+	transfer_init(
+		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
+		&stats->byt_up, true);
+	transfer_init(
+		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
+		&stats->byt_down, false);
+#endif
 
 	FW_CTX_LOG_F(
 		DEBUG, ctx,

@@ -76,12 +76,20 @@ struct transfer {
  * @param byt_transferred Optional pointer to a counter to accumulate the
  *        number of bytes successfully sent. May be NULL.
  * @param is_uplink true if this transfer is for uplink (client to server).
+#if WITH_SPLICE
  * @param use_splice true if splice(2) is preferred for this transfer.
+#endif
  */
+#if WITH_SPLICE
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	int src_fd, int dst_fd, uintmax_t *byt_transferred, bool is_uplink,
 	bool use_splice);
+#else
+void transfer_init(
+	struct transfer *restrict t, const struct transfer_state_cb *callback,
+	int src_fd, int dst_fd, uintmax_t *byt_transferred, bool is_uplink);
+#endif
 
 /**
  * @brief Start the transfer by starting its watcher on the given loop.

@@ -186,6 +186,7 @@ static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
 	ev_timer_stop(loop, &w_timeout);
 }
 
+#if WITH_RULESET
 static void test_drive_once(struct ev_loop *loop, const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
@@ -197,6 +198,7 @@ static void test_drive_once(struct ev_loop *loop, const ev_tstamp timeout_sec)
 	ev_run(loop, EVRUN_ONCE);
 	ev_timer_stop(loop, &w_timeout);
 }
+#endif
 
 static void make_socketpair(int *restrict left_fd, int *restrict right_fd)
 {
@@ -421,6 +423,7 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 	STUB.dialer_cancel_calls++;
 }
 
+#if WITH_SPLICE
 void transfer_init(
 	struct transfer *restrict t, const struct transfer_state_cb *callback,
 	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
@@ -432,7 +435,20 @@ void transfer_init(
 	t->state_cb = *callback;
 	t->byt_transferred = byt_transferred;
 	t->is_uplink = is_uplink;
-	t->use_splice = use_splice;
+	UNUSED(use_splice);
+#else
+void transfer_init(
+	struct transfer *restrict t, const struct transfer_state_cb *callback,
+	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
+	const bool is_uplink)
+{
+	t->state = XFER_INIT;
+	t->src_fd = src_fd;
+	t->dst_fd = dst_fd;
+	t->state_cb = *callback;
+	t->byt_transferred = byt_transferred;
+	t->is_uplink = is_uplink;
+#endif
 	T_CHECK(STUB.transfer_count <
 		(int)(sizeof(STUB.transfers) / sizeof(STUB.transfers[0])));
 	STUB.transfers[STUB.transfer_count++] = t;
