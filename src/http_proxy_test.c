@@ -2253,6 +2253,227 @@ T_DECLARE_CASE(connect_success_counted_once)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(request_with_cl_and_te_is_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* CL appears before TE; RFC 9112 §6.3 requires 400 */
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Content-Length: 5\r\n"
+			   "Transfer-Encoding: chunked\r\n"
+			   "\r\n";
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(request_with_te_and_cl_is_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* TE appears before CL; both orderings must be rejected */
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Transfer-Encoding: chunked\r\n"
+			   "Content-Length: 5\r\n"
+			   "\r\n";
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(request_with_duplicate_cl_is_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* RFC 9112 §6.3: duplicate Content-Length must be rejected */
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Content-Length: 5\r\n"
+			   "Content-Length: 5\r\n"
+			   "\r\n";
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(request_with_invalid_cl_is_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* Comma-list "5, 5" is not valid 1*DIGIT; must be rejected */
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Content-Length: 5, 5\r\n"
+			   "\r\n";
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(request_header_value_with_bare_cr_is_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* Bare CR in a field value is a CTL; RFC 9112 §2.2 SHOULD reject.
+	 * The \r before "Injected" is not followed by \n so strstr("\r\n")
+	 * finds the real CRLF later; value = "foo\rInjected: bar". */
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "X-Custom: foo\r"
+			   "Injected: bar\r\n"
+			   "\r\n";
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(request_header_value_with_ctl_is_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* SOH (0x01) in value is a CTL; must be rejected */
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "X-Custom: foo\x01"
+			   "bar\r\n"
+			   "\r\n";
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* Space in field name is not a tchar; RFC 7230 §3.2.6 requires rejection */
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "X Invalid: foo\r\n"
+			   "\r\n";
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -2296,6 +2517,13 @@ int main(void)
 	T_RUN_CASE(t, ruleset_finish_with_req_and_dialer_error_returns_502);
 	T_RUN_CASE(t, timeout_in_process_state_cancels_ruleset);
 	T_RUN_CASE(t, timeout_in_connect_state_cancels_dialer);
+	T_RUN_CASE(t, request_with_cl_and_te_is_rejected);
+	T_RUN_CASE(t, request_with_te_and_cl_is_rejected);
+	T_RUN_CASE(t, request_with_duplicate_cl_is_rejected);
+	T_RUN_CASE(t, request_with_invalid_cl_is_rejected);
+	T_RUN_CASE(t, request_header_value_with_bare_cr_is_rejected);
+	T_RUN_CASE(t, request_header_value_with_ctl_is_rejected);
+	T_RUN_CASE(t, request_header_name_with_invalid_token_is_rejected);
 
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

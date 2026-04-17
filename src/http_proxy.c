@@ -18,6 +18,7 @@
 #include "os/clock.h"
 #include "os/socket.h"
 #include "utils/arraysize.h"
+#include "utils/ascii.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
@@ -1516,6 +1517,24 @@ static bool parse_header(void *data, const char *key, char *value)
 	struct http_conn *restrict p = &ctx->conn;
 	const bool is_connect = (strcmp(p->msg.req.method, "CONNECT") == 0);
 
+	/* RFC 7230 §3.2.6 / RFC 9112 §2.2: validate field name (tchar only)
+	 * and field value (no CTL except HTAB, no DEL). */
+	for (const unsigned char *c = (const unsigned char *)key; *c != '\0';
+	     c++) {
+		const unsigned char ch = *c;
+		if (!isalnum(ch) && !strchr("!#$%&'*+-.^_`|~", ch)) {
+			return false;
+		}
+	}
+	for (const unsigned char *c = (const unsigned char *)value; *c != '\0';
+	     c++) {
+		const unsigned char ch = *c;
+		/* RFC 9110 §5.5 field-value: VCHAR / SP / HTAB / obs-text */
+		if (iscntrl(ch) && ch != '\t') {
+			return false;
+		}
+	}
+
 	/* hop-by-hop headers: handle but never forward */
 	if (strcasecmp(key, "Connection") == 0) {
 		if (!parsehdr_connection(p, value)) {
@@ -1565,8 +1584,11 @@ static bool parse_header(void *data, const char *key, char *value)
 		}
 		if (!is_connect &&
 		    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
+			/* RFC 9112 §6.3: CL+TE coexistence must be rejected */
+			if (ctx->req_content_length_known) {
+				return false;
+			}
 			ctx->req_has_body = true;
-			ctx->req_content_length_known = false;
 		}
 		return true;
 	}
@@ -1639,17 +1661,27 @@ static bool parse_header(void *data, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "Content-Length") == 0) {
+		/* RFC 9112 §6.3: reject duplicate CL or CL+TE:chunked conflict */
+		if (ctx->req_content_length_known ||
+		    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
+			return false;
+		}
+		/* require bare decimal digits; no sign, prefix, or list */
+		if ((unsigned char)value[0] < '0' ||
+		    (unsigned char)value[0] > '9') {
+			return false;
+		}
 		char *end;
 		const uintmax_t cl = strtoumax(value, &end, 10);
 		while (*end == ' ' || *end == '\t') {
 			end++;
 		}
-		if (end != value && *end == '\0' && cl <= SIZE_MAX) {
-			ctx->req_content_length = (size_t)cl;
-			ctx->req_content_length_known = true;
+		if (*end != '\0' || cl > (uintmax_t)SIZE_MAX) {
+			return false;
 		}
-		if (ctx->req_content_length_known &&
-		    ctx->req_content_length > 0) {
+		ctx->req_content_length = (size_t)cl;
+		ctx->req_content_length_known = true;
+		if (ctx->req_content_length > 0) {
 			ctx->req_has_body = true;
 		}
 		return true;
