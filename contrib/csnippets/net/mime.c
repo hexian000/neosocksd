@@ -28,6 +28,23 @@ char *mime_parse(char *s, char **restrict type, char **restrict subtype)
 	*slash = '\0';
 	*type = strlower(strtrimspace(s));
 	*subtype = strlower(strtrimspace(slash + 1));
+	/* RFC 6838: type and subtype must be non-empty token strings */
+	if ((*type)[0] == '\0') {
+		return NULL;
+	}
+	for (const char *p = *type; *p; p++) {
+		if (!istoken(*p)) {
+			return NULL;
+		}
+	}
+	if ((*subtype)[0] == '\0') {
+		return NULL;
+	}
+	for (const char *p = *subtype; *p; p++) {
+		if (!istoken(*p)) {
+			return NULL;
+		}
+	}
 	return next;
 }
 
