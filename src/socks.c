@@ -29,6 +29,9 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -44,7 +47,6 @@ enum socks_state {
 	STATE_PROCESS,
 	STATE_CONNECT,
 	STATE_BIND, /* waiting for remote to connect to our listen socket */
-	STATE_ESTABLISHED,
 	STATE_BIDIRECTIONAL,
 	STATE_UDP_RELAY, /* relaying UDP datagrams */
 };
@@ -59,7 +61,7 @@ struct socks_ctx {
 	intmax_t accepted_ns;
 	ev_timer w_timeout;
 	union {
-		/* state < STATE_CONNECTED */
+		/* state < STATE_BIDIRECTIONAL */
 		struct {
 			ev_io w_socket;
 			struct {
@@ -79,10 +81,6 @@ struct socks_ctx {
 #endif
 			struct dialreq *dialreq;
 			struct dialer dialer;
-		};
-		/* state >= STATE_CONNECTED */
-		struct {
-			struct transfer uplink, downlink;
 		};
 		/* state == STATE_UDP_RELAY */
 		struct {
@@ -175,50 +173,22 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 		ev_io_stop(loop, &ctx->w_socket);
 		stats->num_halfopen--;
 		return;
-	case STATE_ESTABLISHED:
-		transfer_stop(loop, &ctx->uplink);
-		transfer_stop(loop, &ctx->downlink);
-		stats->num_halfopen--;
-		break;
 	case STATE_BIDIRECTIONAL:
-		transfer_stop(loop, &ctx->uplink);
-		transfer_stop(loop, &ctx->downlink);
-		stats->num_sessions--;
-		break;
+		/* transfer_ctx is self-owned; nothing to do */
+		return;
 	case STATE_UDP_RELAY:
 		ev_io_stop(loop, &ctx->w_udp);
 		ev_io_stop(loop, &ctx->w_tcp);
-		stats->num_sessions--;
-		break;
+#if WITH_THREADS
+		atomic_fetch_sub_explicit(
+			&ctx->s->num_sessions, 1, memory_order_relaxed);
+#else
+		ctx->s->num_sessions--;
+#endif
+		return;
 	default:
 		FAILMSGF("unexpected state: %d", ctx->state);
 	}
-	SOCKS_CTX_LOG_F(
-		VERBOSE, ctx, "closed, %zu active", stats->num_sessions);
-}
-
-static void mark_ready(struct ev_loop *loop, struct socks_ctx *restrict ctx)
-{
-	ctx->state = STATE_BIDIRECTIONAL;
-	ev_timer_stop(loop, &ctx->w_timeout);
-
-	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->num_halfopen--;
-	stats->num_sessions++;
-	if (stats->num_sessions > stats->num_sessions_peak) {
-		stats->num_sessions_peak = stats->num_sessions;
-	}
-	stats->num_success++;
-	{
-		const int_fast64_t elapsed =
-			clock_monotonic_ns() - ctx->accepted_ns;
-		stats->connect_ns
-			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
-			elapsed;
-		stats->num_connects++;
-	}
-	SOCKS_CTX_LOG_F(
-		DEBUG, ctx, "ready, %zu active sessions", stats->num_sessions);
 }
 
 static bool send_rsp(
@@ -372,61 +342,69 @@ static void socks_senderr(
 	}
 }
 
-static void xfer_state_cb(struct ev_loop *restrict loop, void *data)
-{
-	struct socks_ctx *restrict ctx = data;
-	ASSERT(ctx->state == STATE_ESTABLISHED ||
-	       ctx->state == STATE_BIDIRECTIONAL);
-
-	if (ctx->uplink.state == XFER_FINISHED &&
-	    ctx->downlink.state == XFER_FINISHED) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (ctx->state == STATE_ESTABLISHED &&
-	    ctx->uplink.state == XFER_CONNECTED &&
-	    ctx->downlink.state == XFER_CONNECTED) {
-		mark_ready(loop, ctx);
-		return;
-	}
-}
-
 static void
 socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
-	if (ctx->s->conf->bidir_timeout) {
-		ctx->state = STATE_ESTABLISHED;
-	} else {
-		mark_ready(loop, ctx);
-	}
-	const struct transfer_state_cb cb = {
-		.func = xfer_state_cb,
-		.data = ctx,
-	};
+	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
+	ctx->accepted_fd = ctx->dialed_fd = -1;
+	/*
+	 * Transition to STATE_BIDIRECTIONAL before transfer_start so that
+	 * socks_ctx_stop becomes a no-op if gc_unref is called below.
+	 */
+	ctx->state = STATE_BIDIRECTIONAL;
+	ev_timer_stop(loop, &ctx->w_timeout);
 	struct server_stats *restrict stats = &ctx->s->stats;
-#if WITH_SPLICE
-	bool use_splice = ctx->s->conf->pipe;
-	transfer_init(
-		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true, use_splice);
-	transfer_init(
-		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false, use_splice);
-#else
-	transfer_init(
-		&ctx->uplink, &cb, ctx->accepted_fd, ctx->dialed_fd,
-		&stats->byt_up, true);
-	transfer_init(
-		&ctx->downlink, &cb, ctx->dialed_fd, ctx->accepted_fd,
-		&stats->byt_down, false);
-#endif
+	stats->num_halfopen--;
 	SOCKS_CTX_LOG_F(
-		DEBUG, ctx,
-		"transfer start: uplink [%d->%d], downlink [%d->%d]",
-		ctx->accepted_fd, ctx->dialed_fd, ctx->dialed_fd,
-		ctx->accepted_fd);
-	transfer_start(loop, &ctx->uplink);
-	transfer_start(loop, &ctx->downlink);
+		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
+	/*
+	 * Increment num_sessions before transfer_start so the xfer thread's
+	 * decrement can never precede our increment. Undo on OOM.
+	 */
+#if WITH_THREADS
+	const size_t cur =
+		atomic_fetch_add_explicit(
+			&ctx->s->num_sessions, 1, memory_order_relaxed) +
+		1;
+#else
+	const size_t cur = ++ctx->s->num_sessions;
+#endif
+	if (transfer_start(
+		    ctx->s->transfer, acc_fd, dial_fd,
+		    &(struct transfer_opts){
+			    .byt_up = &ctx->s->byt_up,
+			    .byt_down = &ctx->s->byt_down,
+#if WITH_SPLICE
+			    .use_splice = ctx->s->conf->pipe,
+#endif
+			    .num_sessions = &ctx->s->num_sessions,
+		    }) == NULL) {
+#if WITH_THREADS
+		atomic_fetch_sub_explicit(
+			&ctx->s->num_sessions, 1, memory_order_relaxed);
+#else
+		ctx->s->num_sessions--;
+#endif
+		LOGOOM();
+		CLOSE_FD(acc_fd);
+		CLOSE_FD(dial_fd);
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (cur > stats->num_sessions_peak) {
+		stats->num_sessions_peak = cur;
+	}
+	stats->num_success++;
+	{
+		const int_fast64_t elapsed =
+			clock_monotonic_ns() - ctx->accepted_ns;
+		stats->connect_ns
+			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
+			elapsed;
+		stats->num_connects++;
+	}
+	SOCKS_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
+	gc_unref(&ctx->gcbase);
 }
 
 static int socks4a_req(struct socks_ctx *restrict ctx)
@@ -1378,9 +1356,16 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	struct server_stats *restrict stats = &ctx->s->stats;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	stats->num_halfopen--;
-	stats->num_sessions++;
-	if (stats->num_sessions > stats->num_sessions_peak) {
-		stats->num_sessions_peak = stats->num_sessions;
+#if WITH_THREADS
+	const size_t cur =
+		atomic_fetch_add_explicit(
+			&ctx->s->num_sessions, 1, memory_order_relaxed) +
+		1;
+#else
+	const size_t cur = ++ctx->s->num_sessions;
+#endif
+	if (cur > stats->num_sessions_peak) {
+		stats->num_sessions_peak = cur;
 	}
 	stats->num_success++;
 	ctx->udp_peer_known = false;
@@ -1393,8 +1378,7 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ctx->w_tcp.data = ctx;
 	ev_io_start(loop, &ctx->w_tcp);
 	SOCKS_CTX_LOG_F(
-		VERBOSE, ctx, "UDP ASSOCIATE: %zu active sessions",
-		stats->num_sessions);
+		VERBOSE, ctx, "UDP ASSOCIATE: %zu active sessions", cur);
 }
 
 static struct dialreq *make_dialreq(
@@ -1482,9 +1466,6 @@ timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 			socks5_sendrsp(ctx, SOCKS5RSP_TTLEXPIRED);
 		}
 	} break;
-	case STATE_ESTABLISHED:
-		SOCKS_CTX_LOG(WARNING, ctx, "protocol timeout");
-		break;
 	case STATE_BIDIRECTIONAL:
 	case STATE_UDP_RELAY:
 		return;
@@ -1609,7 +1590,7 @@ static void socks_ctx_finalize(struct gcbase *restrict obj)
 		ctx->dialed_fd = -1;
 	}
 
-	if (ctx->state < STATE_ESTABLISHED) {
+	if (ctx->state < STATE_BIDIRECTIONAL) {
 		dialreq_free(ctx->dialreq);
 	}
 }

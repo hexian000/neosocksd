@@ -323,7 +323,7 @@ void modify_io_events(
 	}
 }
 
-double thread_load(void)
+double process_load(void)
 {
 	static _Thread_local struct {
 		struct timespec monotime, cputime;
@@ -334,7 +334,7 @@ double thread_load(void)
 	if (!clock_monotonic(&monotime)) {
 		return load;
 	}
-	if (!clock_thread(&cputime)) {
+	if (!clock_process(&cputime)) {
 		return load;
 	}
 	if (last.set) {

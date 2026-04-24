@@ -105,7 +105,6 @@ struct stub_state {
 	int dialer_syserr;
 	int_least32_t dialreq_free_calls;
 	int_least32_t dialreq_invalid_free_calls;
-	bool transfer_auto_finish;
 	bool ruleset_resolve_ok;
 	bool ruleset_reply_with_req;
 	bool ruleset_finish_now;
@@ -127,7 +126,6 @@ static struct stub_state S = {
 	.dialer_result_fd = -1,
 	.dialer_err = DIALER_ERR_CONNECT,
 	.dialer_syserr = ECONNREFUSED,
-	.transfer_auto_finish = true,
 	.ruleset_resolve_ok = false,
 	.ruleset_reply_with_req = false,
 	.ruleset_finish_now = false,
@@ -174,6 +172,10 @@ static bool untrack_dialreq_allocation(struct dialreq *restrict req)
 	return false;
 }
 
+struct stub_xfer_ctx;
+static struct stub_xfer_ctx *stub_xfer_ctxs[8];
+static int stub_xfer_ctx_count = 0;
+
 /**
  * Initialize server struct for testing.
  * Sets minimal required fields so production code can access conf/resolver/etc.
@@ -182,6 +184,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
+	s->transfer = transfer_new(s->loop);
 	s->ruleset = G.ruleset;
 	s->basereq = NULL;
 }
@@ -199,7 +202,11 @@ static void reset_stub_state(void)
 	S.dialer_syserr = ECONNREFUSED;
 	S.dialreq_free_calls = 0;
 	S.dialreq_invalid_free_calls = 0;
-	S.transfer_auto_finish = true;
+	for (int i = 0; i < stub_xfer_ctx_count; i++) {
+		free(stub_xfer_ctxs[i]);
+		stub_xfer_ctxs[i] = NULL;
+	}
+	stub_xfer_ctx_count = 0;
 	S.ruleset_resolve_ok = false;
 	S.ruleset_reply_with_req = false;
 	S.ruleset_finish_now = false;
@@ -355,52 +362,42 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 	S.dialer_cancel_calls++;
 }
 
-#if WITH_SPLICE
-void transfer_init(
-	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink, const bool use_splice)
-{
-	memset(t, 0xA5, sizeof(*t));
-	t->state = XFER_INIT;
-	t->src_fd = src_fd;
-	t->dst_fd = dst_fd;
-	t->state_cb = *callback;
-	t->byt_transferred = byt_transferred;
-	(void)is_uplink;
-	(void)use_splice;
-}
+struct stub_xfer_ctx {
+#if WITH_THREADS
+	atomic_size_t *num_sessions;
 #else
-void transfer_init(
-	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink)
-{
-	memset(t, 0xA5, sizeof(*t));
-	t->state = XFER_INIT;
-	t->src_fd = src_fd;
-	t->dst_fd = dst_fd;
-	t->state_cb = *callback;
-	t->byt_transferred = byt_transferred;
-	(void)is_uplink;
-}
+	size_t *num_sessions;
 #endif
+};
 
-void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)
+struct transfer *transfer_new(struct ev_loop *restrict loop)
 {
-	t->state = XFER_CONNECTED;
-	t->state_cb.func(loop, t->state_cb.data);
-	if (!S.transfer_auto_finish) {
-		return;
-	}
-	t->state = XFER_FINISHED;
-	t->state_cb.func(loop, t->state_cb.data);
+	UNUSED(loop);
+	static int token;
+	return (struct transfer *)&token;
 }
 
-void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
+void transfer_free(struct transfer *restrict xfer)
 {
-	(void)loop;
-	t->state = XFER_FINISHED;
+	UNUSED(xfer);
+}
+
+struct transfer_ctx *transfer_start(
+	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
+	const struct transfer_opts *restrict opts)
+{
+	(void)xfer;
+	(void)acc_fd;
+	(void)dial_fd;
+	T_CHECK(stub_xfer_ctx_count <
+		(int)(sizeof(stub_xfer_ctxs) / sizeof(stub_xfer_ctxs[0])));
+	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
+	if (xctx == NULL) {
+		return NULL;
+	}
+	xctx->num_sessions = opts->num_sessions;
+	stub_xfer_ctxs[stub_xfer_ctx_count++] = xctx;
+	return (struct transfer_ctx *)xctx;
 }
 
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
@@ -989,7 +986,6 @@ T_DECLARE_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
@@ -1314,7 +1310,6 @@ T_DECLARE_CASE(plain_http_absolute_url_established)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
@@ -1361,7 +1356,6 @@ T_DECLARE_CASE(plain_http_post_with_body_forwarded)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
@@ -1407,7 +1401,6 @@ T_DECLARE_CASE(plain_http_version_preserved_in_forwarded_request)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
@@ -1449,7 +1442,6 @@ T_DECLARE_CASE(plain_http_te_chunked_forwarded_to_upstream)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
@@ -1493,7 +1485,6 @@ T_DECLARE_CASE(plain_http_dynamic_hop_by_hop_not_forwarded)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
@@ -1539,7 +1530,6 @@ T_DECLARE_CASE(plain_http_proxy_authorization_not_forwarded)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
@@ -2202,7 +2192,6 @@ T_DECLARE_CASE(plain_http_forward_success_counted_once)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
@@ -2237,7 +2226,6 @@ T_DECLARE_CASE(connect_success_counted_once)
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
 	S.dialer_syserr = 0;
-	S.transfer_auto_finish = true;
 
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);

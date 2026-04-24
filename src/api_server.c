@@ -243,7 +243,7 @@ static void server_stats_stateful(
 		dt;
 
 	char load_str[16] = "(unknown)";
-	const double load = thread_load();
+	const double load = process_load();
 	if (load >= 0) {
 		(void)snprintf(
 			load_str, sizeof(load_str), "%.03f%%", load * 100);

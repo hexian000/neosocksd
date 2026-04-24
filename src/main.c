@@ -11,6 +11,7 @@
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
+#include "transfer.h"
 #include "util.h"
 
 #include "os/daemon.h"
@@ -66,6 +67,10 @@ int main(int argc, char *argv[])
 	struct resolver *resolver = resolver_new(loop, conf);
 	CHECKOOM(resolver);
 
+	/* Initialize transfer engine */
+	struct transfer *transfer = transfer_new(loop);
+	CHECKOOM(transfer);
+
 	/* Initialize Lua ruleset if specified */
 #if WITH_RULESET
 	struct ruleset *ruleset = NULL;
@@ -86,7 +91,7 @@ int main(int argc, char *argv[])
 
 	/* Initialize the global server and bind all listeners */
 	struct server *s = &app.server;
-	if (!server_init(s, loop, conf, resolver, basereq, ruleset)) {
+	if (!server_init(s, loop, conf, resolver, transfer, basereq, ruleset)) {
 		LOGF("failed to start server");
 		exit(EXIT_FAILURE);
 	}
@@ -136,6 +141,11 @@ int main(int argc, char *argv[])
 	{
 		const size_t num = gc_finalizeall();
 		LOGD_F("%zu objects finalized", num);
+	}
+	/* Stop transfer engine after all sessions cancelled */
+	if (transfer != NULL) {
+		transfer_free(transfer);
+		transfer = NULL;
 	}
 	ev_loop_destroy(loop); /* Destroy the event loop */
 	unloadlibs(); /* Unload dynamic libraries */

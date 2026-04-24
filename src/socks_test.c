@@ -78,12 +78,6 @@ enum stub_dialer_mode {
 	STUB_DIALER_SUCCESS,
 };
 
-enum stub_transfer_mode {
-	STUB_TRANSFER_NONE,
-	STUB_TRANSFER_CONNECTED,
-	STUB_TRANSFER_FINISHED,
-};
-
 enum stub_ruleset_mode {
 	STUB_RULESET_FAIL,
 	STUB_RULESET_ASYNC_OK,
@@ -98,8 +92,6 @@ static struct {
 	int dialer_success_fd;
 	size_t dialer_cancel_count;
 
-	enum stub_transfer_mode transfer_mode;
-
 	enum stub_ruleset_mode ruleset_mode;
 	struct ruleset_callback *ruleset_pending_cb;
 	size_t ruleset_cancel_count;
@@ -109,13 +101,16 @@ static struct {
 	.dialer_err = DIALER_OK,
 	.dialer_syserr = 0,
 	.dialer_success_fd = -1,
-	.transfer_mode = STUB_TRANSFER_NONE,
 	.ruleset_mode = STUB_RULESET_FAIL,
 	.ruleset_pending_cb = NULL,
 	.ruleset_cancel_count = 0,
 };
 
 static int stub_ruleset_state_tag = 0;
+
+struct stub_xfer_ctx;
+static struct stub_xfer_ctx *stub_xfer_ctxs[8];
+static int stub_xfer_ctx_count = 0;
 
 static void stub_reset(void)
 {
@@ -125,7 +120,11 @@ static void stub_reset(void)
 	STUB.dialer_syserr = 0;
 	STUB.dialer_success_fd = -1;
 	STUB.dialer_cancel_count = 0;
-	STUB.transfer_mode = STUB_TRANSFER_NONE;
+	for (int i = 0; i < stub_xfer_ctx_count; i++) {
+		free(stub_xfer_ctxs[i]);
+		stub_xfer_ctxs[i] = NULL;
+	}
+	stub_xfer_ctx_count = 0;
 	STUB.ruleset_mode = STUB_RULESET_FAIL;
 	STUB.ruleset_pending_cb = NULL;
 	STUB.ruleset_cancel_count = 0;
@@ -140,6 +139,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
+	s->transfer = transfer_new(s->loop);
 	s->ruleset = G.ruleset;
 	s->basereq = NULL;
 }
@@ -296,55 +296,42 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 	STUB.dialer_cancel_count++;
 }
 
-#if WITH_SPLICE
-void transfer_init(
-	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink, const bool use_splice)
-{
-	t->state = XFER_INIT;
-	t->state_cb = *callback;
-	t->src_fd = src_fd;
-	t->dst_fd = dst_fd;
-	t->byt_transferred = byt_transferred;
-	t->is_uplink = is_uplink;
-	UNUSED(use_splice);
+struct stub_xfer_ctx {
+#if WITH_THREADS
+	atomic_size_t *num_sessions;
 #else
-void transfer_init(
-	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink)
-{
-	t->state = XFER_INIT;
-	t->state_cb = *callback;
-	t->src_fd = src_fd;
-	t->dst_fd = dst_fd;
-	t->byt_transferred = byt_transferred;
-	t->is_uplink = is_uplink;
+	size_t *num_sessions;
 #endif
+};
+
+struct transfer *transfer_new(struct ev_loop *restrict loop)
+{
+	UNUSED(loop);
+	static int token;
+	return (struct transfer *)&token;
 }
 
-void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)
+void transfer_free(struct transfer *restrict xfer)
 {
-	switch (STUB.transfer_mode) {
-	case STUB_TRANSFER_NONE:
-		return;
-	case STUB_TRANSFER_CONNECTED:
-		t->state = XFER_CONNECTED;
-		break;
-	case STUB_TRANSFER_FINISHED:
-		t->state = XFER_FINISHED;
-		break;
-	default:
-		return;
+	UNUSED(xfer);
+}
+
+struct transfer_ctx *transfer_start(
+	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
+	const struct transfer_opts *restrict opts)
+{
+	UNUSED(xfer);
+	UNUSED(acc_fd);
+	UNUSED(dial_fd);
+	T_CHECK(stub_xfer_ctx_count <
+		(int)(sizeof(stub_xfer_ctxs) / sizeof(stub_xfer_ctxs[0])));
+	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
+	if (xctx == NULL) {
+		return NULL;
 	}
-	t->state_cb.func(loop, t->state_cb.data);
-}
-
-void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
-{
-	(void)loop;
-	(void)t;
+	xctx->num_sessions = opts->num_sessions;
+	stub_xfer_ctxs[stub_xfer_ctx_count++] = xctx;
+	return (struct transfer_ctx *)xctx;
 }
 
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
@@ -1144,7 +1131,6 @@ T_DECLARE_CASE(socks5_dialer_success_transfer_finished)
 	stub_reset();
 	STUB.dialreq_available = true;
 	STUB.dialer_mode = STUB_DIALER_SUCCESS;
-	STUB.transfer_mode = STUB_TRANSFER_FINISHED;
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
@@ -1184,7 +1170,6 @@ T_DECLARE_CASE(socks5_dialer_success_connected_transition)
 	stub_reset();
 	STUB.dialreq_available = true;
 	STUB.dialer_mode = STUB_DIALER_SUCCESS;
-	STUB.transfer_mode = STUB_TRANSFER_CONNECTED;
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
@@ -1333,7 +1318,6 @@ T_DECLARE_CASE(socks5_bind_full_flow)
 	};
 
 	stub_reset();
-	STUB.transfer_mode = STUB_TRANSFER_FINISHED;
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
@@ -1401,7 +1385,6 @@ T_DECLARE_CASE(socks5_bind_mismatch_allows)
 	};
 
 	stub_reset();
-	STUB.transfer_mode = STUB_TRANSFER_FINISHED;
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
@@ -1692,7 +1675,7 @@ T_DECLARE_CASE(socks5_udp_tcp_close_teardown)
 	drive_loop(loop);
 
 	/* Verify that the server session counter is back to zero */
-	T_EXPECT(s.stats.num_sessions == 0);
+	T_EXPECT(s.num_sessions == 0);
 
 	ev_loop_destroy(loop);
 	test_conf.socks5_udp = false;

@@ -4,64 +4,72 @@
 #include "transfer.h"
 
 #include "os/socket.h"
+#include "util.h"
 #include "utils/testing.h"
 
 #include <ev.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#if WITH_SPLICE
-struct pipe_cache pipe_cache = {
-	.cap = PIPE_MAXCACHED,
-	.len = 0,
+struct test_xfer_state {
+#if WITH_THREADS
+	atomic_size_t num_sessions;
+	atomic_uintmax_t byt_up;
+	atomic_uintmax_t byt_down;
+#else
+	size_t num_sessions;
+	uintmax_t byt_up;
+	uintmax_t byt_down;
+#endif
 };
+
+#if WITH_SPLICE
+/* Stubs for splice pipe utilities — transfer_test always passes use_splice=false
+ * so these are never called, but the linker requires them. */
+struct pipe_cache pipe_cache = { 0 };
 
 bool pipe_new(struct splice_pipe *restrict pipe)
 {
-	pipe->fd[0] = -1;
-	pipe->fd[1] = -1;
-	pipe->cap = 0;
-	pipe->len = 0;
+	(void)pipe;
 	return false;
 }
 
 void pipe_close(struct splice_pipe *restrict pipe)
 {
-	UNUSED(pipe);
+	(void)pipe;
+}
+
+void pipe_shrink(const size_t count)
+{
+	(void)count;
 }
 #endif
 
-struct state_trace {
-	enum transfer_state states[8];
-	size_t len;
-};
-
-struct transfer_cb_ctx {
-	struct transfer *t;
-	struct state_trace *trace;
-};
+static bool xfer_finished(void *data)
+{
+	const struct test_xfer_state *restrict s = data;
+#if WITH_THREADS
+	return atomic_load_explicit(&s->num_sessions, memory_order_relaxed) ==
+	       0;
+#else
+	return s->num_sessions == 0;
+#endif
+}
 
 struct test_watchdog {
 	bool fired;
 };
-
-static void transfer_state_cb(struct ev_loop *loop, void *data)
-{
-	struct transfer_cb_ctx *ctx = data;
-
-	UNUSED(loop);
-	if (ctx->trace->len <
-	    sizeof(ctx->trace->states) / sizeof(ctx->trace->states[0])) {
-		ctx->trace->states[ctx->trace->len++] = ctx->t->state;
-	}
-}
 
 static void
 watchdog_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
@@ -73,34 +81,51 @@ watchdog_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
+static void poll_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+{
+	UNUSED(loop);
+	UNUSED(watcher);
+	UNUSED(revents);
+	ev_break(loop, EVBREAK_ONE);
+}
+
+static const ev_tstamp TEST_POLL_INTERVAL_SEC = 0.005;
+
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *data,
 	const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
 	ev_timer w_timeout;
+	ev_timer w_poll;
 
 	ev_timer_init(&w_timeout, watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
+	ev_timer_init(
+		&w_poll, poll_cb, TEST_POLL_INTERVAL_SEC,
+		TEST_POLL_INTERVAL_SEC);
+	ev_timer_start(loop, &w_poll);
 	while (!watchdog.fired) {
 		if (predicate(data)) {
 			ev_timer_stop(loop, &w_timeout);
+			ev_timer_stop(loop, &w_poll);
 			return true;
 		}
 		ev_run(loop, EVRUN_ONCE);
 	}
 	ev_timer_stop(loop, &w_timeout);
+	ev_timer_stop(loop, &w_poll);
 	return predicate(data);
 }
 
-static void make_socketpair(int *restrict left_fd, int *restrict right_fd)
+static void make_socketpair(int *restrict a, int *restrict b)
 {
 	int sv[2] = { -1, -1 };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	*left_fd = sv[0];
-	*right_fd = sv[1];
+	*a = sv[0];
+	*b = sv[1];
 }
 
 static void set_nonblock(const int fd)
@@ -111,112 +136,256 @@ static void set_nonblock(const int fd)
 	T_CHECK(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
 }
 
-static bool transfer_finished(void *data)
+/*
+ * Bidirectional transfer: write uplink payload from acc_peer and downlink
+ * payload from dial_peer; verify both arrive at the opposite peers.
+ */
+T_DECLARE_CASE(test_transfer_moves_payload)
 {
-	const struct transfer *t = data;
-	return t->state == XFER_FINISHED;
-}
-
-T_DECLARE_CASE(test_transfer_moves_payload_and_finishes_on_eof)
-{
-	static const char payload[] = "neosocksd-transfer-payload";
-	int src_write = -1, src_read = -1;
-	int dst_write = -1, dst_read = -1;
+	static const char uplink[] = "neosocksd-uplink";
+	static const char downlink[] = "downlink-data";
+	int acc_peer = -1, acc_fd = -1;
+	int dial_fd = -1, dial_peer = -1;
 	struct ev_loop *loop = EV_DEFAULT;
-	uintmax_t bytes = 0;
-	struct state_trace trace = { 0 };
-	struct transfer t;
-	struct transfer_cb_ctx cb_ctx = {
-		.t = &t,
-		.trace = &trace,
-	};
-	struct transfer_state_cb cb = {
-		.func = transfer_state_cb,
-		.data = &cb_ctx,
-	};
-	char out[sizeof(payload)] = { 0 };
-	size_t got = 0;
+	struct test_xfer_state state = { 0 };
+	char up_out[sizeof(uplink)] = { 0 };
+	char dn_out[sizeof(downlink)] = { 0 };
+	size_t got;
 
-	make_socketpair(&src_write, &src_read);
-	make_socketpair(&dst_write, &dst_read);
-	set_nonblock(src_read);
-	set_nonblock(dst_write);
+	make_socketpair(&acc_peer, &acc_fd);
+	make_socketpair(&dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
 
-#if WITH_SPLICE
-	transfer_init(&t, &cb, src_read, dst_write, &bytes, true, false);
-#else
-	transfer_init(&t, &cb, src_read, dst_write, &bytes, true);
-#endif
-	T_CHECK(send(src_write, payload, sizeof(payload), 0) ==
-		(ssize_t)sizeof(payload));
-	T_CHECK(shutdown(src_write, SHUT_WR) == 0);
-	transfer_start(loop, &t);
+	/* Uplink: write from acc side and close the write end. */
+	T_CHECK(send(acc_peer, uplink, sizeof(uplink), 0) ==
+		(ssize_t)sizeof(uplink));
+	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+	/* Downlink: write from dial side and close the write end. */
+	T_CHECK(send(dial_peer, downlink, sizeof(downlink), 0) ==
+		(ssize_t)sizeof(downlink));
+	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
 
-	T_EXPECT(test_wait_until(loop, transfer_finished, &t, 0.5));
-	while (got < sizeof(out)) {
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_new(loop);
+	T_CHECK(xfer != NULL);
+
+	struct transfer_ctx *restrict ctx = transfer_start(
+		xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.num_sessions = &state.num_sessions,
+		});
+	T_CHECK(ctx != NULL);
+	/* transfer_ctx_new takes fd ownership */
+	acc_fd = dial_fd = -1;
+
+	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
+
+	/* Uplink: acc_peer → acc_fd → dial_fd → dial_peer */
+	got = 0;
+	while (got < sizeof(up_out)) {
 		const ssize_t n =
-			recv(dst_read, out + got, sizeof(out) - got, 0);
+			recv(dial_peer, up_out + got, sizeof(up_out) - got, 0);
 		if (n <= 0) {
 			break;
 		}
 		got += (size_t)n;
 	}
+	T_EXPECT_EQ(got, sizeof(uplink));
+	T_EXPECT_MEMEQ(up_out, uplink, sizeof(uplink));
+	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)sizeof(uplink));
 
-	T_EXPECT_EQ(bytes, sizeof(payload));
-	T_EXPECT_EQ(got, sizeof(payload));
-	T_EXPECT_MEMEQ(out, payload, sizeof(payload));
-	T_EXPECT(trace.len > 0);
-	T_EXPECT_EQ(trace.states[trace.len - 1], XFER_FINISHED);
+	/* Downlink: dial_peer → dial_fd → acc_fd → acc_peer */
+	got = 0;
+	while (got < sizeof(dn_out)) {
+		const ssize_t n =
+			recv(acc_peer, dn_out + got, sizeof(dn_out) - got, 0);
+		if (n <= 0) {
+			break;
+		}
+		got += (size_t)n;
+	}
+	T_EXPECT_EQ(got, sizeof(downlink));
+	T_EXPECT_MEMEQ(dn_out, downlink, sizeof(downlink));
+	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
-	CLOSE_FD(src_write);
-	CLOSE_FD(src_read);
-	CLOSE_FD(dst_write);
-	CLOSE_FD(dst_read);
+	transfer_free(xfer);
+	CLOSE_FD(acc_peer);
+	CLOSE_FD(dial_peer);
 }
 
-T_DECLARE_CASE(test_transfer_stop_marks_finished)
+/*
+ * Cancel must suppress the on_finished callback but still clean up all
+ * internal resources.  transfer_free() joins the xfer thread and drains
+ * main_disp, so after it returns, no callback will arrive.
+ */
+T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
 {
-	int src_write = -1, src_read = -1;
-	int dst_write = -1, dst_read = -1;
+	int acc_peer = -1, acc_fd = -1;
+	int dial_fd = -1, dial_peer = -1;
 	struct ev_loop *loop = EV_DEFAULT;
-	uintmax_t bytes = 0;
-	struct state_trace trace = { 0 };
-	struct transfer t;
-	struct transfer_cb_ctx cb_ctx = {
-		.t = &t,
-		.trace = &trace,
-	};
-	struct transfer_state_cb cb = {
-		.func = transfer_state_cb,
-		.data = &cb_ctx,
-	};
+	struct test_xfer_state state = { 0 };
 
-	make_socketpair(&src_write, &src_read);
-	make_socketpair(&dst_write, &dst_read);
-	set_nonblock(src_read);
-	set_nonblock(dst_write);
+	make_socketpair(&acc_peer, &acc_fd);
+	make_socketpair(&dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
 
-#if WITH_SPLICE
-	transfer_init(&t, &cb, src_read, dst_write, &bytes, false, false);
-#else
-	transfer_init(&t, &cb, src_read, dst_write, &bytes, false);
-#endif
-	transfer_start(loop, &t);
-	transfer_stop(loop, &t);
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_new(loop);
+	T_CHECK(xfer != NULL);
 
-	T_EXPECT_EQ(t.state, XFER_FINISHED);
+	struct transfer_ctx *restrict ctx = transfer_start(
+		xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.num_sessions = &state.num_sessions,
+		});
+	T_CHECK(ctx != NULL);
+	(void)ctx;
+	acc_fd = dial_fd = -1;
 
-	CLOSE_FD(src_write);
-	CLOSE_FD(src_read);
-	CLOSE_FD(dst_write);
-	CLOSE_FD(dst_read);
+	/*
+	 * transfer_free joins the xfer thread; in-flight transfers are
+	 * cancelled and their num_sessions decrements execute before return.
+	 */
+	transfer_free(xfer);
+	T_EXPECT_EQ(state.num_sessions, (size_t)0);
+
+	CLOSE_FD(acc_peer);
+	CLOSE_FD(dial_peer);
+}
+
+/*
+ * If the uplink destination has no reader, writes fail immediately.
+ * The transfer must detect the error and call on_finished.
+ */
+T_DECLARE_CASE(test_transfer_dst_error_finishes)
+{
+	int acc_peer = -1, acc_fd = -1;
+	int dial_fd = -1, dial_peer = -1;
+	struct ev_loop *loop = EV_DEFAULT;
+	struct test_xfer_state state = { 0 };
+
+	/* Prevent SIGPIPE when writing to a socket with no reader. */
+	(void)signal(SIGPIPE, SIG_IGN);
+
+	make_socketpair(&acc_peer, &acc_fd);
+	make_socketpair(&dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+
+	T_CHECK(send(acc_peer, "x", 1, 0) == 1);
+	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+	/* Close the read end of the uplink destination. */
+	CLOSE_FD(dial_peer);
+
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_new(loop);
+	T_CHECK(xfer != NULL);
+
+	struct transfer_ctx *restrict ctx = transfer_start(
+		xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.num_sessions = &state.num_sessions,
+		});
+	T_CHECK(ctx != NULL);
+	(void)ctx;
+	acc_fd = dial_fd = -1;
+
+	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
+
+	transfer_free(xfer);
+	CLOSE_FD(acc_peer);
+}
+
+/*
+ * Pre-fill the uplink send buffer to exercise the EV_WRITE / backpressure
+ * code path; verify the payload still arrives after the buffer is drained.
+ */
+T_DECLARE_CASE(test_transfer_backpressure_completes)
+{
+	static const char fill[] = "backpressure-fill";
+	int acc_peer = -1, acc_fd = -1;
+	int dial_fd = -1, dial_peer = -1;
+	struct ev_loop *loop = EV_DEFAULT;
+	struct test_xfer_state state = { 0 };
+	char drain[4096];
+
+	make_socketpair(&acc_peer, &acc_fd);
+	make_socketpair(&dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+	set_nonblock(dial_peer);
+
+	/* Fill the dial_fd → dial_peer send buffer to create uplink backpressure. */
+	size_t fill_bytes = 0;
+	while (send(dial_fd, fill, sizeof(fill), MSG_DONTWAIT) > 0) {
+		fill_bytes += sizeof(fill);
+	}
+
+	/* One-byte uplink payload; no downlink data. */
+	T_CHECK(send(acc_peer, "y", 1, 0) == 1);
+	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
+
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_new(loop);
+	T_CHECK(xfer != NULL);
+
+	struct transfer_ctx *restrict ctx = transfer_start(
+		xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.num_sessions = &state.num_sessions,
+		});
+	T_CHECK(ctx != NULL);
+	(void)ctx;
+	acc_fd = dial_fd = -1;
+
+	/* Drain exactly the pre-filled bytes to relieve backpressure without
+	 * racing against the xfer thread writing the payload byte. */
+	{
+		size_t remaining = fill_bytes;
+		while (remaining > 0) {
+			const size_t ask = remaining < sizeof(drain) ?
+						   remaining :
+						   sizeof(drain);
+			const ssize_t n = recv(dial_peer, drain, ask, 0);
+			if (n <= 0) {
+				break;
+			}
+			remaining -= (size_t)n;
+		}
+	}
+
+	/* Transfer should complete after backpressure is relieved. */
+	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
+
+	/* The one-byte payload must have arrived at dial_peer. */
+	char out = 0;
+	T_EXPECT_EQ(recv(dial_peer, &out, 1, MSG_DONTWAIT), (ssize_t)1);
+	T_EXPECT_EQ(out, 'y');
+	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)1);
+
+	transfer_free(xfer);
+	CLOSE_FD(acc_peer);
+	CLOSE_FD(dial_peer);
 }
 
 int main(void)
 {
 	T_DECLARE_CTX(t);
 
-	T_RUN_CASE(t, test_transfer_moves_payload_and_finishes_on_eof);
-	T_RUN_CASE(t, test_transfer_stop_marks_finished);
+	T_RUN_CASE(t, test_transfer_moves_payload);
+	T_RUN_CASE(t, test_transfer_ctx_cancel_no_callback);
+	T_RUN_CASE(t, test_transfer_dst_error_finishes);
+	T_RUN_CASE(t, test_transfer_backpressure_completes);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

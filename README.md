@@ -107,6 +107,7 @@ Provided scripts:
 | ---------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | [libruleset.lua](libruleset.lua)                           | Ruleset framework and RPC utilities                                                     |
 | [agent.lua](agent.lua)                                     | RPC-based peer discovery and relay                                                      |
+| [example/config.lua](example/config.lua)                   | Comprehensive boot configuration example for `-c`                                       |
 | [example/ruleset_simple.lua](example/ruleset_simple.lua)   | Minimal ruleset with domain and IP rule tables                                          |
 | [example/ruleset.lua](example/ruleset.lua)                 | Full ruleset: `agent.lua` integration, schedule-based logic, RPC                        |
 | [example/ruleset_egress.lua](example/ruleset_egress.lua)   | Egress: blocks private addresses, maintains external IP/domain biglist, direct outbound |

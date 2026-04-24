@@ -20,6 +20,9 @@
 #include <unistd.h>
 
 #include <errno.h>
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -52,12 +55,6 @@ enum stub_dialer_mode {
 	STUB_DIALER_SUCCESS,
 };
 
-enum stub_transfer_start_mode {
-	STUB_TRANSFER_START_NONE,
-	STUB_TRANSFER_START_CONNECTED,
-	STUB_TRANSFER_START_FINISHED,
-};
-
 #if WITH_RULESET
 enum stub_ruleset_mode {
 	STUB_RULESET_FAIL,
@@ -78,10 +75,8 @@ static struct {
 	int dialer_do_calls;
 	int dialer_cancel_calls;
 
-	enum stub_transfer_start_mode transfer_start_mode;
-	struct transfer *transfers[2];
-	int transfer_count;
-	int transfer_stop_calls;
+	struct stub_xfer_ctx *xfer_ctxs[2];
+	int xfer_count;
 
 #if WITH_RULESET
 	enum stub_ruleset_mode ruleset_mode;
@@ -102,10 +97,8 @@ static struct {
 	.dialer_result_fd = -1,
 	.dialer_do_calls = 0,
 	.dialer_cancel_calls = 0,
-	.transfer_start_mode = STUB_TRANSFER_START_NONE,
-	.transfers = { NULL, NULL },
-	.transfer_count = 0,
-	.transfer_stop_calls = 0,
+	.xfer_ctxs = { NULL, NULL },
+	.xfer_count = 0,
 #if WITH_RULESET
 	.ruleset_mode = STUB_RULESET_FAIL,
 	.ruleset_pending_cb = NULL,
@@ -132,11 +125,11 @@ static void stub_reset(void)
 	STUB.dialer_result_fd = -1;
 	STUB.dialer_do_calls = 0;
 	STUB.dialer_cancel_calls = 0;
-	STUB.transfer_start_mode = STUB_TRANSFER_START_NONE;
-	STUB.transfers[0] = NULL;
-	STUB.transfers[1] = NULL;
-	STUB.transfer_count = 0;
-	STUB.transfer_stop_calls = 0;
+	for (int i = 0; i < STUB.xfer_count; i++) {
+		free(STUB.xfer_ctxs[i]);
+		STUB.xfer_ctxs[i] = NULL;
+	}
+	STUB.xfer_count = 0;
 #if WITH_RULESET
 	STUB.ruleset_mode = STUB_RULESET_FAIL;
 	STUB.ruleset_pending_cb = NULL;
@@ -153,6 +146,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
+	s->transfer = transfer_new(s->loop);
 	s->basereq = NULL;
 #if WITH_RULESET
 	s->ruleset = NULL;
@@ -423,70 +417,55 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 	STUB.dialer_cancel_calls++;
 }
 
-#if WITH_SPLICE
-void transfer_init(
-	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink, const bool use_splice)
-{
-	t->state = XFER_INIT;
-	t->src_fd = src_fd;
-	t->dst_fd = dst_fd;
-	t->state_cb = *callback;
-	t->byt_transferred = byt_transferred;
-	t->is_uplink = is_uplink;
-	UNUSED(use_splice);
+struct stub_xfer_ctx {
+#if WITH_THREADS
+	atomic_size_t *num_sessions;
 #else
-void transfer_init(
-	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	const int src_fd, const int dst_fd, uintmax_t *byt_transferred,
-	const bool is_uplink)
-{
-	t->state = XFER_INIT;
-	t->src_fd = src_fd;
-	t->dst_fd = dst_fd;
-	t->state_cb = *callback;
-	t->byt_transferred = byt_transferred;
-	t->is_uplink = is_uplink;
+	size_t *num_sessions;
 #endif
-	T_CHECK(STUB.transfer_count <
-		(int)(sizeof(STUB.transfers) / sizeof(STUB.transfers[0])));
-	STUB.transfers[STUB.transfer_count++] = t;
-}
+};
 
-void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t)
-{
-	switch (STUB.transfer_start_mode) {
-	case STUB_TRANSFER_START_NONE:
-		return;
-	case STUB_TRANSFER_START_CONNECTED:
-		t->state = XFER_CONNECTED;
-		break;
-	case STUB_TRANSFER_START_FINISHED:
-		t->state = XFER_FINISHED;
-		break;
-	default:
-		return;
-	}
-	t->state_cb.func(loop, t->state_cb.data);
-}
-
-void transfer_stop(struct ev_loop *loop, struct transfer *restrict t)
+struct transfer *transfer_new(struct ev_loop *restrict loop)
 {
 	UNUSED(loop);
-	UNUSED(t);
-	STUB.transfer_stop_calls++;
+	static int token;
+	return (struct transfer *)&token;
 }
 
-static void
-stub_set_all_transfers(struct ev_loop *loop, const enum transfer_state state)
+void transfer_free(struct transfer *restrict xfer)
 {
-	int i;
+	UNUSED(xfer);
+}
 
-	for (i = 0; i < STUB.transfer_count; i++) {
-		STUB.transfers[i]->state = state;
-		STUB.transfers[i]->state_cb.func(
-			loop, STUB.transfers[i]->state_cb.data);
+struct transfer_ctx *transfer_start(
+	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
+	const struct transfer_opts *restrict opts)
+{
+	UNUSED(xfer);
+	UNUSED(acc_fd);
+	UNUSED(dial_fd);
+	T_CHECK(STUB.xfer_count <
+		(int)(sizeof(STUB.xfer_ctxs) / sizeof(STUB.xfer_ctxs[0])));
+	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
+	if (xctx == NULL) {
+		return NULL;
+	}
+	xctx->num_sessions = opts->num_sessions;
+	STUB.xfer_ctxs[STUB.xfer_count++] = xctx;
+	return (struct transfer_ctx *)xctx;
+}
+
+static void stub_fire_all_xfer_finished(struct ev_loop *loop)
+{
+	UNUSED(loop);
+	for (int i = 0; i < STUB.xfer_count; i++) {
+		struct stub_xfer_ctx *restrict xctx = STUB.xfer_ctxs[i];
+#if WITH_THREADS
+		atomic_fetch_sub_explicit(
+			xctx->num_sessions, 1, memory_order_relaxed);
+#else
+		(*xctx->num_sessions)--;
+#endif
 	}
 }
 
@@ -593,7 +572,7 @@ T_DECLARE_CASE(forward_dialer_fail_updates_stats)
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
-	T_EXPECT_EQ(s.stats.num_sessions, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -629,7 +608,7 @@ T_DECLARE_CASE(forward_timeout_cancels_pending_dialer)
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
-	T_EXPECT_EQ(s.stats.num_sessions, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -649,9 +628,7 @@ T_DECLARE_CASE(forward_bidir_timeout_connected_then_finished)
 	int dialed_peer_fd = -1;
 
 	stub_reset();
-	test_conf.bidir_timeout = true;
 	STUB.dialer_mode = STUB_DIALER_SUCCESS;
-	STUB.transfer_start_mode = STUB_TRANSFER_START_NONE;
 	set_ipv4_addr(&base_req.addr, 443);
 
 	T_CHECK(loop != NULL);
@@ -665,24 +642,19 @@ T_DECLARE_CASE(forward_bidir_timeout_connected_then_finished)
 	forward_serve(
 		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
 
-	T_EXPECT_EQ(STUB.transfer_count, 2);
+	/* After serve: ctx is already unref'd; transfer is running. */
+	T_EXPECT_EQ(STUB.xfer_count, 1);
 	T_EXPECT_EQ(s.stats.num_request, 1);
-	T_EXPECT_EQ(s.stats.num_success, 0);
-	T_EXPECT_EQ(s.stats.num_halfopen, 1);
-	T_EXPECT_EQ(s.stats.num_sessions, 0);
+	T_EXPECT_EQ(s.stats.num_success, 1);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT_EQ(s.num_sessions, (size_t)1);
 
-	stub_set_all_transfers(loop, XFER_CONNECTED);
+	/* Simulate transfer finishing on the xfer thread. */
+	stub_fire_all_xfer_finished(loop);
 
 	T_EXPECT_EQ(s.stats.num_success, 1);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
-	T_EXPECT_EQ(s.stats.num_sessions, 1);
-
-	stub_set_all_transfers(loop, XFER_FINISHED);
-
-	T_EXPECT_EQ(STUB.transfer_stop_calls, 2);
-	T_EXPECT_EQ(s.stats.num_success, 1);
-	T_EXPECT_EQ(s.stats.num_halfopen, 0);
-	T_EXPECT_EQ(s.stats.num_sessions, 0);
+	T_EXPECT_EQ(s.num_sessions, (size_t)0);
 
 	T_CHECK(close(accepted_peer_fd) == 0);
 	T_CHECK(close(dialed_peer_fd) == 0);
@@ -731,7 +703,7 @@ T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
-	T_EXPECT_EQ(s.stats.num_sessions, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -767,7 +739,7 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
-	T_EXPECT_EQ(s.stats.num_sessions, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
 
 	ev_loop_destroy(loop);
 }

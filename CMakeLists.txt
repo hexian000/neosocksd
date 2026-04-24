@@ -57,6 +57,7 @@ option(BUILD_STATIC "Build a static executable" OFF)
 option(BUILD_PIE "Build a position independent executable" OFF)
 option(ENABLE_MIMALLOC "Enable mimalloc" OFF)
 option(FORCE_POSIX "Build the core features using POSIX.1 APIs only" OFF)
+option(ENABLE_THREADS "Enable thread offloading" OFF)
 option(LINK_STATIC_LIBS "Link against static libraries" OFF)
 option(ENABLE_SYSTEMD "Enable systemd integration" OFF)
 option(ENABLE_RULESET "Enable ruleset scripting (requires Lua)" ON)
@@ -121,6 +122,19 @@ endif()
 
 include(CTest)
 add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})
+
+include(CheckLibraryExists)
+
+# find math
+check_library_exists(m floor "" LIBM)
+
+# find threads
+if(ENABLE_THREADS)
+    find_package(Threads)
+    if(Threads_FOUND)
+        set(WITH_THREADS TRUE)
+    endif()
+endif()
 
 add_subdirectory(contrib)
 add_subdirectory(src)

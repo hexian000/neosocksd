@@ -175,6 +175,58 @@ T_DECLARE_CASE(resolve_cancel_suppresses_callback)
 	free_test_resolver(resolver, loop);
 }
 
+T_DECLARE_CASE(resolve_success_ipv6)
+{
+	struct ev_loop *loop = NULL;
+	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolve_result result = { 0 };
+	const struct resolver_stats *stats;
+
+	T_CHECK(resolve_do(
+			resolver,
+			(struct resolve_cb){
+				.func = resolve_capture_cb,
+				.data = &result,
+			},
+			"::1", "443", AF_INET6) != NULL);
+	T_EXPECT(wait_for_result(loop, &result));
+	T_EXPECT(result.ok);
+	T_EXPECT_EQ(result.family, AF_INET6);
+	T_EXPECT_EQ(result.port, 443);
+
+	stats = resolver_stats(resolver);
+	T_EXPECT_EQ(stats->num_query, 1);
+	T_EXPECT_EQ(stats->num_success, 1);
+
+	free_test_resolver(resolver, loop);
+}
+
+T_DECLARE_CASE(resolve_success_unspec)
+{
+	struct ev_loop *loop = NULL;
+	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolve_result result = { 0 };
+	const struct resolver_stats *stats;
+
+	T_CHECK(resolve_do(
+			resolver,
+			(struct resolve_cb){
+				.func = resolve_capture_cb,
+				.data = &result,
+			},
+			"127.0.0.1", "80", AF_UNSPEC) != NULL);
+	T_EXPECT(wait_for_result(loop, &result));
+	T_EXPECT(result.ok);
+	T_EXPECT(result.family == AF_INET || result.family == AF_INET6);
+	T_EXPECT_EQ(result.port, 80);
+
+	stats = resolver_stats(resolver);
+	T_EXPECT_EQ(stats->num_query, 1);
+	T_EXPECT_EQ(stats->num_success, 1);
+
+	free_test_resolver(resolver, loop);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -183,6 +235,8 @@ int main(void)
 	T_RUN_CASE(t, resolve_success_ipv4);
 	T_RUN_CASE(t, resolve_failure_invalid_name);
 	T_RUN_CASE(t, resolve_cancel_suppresses_callback);
+	T_RUN_CASE(t, resolve_success_ipv6);
+	T_RUN_CASE(t, resolve_success_unspec);
 	resolver_cleanup();
 	return !T_RESULT(t);
 }

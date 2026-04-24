@@ -141,10 +141,10 @@ void loadlibs(void);
 void unloadlibs(void);
 
 /**
- * @brief Per-thread CPU load since the previous call.
+ * @brief Per-process CPU load since the previous call.
  * @return Fraction in [0,1] when available, or -1 when unavailable.
  */
-double thread_load(void);
+double process_load(void);
 
 /* socket utilities */
 void socket_bind_netdev(int fd, const char *netdev);

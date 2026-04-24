@@ -3,111 +3,97 @@
 
 /**
  * @file transfer.h
- * @brief Non-blocking data transfer helpers built on libev.
+ * @brief Bidirectional non-blocking data transfer, optionally on a dedicated
+ * thread.
  *
- * Provides a small state machine and an `ev_io` watcher to shuttle bytes
- * between a source file descriptor and a destination file descriptor in a
- * non-blocking fashion. Statistics can be optionally reported through a shared
- * counter. When available and enabled at build/runtime, `splice(2)` may be
- * used to reduce copies.
+ * When WITH_THREADS is enabled, `struct transfer` owns an I/O thread and
+ * dispatch infrastructure; transfers run on that thread.  When disabled,
+ * transfers are registered as I/O watchers on the caller-supplied ev_loop.
+ * `struct transfer_ctx` is the per-connection bidirectional transfer object
+ * in both modes.
+ *
+ * Lifecycle:
+ *   transfer_new()  →  transfer_start() × N  →  transfer_free()
+ *
+ * Each transfer_ctx is self-owned: it is allocated by transfer_start() and
+ * freed once both halves finish.  Callers must not dereference the returned
+ * pointer after transfer_start() returns.
  */
 
 #ifndef TRANSFER_H
 #define TRANSFER_H
 
-#include "util.h"
-
-#include "io/io.h"
-#include "utils/buffer.h"
-
 #include <ev.h>
 
-#include <stddef.h>
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
+#include <stdbool.h>
 #include <stdint.h>
 
-enum transfer_state {
-	XFER_INIT,
-	XFER_CONNECTED,
-	XFER_LINGER,
-	XFER_FINISHED,
-};
+struct transfer;
+struct transfer_ctx;
 
 /**
- * @brief Callback invoked when a transfer state change occurs.
- */
-struct transfer_state_cb {
-	void (*func)(struct ev_loop *loop, void *data);
-	void *data;
-};
-
-/**
- * @brief Transfer context and buffers for non-blocking copy between fds.
- */
-struct transfer {
-	enum transfer_state state;
-	int src_fd, dst_fd;
-	ev_io w_socket;
-	struct transfer_state_cb state_cb;
-	uintmax_t *byt_transferred;
-
-	bool is_uplink : 1;
-#if WITH_SPLICE
-	bool use_splice : 1;
-	struct splice_pipe pipe;
-#endif
-	size_t pos;
-	struct {
-		BUFFER_HDR;
-		unsigned char data[IO_BUFSIZE];
-	} buf;
-};
-
-/**
- * @brief Initialize a transfer context.
+ * @brief Create the transfer engine.
  *
- * The transfer is initialized in ::XFER_INIT state and is ready to be started
- * with transfer_start(). The watcher is configured to initially listen for
- * readability on `src_fd`.
+ * When WITH_THREADS is enabled, starts a dedicated I/O thread.
  *
- * @param t Transfer context to initialize.
- * @param callback Callback invoked on state changes.
- * @param src_fd Source file descriptor to read from (non-blocking).
- * @param dst_fd Destination file descriptor to write to (non-blocking).
- * @param byt_transferred Optional pointer to a counter to accumulate the
- *        number of bytes successfully sent. May be NULL.
- * @param is_uplink true if this transfer is for uplink (client to server).
-#if WITH_SPLICE
- * @param use_splice true if splice(2) is preferred for this transfer.
-#endif
+ * @param loop Main event loop (must outlive the returned engine; used directly
+ *             when threads are disabled, stored for reference otherwise).
+ * @return Heap-allocated engine, or NULL on allocation / thread failure.
  */
-#if WITH_SPLICE
-void transfer_init(
-	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	int src_fd, int dst_fd, uintmax_t *byt_transferred, bool is_uplink,
-	bool use_splice);
+struct transfer *transfer_new(struct ev_loop *loop);
+
+/**
+ * @brief Stop the engine and free all resources. NULL-safe.
+ *
+ * When WITH_THREADS is enabled, signals the I/O thread to stop, cancels
+ * all in-flight transfers, joins the thread, and releases all resources.
+ * When disabled, cancels all in-flight transfers and frees the engine.
+ * Any pending num_sessions decrements are executed before this returns.
+ *
+ * @param xfer Engine returned by transfer_new().
+ */
+void transfer_free(struct transfer *xfer);
+
+/* Options passed to transfer_start(). */
+struct transfer_opts {
+#if WITH_THREADS
+	atomic_uintmax_t *byt_up;
+	atomic_uintmax_t *byt_down;
 #else
-void transfer_init(
-	struct transfer *restrict t, const struct transfer_state_cb *callback,
-	int src_fd, int dst_fd, uintmax_t *byt_transferred, bool is_uplink);
+	uintmax_t *byt_up;
+	uintmax_t *byt_down;
 #endif
+#if WITH_SPLICE
+	bool use_splice;
+#endif
+#if WITH_THREADS
+	atomic_size_t *num_sessions;
+#else
+	size_t *num_sessions;
+#endif
+};
 
 /**
- * @brief Start the transfer by starting its watcher on the given loop.
+ * @brief Start a bidirectional transfer between two connected sockets.
  *
- * @param loop Event loop.
- * @param t Transfer context previously initialized with transfer_init().
+ * Takes ownership of `acc_fd` and `dial_fd`; the caller must set both to -1
+ * immediately after a successful call.
+ *
+ * The transfer_ctx is self-owned: it is freed on the I/O thread after both
+ * halves finish, at which point *num_sessions is decremented atomically.
+ * The caller must not dereference the returned pointer.
+ *
+ * @param xfer Engine.
+ * @param acc_fd Accepted (client-side) file descriptor.
+ * @param dial_fd Dialed (upstream-side) file descriptor.
+ * @param opts Transfer options (byte counters, splice hint, session counter).
+ * @return Opaque non-NULL handle on success, NULL on OOM (fds are NOT closed).
  */
-void transfer_start(struct ev_loop *restrict loop, struct transfer *restrict t);
-
-/**
- * @brief Stop the transfer watcher and finalize state.
- *
- * Safe to call multiple times. When built with splice support, this will also
- * release the internal pipe back to the cache.
- *
- * @param loop Event loop.
- * @param t Transfer context.
- */
-void transfer_stop(struct ev_loop *loop, struct transfer *restrict t);
+struct transfer_ctx *transfer_start(
+	struct transfer *xfer, int acc_fd, int dial_fd,
+	const struct transfer_opts *opts);
 
 #endif /* TRANSFER_H */

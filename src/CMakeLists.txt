@@ -3,13 +3,11 @@ add_executable(neosocksd
     conf.c conf.h
     dialer.c dialer.h
     resolver.c resolver.h
-    proto/codec.c proto/codec.h
     ruleset.c ruleset.h
     transfer.c transfer.h
     http_client.c http_client.h
     forward.c forward.h
     socks.c socks.h
-    proto/http.c proto/http.h
     http_proxy.c http_proxy.h
     api_server.c api_server.h
     api_client.c api_client.h
@@ -59,6 +57,14 @@ endif()
 target_compile_options(neosocksd PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 # be strict with original sources
 target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra -Werror)
+
+if(LIBM)
+    target_link_libraries(neosocksd PRIVATE m)
+endif()
+
+if(WITH_THREADS)
+    target_link_libraries(neosocksd PRIVATE Threads::Threads)
+endif()
 
 # find libev
 find_path(LIBEV_INCLUDE_DIR NAMES ev.h)
@@ -158,8 +164,6 @@ if(ENABLE_RULESET)
     set(WITH_RULESET TRUE)
 endif()
 
-include(CheckLibraryExists)
-check_library_exists(m floor "" LIBM)
 if(LIBM)
     target_link_libraries(neosocksd PRIVATE m)
 endif()
@@ -172,7 +176,7 @@ if(ENABLE_MIMALLOC)
     find_package(mimalloc)
     if(EXISTS "${MIMALLOC_OBJECT_DIR}/mimalloc.o")
         message(STATUS "mimalloc ${mimalloc_VERSION}: ${MIMALLOC_OBJECT_DIR}/mimalloc.o")
-        target_link_libraries(neosocksd PUBLIC "${MIMALLOC_OBJECT_DIR}/mimalloc.o")
+        target_link_libraries(neosocksd PRIVATE "${MIMALLOC_OBJECT_DIR}/mimalloc.o")
     else()
         message(WARNING "mimalloc not found")
     endif()
@@ -336,6 +340,9 @@ target_include_directories(transfer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(transfer_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 target_compile_options(transfer_test PRIVATE -pedantic -Wall -Wextra -Werror)
 target_link_libraries(transfer_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(WITH_THREADS)
+    target_link_libraries(transfer_test PRIVATE Threads::Threads)
+endif()
 if(LIBM)
     target_link_libraries(transfer_test PRIVATE m)
 endif()
@@ -432,6 +439,9 @@ target_include_directories(dialer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(dialer_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 target_compile_options(dialer_test PRIVATE -pedantic -Wall -Wextra -Werror)
 target_link_libraries(dialer_test PRIVATE csnippets miniz ${LIBEV_LIBRARY})
+if(WITH_THREADS)
+    target_link_libraries(dialer_test PRIVATE Threads::Threads)
+endif()
 if(LIBM)
     target_link_libraries(dialer_test PRIVATE m)
 endif()

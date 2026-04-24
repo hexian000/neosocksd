@@ -6,6 +6,9 @@
 
 #include <ev.h>
 
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -16,6 +19,7 @@ struct resolver;
 struct ruleset;
 struct sockaddr;
 struct server;
+struct transfer;
 
 struct server_stats {
 	/* Proxy service stats */
@@ -92,6 +96,19 @@ struct server {
 	struct server_stats stats;
 	void *data;
 
+	/*
+	 * Counters written by the transfer thread (or main thread when
+	 * WITH_THREADS is disabled); must be accessed atomically in
+	 * multi-threaded builds.  Exposed as plain values via server_stats().
+	 */
+#if WITH_THREADS
+	atomic_size_t num_sessions;
+	atomic_uintmax_t byt_up, byt_down;
+#else
+	size_t num_sessions;
+	uintmax_t byt_up, byt_down;
+#endif
+
 	/* Signal watchers */
 	ev_signal w_sighup;
 	ev_signal w_sigint;
@@ -99,6 +116,7 @@ struct server {
 
 	struct config *conf;
 	struct resolver *resolver;
+	struct transfer *transfer;
 	struct dialreq *basereq;
 #if WITH_RULESET
 	struct ruleset *ruleset;
@@ -111,7 +129,8 @@ struct server {
 bool server_init(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,
-	struct dialreq *basereq, struct ruleset *ruleset);
+	struct transfer *transfer, struct dialreq *basereq,
+	struct ruleset *ruleset);
 
 void server_stop(struct server *restrict s);
 

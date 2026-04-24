@@ -45,7 +45,7 @@ const struct resolver_stats *resolver_stats(const struct resolver *restrict r)
 	return &resolver_stub_stats;
 }
 
-double thread_load(void)
+double process_load(void)
 {
 	return -1.0;
 }
@@ -64,6 +64,9 @@ void server_stats(
 		out->num_accept += lst->num_accept;
 		out->num_serve += lst->num_serve;
 	}
+	out->num_sessions = s->num_sessions;
+	out->byt_up = s->byt_up;
+	out->byt_down = s->byt_down;
 }
 
 #if WITH_SPLICE
@@ -420,8 +423,8 @@ static void init_server_pair(
 	core->listeners[0].stats.num_serve = 8;
 	core->stats.num_request = 13;
 	core->stats.num_success = 11;
-	core->stats.byt_up = 4096;
-	core->stats.byt_down = 8192;
+	core->byt_up = 4096;
+	core->byt_down = 8192;
 #if WITH_RULESET
 	api->ruleset = NULL;
 	core->ruleset = NULL;
@@ -441,8 +444,8 @@ static void init_unified_server(struct server *restrict s, struct ev_loop *loop)
 	s->listeners[0].stats.num_serve = 8;
 	s->stats.num_request = 13;
 	s->stats.num_success = 11;
-	s->stats.byt_up = 4096;
-	s->stats.byt_down = 8192;
+	s->byt_up = 4096;
+	s->byt_down = 8192;
 #if WITH_RULESET
 	s->ruleset = NULL;
 #endif

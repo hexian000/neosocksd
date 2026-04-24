@@ -27,6 +27,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdbool.h>
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,10 +40,17 @@ static bool is_startup_limited(const struct server *restrict s)
 	const struct server_stats *restrict stats = &s->stats;
 
 	/* Check maximum session limit */
-	if (conf->max_sessions > 0 &&
-	    stats->num_sessions > (size_t)conf->max_sessions) {
-		LOGVV("session limit exceeded, rejecting new connection");
-		return true;
+	if (conf->max_sessions > 0) {
+#if WITH_THREADS
+		const size_t n = atomic_load_explicit(
+			&s->num_sessions, memory_order_relaxed);
+#else
+		const size_t n = s->num_sessions;
+#endif
+		if (n > (size_t)conf->max_sessions) {
+			LOGVV("session limit exceeded, rejecting new connection");
+			return true;
+		}
 	}
 
 	/* Check full startup limit */
@@ -290,13 +300,15 @@ resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
 bool server_init(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,
-	struct dialreq *basereq, struct ruleset *ruleset)
+	struct transfer *transfer, struct dialreq *basereq,
+	struct ruleset *ruleset)
 {
 	UNUSED(ruleset);
 	*s = (struct server){
 		.loop = loop,
 		.conf = conf,
 		.resolver = resolver,
+		.transfer = transfer,
 		.basereq = basereq,
 #if WITH_RULESET
 		.ruleset = ruleset,
@@ -417,4 +429,15 @@ void server_stats(
 		out->num_accept += lst->num_accept;
 		out->num_serve += lst->num_serve;
 	}
+#if WITH_THREADS
+	out->num_sessions =
+		atomic_load_explicit(&s->num_sessions, memory_order_relaxed);
+	out->byt_up = atomic_load_explicit(&s->byt_up, memory_order_relaxed);
+	out->byt_down =
+		atomic_load_explicit(&s->byt_down, memory_order_relaxed);
+#else
+	out->num_sessions = s->num_sessions;
+	out->byt_up = s->byt_up;
+	out->byt_down = s->byt_down;
+#endif
 }
