@@ -7,15 +7,15 @@
 #include "task.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /**
  * @defgroup dispatcher
  * @brief Asynchronous task dispatcher with thread-safe queue.
- * 
- * Two usage modes:
- * - Main thread: dispatcher_tick() + dispatcher_join()
- * - Worker thread: dispatcher_loop() + dispatcher_destroy()
- * 
+ *
+ * Main-thread usage: dispatcher_tick() to process pending tasks,
+ * dispatcher_join() to drain and destroy.
+ *
  * @{
  */
 
@@ -25,11 +25,13 @@
 struct dispatcher;
 
 /**
- * @brief Create a new dispatcher.
+ * @brief Create a new dispatcher with the given inline pool capacity.
  * 
+ * @param capacity Number of task items in the inline pool. 0 disables the
+ *                 pool (all tasks are heap-allocated).
  * @return New dispatcher instance, or NULL on failure.
  */
-struct dispatcher *dispatcher_create(void);
+struct dispatcher *dispatcher_create(size_t capacity);
 
 /**
  * @brief Enqueue a task for asynchronous execution (thread-safe).
@@ -50,30 +52,14 @@ void dispatcher_tick(struct dispatcher *d);
 
 /**
  * @brief Shutdown dispatcher, process remaining tasks and cleanup.
- * 
- * Sets exit flag, processes all pending tasks, then calls dispatcher_destroy().
- * 
+ *
+ * Processes all pending tasks, then calls dispatcher_destroy().
+ *
  * @param d Dispatcher instance.
  * @note Call from main thread. Pointer becomes invalid after return.
+ * @warning No other threads may invoke tasks during or after this call.
  */
 void dispatcher_join(struct dispatcher *d);
-
-/**
- * @brief Run dispatcher loop until dispatcher_break() is called.
- * 
- * Blocks and processes tasks continuously. Does not cleanup resources.
- * 
- * @param d Dispatcher instance.
- * @note Run in worker thread. Call dispatcher_destroy() afterward.
- */
-void dispatcher_loop(struct dispatcher *d);
-
-/**
- * @brief Signal dispatcher_loop() to exit (thread-safe).
- * 
- * @param d Dispatcher instance.
- */
-void dispatcher_break(struct dispatcher *d);
 
 /**
  * @brief Destroy dispatcher and free all resources.

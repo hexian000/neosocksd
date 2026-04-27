@@ -59,20 +59,17 @@ void transfer_free(struct transfer *xfer);
 
 /* Options passed to transfer_start(). */
 struct transfer_opts {
-#if WITH_THREADS
-	atomic_uintmax_t *byt_up;
-	atomic_uintmax_t *byt_down;
-#else
-	uintmax_t *byt_up;
-	uintmax_t *byt_down;
-#endif
 #if WITH_SPLICE
 	bool use_splice;
 #endif
 #if WITH_THREADS
 	atomic_size_t *num_sessions;
+	atomic_uintmax_t *byt_up;
+	atomic_uintmax_t *byt_down;
 #else
 	size_t *num_sessions;
+	uintmax_t *byt_up;
+	uintmax_t *byt_down;
 #endif
 };
 

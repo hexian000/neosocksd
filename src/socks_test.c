@@ -139,7 +139,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
-	s->transfer = transfer_new(s->loop);
+	s->xfer = transfer_new(s->loop);
 	s->ruleset = G.ruleset;
 	s->basereq = NULL;
 }

@@ -5,7 +5,6 @@
 
 #include "io/memory.h"
 #include "io/stream.h"
-#include "miniz.h"
 #include "utils/buffer.h"
 #include "utils/testing.h"
 
@@ -58,6 +57,8 @@ T_DECLARE_CASE(codec_null_base)
 	T_EXPECT(codec_deflate_writer(NULL) == NULL);
 	T_EXPECT(codec_zlib_reader(NULL) == NULL);
 	T_EXPECT(codec_inflate_reader(NULL) == NULL);
+	T_EXPECT(codec_gzip_writer(NULL) == NULL);
+	T_EXPECT(codec_gzip_reader(NULL) == NULL);
 }
 
 T_DECLARE_CASE(codec_zlib_roundtrip)
@@ -133,82 +134,235 @@ T_DECLARE_CASE(codec_deflate_roundtrip)
 	VBUF_FREE(compressed);
 }
 
-T_DECLARE_CASE(gzip_unbox_valid_minimal)
+T_DECLARE_CASE(codec_gzip_roundtrip)
 {
-	static const uint_least8_t gzip_data[] = {
-		0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x03, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x86,
-		0xa6, 0x10, 0x36, 0x05, 0x00, 0x00, 0x00,
-	};
-	size_t len = sizeof(gzip_data);
-	const void *deflate_data = gzip_unbox(gzip_data, &len);
+	enum { N = 16384 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	struct vbuffer *compressed = NULL;
+	struct stream *w = NULL;
+	struct stream *r = NULL;
+	size_t i = 0;
 
-	T_CHECK(deflate_data != NULL);
-	T_EXPECT(deflate_data == gzip_data + 10);
-	T_EXPECT_EQ(len, (size_t)7);
-	T_EXPECT_MEMEQ(deflate_data, gzip_data + 10, len);
+	for (i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 53U + 7U) & 0xffU);
+	}
+	compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+
+	w = codec_gzip_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src, N / 2));
+	T_EXPECT(stream_write_all(w, src + (N / 2), N - (N / 2)));
+	T_EXPECT_EQ(stream_close(w), 0);
+	w = NULL;
+
+	T_CHECK(compressed != NULL);
+	T_EXPECT(VBUF_LEN(compressed) > 0);
+
+	r = codec_gzip_reader(
+		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
+	T_CHECK(r != NULL);
+	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT_EQ(stream_close(r), 0);
+	r = NULL;
+
+	T_EXPECT_MEMEQ(out, src, N);
+	VBUF_FREE(compressed);
 }
 
-T_DECLARE_CASE(gzip_unbox_with_fname_comment)
+T_DECLARE_CASE(codec_gzip_multiframe)
 {
-	static const uint_least8_t gzip_data[] = {
-		0x1f, 0x8b, 0x08, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x03, 'f',  'i',  'l',	'e',  '.',  't',  'x',	't',
-		0x00, 'c',  'o',  'm',	'm',  'e',  'n',  't',	0x00,
-		0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x86, 0xa6,
-		0x10, 0x36, 0x05, 0x00, 0x00, 0x00,
-	};
-	size_t len = sizeof(gzip_data);
-	const uint_least8_t *deflate_data = gzip_unbox(gzip_data, &len);
+	enum { N = 4096 };
+	uint_least8_t src1[N], src2[N];
+	uint_least8_t out[N * 2];
+	struct vbuffer *frame1 = NULL, *frame2 = NULL, *combined = NULL;
+	struct stream *w = NULL;
+	struct stream *r = NULL;
+	size_t i = 0;
 
-	T_CHECK(deflate_data != NULL);
-	T_EXPECT_EQ(len, (size_t)7);
-	T_EXPECT_MEMEQ(deflate_data, gzip_data + sizeof(gzip_data) - 15, len);
+	for (i = 0; i < N; ++i) {
+		src1[i] = (uint_least8_t)((i * 11U) & 0xffU);
+		src2[i] = (uint_least8_t)((i * 17U + 3U) & 0xffU);
+	}
+	frame1 = VBUF_NEW(64);
+	frame2 = VBUF_NEW(64);
+	T_CHECK(frame1 != NULL);
+	T_CHECK(frame2 != NULL);
+
+	w = codec_gzip_writer(io_heapwriter(&frame1));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src1, N));
+	T_EXPECT_EQ(stream_close(w), 0);
+	w = NULL;
+
+	w = codec_gzip_writer(io_heapwriter(&frame2));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src2, N));
+	T_EXPECT_EQ(stream_close(w), 0);
+	w = NULL;
+
+	/* Concatenate both gzip members into one buffer */
+	combined = VBUF_NEW(VBUF_LEN(frame1) + VBUF_LEN(frame2));
+	T_CHECK(combined != NULL);
+	VBUF_APPEND(combined, VBUF_DATA(frame1), VBUF_LEN(frame1));
+	VBUF_APPEND(combined, VBUF_DATA(frame2), VBUF_LEN(frame2));
+	T_CHECK(!VBUF_HAS_OOM(combined));
+	VBUF_FREE(frame1);
+	VBUF_FREE(frame2);
+
+	r = codec_gzip_reader(
+		io_memreader(VBUF_DATA(combined), VBUF_LEN(combined)));
+	T_CHECK(r != NULL);
+	T_EXPECT(stream_read_exact(r, out, N * 2));
+	T_EXPECT_EQ(stream_close(r), 0);
+	r = NULL;
+
+	T_EXPECT_MEMEQ(out, src1, N);
+	T_EXPECT_MEMEQ(out + N, src2, N);
+	VBUF_FREE(combined);
 }
 
-T_DECLARE_CASE(gzip_unbox_fhcrc)
+T_DECLARE_CASE(codec_gzip_crc_error)
 {
-	uint_least8_t gzip_data[] = {
-		0x1f, 0x8b, 0x08, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x03, 0x00, 0x00, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07,
-		0x00, 0x86, 0xa6, 0x10, 0x36, 0x05, 0x00, 0x00, 0x00,
-	};
-	size_t len = sizeof(gzip_data);
-	const uint_least16_t crc16 = (uint_least16_t)mz_crc32(0, gzip_data, 10);
-	const void *deflate_data;
+	enum { N = 512 };
+	uint_least8_t src[N];
+	uint_least8_t dummy[N];
+	struct vbuffer *compressed = NULL;
+	struct stream *w = NULL;
+	struct stream *r = NULL;
+	size_t i = 0;
 
-	gzip_data[10] = (uint_least8_t)(crc16 & 0xffU);
-	gzip_data[11] = (uint_least8_t)((crc16 >> 8) & 0xffU);
+	for (i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 7U + 5U) & 0xffU);
+	}
+	compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
 
-	deflate_data = gzip_unbox(gzip_data, &len);
-	T_CHECK(deflate_data != NULL);
-	T_EXPECT_EQ(len, (size_t)7);
+	w = codec_gzip_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src, N));
+	T_EXPECT_EQ(stream_close(w), 0);
+	w = NULL;
 
-	gzip_data[10] ^= 0x5a;
-	len = sizeof(gzip_data);
-	T_EXPECT(gzip_unbox(gzip_data, &len) == NULL);
+	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 8);
+	/* Flip a bit in the CRC-32 field (last 8 bytes, first 4 = CRC) */
+	((unsigned char *)VBUF_DATA(compressed))[VBUF_LEN(compressed) - 8] ^=
+		0x01;
+
+	r = codec_gzip_reader(
+		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
+	T_CHECK(r != NULL);
+	/* Read all body data, then probe for trailer to trigger validation */
+	(void)stream_read(r, dummy, &(size_t){ sizeof(dummy) });
+	{
+		unsigned char probe[1];
+		size_t n = sizeof(probe);
+		(void)stream_read(r, probe, &n);
+	}
+	const int err = stream_close(r);
+	r = NULL;
+	VBUF_FREE(compressed);
+	T_EXPECT(err != 0);
 }
 
-T_DECLARE_CASE(gzip_unbox_invalid_inputs)
+T_DECLARE_CASE(codec_gzip_flush_multiframe)
 {
-	static const uint_least8_t short_data[] = { 0x1f, 0x8b, 0x08, 0x00 };
-	static const uint_least8_t bad_magic[] = {
-		0x1f, 0x8a, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
-	};
-	static const uint_least8_t no_trailer[] = {
-		0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x03, 0xcb, 0x48,
-	};
-	size_t len;
+	enum { N1 = 4096, N2 = 4096 };
+	uint_least8_t src1[N1], src2[N2];
+	uint_least8_t out[N1 + N2];
+	struct vbuffer *compressed = NULL;
+	struct stream *w = NULL;
+	struct stream *r = NULL;
+	size_t i = 0;
 
-	len = sizeof(short_data);
-	T_EXPECT(gzip_unbox(short_data, &len) == NULL);
+	for (i = 0; i < N1; ++i) {
+		src1[i] = (uint_least8_t)((i * 23U) & 0xffU);
+	}
+	for (i = 0; i < N2; ++i) {
+		src2[i] = (uint_least8_t)((i * 31U + 9U) & 0xffU);
+	}
+	compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
 
-	len = sizeof(bad_magic);
-	T_EXPECT(gzip_unbox(bad_magic, &len) == NULL);
+	/* Write two frames via flush boundary */
+	w = codec_gzip_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src1, N1));
+	T_EXPECT_EQ(stream_flush(w), 0);
+	T_EXPECT(stream_write_all(w, src2, N2));
+	T_EXPECT_EQ(stream_close(w), 0);
+	w = NULL;
 
-	len = sizeof(no_trailer);
-	T_EXPECT(gzip_unbox(no_trailer, &len) == NULL);
+	T_CHECK(compressed != NULL);
+	T_EXPECT(VBUF_LEN(compressed) > 0);
+
+	/* Verify two gzip magic headers in the compressed output */
+	{
+		const unsigned char *data = VBUF_DATA(compressed);
+		const size_t len = VBUF_LEN(compressed);
+		T_EXPECT(len >= 20);
+		T_EXPECT(data[0] == 0x1f && data[1] == 0x8b);
+		/* Scan for second gzip header after the first member */
+		size_t found = 0;
+		for (size_t j = 4; j + 1 < len; ++j) {
+			if (data[j] == 0x1f && data[j + 1] == 0x8b) {
+				found = j;
+				break;
+			}
+		}
+		T_EXPECT(found > 0);
+	}
+
+	/* Read back with gzip_reader (supports multi-member) */
+	r = codec_gzip_reader(
+		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
+	T_CHECK(r != NULL);
+	T_EXPECT(stream_read_exact(r, out, N1 + N2));
+	T_EXPECT_EQ(stream_close(r), 0);
+	r = NULL;
+
+	T_EXPECT_MEMEQ(out, src1, N1);
+	T_EXPECT_MEMEQ(out + N1, src2, N2);
+	VBUF_FREE(compressed);
+}
+
+T_DECLARE_CASE(codec_gzip_flush_empty)
+{
+	enum { N = 4096 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	struct vbuffer *compressed = NULL;
+	struct stream *w = NULL;
+	struct stream *r = NULL;
+	size_t i = 0;
+
+	for (i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 41U + 13U) & 0xffU);
+	}
+	compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+
+	/* Flush then close without writing more data should produce one member */
+	w = codec_gzip_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src, N));
+	T_EXPECT_EQ(stream_flush(w), 0);
+	T_EXPECT_EQ(stream_close(w), 0);
+	w = NULL;
+
+	T_CHECK(compressed != NULL);
+	T_EXPECT(VBUF_LEN(compressed) > 0);
+
+	r = codec_gzip_reader(
+		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
+	T_CHECK(r != NULL);
+	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT_EQ(stream_close(r), 0);
+	r = NULL;
+
+	T_EXPECT_MEMEQ(out, src, N);
+	VBUF_FREE(compressed);
 }
 
 int main(void)
@@ -218,10 +372,11 @@ int main(void)
 	T_RUN_CASE(t, codec_null_base);
 	T_RUN_CASE(t, codec_zlib_roundtrip);
 	T_RUN_CASE(t, codec_deflate_roundtrip);
-	T_RUN_CASE(t, gzip_unbox_valid_minimal);
-	T_RUN_CASE(t, gzip_unbox_with_fname_comment);
-	T_RUN_CASE(t, gzip_unbox_fhcrc);
-	T_RUN_CASE(t, gzip_unbox_invalid_inputs);
+	T_RUN_CASE(t, codec_gzip_roundtrip);
+	T_RUN_CASE(t, codec_gzip_multiframe);
+	T_RUN_CASE(t, codec_gzip_crc_error);
+	T_RUN_CASE(t, codec_gzip_flush_multiframe);
+	T_RUN_CASE(t, codec_gzip_flush_empty);
 
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

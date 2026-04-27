@@ -300,15 +300,14 @@ resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
 bool server_init(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,
-	struct transfer *transfer, struct dialreq *basereq,
-	struct ruleset *ruleset)
+	struct transfer *xfer, struct dialreq *basereq, struct ruleset *ruleset)
 {
 	UNUSED(ruleset);
 	*s = (struct server){
 		.loop = loop,
 		.conf = conf,
 		.resolver = resolver,
-		.transfer = transfer,
+		.xfer = xfer,
 		.basereq = basereq,
 #if WITH_RULESET
 		.ruleset = ruleset,

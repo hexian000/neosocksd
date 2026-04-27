@@ -132,6 +132,7 @@ case "$1" in
     cmake \
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+        -DENABLE_THREADS=ON \
         ..
     cmake --build . -t neosocksd
     (cd bin && objdump -drwS neosocksd >neosocksd.S)
@@ -143,6 +144,7 @@ case "$1" in
     cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Release" \
+        -DENABLE_THREADS=ON \
         ..
     cp compile_commands.json ../
     cmake --build . -t neosocksd
@@ -158,6 +160,7 @@ case "$1" in
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Debug" \
         -DENABLE_SANITIZERS=ON \
+        -DENABLE_THREADS=ON \
         ..
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"

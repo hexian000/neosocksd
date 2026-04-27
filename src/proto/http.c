@@ -310,11 +310,9 @@ struct stream *content_reader(
 	case CENCODING_DEFLATE:
 		r = codec_zlib_reader(io_memreader(buf, len));
 		break;
-	case CENCODING_GZIP: {
-		/* Remove gzip header and create inflate reader */
-		const void *p = gzip_unbox(buf, &len);
-		r = codec_inflate_reader(io_memreader(p, len));
-	} break;
+	case CENCODING_GZIP:
+		r = codec_gzip_reader(io_memreader(buf, len));
+		break;
 	default:
 		FAILMSGF("unexpected content encoding: %d", encoding);
 	}

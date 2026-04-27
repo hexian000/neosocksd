@@ -146,7 +146,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
-	s->transfer = transfer_new(s->loop);
+	s->xfer = transfer_new(s->loop);
 	s->basereq = NULL;
 #if WITH_RULESET
 	s->ruleset = NULL;

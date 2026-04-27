@@ -13,7 +13,7 @@
 #define ASSERT_TYPE(type, value)                                               \
 	((void)sizeof(struct {                                                 \
 		_Static_assert(                                                \
-			_Generic((value), type: 1, default: 0),                \
+			_Generic((value), type : 1, default : 0),              \
 			"type assertion failed");                              \
 		int _;                                                         \
 	}))
@@ -21,7 +21,7 @@
 #ifndef ASSERT_SUPER
 #define ASSERT_SUPER(super, type, member)                                      \
 	_Static_assert(                                                        \
-		_Generic(&(((type *)0)->member), super *: 1, default: 0) &&    \
+		_Generic(&(((type *)0)->member), super * : 1, default : 0) &&  \
 			(offsetof(type, member) == 0),                         \
 		"ill-formed struct definition")
 #endif

@@ -68,8 +68,8 @@ int main(int argc, char *argv[])
 	CHECKOOM(resolver);
 
 	/* Initialize transfer engine */
-	struct transfer *transfer = transfer_new(loop);
-	CHECKOOM(transfer);
+	struct transfer *xfer = transfer_new(loop);
+	CHECKOOM(xfer);
 
 	/* Initialize Lua ruleset if specified */
 #if WITH_RULESET
@@ -91,7 +91,7 @@ int main(int argc, char *argv[])
 
 	/* Initialize the global server and bind all listeners */
 	struct server *s = &app.server;
-	if (!server_init(s, loop, conf, resolver, transfer, basereq, ruleset)) {
+	if (!server_init(s, loop, conf, resolver, xfer, basereq, ruleset)) {
 		LOGF("failed to start server");
 		exit(EXIT_FAILURE);
 	}
@@ -143,9 +143,9 @@ int main(int argc, char *argv[])
 		LOGD_F("%zu objects finalized", num);
 	}
 	/* Stop transfer engine after all sessions cancelled */
-	if (transfer != NULL) {
-		transfer_free(transfer);
-		transfer = NULL;
+	if (xfer != NULL) {
+		transfer_free(xfer);
+		xfer = NULL;
 	}
 	ev_loop_destroy(loop); /* Destroy the event loop */
 	unloadlibs(); /* Unload dynamic libraries */

@@ -335,7 +335,7 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	const size_t cur = ++ctx->s->num_sessions;
 #endif
 	if (transfer_start(
-		    ctx->s->transfer, acc_fd, dial_fd,
+		    ctx->s->xfer, acc_fd, dial_fd,
 		    &(struct transfer_opts){
 			    .byt_up = &ctx->s->byt_up,
 			    .byt_down = &ctx->s->byt_down,
@@ -1068,14 +1068,15 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			const size_t cur = ++ctx->s->num_sessions;
 #endif
 			if (transfer_start(
-				    ctx->s->transfer, acc_fd, dial_fd,
+				    ctx->s->xfer, acc_fd, dial_fd,
 				    &(struct transfer_opts){
 					    .byt_up = &ctx->s->byt_up,
 					    .byt_down = &ctx->s->byt_down,
 #if WITH_SPLICE
 					    .use_splice = ctx->s->conf->pipe,
 #endif
-					    .num_sessions = &ctx->s->num_sessions,
+					    .num_sessions =
+						    &ctx->s->num_sessions,
 				    }) == NULL) {
 #if WITH_THREADS
 				atomic_fetch_sub_explicit(

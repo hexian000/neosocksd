@@ -25,7 +25,6 @@
 #include "utils/serialize.h"
 #include "utils/slog.h"
 
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -149,18 +148,21 @@ deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 }
 
 /**
- * @brief Flush DEFLATE stream (sync flush)
+ * @brief Flush DEFLATE stream (full flush)
  * @param p Pointer to deflate_stream structure
  * @return 0 on success, error code on failure
  *
- * Performs a synchronization flush, ensuring all pending input is
- * compressed and written while maintaining the ability to continue
- * compression.
+ * Performs a full flush, emitting a sync point so that the decompressor
+ * can restart from this point.  The base stream is also flushed.
  */
 static int deflate_flush(void *p)
 {
 	struct deflate_stream *restrict z = p;
-	return deflate_flush_(z, TDEFL_SYNC_FLUSH);
+	int ret = deflate_flush_(z, TDEFL_FULL_FLUSH);
+	if (ret == 0) {
+		ret = stream_flush(z->base);
+	}
+	return ret;
 }
 
 /**
@@ -424,122 +426,687 @@ struct stream *codec_inflate_reader(struct stream *base)
 /* RFC 1952 - gzip format implementation */
 
 /**
+ * @brief gzip compression stream implementation
+ *
+ * Identical layout to deflate_stream, extended with running CRC-32 and
+ * uncompressed byte count for the gzip trailer.
+ */
+struct gzip_wstream {
+	struct stream s;
+	struct stream *base;
+	bool finished : 1;
+	tdefl_status status;
+	tdefl_compressor deflator;
+	size_t dstpos, dstlen;
+	unsigned char dstbuf[IO_BUFSIZE];
+	/* gzip trailer state */
+	uint_least32_t crc;
+	uint_least32_t isize;
+};
+ASSERT_SUPER(struct stream, struct gzip_wstream, s);
+
+static int gzip_write(void *p, const void *buf, size_t *restrict len)
+{
+	struct gzip_wstream *restrict z = p;
+
+	/* Start a new gzip member if the previous one was finished by flush */
+	if (z->finished) {
+		static const unsigned char header[10] = {
+			0x1f, 0x8b, /* ID1, ID2 */
+			0x08, /* CM: deflate */
+			0x00, /* FLG: no optional fields */
+			0,    0,    0, 0, /* MTIME: not set */
+			0x00, /* XFL */
+			0xff, /* OS: unknown */
+		};
+		size_t hlen = sizeof(header);
+		const int herr = stream_write(z->base, header, &hlen);
+		if (herr != 0 || hlen < sizeof(header)) {
+			*len = 0;
+			return herr != 0 ? herr : -1;
+		}
+		const tdefl_status status = tdefl_init(
+			&z->deflator, NULL, NULL, TDEFL_DEFAULT_MAX_PROBES);
+		if (status != TDEFL_STATUS_OKAY) {
+			*len = 0;
+			return status;
+		}
+		z->status = TDEFL_STATUS_OKAY;
+		z->dstpos = z->dstlen = 0;
+		z->finished = false;
+	}
+
+	size_t nwritten = 0;
+	const unsigned char *src = buf;
+	size_t remain = *len;
+
+	while (remain > 0 && z->status == TDEFL_STATUS_OKAY) {
+		if (z->dstlen < sizeof(z->dstbuf)) {
+			size_t srclen = remain;
+			unsigned char *dst = z->dstbuf + z->dstlen;
+			size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
+			z->status = tdefl_compress(
+				&z->deflator, src, &srclen, dst, &dstlen,
+				TDEFL_NO_FLUSH);
+			/* Update CRC-32 and size over the consumed input */
+			z->crc = (uint_least32_t)mz_crc32(z->crc, src, srclen);
+			z->isize += (uint_least32_t)srclen;
+			src += srclen, remain -= srclen;
+			z->dstlen += dstlen;
+			nwritten += srclen;
+		}
+
+		unsigned char *avail = z->dstbuf + z->dstpos;
+		size_t n = z->dstlen - z->dstpos;
+		const int err = stream_write(z->base, avail, &n);
+		z->dstpos += n;
+		if (err != 0) {
+			return err;
+		}
+		if (z->dstpos < z->dstlen) {
+			return -1;
+		}
+		z->dstpos = z->dstlen = 0;
+	}
+
+	*len = nwritten;
+	if (z->status != TDEFL_STATUS_OKAY) {
+		return z->status;
+	}
+	return 0;
+}
+
+static int gzip_flush_(struct gzip_wstream *restrict z, const tdefl_flush flush)
+{
+	do {
+		unsigned char *buf = z->dstbuf + z->dstlen;
+		size_t n = sizeof(z->dstbuf) - z->dstlen;
+		z->status = tdefl_compress(
+			&z->deflator, NULL, NULL, buf, &n, flush);
+		z->dstlen += n;
+
+		buf = z->dstbuf + z->dstpos;
+		n = z->dstlen - z->dstpos;
+		const int err = stream_write(z->base, buf, &n);
+		z->dstpos += n;
+		if (err != 0) {
+			return err;
+		}
+		if (z->dstpos < z->dstlen) {
+			return -1;
+		}
+		z->dstpos = z->dstlen = 0;
+
+		if (z->status < TDEFL_STATUS_OKAY) {
+			return z->status;
+		}
+	} while (z->status != TDEFL_STATUS_DONE);
+	return 0;
+}
+
+/*
+ * Write the 8-byte gzip trailer (CRC-32 then ISIZE) to the base stream.
+ * Returns 0 on success, error code on failure.
+ */
+static int gzip_write_trailer(struct gzip_wstream *restrict z)
+{
+	unsigned char trailer[8];
+	write_uint32_le(trailer + 0, z->crc);
+	write_uint32_le(trailer + 4, z->isize);
+	size_t n = sizeof(trailer);
+	const int ret = stream_write(z->base, trailer, &n);
+	if (ret == 0 && n < sizeof(trailer)) {
+		return -1;
+	}
+	return ret;
+}
+
+/*
+ * Finish the current gzip member: flush the DEFLATE stream, write the
+ * trailer, and mark the stream as finished.  The next write will start
+ * a new gzip member.  The base stream is also flushed.
+ */
+static int gzip_flush(void *p)
+{
+	struct gzip_wstream *restrict z = p;
+	if (z->finished) {
+		return stream_flush(z->base);
+	}
+	int ret = gzip_flush_(z, TDEFL_FINISH);
+	if (ret == 0) {
+		ret = gzip_write_trailer(z);
+	}
+	if (ret == 0) {
+		z->finished = true;
+		z->crc = MZ_CRC32_INIT;
+		z->isize = 0;
+		ret = stream_flush(z->base);
+	}
+	return ret;
+}
+
+static int gzip_wclose(void *p)
+{
+	struct gzip_wstream *restrict z = p;
+	int ret = 0;
+	if (!z->finished) {
+		ret = gzip_flush_(z, TDEFL_FINISH);
+		if (ret == 0) {
+			ret = gzip_write_trailer(z);
+		}
+	}
+	const int err = stream_close(z->base);
+	free(z);
+	return ret != 0 ? ret : err;
+}
+
+struct stream *codec_gzip_writer(struct stream *base)
+{
+	if (base == NULL) {
+		return NULL;
+	}
+
+	/* Write static 10-byte gzip header: ID1 ID2 CM FLG MTIME XFL OS */
+	static const unsigned char header[10] = {
+		0x1f, 0x8b, /* ID1, ID2 */
+		0x08, /* CM: deflate */
+		0x00, /* FLG: no optional fields */
+		0,    0,    0, 0, /* MTIME: not set */
+		0x00, /* XFL */
+		0xff, /* OS: unknown */
+	};
+	size_t hlen = sizeof(header);
+	const int herr = stream_write(base, header, &hlen);
+	if (herr != 0 || hlen < sizeof(header)) {
+		stream_close(base);
+		return NULL;
+	}
+
+	struct gzip_wstream *z = malloc(sizeof(struct gzip_wstream));
+	if (z == NULL) {
+		LOGOOM();
+		stream_close(base);
+		return NULL;
+	}
+
+	static const struct stream_vftable vftable = {
+		.write = gzip_write,
+		.flush = gzip_flush,
+		.close = gzip_wclose,
+	};
+	z->s = (struct stream){ &vftable, NULL };
+	z->base = base;
+	z->finished = false;
+	z->status = TDEFL_STATUS_OKAY;
+
+	const tdefl_status status =
+		tdefl_init(&z->deflator, NULL, NULL, TDEFL_DEFAULT_MAX_PROBES);
+	if (status != TDEFL_STATUS_OKAY) {
+		stream_close(base);
+		free(z);
+		return NULL;
+	}
+
+	z->dstpos = z->dstlen = 0;
+	z->crc = MZ_CRC32_INIT;
+	z->isize = 0;
+	return (struct stream *)z;
+}
+
+/**
  * @brief gzip header flag bits (RFC 1952)
  *
  * These flags indicate which optional fields are present in the gzip header.
  */
 enum gzip_flags {
-	GZIP_FTEXT = 1 << 0, /**< File is probably ASCII text */
-	GZIP_FHCRC = 1 << 1, /**< Header CRC16 is present */
-	GZIP_FEXTRA = 1 << 2, /**< Extra field is present */
-	GZIP_FNAME = 1 << 3, /**< Original filename is present */
-	GZIP_FCOMMENT = 1 << 4, /**< File comment is present */
+	/* File is probably ASCII text */
+	GZIP_FTEXT = 1 << 0,
+	/* Header CRC16 is present */
+	GZIP_FHCRC = 1 << 1,
+	/* Extra field is present */
+	GZIP_FEXTRA = 1 << 2,
+	/* Original filename is present */
+	GZIP_FNAME = 1 << 3,
+	/* File comment is present */
+	GZIP_FCOMMENT = 1 << 4,
 };
 
-const void *gzip_unbox(const void *p, size_t *restrict len)
+/**
+ * @brief gzip decompression stream states
+ */
+enum gzip_rstate {
+	/* Parsing gzip member header */
+	GZIP_R_HEADER,
+	/* Decompressing DEFLATE body */
+	GZIP_R_BODY,
+	/* Consuming and validating 8-byte trailer */
+	GZIP_R_TRAILER,
+};
+
+/**
+ * @brief gzip header parser sub-phases
+ *
+ * These phases track parsing of optional fields within the gzip header.
+ */
+enum gzip_hphase {
+	/* Accumulating fixed 10-byte header */
+	GZIP_HPASE_HEADER,
+	/* FEXTRA: reading 2-byte xlen (low) */
+	GZIP_HPASE_FEXTRA_1,
+	/* FEXTRA: skipping xlen bytes */
+	GZIP_HPASE_FEXTRA_2,
+	/* FNAME: skipping until NUL */
+	GZIP_HPASE_FNAME,
+	/* FCOMMENT: skipping until NUL */
+	GZIP_HPASE_FCOMMENT,
+	/* FHCRC: reading low byte */
+	GZIP_HPASE_FHCRC_1,
+	/* FHCRC: reading high byte and validating */
+	GZIP_HPASE_FHCRC_2,
+	/* Header parsing complete */
+	GZIP_HPASE_DONE,
+	/* Special: waiting for second xlen byte */
+	GZIP_HPASE_XLEN_2 = 100,
+};
+
+/**
+ * @brief gzip decompression stream implementation
+ *
+ * Wraps inflate_stream fields with a state machine that handles the gzip
+ * header, body, and trailer for each member, supporting multiframe streams.
+ */
+struct gzip_rstream {
+	struct stream s;
+	struct stream *base;
+	bool srceof : 1;
+	int srcerr;
+	size_t srclen;
+	const unsigned char *srcbuf;
+	/* DEFLATE decompressor state */
+	tinfl_status status;
+	tinfl_decompressor inflator;
+	size_t dstpos, dstlen;
+	unsigned char dstbuf[TINFL_LZ_DICT_SIZE];
+	/* gzip state machine */
+	enum gzip_rstate rstate;
+	/* Accumulated read error (stored for return by gzip_rclose) */
+	int rderr;
+	/* Per-member output CRC-32 and uncompressed size */
+	uint_least32_t crc;
+	uint_least32_t isize;
+	/* Trailer accumulator */
+	unsigned char trail[8];
+	size_t trailpos;
+	/* Header parser state */
+	unsigned char hdrbuf[10];
+	size_t hdrpos;
+	uint_least8_t hdrflg;
+	uint_fast16_t xlen_remain;
+	uint_least32_t hdrcrc;
+	/* Header parser sub-phase (see enum gzip_hphase) */
+	uint_fast8_t hphase;
+};
+ASSERT_SUPER(struct stream, struct gzip_rstream, s);
+
+/*
+ * Consume bytes from z->srcbuf to parse the gzip member header.
+ * Returns 1 when header is fully parsed, 0 if more input is needed,
+ * -1 on format error.
+ */
+static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 {
-	const unsigned char *restrict b = p;
-	size_t n = *len;
+	while (z->srclen > 0) {
+		unsigned char b = *z->srcbuf;
 
-	/* Check minimum header size (10 bytes) */
-	if (n < 10) {
+		switch (z->hphase) {
+		case GZIP_HPASE_HEADER:
+			z->hdrbuf[z->hdrpos] = b;
+			z->hdrcrc = (uint_least32_t)mz_crc32(
+				z->hdrcrc, z->srcbuf, 1);
+			z->srcbuf++, z->srclen--;
+			z->hdrpos++;
+			if (z->hdrpos < 10) {
+				break;
+			}
+			/* Validate magic and compression method */
+			if (z->hdrbuf[0] != 0x1f || z->hdrbuf[1] != 0x8b ||
+			    z->hdrbuf[2] != 0x08) {
+				LOGD("gzip: invalid magic");
+				return -1;
+			}
+			z->hdrflg = z->hdrbuf[3];
+			/* Advance to first applicable optional-field phase */
+			z->hphase = GZIP_HPASE_FEXTRA_1;
+			/* fall through */
+		case GZIP_HPASE_FEXTRA_1:
+			if (!(z->hdrflg & GZIP_FEXTRA)) {
+				z->hphase = GZIP_HPASE_FNAME;
+				break;
+			}
+			if (z->srclen < 2) {
+				/* need both bytes before consuming */
+				if (z->srclen == 0) {
+					return 0;
+				}
+				/* only 1 byte available - stash and wait */
+				z->hdrbuf[0] = b;
+				z->hdrcrc = (uint_least32_t)mz_crc32(
+					z->hdrcrc, z->srcbuf, 1);
+				z->srcbuf++, z->srclen--;
+				z->hphase = GZIP_HPASE_XLEN_2;
+				return 0;
+			}
+			z->xlen_remain = read_uint16_le(z->srcbuf);
+			z->hdrcrc = (uint_least32_t)mz_crc32(
+				z->hdrcrc, z->srcbuf, 2);
+			z->srcbuf += 2, z->srclen -= 2;
+			z->hphase = GZIP_HPASE_FEXTRA_2;
+			/* fall through */
+		case GZIP_HPASE_FEXTRA_2:
+			if (z->xlen_remain > 0) {
+				size_t skip = z->xlen_remain < z->srclen ?
+						      z->xlen_remain :
+						      z->srclen;
+				z->hdrcrc = (uint_least32_t)mz_crc32(
+					z->hdrcrc, z->srcbuf, skip);
+				z->srcbuf += skip, z->srclen -= skip;
+				z->xlen_remain -= (uint_fast16_t)skip;
+				if (z->xlen_remain > 0) {
+					return 0;
+				}
+			}
+			z->hphase = GZIP_HPASE_FNAME;
+			/* fall through */
+		case GZIP_HPASE_FNAME:
+			if (!(z->hdrflg & GZIP_FNAME)) {
+				z->hphase = GZIP_HPASE_FCOMMENT;
+				break;
+			}
+			z->hdrcrc = (uint_least32_t)mz_crc32(
+				z->hdrcrc, z->srcbuf, 1);
+			z->srcbuf++, z->srclen--;
+			if (b != 0x00) {
+				/* still inside filename */
+				return 0;
+			}
+			z->hphase = GZIP_HPASE_FCOMMENT;
+			break;
+		case GZIP_HPASE_FCOMMENT:
+			if (!(z->hdrflg & GZIP_FCOMMENT)) {
+				z->hphase = GZIP_HPASE_FHCRC_1;
+				break;
+			}
+			z->hdrcrc = (uint_least32_t)mz_crc32(
+				z->hdrcrc, z->srcbuf, 1);
+			z->srcbuf++, z->srclen--;
+			if (b != 0x00) {
+				return 0;
+			}
+			z->hphase = GZIP_HPASE_FHCRC_1;
+			break;
+		case GZIP_HPASE_FHCRC_1:
+			if (!(z->hdrflg & GZIP_FHCRC)) {
+				z->hphase = GZIP_HPASE_DONE;
+				return 1;
+			}
+			z->hdrbuf[0] = b;
+			z->srcbuf++, z->srclen--;
+			z->hphase = GZIP_HPASE_FHCRC_2;
+			return 0;
+		case GZIP_HPASE_FHCRC_2: {
+			const uint_fast16_t stored =
+				(uint_fast16_t)z->hdrbuf[0] |
+				((uint_fast16_t)b << 8);
+			const uint_fast16_t computed =
+				(uint_fast16_t)(z->hdrcrc & 0xffffu);
+			z->srcbuf++, z->srclen--;
+			if (stored != computed) {
+				LOGD("gzip: HCRC mismatch");
+				return -1;
+			}
+		}
+			z->hphase = GZIP_HPASE_DONE;
+			return 1;
+		case GZIP_HPASE_DONE:
+			return 1;
+		case GZIP_HPASE_XLEN_2:
+			z->xlen_remain = (uint_fast16_t)z->hdrbuf[0] |
+					 ((uint_fast16_t)b << 8);
+			z->hdrcrc = (uint_least32_t)mz_crc32(
+				z->hdrcrc, z->srcbuf, 1);
+			z->srcbuf++, z->srclen--;
+			z->hphase = GZIP_HPASE_FEXTRA_2;
+			break;
+		default:
+			return -1;
+		}
+	}
+
+	if (z->hphase == GZIP_HPASE_DONE) {
+		return 1;
+	}
+	/* Handle phases that don't consume bytes but need to advance */
+	if (z->hphase == GZIP_HPASE_FNAME && !(z->hdrflg & GZIP_FNAME)) {
+		z->hphase = GZIP_HPASE_FCOMMENT;
+	}
+	if (z->hphase == GZIP_HPASE_FCOMMENT && !(z->hdrflg & GZIP_FCOMMENT)) {
+		z->hphase = GZIP_HPASE_FHCRC_1;
+	}
+	if (z->hphase == GZIP_HPASE_FHCRC_1 && !(z->hdrflg & GZIP_FHCRC)) {
+		return 1;
+	}
+	return 0;
+}
+
+static int gzip_direct_read(void *p, const void **buf, size_t *restrict len)
+{
+	struct gzip_rstream *restrict z = p;
+	for (;;) {
+		/* Refill source buffer when empty */
+		if (z->srclen == 0 && !z->srceof) {
+			const void *srcbuf;
+			size_t n = IO_BUFSIZE;
+			z->srcerr = stream_direct_read(z->base, &srcbuf, &n);
+			if (n < IO_BUFSIZE || z->srcerr != 0) {
+				z->srceof = true;
+			}
+			z->srclen = n;
+			z->srcbuf = srcbuf;
+		}
+
+		switch (z->rstate) {
+		case GZIP_R_HEADER: {
+			if (z->srclen == 0 && z->srceof) {
+				/* Clean EOF between members */
+				*len = 0;
+				return z->srcerr;
+			}
+			const int hr = gzip_rstream_parse_hdr(z);
+			if (hr < 0) {
+				*len = 0;
+				z->rderr = hr;
+				return hr;
+			}
+			if (hr == 0) {
+				if (z->srceof) {
+					/* Truncated header */
+					*len = 0;
+					z->rderr = -1;
+					return -1;
+				}
+				continue;
+			}
+			/* Header complete - initialise DEFLATE decompressor */
+			tinfl_init(&z->inflator);
+			z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
+			z->crc = (uint_least32_t)MZ_CRC32_INIT;
+			z->isize = 0;
+			z->dstpos = z->dstlen = 0;
+			z->rstate = GZIP_R_BODY;
+			continue;
+		}
+		case GZIP_R_BODY: {
+			/* Wrap around sliding window when fully consumed */
+			if (z->dstpos == z->dstlen &&
+			    z->dstlen == sizeof(z->dstbuf)) {
+				z->dstpos = z->dstlen = 0;
+			}
+
+			/* Decompress if input and output space are available */
+			if (z->srclen > 0 && z->dstlen < sizeof(z->dstbuf) &&
+			    z->status > TINFL_STATUS_DONE) {
+				const unsigned char *src = z->srcbuf;
+				size_t srclen = z->srclen;
+				unsigned char *dst = z->dstbuf + z->dstlen;
+				size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
+				int flags = 0; /* raw DEFLATE */
+				if (!z->srceof) {
+					flags |= TINFL_FLAG_HAS_MORE_INPUT;
+				}
+				z->status = tinfl_decompress(
+					&z->inflator, src, &srclen, z->dstbuf,
+					dst, &dstlen, flags);
+				z->srcbuf += srclen;
+				z->srclen -= srclen;
+				z->dstlen += dstlen;
+			}
+
+			if (z->dstpos < z->dstlen) {
+				const size_t maxread = *len;
+				size_t n = z->dstlen - z->dstpos;
+				if (n > maxread) {
+					n = maxread;
+				}
+				/* Update CRC-32 and size before returning */
+				z->crc = (uint_least32_t)mz_crc32(
+					z->crc, z->dstbuf + z->dstpos, n);
+				z->isize += (uint_least32_t)n;
+				*buf = z->dstbuf + z->dstpos;
+				*len = n;
+				z->dstpos += n;
+				if (z->dstpos == z->dstlen &&
+				    z->status == TINFL_STATUS_DONE) {
+					z->rstate = GZIP_R_TRAILER;
+					z->trailpos = 0;
+				}
+				return 0;
+			}
+
+			if (z->status == TINFL_STATUS_DONE) {
+				z->rstate = GZIP_R_TRAILER;
+				z->trailpos = 0;
+				continue;
+			}
+
+			if (z->status < TINFL_STATUS_DONE) {
+				*len = 0;
+				z->rderr = z->status;
+				return z->status;
+			}
+
+			if (z->srceof) {
+				/* Unexpected EOF inside DEFLATE stream */
+				*len = 0;
+				z->rderr = -1;
+				return -1;
+			}
+			continue;
+		}
+		case GZIP_R_TRAILER: {
+			/* Consume 8 trailer bytes */
+			while (z->trailpos < 8 && z->srclen > 0) {
+				z->trail[z->trailpos++] = *z->srcbuf;
+				z->srcbuf++, z->srclen--;
+			}
+			if (z->trailpos < 8) {
+				if (z->srceof) {
+					LOGD("gzip: short trailer");
+					*len = 0;
+					z->rderr = -1;
+					return -1;
+				}
+				continue;
+			}
+			/* Validate CRC-32 */
+			const uint_least32_t stored_crc =
+				(uint_least32_t)read_uint32_le(z->trail);
+			if (stored_crc != z->crc) {
+				LOGD("gzip: CRC mismatch");
+				*len = 0;
+				z->rderr = -1;
+				return -1;
+			}
+			/* Validate ISIZE */
+			const uint_least32_t stored_isize =
+				(uint_least32_t)read_uint32_le(z->trail + 4);
+			if (stored_isize != z->isize) {
+				LOGD("gzip: ISIZE mismatch");
+				*len = 0;
+				z->rderr = -1;
+				return -1;
+			}
+			/* Check for more members */
+			if (z->srclen == 0 && z->srceof) {
+				*len = 0;
+				return z->srcerr;
+			}
+			/* Reset header parser for next member */
+			z->hdrpos = 0;
+			z->hphase = GZIP_HPASE_HEADER;
+			z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
+			z->rstate = GZIP_R_HEADER;
+			continue;
+		}
+		}
+	}
+}
+
+static int gzip_rclose(void *p)
+{
+	struct gzip_rstream *restrict z = p;
+	const int rderr = z->rderr;
+	const int err = stream_close(z->base);
+	free(z);
+	return rderr != 0 ? rderr : err;
+}
+
+struct stream *codec_gzip_reader(struct stream *base)
+{
+	if (base == NULL) {
 		return NULL;
 	}
 
-	/* Parse fixed gzip header fields */
-	const struct {
-		/* Magic numbers (0x1f, 0x8b) */
-		uint_least8_t id1, id2;
-		/* Compression method and flags */
-		uint_least8_t cm, flg;
-		/* Modification time */
-		uint_least32_t mtime;
-		/* Extra flags and OS identifier */
-		uint_least8_t xfl, os;
-	} header = {
-		.id1 = read_uint8(b + 0),
-		.id2 = read_uint8(b + 1),
-		.cm = read_uint8(b + 2),
-		.flg = read_uint8(b + 3),
-		.mtime = read_uint32_le(b + 4),
-		.xfl = read_uint8(b + 8),
-		.os = read_uint8(b + 9),
+	if (base->vftable->direct_read == NULL) {
+		base = io_bufreader(base, IO_BUFSIZE);
+		if (base == NULL) {
+			return NULL;
+		}
+	}
+
+	struct gzip_rstream *z = malloc(sizeof(struct gzip_rstream));
+	if (z == NULL) {
+		LOGOOM();
+		stream_close(base);
+		return NULL;
+	}
+
+	static const struct stream_vftable vftable = {
+		.direct_read = gzip_direct_read,
+		.close = gzip_rclose,
 	};
-
-	/* Validate gzip magic numbers and compression method */
-	if (header.id1 != 0x1f || header.id2 != 0x8b || header.cm != 0x08) {
-		LOGD("gzip: invalid magic");
-		return NULL;
-	}
-	b += 10, n -= 10;
-	/* Parse optional extra field */
-	if (header.flg & GZIP_FEXTRA) {
-		if (n < 2) {
-			return NULL;
-		}
-		const uint_fast16_t xlen = read_uint16_le(b);
-		b += 2, n -= 2;
-		if (n < xlen) {
-			return NULL;
-		}
-		b += xlen, n -= xlen;
-	}
-
-	/* Parse optional filename field */
-	if (header.flg & GZIP_FNAME) {
-		const char *name = (char *)b;
-		const size_t slen = strnlen(name, n) + 1;
-		if (slen >= n) {
-			return NULL;
-		}
-		b += slen, n -= slen;
-		LOGD_F("gzip: NAME `%s'", name);
-	}
-
-	/* Parse optional comment field */
-	if (header.flg & GZIP_FCOMMENT) {
-		const char *comment = (char *)b;
-		const size_t slen = strnlen(comment, n) + 1;
-		if (slen >= n) {
-			return NULL;
-		}
-		b += slen, n -= slen;
-		LOGD_F("gzip: COMMENT `%s'", comment);
-	}
-
-	/* Validate optional header CRC */
-	if (header.flg & GZIP_FHCRC) {
-		if (n < 2) {
-			return NULL;
-		}
-		const size_t hlen = *len - n;
-		const uint_fast16_t hcrc = read_uint16_le(b);
-		b += 2, n -= 2;
-		if (hcrc != (uint16_t)mz_crc32(0, p, hlen)) {
-			LOGD("gzip: HCRC mismatch");
-			return NULL;
-		}
-	}
-
-	/* Check for trailing CRC32 and ISIZE fields (8 bytes) */
-	if (n < 8) {
-		LOGD("gzip: short tailer");
-		return NULL;
-	}
-
-	/* Parse trailer fields (not validated) */
-	const struct {
-		/* CRC32 of uncompressed data */
-		uint_least32_t crc;
-		/* Size of uncompressed data modulo 2^32 */
-		uint_least32_t isize;
-	} tailer = {
-		.crc = read_uint32_le(b + n - 8),
-		.isize = read_uint32_le(b + n - 4),
-	};
-	LOGD_F("gzip: original size %" PRIuLEAST32 " bytes", tailer.isize);
-
-	/* Return pointer to DEFLATE data and update length */
-	*len = n - 8;
-	return b;
+	z->s = (struct stream){ &vftable, NULL };
+	z->base = base;
+	z->srceof = false;
+	z->srcerr = 0;
+	z->srclen = 0;
+	z->rstate = GZIP_R_HEADER;
+	z->rderr = 0;
+	z->crc = (uint_least32_t)MZ_CRC32_INIT;
+	z->isize = 0;
+	z->trailpos = 0;
+	z->hdrpos = 0;
+	z->hphase = GZIP_HPASE_HEADER;
+	z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
+	z->dstpos = z->dstlen = 0;
+	return (struct stream *)z;
 }

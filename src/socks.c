@@ -370,7 +370,7 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	const size_t cur = ++ctx->s->num_sessions;
 #endif
 	if (transfer_start(
-		    ctx->s->transfer, acc_fd, dial_fd,
+		    ctx->s->xfer, acc_fd, dial_fd,
 		    &(struct transfer_opts){
 			    .byt_up = &ctx->s->byt_up,
 			    .byt_down = &ctx->s->byt_down,

@@ -27,6 +27,9 @@ struct stream;
  * Creates a compression stream that accepts uncompressed data and writes
  * zlib-formatted compressed data to the base stream. The zlib format includes
  * a header and adler32 checksum for data integrity.
+ *
+ * Flushing performs a full DEFLATE flush (emitting a sync point) and
+ * propagates the flush to the base stream.
  */
 struct stream *codec_zlib_writer(struct stream *base);
 
@@ -51,6 +54,9 @@ struct stream *codec_zlib_reader(struct stream *base);
  * Creates a compression stream that accepts uncompressed data and writes
  * raw DEFLATE compressed data to the base stream. This format has no header
  * or checksum - just the compressed data blocks.
+ *
+ * Flushing performs a full DEFLATE flush (emitting a sync point) and
+ * propagates the flush to the base stream.
  */
 struct stream *codec_deflate_writer(struct stream *base);
 
@@ -68,19 +74,30 @@ struct stream *codec_inflate_reader(struct stream *base);
 /* RFC 1952 - gzip format */
 
 /**
- * @brief Extract DEFLATE data from gzip format
- * @param p Pointer to gzip data
- * @param len Pointer to data length; updated with DEFLATE data length on success
- * @return Pointer to DEFLATE data within the gzip stream, or NULL on error
+ * @brief Create a gzip compression writer stream
+ * @param base The base stream to write compressed data to
+ * @return A new stream that compresses data using gzip format, or NULL on error
  *
- * Parses a gzip header to extract the raw DEFLATE data portion. This function
- * validates the gzip magic numbers, compression method, and optional fields
- * like filename and comments. The returned pointer points into the original
- * data buffer at the start of the DEFLATE stream.
+ * Creates a compression stream that writes gzip members with a static 10-byte
+ * header (MTIME=0, OS=0xff), raw DEFLATE compressed data, and an 8-byte
+ * trailer containing CRC-32 and ISIZE of the uncompressed input.
  *
- * Note: This only extracts the DEFLATE portion - use codec_inflate_reader()
- * to actually decompress the data.
+ * Flushing finishes the current gzip member (DEFLATE finish + trailer) and
+ * starts a new one on the next write, producing a multi-member gzip stream.
+ * The base stream is also flushed.
  */
-const void *gzip_unbox(const void *p, size_t *len);
+struct stream *codec_gzip_writer(struct stream *base);
+
+/**
+ * @brief Create a gzip decompression reader stream
+ * @param base The base stream to read compressed data from
+ * @return A new stream that decompresses gzip data, or NULL on error
+ *
+ * Creates a decompression stream that reads one or more concatenated gzip
+ * members, verifying each member's CRC-32 and ISIZE trailer fields.
+ * Supports all standard gzip header optional fields (FEXTRA, FNAME, FCOMMENT,
+ * FHCRC). Returns an error if any checksum does not match.
+ */
+struct stream *codec_gzip_reader(struct stream *base);
 
 #endif /* PROTO_CODEC_H */

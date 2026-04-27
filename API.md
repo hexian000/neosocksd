@@ -30,6 +30,7 @@ Version: dev
   - [regex.compile](#regexcompile)
   - [time.\*](#time)
   - [zlib.compress](#zlibcompress)
+  - [zlib.gzip](#zlibgzip)
   - [\_G.marshal](#_gmarshal)
   - [\_G.async](#_gasync)
   - [await.execute](#awaitexecute)
@@ -479,6 +480,21 @@ assert(s == s1)
 Data compression interface for the zlib format (RFC 1950 and RFC 1951).
 
 Note: [`neosocksd.invoke`](#neosocksdinvoke) and [`await.invoke`](#awaitinvoke) already compress payloads internally.
+
+
+### zlib.gzip
+
+**Synopsis**
+
+```Lua
+local z = zlib.gzip(s)
+local s1 = zlib.gunzip(z)
+assert(s == s1)
+```
+
+**Description**
+
+Data compression interface for the gzip format (RFC 1952).
 
 
 ### _G.marshal

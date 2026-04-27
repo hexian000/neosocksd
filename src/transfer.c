@@ -610,7 +610,7 @@ struct transfer *transfer_new(struct ev_loop *restrict loop)
 	xfer->disp = NULL;
 	xfer->loop = NULL;
 
-	xfer->disp = dispatcher_create();
+	xfer->disp = dispatcher_create(16);
 	if (xfer->disp == NULL) {
 		transfer_free(xfer);
 		return NULL;
@@ -682,7 +682,8 @@ static void xfer_half_init(
 #endif
 	const bool is_uplink
 #if WITH_SPLICE
-	, const bool use_splice
+	,
+	const bool use_splice
 #endif
 )
 {
@@ -718,13 +719,15 @@ struct transfer_ctx *transfer_start(
 	xfer_half_init(
 		&t->up, t, acc_fd, dial_fd, opts->byt_up, true
 #if WITH_SPLICE
-		, opts->use_splice
+		,
+		opts->use_splice
 #endif
 	);
 	xfer_half_init(
 		&t->down, t, dial_fd, acc_fd, opts->byt_down, false
 #if WITH_SPLICE
-		, opts->use_splice
+		,
+		opts->use_splice
 #endif
 	);
 

@@ -717,8 +717,8 @@ static void stop_proxy(struct server *restrict s)
 {
 	server_stop(s);
 	gc_finalizeall();
-	transfer_free(s->transfer);
-	s->transfer = NULL;
+	transfer_free(s->xfer);
+	s->xfer = NULL;
 }
 
 /* Run the event loop for the given duration to allow sessions to drain. */

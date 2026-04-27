@@ -116,7 +116,7 @@ struct server {
 
 	struct config *conf;
 	struct resolver *resolver;
-	struct transfer *transfer;
+	struct transfer *xfer;
 	struct dialreq *basereq;
 #if WITH_RULESET
 	struct ruleset *ruleset;
@@ -129,7 +129,7 @@ struct server {
 bool server_init(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,
-	struct transfer *transfer, struct dialreq *basereq,
+	struct transfer *xfer, struct dialreq *basereq,
 	struct ruleset *ruleset);
 
 void server_stop(struct server *restrict s);
