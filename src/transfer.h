@@ -13,11 +13,7 @@
  * in both modes.
  *
  * Lifecycle:
- *   transfer_new()  →  transfer_start() × N  →  transfer_free()
- *
- * Each transfer_ctx is self-owned: it is allocated by transfer_start() and
- * freed once both halves finish.  Callers must not dereference the returned
- * pointer after transfer_start() returns.
+ *   transfer_new()  →  transfer_serve() × N  →  transfer_free()
  */
 
 #ifndef TRANSFER_H
@@ -32,7 +28,6 @@
 #include <stdint.h>
 
 struct transfer;
-struct transfer_ctx;
 
 /**
  * @brief Create the transfer engine.
@@ -74,22 +69,20 @@ struct transfer_opts {
 };
 
 /**
- * @brief Start a bidirectional transfer between two connected sockets.
+ * @brief Serve a bidirectional transfer between two connected sockets.
  *
  * Takes ownership of `acc_fd` and `dial_fd`; the caller must set both to -1
- * immediately after a successful call.
- *
- * The transfer_ctx is self-owned: it is freed on the I/O thread after both
- * halves finish, at which point *num_sessions is decremented atomically.
- * The caller must not dereference the returned pointer.
+ * immediately after a successful call.  The transfer is self-owned: it is
+ * freed internally once both halves finish, at which point *num_sessions is
+ * decremented atomically.
  *
  * @param xfer Engine.
  * @param acc_fd Accepted (client-side) file descriptor.
  * @param dial_fd Dialed (upstream-side) file descriptor.
  * @param opts Transfer options (byte counters, splice hint, session counter).
- * @return Opaque non-NULL handle on success, NULL on OOM (fds are NOT closed).
+ * @return true on success, false on OOM (fds are NOT closed).
  */
-struct transfer_ctx *transfer_start(
+bool transfer_serve(
 	struct transfer *xfer, int acc_fd, int dial_fd,
 	const struct transfer_opts *opts);
 

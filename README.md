@@ -53,7 +53,7 @@ sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
 
 # Hardened load balancer (requires root)
 sudo ./neosocksd --pipe -d -u nobody: --max-sessions 10000 --max-startups 60:30:100 \
-    --bidir-timeout -t 15 -l :80 -f : -r lb.lua --api 127.0.1.1:9080
+    -t 15 -l :80 -f : -r lb.lua --api 127.0.1.1:9080
 ```
 
 For all flags and options, run `./neosocksd --help`.

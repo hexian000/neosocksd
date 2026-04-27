@@ -213,15 +213,16 @@ T_DECLARE_CASE(test_boot_runtime_error_fails)
 	unlink(path);
 }
 
-T_DECLARE_CASE(test_boot_arg_table_visible)
+T_DECLARE_CASE(test_boot_varargs_visible)
 {
 	char path[] = "/tmp/boot_conf_test_XXXXXX";
 	T_CHECK(write_tempfile(
-			path, "assert(arg[1] == '-c', 'arg[1]')\n"
-			      "assert(arg[3] == '-l', 'arg[3]')\n"
-			      "assert(arg[4] == '0.0.0.0:1080', 'arg[4]')\n"
-			      "assert(arg.n == 4, 'arg.n')\n"
-			      "return { listen = arg[4] }") == 0);
+			path, "local argv = { ... }\n"
+			      "assert(argv[1] == '-c', 'argv[1]')\n"
+			      "assert(argv[3] == '-l', 'argv[3]')\n"
+			      "assert(argv[4] == '0.0.0.0:1080', 'argv[4]')\n"
+			      "assert(#argv == 4, '#argv')\n"
+			      "return { listen = argv[4] }") == 0);
 	struct config conf = conf_default();
 	char *argv[] = {
 		"conf_test", "-c", path, "-l", "0.0.0.0:1080",
@@ -289,7 +290,7 @@ int main(void)
 	T_RUN_CASE(t, test_boot_type_error_fails);
 	T_RUN_CASE(t, test_boot_returns_nontable_fails);
 	T_RUN_CASE(t, test_boot_runtime_error_fails);
-	T_RUN_CASE(t, test_boot_arg_table_visible);
+	T_RUN_CASE(t, test_boot_varargs_visible);
 	T_RUN_CASE(t, test_boot_overrides_numeric_fields);
 	T_RUN_CASE(t, test_boot_overrides_bool_fields);
 #endif

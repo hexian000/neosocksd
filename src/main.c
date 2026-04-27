@@ -67,6 +67,18 @@ int main(int argc, char *argv[])
 	struct resolver *resolver = resolver_new(loop, conf);
 	CHECKOOM(resolver);
 
+	/* Handle user identity changes and daemonization before spawning any
+	 * threads: fork() only duplicates the calling thread, so all thread
+	 * creation must happen after this point. */
+	{
+		if (conf->daemonize) {
+			daemonize(conf->user_name, true, false);
+			slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME);
+		} else if (conf->user_name != NULL) {
+			drop_privileges(conf->user_name);
+		}
+	}
+
 	/* Initialize transfer engine */
 	struct transfer *xfer = transfer_new(loop);
 	CHECKOOM(xfer);
@@ -100,16 +112,6 @@ int main(int argc, char *argv[])
 		ruleset_setserver(ruleset, s);
 	}
 #endif
-
-	/* Handle user identity changes and daemonization */
-	{
-		if (conf->daemonize) {
-			daemonize(conf->user_name, true, false);
-			slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME);
-		} else if (conf->user_name != NULL) {
-			drop_privileges(conf->user_name);
-		}
-	}
 
 	(void)systemd_notify(SYSTEMD_STATE_READY);
 

@@ -74,7 +74,6 @@ struct globals G = { 0 };
 static struct config test_conf = {
 	.timeout = 1.0,
 	.auth_required = false,
-	.bidir_timeout = false,
 	.conn_cache = false,
 };
 
@@ -222,7 +221,6 @@ static void reset_stub_state(void)
 	reset_dialreq_allocations();
 	test_conf.timeout = 1.0;
 	test_conf.auth_required = false;
-	test_conf.bidir_timeout = false;
 	test_conf.conn_cache = false;
 	G.ruleset = NULL;
 }
@@ -382,7 +380,7 @@ void transfer_free(struct transfer *restrict xfer)
 	UNUSED(xfer);
 }
 
-struct transfer_ctx *transfer_start(
+bool transfer_serve(
 	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
 	const struct transfer_opts *restrict opts)
 {
@@ -393,11 +391,11 @@ struct transfer_ctx *transfer_start(
 		(int)(sizeof(stub_xfer_ctxs) / sizeof(stub_xfer_ctxs[0])));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
-		return NULL;
+		return false;
 	}
 	xctx->num_sessions = opts->num_sessions;
 	stub_xfer_ctxs[stub_xfer_ctx_count++] = xctx;
-	return (struct transfer_ctx *)xctx;
+	return true;
 }
 
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
@@ -1600,6 +1598,9 @@ T_DECLARE_CASE(plain_http_response_content_length_preserved)
 		T_EXPECT(
 			memmem(rsp, (size_t)n, "Transfer-Encoding", 17) ==
 			NULL);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Connection: keep-alive", 22) !=
+			NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "hello", 5) != NULL);
 		(void)shutdown(peer_fd, SHUT_WR);
 	}
@@ -1685,6 +1686,7 @@ T_DECLARE_CASE(plain_http_response_conn_close_large_body_complete)
 			off += (size_t)n;
 		}
 		T_EXPECT(hdr_end != NULL);
+		T_EXPECT(memmem(rsp, off, "Connection: close", 17) != NULL);
 		T_EXPECT(memmem(rsp, off, "Content-Length: ", 16) != NULL);
 		body_start = hdr_end + 4;
 		body_recv = off - (size_t)(body_start - rsp);
@@ -1764,6 +1766,9 @@ T_DECLARE_CASE(plain_http_response_chunked_strips_content_length)
 			memmem(rsp, (size_t)n, "Transfer-Encoding: chunked",
 			       26) != NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "Content-Length:", 15) == NULL);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Connection: keep-alive", 22) !=
+			NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "hello", 5) != NULL);
 		(void)shutdown(peer_fd, SHUT_WR);
 	}
@@ -1855,6 +1860,9 @@ T_DECLARE_CASE(plain_http_response_eof_framed_large_body_complete)
 			memmem(rsp, (size_t)n, "Transfer-Encoding: chunked",
 			       26) != NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "Content-Length:", 15) == NULL);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Connection: close", 17) !=
+			NULL);
 		T_EXPECT(decode_chunked_response_body(
 			rsp, (size_t)n, decoded, sizeof(decoded),
 			&decoded_len));
@@ -1862,6 +1870,74 @@ T_DECLARE_CASE(plain_http_response_eof_framed_large_body_complete)
 		T_EXPECT(memcmp(decoded, body, body_len) == 0);
 		(void)shutdown(peer_fd, SHUT_WR);
 	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	reset_stub_state();
+	ev_loop_destroy(loop);
+}
+
+/* When the upstream response is cacheable (Content-Length, no Connection:
+ * close) and the client requested keep-alive, the relay must send
+ * "Connection: keep-alive" to the downstream and cache the upstream fd. */
+T_DECLARE_CASE(plain_http_response_keep_alive_with_content_length)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char buf[4096];
+	unsigned char rsp[4096];
+	const char req[] = "GET http://example.com/data HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+	const char upstream_rsp[] = "HTTP/1.1 200 OK\r\n"
+				    "Content-Length: 5\r\n"
+				    "\r\n"
+				    "hello";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	test_conf.conn_cache = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	{
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 18);
+		T_EXPECT(n >= 18);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "GET /data HTTP/1.1", 18) !=
+			NULL);
+	}
+	T_CHECK(write_all(upstream_fd, upstream_rsp, strlen(upstream_rsp)) ==
+		0);
+	drive_loop(loop);
+
+	{
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 50);
+		T_EXPECT(n >= 50);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Content-Length: 5", 17) !=
+			NULL);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Connection: keep-alive", 22) !=
+			NULL);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Connection: close", 17) ==
+			NULL);
+		T_EXPECT(memmem(rsp, (size_t)n, "hello", 5) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+	T_EXPECT_EQ(S.conn_cache_put_calls, 1);
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -1918,6 +1994,9 @@ T_DECLARE_CASE(plain_http_reuses_cached_upstream_connection)
 		const ssize_t n =
 			recv_at_least(loop, peer_fd1, rsp, sizeof(rsp), 30);
 		T_EXPECT(n >= 30);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Connection: keep-alive", 22) !=
+			NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "one", 3) != NULL);
 		(void)shutdown(peer_fd1, SHUT_WR);
 	}
@@ -1938,6 +2017,9 @@ T_DECLARE_CASE(plain_http_reuses_cached_upstream_connection)
 		const ssize_t n =
 			recv_at_least(loop, peer_fd2, rsp, sizeof(rsp), 30);
 		T_EXPECT(n >= 30);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "Connection: keep-alive", 22) !=
+			NULL);
 		T_EXPECT(memmem(rsp, (size_t)n, "two", 3) != NULL);
 		(void)shutdown(peer_fd2, SHUT_WR);
 	}
@@ -2481,6 +2563,7 @@ int main(void)
 	T_RUN_CASE(t, plain_http_response_conn_close_large_body_complete);
 	T_RUN_CASE(t, plain_http_response_chunked_strips_content_length);
 	T_RUN_CASE(t, plain_http_response_eof_framed_large_body_complete);
+	T_RUN_CASE(t, plain_http_response_keep_alive_with_content_length);
 	T_RUN_CASE(t, plain_http_reuses_cached_upstream_connection);
 	T_RUN_CASE(t, plain_http_stale_cached_fd_falls_back_to_redial);
 	T_RUN_CASE(t, plain_http_non_stale_cached_fd_error_no_redial);

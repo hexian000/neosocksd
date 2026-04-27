@@ -35,7 +35,6 @@ struct config {
 #endif
 
 	bool auth_required;
-	bool bidir_timeout;
 #if WITH_SPLICE
 	bool pipe;
 #endif

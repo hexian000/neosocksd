@@ -334,7 +334,7 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 #else
 	const size_t cur = ++ctx->s->num_sessions;
 #endif
-	if (transfer_start(
+	if (!transfer_serve(
 		    ctx->s->xfer, acc_fd, dial_fd,
 		    &(struct transfer_opts){
 			    .byt_up = &ctx->s->byt_up,
@@ -343,7 +343,7 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 			    .use_splice = ctx->s->conf->pipe,
 #endif
 			    .num_sessions = &ctx->s->num_sessions,
-		    }) == NULL) {
+		    })) {
 #if WITH_THREADS
 		atomic_fetch_sub_explicit(
 			&ctx->s->num_sessions, 1, memory_order_relaxed);
@@ -576,7 +576,11 @@ static bool relay_setup_headers(
 	if (ctx->relay_downstream_body_te == TENCODING_CHUNKED) {
 		BUF_APPENDSTR(p->wbuf, "Transfer-Encoding: chunked\r\n");
 	}
-	BUF_APPENDSTR(p->wbuf, "Connection: close\r\n\r\n");
+	if (ctx->relay_can_cache && ctx->req_client_keep_alive) {
+		BUF_APPENDSTR(p->wbuf, "Connection: keep-alive\r\n\r\n");
+	} else {
+		BUF_APPENDSTR(p->wbuf, "Connection: close\r\n\r\n");
+	}
 	return true;
 }
 
@@ -1067,7 +1071,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 #else
 			const size_t cur = ++ctx->s->num_sessions;
 #endif
-			if (transfer_start(
+			if (!transfer_serve(
 				    ctx->s->xfer, acc_fd, dial_fd,
 				    &(struct transfer_opts){
 					    .byt_up = &ctx->s->byt_up,
@@ -1077,7 +1081,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 #endif
 					    .num_sessions =
 						    &ctx->s->num_sessions,
-				    }) == NULL) {
+				    })) {
 #if WITH_THREADS
 				atomic_fetch_sub_explicit(
 					&ctx->s->num_sessions, 1,

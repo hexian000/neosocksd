@@ -51,7 +51,6 @@ struct globals G = { 0 };
 static struct config test_conf = {
 	.timeout = 1.0,
 	.auth_required = false,
-	.bidir_timeout = false,
 };
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.016;
@@ -316,7 +315,7 @@ void transfer_free(struct transfer *restrict xfer)
 	UNUSED(xfer);
 }
 
-struct transfer_ctx *transfer_start(
+bool transfer_serve(
 	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
 	const struct transfer_opts *restrict opts)
 {
@@ -327,11 +326,11 @@ struct transfer_ctx *transfer_start(
 		(int)(sizeof(stub_xfer_ctxs) / sizeof(stub_xfer_ctxs[0])));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
-		return NULL;
+		return false;
 	}
 	xctx->num_sessions = opts->num_sessions;
 	stub_xfer_ctxs[stub_xfer_ctx_count++] = xctx;
-	return (struct transfer_ctx *)xctx;
+	return true;
 }
 
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
@@ -1136,7 +1135,6 @@ T_DECLARE_CASE(socks5_dialer_success_transfer_finished)
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
-	test_conf.bidir_timeout = true;
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
@@ -1154,7 +1152,6 @@ T_DECLARE_CASE(socks5_dialer_success_transfer_finished)
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.bidir_timeout = false;
 }
 
 T_DECLARE_CASE(socks5_dialer_success_connected_transition)
@@ -1175,7 +1172,6 @@ T_DECLARE_CASE(socks5_dialer_success_connected_transition)
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
-	test_conf.bidir_timeout = true;
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
@@ -1193,7 +1189,6 @@ T_DECLARE_CASE(socks5_dialer_success_connected_transition)
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	test_conf.bidir_timeout = false;
 }
 
 T_DECLARE_CASE(socks5_bind_disabled_cmdnosupport)
@@ -1324,7 +1319,6 @@ T_DECLARE_CASE(socks5_bind_full_flow)
 	test_conf.auth_required = false;
 	test_conf.socks5_bind = true;
 	test_conf.timeout = 1.0;
-	test_conf.bidir_timeout = false;
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
@@ -1370,7 +1364,6 @@ T_DECLARE_CASE(socks5_bind_full_flow)
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 	test_conf.socks5_bind = false;
-	test_conf.bidir_timeout = false;
 }
 
 T_DECLARE_CASE(socks5_bind_mismatch_allows)
@@ -1391,7 +1384,6 @@ T_DECLARE_CASE(socks5_bind_mismatch_allows)
 	test_conf.auth_required = false;
 	test_conf.socks5_bind = true;
 	test_conf.timeout = 1.0;
-	test_conf.bidir_timeout = false;
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
@@ -1434,7 +1426,6 @@ T_DECLARE_CASE(socks5_bind_mismatch_allows)
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 	test_conf.socks5_bind = false;
-	test_conf.bidir_timeout = false;
 }
 
 T_DECLARE_CASE(socks5_bind_timeout_ttlexpired)

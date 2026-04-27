@@ -244,8 +244,6 @@ static void print_usage(void)
 		"  --api <bind_address>       RESTful API listen address\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
-		"  --bidir-timeout            continue counting timeout before bidirectional\n"
-		"                             traffic is established\n"
 		"  --loglevel <level>         0-8 are Silence, Fatal, Error, Warning, Notice, Info,\n"
 		"                             Debug, Verbose, VeryVerbose respectively (default: 4)\n"
 		"  -C, --color                colorized log output using ANSI escape sequences\n"
@@ -297,7 +295,6 @@ static const struct metaconfig conf_fields[] = {
 	{ "memlimit", CONF_INT, offsetof(struct config, memlimit) },
 #endif
 	{ "auth_required", CONF_BOOL, offsetof(struct config, auth_required) },
-	{ "bidir_timeout", CONF_BOOL, offsetof(struct config, bidir_timeout) },
 #if WITH_SPLICE
 	{ "pipe", CONF_BOOL, offsetof(struct config, pipe) },
 #endif
@@ -402,23 +399,21 @@ static bool conf_loadfile(
 	}
 	luaL_openlibs(L);
 
-	/* inject arg[1..argc] with arg.n = argc */
-	lua_createtable(L, argc, 1);
-	for (int_fast32_t i = 0; i < argc; i++) {
-		lua_pushstring(L, argv[i]);
-		lua_rawseti(L, -2, (lua_Integer)(i + 1));
-	}
-	lua_pushinteger(L, (lua_Integer)argc);
-	lua_setfield(L, -2, "n");
-	lua_setglobal(L, "arg");
-
-	/* load and execute the boot script; expect one return value */
+	/* load and execute the boot script; pass extra args as varargs */
 	if (luaL_loadfile(L, path) != LUA_OK) {
 		LOGE_F("boot: %s", lua_tostring(L, -1));
 		lua_close(L);
 		return false;
 	}
-	if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+	if (!lua_checkstack(L, argc)) {
+		LOGF("boot: too many arguments");
+		lua_close(L);
+		return false;
+	}
+	for (int i = 0; i < argc; i++) {
+		lua_pushstring(L, argv[i]);
+	}
+	if (lua_pcall(L, argc, 1, 0) != LUA_OK) {
 		LOGE_F("boot: %s", lua_tostring(L, -1));
 		lua_close(L);
 		return false;
@@ -838,15 +833,6 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			conf->startup_limit_start = (int)start;
 			conf->startup_limit_rate = (int)rate;
 			conf->startup_limit_full = (int)full;
-			continue;
-		}
-		if (strcmp(argv[i], "--proto-timeout") == 0) {
-			LOGW("`--proto-timeout' is deprecated, use `--bidir-timeout' instead");
-			conf->bidir_timeout = true;
-			continue;
-		}
-		if (strcmp(argv[i], "--bidir-timeout") == 0) {
-			conf->bidir_timeout = true;
 			continue;
 		}
 		if (strcmp(argv[i], "--enable-socks5-bind") == 0) {

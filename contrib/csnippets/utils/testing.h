@@ -273,32 +273,34 @@ struct testing_ctx {
 
 /* Private helpers for T_EXPECT_EQ type-generic formatting. */
 #define T_EQ_FMT_(typ_)                                                        \
-	_Generic((typ_), signed char                                           \
-		 : "expect %jd, got %jd", signed short                         \
-		 : "expect %jd, got %jd", signed int                           \
-		 : "expect %jd, got %jd", signed long                          \
-		 : "expect %jd, got %jd", signed long long                     \
-		 : "expect %jd, got %jd", unsigned char                        \
-		 : "expect %ju, got %ju", unsigned short                       \
-		 : "expect %ju, got %ju", unsigned int                         \
-		 : "expect %ju, got %ju", unsigned long                        \
-		 : "expect %ju, got %ju", unsigned long long                   \
-		 : "expect %ju, got %ju", default                              \
-		 : "expect 0x%" PRIxPTR ", got 0x%" PRIxPTR)
+	_Generic(                                                              \
+		(typ_),                                                        \
+		signed char: "expect %jd, got %jd",                            \
+		signed short: "expect %jd, got %jd",                           \
+		signed int: "expect %jd, got %jd",                             \
+		signed long: "expect %jd, got %jd",                            \
+		signed long long: "expect %jd, got %jd",                       \
+		unsigned char: "expect %ju, got %ju",                          \
+		unsigned short: "expect %ju, got %ju",                         \
+		unsigned int: "expect %ju, got %ju",                           \
+		unsigned long: "expect %ju, got %ju",                          \
+		unsigned long long: "expect %ju, got %ju",                     \
+		default: "expect 0x%" PRIxPTR ", got 0x%" PRIxPTR)
 
 #define T_EQ_CAST_(v_, typ_)                                                   \
-	_Generic((typ_), signed char                                           \
-		 : (intmax_t)(v_), signed short                                \
-		 : (intmax_t)(v_), signed int                                  \
-		 : (intmax_t)(v_), signed long                                 \
-		 : (intmax_t)(v_), signed long long                            \
-		 : (intmax_t)(v_), unsigned char                               \
-		 : (uintmax_t)(v_), unsigned short                             \
-		 : (uintmax_t)(v_), unsigned int                               \
-		 : (uintmax_t)(v_), unsigned long                              \
-		 : (uintmax_t)(v_), unsigned long long                         \
-		 : (uintmax_t)(v_), default                                    \
-		 : (uintptr_t)(v_))
+	_Generic(                                                              \
+		(typ_),                                                        \
+		signed char: (intmax_t)(v_),                                   \
+		signed short: (intmax_t)(v_),                                  \
+		signed int: (intmax_t)(v_),                                    \
+		signed long: (intmax_t)(v_),                                   \
+		signed long long: (intmax_t)(v_),                              \
+		unsigned char: (uintmax_t)(v_),                                \
+		unsigned short: (uintmax_t)(v_),                               \
+		unsigned int: (uintmax_t)(v_),                                 \
+		unsigned long: (uintmax_t)(v_),                                \
+		unsigned long long: (uintmax_t)(v_),                           \
+		default: (uintptr_t)(v_))
 
 #define T_EXPECT_EQ(value_, expect_)                                           \
 	do {                                                                   \

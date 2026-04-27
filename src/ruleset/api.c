@@ -209,8 +209,6 @@ static int api_config(lua_State *restrict L)
 
 	lua_pushboolean(L, conf->auth_required);
 	lua_setfield(L, -2, "auth_required");
-	lua_pushboolean(L, conf->bidir_timeout);
-	lua_setfield(L, -2, "bidir_timeout");
 #if WITH_SPLICE
 	lua_pushboolean(L, conf->pipe);
 	lua_setfield(L, -2, "pipe");

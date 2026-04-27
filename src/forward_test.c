@@ -37,7 +37,6 @@
 
 static struct config test_conf = {
 	.timeout = 1.0,
-	.bidir_timeout = false,
 };
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.032;
@@ -139,7 +138,6 @@ static void stub_reset(void)
 	STUB.ruleset_cancel_calls = 0;
 #endif
 	test_conf.timeout = 1.0;
-	test_conf.bidir_timeout = false;
 }
 
 static void test_server_init(struct server *restrict s)
@@ -437,7 +435,7 @@ void transfer_free(struct transfer *restrict xfer)
 	UNUSED(xfer);
 }
 
-struct transfer_ctx *transfer_start(
+bool transfer_serve(
 	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
 	const struct transfer_opts *restrict opts)
 {
@@ -448,11 +446,11 @@ struct transfer_ctx *transfer_start(
 		(int)(sizeof(STUB.xfer_ctxs) / sizeof(STUB.xfer_ctxs[0])));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
-		return NULL;
+		return false;
 	}
 	xctx->num_sessions = opts->num_sessions;
 	STUB.xfer_ctxs[STUB.xfer_count++] = xctx;
-	return (struct transfer_ctx *)xctx;
+	return true;
 }
 
 static void stub_fire_all_xfer_finished(struct ev_loop *loop)

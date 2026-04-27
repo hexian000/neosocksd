@@ -170,14 +170,13 @@ T_DECLARE_CASE(test_transfer_moves_payload)
 	struct transfer *restrict xfer = transfer_new(loop);
 	T_CHECK(xfer != NULL);
 
-	struct transfer_ctx *restrict t = transfer_start(
+	T_CHECK(transfer_serve(
 		xfer, acc_fd, dial_fd,
 		&(struct transfer_opts){
 			.byt_up = &state.byt_up,
 			.byt_down = &state.byt_down,
 			.num_sessions = &state.num_sessions,
-		});
-	T_CHECK(t != NULL);
+		}));
 	/* transfer_ctx_new takes fd ownership */
 	acc_fd = dial_fd = -1;
 
@@ -237,15 +236,13 @@ T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
 	struct transfer *restrict xfer = transfer_new(loop);
 	T_CHECK(xfer != NULL);
 
-	struct transfer_ctx *restrict t = transfer_start(
+	T_CHECK(transfer_serve(
 		xfer, acc_fd, dial_fd,
 		&(struct transfer_opts){
 			.byt_up = &state.byt_up,
 			.byt_down = &state.byt_down,
 			.num_sessions = &state.num_sessions,
-		});
-	T_CHECK(t != NULL);
-	(void)t;
+		}));
 	acc_fd = dial_fd = -1;
 
 	/*
@@ -287,15 +284,13 @@ T_DECLARE_CASE(test_transfer_dst_error_finishes)
 	struct transfer *restrict xfer = transfer_new(loop);
 	T_CHECK(xfer != NULL);
 
-	struct transfer_ctx *restrict t = transfer_start(
+	T_CHECK(transfer_serve(
 		xfer, acc_fd, dial_fd,
 		&(struct transfer_opts){
 			.byt_up = &state.byt_up,
 			.byt_down = &state.byt_down,
 			.num_sessions = &state.num_sessions,
-		});
-	T_CHECK(t != NULL);
-	(void)t;
+		}));
 	acc_fd = dial_fd = -1;
 
 	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
@@ -338,15 +333,13 @@ T_DECLARE_CASE(test_transfer_backpressure_completes)
 	struct transfer *restrict xfer = transfer_new(loop);
 	T_CHECK(xfer != NULL);
 
-	struct transfer_ctx *restrict t = transfer_start(
+	T_CHECK(transfer_serve(
 		xfer, acc_fd, dial_fd,
 		&(struct transfer_opts){
 			.byt_up = &state.byt_up,
 			.byt_down = &state.byt_down,
 			.num_sessions = &state.num_sessions,
-		});
-	T_CHECK(t != NULL);
-	(void)t;
+		}));
 	acc_fd = dial_fd = -1;
 
 	/* Drain exactly the pre-filled bytes to relieve backpressure without

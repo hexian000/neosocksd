@@ -369,7 +369,7 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 #else
 	const size_t cur = ++ctx->s->num_sessions;
 #endif
-	if (transfer_start(
+	if (!transfer_serve(
 		    ctx->s->xfer, acc_fd, dial_fd,
 		    &(struct transfer_opts){
 			    .byt_up = &ctx->s->byt_up,
@@ -378,7 +378,7 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 			    .use_splice = ctx->s->conf->pipe,
 #endif
 			    .num_sessions = &ctx->s->num_sessions,
-		    }) == NULL) {
+		    })) {
 #if WITH_THREADS
 		atomic_fetch_sub_explicit(
 			&ctx->s->num_sessions, 1, memory_order_relaxed);

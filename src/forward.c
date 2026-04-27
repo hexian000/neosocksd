@@ -197,7 +197,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 #else
 	const size_t cur = ++ctx->s->num_sessions;
 #endif
-	if (transfer_start(
+	if (!transfer_serve(
 		    ctx->s->xfer, acc_fd, dial_fd,
 		    &(struct transfer_opts){
 			    .byt_up = &ctx->s->byt_up,
@@ -206,7 +206,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 			    .use_splice = ctx->s->conf->pipe,
 #endif
 			    .num_sessions = &ctx->s->num_sessions,
-		    }) == NULL) {
+		    })) {
 #if WITH_THREADS
 		atomic_fetch_sub_explicit(
 			&ctx->s->num_sessions, 1, memory_order_relaxed);

@@ -82,7 +82,7 @@ static const char *const xfer_state_str[] = {
 
 /*
  * Single-direction transfer half.  All fields accessed exclusively on the
- * xfer thread after xfer_start_func enqueues the initial ev_io_start calls.
+ * xfer thread after task_xfer_start enqueues the initial ev_io_start calls.
  */
 struct xfer_half {
 	enum xfer_half_state state;
@@ -499,9 +499,9 @@ static void pipe_put(struct splice_pipe *restrict pipe)
 
 #endif /* WITH_SPLICE */
 
-/* ---------------------------------------------------------------- xfer_start_func / xfer_stop_func */
+/* ---------------------------------------------------------------- task_xfer_start / task_xfer_stop */
 
-static void xfer_start_func(void *data)
+static void task_xfer_start(void *data)
 {
 	struct transfer_ctx *restrict t = data;
 	struct transfer *restrict xfer = t->xfer;
@@ -532,11 +532,11 @@ static void xfer_start_func(void *data)
 }
 
 /*
- * xfer_stop_func: cancel a single in-flight transfer from the xfer thread.
+ * task_xfer_stop: cancel a single in-flight transfer from the xfer thread.
  * Called during engine shutdown for every entry in active_list.
  */
 static void
-xfer_stop_func(struct ev_loop *restrict loop, struct transfer_ctx *restrict t)
+task_xfer_stop(struct ev_loop *restrict loop, struct transfer_ctx *restrict t)
 {
 	ev_io_stop(loop, &t->up.w_socket);
 	ev_io_stop(loop, &t->down.w_socket);
@@ -585,7 +585,7 @@ static int xfer_thread_func(void *arg)
 	/* Cancel any transfers that are still in flight at shutdown. */
 	for (struct transfer_ctx *t = xfer->active_list; t != NULL;) {
 		struct transfer_ctx *next = t->next;
-		xfer_stop_func(loop, t);
+		task_xfer_stop(loop, t);
 		t = next;
 	}
 	xfer->active_list = NULL;
@@ -664,7 +664,7 @@ void transfer_free(struct transfer *restrict xfer)
 	/* Cancel any in-flight transfers. */
 	for (struct transfer_ctx *t = xfer->active_list; t != NULL;) {
 		struct transfer_ctx *next = t->next;
-		xfer_stop_func(xfer->loop, t);
+		task_xfer_stop(xfer->loop, t);
 		t = next;
 	}
 	xfer->active_list = NULL;
@@ -703,13 +703,13 @@ static void xfer_half_init(
 	BUF_INIT(h->buf, 0);
 }
 
-struct transfer_ctx *transfer_start(
+bool transfer_serve(
 	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
 	const struct transfer_opts *restrict opts)
 {
 	struct transfer_ctx *restrict t = malloc(sizeof(struct transfer_ctx));
 	if (t == NULL) {
-		return NULL;
+		return false;
 	}
 	t->xfer = xfer;
 	t->next = NULL;
@@ -734,13 +734,13 @@ struct transfer_ctx *transfer_start(
 #if WITH_THREADS
 	if (!dispatcher_invoke(
 		    xfer->disp,
-		    (struct task){ .func = xfer_start_func, .data = t })) {
+		    (struct task){ .func = task_xfer_start, .data = t })) {
 		free(t);
-		return NULL;
+		return false;
 	}
 	ev_async_send(xfer->loop, &xfer->w_invoke);
 #else
-	xfer_start_func(t);
+	task_xfer_start(t);
 #endif
-	return t;
+	return true;
 }
