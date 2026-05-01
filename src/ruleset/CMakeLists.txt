@@ -20,23 +20,19 @@ target_sources(neosocksd
 )
 
 if(WITH_LUA)
-    add_executable(cfunc_test
-        cfunc_test.c
-    )
-    target_include_directories(cfunc_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/..)
-    target_include_directories(cfunc_test SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
-    target_compile_options(cfunc_test PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/../config.h")
-    target_compile_options(cfunc_test PRIVATE -pedantic -Wall -Wextra -Werror)
-    target_link_libraries(cfunc_test PRIVATE csnippets miniz ${LIBEV_LIBRARY} ${LUA_LIBRARY})
-    if(LIBM)
-        target_link_libraries(cfunc_test PRIVATE m)
-    endif()
-
-    if(FORCE_POSIX)
-        target_compile_definitions(cfunc_test PRIVATE _POSIX_C_SOURCE=200809L)
-    else()
-        target_compile_definitions(cfunc_test PRIVATE _GNU_SOURCE)
-    endif()
-
-    add_test(NAME cfunc_test COMMAND cfunc_test)
+    add_unit_test(cfunc_test
+        SRCS cfunc_test.c
+        CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
+        EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        WITH_LUA)
+    add_unit_test(api_test
+        SRCS api_test.c api.c base.c
+        CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
+        EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        WITH_LUA)
+    add_unit_test(await_test
+        SRCS await_test.c await.c base.c
+        CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
+        EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
+        WITH_LUA)
 endif()

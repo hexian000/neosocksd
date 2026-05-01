@@ -1009,7 +1009,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	if (ret < 0) {
 		const int err = errno;
 		if (ctx->state == STATE_FORWARD && ctx->fwd_cached_fd &&
-		    is_stale_conn_err(err)) {
+		    IS_STALECONN_ERROR(err)) {
 			ctx->fwd_cached_fd = false;
 			ev_io_stop(loop, &ctx->w_send);
 			ev_io_set(&ctx->w_send, -1, EV_NONE);

@@ -125,11 +125,9 @@ void conn_cache_put(
 int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req);
 
 /* Returns true if err indicates a cached connection has gone stale. */
-static inline bool is_stale_conn_err(const int err)
-{
-	return err == ECONNRESET || err == EPIPE || err == ECONNABORTED ||
-	       err == ENOTCONN || err == EBADF;
-}
+#define IS_STALECONN_ERROR(err)                                                 \
+	((err) == ECONNRESET || (err) == EPIPE || (err) == ECONNABORTED ||     \
+	 (err) == ENOTCONN || (err) == EBADF)
 
 /** Process-level initializations. */
 void init(int argc, char *const restrict argv[]);
