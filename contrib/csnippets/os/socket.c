@@ -200,57 +200,30 @@ socklen_t socket_get_peer(const int fd, union sockaddr_max *const sa)
 
 int socket_send(const int fd, const void *restrict buf, size_t *restrict len)
 {
-	const unsigned char *b = buf;
-	size_t nbsend = 0;
-	size_t n = *len;
-	while (n > 0) {
-		const ssize_t nsend = send(fd, b, n, 0);
-		if (nsend < 0) {
-			const int err = errno;
-			if (IS_TRANSIENT_ERROR(err)) {
-				break;
-			}
-			LOGE_F("send [fd:%d]: (%d) %s", fd, err, strerror(err));
-			*len = nbsend;
-			return -1;
-		}
-		if (nsend == 0) {
-			break;
-		}
-		b += nsend;
-		n -= nsend;
-		nbsend += nsend;
+	ssize_t nsend;
+	do {
+		nsend = send(fd, buf, *len, 0);
+	} while (nsend < 0 && errno == EINTR);
+	if (nsend < 0) {
+		*len = 0;
+		return errno;
 	}
-	*len = nbsend;
+	*len = (size_t)nsend;
 	return 0;
 }
 
 int socket_recv(const int fd, void *restrict buf, size_t *restrict len)
 {
-	unsigned char *b = buf;
-	size_t nbrecv = 0;
-	size_t n = *len;
-	while (n > 0) {
-		const ssize_t nrecv = recv(fd, b, n, 0);
-		if (nrecv < 0) {
-			const int err = errno;
-			if (IS_TRANSIENT_ERROR(err)) {
-				break;
-			}
-			LOGE_F("recv [fd:%d]: (%d) %s", fd, err, strerror(err));
-			*len = nbrecv;
-			return -1;
-		}
-		if (nrecv == 0) {
-			/* EOF */
-			*len = nbrecv;
-			return 0;
-		}
-		b += nrecv;
-		n -= nrecv;
-		nbrecv += nrecv;
+	ssize_t nrecv;
+	do {
+		nrecv = recv(fd, buf, *len, 0);
+	} while (nrecv < 0 && errno == EINTR);
+	if (nrecv < 0) {
+		*len = 0;
+		return errno;
 	}
-	*len = nbrecv;
+	/* nrecv == 0: EOF */
+	*len = (size_t)nrecv;
 	return 0;
 }
 

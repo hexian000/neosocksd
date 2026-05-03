@@ -137,8 +137,8 @@ static int api_setinterval(lua_State *restrict L)
 		ev_idle_start(r->loop, &r->w_idle);
 		return 0;
 	}
-	ev_timer_set(&r->w_ticker, interval, interval);
-	ev_timer_start(r->loop, &r->w_ticker);
+	ev_timer_set(&r->w_ticker, 0.0, interval);
+	ev_timer_again(r->loop, &r->w_ticker);
 	return 0;
 }
 

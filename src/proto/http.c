@@ -542,29 +542,30 @@ static int parse_content(struct http_conn *restrict p)
  * Maintains null termination for string parsing operations.
  *
  * @param p Parser instance
- * @return true if data received successfully
+ * @return 1 on success, 0 if no data (EAGAIN/EWOULDBLOCK), -1 on error or EOF
  */
-static bool recv_request(struct http_conn *restrict p)
+static int recv_request(struct http_conn *restrict p)
 {
 	/* Calculate available space (reserve 1 byte for null terminator) */
 	size_t n = p->rbuf.cap - p->rbuf.len - 1;
 
-	/* Receive data from socket */
-	const int ret = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
-	if (ret != 0) {
-		/* Discard data on error */
-		LOGD_F("socket_recv: error %d", ret);
-		return false;
+	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
+	if (err != 0) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
+			return 0;
+		}
+		LOGD_F("recv: (%d) %s", err, strerror(err));
+		return -1;
 	}
 	if (n == 0) {
-		LOGD("socket_recv: early EOF");
-		return false;
+		LOGD("recv: early EOF");
+		return -1;
 	}
 
 	/* Update buffer length and maintain null termination */
 	p->rbuf.len += n;
 	p->rbuf.data[p->rbuf.len] = '\0';
-	return true;
+	return 1;
 }
 
 /**
@@ -575,30 +576,31 @@ static bool recv_request(struct http_conn *restrict p)
  * length is known.
  *
  * @param p Parser instance
- * @return true if data received successfully
+ * @return 1 on success, 0 if no data (EAGAIN/EWOULDBLOCK), -1 on error or EOF
  */
-static bool recv_content(const struct http_conn *restrict p)
+static int recv_content(const struct http_conn *restrict p)
 {
 	/* Calculate available space in content buffer */
 	unsigned char *b;
 	size_t n;
 	VBUF_SPACE(b, n, p->cbuf);
 
-	/* Receive data directly into content buffer */
-	const int ret = socket_recv(p->fd, b, &n);
-	if (ret != 0) {
-		/* Discard data on error */
-		LOGD_F("socket_recv: error %d", ret);
-		return false;
+	const int err = socket_recv(p->fd, b, &n);
+	if (err != 0) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
+			return 0;
+		}
+		LOGD_F("recv: (%d) %s", err, strerror(err));
+		return -1;
 	}
 	if (n == 0) {
-		LOGD("socket_recv: early EOF");
-		return false;
+		LOGD("recv: early EOF");
+		return -1;
 	}
 
 	/* Update content buffer length */
 	p->cbuf->len += n;
-	return true;
+	return 1;
 }
 
 /**
@@ -618,18 +620,28 @@ int http_conn_recv(struct http_conn *restrict p)
 	switch (p->state) {
 	case STATE_PARSE_REQUEST:
 	case STATE_PARSE_RESPONSE:
-	case STATE_PARSE_HEADER:
+	case STATE_PARSE_HEADER: {
 		/* Receive into main read buffer for header parsing */
-		if (!recv_request(p)) {
+		const int r = recv_request(p);
+		if (r < 0) {
 			return -1;
 		}
+		if (r == 0) {
+			return 1;
+		}
 		break;
-	case STATE_PARSE_CONTENT:
+	}
+	case STATE_PARSE_CONTENT: {
 		/* Receive directly into content buffer */
-		if (!recv_content(p)) {
+		const int r = recv_content(p);
+		if (r < 0) {
 			return -1;
 		}
+		if (r == 0) {
+			return 1;
+		}
 		break;
+	}
 	default:
 		return -1;
 	}
@@ -674,29 +686,43 @@ int http_conn_recv(struct http_conn *restrict p)
 
 int http_conn_send(struct http_conn *restrict p, const int fd)
 {
-	const unsigned char *buf = p->wbuf.data + p->wpos;
-	size_t len = p->wbuf.len - p->wpos;
-	int ret = socket_send(fd, buf, &len);
-	if (ret != 0) {
-		return -1;
-	}
-	p->wpos += len;
-	if (p->wpos < p->wbuf.len) {
-		return 1;
+	{
+		const unsigned char *buf = p->wbuf.data + p->wpos;
+		size_t len = p->wbuf.len - p->wpos;
+		const int err = socket_send(fd, buf, &len);
+		if (err != 0) {
+			if (err == EAGAIN || err == EWOULDBLOCK ||
+			    err == ENOBUFS || err == ENOMEM) {
+				return 1;
+			}
+			return -1;
+		}
+		p->wpos += len;
+		if (p->wpos < p->wbuf.len) {
+			return 1;
+		}
 	}
 
 	if (p->cbuf == NULL) {
 		return 0;
 	}
 
-	VBUF_VIEW(buf, len, p->cbuf, p->cpos);
-	ret = socket_send(fd, buf, &len);
-	if (ret != 0) {
-		return -1;
-	}
-	p->cpos += len;
-	if (p->cpos < VBUF_LEN(p->cbuf)) {
-		return 1;
+	{
+		const unsigned char *buf;
+		size_t len;
+		VBUF_VIEW(buf, len, p->cbuf, p->cpos);
+		const int err = socket_send(fd, buf, &len);
+		if (err != 0) {
+			if (err == EAGAIN || err == EWOULDBLOCK ||
+			    err == ENOBUFS || err == ENOMEM) {
+				return 1;
+			}
+			return -1;
+		}
+		p->cpos += len;
+		if (p->cpos < VBUF_LEN(p->cbuf)) {
+			return 1;
+		}
 	}
 
 	VBUF_FREE(p->cbuf);

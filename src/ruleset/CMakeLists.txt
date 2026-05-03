@@ -21,7 +21,7 @@ target_sources(neosocksd
 
 if(WITH_LUA)
     add_unit_test(cfunc_test
-        SRCS cfunc_test.c
+        SRCS cfunc_test.c ../ruleset.c base.c cfunc.c
         CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
         EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
         WITH_LUA)

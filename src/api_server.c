@@ -1186,9 +1186,7 @@ static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	ctx->uri = (struct url){ 0 };
 	ctx->keepalive = false;
 	ctx->state = STATE_REQUEST;
-	ev_timer_stop(loop, &ctx->w_timeout);
-	ev_timer_set(&ctx->w_timeout, ctx->s->conf->timeout, 0.0);
-	ev_timer_start(loop, &ctx->w_timeout);
+	ev_timer_again(loop, &ctx->w_timeout);
 	ev_io_start(loop, &ctx->w_recv);
 }
 
@@ -1231,26 +1229,41 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	ASSERT(ctx->state == STATE_RESPONSE);
 
 	const int fd = watcher->fd;
-	const unsigned char *buf = ctx->conn.wbuf.data + ctx->conn.wpos;
-	size_t len = ctx->conn.wbuf.len - ctx->conn.wpos;
-	int ret = socket_send(fd, buf, &len);
-	if (ret != 0) {
-		API_CTX_LOG_F(WARNING, ctx, "socket_send: error %d", ret);
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	ctx->conn.wpos += len;
-	if (ctx->conn.wpos < ctx->conn.wbuf.len) {
-		return;
+	{
+		const unsigned char *buf = ctx->conn.wbuf.data + ctx->conn.wpos;
+		size_t len = ctx->conn.wbuf.len - ctx->conn.wpos;
+		const int err = socket_send(fd, buf, &len);
+		if (err != 0) {
+			if (err == EAGAIN || err == EWOULDBLOCK ||
+			    err == ENOBUFS || err == ENOMEM) {
+				return;
+			}
+			API_CTX_LOG_F(
+				WARNING, ctx, "send: (%d) %s", err,
+				strerror(err));
+			gc_unref(&ctx->gcbase);
+			return;
+		}
+		ctx->conn.wpos += len;
+		if (ctx->conn.wpos < ctx->conn.wbuf.len) {
+			return;
+		}
 	}
 
 	/* Send response body after headers are fully sent */
 	if (ctx->conn.cbuf != NULL) {
+		const unsigned char *buf;
+		size_t len;
 		VBUF_VIEW(buf, len, ctx->conn.cbuf, ctx->conn.cpos);
-		ret = socket_send(fd, buf, &len);
-		if (ret != 0) {
+		const int err = socket_send(fd, buf, &len);
+		if (err != 0) {
+			if (err == EAGAIN || err == EWOULDBLOCK ||
+			    err == ENOBUFS || err == ENOMEM) {
+				return;
+			}
 			API_CTX_LOG_F(
-				WARNING, ctx, "socket_send: error %d", ret);
+				WARNING, ctx, "send: (%d) %s", err,
+				strerror(err));
 			gc_unref(&ctx->gcbase);
 			return;
 		}
@@ -1289,7 +1302,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ctx->accepted_fd = fd;
 	ctx->dialed_fd = -1;
 
-	ev_timer_init(&ctx->w_timeout, timeout_cb, s->conf->timeout, 0.0);
+	ev_timer_init(&ctx->w_timeout, timeout_cb, 0.0, s->conf->timeout);
 	ctx->w_timeout.data = ctx;
 	ev_io_init(&ctx->w_recv, recv_cb, fd, EV_READ);
 	ctx->w_recv.data = ctx;
@@ -1311,7 +1324,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 static void api_ctx_start(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	ev_io_start(loop, &ctx->w_recv);
-	ev_timer_start(loop, &ctx->w_timeout);
+	ev_timer_again(loop, &ctx->w_timeout);
 
 	ctx->state = STATE_REQUEST;
 }

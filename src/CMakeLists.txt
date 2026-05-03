@@ -58,14 +58,6 @@ target_compile_options(neosocksd PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/co
 # be strict with original sources
 target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra -Werror)
 
-if(LIBM)
-    target_link_libraries(neosocksd PRIVATE m)
-endif()
-
-if(WITH_THREADS)
-    target_link_libraries(neosocksd PRIVATE Threads::Threads)
-endif()
-
 # find libev
 find_path(LIBEV_INCLUDE_DIR NAMES ev.h)
 if(BUILD_STATIC OR LINK_STATIC_LIBS)
@@ -164,6 +156,10 @@ if(ENABLE_RULESET)
     set(WITH_RULESET TRUE)
 endif()
 
+if(WITH_THREADS)
+    target_link_libraries(neosocksd PRIVATE Threads::Threads)
+endif()
+
 if(LIBM)
     target_link_libraries(neosocksd PRIVATE m)
 endif()
@@ -204,9 +200,6 @@ function(add_unit_test TEST_NAME)
     if(NOT UT_NO_LIBEV)
         target_link_libraries(${TEST_NAME} PRIVATE ${LIBEV_LIBRARY})
     endif()
-    if(LIBM)
-        target_link_libraries(${TEST_NAME} PRIVATE m)
-    endif()
     if(UT_WITH_LUA AND WITH_LUA)
         target_include_directories(${TEST_NAME} SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
         target_link_libraries(${TEST_NAME} PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
@@ -221,6 +214,9 @@ function(add_unit_test TEST_NAME)
     if(UT_WITH_CARES AND WITH_CARES)
         target_include_directories(${TEST_NAME} SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
         target_link_libraries(${TEST_NAME} PRIVATE ${LIBCARES_LIBRARY})
+    endif()
+    if(LIBM)
+        target_link_libraries(${TEST_NAME} PRIVATE m)
     endif()
     if(FORCE_POSIX)
         target_compile_definitions(${TEST_NAME} PRIVATE _POSIX_C_SOURCE=200809L)
@@ -324,6 +320,6 @@ if(WITH_LUA)
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         WITH_LUA WITH_CARES)
     add_unit_test(ruleset_test
-        SRCS ruleset_test.c
+        SRCS ruleset_test.c ruleset.c ruleset/base.c ruleset/cfunc.c
         WITH_LUA)
 endif()

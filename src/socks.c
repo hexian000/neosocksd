@@ -741,10 +741,13 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 {
 	unsigned char *buf = ctx->rbuf.data + ctx->rbuf.len;
 	const size_t n = ctx->rbuf.cap - ctx->rbuf.len;
-	const ssize_t nrecv = recv(fd, buf, n, 0);
+	ssize_t nrecv;
+	do {
+		nrecv = recv(fd, buf, n, 0);
+	} while (nrecv < 0 && errno == EINTR);
 	if (nrecv < 0) {
 		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
 			return 1;
 		}
 		SOCKS_CTX_LOG_F(
@@ -876,7 +879,8 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	const int conn_fd = accept(ctx->dialed_fd, &peer_sa.sa, &peer_len);
 	if (conn_fd < 0) {
 		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+		if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK ||
+		    err == ECONNABORTED) {
 			return;
 		}
 		SOCKS_CTX_LOG_F(
@@ -1055,12 +1059,16 @@ static void udp_frag_reset(struct socks_ctx *restrict ctx)
 
 static void udp_frag_flush(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
-	const ssize_t nsend =
-		sendto(ctx->dialed_fd, ctx->frag_buf.data, ctx->frag_buf.len, 0,
-		       &ctx->frag_target.sa, ctx->frag_target_len);
+	ssize_t nsend;
+	do {
+		nsend =
+			sendto(ctx->dialed_fd, ctx->frag_buf.data,
+			       ctx->frag_buf.len, 0, &ctx->frag_target.sa,
+			       ctx->frag_target_len);
+	} while (nsend < 0 && errno == EINTR);
 	if (nsend < 0) {
 		const int err = errno;
-		if (!IS_TRANSIENT_ERROR(err)) {
+		if (err != EAGAIN && err != EWOULDBLOCK && err != ENOBUFS) {
 			SOCKS_CTX_LOG_F(
 				ERROR, ctx,
 				"sendto target (reassembled): (%d) %s", err,
@@ -1171,7 +1179,7 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		&from_len);
 	if (nrecv < 0) {
 		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+		if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
 			return;
 		}
 		SOCKS_CTX_LOG_F(
@@ -1204,13 +1212,17 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			    &target_len, &hdr_len)) {
 			return; /* unsupported address type, discard */
 		}
-		const ssize_t nsend =
-			sendto(ctx->dialed_fd, ctx->ubuf.data + hdr_len,
-			       (size_t)nrecv - hdr_len, 0, &target_sa.sa,
-			       target_len);
+		ssize_t nsend;
+		do {
+			nsend =
+				sendto(ctx->dialed_fd, ctx->ubuf.data + hdr_len,
+				       (size_t)nrecv - hdr_len, 0,
+				       &target_sa.sa, target_len);
+		} while (nsend < 0 && errno == EINTR);
 		if (nsend < 0) {
 			const int err = errno;
-			if (!IS_TRANSIENT_ERROR(err)) {
+			if (err != EAGAIN && err != EWOULDBLOCK &&
+			    err != ENOBUFS) {
 				SOCKS_CTX_LOG_F(
 					ERROR, ctx, "sendto target: (%d) %s",
 					err, strerror(err));
@@ -1260,10 +1272,14 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			.msg_iov = (struct iovec *)iov,
 			.msg_iovlen = 2,
 		};
-		const ssize_t nsend = sendmsg(ctx->dialed_fd, &msg, 0);
+		ssize_t nsend;
+		do {
+			nsend = sendmsg(ctx->dialed_fd, &msg, 0);
+		} while (nsend < 0 && errno == EINTR);
 		if (nsend < 0) {
 			const int err = errno;
-			if (!IS_TRANSIENT_ERROR(err)) {
+			if (err != EAGAIN && err != EWOULDBLOCK &&
+			    err != ENOBUFS) {
 				SOCKS_CTX_LOG_F(
 					ERROR, ctx,
 					"sendmsg to client: (%d) %s", err,
@@ -1282,11 +1298,13 @@ tcp_monitor_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	ASSERT(ctx->state == STATE_UDP_RELAY);
 	/* Any readable event: check for EOF on the TCP control connection */
 	unsigned char discard_buf[64];
-	const ssize_t n =
-		recv(ctx->accepted_fd, discard_buf, sizeof(discard_buf), 0);
+	ssize_t n;
+	do {
+		n = recv(ctx->accepted_fd, discard_buf, sizeof(discard_buf), 0);
+	} while (n < 0 && errno == EINTR);
 	if (n < 0) {
 		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
 			return;
 		}
 		SOCKS_CTX_LOG_F(

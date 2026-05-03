@@ -116,7 +116,8 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	if (ret < 0) {
 		const int err = errno;
 		if (ctx->state == STATE_CLIENT_REQUEST && !ctx->cache_retried &&
-		    IS_STALECONN_ERROR(err)) {
+		    (err == ECONNRESET || err == EPIPE || err == ECONNABORTED ||
+		     err == ENOTCONN || err == EBADF)) {
 			ctx->cache_retried = true;
 			ev_io_stop(loop, watcher);
 			const int stale_fd = watcher->fd;

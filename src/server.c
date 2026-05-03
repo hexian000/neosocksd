@@ -88,8 +88,11 @@ static void accept_cb(
 		const int fd = accept(watcher->fd, &addr.sa, &addrlen);
 		if (fd < 0) {
 			const int err = errno;
-			if (IS_TRANSIENT_ERROR(err)) {
+			if (err == EAGAIN || err == EWOULDBLOCK) {
 				break; /* No more connections to accept */
+			}
+			if (err == EINTR || err == ECONNABORTED) {
+				continue; /* Retry immediately */
 			}
 			LOGE_F("accept: (%d) %s", err, strerror(err));
 			/* Sleep until next timer, see timer_cb */

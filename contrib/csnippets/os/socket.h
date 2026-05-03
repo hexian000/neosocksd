@@ -22,17 +22,6 @@
  */
 
 /**
- * @def IS_TRANSIENT_ERROR(err)
- * @brief Checks if the error code indicates a transient error that may be retried.
- * @param err The error code to check.
- * @return True if the error is transient.
- * @note POSIX version: POSIX.1-2001
- */
-#define IS_TRANSIENT_ERROR(err)                                                \
-	((err) == EINTR || (err) == EAGAIN || (err) == EWOULDBLOCK ||          \
-	 (err) == ENOBUFS || (err) == ENOMEM)
-
-/**
  * @def SHUTDOWN_FD(fd, dir)
  * @brief Shuts down the write end of the socket and logs any errors.
  * @param fd The socket file descriptor.
@@ -166,21 +155,22 @@ socklen_t socket_get_addr(int fd, union sockaddr_max *sa);
 socklen_t socket_get_peer(int fd, union sockaddr_max *sa);
 
 /**
- * @brief Sends data on a socket, handling partial sends and transient errors.
+ * @brief Sends data on a socket, retrying on EINTR.
  * @param fd The socket file descriptor.
  * @param buf The data buffer.
- * @param len Pointer to the length of data to send; updated to bytes sent in all cases.
- * @return 0 on success or transient break, -1 on unrecoverable failure; logs LOGE on failure.
+ * @param[in,out] len Input: bytes to send. Output: bytes sent; 0 on failure.
+ * @return 0 on success; errno on failure (e.g. EAGAIN/EWOULDBLOCK).
  * @note POSIX version: POSIX.1-2001
  */
 int socket_send(int fd, const void *restrict buf, size_t *restrict len);
 
 /**
- * @brief Receives data from a socket, handling partial receives and transient errors.
+ * @brief Receives data from a socket, retrying on EINTR.
  * @param fd The socket file descriptor.
  * @param buf The data buffer.
- * @param len Pointer to the buffer size; updated to bytes received in all cases.
- * @return 0 on success, EOF, or transient break, -1 on unrecoverable failure; logs LOGE on failure.
+ * @param[in,out] len Input: buffer size. Output: bytes received; 0 on EOF or failure.
+ * @return 0 on success or EOF; errno on failure (e.g. EAGAIN/EWOULDBLOCK).
+ *         EOF is indicated by a return value of 0 with @p len set to 0.
  * @note POSIX version: POSIX.1-2001
  */
 int socket_recv(int fd, void *restrict buf, size_t *restrict len);

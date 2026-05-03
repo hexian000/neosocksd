@@ -182,6 +182,12 @@ static bool accepted_once(void *data)
 	return s->listeners[0].stats.num_accept == 1;
 }
 
+static bool listener_backing_off(void *data)
+{
+	const struct listener *l = data;
+	return !ev_is_active(&l->w_accept) && ev_is_active(&l->w_timer);
+}
+
 T_DECLARE_CASE(test_server_start_accept_and_stop)
 {
 	struct ev_loop *loop = EV_DEFAULT;
@@ -226,11 +232,98 @@ T_DECLARE_CASE(test_server_rejects_when_session_limit_exceeded)
 	server_stop(&s);
 }
 
+T_DECLARE_CASE(test_server_rejects_when_full_startup_limit_exceeded)
+{
+	struct ev_loop *loop = EV_DEFAULT;
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint16_t port;
+	int client_fd = -1;
+
+	conf.startup_limit_full = 1;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	s.stats.num_halfopen = 2;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+
+	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+
+	CLOSE_FD(client_fd);
+	server_stop(&s);
+}
+
+T_DECLARE_CASE(test_server_rejects_when_probabilistic_startup_limit_hits)
+{
+	struct ev_loop *loop = EV_DEFAULT;
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint16_t port;
+	int client_fd = -1;
+
+	conf.startup_limit_start = 1;
+	conf.startup_limit_rate = 100;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	s.stats.num_halfopen = 2;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+
+	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+
+	CLOSE_FD(client_fd);
+	server_stop(&s);
+}
+
+T_DECLARE_CASE(test_server_accept_error_restarts_listener)
+{
+	struct ev_loop *loop = EV_DEFAULT;
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	struct listener *l;
+	uint16_t port;
+	int pipefd[2] = { -1, -1 };
+	int client_fd = -1;
+	int listener_fd;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	l = &s.listeners[0];
+	listener_fd = l->w_accept.fd;
+	port = bound_port(listener_fd);
+	T_CHECK(pipe(pipefd) == 0);
+
+	ev_io_stop(loop, &l->w_accept);
+	ev_io_set(&l->w_accept, pipefd[0], EV_READ);
+	ev_io_start(loop, &l->w_accept);
+	T_CHECK(write(pipefd[1], "x", 1) == 1);
+
+	T_EXPECT(test_wait_until(loop, listener_backing_off, l, 0.5));
+	T_EXPECT(!ev_is_active(&l->w_accept));
+	T_EXPECT(ev_is_active(&l->w_timer));
+
+	ev_io_set(&l->w_accept, listener_fd, EV_READ);
+	CLOSE_FD(pipefd[0]);
+	CLOSE_FD(pipefd[1]);
+	client_fd = connect_loopback(port);
+	T_EXPECT(test_wait_until(loop, served_once, &s, 1.0));
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
+
+	CLOSE_FD(client_fd);
+	server_stop(&s);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
 
 	T_RUN_CASE(t, test_server_start_accept_and_stop);
 	T_RUN_CASE(t, test_server_rejects_when_session_limit_exceeded);
+	T_RUN_CASE(t, test_server_rejects_when_full_startup_limit_exceeded);
+	T_RUN_CASE(
+		t, test_server_rejects_when_probabilistic_startup_limit_hits);
+	T_RUN_CASE(t, test_server_accept_error_restarts_listener);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

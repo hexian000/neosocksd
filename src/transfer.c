@@ -256,47 +256,47 @@ static ssize_t xfer_recv(struct xfer_half *restrict h)
 		return 0;
 	}
 	unsigned char *data = h->buf.data + h->buf.len;
-	const ssize_t nrecv = recv(h->src_fd, data, cap, 0);
-	if (nrecv < 0) {
-		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+	size_t n = cap;
+	const int err = socket_recv(h->src_fd, data, &n);
+	if (err != 0) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
 			return 0;
 		}
 		XFER_HALF_LOG_F(DEBUG, h, "recv: (%d) %s", err, strerror(err));
 		return -1;
 	}
-	if (nrecv == 0) {
+	if (n == 0) {
 		XFER_HALF_LOG(VERYVERBOSE, h, "recv: EOF");
 		return -1;
 	}
-	h->buf.len += (size_t)nrecv;
-	return nrecv;
+	h->buf.len += n;
+	return (ssize_t)n;
 }
 
 static ssize_t xfer_send(struct xfer_half *restrict h)
 {
-	const size_t len = h->buf.len - h->pos;
+	size_t len = h->buf.len - h->pos;
 	if (len == 0) {
 		return 0;
 	}
 	const unsigned char *data = h->buf.data + h->pos;
-	const ssize_t nsend = send(h->dst_fd, data, len, 0);
-	if (nsend < 0) {
-		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+	const int err = socket_send(h->dst_fd, data, &len);
+	if (err != 0) {
+		if (err == EAGAIN || err == EWOULDBLOCK || err == ENOBUFS ||
+		    err == ENOMEM) {
 			return 0;
 		}
 		XFER_HALF_LOG_F(DEBUG, h, "send: (%d) %s", err, strerror(err));
 		return -1;
 	}
-	if (nsend == 0) {
+	if (len == 0) {
 		return 0;
 	}
-	h->pos += (size_t)nsend;
+	h->pos += len;
 	if (h->pos == h->buf.len) {
 		h->pos = h->buf.len = 0;
 	}
-	return nsend;
+	return (ssize_t)len;
 }
 
 static void send_eof(struct xfer_half *restrict h)
@@ -379,11 +379,14 @@ static ssize_t splice_drain(struct xfer_half *restrict h, const int fd)
 	if (cap == 0) {
 		return 0;
 	}
-	const ssize_t nrecv =
-		splice(fd, NULL, pipe->fd[1], NULL, cap, SPLICE_F_NONBLOCK);
+	ssize_t nrecv;
+	do {
+		nrecv = splice(
+			fd, NULL, pipe->fd[1], NULL, cap, SPLICE_F_NONBLOCK);
+	} while (nrecv < 0 && errno == EINTR);
 	if (nrecv < 0) {
 		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
 			return 0;
 		}
 		XFER_HALF_LOG_F(
@@ -405,11 +408,14 @@ static ssize_t splice_pump(struct xfer_half *restrict h, const int fd)
 	if (len == 0) {
 		return 0;
 	}
-	const ssize_t nsend =
-		splice(pipe->fd[0], NULL, fd, NULL, len, SPLICE_F_NONBLOCK);
+	ssize_t nsend;
+	do {
+		nsend = splice(
+			pipe->fd[0], NULL, fd, NULL, len, SPLICE_F_NONBLOCK);
+	} while (nsend < 0 && errno == EINTR);
 	if (nsend < 0) {
 		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
 			return 0;
 		}
 		XFER_HALF_LOG_F(

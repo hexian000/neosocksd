@@ -340,7 +340,7 @@ double process_load(void)
 	if (last.set) {
 		const intmax_t total = TIMESPEC_DIFF(monotime, last.monotime);
 		const intmax_t busy = TIMESPEC_DIFF(cputime, last.cputime);
-		if (busy > 0 && total > 0 && busy <= total) {
+		if (busy > 0 && total > 0) {
 			load = (double)busy / (double)total;
 		}
 	}

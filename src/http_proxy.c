@@ -626,10 +626,12 @@ relay_recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	if (n > free - 64u) {
 		n = free - 64u;
 	}
-	const int ret =
+	const int err =
 		socket_recv(ctx->dialed_fd, p->rbuf.data + p->rbuf.len, &n);
-	if (ret != 0) {
-		const int err = errno;
+	if (err != 0) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
+			return;
+		}
 		HTTP_CTX_LOG_F(
 			WARNING, ctx, "relay recv: (%d) %s", err,
 			strerror(err));
@@ -781,9 +783,12 @@ relay_send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	struct http_conn *restrict p = &ctx->conn;
 	const unsigned char *buf = p->wbuf.data + p->wpos;
 	size_t len = p->wbuf.len - p->wpos;
-	const int ret = socket_send(ctx->accepted_fd, buf, &len);
-	if (ret != 0) {
-		const int err = errno;
+	const int err = socket_send(ctx->accepted_fd, buf, &len);
+	if (err != 0) {
+		if (err == EAGAIN || err == EWOULDBLOCK || err == ENOBUFS ||
+		    err == ENOMEM) {
+			return;
+		}
 		HTTP_CTX_LOG_F(
 			WARNING, ctx, "relay send: (%d) %s", err,
 			strerror(err));
@@ -844,9 +849,12 @@ pass_req_body_send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	struct http_conn *restrict p = &ctx->conn;
 	const unsigned char *buf = p->wbuf.data + p->wpos;
 	size_t len = p->wbuf.len - p->wpos;
-	const int ret = socket_send(ctx->dialed_fd, buf, &len);
-	if (ret != 0) {
-		const int err = errno;
+	const int err = socket_send(ctx->dialed_fd, buf, &len);
+	if (err != 0) {
+		if (err == EAGAIN || err == EWOULDBLOCK || err == ENOBUFS ||
+		    err == ENOMEM) {
+			return;
+		}
 		HTTP_CTX_LOG_F(
 			WARNING, ctx, "req body send: (%d) %s", err,
 			strerror(err));
@@ -935,9 +943,11 @@ pass_req_body_recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			n = remain;
 		}
 	}
-	const int ret = socket_recv(ctx->accepted_fd, p->rbuf.data, &n);
-	if (ret != 0) {
-		const int err = errno;
+	const int err = socket_recv(ctx->accepted_fd, p->rbuf.data, &n);
+	if (err != 0) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
+			return;
+		}
 		HTTP_CTX_LOG_F(
 			WARNING, ctx, "req body recv: (%d) %s", err,
 			strerror(err));
@@ -1009,7 +1019,8 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	if (ret < 0) {
 		const int err = errno;
 		if (ctx->state == STATE_FORWARD && ctx->fwd_cached_fd &&
-		    IS_STALECONN_ERROR(err)) {
+		    (err == ECONNRESET || err == EPIPE || err == ECONNABORTED ||
+		     err == ENOTCONN || err == EBADF)) {
 			ctx->fwd_cached_fd = false;
 			ev_io_stop(loop, &ctx->w_send);
 			ev_io_set(&ctx->w_send, -1, EV_NONE);

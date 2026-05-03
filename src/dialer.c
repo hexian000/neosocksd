@@ -1252,10 +1252,13 @@ static int dialer_recv(struct dialer *restrict d)
 	const int fd = d->w_socket.fd;
 	unsigned char *buf = d->next;
 	const size_t n = d->rbuf.cap - d->rbuf.len;
-	const ssize_t nrecv = recv(fd, buf, n, MSG_PEEK);
+	ssize_t nrecv;
+	do {
+		nrecv = recv(fd, buf, n, MSG_PEEK);
+	} while (nrecv < 0 && errno == EINTR);
 	if (nrecv < 0) {
 		const int err = errno;
-		if (IS_TRANSIENT_ERROR(err)) {
+		if (err == EAGAIN || err == EWOULDBLOCK) {
 			return 1;
 		}
 		DIALER_LOG_F(
@@ -1273,7 +1276,8 @@ static int dialer_recv(struct dialer *restrict d)
 	}
 	const int sockerr = socket_get_error(fd);
 	if (sockerr != 0) {
-		if (IS_TRANSIENT_ERROR(sockerr)) {
+		if (sockerr == EINTR || sockerr == EAGAIN ||
+		    sockerr == EWOULDBLOCK) {
 			return 1;
 		}
 		DIALER_LOG_F(
