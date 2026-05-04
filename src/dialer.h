@@ -21,11 +21,11 @@
 #include "proto/socks.h"
 #include "util.h"
 
-struct config;
-struct resolver;
-
 #include "utils/buffer.h"
 #include "utils/minmax.h"
+
+struct config;
+struct resolver;
 
 #include <ev.h>
 #include <netinet/in.h>
@@ -99,7 +99,8 @@ int dialaddr_format(
  * @brief Supported proxy protocols
  */
 enum proxy_protocol {
-	PROTO_HTTP, /**< HTTP CONNECT proxy */
+	/** HTTP CONNECT proxy. */
+	PROTO_HTTP,
 	PROTO_SOCKS4A,
 	PROTO_SOCKS5,
 
@@ -114,17 +115,28 @@ enum proxy_protocol {
  * a human-readable description.
  */
 enum dialer_error {
-	DIALER_OK = 0, /**< No error, operation successful */
-	DIALER_CANCELLED, /**< Operation cancelled by user */
-	DIALER_ERR_SYSTEM, /**< System error, check syserr for errno */
-	DIALER_ERR_RESOLVE, /**< DNS resolution failed */
-	DIALER_ERR_CONNECT, /**< TCP connection failed */
-	DIALER_ERR_PROXY_PROTO, /**< Proxy protocol error (malformed response) */
-	DIALER_ERR_PROXY_AUTH, /**< Proxy authentication failed */
-	DIALER_ERR_PROXY_REFUSED, /**< Proxy refused the connection request */
-	DIALER_ERR_PROXY_REJECT, /**< Request rejected by proxy (e.g., blocked by rules) */
-	DIALER_ERR_EOF, /**< Unexpected end of connection */
-	DIALER_ERR_BLOCKED, /**< Connection blocked by local policy */
+	/** No error, operation successful. */
+	DIALER_OK = 0,
+	/** Operation cancelled by user. */
+	DIALER_CANCELLED,
+	/** System error, check syserr for errno. */
+	DIALER_ERR_SYSTEM,
+	/** DNS resolution failed. */
+	DIALER_ERR_RESOLVE,
+	/** TCP connection failed. */
+	DIALER_ERR_CONNECT,
+	/** Proxy protocol error from a malformed response. */
+	DIALER_ERR_PROXY_PROTO,
+	/** Proxy authentication failed. */
+	DIALER_ERR_PROXY_AUTH,
+	/** Proxy refused the connection request. */
+	DIALER_ERR_PROXY_REFUSED,
+	/** Request rejected by the proxy, for example by policy. */
+	DIALER_ERR_PROXY_REJECT,
+	/** Unexpected end of connection. */
+	DIALER_ERR_EOF,
+	/** Connection blocked by local policy. */
+	DIALER_ERR_BLOCKED,
 
 	DIALER_ERR_MAX,
 };

@@ -28,11 +28,14 @@
 #include "utils/slog.h"
 
 #if WITH_CARES
-#include <sys/select.h>
-#include <sys/time.h>
 #include <ares.h>
 #endif
 #include <ev.h>
+
+#if WITH_CARES
+#include <sys/select.h>
+#include <sys/time.h>
+#endif
 #include <netinet/in.h>
 #include <sys/socket.h>
 

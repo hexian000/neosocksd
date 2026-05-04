@@ -22,7 +22,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <strings.h>
 
 #include <inttypes.h>
 #include <stdbool.h>
@@ -30,6 +29,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 struct api_client_ctx {
 	struct gcbase gcbase;

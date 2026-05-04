@@ -482,7 +482,6 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 		.traceback = true,
 		.memlimit = 64,
 		.auth_required = true,
-		.conn_cache = false,
 		.tcp_nodelay = true,
 		.tcp_keepalive = true,
 	};
@@ -494,14 +493,13 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 	T_EXPECT(run_chunk(
 		L,
 		"local c = neosocksd.config() "
-		"return c.listen, c.forward, c.timeout, c.traceback, c.memlimit, c.auth_required, c.conn_cache"));
+		"return c.listen, c.forward, c.timeout, c.traceback, c.memlimit, c.auth_required"));
 	T_EXPECT_STREQ(lua_tostring(L, 1), "127.0.0.1:1080");
 	T_EXPECT_STREQ(lua_tostring(L, 2), "127.0.0.1:8080");
 	T_EXPECT_EQ(lua_tonumber(L, 3), 12.5);
 	T_EXPECT(lua_toboolean(L, 4) != 0);
 	T_EXPECT_EQ(lua_tointeger(L, 5), 64);
 	T_EXPECT(lua_toboolean(L, 6) != 0);
-	T_EXPECT(lua_toboolean(L, 7) == 0);
 
 	lua_close(L);
 	ev_loop_destroy(loop);

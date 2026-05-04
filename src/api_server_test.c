@@ -50,8 +50,6 @@ double process_load(void)
 	return -1.0;
 }
 
-struct conn_cache conn_cache = { 0 };
-
 void server_stats(
 	const struct server *restrict s, struct server_stats *restrict out)
 {
@@ -616,7 +614,6 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	conn_cache.len = 7;
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
@@ -632,10 +629,7 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "Cache-Control: no-store\r\n"));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Server Time"));
-		T_EXPECT(find_bytes(
-			rsp, (size_t)n, "Conn Cache          : 7\n"));
 	}
-	conn_cache.len = 0;
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);

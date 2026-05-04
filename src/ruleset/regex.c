@@ -32,16 +32,19 @@ static size_t cstrpos(const lua_Integer pos, const size_t len)
 		/* negative index: -1 = last, -2 = second last, etc. */
 		const lua_Integer adjusted = (lua_Integer)len + pos;
 		if (adjusted < 0) {
-			return 0; /* underflow: clamp to start */
+			/* Underflow: clamp to start. */
+			return 0;
 		}
 		return (size_t)adjusted;
 	}
 	if (pos == 0) {
-		return 0; /* 0 = start */
+		/* Zero means the start position. */
+		return 0;
 	}
 	/* pos > 0: positive index (1-based) */
 	if ((lua_Integer)len < pos) {
-		return len; /* overflow: clamp to end */
+		/* Overflow: clamp to end. */
+		return len;
 	}
 	return (size_t)(pos - 1);
 }

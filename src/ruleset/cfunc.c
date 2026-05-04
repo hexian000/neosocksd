@@ -250,26 +250,37 @@ static int package_replace(lua_State *restrict L)
 	lua_pushvalue(L, idx_modname);
 	if (lua_gettable(L, idx_loaded) != LUA_TNIL) {
 		lua_pushvalue(L, idx_modname);
-		lua_gettable(L, idx_glb); /* _G[modname] */
+		/* _G[modname] */
+		lua_gettable(L, idx_glb);
 		glb = lua_rawequal(L, -2, -1);
 		lua_pop(L, 2);
 	} else {
 		lua_pop(L, 1);
 	}
-	lua_pushvalue(L, idx_openf); /* open function */
-	lua_pushvalue(L, idx_modname); /* argument to open function */
-	lua_call(L, 1, 1); /* call open function */
-	lua_pushvalue(L, idx_modname); /* modname */
+	/* open function */
+	lua_pushvalue(L, idx_openf);
+	/* argument to open function */
+	lua_pushvalue(L, idx_modname);
+	/* call open function */
+	lua_call(L, 1, 1);
+	/* modname */
+	lua_pushvalue(L, idx_modname);
 	if (!lua_isnil(L, -2)) {
-		lua_pushvalue(L, -2); /* make copy of module (call result) */
+		/* Make a copy of the module returned by the open function. */
+		lua_pushvalue(L, -2);
 	} else {
-		lua_pushboolean(L, 1); /* no value, use true as result */
+		/* No value returned, use true as the result. */
+		lua_pushboolean(L, 1);
 	}
-	lua_settable(L, idx_loaded); /* LOADED[modname] = module */
+	/* LOADED[modname] = module */
+	lua_settable(L, idx_loaded);
 	if (glb) {
-		lua_pushvalue(L, idx_modname); /* modname */
-		lua_pushvalue(L, -2); /* copy of module */
-		lua_settable(L, idx_glb); /* _G[modname] = module */
+		/* modname */
+		lua_pushvalue(L, idx_modname);
+		/* copy of module */
+		lua_pushvalue(L, -2);
+		/* _G[modname] = module */
+		lua_settable(L, idx_glb);
 	}
 	return 1;
 }

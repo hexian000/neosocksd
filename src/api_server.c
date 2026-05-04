@@ -5,7 +5,6 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "io/memory.h"
 #include "proto/http.h"
 #include "resolver.h"
 #include "ruleset.h"
@@ -13,6 +12,7 @@
 #include "util.h"
 
 #include "io/io.h"
+#include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
 #include "net/mime.h"
@@ -29,7 +29,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <strings.h>
 
 #include <math.h>
 #include <stdbool.h>
@@ -38,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 /* State machine progression - never rollback to previous states */
@@ -314,8 +314,6 @@ static void append_server_stats(
 		resolv_stats->num_success,
 		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
 		xfer_down);
-
-	(void)io_bufprintf(w, "%-20s: %zu\n", "Conn Cache", conn_cache.len);
 
 #if WITH_RULESET
 	const struct ruleset *ruleset = s->ruleset;
@@ -968,13 +966,6 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			(double)p.p50 * 1e-9, (double)p.p90 * 1e-9,
 			(double)p.p99 * 1e-9, agg.num_connects);
 	}
-
-	(void)io_bufprintf(
-		w,
-		"# HELP neosocksd_api_conn_cache_size Number of cached upstream connections.\n"
-		"# TYPE neosocksd_api_conn_cache_size gauge\n"
-		"neosocksd_api_conn_cache_size %zu\n",
-		conn_cache.len);
 
 #if WITH_RULESET
 	{

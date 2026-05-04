@@ -237,8 +237,6 @@ static int api_config(lua_State *restrict L)
 	lua_pushboolean(L, conf->traceback);
 	lua_setfield(L, -2, "traceback");
 #endif
-	lua_pushboolean(L, conf->conn_cache);
-	lua_setfield(L, -2, "conn_cache");
 	lua_pushboolean(L, conf->socks5_bind);
 	lua_setfield(L, -2, "socks5_bind");
 	lua_pushboolean(L, conf->socks5_udp);

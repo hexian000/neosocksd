@@ -28,11 +28,8 @@
 
 #if WITH_RULESET
 
-struct conn_cache conn_cache = { 0 };
-
 static struct config test_conf = {
 	.timeout = 0.2,
-	.conn_cache = true,
 };
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
@@ -56,11 +53,6 @@ struct stub_state {
 	int_least32_t dialer_do_calls;
 	int_least32_t dialer_cancel_calls;
 	int_least32_t dialreq_free_calls;
-	int_least32_t conn_cache_get_calls;
-	int_least32_t conn_cache_put_calls;
-	int conn_cache_get_fd;
-	int conn_cache_put_fd;
-	const struct dialreq *conn_cache_put_req;
 	bool close_fd_on_conn_put;
 	struct ev_loop *pending_loop;
 	struct dialer *pending_dialer;
@@ -74,11 +66,6 @@ static struct stub_state S = {
 	.dialer_do_calls = 0,
 	.dialer_cancel_calls = 0,
 	.dialreq_free_calls = 0,
-	.conn_cache_get_calls = 0,
-	.conn_cache_put_calls = 0,
-	.conn_cache_get_fd = -1,
-	.conn_cache_put_fd = -1,
-	.conn_cache_put_req = NULL,
 	.close_fd_on_conn_put = true,
 	.pending_loop = NULL,
 	.pending_dialer = NULL,
@@ -93,16 +80,10 @@ static void reset_stub_state(void)
 	S.dialer_do_calls = 0;
 	S.dialer_cancel_calls = 0;
 	S.dialreq_free_calls = 0;
-	S.conn_cache_get_calls = 0;
-	S.conn_cache_put_calls = 0;
-	S.conn_cache_get_fd = -1;
-	S.conn_cache_put_fd = -1;
-	S.conn_cache_put_req = NULL;
 	S.close_fd_on_conn_put = true;
 	S.pending_loop = NULL;
 	S.pending_dialer = NULL;
 	test_conf.timeout = 0.2;
-	test_conf.conn_cache = true;
 }
 
 static bool fd_set_nonblock(const int fd)
@@ -379,27 +360,6 @@ void dialreq_free(struct dialreq *req)
 	free(req);
 }
 
-int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
-{
-	(void)loop;
-	(void)req;
-	S.conn_cache_get_calls++;
-	return S.conn_cache_get_fd;
-}
-
-void conn_cache_put(
-	struct ev_loop *loop, const int fd,
-	const struct dialreq *restrict dialreq)
-{
-	(void)loop;
-	S.conn_cache_put_calls++;
-	S.conn_cache_put_fd = fd;
-	S.conn_cache_put_req = dialreq;
-	if (S.close_fd_on_conn_put) {
-		(void)close(fd);
-	}
-}
-
 bool check_rpcall_mime(char *mime_type)
 {
 	if (mime_type == NULL) {
@@ -484,7 +444,6 @@ T_DECLARE_CASE(invoke_uses_invoke_path)
 	T_CHECK(test_wait_until(
 		loop, fd_closed_predicate, &closed_ctx,
 		TEST_WAIT_RESPONSE_SEC));
-	T_EXPECT_EQ(S.conn_cache_put_calls, 0);
 
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
@@ -731,9 +690,6 @@ T_DECLARE_CASE(connection_keep_alive_recycled)
 	T_CHECK(test_wait_until(
 		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
 	T_EXPECT(out.called);
-	T_EXPECT_EQ(S.conn_cache_put_calls, 1);
-	T_EXPECT_EQ(S.conn_cache_put_fd, sv[0]);
-	T_EXPECT(S.conn_cache_put_req == req);
 
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
@@ -771,62 +727,8 @@ T_DECLARE_CASE(connection_close_not_recycled)
 	T_CHECK(test_wait_until(
 		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
 	T_EXPECT(out.called);
-	T_EXPECT_EQ(S.conn_cache_put_calls, 0);
 
 	T_CHECK(close(sv[1]) == 0);
-	ev_loop_destroy(loop);
-}
-
-T_DECLARE_CASE(stale_cached_connection_fallback_redial)
-{
-	struct ev_loop *loop = ev_loop_new(0);
-	struct cb_result out = { 0 };
-	struct api_client_ctx *ctx = NULL;
-	struct dialreq *req = NULL;
-	int stale_fd = -1;
-	int fresh[2] = { -1, -1 };
-	char reqbuf[512] = { 0 };
-	static const char payload[] = "{}";
-	static const char rsp_body[] = "ok";
-	const struct api_client_cb cb = {
-		.func = capture_cb,
-		.data = &out,
-	};
-
-	T_CHECK(loop != NULL);
-	reset_stub_state();
-	stale_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	T_CHECK(stale_fd >= 0);
-	T_CHECK(fd_set_nonblock(stale_fd));
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fresh) == 0);
-	T_CHECK(fd_set_nonblock(fresh[0]));
-	T_CHECK(fd_set_nonblock(fresh[1]));
-
-	S.conn_cache_get_fd = stale_fd;
-	S.dialer_result_fd = fresh[0];
-	S.dialer_err = DIALER_OK;
-	S.dialer_syserr = 0;
-	req = new_test_dialreq();
-	T_CHECK(req != NULL);
-
-	T_CHECK(api_client_rpcall(
-		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
-	T_CHECK(read_request_headers(
-		loop, fresh[1], reqbuf, sizeof(reqbuf),
-		TEST_WAIT_RESPONSE_SEC));
-	T_EXPECT(strstr(reqbuf, "POST /ruleset/rpcall HTTP/1.1") != NULL);
-	T_CHECK(send_response(
-		fresh[1], "200 OK", MIME_RPCALL, "keep-alive", rsp_body,
-		sizeof(rsp_body) - 1));
-	T_CHECK(test_wait_until(
-		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
-
-	T_EXPECT(out.called);
-	T_EXPECT_EQ(S.conn_cache_get_calls, 1);
-	T_EXPECT_EQ(S.dialer_do_calls, 1);
-
-	T_CHECK(close(fresh[1]) == 0);
 	ev_loop_destroy(loop);
 }
 
@@ -843,7 +745,6 @@ int main(void)
 	T_RUN_CASE(t, cancel_during_connect_calls_dialer_cancel);
 	T_RUN_CASE(t, connection_keep_alive_recycled);
 	T_RUN_CASE(t, connection_close_not_recycled);
-	T_RUN_CASE(t, stale_cached_connection_fallback_redial);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 

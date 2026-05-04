@@ -26,24 +26,17 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-/**
- * @brief Global application state structure
- */
 static struct {
-	/* Parsed configuration from command line */
 	struct config conf;
-	/* Global unified server instance */
 	struct server server;
 } app = { 0 };
 
 int main(int argc, char *argv[])
 {
-	/* Initialize application and parse command line arguments */
 	init(argc, argv);
 	if (!conf_parseargs(&app.conf, argc, argv)) {
 		exit(EXIT_FAILURE);
 	}
-	/* Validate configuration */
 	struct config *restrict conf = &app.conf;
 	if (!conf_check(conf)) {
 		LOGF_F("configuration check failed, try \"%s --help\" for more information",
@@ -52,18 +45,15 @@ int main(int argc, char *argv[])
 	}
 	loadlibs();
 
-	/* Parse and validate outbound connection configuration */
 	struct dialreq *basereq = dialreq_parse(conf->forward, conf->proxy);
 	if (basereq == NULL) {
 		LOGF("unable to parse outbound configuration");
 		exit(EXIT_FAILURE);
 	}
 
-	/* Initialize the main event loop */
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);
 
-	/* Initialize DNS resolver */
 	struct resolver *resolver = resolver_new(loop, conf);
 	CHECKOOM(resolver);
 
@@ -79,11 +69,9 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	/* Initialize transfer engine */
 	struct transfer *xfer = transfer_new(loop);
 	CHECKOOM(xfer);
 
-	/* Initialize Lua ruleset if specified */
 #if WITH_RULESET
 	struct ruleset *ruleset = NULL;
 	if (conf->ruleset != NULL) {
@@ -101,7 +89,6 @@ int main(int argc, char *argv[])
 	struct ruleset *ruleset = NULL;
 #endif
 
-	/* Initialize the global server and bind all listeners */
 	struct server *s = &app.server;
 	if (!server_init(s, loop, conf, resolver, xfer, basereq, ruleset)) {
 		LOGF("failed to start server");
@@ -115,15 +102,12 @@ int main(int argc, char *argv[])
 
 	(void)systemd_notify(SYSTEMD_STATE_READY);
 
-	/* Start the main event loop - this blocks until shutdown */
 	LOGD("starting the main event loop");
 	ev_run(loop, 0);
 
-	/* Graceful shutdown sequence */
 	server_stop(s);
 	LOGN("server shutdown gracefully");
 
-	/* Clean up global resources */
 #if WITH_RULESET
 	if (ruleset != NULL) {
 		ruleset_free(ruleset);
@@ -139,18 +123,16 @@ int main(int argc, char *argv[])
 		basereq = NULL;
 	}
 
-	/* Close any remaining sessions */
 	{
 		const size_t num = gc_finalizeall();
 		LOGD_F("%zu objects finalized", num);
 	}
-	/* Stop transfer engine after all sessions cancelled */
 	if (xfer != NULL) {
 		transfer_free(xfer);
 		xfer = NULL;
 	}
-	ev_loop_destroy(loop); /* Destroy the event loop */
-	unloadlibs(); /* Unload dynamic libraries */
+	ev_loop_destroy(loop);
+	unloadlibs();
 	free(app.conf.strings);
 
 	LOGD("program terminated normally");

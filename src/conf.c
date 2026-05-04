@@ -11,8 +11,6 @@
 
 #include "utils/slog.h"
 
-#include <sys/socket.h>
-
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -20,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /* Module-level state for conf_parseargs / conf_reload */
 static struct {
@@ -67,7 +66,6 @@ struct config conf_default(void)
 #if WITH_TCP_FASTOPEN_CONNECT
 		.tcp_fastopen_connect = false,
 #endif
-		.conn_cache = true,
 		.block_multicast = true,
 
 		.max_sessions = 0,
@@ -316,7 +314,6 @@ static const struct metaconfig conf_fields[] = {
 #if WITH_RULESET
 	{ "traceback", CONF_BOOL, offsetof(struct config, traceback) },
 #endif
-	{ "conn_cache", CONF_BOOL, offsetof(struct config, conn_cache) },
 	{ "socks5_bind", CONF_BOOL, offsetof(struct config, socks5_bind) },
 	{ "socks5_udp", CONF_BOOL, offsetof(struct config, socks5_udp) },
 	{ "daemonize", CONF_BOOL, offsetof(struct config, daemonize) },
@@ -350,7 +347,8 @@ static bool lutil_loadfield(
 	bool ok = true;
 	switch (f->type) {
 	case CONF_STRING:
-		break; /* handled separately in conf_loadfile */
+		/* Handled separately in conf_loadfile(). */
+		break;
 	case CONF_INT:
 		if (!isnil && !lua_isinteger(L, -1)) {
 			LOGE_F("boot: field `%s' must be an integer", f->key);
@@ -727,10 +725,6 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			continue;
 		}
 #endif
-		if (strcmp(argv[i], "--no-conn-cache") == 0) {
-			conf->conn_cache = false;
-			continue;
-		}
 		if (strcmp(argv[i], "-u") == 0 ||
 		    strcmp(argv[i], "--user") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);

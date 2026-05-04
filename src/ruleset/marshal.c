@@ -87,7 +87,8 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			*--s = '0' + x % 10, x /= 10;
 			*--s = '0' + x % 10, x /= 10;
 			*--s = '0' + x % 10;
-			*--s = '\\'; /* escape prefix */
+			/* Escape prefix. */
+			*--s = '\\';
 
 			VBUF_APPEND(*pvbuf, buf, sizeof(buf));
 		}
@@ -149,9 +150,11 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		const char *p = prefix;
 		const char *pend = prefix + sizeof(prefix) - 1;
 		if (x < 0 && x != LUA_MININTEGER) {
-			x = -x; /* Make positive, keep negative prefix */
+			/* Make positive and keep the negative prefix. */
+			x = -x;
 		} else {
-			p++; /* Skip negative sign */
+			/* Skip the negative sign. */
+			p++;
 		}
 
 		lua_Unsigned y = x;
@@ -159,7 +162,8 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		/* Choose decimal vs hexadecimal based on size */
 		if (y <= UINTMAX_C(999999999999)) {
 			/* Use decimal notation for smaller numbers */
-			pend -= 2; /* Skip "0x" prefix */
+			/* Skip the "0x" prefix. */
+			pend -= 2;
 			do {
 				*--s = '0' + y % 10;
 				y /= 10;
@@ -206,16 +210,20 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	const char *p = prefix;
 	const char *pend = prefix + sizeof(prefix) - 1;
 	if (signbit(x)) {
-		x = -x; /* Make positive, keep negative prefix */
+		/* Make positive and keep the negative prefix. */
+		x = -x;
 	} else {
-		p++; /* Skip negative sign */
+		/* Skip the negative sign. */
+		p++;
 	}
 
 	/* Extract exponent using frexp, then adjust for hex format */
 	int e2 = 0;
-	x = frexp(x, &e2) * 2; /* frexp gives [0.5,1), we want [1,2) */
+	/* frexp() gives [0.5, 1); convert it to [1, 2). */
+	x = frexp(x, &e2) * 2;
 	if (x) {
-		e2--; /* Adjust exponent for [1,2) range */
+		/* Adjust the exponent for the [1, 2) range. */
+		e2--;
 	}
 
 	/* Build exponent string backwards */
@@ -225,16 +233,19 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		*--estr = '0' + r % 10;
 	}
 	if (estr == bufend) {
-		*--estr = '0'; /* Exponent is 0 */
+		/* Exponent is 0. */
+		*--estr = '0';
 	}
 	*--estr = (e2 < 0 ? '-' : '+');
-	*--estr = 'p'; /* Binary exponent marker */
+	/* Binary exponent marker. */
+	*--estr = 'p';
 
 	/* Build mantissa in hexadecimal */
 	do {
 		const int i = (int)x;
 		*s++ = xdigits[i];
-		x = 16 * (x - i); /* Extract next hex digit */
+		/* Extract the next hex digit. */
+		x = 16 * (x - i);
 
 		/* Add decimal point after first digit if more digits follow */
 		if (s - buf == 1 && x) {
@@ -301,14 +312,16 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		/* Check if this is a consecutive integer key */
 		if (lua_isinteger(L, -2) && lua_tointeger(L, -2) == i) {
 			/* Use array syntax: just the value */
-			i = luaL_intop(+, i, 1); /* Increment expected index */
+			/* Increment the expected index. */
+			i = luaL_intop(+, i, 1);
 		} else {
 			/* Use explicit key syntax: [key]=value */
 			VBUF_APPENDSTR(*pvbuf, "[");
 
 			/* Marshal the key */
 			lua_pushvalue(L, IDX_MARSHAL);
-			lua_pushvalue(L, -3); /* Push key */
+			/* Push key. */
+			lua_pushvalue(L, -3);
 			lua_call(L, 1, 0);
 
 			VBUF_APPENDSTR(*pvbuf, "]=");
@@ -316,11 +329,13 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 
 		/* Marshal the value */
 		lua_pushvalue(L, IDX_MARSHAL);
-		lua_pushvalue(L, -2); /* Push value */
+		/* Push value. */
+		lua_pushvalue(L, -2);
 		lua_call(L, 1, 0);
 
 		VBUF_APPENDSTR(*pvbuf, ",");
-		lua_pop(L, 1); /* Remove value, keep key for next iteration */
+		/* Remove the value and keep the key for the next iteration. */
+		lua_pop(L, 1);
 	}
 
 	/* End table constructor */
@@ -450,9 +465,12 @@ int api_marshal(lua_State *restrict L)
 	/* lua stack: args... buffer */
 
 	/* Build marshal closure with upvalues */
-	lua_pushvalue(L, -1); /* IDX_BUFFER: buffer userdata */
-	lua_createtable(L, 0, 16); /* IDX_VISITED: visited table */
-	lua_pushnil(L); /* IDX_MARSHAL: placeholder for self-ref */
+	/* IDX_BUFFER: buffer userdata */
+	lua_pushvalue(L, -1);
+	/* IDX_VISITED: visited table */
+	lua_createtable(L, 0, 16);
+	/* IDX_MARSHAL: placeholder for self-reference */
+	lua_pushnil(L);
 	lua_pushcclosure(L, marshal_value, 3);
 
 	/* Set up self-reference for recursive calls */
@@ -467,8 +485,10 @@ int api_marshal(lua_State *restrict L)
 	int i = 1;
 	for (; i < n; i++) {
 		/* Marshal argument i */
-		lua_pushvalue(L, -1); /* Push closure */
-		lua_pushvalue(L, i); /* Push argument */
+		/* Push closure. */
+		lua_pushvalue(L, -1);
+		/* Push argument. */
+		lua_pushvalue(L, i);
 		lua_call(L, 1, 0);
 
 		/* Add comma separator */
@@ -477,13 +497,16 @@ int api_marshal(lua_State *restrict L)
 
 	/* Marshal final argument without trailing comma */
 	if (i == n) {
-		lua_pushvalue(L, i); /* Push argument */
-		lua_call(L, 1, 0); /* Call closure with argument */
+		/* Push argument. */
+		lua_pushvalue(L, i);
+		/* Call the closure with the argument. */
+		lua_call(L, 1, 0);
 	}
 
 	/* Return marshalled string */
 	lua_pushlstring(L, VBUF_DATA(*pvbuf), VBUF_LEN(*pvbuf));
-	aux_close(L, n + 1); /* Clean up buffer */
+	/* Clean up the buffer. */
+	aux_close(L, n + 1);
 	return 1;
 }
 

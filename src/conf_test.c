@@ -30,7 +30,6 @@ T_DECLARE_CASE(test_conf_default_has_expected_values)
 	T_EXPECT_EQ(conf.timeout, 60.0);
 	T_EXPECT(conf.tcp_nodelay);
 	T_EXPECT(conf.tcp_keepalive);
-	T_EXPECT(conf.conn_cache);
 	T_EXPECT(conf.block_multicast);
 	T_EXPECT_EQ(conf.startup_limit_rate, 30);
 }
@@ -255,10 +254,7 @@ T_DECLARE_CASE(test_boot_overrides_numeric_fields)
 T_DECLARE_CASE(test_boot_overrides_bool_fields)
 {
 	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(
-			path,
-			"return { daemonize = true, conn_cache = false }") ==
-		0);
+	T_CHECK(write_tempfile(path, "return { daemonize = true }") == 0);
 	struct config conf = conf_default();
 	char *argv[] = {
 		"conf_test",
@@ -267,7 +263,6 @@ T_DECLARE_CASE(test_boot_overrides_bool_fields)
 	};
 	T_EXPECT(conf_parseargs(&conf, 3, argv));
 	T_EXPECT(conf.daemonize);
-	T_EXPECT(!conf.conn_cache);
 	unlink(path);
 }
 #endif /* WITH_LUA */

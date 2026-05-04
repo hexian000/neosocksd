@@ -21,18 +21,14 @@
 #include <string.h>
 
 /*
- * These tests isolate http_client.c. The dialer, conn_cache, and dialreq
+ * These tests isolate http_client.c. The dialer and dialreq
  * are stubbed so connection accounting and state transitions can be
  * asserted without real network activity.
  */
 
 static struct config test_conf = {
 	.timeout = 0.2,
-	.conn_cache = false,
 };
-
-/* conn_cache global required by util.h – unused in these tests */
-struct conn_cache conn_cache = { 0 };
 
 static struct {
 	int dialer_result_fd;
@@ -100,22 +96,6 @@ void dialreq_free(struct dialreq *req)
 {
 	S.dialreq_free_calls++;
 	free(req);
-}
-
-int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
-{
-	(void)loop;
-	(void)req;
-	return -1;
-}
-
-void conn_cache_put(
-	struct ev_loop *loop, const int fd,
-	const struct dialreq *restrict dialreq)
-{
-	(void)loop;
-	(void)dialreq;
-	(void)close(fd);
 }
 
 /* ---- callback capture ---- */

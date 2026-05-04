@@ -89,7 +89,8 @@ const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 	UNUSED(L);
 	struct stream *s = ud;
 	const void *buf;
-	*sz = SIZE_MAX; /* Lua allows arbitrary length */
+	/* Lua allows arbitrary length. */
+	*sz = SIZE_MAX;
 	const int err = stream_direct_read(s, &buf, sz);
 	if (err != 0) {
 		LOGE_F("read_stream: error %d", err);

@@ -22,12 +22,13 @@
 #include "ruleset/time.h"
 #include "ruleset/zlib.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
+
+#include "lauxlib.h"
+#include "lua.h"
+#include "lualib.h"
 
 #include <ev.h>
 
@@ -94,7 +95,7 @@ static int l_panic(lua_State *L)
 	LOG_STACK_F(
 		FATAL, 0, "PANIC: unprotected error in call to Lua API (%s)",
 		msg);
-	return 0; /* return to Lua to abort */
+	return 0;
 }
 
 /**
@@ -127,9 +128,11 @@ static int ruleset_luainit(lua_State *restrict L)
 		lua_rawseti(L, -2, i + 1);
 	}
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_CONSTANT);
-	lua_newtable(L); /* await context */
+	/* await context */
+	lua_newtable(L);
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
-	aux_newweaktable(L, "k"); /* idle threads */
+	/* idle threads */
+	aux_newweaktable(L, "k");
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
 	/* load Lua libraries */
 	luaL_openlibs(L);

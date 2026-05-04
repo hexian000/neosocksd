@@ -481,13 +481,20 @@ void dialreq_free(struct dialreq *restrict req)
  * @brief Dialer state machine states
  */
 enum dialer_state {
-	STATE_INIT, /**< Initial state, not yet started */
-	STATE_RESOLVE, /**< Resolving domain name to IP address */
-	STATE_CONNECT, /**< Establishing TCP connection */
-	STATE_HANDSHAKE1, /**< First phase of proxy handshake */
-	STATE_HANDSHAKE2, /**< Second phase */
-	STATE_HANDSHAKE3, /**< Third phase */
-	STATE_DONE, /**< Connection established or failed */
+	/* Initial state, not yet started. */
+	STATE_INIT,
+	/* Resolving the domain name to an IP address. */
+	STATE_RESOLVE,
+	/* Establishing the TCP connection. */
+	STATE_CONNECT,
+	/* First phase of the proxy handshake. */
+	STATE_HANDSHAKE1,
+	/* Second phase of the proxy handshake. */
+	STATE_HANDSHAKE2,
+	/* Third phase of the proxy handshake. */
+	STATE_HANDSHAKE3,
+	/* Connection established or failed. */
+	STATE_DONE,
 };
 
 /**
@@ -779,7 +786,8 @@ static bool send_socks5_auth(
 	const size_t len = 1 + 1 + ulen + 1 + plen;
 	unsigned char buf[len];
 	unsigned char *restrict p = buf;
-	*p++ = 0x01; /* version */
+	/* version */
+	*p++ = 0x01;
 	*p++ = (unsigned char)ulen;
 	if (ulen > 0) {
 		(void)memcpy(p, proxy->username, ulen);

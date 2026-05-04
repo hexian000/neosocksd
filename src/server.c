@@ -7,6 +7,7 @@
 #include "conf.h"
 #include "forward.h"
 #include "http_proxy.h"
+#include "proto/domain.h"
 #if WITH_RULESET
 #include "ruleset.h"
 #endif
@@ -18,28 +19,26 @@
 #include "os/clock.h"
 #include "os/daemon.h"
 #include "os/socket.h"
-#include "proto/domain.h"
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <sys/socket.h>
 
 #include <errno.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdlib.h>
 #if WITH_THREADS
 #include <stdatomic.h>
 #endif
-#include <stddef.h>
-#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 static bool is_startup_limited(const struct server *restrict s)
 {
 	const struct config *restrict conf = s->conf;
 	const struct server_stats *restrict stats = &s->stats;
 
-	/* Check maximum session limit */
 	if (conf->max_sessions > 0) {
 #if WITH_THREADS
 		const size_t n = atomic_load_explicit(
@@ -53,14 +52,12 @@ static bool is_startup_limited(const struct server *restrict s)
 		}
 	}
 
-	/* Check full startup limit */
 	if (conf->startup_limit_full > 0 &&
 	    stats->num_halfopen > (size_t)conf->startup_limit_full) {
 		LOGVV("full startup limit exceeded, rejecting new connection");
 		return true;
 	}
 
-	/* Check probabilistic startup limit */
 	if (conf->startup_limit_start > 0 &&
 	    stats->num_halfopen > (size_t)conf->startup_limit_start) {
 		if ((frand() * 100.0) < (double)conf->startup_limit_rate) {
@@ -81,7 +78,6 @@ static void accept_cb(
 	struct server *restrict s = l->server;
 	const struct config *restrict conf = s->conf;
 
-	/* Accept connections in a loop until no more are available */
 	for (;;) {
 		union sockaddr_max addr;
 		socklen_t addrlen = sizeof(addr);
@@ -89,10 +85,10 @@ static void accept_cb(
 		if (fd < 0) {
 			const int err = errno;
 			if (err == EAGAIN || err == EWOULDBLOCK) {
-				break; /* No more connections to accept */
+				break;
 			}
 			if (err == EINTR || err == ECONNABORTED) {
-				continue; /* Retry immediately */
+				continue;
 			}
 			LOGE_F("accept: (%d) %s", err, strerror(err));
 			/* Sleep until next timer, see timer_cb */
@@ -110,13 +106,11 @@ static void accept_cb(
 			      watcher->fd, fd, addr_str);
 		}
 
-		/* Apply rate limiting and connection throttling */
 		if (is_startup_limited(s)) {
 			CLOSE_FD(fd);
 			return;
 		}
 
-		/* Configure the accepted socket */
 		if (!socket_set_nonblock(fd)) {
 			const int err = errno;
 			LOGE_F("fcntl: (%d) %s", err, strerror(err));
@@ -127,12 +121,11 @@ static void accept_cb(
 		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 
 		l->stats.num_serve++;
-		/* Delegate to listener-specific serve function */
 		l->serve(s, loop, fd, (const struct sockaddr *)&addr.sa);
 	}
 }
 
-/* This callback is used to restart the accept I/O watcher after a temporary error condition. */
+/* Restart the accept watcher after a temporary accept failure. */
 static void
 timer_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 {
@@ -146,14 +139,12 @@ static bool add_listener(
 	struct server *restrict s, const struct sockaddr *restrict bindaddr,
 	serve_fn serve)
 {
-	/* Check if server is full */
 	if (s->num_listeners >= SERVER_LISTENERS_MAX) {
 		LOGE_F("cannot add listener: max %d listeners reached",
 		       SERVER_LISTENERS_MAX);
 		return false;
 	}
 
-	/* Create TCP socket */
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
@@ -161,7 +152,6 @@ static bool add_listener(
 		return false;
 	}
 
-	/* Set socket to non-blocking mode */
 	if (!socket_set_nonblock(fd)) {
 		const int err = errno;
 		LOGE_F("fcntl: (%d) %s", err, strerror(err));
@@ -171,7 +161,6 @@ static bool add_listener(
 
 	const struct config *restrict conf = s->conf;
 
-	/* Apply socket options based on configuration */
 #if WITH_REUSEPORT
 	socket_set_reuseport(fd, conf->reuseport);
 #else
@@ -191,14 +180,12 @@ static bool add_listener(
 	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
 	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 
-	/* Log bind address if notice logging is enabled */
 	if (LOGLEVEL(NOTICE)) {
 		char addr_str[64];
 		sa_format(addr_str, sizeof(addr_str), bindaddr);
 		LOG_F(NOTICE, "listen: %s", addr_str);
 	}
 
-	/* Bind socket to address */
 	if (bind(fd, bindaddr, sa_len(bindaddr)) != 0) {
 		const int err = errno;
 		LOGE_F("bind: (%d) %s", err, strerror(err));
@@ -206,7 +193,6 @@ static bool add_listener(
 		return false;
 	}
 
-	/* Start listening for connections */
 	if (listen(fd, backlog)) {
 		const int err = errno;
 		LOGE_F("listen: (%d) %s", err, strerror(err));
@@ -214,18 +200,15 @@ static bool add_listener(
 		return false;
 	}
 
-	/* Get the next available listener slot */
 	struct listener *restrict l = &s->listeners[s->num_listeners];
 	l->server = s;
 	l->serve = serve;
 
-	/* Initialize libev watchers */
 	ev_io_init(&l->w_accept, accept_cb, fd, EV_READ);
 	l->w_accept.data = l;
 	ev_timer_init(&l->w_timer, timer_cb, 0.5, 0.0);
 	l->w_timer.data = l;
 
-	/* Start the listener and record start time if this is the first one */
 	struct ev_loop *loop = s->loop;
 	if (s->num_listeners == 0) {
 		s->stats.started = clock_monotonic_ns();
@@ -268,11 +251,9 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 	case SIGTERM:
 		LOGD_F("signal %d received, breaking", watcher->signum);
 		(void)systemd_notify(SYSTEMD_STATE_STOPPING);
-		/* Break out of the main event loop to initiate graceful shutdown */
 		ev_break(loop, EVBREAK_ALL);
 		break;
 	default:
-		/* Ignore other signals */
 		break;
 	}
 }
@@ -370,7 +351,6 @@ bool server_init(
 		}
 	}
 
-	/* Set up signal watchers */
 	ev_signal_init(&s->w_sighup, signal_cb, SIGHUP);
 	s->w_sighup.data = s;
 	ev_set_priority(&s->w_sighup, EV_MAXPRI);
@@ -391,31 +371,25 @@ bool server_init(
 
 void server_stop(struct server *restrict s)
 {
-	/* Check if server is running */
 	if (s->stats.started == -1) {
-		return; /* Server not running */
+		return;
 	}
 
 	struct ev_loop *loop = s->loop;
 
-	/* Stop signal watchers */
 	ev_signal_stop(loop, &s->w_sighup);
 	ev_signal_stop(loop, &s->w_sigint);
 	ev_signal_stop(loop, &s->w_sigterm);
 
-	/* Stop all listeners */
 	for (size_t i = 0; i < s->num_listeners; i++) {
 		struct listener *restrict l = &s->listeners[i];
 
-		/* Stop accept watcher and close listening socket */
 		ev_io_stop(loop, &l->w_accept);
 		CLOSE_FD(l->w_accept.fd);
 
-		/* Stop timer watcher */
 		ev_timer_stop(loop, &l->w_timer);
 	}
 
-	/* Mark server as stopped only after all listeners are down */
 	s->stats.started = -1;
 }
 

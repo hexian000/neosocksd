@@ -131,7 +131,8 @@ struct transfer {
 	thrd_t thread;
 	struct dispatcher *disp;
 	struct ev_loop *main_loop;
-	ev_async w_invoke; /* main -> xfer: new task enqueued */
+	/* main -> xfer: new task enqueued */
+	ev_async w_invoke;
 	bool stop;
 #endif
 	/* loop thread only; no locking needed */

@@ -11,41 +11,34 @@
  */
 #include "util.h"
 
-#include "dialer.h"
 #include "resolver.h"
 
-#include "algo/luahash.h"
-#if WITH_RULESET
-#include "lua.h"
-#endif
 #include "math/rand.h"
 #include "os/clock.h"
 #if WITH_CRASH_HANDLER
 #include "os/signal.h"
 #endif
 #include "os/socket.h"
-#include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/minmax.h"
 #include "utils/slog.h"
 
+#if WITH_RULESET
+#include "lua.h"
+#endif
+
 #include <ev.h>
+
+#include <errno.h>
 #if WITH_SPLICE
 #include <fcntl.h>
 #endif
 #include <grp.h>
+#include <inttypes.h>
+#include <locale.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <pwd.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-#include <errno.h>
-#include <inttypes.h>
-#include <locale.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -53,7 +46,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <threads.h>
 #include <time.h>
+#include <unistd.h>
 
 #if WITH_SPLICE
 struct pipe_cache pipe_cache = { .cap = PIPE_MAXCACHED, .len = 0 };
@@ -107,138 +106,6 @@ void pipe_shrink(const size_t count)
 }
 #endif
 
-struct conn_cache conn_cache = { .len = 0 };
-
-static void conn_cache_init(void)
-{
-	conn_cache.len = 0;
-	conn_cache.seed = 0xbf16972e;
-	conn_cache.freelist = 0;
-	for (int i = 0; i < CONN_CACHE_CAPACITY; i++) {
-		conn_cache.buckets[i] = -1;
-		conn_cache.entries[i] = (struct conn_cache_entry){
-			.fd = -1,
-			.bucket = -1,
-			.next = (i + 1 < CONN_CACHE_CAPACITY) ? i + 1 : -1,
-		};
-	}
-}
-
-static int
-conn_cache_take(struct ev_loop *loop, struct conn_cache_entry *restrict entry)
-{
-	ev_io_stop(loop, &entry->w_close);
-	ev_timer_stop(loop, &entry->w_expire);
-	ASSERT(entry->bucket != -1);
-	ASSERT(entry >= conn_cache.entries);
-	ASSERT(entry < conn_cache.entries + ARRAY_SIZE(conn_cache.entries));
-	const int index = (int)(entry - conn_cache.entries);
-	int *last_next = &conn_cache.buckets[entry->bucket];
-	while (*last_next != -1) {
-		if (*last_next == index) {
-			*last_next = entry->next;
-			entry->bucket = -1;
-			entry->next = -1;
-			break;
-		}
-		last_next = &conn_cache.entries[*last_next].next;
-	}
-	const int fd = entry->fd;
-	entry->fd = -1;
-	entry->hash = 0;
-	entry->key[0] = '\0';
-	conn_cache.len--;
-	entry->next = conn_cache.freelist;
-	conn_cache.freelist = index;
-	return fd;
-}
-
-static void
-conn_cache_idle_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_READ);
-	struct conn_cache_entry *restrict entry = watcher->data;
-	LOGV_F("conn_cache: [fd:%d] server closed idle `%s'", entry->fd,
-	       entry->key);
-	const int fd = conn_cache_take(loop, entry);
-	CLOSE_FD(fd);
-}
-
-static void
-conn_cache_expire_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_TIMER);
-	struct conn_cache_entry *restrict entry = watcher->data;
-	LOGV_F("conn_cache: [fd:%d] expire `%s'", entry->fd, entry->key);
-	const int fd = conn_cache_take(loop, entry);
-	CLOSE_FD(fd);
-}
-
-#define GET_HASH(s, n) (luahash((s), (n), conn_cache.seed))
-
-void conn_cache_put(
-	struct ev_loop *loop, const int fd,
-	const struct dialreq *restrict dialreq)
-{
-	if (conn_cache.len >= CONN_CACHE_CAPACITY) {
-		LOGV_F("conn_cache: [fd:%d] full, discarding", fd);
-		CLOSE_FD(fd);
-		return;
-	}
-	ASSERT(conn_cache.freelist != -1);
-	const int index = conn_cache.freelist;
-	struct conn_cache_entry *restrict entry = &conn_cache.entries[index];
-	const int nkey =
-		dialreq_format(entry->key, sizeof(entry->key), dialreq);
-	if (nkey < 0 || (size_t)nkey >= sizeof(entry->key)) {
-		LOGV_F("conn_cache: [fd:%d] key too long, discarding", fd);
-		CLOSE_FD(fd);
-		return;
-	}
-	conn_cache.freelist = entry->next;
-	entry->hash = GET_HASH(entry->key, (size_t)nkey);
-	entry->fd = fd;
-	const int bucket = (int)(entry->hash % ARRAY_SIZE(conn_cache.buckets));
-	entry->bucket = bucket;
-	entry->next = conn_cache.buckets[bucket];
-	conn_cache.buckets[bucket] = index;
-	ev_io_init(&entry->w_close, conn_cache_idle_cb, fd, EV_READ);
-	entry->w_close.data = entry;
-	ev_timer_init(
-		&entry->w_expire, conn_cache_expire_cb, CONN_CACHE_TIMEOUT,
-		0.0);
-	entry->w_expire.data = entry;
-	ev_io_start(loop, &entry->w_close);
-	ev_timer_start(loop, &entry->w_expire);
-	conn_cache.len++;
-	LOGV_F("conn_cache: [fd:%d] put `%s' num=%zu", fd, entry->key,
-	       conn_cache.len);
-}
-
-int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req)
-{
-	char key[256];
-	const int nkey = dialreq_format(key, sizeof(key), req);
-	if (nkey < 0 || (size_t)nkey >= sizeof(key)) {
-		return -1;
-	}
-	const unsigned hash = GET_HASH(key, (size_t)nkey);
-	const int bucket = (int)(hash % ARRAY_SIZE(conn_cache.buckets));
-	for (int i = conn_cache.buckets[bucket]; i != -1;
-	     i = conn_cache.entries[i].next) {
-		struct conn_cache_entry *restrict entry =
-			&conn_cache.entries[i];
-		if (entry->hash != hash || strcmp(entry->key, key) != 0) {
-			continue;
-		}
-		const int fd = conn_cache_take(loop, entry);
-		LOGV_F("conn_cache: [fd:%d] get `%s' num=%zu", fd, key,
-		       conn_cache.len);
-		return fd;
-	}
-	return -1;
-}
-
 #if defined(WIN32)
 #define PATH_SEPARATOR '\\'
 #else
@@ -281,7 +148,6 @@ void loadlibs(void)
 	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);
 	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
 	resolver_init();
-	conn_cache_init();
 #if WITH_RULESET
 	LOGD("ruleset interpreter: " LUA_RELEASE);
 #endif
@@ -325,7 +191,7 @@ void modify_io_events(
 
 double process_load(void)
 {
-	static _Thread_local struct {
+	static thread_local struct {
 		struct timespec monotime, cputime;
 		bool set;
 	} last = { .set = false };
@@ -350,7 +216,7 @@ double process_load(void)
 	return load;
 }
 
-void socket_bind_netdev(const int fd, const char *netdev)
+void socket_bind_netdev(int fd, const char *netdev)
 {
 #ifdef SO_BINDTODEVICE
 	char ifname[IFNAMSIZ];
@@ -370,7 +236,7 @@ void socket_bind_netdev(const int fd, const char *netdev)
 #endif
 }
 
-void socket_set_transparent(const int fd, const bool tproxy)
+void socket_set_transparent(int fd, bool tproxy)
 {
 #ifdef IP_TRANSPARENT
 	int val = tproxy ? 1 : 0;

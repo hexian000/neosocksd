@@ -26,19 +26,19 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <strings.h>
 
 #include <errno.h>
 #include <inttypes.h>
-#if WITH_THREADS
-#include <stdatomic.h>
-#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
 
 struct http_ctx;
 
@@ -50,9 +50,6 @@ enum http_state {
 	STATE_RESPONSE,
 	STATE_CONNECT,
 	STATE_FORWARD,
-	STATE_RELAY_REQBODY,
-	STATE_RELAY_RSPHDR,
-	STATE_RELAY_RSPBODY,
 	STATE_BIDIRECTIONAL,
 };
 
@@ -79,23 +76,9 @@ struct http_ctx {
 			struct dialer dialer;
 			struct http_conn conn;
 			size_t req_content_length;
-			struct http_body req_body_inspector;
-			struct http_body rsp_body_inspector;
-			enum transfer_encodings relay_downstream_body_te;
 			/* cached target hostport for proxy_pass requests */
 			char req_target[FQDN_MAX_LENGTH + sizeof(":65535")];
-			/* offset into rbuf already scanned for CRLFCRLF */
-			size_t relay_hdr_scanned;
-			bool relay_can_cache : 1;
 			bool req_content_length_known : 1;
-			bool req_conn_cache_capable : 1;
-			bool req_client_keep_alive : 1;
-			/* request has body bytes after the header section */
-			bool req_has_body : 1;
-			/* Connection header contains "close" token */
-			bool req_conn_token_close : 1;
-			/* true when current forward uses a cached upstream fd */
-			bool fwd_cached_fd : 1;
 		};
 	};
 };
@@ -164,17 +147,6 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		stats->num_halfopen--;
 		return;
 	case STATE_FORWARD:
-		ev_io_stop(loop, &ctx->w_send);
-		stats->num_halfopen--;
-		return;
-	case STATE_RELAY_REQBODY:
-		ev_io_stop(loop, &ctx->w_recv);
-		ev_io_stop(loop, &ctx->w_send);
-		stats->num_halfopen--;
-		return;
-	case STATE_RELAY_RSPHDR:
-	case STATE_RELAY_RSPBODY:
-		ev_io_stop(loop, &ctx->w_recv);
 		ev_io_stop(loop, &ctx->w_send);
 		stats->num_halfopen--;
 		return;
@@ -372,643 +344,6 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	gc_unref(&ctx->gcbase);
 }
 
-static bool append_encoded_body(
-	struct http_ctx *restrict ctx, const unsigned char *restrict data,
-	const size_t len, const enum transfer_encodings te,
-	const bool final_chunk)
-{
-	struct http_conn *restrict p = &ctx->conn;
-	if (te == TENCODING_NONE) {
-		if (p->wbuf.cap - p->wbuf.len < len) {
-			return false;
-		}
-		BUF_APPEND(p->wbuf, data, len);
-		return true;
-	}
-	if (te != TENCODING_CHUNKED) {
-		return false;
-	}
-	if (final_chunk) {
-		if (p->wbuf.cap - p->wbuf.len < CONSTSTRLEN("0\r\n\r\n")) {
-			return false;
-		}
-		BUF_APPENDSTR(p->wbuf, "0\r\n\r\n");
-		return true;
-	}
-	if (len == 0) {
-		return true;
-	}
-	if (p->wbuf.cap - p->wbuf.len < len + 32u) {
-		return false;
-	}
-	(void)BUF_APPENDF(p->wbuf, "%zx\r\n", len);
-	BUF_APPEND(p->wbuf, data, len);
-	BUF_APPENDSTR(p->wbuf, "\r\n");
-	return true;
-}
-
-static bool relay_body_data_cb(
-	void *restrict data, const unsigned char *restrict buf,
-	const size_t len)
-{
-	struct http_ctx *restrict ctx = data;
-	return append_encoded_body(
-		ctx, buf, len, ctx->relay_downstream_body_te, false);
-}
-
-static bool relay_setup_headers(
-	struct http_ctx *restrict ctx, const char *restrict raw,
-	const char *restrict hdr_end)
-{
-	struct http_conn *restrict p = &ctx->conn;
-	const char *line_end =
-		(const char *)memchr(raw, '\n', (size_t)(hdr_end - raw));
-	if (line_end == NULL) {
-		return false;
-	}
-	BUF_APPEND(p->wbuf, raw, (size_t)(line_end - raw + 1));
-
-	int status_code = 502;
-	{
-		const char *sp1 = strchr(raw, ' ');
-		if (sp1 != NULL) {
-			status_code = (int)strtol(sp1 + 1, NULL, 10);
-		}
-	}
-
-	bool has_upstream_chunked = false;
-	bool has_upstream_length = false;
-	size_t upstream_length = 0;
-	bool conn_close = false;
-
-	for (const char *cur = line_end + 1; cur < hdr_end;) {
-		const char *eol = (const char *)memchr(
-			cur, '\n', (size_t)(hdr_end - cur));
-		if (eol == NULL) {
-			break;
-		}
-		const char *line = cur;
-		cur = eol + 1;
-		if (line == eol || (line + 1 == eol && line[0] == '\r')) {
-			break;
-		}
-		const char *colon =
-			(const char *)memchr(line, ':', (size_t)(eol - line));
-		if (colon == NULL) {
-			continue;
-		}
-		const size_t klen = (size_t)(colon - line);
-		const char *val = colon + 1;
-		while (val < eol && (*val == ' ' || *val == '\t')) {
-			val++;
-		}
-		const char *vend = eol;
-		if (vend > val && vend[-1] == '\r') {
-			vend--;
-		}
-		const size_t vlen = (size_t)(vend - val);
-
-		if (klen == CONSTSTRLEN("Transfer-Encoding") &&
-		    strncasecmp(line, "Transfer-Encoding", klen) == 0) {
-			char tmp[64];
-			if (vlen < sizeof(tmp)) {
-				memcpy(tmp, val, vlen);
-				tmp[vlen] = '\0';
-				for (size_t i = 0; i < vlen; i++) {
-					const unsigned char c =
-						(unsigned char)tmp[i];
-					if (c >= 'A' && c <= 'Z') {
-						tmp[i] = (char)(c | 0x20u);
-					}
-				}
-				if (strstr(tmp, "chunked") != NULL) {
-					has_upstream_chunked = true;
-				}
-			}
-			continue;
-		}
-		if (klen == CONSTSTRLEN("Content-Length") &&
-		    strncasecmp(line, "Content-Length", klen) == 0) {
-			char tmp[32];
-			if (vlen < sizeof(tmp)) {
-				memcpy(tmp, val, vlen);
-				tmp[vlen] = '\0';
-				char *end;
-				const uintmax_t n = strtoumax(tmp, &end, 10);
-				if (*end == '\0' && n <= SIZE_MAX) {
-					has_upstream_length = true;
-					upstream_length = (size_t)n;
-				}
-			}
-			continue;
-		}
-		if (klen == CONSTSTRLEN("Connection") &&
-		    strncasecmp(line, "Connection", klen) == 0) {
-			char tmp[128];
-			if (vlen < sizeof(tmp)) {
-				memcpy(tmp, val, vlen);
-				tmp[vlen] = '\0';
-				const char *tok;
-				size_t toklen;
-				for (const char *next =
-					     parsehdr_connection_token(
-						     tmp, &tok, &toklen);
-				     tok != NULL;
-				     next = parsehdr_connection_token(
-					     next, &tok, &toklen)) {
-					if (toklen == CONSTSTRLEN("close") &&
-					    strncasecmp(tok, "close", toklen) ==
-						    0) {
-						conn_close = true;
-						break;
-					}
-				}
-			}
-			continue;
-		}
-		if ((klen == CONSTSTRLEN("Keep-Alive") &&
-		     strncasecmp(line, "Keep-Alive", klen) == 0) ||
-		    (klen == CONSTSTRLEN("Proxy-Connection") &&
-		     strncasecmp(line, "Proxy-Connection", klen) == 0) ||
-		    (klen == CONSTSTRLEN("Trailer") &&
-		     strncasecmp(line, "Trailer", klen) == 0) ||
-		    (klen == CONSTSTRLEN("Trailers") &&
-		     strncasecmp(line, "Trailers", klen) == 0) ||
-		    (klen == CONSTSTRLEN("Upgrade") &&
-		     strncasecmp(line, "Upgrade", klen) == 0) ||
-		    (klen == CONSTSTRLEN("TE") &&
-		     strncasecmp(line, "TE", klen) == 0)) {
-			continue;
-		}
-		BUF_APPEND(p->wbuf, line, klen);
-		BUF_APPENDSTR(p->wbuf, ": ");
-		BUF_APPEND(p->wbuf, val, vlen);
-		BUF_APPENDSTR(p->wbuf, "\r\n");
-	}
-
-	ctx->relay_can_cache = !conn_close;
-	const bool no_body = (strcmp(ctx->conn.msg.req.method, "HEAD") == 0) ||
-			     (100 <= status_code && status_code < 200) ||
-			     (status_code == 204 || status_code == 304);
-
-	if (no_body) {
-		http_body_init(&ctx->rsp_body_inspector, HTTP_BODY_NONE, 0);
-		ctx->relay_downstream_body_te = TENCODING_NONE;
-	} else if (has_upstream_chunked) {
-		http_body_init(&ctx->rsp_body_inspector, HTTP_BODY_CHUNKED, 0);
-		ctx->relay_downstream_body_te = TENCODING_CHUNKED;
-	} else if (has_upstream_length) {
-		http_body_init(
-			&ctx->rsp_body_inspector, HTTP_BODY_CONTENT_LENGTH,
-			upstream_length);
-		ctx->relay_downstream_body_te = TENCODING_NONE;
-	} else {
-		http_body_init(&ctx->rsp_body_inspector, HTTP_BODY_EOF, 0);
-		ctx->relay_downstream_body_te = TENCODING_CHUNKED;
-		ctx->relay_can_cache = false;
-	}
-
-	if (has_upstream_length &&
-	    ctx->relay_downstream_body_te == TENCODING_NONE) {
-		(void)BUF_APPENDF(
-			p->wbuf, "Content-Length: %zu\r\n", upstream_length);
-	}
-	if (ctx->relay_downstream_body_te == TENCODING_CHUNKED) {
-		BUF_APPENDSTR(p->wbuf, "Transfer-Encoding: chunked\r\n");
-	}
-	if (ctx->relay_can_cache && ctx->req_client_keep_alive) {
-		BUF_APPENDSTR(p->wbuf, "Connection: keep-alive\r\n\r\n");
-	} else {
-		BUF_APPENDSTR(p->wbuf, "Connection: close\r\n\r\n");
-	}
-	return true;
-}
-
-static void relay_finish(struct ev_loop *loop, struct http_ctx *restrict ctx)
-{
-	ev_io_stop(loop, &ctx->w_recv);
-	ev_io_stop(loop, &ctx->w_send);
-	if (ctx->relay_can_cache && ctx->req_client_keep_alive) {
-		if (ctx->s->conf->conn_cache) {
-			conn_cache_put(loop, ctx->dialed_fd, ctx->dialreq);
-		} else {
-			CLOSE_FD(ctx->dialed_fd);
-		}
-		ctx->dialed_fd = -1;
-	}
-	dialreq_free(ctx->dialreq);
-	ctx->dialreq = NULL;
-	gc_unref(&ctx->gcbase);
-}
-
-static void
-relay_recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_READ);
-	struct http_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_RELAY_RSPHDR ||
-	       ctx->state == STATE_RELAY_RSPBODY);
-
-	struct http_conn *restrict p = &ctx->conn;
-	/* Pause reading if wbuf cannot accommodate a full recv to prevent
-	 * truncation. relay_send_cb will restart reading once wbuf drains. */
-	const size_t free = p->wbuf.cap - p->wbuf.len;
-	if (free <= 64u) {
-		ev_io_stop(loop, watcher);
-		return;
-	}
-	size_t n = p->rbuf.cap - p->rbuf.len;
-	if (n == 0) {
-		/* response headers exceed buffer capacity */
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (n > free - 64u) {
-		n = free - 64u;
-	}
-	const int err =
-		socket_recv(ctx->dialed_fd, p->rbuf.data + p->rbuf.len, &n);
-	if (err != 0) {
-		if (err == EAGAIN || err == EWOULDBLOCK) {
-			return;
-		}
-		HTTP_CTX_LOG_F(
-			WARNING, ctx, "relay recv: (%d) %s", err,
-			strerror(err));
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (n == 0) {
-		/* upstream EOF */
-		if (ctx->state == STATE_RELAY_RSPHDR) {
-			/* headers never completed */
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		if (p->rbuf.len > 0) {
-			const struct http_body_data_cb cb = {
-				.func = relay_body_data_cb,
-				.ctx = ctx,
-			};
-			if (!http_body_consume(
-				    &ctx->rsp_body_inspector, p->rbuf.data,
-				    p->rbuf.len, cb)) {
-				gc_unref(&ctx->gcbase);
-				return;
-			}
-			BUF_RESET(p->rbuf);
-		}
-		if (!http_body_finish(&ctx->rsp_body_inspector)) {
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		if (ctx->relay_downstream_body_te == TENCODING_CHUNKED &&
-		    !append_encoded_body(
-			    ctx, NULL, 0, ctx->relay_downstream_body_te,
-			    true)) {
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		if (p->wbuf.len > p->wpos) {
-			ev_io_start(loop, &ctx->w_send);
-		}
-		ev_io_stop(loop, watcher);
-		if (ctx->rsp_body_inspector.mode == HTTP_BODY_EOF) {
-			ctx->relay_can_cache = false;
-		}
-		if (p->wbuf.len == p->wpos) {
-			relay_finish(loop, ctx);
-		}
-		return;
-	}
-
-	p->rbuf.len += n;
-
-	if (ctx->state == STATE_RELAY_RSPHDR) {
-		/* Incremental scan for end-of-headers marker.
-		 * Back up 3 bytes so a split CRLFCRLF is not missed. */
-		const char *raw = (const char *)p->rbuf.data;
-		const size_t rawlen = p->rbuf.len;
-		const size_t start = ctx->relay_hdr_scanned > 3u ?
-					     ctx->relay_hdr_scanned - 3u :
-					     0;
-		const char *hdr_end = NULL;
-		for (size_t i = start; i + 3 < rawlen; i++) {
-			if (raw[i] == '\r' && raw[i + 1] == '\n' &&
-			    raw[i + 2] == '\r' && raw[i + 3] == '\n') {
-				hdr_end = raw + i + 4;
-				break;
-			}
-		}
-		ctx->relay_hdr_scanned = rawlen;
-		if (hdr_end == NULL) {
-			return;
-		}
-
-		if (!relay_setup_headers(ctx, raw, hdr_end)) {
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-
-		const size_t body_so_far = rawlen - (size_t)(hdr_end - raw);
-		if (body_so_far > 0) {
-			const struct http_body_data_cb cb = {
-				.func = relay_body_data_cb,
-				.ctx = ctx,
-			};
-			if (!http_body_consume(
-				    &ctx->rsp_body_inspector,
-				    (const unsigned char *)hdr_end, body_so_far,
-				    cb)) {
-				gc_unref(&ctx->gcbase);
-				return;
-			}
-		}
-		BUF_RESET(p->rbuf);
-		if (ctx->rsp_body_inspector.done) {
-			if (ctx->relay_downstream_body_te ==
-				    TENCODING_CHUNKED &&
-			    !append_encoded_body(
-				    ctx, NULL, 0, ctx->relay_downstream_body_te,
-				    true)) {
-				gc_unref(&ctx->gcbase);
-				return;
-			}
-			ev_io_stop(loop, watcher);
-		}
-		if (p->wbuf.len > p->wpos) {
-			ev_io_start(loop, &ctx->w_send);
-		}
-		ctx->state = STATE_RELAY_RSPBODY;
-		return;
-	}
-
-	/* STATE_RELAY_BODY: decode + re-encode body bytes */
-	const struct http_body_data_cb cb = {
-		.func = relay_body_data_cb,
-		.ctx = ctx,
-	};
-	if (!http_body_consume(
-		    &ctx->rsp_body_inspector, p->rbuf.data, p->rbuf.len, cb)) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	BUF_RESET(p->rbuf);
-	if (p->wbuf.len > p->wpos) {
-		ev_io_start(loop, &ctx->w_send);
-	}
-	if (ctx->rsp_body_inspector.done) {
-		if (ctx->relay_downstream_body_te == TENCODING_CHUNKED &&
-		    !append_encoded_body(
-			    ctx, NULL, 0, ctx->relay_downstream_body_te,
-			    true)) {
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		ev_io_stop(loop, watcher);
-		if (p->wbuf.len == p->wpos) {
-			relay_finish(loop, ctx);
-		}
-	}
-}
-
-static void
-relay_send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_WRITE);
-	struct http_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_RELAY_RSPHDR ||
-	       ctx->state == STATE_RELAY_RSPBODY);
-
-	struct http_conn *restrict p = &ctx->conn;
-	const unsigned char *buf = p->wbuf.data + p->wpos;
-	size_t len = p->wbuf.len - p->wpos;
-	const int err = socket_send(ctx->accepted_fd, buf, &len);
-	if (err != 0) {
-		if (err == EAGAIN || err == EWOULDBLOCK || err == ENOBUFS ||
-		    err == ENOMEM) {
-			return;
-		}
-		HTTP_CTX_LOG_F(
-			WARNING, ctx, "relay send: (%d) %s", err,
-			strerror(err));
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	p->wpos += len;
-	if (p->wpos < p->wbuf.len) {
-		return;
-	}
-	/* wbuf fully sent; reset positions */
-	BUF_RESET(p->wbuf);
-	p->wpos = 0;
-	ev_io_stop(loop, watcher);
-
-	/* If recv is still active, wbuf was just drained between two recv
-	 * callbacks — nothing to do, wait for more data. */
-	if (ev_is_active(&ctx->w_recv)) {
-		return;
-	}
-	/* recv is not active; determine why */
-	if (ctx->rsp_body_inspector.done) {
-		relay_finish(loop, ctx);
-		return;
-	}
-	/* recv was paused because wbuf was full; resume reading */
-	ev_io_start(loop, &ctx->w_recv);
-}
-
-static void
-http_ctx_relay_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
-{
-	struct http_conn *restrict p = &ctx->conn;
-	BUF_RESET(p->rbuf);
-	BUF_RESET(p->wbuf);
-	p->wpos = 0;
-
-	ctx->relay_can_cache = true; /* updated after header scan */
-	ctx->relay_downstream_body_te = TENCODING_NONE;
-	ctx->relay_hdr_scanned = 0;
-	http_body_init(&ctx->rsp_body_inspector, HTTP_BODY_NONE, 0);
-	ctx->state = STATE_RELAY_RSPHDR;
-
-	ev_io_init(&ctx->w_recv, relay_recv_cb, ctx->dialed_fd, EV_READ);
-	ctx->w_recv.data = ctx;
-	ev_io_init(&ctx->w_send, relay_send_cb, ctx->accepted_fd, EV_WRITE);
-	ctx->w_send.data = ctx;
-	ev_io_start(loop, &ctx->w_recv);
-}
-
-static void
-pass_req_body_send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_WRITE);
-	struct http_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_RELAY_REQBODY);
-
-	struct http_conn *restrict p = &ctx->conn;
-	const unsigned char *buf = p->wbuf.data + p->wpos;
-	size_t len = p->wbuf.len - p->wpos;
-	const int err = socket_send(ctx->dialed_fd, buf, &len);
-	if (err != 0) {
-		if (err == EAGAIN || err == EWOULDBLOCK || err == ENOBUFS ||
-		    err == ENOMEM) {
-			return;
-		}
-		HTTP_CTX_LOG_F(
-			WARNING, ctx, "req body send: (%d) %s", err,
-			strerror(err));
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	p->wpos += len;
-	if (p->wpos < p->wbuf.len) {
-		return;
-	}
-
-	BUF_RESET(p->wbuf);
-	p->wpos = 0;
-	ev_io_stop(loop, watcher);
-
-	if (ctx->req_body_inspector.done) {
-		http_ctx_relay_start(loop, ctx);
-		return;
-	}
-
-	if (!ev_is_active(&ctx->w_recv)) {
-		ev_io_start(loop, &ctx->w_recv);
-	}
-}
-
-static bool body_discard_cb(
-	void *restrict data, const unsigned char *restrict buf,
-	const size_t len)
-{
-	UNUSED(data);
-	UNUSED(buf);
-	UNUSED(len);
-	return true;
-}
-
-static bool req_consume_body_bytes(
-	struct http_ctx *restrict ctx, const unsigned char *restrict data,
-	const size_t len)
-{
-	if (len == 0) {
-		return true;
-	}
-	struct http_conn *restrict p = &ctx->conn;
-	if (p->wbuf.cap - p->wbuf.len < len) {
-		return false;
-	}
-	BUF_APPEND(p->wbuf, data, len);
-	const struct http_body_data_cb cb = {
-		.func = body_discard_cb,
-		.ctx = ctx,
-	};
-	if (!http_body_consume(&ctx->req_body_inspector, data, len, cb)) {
-		return false;
-	}
-	return true;
-}
-
-static void
-pass_req_body_recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_READ);
-	struct http_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_RELAY_REQBODY);
-
-	if (ctx->req_body_inspector.done) {
-		ev_io_stop(loop, watcher);
-		http_ctx_relay_start(loop, ctx);
-		return;
-	}
-
-	struct http_conn *restrict p = &ctx->conn;
-	const size_t free = p->wbuf.cap - p->wbuf.len;
-	if (free <= 64u) {
-		ev_io_stop(loop, watcher);
-		return;
-	}
-
-	size_t n = p->rbuf.cap;
-	if (n > free - 64u) {
-		n = free - 64u;
-	}
-	if (ctx->req_body_inspector.mode == HTTP_BODY_CONTENT_LENGTH) {
-		const size_t remain = ctx->req_body_inspector.content_length -
-				      ctx->req_body_inspector.consumed;
-		if (n > remain) {
-			n = remain;
-		}
-	}
-	const int err = socket_recv(ctx->accepted_fd, p->rbuf.data, &n);
-	if (err != 0) {
-		if (err == EAGAIN || err == EWOULDBLOCK) {
-			return;
-		}
-		HTTP_CTX_LOG_F(
-			WARNING, ctx, "req body recv: (%d) %s", err,
-			strerror(err));
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (n == 0) {
-		if (ctx->req_body_inspector.mode == HTTP_BODY_EOF) {
-			if (!http_body_finish(&ctx->req_body_inspector)) {
-				gc_unref(&ctx->gcbase);
-				return;
-			}
-			ev_io_stop(loop, watcher);
-			if (p->wbuf.len > p->wpos) {
-				ev_io_start(loop, &ctx->w_send);
-			} else {
-				http_ctx_relay_start(loop, ctx);
-			}
-			return;
-		}
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-
-	p->rbuf.len = n;
-	if (!req_consume_body_bytes(ctx, p->rbuf.data, n)) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	BUF_RESET(p->rbuf);
-	if (p->wbuf.len > p->wpos) {
-		ev_io_start(loop, &ctx->w_send);
-	}
-
-	if (ctx->req_body_inspector.done) {
-		ev_io_stop(loop, watcher);
-	}
-}
-
-static void http_ctx_pass_req_body_start(
-	struct ev_loop *loop, struct http_ctx *restrict ctx)
-{
-	ASSERT(ctx->req_conn_cache_capable);
-	ASSERT(ctx->req_has_body);
-	ASSERT(!ctx->req_body_inspector.done);
-	ctx->state = STATE_RELAY_REQBODY;
-
-	struct http_conn *restrict p = &ctx->conn;
-	BUF_RESET(p->rbuf);
-	BUF_RESET(p->wbuf);
-	p->wpos = 0;
-
-	ev_io_init(
-		&ctx->w_recv, pass_req_body_recv_cb, ctx->accepted_fd, EV_READ);
-	ctx->w_recv.data = ctx;
-	ev_io_init(
-		&ctx->w_send, pass_req_body_send_cb, ctx->dialed_fd, EV_WRITE);
-	ctx->w_send.data = ctx;
-	ev_io_start(loop, &ctx->w_recv);
-}
-
 static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
@@ -1018,26 +353,6 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	const int ret = http_conn_send(&ctx->conn, watcher->fd);
 	if (ret < 0) {
 		const int err = errno;
-		if (ctx->state == STATE_FORWARD && ctx->fwd_cached_fd &&
-		    (err == ECONNRESET || err == EPIPE || err == ECONNABORTED ||
-		     err == ENOTCONN || err == EBADF)) {
-			ctx->fwd_cached_fd = false;
-			ev_io_stop(loop, &ctx->w_send);
-			ev_io_set(&ctx->w_send, -1, EV_NONE);
-			if (ctx->dialed_fd != -1) {
-				CLOSE_FD(ctx->dialed_fd);
-				ctx->dialed_fd = -1;
-			}
-			if (ctx->dialreq == NULL) {
-				gc_unref(&ctx->gcbase);
-				return;
-			}
-			ctx->state = STATE_CONNECT;
-			dialer_do(
-				&ctx->dialer, loop, ctx->dialreq, ctx->s->conf,
-				ctx->s->resolver);
-			return;
-		}
 		HTTP_CTX_LOG_F(
 			WARNING, ctx, "socket_send: (%d) %s", err,
 			strerror(err));
@@ -1050,16 +365,6 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	if (ctx->state == STATE_FORWARD) {
 		/* request fully forwarded */
 		ev_io_stop(loop, &ctx->w_send);
-		if (ctx->s->conf->conn_cache && ctx->req_conn_cache_capable &&
-		    ctx->req_has_body && !ctx->req_body_inspector.done) {
-			http_ctx_pass_req_body_start(loop, ctx);
-			return;
-		}
-		if (ctx->s->conf->conn_cache && ctx->req_conn_cache_capable) {
-			/* relay the upstream response, then maybe cache conn */
-			http_ctx_relay_start(loop, ctx);
-			return;
-		}
 		dialreq_free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		VBUF_FREE(ctx->conn.cbuf);
@@ -1181,18 +486,6 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		ctx->s->stats.num_reject_ruleset++;
 		send_errpage(loop, ctx, HTTP_FORBIDDEN);
 		return;
-	}
-	if (strcmp(ctx->conn.msg.req.method, "CONNECT") != 0 &&
-	    ctx->req_conn_cache_capable) {
-		const int fd = conn_cache_get(loop, ctx->dialreq);
-		if (fd != -1) {
-			LOGV_F("http_proxy: reusing cached connection [fd:%d]",
-			       fd);
-			ctx->dialed_fd = fd;
-			ctx->fwd_cached_fd = true;
-			http_ctx_forward(loop, ctx);
-			return;
-		}
 	}
 	http_connect(loop, ctx);
 }
@@ -1330,30 +623,6 @@ static void build_pass_req(struct http_ctx *restrict ctx)
 	(void)BUF_APPENDF(p->wbuf, "Via: %s neosocksd\r\n", version + 5);
 }
 
-static bool req_connection_is_close(const struct http_ctx *restrict ctx)
-{
-	return ctx->req_conn_token_close;
-}
-
-static bool req_is_conn_cache_capable(const struct http_ctx *restrict ctx)
-{
-	const struct http_conn *restrict p = &ctx->conn;
-	if (!ctx->s->conf->conn_cache) {
-		return false;
-	}
-	if (!ctx->req_client_keep_alive) {
-		return false;
-	}
-	if (!ctx->req_has_body) {
-		return true;
-	}
-	if (ctx->req_content_length_known ||
-	    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
-		return true;
-	}
-	return false;
-}
-
 static struct dialreq *
 make_dialreq(struct http_ctx *restrict ctx, const char *restrict addr_str)
 {
@@ -1374,21 +643,6 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	struct http_conn *restrict p = &ctx->conn;
 	const size_t overread =
 		p->rbuf.len - (size_t)((unsigned char *)p->next - p->rbuf.data);
-	ctx->req_client_keep_alive = !req_connection_is_close(ctx);
-	ctx->req_conn_cache_capable = req_is_conn_cache_capable(ctx);
-	if (!ctx->req_has_body) {
-		http_body_init(&ctx->req_body_inspector, HTTP_BODY_NONE, 0);
-	} else if (
-		ctx->req_content_length_known &&
-		p->hdr.transfer.encoding == TENCODING_NONE) {
-		http_body_init(
-			&ctx->req_body_inspector, HTTP_BODY_CONTENT_LENGTH,
-			ctx->req_content_length);
-	} else if (p->hdr.transfer.encoding == TENCODING_CHUNKED) {
-		http_body_init(&ctx->req_body_inspector, HTTP_BODY_CHUNKED, 0);
-	} else {
-		http_body_init(&ctx->req_body_inspector, HTTP_BODY_NONE, 0);
-	}
 
 	/* ensure the request line was written (no headers case) */
 	if (p->wbuf.len == 0) {
@@ -1402,24 +656,12 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 			ctx->req_content_length);
 	}
 
-	/* keep upstream connection alive when conn_cache path is enabled */
-	if (ctx->req_conn_cache_capable) {
-		BUF_APPENDSTR(p->wbuf, "\r\n");
-	} else {
-		BUF_APPENDSTR(p->wbuf, "Connection: close\r\n\r\n");
-	}
+	/* always close upstream after request to keep proxy stateless */
+	BUF_APPENDSTR(p->wbuf, "Connection: close\r\n\r\n");
 
 	/* forward any body bytes already buffered in rbuf */
 	if (overread > 0) {
-		if (ctx->req_has_body) {
-			if (!req_consume_body_bytes(
-				    ctx, (unsigned char *)p->next, overread)) {
-				send_errpage(loop, ctx, HTTP_BAD_REQUEST);
-				return;
-			}
-		} else {
-			BUF_APPEND(p->wbuf, (unsigned char *)p->next, overread);
-		}
+		BUF_APPEND(p->wbuf, (unsigned char *)p->next, overread);
 	}
 
 	HTTP_CTX_LOG_F(
@@ -1440,17 +682,6 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 			return;
 		}
 		ctx->dialreq = make_dialreq(ctx, hostport);
-	}
-	if (ctx->dialreq != NULL && ctx->req_conn_cache_capable) {
-		const int fd = conn_cache_get(loop, ctx->dialreq);
-		if (fd != -1) {
-			LOGV_F("http_proxy: reusing cached connection [fd:%d]",
-			       fd);
-			ctx->dialed_fd = fd;
-			ctx->fwd_cached_fd = true;
-			http_ctx_forward(loop, ctx);
-			return;
-		}
 	}
 	http_connect(loop, ctx);
 }
@@ -1592,7 +823,6 @@ static bool parse_header(void *data, const char *key, char *value)
 		     next = parsehdr_connection_token(next, &tok, &toklen)) {
 			if (toklen == CONSTSTRLEN("close") &&
 			    strncasecmp(tok, "close", toklen) == 0) {
-				ctx->req_conn_token_close = true;
 				break;
 			}
 		}
@@ -1631,7 +861,6 @@ static bool parse_header(void *data, const char *key, char *value)
 			if (ctx->req_content_length_known) {
 				return false;
 			}
-			ctx->req_has_body = true;
 		}
 		return true;
 	}
@@ -1724,9 +953,6 @@ static bool parse_header(void *data, const char *key, char *value)
 		}
 		ctx->req_content_length = (size_t)cl;
 		ctx->req_content_length_known = true;
-		if (ctx->req_content_length > 0) {
-			ctx->req_has_body = true;
-		}
 		return true;
 	}
 	if (strcasecmp(key, "Content-Type") == 0) {
@@ -1739,7 +965,6 @@ static bool parse_header(void *data, const char *key, char *value)
 	if (strcasecmp(key, "Expect") == 0) {
 		/* Expect: 100-continue means the client has a request body */
 		if (strcasecmp(value, "100-continue") == 0) {
-			ctx->req_has_body = true;
 			p->expect_continue = true;
 		}
 		BUF_APPENDSTR(p->wbuf, "Expect: ");
@@ -1785,17 +1010,8 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 #endif
 	ctx->dialreq = NULL;
 	ctx->req_content_length = 0;
-	http_body_init(&ctx->req_body_inspector, HTTP_BODY_NONE, 0);
-	http_body_init(&ctx->rsp_body_inspector, HTTP_BODY_NONE, 0);
-	ctx->relay_downstream_body_te = TENCODING_NONE;
 	ctx->req_content_length_known = false;
-	ctx->req_conn_cache_capable = false;
-	ctx->req_client_keep_alive = false;
-	ctx->req_has_body = false;
-	ctx->req_conn_token_close = false;
-	ctx->fwd_cached_fd = false;
 	ctx->req_target[0] = '\0';
-	ctx->relay_hdr_scanned = 0;
 	const struct dialer_cb cb = {
 		.func = dialer_cb,
 		.data = ctx,

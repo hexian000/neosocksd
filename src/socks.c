@@ -94,8 +94,9 @@ struct socks_ctx {
 				BUFFER_HDR;
 				unsigned char data[IO_BUFSIZE];
 			} ubuf;
-			/* fragment reassembly state */
-			/* 0=idle, else next expected # */
+			/* Fragment reassembly state.
+			 * 0 = idle, else the next expected fragment number.
+			 */
 			uint_least8_t frag_next;
 			struct {
 				BUFFER_HDR;
@@ -644,7 +645,8 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 	ctx->auth.password = password;
 
 	/* authentication is always successful because the request is unknown yet */
-	wbuf[1] = 0x00; /* STATUS = SUCCESS */
+	/* STATUS = SUCCESS */
+	wbuf[1] = 0x00;
 	if (!send_rsp(ctx, wbuf, sizeof(wbuf))) {
 		return -1;
 	}
@@ -1194,7 +1196,8 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			ctx->udp_peer_known = true;
 		}
 		if ((size_t)nrecv < SOCKS5_UDP_HDR_LEN) {
-			return; /* too short, discard */
+			/* Too short, discard. */
+			return;
 		}
 		struct socks5_udp_hdr udph;
 		socks5udphdr_read(&udph, ctx->ubuf.data);
@@ -1210,7 +1213,8 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		if (!udp_parse_addr(
 			    ctx->ubuf.data, (size_t)nrecv, &target_sa,
 			    &target_len, &hdr_len)) {
-			return; /* unsupported address type, discard */
+			/* Unsupported address type, discard. */
+			return;
 		}
 		ssize_t nsend;
 		do {
@@ -1258,7 +1262,8 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			hdr_len += sizeof(from_sa.in6.sin6_port);
 			break;
 		default:
-			return; /* unexpected address family, discard */
+			/* Unexpected address family, discard. */
+			return;
 		}
 		socks5udphdr_write(hdr_buf, &udph);
 		const struct iovec iov[2] = {

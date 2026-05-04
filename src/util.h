@@ -97,34 +97,8 @@ void pipe_close(struct splice_pipe *pipe);
 void pipe_shrink(size_t count);
 #endif
 
-#define CONN_CACHE_CAPACITY 32
-/* Seconds before an idle cached connection is discarded */
-#define CONN_CACHE_TIMEOUT 60.0
-
-struct conn_cache_entry {
-	int fd;
-	unsigned hash;
-	int bucket;
-	int next;
-	ev_io w_close;
-	ev_timer w_expire;
-	char key[256];
-};
-
-/** @brief Global cache of reusable upstream connections. */
-extern struct conn_cache {
-	size_t len;
-	unsigned seed;
-	int freelist;
-	int buckets[CONN_CACHE_CAPACITY];
-	struct conn_cache_entry entries[CONN_CACHE_CAPACITY];
-} conn_cache;
-
-void conn_cache_put(
-	struct ev_loop *loop, int fd, const struct dialreq *restrict dialreq);
-int conn_cache_get(struct ev_loop *loop, const struct dialreq *restrict req);
-
-/* Returns true if err indicates a cached connection has gone stale. */
+/* Returns true if err indicates a send error on a connection that should
+ * simply be closed rather than retried. */
 #define IS_STALECONN_ERROR(err)                                                \
 	((err) == ECONNRESET || (err) == EPIPE || (err) == ECONNABORTED ||     \
 	 (err) == ENOTCONN || (err) == EBADF)

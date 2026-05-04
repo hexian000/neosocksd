@@ -959,7 +959,8 @@ static int gzip_direct_read(void *p, const void **buf, size_t *restrict len)
 				size_t srclen = z->srclen;
 				unsigned char *dst = z->dstbuf + z->dstlen;
 				size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
-				int flags = 0; /* raw DEFLATE */
+				/* raw DEFLATE */
+				int flags = 0;
 				if (!z->srceof) {
 					flags |= TINFL_FLAG_HAS_MORE_INPUT;
 				}

@@ -118,7 +118,8 @@ struct resolve_cb {
 	void (*func)(
 		struct resolve_query *q, struct ev_loop *loop, void *data,
 		const struct sockaddr *sa);
-	void *data; /**< User data passed to callback (not freed by resolver) */
+	/** User data passed to callback (not freed by resolver). */
+	void *data;
 };
 
 /**

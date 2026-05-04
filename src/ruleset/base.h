@@ -8,12 +8,13 @@
 
 #include "lua.h"
 
-_Static_assert(LUA_VERSION_NUM >= 503, "ruleset requires Lua >= 5.3");
-
 #include <ev.h>
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
+
+static_assert(LUA_VERSION_NUM >= 503, "ruleset requires Lua >= 5.3");
 
 struct config;
 struct dialreq;

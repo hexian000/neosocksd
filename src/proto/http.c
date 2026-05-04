@@ -384,7 +384,8 @@ static int parse_message(struct http_conn *restrict p)
 			p->state = STATE_PARSE_ERROR;
 			return 0;
 		}
-		return 1; /* Need more data */
+		/* Need more data. */
+		return 1;
 	}
 
 	/* Log parsed message components */
@@ -530,7 +531,8 @@ static int parse_content(struct http_conn *restrict p)
 
 	/* Check if we have all content */
 	if (VBUF_LEN(p->cbuf) < content_length) {
-		return 1; /* Need more data */
+		/* Need more data. */
+		return 1;
 	}
 	return 0;
 }
