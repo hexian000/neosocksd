@@ -200,6 +200,26 @@ static void update_stats(
 	XFER_HALF_LOG_F(VERYVERBOSE, h, "%zu bytes transmitted", nbsend);
 }
 
+#if WITH_SPLICE
+static bool pipe_get(struct splice_pipe *restrict pipe)
+{
+	if (pipe_cache.len == 0) {
+		return pipe_new(pipe);
+	}
+	*pipe = pipe_cache.pipes[--pipe_cache.len];
+	return true;
+}
+
+static void pipe_put(struct splice_pipe *restrict pipe)
+{
+	if (pipe->len > 0 || pipe_cache.len == pipe_cache.cap) {
+		pipe_close(pipe);
+		return;
+	}
+	pipe_cache.pipes[pipe_cache.len++] = *pipe;
+}
+#endif
+
 /* ---------------------------------------------------------------- set_state */
 
 /*
@@ -228,6 +248,16 @@ static void set_state(
 	if (t->n_finished < 2) {
 		return;
 	}
+
+#if WITH_SPLICE
+	if (t->up.pipe.fd[0] != -1) {
+		pipe_put(&t->up.pipe);
+	}
+	if (t->down.pipe.fd[0] != -1) {
+		pipe_put(&t->down.pipe);
+	}
+#endif
+
 	/* Both halves finished: close fds, decrement counter, free. */
 	CLOSE_FD(t->up.src_fd);
 	CLOSE_FD(t->down.src_fd);
@@ -484,24 +514,6 @@ pipe_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 		FAILMSGF("unexpected state: %d", state);
 	}
 	set_state(h, loop, state);
-}
-
-static bool pipe_get(struct splice_pipe *restrict pipe)
-{
-	if (pipe_cache.len == 0) {
-		return pipe_new(pipe);
-	}
-	*pipe = pipe_cache.pipes[--pipe_cache.len];
-	return true;
-}
-
-static void pipe_put(struct splice_pipe *restrict pipe)
-{
-	if (pipe->len > 0 || pipe_cache.len == pipe_cache.cap) {
-		pipe_close(pipe);
-		return;
-	}
-	pipe_cache.pipes[pipe_cache.len++] = *pipe;
 }
 
 #endif /* WITH_SPLICE */

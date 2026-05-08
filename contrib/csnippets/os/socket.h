@@ -61,12 +61,20 @@ union sockaddr_max {
 };
 
 /**
- * @brief Sets the socket to non-blocking mode and enables the close-on-exec flag.
+ * @brief Sets the socket to close-on-exec mode.
  * @param fd The socket file descriptor.
- * @return True on success, false on failure; logs LOGE on failure.
+ * @return 0 on success, or errno on failure; logs LOGE on failure.
  * @note POSIX version: POSIX.1-2001
  */
-bool socket_set_nonblock(int fd);
+int socket_set_cloexec(int fd);
+
+/**
+ * @brief Sets the socket to non-blocking mode.
+ * @param fd The socket file descriptor.
+ * @return 0 on success, or errno on failure; logs LOGE on failure.
+ * @note POSIX version: POSIX.1-2001
+ */
+int socket_set_nonblock(int fd);
 
 /**
  * @brief Sets the send and receive buffer sizes for the socket.

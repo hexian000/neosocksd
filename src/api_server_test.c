@@ -459,8 +459,10 @@ static void start_api(
 	};
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]));
-	T_CHECK(socket_set_nonblock(sv[1]));
+	T_CHECK(socket_set_cloexec(sv[0]) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
+	T_CHECK(socket_set_cloexec(sv[1]) == 0);
+	T_CHECK(socket_set_nonblock(sv[1]) == 0);
 	api_serve(api, loop, sv[0], (const struct sockaddr *)&sa);
 	*peer_fd = sv[1];
 }

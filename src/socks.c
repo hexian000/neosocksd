@@ -902,11 +902,21 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			"BIND peer mismatch (expected `%s', got `%s'), allowing",
 			expect_str, peer_str);
 	}
-	if (!socket_set_nonblock(conn_fd)) {
-		CLOSE_FD(conn_fd);
-		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-		gc_unref(&ctx->gcbase);
-		return;
+	{
+		int err = socket_set_cloexec(conn_fd);
+		if (err != 0) {
+			CLOSE_FD(conn_fd);
+			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+			gc_unref(&ctx->gcbase);
+			return;
+		}
+		err = socket_set_nonblock(conn_fd);
+		if (err != 0) {
+			CLOSE_FD(conn_fd);
+			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+			gc_unref(&ctx->gcbase);
+			return;
+		}
 	}
 	ev_io_stop(loop, &ctx->w_socket);
 	CLOSE_FD(ctx->dialed_fd);
@@ -968,11 +978,21 @@ socks_bind_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		gc_unref(&ctx->gcbase);
 		return;
 	}
-	if (!socket_set_nonblock(listen_fd)) {
-		CLOSE_FD(listen_fd);
-		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-		gc_unref(&ctx->gcbase);
-		return;
+	{
+		int err = socket_set_cloexec(listen_fd);
+		if (err != 0) {
+			CLOSE_FD(listen_fd);
+			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+			gc_unref(&ctx->gcbase);
+			return;
+		}
+		err = socket_set_nonblock(listen_fd);
+		if (err != 0) {
+			CLOSE_FD(listen_fd);
+			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+			gc_unref(&ctx->gcbase);
+			return;
+		}
 	}
 	ctx->dialed_fd = listen_fd;
 	if (!socks5_sendrsp(ctx, SOCKS5RSP_SUCCEEDED)) {
@@ -1364,11 +1384,21 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 			return;
 		}
 	}
-	if (!socket_set_nonblock(udp_fd)) {
-		CLOSE_FD(udp_fd);
-		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-		gc_unref(&ctx->gcbase);
-		return;
+	{
+		int err = socket_set_cloexec(udp_fd);
+		if (err != 0) {
+			CLOSE_FD(udp_fd);
+			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+			gc_unref(&ctx->gcbase);
+			return;
+		}
+		err = socket_set_nonblock(udp_fd);
+		if (err != 0) {
+			CLOSE_FD(udp_fd);
+			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+			gc_unref(&ctx->gcbase);
+			return;
+		}
 	}
 	ctx->dialed_fd = udp_fd;
 	if (!socks5_sendrsp(ctx, SOCKS5RSP_SUCCEEDED)) {

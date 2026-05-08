@@ -69,8 +69,6 @@ void pipe_close(struct splice_pipe *restrict pipe)
 	}
 }
 
-#define PIPE_BUFSIZE 262144
-
 bool pipe_new(struct splice_pipe *restrict pipe)
 {
 	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
@@ -78,14 +76,19 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 		LOGW_F("pipe2: (%d) %s", err, strerror(err));
 		return false;
 	}
-	const int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, PIPE_BUFSIZE);
+	int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, 262144);
+	if (pipe_cap < 0) {
+		const int err = errno;
+		LOGD_F("fcntl: (%d) %s", err, strerror(err));
+	}
+	pipe_cap = fcntl(pipe->fd[0], F_GETPIPE_SZ, 0);
 	if (pipe_cap < 0) {
 		const int err = errno;
 		LOGW_F("fcntl: (%d) %s", err, strerror(err));
 		pipe_close(pipe);
 		return false;
 	}
-	if (pipe_cap < PIPE_BUFSIZE) {
+	if (pipe_cap < 16384) {
 		LOGW_F("pipe: insufficient capacity %d", pipe_cap);
 		pipe_close(pipe);
 		return false;

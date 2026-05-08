@@ -111,11 +111,17 @@ static void accept_cb(
 			return;
 		}
 
-		if (!socket_set_nonblock(fd)) {
-			const int err = errno;
-			LOGE_F("fcntl: (%d) %s", err, strerror(err));
-			CLOSE_FD(fd);
-			return;
+		{
+			int err = socket_set_cloexec(fd);
+			if (err != 0) {
+				CLOSE_FD(fd);
+				return;
+			}
+			err = socket_set_nonblock(fd);
+			if (err != 0) {
+				CLOSE_FD(fd);
+				return;
+			}
 		}
 		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
 		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
@@ -152,11 +158,17 @@ static bool add_listener(
 		return false;
 	}
 
-	if (!socket_set_nonblock(fd)) {
-		const int err = errno;
-		LOGE_F("fcntl: (%d) %s", err, strerror(err));
-		CLOSE_FD(fd);
-		return false;
+	{
+		int err = socket_set_cloexec(fd);
+		if (err != 0) {
+			CLOSE_FD(fd);
+			return false;
+		}
+		err = socket_set_nonblock(fd);
+		if (err != 0) {
+			CLOSE_FD(fd);
+			return false;
+		}
 	}
 
 	const struct config *restrict conf = s->conf;

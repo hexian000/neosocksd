@@ -35,24 +35,45 @@ struct test_xfer_state {
 };
 
 #if WITH_SPLICE
+static struct {
+	int pipe_new_calls;
+	int pipe_close_calls;
+} PIPE_STUB = { 0 };
+
 /* Stubs for splice pipe utilities — transfer_test always passes use_splice=false
  * so these are never called, but the linker requires them. */
 struct pipe_cache pipe_cache = { 0 };
 
 bool pipe_new(struct splice_pipe *restrict pipe)
 {
-	(void)pipe;
-	return false;
+	PIPE_STUB.pipe_new_calls++;
+	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
+		return false;
+	}
+	pipe->cap = 65536;
+	pipe->len = 0;
+	return true;
 }
 
 void pipe_close(struct splice_pipe *restrict pipe)
 {
-	(void)pipe;
+	PIPE_STUB.pipe_close_calls++;
+	CLOSE_FD(pipe->fd[0]);
+	CLOSE_FD(pipe->fd[1]);
+	pipe->fd[0] = -1;
+	pipe->fd[1] = -1;
 }
 
 void pipe_shrink(const size_t count)
 {
 	(void)count;
+}
+
+static void reset_pipe_stub_state(void)
+{
+	PIPE_STUB.pipe_new_calls = 0;
+	PIPE_STUB.pipe_close_calls = 0;
+	pipe_cache = (struct pipe_cache){ 0 };
 }
 #endif
 
@@ -214,6 +235,87 @@ T_DECLARE_CASE(test_transfer_moves_payload)
 	CLOSE_FD(acc_peer);
 	CLOSE_FD(dial_peer);
 }
+
+#if WITH_SPLICE
+/* The normal FINISHED path must also release splice pipes, not only the
+ * cancellation path. */
+T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
+{
+	static const char uplink[] = "splice-uplink";
+	static const char downlink[] = "splice-downlink";
+	int acc_peer = -1, acc_fd = -1;
+	int dial_fd = -1, dial_peer = -1;
+	struct ev_loop *loop = EV_DEFAULT;
+	struct test_xfer_state state = { 0 };
+	char up_out[sizeof(uplink)] = { 0 };
+	char dn_out[sizeof(downlink)] = { 0 };
+	size_t got;
+
+	make_socketpair(&acc_peer, &acc_fd);
+	make_socketpair(&dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+
+	reset_pipe_stub_state();
+	pipe_cache.cap = 0;
+	pipe_cache.len = 0;
+
+	T_CHECK(send(acc_peer, uplink, sizeof(uplink), 0) ==
+		(ssize_t)sizeof(uplink));
+	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+	T_CHECK(send(dial_peer, downlink, sizeof(downlink), 0) ==
+		(ssize_t)sizeof(downlink));
+	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
+
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_new(loop);
+	T_CHECK(xfer != NULL);
+
+	T_CHECK(transfer_serve(
+		xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.use_splice = true,
+			.num_sessions = &state.num_sessions,
+		}));
+	acc_fd = dial_fd = -1;
+
+	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
+	T_EXPECT_EQ(PIPE_STUB.pipe_new_calls, 2);
+	T_EXPECT_EQ(PIPE_STUB.pipe_close_calls, 2);
+
+	got = 0;
+	while (got < sizeof(up_out)) {
+		const ssize_t n =
+			recv(dial_peer, up_out + got, sizeof(up_out) - got, 0);
+		if (n <= 0) {
+			break;
+		}
+		got += (size_t)n;
+	}
+	T_EXPECT_EQ(got, sizeof(uplink));
+	T_EXPECT_MEMEQ(up_out, uplink, sizeof(uplink));
+	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)sizeof(uplink));
+
+	got = 0;
+	while (got < sizeof(dn_out)) {
+		const ssize_t n =
+			recv(acc_peer, dn_out + got, sizeof(dn_out) - got, 0);
+		if (n <= 0) {
+			break;
+		}
+		got += (size_t)n;
+	}
+	T_EXPECT_EQ(got, sizeof(downlink));
+	T_EXPECT_MEMEQ(dn_out, downlink, sizeof(downlink));
+	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
+
+	transfer_free(xfer);
+	CLOSE_FD(acc_peer);
+	CLOSE_FD(dial_peer);
+}
+#endif
 
 /*
  * Cancel must suppress the on_finished callback but still clean up all
@@ -377,6 +479,7 @@ int main(void)
 	T_DECLARE_CTX(t);
 
 	T_RUN_CASE(t, test_transfer_moves_payload);
+	T_RUN_CASE(t, test_transfer_splice_releases_pipes_on_finish);
 	T_RUN_CASE(t, test_transfer_ctx_cancel_no_callback);
 	T_RUN_CASE(t, test_transfer_dst_error_finishes);
 	T_RUN_CASE(t, test_transfer_backpressure_completes);

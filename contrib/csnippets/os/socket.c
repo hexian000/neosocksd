@@ -22,22 +22,40 @@
 #include <stdlib.h>
 #include <string.h>
 
-bool socket_set_nonblock(const int fd)
+int socket_set_cloexec(const int fd)
+{
+	const int flags = fcntl(fd, F_GETFD, 0);
+	if (flags == -1) {
+		const int err = errno;
+		LOGE_F("fcntl [fd:%d]: F_GETFD (%d) %s", fd, err,
+		       strerror(err));
+		return err;
+	}
+	if (fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
+		const int err = errno;
+		LOGE_F("fcntl [fd:%d]: F_SETFD (%d) %s", fd, err,
+		       strerror(err));
+		return err;
+	}
+	return 0;
+}
+
+int socket_set_nonblock(const int fd)
 {
 	const int flags = fcntl(fd, F_GETFL, 0);
 	if (flags == -1) {
 		const int err = errno;
 		LOGE_F("fcntl [fd:%d]: F_GETFL (%d) %s", fd, err,
 		       strerror(err));
-		return false;
+		return err;
 	}
-	if (fcntl(fd, F_SETFL, flags | FD_CLOEXEC | O_NONBLOCK) == -1) {
+	if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
 		const int err = errno;
 		LOGE_F("fcntl [fd:%d]: F_SETFL (%d) %s", fd, err,
 		       strerror(err));
-		return false;
+		return err;
 	}
-	return true;
+	return 0;
 }
 
 bool socket_set_buffer(const int fd, const int sndbuf, const int rcvbuf)

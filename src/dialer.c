@@ -1485,14 +1485,22 @@ static bool connect_sa(
 		return false;
 	}
 
-	/* Configure non-blocking mode */
-	if (!socket_set_nonblock(fd)) {
-		const int err = errno;
-		LOGD_F("fcntl: (%d) %s", err, strerror(err));
-		CLOSE_FD(fd);
-		d->err = DIALER_ERR_SYSTEM;
-		d->syserr = err;
-		return false;
+	/* Configure socket options */
+	{
+		int err = socket_set_cloexec(fd);
+		if (err != 0) {
+			CLOSE_FD(fd);
+			d->err = DIALER_ERR_SYSTEM;
+			d->syserr = err;
+			return false;
+		}
+		err = socket_set_nonblock(fd);
+		if (err != 0) {
+			CLOSE_FD(fd);
+			d->err = DIALER_ERR_SYSTEM;
+			d->syserr = err;
+			return false;
+		}
 	}
 	const struct config *restrict conf = d->conf;
 #if WITH_NETDEVICE
