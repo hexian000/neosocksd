@@ -796,7 +796,8 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 		}
 	}
 
-	return false;
+	/* Valid header, but no supported encoding — leave accept_encoding as CENCODING_NONE */
+	return true;
 }
 
 bool parsehdr_content_length(

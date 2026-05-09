@@ -573,6 +573,36 @@ T_DECLARE_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(metrics_unsupported_accept_encoding_and_te_returns_200)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+
+	T_CHECK(loop != NULL);
+	init_unified_server(&s, loop);
+	start_api(&s, loop, &peer_fd);
+
+	/* Prometheus sends Accept-Encoding: gzip and TE: trailers — both
+	 * are valid headers whose values the server simply does not support.
+	 * The API endpoint must respond 200, not 400. */
+	T_CHECK(send_request(
+		peer_fd, "GET /metrics HTTP/1.1\r\n"
+			 "Accept-Encoding: gzip\r\n"
+			 "TE: trailers\r\n"
+			 "\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1101,6 +1131,7 @@ int main(void)
 	T_RUN_CASE(t, healthy_connection_close_header);
 	T_RUN_CASE(t, api_stats_do_not_pollute_proxy_stats_in_unified_server);
 	T_RUN_CASE(t, metrics_keep_proxy_and_api_request_totals_separate);
+	T_RUN_CASE(t, metrics_unsupported_accept_encoding_and_te_returns_200);
 	T_RUN_CASE(t, stats_get_ok_with_nocache);
 	T_RUN_CASE(t, stats_output_format_has_no_raw_specifiers);
 	T_RUN_CASE(t, stats_post_ok_without_nocache);

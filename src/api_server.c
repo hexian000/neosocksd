@@ -1126,7 +1126,12 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "TE") == 0) {
-		return parsehdr_accept_te(p, value);
+		/* Record chunked TE if offered; ignore unsupported tokens —
+		 * the API server is an endpoint, not an intermediary, so it
+		 * must not reject clients that advertise encodings it does not
+		 * support (e.g. Prometheus sending "TE: trailers"). */
+		(void)parsehdr_accept_te(p, value);
+		return true;
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
 		return parsehdr_transfer_encoding(p, value);

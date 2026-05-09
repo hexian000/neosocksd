@@ -239,8 +239,10 @@ T_DECLARE_CASE(parsehdr_accept_encoding_cases)
 		T_EXPECT_EQ(p.hdr.accept_encoding, CENCODING_DEFLATE);
 	}
 	{
+		struct http_conn q = { 0 };
 		char value[] = "gzip,br";
-		T_EXPECT(!parsehdr_accept_encoding(&p, value));
+		T_EXPECT(parsehdr_accept_encoding(&q, value));
+		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_NONE);
 	}
 }
 
