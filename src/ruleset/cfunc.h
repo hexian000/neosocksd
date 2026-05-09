@@ -24,6 +24,8 @@ int cfunc_update(lua_State *L);
 
 int cfunc_stats(lua_State *L);
 
+int cfunc_metrics(lua_State *L);
+
 int cfunc_tick(lua_State *L);
 
 int cfunc_gc(lua_State *L);

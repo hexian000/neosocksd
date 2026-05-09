@@ -201,6 +201,33 @@ static void append_vmstats(
 
 #endif
 
+static double process_load(void)
+{
+	static struct {
+		struct timespec monotime, cputime;
+		bool set;
+	} last = { .set = false };
+	double load = -1;
+	struct timespec monotime, cputime;
+	if (!clock_monotonic(&monotime)) {
+		return load;
+	}
+	if (!clock_process(&cputime)) {
+		return load;
+	}
+	if (last.set) {
+		const intmax_t total = TIMESPEC_DIFF(monotime, last.monotime);
+		const intmax_t busy = TIMESPEC_DIFF(cputime, last.cputime);
+		if (busy > 0 && total > 0) {
+			load = (double)busy / (double)total;
+		}
+	}
+	last.monotime = monotime;
+	last.cputime = cputime;
+	last.set = true;
+	return load;
+}
+
 static void server_stats_stateful(
 	struct stream *restrict w, const struct server *restrict api,
 	const double dt)
@@ -871,6 +898,8 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	const double uptime =
 		(double)(clock_monotonic_ns() - ctx->s->stats.started) * 1e-9;
+	struct timespec cpu_ts = { 0 };
+	const bool have_cpu = clock_process(&cpu_ts);
 
 	const enum content_encodings encoding =
 		(ctx->conn.hdr.accept_encoding == CENCODING_DEFLATE) ?
@@ -903,6 +932,14 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		uptime);
 
 	/* Counters */
+	if (have_cpu) {
+		(void)io_bufprintf(
+			w,
+			"# HELP neosocksd_process_cpu_seconds_total Total CPU time consumed by the process.\n"
+			"# TYPE neosocksd_process_cpu_seconds_total counter\n"
+			"neosocksd_process_cpu_seconds_total %g\n",
+			(double)TIMESPEC_NANO(cpu_ts) * 1e-9);
+	}
 	(void)io_bufprintf(
 		w,
 		"# HELP neosocksd_connections_accepted_total Connections accepted by the listener.\n"
@@ -983,6 +1020,26 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			"# TYPE neosocksd_lua_objects gauge\n"
 			"neosocksd_lua_objects %zu\n",
 			vmstats.byt_allocated, vmstats.num_object);
+	}
+	{
+		struct ruleset *restrict ruleset = s->ruleset;
+		if (ruleset != NULL) {
+			size_t len;
+			const char *m = ruleset_metrics(ruleset, &len);
+			if (m != NULL) {
+				size_t n = len;
+				const int werr = stream_write(w, m, &n);
+				if (n < len || werr != 0) {
+					LOGE_F("stream_write error: %d, %zu/%zu",
+					       werr, n, len);
+					(void)stream_close(w);
+					send_errpage(
+						loop, ctx,
+						HTTP_INTERNAL_SERVER_ERROR);
+					return;
+				}
+			}
+		}
 	}
 #endif
 

@@ -533,6 +533,65 @@ T_DECLARE_CASE(ruleset_update_invoke_rpcall_stats_and_tick)
 	free_ruleset(loop, r);
 }
 
+T_DECLARE_CASE(ruleset_metrics_returns_string_when_defined_and_null_when_absent)
+{
+	static const char with_metrics_chunk[] =
+		"local name = ... "
+		"  local ruleset = {} "
+		"  function ruleset.resolve(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.route(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.route6(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.stats(dt, query) return '' end "
+		"  function ruleset.tick() end "
+		"  function ruleset.metrics() return 'custom_metric 42\\n' end "
+		"  return ruleset "
+		"";
+	static const char without_metrics_chunk[] =
+		"local name = ... "
+		"  local ruleset = {} "
+		"  function ruleset.resolve(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.route(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.route6(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.stats(dt, query) return '' end "
+		"  function ruleset.tick() end "
+		"  return ruleset "
+		"";
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+	size_t len = 0;
+	const char *s;
+
+	T_EXPECT(ruleset_update(
+		r, NULL, NULL,
+		string_stream_open(&stream, with_metrics_chunk)));
+	s = ruleset_metrics(r, &len);
+	T_CHECK(s != NULL);
+	T_EXPECT_EQ(len, strlen("custom_metric 42\n"));
+	T_EXPECT_MEMEQ(s, "custom_metric 42\n", len);
+
+	T_EXPECT(ruleset_update(
+		r, NULL, NULL,
+		string_stream_open(&stream, without_metrics_chunk)));
+	s = ruleset_metrics(r, &len);
+	T_EXPECT_EQ(s, NULL);
+
+	free_ruleset(loop, r);
+}
+
 T_DECLARE_CASE(ruleset_cancel_pending_request_clears_callback)
 {
 	static const char update_chunk[] =
@@ -609,6 +668,9 @@ int main(void)
 	T_DECLARE_CTX(t);
 	T_RUN_CASE(t, ruleset_loadfile_dispatches_requests);
 	T_RUN_CASE(t, ruleset_update_invoke_rpcall_stats_and_tick);
+	T_RUN_CASE(
+		t,
+		ruleset_metrics_returns_string_when_defined_and_null_when_absent);
 	T_RUN_CASE(t, ruleset_cancel_pending_request_clears_callback);
 	T_RUN_CASE(t, ruleset_geterror_variants);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;

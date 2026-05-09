@@ -455,6 +455,58 @@ T_DECLARE_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed)
 	free_ruleset(loop, r);
 }
 
+T_DECLARE_CASE(cfunc_metrics_returns_string_when_defined_and_nil_when_absent)
+{
+	static const char with_metrics_chunk[] =
+		"local modname = ... "
+		"local ruleset = {} "
+		"function ruleset.resolve(request, username, password) return request end "
+		"function ruleset.route(request, username, password) return request end "
+		"function ruleset.route6(request, username, password) return request end "
+		"function ruleset.stats(dt, query) return '' end "
+		"function ruleset.tick() end "
+		"function ruleset.metrics() return 'custom_metric 1\\n' end "
+		"return ruleset";
+	static const char without_metrics_chunk[] =
+		"local modname = ... "
+		"local ruleset = {} "
+		"function ruleset.resolve(request, username, password) return request end "
+		"function ruleset.route(request, username, password) return request end "
+		"function ruleset.route6(request, username, password) return request end "
+		"function ruleset.stats(dt, query) return '' end "
+		"function ruleset.tick() end "
+		"return ruleset";
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+	size_t len;
+	const char *s;
+
+	/* with ruleset.metrics defined: returns the string */
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_update, 3, 0, NULL, "=test",
+		string_stream_open(&stream, with_metrics_chunk)));
+	T_EXPECT(ruleset_pcall(r, cfunc_metrics, 0, 1));
+	T_EXPECT_EQ(lua_gettop(r->L), 1);
+	s = lua_tolstring(r->L, -1, &len);
+	T_CHECK(s != NULL);
+	T_EXPECT_EQ(len, strlen("custom_metric 1\n"));
+	T_EXPECT_MEMEQ(s, "custom_metric 1\n", len);
+	lua_pop(r->L, 1);
+
+	/* without ruleset.metrics defined: stack has nil (nresults=1 pads) */
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_update, 3, 0, NULL, "=test",
+		string_stream_open(&stream, without_metrics_chunk)));
+	T_EXPECT(ruleset_pcall(r, cfunc_metrics, 0, 1));
+	T_EXPECT_EQ(lua_gettop(r->L), 1);
+	T_EXPECT(lua_isnil(r->L, -1));
+	lua_pop(r->L, 1);
+
+	free_ruleset(loop, r);
+}
+
 T_DECLARE_CASE(cfunc_update_replaces_loaded_module)
 {
 	static const char mod_chunk[] =
@@ -605,6 +657,9 @@ int main(void)
 {
 	T_DECLARE_CTX(t);
 	T_RUN_CASE(t, cfunc_loadfile_stats_tick_and_invoke_are_sandboxed);
+	T_RUN_CASE(
+		t,
+		cfunc_metrics_returns_string_when_defined_and_nil_when_absent);
 	T_RUN_CASE(t, cfunc_update_replaces_loaded_module);
 	T_RUN_CASE(t, cfunc_request_accepts_and_rejects);
 	T_RUN_CASE(t, cfunc_request_reports_lua_error_via_callback);

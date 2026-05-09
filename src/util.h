@@ -112,12 +112,6 @@ void loadlibs(void);
 /** Clean up and unload global subsystems and resources. */
 void unloadlibs(void);
 
-/**
- * @brief Per-process CPU load since the previous call.
- * @return Fraction in [0,1] when available, or -1 when unavailable.
- */
-double process_load(void);
-
 /* socket utilities */
 void socket_bind_netdev(int fd, const char *netdev);
 void socket_set_transparent(int fd, bool tproxy);

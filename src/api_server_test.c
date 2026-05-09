@@ -45,11 +45,6 @@ const struct resolver_stats *resolver_stats(const struct resolver *restrict r)
 	return &resolver_stub_stats;
 }
 
-double process_load(void)
-{
-	return -1.0;
-}
-
 void server_stats(
 	const struct server *restrict s, struct server_stats *restrict out)
 {
@@ -99,6 +94,10 @@ static struct {
 	struct ruleset_callback *pending_rpcall;
 	size_t cancel_count;
 	size_t stats_call_count;
+	bool metrics_ok;
+	const char *metrics_str;
+	size_t metrics_len;
+	size_t metrics_call_count;
 	struct ev_loop *loop;
 } RS = {
 	.invoke_ok = true,
@@ -112,6 +111,9 @@ static struct {
 	.errlen = sizeof("ruleset error") - 1,
 	.stats_str = "ruleset stats\n",
 	.stats_len = sizeof("ruleset stats\n") - 1,
+	.metrics_ok = false,
+	.metrics_str = "custom_metric 1\n",
+	.metrics_len = sizeof("custom_metric 1\n") - 1,
 	.rpcall_result = "ok",
 	.rpcall_resultlen = 2,
 	.vmstats_count = 0,
@@ -164,6 +166,10 @@ static void reset_ruleset_stub(void)
 	RS.pending_rpcall = NULL;
 	RS.cancel_count = 0;
 	RS.stats_call_count = 0;
+	RS.metrics_ok = false;
+	RS.metrics_str = "custom_metric 1\n";
+	RS.metrics_len = sizeof("custom_metric 1\n") - 1;
+	RS.metrics_call_count = 0;
 	RS.loop = NULL;
 }
 
@@ -273,6 +279,19 @@ const char *ruleset_stats(
 		*len = RS.stats_len;
 	}
 	return RS.stats_str;
+}
+
+const char *ruleset_metrics(struct ruleset *restrict r, size_t *len)
+{
+	(void)r;
+	RS.metrics_call_count++;
+	if (!RS.metrics_ok) {
+		return NULL;
+	}
+	if (len != NULL) {
+		*len = RS.metrics_len;
+	}
+	return RS.metrics_str;
 }
 #endif
 
@@ -632,6 +651,37 @@ T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 			rsp, (size_t)n, "neosocksd_requests_total 13\n"));
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "neosocksd_api_requests_total 2\n"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+
+	T_CHECK(loop != NULL);
+	init_unified_server(&s, loop);
+#if WITH_RULESET
+	s.ruleset = (struct ruleset *)&s;
+	RS.metrics_ok = true;
+#endif
+	start_api(&s, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET /metrics HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+#if WITH_RULESET
+		T_EXPECT(find_bytes(rsp, (size_t)n, "custom_metric 1\n"));
+		T_EXPECT_EQ(RS.metrics_call_count, (size_t)1);
+#endif
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1132,6 +1182,7 @@ int main(void)
 	T_RUN_CASE(t, api_stats_do_not_pollute_proxy_stats_in_unified_server);
 	T_RUN_CASE(t, metrics_keep_proxy_and_api_request_totals_separate);
 	T_RUN_CASE(t, metrics_unsupported_accept_encoding_and_te_returns_200);
+	T_RUN_CASE(t, metrics_appends_ruleset_metrics_when_defined);
 	T_RUN_CASE(t, stats_get_ok_with_nocache);
 	T_RUN_CASE(t, stats_output_format_has_no_raw_specifiers);
 	T_RUN_CASE(t, stats_post_ok_without_nocache);

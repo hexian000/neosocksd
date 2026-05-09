@@ -411,4 +411,15 @@ const char *ruleset_stats(
 	return lua_tolstring(L, -1, len);
 }
 
+const char *ruleset_metrics(struct ruleset *restrict r, size_t *len)
+{
+	lua_State *restrict L = r->L;
+	const bool ok = ruleset_pcall(r, cfunc_metrics, 0, 1);
+	if (!ok) {
+		LOGW_F("ruleset.metrics: %s", ruleset_geterror(r, NULL));
+		return NULL;
+	}
+	return lua_tolstring(L, -1, len);
+}
+
 #endif /* WITH_RULESET */

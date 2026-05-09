@@ -14,7 +14,6 @@
 #include "resolver.h"
 
 #include "math/rand.h"
-#include "os/clock.h"
 #if WITH_CRASH_HANDLER
 #include "os/signal.h"
 #endif
@@ -190,33 +189,6 @@ void modify_io_events(
 		LOGV_F("io: [fd:%d] events=0x%x", fd, ioevents);
 		ev_io_start(loop, watcher);
 	}
-}
-
-double process_load(void)
-{
-	static thread_local struct {
-		struct timespec monotime, cputime;
-		bool set;
-	} last = { .set = false };
-	double load = -1;
-	struct timespec monotime, cputime;
-	if (!clock_monotonic(&monotime)) {
-		return load;
-	}
-	if (!clock_process(&cputime)) {
-		return load;
-	}
-	if (last.set) {
-		const intmax_t total = TIMESPEC_DIFF(monotime, last.monotime);
-		const intmax_t busy = TIMESPEC_DIFF(cputime, last.cputime);
-		if (busy > 0 && total > 0) {
-			load = (double)busy / (double)total;
-		}
-	}
-	last.monotime = monotime;
-	last.cputime = cputime;
-	last.set = true;
-	return load;
 }
 
 void socket_bind_netdev(int fd, const char *netdev)

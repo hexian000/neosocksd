@@ -15,6 +15,7 @@ Version: dev
   - [ruleset.route6](#rulesetroute6)
   - [ruleset.tick](#rulesettick)
   - [ruleset.stats](#rulesetstats)
+  - [ruleset.metrics](#rulesetmetrics)
 - [Lua API](#lua-api)
   - [neosocksd.config](#neosocksdconfig)
   - [neosocksd.resolve](#neosocksdresolve)
@@ -243,6 +244,31 @@ Generates custom information for the `/stats` API. See also [stats](#stats).
 **Returns**
 
 Custom information as a string.
+
+
+### ruleset.metrics
+
+**Synopsis**
+
+```Lua
+function ruleset.metrics()
+    return "# HELP my_counter An example counter.\n"
+        .. "# TYPE my_counter counter\n"
+        .. string.format("my_counter %d\n", _G.my_value or 0)
+end
+```
+
+**Description**
+
+Appends custom text to the `/metrics` API response. This callback is optional; if it is not defined the `/metrics` output is unchanged.
+
+The returned string is appended verbatim after all built-in Prometheus metrics, so it must conform to the [Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/).
+
+*This callback is NOT called from an asynchronous routine.*
+
+**Returns**
+
+A string in Prometheus text format to append to the `/metrics` response.
 
 
 ## Lua API

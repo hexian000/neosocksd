@@ -282,4 +282,17 @@ const char *ruleset_stats(
 	struct ruleset *restrict r, double dt, const char *restrict query,
 	size_t *len);
 
+/**
+ * @brief Get ruleset metrics
+ *
+ * Calls the optional ruleset.metrics() function to append custom text to
+ * the Prometheus metrics output. The ruleset is not required to define this
+ * callback; if it is absent the function returns NULL without logging an error.
+ *
+ * @param r Ruleset instance
+ * @param len Output parameter for result length
+ * @return Metrics string, or NULL if the callback is not defined or on error
+ */
+const char *ruleset_metrics(struct ruleset *restrict r, size_t *len);
+
 #endif /* RULESET_H */
