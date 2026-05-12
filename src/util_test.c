@@ -177,6 +177,103 @@ T_DECLARE_CASE(util_pipe_shrink)
 }
 #endif /* WITH_SPLICE */
 
+T_DECLARE_CASE(util_init_runs_without_crash)
+{
+	/* Exercises setlocale, setvbuf, slog setup, and sigaction(SIGPIPE). */
+	init(0, NULL);
+	T_EXPECT(true);
+}
+
+T_DECLARE_CASE(util_loadlibs_unloadlibs)
+{
+	/* Exercises srand64, resolver_init (stub), and pipe cache cleanup. */
+	loadlibs();
+	unloadlibs();
+	T_EXPECT(true);
+}
+
+T_DECLARE_CASE(util_modify_io_events_no_op_stop)
+{
+	/* Calling modify_io_events with EV_NONE on an inactive watcher
+	 * is a no-op: the watcher must remain inactive. */
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+
+	ev_io w;
+	ev_io_init(&w, dummy_io_cb, sv[0], EV_READ);
+	/* watcher is inactive; do NOT call ev_io_start */
+	T_EXPECT(!ev_is_active(&w));
+
+	modify_io_events(loop, &w, EV_NONE);
+	T_EXPECT(!ev_is_active(&w));
+
+	ev_loop_destroy(loop);
+	(void)close(sv[0]);
+	(void)close(sv[1]);
+}
+
+T_DECLARE_CASE(util_modify_io_events_start_inactive)
+{
+	/* Starting a watcher that is currently inactive. */
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+
+	ev_io w;
+	ev_io_init(&w, dummy_io_cb, sv[0], EV_READ);
+
+	modify_io_events(loop, &w, EV_READ);
+	T_EXPECT(ev_is_active(&w));
+	T_EXPECT_EQ(w.events & (EV_READ | EV_WRITE), EV_READ);
+
+	ev_io_stop(loop, &w);
+	ev_loop_destroy(loop);
+	(void)close(sv[0]);
+	(void)close(sv[1]);
+}
+
+T_DECLARE_CASE(util_modify_io_events_same_events_noop)
+{
+	/* Setting the same events on an active watcher must not stop/restart it. */
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+
+	ev_io w;
+	ev_io_init(&w, dummy_io_cb, sv[0], EV_READ);
+	ev_io_start(loop, &w);
+	T_EXPECT(ev_is_active(&w));
+
+	modify_io_events(loop, &w, EV_READ);
+	T_EXPECT(ev_is_active(&w));
+	T_EXPECT_EQ(w.events & (EV_READ | EV_WRITE), EV_READ);
+
+	ev_io_stop(loop, &w);
+	ev_loop_destroy(loop);
+	(void)close(sv[0]);
+	(void)close(sv[1]);
+}
+
+T_DECLARE_CASE(util_socket_bind_netdev_invalid_fd)
+{
+	/* An invalid fd causes setsockopt to fail; socket_bind_netdev
+	 * must log a warning and return without crashing. */
+	socket_bind_netdev(-1, "lo");
+	T_EXPECT(true);
+}
+
+T_DECLARE_CASE(util_socket_bind_netdev_empty_name)
+{
+	/* An empty device name is a no-op on platforms without SO_BINDTODEVICE
+	 * and triggers a setsockopt call (that fails) on Linux; no crash. */
+	socket_bind_netdev(-1, "");
+	T_EXPECT(true);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -184,6 +281,13 @@ int main(void)
 	T_RUN_CASE(t, util_staleconn_err_false);
 	T_RUN_CASE(t, util_modify_io_events_stop);
 	T_RUN_CASE(t, util_modify_io_events_change);
+	T_RUN_CASE(t, util_modify_io_events_no_op_stop);
+	T_RUN_CASE(t, util_modify_io_events_start_inactive);
+	T_RUN_CASE(t, util_modify_io_events_same_events_noop);
+	T_RUN_CASE(t, util_init_runs_without_crash);
+	T_RUN_CASE(t, util_loadlibs_unloadlibs);
+	T_RUN_CASE(t, util_socket_bind_netdev_invalid_fd);
+	T_RUN_CASE(t, util_socket_bind_netdev_empty_name);
 #if WITH_SPLICE
 	T_RUN_CASE(t, util_pipe_new_close);
 	T_RUN_CASE(t, util_pipe_shrink);

@@ -624,6 +624,292 @@ T_DECLARE_CASE(http_conn_recv_header_callback_reject)
 	T_CHECK(close(sv[1]) == 0);
 }
 
+/* ------------------------------------------------------------------ */
+/* http_body_* tests                                                   */
+/* ------------------------------------------------------------------ */
+
+struct body_sink {
+	unsigned char buf[1024];
+	size_t len;
+	bool reject;
+};
+
+static bool body_sink_cb(void *ctx, const unsigned char *data, const size_t len)
+{
+	struct body_sink *s = ctx;
+	if (s->reject) {
+		return false;
+	}
+	if (s->len + len > sizeof(s->buf)) {
+		return false;
+	}
+	memcpy(s->buf + s->len, data, len);
+	s->len += len;
+	return true;
+}
+
+T_DECLARE_CASE(http_body_none)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_NONE, 0);
+	T_EXPECT(d.done);
+	T_EXPECT(http_body_finish(&d));
+
+	/* any consume on HTTP_BODY_NONE returns false */
+	static const unsigned char data[] = "x";
+	T_EXPECT(!http_body_consume(&d, data, 1, cb));
+
+	/* zero-length consume is always accepted */
+	T_EXPECT(http_body_consume(&d, data, 0, cb));
+}
+
+T_DECLARE_CASE(http_body_content_length)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+	static const unsigned char data[] = "hello";
+
+	http_body_init(&d, HTTP_BODY_CONTENT_LENGTH, 5);
+	T_EXPECT(!d.done);
+	T_EXPECT(!http_body_finish(&d));
+
+	T_EXPECT(http_body_consume(&d, data, 5, cb));
+	T_EXPECT(d.done);
+	T_EXPECT(http_body_finish(&d));
+	T_EXPECT_EQ(sink.len, (size_t)5);
+	T_EXPECT_MEMEQ(sink.buf, data, 5);
+
+	/* extra data after completion */
+	T_EXPECT(!http_body_consume(&d, data, 1, cb));
+
+	/* zero content-length body is immediately done */
+	http_body_init(&d, HTTP_BODY_CONTENT_LENGTH, 0);
+	T_EXPECT(d.done);
+}
+
+T_DECLARE_CASE(http_body_content_length_overflow)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+	static const unsigned char data[] = "hello world";
+
+	http_body_init(&d, HTTP_BODY_CONTENT_LENGTH, 5);
+	/* providing more bytes than content_length must fail */
+	T_EXPECT(!http_body_consume(&d, data, sizeof(data) - 1, cb));
+}
+
+T_DECLARE_CASE(http_body_content_length_cb_reject)
+{
+	struct http_body d;
+	struct body_sink sink = { .reject = true };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+	static const unsigned char data[] = "hello";
+
+	http_body_init(&d, HTTP_BODY_CONTENT_LENGTH, 5);
+	T_EXPECT(!http_body_consume(&d, data, 5, cb));
+}
+
+T_DECLARE_CASE(http_body_eof)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+	static const unsigned char data[] = "stream";
+
+	http_body_init(&d, HTTP_BODY_EOF, 0);
+	T_EXPECT(!d.done);
+
+	T_EXPECT(http_body_consume(&d, data, sizeof(data) - 1, cb));
+	T_EXPECT(!d.done); /* not done until http_body_finish */
+	T_EXPECT_EQ(sink.len, sizeof(data) - 1);
+
+	T_EXPECT(http_body_finish(&d));
+	T_EXPECT(d.done);
+}
+
+T_DECLARE_CASE(http_body_eof_cb_reject)
+{
+	struct http_body d;
+	struct body_sink sink = { .reject = true };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+	static const unsigned char data[] = "stream";
+
+	http_body_init(&d, HTTP_BODY_EOF, 0);
+	T_EXPECT(!http_body_consume(&d, data, sizeof(data) - 1, cb));
+}
+
+T_DECLARE_CASE(http_body_chunked_simple)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+	T_EXPECT(!d.done);
+
+	/* "5\r\nhello\r\n0\r\n\r\n" */
+	static const unsigned char chunk[] = "5\r\nhello\r\n0\r\n\r\n";
+	T_EXPECT(http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
+	T_EXPECT(d.done);
+	T_EXPECT(http_body_finish(&d));
+	T_EXPECT_EQ(sink.len, (size_t)5);
+	T_EXPECT_MEMEQ(sink.buf, "hello", 5);
+}
+
+T_DECLARE_CASE(http_body_chunked_split_input)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Feed one byte at a time to exercise state machine transitions. */
+	static const unsigned char chunk[] = "3\r\nabc\r\n0\r\n\r\n";
+	for (size_t i = 0; i < sizeof(chunk) - 1; i++) {
+		T_EXPECT(http_body_consume(&d, chunk + i, 1, cb));
+	}
+	T_EXPECT(d.done);
+	T_EXPECT_EQ(sink.len, (size_t)3);
+	T_EXPECT_MEMEQ(sink.buf, "abc", 3);
+}
+
+T_DECLARE_CASE(http_body_chunked_uppercase_hex)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Uppercase hex size: "A" = 10 bytes */
+	static const unsigned char chunk[] = "A\r\n0123456789\r\n0\r\n\r\n";
+	T_EXPECT(http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
+	T_EXPECT(d.done);
+	T_EXPECT_EQ(sink.len, (size_t)10);
+}
+
+T_DECLARE_CASE(http_body_chunked_with_extension)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Chunk size line with extension: "5;ext=val\r\nhello\r\n0\r\n\r\n" */
+	static const unsigned char chunk[] = "5;ext=val\r\nhello\r\n0\r\n\r\n";
+	T_EXPECT(http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
+	T_EXPECT(d.done);
+	T_EXPECT_EQ(sink.len, (size_t)5);
+}
+
+T_DECLARE_CASE(http_body_chunked_trailer)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Last chunk with trailer header: "0\r\nTrailer: val\r\n\r\n" */
+	static const unsigned char chunk[] = "0\r\nTrailer: val\r\n\r\n";
+	T_EXPECT(http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
+	T_EXPECT(d.done);
+	T_EXPECT_EQ(sink.len, (size_t)0);
+}
+
+T_DECLARE_CASE(http_body_chunked_no_hex_digit_fails)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Leading \r\n with no hex digit must fail */
+	static const unsigned char bad[] = "\r\nhello";
+	T_EXPECT(!http_body_consume(&d, bad, sizeof(bad) - 1, cb));
+}
+
+T_DECLARE_CASE(http_body_chunked_size_line_too_long)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Fill the 128-byte line buffer to trigger the overflow check. */
+	unsigned char long_line[130];
+	memset(long_line, 'a', 128);
+	long_line[128] = '\n';
+	long_line[129] = '\0';
+	T_EXPECT(!http_body_consume(&d, long_line, 129, cb));
+}
+
+T_DECLARE_CASE(http_body_chunked_missing_cr_after_data)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* After chunk data the CRLF separator is mandatory;
+	 * a bare LF in place of CR must be rejected. */
+	static const unsigned char bad[] = "3\r\nabc\nmore";
+	T_EXPECT(!http_body_consume(&d, bad, sizeof(bad) - 1, cb));
+}
+
+T_DECLARE_CASE(http_body_chunked_extra_data_after_done)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+	static const unsigned char chunk[] = "0\r\n\r\n";
+	T_EXPECT(http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
+	T_EXPECT(d.done);
+
+	/* any data after the terminal chunk must be rejected */
+	static const unsigned char extra[] = "x";
+	T_EXPECT(!http_body_consume(&d, extra, 1, cb));
+}
+
+T_DECLARE_CASE(http_body_chunked_data_cb_reject)
+{
+	struct http_body d;
+	struct body_sink sink = { .reject = true };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+	static const unsigned char chunk[] = "3\r\nabc\r\n0\r\n\r\n";
+	T_EXPECT(!http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -650,6 +936,22 @@ int main(void)
 	T_RUN_CASE(t, http_conn_recv_expect_continue);
 	T_RUN_CASE(t, http_conn_recv_content_early_eof);
 	T_RUN_CASE(t, http_conn_recv_header_callback_reject);
+	T_RUN_CASE(t, http_body_none);
+	T_RUN_CASE(t, http_body_content_length);
+	T_RUN_CASE(t, http_body_content_length_overflow);
+	T_RUN_CASE(t, http_body_content_length_cb_reject);
+	T_RUN_CASE(t, http_body_eof);
+	T_RUN_CASE(t, http_body_eof_cb_reject);
+	T_RUN_CASE(t, http_body_chunked_simple);
+	T_RUN_CASE(t, http_body_chunked_split_input);
+	T_RUN_CASE(t, http_body_chunked_uppercase_hex);
+	T_RUN_CASE(t, http_body_chunked_with_extension);
+	T_RUN_CASE(t, http_body_chunked_trailer);
+	T_RUN_CASE(t, http_body_chunked_no_hex_digit_fails);
+	T_RUN_CASE(t, http_body_chunked_size_line_too_long);
+	T_RUN_CASE(t, http_body_chunked_missing_cr_after_data);
+	T_RUN_CASE(t, http_body_chunked_extra_data_after_done);
+	T_RUN_CASE(t, http_body_chunked_data_cb_reject);
 
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

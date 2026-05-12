@@ -283,6 +283,8 @@ add_unit_test(http_test
     SRCS proto/http_test.c proto/http.c proto/codec.c)
 add_unit_test(codec_test
     SRCS proto/codec_test.c proto/codec.c)
+add_unit_test(fuzz_test
+    SRCS fuzz_test.c socks.c proto/http.c proto/codec.c)
 add_unit_test(dialer_test
     SRCS dialer_test.c dialer.c util.c resolver.c
          server.c server.h socks.c socks.h http_proxy.c http_proxy.h
@@ -323,3 +325,19 @@ if(WITH_LUA)
         SRCS ruleset_test.c ruleset.c ruleset/base.c ruleset/cfunc.c
         WITH_LUA)
 endif()
+
+# neosocksd binary early-exit integration tests.
+# These cover main.c code paths that cannot be reached from unit tests.
+# Each scenario exits before the event loop, so the tests complete quickly.
+
+# --help: covers print_usage() in conf.c and the early-exit path in main().
+add_test(NAME neosocksd_help COMMAND neosocksd --help)
+set_tests_properties(neosocksd_help PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
+
+# No listen address: conf_parseargs succeeds but conf_check fails.
+add_test(NAME neosocksd_no_listen COMMAND neosocksd)
+set_tests_properties(neosocksd_no_listen PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
+
+# Unknown argument: conf_parseargs returns false immediately.
+add_test(NAME neosocksd_bad_arg COMMAND neosocksd --zz-invalid-arg)
+set_tests_properties(neosocksd_bad_arg PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
