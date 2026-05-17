@@ -567,6 +567,9 @@ static int recv_request(struct http_conn *restrict p)
 	/* Update buffer length and maintain null termination */
 	p->rbuf.len += n;
 	p->rbuf.data[p->rbuf.len] = '\0';
+	if (p->byt_recv != NULL) {
+		*p->byt_recv += n;
+	}
 	return 1;
 }
 
@@ -602,6 +605,9 @@ static int recv_content(const struct http_conn *restrict p)
 
 	/* Update content buffer length */
 	p->cbuf->len += n;
+	if (p->byt_recv != NULL) {
+		*p->byt_recv += n;
+	}
 	return 1;
 }
 
@@ -700,6 +706,9 @@ int http_conn_send(struct http_conn *restrict p, const int fd)
 			return -1;
 		}
 		p->wpos += len;
+		if (p->byt_sent != NULL) {
+			*p->byt_sent += len;
+		}
 		if (p->wpos < p->wbuf.len) {
 			return 1;
 		}
@@ -722,6 +731,9 @@ int http_conn_send(struct http_conn *restrict p, const int fd)
 			return -1;
 		}
 		p->cpos += len;
+		if (p->byt_sent != NULL) {
+			*p->byt_sent += len;
+		}
 		if (p->cpos < VBUF_LEN(p->cbuf)) {
 			return 1;
 		}
@@ -894,7 +906,8 @@ const char *parsehdr_connection_token(
 void http_conn_init(
 	struct http_conn *restrict p, const int fd,
 	const enum http_conn_state mode,
-	const struct http_parsehdr_cb on_header)
+	const struct http_parsehdr_cb on_header, uintmax_t *const byt_recv,
+	uintmax_t *const byt_sent)
 {
 	/* Initialize parser state */
 	p->state = mode;
@@ -917,4 +930,6 @@ void http_conn_init(
 	/* Initialize fixed buffers */
 	BUF_INIT(p->rbuf, 0);
 	BUF_INIT(p->wbuf, 0);
+	p->byt_recv = byt_recv;
+	p->byt_sent = byt_sent;
 }

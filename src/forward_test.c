@@ -144,7 +144,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
-	s->xfer = transfer_new(s->loop);
+	s->xfer = transfer_new(s->loop, 1);
 	s->basereq = NULL;
 #if WITH_RULESET
 	s->ruleset = NULL;
@@ -373,8 +373,12 @@ int dialaddr_format(
 	}
 }
 
-void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uintmax_t *byt_sent, uintmax_t *byt_recv)
 {
+	(void)byt_sent;
+	(void)byt_recv;
 	d->finish_cb = *callback;
 	d->err = DIALER_OK;
 	d->syserr = 0;
@@ -382,11 +386,13 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 
 void dialer_do(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req,
-	const struct config *conf, struct resolver *resolver)
+	const struct config *conf, struct resolver *resolver,
+	struct server *server)
 {
 	UNUSED(req);
 	UNUSED(conf);
 	UNUSED(resolver);
+	UNUSED(server);
 	STUB.dialer_do_calls++;
 
 	switch (STUB.dialer_mode) {
@@ -423,9 +429,11 @@ struct stub_xfer_ctx {
 #endif
 };
 
-struct transfer *transfer_new(struct ev_loop *restrict loop)
+struct transfer *
+transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
 	UNUSED(loop);
+	UNUSED(nworkers);
 	static int token;
 	return (struct transfer *)&token;
 }

@@ -440,11 +440,13 @@ T_DECLARE_CASE(direct_connect_reports_success)
 	req = dialreq_parse(addr, NULL);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
 		NULL, NULL);
@@ -481,11 +483,13 @@ T_DECLARE_CASE(local_address_blocked_by_egress_policy)
 	T_CHECK(req != NULL);
 	conf.block_local = true;
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
 		NULL, NULL);
@@ -524,11 +528,13 @@ T_DECLARE_CASE(http_connect_success_sends_expected_request)
 	req = dialreq_parse("example.com:443", proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		proxy_server_pump, &server);
@@ -578,11 +584,13 @@ T_DECLARE_CASE(http_connect_407_maps_to_proxy_auth)
 	req = dialreq_parse("example.com:443", proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		proxy_server_pump, &server);
@@ -706,7 +714,7 @@ static uint_least16_t start_proxy(
 	socklen_t len = sizeof(bound_addr);
 
 	T_CHECK(server_init(
-		s, loop, conf, NULL, transfer_new(loop), NULL, NULL));
+		s, loop, conf, NULL, transfer_new(loop, 1), NULL, NULL));
 	T_CHECK(getsockname(
 			s->listeners[0].w_accept.fd,
 			(struct sockaddr *)&bound_addr, &len) == 0);
@@ -774,11 +782,13 @@ T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		NULL, NULL);
@@ -826,11 +836,13 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		NULL, NULL);
@@ -869,11 +881,13 @@ T_DECLARE_CASE(socks5_noauth_rejected_when_auth_required)
 	req = dialreq_parse("127.0.0.1:1", proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		NULL, NULL);
@@ -920,11 +934,13 @@ T_DECLARE_CASE(socks5_credentials_accepted_when_auth_required)
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		NULL, NULL);
@@ -976,11 +992,13 @@ T_DECLARE_CASE(socks4a_connect_success_via_real_proxy)
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		NULL, NULL);
@@ -1032,11 +1050,13 @@ T_DECLARE_CASE(http_proxy_connect_success_via_real_proxy)
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		NULL, NULL);
@@ -1084,11 +1104,13 @@ T_DECLARE_CASE(http_connect_403_maps_to_proxy_reject)
 	req = dialreq_parse("example.com:443", proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		proxy_server_pump, &server);
@@ -1131,11 +1153,13 @@ T_DECLARE_CASE(http_connect_502_maps_to_proxy_refused)
 	req = dialreq_parse("example.com:443", proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		proxy_server_pump, &server);
@@ -1178,11 +1202,13 @@ T_DECLARE_CASE(http_connect_non_200_maps_to_proxy_proto)
 	req = dialreq_parse("example.com:443", proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		proxy_server_pump, &server);
@@ -1302,11 +1328,13 @@ T_DECLARE_CASE(socks4a_rejected_maps_to_proxy_refused)
 	req = dialreq_parse("example.com:443", proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		socks4_raw_pump, &server);
@@ -1457,11 +1485,13 @@ T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
 	req = dialreq_parse("example.com:443", proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		socks5_raw_pump, &server);
@@ -1503,11 +1533,13 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
 	dialer_init(
-		&d, &(struct dialer_cb){
-			    .func = dialer_finish_cb,
-			    .data = &result,
-		    });
-	dialer_do(&d, loop, req, &test_conf, NULL);
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		NULL, NULL);

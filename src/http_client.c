@@ -118,7 +118,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			ctx->state = STATE_CLIENT_CONNECT;
 			dialer_do(
 				&ctx->dialer, loop, ctx->dialreq, ctx->conf,
-				ctx->resolver);
+				ctx->resolver, NULL);
 			return;
 		}
 		const char *strerr = strerror(err);
@@ -194,7 +194,9 @@ void http_client_init(
 	struct http_client_ctx *restrict ctx, struct ev_loop *loop,
 	const struct http_parsehdr_cb on_header,
 	const struct http_client_cb *restrict cb, const struct config *conf,
-	struct resolver *resolver)
+	struct resolver *resolver, uintmax_t *const byt_recv,
+	uintmax_t *const byt_sent, uintmax_t *const dialer_byt_sent,
+	uintmax_t *const dialer_byt_recv)
 {
 	ctx->loop = loop;
 	ctx->conf = conf;
@@ -213,9 +215,13 @@ void http_client_init(
 		.func = dialer_cb,
 		.data = ctx,
 	};
-	dialer_init(&ctx->dialer, &dialer_cb_conf);
+	dialer_init(
+		&ctx->dialer, &dialer_cb_conf, dialer_byt_sent,
+		dialer_byt_recv);
 	const struct http_parsehdr_cb hdr_cb = { http_client_on_header, ctx };
-	http_conn_init(&ctx->conn, -1, STATE_PARSE_RESPONSE, hdr_cb);
+	http_conn_init(
+		&ctx->conn, -1, STATE_PARSE_RESPONSE, hdr_cb, byt_recv,
+		byt_sent);
 }
 
 void http_client_do(
@@ -227,7 +233,7 @@ void http_client_do(
 	ctx->cache_retried = false;
 	ctx->state = STATE_CLIENT_CONNECT;
 	ev_timer_start(loop, &ctx->w_timeout);
-	dialer_do(&ctx->dialer, loop, req, ctx->conf, ctx->resolver);
+	dialer_do(&ctx->dialer, loop, req, ctx->conf, ctx->resolver, NULL);
 }
 
 void http_client_cancel(struct ev_loop *loop, struct http_client_ctx *ctx)

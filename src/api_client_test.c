@@ -324,18 +324,24 @@ const char *dialer_strerror(const enum dialer_error err)
 	return "stub dialer error";
 }
 
-void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uintmax_t *byt_sent, uintmax_t *byt_recv)
 {
+	(void)byt_sent;
+	(void)byt_recv;
 	d->finish_cb = *callback;
 }
 
 void dialer_do(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req,
-	const struct config *conf, struct resolver *resolver)
+	const struct config *conf, struct resolver *resolver,
+	struct server *server)
 {
 	(void)req;
 	(void)conf;
 	(void)resolver;
+	(void)server;
 	S.dialer_do_calls++;
 	d->err = S.dialer_err;
 	d->syserr = S.dialer_syserr;
@@ -394,7 +400,7 @@ T_DECLARE_CASE(rpcall_success_returns_stream)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(ctx != NULL);
 	T_CHECK(read_request_headers(
 		loop, sv[1], reqbuf, sizeof(reqbuf), TEST_WAIT_RESPONSE_SEC));
@@ -435,7 +441,8 @@ T_DECLARE_CASE(invoke_uses_invoke_path)
 	T_CHECK(req != NULL);
 
 	api_client_invoke(
-		loop, req, payload, sizeof(payload) - 1, &test_conf, NULL);
+		loop, req, payload, sizeof(payload) - 1, &test_conf, NULL,
+		NULL);
 	T_CHECK(read_request_headers(
 		loop, sv[1], reqbuf, sizeof(reqbuf), TEST_WAIT_RESPONSE_SEC));
 	T_EXPECT(strstr(reqbuf, "POST /ruleset/invoke HTTP/1.1") != NULL);
@@ -474,7 +481,7 @@ T_DECLARE_CASE(rpcall_unsupported_content_type)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(send_response(
 		sv[1], "200 OK", "text/plain", "keep-alive", rsp_body,
 		sizeof(rsp_body) - 1));
@@ -509,7 +516,7 @@ T_DECLARE_CASE(rpcall_dialer_failure)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(test_wait_until(
 		loop, cb_called_predicate, &out, TEST_WAIT_SHORT_SEC));
 	T_EXPECT(out.called);
@@ -544,7 +551,7 @@ T_DECLARE_CASE(rpcall_timeout)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(test_wait_until(
 		loop, cb_called_predicate, &out, TEST_WAIT_LONG_SEC));
 	T_EXPECT(out.called);
@@ -578,7 +585,7 @@ T_DECLARE_CASE(rpcall_http_error_status_line)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(send_response(sv[1], "404 Not Found", NULL, "close", NULL, 0));
 	T_CHECK(test_wait_until(
 		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
@@ -614,7 +621,7 @@ T_DECLARE_CASE(rpcall_structured_error_body)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(send_response(
 		sv[1], "500 Internal Server Error", MIME_RPCALL, "close",
 		rsp_body, sizeof(rsp_body) - 1));
@@ -649,7 +656,7 @@ T_DECLARE_CASE(cancel_during_connect_calls_dialer_cancel)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(ctx != NULL);
 	api_client_cancel(loop, ctx);
 	T_EXPECT_EQ(S.dialer_cancel_calls, 1);
@@ -683,7 +690,7 @@ T_DECLARE_CASE(connection_keep_alive_recycled)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(send_response(
 		sv[1], "200 OK", MIME_RPCALL, "keep-alive", rsp_body,
 		sizeof(rsp_body) - 1));
@@ -720,7 +727,7 @@ T_DECLARE_CASE(connection_close_not_recycled)
 
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
-		NULL));
+		NULL, NULL));
 	T_CHECK(send_response(
 		sv[1], "200 OK", MIME_RPCALL, "close", rsp_body,
 		sizeof(rsp_body) - 1));

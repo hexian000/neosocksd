@@ -15,9 +15,7 @@
 #include "codec/base64.h"
 #include "net/http.h"
 #include "net/url.h"
-#include "os/clock.h"
 #include "os/socket.h"
-#include "utils/arraysize.h"
 #include "utils/ascii.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
@@ -61,7 +59,6 @@ struct http_ctx {
 	enum http_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
-	intmax_t accepted_ns;
 	ev_timer w_timeout;
 	union {
 		/* state < STATE_BIDIRECTIONAL */
@@ -288,9 +285,9 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	 * Transition to STATE_BIDIRECTIONAL before transfer_start so that
 	 * http_ctx_stop becomes a no-op if gc_unref is called below.
 	 */
+	struct server_stats *restrict stats = &ctx->s->stats;
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
-	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen--;
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
@@ -332,14 +329,6 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		stats->num_sessions_peak = cur;
 	}
 	stats->num_success++;
-	{
-		const int_fast64_t elapsed =
-			clock_monotonic_ns() - ctx->accepted_ns;
-		stats->connect_ns
-			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
-			elapsed;
-		stats->num_connects++;
-	}
 	HTTP_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
 	gc_unref(&ctx->gcbase);
 }
@@ -415,15 +404,6 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 				stats->num_sessions_peak = cur;
 			}
 			stats->num_success++;
-			{
-				const int_fast64_t elapsed =
-					clock_monotonic_ns() - ctx->accepted_ns;
-				stats->connect_ns
-					[stats->num_connects %
-					 ARRAY_SIZE(stats->connect_ns)] =
-					elapsed;
-				stats->num_connects++;
-			}
 			HTTP_CTX_LOG_F(
 				DEBUG, ctx, "ready, %zu active sessions", cur);
 			gc_unref(&ctx->gcbase);
@@ -470,7 +450,7 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ctx->state = STATE_CONNECT;
 	dialer_do(
 		&ctx->dialer, loop, ctx->dialreq, ctx->s->conf,
-		ctx->s->resolver);
+		ctx->s->resolver, ctx->s);
 }
 
 #if WITH_RULESET
@@ -1016,9 +996,13 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 		.func = dialer_cb,
 		.data = ctx,
 	};
-	dialer_init(&ctx->dialer, &cb);
+	dialer_init(
+		&ctx->dialer, &cb, &s->stats.byt_dial_send,
+		&s->stats.byt_dial_recv);
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
-	http_conn_init(&ctx->conn, fd, STATE_PARSE_REQUEST, on_header);
+	http_conn_init(
+		&ctx->conn, fd, STATE_PARSE_REQUEST, on_header,
+		&s->stats.byt_client_recv, &s->stats.byt_client_send);
 
 	gc_register(&ctx->gcbase, http_ctx_finalize);
 	return ctx;
@@ -1029,7 +1013,6 @@ static void http_ctx_start(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_recv);
 	ev_timer_start(loop, &ctx->w_timeout);
 
-	ctx->accepted_ns = clock_monotonic_ns();
 	ctx->state = STATE_REQUEST;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen++;

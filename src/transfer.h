@@ -32,13 +32,25 @@ struct transfer;
 /**
  * @brief Create the transfer engine.
  *
- * When WITH_THREADS is enabled, starts a dedicated I/O thread.
+ * When WITH_THREADS is enabled, starts @p nworkers dedicated I/O threads,
+ * each with its own ev_loop and dispatcher.  Incoming connections are
+ * distributed across workers in round-robin order.
+ * When WITH_THREADS is disabled, @p nworkers is ignored and transfers are
+ * registered as I/O watchers on the caller-supplied ev_loop.
  *
- * @param loop Main event loop (must outlive the returned engine; used directly
- *             when threads are disabled, stored for reference otherwise).
+ * @note When WITH_THREADS is enabled and nworkers > 1, the splice pipe cache
+ *       (pipe_get / pipe_put in util.c) is accessed from multiple threads
+ *       without synchronisation.  Keep nworkers == 1 until that cache is
+ *       made thread-safe.
+ *
+ * @param loop     Main event loop (must outlive the returned engine; used
+ *                 directly when threads are disabled, stored for reference
+ *                 otherwise).
+ * @param nworkers Number of I/O worker threads to spawn (ignored when
+ *                 WITH_THREADS is disabled; must be >= 1).
  * @return Heap-allocated engine, or NULL on allocation / thread failure.
  */
-struct transfer *transfer_new(struct ev_loop *loop);
+struct transfer *transfer_new(struct ev_loop *loop, unsigned int nworkers);
 
 /**
  * @brief Stop the engine and free all resources. NULL-safe.

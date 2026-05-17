@@ -529,6 +529,7 @@ T_DECLARE_CASE(ruleset_update_invoke_rpcall_stats_and_tick)
 	T_EXPECT(ruleset_gc(r));
 	ruleset_vmstats(r, &stats);
 	T_EXPECT(stats.num_events > 0);
+	T_EXPECT_EQ(stats.num_thread_active, (size_t)0);
 
 	free_ruleset(loop, r);
 }

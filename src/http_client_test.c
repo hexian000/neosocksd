@@ -64,8 +64,12 @@ const char *dialer_strerror(const enum dialer_error err)
 	return "stub error";
 }
 
-void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uintmax_t *byt_sent, uintmax_t *byt_recv)
 {
+	(void)byt_sent;
+	(void)byt_recv;
 	d->finish_cb = *callback;
 	d->err = DIALER_OK;
 	d->syserr = 0;
@@ -74,11 +78,12 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 void dialer_do(
 	struct dialer *restrict d, struct ev_loop *loop,
 	const struct dialreq *req, const struct config *conf,
-	struct resolver *resolver)
+	struct resolver *resolver, struct server *server)
 {
 	(void)req;
 	(void)conf;
 	(void)resolver;
+	(void)server;
 	S.dialer_do_calls++;
 	d->err = S.dialer_err;
 	d->syserr = S.dialer_syserr;
@@ -133,7 +138,9 @@ T_DECLARE_CASE(http_client_init_state)
 		.data = &result,
 	};
 
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_conf, NULL);
+	http_client_init(
+		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
+		NULL);
 	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
 	T_EXPECT(ctx.cb.func == capture_cb);
 	T_EXPECT(ctx.cb.data == &result);
@@ -156,7 +163,9 @@ T_DECLARE_CASE(http_client_cancel_noop)
 		.data = &result,
 	};
 
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_conf, NULL);
+	http_client_init(
+		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
+		NULL);
 	http_client_cancel(loop, &ctx);
 	/* cancel should not invoke the user callback */
 	T_EXPECT(!result.called);
@@ -180,7 +189,9 @@ T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
 		.data = &result,
 	};
 
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_conf, NULL);
+	http_client_init(
+		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
+		NULL);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);

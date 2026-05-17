@@ -111,6 +111,10 @@ struct xfer_half {
 
 struct transfer_ctx {
 	struct transfer *xfer;
+#if WITH_THREADS
+	/* which worker owns this ctx; set once at construction, then read-only */
+	struct xfer_worker *worker;
+#endif
 	/* intrusive singly-linked list; xfer thread only */
 	struct transfer_ctx *next;
 	struct xfer_half up, down;
@@ -123,20 +127,40 @@ struct transfer_ctx {
 #endif
 };
 
+/* ---------------------------------------------------------------- xfer_worker (WITH_THREADS only) */
+
+#if WITH_THREADS
+/*
+ * One worker thread owns one ev_loop, one dispatcher, and its own active_list.
+ * Workers are created by transfer_new() and destroyed by transfer_free().
+ */
+struct xfer_worker {
+	struct transfer *xfer;
+	thrd_t thread;
+	bool thread_started;
+	struct dispatcher *disp;
+	struct ev_loop *loop;
+	/* main -> worker: new task enqueued */
+	ev_async w_invoke;
+	bool stop;
+	/* worker thread only; no locking needed */
+	struct transfer_ctx *active_list;
+};
+#endif /* WITH_THREADS */
+
 /* ---------------------------------------------------------------- transfer (engine) */
 
 struct transfer {
-	struct ev_loop *loop;
 #if WITH_THREADS
-	thrd_t thread;
-	struct dispatcher *disp;
 	struct ev_loop *main_loop;
-	/* main -> xfer: new task enqueued */
-	ev_async w_invoke;
-	bool stop;
-#endif
+	unsigned int nworkers;
+	atomic_uint next_worker;
+	struct xfer_worker workers[];
+#else
+	struct ev_loop *loop;
 	/* loop thread only; no locking needed */
 	struct transfer_ctx *active_list;
+#endif
 };
 
 /* ---------------------------------------------------------------- logging */
@@ -262,8 +286,11 @@ static void set_state(
 	CLOSE_FD(t->up.src_fd);
 	CLOSE_FD(t->down.src_fd);
 	/* Remove from active_list. */
-	struct transfer *restrict xfer = t->xfer;
-	struct transfer_ctx **pp = &xfer->active_list;
+#if WITH_THREADS
+	struct transfer_ctx **pp = &t->worker->active_list;
+#else
+	struct transfer_ctx **pp = &t->xfer->active_list;
+#endif
 	for (; *pp != NULL; pp = &(*pp)->next) {
 		if (*pp == t) {
 			*pp = t->next;
@@ -523,11 +550,19 @@ pipe_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 static void task_xfer_start(void *data)
 {
 	struct transfer_ctx *restrict t = data;
+#if WITH_THREADS
+	struct xfer_worker *restrict worker = t->worker;
+	struct ev_loop *restrict loop = worker->loop;
+	/* Prepend to active list before starting I/O watchers. */
+	t->next = worker->active_list;
+	worker->active_list = t;
+#else
 	struct transfer *restrict xfer = t->xfer;
 	struct ev_loop *restrict loop = xfer->loop;
 	/* Prepend to active list before starting I/O watchers. */
 	t->next = xfer->active_list;
 	xfer->active_list = t;
+#endif
 
 #if WITH_SPLICE
 	if (t->up.use_splice) {
@@ -587,9 +622,9 @@ static void
 w_invoke_cb(struct ev_loop *restrict loop, ev_async *watcher, const int revents)
 {
 	UNUSED(revents);
-	struct transfer *restrict xfer = watcher->data;
-	dispatcher_tick(xfer->disp);
-	if (xfer->stop) {
+	struct xfer_worker *restrict worker = watcher->data;
+	dispatcher_tick(worker->disp);
+	if (worker->stop) {
 		ev_break(loop, EVBREAK_ONE);
 	}
 }
@@ -598,16 +633,16 @@ w_invoke_cb(struct ev_loop *restrict loop, ev_async *watcher, const int revents)
 
 static int xfer_thread_func(void *arg)
 {
-	struct transfer *restrict xfer = arg;
-	struct ev_loop *restrict loop = xfer->loop;
+	struct xfer_worker *restrict worker = arg;
+	struct ev_loop *restrict loop = worker->loop;
 	ev_run(loop, 0);
 	/* Cancel any transfers that are still in flight at shutdown. */
-	for (struct transfer_ctx *t = xfer->active_list; t != NULL;) {
+	for (struct transfer_ctx *t = worker->active_list; t != NULL;) {
 		struct transfer_ctx *next = t->next;
 		task_xfer_stop(loop, t);
 		t = next;
 	}
-	xfer->active_list = NULL;
+	worker->active_list = NULL;
 	return 0;
 }
 
@@ -615,47 +650,66 @@ static int xfer_thread_func(void *arg)
 
 /* ---------------------------------------------------------------- public API */
 
-struct transfer *transfer_new(struct ev_loop *restrict loop)
+struct transfer *
+transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
-	struct transfer *restrict xfer = malloc(sizeof(struct transfer));
+	struct transfer *restrict xfer =
+#if WITH_THREADS
+		malloc(sizeof(struct transfer) +
+		       nworkers * sizeof(struct xfer_worker));
+#else
+		malloc(sizeof(struct transfer));
+#endif
 	if (xfer == NULL) {
 		return NULL;
 	}
-	xfer->active_list = NULL;
 
 #if WITH_THREADS
 	xfer->main_loop = loop;
-	xfer->stop = false;
-	xfer->disp = NULL;
-	xfer->loop = NULL;
+	xfer->nworkers = nworkers;
+	atomic_init(&xfer->next_worker, 0u);
+	memset(xfer->workers, 0, nworkers * sizeof(struct xfer_worker));
 
-	xfer->disp = dispatcher_create(16);
-	if (xfer->disp == NULL) {
-		transfer_free(xfer);
-		return NULL;
-	}
+	for (unsigned int i = 0; i < nworkers; i++) {
+		struct xfer_worker *restrict w = &xfer->workers[i];
+		w->xfer = xfer;
+		w->thread_started = false;
+		w->stop = false;
+		w->active_list = NULL;
+		w->disp = NULL;
+		w->loop = NULL;
 
-	xfer->loop = ev_loop_new(0);
-	if (xfer->loop == NULL) {
-		transfer_free(xfer);
-		return NULL;
-	}
+		w->disp = dispatcher_create(16);
+		if (w->disp == NULL) {
+			transfer_free(xfer);
+			return NULL;
+		}
 
-	ev_async_init(&xfer->w_invoke, w_invoke_cb);
-	ev_set_priority(&xfer->w_invoke, EV_MAXPRI);
-	xfer->w_invoke.data = xfer;
-	ev_async_start(xfer->loop, &xfer->w_invoke);
+		w->loop = ev_loop_new(0);
+		if (w->loop == NULL) {
+			transfer_free(xfer);
+			return NULL;
+		}
 
-	if (thrd_create(&xfer->thread, xfer_thread_func, xfer) !=
-	    thrd_success) {
-		ev_async_stop(xfer->loop, &xfer->w_invoke);
-		ev_loop_destroy(xfer->loop);
-		xfer->loop = NULL;
-		transfer_free(xfer);
-		return NULL;
+		ev_async_init(&w->w_invoke, w_invoke_cb);
+		ev_set_priority(&w->w_invoke, EV_MAXPRI);
+		w->w_invoke.data = w;
+		ev_async_start(w->loop, &w->w_invoke);
+
+		if (thrd_create(&w->thread, xfer_thread_func, w) !=
+		    thrd_success) {
+			ev_async_stop(w->loop, &w->w_invoke);
+			ev_loop_destroy(w->loop);
+			w->loop = NULL;
+			transfer_free(xfer);
+			return NULL;
+		}
+		w->thread_started = true;
 	}
 #else
+	UNUSED(nworkers);
 	xfer->loop = loop;
+	xfer->active_list = NULL;
 #endif
 	return xfer;
 }
@@ -666,18 +720,22 @@ void transfer_free(struct transfer *restrict xfer)
 		return;
 	}
 #if WITH_THREADS
-	if (xfer->loop != NULL) {
-		xfer->stop = true;
-		ev_async_send(xfer->loop, &xfer->w_invoke);
-		THRD_ASSERT(thrd_join(xfer->thread, NULL));
-		/* xfer_thread_func has cancelled all in-flight transfers. */
-		ev_async_stop(xfer->loop, &xfer->w_invoke);
-		ev_loop_destroy(xfer->loop);
-		xfer->loop = NULL;
-	}
-	if (xfer->disp != NULL) {
-		dispatcher_destroy(xfer->disp);
-		xfer->disp = NULL;
+	for (unsigned int i = 0; i < xfer->nworkers; i++) {
+		struct xfer_worker *restrict w = &xfer->workers[i];
+		if (w->loop != NULL) {
+			if (w->thread_started) {
+				w->stop = true;
+				ev_async_send(w->loop, &w->w_invoke);
+				THRD_ASSERT(thrd_join(w->thread, NULL));
+				/* xfer_thread_func cancelled all in-flight
+				 * transfers for this worker. */
+			}
+			ev_async_stop(w->loop, &w->w_invoke);
+			ev_loop_destroy(w->loop);
+		}
+		if (w->disp != NULL) {
+			dispatcher_destroy(w->disp);
+		}
 	}
 #else
 	/* Cancel any in-flight transfers. */
@@ -735,6 +793,14 @@ bool transfer_serve(
 	t->n_finished = 0;
 	t->num_sessions = opts->num_sessions;
 
+#if WITH_THREADS
+	const unsigned int idx =
+		atomic_fetch_add_explicit(
+			&xfer->next_worker, 1u, memory_order_relaxed) %
+		xfer->nworkers;
+	t->worker = &xfer->workers[idx];
+#endif
+
 	xfer_half_init(
 		&t->up, t, acc_fd, dial_fd, opts->byt_up, true
 #if WITH_SPLICE
@@ -751,13 +817,14 @@ bool transfer_serve(
 	);
 
 #if WITH_THREADS
+	struct xfer_worker *restrict worker = t->worker;
 	if (!dispatcher_invoke(
-		    xfer->disp,
+		    worker->disp,
 		    (struct task){ .func = task_xfer_start, .data = t })) {
 		free(t);
 		return false;
 	}
-	ev_async_send(xfer->loop, &xfer->w_invoke);
+	ev_async_send(worker->loop, &worker->w_invoke);
 #else
 	task_xfer_start(t);
 #endif

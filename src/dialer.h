@@ -26,6 +26,7 @@
 
 struct config;
 struct resolver;
+struct server;
 
 #include <ev.h>
 #include <netinet/in.h>
@@ -250,6 +251,11 @@ struct dialer {
 	int dialed_fd;
 	ev_watcher w_finish;
 	struct dialer_cb finish_cb;
+	uintmax_t *byt_sent, *byt_recv;
+	/* Timestamp when dialer_do() was called (clock_monotonic_ns) */
+	intmax_t start_ns;
+	/* Server for recording connect_ns; may be NULL */
+	struct server *server;
 	unsigned char *next;
 	struct {
 		BUFFER_HDR;
@@ -262,7 +268,9 @@ struct dialer {
  * @param d Dialer structure to initialize
  * @param callback Completion callback configuration
  */
-void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback);
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uintmax_t *byt_sent, uintmax_t *byt_recv);
 
 /**
  * @brief Start a dial operation
@@ -271,10 +279,12 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback);
  * @param req Dial request specifying target and proxy chain
  * @param conf Configuration (ingress/egress policy, socket options, etc.)
  * @param resolver DNS resolver
+ * @param server Server instance for recording connect_ns; may be NULL
  */
 void dialer_do(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req,
-	const struct config *conf, struct resolver *resolver);
+	const struct config *conf, struct resolver *resolver,
+	struct server *server);
 
 /**
  * @brief Cancel an ongoing dial operation

@@ -181,6 +181,9 @@ static void append_vmstats(
 			w, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
 			allocated, objects);
 	}
+	(void)io_bufprintf(
+		w, "%-20s: %zu (peak %zu)\n", "Ruleset Threads",
+		vm->num_thread_active, vm->num_thread_peak);
 
 	if (vm->num_events == 0) {
 		(void)io_bufprintf(
@@ -320,6 +323,12 @@ static void append_server_stats(
 	FORMAT_DURATION(str_uptime, make_duration_nanos(uptime));
 	FORMAT_BYTES(xfer_up, (double)agg.byt_up);
 	FORMAT_BYTES(xfer_down, (double)agg.byt_down);
+	FORMAT_BYTES(hs_crx, (double)agg.byt_client_recv);
+	FORMAT_BYTES(hs_ctx, (double)agg.byt_client_send);
+	FORMAT_BYTES(hs_drx, (double)agg.byt_dial_recv);
+	FORMAT_BYTES(hs_dtx, (double)agg.byt_dial_send);
+	FORMAT_BYTES(api_recv, (double)apistats->api_byt_recv);
+	FORMAT_BYTES(api_send, (double)apistats->api_byt_send);
 
 	(void)io_bufprintf(
 		w,
@@ -328,19 +337,44 @@ static void append_server_stats(
 		"Num Sessions        : %zu (+%zu) peak=%zu\n"
 		"Num Rejected        : ruleset=%ju, timeout=%ju, upstream=%ju\n"
 		"Conn Accepts        : %ju (+%ju)\n"
-		"Requests            : %ju (+%ju)\n"
-		"API Requests        : %ju (+%ju)\n"
 		"Name Resolves       : %ju (+%ju)\n"
+		"Requests            : %ju (+%ju), Rx %s, Tx %s\n"
+		"API Requests        : %ju (+%ju), Rx %s, Tx %s\n"
+		"Handshake Dial      : Rx %s, Tx %s\n"
 		"Traffic             : Up %s, Down %s\n",
-		timestamp, str_uptime, agg.num_sessions, agg.num_halfopen,
-		agg.num_sessions_peak, agg.num_reject_ruleset,
-		agg.num_reject_timeout, agg.num_reject_upstream, agg.num_serve,
-		agg.num_accept - agg.num_serve, agg.num_success,
-		agg.num_request - agg.num_success, apistats->num_api_success,
-		apistats->num_api_request - apistats->num_api_success,
+		/* Server Time, Uptime */
+		timestamp, str_uptime,
+		/* Num Sessions */
+		agg.num_sessions, agg.num_halfopen, agg.num_sessions_peak,
+		/* Num Rejected */
+		agg.num_reject_ruleset, agg.num_reject_timeout,
+		agg.num_reject_upstream,
+		/* Conn Accepts */
+		agg.num_serve, agg.num_accept - agg.num_serve,
+		/* Name Resolves */
 		resolv_stats->num_success,
-		resolv_stats->num_query - resolv_stats->num_success, xfer_up,
-		xfer_down);
+		resolv_stats->num_query - resolv_stats->num_success,
+		/* Requests */
+		agg.num_success, agg.num_request - agg.num_success, hs_crx,
+		hs_ctx,
+		/* API Requests */
+		apistats->num_api_success,
+		apistats->num_api_request - apistats->num_api_success, api_recv,
+		api_send,
+		/* Handshake Dial */
+		hs_drx, hs_dtx,
+		/* Traffic */
+		xfer_up, xfer_down);
+
+#if WITH_RULESET
+	{
+		FORMAT_BYTES(cli_recv, (double)agg.api_client_byt_recv);
+		FORMAT_BYTES(cli_send, (double)agg.api_client_byt_send);
+		(void)io_bufprintf(
+			w, "API Client          : %ju reqs, Rx %s, Tx %s\n",
+			agg.num_api_client_request, cli_recv, cli_send);
+	}
+#endif
 
 #if WITH_RULESET
 	const struct ruleset *ruleset = s->ruleset;
@@ -963,12 +997,6 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		"# HELP neosocksd_rejects_upstream_total Connections failed during upstream dial.\n"
 		"# TYPE neosocksd_rejects_upstream_total counter\n"
 		"neosocksd_rejects_upstream_total %ju\n"
-		"# HELP neosocksd_bytes_up_total Bytes sent upstream.\n"
-		"# TYPE neosocksd_bytes_up_total counter\n"
-		"neosocksd_bytes_up_total %ju\n"
-		"# HELP neosocksd_bytes_down_total Bytes received downstream.\n"
-		"# TYPE neosocksd_bytes_down_total counter\n"
-		"neosocksd_bytes_down_total %ju\n"
 		"# HELP neosocksd_dns_queries_total DNS queries issued.\n"
 		"# TYPE neosocksd_dns_queries_total counter\n"
 		"neosocksd_dns_queries_total %ju\n"
@@ -983,9 +1011,42 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		"neosocksd_api_requests_success_total %ju\n",
 		agg.num_accept, agg.num_serve, agg.num_request, agg.num_success,
 		agg.num_reject_ruleset, agg.num_reject_timeout,
-		agg.num_reject_upstream, agg.byt_up, agg.byt_down,
-		resolv_stats->num_query, resolv_stats->num_success,
-		apistats->num_api_request, apistats->num_api_success);
+		agg.num_reject_upstream, resolv_stats->num_query,
+		resolv_stats->num_success, apistats->num_api_request,
+		apistats->num_api_success);
+	(void)io_bufprintf(
+		w,
+		"# HELP neosocksd_bytes_down_total Total bytes transferred from upstream to client.\n"
+		"# TYPE neosocksd_bytes_down_total counter\n"
+		"neosocksd_bytes_down_total %ju\n"
+		"# HELP neosocksd_bytes_up_total Total bytes transferred from client to upstream.\n"
+		"# TYPE neosocksd_bytes_up_total counter\n"
+		"neosocksd_bytes_up_total %ju\n",
+		agg.byt_down, agg.byt_up);
+	(void)io_bufprintf(
+		w,
+		"# HELP neosocksd_bytes_total Total bytes transferred, by direction and traffic state.\n"
+		"# TYPE neosocksd_bytes_total counter\n"
+		"neosocksd_bytes_total{direction=\"recv\",state=\"api\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"send\",state=\"api\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"recv\",state=\"handshake_client\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"send\",state=\"handshake_client\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"recv\",state=\"handshake_dial\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"send\",state=\"handshake_dial\"} %ju\n",
+		apistats->api_byt_recv, apistats->api_byt_send,
+		agg.byt_client_recv, agg.byt_client_send, agg.byt_dial_recv,
+		agg.byt_dial_send);
+#if WITH_RULESET
+	(void)io_bufprintf(
+		w,
+		"# HELP neosocksd_api_client_requests_total API client requests issued by the ruleset.\n"
+		"# TYPE neosocksd_api_client_requests_total counter\n"
+		"neosocksd_api_client_requests_total %ju\n"
+		"neosocksd_bytes_total{direction=\"recv\",state=\"api_client\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"send\",state=\"api_client\"} %ju\n",
+		agg.num_api_client_request, agg.api_client_byt_recv,
+		agg.api_client_byt_send);
+#endif
 
 	/* Connect latency summary */
 	if (agg.num_connects > 0) {
@@ -1018,8 +1079,15 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			"neosocksd_lua_memory_bytes %zu\n"
 			"# HELP neosocksd_lua_objects Number of live Lua objects.\n"
 			"# TYPE neosocksd_lua_objects gauge\n"
-			"neosocksd_lua_objects %zu\n",
-			vmstats.byt_allocated, vmstats.num_object);
+			"neosocksd_lua_objects %zu\n"
+			"# HELP neosocksd_lua_threads_active Lua coroutines currently dispatched.\n"
+			"# TYPE neosocksd_lua_threads_active gauge\n"
+			"neosocksd_lua_threads_active %zu\n"
+			"# HELP neosocksd_lua_threads_peak Peak concurrent dispatched Lua coroutines since start.\n"
+			"# TYPE neosocksd_lua_threads_peak gauge\n"
+			"neosocksd_lua_threads_peak %zu\n",
+			vmstats.byt_allocated, vmstats.num_object,
+			vmstats.num_thread_active, vmstats.num_thread_peak);
 	}
 	{
 		struct ruleset *restrict ruleset = s->ruleset;
@@ -1235,7 +1303,8 @@ static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	VBUF_FREE(ctx->conn.cbuf);
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
 	http_conn_init(
-		&ctx->conn, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header);
+		&ctx->conn, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header,
+		&ctx->s->stats.api_byt_recv, &ctx->s->stats.api_byt_send);
 	ctx->uri = (struct url){ 0 };
 	ctx->keepalive = false;
 	ctx->state = STATE_REQUEST;
@@ -1298,6 +1367,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		ctx->conn.wpos += len;
+		*ctx->conn.byt_sent += len;
 		if (ctx->conn.wpos < ctx->conn.wbuf.len) {
 			return;
 		}
@@ -1321,6 +1391,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		ctx->conn.cpos += len;
+		*ctx->conn.byt_sent += len;
 		if (ctx->conn.cpos < VBUF_LEN(ctx->conn.cbuf)) {
 			return;
 		}
@@ -1369,7 +1440,9 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ctx->rpcstate = NULL;
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };
-	http_conn_init(&ctx->conn, fd, STATE_PARSE_REQUEST, on_header);
+	http_conn_init(
+		&ctx->conn, fd, STATE_PARSE_REQUEST, on_header,
+		&s->stats.api_byt_recv, &s->stats.api_byt_send);
 	gc_register(&ctx->gcbase, api_ctx_finalize);
 	return ctx;
 }

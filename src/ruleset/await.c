@@ -7,6 +7,7 @@
 #include "conf.h"
 #include "resolver.h"
 #include "ruleset/base.h"
+#include "server.h"
 #include "util.h"
 
 #include "lauxlib.h"
@@ -323,7 +324,8 @@ static int await_invoke(lua_State *restrict L)
 		.data = ud,
 	};
 	const bool ok = api_client_rpcall(
-		r->loop, &ud->ctx, req, code, len, &cb, r->conf, r->resolver);
+		r->loop, &ud->ctx, req, code, len, &cb, r->conf, r->resolver,
+		r->server != NULL ? &r->server->stats : NULL);
 	if (!ok) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);

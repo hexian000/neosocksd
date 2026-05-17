@@ -62,7 +62,9 @@ static int api_invoke(lua_State *restrict L)
 		return lua_error(L);
 	}
 	const struct ruleset *restrict r = aux_getruleset(L);
-	api_client_invoke(r->loop, req, code, len, r->conf, r->resolver);
+	api_client_invoke(
+		r->loop, req, code, len, r->conf, r->resolver,
+		r->server != NULL ? &r->server->stats : NULL);
 	return 0;
 }
 
@@ -285,7 +287,7 @@ static int api_stats(lua_State *restrict L)
 			}
 		}
 	}
-	lua_createtable(L, 0, 20);
+	lua_createtable(L, 0, 22);
 
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	lua_setfield(L, -2, "lasterror");
@@ -315,6 +317,10 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "bytes_allocated");
 	lua_pushinteger(L, (lua_Integer)r->vmstats.num_object);
 	lua_setfield(L, -2, "num_object");
+	lua_pushinteger(L, (lua_Integer)r->vmstats.num_thread_active);
+	lua_setfield(L, -2, "num_thread_active");
+	lua_pushinteger(L, (lua_Integer)r->vmstats.num_thread_peak);
+	lua_setfield(L, -2, "num_thread_peak");
 	lua_pushinteger(L, (lua_Integer)stats.num_accept);
 	lua_setfield(L, -2, "num_accept");
 	lua_pushinteger(L, (lua_Integer)stats.num_serve);

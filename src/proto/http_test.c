@@ -130,7 +130,7 @@ static void conn_init_for_test(
 		.func = parse_header_cb,
 		.ctx = cb,
 	};
-	http_conn_init(p, fd, mode, on_header);
+	http_conn_init(p, fd, mode, on_header, NULL, NULL);
 }
 
 static bool stream_read_exact(

@@ -45,7 +45,7 @@ struct server_stats {
 	/* Successful connection count (histogram index) */
 	size_t num_connects;
 	/* Connection latency ring buffer (ns) */
-	intmax_t connect_ns[1024];
+	intmax_t connect_ns[256];
 
 	/* Aggregated listener accept/serve stats (filled by server_stats()) */
 	uintmax_t num_accept;
@@ -54,6 +54,26 @@ struct server_stats {
 	/* API server stats */
 	uintmax_t num_api_request;
 	uintmax_t num_api_success;
+	/* Bytes received by the API server */
+	uintmax_t api_byt_recv;
+	/* Bytes sent by the API server */
+	uintmax_t api_byt_send;
+	/* API client requests issued */
+	uintmax_t num_api_client_request;
+	/* Bytes sent by the API client */
+	uintmax_t api_client_byt_send;
+	/* Bytes received by the API client */
+	uintmax_t api_client_byt_recv;
+
+	/* Protocol handshake overhead */
+	/* Bytes received from clients during handshake */
+	uintmax_t byt_client_recv;
+	/* Bytes sent to clients during handshake */
+	uintmax_t byt_client_send;
+	/* Bytes sent to upstream proxies in CONNECT handshake */
+	uintmax_t byt_dial_send;
+	/* Bytes received from upstream proxies in CONNECT handshake */
+	uintmax_t byt_dial_recv;
 
 	/* Server start timestamp */
 	intmax_t started;

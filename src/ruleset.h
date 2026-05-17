@@ -34,6 +34,11 @@ struct ruleset_vmstats {
 	/* Total bytes allocated by Lua VM */
 	size_t byt_allocated;
 
+	/* Number of Lua coroutines currently dispatched (in-flight) */
+	size_t num_thread_active;
+	/* Peak concurrent dispatched Lua coroutines since start */
+	size_t num_thread_peak;
+
 	/* Total time used by ruleset in nanoseconds */
 	uintmax_t time_total;
 	/* Number of completed events */

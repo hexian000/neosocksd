@@ -10,6 +10,7 @@
 #include "dialer.h"
 #include "io/stream.h"
 #include "resolver.h"
+#include "server.h"
 
 #include "lauxlib.h"
 #include "lua.h"
@@ -329,10 +330,11 @@ bool api_client_rpcall(
 	struct ev_loop *restrict loop, struct api_client_ctx **restrict pctx,
 	struct dialreq *restrict req, const void *restrict payload, size_t len,
 	const struct api_client_cb *restrict cb, const struct config *conf,
-	struct resolver *resolver)
+	struct resolver *resolver, struct server_stats *restrict stats)
 {
 	(void)conf;
 	(void)resolver;
+	(void)stats;
 	if (!STUB.api_start_ok) {
 		return false;
 	}

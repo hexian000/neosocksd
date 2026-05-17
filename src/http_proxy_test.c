@@ -176,7 +176,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
-	s->xfer = transfer_new(s->loop);
+	s->xfer = transfer_new(s->loop, 1);
 	s->ruleset = G.ruleset;
 	s->basereq = NULL;
 }
@@ -315,8 +315,12 @@ int dialaddr_format(
 	return 6;
 }
 
-void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uintmax_t *byt_sent, uintmax_t *byt_recv)
 {
+	(void)byt_sent;
+	(void)byt_recv;
 	d->finish_cb = *callback;
 	d->err = DIALER_OK;
 	d->syserr = 0;
@@ -324,13 +328,15 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 
 void dialer_do(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req,
-	const struct config *conf, struct resolver *resolver)
+	const struct config *conf, struct resolver *resolver,
+	struct server *server)
 {
 	d->req = req;
 	S.dialer_do_calls++;
 	(void)loop;
 	(void)conf;
 	(void)resolver;
+	(void)server;
 	d->err = S.dialer_err;
 	d->syserr = S.dialer_syserr;
 	if (!S.dialer_invoke_now) {
@@ -354,9 +360,11 @@ struct stub_xfer_ctx {
 #endif
 };
 
-struct transfer *transfer_new(struct ev_loop *restrict loop)
+struct transfer *
+transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
 	UNUSED(loop);
+	UNUSED(nworkers);
 	static int token;
 	return (struct transfer *)&token;
 }

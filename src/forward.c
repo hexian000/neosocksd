@@ -10,9 +10,7 @@
 #include "transfer.h"
 #include "util.h"
 
-#include "os/clock.h"
 #include "os/socket.h"
-#include "utils/arraysize.h"
 #include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
@@ -46,7 +44,6 @@ struct forward_ctx {
 	enum forward_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
-	intmax_t accepted_ns;
 	ev_timer w_timeout;
 	/* state < STATE_BIDIRECTIONAL */
 	struct {
@@ -223,14 +220,6 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		stats->num_sessions_peak = cur;
 	}
 	stats->num_success++;
-	{
-		const int_fast64_t elapsed =
-			clock_monotonic_ns() - ctx->accepted_ns;
-		stats->connect_ns
-			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
-			elapsed;
-		stats->num_connects++;
-	}
 	FW_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
 	gc_unref(&ctx->gcbase);
 }
@@ -242,7 +231,9 @@ static void forward_ctx_start(
 	FW_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
 	ctx->s->stats.num_request++;
-	dialer_do(&ctx->dialer, loop, req, ctx->s->conf, ctx->s->resolver);
+	dialer_do(
+		&ctx->dialer, loop, req, ctx->s->conf, ctx->s->resolver,
+		ctx->s);
 }
 
 #if WITH_RULESET
@@ -336,7 +327,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 		.func = dialer_cb,
 		.data = ctx,
 	};
-	dialer_init(&ctx->dialer, &cb);
+	dialer_init(&ctx->dialer, &cb, NULL, NULL);
 	gc_register(&ctx->gcbase, forward_ctx_finalize);
 	return ctx;
 }
@@ -352,7 +343,6 @@ void forward_serve(
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
-	ctx->accepted_ns = clock_monotonic_ns();
 
 	ctx->state = STATE_PROCESS;
 	ev_timer_start(loop, &ctx->w_timeout);
@@ -467,7 +457,6 @@ void tproxy_serve(
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
-	ctx->accepted_ns = clock_monotonic_ns();
 
 	ctx->state = STATE_PROCESS;
 	ev_timer_start(loop, &ctx->w_timeout);

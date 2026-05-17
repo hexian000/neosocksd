@@ -9,6 +9,7 @@
 #include "dialer.h"
 #include "http_client.h"
 #include "proto/http.h"
+#include "server.h"
 #include "util.h"
 
 #include "io/stream.h"
@@ -35,6 +36,7 @@ struct api_client_ctx {
 	struct gcbase gcbase;
 	struct ev_loop *loop;
 	const struct config *conf;
+	struct server_stats *stats;
 	struct api_client_cb cb;
 	ev_idle w_process;
 	struct http_client_ctx hctx;
@@ -273,7 +275,8 @@ static bool api_client_do(
 	struct dialreq *restrict req, const char *restrict uri,
 	const void *restrict payload, const size_t len,
 	const struct api_client_cb *restrict in_cb,
-	const struct config *restrict conf, struct resolver *restrict resolver)
+	const struct config *restrict conf, struct resolver *restrict resolver,
+	struct server_stats *restrict stats)
 {
 	struct api_client_ctx *restrict ctx =
 		malloc(sizeof(struct api_client_ctx));
@@ -284,6 +287,7 @@ static bool api_client_do(
 	}
 	ctx->loop = loop;
 	ctx->conf = conf;
+	ctx->stats = stats;
 	ctx->result.errmsg = NULL;
 	ctx->result.errlen = 0;
 	ctx->result.stream = NULL;
@@ -293,7 +297,15 @@ static bool api_client_do(
 		.func = on_http_client_done,
 		.data = ctx,
 	};
-	http_client_init(&ctx->hctx, loop, on_header, &hcb, conf, resolver);
+	if (stats != NULL) {
+		stats->num_api_client_request++;
+	}
+	http_client_init(
+		&ctx->hctx, loop, on_header, &hcb, conf, resolver,
+		stats != NULL ? &stats->api_client_byt_recv : NULL,
+		stats != NULL ? &stats->api_client_byt_send : NULL,
+		stats != NULL ? &stats->byt_dial_send : NULL,
+		stats != NULL ? &stats->byt_dial_recv : NULL);
 	if (!make_request(&ctx->hctx.conn, uri, payload, len)) {
 		LOGOOM();
 		dialreq_free(req);
@@ -314,23 +326,25 @@ static bool api_client_do(
 void api_client_invoke(
 	struct ev_loop *restrict loop, struct dialreq *restrict req,
 	const void *restrict payload, const size_t len,
-	const struct config *restrict conf, struct resolver *restrict resolver)
+	const struct config *restrict conf, struct resolver *restrict resolver,
+	struct server_stats *restrict stats)
 {
 	(void)api_client_do(
 		loop, NULL, req, "/ruleset/invoke", payload, len,
-		&(struct api_client_cb){ NULL, NULL }, conf, resolver);
+		&(struct api_client_cb){ NULL, NULL }, conf, resolver, stats);
 }
 
 bool api_client_rpcall(
 	struct ev_loop *restrict loop, struct api_client_ctx **restrict pctx,
 	struct dialreq *restrict req, const void *restrict payload,
 	const size_t len, const struct api_client_cb *restrict cb,
-	const struct config *restrict conf, struct resolver *restrict resolver)
+	const struct config *restrict conf, struct resolver *restrict resolver,
+	struct server_stats *restrict stats)
 {
 	ASSERT(cb->func != NULL);
 	return api_client_do(
 		loop, pctx, req, "/ruleset/rpcall", payload, len, cb, conf,
-		resolver);
+		resolver, stats);
 }
 
 void api_client_cancel(

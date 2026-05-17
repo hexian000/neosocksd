@@ -286,7 +286,7 @@ fuzz_http_conn(struct prng *restrict p, const enum http_conn_state mode)
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	T_CHECK(write_all(sv[1], input, len));
 	T_CHECK(shutdown(sv[1], SHUT_WR) == 0);
-	http_conn_init(&conn, sv[0], mode, cb);
+	http_conn_init(&conn, sv[0], mode, cb, NULL, NULL);
 
 	for (size_t i = 0; i < 8; i++) {
 		const int ret = http_conn_recv(&conn);
@@ -339,7 +339,8 @@ static void fuzz_http_headers_once(struct prng *restrict p)
 
 	struct http_conn conn = { 0 };
 	http_conn_init(
-		&conn, -1, STATE_PARSE_REQUEST, (struct http_parsehdr_cb){ 0 });
+		&conn, -1, STATE_PARSE_REQUEST, (struct http_parsehdr_cb){ 0 },
+		NULL, NULL);
 	conn.msg.req.method = "";
 
 #define CALL_PARSEHDR(fn)                                                      \
@@ -462,8 +463,12 @@ int dialaddr_format(
 	return snprintf(s, maxlen, "?:%" PRIuLEAST16, addr->port);
 }
 
-void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uintmax_t *byt_sent, uintmax_t *byt_recv)
 {
+	(void)byt_sent;
+	(void)byt_recv;
 	(void)memset(d, 0, sizeof(*d));
 	d->finish_cb = *callback;
 	d->err = DIALER_OK;
@@ -473,11 +478,13 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 
 void dialer_do(
 	struct dialer *d, struct ev_loop *loop, const struct dialreq *req,
-	const struct config *conf, struct resolver *resolver)
+	const struct config *conf, struct resolver *resolver,
+	struct server *server)
 {
 	UNUSED(req);
 	UNUSED(conf);
 	UNUSED(resolver);
+	UNUSED(server);
 	d->err = DIALER_ERR_CONNECT;
 	d->syserr = ECONNREFUSED;
 	d->finish_cb.func(loop, d->finish_cb.data, -1);
@@ -489,9 +496,11 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 	UNUSED(loop);
 }
 
-struct transfer *transfer_new(struct ev_loop *restrict loop)
+struct transfer *
+transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
 	UNUSED(loop);
+	UNUSED(nworkers);
 	static int token;
 	return (struct transfer *)&token;
 }
@@ -568,7 +577,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
-	s->xfer = transfer_new(s->loop);
+	s->xfer = transfer_new(s->loop, 1);
 	s->basereq = NULL;
 #if WITH_RULESET
 	s->ruleset = NULL;

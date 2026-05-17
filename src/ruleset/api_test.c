@@ -228,9 +228,11 @@ void server_stats(
 void api_client_invoke(
 	struct ev_loop *restrict loop, struct dialreq *restrict req,
 	const void *restrict payload, const size_t len,
-	const struct config *restrict conf, struct resolver *restrict resolver)
+	const struct config *restrict conf, struct resolver *restrict resolver,
+	struct server_stats *restrict stats)
 {
 	(void)loop;
+	(void)stats;
 	G.invoke_called = true;
 	G.req = req;
 	G.payload_len =

@@ -13,9 +13,7 @@
 #include "util.h"
 
 #include "io/io.h"
-#include "os/clock.h"
 #include "os/socket.h"
-#include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
 #include "utils/debug.h"
@@ -58,7 +56,6 @@ struct socks_ctx {
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
 	struct dialaddr addr;
-	intmax_t accepted_ns;
 	ev_timer w_timeout;
 	union {
 		/* state < STATE_BIDIRECTIONAL */
@@ -192,8 +189,8 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 	}
 }
 
-static bool send_rsp(
-	const struct socks_ctx *restrict ctx, const void *buf, const size_t len)
+static bool
+send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 {
 	const int fd = ctx->accepted_fd;
 	LOG_BIN_F(
@@ -211,11 +208,12 @@ static bool send_rsp(
 			DEBUG, ctx, "send: %zu < %zu", (size_t)nsend, len);
 		return false;
 	}
+	ctx->s->stats.byt_client_send += len;
 	return true;
 }
 
 static bool
-socks4_sendrsp(const struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
+socks4_sendrsp(struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 {
 	unsigned char buf[SOCKS4_HDR_LEN];
 	const struct socks4_hdr h = { .version = 0, .command = rsp };
@@ -224,7 +222,7 @@ socks4_sendrsp(const struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 }
 
 static bool
-socks5_sendrsp(const struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
+socks5_sendrsp(struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 {
 	union sockaddr_max addr = {
 		.sa.sa_family = AF_INET,
@@ -327,7 +325,7 @@ socks5_dialerr2rsp(const enum dialer_error err, const int syserr)
 }
 
 static void socks_senderr(
-	const struct socks_ctx *restrict ctx, const enum dialer_error err,
+	struct socks_ctx *restrict ctx, const enum dialer_error err,
 	const int syserr)
 {
 	const uint_fast8_t version = read_uint8(ctx->rbuf.data);
@@ -352,9 +350,10 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	 * Transition to STATE_BIDIRECTIONAL before transfer_start so that
 	 * socks_ctx_stop becomes a no-op if gc_unref is called below.
 	 */
+	struct server_stats *restrict stats = &ctx->s->stats;
+	stats->byt_client_recv += ctx->rbuf.len;
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
-	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen--;
 	SOCKS_CTX_LOG_F(
 		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
@@ -396,14 +395,6 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		stats->num_sessions_peak = cur;
 	}
 	stats->num_success++;
-	{
-		const int_fast64_t elapsed =
-			clock_monotonic_ns() - ctx->accepted_ns;
-		stats->connect_ns
-			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
-			elapsed;
-		stats->num_connects++;
-	}
 	SOCKS_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
 	gc_unref(&ctx->gcbase);
 }
@@ -791,11 +782,11 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ctx->state = STATE_CONNECT;
 	dialer_do(
 		&ctx->dialer, loop, ctx->dialreq, ctx->s->conf,
-		ctx->s->resolver);
+		ctx->s->resolver, ctx->s);
 }
 
 static bool socks5_sendrsp_addr(
-	const struct socks_ctx *restrict ctx, const uint_fast8_t rsp,
+	struct socks_ctx *restrict ctx, const uint_fast8_t rsp,
 	const union sockaddr_max *restrict addr)
 {
 	unsigned char buf[SOCKS5_RSP_MAXLEN];
@@ -1682,7 +1673,9 @@ socks_ctx_new(struct server *restrict s, const int accepted_fd)
 		.func = dialer_cb,
 		.data = ctx,
 	};
-	dialer_init(&ctx->dialer, &cb);
+	dialer_init(
+		&ctx->dialer, &cb, &ctx->s->stats.byt_dial_send,
+		&ctx->s->stats.byt_dial_recv);
 	gc_register(&ctx->gcbase, socks_ctx_finalize);
 	return ctx;
 }
@@ -1693,7 +1686,6 @@ socks_ctx_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_socket);
 	ev_timer_start(loop, &ctx->w_timeout);
 
-	ctx->accepted_ns = clock_monotonic_ns();
 	ctx->state = STATE_HANDSHAKE1;
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen++;

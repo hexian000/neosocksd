@@ -222,7 +222,7 @@ thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
 	/* lua stack: errfunc? finish ? ... */
 	int errfunc = 0;
-	const struct ruleset *restrict r = aux_getruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	if (r->config.traceback) {
 		lua_pushcfunction(L, aux_traceback);
 		lua_replace(L, 1);
@@ -240,6 +240,8 @@ thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 		}
 	}
 
+	/* thread transitions from active to idle */
+	r->vmstats.num_thread_active--;
 	/* cache the thread for reuse */
 	aux_getregtable(L, RIDX_IDLE_THREAD);
 	lua_pushthread(L);
@@ -270,8 +272,10 @@ static int thread_main(lua_State *restrict L)
 /* [-0, +1, v] */
 lua_State *aux_getthread(lua_State *restrict L)
 {
+	struct ruleset *restrict r = aux_getruleset(L);
 	aux_getregtable(L, RIDX_IDLE_THREAD);
 	lua_pushnil(L);
+	lua_State *restrict co;
 	if (lua_next(L, -2)) {
 		lua_pop(L, 1);
 		lua_pushvalue(L, -1);
@@ -279,14 +283,19 @@ lua_State *aux_getthread(lua_State *restrict L)
 		/* lua stack: RIDX_IDLE_THREAD co co nil */
 		lua_rawset(L, -4);
 		lua_replace(L, -2);
-		return lua_tothread(L, -1);
+		co = lua_tothread(L, -1);
+	} else {
+		lua_pop(L, 1);
+		co = lua_newthread(L);
+		lua_pushcfunction(co, thread_main);
+		const int status = aux_resume(co, L, 0);
+		ASSERT(status == LUA_YIELD);
+		UNUSED(status);
 	}
-	lua_pop(L, 1);
-	lua_State *restrict co = lua_newthread(L);
-	lua_pushcfunction(co, thread_main);
-	const int status = aux_resume(co, L, 0);
-	ASSERT(status == LUA_YIELD);
-	UNUSED(status);
+	r->vmstats.num_thread_active++;
+	if (r->vmstats.num_thread_active > r->vmstats.num_thread_peak) {
+		r->vmstats.num_thread_peak = r->vmstats.num_thread_active;
+	}
 	return co;
 }
 
@@ -306,7 +315,7 @@ int aux_async(
 	lua_State *restrict L, lua_State *restrict from, const int narg,
 	const int finishidx)
 {
-	const struct ruleset *restrict r = aux_getruleset(L);
+	struct ruleset *restrict r = aux_getruleset(L);
 	if (r->config.traceback) {
 		lua_pushcfunction(L, aux_traceback);
 	} else {
@@ -316,7 +325,12 @@ int aux_async(
 	lua_xmove(from, L, 1);
 	lua_pushnil(L);
 	lua_xmove(from, L, 1 + narg);
-	return aux_resume(L, from, 4 + narg);
+	const int status = aux_resume(L, from, 4 + narg);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		/* catastrophic failure: thread died without passing through thread_call_k */
+		r->vmstats.num_thread_active--;
+	}
+	return status;
 }
 
 static void record_event_time(
@@ -396,6 +410,8 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	const int status = aux_resume(co, NULL, narg);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		/* catastrophic failure: thread died without passing through thread_call_k */
+		r->vmstats.num_thread_active--;
 	}
 	const int_fast64_t time_end = clock_monotonic_ns();
 	record_event_time(r, time_end - time_begin, time_end);

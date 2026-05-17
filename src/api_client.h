@@ -11,6 +11,7 @@ struct ev_loop;
 struct config;
 struct dialreq;
 struct resolver;
+struct server_stats;
 struct api_client_ctx;
 struct stream;
 
@@ -24,13 +25,13 @@ struct api_client_cb {
 void api_client_invoke(
 	struct ev_loop *restrict loop, struct dialreq *restrict req,
 	const void *restrict payload, size_t len, const struct config *conf,
-	struct resolver *resolver);
+	struct resolver *resolver, struct server_stats *restrict stats);
 
 bool api_client_rpcall(
 	struct ev_loop *restrict loop, struct api_client_ctx **restrict pctx,
 	struct dialreq *restrict req, const void *restrict payload, size_t len,
 	const struct api_client_cb *restrict cb, const struct config *conf,
-	struct resolver *resolver);
+	struct resolver *resolver, struct server_stats *restrict stats);
 
 void api_client_cancel(
 	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx);

@@ -188,7 +188,7 @@ T_DECLARE_CASE(test_transfer_moves_payload)
 	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop);
+	struct transfer *restrict xfer = transfer_new(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
@@ -268,7 +268,7 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop);
+	struct transfer *restrict xfer = transfer_new(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
@@ -335,7 +335,7 @@ T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
 	set_nonblock(dial_fd);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop);
+	struct transfer *restrict xfer = transfer_new(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
@@ -383,7 +383,7 @@ T_DECLARE_CASE(test_transfer_dst_error_finishes)
 	CLOSE_FD(dial_peer);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop);
+	struct transfer *restrict xfer = transfer_new(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
@@ -432,7 +432,7 @@ T_DECLARE_CASE(test_transfer_backpressure_completes)
 	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop);
+	struct transfer *restrict xfer = transfer_new(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(

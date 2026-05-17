@@ -28,12 +28,14 @@
 #include "proto/domain.h"
 #include "proto/socks.h"
 #include "resolver.h"
+#include "server.h"
 #include "util.h"
 
 #include "codec/base64.h"
 #include "net/addr.h"
 #include "net/http.h"
 #include "net/url.h"
+#include "os/clock.h"
 #include "os/socket.h"
 #include "utils/arraysize.h"
 #include "utils/buffer.h"
@@ -553,6 +555,14 @@ finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	const int fd = d->dialed_fd;
 	LOGV_F("dialer [%p]: request finished [fd:%d]", (void *)d->req, fd);
 	dialer_stop(d, loop);
+	if (fd >= 0 && d->server != NULL) {
+		struct server_stats *restrict stats = &d->server->stats;
+		const int_fast64_t elapsed = clock_monotonic_ns() - d->start_ns;
+		stats->connect_ns
+			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
+			elapsed;
+		stats->num_connects++;
+	}
 	/* Call user's completion callback with the result */
 	d->finish_cb.func(loop, d->finish_cb.data, fd);
 }
@@ -619,6 +629,9 @@ static bool dialer_send(
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
 		return false;
+	}
+	if (d->byt_sent != NULL) {
+		*d->byt_sent += (size_t)nsend;
 	}
 	return true;
 }
@@ -913,6 +926,9 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 		return false;
 	}
 	d->next += n;
+	if (d->byt_recv != NULL) {
+		*d->byt_recv += n;
+	}
 	return true;
 }
 
@@ -1679,7 +1695,9 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
  * Sets up a dialer structure with initial values and configures libev watchers.
  * Must be called before using dialer_do().
  */
-void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uintmax_t *const byt_sent, uintmax_t *const byt_recv)
 {
 	/* Initialize state */
 	d->req = NULL;
@@ -1698,6 +1716,8 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 
 	/* Store callback and initialize buffer */
 	d->finish_cb = *callback;
+	d->byt_sent = byt_sent;
+	d->byt_recv = byt_recv;
 	d->next = d->rbuf.data;
 	BUF_INIT(d->rbuf, 0);
 }
@@ -1712,7 +1732,7 @@ void dialer_init(struct dialer *restrict d, const struct dialer_cb *callback)
 void dialer_do(
 	struct dialer *restrict d, struct ev_loop *loop,
 	const struct dialreq *restrict req, const struct config *restrict conf,
-	struct resolver *restrict resolver)
+	struct resolver *restrict resolver, struct server *restrict server)
 {
 	/* Log the dial request for debugging */
 	if (LOGLEVEL(VERBOSE)) {
@@ -1729,6 +1749,8 @@ void dialer_do(
 	d->resolver = resolver;
 	d->err = DIALER_OK;
 	d->syserr = 0;
+	d->start_ns = clock_monotonic_ns();
+	d->server = server;
 	dialer_start(d, loop);
 }
 

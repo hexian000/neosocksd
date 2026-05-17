@@ -248,13 +248,19 @@ T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 	lua_State *co1, *co2;
 
 	co1 = aux_getthread(L);
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
+	T_EXPECT_EQ(r.vmstats.num_thread_peak, (size_t)1);
 	lua_pushcfunction(L, async_finish);
 	lua_pushcfunction(L, async_worker);
 	T_EXPECT_EQ(aux_async(co1, L, 0, 1), LUA_YIELD);
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+	T_EXPECT_EQ(r.vmstats.num_thread_peak, (size_t)1);
 	lua_settop(L, 0);
 
 	co2 = aux_getthread(L);
 	T_EXPECT_EQ((void *)co2, (void *)co1);
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
+	T_EXPECT_EQ(r.vmstats.num_thread_peak, (size_t)1);
 
 	lua_close(L);
 }

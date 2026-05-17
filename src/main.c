@@ -69,7 +69,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	struct transfer *xfer = transfer_new(loop);
+	struct transfer *xfer = transfer_new(loop, 1);
 	CHECKOOM(xfer);
 
 #if WITH_RULESET
