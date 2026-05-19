@@ -14,6 +14,8 @@ agent.peername = table.get(_G.agent, "peername")
 agent.conns = table.get(_G.agent, "conns") or {}
 -- agent.hosts = { "host1", "host2", ... }
 agent.hosts = table.get(_G.agent, "hosts") or {}
+-- agent.conn_state[id] = { peername = "peer1", rtt = 0, last_success = os.time(), failures = 0 }
+agent.conn_state = table.get(_G.agent, "conn_state") or {}
 
 local function connid_of(v)
     for id, conn in pairs(agent.conns) do
@@ -38,6 +40,11 @@ agent.SYNC_INTERVAL_BASE = 300
 agent.SYNC_INTERVAL_RANDOM = 300
 agent.TIMESTAMP_TOLERANCE = 300
 agent.PEERDB_EXPIRY_TIME = 7200
+-- tolerate transient probe failures: keep a cached neighbor entry until either
+-- CONN_MAX_FAILURES consecutive failures or CONN_GRACE_TIME elapses since the
+-- last successful probe.
+agent.CONN_GRACE_TIME = agent.SYNC_INTERVAL_BASE * 2 + agent.SYNC_INTERVAL_RANDOM
+agent.CONN_MAX_FAILURES = 3
 
 agent.verbose = table.get(_G.agent, "verbose")
 
@@ -441,16 +448,61 @@ end
 
 function agent.maintenance()
     -- probe
-    local conns = {}
+    local probe_results = {}
     parallel_for("probe", agent.conns, function(connid, conn)
-        conns[connid] = probe_via(conn)
+        local ok, result = pcall(probe_via, conn)
+        probe_results[connid] = { ok = ok, result = result }
     end)
+    -- merge probe results with cached state to tolerate transient failures
+    local now = os.time()
+    local conns = {}
+    for connid, _ in pairs(agent.conns) do
+        local r = probe_results[connid]
+        local state = agent.conn_state[connid]
+        if r and r.ok then
+            local info = r.result
+            conns[connid] = info
+            agent.conn_state[connid] = {
+                peername = info.peername,
+                rtt = info.rtt,
+                last_success = now,
+                failures = 0,
+            }
+        else
+            local err = r and r.result
+            if state then
+                state.failures = state.failures + 1
+                if state.failures <= agent.CONN_MAX_FAILURES and
+                    now - state.last_success <= agent.CONN_GRACE_TIME then
+                    conns[connid] = { peername = state.peername, rtt = state.rtt }
+                    evlogf("probe stale: [%s] %q failures=%d age=%ds (%s)",
+                        tostring(connid), state.peername, state.failures,
+                        now - state.last_success,
+                        (err and err:match("^(.-)\n") or err) or "unknown")
+                else
+                    evlogf("probe drop: [%s] %q failures=%d age=%ds",
+                        tostring(connid), state.peername, state.failures,
+                        now - state.last_success)
+                    agent.conn_state[connid] = nil
+                end
+            else
+                evlogf("probe error: [%s] %s", tostring(connid),
+                    (err and err:match("^(.-)\n") or err) or "unknown")
+            end
+        end
+    end
+    -- drop state for connections that no longer exist
+    for connid, _ in pairs(agent.conn_state) do
+        if agent.conns[connid] == nil then
+            agent.conn_state[connid] = nil
+        end
+    end
     -- update self
     if agent.peername then
         local info = _G.peerdb[agent.peername] or {}
         info.hosts = agent.hosts
         info.conns = conns
-        info.timestamp = os.time()
+        info.timestamp = now
         _G.peerdb[agent.peername] = info
     end
     if agent.verbose then
