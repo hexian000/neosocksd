@@ -213,8 +213,10 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	set_nonblock(acc_fd);
 	set_nonblock(dial_fd);
 
+#if WITH_ALLOC_CACHE
 	pipe_cache.cap = 0;
 	pipe_cache.len = 0;
+#endif
 
 	T_CHECK(send(acc_peer, uplink, sizeof(uplink), 0) ==
 		(ssize_t)sizeof(uplink));
@@ -447,6 +449,7 @@ T_DECLARE_CASE(transfer_pipe_new_close)
 	T_EXPECT_EQ(p.fd[1], -1);
 }
 
+#if WITH_ALLOC_CACHE
 T_DECLARE_CASE(transfer_pipe_shrink)
 {
 	/* Start from a clean slate */
@@ -468,6 +471,7 @@ T_DECLARE_CASE(transfer_pipe_shrink)
 	pipe_shrink(SIZE_MAX);
 	T_EXPECT_EQ(pipe_cache.len, (size_t)0);
 }
+#endif /* WITH_ALLOC_CACHE */
 #endif /* WITH_SPLICE */
 
 int main(void)
@@ -477,7 +481,9 @@ int main(void)
 	T_RUN_CASE(t, test_transfer_moves_payload);
 #if WITH_SPLICE
 	T_RUN_CASE(t, transfer_pipe_new_close);
+#if WITH_ALLOC_CACHE
 	T_RUN_CASE(t, transfer_pipe_shrink);
+#endif
 	T_RUN_CASE(t, test_transfer_splice_releases_pipes_on_finish);
 #endif
 	T_RUN_CASE(t, test_transfer_ctx_cancel_no_callback);

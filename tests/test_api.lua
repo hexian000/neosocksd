@@ -18,8 +18,8 @@ return function(T)
             string.format("auth_required: expected boolean, got %s", type(cfg.auth_required)))
         assert(type(cfg.listen) == "string",
             string.format("listen: expected string, got %s", type(cfg.listen)))
-        assert(type(cfg.api) == "string",
-            string.format("api: expected string, got %s", type(cfg.api)))
+        assert(type(cfg.restapi) == "string",
+            string.format("restapi: expected string, got %s", type(cfg.restapi)))
     end)
 
     -- neosocksd.splithostport --
@@ -142,7 +142,7 @@ return function(T)
 
     T:atest("neosocksd.stats keeps proxy and API counters separate", function()
         local before = neosocksd.stats()
-        local target = { neosocksd.config().api }
+        local target = { neosocksd.config().restapi }
         local ok, ret = await.rpcall(target, "echo", "stats-semantics")
         assert(ok, "rpcall failed: " .. tostring(ret))
         assert(ret == "stats-semantics",

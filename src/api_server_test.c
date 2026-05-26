@@ -62,7 +62,7 @@ void server_stats(
 	out->byt_down = s->byt_down;
 }
 
-#if WITH_SPLICE
+#if WITH_SPLICE && WITH_ALLOC_CACHE
 void pipe_shrink(size_t count)
 {
 	(void)count;

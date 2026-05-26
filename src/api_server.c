@@ -795,7 +795,7 @@ static void handle_ruleset_gc(
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
 
-#if WITH_SPLICE
+#if WITH_SPLICE && WITH_ALLOC_CACHE
 	/* Shrink the splice pipe cache too */
 	pipe_shrink(SIZE_MAX);
 #endif

@@ -54,6 +54,10 @@ if(NOT FORCE_POSIX)
     endif()
 endif()
 
+if(ENABLE_ALLOC_CACHE)
+    set(WITH_ALLOC_CACHE TRUE)
+endif()
+
 target_compile_options(neosocksd PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 # be strict with original sources
 target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra -Werror)

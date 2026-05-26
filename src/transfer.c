@@ -225,7 +225,9 @@ static void update_stats(
 }
 
 #if WITH_SPLICE
+#if WITH_ALLOC_CACHE
 struct pipe_cache pipe_cache = { .cap = PIPE_MAXCACHED, .len = 0 };
+#endif
 
 void pipe_close(struct splice_pipe *restrict pipe)
 {
@@ -246,19 +248,23 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 		LOGW_F("pipe2: (%d) %s", err, strerror(err));
 		return false;
 	}
+#if WITH_ALLOC_CACHE
 	int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, 262144);
 	if (pipe_cap < 0) {
 		const int err = errno;
 		LOGD_F("fcntl: (%d) %s", err, strerror(err));
 	}
 	pipe_cap = fcntl(pipe->fd[0], F_GETPIPE_SZ, 0);
+#else
+	int pipe_cap = fcntl(pipe->fd[0], F_GETPIPE_SZ, 0);
+#endif
 	if (pipe_cap < 0) {
 		const int err = errno;
 		LOGW_F("fcntl: (%d) %s", err, strerror(err));
 		pipe_close(pipe);
 		return false;
 	}
-	if (pipe_cap < 16384) {
+	if (pipe_cap < IO_BUFSIZE) {
 		LOGW_F("pipe: insufficient capacity %d", pipe_cap);
 		pipe_close(pipe);
 		return false;
@@ -268,6 +274,7 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 	return true;
 }
 
+#if WITH_ALLOC_CACHE
 void pipe_shrink(const size_t count)
 {
 	size_t n = pipe_cache.len;
@@ -278,24 +285,33 @@ void pipe_shrink(const size_t count)
 	pipe_cache.len = n;
 }
 #endif
+#endif
 
 #if WITH_SPLICE
 static bool pipe_get(struct splice_pipe *restrict pipe)
 {
+#if WITH_ALLOC_CACHE
 	if (pipe_cache.len == 0) {
 		return pipe_new(pipe);
 	}
 	*pipe = pipe_cache.pipes[--pipe_cache.len];
 	return true;
+#else
+	return pipe_new(pipe);
+#endif
 }
 
 static void pipe_put(struct splice_pipe *restrict pipe)
 {
+#if WITH_ALLOC_CACHE
 	if (pipe->len > 0 || pipe_cache.len == pipe_cache.cap) {
 		pipe_close(pipe);
 		return;
 	}
 	pipe_cache.pipes[pipe_cache.len++] = *pipe;
+#else
+	pipe_close(pipe);
+#endif
 }
 #endif
 
@@ -802,7 +818,7 @@ void transfer_free(struct transfer *restrict xfer)
 	xfer->active_list = NULL;
 #endif
 	free(xfer);
-#if WITH_SPLICE
+#if WITH_SPLICE && WITH_ALLOC_CACHE
 	pipe_shrink(SIZE_MAX);
 #endif
 }

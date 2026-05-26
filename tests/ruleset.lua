@@ -1,10 +1,10 @@
 -- neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
 -- This code is licensed under MIT license (see LICENSE for details)
 
--- [[ tests/main.lua: main test entry point ]] --
+-- [[ tests/ruleset.lua: main test entry point ]] --
 --
 -- Usage:
---   neosocksd -l 127.0.1.1:31080 --api 127.0.1.1:39080 -r tests/main.lua --traceback
+--   neosocksd -c tests/boot.lua
 --
 -- package.path is "?.lua" relative to the working directory (project root).
 

@@ -30,6 +30,7 @@ struct splice_pipe {
 	size_t cap, len;
 };
 
+#if WITH_ALLOC_CACHE
 #define PIPE_MAXCACHED 8
 
 /**
@@ -39,16 +40,19 @@ extern struct pipe_cache {
 	size_t cap, len;
 	struct splice_pipe pipes[PIPE_MAXCACHED];
 } pipe_cache;
+#endif /* WITH_ALLOC_CACHE */
 
 bool pipe_new(struct splice_pipe *pipe);
 
 void pipe_close(struct splice_pipe *pipe);
 
+#if WITH_ALLOC_CACHE
 /**
  * @brief Shrink the splice pipe cache by closing up to `count` pipes.
  * @param count Number of pipes to discard; pass SIZE_MAX to clear all.
  */
 void pipe_shrink(size_t count);
+#endif /* WITH_ALLOC_CACHE */
 #endif
 
 #if WITH_THREADS
