@@ -949,110 +949,104 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 
-/* name: metric name suffix after "neosocksd_"; type: "gauge"/"counter"/etc.;
+/* name: full metric name; type: "gauge"/"counter"/etc.;
  * help: description; fmt: printf format for the value(s); ...: value(s). */
 #define APPEND_METRIC(name, type, help, fmt, ...)                              \
 	(void)io_bufprintf(                                                    \
 		w,                                                             \
-		"# HELP neosocksd_%s %s\n"                                     \
-		"# TYPE neosocksd_%s %s\n"                                     \
-		"neosocksd_%s " fmt "\n",                                      \
+		"# HELP %s %s\n"                                               \
+		"# TYPE %s %s\n"                                               \
+		"%s " fmt "\n",                                                \
 		name, help, name, type, name, __VA_ARGS__)
 
 	/* Gauges */
 	APPEND_METRIC(
-		"sessions_active", "gauge", "Number of active proxy sessions.",
-		"%zu", agg.num_sessions);
+		"neosocksd_sessions_active", "gauge",
+		"Number of active proxy sessions.", "%zu", agg.num_sessions);
 	APPEND_METRIC(
-		"sessions_peak", "gauge",
+		"neosocksd_sessions_peak", "gauge",
 		"Peak concurrent proxy sessions since start.", "%zu",
 		agg.num_sessions_peak);
 	APPEND_METRIC(
-		"halfopen_connections", "gauge",
+		"neosocksd_halfopen_connections", "gauge",
 		"Connections in handshake/ruleset/dial phase.", "%zu",
 		agg.num_halfopen);
 	APPEND_METRIC(
-		"uptime_seconds", "gauge", "Seconds since server start.", "%g",
-		uptime);
+		"neosocksd_uptime_seconds", "gauge",
+		"Seconds since server start.", "%g", uptime);
 
 	/* Counters */
 	if (have_cpu) {
 		APPEND_METRIC(
-			"process_cpu_seconds_total", "counter",
+			"neosocksd_process_cpu_seconds_total", "counter",
 			"Total CPU time consumed by the process.", "%g",
 			(double)TIMESPEC_NANO(cpu_ts) * 1e-9);
 	}
 	APPEND_METRIC(
-		"connections_accepted_total", "counter",
+		"neosocksd_connections_accepted_total", "counter",
 		"Connections accepted by the listener.", "%ju", agg.num_accept);
 	APPEND_METRIC(
-		"connections_served_total", "counter",
+		"neosocksd_connections_served_total", "counter",
 		"Connections upgraded to proxy sessions.", "%ju",
 		agg.num_serve);
 	APPEND_METRIC(
-		"requests_total", "counter", "Total proxy requests processed.",
-		"%ju", agg.num_request);
+		"neosocksd_requests_total", "counter",
+		"Total proxy requests processed.", "%ju", agg.num_request);
 	APPEND_METRIC(
-		"requests_success_total", "counter",
+		"neosocksd_requests_success_total", "counter",
 		"Proxy requests completed successfully.", "%ju",
 		agg.num_success);
 	APPEND_METRIC(
-		"rejects_ruleset_total", "counter",
+		"neosocksd_rejects_ruleset_total", "counter",
 		"Connections rejected by the ruleset.", "%ju",
 		agg.num_reject_ruleset);
 	APPEND_METRIC(
-		"rejects_timeout_total", "counter",
+		"neosocksd_rejects_timeout_total", "counter",
 		"Connections timed out before becoming active.", "%ju",
 		agg.num_reject_timeout);
 	APPEND_METRIC(
-		"rejects_upstream_total", "counter",
+		"neosocksd_rejects_upstream_total", "counter",
 		"Connections failed during upstream dial.", "%ju",
 		agg.num_reject_upstream);
 	APPEND_METRIC(
-		"dns_queries_total", "counter", "DNS queries issued.", "%ju",
-		resolv_stats->num_query);
+		"neosocksd_dns_queries_total", "counter", "DNS queries issued.",
+		"%ju", resolv_stats->num_query);
 	APPEND_METRIC(
-		"dns_success_total", "counter",
+		"neosocksd_dns_success_total", "counter",
 		"DNS queries resolved successfully.", "%ju",
 		resolv_stats->num_success);
 	APPEND_METRIC(
-		"api_requests_total", "counter", "API requests received.",
-		"%ju", apistats->num_api_request);
+		"neosocksd_api_requests_total", "counter",
+		"API requests received.", "%ju", apistats->num_api_request);
 	APPEND_METRIC(
-		"api_requests_success_total", "counter",
+		"neosocksd_api_requests_success_total", "counter",
 		"API requests completed successfully.", "%ju",
 		apistats->num_api_success);
-	APPEND_METRIC(
-		"bytes_down_total", "counter",
-		"Total bytes transferred from upstream to client.", "%ju",
-		agg.byt_down);
-	APPEND_METRIC(
-		"bytes_up_total", "counter",
-		"Total bytes transferred from client to upstream.", "%ju",
-		agg.byt_up);
 	/* neosocksd_bytes_total: labeled multi-sample family */
 	(void)io_bufprintf(
 		w,
-		"# HELP neosocksd_bytes_total Total bytes transferred, by direction and traffic state.\n"
+		"# HELP neosocksd_bytes_total Total bytes transferred, by direction and module.\n"
 		"# TYPE neosocksd_bytes_total counter\n"
-		"neosocksd_bytes_total{direction=\"recv\",state=\"api\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"send\",state=\"api\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"recv\",state=\"handshake_client\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"send\",state=\"handshake_client\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"recv\",state=\"handshake_dial\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"send\",state=\"handshake_dial\"} %ju\n",
-		apistats->api_byt_recv, apistats->api_byt_send,
-		agg.byt_client_recv, agg.byt_client_send, agg.byt_dial_recv,
-		agg.byt_dial_send);
+		"neosocksd_bytes_total{direction=\"up\",module=\"transfer\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"down\",module=\"transfer\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"recv\",module=\"api_server\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"send\",module=\"api_server\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"recv\",module=\"proxy_server\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"send\",module=\"proxy_server\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"recv\",module=\"proxy_client\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"send\",module=\"proxy_client\"} %ju\n",
+		agg.byt_up, agg.byt_down, apistats->api_byt_recv,
+		apistats->api_byt_send, agg.byt_client_recv,
+		agg.byt_client_send, agg.byt_dial_recv, agg.byt_dial_send);
 #if WITH_RULESET
 	APPEND_METRIC(
-		"api_client_requests_total", "counter",
+		"neosocksd_api_client_requests_total", "counter",
 		"API client requests issued by the ruleset.", "%ju",
 		agg.num_api_client_request);
 	(void)io_bufprintf(
 		w,
-		"neosocksd_bytes_total{direction=\"recv\",state=\"api_client\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"send\",state=\"api_client\"} %ju\n",
+		"neosocksd_bytes_total{direction=\"recv\",module=\"api_client\"} %ju\n"
+		"neosocksd_bytes_total{direction=\"send\",module=\"api_client\"} %ju\n",
 		agg.api_client_byt_recv, agg.api_client_byt_send);
 #endif
 
@@ -1081,18 +1075,19 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			ruleset_vmstats(ruleset, &vmstats);
 		}
 		APPEND_METRIC(
-			"lua_memory_bytes", "gauge",
+			"neosocksd_lua_memory_bytes", "gauge",
 			"Bytes allocated by the Lua VM.", "%zu",
 			vmstats.byt_allocated);
 		APPEND_METRIC(
-			"lua_objects", "gauge", "Number of live Lua objects.",
-			"%zu", vmstats.num_object);
+			"neosocksd_lua_objects", "gauge",
+			"Number of live Lua objects.", "%zu",
+			vmstats.num_object);
 		APPEND_METRIC(
-			"lua_threads_active", "gauge",
+			"neosocksd_lua_threads_active", "gauge",
 			"Lua coroutines currently dispatched.", "%zu",
 			vmstats.num_thread_active);
 		APPEND_METRIC(
-			"lua_threads_peak", "gauge",
+			"neosocksd_lua_threads_peak", "gauge",
 			"Peak concurrent dispatched Lua coroutines since start.",
 			"%zu", vmstats.num_thread_peak);
 	}
