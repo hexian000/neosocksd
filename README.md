@@ -27,14 +27,14 @@ Status: **Stable**
 ## Features
 
 - Protocols: SOCKS4, SOCKS4A, SOCKS5 (CONNECT), HTTP CONNECT, transparent proxy (Linux).
-- 10+ Gbps per x86 core on Linux (with `--pipe`, 2024); ~500 KiB executable on most platforms\*.
-- Lua scripting on the control plane with rich RPC facilities.
+- 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024); ~500 KiB executable on most platforms\*.
+- Lua scripting on the control plane with extensive RPC support.
 - RESTful API for live monitoring and hot-reloading Lua modules without restarts.
 - Full IPv6 support; horizontal scalability.
 - Standards-compliant: ISO C11 and POSIX.1-2008.
-- No built-in encryption — pair with other tools for transport security. Basic authentication only (plaintext).
+- No built-in encryption — pair with external tools for transport security. Supports basic authentication (plaintext credentials) only.
 
-*\* Dynamically linked builds depend on libev and c-ares; see [Runtime Dependencies](#runtime-dependencies). Statically linked executables can be larger.*
+*\* Dynamically linked builds depend on libev and c-ares; see [Runtime Dependencies](#runtime-dependencies). Statically linked executables may be larger due to bundled dependencies.*
 
 
 ## Usage
@@ -93,7 +93,7 @@ curl "http://127.0.1.1:9080/ruleset/update?chunkname=%40ruleset.lua" \
 curl "http://127.0.1.1:9080/ruleset/update?module=libruleset&chunkname=%40libruleset.lua" \
     --data-binary @libruleset.lua
 
-# Eval arbitrary code
+# Execute arbitrary code
 curl "http://127.0.1.1:9080/ruleset/invoke" -d "_G.some_switch = true"
 
 # Push a gzip-compressed chunk
@@ -133,7 +133,7 @@ See [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Re
 
 `agent.lua` builds an autonomous overlay across multiple LANs: peers discover each other via RPC, traffic is relayed across nodes, and remote resources are reachable through the local proxy endpoint.
 
-Setup on each site:
+Set up on each node:
 
 1. Start neosocksd with the API enabled.
 2. Load `libruleset.lua` and `agent.lua`.
