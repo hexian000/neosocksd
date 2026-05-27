@@ -1022,22 +1022,28 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		"neosocksd_api_requests_success_total", "counter",
 		"API requests completed successfully.", "%ju",
 		apistats->num_api_success);
-	/* neosocksd_bytes_total: labeled multi-sample family */
+	APPEND_METRIC(
+		"neosocksd_uplink_bytes_total", "counter",
+		"Total bytes of proxied payload sent to upstream.", "%ju",
+		agg.byt_up);
+	APPEND_METRIC(
+		"neosocksd_downlink_bytes_total", "counter",
+		"Total bytes of proxied payload received from upstream.", "%ju",
+		agg.byt_down);
+	/* neosocksd_protocol_bytes_total: per-module protocol overhead */
 	(void)io_bufprintf(
 		w,
-		"# HELP neosocksd_bytes_total Total bytes transferred, by direction and module.\n"
-		"# TYPE neosocksd_bytes_total counter\n"
-		"neosocksd_bytes_total{direction=\"up\",module=\"transfer\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"down\",module=\"transfer\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"recv\",module=\"api_server\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"send\",module=\"api_server\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"recv\",module=\"proxy_server\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"send\",module=\"proxy_server\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"recv\",module=\"proxy_client\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"send\",module=\"proxy_client\"} %ju\n",
-		agg.byt_up, agg.byt_down, apistats->api_byt_recv,
-		apistats->api_byt_send, agg.byt_client_recv,
-		agg.byt_client_send, agg.byt_dial_recv, agg.byt_dial_send);
+		"# HELP neosocksd_protocol_bytes_total Total bytes of protocol overhead, by direction and module.\n"
+		"# TYPE neosocksd_protocol_bytes_total counter\n"
+		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"api_server\"} %ju\n"
+		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_server\"} %ju\n"
+		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"proxy_server\"} %ju\n"
+		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"proxy_server\"} %ju\n"
+		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"proxy_client\"} %ju\n"
+		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"proxy_client\"} %ju\n",
+		apistats->api_byt_recv, apistats->api_byt_send,
+		agg.byt_client_recv, agg.byt_client_send, agg.byt_dial_recv,
+		agg.byt_dial_send);
 #if WITH_RULESET
 	APPEND_METRIC(
 		"neosocksd_api_client_requests_total", "counter",
@@ -1045,8 +1051,8 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		agg.num_api_client_request);
 	(void)io_bufprintf(
 		w,
-		"neosocksd_bytes_total{direction=\"recv\",module=\"api_client\"} %ju\n"
-		"neosocksd_bytes_total{direction=\"send\",module=\"api_client\"} %ju\n",
+		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"api_client\"} %ju\n"
+		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_client\"} %ju\n",
 		agg.api_client_byt_recv, agg.api_client_byt_send);
 #endif
 
