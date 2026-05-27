@@ -93,8 +93,8 @@ static int regex_find(lua_State *restrict L)
 	if (err != 0) {
 		return regex_error(L, err, preg);
 	}
-	lua_pushinteger(L, (lua_Integer)(init + (size_t)match.rm_so) + 1);
-	lua_pushinteger(L, (lua_Integer)(init + (size_t)match.rm_eo));
+	lua_pushinteger(L, (lua_Integer)init + match.rm_so + 1);
+	lua_pushinteger(L, (lua_Integer)init + match.rm_eo);
 	return 2;
 }
 

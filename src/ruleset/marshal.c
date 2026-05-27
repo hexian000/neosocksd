@@ -39,7 +39,7 @@
  */
 static int marshal_buffer_close(lua_State *restrict L)
 {
-	struct vbuffer **pvbuf = lua_touserdata(L, 1);
+	struct vbuffer **pvbuf = (struct vbuffer **)lua_touserdata(L, 1);
 	VBUF_FREE(*pvbuf);
 	return 0;
 }
@@ -366,7 +366,8 @@ static int marshal_value(lua_State *restrict L)
 {
 	const int idx = 1;
 	struct vbuffer *restrict *restrict pvbuf =
-		lua_touserdata(L, IDX_BUFFER);
+		(struct vbuffer *restrict *restrict)lua_touserdata(
+			L, IDX_BUFFER);
 	const int type = lua_type(L, idx);
 
 	switch (type) {

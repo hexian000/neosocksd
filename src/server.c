@@ -286,7 +286,7 @@ resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
 		LOGF_F("unable to parse address: %s", addrstr);
 		return false;
 	}
-	if (!sa_resolve_tcpbind(out, host, port)) {
+	if (!sa_resolve_bind(out, host, port, SA_RESOLVE_TCP)) {
 		LOGF_F("unable to resolve address: %s", addrstr);
 		return false;
 	}

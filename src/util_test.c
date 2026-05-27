@@ -9,7 +9,6 @@
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -67,24 +66,6 @@ void resolver_cleanup(void)
 
 /* Tests */
 
-T_DECLARE_CASE(util_staleconn_err_true)
-{
-	T_EXPECT(IS_STALECONN_ERROR(ECONNRESET));
-	T_EXPECT(IS_STALECONN_ERROR(EPIPE));
-	T_EXPECT(IS_STALECONN_ERROR(ECONNABORTED));
-	T_EXPECT(IS_STALECONN_ERROR(ENOTCONN));
-	T_EXPECT(IS_STALECONN_ERROR(EBADF));
-}
-
-T_DECLARE_CASE(util_staleconn_err_false)
-{
-	T_EXPECT(!IS_STALECONN_ERROR(EAGAIN));
-	T_EXPECT(!IS_STALECONN_ERROR(ETIMEDOUT));
-	T_EXPECT(!IS_STALECONN_ERROR(EINTR));
-	T_EXPECT(!IS_STALECONN_ERROR(ENOMEM));
-	T_EXPECT(!IS_STALECONN_ERROR(0));
-}
-
 static void dummy_io_cb(struct ev_loop *loop, ev_io *w, const int revents)
 {
 	(void)loop;
@@ -135,48 +116,6 @@ T_DECLARE_CASE(util_modify_io_events_change)
 	(void)close(sv[1]);
 }
 
-#if WITH_SPLICE
-T_DECLARE_CASE(util_pipe_new_close)
-{
-	struct splice_pipe p = { .fd = { -1, -1 } };
-	T_EXPECT(pipe_new(&p));
-	T_EXPECT(p.fd[0] >= 0);
-	T_EXPECT(p.fd[1] >= 0);
-	T_EXPECT(p.cap > 0);
-
-	unsigned char buf[1] = { 0x42 };
-	T_EXPECT_EQ((ssize_t)write(p.fd[1], buf, 1), (ssize_t)1);
-	T_EXPECT_EQ((ssize_t)read(p.fd[0], buf, 1), (ssize_t)1);
-	T_EXPECT_EQ(buf[0], 0x42);
-
-	pipe_close(&p);
-	T_EXPECT_EQ(p.fd[0], -1);
-	T_EXPECT_EQ(p.fd[1], -1);
-}
-
-T_DECLARE_CASE(util_pipe_shrink)
-{
-	/* Start from a clean slate */
-	pipe_shrink(SIZE_MAX);
-	T_EXPECT_EQ(pipe_cache.len, (size_t)0);
-
-	/* Manually place two fresh pipes into the cache */
-	struct splice_pipe p1 = { .fd = { -1, -1 } };
-	struct splice_pipe p2 = { .fd = { -1, -1 } };
-	T_CHECK(pipe_new(&p1));
-	T_CHECK(pipe_new(&p2));
-	pipe_cache.pipes[0] = p1;
-	pipe_cache.pipes[1] = p2;
-	pipe_cache.len = 2;
-
-	pipe_shrink(1);
-	T_EXPECT_EQ(pipe_cache.len, (size_t)1);
-
-	pipe_shrink(SIZE_MAX);
-	T_EXPECT_EQ(pipe_cache.len, (size_t)0);
-}
-#endif /* WITH_SPLICE */
-
 T_DECLARE_CASE(util_init_runs_without_crash)
 {
 	/* Exercises setlocale, setvbuf, slog setup, and sigaction(SIGPIPE). */
@@ -186,7 +125,7 @@ T_DECLARE_CASE(util_init_runs_without_crash)
 
 T_DECLARE_CASE(util_loadlibs_unloadlibs)
 {
-	/* Exercises srand64, resolver_init (stub), and pipe cache cleanup. */
+	/* Exercises srand64 and resolver_init (stub). */
 	loadlibs();
 	unloadlibs();
 	T_EXPECT(true);
@@ -277,8 +216,6 @@ T_DECLARE_CASE(util_socket_bind_netdev_empty_name)
 int main(void)
 {
 	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, util_staleconn_err_true);
-	T_RUN_CASE(t, util_staleconn_err_false);
 	T_RUN_CASE(t, util_modify_io_events_stop);
 	T_RUN_CASE(t, util_modify_io_events_change);
 	T_RUN_CASE(t, util_modify_io_events_no_op_stop);
@@ -288,9 +225,5 @@ int main(void)
 	T_RUN_CASE(t, util_loadlibs_unloadlibs);
 	T_RUN_CASE(t, util_socket_bind_netdev_invalid_fd);
 	T_RUN_CASE(t, util_socket_bind_netdev_empty_name);
-#if WITH_SPLICE
-	T_RUN_CASE(t, util_pipe_new_close);
-	T_RUN_CASE(t, util_pipe_shrink);
-#endif
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

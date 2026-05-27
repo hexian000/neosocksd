@@ -226,6 +226,30 @@ static int make_listener(uint_least16_t *restrict port)
 	return fd;
 }
 
+static int make_listener6(uint_least16_t *restrict port)
+{
+	const int fd = socket(AF_INET6, SOCK_STREAM, 0);
+	const int enable = 1;
+	struct sockaddr_in6 addr = {
+		.sin6_family = AF_INET6,
+		.sin6_addr = IN6ADDR_LOOPBACK_INIT,
+		.sin6_port = 0,
+	};
+	struct sockaddr_in6 bound_addr = { 0 };
+	socklen_t len = sizeof(bound_addr);
+
+	T_CHECK(fd >= 0);
+	T_CHECK(setsockopt(
+			fd, SOL_SOCKET, SO_REUSEADDR, &enable,
+			sizeof(enable)) == 0);
+	T_CHECK(bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0);
+	T_CHECK(listen(fd, 1) == 0);
+	T_CHECK(fd_set_nonblock(fd));
+	T_CHECK(getsockname(fd, (struct sockaddr *)&bound_addr, &len) == 0);
+	*port = ntohs(bound_addr.sin6_port);
+	return fd;
+}
+
 static int wait_for_accept(
 	struct ev_loop *loop, const int listener_fd,
 	const ev_tstamp timeout_sec)
@@ -1555,6 +1579,56 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 	T_EXPECT_EQ(d.syserr, 0);
 }
 
+T_DECLARE_CASE(direct_connect_ipv6_reports_success)
+{
+	uint_least16_t port = 0;
+	const int listener_fd = make_listener6(&port);
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char addr[32];
+	bool completed;
+	int accepted_fd;
+	int client_fd;
+	bool accepted;
+	bool has_client_fd;
+	enum dialer_error err;
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(addr, sizeof(addr), "[::1]:%u", (unsigned)port) > 0);
+	req = dialreq_parse(addr, NULL);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
+		NULL, NULL);
+	accepted_fd = wait_for_accept(loop, listener_fd, TEST_WAIT_SHORT_SEC);
+	client_fd = result.fd;
+	accepted = accepted_fd >= 0;
+	has_client_fd = client_fd >= 0;
+	err = d.err;
+	close_if_open(&accepted_fd);
+	close_if_open(&client_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	T_CHECK(close(listener_fd) == 0);
+
+	T_EXPECT(completed);
+	T_EXPECT(result.called);
+	T_EXPECT(has_client_fd);
+	T_EXPECT(accepted);
+	T_EXPECT_EQ(err, DIALER_OK);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -1564,6 +1638,7 @@ int main(void)
 	T_RUN_CASE(t, dialreq_new_copies_base_request);
 	T_RUN_CASE(t, dialer_strerror_known_and_unknown);
 	T_RUN_CASE(t, direct_connect_reports_success);
+	T_RUN_CASE(t, direct_connect_ipv6_reports_success);
 	T_RUN_CASE(t, local_address_blocked_by_egress_policy);
 	T_RUN_CASE(t, http_connect_success_sends_expected_request);
 	T_RUN_CASE(t, http_connect_407_maps_to_proxy_auth);

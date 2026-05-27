@@ -1896,6 +1896,227 @@ T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
 	test_conf.socks5_udp = false;
 }
 
+T_DECLARE_CASE(socks5_dialer_err_resolve_hostunreach)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x00, 0x50,
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.dialer_err = DIALER_ERR_RESOLVE;
+	STUB.dialer_syserr = 0;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 6);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_HOSTUNREACH);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(socks5_dialer_err_system_hostunreach)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x00, 0x50,
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.dialer_err = DIALER_ERR_SYSTEM;
+	STUB.dialer_syserr = EHOSTUNREACH;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 6);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_HOSTUNREACH);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(socks5_dialer_err_proxy_refused_connrefused)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x00, 0x50,
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.dialer_err = DIALER_ERR_PROXY_REFUSED;
+	STUB.dialer_syserr = 0;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 6);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_CONNREFUSED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(socks5_dialer_err_blocked_noallowed)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x00, 0x50,
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.dialer_err = DIALER_ERR_BLOCKED;
+	STUB.dialer_syserr = 0;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 6);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_NOALLOWED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(socks5_unknown_command_cmdnosupport)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* auth + unknown command 0x04 + IPv4 target */
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, 0x04, 0x00, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x00, 0x50,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 4);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_CMDNOSUPPORT);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(socks4_bind_command_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* SOCKS4 BIND request: version=4, command=2, port=80, addr=127.0.0.1 */
+	const unsigned char req[] = {
+		SOCKS4, 0x02, 0x00, 0x50, 0x7f, 0x00, 0x00, 0x01, 'u', 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
+		T_EXPECT_EQ(rsp[0], 0x00);
+		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -1915,6 +2136,12 @@ int main(void)
 	T_RUN_CASE(t, socks5_ruleset_reject_rsp_fail);
 	T_RUN_CASE(t, socks5_ruleset_async_then_dialer_fail_noallowed);
 	T_RUN_CASE(t, socks5_dialer_system_error_netunreach);
+	T_RUN_CASE(t, socks5_dialer_err_resolve_hostunreach);
+	T_RUN_CASE(t, socks5_dialer_err_system_hostunreach);
+	T_RUN_CASE(t, socks5_dialer_err_proxy_refused_connrefused);
+	T_RUN_CASE(t, socks5_dialer_err_blocked_noallowed);
+	T_RUN_CASE(t, socks5_unknown_command_cmdnosupport);
+	T_RUN_CASE(t, socks4_bind_command_rejected);
 	T_RUN_CASE(t, socks5_dialer_success_transfer_finished);
 	T_RUN_CASE(t, socks5_dialer_success_connected_transition);
 	T_RUN_CASE(t, socks5_bind_disabled_cmdnosupport);

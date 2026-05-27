@@ -4,6 +4,7 @@
 #include "ruleset/base.h"
 
 #include "dialer.h"
+#include "util.h"
 
 #include "io/stream.h"
 #include "lauxlib.h"
@@ -346,7 +347,7 @@ static void record_event_time(
 
 static bool ruleset_pcallv(
 	const struct ruleset *restrict r, const lua_CFunction func,
-	const int nargs, const int nresults, va_list args)
+	const int nargs, const int nresults, va_list *args)
 {
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
@@ -357,7 +358,7 @@ static bool ruleset_pcallv(
 	}
 	lua_pushcfunction(L, func);
 	for (int i = 0; i < nargs; i++) {
-		lua_pushlightuserdata(L, va_arg(args, void *));
+		lua_pushlightuserdata(L, va_arg(*args, void *));
 	}
 	if (lua_pcall(L, nargs, nresults, errfunc) != LUA_OK) {
 		lua_pushvalue(L, -1);
@@ -374,7 +375,7 @@ bool ruleset_pcall(
 	const int_fast64_t time_begin = clock_monotonic_ns();
 	va_list args;
 	va_start(args, nresults);
-	const bool result = ruleset_pcallv(r, func, nargs, nresults, args);
+	const bool result = ruleset_pcallv(r, func, nargs, nresults, &args);
 	va_end(args);
 	const int_fast64_t time_end = clock_monotonic_ns();
 	record_event_time(r, time_end - time_begin, time_end);
@@ -386,11 +387,14 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	const int_fast64_t time_begin = clock_monotonic_ns();
 	lua_State *restrict L = r->L;
 	lua_settop(L, 0);
+	va_list args;
+	va_start(args, narg);
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
 	    LUA_TTABLE) {
 		lua_pop(L, 1);
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		va_end(args);
 		return;
 	}
 	lua_rawgetp(L, -1, ctx);
@@ -398,11 +402,10 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	if (co == NULL) {
 		lua_pop(L, 2);
 		LOGD_F("async context lost: %p", ctx);
+		va_end(args);
 		return;
 	}
 	lua_replace(L, 1);
-	va_list args;
-	va_start(args, narg);
 	for (int i = 0; i < narg; i++) {
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}

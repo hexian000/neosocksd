@@ -29,15 +29,10 @@
 #include <ev.h>
 
 #include <errno.h>
-#if WITH_SPLICE
-#include <fcntl.h>
-#endif
-#include <grp.h>
 #include <inttypes.h>
 #include <locale.h>
 #include <net/if.h>
 #include <netinet/in.h>
-#include <pwd.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -46,67 +41,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <threads.h>
 #include <time.h>
 #include <unistd.h>
-
-#if WITH_SPLICE
-struct pipe_cache pipe_cache = { .cap = PIPE_MAXCACHED, .len = 0 };
-
-void pipe_close(struct splice_pipe *restrict pipe)
-{
-	if (pipe->fd[0] != -1) {
-		CLOSE_FD(pipe->fd[0]);
-		pipe->fd[0] = -1;
-	}
-	if (pipe->fd[1] != -1) {
-		CLOSE_FD(pipe->fd[1]);
-		pipe->fd[1] = -1;
-	}
-}
-
-bool pipe_new(struct splice_pipe *restrict pipe)
-{
-	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
-		const int err = errno;
-		LOGW_F("pipe2: (%d) %s", err, strerror(err));
-		return false;
-	}
-	int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, 262144);
-	if (pipe_cap < 0) {
-		const int err = errno;
-		LOGD_F("fcntl: (%d) %s", err, strerror(err));
-	}
-	pipe_cap = fcntl(pipe->fd[0], F_GETPIPE_SZ, 0);
-	if (pipe_cap < 0) {
-		const int err = errno;
-		LOGW_F("fcntl: (%d) %s", err, strerror(err));
-		pipe_close(pipe);
-		return false;
-	}
-	if (pipe_cap < 16384) {
-		LOGW_F("pipe: insufficient capacity %d", pipe_cap);
-		pipe_close(pipe);
-		return false;
-	}
-	pipe->cap = (size_t)pipe_cap;
-	pipe->len = 0;
-	return true;
-}
-
-void pipe_shrink(const size_t count)
-{
-	size_t n = pipe_cache.len;
-	const size_t stop = count < n ? n - count : 0;
-	while (n > stop) {
-		pipe_close(&pipe_cache.pipes[--n]);
-	}
-	pipe_cache.len = n;
-}
-#endif
 
 #if defined(WIN32)
 #define PATH_SEPARATOR '\\'
@@ -158,9 +94,6 @@ void loadlibs(void)
 void unloadlibs(void)
 {
 	resolver_cleanup();
-#if WITH_SPLICE
-	pipe_shrink(SIZE_MAX);
-#endif
 }
 
 void modify_io_events(

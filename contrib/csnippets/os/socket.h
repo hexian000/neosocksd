@@ -81,10 +81,9 @@ int socket_set_nonblock(int fd);
  * @param fd The socket file descriptor.
  * @param sndbuf The send buffer size in bytes; ignored if <= 0.
  * @param rcvbuf The receive buffer size in bytes; ignored if <= 0.
- * @return Always returns true; setsockopt failures are logged as LOGW.
- * @note POSIX version: POSIX.1-2001
+ * @note POSIX version: POSIX.1-2001. Logs LOGW on setsockopt failure.
  */
-bool socket_set_buffer(int fd, int sndbuf, int rcvbuf);
+void socket_set_buffer(int fd, int sndbuf, int rcvbuf);
 
 /**
  * @brief Sets socket reuse options for binding to the same address and port.
@@ -228,6 +227,7 @@ bool sa_equals(const struct sockaddr *a, const struct sockaddr *b);
 bool sa_matches(const struct sockaddr *bind, const struct sockaddr *dest);
 
 enum ipclass {
+	IPCLASS_UNKNOWN = -1,
 	IPCLASS_UNSPECIFIED = 0,
 	IPCLASS_LOOPBACK,
 	IPCLASS_LINKLOCAL,
@@ -239,58 +239,42 @@ enum ipclass {
 /**
  * @brief Classifies the IP address of a sockaddr into an address class.
  * @param sa The sockaddr to classify.
- * @return The address class; IPCLASS_GLOBAL for unknown address families.
+ * @return The address class; IPCLASS_UNKNOWN for unknown address families.
  * @note POSIX version: POSIX.1-2001
  */
 enum ipclass sa_ipclassify(const struct sockaddr *sa);
 
+enum sa_resolve_type {
+	SA_RESOLVE_TCP,
+	SA_RESOLVE_UDP,
+};
+
 /**
- * @brief Resolves a hostname and service into a TCP sockaddr.
+ * @brief Resolves a hostname and service into a sockaddr.
  * @param[out] sa The output sockaddr union.
  * @param[in] name The hostname or IP.
  * @param[in] service The service name or port.
+ * @param type The socket type (SA_RESOLVE_TCP or SA_RESOLVE_UDP).
  * @param family The preferred protocol family (PF_UNSPEC, PF_INET, or PF_INET6).
  * @return True on success, false on failure; logs LOGE on getaddrinfo failure.
  * @note POSIX version: POSIX.1-2001
  */
-bool sa_resolve_tcp(
+bool sa_resolve(
 	union sockaddr_max *restrict sa, const char *name, const char *service,
-	int family);
+	enum sa_resolve_type type, int family);
 
 /**
- * @brief Resolves a bind hostname and service string into a TCP sockaddr.
+ * @brief Resolves a bind hostname and service into a sockaddr.
  * @param[out] sa The output sockaddr union.
  * @param[in] name The hostname or IP.
  * @param[in] service The service name or port.
+ * @param type The socket type (SA_RESOLVE_TCP or SA_RESOLVE_UDP).
  * @return True on success, false on failure; logs LOGE on getaddrinfo failure.
  * @note POSIX version: POSIX.1-2001
  */
-bool sa_resolve_tcpbind(
-	union sockaddr_max *restrict sa, const char *name, const char *service);
-
-/**
- * @brief Resolves a hostname and service into a UDP sockaddr.
- * @param[out] sa The output sockaddr union.
- * @param[in] name The hostname or IP.
- * @param[in] service The service name or port.
- * @param family The preferred protocol family (PF_UNSPEC, PF_INET, or PF_INET6).
- * @return True on success, false on failure; logs LOGE on getaddrinfo failure.
- * @note POSIX version: POSIX.1-2001
- */
-bool sa_resolve_udp(
+bool sa_resolve_bind(
 	union sockaddr_max *restrict sa, const char *name, const char *service,
-	int family);
-
-/**
- * @brief Resolves a bind hostname and service string into a UDP sockaddr.
- * @param[out] sa The output sockaddr union.
- * @param[in] name The hostname or IP.
- * @param[in] service The service name or port.
- * @return True on success, false on failure; logs LOGE on getaddrinfo failure.
- * @note POSIX version: POSIX.1-2001
- */
-bool sa_resolve_udpbind(
-	union sockaddr_max *restrict sa, const char *name, const char *service);
+	enum sa_resolve_type type);
 
 /** @} */
 

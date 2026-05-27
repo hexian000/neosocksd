@@ -920,19 +920,20 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	socks_start_transfer(loop, ctx);
 }
 
-static void
-socks_bind_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
+/* Creates a non-blocking socket of the given type, bound to INADDR_ANY:0 on
+ * the specified address family. On any error, sends a SOCKS5 failure response,
+ * releases the context via gc_unref, and returns -1. */
+static int socks_open_bound_fd(
+	struct socks_ctx *restrict ctx, const int family, const int type)
 {
-	ASSERT(ctx->state == STATE_PROCESS);
-	const int family = ctx->accepted_sa.sa.sa_family;
-	const int listen_fd = socket(family, SOCK_STREAM, 0);
-	if (listen_fd < 0) {
+	const int fd = socket(family, type, 0);
+	if (fd < 0) {
 		const int err = errno;
 		SOCKS_CTX_LOG_F(
 			ERROR, ctx, "socket: (%d) %s", err, strerror(err));
 		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 		gc_unref(&ctx->gcbase);
-		return;
+		return -1;
 	}
 	{
 		union sockaddr_max bindsa;
@@ -949,16 +950,44 @@ socks_bind_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 			bindsa.in.sin_port = 0;
 			bindlen = sizeof(struct sockaddr_in);
 		}
-		if (bind(listen_fd, &bindsa.sa, bindlen) != 0) {
+		if (bind(fd, &bindsa.sa, bindlen) != 0) {
 			const int err = errno;
 			SOCKS_CTX_LOG_F(
 				ERROR, ctx, "bind: (%d) %s", err,
 				strerror(err));
-			CLOSE_FD(listen_fd);
+			CLOSE_FD(fd);
 			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 			gc_unref(&ctx->gcbase);
-			return;
+			return -1;
 		}
+	}
+	{
+		int err = socket_set_cloexec(fd);
+		if (err != 0) {
+			CLOSE_FD(fd);
+			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+			gc_unref(&ctx->gcbase);
+			return -1;
+		}
+		err = socket_set_nonblock(fd);
+		if (err != 0) {
+			CLOSE_FD(fd);
+			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+			gc_unref(&ctx->gcbase);
+			return -1;
+		}
+	}
+	return fd;
+}
+
+static void
+socks_bind_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
+{
+	ASSERT(ctx->state == STATE_PROCESS);
+	const int family = ctx->accepted_sa.sa.sa_family;
+	const int listen_fd = socks_open_bound_fd(ctx, family, SOCK_STREAM);
+	if (listen_fd < 0) {
+		return;
 	}
 	if (listen(listen_fd, 1) != 0) {
 		const int err = errno;
@@ -968,22 +997,6 @@ socks_bind_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 		gc_unref(&ctx->gcbase);
 		return;
-	}
-	{
-		int err = socket_set_cloexec(listen_fd);
-		if (err != 0) {
-			CLOSE_FD(listen_fd);
-			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		err = socket_set_nonblock(listen_fd);
-		if (err != 0) {
-			CLOSE_FD(listen_fd);
-			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-			gc_unref(&ctx->gcbase);
-			return;
-		}
 	}
 	ctx->dialed_fd = listen_fd;
 	if (!socks5_sendrsp(ctx, SOCKS5RSP_SUCCEEDED)) {
@@ -1340,56 +1353,9 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
 	ASSERT(ctx->state == STATE_PROCESS);
 	const int family = ctx->accepted_sa.sa.sa_family;
-	const int udp_fd = socket(family, SOCK_DGRAM, 0);
+	const int udp_fd = socks_open_bound_fd(ctx, family, SOCK_DGRAM);
 	if (udp_fd < 0) {
-		const int err = errno;
-		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "socket: (%d) %s", err, strerror(err));
-		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-		gc_unref(&ctx->gcbase);
 		return;
-	}
-	{
-		union sockaddr_max bindsa;
-		socklen_t bindlen;
-		memset(&bindsa, 0, sizeof(bindsa));
-		if (family == AF_INET6) {
-			bindsa.in6.sin6_family = AF_INET6;
-			bindsa.in6.sin6_addr = in6addr_any;
-			bindsa.in6.sin6_port = 0;
-			bindlen = sizeof(struct sockaddr_in6);
-		} else {
-			bindsa.in.sin_family = AF_INET;
-			bindsa.in.sin_addr.s_addr = htonl(INADDR_ANY);
-			bindsa.in.sin_port = 0;
-			bindlen = sizeof(struct sockaddr_in);
-		}
-		if (bind(udp_fd, &bindsa.sa, bindlen) != 0) {
-			const int err = errno;
-			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "bind: (%d) %s", err,
-				strerror(err));
-			CLOSE_FD(udp_fd);
-			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-	}
-	{
-		int err = socket_set_cloexec(udp_fd);
-		if (err != 0) {
-			CLOSE_FD(udp_fd);
-			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		err = socket_set_nonblock(udp_fd);
-		if (err != 0) {
-			CLOSE_FD(udp_fd);
-			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
-			gc_unref(&ctx->gcbase);
-			return;
-		}
 	}
 	ctx->dialed_fd = udp_fd;
 	if (!socks5_sendrsp(ctx, SOCKS5RSP_SUCCEEDED)) {

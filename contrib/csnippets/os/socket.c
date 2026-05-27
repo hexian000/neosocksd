@@ -58,7 +58,7 @@ int socket_set_nonblock(const int fd)
 	return 0;
 }
 
-bool socket_set_buffer(const int fd, const int sndbuf, const int rcvbuf)
+void socket_set_buffer(const int fd, const int sndbuf, const int rcvbuf)
 {
 	if (sndbuf > 0) {
 		if (setsockopt(
@@ -78,7 +78,6 @@ bool socket_set_buffer(const int fd, const int sndbuf, const int rcvbuf)
 			       strerror(err));
 		}
 	}
-	return true;
 }
 
 void socket_set_reuseport(const int fd, const bool reuseport)
@@ -388,6 +387,8 @@ enum ipclass sa_ipclassify(const struct sockaddr *sa)
 		switch (addr & (in_addr_t)0xf0000000) {
 		case 0xe0000000: /* 224.0.0.0/4 */
 			return IPCLASS_MULTICAST;
+		default:
+			break;
 		}
 		switch (addr & (in_addr_t)0xff000000) {
 		case 0x00000000: /* 0.0.0.0/8 */
@@ -396,20 +397,28 @@ enum ipclass sa_ipclassify(const struct sockaddr *sa)
 			return IPCLASS_LOOPBACK;
 		case 0x0a000000: /* 10.0.0.0/8 */
 			return IPCLASS_SITELOCAL;
+		default:
+			break;
 		}
 		switch (addr & (in_addr_t)0xfff00000) {
 		case 0xac100000: /* 172.16.0.0/12 */
 			return IPCLASS_SITELOCAL;
+		default:
+			break;
 		}
 		switch (addr & (in_addr_t)0xffff0000) {
 		case 0xa9fe0000: /* 169.254.0.0/16 */
 			return IPCLASS_LINKLOCAL;
 		case 0xc0a80000: /* 192.168.0.0/16 */
 			return IPCLASS_SITELOCAL;
+		default:
+			break;
 		}
 		switch (addr & (in_addr_t)0xffffff00) {
 		case 0xc0000000: /* 192.0.0.0/24 */
 			return IPCLASS_SITELOCAL;
+		default:
+			break;
 		}
 	} break;
 	case AF_INET6: {
@@ -434,7 +443,7 @@ enum ipclass sa_ipclassify(const struct sockaddr *sa)
 		}
 	} break;
 	default:
-		return -1;
+		return IPCLASS_UNKNOWN;
 	}
 	return IPCLASS_GLOBAL;
 }
@@ -486,58 +495,35 @@ static bool nsresolve(
 	return ok;
 }
 
-bool sa_resolve_tcp(
+bool sa_resolve(
 	union sockaddr_max *restrict sa, const char *restrict name,
-	const char *restrict service, const int family)
+	const char *restrict service, const enum sa_resolve_type type,
+	const int family)
 {
 	const struct addrinfo hints = {
 		.ai_family = family,
-		.ai_socktype = SOCK_STREAM,
-		.ai_protocol = IPPROTO_TCP,
+		.ai_socktype =
+			(type == SA_RESOLVE_UDP) ? SOCK_DGRAM : SOCK_STREAM,
+		.ai_protocol =
+			(type == SA_RESOLVE_UDP) ? IPPROTO_UDP : IPPROTO_TCP,
 		.ai_flags = AI_ADDRCONFIG,
 	};
 	return nsresolve(sa, name, service, &hints);
 }
 
-bool sa_resolve_tcpbind(
+bool sa_resolve_bind(
 	union sockaddr_max *restrict sa, const char *restrict name,
-	const char *restrict service)
+	const char *restrict service, const enum sa_resolve_type type)
 {
 	if (name[0] == '\0') {
 		name = NULL;
 	}
-	struct addrinfo hints = {
-		.ai_family = PF_UNSPEC,
-		.ai_socktype = SOCK_STREAM,
-		.ai_protocol = IPPROTO_TCP,
-		.ai_flags = AI_ADDRCONFIG | AI_PASSIVE,
-	};
-	return nsresolve(sa, name, service, &hints);
-}
-
-bool sa_resolve_udp(
-	union sockaddr_max *restrict sa, const char *restrict name,
-	const char *restrict service, const int family)
-{
 	const struct addrinfo hints = {
-		.ai_family = family,
-		.ai_socktype = SOCK_DGRAM,
-		.ai_protocol = IPPROTO_UDP,
-		.ai_flags = AI_ADDRCONFIG,
-	};
-	return nsresolve(sa, name, service, &hints);
-}
-
-bool sa_resolve_udpbind(
-	union sockaddr_max *restrict sa, const char *name, const char *service)
-{
-	if (name[0] == '\0') {
-		name = NULL;
-	}
-	struct addrinfo hints = {
 		.ai_family = PF_UNSPEC,
-		.ai_socktype = SOCK_DGRAM,
-		.ai_protocol = IPPROTO_UDP,
+		.ai_socktype =
+			(type == SA_RESOLVE_UDP) ? SOCK_DGRAM : SOCK_STREAM,
+		.ai_protocol =
+			(type == SA_RESOLVE_UDP) ? IPPROTO_UDP : IPPROTO_TCP,
 		.ai_flags = AI_ADDRCONFIG | AI_PASSIVE,
 	};
 	return nsresolve(sa, name, service, &hints);

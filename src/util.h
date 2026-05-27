@@ -70,39 +70,6 @@ void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
 		}                                                              \
 	} while (0)
 
-#if WITH_SPLICE
-struct splice_pipe {
-	int fd[2];
-	size_t cap, len;
-};
-
-#define PIPE_MAXCACHED 8
-
-/**
- * @brief Global cache of reusable pipes.
- */
-extern struct pipe_cache {
-	size_t cap, len;
-	struct splice_pipe pipes[PIPE_MAXCACHED];
-} pipe_cache;
-
-bool pipe_new(struct splice_pipe *pipe);
-
-void pipe_close(struct splice_pipe *pipe);
-
-/**
- * @brief Shrink the splice pipe cache by closing up to `count` pipes.
- * @param count Number of pipes to discard; pass SIZE_MAX to clear all.
- */
-void pipe_shrink(size_t count);
-#endif
-
-/* Returns true if err indicates a send error on a connection that should
- * simply be closed rather than retried. */
-#define IS_STALECONN_ERROR(err)                                                \
-	((err) == ECONNRESET || (err) == EPIPE || (err) == ECONNABORTED ||     \
-	 (err) == ENOTCONN || (err) == EBADF)
-
 /** Process-level initializations. */
 void init(int argc, char *const restrict argv[]);
 

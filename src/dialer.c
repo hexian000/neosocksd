@@ -652,7 +652,7 @@ static bool send_http_req(
 	char buf[DIALER_HTTP_REQ_MAXLEN];
 #define APPEND(b, s)                                                           \
 	do {                                                                   \
-		if (b + CONSTSTRLEN(s) > buf + sizeof(buf)) {                  \
+		if ((b) + CONSTSTRLEN(s) > buf + sizeof(buf)) {                \
 			DIALER_LOG(DEBUG, d, "buffer overflow");               \
 			return false;                                          \
 		}                                                              \
@@ -1332,7 +1332,7 @@ static int dialer_recv(struct dialer *restrict d)
 		d->syserr = 0;
 		return -1;
 	}
-	socket_rcvlowat(fd, want);
+	socket_rcvlowat(fd, (int)want);
 	return 1;
 }
 

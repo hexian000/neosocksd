@@ -5,9 +5,11 @@
 
 #include "conf.h"
 #include "dialer.h"
+#include "proto/http.h"
 #include "util.h"
 
 #include "os/socket.h"
+#include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 

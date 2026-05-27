@@ -228,7 +228,6 @@ bool http_body_finish(struct http_body *restrict d)
 	case HTTP_BODY_NONE:
 		return true;
 	case HTTP_BODY_CONTENT_LENGTH:
-		return d->done;
 	case HTTP_BODY_CHUNKED:
 		return d->done;
 	case HTTP_BODY_EOF:

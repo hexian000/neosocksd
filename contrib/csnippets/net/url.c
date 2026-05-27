@@ -214,6 +214,9 @@ int url_escape_query_component(
 
 int url_build(char *restrict buf, size_t maxlen, const struct url *restrict url)
 {
+	if (buf == NULL) {
+		maxlen = 0;
+	}
 	size_t written = 0;
 
 	/* [scheme:][//[userinfo@]host]/path[?query][#fragment] */

@@ -21,6 +21,7 @@
 #include "ruleset/regex.h"
 #include "ruleset/time.h"
 #include "ruleset/zlib.h"
+#include "util.h"
 
 #include "utils/arraysize.h"
 #include "utils/debug.h"

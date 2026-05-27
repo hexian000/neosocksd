@@ -9,4 +9,5 @@
 /build
 /build-gcov
 /xbuild
+/scripts/__pycache__
 /compile_commands.json

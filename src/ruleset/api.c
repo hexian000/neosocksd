@@ -74,7 +74,8 @@ static int api_resolve(lua_State *restrict L)
 	const char *restrict name = luaL_checkstring(L, 1);
 	const struct ruleset *restrict r = aux_getruleset(L);
 	union sockaddr_max addr;
-	if (!sa_resolve_tcp(&addr, name, NULL, r->conf->resolve_pf)) {
+	if (!sa_resolve(
+		    &addr, name, NULL, SA_RESOLVE_TCP, r->conf->resolve_pf)) {
 		return 0;
 	}
 	lua_pushlightuserdata(L, &addr.sa);

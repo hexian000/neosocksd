@@ -34,49 +34,6 @@ struct test_xfer_state {
 #endif
 };
 
-#if WITH_SPLICE
-static struct {
-	int pipe_new_calls;
-	int pipe_close_calls;
-} PIPE_STUB = { 0 };
-
-/* Stubs for splice pipe utilities — transfer_test always passes use_splice=false
- * so these are never called, but the linker requires them. */
-struct pipe_cache pipe_cache = { 0 };
-
-bool pipe_new(struct splice_pipe *restrict pipe)
-{
-	PIPE_STUB.pipe_new_calls++;
-	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
-		return false;
-	}
-	pipe->cap = 65536;
-	pipe->len = 0;
-	return true;
-}
-
-void pipe_close(struct splice_pipe *restrict pipe)
-{
-	PIPE_STUB.pipe_close_calls++;
-	CLOSE_FD(pipe->fd[0]);
-	CLOSE_FD(pipe->fd[1]);
-	pipe->fd[0] = -1;
-	pipe->fd[1] = -1;
-}
-
-void pipe_shrink(const size_t count)
-{
-	(void)count;
-}
-
-static void reset_pipe_stub_state(void)
-{
-	PIPE_STUB.pipe_new_calls = 0;
-	PIPE_STUB.pipe_close_calls = 0;
-	pipe_cache = (struct pipe_cache){ 0 };
-}
-#endif
-
 static bool xfer_finished(void *data)
 {
 	const struct test_xfer_state *restrict s = data;
@@ -256,7 +213,6 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	set_nonblock(acc_fd);
 	set_nonblock(dial_fd);
 
-	reset_pipe_stub_state();
 	pipe_cache.cap = 0;
 	pipe_cache.len = 0;
 
@@ -282,8 +238,6 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	acc_fd = dial_fd = -1;
 
 	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
-	T_EXPECT_EQ(PIPE_STUB.pipe_new_calls, 2);
-	T_EXPECT_EQ(PIPE_STUB.pipe_close_calls, 2);
 
 	got = 0;
 	while (got < sizeof(up_out)) {
@@ -474,12 +428,58 @@ T_DECLARE_CASE(test_transfer_backpressure_completes)
 	CLOSE_FD(dial_peer);
 }
 
+#if WITH_SPLICE
+T_DECLARE_CASE(transfer_pipe_new_close)
+{
+	struct splice_pipe p = { .fd = { -1, -1 } };
+	T_EXPECT(pipe_new(&p));
+	T_EXPECT(p.fd[0] >= 0);
+	T_EXPECT(p.fd[1] >= 0);
+	T_EXPECT(p.cap > 0);
+
+	unsigned char buf[1] = { 0x42 };
+	T_EXPECT_EQ((ssize_t)write(p.fd[1], buf, 1), (ssize_t)1);
+	T_EXPECT_EQ((ssize_t)read(p.fd[0], buf, 1), (ssize_t)1);
+	T_EXPECT_EQ(buf[0], 0x42);
+
+	pipe_close(&p);
+	T_EXPECT_EQ(p.fd[0], -1);
+	T_EXPECT_EQ(p.fd[1], -1);
+}
+
+T_DECLARE_CASE(transfer_pipe_shrink)
+{
+	/* Start from a clean slate */
+	pipe_shrink(SIZE_MAX);
+	T_EXPECT_EQ(pipe_cache.len, (size_t)0);
+
+	/* Manually place two fresh pipes into the cache */
+	struct splice_pipe p1 = { .fd = { -1, -1 } };
+	struct splice_pipe p2 = { .fd = { -1, -1 } };
+	T_CHECK(pipe_new(&p1));
+	T_CHECK(pipe_new(&p2));
+	pipe_cache.pipes[0] = p1;
+	pipe_cache.pipes[1] = p2;
+	pipe_cache.len = 2;
+
+	pipe_shrink(1);
+	T_EXPECT_EQ(pipe_cache.len, (size_t)1);
+
+	pipe_shrink(SIZE_MAX);
+	T_EXPECT_EQ(pipe_cache.len, (size_t)0);
+}
+#endif /* WITH_SPLICE */
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
 
 	T_RUN_CASE(t, test_transfer_moves_payload);
+#if WITH_SPLICE
+	T_RUN_CASE(t, transfer_pipe_new_close);
+	T_RUN_CASE(t, transfer_pipe_shrink);
 	T_RUN_CASE(t, test_transfer_splice_releases_pipes_on_finish);
+#endif
 	T_RUN_CASE(t, test_transfer_ctx_cancel_no_callback);
 	T_RUN_CASE(t, test_transfer_dst_error_finishes);
 	T_RUN_CASE(t, test_transfer_backpressure_completes);

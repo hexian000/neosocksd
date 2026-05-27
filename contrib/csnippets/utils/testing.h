@@ -74,6 +74,37 @@
  *   T_FAILNOW and T_SKIPNOW abort the current case body immediately via
  *   longjmp back to T_RUN_CASE.  They must only be called within a test
  *   case body (i.e. under an active T_RUN_CASE).
+ *
+ * BENCH CASE DEFINITION
+ *   Use T_DECLARE_BENCH(name) to begin a static benchmark function.
+ *   The macro expands to a static function with a hidden parameter
+ *   `struct testing_bench *_b_`.  The body must run the benchmarked
+ *   operation exactly _b_->N times.
+ *
+ *     T_DECLARE_BENCH(bench_add)
+ *     {
+ *         for (uint_fast64_t i = 0; i < _b_->N; i++) {
+ *             (void)add(1, 2);
+ *         }
+ *     }
+ *
+ * RUNNING BENCHMARKS
+ *   Use T_RUN_BENCH(ctx, name) to run a benchmark.  It auto-calibrates the
+ *   iteration count by doubling N each round until at least 1 second of
+ *   wall time has elapsed, then reports the result as ns/op:
+ *
+ *     int main(void)
+ *     {
+ *         T_DECLARE_CTX(t);
+ *         T_RUN_CASE(t, test_add);
+ *         T_RUN_BENCH(t, bench_add);
+ *         return T_RESULT(t);
+ *     }
+ *
+ *   T_DECLARE_BENCH and T_RUN_BENCH are available only when measure.h is
+ *   included before testing.h (they require clock_monotonic_ns()).
+ *   Benchmarks do not affect the passed/failed/skipped counters; the
+ *   benched counter in struct testing_ctx is incremented instead.
  */
 
 #ifndef UTILS_TESTING_H
@@ -92,6 +123,7 @@ struct testing_ctx {
 	int passed;
 	int failed;
 	int skipped;
+	int benched;
 	const char *current;
 	volatile bool case_failed : 1;
 	volatile bool case_skipped : 1;
@@ -334,5 +366,57 @@ struct testing_ctx {
 				(size_t)(size_));                              \
 		}                                                              \
 	} while (0)
+
+/* -------------------------------------------------------------------------
+ * Benchmark support - available only when measure.h is included first,
+ * since T_RUN_BENCH requires clock_monotonic_ns().
+ * ---------------------------------------------------------------------- */
+
+#ifdef UTILS_MEASURE_H
+
+/* Benchmark context.  Passed via implicit _b_ inside T_DECLARE_BENCH. */
+struct testing_bench {
+	uint_fast64_t N;
+};
+
+/*
+ * T_DECLARE_BENCH(name)
+ *   Begins the definition of a static benchmark function named `name`.
+ *   Expands to: static void _benchcase_name_(struct testing_bench *_b_)
+ *   The body must run the benchmarked operation exactly _b_->N times.
+ */
+#define T_DECLARE_BENCH(name_)                                                 \
+	static void _benchcase_##name_##_(struct testing_bench *_b_)
+
+/*
+ * T_RUN_BENCH(ctx, name)
+ *   Runs benchmark `name`, auto-calibrating by doubling N each round until
+ *   at least 1 second of wall time has elapsed.  Reports the result as
+ *   ns/op and increments ctx.benched.  Does not affect passed/failed/skipped.
+ */
+#define T_RUN_BENCH(ctx_, name_)                                               \
+	do {                                                                   \
+		(void)fprintf((ctx_).out, "=== RUN   %s\n", #name_);           \
+		(void)fflush((ctx_).out);                                      \
+		struct testing_bench _b_ = { 0 };                              \
+		const int_least64_t _bstart_ = clock_monotonic_ns();           \
+		int_least64_t _belapsed_;                                      \
+		uint_fast64_t _bN_ = 1;                                        \
+		do {                                                           \
+			_b_.N = _bN_;                                          \
+			_benchcase_##name_##_(&_b_);                           \
+			_bN_ <<= 1u;                                           \
+			_belapsed_ = clock_monotonic_ns() - _bstart_;          \
+		} while (_bN_ && _belapsed_ < 1000000000 /* 1s */);            \
+		const double _bnsop_ =                                         \
+			(double)_belapsed_ / (double)(_bN_ - 1);               \
+		(void)fprintf(                                                 \
+			(ctx_).out, "--- BENCH %s\t%ju\t%.2f ns/op\n", #name_, \
+			(uintmax_t)(_bN_ - 1), _bnsop_);                       \
+		(void)fflush((ctx_).out);                                      \
+		(ctx_).benched++;                                              \
+	} while (0)
+
+#endif /* UTILS_MEASURE_H */
 
 #endif /* UTILS_TESTING_H */

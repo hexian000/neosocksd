@@ -465,21 +465,26 @@ static bool conf_loadfile(
 	}
 
 	/* Pass 2: copy Lua-provided strings into block; nil fields unchanged */
-	char *pos = block;
-	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
-		if (f->type != CONF_STRING) {
-			continue;
+	if (total > 0) {
+		char *pos = block;
+		for (const struct metaconfig *f = conf_fields; f->key != NULL;
+		     f++) {
+			if (f->type != CONF_STRING) {
+				continue;
+			}
+			const char **fptr =
+				(const char **)((char *)conf + f->offset);
+			lua_getfield(L, -1, f->key);
+			if (!lua_isnil(L, -1)) {
+				size_t len;
+				const char *restrict s =
+					lua_tolstring(L, -1, &len);
+				memcpy(pos, s, len + 1);
+				*fptr = pos;
+				pos += len + 1;
+			}
+			lua_pop(L, 1);
 		}
-		const char **fptr = (const char **)((char *)conf + f->offset);
-		lua_getfield(L, -1, f->key);
-		if (!lua_isnil(L, -1)) {
-			size_t len;
-			const char *restrict s = lua_tolstring(L, -1, &len);
-			memcpy(pos, s, len + 1);
-			*fptr = pos;
-			pos += len + 1;
-		}
-		lua_pop(L, 1);
 	}
 
 	lua_close(L);

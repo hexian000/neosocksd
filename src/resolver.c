@@ -28,12 +28,12 @@
 #include "utils/slog.h"
 
 #if WITH_CARES
+#include <sys/select.h>
 #include <ares.h>
 #endif
 #include <ev.h>
 
 #if WITH_CARES
-#include <sys/select.h>
 #include <sys/time.h>
 #endif
 #include <netinet/in.h>
@@ -302,16 +302,17 @@ static void sock_state_cb(
 	/* Need to start/modify monitoring */
 	if (node == NULL) {
 		/* No suitable node exists, create a new one */
-		node = malloc(sizeof(struct io_node));
-		if (node == NULL) {
+		struct io_node *const new_node = malloc(sizeof(struct io_node));
+		if (new_node == NULL) {
 			LOGOOM();
 			return;
 		}
-		ev_io_init(&node->watcher, socket_cb, fd, events);
-		node->watcher.data = r;
+		ev_io_init(&new_node->watcher, socket_cb, fd, events);
+		new_node->watcher.data = r;
 		/* Insert at head of list */
-		node->next = r->sockets.next;
-		r->sockets.next = node;
+		new_node->next = r->sockets.next;
+		r->sockets.next = new_node;
+		node = new_node;
 	} else {
 		/* Modify existing watcher */
 		ev_io_stop(r->loop, &node->watcher);
@@ -573,7 +574,8 @@ void resolve_start(struct resolver *restrict r, struct resolve_query *restrict q
 #endif /* WITH_CARES */
 
 	/* Fall back to synchronous resolution */
-	q->ok = sa_resolve_tcp(&q->addr, q->name, q->service, q->family);
+	q->ok = sa_resolve(
+		&q->addr, q->name, q->service, SA_RESOLVE_TCP, q->family);
 	ev_feed_event(r->loop, &q->w_finish, EV_CUSTOM);
 }
 

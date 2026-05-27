@@ -159,8 +159,10 @@ static struct config make_conf(void)
 		.timeout = 1.0,
 		.tcp_nodelay = true,
 		.tcp_keepalive = true,
+#if WITH_RULESET
 		.traceback = false,
 		.memlimit = 0,
+#endif
 	};
 }
 

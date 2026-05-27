@@ -423,7 +423,7 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 
 static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
 {
-	union sockaddr_max dest;
+	union sockaddr_max dest = { 0 };
 	socklen_t len = sizeof(dest);
 	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
 		const int err = errno;

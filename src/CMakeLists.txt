@@ -321,9 +321,11 @@ if(WITH_LUA)
              proto/codec.c util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         WITH_LUA WITH_CARES)
-    add_unit_test(ruleset_test
-        SRCS ruleset_test.c ruleset.c ruleset/base.c ruleset/cfunc.c
-        WITH_LUA)
+    if(WITH_RULESET)
+        add_unit_test(ruleset_test
+            SRCS ruleset_test.c ruleset.c ruleset/base.c ruleset/cfunc.c
+            WITH_LUA)
+    endif()
 endif()
 
 # neosocksd binary early-exit integration tests.

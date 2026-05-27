@@ -99,7 +99,7 @@ struct stream *io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
 static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct stream *restrict s = p;
-	struct vbuffer *restrict *restrict pvbuf = s->data;
+	struct vbuffer *restrict *restrict pvbuf = (struct vbuffer **)s->data;
 	const size_t n = *len;
 	const size_t expected = VBUF_LEN(*pvbuf) + n;
 	VBUF_APPEND(*pvbuf, buf, n);
@@ -121,14 +121,14 @@ struct stream *io_heapwriter(struct vbuffer **restrict pvbuf)
 	if (s == NULL) {
 		return NULL;
 	}
-	*s = (struct stream){ &vftable_heapwriter, pvbuf };
+	*s = (struct stream){ &vftable_heapwriter, (void *)pvbuf };
 	return s;
 }
 
 int io_heapprintf(struct stream *restrict s, const char *restrict format, ...)
 {
 	assert(s->vftable == &vftable_heapwriter);
-	struct vbuffer *restrict *restrict pvbuf = s->data;
+	struct vbuffer *restrict *restrict pvbuf = (struct vbuffer **)s->data;
 	va_list args;
 	va_start(args, format);
 	VBUF_VAPPENDF(*pvbuf, format, args);
@@ -275,7 +275,8 @@ static int buf_write(void *p, const void *restrict buf, size_t *restrict len)
 	}
 	memcpy(b->buf + b->len, src, srclen);
 	b->len += srclen;
-	*len = (nwritten += srclen);
+	nwritten += srclen;
+	*len = nwritten;
 	return 0;
 }
 

@@ -9,6 +9,7 @@
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
+#include "transfer.h"
 #include "util.h"
 
 #include "io/io.h"
@@ -285,7 +286,7 @@ static void server_stats_stateful(
 		"Accept Rate         : %.1f/s (%+.1f/s)\n"
 		"Request Rate        : %.1f/s (API%+.1f/s)\n"
 		"Reject Rate         : ruleset=%.1f/s, timeout=%.1f/s, upstream=%.1f/s\n"
-		"Bandwidth           : Up %s/s, Down %s/s\n"
+		"Throughput          : Up %s/s, Down %s/s\n"
 		"Server Load         : %s (last %s)\n",
 		accept_rate, reject_rate, request_rate, api_request_rate,
 		reject_ruleset_rate, reject_timeout_rate, reject_upstream_rate,
@@ -306,7 +307,6 @@ static void append_server_stats(
 	struct stream *restrict w, const struct server *restrict api,
 	const int_fast64_t uptime, const double dt, const bool runtime)
 {
-	UNUSED(runtime);
 	const struct server_stats *restrict apistats = &api->stats;
 	const struct server *restrict s = api->data;
 	struct server_stats agg;
@@ -383,6 +383,8 @@ static void append_server_stats(
 		ruleset_vmstats(ruleset, &vmstats);
 		append_vmstats(w, &vmstats, s->conf);
 	}
+#else
+	UNUSED(runtime);
 #endif
 
 	if (agg.num_connects > 0) {
@@ -947,82 +949,88 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 
+/* name: metric name suffix after "neosocksd_"; type: "gauge"/"counter"/etc.;
+ * help: description; fmt: printf format for the value(s); ...: value(s). */
+#define APPEND_METRIC(name, type, help, fmt, ...)                              \
+	(void)io_bufprintf(                                                    \
+		w,                                                             \
+		"# HELP neosocksd_%s %s\n"                                     \
+		"# TYPE neosocksd_%s %s\n"                                     \
+		"neosocksd_%s " fmt "\n",                                      \
+		name, help, name, type, name, __VA_ARGS__)
+
 	/* Gauges */
-	(void)io_bufprintf(
-		w,
-		"# HELP neosocksd_sessions_active Number of active proxy sessions.\n"
-		"# TYPE neosocksd_sessions_active gauge\n"
-		"neosocksd_sessions_active %zu\n"
-		"# HELP neosocksd_sessions_peak Peak concurrent proxy sessions since start.\n"
-		"# TYPE neosocksd_sessions_peak gauge\n"
-		"neosocksd_sessions_peak %zu\n"
-		"# HELP neosocksd_halfopen_connections Connections in handshake/ruleset/dial phase.\n"
-		"# TYPE neosocksd_halfopen_connections gauge\n"
-		"neosocksd_halfopen_connections %zu\n"
-		"# HELP neosocksd_uptime_seconds Seconds since server start.\n"
-		"# TYPE neosocksd_uptime_seconds gauge\n"
-		"neosocksd_uptime_seconds %g\n",
-		agg.num_sessions, agg.num_sessions_peak, agg.num_halfopen,
+	APPEND_METRIC(
+		"sessions_active", "gauge", "Number of active proxy sessions.",
+		"%zu", agg.num_sessions);
+	APPEND_METRIC(
+		"sessions_peak", "gauge",
+		"Peak concurrent proxy sessions since start.", "%zu",
+		agg.num_sessions_peak);
+	APPEND_METRIC(
+		"halfopen_connections", "gauge",
+		"Connections in handshake/ruleset/dial phase.", "%zu",
+		agg.num_halfopen);
+	APPEND_METRIC(
+		"uptime_seconds", "gauge", "Seconds since server start.", "%g",
 		uptime);
 
 	/* Counters */
 	if (have_cpu) {
-		(void)io_bufprintf(
-			w,
-			"# HELP neosocksd_process_cpu_seconds_total Total CPU time consumed by the process.\n"
-			"# TYPE neosocksd_process_cpu_seconds_total counter\n"
-			"neosocksd_process_cpu_seconds_total %g\n",
+		APPEND_METRIC(
+			"process_cpu_seconds_total", "counter",
+			"Total CPU time consumed by the process.", "%g",
 			(double)TIMESPEC_NANO(cpu_ts) * 1e-9);
 	}
-	(void)io_bufprintf(
-		w,
-		"# HELP neosocksd_connections_accepted_total Connections accepted by the listener.\n"
-		"# TYPE neosocksd_connections_accepted_total counter\n"
-		"neosocksd_connections_accepted_total %ju\n"
-		"# HELP neosocksd_connections_served_total Connections upgraded to proxy sessions.\n"
-		"# TYPE neosocksd_connections_served_total counter\n"
-		"neosocksd_connections_served_total %ju\n"
-		"# HELP neosocksd_requests_total Total proxy requests processed.\n"
-		"# TYPE neosocksd_requests_total counter\n"
-		"neosocksd_requests_total %ju\n"
-		"# HELP neosocksd_requests_success_total Proxy requests completed successfully.\n"
-		"# TYPE neosocksd_requests_success_total counter\n"
-		"neosocksd_requests_success_total %ju\n"
-		"# HELP neosocksd_rejects_ruleset_total Connections rejected by the ruleset.\n"
-		"# TYPE neosocksd_rejects_ruleset_total counter\n"
-		"neosocksd_rejects_ruleset_total %ju\n"
-		"# HELP neosocksd_rejects_timeout_total Connections timed out before becoming active.\n"
-		"# TYPE neosocksd_rejects_timeout_total counter\n"
-		"neosocksd_rejects_timeout_total %ju\n"
-		"# HELP neosocksd_rejects_upstream_total Connections failed during upstream dial.\n"
-		"# TYPE neosocksd_rejects_upstream_total counter\n"
-		"neosocksd_rejects_upstream_total %ju\n"
-		"# HELP neosocksd_dns_queries_total DNS queries issued.\n"
-		"# TYPE neosocksd_dns_queries_total counter\n"
-		"neosocksd_dns_queries_total %ju\n"
-		"# HELP neosocksd_dns_success_total DNS queries resolved successfully.\n"
-		"# TYPE neosocksd_dns_success_total counter\n"
-		"neosocksd_dns_success_total %ju\n"
-		"# HELP neosocksd_api_requests_total API requests received.\n"
-		"# TYPE neosocksd_api_requests_total counter\n"
-		"neosocksd_api_requests_total %ju\n"
-		"# HELP neosocksd_api_requests_success_total API requests completed successfully.\n"
-		"# TYPE neosocksd_api_requests_success_total counter\n"
-		"neosocksd_api_requests_success_total %ju\n",
-		agg.num_accept, agg.num_serve, agg.num_request, agg.num_success,
-		agg.num_reject_ruleset, agg.num_reject_timeout,
-		agg.num_reject_upstream, resolv_stats->num_query,
-		resolv_stats->num_success, apistats->num_api_request,
+	APPEND_METRIC(
+		"connections_accepted_total", "counter",
+		"Connections accepted by the listener.", "%ju", agg.num_accept);
+	APPEND_METRIC(
+		"connections_served_total", "counter",
+		"Connections upgraded to proxy sessions.", "%ju",
+		agg.num_serve);
+	APPEND_METRIC(
+		"requests_total", "counter", "Total proxy requests processed.",
+		"%ju", agg.num_request);
+	APPEND_METRIC(
+		"requests_success_total", "counter",
+		"Proxy requests completed successfully.", "%ju",
+		agg.num_success);
+	APPEND_METRIC(
+		"rejects_ruleset_total", "counter",
+		"Connections rejected by the ruleset.", "%ju",
+		agg.num_reject_ruleset);
+	APPEND_METRIC(
+		"rejects_timeout_total", "counter",
+		"Connections timed out before becoming active.", "%ju",
+		agg.num_reject_timeout);
+	APPEND_METRIC(
+		"rejects_upstream_total", "counter",
+		"Connections failed during upstream dial.", "%ju",
+		agg.num_reject_upstream);
+	APPEND_METRIC(
+		"dns_queries_total", "counter", "DNS queries issued.", "%ju",
+		resolv_stats->num_query);
+	APPEND_METRIC(
+		"dns_success_total", "counter",
+		"DNS queries resolved successfully.", "%ju",
+		resolv_stats->num_success);
+	APPEND_METRIC(
+		"api_requests_total", "counter", "API requests received.",
+		"%ju", apistats->num_api_request);
+	APPEND_METRIC(
+		"api_requests_success_total", "counter",
+		"API requests completed successfully.", "%ju",
 		apistats->num_api_success);
-	(void)io_bufprintf(
-		w,
-		"# HELP neosocksd_bytes_down_total Total bytes transferred from upstream to client.\n"
-		"# TYPE neosocksd_bytes_down_total counter\n"
-		"neosocksd_bytes_down_total %ju\n"
-		"# HELP neosocksd_bytes_up_total Total bytes transferred from client to upstream.\n"
-		"# TYPE neosocksd_bytes_up_total counter\n"
-		"neosocksd_bytes_up_total %ju\n",
-		agg.byt_down, agg.byt_up);
+	APPEND_METRIC(
+		"bytes_down_total", "counter",
+		"Total bytes transferred from upstream to client.", "%ju",
+		agg.byt_down);
+	APPEND_METRIC(
+		"bytes_up_total", "counter",
+		"Total bytes transferred from client to upstream.", "%ju",
+		agg.byt_up);
+	/* neosocksd_bytes_total: labeled multi-sample family */
 	(void)io_bufprintf(
 		w,
 		"# HELP neosocksd_bytes_total Total bytes transferred, by direction and traffic state.\n"
@@ -1037,15 +1045,15 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		agg.byt_client_recv, agg.byt_client_send, agg.byt_dial_recv,
 		agg.byt_dial_send);
 #if WITH_RULESET
+	APPEND_METRIC(
+		"api_client_requests_total", "counter",
+		"API client requests issued by the ruleset.", "%ju",
+		agg.num_api_client_request);
 	(void)io_bufprintf(
 		w,
-		"# HELP neosocksd_api_client_requests_total API client requests issued by the ruleset.\n"
-		"# TYPE neosocksd_api_client_requests_total counter\n"
-		"neosocksd_api_client_requests_total %ju\n"
 		"neosocksd_bytes_total{direction=\"recv\",state=\"api_client\"} %ju\n"
 		"neosocksd_bytes_total{direction=\"send\",state=\"api_client\"} %ju\n",
-		agg.num_api_client_request, agg.api_client_byt_recv,
-		agg.api_client_byt_send);
+		agg.api_client_byt_recv, agg.api_client_byt_send);
 #endif
 
 	/* Connect latency summary */
@@ -1072,22 +1080,21 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		if (ruleset != NULL) {
 			ruleset_vmstats(ruleset, &vmstats);
 		}
-		(void)io_bufprintf(
-			w,
-			"# HELP neosocksd_lua_memory_bytes Bytes allocated by the Lua VM.\n"
-			"# TYPE neosocksd_lua_memory_bytes gauge\n"
-			"neosocksd_lua_memory_bytes %zu\n"
-			"# HELP neosocksd_lua_objects Number of live Lua objects.\n"
-			"# TYPE neosocksd_lua_objects gauge\n"
-			"neosocksd_lua_objects %zu\n"
-			"# HELP neosocksd_lua_threads_active Lua coroutines currently dispatched.\n"
-			"# TYPE neosocksd_lua_threads_active gauge\n"
-			"neosocksd_lua_threads_active %zu\n"
-			"# HELP neosocksd_lua_threads_peak Peak concurrent dispatched Lua coroutines since start.\n"
-			"# TYPE neosocksd_lua_threads_peak gauge\n"
-			"neosocksd_lua_threads_peak %zu\n",
-			vmstats.byt_allocated, vmstats.num_object,
-			vmstats.num_thread_active, vmstats.num_thread_peak);
+		APPEND_METRIC(
+			"lua_memory_bytes", "gauge",
+			"Bytes allocated by the Lua VM.", "%zu",
+			vmstats.byt_allocated);
+		APPEND_METRIC(
+			"lua_objects", "gauge", "Number of live Lua objects.",
+			"%zu", vmstats.num_object);
+		APPEND_METRIC(
+			"lua_threads_active", "gauge",
+			"Lua coroutines currently dispatched.", "%zu",
+			vmstats.num_thread_active);
+		APPEND_METRIC(
+			"lua_threads_peak", "gauge",
+			"Peak concurrent dispatched Lua coroutines since start.",
+			"%zu", vmstats.num_thread_peak);
 	}
 	{
 		struct ruleset *restrict ruleset = s->ruleset;
@@ -1110,6 +1117,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		}
 	}
 #endif
+#undef APPEND_METRIC
 
 	const int err = stream_close(w);
 	if (err != 0) {

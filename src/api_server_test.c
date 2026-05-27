@@ -875,6 +875,60 @@ T_DECLARE_CASE(not_found_404)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	core.stats.num_connects = 3;
+	core.stats.connect_ns[0] = 100000000; /* 100 ms */
+	core.stats.connect_ns[1] = 200000000; /* 200 ms */
+	core.stats.connect_ns[2] = 300000000; /* 300 ms */
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET /stats HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Connect Latency"));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "P50="));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(stats_nobanner_option_suppresses_banner)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET /stats?nobanner=1 HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Server Time"));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "neosocksd "));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 #if WITH_RULESET
 T_DECLARE_CASE(stats_post_with_ruleset_q)
 {
@@ -1190,6 +1244,8 @@ int main(void)
 	T_RUN_CASE(t, stats_bad_query_400);
 	T_RUN_CASE(t, stats_deflate_response_header);
 	T_RUN_CASE(t, not_found_404);
+	T_RUN_CASE(t, stats_connect_latency_shows_percentiles);
+	T_RUN_CASE(t, stats_nobanner_option_suppresses_banner);
 
 #if WITH_RULESET
 	T_RUN_CASE(t, stats_post_with_ruleset_q);

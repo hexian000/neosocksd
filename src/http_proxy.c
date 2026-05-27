@@ -270,15 +270,13 @@ static bool parse_req_target(
 	return true;
 }
 
-static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
+/* Transitions ctx to STATE_BIDIRECTIONAL and starts bidirectional transfer
+ * between ctx->accepted_fd and ctx->dialed_fd. Handles session counters and
+ * always calls gc_unref before returning. The caller must stop any active
+ * watchers and release dialreq / cbuf before calling this. */
+static void
+http_ctx_start_transfer(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	/* cleanup before state change */
-	ev_io_stop(loop, &ctx->w_recv);
-	ev_io_stop(loop, &ctx->w_send);
-	dialreq_free(ctx->dialreq);
-	ctx->dialreq = NULL;
-	VBUF_FREE(ctx->conn.cbuf);
-
 	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
 	ctx->accepted_fd = ctx->dialed_fd = -1;
 	/*
@@ -333,6 +331,17 @@ static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	gc_unref(&ctx->gcbase);
 }
 
+static void http_ctx_hijack(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	/* cleanup before state change */
+	ev_io_stop(loop, &ctx->w_recv);
+	ev_io_stop(loop, &ctx->w_send);
+	dialreq_free(ctx->dialreq);
+	ctx->dialreq = NULL;
+	VBUF_FREE(ctx->conn.cbuf);
+	http_ctx_start_transfer(loop, ctx);
+}
+
 static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
@@ -357,57 +366,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		dialreq_free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		VBUF_FREE(ctx->conn.cbuf);
-		{
-			const int acc_fd = ctx->accepted_fd,
-				  dial_fd = ctx->dialed_fd;
-			ctx->accepted_fd = ctx->dialed_fd = -1;
-			ctx->state = STATE_BIDIRECTIONAL;
-			ev_timer_stop(loop, &ctx->w_timeout);
-			struct server_stats *restrict stats = &ctx->s->stats;
-			stats->num_halfopen--;
-			HTTP_CTX_LOG_F(
-				DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd,
-				dial_fd);
-#if WITH_THREADS
-			const size_t cur = atomic_fetch_add_explicit(
-						   &ctx->s->num_sessions, 1,
-						   memory_order_relaxed) +
-					   1;
-#else
-			const size_t cur = ++ctx->s->num_sessions;
-#endif
-			if (!transfer_serve(
-				    ctx->s->xfer, acc_fd, dial_fd,
-				    &(struct transfer_opts){
-					    .byt_up = &ctx->s->byt_up,
-					    .byt_down = &ctx->s->byt_down,
-#if WITH_SPLICE
-					    .use_splice = ctx->s->conf->pipe,
-#endif
-					    .num_sessions =
-						    &ctx->s->num_sessions,
-				    })) {
-#if WITH_THREADS
-				atomic_fetch_sub_explicit(
-					&ctx->s->num_sessions, 1,
-					memory_order_relaxed);
-#else
-				ctx->s->num_sessions--;
-#endif
-				LOGOOM();
-				CLOSE_FD(acc_fd);
-				CLOSE_FD(dial_fd);
-				gc_unref(&ctx->gcbase);
-				return;
-			}
-			if (cur > stats->num_sessions_peak) {
-				stats->num_sessions_peak = cur;
-			}
-			stats->num_success++;
-			HTTP_CTX_LOG_F(
-				DEBUG, ctx, "ready, %zu active sessions", cur);
-			gc_unref(&ctx->gcbase);
-		}
+		http_ctx_start_transfer(loop, ctx);
 		return;
 	}
 	/* Connection: close */
@@ -765,6 +724,112 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	}
 }
 
+/* Handles proxy_pass-specific header processing for parse_header().
+ * Called when the request is not CONNECT and all hop-by-hop headers have
+ * already been handled by parse_header(). Builds the forwarded request in
+ * ctx->conn.wbuf and updates relevant header fields. */
+static bool parse_header_proxy_pass(
+	struct http_ctx *restrict ctx, struct http_conn *restrict p,
+	const char *key, char *value)
+{
+	/* skip headers listed in Connection (dynamic hop-by-hop) */
+	{
+		const size_t keylen = strlen(key);
+		const char *tok;
+		size_t toklen;
+		for (const char *next = parsehdr_connection_token(
+			     p->hdr.connection, &tok, &toklen);
+		     tok != NULL;
+		     next = parsehdr_connection_token(next, &tok, &toklen)) {
+			if (toklen == keylen &&
+			    strncasecmp(tok, key, keylen) == 0) {
+				return true;
+			}
+		}
+	}
+	if (p->wbuf.len == 0) {
+		build_pass_req(ctx);
+	}
+
+	if (strcasecmp(key, "Host") == 0) {
+		p->hdr.host = value;
+		BUF_APPENDSTR(p->wbuf, "Host: ");
+		BUF_APPEND(p->wbuf, value, strlen(value));
+		BUF_APPENDSTR(p->wbuf, "\r\n");
+		return true;
+	}
+	if (strcasecmp(key, "Authorization") == 0) {
+		char *sep = strchr(value, ' ');
+		if (sep == NULL) {
+			return false;
+		}
+		*sep = '\0';
+		p->hdr.authorization.type = value;
+		p->hdr.authorization.credentials = sep + 1;
+		/* reconstruct for forwarding */
+		BUF_APPENDSTR(p->wbuf, "Authorization: ");
+		BUF_APPEND(
+			p->wbuf, p->hdr.authorization.type,
+			strlen(p->hdr.authorization.type));
+		BUF_APPENDSTR(p->wbuf, " ");
+		BUF_APPEND(
+			p->wbuf, p->hdr.authorization.credentials,
+			strlen(p->hdr.authorization.credentials));
+		BUF_APPENDSTR(p->wbuf, "\r\n");
+		return true;
+	}
+	if (strcasecmp(key, "Content-Length") == 0) {
+		/* RFC 9112 §6.3: reject duplicate CL or CL+TE:chunked conflict */
+		if (ctx->req_content_length_known ||
+		    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
+			return false;
+		}
+		/* require bare decimal digits; no sign, prefix, or list */
+		if ((unsigned char)value[0] < '0' ||
+		    (unsigned char)value[0] > '9') {
+			return false;
+		}
+		char *end;
+		const uintmax_t cl = strtoumax(value, &end, 10);
+		while (*end == ' ' || *end == '\t') {
+			end++;
+		}
+		if (*end != '\0' || cl > (uintmax_t)SIZE_MAX) {
+			return false;
+		}
+		ctx->req_content_length = (size_t)cl;
+		ctx->req_content_length_known = true;
+		return true;
+	}
+	if (strcasecmp(key, "Content-Type") == 0) {
+		p->hdr.content.type = value;
+		BUF_APPENDSTR(p->wbuf, "Content-Type: ");
+		BUF_APPEND(p->wbuf, value, strlen(value));
+		BUF_APPENDSTR(p->wbuf, "\r\n");
+		return true;
+	}
+	if (strcasecmp(key, "Expect") == 0) {
+		/* Expect: 100-continue means the client has a request body */
+		if (strcasecmp(value, "100-continue") == 0) {
+			p->expect_continue = true;
+		}
+		BUF_APPENDSTR(p->wbuf, "Expect: ");
+		BUF_APPEND(p->wbuf, value, strlen(value));
+		BUF_APPENDSTR(p->wbuf, "\r\n");
+		return true;
+	}
+	/* forward all other end-to-end headers */
+	{
+		const size_t klen = strlen(key);
+		const size_t vlen = strlen(value);
+		BUF_APPEND(p->wbuf, key, klen);
+		BUF_APPENDSTR(p->wbuf, ": ");
+		BUF_APPEND(p->wbuf, value, vlen);
+		BUF_APPENDSTR(p->wbuf, "\r\n");
+	}
+	return true;
+}
+
 static bool parse_header(void *data, const char *key, char *value)
 {
 	struct http_ctx *restrict ctx = (struct http_ctx *)data;
@@ -864,104 +929,7 @@ static bool parse_header(void *data, const char *key, char *value)
 		}
 		return true;
 	}
-
-	/* proxy_pass: build forwarded request in wbuf */
-	/* skip headers listed in Connection (dynamic hop-by-hop) */
-	{
-		const size_t keylen = strlen(key);
-		const char *tok;
-		size_t toklen;
-		for (const char *next = parsehdr_connection_token(
-			     p->hdr.connection, &tok, &toklen);
-		     tok != NULL;
-		     next = parsehdr_connection_token(next, &tok, &toklen)) {
-			if (toklen == keylen &&
-			    strncasecmp(tok, key, keylen) == 0) {
-				return true;
-			}
-		}
-	}
-	if (p->wbuf.len == 0) {
-		build_pass_req(ctx);
-	}
-
-	if (strcasecmp(key, "Host") == 0) {
-		p->hdr.host = value;
-		BUF_APPENDSTR(p->wbuf, "Host: ");
-		BUF_APPEND(p->wbuf, value, strlen(value));
-		BUF_APPENDSTR(p->wbuf, "\r\n");
-		return true;
-	}
-	if (strcasecmp(key, "Authorization") == 0) {
-		char *sep = strchr(value, ' ');
-		if (sep == NULL) {
-			return false;
-		}
-		*sep = '\0';
-		p->hdr.authorization.type = value;
-		p->hdr.authorization.credentials = sep + 1;
-		/* reconstruct for forwarding */
-		BUF_APPENDSTR(p->wbuf, "Authorization: ");
-		BUF_APPEND(
-			p->wbuf, p->hdr.authorization.type,
-			strlen(p->hdr.authorization.type));
-		BUF_APPENDSTR(p->wbuf, " ");
-		BUF_APPEND(
-			p->wbuf, p->hdr.authorization.credentials,
-			strlen(p->hdr.authorization.credentials));
-		BUF_APPENDSTR(p->wbuf, "\r\n");
-		return true;
-	}
-	if (strcasecmp(key, "Content-Length") == 0) {
-		/* RFC 9112 §6.3: reject duplicate CL or CL+TE:chunked conflict */
-		if (ctx->req_content_length_known ||
-		    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
-			return false;
-		}
-		/* require bare decimal digits; no sign, prefix, or list */
-		if ((unsigned char)value[0] < '0' ||
-		    (unsigned char)value[0] > '9') {
-			return false;
-		}
-		char *end;
-		const uintmax_t cl = strtoumax(value, &end, 10);
-		while (*end == ' ' || *end == '\t') {
-			end++;
-		}
-		if (*end != '\0' || cl > (uintmax_t)SIZE_MAX) {
-			return false;
-		}
-		ctx->req_content_length = (size_t)cl;
-		ctx->req_content_length_known = true;
-		return true;
-	}
-	if (strcasecmp(key, "Content-Type") == 0) {
-		p->hdr.content.type = value;
-		BUF_APPENDSTR(p->wbuf, "Content-Type: ");
-		BUF_APPEND(p->wbuf, value, strlen(value));
-		BUF_APPENDSTR(p->wbuf, "\r\n");
-		return true;
-	}
-	if (strcasecmp(key, "Expect") == 0) {
-		/* Expect: 100-continue means the client has a request body */
-		if (strcasecmp(value, "100-continue") == 0) {
-			p->expect_continue = true;
-		}
-		BUF_APPENDSTR(p->wbuf, "Expect: ");
-		BUF_APPEND(p->wbuf, value, strlen(value));
-		BUF_APPENDSTR(p->wbuf, "\r\n");
-		return true;
-	}
-	/* forward all other end-to-end headers */
-	{
-		const size_t klen = strlen(key);
-		const size_t vlen = strlen(value);
-		BUF_APPEND(p->wbuf, key, klen);
-		BUF_APPENDSTR(p->wbuf, ": ");
-		BUF_APPEND(p->wbuf, value, vlen);
-		BUF_APPENDSTR(p->wbuf, "\r\n");
-	}
-	return true;
+	return parse_header_proxy_pass(ctx, p, key, value);
 }
 
 static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
