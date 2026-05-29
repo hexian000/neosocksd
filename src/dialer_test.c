@@ -738,7 +738,7 @@ static uint_least16_t start_proxy(
 	socklen_t len = sizeof(bound_addr);
 
 	T_CHECK(server_init(
-		s, loop, conf, NULL, transfer_new(loop, 1), NULL, NULL));
+		s, loop, conf, NULL, transfer_create(loop, 1), NULL, NULL));
 	T_CHECK(getsockname(
 			s->listeners[0].w_accept.fd,
 			(struct sockaddr *)&bound_addr, &len) == 0);
@@ -749,7 +749,7 @@ static void stop_proxy(struct server *restrict s)
 {
 	server_stop(s);
 	gc_finalizeall();
-	transfer_free(s->xfer);
+	transfer_join(s->xfer);
 	s->xfer = NULL;
 }
 

@@ -176,7 +176,7 @@ static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
 	s->resolver = NULL;
-	s->xfer = transfer_new(s->loop, 1);
+	s->xfer = transfer_create(s->loop, 1);
 	s->ruleset = G.ruleset;
 	s->basereq = NULL;
 }
@@ -361,7 +361,7 @@ struct stub_xfer_ctx {
 };
 
 struct transfer *
-transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
+transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
 	UNUSED(loop);
 	UNUSED(nworkers);
@@ -369,7 +369,7 @@ transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
 	return (struct transfer *)&token;
 }
 
-void transfer_free(struct transfer *restrict xfer)
+void transfer_join(struct transfer *restrict xfer)
 {
 	UNUSED(xfer);
 }

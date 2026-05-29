@@ -132,7 +132,7 @@ struct transfer_ctx {
 #if WITH_THREADS
 /*
  * One worker thread owns one ev_loop, one dispatcher, and its own active_list.
- * Workers are created by transfer_new() and destroyed by transfer_free().
+ * Workers are created by transfer_create() and destroyed by transfer_free().
  */
 struct xfer_worker {
 	struct transfer *xfer;
@@ -142,9 +142,12 @@ struct xfer_worker {
 	struct ev_loop *loop;
 	/* main -> worker: new task enqueued */
 	ev_async w_invoke;
-	bool stop;
+	atomic_bool stop;
 	/* worker thread only; no locking needed */
 	struct transfer_ctx *active_list;
+#if WITH_SPLICE && WITH_ALLOC_CACHE
+	struct pipe_cache cache;
+#endif
 };
 #endif /* WITH_THREADS */
 
@@ -160,6 +163,9 @@ struct transfer {
 	struct ev_loop *loop;
 	/* loop thread only; no locking needed */
 	struct transfer_ctx *active_list;
+#if WITH_SPLICE && WITH_ALLOC_CACHE
+	struct pipe_cache cache;
+#endif
 #endif
 };
 
@@ -225,9 +231,6 @@ static void update_stats(
 }
 
 #if WITH_SPLICE
-#if WITH_ALLOC_CACHE
-struct pipe_cache pipe_cache = { .cap = PIPE_MAXCACHED, .len = 0 };
-#endif
 
 void pipe_close(struct splice_pipe *restrict pipe)
 {
@@ -275,44 +278,62 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 }
 
 #if WITH_ALLOC_CACHE
-void pipe_shrink(const size_t count)
+void pipe_shrink(struct pipe_cache *restrict cache, const size_t count)
 {
-	size_t n = pipe_cache.len;
+	size_t n = cache->len;
 	const size_t stop = count < n ? n - count : 0;
 	while (n > stop) {
-		pipe_close(&pipe_cache.pipes[--n]);
+		pipe_close(&cache->pipes[--n]);
 	}
-	pipe_cache.len = n;
+	cache->len = n;
 }
 #endif
 #endif
 
 #if WITH_SPLICE
-static bool pipe_get(struct splice_pipe *restrict pipe)
-{
 #if WITH_ALLOC_CACHE
-	if (pipe_cache.len == 0) {
+static bool
+pipe_get(struct pipe_cache *restrict cache, struct splice_pipe *restrict pipe)
+{
+	if (cache->len == 0) {
 		return pipe_new(pipe);
 	}
-	*pipe = pipe_cache.pipes[--pipe_cache.len];
+	*pipe = cache->pipes[--cache->len];
 	return true;
+}
+
+static void
+pipe_put(struct pipe_cache *restrict cache, struct splice_pipe *restrict pipe)
+{
+	if (pipe->len > 0 || cache->len == cache->cap) {
+		pipe_close(pipe);
+		return;
+	}
+	cache->pipes[cache->len++] = *pipe;
+}
 #else
+static bool pipe_get(struct splice_pipe *restrict pipe)
+{
 	return pipe_new(pipe);
-#endif
 }
 
 static void pipe_put(struct splice_pipe *restrict pipe)
 {
-#if WITH_ALLOC_CACHE
-	if (pipe->len > 0 || pipe_cache.len == pipe_cache.cap) {
-		pipe_close(pipe);
-		return;
-	}
-	pipe_cache.pipes[pipe_cache.len++] = *pipe;
-#else
 	pipe_close(pipe);
+}
+#endif /* WITH_ALLOC_CACHE */
+
+/* Returns the pipe cache that owns the given transfer context. */
+#if WITH_ALLOC_CACHE
+static struct pipe_cache *xfer_cache(struct transfer_ctx *restrict t)
+{
+#if WITH_THREADS
+	return &t->worker->cache;
+#else
+	return &t->xfer->cache;
 #endif
 }
+#endif /* WITH_ALLOC_CACHE */
 #endif
 
 /* ---------------------------------------------------------------- set_state */
@@ -346,10 +367,18 @@ static void set_state(
 
 #if WITH_SPLICE
 	if (t->up.pipe.fd[0] != -1) {
-		pipe_put(&t->up.pipe);
+		pipe_put(
+#if WITH_ALLOC_CACHE
+			xfer_cache(t),
+#endif
+			&t->up.pipe);
 	}
 	if (t->down.pipe.fd[0] != -1) {
-		pipe_put(&t->down.pipe);
+		pipe_put(
+#if WITH_ALLOC_CACHE
+			xfer_cache(t),
+#endif
+			&t->down.pipe);
 	}
 #endif
 
@@ -638,14 +667,22 @@ static void task_xfer_start(void *data)
 #if WITH_SPLICE
 	if (t->up.use_splice) {
 		struct splice_pipe pipe;
-		if (pipe_get(&pipe)) {
+		if (pipe_get(
+#if WITH_ALLOC_CACHE
+			    xfer_cache(t),
+#endif
+			    &pipe)) {
 			ev_set_cb(&t->up.w_socket, pipe_cb);
 			t->up.pipe = pipe;
 		}
 	}
 	if (t->down.use_splice) {
 		struct splice_pipe pipe;
-		if (pipe_get(&pipe)) {
+		if (pipe_get(
+#if WITH_ALLOC_CACHE
+			    xfer_cache(t),
+#endif
+			    &pipe)) {
 			ev_set_cb(&t->down.w_socket, pipe_cb);
 			t->down.pipe = pipe;
 		}
@@ -668,10 +705,18 @@ task_xfer_stop(struct ev_loop *restrict loop, struct transfer_ctx *restrict t)
 
 #if WITH_SPLICE
 	if (t->up.pipe.fd[0] != -1) {
-		pipe_put(&t->up.pipe);
+		pipe_put(
+#if WITH_ALLOC_CACHE
+			xfer_cache(t),
+#endif
+			&t->up.pipe);
 	}
 	if (t->down.pipe.fd[0] != -1) {
-		pipe_put(&t->down.pipe);
+		pipe_put(
+#if WITH_ALLOC_CACHE
+			xfer_cache(t),
+#endif
+			&t->down.pipe);
 	}
 #endif
 
@@ -695,7 +740,7 @@ w_invoke_cb(struct ev_loop *restrict loop, ev_async *watcher, const int revents)
 	UNUSED(revents);
 	struct xfer_worker *restrict worker = watcher->data;
 	dispatcher_tick(worker->disp);
-	if (worker->stop) {
+	if (atomic_load_explicit(&worker->stop, memory_order_acquire)) {
 		ev_break(loop, EVBREAK_ONE);
 	}
 }
@@ -722,7 +767,7 @@ static int xfer_thread_func(void *arg)
 /* ---------------------------------------------------------------- public API */
 
 struct transfer *
-transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
+transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
 	struct transfer *restrict xfer =
 #if WITH_THREADS
@@ -745,20 +790,24 @@ transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
 		struct xfer_worker *restrict w = &xfer->workers[i];
 		w->xfer = xfer;
 		w->thread_started = false;
-		w->stop = false;
+		atomic_init(&w->stop, false);
 		w->active_list = NULL;
 		w->disp = NULL;
 		w->loop = NULL;
+#if WITH_SPLICE && WITH_ALLOC_CACHE
+		w->cache =
+			(struct pipe_cache){ .cap = PIPE_MAXCACHED, .len = 0 };
+#endif
 
 		w->disp = dispatcher_create(16);
 		if (w->disp == NULL) {
-			transfer_free(xfer);
+			transfer_join(xfer);
 			return NULL;
 		}
 
 		w->loop = ev_loop_new(0);
 		if (w->loop == NULL) {
-			transfer_free(xfer);
+			transfer_join(xfer);
 			return NULL;
 		}
 
@@ -772,7 +821,7 @@ transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
 			ev_async_stop(w->loop, &w->w_invoke);
 			ev_loop_destroy(w->loop);
 			w->loop = NULL;
-			transfer_free(xfer);
+			transfer_join(xfer);
 			return NULL;
 		}
 		w->thread_started = true;
@@ -781,11 +830,14 @@ transfer_new(struct ev_loop *restrict loop, const unsigned int nworkers)
 	UNUSED(nworkers);
 	xfer->loop = loop;
 	xfer->active_list = NULL;
+#if WITH_SPLICE && WITH_ALLOC_CACHE
+	xfer->cache = (struct pipe_cache){ .cap = PIPE_MAXCACHED, .len = 0 };
+#endif
 #endif
 	return xfer;
 }
 
-void transfer_free(struct transfer *restrict xfer)
+void transfer_join(struct transfer *restrict xfer)
 {
 	if (xfer == NULL) {
 		return;
@@ -795,7 +847,8 @@ void transfer_free(struct transfer *restrict xfer)
 		struct xfer_worker *restrict w = &xfer->workers[i];
 		if (w->loop != NULL) {
 			if (w->thread_started) {
-				w->stop = true;
+				atomic_store_explicit(
+					&w->stop, true, memory_order_release);
 				ev_async_send(w->loop, &w->w_invoke);
 				THRD_ASSERT(thrd_join(w->thread, NULL));
 				/* xfer_thread_func cancelled all in-flight
@@ -817,10 +870,16 @@ void transfer_free(struct transfer *restrict xfer)
 	}
 	xfer->active_list = NULL;
 #endif
-	free(xfer);
 #if WITH_SPLICE && WITH_ALLOC_CACHE
-	pipe_shrink(SIZE_MAX);
+#if WITH_THREADS
+	for (unsigned int i = 0; i < xfer->nworkers; i++) {
+		pipe_shrink(&xfer->workers[i].cache, SIZE_MAX);
+	}
+#else
+	pipe_shrink(&xfer->cache, SIZE_MAX);
 #endif
+#endif
+	free(xfer);
 }
 
 static void xfer_half_init(

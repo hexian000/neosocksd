@@ -9,7 +9,6 @@
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
-#include "transfer.h"
 #include "util.h"
 
 #include "io/io.h"
@@ -794,11 +793,6 @@ static void handle_ruleset_gc(
 	const int_fast64_t end = clock_monotonic_ns();
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
-
-#if WITH_SPLICE && WITH_ALLOC_CACHE
-	/* Shrink the splice pipe cache too */
-	pipe_shrink(SIZE_MAX);
-#endif
 
 	struct stream *w = io_bufwriter(
 		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, CENCODING_NONE),

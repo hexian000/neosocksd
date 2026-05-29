@@ -145,7 +145,7 @@ T_DECLARE_CASE(test_transfer_moves_payload)
 	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop, 1);
+	struct transfer *restrict xfer = transfer_create(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
@@ -188,7 +188,7 @@ T_DECLARE_CASE(test_transfer_moves_payload)
 	T_EXPECT_MEMEQ(dn_out, downlink, sizeof(downlink));
 	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
-	transfer_free(xfer);
+	transfer_join(xfer);
 	CLOSE_FD(acc_peer);
 	CLOSE_FD(dial_peer);
 }
@@ -213,10 +213,9 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	set_nonblock(acc_fd);
 	set_nonblock(dial_fd);
 
-#if WITH_ALLOC_CACHE
-	pipe_cache.cap = 0;
-	pipe_cache.len = 0;
-#endif
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_create(loop, 1);
+	T_CHECK(xfer != NULL);
 
 	T_CHECK(send(acc_peer, uplink, sizeof(uplink), 0) ==
 		(ssize_t)sizeof(uplink));
@@ -224,10 +223,6 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	T_CHECK(send(dial_peer, downlink, sizeof(downlink), 0) ==
 		(ssize_t)sizeof(downlink));
 	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
-
-	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop, 1);
-	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
 		xfer, acc_fd, dial_fd,
@@ -267,7 +262,7 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	T_EXPECT_MEMEQ(dn_out, downlink, sizeof(downlink));
 	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
-	transfer_free(xfer);
+	transfer_join(xfer);
 	CLOSE_FD(acc_peer);
 	CLOSE_FD(dial_peer);
 }
@@ -291,7 +286,7 @@ T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
 	set_nonblock(dial_fd);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop, 1);
+	struct transfer *restrict xfer = transfer_create(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
@@ -307,7 +302,7 @@ T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
 	 * transfer_free joins the xfer thread; in-flight transfers are
 	 * cancelled and their num_sessions decrements execute before return.
 	 */
-	transfer_free(xfer);
+	transfer_join(xfer);
 	T_EXPECT_EQ(state.num_sessions, (size_t)0);
 
 	CLOSE_FD(acc_peer);
@@ -339,7 +334,7 @@ T_DECLARE_CASE(test_transfer_dst_error_finishes)
 	CLOSE_FD(dial_peer);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop, 1);
+	struct transfer *restrict xfer = transfer_create(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
@@ -353,7 +348,7 @@ T_DECLARE_CASE(test_transfer_dst_error_finishes)
 
 	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
 
-	transfer_free(xfer);
+	transfer_join(xfer);
 	CLOSE_FD(acc_peer);
 }
 
@@ -388,7 +383,7 @@ T_DECLARE_CASE(test_transfer_backpressure_completes)
 	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
 
 	state.num_sessions = 1;
-	struct transfer *restrict xfer = transfer_new(loop, 1);
+	struct transfer *restrict xfer = transfer_create(loop, 1);
 	T_CHECK(xfer != NULL);
 
 	T_CHECK(transfer_serve(
@@ -425,7 +420,7 @@ T_DECLARE_CASE(test_transfer_backpressure_completes)
 	T_EXPECT_EQ(out, 'y');
 	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)1);
 
-	transfer_free(xfer);
+	transfer_join(xfer);
 	CLOSE_FD(acc_peer);
 	CLOSE_FD(dial_peer);
 }
@@ -452,24 +447,23 @@ T_DECLARE_CASE(transfer_pipe_new_close)
 #if WITH_ALLOC_CACHE
 T_DECLARE_CASE(transfer_pipe_shrink)
 {
-	/* Start from a clean slate */
-	pipe_shrink(SIZE_MAX);
-	T_EXPECT_EQ(pipe_cache.len, (size_t)0);
+	struct pipe_cache cache = { .cap = PIPE_MAXCACHED, .len = 0 };
+	struct pipe_cache *restrict pc = &cache;
 
 	/* Manually place two fresh pipes into the cache */
 	struct splice_pipe p1 = { .fd = { -1, -1 } };
 	struct splice_pipe p2 = { .fd = { -1, -1 } };
 	T_CHECK(pipe_new(&p1));
 	T_CHECK(pipe_new(&p2));
-	pipe_cache.pipes[0] = p1;
-	pipe_cache.pipes[1] = p2;
-	pipe_cache.len = 2;
+	pc->pipes[0] = p1;
+	pc->pipes[1] = p2;
+	pc->len = 2;
 
-	pipe_shrink(1);
-	T_EXPECT_EQ(pipe_cache.len, (size_t)1);
+	pipe_shrink(pc, 1);
+	T_EXPECT_EQ(pc->len, (size_t)1);
 
-	pipe_shrink(SIZE_MAX);
-	T_EXPECT_EQ(pipe_cache.len, (size_t)0);
+	pipe_shrink(pc, SIZE_MAX);
+	T_EXPECT_EQ(pc->len, (size_t)0);
 }
 #endif /* WITH_ALLOC_CACHE */
 #endif /* WITH_SPLICE */

@@ -3,17 +3,17 @@
 
 /**
  * @file transfer.h
- * @brief Bidirectional non-blocking data transfer, optionally on a dedicated
- * thread.
+ * @brief Bidirectional non-blocking data transfer, optionally on dedicated
+ * I/O threads.
  *
- * When WITH_THREADS is enabled, `struct transfer` owns an I/O thread and
- * dispatch infrastructure; transfers run on that thread.  When disabled,
+ * When WITH_THREADS is enabled, `struct transfer` owns I/O threads and
+ * dispatch infrastructure; transfers run on those threads.  When disabled,
  * transfers are registered as I/O watchers on the caller-supplied ev_loop.
  * `struct transfer_ctx` is the per-connection bidirectional transfer object
  * in both modes.
  *
  * Lifecycle:
- *   transfer_new()  →  transfer_serve() × N  →  transfer_free()
+ *   transfer_create()  →  transfer_serve() × N  →  transfer_join()
  */
 
 #ifndef TRANSFER_H
@@ -33,13 +33,10 @@ struct splice_pipe {
 #if WITH_ALLOC_CACHE
 #define PIPE_MAXCACHED 8
 
-/**
- * @brief Global cache of reusable pipes.
- */
-extern struct pipe_cache {
+struct pipe_cache {
 	size_t cap, len;
 	struct splice_pipe pipes[PIPE_MAXCACHED];
-} pipe_cache;
+};
 #endif /* WITH_ALLOC_CACHE */
 
 bool pipe_new(struct splice_pipe *pipe);
@@ -48,10 +45,11 @@ void pipe_close(struct splice_pipe *pipe);
 
 #if WITH_ALLOC_CACHE
 /**
- * @brief Shrink the splice pipe cache by closing up to `count` pipes.
+ * @brief Shrink a splice pipe cache by closing up to @p count pipes.
+ * @param cache Per-engine pipe cache to shrink (never NULL).
  * @param count Number of pipes to discard; pass SIZE_MAX to clear all.
  */
-void pipe_shrink(size_t count);
+void pipe_shrink(struct pipe_cache *cache, size_t count);
 #endif /* WITH_ALLOC_CACHE */
 #endif
 
@@ -72,11 +70,6 @@ struct transfer;
  * When WITH_THREADS is disabled, @p nworkers is ignored and transfers are
  * registered as I/O watchers on the caller-supplied ev_loop.
  *
- * @note When WITH_THREADS is enabled and nworkers > 1, the splice pipe cache
- *       (pipe_get / pipe_put in util.c) is accessed from multiple threads
- *       without synchronisation.  Keep nworkers == 1 until that cache is
- *       made thread-safe.
- *
  * @param loop     Main event loop (must outlive the returned engine; used
  *                 directly when threads are disabled, stored for reference
  *                 otherwise).
@@ -84,21 +77,21 @@ struct transfer;
  *                 WITH_THREADS is disabled; must be >= 1).
  * @return Heap-allocated engine, or NULL on allocation / thread failure.
  */
-struct transfer *transfer_new(struct ev_loop *loop, unsigned int nworkers);
+struct transfer *transfer_create(struct ev_loop *loop, unsigned int nworkers);
 
 /**
  * @brief Stop the engine and free all resources. NULL-safe.
  *
- * When WITH_THREADS is enabled, signals the I/O thread to stop, cancels
- * all in-flight transfers, joins the thread, and releases all resources.
+ * When WITH_THREADS is enabled, signals all I/O threads to stop, cancels
+ * all in-flight transfers, joins all threads, and releases all resources.
  * When disabled, cancels all in-flight transfers and frees the engine.
  * Any pending num_sessions decrements are executed before this returns.
  *
- * @param xfer Engine returned by transfer_new().
+ * @param xfer Engine returned by transfer_create().
  */
-void transfer_free(struct transfer *xfer);
+void transfer_join(struct transfer *xfer);
 
-/* Options passed to transfer_start(). */
+/* Options passed to transfer_serve(). */
 struct transfer_opts {
 #if WITH_SPLICE
 	bool use_splice;

@@ -63,8 +63,10 @@ void server_stats(
 }
 
 #if WITH_SPLICE && WITH_ALLOC_CACHE
-void pipe_shrink(size_t count)
+struct pipe_cache; /* forward declaration for the stub below */
+void pipe_shrink(struct pipe_cache *cache, size_t count)
 {
+	(void)cache;
 	(void)count;
 }
 #endif

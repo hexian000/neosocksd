@@ -21,6 +21,11 @@
 
 #include <ev.h>
 
+#if WITH_THREADS
+#include <pthread.h>
+#include <signal.h>
+#include <string.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -68,7 +73,33 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	struct transfer *xfer = transfer_new(loop, 1);
+	struct transfer *xfer;
+#if WITH_THREADS
+	/* Block all signals before spawning the I/O worker so it inherits the
+	 * mask; server_init will re-enable them in the main thread via
+	 * ev_signal_start. */
+	{
+		sigset_t ss, old_ss;
+		CHECK(sigfillset(&ss) == 0);
+		{
+			const int err =
+				pthread_sigmask(SIG_BLOCK, &ss, &old_ss);
+			CHECKMSGF(
+				err == 0, "pthread_sigmask: (%d) %s", err,
+				strerror(err));
+		}
+		xfer = transfer_create(loop, 1);
+		{
+			const int err =
+				pthread_sigmask(SIG_SETMASK, &old_ss, NULL);
+			CHECKMSGF(
+				err == 0, "pthread_sigmask: (%d) %s", err,
+				strerror(err));
+		}
+	}
+#else
+	xfer = transfer_create(loop, 1);
+#endif
 	CHECKOOM(xfer);
 
 #if WITH_RULESET
@@ -127,7 +158,7 @@ int main(int argc, char *argv[])
 		LOGD_F("%zu objects finalized", num);
 	}
 	if (xfer != NULL) {
-		transfer_free(xfer);
+		transfer_join(xfer);
 		xfer = NULL;
 	}
 	ev_loop_destroy(loop);
