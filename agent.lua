@@ -14,8 +14,10 @@ agent.peername = table.get(_G.agent, "peername")
 agent.conns = table.get(_G.agent, "conns") or {}
 -- agent.hosts = { "host1", "host2", ... }
 agent.hosts = table.get(_G.agent, "hosts") or {}
--- agent.conn_state[id] = { peername = "peer1", rtt = 0, last_success = os.time(), failures = 0 }
+-- agent.conn_state[id] = { peername, rtt_win } (local only)
 agent.conn_state = table.get(_G.agent, "conn_state") or {}
+-- agent.last_seen[peername] = monotonic seconds when the entry was last refreshed (local only)
+agent.last_seen = table.get(_G.agent, "last_seen") or {}
 
 local function connid_of(v)
     for id, conn in pairs(agent.conns) do
@@ -26,7 +28,7 @@ local function connid_of(v)
     return "?"
 end
 
--- _G.peerdb[peername] = { hosts = { hostname, "host1" }, conns = { [id] = { peername = "peer1", rtt = 0 } }, timestamp = os.time() }
+-- _G.peerdb[peername] = { version = N, timestamp = T, hosts = { "host1", ... }, conns = { [id] = { peername = "peer1", rtt = 0 } } }
 _G.peerdb = _G.peerdb or {}
 
 agent.API_ENDPOINT = "api.neosocksd.internal:80"
@@ -35,30 +37,44 @@ agent.INTERNAL_DOMAIN = ".internal"
 agent.RELAY_DOMAIN = ".relay.neosocksd.internal"
 
 agent.BOOTSTRAP_DELAY = 10
-agent.GOSSIP_TARGET_COUNT = 2
-agent.SYNC_INTERVAL_BASE = 300
-agent.SYNC_INTERVAL_RANDOM = 300
-agent.TIMESTAMP_TOLERANCE = 300
-agent.PEERDB_EXPIRY_TIME = 7200
--- tolerate transient probe failures: keep a cached neighbor entry until either
--- CONN_MAX_FAILURES consecutive failures or CONN_GRACE_TIME elapses since the
--- last successful probe.
-agent.CONN_GRACE_TIME = agent.SYNC_INTERVAL_BASE * 2 + agent.SYNC_INTERVAL_RANDOM
-agent.CONN_MAX_FAILURES = 3
+-- fast probe loop: one round performs liveness + RTT + digest-pull anti-entropy
+agent.PROBE_INTERVAL_BASE = 50
+agent.PROBE_INTERVAL_RANDOM = 10
+-- windowed minimum RTT window size in seconds (Kathleen Nichols, 2012)
+agent.RTT_WINDOW = 600
+-- only switch the chosen route when a candidate is at least this much faster
+agent.ROUTE_HYSTERESIS = 0.2
+-- expire a peer entry when not refreshed within this period (local clock only)
+agent.PEERDB_EXPIRY_TIME = 60
 
 agent.verbose = table.get(_G.agent, "verbose")
 
-local function is_valid(data, now)
-    local timestamp = data.timestamp
-    return
-        (type(timestamp) == "number")                 -- malformed peer data
-        and
-        (now - agent.PEERDB_EXPIRY_TIME < timestamp)  -- lower bound to expire peer data
-        and
-        (timestamp < now + agent.TIMESTAMP_TOLERANCE) -- upper bound to detect clock skew
+local strformat = string.format
+local monotonic = time.monotonic
+
+local function oneline(err)
+    if not err then return "unknown" end
+    err = tostring(err)
+    return err:match("^(.-)\n") or err
 end
 
-local strformat = string.format
+-- windowed minimum filter (Kathleen Nichols, 2012)
+-- win: array used as a monotone deque of {rtt, expiry} pairs
+local function winmin_update(win, rtt, now)
+    -- expire entries from the front
+    while win[1] and win[1].expiry <= now do
+        table.remove(win, 1)
+    end
+    -- drop dominated entries from the back
+    local n = #win
+    while n > 0 and win[n].rtt >= rtt do
+        win[n] = nil
+        n = n - 1
+    end
+    win[n + 1] = { rtt = rtt, expiry = now + agent.RTT_WINDOW }
+    return win[1].rtt
+end
+
 local function format_path(path)
     return list:new():append(path):reverse():map(function(s)
         return strformat("%q", s)
@@ -135,20 +151,45 @@ local function dijkstra(peerdb, source)
     return paths
 end
 
-local function build_index(peerdb)
+local function build_index(peerdb, prev)
+    prev = prev or {}
     local hosts = {}
     for peername, data in pairs(peerdb) do
         for _, host in pairs(data.hosts or {}) do
             hosts[host] = peername
         end
     end
-    local peers = {}
+    -- group direct conns by neighbor peername
+    local bypeer = {}
     local selfinfo = peerdb[agent.peername] or {}
     for connid, conninfo in pairs(selfinfo.conns or {}) do
-        local existing = peers[conninfo.peername]
-        if not existing or conninfo.rtt < existing.rtt then
-            peers[conninfo.peername] = { conn = agent.conns[connid], rtt = conninfo.rtt }
+        local name = conninfo.peername
+        local cands = bypeer[name]
+        if not cands then
+            cands = {}
+            bypeer[name] = cands
         end
+        cands[#cands + 1] = { conn = agent.conns[connid], rtt = conninfo.rtt }
+    end
+    -- pick the best conn per neighbor, with hysteresis toward the previous choice
+    local peers = {}
+    for name, cands in pairs(bypeer) do
+        local best = cands[1]
+        for i = 2, #cands do
+            if cands[i].rtt < best.rtt then best = cands[i] end
+        end
+        local prevroute = prev[name]
+        local prevconn = prevroute and #prevroute.path == 1 and prevroute.conn
+        if prevconn then
+            for _, c in ipairs(cands) do
+                if c.conn == prevconn and
+                    best.rtt >= c.rtt * (1 - agent.ROUTE_HYSTERESIS) then
+                    best = c -- improvement below threshold, keep the previous conn
+                    break
+                end
+            end
+        end
+        peers[name] = best
     end
     local routes = {}
     local paths = dijkstra(peerdb, agent.peername)
@@ -279,7 +320,7 @@ local function matcher(addr)
     if agent.verbose then
         evlogf("relay [%s] %q: %s", connid_of(conn), peername, addr)
     end
-    local proxies = list:new(conn):reverse()
+    local proxies = list:new():append(conn):reverse()
     return function()
         return addr, proxies:unpack()
     end
@@ -297,140 +338,131 @@ local function callbyconn(conn, func, ...)
     return await.rpcall(target, func, ...)
 end
 
-local function update_peerdb(peername, peerdb)
-    local updated = false
-    local now = os.time()
-    -- remove stale data
-    for peer, data in pairs(_G.peerdb) do
-        if not is_valid(data, now) then
-            evlogf("peer expired: %q (time=%d)", peer, data.timestamp - now)
-            _G.peerdb[peer] = nil
-        end
-    end
-    -- update peerdb
-    for peer, data in pairs(peerdb) do
-        if peer == peername then
-            -- direct update from peer
+local function apply_delta(from, delta)
+    local changed = false
+    local now = monotonic()
+    for peer, data in pairs(delta) do
+        if peer == agent.peername then
+            -- ignore updates to self; this node owns its own entry
+        elseif type(data) == "table" and type(data.version) == "number" then
             local old = _G.peerdb[peer]
-            if not old or data.timestamp ~= old.timestamp then
-                updated = true
-            end
-            _G.peerdb[peer] = data
-        elseif peer == agent.peername then
-            -- ignore updates to self
-        elseif is_valid(data, now) then
-            local old = _G.peerdb[peer]
-            if not old or data.timestamp > old.timestamp then
-                updated = true
-                evlogf("peerdb: updated peer %q from %q (time=%d)",
-                    peer, peername, data.timestamp - now)
+            local is_newer = not old or data.version > old.version or
+                (data.version == old.version and
+                    type(data.timestamp) == "number" and
+                    (not old.timestamp or data.timestamp > old.timestamp))
+            if is_newer then
                 _G.peerdb[peer] = data
+                agent.last_seen[peer] = now
+                changed = true
+                if agent.verbose then
+                    evlogf("peerdb: updated %q v%d from %q (time=%s)",
+                        peer, data.version, from,
+                        data.timestamp and format_timestamp(data.timestamp) or "?")
+                end
+            elseif data.version == old.version then
+                agent.last_seen[peer] = now -- refresh liveness without a version change
             end
         end
     end
-    return updated
+    return changed
 end
 
-local function sync_via(conn)
-    local ok, r1, r2 = callbyconn(conn, "sync", agent.peername, _G.peerdb)
-    if ok then
-        local peername, peerdb = r1, r2
-        update_peerdb(peername, peerdb)
-    end
-    return ok, r1
-end
-
-local function gossip(peername)
-    -- randomly pick connections to gossip (excluding the source)
-    local candidates = {}
-    for connid, conn in pairs(agent.conns) do
-        -- find the peername for this connection
-        local selfinfo = _G.peerdb[agent.peername]
-        if selfinfo and selfinfo.conns then
-            local conninfo = selfinfo.conns[connid]
-            if conninfo and conninfo.peername ~= peername then
-                table.insert(candidates, { connid = connid, conn = conn })
+local function expire(now)
+    for peer, _ in pairs(_G.peerdb) do
+        if peer ~= agent.peername then
+            local seen = agent.last_seen[peer]
+            if not seen or now - seen > agent.PEERDB_EXPIRY_TIME then
+                evlogf("peer expired: %q", peer)
+                _G.peerdb[peer] = nil
+                agent.last_seen[peer] = nil
             end
         end
     end
-    local n = #candidates
-    if n == 0 then
-        return -- no one to gossip to
-    end
-    -- shuffle candidates
-    for i = n, 2, -1 do
-        local j = math.random(i)
-        candidates[i], candidates[j] = candidates[j], candidates[i]
-    end
-    local n = 0
-    for _, target in pairs(candidates) do
-        if n >= agent.GOSSIP_TARGET_COUNT then break end
-        local ok, r1 = sync_via(target.conn)
-        if ok then
-            if agent.verbose then
-                evlogf("gossip: [%s] propagated update from %q to %q",
-                    connid_of(target.conn), peername, r1)
-            end
-            n = n + 1
-        else
-            evlogf("gossip error: [%s] %s", connid_of(target.conn), r1)
-        end
-    end
-    hosts, routes = build_index(_G.peerdb)
 end
 
-function rpc.sync(peername, peerdb)
-    if type(peername) ~= "string" or type(peerdb) ~= "table" then
-        return agent.peername, _G.peerdb
+-- a digest carries only versions: { [peername] = version }
+local function build_digest()
+    local digest = {}
+    for peer, data in pairs(_G.peerdb) do
+        digest[peer] = data.version
     end
-    local updated = update_peerdb(peername, peerdb)
-    if updated then
-        async(gossip, peername)
-    end
-    hosts, routes = build_index(_G.peerdb)
-
-    local peerdiff = {}
-    for name, info in pairs(_G.peerdb) do
-        if name == agent.peername then
-            peerdiff[name] = info
-        elseif name ~= peername then
-            local known = peerdb[name]
-            if not known or known.timestamp ~= info.timestamp then
-                peerdiff[name] = info
-            end
-        end
-    end
-    return agent.peername, peerdiff
+    return digest
 end
 
-function rpc.probe()
+local function next_version()
+    local selfinfo = _G.peerdb[agent.peername]
+    local ver = selfinfo and selfinfo.version
+    if type(ver) ~= "number" then
+        return 1
+    end
+    return ver + 1
+end
+
+
+-- probe: cheap liveness check and RTT measurement; returns own digest so the
+-- caller can decide whether a full rpc.sync is worth the extra round trip.
+function rpc.probe(peername)
     if not agent.peername then
         error("peer is not available for relay")
     end
-    return agent.peername
+    return agent.peername, build_digest()
+end
+
+-- digest-pull: the caller sends its versions, the callee returns entries the
+-- caller is missing or has an older version of. Because every link is probed
+-- from both ends each interval, both directions converge without a separate
+-- gossip fanout.
+function rpc.sync(peername, digest)
+    if not agent.peername then
+        error("peer is not available for relay")
+    end
+    local delta = {}
+    if type(digest) == "table" then
+        for peer, data in pairs(_G.peerdb) do
+            local known = digest[peer]
+            if not known or data.version >= known then
+                delta[peer] = data
+            end
+        end
+    else
+        for peer, data in pairs(_G.peerdb) do
+            delta[peer] = data
+        end
+    end
+    return agent.peername, delta
 end
 
 local function probe_via(conn)
-    assert(sync_via(conn))
-    local minrtt, peername, err
-    for _ = 1, 4 do
-        await.sleep(1)
-        local probe_start = time.monotonic()
-        local ok, result = callbyconn(conn, "probe")
-        local probe_end = time.monotonic()
-        if ok then
-            local rtt = probe_end - probe_start
-            if not minrtt or rtt < minrtt then
-                minrtt = rtt
+    local digest = build_digest()
+    local start = monotonic()
+    local ok, peername, remote_digest = callbyconn(conn, "probe", agent.peername)
+    local rtt = monotonic() - start
+    if not ok then
+        error(peername) -- holds the error message on failure
+    end
+    -- refresh last_seen immediately after confirming liveness via probe
+    agent.last_seen[peername] = monotonic()
+    -- only pull a full delta when remote has entries we are missing or behind on
+    if type(remote_digest) == "table" then
+        local needs_sync = false
+        for peer, remote_ver in pairs(remote_digest) do
+            local local_entry = _G.peerdb[peer]
+            if not local_entry or local_entry.version < remote_ver then
+                needs_sync = true
+                break
             end
-            peername = result
-        else
-            err = result
+        end
+        if needs_sync then
+            local ok2, _, delta = callbyconn(conn, "sync", agent.peername, digest)
+            if ok2 and type(delta) == "table" then
+                apply_delta(peername, delta)
+            end
         end
     end
-    if not peername then error(err) end
-    evlogf("probe: [%s] %q %.0fms", connid_of(conn), peername, minrtt * 1e+3)
-    return { peername = peername, rtt = minrtt }
+    if agent.verbose then
+        evlogf("probe: [%s] %q %.0fms", connid_of(conn), peername, rtt * 1e+3)
+    end
+    return { peername = peername, rtt = rtt }
 end
 
 local function parallel_for(tag, t, func)
@@ -447,82 +479,85 @@ local function parallel_for(tag, t, func)
 end
 
 function agent.maintenance()
-    -- probe
+    -- probe every conn: one round-trip yields liveness, an RTT sample, and a
+    -- digest-pull delta that is merged into _G.peerdb
     local probe_results = {}
     parallel_for("probe", agent.conns, function(connid, conn)
         local ok, result = pcall(probe_via, conn)
         probe_results[connid] = { ok = ok, result = result }
     end)
-    -- merge probe results with cached state to tolerate transient failures
-    local now = os.time()
+    local now = monotonic()
+    -- fold probe results into conn_state and build the advertised conns map
+    local selfentry = agent.peername and _G.peerdb[agent.peername]
+    local prev_conns = selfentry and selfentry.conns or {}
+    local changed = not selfentry or selfentry.hosts ~= agent.hosts
     local conns = {}
     for connid, _ in pairs(agent.conns) do
         local r = probe_results[connid]
         local state = agent.conn_state[connid]
         if r and r.ok then
             local info = r.result
-            conns[connid] = info
+            local win = state and state.rtt_win or {}
+            local rtt = winmin_update(win, info.rtt, now)
             agent.conn_state[connid] = {
                 peername = info.peername,
-                rtt = info.rtt,
-                last_success = now,
-                failures = 0,
+                rtt_win = win,
             }
-        else
-            local err = r and r.result
-            if state then
-                state.failures = state.failures + 1
-                if state.failures <= agent.CONN_MAX_FAILURES and
-                    now - state.last_success <= agent.CONN_GRACE_TIME then
-                    conns[connid] = { peername = state.peername, rtt = state.rtt }
-                    evlogf("probe stale: [%s] %q failures=%d age=%ds (%s)",
-                        tostring(connid), state.peername, state.failures,
-                        now - state.last_success,
-                        (err and err:match("^(.-)\n") or err) or "unknown")
-                else
-                    evlogf("probe drop: [%s] %q failures=%d age=%ds",
-                        tostring(connid), state.peername, state.failures,
-                        now - state.last_success)
-                    agent.conn_state[connid] = nil
+            conns[connid] = { peername = info.peername, rtt = rtt }
+            local prev = prev_conns[connid]
+            if not prev or prev.peername ~= info.peername then
+                changed = true
+            elseif prev.rtt > 0 then
+                if math.abs(rtt - prev.rtt) / prev.rtt >= agent.ROUTE_HYSTERESIS then
+                    changed = true
                 end
-            else
-                evlogf("probe error: [%s] %s", tostring(connid),
-                    (err and err:match("^(.-)\n") or err) or "unknown")
+            elseif prev.rtt ~= rtt then
+                changed = true
             end
+        elseif state then
+            evlogf("conn lost: [%s] %q (%s)",
+                tostring(connid), state.peername, oneline(r and r.result))
+            agent.conn_state[connid] = nil
+            if prev_conns[connid] then changed = true end
+        else
+            if prev_conns[connid] then changed = true end
+            evlogf("probe error: [%s] %s", tostring(connid), oneline(r and r.result))
         end
     end
     -- drop state for connections that no longer exist
     for connid, _ in pairs(agent.conn_state) do
         if agent.conns[connid] == nil then
             agent.conn_state[connid] = nil
+            if prev_conns[connid] then changed = true end
         end
     end
-    -- update self
+    -- expire peers not refreshed recently
+    expire(now)
+    -- update self entry when changed, bumping the version
     if agent.peername then
-        local info = _G.peerdb[agent.peername] or {}
-        info.hosts = agent.hosts
-        info.conns = conns
-        info.timestamp = now
-        _G.peerdb[agent.peername] = info
+        if changed then
+            _G.peerdb[agent.peername] = {
+                version = next_version(),
+                timestamp = os.time(),
+                hosts = agent.hosts,
+                conns = conns,
+            }
+        end
+        agent.last_seen[agent.peername] = now
     end
+    hosts, routes = build_index(_G.peerdb, routes)
     if agent.verbose then
-        evlog("agent: probe finished")
+        evlog("agent: probe round finished")
     end
-    -- sync
-    parallel_for("sync", agent.conns, function(_, conn)
-        assert(sync_via(conn))
-    end)
-    if agent.verbose then
-        evlog("agent: sync finished")
-    end
-    hosts, routes = build_index(_G.peerdb)
-    evlog("agent: maintenance finished")
 end
 
 local function mainloop()
     await.sleep(agent.BOOTSTRAP_DELAY)
     while agent.running do
-        agent.maintenance()
+        local ok, err = pcall(agent.maintenance)
+        if not ok then
+            evlogf("agent.maintenance: %s", oneline(err))
+        end
         local update = table.get(_G, "ruleset", "update")
         if update then
             local ok, err = pcall(update)
@@ -530,7 +565,7 @@ local function mainloop()
                 evlogf("ruleset.update: %s", err)
             end
         end
-        await.sleep(agent.SYNC_INTERVAL_BASE + math.random(agent.SYNC_INTERVAL_RANDOM))
+        await.sleep(agent.PROBE_INTERVAL_BASE + math.random(agent.PROBE_INTERVAL_RANDOM))
     end
 end
 
@@ -539,13 +574,13 @@ function agent.stats(dt)
     local w = list:new()
     for peername, data in pairs(_G.peerdb) do
         local tag = strformat("%q", peername)
-        local timestamp = format_timestamp(data.timestamp)
+        local ts = data.timestamp and format_timestamp(data.timestamp) or "?"
         local route = routes[peername]
         if route then
-            w:insertf("%-16s: %s [%s] %4.0fms %s", tag, timestamp, connid_of(route.conn),
-                route.rtt * 1e+3, format_path(route.path))
+            w:insertf("%-16s: %s [%s] %4.0fms %s", tag, ts,
+                connid_of(route.conn), route.rtt * 1e+3, format_path(route.path))
         elseif peername ~= agent.peername then
-            w:insertf("%-16s: %s (unreachable)", tag, timestamp)
+            w:insertf("%-16s: %s (unreachable)", tag, ts)
         end
     end
     local title = "> Peers"

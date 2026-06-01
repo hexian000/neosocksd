@@ -47,7 +47,7 @@ Checks: >-
   readability-braces-around-statements,
   readability-else-after-return,
   -readability-function-cognitive-complexity,
-  readability-function-size,
+  -readability-function-size,
   readability-non-const-parameter,
   readability-redundant-control-flow,
   readability-simplify-boolean-expr

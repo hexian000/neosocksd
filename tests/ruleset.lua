@@ -29,6 +29,7 @@ local function run_all(T)
     require("tests.test_async")(T)
     require("tests.test_api")(T)
     run_rpc_tests(T, API_TARGET)
+    require("tests.test_agent")(T:sub("agent"))
 end
 
 async(function()
