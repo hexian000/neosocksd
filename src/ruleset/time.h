@@ -4,7 +4,7 @@
 #ifndef RULESET_TIME_H
 #define RULESET_TIME_H
 
-#include "lua.h"
+#include <lua.h>
 
 int luaopen_time(lua_State *L);
 

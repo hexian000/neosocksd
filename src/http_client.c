@@ -17,6 +17,7 @@
 
 #include <errno.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <strings.h>
 
@@ -46,7 +47,7 @@ static void http_client_cleanup(struct http_client_ctx *restrict ctx)
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
 	if (ctx->w_socket.fd != -1) {
-		CLOSE_FD(ctx->w_socket.fd);
+		SOCKET_CLOSE_FD(ctx->w_socket.fd);
 		ctx->w_socket.fd = -1;
 	}
 	VBUF_FREE(ctx->conn.cbuf);
@@ -92,7 +93,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	int fd = watcher->fd;
 	watcher->fd = -1;
-	CLOSE_FD(fd);
+	SOCKET_CLOSE_FD(fd);
 	const struct http_client_cb cb = ctx->cb;
 	if (cb.func != NULL) {
 		cb.func(loop, cb.data, NULL, 0, &ctx->conn);
@@ -115,7 +116,7 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			const int stale_fd = watcher->fd;
 			ev_io_set(watcher, -1, EV_NONE);
 			if (stale_fd != -1) {
-				CLOSE_FD(stale_fd);
+				SOCKET_CLOSE_FD(stale_fd);
 			}
 			ctx->state = STATE_CLIENT_CONNECT;
 			dialer_do(
@@ -196,9 +197,9 @@ void http_client_init(
 	struct http_client_ctx *restrict ctx, struct ev_loop *loop,
 	const struct http_parsehdr_cb on_header,
 	const struct http_client_cb *restrict cb, const struct config *conf,
-	struct resolver *resolver, uintmax_t *const byt_recv,
-	uintmax_t *const byt_sent, uintmax_t *const dialer_byt_sent,
-	uintmax_t *const dialer_byt_recv)
+	struct resolver *resolver, uint_least64_t *const byt_recv,
+	uint_least64_t *const byt_sent, uint_least64_t *const dialer_byt_sent,
+	uint_least64_t *const dialer_byt_recv)
 {
 	ctx->loop = loop;
 	ctx->conf = conf;

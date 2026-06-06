@@ -3,17 +3,19 @@
 
 #include "ruleset/cfunc.h"
 
+#include "conf.h"
+#include "proto/codec.h"
 #include "ruleset.h"
 #include "ruleset/base.h"
 #include "util.h"
 
 #include "io/stream.h"
-#include "lauxlib.h"
-#include "lua.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
 #include <ev.h>
+#include <lauxlib.h>
+#include <lua.h>
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -125,20 +127,70 @@ int cfunc_request(lua_State *restrict L)
 	return 1;
 }
 
-/* loadfile(filename) */
+/* loadfile(stream) */
 int cfunc_loadfile(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
-	const char *filename = lua_touserdata(L, 1);
+	struct stream *restrict s = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
-	if (luaL_loadfile(L, filename)) {
+	if (lua_load(L, aux_reader, s, "=ruleset", "t")) {
 		return lua_error(L);
 	}
 	lua_pushliteral(L, "ruleset");
 	lua_call(L, 1, 1);
 	lua_setglobal(L, "ruleset");
+	return 0;
+}
+
+/* loadconfig() */
+int cfunc_loadconfig(lua_State *restrict L)
+{
+	check_memlimit(L);
+	ASSERT(lua_gettop(L) == 1);
+	struct stream *restrict s = lua_touserdata(L, 1);
+	lua_settop(L, 0);
+
+	if (lua_load(L, aux_reader, s, "=config", "t")) {
+		return lua_error(L);
+	}
+	lua_pushliteral(L, "config");
+	if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+		return lua_error(L);
+	}
+	if (!lua_istable(L, -1)) {
+		return luaL_error(
+			L, "config: expected table, got %s",
+			luaL_typename(L, -1));
+	}
+
+	struct ruleset *restrict r = aux_getruleset(L);
+	if (!conf_loadfromtable(L, r->conf)) {
+		return luaL_error(L, "config: failed to load fields");
+	}
+
+	/* Extract memlimit and traceback into r->config */
+	lua_getfield(L, -1, "memlimit");
+	if (!lua_isnil(L, -1)) {
+		const int mb = (int)luaL_checkinteger(L, -1);
+		r->config.memlimit_kb = (mb > 0) ? (mb << 10u) : 0;
+	}
+	lua_pop(L, 1);
+
+	lua_getfield(L, -1, "traceback");
+	if (!lua_isnil(L, -1)) {
+		r->config.traceback = lua_toboolean(L, -1) != 0;
+	}
+	lua_pop(L, 1);
+
+	/* Extract ruleset field into _G.ruleset (only if it's a table) */
+	lua_getfield(L, -1, "ruleset");
+	if (lua_istable(L, -1)) {
+		lua_setglobal(L, "ruleset");
+	} else {
+		lua_pop(L, 1);
+	}
 	return 0;
 }
 
@@ -307,7 +359,7 @@ int cfunc_update(lua_State *restrict L)
 	} else {
 		chunkname = lua_pushfstring(L, "=%s", modname);
 	}
-	if (lua_load(L, aux_reader, stream, chunkname, NULL)) {
+	if (lua_load(L, aux_reader, stream, chunkname, "t")) {
 		return lua_error(L);
 	}
 	/* lua stack: modname chunkname chunk */

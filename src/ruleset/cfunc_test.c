@@ -4,6 +4,7 @@
 #include "conf.h"
 #include "dialer.h"
 #include "io/stream.h"
+#include "proto/codec.h"
 #include "ruleset.h"
 
 #include "ruleset/base.h"
@@ -224,7 +225,7 @@ int luaopen_zlib(lua_State *restrict L)
 	return 1;
 }
 
-const char *proxy_protocol_str[PROTO_MAX] = {
+char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -428,7 +429,10 @@ T_DECLARE_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed)
 	const char *s;
 
 	T_CHECK(write_tempfile(path, file_chunk) == 0);
-	T_EXPECT(ruleset_pcall(r, cfunc_loadfile, 1, 0, path));
+	struct stream *restrict code = codec_lua_reader(path);
+	T_CHECK(code != NULL);
+	T_EXPECT(ruleset_pcall(r, cfunc_loadfile, 1, 0, code));
+	stream_close(code);
 
 	T_EXPECT(ruleset_pcall(r, cfunc_stats, 2, 1, &dt, "alpha"));
 	s = lua_tolstring(r->L, -1, &len);

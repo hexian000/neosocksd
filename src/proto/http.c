@@ -1,15 +1,6 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file http.c
- * @brief HTTP parsing and utility functions implementation
- *
- * Implements streaming HTTP parser with support for content encoding,
- * transfer encoding, and various HTTP features. The parser operates
- * in phases: message line, headers, and content body.
- */
-
 #include "http.h"
 
 #include "codec.h"
@@ -24,19 +15,18 @@
 #include "utils/debug.h"
 #include "utils/slog.h"
 
-#include <strings.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-
 #include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
 /** String representations of content encoding types */
-const char *content_encoding_str[] = {
+const char *http_content_encoding_str[] = {
 	[CENCODING_NONE] = NULL,
 	[CENCODING_DEFLATE] = "deflate",
 	[CENCODING_GZIP] = "gzip",
@@ -255,7 +245,7 @@ void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 		return;
 	}
 	p->wbuf.len += len;
-	LOG_STACK_F(VERBOSE, 0, "http: response error page %" PRIu16, code);
+	LOG_STACK_F(VERBOSE, 0, "http: response error page %" PRIuFAST16, code);
 }
 
 /**
@@ -790,7 +780,7 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 	}
 
 	/* Parse comma-separated encoding list */
-	const char *deflate = content_encoding_str[CENCODING_DEFLATE];
+	const char *deflate = http_content_encoding_str[CENCODING_DEFLATE];
 	for (char *token = strtok(value, ","); token != NULL;
 	     token = strtok(NULL, ",")) {
 		/* Remove quality value if present */
@@ -841,10 +831,10 @@ bool parsehdr_content_encoding(
 {
 	/* Check against all supported encodings */
 	for (size_t i = 0; i < CENCODING_MAX; i++) {
-		if (content_encoding_str[i] == NULL) {
+		if (http_content_encoding_str[i] == NULL) {
 			continue;
 		}
-		if (strcasecmp(value, content_encoding_str[i]) == 0) {
+		if (strcasecmp(value, http_content_encoding_str[i]) == 0) {
 			p->hdr.content.encoding = (enum content_encodings)i;
 			return true;
 		}
@@ -905,8 +895,8 @@ const char *parsehdr_connection_token(
 void http_conn_init(
 	struct http_conn *restrict p, const int fd,
 	const enum http_conn_state mode,
-	const struct http_parsehdr_cb on_header, uintmax_t *const byt_recv,
-	uintmax_t *const byt_sent)
+	const struct http_parsehdr_cb on_header, uint_least64_t *const byt_recv,
+	uint_least64_t *const byt_sent)
 {
 	/* Initialize parser state */
 	p->state = mode;

@@ -12,6 +12,7 @@
 #include "util.h"
 
 #include "os/socket.h"
+#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -88,7 +89,7 @@ static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
 	return wait_sec;
 }
 
-const char *proxy_protocol_str[PROTO_MAX] = {
+char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -317,7 +318,7 @@ int dialaddr_format(
 
 void dialer_init(
 	struct dialer *restrict d, const struct dialer_cb *callback,
-	uintmax_t *byt_sent, uintmax_t *byt_recv)
+	uint_least64_t *byt_sent, uint_least64_t *byt_recv)
 {
 	(void)byt_sent;
 	(void)byt_recv;
@@ -1801,5 +1802,7 @@ int main(void)
 	T_RUN_CASE(t, request_header_value_with_ctl_is_rejected);
 	T_RUN_CASE(t, request_header_name_with_invalid_token_is_rejected);
 
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	const bool ok = T_RESULT(t);
+	reset_stub_state();
+	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

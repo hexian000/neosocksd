@@ -1,15 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file dialer.c
- * @brief Implementation of network dialer with proxy chain support
- *
- * This file implements an asynchronous network dialer that can establish
- * connections through chains of proxy servers. The dialer uses a state machine
- * approach to handle the complex handshake protocols required by different
- * proxy types (HTTP CONNECT, SOCKS4A, SOCKS5).
- *
+/*
  * State Machine Flow:
  * 1. STATE_INIT -> STATE_RESOLVE (for domain names) or STATE_CONNECT (for IPs)
  * 2. STATE_RESOLVE -> STATE_CONNECT (after DNS resolution)
@@ -18,8 +10,7 @@
  * 5. STATE_HANDSHAKE2 -> STATE_HANDSHAKE3 (SOCKS5 after auth)
  * 6. STATE_HANDSHAKE3 -> next proxy or STATE_DONE
  *
- * The dialer can traverse multiple proxies in sequence, performing the appropriate
- * handshake for each proxy protocol before moving to the next hop.
+ * The dialer can traverse multiple proxies in sequence.
  */
 
 #include "dialer.h"
@@ -43,28 +34,27 @@
 #include "utils/serialize.h"
 #include "utils/slog.h"
 
-#include <arpa/inet.h>
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
-/** @brief String names for each proxy protocol */
-const char *proxy_protocol_str[PROTO_MAX] = {
+char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
 };
 
-/** @brief Human-readable error descriptions */
 static const char *dialer_error_strs[DIALER_ERR_MAX] = {
 	[DIALER_OK] = "success",
 	[DIALER_CANCELLED] = "operation cancelled",
@@ -87,16 +77,6 @@ const char *dialer_strerror(const enum dialer_error err)
 	return "unknown error";
 }
 
-/**
- * @brief Set dialaddr from host string and port
- * @param addr Output dialaddr structure
- * @param host Host string (IPv4, IPv6, or domain name)
- * @param port Port number in host byte order
- * @return true on success, false if hostname too long
- *
- * This function attempts to parse the host as an IP address first,
- * falling back to treating it as a domain name if IP parsing fails.
- */
 static bool dialaddr_sethostport(
 	struct dialaddr *restrict addr, const char *restrict host,
 	const uint_fast16_t port)
@@ -148,7 +128,7 @@ bool dialaddr_parse(
 
 	/* Split into host and port components */
 	char *host, *port;
-	if (!splithostport(buf, &host, &port)) {
+	if (!addr_splithostport(buf, &host, &port)) {
 		LOGE_F("invalid address: `%s'", s);
 		return false;
 	}
@@ -214,7 +194,7 @@ void dialaddr_copy(
 		dst->in6 = src->in6;
 		break;
 	case ATYP_DOMAIN: {
-		const uint_fast8_t len = src->domain.len;
+		const uint_fast8_t len = (uint_fast8_t)src->domain.len;
 		dst->domain.len = len;
 		memcpy(dst->domain.name, src->domain.name, len);
 	} break;
@@ -298,19 +278,19 @@ bool dialreq_addproxy(
 	char *host, *port;
 	if (strcmp(uri.scheme, proxy_protocol_str[PROTO_HTTP]) == 0) {
 		protocol = PROTO_HTTP;
-		if (!splithostport(uri.host, &host, &port)) {
+		if (!addr_splithostport(uri.host, &host, &port)) {
 			host = uri.host;
 			port = "80";
 		}
 	} else if (strcmp(uri.scheme, proxy_protocol_str[PROTO_SOCKS4A]) == 0) {
 		protocol = PROTO_SOCKS4A;
-		if (!splithostport(uri.host, &host, &port)) {
+		if (!addr_splithostport(uri.host, &host, &port)) {
 			host = uri.host;
 			port = "1080";
 		}
 	} else if (strcmp(uri.scheme, proxy_protocol_str[PROTO_SOCKS5]) == 0) {
 		protocol = PROTO_SOCKS5;
-		if (!splithostport(uri.host, &host, &port)) {
+		if (!addr_splithostport(uri.host, &host, &port)) {
 			host = uri.host;
 			port = "1080";
 		}
@@ -381,6 +361,7 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 	}
 	req->num_proxy = 0;
 	if (n > 0) {
+		ASSERT(len < (1u << 16));
 		char buf[len + 1];
 		(void)memcpy(buf, csv, len + 1);
 		for (const char *tok = strtok(buf, ","); tok != NULL;
@@ -412,7 +393,7 @@ static int format_proxyreq(
 		return nhost;
 	}
 	const struct url u = {
-		.scheme = (char *)proxy_protocol_str[req->proto],
+		.scheme = proxy_protocol_str[req->proto],
 		.host = host,
 	};
 	return url_build(s, maxlen, &u);
@@ -535,7 +516,7 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 
 	/* Close socket if connection wasn't successful */
 	if (d->dialed_fd == -1 && d->w_socket.fd != -1) {
-		CLOSE_FD(d->w_socket.fd);
+		SOCKET_CLOSE_FD(d->w_socket.fd);
 	}
 	d->state = STATE_DONE;
 }
@@ -557,10 +538,11 @@ finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	dialer_stop(d, loop);
 	if (fd >= 0 && d->server != NULL) {
 		struct server_stats *restrict stats = &d->server->stats;
-		const int_fast64_t elapsed = clock_monotonic_ns() - d->start_ns;
+		const int_fast64_t elapsed =
+			clock_monotonic_ns() - (int_fast64_t)d->start_ns;
 		stats->connect_ns
 			[stats->num_connects % ARRAY_SIZE(stats->connect_ns)] =
-			elapsed;
+			(int_least64_t)elapsed;
 		stats->num_connects++;
 	}
 	/* Call user's completion callback with the result */
@@ -1505,14 +1487,14 @@ static bool connect_sa(
 	{
 		int err = socket_set_cloexec(fd);
 		if (err != 0) {
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			d->err = DIALER_ERR_SYSTEM;
 			d->syserr = err;
 			return false;
 		}
 		err = socket_set_nonblock(fd);
 		if (err != 0) {
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			d->err = DIALER_ERR_SYSTEM;
 			d->syserr = err;
 			return false;
@@ -1548,7 +1530,7 @@ static bool connect_sa(
 			}
 			d->err = DIALER_ERR_CONNECT;
 			d->syserr = err;
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			return false;
 		}
 		ev_io_set(&d->w_socket, fd, EV_WRITE);
@@ -1564,7 +1546,7 @@ static bool connect_sa(
 
 	d->state = STATE_HANDSHAKE1;
 	if (!send_dispatch(d)) {
-		CLOSE_FD(fd);
+		SOCKET_CLOSE_FD(fd);
 		return false;
 	}
 	ev_io_set(&d->w_socket, fd, EV_READ);
@@ -1697,7 +1679,7 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
  */
 void dialer_init(
 	struct dialer *restrict d, const struct dialer_cb *callback,
-	uintmax_t *const byt_sent, uintmax_t *const byt_recv)
+	uint_least64_t *const byt_sent, uint_least64_t *const byt_recv)
 {
 	/* Initialize state */
 	d->req = NULL;
@@ -1749,7 +1731,7 @@ void dialer_do(
 	d->resolver = resolver;
 	d->err = DIALER_OK;
 	d->syserr = 0;
-	d->start_ns = clock_monotonic_ns();
+	d->start_ns = (int_least64_t)clock_monotonic_ns();
 	d->server = server;
 	dialer_start(d, loop);
 }

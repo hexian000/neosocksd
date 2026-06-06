@@ -19,6 +19,7 @@ struct config {
 	const char *http_listen;
 #if WITH_RULESET
 	const char *ruleset;
+	const char *boot;
 #endif
 	const char *user_name;
 #if WITH_CARES
@@ -75,16 +76,15 @@ struct config conf_default(void);
 
 bool conf_check(const struct config *conf);
 
-/* Parse command line arguments into *conf. Stores argc and argv internally
- * for later use by conf_reload(). Loads the -c Lua config file if specified.
+/* Parse command line arguments into *conf.
  * On error, logs a message and returns false; the caller should exit. */
 bool conf_parseargs(struct config *restrict conf, int argc, char *argv[]);
 
-/* Reload *conf from the Lua file specified via -c in conf_parseargs().
- * Resets string fields to their argv-parsed baseline before applying the
- * new Lua values (nil fields revert to command-line originals). Logs
- * appropriate messages. Returns false if no config file was specified or
- * loading failed; conf is unchanged on failure. */
-bool conf_reload(struct config *restrict conf);
+struct lua_State;
+
+/* Extract config fields from a Lua table at the top of the ruleset VM's
+ * stack. Nil fields keep their current value. Returns false on type error.
+ * This is called from cfunc_loadconfig within the ruleset Lua VM. */
+bool conf_loadfromtable(struct lua_State *L, struct config *restrict conf);
 
 #endif /* CONF_H */

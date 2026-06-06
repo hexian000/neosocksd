@@ -6,7 +6,7 @@
 
 #include "ruleset.h"
 
-#include "lua.h"
+#include <lua.h>
 
 struct ruleset_state {
 	struct ruleset_callback *cb;
@@ -15,6 +15,8 @@ struct ruleset_state {
 int cfunc_request(lua_State *L);
 
 int cfunc_loadfile(lua_State *L);
+
+int cfunc_loadconfig(lua_State *L);
 
 int cfunc_invoke(lua_State *L);
 

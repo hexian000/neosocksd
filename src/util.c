@@ -1,14 +1,6 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file util.c
- * @brief Implementation of utility routines and globals for neosocksd.
- *
- * Contains initialization/teardown helpers, libev watcher utilities,
- * privilege and daemon helpers, optional splice-based pipe cache utilities,
- * and basic timing/load measurement functions.
- */
 #include "util.h"
 
 #include "resolver.h"
@@ -17,16 +9,13 @@
 #if WITH_CRASH_HANDLER
 #include "os/signal.h"
 #endif
-#include "os/socket.h"
 #include "utils/debug.h"
-#include "utils/minmax.h"
 #include "utils/slog.h"
 
-#if WITH_RULESET
-#include "lua.h"
-#endif
-
 #include <ev.h>
+#if WITH_RULESET
+#include <lua.h>
+#endif
 
 #include <errno.h>
 #include <inttypes.h>
@@ -38,7 +27,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>

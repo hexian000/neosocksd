@@ -1,22 +1,9 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file codec.c
- * @brief Implementation of compression and decompression codecs
- *
- * This file implements stream-based compression and decompression using the
- * miniz library. It provides DEFLATE/zlib compression writers and inflation
- * readers, as well as gzip header parsing functionality.
- *
- * The implementation uses a streaming approach where:
- * - Writers accept uncompressed data and output compressed data
- * - Readers accept compressed data and output uncompressed data
- * - Internal buffers handle partial reads/writes and data flow control
- */
-
 #include "codec.h"
 
+#include "io/file.h"
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
@@ -25,18 +12,14 @@
 #include "utils/serialize.h"
 #include "utils/slog.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/**
- * @brief DEFLATE compression stream implementation
- *
- * This structure wraps a base stream to provide DEFLATE compression.
- * It maintains internal buffers and state for the compression process.
- */
 struct deflate_stream {
 	struct stream s;
 	struct stream *base;
@@ -47,18 +30,6 @@ struct deflate_stream {
 };
 ASSERT_SUPER(struct stream, struct deflate_stream, s);
 
-/**
- * @brief Write data to DEFLATE compression stream
- * @param p Pointer to deflate_stream structure
- * @param buf Input data to compress
- * @param len Pointer to input length; updated with bytes consumed on return
- * @return 0 on success, error code on failure
- *
- * This function compresses input data using DEFLATE and writes the compressed
- * output to the base stream. It handles partial writes and internal buffering.
- * The compression is done incrementally - not all input may be consumed in
- * one call if the output buffer becomes full.
- */
 static int deflate_write(void *p, const void *buf, size_t *restrict len)
 {
 	struct deflate_stream *restrict z = p;
@@ -796,7 +767,8 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				z->hphase = GZIP_HPASE_XLEN_2;
 				return 0;
 			}
-			z->xlen_remain = read_uint16_le(z->srcbuf);
+			z->xlen_remain =
+				(uint_fast16_t)read_uint16_le(z->srcbuf);
 			z->hdrcrc = (uint_least32_t)mz_crc32(
 				z->hdrcrc, z->srcbuf, 2);
 			z->srcbuf += 2, z->srclen -= 2;
@@ -898,6 +870,164 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 	return 0;
 }
 
+static bool gzip_parse_header(struct gzip_rstream *z, size_t *len, int *ret)
+{
+	if (z->srclen == 0 && z->srceof) {
+		/* Clean EOF between members */
+		*len = 0;
+		*ret = z->srcerr;
+		return true;
+	}
+	const int hr = gzip_rstream_parse_hdr(z);
+	if (hr < 0) {
+		*len = 0;
+		z->rderr = hr;
+		*ret = hr;
+		return true;
+	}
+	if (hr == 0) {
+		if (z->srceof) {
+			/* Truncated header */
+			*len = 0;
+			z->rderr = -1;
+			*ret = -1;
+			return true;
+		}
+		return false;
+	}
+	/* Header complete - initialise DEFLATE decompressor */
+	tinfl_init(&z->inflator);
+	z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
+	z->crc = (uint_least32_t)MZ_CRC32_INIT;
+	z->isize = 0;
+	z->dstpos = z->dstlen = 0;
+	z->rstate = GZIP_R_BODY;
+	return false;
+}
+
+static bool gzip_decompress_body(
+	struct gzip_rstream *z, const void **buf, size_t *len, int *ret)
+{
+	/* Wrap around sliding window when fully consumed */
+	if (z->dstpos == z->dstlen && z->dstlen == sizeof(z->dstbuf)) {
+		z->dstpos = z->dstlen = 0;
+	}
+
+	/* Decompress if input and output space are available */
+	if (z->srclen > 0 && z->dstlen < sizeof(z->dstbuf) &&
+	    z->status > TINFL_STATUS_DONE) {
+		const unsigned char *src = z->srcbuf;
+		size_t srclen = z->srclen;
+		unsigned char *dst = z->dstbuf + z->dstlen;
+		size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
+		/* raw DEFLATE */
+		int flags = 0;
+		if (!z->srceof) {
+			flags |= TINFL_FLAG_HAS_MORE_INPUT;
+		}
+		z->status = tinfl_decompress(
+			&z->inflator, src, &srclen, z->dstbuf, dst, &dstlen,
+			flags);
+		z->srcbuf += srclen;
+		z->srclen -= srclen;
+		z->dstlen += dstlen;
+	}
+
+	if (z->dstpos < z->dstlen) {
+		const size_t maxread = *len;
+		size_t n = z->dstlen - z->dstpos;
+		if (n > maxread) {
+			n = maxread;
+		}
+		/* Update CRC-32 and size before returning */
+		z->crc = (uint_least32_t)mz_crc32(
+			z->crc, z->dstbuf + z->dstpos, n);
+		z->isize += (uint_least32_t)n;
+		*buf = z->dstbuf + z->dstpos;
+		*len = n;
+		z->dstpos += n;
+		if (z->dstpos == z->dstlen && z->status == TINFL_STATUS_DONE) {
+			z->rstate = GZIP_R_TRAILER;
+			z->trailpos = 0;
+		}
+		*ret = 0;
+		return true;
+	}
+
+	if (z->status == TINFL_STATUS_DONE) {
+		z->rstate = GZIP_R_TRAILER;
+		z->trailpos = 0;
+		return false;
+	}
+
+	if (z->status < TINFL_STATUS_DONE) {
+		*len = 0;
+		z->rderr = z->status;
+		*ret = z->status;
+		return true;
+	}
+
+	if (z->srceof) {
+		/* Unexpected EOF inside DEFLATE stream */
+		*len = 0;
+		z->rderr = -1;
+		*ret = -1;
+		return true;
+	}
+	return false;
+}
+
+static bool gzip_validate_trailer(struct gzip_rstream *z, size_t *len, int *ret)
+{
+	/* Consume 8 trailer bytes */
+	while (z->trailpos < 8 && z->srclen > 0) {
+		z->trail[z->trailpos++] = *z->srcbuf;
+		z->srcbuf++, z->srclen--;
+	}
+	if (z->trailpos < 8) {
+		if (z->srceof) {
+			LOGD("gzip: short trailer");
+			*len = 0;
+			z->rderr = -1;
+			*ret = -1;
+			return true;
+		}
+		return false;
+	}
+	/* Validate CRC-32 */
+	const uint_least32_t stored_crc =
+		(uint_least32_t)read_uint32_le(z->trail);
+	if (stored_crc != z->crc) {
+		LOGD("gzip: CRC mismatch");
+		*len = 0;
+		z->rderr = -1;
+		*ret = -1;
+		return true;
+	}
+	/* Validate ISIZE */
+	const uint_least32_t stored_isize =
+		(uint_least32_t)read_uint32_le(z->trail + 4);
+	if (stored_isize != z->isize) {
+		LOGD("gzip: ISIZE mismatch");
+		*len = 0;
+		z->rderr = -1;
+		*ret = -1;
+		return true;
+	}
+	/* Check for more members */
+	if (z->srclen == 0 && z->srceof) {
+		*len = 0;
+		*ret = z->srcerr;
+		return true;
+	}
+	/* Reset header parser for next member */
+	z->hdrpos = 0;
+	z->hphase = GZIP_HPASE_HEADER;
+	z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
+	z->rstate = GZIP_R_HEADER;
+	return false;
+}
+
 static int gzip_direct_read(void *p, const void **buf, size_t *restrict len)
 {
 	struct gzip_rstream *restrict z = p;
@@ -914,150 +1044,21 @@ static int gzip_direct_read(void *p, const void **buf, size_t *restrict len)
 			z->srcbuf = srcbuf;
 		}
 
+		int ret;
+		bool done;
 		switch (z->rstate) {
-		case GZIP_R_HEADER: {
-			if (z->srclen == 0 && z->srceof) {
-				/* Clean EOF between members */
-				*len = 0;
-				return z->srcerr;
-			}
-			const int hr = gzip_rstream_parse_hdr(z);
-			if (hr < 0) {
-				*len = 0;
-				z->rderr = hr;
-				return hr;
-			}
-			if (hr == 0) {
-				if (z->srceof) {
-					/* Truncated header */
-					*len = 0;
-					z->rderr = -1;
-					return -1;
-				}
-				continue;
-			}
-			/* Header complete - initialise DEFLATE decompressor */
-			tinfl_init(&z->inflator);
-			z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
-			z->crc = (uint_least32_t)MZ_CRC32_INIT;
-			z->isize = 0;
-			z->dstpos = z->dstlen = 0;
-			z->rstate = GZIP_R_BODY;
-			continue;
+		case GZIP_R_HEADER:
+			done = gzip_parse_header(z, len, &ret);
+			break;
+		case GZIP_R_BODY:
+			done = gzip_decompress_body(z, buf, len, &ret);
+			break;
+		case GZIP_R_TRAILER:
+			done = gzip_validate_trailer(z, len, &ret);
+			break;
 		}
-		case GZIP_R_BODY: {
-			/* Wrap around sliding window when fully consumed */
-			if (z->dstpos == z->dstlen &&
-			    z->dstlen == sizeof(z->dstbuf)) {
-				z->dstpos = z->dstlen = 0;
-			}
-
-			/* Decompress if input and output space are available */
-			if (z->srclen > 0 && z->dstlen < sizeof(z->dstbuf) &&
-			    z->status > TINFL_STATUS_DONE) {
-				const unsigned char *src = z->srcbuf;
-				size_t srclen = z->srclen;
-				unsigned char *dst = z->dstbuf + z->dstlen;
-				size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
-				/* raw DEFLATE */
-				int flags = 0;
-				if (!z->srceof) {
-					flags |= TINFL_FLAG_HAS_MORE_INPUT;
-				}
-				z->status = tinfl_decompress(
-					&z->inflator, src, &srclen, z->dstbuf,
-					dst, &dstlen, flags);
-				z->srcbuf += srclen;
-				z->srclen -= srclen;
-				z->dstlen += dstlen;
-			}
-
-			if (z->dstpos < z->dstlen) {
-				const size_t maxread = *len;
-				size_t n = z->dstlen - z->dstpos;
-				if (n > maxread) {
-					n = maxread;
-				}
-				/* Update CRC-32 and size before returning */
-				z->crc = (uint_least32_t)mz_crc32(
-					z->crc, z->dstbuf + z->dstpos, n);
-				z->isize += (uint_least32_t)n;
-				*buf = z->dstbuf + z->dstpos;
-				*len = n;
-				z->dstpos += n;
-				if (z->dstpos == z->dstlen &&
-				    z->status == TINFL_STATUS_DONE) {
-					z->rstate = GZIP_R_TRAILER;
-					z->trailpos = 0;
-				}
-				return 0;
-			}
-
-			if (z->status == TINFL_STATUS_DONE) {
-				z->rstate = GZIP_R_TRAILER;
-				z->trailpos = 0;
-				continue;
-			}
-
-			if (z->status < TINFL_STATUS_DONE) {
-				*len = 0;
-				z->rderr = z->status;
-				return z->status;
-			}
-
-			if (z->srceof) {
-				/* Unexpected EOF inside DEFLATE stream */
-				*len = 0;
-				z->rderr = -1;
-				return -1;
-			}
-			continue;
-		}
-		case GZIP_R_TRAILER: {
-			/* Consume 8 trailer bytes */
-			while (z->trailpos < 8 && z->srclen > 0) {
-				z->trail[z->trailpos++] = *z->srcbuf;
-				z->srcbuf++, z->srclen--;
-			}
-			if (z->trailpos < 8) {
-				if (z->srceof) {
-					LOGD("gzip: short trailer");
-					*len = 0;
-					z->rderr = -1;
-					return -1;
-				}
-				continue;
-			}
-			/* Validate CRC-32 */
-			const uint_least32_t stored_crc =
-				(uint_least32_t)read_uint32_le(z->trail);
-			if (stored_crc != z->crc) {
-				LOGD("gzip: CRC mismatch");
-				*len = 0;
-				z->rderr = -1;
-				return -1;
-			}
-			/* Validate ISIZE */
-			const uint_least32_t stored_isize =
-				(uint_least32_t)read_uint32_le(z->trail + 4);
-			if (stored_isize != z->isize) {
-				LOGD("gzip: ISIZE mismatch");
-				*len = 0;
-				z->rderr = -1;
-				return -1;
-			}
-			/* Check for more members */
-			if (z->srclen == 0 && z->srceof) {
-				*len = 0;
-				return z->srcerr;
-			}
-			/* Reset header parser for next member */
-			z->hdrpos = 0;
-			z->hphase = GZIP_HPASE_HEADER;
-			z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
-			z->rstate = GZIP_R_HEADER;
-			continue;
-		}
+		if (done) {
+			return ret;
 		}
 	}
 }
@@ -1110,4 +1111,217 @@ struct stream *codec_gzip_reader(struct stream *base)
 	z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
 	z->dstpos = z->dstlen = 0;
 	return (struct stream *)z;
+}
+
+/* codec_lua_reader: auto-detect gzip, skip BOM and shebang */
+
+enum lua_rstate {
+	LUA_SKIP_BOM,
+	LUA_SKIP_SHEBANG,
+	LUA_PASSTHROUGH,
+};
+
+struct lua_rstream {
+	struct stream s;
+	struct stream *inner;
+	enum lua_rstate state;
+	int rderr;
+};
+ASSERT_SUPER(struct stream, struct lua_rstream, s);
+
+/*
+ * Check the first few bytes for a BOM.  Sets *offset to 3 (UTF-8 BOM
+ * skipped) or 0 and transitions z->state to LUA_SKIP_SHEBANG.
+ * Returns false if a non-UTF-8 BOM is detected (z->rderr already set).
+ */
+static bool lua_skip_bom(
+	struct lua_rstream *z, const unsigned char *p, size_t n, size_t *offset)
+{
+	if (n >= 4 && p[0] == 0x00 && p[1] == 0x00 && p[2] == 0xFE &&
+	    p[3] == 0xFF) {
+		LOGD("lua: unsupported BOM (UTF-32 BE)");
+		z->rderr = -1;
+		return false;
+	}
+	if (n >= 4 && p[0] == 0xFF && p[1] == 0xFE && p[2] == 0x00 &&
+	    p[3] == 0x00) {
+		LOGD("lua: unsupported BOM (UTF-32 LE)");
+		z->rderr = -1;
+		return false;
+	}
+	if (n >= 2 && p[0] == 0xFE && p[1] == 0xFF) {
+		LOGD("lua: unsupported BOM (UTF-16 BE)");
+		z->rderr = -1;
+		return false;
+	}
+	if (n >= 2 && p[0] == 0xFF && p[1] == 0xFE) {
+		LOGD("lua: unsupported BOM (UTF-16 LE)");
+		z->rderr = -1;
+		return false;
+	}
+	/* UTF-8 BOM: skip EF BB BF */
+	if (n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF) {
+		*offset = 3;
+	}
+	z->state = LUA_SKIP_SHEBANG;
+	return true;
+}
+
+/*
+ * Check for a shebang line starting at p[*offset] and update *offset past
+ * the terminating newline if found.  If no newline is found within the chunk
+ * the shebang spans the entire chunk and z->state remains LUA_SKIP_SHEBANG;
+ * the caller must read more data and retry.  Otherwise transitions to
+ * LUA_PASSTHROUGH.
+ */
+static void lua_skip_shebang(
+	struct lua_rstream *z, const unsigned char *p, size_t n, size_t *offset)
+{
+	if (n - *offset < 2 || p[*offset] != '#' || p[*offset + 1] != '!') {
+		z->state = LUA_PASSTHROUGH;
+		return;
+	}
+	for (size_t i = *offset + 2; i < n; i++) {
+		if (p[i] == '\n') {
+			*offset = i + 1;
+			z->state = LUA_PASSTHROUGH;
+			return;
+		}
+	}
+}
+
+static int lua_direct_read(void *p, const void **buf, size_t *restrict len)
+{
+	struct lua_rstream *restrict z = p;
+
+	if (z->state == LUA_PASSTHROUGH) {
+		int err = stream_direct_read(z->inner, buf, len);
+		if (err != 0) {
+			z->rderr = err;
+		}
+		return err;
+	}
+
+	for (;;) {
+		const void *data;
+		size_t n = (z->state == LUA_SKIP_BOM) ? 4 : *len;
+		const int err = stream_direct_read(z->inner, &data, &n);
+
+		if (err != 0) {
+			z->state = LUA_PASSTHROUGH;
+			z->rderr = err;
+			*len = 0;
+			return err;
+		}
+		if (n == 0) {
+			z->state = LUA_PASSTHROUGH;
+			*len = 0;
+			return 0;
+		}
+
+		const unsigned char *p = data;
+		size_t offset = 0;
+
+		if (z->state == LUA_SKIP_BOM) {
+			if (!lua_skip_bom(z, p, n, &offset)) {
+				*len = 0;
+				return -1;
+			}
+		}
+		if (z->state == LUA_SKIP_SHEBANG) {
+			lua_skip_shebang(z, p, n, &offset);
+		}
+
+		if (offset < n) {
+			*buf = p + offset;
+			*len = n - offset;
+			return 0;
+		}
+	}
+}
+
+static int lua_close(void *p)
+{
+	struct lua_rstream *restrict z = p;
+	const int rderr = z->rderr;
+	const int err = stream_close(z->inner);
+	free(z);
+	return rderr != 0 ? rderr : err;
+}
+
+struct stream *lua_reader_new(struct stream *base)
+{
+	if (base == NULL) {
+		return NULL;
+	}
+
+	/* Wrap with bufreader so we can peek for gzip magic */
+	if (base->vftable->direct_read == NULL) {
+		base = io_bufreader(base, IO_BUFSIZE);
+		if (base == NULL) {
+			return NULL;
+		}
+	}
+
+	struct stream *inner;
+	{
+		const void *peek;
+		size_t peek_len = 2;
+		const int err = io_bufpeek(base, &peek, &peek_len);
+		if (err == 0 && peek_len >= 2 &&
+		    *(const unsigned char *)peek == 0x1f &&
+		    *((const unsigned char *)peek + 1) == 0x8b) {
+			inner = codec_gzip_reader(base);
+			if (inner == NULL) {
+				return NULL;
+			}
+		} else {
+			inner = base;
+		}
+	}
+
+	struct lua_rstream *z = malloc(sizeof(struct lua_rstream));
+	if (z == NULL) {
+		LOGOOM();
+		stream_close(inner);
+		return NULL;
+	}
+
+	static const struct stream_vftable vftable = {
+		.direct_read = lua_direct_read,
+		.close = lua_close,
+	};
+	z->s = (struct stream){ &vftable, NULL };
+	z->inner = inner;
+	z->state = LUA_SKIP_BOM;
+	z->rderr = 0;
+	return (struct stream *)z;
+}
+
+struct stream *codec_lua_reader(const char *path)
+{
+	FILE *f;
+	if (strcmp(path, "-") == 0) {
+		f = stdin;
+	} else {
+		f = fopen(path, "r");
+		if (f == NULL) {
+			LOGE_F("codec_lua_reader: fopen(\"%s\"): (%d) %s", path,
+			       errno, strerror(errno));
+			return NULL;
+		}
+	}
+	struct stream *s = io_filereader(f);
+	if (s == NULL) {
+		LOGOOM();
+		if (f != stdin) {
+			(void)fclose(f);
+		}
+		return NULL;
+	}
+	s = lua_reader_new(s);
+	if (s == NULL) {
+		return NULL;
+	}
+	return s;
 }

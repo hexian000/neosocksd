@@ -7,23 +7,23 @@
 #include "util.h"
 
 #include "io/stream.h"
-#include "lauxlib.h"
-#include "lua.h"
 #include "os/clock.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <lauxlib.h>
+#include <lua.h>
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>
 
 struct ruleset *aux_getruleset(lua_State *restrict L)
 {
@@ -83,6 +83,90 @@ void aux_getregtable(lua_State *restrict L, const int ridx)
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
 	}
+}
+
+static int thread_main_k(lua_State *L, int status, lua_KContext ctx);
+
+static int
+thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
+{
+	/* lua stack: errfunc? finish ? ... */
+	int errfunc = 0;
+	struct ruleset *restrict r = aux_getruleset(L);
+	if (r->config.traceback) {
+		lua_pushcfunction(L, aux_traceback);
+		lua_replace(L, 1);
+		errfunc = 1;
+	}
+	const int n = lua_gettop(L);
+	const int nargs = n - 2;
+	ASSERT(nargs >= 1);
+	lua_pushboolean(L, (status == LUA_OK || status == LUA_YIELD));
+	lua_replace(L, 3);
+	if (lua_isfunction(L, 2)) {
+		status = lua_pcall(L, nargs, 0, errfunc);
+		if (status != LUA_OK && status != LUA_YIELD) {
+			lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+		}
+	}
+
+	/* thread transitions from active to idle */
+	r->vmstats.num_thread_active--;
+	/* cache the thread for reuse */
+	aux_getregtable(L, RIDX_IDLE_THREAD);
+	lua_pushthread(L);
+	lua_pushboolean(L, 1);
+	lua_rawset(L, -3);
+	lua_settop(L, 0);
+	return lua_yieldk(L, 0, ctx, thread_main_k);
+}
+
+static int
+thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
+{
+	ASSERT(status == LUA_YIELD);
+	/* lua stack: errfunc finish ? func ... */
+	const int errfunc = lua_isfunction(L, 1) ? 1 : 0;
+	const int n = lua_gettop(L);
+	const int nargs = n - 4;
+	ASSERT(nargs >= 0);
+	status = lua_pcallk(L, nargs, LUA_MULTRET, errfunc, ctx, thread_call_k);
+	return thread_call_k(L, status, ctx);
+}
+
+static int thread_main(lua_State *restrict L)
+{
+	return lua_yieldk(L, 0, 0, thread_main_k);
+}
+
+/* [-0, +1, v] */
+lua_State *aux_getthread(lua_State *restrict L)
+{
+	struct ruleset *restrict r = aux_getruleset(L);
+	aux_getregtable(L, RIDX_IDLE_THREAD);
+	lua_pushnil(L);
+	lua_State *restrict co;
+	if (lua_next(L, -2)) {
+		lua_pop(L, 1);
+		lua_pushvalue(L, -1);
+		lua_pushnil(L);
+		/* lua stack: RIDX_IDLE_THREAD co co nil */
+		lua_rawset(L, -4);
+		lua_replace(L, -2);
+		co = lua_tothread(L, -1);
+	} else {
+		lua_pop(L, 1);
+		co = lua_newthread(L);
+		lua_pushcfunction(co, thread_main);
+		const int status = aux_resume(co, L, 0);
+		ASSERT(status == LUA_YIELD);
+		UNUSED(status);
+	}
+	r->vmstats.num_thread_active++;
+	if (r->vmstats.num_thread_active > r->vmstats.num_thread_peak) {
+		r->vmstats.num_thread_peak = r->vmstats.num_thread_active;
+	}
+	return co;
 }
 
 const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
@@ -216,90 +300,6 @@ int aux_traceback(lua_State *restrict L)
 	return 1;
 }
 
-static int thread_main_k(lua_State *L, int status, lua_KContext ctx);
-
-static int
-thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
-{
-	/* lua stack: errfunc? finish ? ... */
-	int errfunc = 0;
-	struct ruleset *restrict r = aux_getruleset(L);
-	if (r->config.traceback) {
-		lua_pushcfunction(L, aux_traceback);
-		lua_replace(L, 1);
-		errfunc = 1;
-	}
-	const int n = lua_gettop(L);
-	const int nargs = n - 2;
-	ASSERT(nargs >= 1);
-	lua_pushboolean(L, (status == LUA_OK || status == LUA_YIELD));
-	lua_replace(L, 3);
-	if (lua_isfunction(L, 2)) {
-		status = lua_pcall(L, nargs, 0, errfunc);
-		if (status != LUA_OK && status != LUA_YIELD) {
-			lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
-		}
-	}
-
-	/* thread transitions from active to idle */
-	r->vmstats.num_thread_active--;
-	/* cache the thread for reuse */
-	aux_getregtable(L, RIDX_IDLE_THREAD);
-	lua_pushthread(L);
-	lua_pushboolean(L, 1);
-	lua_rawset(L, -3);
-	lua_settop(L, 0);
-	return lua_yieldk(L, 0, ctx, thread_main_k);
-}
-
-static int
-thread_main_k(lua_State *restrict L, int status, const lua_KContext ctx)
-{
-	ASSERT(status == LUA_YIELD);
-	/* lua stack: errfunc finish ? func ... */
-	const int errfunc = lua_isfunction(L, 1) ? 1 : 0;
-	const int n = lua_gettop(L);
-	const int nargs = n - 4;
-	ASSERT(nargs >= 0);
-	status = lua_pcallk(L, nargs, LUA_MULTRET, errfunc, ctx, thread_call_k);
-	return thread_call_k(L, status, ctx);
-}
-
-static int thread_main(lua_State *restrict L)
-{
-	return lua_yieldk(L, 0, 0, thread_main_k);
-}
-
-/* [-0, +1, v] */
-lua_State *aux_getthread(lua_State *restrict L)
-{
-	struct ruleset *restrict r = aux_getruleset(L);
-	aux_getregtable(L, RIDX_IDLE_THREAD);
-	lua_pushnil(L);
-	lua_State *restrict co;
-	if (lua_next(L, -2)) {
-		lua_pop(L, 1);
-		lua_pushvalue(L, -1);
-		lua_pushnil(L);
-		/* lua stack: RIDX_IDLE_THREAD co co nil */
-		lua_rawset(L, -4);
-		lua_replace(L, -2);
-		co = lua_tothread(L, -1);
-	} else {
-		lua_pop(L, 1);
-		co = lua_newthread(L);
-		lua_pushcfunction(co, thread_main);
-		const int status = aux_resume(co, L, 0);
-		ASSERT(status == LUA_YIELD);
-		UNUSED(status);
-	}
-	r->vmstats.num_thread_active++;
-	if (r->vmstats.num_thread_active > r->vmstats.num_thread_peak) {
-		r->vmstats.num_thread_peak = r->vmstats.num_thread_active;
-	}
-	return co;
-}
-
 int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
 {
 	int status;
@@ -340,9 +340,9 @@ static void record_event_time(
 {
 	const size_t idx =
 		r->vmstats.num_events++ % ARRAY_SIZE(r->vmstats.event_ns);
-	r->vmstats.event_ns[idx] = time_used;
-	r->vmstats.event_end[idx] = time_end;
-	r->vmstats.time_total += (uintmax_t)time_used;
+	r->vmstats.event_ns[idx] = (int_least64_t)time_used;
+	r->vmstats.event_end[idx] = (int_least64_t)time_end;
+	r->vmstats.time_total += (uint_least64_t)time_used;
 }
 
 static bool ruleset_pcallv(

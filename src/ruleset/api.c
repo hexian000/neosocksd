@@ -11,23 +11,23 @@
 #include "server.h"
 #include "util.h"
 
-#include "lauxlib.h"
-#include "lua.h"
 #include "net/addr.h"
 #include "os/clock.h"
 #include "os/socket.h"
 #include "utils/minmax.h"
 #include "utils/serialize.h"
 
-#include <arpa/inet.h>
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <lauxlib.h>
+#include <lua.h>
 
+#include <arpa/inet.h>
 #include <math.h>
+#include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /* co, err = neosocksd.async(finish, func, ...) */
 static int api_async(lua_State *restrict L)
@@ -159,7 +159,7 @@ static int api_splithostport(lua_State *restrict L)
 	memcpy(buf, s, len);
 	buf[len] = '\0';
 	char *host, *port;
-	if (!splithostport(buf, &host, &port)) {
+	if (!addr_splithostport(buf, &host, &port)) {
 		return luaL_error(L, "invalid address: `%s'", s);
 	}
 	lua_pushstring(L, host);
@@ -275,7 +275,7 @@ static int api_stats(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
 	struct server_stats stats = { 0 };
-	uintmax_t num_dns_query = 0, num_dns_success = 0;
+	uint_least64_t num_dns_query = 0, num_dns_success = 0;
 	{
 		const struct server *restrict s = r->server;
 		if (s != NULL) {

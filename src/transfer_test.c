@@ -124,7 +124,8 @@ T_DECLARE_CASE(test_transfer_moves_payload)
 	static const char downlink[] = "downlink-data";
 	int acc_peer = -1, acc_fd = -1;
 	int dial_fd = -1, dial_peer = -1;
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct test_xfer_state state = { 0 };
 	char up_out[sizeof(uplink)] = { 0 };
 	char dn_out[sizeof(downlink)] = { 0 };
@@ -189,8 +190,9 @@ T_DECLARE_CASE(test_transfer_moves_payload)
 	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
 	transfer_join(xfer);
-	CLOSE_FD(acc_peer);
-	CLOSE_FD(dial_peer);
+	SOCKET_CLOSE_FD(acc_peer);
+	SOCKET_CLOSE_FD(dial_peer);
+	ev_loop_destroy(loop);
 }
 
 #if WITH_SPLICE
@@ -202,7 +204,8 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	static const char downlink[] = "splice-downlink";
 	int acc_peer = -1, acc_fd = -1;
 	int dial_fd = -1, dial_peer = -1;
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct test_xfer_state state = { 0 };
 	char up_out[sizeof(uplink)] = { 0 };
 	char dn_out[sizeof(downlink)] = { 0 };
@@ -263,8 +266,9 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
 	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
 	transfer_join(xfer);
-	CLOSE_FD(acc_peer);
-	CLOSE_FD(dial_peer);
+	SOCKET_CLOSE_FD(acc_peer);
+	SOCKET_CLOSE_FD(dial_peer);
+	ev_loop_destroy(loop);
 }
 #endif
 
@@ -277,7 +281,8 @@ T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
 {
 	int acc_peer = -1, acc_fd = -1;
 	int dial_fd = -1, dial_peer = -1;
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct test_xfer_state state = { 0 };
 
 	make_socketpair(&acc_peer, &acc_fd);
@@ -305,8 +310,9 @@ T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
 	transfer_join(xfer);
 	T_EXPECT_EQ(state.num_sessions, (size_t)0);
 
-	CLOSE_FD(acc_peer);
-	CLOSE_FD(dial_peer);
+	SOCKET_CLOSE_FD(acc_peer);
+	SOCKET_CLOSE_FD(dial_peer);
+	ev_loop_destroy(loop);
 }
 
 /*
@@ -317,7 +323,8 @@ T_DECLARE_CASE(test_transfer_dst_error_finishes)
 {
 	int acc_peer = -1, acc_fd = -1;
 	int dial_fd = -1, dial_peer = -1;
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct test_xfer_state state = { 0 };
 
 	/* Prevent SIGPIPE when writing to a socket with no reader. */
@@ -331,7 +338,7 @@ T_DECLARE_CASE(test_transfer_dst_error_finishes)
 	T_CHECK(send(acc_peer, "x", 1, 0) == 1);
 	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
 	/* Close the read end of the uplink destination. */
-	CLOSE_FD(dial_peer);
+	SOCKET_CLOSE_FD(dial_peer);
 
 	state.num_sessions = 1;
 	struct transfer *restrict xfer = transfer_create(loop, 1);
@@ -349,7 +356,8 @@ T_DECLARE_CASE(test_transfer_dst_error_finishes)
 	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
 
 	transfer_join(xfer);
-	CLOSE_FD(acc_peer);
+	SOCKET_CLOSE_FD(acc_peer);
+	ev_loop_destroy(loop);
 }
 
 /*
@@ -361,7 +369,8 @@ T_DECLARE_CASE(test_transfer_backpressure_completes)
 	static const char fill[] = "backpressure-fill";
 	int acc_peer = -1, acc_fd = -1;
 	int dial_fd = -1, dial_peer = -1;
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct test_xfer_state state = { 0 };
 	char drain[4096];
 
@@ -421,8 +430,100 @@ T_DECLARE_CASE(test_transfer_backpressure_completes)
 	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)1);
 
 	transfer_join(xfer);
-	CLOSE_FD(acc_peer);
-	CLOSE_FD(dial_peer);
+	SOCKET_CLOSE_FD(acc_peer);
+	SOCKET_CLOSE_FD(dial_peer);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Rapid serve-and-join cycles must not let num_sessions underflow.
+ * This simulates a server under high churn where connections are
+ * accepted and immediately closed.
+ */
+T_DECLARE_CASE(test_transfer_serve_join_rapid_cycles)
+{
+	static const int CYCLES = 50;
+	struct ev_loop *loop = ev_loop_new(0);
+
+	T_CHECK(loop != NULL);
+
+	for (int i = 0; i < CYCLES; i++) {
+		int acc_peer = -1, acc_fd = -1;
+		int dial_fd = -1, dial_peer = -1;
+		struct test_xfer_state state = { 0 };
+
+		make_socketpair(&acc_peer, &acc_fd);
+		make_socketpair(&dial_fd, &dial_peer);
+		set_nonblock(acc_fd);
+		set_nonblock(dial_fd);
+
+		state.num_sessions = 1;
+		struct transfer *restrict xfer = transfer_create(loop, 1);
+		T_CHECK(xfer != NULL);
+
+		T_CHECK(transfer_serve(
+			xfer, acc_fd, dial_fd,
+			&(struct transfer_opts){
+				.byt_up = &state.byt_up,
+				.byt_down = &state.byt_down,
+				.num_sessions = &state.num_sessions,
+			}));
+		acc_fd = dial_fd = -1;
+
+		/* Join immediately — in-flight transfers are cancelled. */
+		transfer_join(xfer);
+
+		/* num_sessions must reach exactly zero, never negative. */
+		T_EXPECT_EQ((size_t)state.num_sessions, (size_t)0);
+
+		SOCKET_CLOSE_FD(acc_peer);
+		SOCKET_CLOSE_FD(dial_peer);
+	}
+
+	ev_loop_destroy(loop);
+}
+
+/*
+ * When both uplink and downlink close their write ends, the transfer
+ * must complete and decrement num_sessions exactly once, not twice.
+ */
+T_DECLARE_CASE(test_transfer_both_halves_close_normally)
+{
+	int acc_peer = -1, acc_fd = -1;
+	int dial_fd = -1, dial_peer = -1;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct test_xfer_state state = { 0 };
+
+	make_socketpair(&acc_peer, &acc_fd);
+	make_socketpair(&dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+
+	/* Close write ends immediately — no data to transfer. */
+	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
+
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_create(loop, 1);
+	T_CHECK(xfer != NULL);
+
+	T_CHECK(transfer_serve(
+		xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.num_sessions = &state.num_sessions,
+		}));
+	acc_fd = dial_fd = -1;
+
+	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
+	T_EXPECT_EQ((size_t)state.num_sessions, (size_t)0);
+
+	transfer_join(xfer);
+	SOCKET_CLOSE_FD(acc_peer);
+	SOCKET_CLOSE_FD(dial_peer);
+	ev_loop_destroy(loop);
 }
 
 #if WITH_SPLICE
@@ -483,5 +584,7 @@ int main(void)
 	T_RUN_CASE(t, test_transfer_ctx_cancel_no_callback);
 	T_RUN_CASE(t, test_transfer_dst_error_finishes);
 	T_RUN_CASE(t, test_transfer_backpressure_completes);
+	T_RUN_CASE(t, test_transfer_serve_join_rapid_cycles);
+	T_RUN_CASE(t, test_transfer_both_halves_close_normally);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

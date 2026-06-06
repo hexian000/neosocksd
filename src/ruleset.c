@@ -1,17 +1,13 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file ruleset.c
- * @brief Implementation of Lua-based ruleset engine
- */
-
 #include "ruleset.h"
 
 #if WITH_RULESET
 
 #include "conf.h"
 #include "dialer.h"
+#include "proto/codec.h"
 #include "resolver.h"
 #include "ruleset/api.h"
 #include "ruleset/await.h"
@@ -23,33 +19,20 @@
 #include "ruleset/zlib.h"
 #include "util.h"
 
+#include "io/stream.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
-
 #include <ev.h>
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
 
-/**
- * @brief Custom memory allocator for Lua virtual machine
- *
- * This allocator tracks memory usage statistics and provides memory
- * accounting for the ruleset engine. It wraps standard malloc/free/realloc
- * functions while maintaining counters for allocated objects and bytes.
- *
- * @param ud User data (ruleset instance)
- * @param ptr Pointer to existing memory block (NULL for allocation)
- * @param osize Old size of memory block
- * @param nsize New size of memory block (0 for deallocation)
- * @return Pointer to allocated/reallocated memory, or NULL
- */
 static void *
 l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 {
@@ -209,7 +192,7 @@ static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 }
 
 struct ruleset *ruleset_new(
-	struct ev_loop *restrict loop, const struct config *restrict conf,
+	struct ev_loop *restrict loop, struct config *restrict conf,
 	struct resolver *restrict resolver, struct dialreq *restrict basereq)
 {
 	struct ruleset *restrict r = malloc(sizeof(struct ruleset));
@@ -279,6 +262,12 @@ void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s)
 	r->server = s;
 }
 
+void ruleset_setbasereq(
+	struct ruleset *restrict r, struct dialreq *restrict basereq)
+{
+	r->basereq = basereq;
+}
+
 /**
  * @brief Macro to create constant length string
  *
@@ -340,7 +329,25 @@ bool ruleset_update(
 
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 {
-	return ruleset_pcall(r, cfunc_loadfile, 1, 0, filename);
+	struct stream *restrict s = codec_lua_reader(filename);
+	if (s == NULL) {
+		return false;
+	}
+	const bool ok = ruleset_pcall(r, cfunc_loadfile, 1, 0, s);
+	stream_close(s);
+	return ok;
+}
+
+bool ruleset_loadconfig(
+	struct ruleset *restrict r, const char *restrict filename)
+{
+	struct stream *restrict s = codec_lua_reader(filename);
+	if (s == NULL) {
+		return false;
+	}
+	const bool ok = ruleset_pcall(r, cfunc_loadconfig, 1, 0, s);
+	stream_close(s);
+	return ok;
 }
 
 bool ruleset_gc(struct ruleset *restrict r)

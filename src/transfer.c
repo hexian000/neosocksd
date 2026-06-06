@@ -1,25 +1,6 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file transfer.c
- * @brief Bidirectional data transfer, optionally on a dedicated I/O thread.
- *
- * When built with WITH_THREADS:
- *   `struct transfer` (engine) runs an ev_loop on a dedicated C11 thread.
- *   `struct transfer_ctx` wraps two `struct xfer_half` objects (one per
- *   direction). Tasks are enqueued from the main thread via a dispatcher queue
- *   signalled with an ev_async watcher.
- *
- * When built without WITH_THREADS:
- *   The engine reuses the caller-supplied ev_loop; `transfer_start` registers
- *   I/O watchers directly on that loop without spawning a thread.
- *
- * transfer_ctx is self-owned: allocated by transfer_start(), freed once both
- * halves finish.  On completion, the atomic num_sessions counter is
- * decremented.
- */
-
 #include "transfer.h"
 
 #include "util.h"
@@ -35,23 +16,23 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
+#include <assert.h>
+#include <errno.h>
 #if WITH_SPLICE
 #include <fcntl.h>
 #endif
-#include <sys/socket.h>
-
-#include <errno.h>
 #if WITH_THREADS
 #include <stdatomic.h>
+#include <threads.h>
 #endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#if WITH_THREADS
-#include <threads.h>
-#endif
+#include <sys/socket.h>
+#include <sys/types.h>
 
 #if WITH_THREADS
 #define THRD_ASSERT(expr)                                                      \
@@ -89,9 +70,9 @@ struct xfer_half {
 	int src_fd, dst_fd;
 	ev_io w_socket;
 #if WITH_THREADS
-	atomic_uintmax_t *byt_transferred;
+	atomic_uint_least64_t *byt_transferred;
 #else
-	uintmax_t *byt_transferred;
+	uint_least64_t *byt_transferred;
 #endif
 	bool is_uplink : 1;
 #if WITH_SPLICE
@@ -210,12 +191,12 @@ static void update_stats(
 	const size_t buffered)
 {
 #if WITH_THREADS
-	atomic_uintmax_t *restrict byt = h->byt_transferred;
+	atomic_uint_least64_t *restrict byt = h->byt_transferred;
 	if (byt != NULL) {
 		atomic_fetch_add_explicit(byt, nbsend, memory_order_relaxed);
 	}
 #else
-	uintmax_t *restrict byt = h->byt_transferred;
+	uint_least64_t *restrict byt = h->byt_transferred;
 	if (byt != NULL) {
 		*byt += nbsend;
 	}
@@ -235,11 +216,11 @@ static void update_stats(
 void pipe_close(struct splice_pipe *restrict pipe)
 {
 	if (pipe->fd[0] != -1) {
-		CLOSE_FD(pipe->fd[0]);
+		SOCKET_CLOSE_FD(pipe->fd[0]);
 		pipe->fd[0] = -1;
 	}
 	if (pipe->fd[1] != -1) {
-		CLOSE_FD(pipe->fd[1]);
+		SOCKET_CLOSE_FD(pipe->fd[1]);
 		pipe->fd[1] = -1;
 	}
 }
@@ -288,9 +269,7 @@ void pipe_shrink(struct pipe_cache *restrict cache, const size_t count)
 	cache->len = n;
 }
 #endif
-#endif
 
-#if WITH_SPLICE
 #if WITH_ALLOC_CACHE
 static bool
 pipe_get(struct pipe_cache *restrict cache, struct splice_pipe *restrict pipe)
@@ -334,7 +313,7 @@ static struct pipe_cache *xfer_cache(struct transfer_ctx *restrict t)
 #endif
 }
 #endif /* WITH_ALLOC_CACHE */
-#endif
+#endif /* WITH_SPLICE */
 
 /* ---------------------------------------------------------------- set_state */
 
@@ -383,8 +362,8 @@ static void set_state(
 #endif
 
 	/* Both halves finished: close fds, decrement counter, free. */
-	CLOSE_FD(t->up.src_fd);
-	CLOSE_FD(t->down.src_fd);
+	SOCKET_CLOSE_FD(t->up.src_fd);
+	SOCKET_CLOSE_FD(t->down.src_fd);
 	/* Remove from active_list. */
 #if WITH_THREADS
 	struct transfer_ctx **pp = &t->worker->active_list;
@@ -687,7 +666,7 @@ static void task_xfer_start(void *data)
 			t->down.pipe = pipe;
 		}
 	}
-#endif
+#endif /* WITH_SPLICE */
 
 	ev_io_start(loop, &t->up.w_socket);
 	ev_io_start(loop, &t->down.w_socket);
@@ -718,10 +697,10 @@ task_xfer_stop(struct ev_loop *restrict loop, struct transfer_ctx *restrict t)
 #endif
 			&t->down.pipe);
 	}
-#endif
+#endif /* WITH_SPLICE */
 
-	CLOSE_FD(t->up.src_fd);
-	CLOSE_FD(t->down.src_fd);
+	SOCKET_CLOSE_FD(t->up.src_fd);
+	SOCKET_CLOSE_FD(t->down.src_fd);
 #if WITH_THREADS
 	atomic_fetch_sub_explicit(t->num_sessions, 1, memory_order_relaxed);
 #else
@@ -833,7 +812,7 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 #if WITH_SPLICE && WITH_ALLOC_CACHE
 	xfer->cache = (struct pipe_cache){ .cap = PIPE_MAXCACHED, .len = 0 };
 #endif
-#endif
+#endif /* WITH_THREADS */
 	return xfer;
 }
 
@@ -869,7 +848,7 @@ void transfer_join(struct transfer *restrict xfer)
 		t = next;
 	}
 	xfer->active_list = NULL;
-#endif
+#endif /* WITH_THREADS */
 #if WITH_SPLICE && WITH_ALLOC_CACHE
 #if WITH_THREADS
 	for (unsigned int i = 0; i < xfer->nworkers; i++) {
@@ -878,7 +857,7 @@ void transfer_join(struct transfer *restrict xfer)
 #else
 	pipe_shrink(&xfer->cache, SIZE_MAX);
 #endif
-#endif
+#endif /* WITH_SPLICE && WITH_ALLOC_CACHE */
 	free(xfer);
 }
 
@@ -886,9 +865,9 @@ static void xfer_half_init(
 	struct xfer_half *restrict h, struct transfer_ctx *restrict owner,
 	const int src_fd, const int dst_fd,
 #if WITH_THREADS
-	atomic_uintmax_t *restrict byt_transferred,
+	atomic_uint_least64_t *restrict byt_transferred,
 #else
-	uintmax_t *restrict byt_transferred,
+	uint_least64_t *restrict byt_transferred,
 #endif
 	const bool is_uplink
 #if WITH_SPLICE

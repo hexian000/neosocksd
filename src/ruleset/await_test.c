@@ -221,7 +221,7 @@ static bool parse_hostport(
 
 /* ---- dialer stubs (required by base.c's aux_todialreq) ---- */
 
-const char *proxy_protocol_str[PROTO_MAX] = {
+char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",

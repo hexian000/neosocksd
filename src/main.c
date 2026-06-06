@@ -1,11 +1,6 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file main.c
- * @brief Main entry point for neosocksd
- */
-
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
@@ -42,7 +37,7 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 	struct config *restrict conf = &app.conf;
-	if (!conf_check(conf)) {
+	if (conf->boot == NULL && !conf_check(conf)) {
 		LOGF_F("configuration check failed, try \"%s --help\" for more information",
 		       argv[0]);
 		exit(EXIT_FAILURE);
@@ -104,15 +99,49 @@ int main(int argc, char *argv[])
 
 #if WITH_RULESET
 	struct ruleset *ruleset = NULL;
-	if (conf->ruleset != NULL) {
+	if (conf->ruleset != NULL || conf->boot != NULL) {
 		ruleset = ruleset_new(loop, conf, resolver, basereq);
 		CHECKOOM(ruleset);
-		const bool ok = ruleset_loadfile(ruleset, conf->ruleset);
-		if (!ok) {
-			LOGE_F("ruleset load: %s",
-			       ruleset_geterror(ruleset, NULL));
-			LOGF_F("unable to load ruleset: %s", conf->ruleset);
+		if (conf->boot != NULL) {
+			const bool ok = ruleset_loadconfig(ruleset, conf->boot);
+			if (!ok) {
+				LOGE_F("config load: %s",
+				       ruleset_geterror(ruleset, NULL));
+				LOGF_F("unable to load config: %s", conf->boot);
+				exit(EXIT_FAILURE);
+			}
+			/* The boot config may change forward/proxy, so rebuild
+			 * the base dial request to reflect the effective
+			 * configuration. */
+			struct dialreq *restrict newbasereq =
+				dialreq_parse(conf->forward, conf->proxy);
+			if (newbasereq == NULL) {
+				LOGF("unable to parse outbound configuration");
+				exit(EXIT_FAILURE);
+			}
+			dialreq_free(basereq);
+			basereq = newbasereq;
+			ruleset_setbasereq(ruleset, basereq);
+		}
+		if (conf->ruleset != NULL) {
+			const bool ok =
+				ruleset_loadfile(ruleset, conf->ruleset);
+			if (!ok) {
+				LOGE_F("ruleset load: %s",
+				       ruleset_geterror(ruleset, NULL));
+				LOGF_F("unable to load ruleset: %s",
+				       conf->ruleset);
+				exit(EXIT_FAILURE);
+			}
+		}
+		if (!conf_check(conf)) {
+			LOGF_F("configuration check failed, try \"%s --help\" for more information",
+			       argv[0]);
 			exit(EXIT_FAILURE);
+		}
+		if (conf->ruleset == NULL) {
+			ruleset_free(ruleset);
+			ruleset = NULL;
 		}
 	}
 #else
@@ -130,7 +159,7 @@ int main(int argc, char *argv[])
 	}
 #endif
 
-	(void)systemd_notify(SYSTEMD_STATE_READY);
+	(void)systemd_notify(DAEMON_SYSTEMD_STATE_READY);
 
 	LOGD("starting the main event loop");
 	ev_run(loop, 0);
@@ -147,10 +176,6 @@ int main(int argc, char *argv[])
 	if (resolver != NULL) {
 		resolver_free(resolver);
 		resolver = NULL;
-	}
-	if (basereq != NULL) {
-		dialreq_free(basereq);
-		basereq = NULL;
 	}
 
 	{

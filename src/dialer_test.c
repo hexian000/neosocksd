@@ -682,7 +682,44 @@ bool ruleset_route6(
 	return false;
 }
 
+struct ruleset *ruleset_new(
+	struct ev_loop *restrict loop, struct config *restrict conf,
+	struct resolver *restrict resolver, struct dialreq *restrict basereq)
+{
+	(void)loop;
+	(void)conf;
+	(void)resolver;
+	(void)basereq;
+	return NULL;
+}
+
+void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s)
+{
+	(void)r;
+	(void)s;
+}
+
+void ruleset_setbasereq(
+	struct ruleset *restrict r, struct dialreq *restrict basereq)
+{
+	(void)r;
+	(void)basereq;
+}
+
+void ruleset_free(struct ruleset *restrict r)
+{
+	(void)r;
+}
+
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
+{
+	(void)r;
+	(void)filename;
+	return false;
+}
+
+bool ruleset_loadconfig(
+	struct ruleset *restrict r, const char *restrict filename)
 {
 	(void)r;
 	(void)filename;
@@ -699,26 +736,6 @@ ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 	return "(nil)";
 }
 #endif /* WITH_RULESET */
-
-#if WITH_LUA
-bool conf_loadfile(
-	const char *restrict path, const int argc,
-	const char *const restrict argv[const restrict],
-	struct config *restrict conf)
-{
-	(void)path;
-	(void)argc;
-	(void)argv;
-	(void)conf;
-	return false;
-}
-#endif /* WITH_LUA */
-
-bool conf_reload(struct config *restrict conf)
-{
-	(void)conf;
-	return false;
-}
 
 /* Start a proxy server on an ephemeral loopback port and return that port.
  * Sets conf->listen or conf->http_listen to "127.0.0.1:0" depending on

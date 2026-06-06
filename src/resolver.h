@@ -40,8 +40,8 @@ struct resolve_query;
  * All counters are monotonically increasing and never reset.
  */
 struct resolver_stats {
-	uintmax_t num_query;
-	uintmax_t num_success;
+	uint_least64_t num_query;
+	uint_least64_t num_success;
 };
 
 /**

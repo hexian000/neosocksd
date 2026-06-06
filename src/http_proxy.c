@@ -27,6 +27,9 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -34,9 +37,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#if WITH_THREADS
-#include <stdatomic.h>
-#endif
 
 struct http_ctx;
 
@@ -163,11 +163,11 @@ static void http_ctx_finalize(struct gcbase *restrict obj)
 
 	http_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
-		CLOSE_FD(ctx->accepted_fd);
+		SOCKET_CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
 	}
 	if (ctx->dialed_fd != -1) {
-		CLOSE_FD(ctx->dialed_fd);
+		SOCKET_CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
 
@@ -318,8 +318,8 @@ http_ctx_start_transfer(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ctx->s->num_sessions--;
 #endif
 		LOGOOM();
-		CLOSE_FD(acc_fd);
-		CLOSE_FD(dial_fd);
+		SOCKET_CLOSE_FD(acc_fd);
+		SOCKET_CLOSE_FD(dial_fd);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -993,7 +993,7 @@ void http_proxy_serve(
 	struct http_ctx *restrict ctx = http_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		CLOSE_FD(accepted_fd);
+		SOCKET_CLOSE_FD(accepted_fd);
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);

@@ -9,6 +9,7 @@
 #include "util.h"
 
 #include "io/stream.h"
+#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -326,7 +327,7 @@ const char *dialer_strerror(const enum dialer_error err)
 
 void dialer_init(
 	struct dialer *restrict d, const struct dialer_cb *callback,
-	uintmax_t *byt_sent, uintmax_t *byt_recv)
+	uint_least64_t *byt_sent, uint_least64_t *byt_recv)
 {
 	(void)byt_sent;
 	(void)byt_recv;

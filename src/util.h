@@ -13,13 +13,13 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 struct dialreq;
 

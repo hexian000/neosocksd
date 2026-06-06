@@ -10,6 +10,7 @@
 #include "transfer.h"
 #include "util.h"
 
+#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <arpa/inet.h>
@@ -42,7 +43,7 @@ static struct config test_conf = {
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.032;
 static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 0.128;
 
-const char *proxy_protocol_str[PROTO_MAX] = {
+char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -162,20 +163,6 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	UNUSED(revents);
 	watchdog->fired = true;
 	ev_break(loop, EVBREAK_ONE);
-}
-
-static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
-{
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired) {
-		ev_run(loop, EVRUN_ONCE);
-	}
-	ev_timer_stop(loop, &w_timeout);
 }
 
 #if WITH_RULESET
@@ -375,7 +362,7 @@ int dialaddr_format(
 
 void dialer_init(
 	struct dialer *restrict d, const struct dialer_cb *callback,
-	uintmax_t *byt_sent, uintmax_t *byt_recv)
+	uint_least64_t *byt_sent, uint_least64_t *byt_recv)
 {
 	(void)byt_sent;
 	(void)byt_recv;
@@ -607,7 +594,19 @@ T_DECLARE_CASE(forward_timeout_cancels_pending_dialer)
 
 	forward_serve(
 		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
-	test_run_for(loop, TEST_WAIT_TIMEOUT_SEC);
+
+	/* Wait for timeout to clean up — exit when num_halfopen hits zero. */
+	{
+		struct test_watchdog watchdog = { 0 };
+		struct ev_timer w;
+		ev_timer_init(&w, test_watchdog_cb, TEST_WAIT_TIMEOUT_SEC, 0.0);
+		w.data = &watchdog;
+		ev_timer_start(loop, &w);
+		while (!watchdog.fired && s.stats.num_halfopen != 0) {
+			ev_run(loop, EVRUN_ONCE);
+		}
+		ev_timer_stop(loop, &w);
+	}
 
 	T_EXPECT_EQ(STUB.dialer_do_calls, 1);
 	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
@@ -716,6 +715,241 @@ T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 }
 #endif
 
+/*
+ * SIGHUP clears s->ruleset between forward_serve starting
+ * the idle watcher and the idle watcher actually firing.  forward_process_cb
+ * must fall back to direct dial instead of crashing on NULL ruleset.
+ */
+#if WITH_RULESET
+T_DECLARE_CASE(forward_ruleset_null_after_sighup)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = {
+		.sin_family = AF_INET,
+	};
+	struct dialreq base_req = { 0 };
+	int accepted_fd = -1;
+	int peer_fd = -1;
+
+	stub_reset();
+	/* Use a short timeout so that after the idle watcher fires and
+	 * falls back to direct-dial, the timer cleans up quickly. */
+	test_conf.timeout = TEST_WAIT_SHORT_SEC;
+	STUB.dialer_mode = STUB_DIALER_NONE;
+	set_ipv4_addr(&base_req.addr, 80);
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	s.basereq = &base_req;
+	s.ruleset = (struct ruleset *)&s;
+	make_socketpair(&accepted_fd, &peer_fd);
+
+	forward_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	/*
+	 * Simulate SIGHUP: the idle watcher is pending but s->ruleset
+	 * is cleared before it fires.  The idle cb must fallback to
+	 * direct dial (forward_ctx_start) rather than crash.
+	 */
+	s.ruleset = NULL;
+
+	/*
+	 * ev_run loop until either the timer fires and cleans
+	 * up, or the watchdog expires.  The forward timeout
+	 * (TEST_WAIT_SHORT_SEC) fires first, then the idle
+	 * watcher triggers the fallback path.
+	 */
+	{
+		struct test_watchdog watchdog = { 0 };
+		struct ev_timer w;
+		ev_timer_init(&w, test_watchdog_cb, TEST_WAIT_TIMEOUT_SEC, 0.0);
+		w.data = &watchdog;
+		ev_timer_start(loop, &w);
+		while (!watchdog.fired && s.stats.num_halfopen != 0) {
+			ev_run(loop, EVRUN_ONCE);
+		}
+		ev_timer_stop(loop, &w);
+	}
+
+	/*
+	 * forward_process_cb should have fallen back to direct dial,
+	 * then the timer cleaned up.  Verify dialer_do was called
+	 * (once for the direct-dial fallback).
+	 */
+	T_EXPECT_EQ(STUB.dialer_do_calls, 1);
+	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
+	T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
+	T_EXPECT_EQ(s.num_sessions, (size_t)0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+#endif /* WITH_RULESET */
+
+/*
+ * Repeated forward_ctx creation and cancellation must not let
+ * num_halfopen underflow below zero.
+ */
+T_DECLARE_CASE(forward_num_halfopen_no_underflow)
+{
+	static const int ITERATIONS = 50;
+	const ev_tstamp max_wait = TEST_WAIT_TIMEOUT_SEC;
+
+	for (int i = 0; i < ITERATIONS; i++) {
+		struct ev_loop *loop = ev_loop_new(0);
+		struct server s = { 0 };
+		struct sockaddr_in accepted_sa = {
+			.sin_family = AF_INET,
+		};
+		struct dialreq base_req = { 0 };
+		int accepted_fd = -1;
+		int peer_fd = -1;
+
+		stub_reset();
+		test_conf.timeout = TEST_WAIT_SHORT_SEC;
+		STUB.dialer_mode = STUB_DIALER_NONE;
+		set_ipv4_addr(&base_req.addr, 80);
+
+		T_CHECK(loop != NULL);
+		s.loop = loop;
+		test_server_init(&s);
+		s.basereq = &base_req;
+		make_socketpair(&accepted_fd, &peer_fd);
+
+		forward_serve(
+			&s, loop, accepted_fd,
+			(const struct sockaddr *)&accepted_sa);
+		T_EXPECT_EQ(s.stats.num_halfopen, (size_t)1);
+
+		/*
+		 * Wait for the timeout to clean up the pending dialer.
+		 * Predicate-based: exit as soon as num_halfopen reaches
+		 * zero rather than waiting a fixed wall-clock duration.
+		 */
+		{
+			struct test_watchdog watchdog = { 0 };
+			struct ev_timer w;
+			ev_timer_init(&w, test_watchdog_cb, max_wait, 0.0);
+			w.data = &watchdog;
+			ev_timer_start(loop, &w);
+			while (!watchdog.fired && s.stats.num_halfopen != 0) {
+				ev_run(loop, EVRUN_ONCE);
+			}
+			ev_timer_stop(loop, &w);
+		}
+
+		T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
+		T_EXPECT_EQ(s.num_sessions, (size_t)0);
+
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+	}
+}
+
+/*
+ * When a connection times out while the dialer is still pending,
+ * forward_ctx_stop is called via gc_unref from timeout_cb.  The
+ * state must transition cleanly and dialer_cancel must be invoked
+ * exactly once.
+ */
+T_DECLARE_CASE(forward_timeout_stops_pending_dialer_once)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = {
+		.sin_family = AF_INET,
+	};
+	struct dialreq base_req = { 0 };
+	int accepted_fd = -1;
+	int peer_fd = -1;
+
+	stub_reset();
+	test_conf.timeout = TEST_WAIT_SHORT_SEC;
+	STUB.dialer_mode = STUB_DIALER_NONE;
+	set_ipv4_addr(&base_req.addr, 80);
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	s.basereq = &base_req;
+	make_socketpair(&accepted_fd, &peer_fd);
+
+	forward_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+
+	/* Wait for timeout to clean up — exit when num_halfopen hits zero. */
+	{
+		struct test_watchdog watchdog = { 0 };
+		struct ev_timer w;
+		ev_timer_init(&w, test_watchdog_cb, TEST_WAIT_TIMEOUT_SEC, 0.0);
+		w.data = &watchdog;
+		ev_timer_start(loop, &w);
+		while (!watchdog.fired && s.stats.num_halfopen != 0) {
+			ev_run(loop, EVRUN_ONCE);
+		}
+		ev_timer_stop(loop, &w);
+	}
+
+	/*
+	 * dialer_do was called once (direct dial path, no ruleset).
+	 * Timeout should have cancelled the dialer exactly once.
+	 */
+	T_EXPECT_EQ(STUB.dialer_do_calls, 1);
+	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
+	T_EXPECT_EQ(s.stats.num_reject_timeout, (uint_least64_t)1);
+	T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
+	T_EXPECT_EQ(s.num_sessions, (size_t)0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+#if WITH_TPROXY
+/*
+ * SIGHUP variant for tproxy: ruleset is cleared between forward_serve
+ * and tproxy_process_cb.  The callback must reject cleanly instead
+ * of dereferencing NULL.
+ */
+T_DECLARE_CASE(tproxy_ruleset_null_after_sighup)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = {
+		.sin_family = AF_INET,
+	};
+	int accepted_fd = -1;
+
+	stub_reset();
+	STUB.dialaddr_set_ok = true;
+	STUB.dialer_mode = STUB_DIALER_NONE;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	accepted_fd = make_bound_ipv4_socket();
+	s.ruleset = (struct ruleset *)&s;
+
+	tproxy_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+
+	/* Simulate SIGHUP clearing ruleset before idle watcher fires. */
+	s.ruleset = NULL;
+	ev_run(loop, EVRUN_NOWAIT);
+
+	/*
+	 * tproxy_process_cb must reject the connection (num_reject_ruleset++)
+	 * rather than crash.
+	 */
+	T_EXPECT_EQ(s.stats.num_reject_ruleset, (uint_least64_t)1);
+	T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
+	T_EXPECT_EQ(s.num_sessions, (size_t)0);
+
+	ev_loop_destroy(loop);
+}
+#endif /* WITH_TPROXY */
+
 #if WITH_TPROXY
 T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 {
@@ -754,16 +988,22 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 #define FORWARD_TESTS(X)                                                       \
 	X(forward_dialer_fail_updates_stats);                                  \
 	X(forward_timeout_cancels_pending_dialer);                             \
-	X(forward_bidir_timeout_connected_then_finished)
+	X(forward_bidir_timeout_connected_then_finished);                      \
+	X(forward_num_halfopen_no_underflow);                                  \
+	X(forward_timeout_stops_pending_dialer_once)
 
 #if WITH_RULESET
-#define FORWARD_RULESET_TESTS(X) X(forward_ruleset_async_then_dialer_fail)
+#define FORWARD_RULESET_TESTS(X)                                               \
+	X(forward_ruleset_async_then_dialer_fail);                             \
+	X(forward_ruleset_null_after_sighup)
 #else
 #define FORWARD_RULESET_TESTS(X)
 #endif
 
 #if WITH_TPROXY
-#define FORWARD_TPROXY_TESTS(X) X(tproxy_dialer_fail_uses_socket_destination)
+#define FORWARD_TPROXY_TESTS(X)                                                \
+	X(tproxy_ruleset_null_after_sighup);                                   \
+	X(tproxy_dialer_fail_uses_socket_destination)
 #else
 #define FORWARD_TPROXY_TESTS(X)
 #endif
@@ -778,5 +1018,7 @@ int main(void)
 	FORWARD_TPROXY_TESTS(RUN_TEST);
 #undef RUN_TEST
 
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	const bool ok = T_RESULT(t);
+	stub_reset();
+	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

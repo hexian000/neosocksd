@@ -4,7 +4,7 @@
 #ifndef RULESET_REGEX_H
 #define RULESET_REGEX_H
 
-#include "lua.h"
+#include <lua.h>
 
 int luaopen_regex(lua_State *L);
 

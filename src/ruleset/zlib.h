@@ -4,7 +4,7 @@
 #ifndef RULESET_ZLIB_H
 #define RULESET_ZLIB_H
 
-#include "lua.h"
+#include <lua.h>
 
 int luaopen_zlib(lua_State *L);
 

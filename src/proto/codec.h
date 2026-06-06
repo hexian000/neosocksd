@@ -100,4 +100,21 @@ struct stream *codec_gzip_writer(struct stream *base);
  */
 struct stream *codec_gzip_reader(struct stream *base);
 
+/**
+ * @brief Create a Lua source reader stream from a file path
+ * @param path File path.
+ * @return A stream with ownership transferred to the caller, or NULL on error.
+ *
+ * Opens the file, auto-detects gzip compression by peeking at the first two
+ * bytes. If the stream starts with the gzip magic (0x1f 0x8b), it is
+ * transparently decompressed via codec_gzip_reader().
+ *
+ * After decompression (if applicable), strips a leading UTF-8 BOM
+ * (EF BB BF) and a shebang line (#!...\\n). Non-UTF-8 BOMs
+ * (UTF-16 BE/LE, UTF-32 BE/LE) are rejected with an error.
+ *
+ * The caller must stream_close() the returned stream.
+ */
+struct stream *codec_lua_reader(const char *path);
+
 #endif /* PROTO_CODEC_H */

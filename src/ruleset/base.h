@@ -6,9 +6,8 @@
 
 #include "ruleset.h"
 
-#include "lua.h"
-
 #include <ev.h>
+#include <lua.h>
 
 #include <assert.h>
 #include <stdbool.h>
@@ -34,7 +33,7 @@ struct ruleset {
 		int memlimit_kb;
 		bool traceback;
 	} config;
-	const struct config *conf;
+	struct config *conf;
 	struct resolver *resolver;
 	struct server *server;
 	struct dialreq *basereq;

@@ -9,9 +9,10 @@
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
-#include "lauxlib.h"
-#include "lua.h"
 #include "utils/buffer.h"
+
+#include <lauxlib.h>
+#include <lua.h>
 
 #include <stddef.h>
 

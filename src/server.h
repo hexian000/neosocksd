@@ -29,62 +29,62 @@ struct server_stats {
 	/* Peak concurrent sessions */
 	size_t num_sessions_peak;
 	/* Total proxy requests processed */
-	uintmax_t num_request;
+	uint_least64_t num_request;
 	/* Successful proxy requests */
-	uintmax_t num_success;
+	uint_least64_t num_success;
 	/* Connections rejected by ruleset */
-	uintmax_t num_reject_ruleset;
+	uint_least64_t num_reject_ruleset;
 	/* Connections timed out before ready */
-	uintmax_t num_reject_timeout;
+	uint_least64_t num_reject_timeout;
 	/* Connections failed during upstream dial */
-	uintmax_t num_reject_upstream;
+	uint_least64_t num_reject_upstream;
 	/* Bytes uploaded */
-	uintmax_t byt_up;
+	uint_least64_t byt_up;
 	/* Bytes downloaded */
-	uintmax_t byt_down;
+	uint_least64_t byt_down;
 	/* Successful connection count (histogram index) */
 	size_t num_connects;
 	/* Connection latency ring buffer (ns) */
-	intmax_t connect_ns[256];
+	int_least64_t connect_ns[256];
 
 	/* Aggregated listener accept/serve stats (filled by server_stats()) */
-	uintmax_t num_accept;
-	uintmax_t num_serve;
+	uint_least64_t num_accept;
+	uint_least64_t num_serve;
 
 	/* API server stats */
-	uintmax_t num_api_request;
-	uintmax_t num_api_success;
+	uint_least64_t num_api_request;
+	uint_least64_t num_api_success;
 	/* Bytes received by the API server */
-	uintmax_t api_byt_recv;
+	uint_least64_t api_byt_recv;
 	/* Bytes sent by the API server */
-	uintmax_t api_byt_send;
+	uint_least64_t api_byt_send;
 	/* API client requests issued */
-	uintmax_t num_api_client_request;
+	uint_least64_t num_api_client_request;
 	/* Bytes sent by the API client */
-	uintmax_t api_client_byt_send;
+	uint_least64_t api_client_byt_send;
 	/* Bytes received by the API client */
-	uintmax_t api_client_byt_recv;
+	uint_least64_t api_client_byt_recv;
 
 	/* Protocol handshake overhead */
 	/* Bytes received from clients during handshake */
-	uintmax_t byt_client_recv;
+	uint_least64_t byt_client_recv;
 	/* Bytes sent to clients during handshake */
-	uintmax_t byt_client_send;
+	uint_least64_t byt_client_send;
 	/* Bytes sent to upstream proxies in CONNECT handshake */
-	uintmax_t byt_dial_send;
+	uint_least64_t byt_dial_send;
 	/* Bytes received from upstream proxies in CONNECT handshake */
-	uintmax_t byt_dial_recv;
+	uint_least64_t byt_dial_recv;
 
 	/* Server start timestamp */
-	intmax_t started;
+	int_least64_t started;
 };
 
 /* Per-listener connection accept/serve counters */
 struct listener_stats {
 	/* Total connections accepted at TCP level */
-	uintmax_t num_accept;
+	uint_least64_t num_accept;
 	/* Connections forwarded to handler after rate-limit check */
-	uintmax_t num_serve;
+	uint_least64_t num_serve;
 };
 
 /**
@@ -123,10 +123,10 @@ struct server {
 	 */
 #if WITH_THREADS
 	atomic_size_t num_sessions;
-	atomic_uintmax_t byt_up, byt_down;
+	atomic_uint_least64_t byt_up, byt_down;
 #else
 	size_t num_sessions;
-	uintmax_t byt_up, byt_down;
+	uint_least64_t byt_up, byt_down;
 #endif
 
 	/* Signal watchers */

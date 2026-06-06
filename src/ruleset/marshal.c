@@ -1,28 +1,19 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file marshal.c
- * @brief Lua value marshalling implementation
- *
- * This module provides functionality to marshal Lua values into string
- * representations that can be later loaded back into Lua. It supports
- * basic types (nil, boolean, number, string, table) and handles special
- * cases like circular references, floating point edge cases, and proper
- * string escaping.
- */
-
 #include "ruleset/marshal.h"
 
 #include "ruleset/base.h"
 #include "util.h"
 
-#include "lauxlib.h"
-#include "lua.h"
 #include "utils/ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 
+#include <lauxlib.h>
+#include <lua.h>
+
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <tgmath.h>
@@ -44,20 +35,6 @@ static int marshal_buffer_close(lua_State *restrict L)
 	return 0;
 }
 
-/**
- * @brief Marshal a Lua string value into buffer
- * @param L Lua state (string at index 1)
- * @param pvbuf Pointer to variable buffer pointer
- *
- * Converts a Lua string into a properly escaped string literal that can be
- * parsed back by Lua. The marshalling process:
- * 1. Wraps the string in double quotes
- * 2. Escapes special characters: ", \, and newline with backslash
- * 3. Converts control characters to octal escape sequences (\000-\377)
- * 4. Leaves other characters unchanged
- *
- * Stack effect: [-0, +0, -] (no stack changes, no errors)
- */
 static void
 marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 {
@@ -103,30 +80,6 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	VBUF_APPENDSTR(*pvbuf, "\"");
 }
 
-/**
- * @brief Marshal a Lua number value into buffer
- * @param L Lua state (number at index 1)
- * @param pvbuf Pointer to variable buffer pointer
- *
- * Converts a Lua number into a string representation that preserves exact
- * value when parsed back. The function handles both integers and floating
- * point numbers with special optimizations:
- *
- * For integers:
- * - Zero is represented as "0"
- * - Small integers (≤999999999999) use decimal notation
- * - Large integers use hexadecimal notation (0x...) for compactness
- * - Handles LUA_MININTEGER edge case properly
- *
- * For floating point:
- * - NaN is represented as "0/0"
- * - Infinity as "1/0" or "-1/0"
- * - Zero as "0"
- * - Other values use hexadecimal floating point notation (-0x1.23p+4)
- *   which preserves exact binary representation
- *
- * Stack effect: [-0, +0, -] (no stack changes, no errors)
- */
 static void
 marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 {

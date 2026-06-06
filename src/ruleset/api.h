@@ -4,7 +4,7 @@
 #ifndef RULESET_API_H
 #define RULESET_API_H
 
-#include "lua.h"
+#include <lua.h>
 
 int luaopen_neosocksd(lua_State *L);
 

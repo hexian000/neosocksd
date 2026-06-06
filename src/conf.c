@@ -3,31 +3,31 @@
 
 #include "conf.h"
 
-#if WITH_LUA
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
-#endif
-
 #include "utils/slog.h"
+
+#if WITH_LUA
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
+#endif
 
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
-/* Module-level state for conf_parseargs / conf_reload */
+/* Module-level state for conf_parseargs */
 static struct {
 	int argc;
 	char **argv;
 } args;
 
 #if WITH_LUA
-/* Tag for a struct config field's C type. */
 enum conf_type {
 	CONF_STRING, /* const char * */
 	CONF_INT, /* int */
@@ -42,12 +42,7 @@ struct metaconfig {
 	size_t offset;
 };
 
-/* Pointer into conf_argv[i]; valid for the process lifetime */
-static const char *bootfile;
-/* The baseline config produced by pure argv parsing (strings == NULL).
- * conf_reload resets to this before applying the Lua file. */
-static struct config baseconf;
-#endif
+#endif /* WITH_LUA */
 
 struct config conf_default(void)
 {
@@ -203,7 +198,7 @@ static void print_usage(void)
 		stderr, "%s",
 		"  -h, --help                 show usage and exit\n"
 #if WITH_LUA
-		"  -c, --config <boot.lua>    load configuration from Lua script\n"
+		"  -c, --config <config.lua>  load configuration from Lua script\n"
 		"  --dump-config              dump effective configuration as Lua and exit\n"
 #endif
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
@@ -278,6 +273,7 @@ static const struct metaconfig conf_fields[] = {
 	{ "http_listen", CONF_STRING, offsetof(struct config, http_listen) },
 #if WITH_RULESET
 	{ "ruleset", CONF_STRING, offsetof(struct config, ruleset) },
+	{ "boot", CONF_STRING, offsetof(struct config, boot) },
 #endif
 	{ "user_name", CONF_STRING, offsetof(struct config, user_name) },
 #if WITH_CARES
@@ -335,19 +331,20 @@ static const struct metaconfig conf_fields[] = {
 	{ NULL, 0, 0 },
 };
 
-/* Load one non-string field from the Lua table at stack top into *conf.
- * Must not be called for CONF_STRING fields. Returns false on type error. */
+/* Validate (apply=false) or apply (apply=true) one non-string field from the
+ * Lua table at stack top. When apply is false only type/range checks are
+ * performed; nothing is written to *conf. Must not be called for CONF_STRING
+ * fields. Returns false on type or range error. */
 static bool lutil_loadfield(
 	lua_State *restrict L, const struct metaconfig *restrict f,
-	struct config *restrict conf)
+	struct config *restrict conf, const bool apply)
 {
-	void *const field = (char *)conf + f->offset;
 	lua_getfield(L, -1, f->key);
 	const bool isnil = lua_isnil(L, -1);
 	bool ok = true;
 	switch (f->type) {
 	case CONF_STRING:
-		/* Handled separately in conf_loadfile(). */
+		/* String fields are handled in conf_loadfromtable. */
 		break;
 	case CONF_INT:
 		if (!isnil && !lua_isinteger(L, -1)) {
@@ -360,8 +357,8 @@ static bool lutil_loadfield(
 				LOGE_F("boot: field `%s' is out of range",
 				       f->key);
 				ok = false;
-			} else {
-				*(int *)field = (int)v;
+			} else if (apply) {
+				*(int *)((char *)conf + f->offset) = (int)v;
 			}
 		}
 		break;
@@ -369,16 +366,18 @@ static bool lutil_loadfield(
 		if (!isnil && !lua_isnumber(L, -1)) {
 			LOGE_F("boot: field `%s' must be a number", f->key);
 			ok = false;
-		} else if (!isnil) {
-			*(double *)field = (double)lua_tonumber(L, -1);
+		} else if (!isnil && apply) {
+			*(double *)((char *)conf + f->offset) =
+				(double)lua_tonumber(L, -1);
 		}
 		break;
 	case CONF_BOOL:
 		if (!isnil && lua_type(L, -1) != LUA_TBOOLEAN) {
 			LOGE_F("boot: field `%s' must be a boolean", f->key);
 			ok = false;
-		} else if (!isnil) {
-			*(bool *)field = lua_toboolean(L, -1) != 0;
+		} else if (!isnil && apply) {
+			*(bool *)((char *)conf + f->offset) =
+				lua_toboolean(L, -1) != 0;
 		}
 		break;
 	}
@@ -386,51 +385,24 @@ static bool lutil_loadfield(
 	return ok;
 }
 
-static bool conf_loadfile(
-	const char *restrict path, const int argc, char *argv[],
-	struct config *restrict conf)
+bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 {
-	lua_State *restrict L = luaL_newstate();
-	if (L == NULL) {
-		LOGE("boot: cannot create Lua state");
-		return false;
-	}
-	luaL_openlibs(L);
-
-	/* load and execute the boot script; pass extra args as varargs */
-	if (luaL_loadfile(L, path) != LUA_OK) {
-		LOGE_F("boot: %s", lua_tostring(L, -1));
-		lua_close(L);
-		return false;
-	}
-	if (!lua_checkstack(L, argc)) {
-		LOGF("boot: too many arguments");
-		lua_close(L);
-		return false;
-	}
-	for (int i = 0; i < argc; i++) {
-		lua_pushstring(L, argv[i]);
-	}
-	if (lua_pcall(L, argc, 1, 0) != LUA_OK) {
-		LOGE_F("boot: %s", lua_tostring(L, -1));
-		lua_close(L);
-		return false;
-	}
-	if (!lua_istable(L, -1)) {
-		LOGE_F("boot: expected table, got %s", luaL_typename(L, -1));
-		lua_close(L);
-		return false;
-	}
-
-	/* Load non-string fields directly */
+	/* Validate non-string fields first (read-only) to avoid partial updates
+	 * on failure, which would leave the config in an inconsistent state. */
 	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
 		if (f->type == CONF_STRING) {
 			continue;
 		}
-		if (!lutil_loadfield(L, f, conf)) {
-			lua_close(L);
+		if (!lutil_loadfield(L, f, conf, false)) {
 			return false;
 		}
+	}
+	/* Apply non-string fields */
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		if (f->type == CONF_STRING) {
+			continue;
+		}
+		(void)lutil_loadfield(L, f, conf, true);
 	}
 
 	/* Pass 1: measure the block size for Lua-provided string fields only.
@@ -450,7 +422,6 @@ static bool conf_loadfile(
 		} else {
 			LOGE_F("boot: field `%s' must be a string", f->key);
 			lua_pop(L, 1);
-			lua_close(L);
 			return false;
 		}
 		lua_pop(L, 1);
@@ -460,7 +431,6 @@ static bool conf_loadfile(
 	char *restrict block = (total > 0) ? malloc(total) : NULL;
 	if (total > 0 && block == NULL) {
 		LOGE("boot: out of memory");
-		lua_close(L);
 		return false;
 	}
 
@@ -487,12 +457,12 @@ static bool conf_loadfile(
 		}
 	}
 
-	lua_close(L);
 	free(conf->strings);
 	conf->strings = block;
 	return true;
 }
 
+#if 0
 /* Write a Lua double-quoted string literal for s. */
 static bool lutil_printstring(const char *restrict s)
 {
@@ -570,6 +540,7 @@ static bool conf_print(const struct config *restrict conf)
 	}
 	return ok;
 }
+#endif /* 0 */
 #endif /* WITH_LUA */
 
 bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
@@ -594,10 +565,6 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 	args.argv = argv;
 	*conf = conf_default();
 	bool http_only = false;
-#if WITH_LUA
-	bool dump_config = false;
-	bootfile = NULL;
-#endif
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-h") == 0 ||
 		    strcmp(argv[i], "--help") == 0) {
@@ -608,11 +575,11 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 		if (strcmp(argv[i], "-c") == 0 ||
 		    strcmp(argv[i], "--config") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
-			bootfile = argv[++i];
+			conf->boot = argv[++i];
 			continue;
 		}
 		if (strcmp(argv[i], "--dump-config") == 0) {
-			dump_config = true;
+			LOGW("--dump-config is deprecated");
 			continue;
 		}
 #endif
@@ -856,47 +823,6 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 		conf->http_listen = conf->listen;
 		conf->listen = NULL;
 	}
-#if WITH_LUA
-	/* Save baseline before Lua overrides: all strings point into argv[] */
-	baseconf = *conf;
-	if (bootfile != NULL) {
-		if (!conf_loadfile(bootfile, argc - 1, argv + 1, conf)) {
-			return false;
-		}
-	}
-	if (dump_config) {
-		if (!conf_print(conf)) {
-			return false;
-		}
-		return true;
-	}
-#endif
 	slog_setlevel(conf->loglevel);
 	return true;
-}
-
-bool conf_reload(struct config *restrict conf)
-{
-#if WITH_LUA
-	if (bootfile == NULL) {
-		LOGW("reload: no config file loaded");
-		return false;
-	}
-	/* Load into a temporary built from the argv baseline; this ensures nil
-	 * Lua fields revert to command-line values rather than keeping stale
-	 * values from the previous reload. */
-	struct config new_conf = baseconf;
-	if (!conf_loadfile(bootfile, 0, NULL, &new_conf)) {
-		LOGW("reload: config reload failed");
-		return false;
-	}
-	free(conf->strings);
-	*conf = new_conf;
-	LOGN("reload: config successfully reloaded");
-	slog_setlevel(conf->loglevel);
-	return true;
-#else
-	LOGW("reload: not supported in current build");
-	return false;
-#endif
 }

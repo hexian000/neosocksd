@@ -4,7 +4,7 @@
 -- [[ tests/ruleset.lua: main test entry point ]] --
 --
 -- Usage:
---   neosocksd -c tests/boot.lua
+--   neosocksd -c tests/main.lua
 --
 -- package.path is "?.lua" relative to the working directory (project root).
 
@@ -38,14 +38,21 @@ async(function()
     await.sleep(0.1)
 
     local T = testlib.new("neosocksd")
-    run_all(T)
-    local ok = T:report()
-    if ok then
-        print("all tests passed")
-    else
-        print("some tests failed")
+    -- Run the suite as a child task and observe its future. An uncaught
+    -- error (e.g. a syntax error while loading a test module) is captured
+    -- here and reported, instead of silently aborting this fire-and-forget
+    -- driver and leaving the event loop running forever (a silent hang).
+    local ok, err = async(run_all, T):get()
+    if not ok then
+        printf("[FATAL] test driver aborted: %s", tostring(err))
     end
-    os.exit(ok and 0 or 1)
+    local passed = T:report()
+    if ok and passed then
+        print("all tests passed")
+        os.exit(0)
+    end
+    print("some tests failed")
+    os.exit(1)
 end)
 
 -- Ruleset boilerplate required by neosocksd --

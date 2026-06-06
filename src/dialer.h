@@ -29,8 +29,8 @@ struct resolver;
 struct server;
 
 #include <ev.h>
-#include <netinet/in.h>
 
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -150,7 +150,7 @@ enum dialer_error {
 const char *dialer_strerror(enum dialer_error err);
 
 /** @brief String names for proxy protocols */
-extern const char *proxy_protocol_str[PROTO_MAX];
+extern char *const proxy_protocol_str[PROTO_MAX];
 
 /**
  * @brief Proxy server request configuration
@@ -251,9 +251,9 @@ struct dialer {
 	int dialed_fd;
 	ev_watcher w_finish;
 	struct dialer_cb finish_cb;
-	uintmax_t *byt_sent, *byt_recv;
+	uint_least64_t *byt_sent, *byt_recv;
 	/* Timestamp when dialer_do() was called (clock_monotonic_ns) */
-	intmax_t start_ns;
+	int_least64_t start_ns;
 	/* Server for recording connect_ns; may be NULL */
 	struct server *server;
 	unsigned char *next;
@@ -270,7 +270,7 @@ struct dialer {
  */
 void dialer_init(
 	struct dialer *restrict d, const struct dialer_cb *callback,
-	uintmax_t *byt_sent, uintmax_t *byt_recv);
+	uint_least64_t *byt_sent, uint_least64_t *byt_recv);
 
 /**
  * @brief Start a dial operation

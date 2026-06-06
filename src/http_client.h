@@ -49,8 +49,8 @@ void http_client_init(
 	struct http_client_ctx *ctx, struct ev_loop *loop,
 	struct http_parsehdr_cb on_header, const struct http_client_cb *cb,
 	const struct config *conf, struct resolver *resolver,
-	uintmax_t *byt_recv, uintmax_t *byt_sent, uintmax_t *dialer_byt_sent,
-	uintmax_t *dialer_byt_recv);
+	uint_least64_t *byt_recv, uint_least64_t *byt_sent,
+	uint_least64_t *dialer_byt_sent, uint_least64_t *dialer_byt_recv);
 
 /* Takes ownership of req. */
 void http_client_do(

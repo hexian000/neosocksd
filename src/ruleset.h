@@ -40,13 +40,13 @@ struct ruleset_vmstats {
 	size_t num_thread_peak;
 
 	/* Total time used by ruleset in nanoseconds */
-	uintmax_t time_total;
+	uint_least64_t time_total;
 	/* Number of completed events */
 	size_t num_events;
 	/* A circular buffer of recent event timestamps (ns) */
-	intmax_t event_ns[1024];
+	int_least64_t event_ns[1024];
 	/* A circular buffer of recent event end timestamps (ns) */
-	intmax_t event_end[1024];
+	int_least64_t event_end[1024];
 };
 
 /**
@@ -63,7 +63,7 @@ struct ruleset_vmstats {
  * @return New ruleset instance, or NULL on failure
  */
 struct ruleset *ruleset_new(
-	struct ev_loop *restrict loop, const struct config *restrict conf,
+	struct ev_loop *restrict loop, struct config *restrict conf,
 	struct resolver *restrict resolver, struct dialreq *restrict basereq);
 
 /**
@@ -76,6 +76,19 @@ struct ruleset *ruleset_new(
  * @param s Main proxy server (may be NULL to detach)
  */
 void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s);
+
+/**
+ * @brief Replace the base dial request used for outbound connections.
+ *
+ * Used to keep the ruleset's base dial request in sync after the
+ * configuration (and therefore the forward/proxy chain) is reloaded.
+ * The ruleset does not take ownership of @p basereq.
+ *
+ * @param r Ruleset instance
+ * @param basereq Base dial request prepended to all outbound connections
+ */
+void ruleset_setbasereq(
+	struct ruleset *restrict r, struct dialreq *restrict basereq);
 
 /**
  * @brief Free a ruleset instance
@@ -190,6 +203,20 @@ bool ruleset_update(
  * @return true on success, false on error
  */
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename);
+
+/**
+ * @brief Load config from a Lua file into the ruleset
+ *
+ * Opens the file via codec_lua_reader, executes it in "config" mode
+ * (chunk("config")), extracts configuration fields into the C config
+ * struct, and optionally sets the ruleset module from the returned table.
+ *
+ * @param r Ruleset instance
+ * @param filename Path to Lua file
+ * @return true on success, false on error
+ */
+bool ruleset_loadconfig(
+	struct ruleset *restrict r, const char *restrict filename);
 
 /**
  * @brief Trigger garbage collection

@@ -194,7 +194,7 @@ function(add_unit_test TEST_NAME)
         set(UT_CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/config.h")
     endif()
     add_executable(${TEST_NAME} ${UT_SRCS})
-    target_include_directories(${TEST_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(${TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/src)
     if(UT_EXTRA_INCLUDES)
         target_include_directories(${TEST_NAME} PRIVATE ${UT_EXTRA_INCLUDES})
     endif()
@@ -275,13 +275,13 @@ endif()
 add_unit_test(forward_test
     SRCS forward_test.c forward.c)
 add_unit_test(conf_test
-    SRCS conf_test.c conf.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    SRCS conf_test.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_LUA)
 add_unit_test(transfer_test
     SRCS transfer_test.c transfer.c
     WITH_THREADS)
 add_unit_test(server_test
-    SRCS server_test.c server.c conf.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    SRCS server_test.c server.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_LUA)
 add_unit_test(http_test
     SRCS proto/http_test.c proto/http.c proto/codec.c)
@@ -327,7 +327,7 @@ if(WITH_LUA)
         WITH_LUA WITH_CARES)
     if(WITH_RULESET)
         add_unit_test(ruleset_test
-            SRCS ruleset_test.c ruleset.c ruleset/base.c ruleset/cfunc.c
+            SRCS ruleset_test.c ruleset.c ruleset/base.c ruleset/cfunc.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
             WITH_LUA)
     endif()
 endif()

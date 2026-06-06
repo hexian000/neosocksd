@@ -54,7 +54,8 @@ def ensure_tool(name: str) -> str:
 def ensure_project_root(root: Path) -> None:
     if not (root / "CMakeLists.txt").exists():
         sys.exit(
-            f"error: working directory does not look like the project root: {root}"
+            f"error: working directory does not look like the project root: {
+                root}"
         )
 
 
@@ -183,24 +184,62 @@ def _sloc(path: Path) -> int:
 # Size collection
 # ---------------------------------------------------------------------------
 
-def collect_sizes(build_dir: Path, target: str | None = None) -> list[tuple[str, int, int]]:
-    """Return [(source_rel, byte_size, sloc), ...] from compile_commands.json.
+def _resolve_linked_dirs(build_dir: Path, target: str) -> set[str]:
+    """Return the CMakeFiles *.dir names for *target* and any linked static archives.
 
-    Each entry's ``-o`` path is used to locate the actual object file.  Entries
-    whose object file does not exist on disk are skipped (e.g. not built).
+    Reads link.txt for the target, resolves each ``.a`` path, and derives the
+    CMake target directory name from the archive stem (``libFOO.a`` → ``FOO.dir``).
+    """
+    primary = f"{target}.dir"
+    dirs: set[str] = {primary}
+
+    link_txt: Path | None = None
+    for dirpath, _subdirs, filenames in os.walk(build_dir):
+        if Path(dirpath).name == primary and "link.txt" in filenames:
+            link_txt = Path(dirpath) / "link.txt"
+            break
+    if link_txt is None:
+        return dirs
+
+    # CMake runs the link command from the binary directory three levels above
+    # link.txt: .../CMakeFiles/{target}.dir/link.txt → .../
+    run_dir = link_txt.parent.parent.parent
+
+    content = link_txt.read_text(encoding="utf-8", errors="replace")
+    try:
+        tokens = shlex.split(content)
+    except ValueError:
+        return dirs
+
+    for token in tokens:
+        p = Path(token)
+        if p.suffix != ".a":
+            continue
+        resolved = (
+            run_dir / p).resolve() if not p.is_absolute() else p.resolve()
+        if not resolved.exists():
+            continue
+        stem = resolved.stem
+        lib_name = stem[3:] if stem.startswith("lib") else stem
+        dirs.add(f"{lib_name}.dir")
+
+    return dirs
+
+
+def _find_obj_files(build_dir: Path, target: str | None = None) -> dict[str, Path]:
+    """Return {src_rel: obj_path} from compile_commands.json.
+
     When the same source appears in multiple entries (compiled into multiple
-    targets), keep only the largest object file.
-
-    If *target* is given, only entries whose object file lives under
-    ``CMakeFiles/<target>.dir/`` are considered.
+    targets), keep the entry with the largest object file.
     """
     db_path = build_dir / "compile_commands.json"
     if not db_path.exists():
         sys.exit(f"error: {db_path} not found — run cmake configure first")
     db: list[dict] = json.loads(db_path.read_text(encoding="utf-8"))
 
-    target_dir = f"{target}.dir" if target is not None else None
-    best: dict[str, int] = {}
+    target_dirs = _resolve_linked_dirs(
+        build_dir, target) if target is not None else None
+    best: dict[str, tuple[Path, int]] = {}
     for entry in db:
         src_abs = Path(entry["file"])
         try:
@@ -210,18 +249,64 @@ def collect_sizes(build_dir: Path, target: str | None = None) -> list[tuple[str,
         obj = _extract_obj(entry)
         if obj is None or not obj.exists():
             continue
-        if target_dir is not None:
+        if target_dirs is not None:
             parts = obj.parts
             try:
                 idx = parts.index("CMakeFiles")
             except ValueError:
                 continue
-            if idx + 1 >= len(parts) or parts[idx + 1] != target_dir:
+            if idx + 1 >= len(parts) or parts[idx + 1] not in target_dirs:
                 continue
         sz = obj.stat().st_size
-        if sz > best.get(src_rel, 0):
-            best[src_rel] = sz
-    return [(src, sz, _sloc(ROOT / src)) for src, sz in best.items()]
+        if sz > best.get(src_rel, (None, 0))[1]:
+            best[src_rel] = (obj, sz)
+    return {src: obj for src, (obj, _) in best.items()}
+
+
+def collect_sizes(build_dir: Path, target: str | None = None) -> list[tuple[str, int, int]]:
+    """Return [(source_rel, byte_size, sloc), ...] from compile_commands.json."""
+    obj_files = _find_obj_files(build_dir, target)
+    return [(src, obj.stat().st_size, _sloc(ROOT / src)) for src, obj in obj_files.items()]
+
+
+def collect_symbols(
+    build_dir: Path, target: str | None = None
+) -> list[tuple[str, int, str, str]]:
+    """Return [(name, size_bytes, type_char, src_rel), ...] sorted by size descending.
+
+    Runs ``nm --print-size --defined-only`` on every object file found in
+    compile_commands.json.  Only symbols with non-zero size are included.
+    Returns an empty list if ``nm`` is not available.
+    """
+    nm_path = shutil.which("nm")
+    if nm_path is None:
+        log("warning: nm not found; skipping symbol table")
+        return []
+
+    obj_files = _find_obj_files(build_dir, target)
+    symbols: list[tuple[str, int, str, str]] = []
+    for src_rel, obj in obj_files.items():
+        try:
+            proc = subprocess.run(
+                [nm_path, "--print-size", "--defined-only", str(obj)],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError:
+            continue
+        for line in proc.stdout.splitlines():
+            fields = line.split()
+            # Defined symbols with a size field: addr size type name (≥4 fields)
+            if len(fields) < 4:
+                continue
+            try:
+                size = int(fields[1], 16)
+            except ValueError:
+                continue
+            if size == 0:
+                continue
+            symbols.append((fields[3], size, fields[2], src_rel))
+    symbols.sort(key=lambda x: -x[1])
+    return symbols
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +315,7 @@ def collect_sizes(build_dir: Path, target: str | None = None) -> list[tuple[str,
 
 def write_report(
     rows: list[tuple[str, int, int]],
+    symbols: list[tuple[str, int, str, str]],
     output: Path,
     elapsed: float,
     config: str,
@@ -261,6 +347,24 @@ def write_report(
     lines.append(
         f"| **Total** | **{total_sloc:,}** | **{total_bytes:,}** | **100.0** |"
     )
+
+    if symbols:
+        total_sym_bytes = sum(sz for _, sz, _, _ in symbols)
+        lines += [
+            "",
+            "## Symbols by Size",
+            "",
+            f"All defined symbols with non-zero size from"
+            f" `nm --print-size --defined-only`, sorted largest first."
+            f"  **{len(symbols):,}** symbols,"
+            f" {total_sym_bytes:,} B ({_human(total_sym_bytes)}) total.",
+            "",
+            "| Symbol | Type | Bytes | Source |",
+            "|---|:---:|---:|---|",
+        ]
+        for name, size, type_char, src in symbols:
+            lines.append(f"| `{name}` | {type_char} | {size:,} | `{src}` |")
+
     lines.append("")
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -332,10 +436,17 @@ def main() -> int:
         sys.exit(
             f"error: no compiled sources found via {build_dir / 'compile_commands.json'}")
 
-    elapsed = time.monotonic() - t0
-    log(f"{len(rows)} file(s), {sum(sl for _, _, sl in rows):,} SLOC, total {_human(sum(sz for _, sz, _ in rows))}, {elapsed:.1f} s")
+    log("Collecting symbols via nm …")
+    symbols = collect_symbols(build_dir, target=args.target)
 
-    write_report(rows, output, elapsed, args.config)
+    elapsed = time.monotonic() - t0
+    log(f"{len(rows)} file(s), {sum(sl for _, _, sl in rows):,} SLOC, total {
+        _human(sum(sz for _, sz, _ in rows))}, {elapsed:.1f} s")
+    if symbols:
+        log(f"{len(symbols):,} symbols, {
+            _human(sum(sz for _, sz, _, _ in symbols))} total")
+
+    write_report(rows, symbols, output, elapsed, args.config)
     return 0
 
 

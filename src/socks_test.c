@@ -11,6 +11,7 @@
 #include "transfer.h"
 #include "util.h"
 
+#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -65,7 +66,7 @@ static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
 	return wait_sec;
 }
 
-const char *proxy_protocol_str[PROTO_MAX] = {
+char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -246,7 +247,7 @@ int dialaddr_format(
 
 void dialer_init(
 	struct dialer *restrict d, const struct dialer_cb *callback,
-	uintmax_t *byt_sent, uintmax_t *byt_recv)
+	uint_least64_t *byt_sent, uint_least64_t *byt_recv)
 {
 	(void)byt_sent;
 	(void)byt_recv;
@@ -2117,6 +2118,49 @@ T_DECLARE_CASE(socks4_bind_command_rejected)
 	ev_loop_destroy(loop);
 }
 
+/*
+ * SOCKS5 CONNECT with ATYP=DOMAIN and a zero-length domain name must be
+ * rejected gracefully rather than crashing.
+ */
+T_DECLARE_CASE(socks5_zero_length_domain_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* auth neg + CONNECT to zero-length domain:port */
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, /* auth negotiation */
+		0x05, 0x01, 0x00, 0x03, 0x00, 0x00, 0x50,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		/* Must at least reply with auth method selection (2 bytes)
+		 * plus a CONNECT response header (4+ bytes). */
+		T_EXPECT(n >= (ssize_t)(2 + 4));
+		/* Verify the server responded without crashing.  The exact
+		 * error code may vary depending on internal handling of
+		 * zero-length domains. */
+		T_EXPECT(rsp[0] == SOCKS5);
+		T_EXPECT(rsp[1] == SOCKS5AUTH_NOAUTH);
+		T_EXPECT(rsp[2] == SOCKS5);
+		T_EXPECT(rsp[3] != SOCKS5RSP_SUCCEEDED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -2155,6 +2199,9 @@ int main(void)
 	T_RUN_CASE(t, socks5_udp_tcp_close_teardown);
 	T_RUN_CASE(t, socks5_udp_frag_two_parts);
 	T_RUN_CASE(t, socks5_udp_frag_discard_out_of_order);
+	T_RUN_CASE(t, socks5_zero_length_domain_rejected);
 
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	const bool ok = T_RESULT(t);
+	stub_reset();
+	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

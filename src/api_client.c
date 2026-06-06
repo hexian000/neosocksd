@@ -229,7 +229,7 @@ static bool make_request(
 		"Content-Length: %zu\r\n"
 		"Content-Type: %s\r\n",
 		uri, VBUF_LEN(p->cbuf), MIME_RPCALL);
-	const char *encoding_str = content_encoding_str[encoding];
+	const char *encoding_str = http_content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		BUF_APPENDF(p->wbuf, "Content-Encoding: %s\r\n", encoding_str);
 	}

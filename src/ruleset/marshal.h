@@ -4,7 +4,7 @@
 #ifndef RULESET_MARSHAL_H
 #define RULESET_MARSHAL_H
 
-#include "lua.h"
+#include <lua.h>
 
 int luaopen_marshal(lua_State *L);
 

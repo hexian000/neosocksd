@@ -10,14 +10,13 @@
 #include "server.h"
 #include "util.h"
 
-#include "lauxlib.h"
-#include "lua.h"
 #include "os/socket.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <unistd.h>
+#include <lauxlib.h>
+#include <lua.h>
 
 #include <errno.h>
 #include <math.h>
@@ -26,6 +25,8 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"

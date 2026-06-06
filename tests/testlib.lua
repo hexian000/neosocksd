@@ -7,7 +7,7 @@ local M = {}
 local M_mt = { __index = M }
 
 function M.new(name)
-    return setmetatable({ name = name, passed = 0, failed = 0 }, M_mt)
+    return setmetatable({ name = name, passed = 0, failed = 0, benches = {} }, M_mt)
 end
 
 function M:test(name, fn)
@@ -34,14 +34,23 @@ function M:atest(name, fn)
     end
 end
 
--- bench measures throughput; iters is the total number of operations fn performs
--- bench must be called from within an async context
+-- bench measures throughput; iters is the total number of operations fn performs.
+-- bench must be called from within an async context.
+-- Benchmarks are deferred and only run after all tests pass.
 function M:bench(name, iters, fn)
-    local begin = neosocksd.now()
-    fn()
-    local cost = (neosocksd.now() - begin) / iters
-    printf("[BENCH] %-32s %d ns/op, %.0f tps",
-        name, math.ceil(cost * 1e+9), 1.0 / cost)
+    table.insert(self.benches, { name = name, iters = iters, fn = fn })
+end
+
+-- runbenches executes all deferred benchmarks. Called automatically by report()
+-- when all tests have passed.
+function M:runbenches()
+    for _, b in ipairs(self.benches) do
+        local begin = neosocksd.now()
+        b.fn()
+        local cost = (neosocksd.now() - begin) / b.iters
+        printf("[BENCH] %-32s %d ns/op, %.0f tps",
+            b.name, math.ceil(cost * 1e+9), 1.0 / cost)
+    end
 end
 
 function M:sub(name)
@@ -69,10 +78,17 @@ function M:sub(name)
                 printf("[FAIL] %s/%s\n%s", self.name, tname, tostring(err))
             end
         end,
+        bench = function(self, bname, iters, fn)
+            table.insert(parent.benches, { name = string.format("%s/%s", self.name, bname), iters = iters, fn = fn })
+        end,
     }
 end
 
 function M:report()
+    if self.failed == 0 and #self.benches > 0 then
+        printf("[%s] all tests passed, running %d benchmark(s)...", self.name, #self.benches)
+        self:runbenches()
+    end
     printf("[%s] passed=%d, failed=%d", self.name, self.passed, self.failed)
     return self.failed == 0
 end

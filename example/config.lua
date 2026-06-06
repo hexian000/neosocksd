@@ -1,12 +1,12 @@
 -- [[ config.lua: comprehensive boot configuration example ]] --
--- Load with: neosocksd -c config.lua [extra args...]
+-- Load with: neosocksd -c config.lua
 --
--- This file is executed by conf_loadfile and must return a Lua table.
--- Fields set to nil are inherited from command-line arguments (or defaults).
--- On reload (SIGHUP), arg.n == 0 and nil fields revert to command-line values.
+-- This file is loaded by the ruleset engine in "config" mode (chunk("config"))
+-- and must return a Lua table.  Fields set to nil are inherited from
+-- command-line arguments (or defaults).
 --
--- Extra positional arguments passed on the command line are available as
--- varargs (...).  During reload, ... is empty.
+-- To include ruleset functions directly, add a `ruleset` table field.
+-- If `ruleset` is a string, it is treated as a path and loaded separately.
 
 -- [[ optional: read extra arguments from the command line ]] --
 -- Example: neosocksd -c config.lua --dev eth0
@@ -63,6 +63,9 @@ return {
     -- by whatever the ruleset returns.  Incompatible with socks5_bind and
     -- socks5_udp.
     -- ruleset = "/etc/neosocksd/ruleset.lua",
+
+    -- Path to boot config file (loaded by -c).  Usually set via CLI only.
+    -- boot = nil,
 
     -- Print a full Lua traceback on ruleset errors (useful for debugging).
     -- traceback = false,

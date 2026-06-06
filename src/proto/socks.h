@@ -9,7 +9,6 @@
 #include "utils/serialize.h"
 
 #include <netinet/in.h>
-
 #include <stdint.h>
 
 enum socks_version {
@@ -34,9 +33,7 @@ enum socks_version {
 struct socks4_hdr {
 	uint_least8_t version;
 	uint_least8_t command;
-	/* host byte order */
 	uint_least16_t port;
-	/* host byte order */
 	uint_least32_t address;
 };
 

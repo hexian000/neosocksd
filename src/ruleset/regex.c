@@ -3,12 +3,11 @@
 
 #include "ruleset/regex.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-
-#include <regex.h>
+#include <lauxlib.h>
+#include <lua.h>
 
 #include <limits.h>
+#include <regex.h>
 #include <stddef.h>
 
 #define MT_REGEX "regex"
@@ -42,8 +41,7 @@ static size_t cstrpos(const lua_Integer pos, const size_t len)
 		return 0;
 	}
 	/* pos > 0: positive index (1-based) */
-	if ((lua_Integer)len < pos) {
-		/* Overflow: clamp to end. */
+	if (len < (size_t)pos) {
 		return len;
 	}
 	return (size_t)(pos - 1);

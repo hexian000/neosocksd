@@ -37,7 +37,7 @@ enum content_encodings {
 };
 
 /** String representations of content encodings */
-extern const char *content_encoding_str[];
+extern const char *http_content_encoding_str[];
 
 /**
  * @brief Parsed HTTP headers structure
@@ -136,7 +136,7 @@ struct http_conn {
 	enum http_conn_state state;
 	int http_status;
 	int fd;
-	uintmax_t *byt_recv, *byt_sent;
+	uint_least64_t *byt_recv, *byt_sent;
 	struct http_message msg;
 	char *next;
 	bool expect_continue : 1;
@@ -161,8 +161,8 @@ struct http_conn {
  */
 void http_conn_init(
 	struct http_conn *restrict p, int fd, enum http_conn_state mode,
-	struct http_parsehdr_cb on_header, uintmax_t *byt_recv,
-	uintmax_t *byt_sent);
+	struct http_parsehdr_cb on_header, uint_least64_t *byt_recv,
+	uint_least64_t *byt_sent);
 
 /**
  * @brief Receive and parse HTTP data

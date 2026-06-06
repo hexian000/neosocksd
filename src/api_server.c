@@ -30,6 +30,8 @@
 
 #include <ev.h>
 
+#include <errno.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -123,10 +125,10 @@ bool check_rpcall_mime(char *s)
 }
 #endif
 
-static int comp_intmax(const void *a, const void *b)
+static int comp_intleast64(const void *a, const void *b)
 {
-	const intmax_t va = *(const intmax_t *)a;
-	const intmax_t vb = *(const intmax_t *)b;
+	const int_least64_t va = *(const int_least64_t *)a;
+	const int_least64_t vb = *(const int_least64_t *)b;
 	if (va < vb) {
 		return -1;
 	}
@@ -137,20 +139,21 @@ static int comp_intmax(const void *a, const void *b)
 }
 
 struct percentiles {
-	intmax_t p50, p90, p99, pmax;
+	int_least64_t p50, p90, p99, pmax;
 };
 
 static struct percentiles calc_percentiles(
-	const size_t num_stats, const size_t num_samples, const intmax_t *stats)
+	const size_t num_stats, const size_t num_samples,
+	const int_least64_t *stats)
 {
 	const size_t n = MIN(num_stats, num_samples);
-	intmax_t samples[n];
+	int_least64_t samples[n];
 	for (size_t i = 0; i < n; i++) {
 		const size_t idx =
 			(num_samples + num_stats - i - 1) % num_stats;
 		samples[i] = stats[idx];
 	}
-	qsort(samples, n, sizeof(intmax_t), comp_intmax);
+	qsort(samples, n, sizeof(int_least64_t), comp_intleast64);
 	const int i50 = (int)floor((double)n * 0.50);
 	const int i90 = (int)floor((double)n * 0.90);
 	const int i99 = (int)floor((double)n * 0.99);
@@ -219,8 +222,9 @@ static double process_load(void)
 		return load;
 	}
 	if (last.set) {
-		const intmax_t total = TIMESPEC_DIFF(monotime, last.monotime);
-		const intmax_t busy = TIMESPEC_DIFF(cputime, last.cputime);
+		const int_least64_t total =
+			TIMESPEC_DIFF(monotime, last.monotime);
+		const int_least64_t busy = TIMESPEC_DIFF(cputime, last.cputime);
 		if (busy > 0 && total > 0) {
 			load = (double)busy / (double)total;
 		}
@@ -241,21 +245,21 @@ static void server_stats_stateful(
 
 	/* Static counters for rate calculation between calls */
 	static struct {
-		uintmax_t xfer_up, xfer_down;
-		uintmax_t num_accept;
-		uintmax_t num_reject;
-		uintmax_t num_request;
-		uintmax_t num_api_request;
-		uintmax_t num_reject_ruleset;
-		uintmax_t num_reject_timeout;
-		uintmax_t num_reject_upstream;
+		uint_least64_t xfer_up, xfer_down;
+		uint_least64_t num_accept;
+		uint_least64_t num_reject;
+		uint_least64_t num_request;
+		uint_least64_t num_api_request;
+		uint_least64_t num_reject_ruleset;
+		uint_least64_t num_reject_timeout;
+		uint_least64_t num_reject_upstream;
 	} last = { 0 };
 
 	FORMAT_BYTES(xfer_rate_up, (double)(agg.byt_up - last.xfer_up) / dt);
 	FORMAT_BYTES(
 		xfer_rate_down, (double)(agg.byt_down - last.xfer_down) / dt);
 
-	const uintmax_t num_reject = agg.num_accept - agg.num_serve;
+	const uint_least64_t num_reject = agg.num_accept - agg.num_serve;
 	const double accept_rate =
 		(double)(agg.num_accept - last.num_accept) / dt;
 	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
@@ -334,11 +338,14 @@ static void append_server_stats(
 		"Server Time         : %s\n"
 		"Uptime              : %s\n"
 		"Num Sessions        : %zu (+%zu) peak=%zu\n"
-		"Num Rejected        : ruleset=%ju, timeout=%ju, upstream=%ju\n"
-		"Conn Accepts        : %ju (+%ju)\n"
-		"Name Resolves       : %ju (+%ju)\n"
-		"Requests            : %ju (+%ju), Rx %s, Tx %s\n"
-		"API Requests        : %ju (+%ju), Rx %s, Tx %s\n"
+		"Num Rejected        : ruleset=%" PRIuLEAST64
+		", timeout=%" PRIuLEAST64 ", upstream=%" PRIuLEAST64 "\n"
+		"Conn Accepts        : %" PRIuLEAST64 " (+%" PRIuLEAST64 ")\n"
+		"Name Resolves       : %" PRIuLEAST64 " (+%" PRIuLEAST64 ")\n"
+		"Requests            : %" PRIuLEAST64 " (+%" PRIuLEAST64
+		"), Rx %s, Tx %s\n"
+		"API Requests        : %" PRIuLEAST64 " (+%" PRIuLEAST64
+		"), Rx %s, Tx %s\n"
 		"Handshake Dial      : Rx %s, Tx %s\n"
 		"Traffic             : Up %s, Down %s\n",
 		/* Server Time, Uptime */
@@ -370,7 +377,9 @@ static void append_server_stats(
 		FORMAT_BYTES(cli_recv, (double)agg.api_client_byt_recv);
 		FORMAT_BYTES(cli_send, (double)agg.api_client_byt_send);
 		(void)io_bufprintf(
-			w, "API Client          : %ju reqs, Rx %s, Tx %s\n",
+			w,
+			"API Client          : %" PRIuLEAST64
+			" reqs, Rx %s, Tx %s\n",
 			agg.num_api_client_request, cli_recv, cli_send);
 	}
 #endif
@@ -496,11 +505,11 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			PROJECT_HOMEPAGE);
 	}
 
-	const intmax_t now = clock_monotonic_ns();
-	const intmax_t uptime = now - ctx->s->stats.started;
+	const int_least64_t now = (int_least64_t)clock_monotonic_ns();
+	const int_least64_t uptime = now - ctx->s->stats.started;
 	/* Track time between stateful requests for rate calculations */
 	static struct {
-		intmax_t tstamp;
+		int_least64_t tstamp;
 		bool is_set : 1;
 	} last = { .is_set = false };
 	double dt = 0.0;
@@ -549,7 +558,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	if (stateless) {
 		RESPHDR_NOCACHE(ctx->conn.wbuf);
 	}
-	const char *encoding_str = content_encoding_str[encoding];
+	const char *encoding_str = http_content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
 	}
@@ -657,7 +666,7 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 	}
 	RESPHDR_CTYPE(ctx->conn.wbuf, MIME_RPCALL);
-	const char *encoding_str = content_encoding_str[encoding];
+	const char *encoding_str = http_content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
 	}
@@ -978,75 +987,86 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 	APPEND_METRIC(
 		"neosocksd_connections_accepted_total", "counter",
-		"Connections accepted by the listener.", "%ju", agg.num_accept);
+		"Connections accepted by the listener.", "%" PRIuLEAST64,
+		agg.num_accept);
 	APPEND_METRIC(
 		"neosocksd_connections_served_total", "counter",
-		"Connections upgraded to proxy sessions.", "%ju",
+		"Connections upgraded to proxy sessions.", "%" PRIuLEAST64,
 		agg.num_serve);
 	APPEND_METRIC(
 		"neosocksd_requests_total", "counter",
-		"Total proxy requests processed.", "%ju", agg.num_request);
+		"Total proxy requests processed.", "%" PRIuLEAST64,
+		agg.num_request);
 	APPEND_METRIC(
 		"neosocksd_requests_success_total", "counter",
-		"Proxy requests completed successfully.", "%ju",
+		"Proxy requests completed successfully.", "%" PRIuLEAST64,
 		agg.num_success);
 	APPEND_METRIC(
 		"neosocksd_rejects_ruleset_total", "counter",
-		"Connections rejected by the ruleset.", "%ju",
+		"Connections rejected by the ruleset.", "%" PRIuLEAST64,
 		agg.num_reject_ruleset);
 	APPEND_METRIC(
 		"neosocksd_rejects_timeout_total", "counter",
-		"Connections timed out before becoming active.", "%ju",
-		agg.num_reject_timeout);
+		"Connections timed out before becoming active.",
+		"%" PRIuLEAST64, agg.num_reject_timeout);
 	APPEND_METRIC(
 		"neosocksd_rejects_upstream_total", "counter",
-		"Connections failed during upstream dial.", "%ju",
+		"Connections failed during upstream dial.", "%" PRIuLEAST64,
 		agg.num_reject_upstream);
 	APPEND_METRIC(
 		"neosocksd_dns_queries_total", "counter", "DNS queries issued.",
-		"%ju", resolv_stats->num_query);
+		"%" PRIuLEAST64, resolv_stats->num_query);
 	APPEND_METRIC(
 		"neosocksd_dns_success_total", "counter",
-		"DNS queries resolved successfully.", "%ju",
+		"DNS queries resolved successfully.", "%" PRIuLEAST64,
 		resolv_stats->num_success);
 	APPEND_METRIC(
 		"neosocksd_api_requests_total", "counter",
-		"API requests received.", "%ju", apistats->num_api_request);
+		"API requests received.", "%" PRIuLEAST64,
+		apistats->num_api_request);
 	APPEND_METRIC(
 		"neosocksd_api_requests_success_total", "counter",
-		"API requests completed successfully.", "%ju",
+		"API requests completed successfully.", "%" PRIuLEAST64,
 		apistats->num_api_success);
 	APPEND_METRIC(
 		"neosocksd_uplink_bytes_total", "counter",
-		"Total bytes of proxied payload sent to upstream.", "%ju",
-		agg.byt_up);
+		"Total bytes of proxied payload sent to upstream.",
+		"%" PRIuLEAST64, agg.byt_up);
 	APPEND_METRIC(
 		"neosocksd_downlink_bytes_total", "counter",
-		"Total bytes of proxied payload received from upstream.", "%ju",
-		agg.byt_down);
+		"Total bytes of proxied payload received from upstream.",
+		"%" PRIuLEAST64, agg.byt_down);
 	/* neosocksd_protocol_bytes_total: per-module protocol overhead */
 	(void)io_bufprintf(
 		w,
 		"# HELP neosocksd_protocol_bytes_total Total bytes of protocol overhead, by direction and module.\n"
 		"# TYPE neosocksd_protocol_bytes_total counter\n"
-		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"api_server\"} %ju\n"
-		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_server\"} %ju\n"
-		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"proxy_server\"} %ju\n"
-		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"proxy_server\"} %ju\n"
-		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"proxy_client\"} %ju\n"
-		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"proxy_client\"} %ju\n",
+		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"api_server\"} %" PRIuLEAST64
+		"\n"
+		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_server\"} %" PRIuLEAST64
+		"\n"
+		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"proxy_server\"} %" PRIuLEAST64
+		"\n"
+		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"proxy_server\"} %" PRIuLEAST64
+		"\n"
+		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"proxy_client\"} %" PRIuLEAST64
+		"\n"
+		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"proxy_client\"} %" PRIuLEAST64
+		"\n",
 		apistats->api_byt_recv, apistats->api_byt_send,
 		agg.byt_client_recv, agg.byt_client_send, agg.byt_dial_recv,
 		agg.byt_dial_send);
 #if WITH_RULESET
 	APPEND_METRIC(
 		"neosocksd_api_client_requests_total", "counter",
-		"API client requests issued by the ruleset.", "%ju",
+		"API client requests issued by the ruleset.", "%" PRIuLEAST64,
 		agg.num_api_client_request);
 	(void)io_bufprintf(
 		w,
-		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"api_client\"} %ju\n"
-		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_client\"} %ju\n",
+		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"api_client\"} %" PRIuLEAST64
+		"\n"
+		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_client\"} %" PRIuLEAST64
+		"\n",
 		agg.api_client_byt_recv, agg.api_client_byt_send);
 #endif
 
@@ -1130,7 +1150,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	RESPHDR_NOCACHE(ctx->conn.wbuf);
 	RESPHDR_CTYPE(
 		ctx->conn.wbuf, "text/plain; version=0.0.4; charset=utf-8");
-	const char *encoding_str = content_encoding_str[encoding];
+	const char *encoding_str = http_content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
 	}
@@ -1233,11 +1253,11 @@ static void api_ctx_finalize(struct gcbase *restrict obj)
 
 	api_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
-		CLOSE_FD(ctx->accepted_fd);
+		SOCKET_CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
 	}
 	if (ctx->dialed_fd != -1) {
-		CLOSE_FD(ctx->dialed_fd);
+		SOCKET_CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
 
@@ -1370,7 +1390,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		ctx->conn.wpos += len;
-		*ctx->conn.byt_sent += len;
+		*ctx->conn.byt_sent += (uint_least64_t)len;
 		if (ctx->conn.wpos < ctx->conn.wbuf.len) {
 			return;
 		}
@@ -1394,7 +1414,7 @@ void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		ctx->conn.cpos += len;
-		*ctx->conn.byt_sent += len;
+		*ctx->conn.byt_sent += (uint_least64_t)len;
 		if (ctx->conn.cpos < VBUF_LEN(ctx->conn.cbuf)) {
 			return;
 		}
@@ -1465,7 +1485,7 @@ void api_serve(
 	struct api_ctx *restrict ctx = api_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		CLOSE_FD(accepted_fd);
+		SOCKET_CLOSE_FD(accepted_fd);
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);

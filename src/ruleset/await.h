@@ -4,7 +4,7 @@
 #ifndef RULESET_AWAIT_H
 #define RULESET_AWAIT_H
 
-#include "lua.h"
+#include <lua.h>
 
 int luaopen_await(lua_State *L);
 

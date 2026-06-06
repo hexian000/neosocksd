@@ -525,6 +525,7 @@ T_DECLARE_CASE(test_parseargs_ruleset)
 #endif /* WITH_RULESET */
 
 #if WITH_LUA
+#if 0 /* boot config tests require the removed conf_loadfile */
 /* Write content to a temporary file and return the fd; caller owns fd. */
 static int write_tempfile(char *restrict tmpl, const char *restrict content)
 {
@@ -541,8 +542,6 @@ static int write_tempfile(char *restrict tmpl, const char *restrict content)
 	close(fd);
 	return 0;
 }
-
-T_DECLARE_CASE(test_boot_overrides_string_field)
 {
 	char path[] = "/tmp/boot_conf_test_XXXXXX";
 	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:9999' }") ==
@@ -716,68 +715,7 @@ T_DECLARE_CASE(test_dump_config)
 	T_EXPECT_STREQ(buf, "return {\n");
 	(void)fclose(tmp);
 }
-
-T_DECLARE_CASE(test_conf_reload_no_bootfile)
-{
-	/* Without -c, bootfile is NULL: conf_reload must return false. */
-	struct config conf = conf_default();
-	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080" };
-
-	T_EXPECT(conf_parseargs(&conf, 3, argv));
-	T_EXPECT(!conf_reload(&conf));
-}
-
-T_DECLARE_CASE(test_conf_reload_success)
-{
-	char path[] = "/tmp/reload_test_XXXXXX";
-	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:2222' }") ==
-		0);
-
-	struct config conf = conf_default();
-	char *argv[] = { "conf_test", "-c", path, "-l", "127.0.0.1:1080" };
-
-	T_EXPECT(conf_parseargs(&conf, 5, argv));
-	T_EXPECT_STREQ(conf.listen, "0.0.0.0:2222");
-
-	/* Overwrite with new content and reload */
-	{
-		FILE *f = fopen(path, "w");
-		T_CHECK(f != NULL);
-		T_CHECK(fputs("return { listen = '0.0.0.0:3333' }", f) != EOF);
-		T_CHECK(fclose(f) == 0);
-	}
-
-	T_EXPECT(conf_reload(&conf));
-	T_EXPECT_STREQ(conf.listen, "0.0.0.0:3333");
-	free(conf.strings);
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_conf_reload_failure_preserves_config)
-{
-	char path[] = "/tmp/reload_fail_XXXXXX";
-	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:2222' }") ==
-		0);
-
-	struct config conf = conf_default();
-	char *argv[] = { "conf_test", "-c", path, "-l", "127.0.0.1:1080" };
-
-	T_EXPECT(conf_parseargs(&conf, 5, argv));
-	T_EXPECT_STREQ(conf.listen, "0.0.0.0:2222");
-
-	/* Replace with invalid Lua; reload must fail without changing conf */
-	{
-		FILE *f = fopen(path, "w");
-		T_CHECK(f != NULL);
-		T_CHECK(fputs("error('intentional')", f) != EOF);
-		T_CHECK(fclose(f) == 0);
-	}
-
-	T_EXPECT(!conf_reload(&conf));
-	T_EXPECT_STREQ(conf.listen, "0.0.0.0:2222");
-	free(conf.strings);
-	unlink(path);
-}
+#endif /* 0 */
 #endif /* WITH_LUA */
 
 int main(void)
@@ -839,21 +777,6 @@ int main(void)
 #endif
 #if WITH_RULESET
 	T_RUN_CASE(t, test_parseargs_ruleset);
-#endif
-#if WITH_LUA
-	T_RUN_CASE(t, test_boot_overrides_string_field);
-	T_RUN_CASE(t, test_boot_nil_field_preserves_cli_value);
-	T_RUN_CASE(t, test_boot_unknown_fields_ignored);
-	T_RUN_CASE(t, test_boot_type_error_fails);
-	T_RUN_CASE(t, test_boot_returns_nontable_fails);
-	T_RUN_CASE(t, test_boot_runtime_error_fails);
-	T_RUN_CASE(t, test_boot_varargs_visible);
-	T_RUN_CASE(t, test_boot_overrides_numeric_fields);
-	T_RUN_CASE(t, test_boot_overrides_bool_fields);
-	T_RUN_CASE(t, test_dump_config);
-	T_RUN_CASE(t, test_conf_reload_no_bootfile);
-	T_RUN_CASE(t, test_conf_reload_success);
-	T_RUN_CASE(t, test_conf_reload_failure_preserves_config);
 #endif
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

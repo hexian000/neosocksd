@@ -17,10 +17,9 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include <errno.h>
+#include <netinet/in.h>
 #if WITH_THREADS
 #include <stdatomic.h>
 #endif
@@ -29,6 +28,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /* never rollback */
 enum forward_state {
@@ -109,11 +109,11 @@ static void forward_ctx_finalize(struct gcbase *restrict obj)
 
 	forward_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
-		CLOSE_FD(ctx->accepted_fd);
+		SOCKET_CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
 	}
 	if (ctx->dialed_fd != -1) {
-		CLOSE_FD(ctx->dialed_fd);
+		SOCKET_CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
 
@@ -211,8 +211,8 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		ctx->s->num_sessions--;
 #endif
 		LOGOOM();
-		CLOSE_FD(acc_fd);
-		CLOSE_FD(dial_fd);
+		SOCKET_CLOSE_FD(acc_fd);
+		SOCKET_CLOSE_FD(dial_fd);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -264,7 +264,14 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	struct forward_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
 	struct ruleset *restrict ruleset = ctx->s->ruleset;
-	ASSERT(ruleset != NULL);
+	if (ruleset == NULL) {
+		/* SIGHUP may have cleared s->ruleset between the
+		 * forward_serve check and this callback. Fall back
+		 * to the no-ruleset direct-dial path. */
+		FW_CTX_LOG(VERBOSE, ctx, "ruleset gone, fallback to direct");
+		forward_ctx_start(loop, ctx, ctx->s->basereq);
+		return;
+	}
 	const struct dialreq *restrict req = ctx->s->basereq;
 	const struct dialaddr *restrict addr = &req->addr;
 
@@ -339,7 +346,7 @@ void forward_serve(
 	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		CLOSE_FD(accepted_fd);
+		SOCKET_CLOSE_FD(accepted_fd);
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
@@ -371,7 +378,15 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	ev_idle_stop(loop, watcher);
 	struct forward_ctx *restrict ctx = watcher->data;
 	struct ruleset *restrict ruleset = ctx->s->ruleset;
-	ASSERT(ruleset != NULL);
+	if (ruleset == NULL) {
+		/* SIGHUP may have cleared s->ruleset between the
+		 * forward_serve check and this callback. TPROXY mode
+		 * cannot proceed without a ruleset. */
+		FW_CTX_LOG(ERROR, ctx, "ruleset gone, cannot route tproxy");
+		ctx->s->stats.num_reject_ruleset++;
+		gc_unref(&ctx->gcbase);
+		return;
+	}
 
 	union sockaddr_max dest;
 	socklen_t len = sizeof(dest);
@@ -453,7 +468,7 @@ void tproxy_serve(
 	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		CLOSE_FD(accepted_fd);
+		SOCKET_CLOSE_FD(accepted_fd);
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);

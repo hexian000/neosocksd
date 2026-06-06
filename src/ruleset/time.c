@@ -5,8 +5,8 @@
 
 #include "os/clock.h"
 
-#include "lauxlib.h"
-#include "lua.h"
+#include <lauxlib.h>
+#include <lua.h>
 
 #include <stdbool.h>
 #include <stdint.h>

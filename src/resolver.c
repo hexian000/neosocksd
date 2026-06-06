@@ -1,23 +1,6 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file resolver.c
- * @brief DNS resolver implementation with optional c-ares support
- *
- * This implementation provides both synchronous and asynchronous DNS resolution.
- * When compiled with c-ares support (WITH_CARES), it uses the c-ares library
- * for non-blocking DNS queries integrated with libev. Without c-ares, it falls
- * back to synchronous getaddrinfo() calls.
- *
- * Key features:
- * - Asynchronous DNS resolution with c-ares
- * - Fallback to synchronous resolution
- * - Socket event management for c-ares integration
- * - Query cancellation support
- * - Statistics tracking
- */
-
 #include "resolver.h"
 
 #include "conf.h"
@@ -28,44 +11,27 @@
 #include "utils/slog.h"
 
 #if WITH_CARES
-#include <sys/select.h>
 #include <ares.h>
 #endif
 #include <ev.h>
 
-#if WITH_CARES
-#include <sys/time.h>
-#endif
 #include <netinet/in.h>
-#include <sys/socket.h>
-
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if WITH_CARES
+#include <sys/select.h>
+#include <sys/time.h>
+#endif
+#include <sys/socket.h>
 
-/**
- * @brief I/O watcher node for c-ares socket management
- *
- * Represents a single socket watcher in a singly-linked list. Used to manage
- * multiple sockets that c-ares may create for DNS queries. Inactive watchers
- * are kept in the list for reuse and periodically purged by purge_watchers().
- *
- * The head node (resolver.sockets) is embedded in the resolver struct and
- * serves as both a list sentinel and a reusable watcher node.
- */
 struct io_node {
 	ev_io watcher;
 	struct io_node *next;
 };
 
-/**
- * @brief DNS resolver instance
- *
- * Contains the resolver state, statistics, and c-ares integration data.
- * The resolver maintains a linked list of socket watchers for c-ares I/O.
- */
 struct resolver {
 	struct ev_loop *loop;
 	struct resolver_stats stats;
@@ -78,13 +44,6 @@ struct resolver {
 #endif
 };
 
-/**
- * @brief DNS query context
- *
- * Represents a single DNS resolution request with its completion callback
- * and result storage. Uses a flexible array member to store the hostname
- * and service strings contiguously with the structure.
- */
 struct resolve_query {
 	struct resolver *resolver;
 	struct resolve_cb done_cb;
@@ -96,16 +55,6 @@ struct resolve_query {
 	char buf[];
 };
 
-/**
- * @brief Query completion callback handler
- *
- * Called when a DNS query finishes (either successfully or with failure).
- * Invokes the user callback and cleans up the query structure.
- *
- * @param loop Event loop
- * @param watcher The completion watcher
- * @param revents Event flags (should be EV_CUSTOM)
- */
 static void
 finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 {
@@ -139,16 +88,6 @@ finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 }
 
 #if WITH_CARES
-/**
- * @brief Socket I/O event callback for c-ares
- *
- * Called when a c-ares socket becomes readable or writable. Notifies
- * c-ares to process the socket events.
- *
- * @param loop Event loop (unused)
- * @param watcher The I/O watcher that triggered
- * @param revents Event flags (EV_READ and/or EV_WRITE)
- */
 static void
 socket_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 {

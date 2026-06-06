@@ -80,6 +80,10 @@ Binary releases include `neosocksd.noarch.tar.gz` with all Lua scripts. Deploy `
 # Full ruleset with tracing
 ./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 \
     -r ruleset.lua --traceback --loglevel 6
+
+# Gzip-compressed lua files
+./neosocksd -l 0.0.0.0:1080 -r ruleset.lua.gz
+./neosocksd -c config.lua.gz -r ruleset.lua.gz
 ```
 
 Hot-reload without restart:
@@ -107,9 +111,8 @@ Provided scripts:
 | ---------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | [libruleset.lua](libruleset.lua)                           | Ruleset framework and RPC utilities                                                     |
 | [agent.lua](agent.lua)                                     | RPC-based peer discovery and relay                                                      |
-| [example/config.lua](example/config.lua)                   | Comprehensive boot configuration example for `-c`                                       |
 | [example/ruleset_simple.lua](example/ruleset_simple.lua)   | Minimal ruleset with domain and IP rule tables                                          |
-| [example/ruleset.lua](example/ruleset.lua)                 | Full ruleset: `agent.lua` integration, schedule-based logic, RPC                        |
+| [example/ruleset.lua](example/ruleset.lua)                 | Full ruleset: `agent.lua` integration, schedule-based logic, RPC; doubles as `-c` config  |
 | [example/ruleset_egress.lua](example/ruleset_egress.lua)   | Egress: blocks private addresses, maintains external IP/domain biglist, direct outbound |
 | [example/ruleset_ingress.lua](example/ruleset_ingress.lua) | Ingress: client auth, biglist routing, upstream proxy fallback, RPC biglist sync        |
 | [example/lb.lua](example/lb.lua)                           | IWRR weighted load balancer with runtime weight updates via RPC                         |

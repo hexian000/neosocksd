@@ -22,11 +22,10 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 
 #include <errno.h>
 #include <inttypes.h>
+#include <netinet/in.h>
 #if WITH_THREADS
 #include <stdatomic.h>
 #endif
@@ -35,6 +34,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/uio.h>
 
 /* never rollback */
 enum socks_state {
@@ -204,8 +206,7 @@ send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 		return false;
 	}
 	if ((size_t)nsend != len) {
-		SOCKS_CTX_LOG_F(
-			DEBUG, ctx, "send: %zu < %zu", (size_t)nsend, len);
+		SOCKS_CTX_LOG_F(DEBUG, ctx, "send: %zd < %zu", nsend, len);
 		return false;
 	}
 	ctx->s->stats.byt_client_send += len;
@@ -351,7 +352,7 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	 * socks_ctx_stop becomes a no-op if gc_unref is called below.
 	 */
 	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->byt_client_recv += ctx->rbuf.len;
+	stats->byt_client_recv += (uint_least64_t)ctx->rbuf.len;
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	stats->num_halfopen--;
@@ -386,8 +387,8 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		ctx->s->num_sessions--;
 #endif
 		LOGOOM();
-		CLOSE_FD(acc_fd);
-		CLOSE_FD(dial_fd);
+		SOCKET_CLOSE_FD(acc_fd);
+		SOCKET_CLOSE_FD(dial_fd);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -694,7 +695,7 @@ static int socks5_authmethod(struct socks_ctx *restrict ctx)
 			"SOCKS5: no acceptable authentication method");
 		return -1;
 	}
-	ctx->auth.method = method;
+	ctx->auth.method = (uint_least8_t)method;
 
 	ctx->next += want;
 	ctx->state = STATE_HANDSHAKE2;
@@ -896,21 +897,21 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	{
 		int err = socket_set_cloexec(conn_fd);
 		if (err != 0) {
-			CLOSE_FD(conn_fd);
+			SOCKET_CLOSE_FD(conn_fd);
 			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 			gc_unref(&ctx->gcbase);
 			return;
 		}
 		err = socket_set_nonblock(conn_fd);
 		if (err != 0) {
-			CLOSE_FD(conn_fd);
+			SOCKET_CLOSE_FD(conn_fd);
 			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 			gc_unref(&ctx->gcbase);
 			return;
 		}
 	}
 	ev_io_stop(loop, &ctx->w_socket);
-	CLOSE_FD(ctx->dialed_fd);
+	SOCKET_CLOSE_FD(ctx->dialed_fd);
 	ctx->dialed_fd = conn_fd;
 	if (!socks5_sendrsp_addr(ctx, SOCKS5RSP_SUCCEEDED, &peer_sa)) {
 		gc_unref(&ctx->gcbase);
@@ -955,7 +956,7 @@ static int socks_open_bound_fd(
 			SOCKS_CTX_LOG_F(
 				ERROR, ctx, "bind: (%d) %s", err,
 				strerror(err));
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 			gc_unref(&ctx->gcbase);
 			return -1;
@@ -964,14 +965,14 @@ static int socks_open_bound_fd(
 	{
 		int err = socket_set_cloexec(fd);
 		if (err != 0) {
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 			gc_unref(&ctx->gcbase);
 			return -1;
 		}
 		err = socket_set_nonblock(fd);
 		if (err != 0) {
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 			gc_unref(&ctx->gcbase);
 			return -1;
@@ -993,7 +994,7 @@ socks_bind_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		const int err = errno;
 		SOCKS_CTX_LOG_F(
 			ERROR, ctx, "listen: (%d) %s", err, strerror(err));
-		CLOSE_FD(listen_fd);
+		SOCKET_CLOSE_FD(listen_fd);
 		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 		gc_unref(&ctx->gcbase);
 		return;
@@ -1592,11 +1593,11 @@ static void socks_ctx_finalize(struct gcbase *restrict obj)
 
 	socks_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
-		CLOSE_FD(ctx->accepted_fd);
+		SOCKET_CLOSE_FD(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
 	}
 	if (ctx->dialed_fd != -1) {
-		CLOSE_FD(ctx->dialed_fd);
+		SOCKET_CLOSE_FD(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
 
@@ -1664,7 +1665,7 @@ void socks_serve(
 	struct socks_ctx *restrict ctx = socks_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		CLOSE_FD(accepted_fd);
+		SOCKET_CLOSE_FD(accepted_fd);
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);

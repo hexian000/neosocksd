@@ -51,7 +51,7 @@ void pipe_close(struct splice_pipe *pipe);
  */
 void pipe_shrink(struct pipe_cache *cache, size_t count);
 #endif /* WITH_ALLOC_CACHE */
-#endif
+#endif /* WITH_SPLICE */
 
 #if WITH_THREADS
 #include <stdatomic.h>
@@ -98,12 +98,12 @@ struct transfer_opts {
 #endif
 #if WITH_THREADS
 	atomic_size_t *num_sessions;
-	atomic_uintmax_t *byt_up;
-	atomic_uintmax_t *byt_down;
+	atomic_uint_least64_t *byt_up;
+	atomic_uint_least64_t *byt_down;
 #else
 	size_t *num_sessions;
-	uintmax_t *byt_up;
-	uintmax_t *byt_down;
+	uint_least64_t *byt_up;
+	uint_least64_t *byt_down;
 #endif
 };
 

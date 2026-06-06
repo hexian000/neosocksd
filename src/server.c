@@ -5,6 +5,7 @@
 
 #include "api_server.h"
 #include "conf.h"
+#include "dialer.h"
 #include "forward.h"
 #include "http_proxy.h"
 #include "proto/domain.h"
@@ -25,14 +26,16 @@
 
 #include <errno.h>
 #include <signal.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdlib.h>
 #if WITH_THREADS
 #include <stdatomic.h>
 #endif
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 
 static bool is_startup_limited(const struct server *restrict s)
 {
@@ -107,19 +110,19 @@ static void accept_cb(
 		}
 
 		if (is_startup_limited(s)) {
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			return;
 		}
 
 		{
 			int err = socket_set_cloexec(fd);
 			if (err != 0) {
-				CLOSE_FD(fd);
+				SOCKET_CLOSE_FD(fd);
 				return;
 			}
 			err = socket_set_nonblock(fd);
 			if (err != 0) {
-				CLOSE_FD(fd);
+				SOCKET_CLOSE_FD(fd);
 				return;
 			}
 		}
@@ -161,12 +164,12 @@ static bool add_listener(
 	{
 		int err = socket_set_cloexec(fd);
 		if (err != 0) {
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			return false;
 		}
 		err = socket_set_nonblock(fd);
 		if (err != 0) {
-			CLOSE_FD(fd);
+			SOCKET_CLOSE_FD(fd);
 			return false;
 		}
 	}
@@ -201,14 +204,14 @@ static bool add_listener(
 	if (bind(fd, bindaddr, sa_len(bindaddr)) != 0) {
 		const int err = errno;
 		LOGE_F("bind: (%d) %s", err, strerror(err));
-		CLOSE_FD(fd);
+		SOCKET_CLOSE_FD(fd);
 		return false;
 	}
 
 	if (listen(fd, backlog)) {
 		const int err = errno;
 		LOGE_F("listen: (%d) %s", err, strerror(err));
-		CLOSE_FD(fd);
+		SOCKET_CLOSE_FD(fd);
 		return false;
 	}
 
@@ -223,12 +226,37 @@ static bool add_listener(
 
 	struct ev_loop *loop = s->loop;
 	if (s->num_listeners == 0) {
-		s->stats.started = clock_monotonic_ns();
+		s->stats.started = (int_least64_t)clock_monotonic_ns();
 	}
 	ev_io_start(loop, &l->w_accept);
 	s->num_listeners++;
 	return true;
 }
+
+#if WITH_RULESET
+/**
+ * @brief Rebuild the base dial request after a configuration reload.
+ *
+ * The boot configuration may change the forward/proxy settings, so the base
+ * dial request must be rebuilt to reflect the effective configuration. On
+ * success the previous request is freed and both the server and the attached
+ * ruleset (if any) are updated; on failure the existing request is kept.
+ */
+static void server_reload_basereq(struct server *restrict s)
+{
+	struct dialreq *restrict newbasereq =
+		dialreq_parse(s->conf->forward, s->conf->proxy);
+	if (newbasereq == NULL) {
+		LOGW("reload: unable to parse outbound configuration; keeping the previous one");
+		return;
+	}
+	dialreq_free(s->basereq);
+	s->basereq = newbasereq;
+	if (s->ruleset != NULL) {
+		ruleset_setbasereq(s->ruleset, newbasereq);
+	}
+}
+#endif
 
 static void
 signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
@@ -238,31 +266,77 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 	struct server *restrict s = watcher->data;
 	switch (watcher->signum) {
 	case SIGHUP: {
-		(void)systemd_notify(SYSTEMD_STATE_RELOADING);
-		if (!conf_reload(s->conf)) {
-			(void)systemd_notify(SYSTEMD_STATE_READY);
-			break;
-		}
+		(void)systemd_notify(DAEMON_SYSTEMD_STATE_RELOADING);
 #if WITH_RULESET
-		struct ruleset *restrict ruleset = s->ruleset;
-		if (s->conf->ruleset != NULL && ruleset != NULL) {
-			const bool ok =
-				ruleset_loadfile(ruleset, s->conf->ruleset);
+		if (s->ruleset != NULL) {
+			struct ruleset *restrict ruleset = s->ruleset;
+			bool ok = true;
+			if (s->conf->boot != NULL) {
+				ok = ruleset_loadconfig(ruleset, s->conf->boot);
+				if (!ok) {
+					LOGW_F("reload: config error: %s",
+					       ruleset_geterror(ruleset, NULL));
+				}
+			}
+			if (ok && s->conf->ruleset != NULL) {
+				ok = ruleset_loadfile(
+					ruleset, s->conf->ruleset);
+				if (!ok) {
+					LOGW_F("reload: ruleset error: %s",
+					       ruleset_geterror(ruleset, NULL));
+				}
+			}
 			if (!ok) {
-				LOGW_F("reload: ruleset error: %s",
-				       ruleset_geterror(ruleset, NULL));
-				(void)systemd_notify(SYSTEMD_STATE_READY);
+				(void)systemd_notify(
+					DAEMON_SYSTEMD_STATE_READY);
 				break;
 			}
+			if (s->conf->ruleset == NULL) {
+				ruleset_free(ruleset);
+				s->ruleset = NULL;
+			}
+		} else if (s->conf->boot != NULL) {
+			struct ruleset *restrict ruleset = ruleset_new(
+				s->loop, s->conf, s->resolver, s->basereq);
+			if (ruleset == NULL) {
+				LOGOOM();
+				break;
+			}
+			bool ok = ruleset_loadconfig(ruleset, s->conf->boot);
+			if (!ok) {
+				LOGW_F("reload: config error: %s",
+				       ruleset_geterror(ruleset, NULL));
+				ruleset_free(ruleset);
+				break;
+			}
+			if (s->conf->ruleset != NULL) {
+				ok = ruleset_loadfile(
+					ruleset, s->conf->ruleset);
+				if (!ok) {
+					LOGW_F("reload: ruleset error: %s",
+					       ruleset_geterror(ruleset, NULL));
+					ruleset_free(ruleset);
+					break;
+				}
+			}
+			if (s->conf->ruleset == NULL) {
+				ruleset_free(ruleset);
+			} else {
+				ruleset_setserver(ruleset, s);
+				s->ruleset = ruleset;
+			}
+		}
+		if (s->conf->boot != NULL) {
+			server_reload_basereq(s);
 		}
 #endif
 		LOGN("reload: config successfully reloaded");
-		(void)systemd_notify(SYSTEMD_STATE_READY);
+		(void)systemd_notify(DAEMON_SYSTEMD_STATE_READY);
 	} break;
 	case SIGINT:
 	case SIGTERM:
 		LOGD_F("signal %d received, breaking", watcher->signum);
-		(void)systemd_notify(SYSTEMD_STATE_STOPPING);
+		(void)systemd_notify(DAEMON_SYSTEMD_STATE_STOPPING);
 		ev_break(loop, EVBREAK_ALL);
 		break;
 	default:
@@ -282,7 +356,7 @@ resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
 	char buf[bufsize];
 	memcpy(buf, addrstr, addrlen + 1);
 	char *host, *port;
-	if (!splithostport(buf, &host, &port)) {
+	if (!addr_splithostport(buf, &host, &port)) {
 		LOGF_F("unable to parse address: %s", addrstr);
 		return false;
 	}
@@ -397,11 +471,13 @@ void server_stop(struct server *restrict s)
 		struct listener *restrict l = &s->listeners[i];
 
 		ev_io_stop(loop, &l->w_accept);
-		CLOSE_FD(l->w_accept.fd);
+		SOCKET_CLOSE_FD(l->w_accept.fd);
 
 		ev_timer_stop(loop, &l->w_timer);
 	}
 
+	dialreq_free(s->basereq);
+	s->basereq = NULL;
 	s->stats.started = -1;
 }
 

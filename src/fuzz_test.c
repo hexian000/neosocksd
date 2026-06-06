@@ -15,13 +15,10 @@
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include <errno.h>
 #include <inttypes.h>
+#include <netinet/in.h>
 #if WITH_THREADS
 #include <stdatomic.h>
 #endif
@@ -32,6 +29,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #define FUZZ_DEFAULT_ITERATIONS 1000
 #define FUZZ_MAX_CODEC_INPUT 512
@@ -466,7 +466,7 @@ int dialaddr_format(
 
 void dialer_init(
 	struct dialer *restrict d, const struct dialer_cb *callback,
-	uintmax_t *byt_sent, uintmax_t *byt_recv)
+	uint_least64_t *byt_sent, uint_least64_t *byt_recv)
 {
 	(void)byt_sent;
 	(void)byt_recv;

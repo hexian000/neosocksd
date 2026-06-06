@@ -30,6 +30,19 @@ void socket_set_transparent(const int fd, const bool tproxy)
 	(void)tproxy;
 }
 
+struct dialreq *
+dialreq_parse(const char *restrict addr, const char *restrict csv)
+{
+	(void)addr;
+	(void)csv;
+	return NULL;
+}
+
+void dialreq_free(struct dialreq *req)
+{
+	(void)req;
+}
+
 void api_serve(
 	struct server *s, struct ev_loop *loop, int accepted_fd,
 	const struct sockaddr *accepted_sa)
@@ -83,7 +96,44 @@ void tproxy_serve(
 #endif /* WITH_TPROXY */
 
 #if WITH_RULESET
+struct ruleset *ruleset_new(
+	struct ev_loop *restrict loop, struct config *restrict conf,
+	struct resolver *restrict resolver, struct dialreq *restrict basereq)
+{
+	(void)loop;
+	(void)conf;
+	(void)resolver;
+	(void)basereq;
+	return NULL;
+}
+
+void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s)
+{
+	(void)r;
+	(void)s;
+}
+
+void ruleset_setbasereq(
+	struct ruleset *restrict r, struct dialreq *restrict basereq)
+{
+	(void)r;
+	(void)basereq;
+}
+
+void ruleset_free(struct ruleset *restrict r)
+{
+	(void)r;
+}
+
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
+{
+	(void)r;
+	(void)filename;
+	return false;
+}
+
+bool ruleset_loadconfig(
+	struct ruleset *restrict r, const char *restrict filename)
 {
 	(void)r;
 	(void)filename;
@@ -190,7 +240,8 @@ static bool listener_backing_off(void *data)
 
 T_DECLARE_CASE(test_server_start_accept_and_stop)
 {
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
 	uint16_t port;
@@ -205,14 +256,16 @@ T_DECLARE_CASE(test_server_start_accept_and_stop)
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 	T_EXPECT(s.stats.started != -1);
 
-	CLOSE_FD(client_fd);
+	SOCKET_CLOSE_FD(client_fd);
 	server_stop(&s);
 	T_EXPECT_EQ(s.stats.started, -1);
+	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(test_server_rejects_when_session_limit_exceeded)
 {
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
 	uint16_t port;
@@ -228,13 +281,15 @@ T_DECLARE_CASE(test_server_rejects_when_session_limit_exceeded)
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
 
-	CLOSE_FD(client_fd);
+	SOCKET_CLOSE_FD(client_fd);
 	server_stop(&s);
+	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(test_server_rejects_when_full_startup_limit_exceeded)
 {
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
 	uint16_t port;
@@ -250,13 +305,15 @@ T_DECLARE_CASE(test_server_rejects_when_full_startup_limit_exceeded)
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
 
-	CLOSE_FD(client_fd);
+	SOCKET_CLOSE_FD(client_fd);
 	server_stop(&s);
+	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(test_server_rejects_when_probabilistic_startup_limit_hits)
 {
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
 	uint16_t port;
@@ -273,13 +330,15 @@ T_DECLARE_CASE(test_server_rejects_when_probabilistic_startup_limit_hits)
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
 
-	CLOSE_FD(client_fd);
+	SOCKET_CLOSE_FD(client_fd);
 	server_stop(&s);
+	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(test_server_accept_error_restarts_listener)
 {
-	struct ev_loop *loop = EV_DEFAULT;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
 	struct listener *l;
@@ -304,15 +363,124 @@ T_DECLARE_CASE(test_server_accept_error_restarts_listener)
 	T_EXPECT(ev_is_active(&l->w_timer));
 
 	ev_io_set(&l->w_accept, listener_fd, EV_READ);
-	CLOSE_FD(pipefd[0]);
-	CLOSE_FD(pipefd[1]);
+	SOCKET_CLOSE_FD(pipefd[0]);
+	SOCKET_CLOSE_FD(pipefd[1]);
 	client_fd = connect_loopback(port);
 	T_EXPECT(test_wait_until(loop, served_once, &s, 1.0));
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 
-	CLOSE_FD(client_fd);
+	SOCKET_CLOSE_FD(client_fd);
 	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * max_sessions uses > (not >=) comparison.  Verify that exactly
+ * max_sessions concurrent sessions are allowed, and the next is
+ * rejected.
+ */
+T_DECLARE_CASE(test_server_allows_when_at_max_sessions)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint16_t port;
+	int client_fd = -1;
+
+	conf.max_sessions = 1;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	/* Exactly at the limit — should still accept. */
+	s.num_sessions = 1;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+
+	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
+
+	SOCKET_CLOSE_FD(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * max_sessions == 0 means unlimited.
+ */
+T_DECLARE_CASE(test_server_zero_max_sessions_allows_unlimited)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint16_t port;
+	int client_fd = -1;
+
+	/* max_sessions=0: no limit.  Use a large num_sessions to
+	 * confirm the guard is not triggered. */
+	conf.max_sessions = 0;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	s.num_sessions = (size_t)999999;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+
+	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
+
+	SOCKET_CLOSE_FD(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Two listeners (proxy + http) on the same server must work independently.
+ */
+T_DECLARE_CASE(test_server_dual_listener_independent_accepts)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint16_t port_a, port_b;
+	int client_fd = -1;
+
+	conf.http_listen = "127.0.0.1:0";
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	/* Two listeners must have been created (proxy + http). */
+	T_EXPECT_EQ(s.num_listeners, (size_t)2);
+
+	port_a = bound_port(s.listeners[0].w_accept.fd);
+	port_b = bound_port(s.listeners[1].w_accept.fd);
+	T_EXPECT(port_a != port_b);
+
+	/* Connect to the first listener. */
+	client_fd = connect_loopback(port_a);
+	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
+	T_EXPECT_EQ(s.listeners[1].stats.num_serve, 0);
+	SOCKET_CLOSE_FD(client_fd);
+
+	/* Connect to the second listener. */
+	client_fd = connect_loopback(port_b);
+	{
+		const size_t num_serve = s.listeners[0].stats.num_serve;
+		struct test_watchdog wd = { 0 };
+		ev_timer w;
+		ev_timer_init(&w, watchdog_cb, 0.5, 0.0);
+		w.data = &wd;
+		ev_timer_start(loop, &w);
+		while (!wd.fired && s.listeners[1].stats.num_serve == 0) {
+			ev_run(loop, EVRUN_ONCE);
+		}
+		ev_timer_stop(loop, &w);
+		T_EXPECT_EQ(s.listeners[0].stats.num_serve, num_serve);
+		T_EXPECT_EQ(s.listeners[1].stats.num_serve, 1);
+	}
+	SOCKET_CLOSE_FD(client_fd);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
 }
 
 int main(void)
@@ -321,9 +489,12 @@ int main(void)
 
 	T_RUN_CASE(t, test_server_start_accept_and_stop);
 	T_RUN_CASE(t, test_server_rejects_when_session_limit_exceeded);
+	T_RUN_CASE(t, test_server_allows_when_at_max_sessions);
+	T_RUN_CASE(t, test_server_zero_max_sessions_allows_unlimited);
 	T_RUN_CASE(t, test_server_rejects_when_full_startup_limit_exceeded);
 	T_RUN_CASE(
 		t, test_server_rejects_when_probabilistic_startup_limit_hits);
 	T_RUN_CASE(t, test_server_accept_error_restarts_listener);
+	T_RUN_CASE(t, test_server_dual_listener_independent_accepts);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

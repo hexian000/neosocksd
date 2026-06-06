@@ -149,4 +149,14 @@ local function main(...)
 end
 
 evlogf("ruleset loaded, interpreter: %s", _VERSION)
+local mode = ...
+if mode == "config" then
+	return {
+		listen   = "0.0.0.0:1080",
+		restapi  = "127.0.1.1:9080",
+		traceback = nil,
+		memlimit = nil,
+		ruleset = main(mode),
+	}
+end
 return main(...)

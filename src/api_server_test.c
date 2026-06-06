@@ -12,6 +12,7 @@
 
 #include "os/clock.h"
 #include "os/socket.h"
+#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <ev.h>
