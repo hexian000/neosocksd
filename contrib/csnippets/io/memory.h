@@ -60,6 +60,18 @@ int io_heapprintf(struct stream *s, const char *format, ...);
 struct stream *io_bufreader(struct stream *base, size_t bufsize);
 
 /**
+ * @brief Peek at buffered data without consuming it.
+ * @param[in] s Must be a stream created by io_bufreader().
+ * @param[out] buf Internal buffer pointer (valid until next read/peek/close).
+ * @param[inout] len Max requested / actual bytes returned.
+ * @return Error code, 0 for OK.
+ * @details Returns a zero-copy pointer up to bufsize bytes.
+ * Data is not consumed; the next read or peek returns the same bytes.
+ * If the buffer is empty, the underlying stream is read to fill it.
+ */
+int io_bufpeek(struct stream *s, const void **buf, size_t *len);
+
+/**
  * @brief Buffered stream writer.
  * @param[in] base Transfer ownership of the base stream.
  * @param[in] bufsize Size of buffer in bytes, 0 for default.

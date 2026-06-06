@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "memory.h"
+
 #include "stream.h"
 #include "utils/buffer.h"
 #include "utils/class.h"
@@ -79,7 +80,10 @@ struct stream *io_memreader(const void *buf, const size_t bufsize)
 	static const struct stream_vftable vftable = {
 		.direct_read = mem_direct_read,
 	};
-	*s = (struct stream){ &vftable, NULL };
+	*s = (struct stream){
+		.vftable = &vftable,
+		.data = NULL,
+	};
 	return s;
 }
 
@@ -92,7 +96,10 @@ struct stream *io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
 	static const struct stream_vftable vftable = {
 		.write = mem_write,
 	};
-	*s = (struct stream){ &vftable, NULL };
+	*s = (struct stream){
+		.vftable = &vftable,
+		.data = NULL,
+	};
 	return s;
 }
 
@@ -121,7 +128,10 @@ struct stream *io_heapwriter(struct vbuffer **restrict pvbuf)
 	if (s == NULL) {
 		return NULL;
 	}
-	*s = (struct stream){ &vftable_heapwriter, (void *)pvbuf };
+	*s = (struct stream){
+		.vftable = &vftable_heapwriter,
+		.data = (void *)pvbuf,
+	};
 	return s;
 }
 
@@ -205,6 +215,31 @@ static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 	b->pos += n;
 	*len = n;
 	return 0;
+}
+
+static int buf_peek(void *p, const void **restrict buf, size_t *restrict len)
+{
+	struct buffered_stream *restrict b = p;
+	if (b->pos < b->len) {
+		*buf = b->buf + b->pos;
+		if (*len > b->len - b->pos) {
+			*len = b->len - b->pos;
+		}
+		return 0;
+	}
+	if (b->err != 0) {
+		*len = 0;
+		return b->err;
+	}
+	b->pos = 0;
+	b->len = 0;
+	size_t n = b->bufsize;
+	const size_t req = (*len < n) ? *len : n;
+	b->err = stream_read(b->base, b->buf, &n);
+	b->len = n;
+	*buf = b->buf;
+	*len = (req < n) ? req : n;
+	return b->err;
 }
 
 static int buf_flush_(struct buffered_stream *restrict b)
@@ -338,6 +373,12 @@ static struct stream *io_bufstream(struct stream *base, size_t bufsize)
 	return &b->s;
 }
 
+static const struct stream_vftable vftable_bufreader = {
+	.direct_read = buf_direct_read,
+	.read = buf_read,
+	.close = rbuf_close,
+};
+
 struct stream *io_bufreader(struct stream *base, const size_t bufsize)
 {
 	if (bufsize == 0) {
@@ -347,13 +388,19 @@ struct stream *io_bufreader(struct stream *base, const size_t bufsize)
 	if (s == NULL) {
 		return NULL;
 	}
-	static const struct stream_vftable vftable = {
-		.direct_read = buf_direct_read,
-		.read = buf_read,
-		.close = rbuf_close,
+	*s = (struct stream){
+		.vftable = &vftable_bufreader,
+		.data = NULL,
 	};
-	*s = (struct stream){ &vftable, NULL };
 	return s;
+}
+
+int io_bufpeek(
+	struct stream *restrict s, const void **restrict buf,
+	size_t *restrict len)
+{
+	assert(s->vftable == &vftable_bufreader);
+	return buf_peek(s, buf, len);
 }
 
 static const struct stream_vftable vftable_bufwriter = {
@@ -370,7 +417,10 @@ struct stream *io_bufwriter(struct stream *base, const size_t bufsize)
 	if (s == NULL) {
 		return NULL;
 	}
-	*s = (struct stream){ &vftable_bufwriter, NULL };
+	*s = (struct stream){
+		.vftable = &vftable_bufwriter,
+		.data = NULL,
+	};
 	return s;
 }
 
@@ -454,7 +504,10 @@ struct stream *io_metered(struct stream *base, size_t *meter)
 		.flush = metered_flush,
 		.close = metered_close,
 	};
-	m->s = (struct stream){ &vftable, NULL };
+	m->s = (struct stream){
+		.vftable = &vftable,
+		.data = NULL,
+	};
 	m->base = base;
 	m->meter = meter;
 	return &m->s;

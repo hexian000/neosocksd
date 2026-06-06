@@ -65,8 +65,8 @@ void gc_unref(struct gcbase *restrict obj)
 size_t gc_finalizeall(void)
 {
 	size_t count = 0;
-	for (struct gcbase *obj = gcroot; obj != NULL; obj = gcroot) {
-		gc_finalize(obj);
+	while (gcroot != NULL) {
+		gc_finalize(gcroot);
 		count++;
 	}
 	return count;

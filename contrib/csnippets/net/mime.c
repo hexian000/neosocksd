@@ -2,6 +2,7 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "mime.h"
+
 #include "utils/ascii.h"
 
 #include <string.h>

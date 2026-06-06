@@ -18,7 +18,7 @@
  * @param[out] subtype Subtype value.
  * @return The start position of next parsing, or NULL when parsing failed.
  */
-char *mime_parse(char *s, char **type, char **subtype);
+char *mime_parse(char *s, char **restrict type, char **restrict subtype);
 
 /**
  * @brief Parse a media type parameter.
@@ -28,7 +28,7 @@ char *mime_parse(char *s, char **type, char **subtype);
  * @param[out] value Parameter value, or NULL when finished.
  * @return The start position of next parsing, or NULL when parsing failed.
  */
-char *mime_parseparam(char *s, char **key, char **value);
+char *mime_parseparam(char *s, char **restrict key, char **restrict value);
 
 /** @} */
 
