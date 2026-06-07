@@ -9,6 +9,7 @@ Version: dev
   - [/ruleset/rpcall](#rulesetrpcall)
   - [/ruleset/update](#rulesetupdate)
   - [/ruleset/gc](#rulesetgc)
+  - [/metrics](#metrics)
 - [Ruleset Callbacks](#ruleset-callbacks)
   - [ruleset.resolve](#rulesetresolve)
   - [ruleset.route](#rulesetroute)
@@ -42,9 +43,9 @@ Version: dev
 
 ## RESTful API
 
-1. The REST API uses `HTTP/1.1`.
+1. The RESTful API uses `HTTP/1.1`.
 2. The maximum request body size is 4 MiB.
-3. Requests and responses support `deflate` compression when the appropriate headers are present (`Content-Encoding` for requests, `Accept-Encoding` for responses).
+3. Requests and responses support `deflate` compression when the appropriate headers are present (`Content-Encoding` on request bodies, `Accept-Encoding` on response bodies).
 
 ### /healthy
 
@@ -59,13 +60,14 @@ Health check.
 - **Query**:
   - `nobanner`: omit the banner. Default: 0.
   - `server`: include server statistics. Default: 1.
+  - `runtime`: include ruleset VM memory statistics. Default: 0.
+  - `q` (POST only): passed to [ruleset.stats](#rulesetstats) as the second argument. Default: nil.
 - **Status**: HTTP 200
 - **Response**: Server statistics (`text/plain`).
 
 GET: Returns stateless server statistics.
 
 POST: Returns server statistics accumulated since the previous request. Also invokes [ruleset.stats](#rulesetstats) if a ruleset is active.
-- `q`: passed to [ruleset.stats](#rulesetstats) as the second argument. Default: nil.
 
 ### /ruleset/invoke
 
@@ -98,7 +100,7 @@ Loads the posted script and applies it as follows:
 
 1. If `module` is not specified, replace the active ruleset.
 2. If `module` is specified, replace the named Lua module.
-3. If the `_G.module` refers to the named module, update it.
+3. If the updated module returns a table, it is installed as `_G[modname]` in addition to being reloaded in `package.loaded`.
 
 ### /ruleset/gc
 
@@ -109,8 +111,18 @@ Loads the posted script and applies it as follows:
 
 Triggers garbage collection.
 
+### /metrics
+
+- **Method**: GET
+- **Status**: HTTP 200, HTTP 405 (method not allowed)
+- **Response Content-Type**: `text/plain; version=0.0.4; charset=utf-8`
+- **Response**: Built-in server metrics, optionally followed by custom output from [ruleset.metrics](#rulesetmetrics). The response is `deflate`-compressed if the request includes `Accept-Encoding: deflate`.
+
+Exposes built-in server metrics in [Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/).
+
 
 ## Ruleset Callbacks
+
 ### ruleset.resolve
 
 **Synopsis**
@@ -125,7 +137,7 @@ end
 
 Handles a hostname request. Specifically:
 - Any HTTP CONNECT request
-- SOCKS5 with a hostname (a.k.a. "socks5h")
+- SOCKS5 with a hostname (a.k.a. socks5h)
 - Any SOCKS4A request
 
 *This callback is called from an asynchronous routine.*
@@ -217,6 +229,10 @@ Periodic timer callback. See [neosocksd.setinterval](#neosocksdsetinterval).
 
 *This callback is NOT called from an asynchronous routine.*
 
+**Returns**
+
+None.
+
 
 ### ruleset.stats
 
@@ -243,7 +259,7 @@ Generates custom information for the `/stats` API. See also [stats](#stats).
 
 **Returns**
 
-Custom information as a string.
+Custom information as a string. Newlines are preserved in the response body.
 
 
 ### ruleset.metrics
@@ -260,7 +276,7 @@ end
 
 **Description**
 
-Appends custom text to the `/metrics` API response. This callback is optional; if it is not defined the `/metrics` output is unchanged.
+Appends custom text to the `/metrics` API response. This callback is optional; if it is not defined, the `/metrics` output is unchanged.
 
 The returned string is appended verbatim after all built-in Prometheus metrics, so it must conform to the [Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/).
 
@@ -380,7 +396,7 @@ Behavior by input value:
 ```Lua
 local co, err = neosocksd.async(finish, func, ...)
 -- works like: finish(pcall(func, ...))
--- func is yieldable, but finish is NOT
+-- func may yield; finish must not.
 ```
 
 **Description**
@@ -401,7 +417,7 @@ neosocksd.invoke([[log("test rpc")]], "api.neosocksd.internal:80", "socks4a://12
 
 **Description**
 
-Runs Lua code on another neosocksd. Returns immediately. On failure, the invocation is dropped.
+Runs Lua code on another neosocksd. Returns immediately, and drops the invocation on failure.
 
 Note: See `neosocksd.sendmsg` in `libruleset.lua`.
 
@@ -430,6 +446,8 @@ local now = neosocksd.now()
 **Description**
 
 Returns the timestamp of the latest event in seconds.
+
+**Notes**
 
 - Any ruleset callback must be invoked by an event.
 - Any asynchronous routine must be resumed by an event.
@@ -633,7 +651,7 @@ end)
 
 **Description**
 
-Resolves a hostname asynchronously. If asynchronous name resolution is not supported, `await.resolve` behaves the same as `neosocksd.resolve`.
+Resolves a hostname asynchronously using the server's configured name resolver.
 
 IPv4/IPv6 preference depends on the `-4`/`-6` command-line flag.
 

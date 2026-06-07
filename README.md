@@ -27,7 +27,8 @@ Status: **Stable**
 ## Features
 
 - Protocols: SOCKS4, SOCKS4A, SOCKS5 (CONNECT), HTTP CONNECT, transparent proxy (Linux).
-- 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024); ~500 KiB executable on most platforms\*.
+- 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024).
+- ~650 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
 - Lua scripting on the control plane with extensive RPC support.
 - RESTful API for live monitoring and hot-reloading Lua modules without restarts.
 - Full IPv6 support; horizontal scalability.
@@ -42,10 +43,10 @@ Status: **Stable**
 ### Protocol Modes
 
 ```sh
-./neosocksd -l 0.0.0.0:1080               # SOCKS server
-./neosocksd -4 -l 0.0.0.0:1080            # Prefer IPv4 in DNS resolution
-./neosocksd -4 -l 0.0.0.0:1080 -i eth0    # Bind outbound to eth0
-./neosocksd -l 0.0.0.0:1080 --http 0.0.0.0:8080 # SOCKS and HTTP server
+./neosocksd -l 0.0.0.0:1080  # SOCKS server
+./neosocksd -4 -l 0.0.0.0:1080  # Prefer IPv4 in DNS resolution
+./neosocksd -4 -l 0.0.0.0:1080 -i eth0  # Bind outbound to eth0
+./neosocksd -l 0.0.0.0:1080 --http 0.0.0.0:8080  # SOCKS and HTTP server
 
 # Transparent proxy (requires root)
 sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
@@ -71,7 +72,7 @@ Forward through an upstream chain and expose a different inbound protocol:
 
 ### Lua Ruleset
 
-Binary releases include `neosocksd.noarch.tar.gz` with all Lua scripts. Deploy `neosocksd` alongside `libruleset.lua`.
+Binary releases include `neosocksd.noarch.tar.gz` with `libruleset.lua`, `agent.lua`, and the `example/` scripts. Deploy `neosocksd` alongside `libruleset.lua`.
 
 ```sh
 # Simple rule table
@@ -81,7 +82,7 @@ Binary releases include `neosocksd.noarch.tar.gz` with all Lua scripts. Deploy `
 ./neosocksd -l 0.0.0.0:1080 --api 127.0.1.1:9080 \
     -r ruleset.lua --traceback --loglevel 6
 
-# Gzip-compressed lua files
+# Gzip-compressed Lua files
 ./neosocksd -l 0.0.0.0:1080 -r ruleset.lua.gz
 ./neosocksd -c config.lua.gz -r ruleset.lua.gz
 ```
@@ -89,7 +90,7 @@ Binary releases include `neosocksd.noarch.tar.gz` with all Lua scripts. Deploy `
 Hot-reload without restart:
 
 ```sh
-# Replace the main ruleset chunk
+# Replace the active ruleset
 curl "http://127.0.1.1:9080/ruleset/update?chunkname=%40ruleset.lua" \
     --data-binary @ruleset.lua
 
@@ -107,15 +108,15 @@ curl "http://127.0.1.1:9080/ruleset/invoke" \
 
 Provided scripts:
 
-| Script                                                     | Description                                                                             |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| [libruleset.lua](libruleset.lua)                           | Ruleset framework and RPC utilities                                                     |
-| [agent.lua](agent.lua)                                     | RPC-based peer discovery and relay                                                      |
-| [example/ruleset_simple.lua](example/ruleset_simple.lua)   | Minimal ruleset with domain and IP rule tables                                          |
+| Script                                                     | Description                                                                               |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| [libruleset.lua](libruleset.lua)                           | Ruleset framework and RPC utilities                                                       |
+| [agent.lua](agent.lua)                                     | RPC-based peer discovery and relay                                                        |
+| [example/ruleset_simple.lua](example/ruleset_simple.lua)   | Minimal ruleset with domain and IP rule tables                                            |
 | [example/ruleset.lua](example/ruleset.lua)                 | Full ruleset: `agent.lua` integration, schedule-based logic, RPC; doubles as `-c` config  |
-| [example/ruleset_egress.lua](example/ruleset_egress.lua)   | Egress: blocks private addresses, maintains external IP/domain biglist, direct outbound |
-| [example/ruleset_ingress.lua](example/ruleset_ingress.lua) | Ingress: client auth, biglist routing, upstream proxy fallback, RPC biglist sync        |
-| [example/lb.lua](example/lb.lua)                           | IWRR weighted load balancer with runtime weight updates via RPC                         |
+| [example/ruleset_egress.lua](example/ruleset_egress.lua)   | Egress: blocks private addresses, maintains external IP/domain biglist, direct outbound   |
+| [example/ruleset_ingress.lua](example/ruleset_ingress.lua) | Ingress: client auth, biglist routing, upstream proxy fallback, RPC biglist sync          |
+| [example/lb.lua](example/lb.lua)                           | IWRR (interleaved weighted round robin) load balancer with runtime weight updates via RPC |
 
 References: [neosocksd API Reference](https://github.com/hexian000/neosocksd/wiki/API-Reference) · [Lua 5.4 Manual](https://www.lua.org/manual/5.4/manual.html)
 

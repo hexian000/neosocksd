@@ -105,13 +105,6 @@ static bool dialaddr_sethostport(
 	return true;
 }
 
-/**
- * @brief Parse string address in "host:port" format
- *
- * Parses an address string and populates a dialaddr structure.
- * The input string should be in "host:port" format where host
- * can be an IPv4 address, IPv6 address, or domain name.
- */
 bool dialaddr_parse(
 	struct dialaddr *restrict addr, const char *restrict s,
 	const size_t len)
@@ -143,12 +136,6 @@ bool dialaddr_parse(
 	return dialaddr_sethostport(addr, host, (uint_fast16_t)portvalue);
 }
 
-/**
- * @brief Convert sockaddr structure to dialaddr
- *
- * Extracts address and port information from a sockaddr structure
- * and stores it in a dialaddr structure.
- */
 bool dialaddr_set(
 	struct dialaddr *restrict addr, const struct sockaddr *restrict sa,
 	const socklen_t len)
@@ -175,12 +162,6 @@ bool dialaddr_set(
 	return false;
 }
 
-/**
- * @brief Copy dialaddr structure
- *
- * Performs a deep copy of a dialaddr structure, handling the
- * different address types appropriately.
- */
 void dialaddr_copy(
 	struct dialaddr *restrict dst, const struct dialaddr *restrict src)
 {
@@ -460,9 +441,6 @@ void dialreq_free(struct dialreq *restrict req)
 	free(req);
 }
 
-/**
- * @brief Dialer state machine states
- */
 enum dialer_state {
 	/* Initial state, not yet started. */
 	STATE_INIT,
@@ -1704,13 +1682,6 @@ void dialer_init(
 	BUF_INIT(d->rbuf, 0);
 }
 
-/**
- * @brief Start a dial operation
- *
- * Begins the asynchronous process of establishing a connection according to
- * the provided dial request. The completion callback will be invoked when
- * the operation finishes (successfully or with an error).
- */
 void dialer_do(
 	struct dialer *restrict d, struct ev_loop *loop,
 	const struct dialreq *restrict req, const struct config *restrict conf,
@@ -1736,13 +1707,6 @@ void dialer_do(
 	dialer_start(d, loop);
 }
 
-/**
- * @brief Cancel an ongoing dial operation
- *
- * Stops the dialer state machine and cleans up all resources. Safe to call
- * multiple times or on an already completed dialer. The completion callback
- * will not be invoked after cancellation.
- */
 void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 {
 	if (d->state == STATE_DONE) {

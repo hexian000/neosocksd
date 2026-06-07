@@ -1,3 +1,5 @@
+-- [[ ruleset_egress.lua: egress ruleset that downloads and publishes blocklists ]] --
+
 _G.libruleset = require("libruleset")
 
 local ruleset = {}

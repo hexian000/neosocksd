@@ -1,4 +1,7 @@
 
+/* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
+ * This code is licensed under MIT license (see LICENSE for details) */
+
 const char *neosocksd_version(void)
 {
 	return "@PROJECT_VERSION_STRING@";

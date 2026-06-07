@@ -340,7 +340,6 @@ end
 
 local rpc = _G.rpc or {}
 function rpc.echo(...)
-    -- logf("rpc.echo(%s)", marshal(...))
     return ...
 end
 
@@ -355,7 +354,6 @@ end
 
 local msgh = _G.msgh or {}
 function msgh.nop(...)
-    -- logf("msgh.nop(%s)", marshal(...))
 end
 
 _G.msgh = msgh
@@ -888,7 +886,6 @@ local function route_(addr)
 end
 
 local function route6_(addr)
-    -- check redirect table
     local redirtab = _G.redirect6
     if redirtab then
         local action, tag = runchain_(redirtab, addr)
@@ -899,7 +896,6 @@ local function route6_(addr)
             return action(addr)
         end
     end
-    -- check route table
     local routetab = _G.route6
     if routetab then
         local host, _ = splithostport(addr)
@@ -912,12 +908,10 @@ local function route6_(addr)
             return action(addr)
         end
     end
-    -- global default
     return default_(addr)
 end
 
 local function resolve_(addr)
-    -- check redirect table
     local redirtab = _G.redirect_name
     if redirtab then
         local action, tag = runchain_(redirtab, addr)
@@ -939,14 +933,12 @@ local function resolve_(addr)
             addr = strformat("%s:%s", host, port)
         end
     end
-    -- check if the addr is a raw address
     if parse_ipv4(host) then
         return route_(addr)
     end
     if parse_ipv6(host) then
         return route6_(addr)
     end
-    -- global default
     return default_(addr)
 end
 

@@ -748,7 +748,7 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 			z->hdrflg = z->hdrbuf[3];
 			/* Advance to first applicable optional-field phase */
 			z->hphase = GZIP_HPASE_FEXTRA_1;
-			/* fall through */
+			/* fallthrough */
 		case GZIP_HPASE_FEXTRA_1:
 			if (!(z->hdrflg & GZIP_FEXTRA)) {
 				z->hphase = GZIP_HPASE_FNAME;
@@ -773,7 +773,7 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				z->hdrcrc, z->srcbuf, 2);
 			z->srcbuf += 2, z->srclen -= 2;
 			z->hphase = GZIP_HPASE_FEXTRA_2;
-			/* fall through */
+			/* fallthrough */
 		case GZIP_HPASE_FEXTRA_2:
 			if (z->xlen_remain > 0) {
 				size_t skip = z->xlen_remain < z->srclen ?
@@ -788,7 +788,7 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				}
 			}
 			z->hphase = GZIP_HPASE_FNAME;
-			/* fall through */
+			/* fallthrough */
 		case GZIP_HPASE_FNAME:
 			if (!(z->hdrflg & GZIP_FNAME)) {
 				z->hphase = GZIP_HPASE_FCOMMENT;
