@@ -182,6 +182,17 @@ return function(T)
             string.format("not ISO 8601: %q", s))
     end)
 
+    T:test("format_timestamp handles float timestamps (time.unix)", function()
+        -- time.unix() returns float seconds with nanosecond precision;
+        -- format_timestamp must floor to integer before calling os.date.
+        local t = os.time() + 0.123456789
+        local s = format_timestamp(t)
+        assert(type(s) == "string" and #s == 25,
+            string.format("expected 25 chars, got %d: %q", #s, s))
+        assert(s:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d[+-]%d%d:%d%d$"),
+            string.format("not ISO 8601: %q", s))
+    end)
+
     -- [[ parse_cidr ]] --
 
     T:test("parse_cidr valid subnet", function()

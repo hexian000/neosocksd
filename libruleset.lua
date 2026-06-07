@@ -15,7 +15,7 @@ _G.printf = printf
 
 -- a fixed-length layout conforming to both ISO 8601 and RFC 3339
 local function format_timestamp(t)
-    local s = os.date("%FT%T%z", t)
+    local s = os.date("%FT%T%z", math.floor(t))
     return s:sub(1, -3) .. ":" .. s:sub(-2, -1)
 end
 _G.format_timestamp = format_timestamp
