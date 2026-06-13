@@ -1496,6 +1496,7 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ctx->w_process.data = ctx;
 	ev_init(&ctx->rpcreturn.w_finish, rpcall_cb);
 	ctx->rpcreturn.w_finish.data = ctx;
+	ctx->rpcreturn.forward = NULL;
 	ctx->rpcstate = NULL;
 #endif
 	const struct http_parsehdr_cb on_header = { parse_header, ctx };

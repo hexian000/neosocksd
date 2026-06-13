@@ -1,4 +1,5 @@
 -- [[ ruleset_ingress.lua: ingress ruleset that fetches blocklists from an egress peer ]] --
+-- Load with `neosocksd -r ruleset_ingress.lua`.
 
 _G.libruleset = require("libruleset")
 

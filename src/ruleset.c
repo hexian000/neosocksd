@@ -99,6 +99,9 @@ static int ruleset_luainit(lua_State *restrict L)
 	/* idle threads */
 	aux_newweaktable(L, "k");
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+	/* forward context: thread pointer -> request state lightuserdata */
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
 	/* load Lua libraries */
 	luaL_openlibs(L);
 	/* restrict package searcher */
@@ -308,6 +311,14 @@ bool ruleset_loadconfig(
 bool ruleset_gc(struct ruleset *restrict r)
 {
 	return ruleset_pcall(r, cfunc_gc, 0, 0);
+}
+
+bool ruleset_isvalid(struct ruleset *restrict r)
+{
+	lua_State *restrict L = r->L;
+	const bool valid = (lua_getglobal(L, "ruleset") == LUA_TTABLE);
+	lua_pop(L, 1);
+	return valid;
 }
 
 static bool dispatch_request(

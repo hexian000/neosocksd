@@ -152,12 +152,24 @@ struct ruleset_callback {
 	union {
 		struct {
 			struct dialreq *req;
+			/* last await.forward() dial error (an `enum dialer_error`,
+			 * DIALER_OK if none), reported on a later rejection */
+			int fwd_err;
+			int fwd_syserr;
 		} request;
 		struct {
 			const char *result;
 			size_t resultlen;
 		} rpcall;
 	};
+	/**
+	 * @brief Commit a connected upstream for await.forward().
+	 *
+	 * Takes ownership of @p fd, sends the success response, and starts the
+	 * transfer. May free the session. NULL if forwarding is unsupported.
+	 */
+	void (*forward)(
+		struct ev_loop *loop, struct ruleset_callback *cb, int fd);
 };
 
 /**
@@ -217,6 +229,14 @@ bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
  */
 bool ruleset_loadconfig(
 	struct ruleset *restrict r, const char *restrict filename);
+
+/**
+ * @brief Report whether the Lua global `ruleset` is set
+ *
+ * @param r Ruleset instance
+ * @return true if `_G.ruleset` is non-nil, false otherwise
+ */
+bool ruleset_isvalid(struct ruleset *restrict r);
 
 /**
  * @brief Trigger garbage collection

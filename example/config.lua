@@ -1,12 +1,11 @@
 -- [[ config.lua: comprehensive boot configuration example ]] --
 -- Load with: neosocksd -c config.lua
 --
--- This file is loaded by the ruleset engine in "config" mode (chunk("config"))
--- and must return a Lua table.  Fields set to nil are inherited from
--- command-line arguments (or defaults).
+-- Loaded in "config" mode; must return a Lua table.  Fields set to nil are
+-- inherited from command-line arguments (or defaults).
 --
--- To include ruleset functions directly, add a `ruleset` table field.
--- If `ruleset` is a string, it is treated as a path and loaded separately.
+-- To install a ruleset, set `_G.ruleset` in this script's body, or set the
+-- `ruleset` field below (a table is used directly; a string is a path).
 
 -- [[ optional: read extra arguments from the command line ]] --
 -- Example: neosocksd -c config.lua --dev eth0
@@ -59,9 +58,9 @@ return {
     -- Ruleset (requires WITH_RULESET build)                               --
     -- ------------------------------------------------------------------ --
 
-    -- Path to the Lua ruleset file.  When set, proxy above is overridden
-    -- by whatever the ruleset returns.  Incompatible with socks5_bind and
-    -- socks5_udp.
+    -- The ruleset: a string path to a Lua file, or a table used directly as
+    -- _G.ruleset (e.g. require("libruleset")).  When active, it overrides the
+    -- proxy above.  Incompatible with socks5_bind and socks5_udp.
     -- ruleset = "/etc/neosocksd/ruleset.lua",
 
     -- Path to boot config file (loaded by -c).  Usually set via CLI only.

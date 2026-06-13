@@ -381,6 +381,10 @@ local function runchain_(t, ...)
     return nil
 end
 
+-- routing decision functions (forward-declared): each returns the resolved
+-- "addr, proxyN, ..., proxy1" or nil to reject
+local default_, route_, route6_, resolve_
+
 
 -- [[ _G.route table matchers ]] --
 local inet = {}
@@ -722,19 +726,18 @@ end
 
 function rule.resolve()
     return function(addr)
-        local ruleset = table.get(_G, "ruleset")
-        if not ruleset then
+        addr = await.resolve(addr)
+        if not addr then
             return nil
         end
-        addr = await.resolve(addr)
         local host, _ = splithostport(addr)
         if parse_ipv4(host) then
-            return ruleset.route(addr)
+            return route_(addr)
         end
         if parse_ipv6(host) then
-            return ruleset.route6(addr)
+            return route6_(addr)
         end
-        return ruleset.resolve(addr)
+        return resolve_(addr)
     end
 end
 
@@ -784,19 +787,15 @@ end
 
 function rule.loopback(pattern, repl)
     return function(addr)
-        local ruleset = table.get(_G, "ruleset")
-        if not ruleset then
-            return nil
-        end
         addr = addr:gsub(pattern, repl)
         local host, _ = splithostport(addr)
         if parse_ipv4(host) then
-            return ruleset.route(addr)
+            return route_(addr)
         end
         if parse_ipv6(host) then
-            return ruleset.route6(addr)
+            return route6_(addr)
         end
-        return ruleset.resolve(addr)
+        return resolve_(addr)
     end
 end
 
@@ -842,7 +841,7 @@ _G.num_requests = _G.num_requests or 0
 _G.num_authorized = _G.num_authorized or 0
 _G.stat_requests = rlist:check(_G.stat_requests) or rlist:new(60, { _G.num_requests })
 
-local function default_(addr)
+function default_(addr)
     local route = _G.route_default
     if route then
         local action, tag = table.unpack(route)
@@ -856,7 +855,7 @@ local function default_(addr)
     return addr
 end
 
-local function route_(addr)
+function route_(addr)
     -- check redirect table
     local redirtab = _G.redirect
     if redirtab then
@@ -885,7 +884,7 @@ local function route_(addr)
     return default_(addr)
 end
 
-local function route6_(addr)
+function route6_(addr)
     local redirtab = _G.redirect6
     if redirtab then
         local action, tag = runchain_(redirtab, addr)
@@ -911,7 +910,7 @@ local function route6_(addr)
     return default_(addr)
 end
 
-local function resolve_(addr)
+function resolve_(addr)
     local redirtab = _G.redirect_name
     if redirtab then
         local action, tag = runchain_(redirtab, addr)
@@ -1015,9 +1014,35 @@ local function with_authenticate(f)
     end
 end
 
-ruleset.resolve = with_authenticate(resolve_)
-ruleset.route = with_authenticate(route_)
-ruleset.route6 = with_authenticate(route6_)
+-- wrap a decision function to forward the request via await.forward()
+local function forwarding(decide)
+    return function(addr)
+        return await.forward(decide(addr))
+    end
+end
+
+ruleset.resolve = with_authenticate(forwarding(resolve_))
+ruleset.route = with_authenticate(forwarding(route_))
+ruleset.route6 = with_authenticate(forwarding(route6_))
+
+-- the routing decision functions (return a decision; do not forward)
+ruleset.decide = {
+    resolve = resolve_,
+    route = route_,
+    route6 = route6_,
+}
+
+-- forward `addr` through each proxy chain until one connects; each chain is a
+-- proxy-URI list (empty = direct). returns true on success, false if all fail
+-- (false reports the upstream error; return nil to reject by policy instead).
+function ruleset.failover(addr, chains)
+    for _, chain in ipairs(chains) do
+        if await.forward(addr, table.unpack(chain)) then
+            return true
+        end
+    end
+    return false
+end
 
 function ruleset.tick()
     stat_requests:push(num_requests)

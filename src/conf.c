@@ -165,12 +165,7 @@ bool conf_check(const struct config *restrict conf)
 			LOGE("authentication is not supported in current mode");
 			return false;
 		}
-#if WITH_RULESET
-		if (conf->ruleset == NULL) {
-			LOGE("ruleset must be enabled for authentication");
-			return false;
-		}
-#endif
+		/* the ruleset requirement is checked in main() after loading */
 	}
 
 	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
@@ -196,7 +191,8 @@ static void print_usage(void)
 		stderr, "%s",
 		"  -h, --help                 show usage and exit\n"
 #if WITH_LUA
-		"  -c, --config <config.lua>  load configuration from Lua script\n"
+		"  -c, --config <config.lua>  load configuration from Lua script;\n"
+		"                             the script may also set the ruleset via _G.ruleset\n"
 		"  --dump-config              dump effective configuration as Lua and exit\n"
 #endif
 		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"

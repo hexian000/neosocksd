@@ -144,10 +144,15 @@ int main(int argc, char *argv[])
 			       argv[0]);
 			exit(EXIT_FAILURE);
 		}
-		if (conf->ruleset == NULL) {
+		/* drop the engine if no ruleset was installed */
+		if (!ruleset_isvalid(ruleset)) {
 			ruleset_free(ruleset);
 			ruleset = NULL;
 		}
+	}
+	if (conf->auth_required && ruleset == NULL) {
+		LOGF("authentication requires a ruleset");
+		exit(EXIT_FAILURE);
 	}
 #else
 	struct ruleset *ruleset = NULL;

@@ -68,6 +68,8 @@ static int request_finish(lua_State *restrict L)
 {
 	struct ruleset_state *restrict state =
 		lua_touserdata(L, lua_upvalueindex(1));
+	/* clear the forward context as the routine finishes */
+	aux_setforward(L, L, NULL);
 	if (state->cb == NULL) {
 		return 0;
 	}
@@ -75,8 +77,18 @@ static int request_finish(lua_State *restrict L)
 	struct dialreq *req = NULL;
 	if (lua_toboolean(L, 1)) {
 		const int n = lua_gettop(L) - 1;
+		/* a `false` first return value means await.forward() was tried and
+		 * failed; keep request.fwd_err so the rejection reports the
+		 * upstream error. Any other rejection is by policy: clear it. */
+		const bool forward_failed =
+			(n >= 1 && lua_type(L, 2) == LUA_TBOOLEAN &&
+			 !lua_toboolean(L, 2));
 		if (n > 0 && aux_todialreq(L, n)) {
 			req = lua_touserdata(L, -1);
+		}
+		if (req == NULL && !forward_failed) {
+			state->cb->request.fwd_err = 0;
+			state->cb->request.fwd_syserr = 0;
 		}
 		if (req == NULL) {
 			LOGD("ruleset: request rejected");
@@ -102,6 +114,8 @@ int cfunc_request(lua_State *restrict L)
 	const char *username = lua_touserdata(L, 4);
 	const char *password = lua_touserdata(L, 5);
 	struct ruleset_callback *restrict in_cb = lua_touserdata(L, 6);
+	in_cb->request.fwd_err = 0;
+	in_cb->request.fwd_syserr = 0;
 	lua_settop(L, 0);
 
 	struct ruleset_state *restrict state = new_ruleset_state(L);
@@ -118,6 +132,8 @@ int cfunc_request(lua_State *restrict L)
 
 	state->cb = in_cb;
 	*pstate = state;
+	/* register the request for await.forward() */
+	aux_setforward(L, co, state);
 	const int status = aux_async(co, L, 3, -6);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_xmove(co, L, 1);
@@ -165,6 +181,17 @@ int cfunc_loadconfig(lua_State *restrict L)
 			luaL_typename(L, -1));
 	}
 
+	/* a `ruleset` table field is installed as _G.ruleset and removed here so
+	 * conf_loadfromtable() ignores it; a string field is left as a filename */
+	lua_getfield(L, -1, "ruleset");
+	if (lua_istable(L, -1)) {
+		lua_setglobal(L, "ruleset");
+		lua_pushnil(L);
+		lua_setfield(L, -2, "ruleset");
+	} else {
+		lua_pop(L, 1);
+	}
+
 	struct ruleset *restrict r = aux_getruleset(L);
 	if (!conf_loadfromtable(L, r->conf)) {
 		return luaL_error(L, "config: failed to load fields");
@@ -184,13 +211,6 @@ int cfunc_loadconfig(lua_State *restrict L)
 	}
 	lua_pop(L, 1);
 
-	/* Extract ruleset field into _G.ruleset (only if it's a table) */
-	lua_getfield(L, -1, "ruleset");
-	if (lua_istable(L, -1)) {
-		lua_setglobal(L, "ruleset");
-	} else {
-		lua_pop(L, 1);
-	}
 	return 0;
 }
 

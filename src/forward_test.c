@@ -697,7 +697,8 @@ T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 
 	T_EXPECT_EQ(STUB.ruleset_resolve_calls, 1);
 	T_EXPECT(STUB.ruleset_pending_cb != NULL);
-	T_EXPECT_EQ(s.stats.num_request, 0);
+	/* num_request is counted at request receipt (in forward_serve) */
+	T_EXPECT_EQ(s.stats.num_request, 1);
 
 	complete_pending_ruleset(loop);
 

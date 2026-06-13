@@ -582,14 +582,14 @@ return function(T)
 
     -- [[ ruleset callbacks (integration) ]] --
 
-    T:test("ruleset.route passthrough when no tables set", function()
+    T:test("ruleset.decide.route passthrough when no tables set", function()
         local saved_redirect      = _G.redirect
         local saved_route         = _G.route
         local saved_route_default = _G.route_default
         _G.redirect      = nil
         _G.route         = nil
         _G.route_default = nil
-        local dst = libruleset.route("example.com:80")
+        local dst = libruleset.decide.route("example.com:80")
         _G.redirect      = saved_redirect
         _G.route         = saved_route
         _G.route_default = saved_route_default
@@ -597,7 +597,7 @@ return function(T)
             string.format("expected passthrough, got %q", tostring(dst)))
     end)
 
-    T:test("ruleset.route applies redirect table", function()
+    T:test("ruleset.decide.route applies redirect table", function()
         local saved_redirect      = _G.redirect
         local saved_route         = _G.route
         local saved_route_default = _G.route_default
@@ -606,7 +606,7 @@ return function(T)
         }
         _G.route         = nil
         _G.route_default = nil
-        local dst = libruleset.route("example.com:80")
+        local dst = libruleset.decide.route("example.com:80")
         _G.redirect      = saved_redirect
         _G.route         = saved_route
         _G.route_default = saved_route_default
@@ -614,7 +614,7 @@ return function(T)
             string.format("expected '10.0.0.1:8080', got %q", tostring(dst)))
     end)
 
-    T:test("ruleset.route6 applies redirect6 table", function()
+    T:test("ruleset.decide.route6 applies redirect6 table", function()
         local saved_redirect6     = _G.redirect6
         local saved_route6        = _G.route6
         local saved_route_default = _G.route_default
@@ -623,7 +623,7 @@ return function(T)
         }
         _G.route6        = nil
         _G.route_default = nil
-        local dst = libruleset.route6("[::1]:80")
+        local dst = libruleset.decide.route6("[::1]:80")
         _G.redirect6     = saved_redirect6
         _G.route6        = saved_route6
         _G.route_default = saved_route_default
@@ -631,7 +631,7 @@ return function(T)
             string.format("expected '10.0.0.1:8080', got %q", tostring(dst)))
     end)
 
-    T:test("ruleset.resolve performs hosts table lookup", function()
+    T:test("ruleset.decide.resolve performs hosts table lookup", function()
         local saved_hosts         = _G.hosts
         local saved_redirect_name = _G.redirect_name
         local saved_route         = _G.route
@@ -640,7 +640,7 @@ return function(T)
         _G.redirect_name = nil
         _G.route         = nil
         _G.route_default = nil
-        local dst = libruleset.resolve("myhost:80")
+        local dst = libruleset.decide.resolve("myhost:80")
         _G.hosts         = saved_hosts
         _G.redirect_name = saved_redirect_name
         _G.route         = saved_route
@@ -649,14 +649,14 @@ return function(T)
             string.format("expected '192.168.1.1:80', got %q", tostring(dst)))
     end)
 
-    T:test("ruleset.resolve applies redirect_name table", function()
+    T:test("ruleset.decide.resolve applies redirect_name table", function()
         local saved_redirect_name = _G.redirect_name
         local saved_route_default = _G.route_default
         _G.redirect_name = {
             { match.host("blocked.example"), rule.reject() },
         }
         _G.route_default = nil
-        local dst = libruleset.resolve("blocked.example:80")
+        local dst = libruleset.decide.resolve("blocked.example:80")
         _G.redirect_name = saved_redirect_name
         _G.route_default = saved_route_default
         assert(dst == nil,

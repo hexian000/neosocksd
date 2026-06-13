@@ -1,4 +1,5 @@
 -- [[ ruleset_simple.lua: simple runnable ruleset example ]] --
+-- Load with `neosocksd -r ruleset_simple.lua`.
 _G.libruleset     = require("libruleset")
 
 local front_proxy = rule.proxy("socks4a://front-proxy.lan:1080")

@@ -322,6 +322,28 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ctx->s->resolver, ctx->s);
 }
 
+/* commit a connected upstream: for CONNECT queue the 200 response, otherwise
+ * replay the buffered request to the upstream; takes ownership of @p fd */
+static void
+http_commit(struct ev_loop *loop, struct http_ctx *restrict ctx, const int fd)
+{
+	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
+	ctx->dialed_fd = fd;
+
+	if (strcmp(ctx->conn.msg.req.method, "CONNECT") == 0) {
+		/* CONNECT tunnel: queue the 200 response */
+		ASSERT(ctx->conn.wbuf.len == 0);
+		BUF_APPENDSTR(
+			ctx->conn.wbuf,
+			"HTTP/1.1 200 Connection established\r\n\r\n");
+		ctx->state = STATE_ESTABLISHED;
+		ev_io_start(loop, &ctx->w_send);
+		return;
+	}
+	/* plain HTTP: forward the buffered request to upstream */
+	http_ctx_forward(loop, ctx);
+}
+
 #if WITH_RULESET
 static void
 ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
@@ -332,11 +354,30 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ctx->dialreq = ctx->ruleset_callback.request.req;
 	ctx->ruleset_state = NULL;
 	if (ctx->dialreq == NULL) {
-		ctx->s->stats.num_reject_ruleset++;
-		send_errpage(loop, ctx, HTTP_FORBIDDEN);
+		/* a recorded await.forward() dial error means an upstream
+		 * rejection (502); otherwise a policy rejection (403) */
+		const int fwd_err = ctx->ruleset_callback.request.fwd_err;
+		if (fwd_err != DIALER_OK) {
+			ctx->s->stats.num_reject_upstream++;
+			send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
+		} else {
+			ctx->s->stats.num_reject_ruleset++;
+			send_errpage(loop, ctx, HTTP_FORBIDDEN);
+		}
 		return;
 	}
 	http_connect(loop, ctx);
+}
+
+/* await.forward() commit hook */
+static void http_forward_commit(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb,
+	const int fd)
+{
+	struct http_ctx *restrict ctx = cb->w_finish.data;
+	ASSERT(ctx->state == STATE_PROCESS);
+	ctx->ruleset_state = NULL;
+	http_commit(loop, ctx, fd);
 }
 
 static void parse_proxy_auth(
@@ -669,21 +710,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
 		return;
 	}
-	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
-	ctx->dialed_fd = fd;
-
-	if (strcmp(ctx->conn.msg.req.method, "CONNECT") == 0) {
-		/* CONNECT tunnel: queue the 200 response */
-		ASSERT(ctx->conn.wbuf.len == 0);
-		BUF_APPENDSTR(
-			ctx->conn.wbuf,
-			"HTTP/1.1 200 Connection established\r\n\r\n");
-		ctx->state = STATE_ESTABLISHED;
-		ev_io_start(loop, &ctx->w_send);
-		return;
-	}
-	/* plain HTTP: forward the buffered request to upstream */
-	http_ctx_forward(loop, ctx);
+	http_commit(loop, ctx, fd);
 }
 
 /* Handles proxy_pass-specific header processing for parse_header().
@@ -852,6 +879,7 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	ctx->w_process.data = ctx;
 	ev_init(&ctx->ruleset_callback.w_finish, ruleset_cb);
 	ctx->ruleset_callback.w_finish.data = ctx;
+	ctx->ruleset_callback.forward = http_forward_commit;
 	ctx->ruleset_state = NULL;
 #endif
 	ctx->dialreq = NULL;

@@ -414,6 +414,9 @@ bool ruleset_resolve(
 		return false;
 	}
 	callback->request.req = NULL;
+	/* cleared by cfunc_request() in the real path */
+	callback->request.fwd_err = 0;
+	callback->request.fwd_syserr = 0;
 	if (S.ruleset_reply_with_req) {
 		callback->request.req = dialreq_new(NULL, 0);
 	}

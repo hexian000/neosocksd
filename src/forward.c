@@ -144,25 +144,10 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	gc_unref(&ctx->gcbase);
 }
 
-static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
+/* start the transfer between the client and @p fd; takes ownership of @p fd */
+static void forward_commit(
+	struct ev_loop *loop, struct forward_ctx *restrict ctx, const int fd)
 {
-	struct forward_ctx *restrict ctx = data;
-	ASSERT(ctx->state == STATE_CONNECT);
-	if (fd < 0) {
-		const enum dialer_error err = ctx->dialer.err;
-		const int syserr = ctx->dialer.syserr;
-		if (syserr != 0) {
-			FW_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s (%d) %s",
-				dialer_strerror(err), syserr, strerror(syserr));
-		} else {
-			FW_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s", dialer_strerror(err));
-		}
-		ctx->s->stats.num_reject_upstream++;
-		gc_unref(&ctx->gcbase);
-		return;
-	}
 	ctx->dialed_fd = fd;
 
 	FW_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
@@ -224,13 +209,47 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	gc_unref(&ctx->gcbase);
 }
 
+static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
+{
+	struct forward_ctx *restrict ctx = data;
+	ASSERT(ctx->state == STATE_CONNECT);
+	if (fd < 0) {
+		const enum dialer_error err = ctx->dialer.err;
+		const int syserr = ctx->dialer.syserr;
+		if (syserr != 0) {
+			FW_CTX_LOG_F(
+				ERROR, ctx, "dialer: %s (%d) %s",
+				dialer_strerror(err), syserr, strerror(syserr));
+		} else {
+			FW_CTX_LOG_F(
+				ERROR, ctx, "dialer: %s", dialer_strerror(err));
+		}
+		ctx->s->stats.num_reject_upstream++;
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	forward_commit(loop, ctx, fd);
+}
+
+#if WITH_RULESET
+/* await.forward() commit hook */
+static void forward_forward_commit(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb,
+	const int fd)
+{
+	struct forward_ctx *restrict ctx = cb->w_finish.data;
+	ASSERT(ctx->state == STATE_PROCESS);
+	ctx->ruleset_state = NULL;
+	forward_commit(loop, ctx, fd);
+}
+#endif /* WITH_RULESET */
+
 static void forward_ctx_start(
 	struct ev_loop *loop, struct forward_ctx *restrict ctx,
 	const struct dialreq *req)
 {
 	FW_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
-	ctx->s->stats.num_request++;
 	dialer_do(
 		&ctx->dialer, loop, req, ctx->s->conf, ctx->s->resolver,
 		ctx->s);
@@ -246,7 +265,13 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ctx->ruleset_state = NULL;
 	struct dialreq *req = ctx->ruleset_callback.request.req;
 	if (req == NULL) {
-		ctx->s->stats.num_reject_ruleset++;
+		/* a recorded await.forward() dial error means an upstream
+		 * rejection; otherwise the ruleset rejected by policy */
+		if (ctx->ruleset_callback.request.fwd_err != DIALER_OK) {
+			ctx->s->stats.num_reject_upstream++;
+		} else {
+			ctx->s->stats.num_reject_ruleset++;
+		}
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -326,6 +351,7 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->w_process.data = ctx;
 	ev_init(&ctx->ruleset_callback.w_finish, NULL);
 	ctx->ruleset_callback.w_finish.data = ctx;
+	ctx->ruleset_callback.forward = forward_forward_commit;
 	ctx->ruleset_state = NULL;
 #endif
 
@@ -354,6 +380,7 @@ void forward_serve(
 	ctx->state = STATE_PROCESS;
 	ev_timer_start(loop, &ctx->w_timeout);
 	ctx->s->stats.num_halfopen++;
+	ctx->s->stats.num_request++;
 
 #if WITH_RULESET
 	const struct ruleset *ruleset = ctx->s->ruleset;
@@ -476,6 +503,7 @@ void tproxy_serve(
 	ctx->state = STATE_PROCESS;
 	ev_timer_start(loop, &ctx->w_timeout);
 	ctx->s->stats.num_halfopen++;
+	ctx->s->stats.num_request++;
 
 #if WITH_RULESET
 	const struct ruleset *ruleset = ctx->s->ruleset;

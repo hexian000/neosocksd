@@ -57,6 +57,8 @@ enum ruleset_ridx {
 	RIDX_AWAIT_CONTEXT,
 	/* t[thread] = true */
 	RIDX_IDLE_THREAD,
+	/* t[thread] = request state, for await.forward() */
+	RIDX_FORWARD_CONTEXT,
 };
 
 #define ERR_MEMORY "out of memory"
@@ -170,6 +172,19 @@ int aux_traceback(lua_State *L);
  * @return Lua result code
  */
 int aux_resume(lua_State *L, lua_State *from, int narg);
+
+/**
+ * @brief Set (or clear, when @p state is NULL) coroutine @p co's request state
+ * @param L Any thread sharing the ruleset registry
+ * @param co Coroutine running the request handler
+ * @param state Request state pointer, or NULL to clear
+ */
+void aux_setforward(lua_State *L, lua_State *co, void *state);
+
+/**
+ * @brief Get the request state of the running coroutine @p L, or NULL
+ */
+void *aux_getforward(lua_State *L);
 
 /**
  * @brief Start asynchronous operation

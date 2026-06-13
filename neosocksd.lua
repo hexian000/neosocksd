@@ -14,6 +14,8 @@ local await = {}
 
 function await.execute(command) return 0 end
 
+function await.forward(addr, ...) return false, "" end
+
 function await.invoke(code, addr, ...) return false, ... end
 
 function await.resolve(s) return "" end

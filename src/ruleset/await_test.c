@@ -4,11 +4,13 @@
 #include "ruleset/await.h"
 
 #include "ruleset/base.h"
+#include "ruleset/cfunc.h"
 
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
 #include "io/stream.h"
+#include "os/socket.h"
 #include "resolver.h"
 #include "server.h"
 
@@ -22,6 +24,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +60,10 @@ static struct {
 	size_t payload_len;
 	bool api_cancelled;
 	bool resolve_cancelled;
+	/* await.forward dialer stub state */
+	struct dialer *dial_d;
+	bool dial_pending;
+	bool dial_cancelled;
 } STUB = {
 	.loop = NULL,
 	.resolve_start_ok = true,
@@ -70,6 +77,9 @@ static struct {
 	.payload_len = 0,
 	.api_cancelled = false,
 	.resolve_cancelled = false,
+	.dial_d = NULL,
+	.dial_pending = false,
+	.dial_cancelled = false,
 };
 
 static void reset_stub_state(void)
@@ -94,6 +104,9 @@ static void reset_stub_state(void)
 	STUB.payload_len = 0;
 	STUB.api_cancelled = false;
 	STUB.resolve_cancelled = false;
+	STUB.dial_d = NULL;
+	STUB.dial_pending = false;
+	STUB.dial_cancelled = false;
 }
 
 static void
@@ -293,6 +306,50 @@ bool dialaddr_parse(
 	return parse_hostport(addr, s, len);
 }
 
+/* ---- dialer stubs (required by await.c's await_forward) ---- */
+
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uint_least64_t *const byt_sent, uint_least64_t *const byt_recv)
+{
+	(void)byt_sent;
+	(void)byt_recv;
+	d->finish_cb = *callback;
+	d->dialed_fd = -1;
+	d->err = DIALER_OK;
+	d->syserr = 0;
+}
+
+void dialer_do(
+	struct dialer *restrict d, struct ev_loop *loop,
+	const struct dialreq *restrict req, const struct config *restrict conf,
+	struct resolver *restrict resolver, struct server *restrict server)
+{
+	(void)conf;
+	(void)resolver;
+	(void)server;
+	STUB.loop = loop;
+	STUB.dial_d = d;
+	STUB.dial_pending = true;
+	d->req = req;
+}
+
+void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
+{
+	(void)loop;
+	STUB.dial_cancelled = true;
+	if (STUB.dial_d == d) {
+		STUB.dial_pending = false;
+		STUB.dial_d = NULL;
+	}
+}
+
+const char *dialer_strerror(const enum dialer_error err)
+{
+	(void)err;
+	return "stub dialer error";
+}
+
 /* ---- resolver stubs (required by await.c's await_resolve) ---- */
 
 struct resolve_query *resolve_do(
@@ -393,6 +450,8 @@ static lua_State *new_ruleset_lua(
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
 	aux_newweaktable(L, "k");
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
 	r->loop = loop;
 	r->conf = conf;
 	r->resolver = (struct resolver *)0x1234;
@@ -441,6 +500,40 @@ static void trigger_invoke_success(const char *restrict chunk)
 	STUB.api_ctx = NULL;
 }
 
+/* The connected fd handed to the most recent await.forward() commit. */
+static int g_committed_fd = -1;
+
+static void mock_forward_commit(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb,
+	const int fd)
+{
+	(void)loop;
+	(void)cb;
+	g_committed_fd = fd;
+}
+
+static void trigger_dial_success(const int fd)
+{
+	T_CHECK(STUB.dial_d != NULL);
+	struct dialer *const d = STUB.dial_d;
+	STUB.dial_pending = false;
+	STUB.dial_d = NULL;
+	d->dialed_fd = fd;
+	d->finish_cb.func(STUB.loop, d->finish_cb.data, fd);
+}
+
+static void trigger_dial_failure(void)
+{
+	T_CHECK(STUB.dial_d != NULL);
+	struct dialer *const d = STUB.dial_d;
+	STUB.dial_pending = false;
+	STUB.dial_d = NULL;
+	d->err = DIALER_ERR_CONNECT;
+	d->syserr = ECONNREFUSED;
+	d->dialed_fd = -1;
+	d->finish_cb.func(STUB.loop, d->finish_cb.data, -1);
+}
+
 /* ---- tests ---- */
 
 T_DECLARE_CASE(await_module_opens)
@@ -451,7 +544,8 @@ T_DECLARE_CASE(await_module_opens)
 	lua_getglobal(L, "await");
 	T_EXPECT(lua_istable(L, -1));
 
-	const char *const fns[] = { "sleep", "resolve", "invoke", "execute" };
+	const char *const fns[] = { "sleep", "resolve", "invoke", "execute",
+				    "forward" };
 	for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
 		lua_getfield(L, -1, fns[i]);
 		T_EXPECT(lua_isfunction(L, -1));
@@ -655,6 +749,125 @@ T_DECLARE_CASE(await_execute_reports_exit_status)
 	lua_close(L);
 }
 
+T_DECLARE_CASE(await_forward_commits_on_success)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct ruleset_callback mock_cb = { 0 };
+	mock_cb.forward = mock_forward_commit;
+	struct ruleset_state mock_state = { .cb = &mock_cb };
+
+	reset_stub_state();
+	g_committed_fd = -1;
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  _G.fwd_ok = await.forward('1.2.3.4:80') "
+		   "end)"));
+	lua_getglobal(L, "co");
+	lua_State *const co = lua_tothread(L, -1);
+	lua_pop(L, 1);
+	T_CHECK(co != NULL);
+	aux_setforward(L, co, &mock_state);
+
+	/* resume: await.forward() starts the dial and yields */
+	T_EXPECT(run_chunk(L, "return coroutine.resume(co)"));
+	T_CHECK(STUB.dial_pending);
+
+	/* complete the dial; the coroutine commits and finishes synchronously */
+	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(fd >= 0);
+	trigger_dial_success(fd);
+
+	T_EXPECT_EQ(g_committed_fd, fd);
+	T_EXPECT_EQ(mock_state.cb, NULL); /* await.forward() cleared it */
+	lua_getglobal(L, "fwd_ok");
+	T_EXPECT(lua_toboolean(L, -1) != 0);
+	lua_pop(L, 1);
+
+	SOCKET_CLOSE_FD(fd);
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_forward_reports_dial_failure)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct ruleset_callback mock_cb = { 0 };
+	mock_cb.forward = mock_forward_commit;
+	struct ruleset_state mock_state = { .cb = &mock_cb };
+
+	reset_stub_state();
+	g_committed_fd = -1;
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  _G.fwd_ok, _G.fwd_err = await.forward('1.2.3.4:80') "
+		   "end)"));
+	lua_getglobal(L, "co");
+	lua_State *const co = lua_tothread(L, -1);
+	lua_pop(L, 1);
+	aux_setforward(L, co, &mock_state);
+
+	T_EXPECT(run_chunk(L, "return coroutine.resume(co)"));
+	T_CHECK(STUB.dial_pending);
+	trigger_dial_failure();
+
+	T_EXPECT_EQ(g_committed_fd, -1); /* never committed */
+	/* the dial error is recorded for the rejection path */
+	T_EXPECT_EQ(mock_cb.request.fwd_err, (int)DIALER_ERR_CONNECT);
+	T_EXPECT_EQ(mock_cb.request.fwd_syserr, ECONNREFUSED);
+	/* the session callback is left intact so the caller may retry */
+	T_EXPECT(mock_state.cb == &mock_cb);
+	lua_getglobal(L, "fwd_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0); /* false */
+	lua_pop(L, 1);
+	lua_getglobal(L, "fwd_err");
+	T_CHECK(lua_tostring(L, -1) != NULL); /* error string */
+	lua_pop(L, 1);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_forward_rejects_outside_request)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	/* no forward context registered: await.forward() must raise */
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  return pcall(await.forward, '1.2.3.4:80') "
+		   "end) "
+		   "local _, ok, err = coroutine.resume(co) "
+		   "_G.f_ok, _G.f_err = ok, err"));
+	lua_getglobal(L, "f_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+	lua_getglobal(L, "f_err");
+	const char *const err = lua_tostring(L, -1);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "ruleset request") != NULL);
+	lua_pop(L, 1);
+	T_EXPECT(!STUB.dial_pending); /* never dialed */
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -666,5 +879,8 @@ int main(void)
 	T_RUN_CASE(t, await_resolve_real_path);
 	T_RUN_CASE(t, await_invoke_real_path);
 	T_RUN_CASE(t, await_execute_reports_exit_status);
+	T_RUN_CASE(t, await_forward_commits_on_success);
+	T_RUN_CASE(t, await_forward_reports_dial_failure);
+	T_RUN_CASE(t, await_forward_rejects_outside_request);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

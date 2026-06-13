@@ -177,13 +177,14 @@ T_DECLARE_CASE(conf_rejects_auth_required_in_forward_mode)
 }
 
 #if WITH_RULESET
-T_DECLARE_CASE(conf_rejects_auth_required_without_ruleset)
+T_DECLARE_CASE(conf_defers_auth_required_ruleset_check)
 {
 	struct config conf = make_valid_conf();
 
 	conf.auth_required = true;
-	/* ruleset == NULL with auth_required is rejected when WITH_RULESET */
-	T_EXPECT(!conf_check(&conf));
+	/* the ruleset requirement is enforced in main(), not conf_check();
+	 * SOCKS mode supports authentication, so this passes */
+	T_EXPECT(conf_check(&conf));
 }
 #endif /* WITH_RULESET */
 
@@ -544,7 +545,7 @@ int main(void)
 #endif
 	T_RUN_CASE(t, conf_rejects_auth_required_in_forward_mode);
 #if WITH_RULESET
-	T_RUN_CASE(t, conf_rejects_auth_required_without_ruleset);
+	T_RUN_CASE(t, conf_defers_auth_required_ruleset_check);
 #endif
 	T_RUN_CASE(t, parseargs_help_returns_false);
 	T_RUN_CASE(t, parseargs_resolve_pf_flags);

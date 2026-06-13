@@ -87,6 +87,20 @@ Binary releases include `neosocksd.noarch.tar.gz` with `libruleset.lua`, `agent.
 ./neosocksd -c config.lua.gz -r ruleset.lua.gz
 ```
 
+`-c` and `-r` are unified: a single `-c config.lua` can configure the server
+*and* install the ruleset — the config script just sets `_G.ruleset` (or returns
+a `ruleset` field). `-r` remains as a shorthand for a ruleset-only file.
+
+```sh
+# One file does both: configure the server and set up the ruleset
+./neosocksd -c config.lua
+```
+
+The ruleset routes each request, then actively forwards it with `await.forward`
+and learns whether the upstream connected — see
+[await.forward](https://github.com/hexian000/neosocksd/wiki/API-Reference#awaitforward)
+for failover and retries.
+
 Hot-reload without restart:
 
 ```sh

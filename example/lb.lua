@@ -1,4 +1,6 @@
 -- [[ lb.lua: load balancer example ]] --
+-- Load with `neosocksd -r lb.lua`. For failover across backends, drive
+-- await.forward in a custom callback (see example/ruleset.lua).
 _G.libruleset = require("libruleset")
 
 local backends = {

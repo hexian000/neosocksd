@@ -1,4 +1,6 @@
 -- [[ ruleset.lua: code with rule table example ]] --
+-- Load with `neosocksd -r ruleset.lua`, or `-c ruleset.lua` to also apply the
+-- config table returned at the bottom.
 _G.libruleset = require("libruleset")
 _G.agent = require("agent")
 
@@ -125,6 +127,20 @@ _G.route6 = {
 -- in {action, optional log tag}
 _G.route_default = { rule.proxy("socks5://user:pass@gateway.lan:1080"), "wan" }
 
+-- [[ optional: failover with await.forward ]] --
+-- Uncomment to try the gateway, then a backup proxy, then direct, resolving
+-- the address with ruleset.decide.route:
+--
+-- function ruleset.route(addr)
+--     local resolved = libruleset.decide.route(addr)
+--     if not resolved then return nil end
+--     return ruleset.failover(resolved, {
+--         { "socks5://user:pass@gateway.lan:1080" },
+--         { "socks5://backup.lan:1080" },
+--         {},
+--     })
+-- end
+
 function ruleset.stats(dt, q)
     local w = list:new()
     if is_disabled and is_disabled() then
@@ -150,6 +166,8 @@ end
 
 evlogf("ruleset loaded, interpreter: %s", _VERSION)
 local mode = ...
+-- "config" mode (-c): return a config table whose `ruleset` field is the
+-- ruleset. "ruleset" mode (-r): return the ruleset table.
 if mode == "config" then
 	return {
 		listen   = "0.0.0.0:1080",

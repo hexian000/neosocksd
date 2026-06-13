@@ -36,6 +36,7 @@ Version: dev
   - [\_G.marshal](#_gmarshal)
   - [\_G.async](#_gasync)
   - [await.execute](#awaitexecute)
+  - [await.forward](#awaitforward)
   - [await.invoke](#awaitinvoke)
   - [await.resolve](#awaitresolve)
   - [await.sleep](#awaitsleep)
@@ -157,6 +158,21 @@ Proxy addresses are specified in URI format. Supported schemes:
 - `socks4a://example.org:1080`: SOCKS4A server. The implementation is SOCKS4-compatible when requesting an IPv4 address.
 - `socks5://example.org:1080`: SOCKS5 server.
 - `http://example.org:8080`: HTTP/1.1 CONNECT server.
+
+**Active forwarding**
+
+Returning a decision (above) lets the server perform the dial. Alternatively,
+the callback may forward the request itself with [await.forward](#awaitforward)
+and learn whether the connection succeeded — enabling failover and retries:
+
+```Lua
+function ruleset.route(addr)
+    return await.forward(addr, "socks5://gateway.lan:1080")
+end
+```
+
+Both styles are supported. The bundled `libruleset.lua` uses active forwarding
+internally while keeping the return-value style for its `rule.*` actions.
 
 
 ### ruleset.route
@@ -604,6 +620,66 @@ end)
 Executes a shell command asynchronously. Returns three values, similar to `os.execute`.
 
 Requires `/bin/sh`.
+
+
+### await.forward
+
+**Synopsis**
+
+```Lua
+function ruleset.route(addr)
+    -- try a proxy, fall back to a direct connection
+    if await.forward(addr, "socks5://backup.lan:1080") then
+        return -- connected; the session now relays
+    end
+    return await.forward(addr) -- direct
+end
+```
+
+**Description**
+
+Actively forwards the current request to `addr`, optionally through a proxy
+chain, and reports whether the upstream connection succeeded. This inverts the
+classic return-value contract (see [ruleset.route](#rulesetroute)): instead of
+returning a routing decision for the server to dial, the ruleset drives the
+dial itself and observes the outcome, which makes failover, retries, and
+per-route success metrics possible.
+
+The arguments match the return values of [ruleset.resolve](#rulesetresolve):
+
+```Lua
+await.forward(addr)                       -- direct connection
+await.forward(addr, proxy)                -- through one proxy
+await.forward(addr, proxyN, ..., proxy1)  -- through a proxy chain
+await.forward(nil)                        -- reject (nothing is dialed)
+```
+
+**Returns**
+
+- `true`: the upstream is connected. The server takes over and relays the
+  session; the routine should stop forwarding and return.
+- `false, err`: the dial failed (`err` is a description). The request is **not**
+  consumed, so the routine may call `await.forward` again to try an alternative.
+- `nil`: the address was `nil`; the request is rejected.
+
+**Notes**
+
+- `await.forward` must be called from a ruleset request handler
+  ([ruleset.resolve](#rulesetresolve), [ruleset.route](#rulesetroute), or
+  [ruleset.route6](#rulesetroute6)); calling it elsewhere raises an error.
+- Once a forward succeeds, the request is committed; a further `await.forward`
+  in the same routine raises an error.
+- When the handler gives up without forwarding, its return value selects the
+  rejection reason: returning `false` reports the upstream dial error (and
+  counts as an upstream rejection), while returning `nil` rejects by policy.
+  `ruleset.failover` follows this convention (it returns `false` if every chain
+  fails); return `nil` to reject by policy instead.
+- The shipped `libruleset.lua` already forwards through this function. Its
+  `rule.*` actions still return routing decisions; the `ruleset.resolve`,
+  `ruleset.route`, and `ruleset.route6` callbacks wrap the pure decision
+  pipeline (exposed as `ruleset.decide.*`) with `await.forward`. The
+  `ruleset.failover(addr, chains)` helper forwards through the first reachable
+  chain.
 
 
 ### await.invoke

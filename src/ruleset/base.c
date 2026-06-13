@@ -300,6 +300,27 @@ int aux_traceback(lua_State *restrict L)
 	return 1;
 }
 
+void aux_setforward(lua_State *restrict L, lua_State *restrict co, void *state)
+{
+	aux_getregtable(L, RIDX_FORWARD_CONTEXT);
+	if (state != NULL) {
+		lua_pushlightuserdata(L, state);
+	} else {
+		lua_pushnil(L);
+	}
+	lua_rawsetp(L, -2, co);
+	lua_pop(L, 1);
+}
+
+void *aux_getforward(lua_State *restrict L)
+{
+	aux_getregtable(L, RIDX_FORWARD_CONTEXT);
+	lua_rawgetp(L, -1, L);
+	void *const state = lua_touserdata(L, -1);
+	lua_pop(L, 2);
+	return state;
+}
+
 int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
 {
 	int status;

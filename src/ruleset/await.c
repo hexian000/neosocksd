@@ -5,8 +5,10 @@
 
 #include "api_client.h"
 #include "conf.h"
+#include "dialer.h"
 #include "resolver.h"
 #include "ruleset/base.h"
+#include "ruleset/cfunc.h"
 #include "server.h"
 #include "util.h"
 
@@ -32,6 +34,7 @@
 #define MT_AWAIT_RESOLVE "await.resolve"
 #define MT_AWAIT_INVOKE "await.invoke"
 #define MT_AWAIT_EXECUTE "await.execute"
+#define MT_AWAIT_FORWARD "await.forward"
 
 #define AWAIT_CHECK_YIELDABLE(L)                                               \
 	do {                                                                   \
@@ -340,6 +343,157 @@ static int await_invoke(lua_State *restrict L)
 	return lua_error(L);
 }
 
+struct await_forward_userdata {
+	struct ruleset *ruleset;
+	struct ruleset_state *state;
+	struct dialreq *req;
+	struct dialer dialer;
+	int fd;
+	bool dialing;
+};
+
+static int await_forward_close(lua_State *restrict L)
+{
+	struct await_forward_userdata *restrict ud = lua_touserdata(L, 1);
+	if (ud->dialing) {
+		dialer_cancel(&ud->dialer, ud->ruleset->loop);
+		ud->dialing = false;
+	}
+	if (ud->fd != -1) {
+		/* fd not handed off to a session: drop it */
+		SOCKET_CLOSE_FD(ud->fd);
+		ud->fd = -1;
+	}
+	if (ud->req != NULL) {
+		dialreq_free(ud->req);
+		ud->req = NULL;
+	}
+	context_unpin(L, ud);
+	return 0;
+}
+
+static void forward_dialer_cb(struct ev_loop *loop, void *data, const int fd)
+{
+	UNUSED(loop);
+	struct await_forward_userdata *restrict ud = data;
+	ud->dialing = false;
+	ud->fd = fd;
+	ruleset_resume(ud->ruleset, ud, 0);
+}
+
+static int
+await_forward_k(lua_State *restrict L, const int status, const lua_KContext ctx)
+{
+	ASSERT(status == LUA_YIELD);
+	UNUSED(status);
+	UNUSED(ctx);
+	/* lua stack: ud */
+	ASSERT(lua_gettop(L) == 1);
+	struct await_forward_userdata *restrict ud = lua_touserdata(L, 1);
+	struct ruleset_state *restrict state = ud->state;
+	struct ruleset_callback *restrict cb = state->cb;
+
+	bool ok = false;
+	const char *err = NULL;
+	if (ud->fd < 0) {
+		/* dial failed: record the error and report it */
+		if (cb != NULL) {
+			cb->request.fwd_err = (int)ud->dialer.err;
+			cb->request.fwd_syserr = ud->dialer.syserr;
+		}
+		err = dialer_strerror(ud->dialer.err);
+	} else if (cb != NULL) {
+		/* hand the fd to the session; this may free it, so cb must not
+		 * be touched afterwards */
+		const int fd = ud->fd;
+		ud->fd = -1;
+		cb->forward(ud->ruleset->loop, cb, fd);
+		state->cb = NULL; /* makes request_finish() a no-op */
+		ok = true;
+	} else {
+		/* session gone; await_forward_close() drops the fd */
+		err = "request cancelled";
+	}
+
+	aux_close(L, 1);
+	lua_settop(L, 0);
+	lua_pushboolean(L, ok);
+	if (err != NULL) {
+		lua_pushstring(L, err);
+		return 2;
+	}
+	return 1;
+}
+
+/* ok, err = await.forward(addr, proxyN, ..., proxy1) */
+static int await_forward(lua_State *restrict L)
+{
+	AWAIT_CHECK_YIELDABLE(L);
+	struct ruleset_state *restrict state = aux_getforward(L);
+	if (state == NULL) {
+		lua_pushliteral(
+			L,
+			"await.forward must be called from a ruleset request handler");
+		return lua_error(L);
+	}
+	struct ruleset_callback *restrict cb = state->cb;
+	if (cb == NULL || cb->forward == NULL) {
+		lua_pushliteral(
+			L, "await.forward: the request is not forwardable");
+		return lua_error(L);
+	}
+
+	const int n = lua_gettop(L);
+	if (n < 1) {
+		/* reject: nothing to forward */
+		lua_pushnil(L);
+		return 1;
+	}
+	if (!aux_todialreq(L, n)) {
+		lua_pushliteral(L, ERR_INVALID_ADDR);
+		return lua_error(L);
+	}
+	struct dialreq *restrict req = lua_touserdata(L, -1);
+	if (req == NULL) {
+		/* reject: nil address */
+		lua_settop(L, 0);
+		lua_pushnil(L);
+		return 1;
+	}
+	lua_settop(L, 0);
+
+	struct ruleset *restrict r = aux_getruleset(L);
+	struct await_forward_userdata *restrict ud =
+		lua_newuserdata(L, sizeof(struct await_forward_userdata));
+	*ud = (struct await_forward_userdata){
+		.ruleset = r,
+		.state = state,
+		.req = req,
+		.fd = -1,
+		.dialing = false,
+	};
+	aux_toclose(L, -1, MT_AWAIT_FORWARD, await_forward_close);
+
+	struct server *restrict server = r->server;
+	const struct dialer_cb dcb = {
+		.func = forward_dialer_cb,
+		.data = ud,
+	};
+	dialer_init(
+		&ud->dialer, &dcb,
+		server != NULL ? &server->stats.byt_dial_send : NULL,
+		server != NULL ? &server->stats.byt_dial_recv : NULL);
+	ud->dialing = true;
+	dialer_do(&ud->dialer, r->loop, ud->req, r->conf, r->resolver, server);
+
+	context_pin(L, ud);
+	/* lua stack: ud */
+	ASSERT(lua_gettop(L) == 1);
+	lua_yieldk(L, 0, 0, await_forward_k);
+	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
+	return lua_error(L);
+}
+
 struct await_execute_userdata {
 	struct ruleset *ruleset;
 	ev_child w_child;
@@ -465,11 +619,9 @@ static int await_execute(lua_State *restrict L)
 int luaopen_await(lua_State *restrict L)
 {
 	const luaL_Reg awaitlib[] = {
-		{ "execute", await_execute },
-		{ "invoke", await_invoke },
-		{ "resolve", await_resolve },
-		{ "sleep", await_sleep },
-		{ NULL, NULL },
+		{ "execute", await_execute }, { "forward", await_forward },
+		{ "invoke", await_invoke },   { "resolve", await_resolve },
+		{ "sleep", await_sleep },     { NULL, NULL },
 	};
 	luaL_newlib(L, awaitlib);
 	return 1;

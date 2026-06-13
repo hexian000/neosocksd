@@ -1,4 +1,5 @@
 -- [[ ruleset_egress.lua: egress ruleset that downloads and publishes blocklists ]] --
+-- Load with `neosocksd -r ruleset_egress.lua`.
 
 _G.libruleset = require("libruleset")
 
