@@ -35,10 +35,7 @@
  * isolation.
  */
 
-/**
- * Test-only definition of struct globals (removed from util.h during refactoring).
- * Used to stub G.conf and G.ruleset for test initialization.
- */
+/* test-only definition of struct globals, used to stub G.conf/G.ruleset */
 struct globals {
 	const struct config *conf;
 	struct resolver *resolver;
@@ -131,10 +128,7 @@ static void stub_reset(void)
 	G.ruleset = NULL;
 }
 
-/**
- * Initialize server struct for testing.
- * Sets minimal required fields so production code can access conf/resolver/etc.
- */
+/* set the minimal server fields required by production code */
 static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;

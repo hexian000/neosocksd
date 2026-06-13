@@ -10,10 +10,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#if WITH_LUA
-#include <stdio.h>
-#include <unistd.h>
-#endif
 
 static struct config make_valid_conf(void)
 {
@@ -22,7 +18,7 @@ static struct config make_valid_conf(void)
 	return conf;
 }
 
-T_DECLARE_CASE(test_conf_default_has_expected_values)
+T_DECLARE_CASE(conf_default_has_expected_values)
 {
 	const struct config conf = conf_default();
 
@@ -35,7 +31,7 @@ T_DECLARE_CASE(test_conf_default_has_expected_values)
 	T_EXPECT_EQ(conf.startup_limit_rate, 30);
 }
 
-T_DECLARE_CASE(test_conf_requires_listen)
+T_DECLARE_CASE(conf_requires_listen)
 {
 	struct config conf = conf_default();
 
@@ -45,7 +41,7 @@ T_DECLARE_CASE(test_conf_requires_listen)
 	T_EXPECT(conf_check(&conf));
 }
 
-T_DECLARE_CASE(test_conf_rejects_incompatible_modes)
+T_DECLARE_CASE(conf_rejects_incompatible_modes)
 {
 	struct config conf = make_valid_conf();
 
@@ -54,7 +50,7 @@ T_DECLARE_CASE(test_conf_rejects_incompatible_modes)
 	T_EXPECT(!conf_check(&conf));
 }
 
-T_DECLARE_CASE(test_conf_rejects_timeout_out_of_range)
+T_DECLARE_CASE(conf_rejects_timeout_out_of_range)
 {
 	struct config conf = make_valid_conf();
 
@@ -64,7 +60,7 @@ T_DECLARE_CASE(test_conf_rejects_timeout_out_of_range)
 	T_EXPECT(!conf_check(&conf));
 }
 
-T_DECLARE_CASE(test_conf_rejects_startup_limits_out_of_range)
+T_DECLARE_CASE(conf_rejects_startup_limits_out_of_range)
 {
 	struct config conf = make_valid_conf();
 
@@ -77,7 +73,7 @@ T_DECLARE_CASE(test_conf_rejects_startup_limits_out_of_range)
 	T_EXPECT(!conf_check(&conf));
 }
 
-T_DECLARE_CASE(test_conf_rejects_proxy_with_socks5_extensions)
+T_DECLARE_CASE(conf_rejects_proxy_with_socks5_extensions)
 {
 	struct config conf = make_valid_conf();
 
@@ -91,7 +87,7 @@ T_DECLARE_CASE(test_conf_rejects_proxy_with_socks5_extensions)
 	T_EXPECT(!conf_check(&conf));
 }
 
-T_DECLARE_CASE(test_conf_accepts_valid_configuration)
+T_DECLARE_CASE(conf_accepts_valid_configuration)
 {
 	struct config conf = make_valid_conf();
 
@@ -104,7 +100,7 @@ T_DECLARE_CASE(test_conf_accepts_valid_configuration)
 	T_EXPECT(conf_check(&conf));
 }
 
-T_DECLARE_CASE(test_conf_warns_small_tcp_buffers)
+T_DECLARE_CASE(conf_warns_small_tcp_buffers)
 {
 	struct config conf = make_valid_conf();
 
@@ -113,7 +109,7 @@ T_DECLARE_CASE(test_conf_warns_small_tcp_buffers)
 	T_EXPECT(conf_check(&conf)); /* warns but remains valid */
 }
 
-T_DECLARE_CASE(test_conf_rejects_block_global_and_local)
+T_DECLARE_CASE(conf_rejects_block_global_and_local)
 {
 	struct config conf = make_valid_conf();
 
@@ -123,7 +119,7 @@ T_DECLARE_CASE(test_conf_rejects_block_global_and_local)
 }
 
 #if WITH_TPROXY
-T_DECLARE_CASE(test_conf_rejects_http_with_tproxy)
+T_DECLARE_CASE(conf_rejects_http_with_tproxy)
 {
 	struct config conf = make_valid_conf();
 
@@ -132,7 +128,7 @@ T_DECLARE_CASE(test_conf_rejects_http_with_tproxy)
 	T_EXPECT(!conf_check(&conf));
 }
 
-T_DECLARE_CASE(test_conf_rejects_forward_with_tproxy)
+T_DECLARE_CASE(conf_rejects_forward_with_tproxy)
 {
 	struct config conf = make_valid_conf();
 
@@ -143,7 +139,7 @@ T_DECLARE_CASE(test_conf_rejects_forward_with_tproxy)
 #endif /* WITH_TPROXY */
 
 #if WITH_RULESET
-T_DECLARE_CASE(test_conf_warns_ruleset_overrides_proxy)
+T_DECLARE_CASE(conf_warns_ruleset_overrides_proxy)
 {
 	struct config conf = make_valid_conf();
 
@@ -152,7 +148,7 @@ T_DECLARE_CASE(test_conf_warns_ruleset_overrides_proxy)
 	T_EXPECT(conf_check(&conf)); /* just a warning, still valid */
 }
 
-T_DECLARE_CASE(test_conf_rejects_ruleset_with_socks5_bind)
+T_DECLARE_CASE(conf_rejects_ruleset_with_socks5_bind)
 {
 	struct config conf = make_valid_conf();
 
@@ -161,7 +157,7 @@ T_DECLARE_CASE(test_conf_rejects_ruleset_with_socks5_bind)
 	T_EXPECT(!conf_check(&conf));
 }
 
-T_DECLARE_CASE(test_conf_rejects_ruleset_with_socks5_udp)
+T_DECLARE_CASE(conf_rejects_ruleset_with_socks5_udp)
 {
 	struct config conf = make_valid_conf();
 
@@ -171,7 +167,7 @@ T_DECLARE_CASE(test_conf_rejects_ruleset_with_socks5_udp)
 }
 #endif /* WITH_RULESET */
 
-T_DECLARE_CASE(test_conf_rejects_auth_required_in_forward_mode)
+T_DECLARE_CASE(conf_rejects_auth_required_in_forward_mode)
 {
 	struct config conf = make_valid_conf();
 
@@ -181,7 +177,7 @@ T_DECLARE_CASE(test_conf_rejects_auth_required_in_forward_mode)
 }
 
 #if WITH_RULESET
-T_DECLARE_CASE(test_conf_rejects_auth_required_without_ruleset)
+T_DECLARE_CASE(conf_rejects_auth_required_without_ruleset)
 {
 	struct config conf = make_valid_conf();
 
@@ -193,7 +189,7 @@ T_DECLARE_CASE(test_conf_rejects_auth_required_without_ruleset)
 
 /* conf_parseargs tests */
 
-T_DECLARE_CASE(test_parseargs_help_returns_false)
+T_DECLARE_CASE(parseargs_help_returns_false)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "--help" };
@@ -201,7 +197,7 @@ T_DECLARE_CASE(test_parseargs_help_returns_false)
 	T_EXPECT(!conf_parseargs(&conf, 2, argv));
 }
 
-T_DECLARE_CASE(test_parseargs_resolve_pf_flags)
+T_DECLARE_CASE(parseargs_resolve_pf_flags)
 {
 	struct config conf = conf_default();
 	char *argv4[] = { "conf_test", "-4", "-l", "127.0.0.1:1080" };
@@ -214,7 +210,7 @@ T_DECLARE_CASE(test_parseargs_resolve_pf_flags)
 	T_EXPECT_EQ(conf.resolve_pf, PF_INET6);
 }
 
-T_DECLARE_CASE(test_parseargs_http_with_address)
+T_DECLARE_CASE(parseargs_http_with_address)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "0.0.0.0:1080", "--http",
@@ -225,7 +221,7 @@ T_DECLARE_CASE(test_parseargs_http_with_address)
 	T_EXPECT_STREQ(conf.listen, "0.0.0.0:1080");
 }
 
-T_DECLARE_CASE(test_parseargs_http_only)
+T_DECLARE_CASE(parseargs_http_only)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "0.0.0.0:8080", "--http" };
@@ -235,7 +231,7 @@ T_DECLARE_CASE(test_parseargs_http_only)
 	T_EXPECT_STREQ(conf.http_listen, "0.0.0.0:8080");
 }
 
-T_DECLARE_CASE(test_parseargs_proxy_and_api)
+T_DECLARE_CASE(parseargs_proxy_and_api)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test",
@@ -251,7 +247,7 @@ T_DECLARE_CASE(test_parseargs_proxy_and_api)
 	T_EXPECT_STREQ(conf.restapi, "127.0.0.1:9080");
 }
 
-T_DECLARE_CASE(test_parseargs_auth_required)
+T_DECLARE_CASE(parseargs_auth_required)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
@@ -261,7 +257,7 @@ T_DECLARE_CASE(test_parseargs_auth_required)
 	T_EXPECT(conf.auth_required);
 }
 
-T_DECLARE_CASE(test_parseargs_user_daemonize_color)
+T_DECLARE_CASE(parseargs_user_daemonize_color)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test",
@@ -281,7 +277,7 @@ T_DECLARE_CASE(test_parseargs_user_daemonize_color)
 	T_EXPECT(conf.socks5_udp);
 }
 
-T_DECLARE_CASE(test_parseargs_timeout)
+T_DECLARE_CASE(parseargs_timeout)
 {
 	{
 		struct config conf = conf_default();
@@ -300,7 +296,7 @@ T_DECLARE_CASE(test_parseargs_timeout)
 	}
 }
 
-T_DECLARE_CASE(test_parseargs_loglevel)
+T_DECLARE_CASE(parseargs_loglevel)
 {
 	{
 		struct config conf = conf_default();
@@ -319,7 +315,7 @@ T_DECLARE_CASE(test_parseargs_loglevel)
 	}
 }
 
-T_DECLARE_CASE(test_parseargs_block_outbound)
+T_DECLARE_CASE(parseargs_block_outbound)
 {
 	{
 		struct config conf = conf_default();
@@ -360,7 +356,7 @@ T_DECLARE_CASE(test_parseargs_block_outbound)
 	}
 }
 
-T_DECLARE_CASE(test_parseargs_max_sessions)
+T_DECLARE_CASE(parseargs_max_sessions)
 {
 	{
 		struct config conf = conf_default();
@@ -379,7 +375,7 @@ T_DECLARE_CASE(test_parseargs_max_sessions)
 	}
 }
 
-T_DECLARE_CASE(test_parseargs_max_startups)
+T_DECLARE_CASE(parseargs_max_startups)
 {
 	{
 		struct config conf = conf_default();
@@ -400,7 +396,7 @@ T_DECLARE_CASE(test_parseargs_max_startups)
 	}
 }
 
-T_DECLARE_CASE(test_parseargs_double_dash_and_unknown)
+T_DECLARE_CASE(parseargs_double_dash_and_unknown)
 {
 	{
 		/* -- terminates option parsing; remaining args are ignored */
@@ -427,7 +423,7 @@ T_DECLARE_CASE(test_parseargs_double_dash_and_unknown)
 }
 
 #if WITH_CARES
-T_DECLARE_CASE(test_parseargs_nameserver)
+T_DECLARE_CASE(parseargs_nameserver)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--nameserver",
@@ -439,7 +435,7 @@ T_DECLARE_CASE(test_parseargs_nameserver)
 #endif /* WITH_CARES */
 
 #if WITH_TPROXY
-T_DECLARE_CASE(test_parseargs_tproxy)
+T_DECLARE_CASE(parseargs_tproxy)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--tproxy" };
@@ -450,7 +446,7 @@ T_DECLARE_CASE(test_parseargs_tproxy)
 #endif /* WITH_TPROXY */
 
 #if WITH_NETDEVICE
-T_DECLARE_CASE(test_parseargs_netdev)
+T_DECLARE_CASE(parseargs_netdev)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "-i", "eth0" };
@@ -461,7 +457,7 @@ T_DECLARE_CASE(test_parseargs_netdev)
 #endif /* WITH_NETDEVICE */
 
 #if WITH_REUSEPORT
-T_DECLARE_CASE(test_parseargs_reuseport)
+T_DECLARE_CASE(parseargs_reuseport)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--reuseport" };
@@ -472,7 +468,7 @@ T_DECLARE_CASE(test_parseargs_reuseport)
 #endif /* WITH_REUSEPORT */
 
 #if WITH_SPLICE
-T_DECLARE_CASE(test_parseargs_pipe)
+T_DECLARE_CASE(parseargs_pipe)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--pipe" };
@@ -483,7 +479,7 @@ T_DECLARE_CASE(test_parseargs_pipe)
 #endif /* WITH_SPLICE */
 
 #if WITH_TCP_FASTOPEN
-T_DECLARE_CASE(test_parseargs_no_fastopen)
+T_DECLARE_CASE(parseargs_no_fastopen)
 {
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--no-fastopen" };
@@ -494,7 +490,7 @@ T_DECLARE_CASE(test_parseargs_no_fastopen)
 #endif /* WITH_TCP_FASTOPEN */
 
 #if WITH_RULESET
-T_DECLARE_CASE(test_parseargs_ruleset)
+T_DECLARE_CASE(parseargs_ruleset)
 {
 	{
 		struct config conf = conf_default();
@@ -524,259 +520,65 @@ T_DECLARE_CASE(test_parseargs_ruleset)
 }
 #endif /* WITH_RULESET */
 
-#if WITH_LUA
-#if 0 /* boot config tests require the removed conf_loadfile */
-/* Write content to a temporary file and return the fd; caller owns fd. */
-static int write_tempfile(char *restrict tmpl, const char *restrict content)
-{
-	const int fd = mkstemp(tmpl);
-	if (fd < 0) {
-		return -1;
-	}
-	const size_t len = strlen(content);
-	if ((size_t)write(fd, content, len) != len) {
-		close(fd);
-		unlink(tmpl);
-		return -1;
-	}
-	close(fd);
-	return 0;
-}
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:9999' }") ==
-		0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test", "-c", path, "-l", "old:1080",
-	};
-	T_EXPECT(conf_parseargs(&conf, 5, argv));
-	T_EXPECT_STREQ(conf.listen, "0.0.0.0:9999");
-	free(conf.strings);
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_boot_nil_field_preserves_cli_value)
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(path, "return { listen = '0.0.0.0:1080' }") ==
-		0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test", "-c", path, "-f", "kept:8080",
-	};
-	T_EXPECT(conf_parseargs(&conf, 5, argv));
-	T_EXPECT_STREQ(conf.forward, "kept:8080");
-	free(conf.strings);
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_boot_unknown_fields_ignored)
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(
-			path,
-			"return { listen = '0.0.0.0:1080', _unknown_ = true }") ==
-		0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test",
-		"-c",
-		path,
-	};
-	T_EXPECT(conf_parseargs(&conf, 3, argv));
-	T_EXPECT_STREQ(conf.listen, "0.0.0.0:1080");
-	free(conf.strings);
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_boot_type_error_fails)
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(path, "return { listen = 42 }") == 0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test",
-		"-c",
-		path,
-	};
-	T_EXPECT(!conf_parseargs(&conf, 3, argv));
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_boot_returns_nontable_fails)
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(path, "return 'oops'") == 0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test",
-		"-c",
-		path,
-	};
-	T_EXPECT(!conf_parseargs(&conf, 3, argv));
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_boot_runtime_error_fails)
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(path, "error('intentional')") == 0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test",
-		"-c",
-		path,
-	};
-	T_EXPECT(!conf_parseargs(&conf, 3, argv));
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_boot_varargs_visible)
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(
-			path, "local argv = { ... }\n"
-			      "assert(argv[1] == '-c', 'argv[1]')\n"
-			      "assert(argv[3] == '-l', 'argv[3]')\n"
-			      "assert(argv[4] == '0.0.0.0:1080', 'argv[4]')\n"
-			      "assert(#argv == 4, '#argv')\n"
-			      "return { listen = argv[4] }") == 0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test", "-c", path, "-l", "0.0.0.0:1080",
-	};
-	T_EXPECT(conf_parseargs(&conf, 5, argv));
-	T_EXPECT_STREQ(conf.listen, "0.0.0.0:1080");
-	free(conf.strings);
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_boot_overrides_numeric_fields)
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(
-			path, "return { loglevel = 3, timeout = 120.0,"
-			      " max_sessions = 512 }") == 0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test",
-		"-c",
-		path,
-	};
-	T_EXPECT(conf_parseargs(&conf, 3, argv));
-	T_EXPECT_EQ(conf.loglevel, 3);
-	T_EXPECT_EQ(conf.timeout, 120.0);
-	T_EXPECT_EQ(conf.max_sessions, 512);
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_boot_overrides_bool_fields)
-{
-	char path[] = "/tmp/boot_conf_test_XXXXXX";
-	T_CHECK(write_tempfile(path, "return { daemonize = true }") == 0);
-	struct config conf = conf_default();
-	char *argv[] = {
-		"conf_test",
-		"-c",
-		path,
-	};
-	T_EXPECT(conf_parseargs(&conf, 3, argv));
-	T_EXPECT(conf.daemonize);
-	unlink(path);
-}
-
-T_DECLARE_CASE(test_dump_config)
-{
-	/* Redirect stdout to a temp file so conf_print output is captured.
-	 * The testing framework uses stderr, so T_EXPECT macros still work. */
-	(void)fflush(stdout);
-	const int saved_stdout = dup(STDOUT_FILENO);
-	T_CHECK(saved_stdout >= 0);
-	FILE *tmp = tmpfile();
-	T_CHECK(tmp != NULL);
-	T_CHECK(dup2(fileno(tmp), STDOUT_FILENO) >= 0);
-
-	struct config conf = conf_default();
-	/* listen string with backslash, double-quote, and a control char
-	 * to exercise all branches in lutil_printstring */
-	char special_listen[] = "a\\\"b\x01";
-	char *argv[] = { "conf_test", "-l", special_listen, "--dump-config" };
-	const bool ok = conf_parseargs(&conf, 4, argv);
-
-	(void)fflush(stdout);
-	(void)dup2(saved_stdout, STDOUT_FILENO);
-	(void)close(saved_stdout);
-
-	T_EXPECT(ok);
-	rewind(tmp);
-	char buf[32] = { 0 };
-	T_CHECK(fgets(buf, sizeof(buf), tmp) != NULL);
-	T_EXPECT_STREQ(buf, "return {\n");
-	(void)fclose(tmp);
-}
-#endif /* 0 */
-#endif /* WITH_LUA */
-
 int main(void)
 {
 	T_DECLARE_CTX(t);
 
-	T_RUN_CASE(t, test_conf_default_has_expected_values);
-	T_RUN_CASE(t, test_conf_requires_listen);
-	T_RUN_CASE(t, test_conf_rejects_incompatible_modes);
-	T_RUN_CASE(t, test_conf_rejects_timeout_out_of_range);
-	T_RUN_CASE(t, test_conf_rejects_startup_limits_out_of_range);
-	T_RUN_CASE(t, test_conf_rejects_proxy_with_socks5_extensions);
-	T_RUN_CASE(t, test_conf_accepts_valid_configuration);
-	T_RUN_CASE(t, test_conf_warns_small_tcp_buffers);
-	T_RUN_CASE(t, test_conf_rejects_block_global_and_local);
+	T_RUN_CASE(t, conf_default_has_expected_values);
+	T_RUN_CASE(t, conf_requires_listen);
+	T_RUN_CASE(t, conf_rejects_incompatible_modes);
+	T_RUN_CASE(t, conf_rejects_timeout_out_of_range);
+	T_RUN_CASE(t, conf_rejects_startup_limits_out_of_range);
+	T_RUN_CASE(t, conf_rejects_proxy_with_socks5_extensions);
+	T_RUN_CASE(t, conf_accepts_valid_configuration);
+	T_RUN_CASE(t, conf_warns_small_tcp_buffers);
+	T_RUN_CASE(t, conf_rejects_block_global_and_local);
 #if WITH_TPROXY
-	T_RUN_CASE(t, test_conf_rejects_http_with_tproxy);
-	T_RUN_CASE(t, test_conf_rejects_forward_with_tproxy);
+	T_RUN_CASE(t, conf_rejects_http_with_tproxy);
+	T_RUN_CASE(t, conf_rejects_forward_with_tproxy);
 #endif
 #if WITH_RULESET
-	T_RUN_CASE(t, test_conf_warns_ruleset_overrides_proxy);
-	T_RUN_CASE(t, test_conf_rejects_ruleset_with_socks5_bind);
-	T_RUN_CASE(t, test_conf_rejects_ruleset_with_socks5_udp);
+	T_RUN_CASE(t, conf_warns_ruleset_overrides_proxy);
+	T_RUN_CASE(t, conf_rejects_ruleset_with_socks5_bind);
+	T_RUN_CASE(t, conf_rejects_ruleset_with_socks5_udp);
 #endif
-	T_RUN_CASE(t, test_conf_rejects_auth_required_in_forward_mode);
+	T_RUN_CASE(t, conf_rejects_auth_required_in_forward_mode);
 #if WITH_RULESET
-	T_RUN_CASE(t, test_conf_rejects_auth_required_without_ruleset);
+	T_RUN_CASE(t, conf_rejects_auth_required_without_ruleset);
 #endif
-	T_RUN_CASE(t, test_parseargs_help_returns_false);
-	T_RUN_CASE(t, test_parseargs_resolve_pf_flags);
-	T_RUN_CASE(t, test_parseargs_http_with_address);
-	T_RUN_CASE(t, test_parseargs_http_only);
-	T_RUN_CASE(t, test_parseargs_proxy_and_api);
-	T_RUN_CASE(t, test_parseargs_auth_required);
-	T_RUN_CASE(t, test_parseargs_user_daemonize_color);
-	T_RUN_CASE(t, test_parseargs_timeout);
-	T_RUN_CASE(t, test_parseargs_loglevel);
-	T_RUN_CASE(t, test_parseargs_block_outbound);
-	T_RUN_CASE(t, test_parseargs_max_sessions);
-	T_RUN_CASE(t, test_parseargs_max_startups);
-	T_RUN_CASE(t, test_parseargs_double_dash_and_unknown);
+	T_RUN_CASE(t, parseargs_help_returns_false);
+	T_RUN_CASE(t, parseargs_resolve_pf_flags);
+	T_RUN_CASE(t, parseargs_http_with_address);
+	T_RUN_CASE(t, parseargs_http_only);
+	T_RUN_CASE(t, parseargs_proxy_and_api);
+	T_RUN_CASE(t, parseargs_auth_required);
+	T_RUN_CASE(t, parseargs_user_daemonize_color);
+	T_RUN_CASE(t, parseargs_timeout);
+	T_RUN_CASE(t, parseargs_loglevel);
+	T_RUN_CASE(t, parseargs_block_outbound);
+	T_RUN_CASE(t, parseargs_max_sessions);
+	T_RUN_CASE(t, parseargs_max_startups);
+	T_RUN_CASE(t, parseargs_double_dash_and_unknown);
 #if WITH_CARES
-	T_RUN_CASE(t, test_parseargs_nameserver);
+	T_RUN_CASE(t, parseargs_nameserver);
 #endif
 #if WITH_TPROXY
-	T_RUN_CASE(t, test_parseargs_tproxy);
+	T_RUN_CASE(t, parseargs_tproxy);
 #endif
 #if WITH_NETDEVICE
-	T_RUN_CASE(t, test_parseargs_netdev);
+	T_RUN_CASE(t, parseargs_netdev);
 #endif
 #if WITH_REUSEPORT
-	T_RUN_CASE(t, test_parseargs_reuseport);
+	T_RUN_CASE(t, parseargs_reuseport);
 #endif
 #if WITH_SPLICE
-	T_RUN_CASE(t, test_parseargs_pipe);
+	T_RUN_CASE(t, parseargs_pipe);
 #endif
 #if WITH_TCP_FASTOPEN
-	T_RUN_CASE(t, test_parseargs_no_fastopen);
+	T_RUN_CASE(t, parseargs_no_fastopen);
 #endif
 #if WITH_RULESET
-	T_RUN_CASE(t, test_parseargs_ruleset);
+	T_RUN_CASE(t, parseargs_ruleset);
 #endif
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

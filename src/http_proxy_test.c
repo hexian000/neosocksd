@@ -58,10 +58,7 @@ static void *test_memmem(
  * parsing and error response paths.
  */
 
-/**
- * Test-only definition of struct globals (removed from util.h during refactoring).
- * Used to stub G.conf and G.ruleset for test initialization.
- */
+/* test-only definition of struct globals, used to stub G.conf/G.ruleset */
 struct globals {
 	const struct config *conf;
 	struct resolver *resolver;
@@ -169,10 +166,7 @@ struct stub_xfer_ctx;
 static struct stub_xfer_ctx *stub_xfer_ctxs[8];
 static int stub_xfer_ctx_count = 0;
 
-/**
- * Initialize server struct for testing.
- * Sets minimal required fields so production code can access conf/resolver/etc.
- */
+/* set the minimal server fields required by production code */
 static void test_server_init(struct server *restrict s)
 {
 	s->conf = &test_conf;
@@ -686,12 +680,12 @@ static void make_fd_pair(int *restrict a, int *restrict b)
 	*b = sv[1];
 }
 
-T_DECLARE_CASE(plain_http_origin_form_no_dialreq_returns_500)
+T_DECLARE_CASE(plain_http_origin_form_returns_400)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
 	int peer_fd = -1;
-	/* origin-form URL; Host header used as fallback target */
+	/* origin-form URL is not allowed; proxy requires absolute-form */
 	const char req[] = "GET / HTTP/1.1\r\nHost: example\r\n\r\n";
 
 	T_CHECK(loop != NULL);
@@ -706,8 +700,8 @@ T_DECLARE_CASE(plain_http_origin_form_no_dialreq_returns_500)
 		const ssize_t n =
 			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
 		T_EXPECT(n >= 17);
-		/* dialreq_new_ok=false -> make_dialreq returns NULL -> 500 */
-		T_EXPECT(has_http_status(rsp, (size_t)n, "500"));
+		/* origin-form → 400 Bad Request */
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
 		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
@@ -730,8 +724,8 @@ T_DECLARE_CASE(split_request_is_parsed_incrementally)
 	T_CHECK(write_all(peer_fd, "ample\r\n\r\n", 9) == 0);
 	drive_loop(loop);
 
-	/* dialreq_new_ok=false -> make_dialreq returns NULL -> 500 */
-	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
+	/* origin-form → 400 Bad Request */
+	T_EXPECT(assert_response_status(loop, peer_fd, "400"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -1764,7 +1758,7 @@ int main(void)
 {
 	T_DECLARE_CTX(t);
 	reset_stub_state();
-	T_RUN_CASE(t, plain_http_origin_form_no_dialreq_returns_500);
+	T_RUN_CASE(t, plain_http_origin_form_returns_400);
 	T_RUN_CASE(t, split_request_is_parsed_incrementally);
 	T_RUN_CASE(t, plain_http_absolute_url_no_dialreq_returns_500);
 	T_RUN_CASE(t, plain_http_absolute_url_no_host_returns_400);

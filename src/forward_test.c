@@ -906,7 +906,7 @@ T_DECLARE_CASE(forward_timeout_stops_pending_dialer_once)
 	ev_loop_destroy(loop);
 }
 
-#if WITH_TPROXY
+#if WITH_TPROXY && WITH_RULESET
 /*
  * SIGHUP variant for tproxy: ruleset is cleared between forward_serve
  * and tproxy_process_cb.  The callback must reject cleanly instead
@@ -948,7 +948,7 @@ T_DECLARE_CASE(tproxy_ruleset_null_after_sighup)
 
 	ev_loop_destroy(loop);
 }
-#endif /* WITH_TPROXY */
+#endif /* WITH_TPROXY && WITH_RULESET */
 
 #if WITH_TPROXY
 T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
@@ -1001,11 +1001,15 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 #endif
 
 #if WITH_TPROXY
-#define FORWARD_TPROXY_TESTS(X)                                                \
-	X(tproxy_ruleset_null_after_sighup);                                   \
-	X(tproxy_dialer_fail_uses_socket_destination)
+#define FORWARD_TPROXY_TESTS(X) X(tproxy_dialer_fail_uses_socket_destination)
 #else
 #define FORWARD_TPROXY_TESTS(X)
+#endif
+
+#if WITH_TPROXY && WITH_RULESET
+#define FORWARD_TPROXY_RULESET_TESTS(X) X(tproxy_ruleset_null_after_sighup)
+#else
+#define FORWARD_TPROXY_RULESET_TESTS(X)
 #endif
 
 int main(void)
@@ -1016,6 +1020,7 @@ int main(void)
 	FORWARD_TESTS(RUN_TEST);
 	FORWARD_RULESET_TESTS(RUN_TEST);
 	FORWARD_TPROXY_TESTS(RUN_TEST);
+	FORWARD_TPROXY_RULESET_TESTS(RUN_TEST);
 #undef RUN_TEST
 
 	const bool ok = T_RESULT(t);

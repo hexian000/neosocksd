@@ -25,7 +25,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-/** String representations of content encoding types */
 const char *http_content_encoding_str[] = {
 	[CENCODING_NONE] = NULL,
 	[CENCODING_DEFLATE] = "deflate",
@@ -229,11 +228,9 @@ bool http_body_finish(struct http_body *restrict d)
 
 void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 {
-	/* Reset buffers for error response */
 	p->wbuf.len = 0;
 	VBUF_FREE(p->cbuf);
 
-	/* Try to generate full error page */
 	const size_t cap = p->wbuf.cap - p->wbuf.len;
 	char *buf = (char *)(p->wbuf.data + p->wbuf.len);
 	const int len = http_error(buf, cap, code);
@@ -248,24 +245,13 @@ void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 	LOG_STACK_F(VERBOSE, 0, "http: response error page %" PRIuFAST16, code);
 }
 
-/**
- * @brief Send short response message immediately
- *
- * Sends a complete short message (like status responses) directly
- * to the socket without buffering. Used for protocol responses
- * that need immediate delivery.
- *
- * @param p Parser instance containing socket fd
- * @param s String message to send
- * @return true if message sent successfully
- */
+/* send a short message directly to the socket, bypassing the buffers */
 static bool reply_short(struct http_conn *restrict p, const char *s)
 {
 	const size_t n = strlen(s);
 	ASSERT(n < 256);
 	LOG_BIN_F(VERBOSE, s, n, 0, "reply_short: [fd:%d] %zu bytes", p->fd, n);
 
-	/* Send message directly to socket */
 	const ssize_t nsend = send(p->fd, s, n, 0);
 	if (nsend < 0) {
 		const int err = errno;
@@ -280,18 +266,11 @@ static bool reply_short(struct http_conn *restrict p, const char *s)
 	return true;
 }
 
-bool http_resp_established(struct http_conn *restrict p)
-{
-	const char msg[] = "HTTP/1.1 200 Connection established\r\n\r\n";
-	return reply_short(p, msg);
-}
-
 struct stream *content_reader(
 	const void *buf, size_t len, const enum content_encodings encoding)
 {
 	struct stream *r = NULL;
 
-	/* Create appropriate reader based on encoding */
 	switch (encoding) {
 	case CENCODING_NONE:
 		r = io_memreader(buf, len);
@@ -320,14 +299,12 @@ struct stream *content_writer(
 	struct vbuffer **restrict pvbuf, const size_t bufsize,
 	const enum content_encodings encoding)
 {
-	/* Ensure buffer has adequate initial size */
 	VBUF_RESERVE(*pvbuf, bufsize);
 	if (*pvbuf == NULL) {
 		return NULL;
 	}
 	VBUF_RESET(*pvbuf);
 
-	/* Create appropriate writer based on encoding */
 	switch (encoding) {
 	case CENCODING_NONE:
 		return io_heapwriter(pvbuf);
@@ -339,49 +316,38 @@ struct stream *content_writer(
 	FAILMSGF("unexpected content encoding: %d", encoding);
 }
 
-/**
- * @brief Parse HTTP message line (request or response)
- *
- * Parses the first line of an HTTP message, which contains either
- * the request line (method, URI, version) or response line (version,
- * status, reason phrase). Validates HTTP version compatibility.
- *
- * @param p Parser instance
- * @return 0 on success, 1 if more data needed, -1 on error
- */
+/* parse_*: 0 on success, 1 if more data is needed, -1 on error */
 static int parse_message(struct http_conn *restrict p)
 {
-	/* Initialize parsing position if needed */
 	char *next = p->next;
 	if (next == NULL) {
 		next = (char *)p->rbuf.data;
 		p->next = next;
 	}
 
-	/* Parse the message line */
 	struct http_message *restrict msg = &p->msg;
 	next = http_parse(next, msg);
 	if (next == NULL) {
 		LOGD("http: failed parsing message");
+		if (p->state == STATE_PARSE_REQUEST) {
+			p->state = STATE_PARSE_ERROR;
+			return 0;
+		}
 		return -1;
 	}
 
-	/* Check if we need more data */
 	if (next == p->next) {
 		if (p->rbuf.len + 1 >= p->rbuf.cap) {
 			p->http_status = HTTP_ENTITY_TOO_LARGE;
 			p->state = STATE_PARSE_ERROR;
 			return 0;
 		}
-		/* Need more data. */
 		return 1;
 	}
 
-	/* Log parsed message components */
 	LOGVV_F("http_message: `%s' `%s' `%s'", msg->any.field1,
 		msg->any.field2, msg->any.field3);
 
-	/* Validate HTTP version */
 	const char *version = NULL;
 	switch (p->state) {
 	case STATE_PARSE_REQUEST:
@@ -395,26 +361,18 @@ static int parse_message(struct http_conn *restrict p)
 	}
 	if (strncmp(version, "HTTP/1.", 7) != 0) {
 		LOGD_F("http: unsupported protocol `%s'", version);
+		if (p->state == STATE_PARSE_REQUEST) {
+			p->state = STATE_PARSE_ERROR;
+			return 0;
+		}
 		return -1;
 	}
 
-	/* Advance to header parsing phase */
 	p->next = next;
 	p->state = STATE_PARSE_HEADER;
 	return 0;
 }
 
-/**
- * @brief Process a parsed header key-value pair
- *
- * Invokes the registered header callback to process each parsed header.
- * This allows custom handling of headers by the application.
- *
- * @param p Parser instance
- * @param key Header name
- * @param value Header value
- * @return true if header processed successfully
- */
 static bool parse_header_kv(
 	const struct http_conn *restrict p, const char *key, char *value)
 {
@@ -422,30 +380,21 @@ static bool parse_header_kv(
 	return p->on_header.func(p->on_header.ctx, key, value);
 }
 
-/**
- * @brief Parse HTTP headers
- *
- * Parses HTTP headers one by one until the empty line that separates
- * headers from content. Each header is processed through the registered
- * callback function. When headers are complete, transitions to content
- * parsing phase.
- *
- * @param p Parser instance
- * @return 0 on success, 1 if more data needed, -1 on error
- */
 static int parse_header(struct http_conn *restrict p)
 {
 	char *next = p->next;
 	char *key, *value;
 
-	/* Parse next header line */
 	next = http_parsehdr(next, &key, &value);
 	if (next == NULL) {
 		LOGD("http: failed parsing header");
+		if (p->mode == STATE_PARSE_REQUEST) {
+			p->state = STATE_PARSE_ERROR;
+			return 0;
+		}
 		return -1;
 	}
 
-	/* Check if we need more data */
 	if (next == p->next) {
 		return 1;
 	}
@@ -459,7 +408,6 @@ static int parse_header(struct http_conn *restrict p)
 		return 0;
 	}
 
-	/* Process the header through callback */
 	if (!parse_header_kv(p, key, value)) {
 		p->state = STATE_PARSE_ERROR;
 		return 0;
@@ -467,21 +415,10 @@ static int parse_header(struct http_conn *restrict p)
 	return 0;
 }
 
-/**
- * @brief Parse HTTP content body
- *
- * Handles content body parsing based on Content-Length header.
- * Allocates content buffer and copies any remaining data from
- * the read buffer. Sends 100-Continue response if expected.
- *
- * @param p Parser instance
- * @return 0 when complete, 1 if more data needed, -1 on error
- */
 static int parse_content(struct http_conn *restrict p)
 {
-	/* Only handle Content-Length based content for now */
+	/* only Content-Length based content is handled here */
 	if (!p->hdr.content.has_length) {
-		/* Chunked encoding and other methods not implemented */
 		return 0;
 	}
 
@@ -490,7 +427,6 @@ static int parse_content(struct http_conn *restrict p)
 		return 0;
 	}
 
-	/* Check content size limits */
 	if (content_length > HTTP_MAX_CONTENT) {
 		p->http_status = HTTP_ENTITY_TOO_LARGE;
 		p->state = STATE_PARSE_ERROR;
@@ -510,7 +446,6 @@ static int parse_content(struct http_conn *restrict p)
 		const size_t len = p->rbuf.len - pos;
 		VBUF_APPEND(p->cbuf, p->next, len);
 
-		/* Send 100-Continue if client expects it */
 		if (p->expect_continue) {
 			if (!reply_short(p, "HTTP/1.1 100 Continue\r\n\r\n")) {
 				return -1;
@@ -518,26 +453,16 @@ static int parse_content(struct http_conn *restrict p)
 		}
 	}
 
-	/* Check if we have all content */
 	if (VBUF_LEN(p->cbuf) < content_length) {
-		/* Need more data. */
 		return 1;
 	}
 	return 0;
 }
 
-/**
- * @brief Receive data into request buffer
- *
- * Reads available data from the socket into the parser's read buffer.
- * Maintains null termination for string parsing operations.
- *
- * @param p Parser instance
- * @return 1 on success, 0 if no data (EAGAIN/EWOULDBLOCK), -1 on error or EOF
- */
+/* recv_*: 1 on success, 0 if no data, -1 on error or EOF */
 static int recv_request(struct http_conn *restrict p)
 {
-	/* Calculate available space (reserve 1 byte for null terminator) */
+	/* reserve 1 byte for the null terminator */
 	size_t n = p->rbuf.cap - p->rbuf.len - 1;
 
 	const int err = socket_recv(p->fd, p->rbuf.data + p->rbuf.len, &n);
@@ -553,7 +478,6 @@ static int recv_request(struct http_conn *restrict p)
 		return -1;
 	}
 
-	/* Update buffer length and maintain null termination */
 	p->rbuf.len += n;
 	p->rbuf.data[p->rbuf.len] = '\0';
 	if (p->byt_recv != NULL) {
@@ -562,19 +486,8 @@ static int recv_request(struct http_conn *restrict p)
 	return 1;
 }
 
-/**
- * @brief Receive data into content buffer
- *
- * Reads data directly into the content buffer when parsing the
- * HTTP message body. Used after headers are parsed and content
- * length is known.
- *
- * @param p Parser instance
- * @return 1 on success, 0 if no data (EAGAIN/EWOULDBLOCK), -1 on error or EOF
- */
 static int recv_content(const struct http_conn *restrict p)
 {
-	/* Calculate available space in content buffer */
 	unsigned char *b;
 	size_t n;
 	VBUF_SPACE(b, n, p->cbuf);
@@ -592,7 +505,6 @@ static int recv_content(const struct http_conn *restrict p)
 		return -1;
 	}
 
-	/* Update content buffer length */
 	p->cbuf->len += n;
 	if (p->byt_recv != NULL) {
 		*p->byt_recv += n;
@@ -600,25 +512,12 @@ static int recv_content(const struct http_conn *restrict p)
 	return 1;
 }
 
-/**
- * @brief Main HTTP parser receive and process function
- *
- * Receives data from socket and processes it through the parser
- * state machine. Handles all parsing phases: message line, headers,
- * and content. Returns when parsing is complete, more data is needed,
- * or an error occurs.
- *
- * @param p Parser instance
- * @return 0 on completion, 1 if more data needed, -1 on error
- */
 int http_conn_recv(struct http_conn *restrict p)
 {
-	/* Receive data based on current parsing phase */
 	switch (p->state) {
 	case STATE_PARSE_REQUEST:
 	case STATE_PARSE_RESPONSE:
 	case STATE_PARSE_HEADER: {
-		/* Receive into main read buffer for header parsing */
 		const int r = recv_request(p);
 		if (r < 0) {
 			return -1;
@@ -629,7 +528,6 @@ int http_conn_recv(struct http_conn *restrict p)
 		break;
 	}
 	case STATE_PARSE_CONTENT: {
-		/* Receive directly into content buffer */
 		const int r = recv_content(p);
 		if (r < 0) {
 			return -1;
@@ -643,37 +541,31 @@ int http_conn_recv(struct http_conn *restrict p)
 		return -1;
 	}
 
-	/* Process received data through state machine */
 	for (;;) {
 		int ret;
 		switch (p->state) {
 		case STATE_PARSE_REQUEST:
 		case STATE_PARSE_RESPONSE:
-			/* Parse HTTP message line */
 			ret = parse_message(p);
 			if (ret != 0) {
 				return ret;
 			}
 			break;
 		case STATE_PARSE_HEADER:
-			/* Parse HTTP headers */
 			ret = parse_header(p);
 			if (ret != 0) {
 				return ret;
 			}
 			break;
 		case STATE_PARSE_CONTENT:
-			/* Parse HTTP content body */
 			ret = parse_content(p);
 			if (ret != 0) {
 				return ret;
 			}
-			/* Content parsing complete */
 			p->state = STATE_PARSE_OK;
 			/* fallthrough */
 		case STATE_PARSE_ERROR:
 		case STATE_PARSE_OK:
-			/* Parsing finished (success or error) */
 			return 0;
 		default:
 			FAILMSGF("unexpected http parser state: %d", p->state);
@@ -736,13 +628,11 @@ bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 
-	/* Empty value means no transfer encoding accepted */
 	if (value[0] == '\0') {
 		p->hdr.transfer.accept = TENCODING_NONE;
 		return true;
 	}
 
-	/* Check for chunked transfer encoding */
 	if (strcmp(value, "chunked") == 0) {
 		p->hdr.transfer.accept = TENCODING_CHUNKED;
 		return true;
@@ -756,13 +646,11 @@ bool parsehdr_transfer_encoding(
 {
 	value = strtrimspace(value);
 
-	/* Empty value means no transfer encoding */
 	if (value[0] == '\0') {
 		p->hdr.transfer.encoding = TENCODING_NONE;
 		return true;
 	}
 
-	/* Check for chunked transfer encoding */
 	if (strcmp(value, "chunked") == 0) {
 		p->hdr.transfer.encoding = TENCODING_CHUNKED;
 		return true;
@@ -773,13 +661,11 @@ bool parsehdr_transfer_encoding(
 
 bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value)
 {
-	/* Wildcard accepts deflate encoding */
 	if (strcmp(value, "*") == 0) {
 		p->hdr.accept_encoding = CENCODING_DEFLATE;
 		return true;
 	}
 
-	/* Parse comma-separated encoding list */
 	const char *deflate = http_content_encoding_str[CENCODING_DEFLATE];
 	for (char *token = strtok(value, ","); token != NULL;
 	     token = strtok(NULL, ",")) {
@@ -789,7 +675,6 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 			*q = '\0';
 		}
 
-		/* Check for supported encoding */
 		token = strtrimspace(token);
 		if (strcasecmp(token, deflate) == 0) {
 			p->hdr.accept_encoding = CENCODING_DEFLATE;
@@ -804,11 +689,9 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 bool parsehdr_content_length(
 	struct http_conn *restrict p, const char *restrict value)
 {
-	/* Parse numeric value */
 	char *endptr;
 	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
 
-	/* Validate parsing and range */
 	if (*endptr || lenvalue > SIZE_MAX) {
 		return false;
 	}
@@ -820,7 +703,6 @@ bool parsehdr_content_length(
 		return false;
 	}
 
-	/* Store parsed content length */
 	p->hdr.content.has_length = true;
 	p->hdr.content.length = content_length;
 	return true;
@@ -829,7 +711,6 @@ bool parsehdr_content_length(
 bool parsehdr_content_encoding(
 	struct http_conn *restrict p, const char *restrict value)
 {
-	/* Check against all supported encodings */
 	for (size_t i = 0; i < CENCODING_MAX; i++) {
 		if (http_content_encoding_str[i] == NULL) {
 			continue;
@@ -840,7 +721,6 @@ bool parsehdr_content_encoding(
 		}
 	}
 
-	/* Unsupported encoding */
 	p->http_status = HTTP_UNSUPPORTED_MEDIA_TYPE;
 	return false;
 }
@@ -849,13 +729,11 @@ bool parsehdr_expect(struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 
-	/* Only 100-continue is supported */
 	if (strcasecmp(value, "100-continue") != 0) {
 		p->http_status = HTTP_EXPECTATION_FAILED;
 		return false;
 	}
 
-	/* Set flag for 100-continue handling */
 	p->expect_continue = true;
 	return true;
 }
@@ -898,25 +776,21 @@ void http_conn_init(
 	const struct http_parsehdr_cb on_header, uint_least64_t *const byt_recv,
 	uint_least64_t *const byt_sent)
 {
-	/* Initialize parser state */
 	p->state = mode;
+	p->mode = mode;
 	p->http_status = HTTP_BAD_REQUEST;
 	p->fd = fd;
 
-	/* Initialize message and parsing state */
 	p->msg = (struct http_message){ 0 };
 	p->next = NULL;
 	p->expect_continue = false;
 
-	/* Initialize headers and callback */
 	p->hdr = (struct http_headers){ 0 };
 	p->on_header = on_header;
 
-	/* Initialize buffer positions */
 	p->wpos = p->cpos = 0;
 	p->cbuf = NULL;
 
-	/* Initialize fixed buffers */
 	BUF_INIT(p->rbuf, 0);
 	BUF_INIT(p->wbuf, 0);
 	p->byt_recv = byt_recv;

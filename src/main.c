@@ -17,7 +17,6 @@
 #include <ev.h>
 
 #if WITH_THREADS
-#include <pthread.h>
 #include <signal.h>
 #include <string.h>
 #endif
@@ -37,7 +36,13 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 	struct config *restrict conf = &app.conf;
-	if (conf->boot == NULL && !conf_check(conf)) {
+#if WITH_RULESET
+	/* A boot config may fill in required fields, so defer the check. */
+	const bool defer_check = (conf->boot != NULL);
+#else
+	const bool defer_check = false;
+#endif
+	if (!defer_check && !conf_check(conf)) {
 		LOGF_F("configuration check failed, try \"%s --help\" for more information",
 		       argv[0]);
 		exit(EXIT_FAILURE);

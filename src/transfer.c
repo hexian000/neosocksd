@@ -21,6 +21,7 @@
 #include <errno.h>
 #if WITH_SPLICE
 #include <fcntl.h>
+#include <unistd.h>
 #endif
 #if WITH_THREADS
 #include <stdatomic.h>

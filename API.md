@@ -154,7 +154,7 @@ Handles a hostname request. Specifically:
 - `nil`: rejects the request
 
 Proxy addresses are specified in URI format. Supported schemes:
-- `socks4a://example.org:1080`: SOCKS4A server. The implementation is SOCKS4‑compatible when requesting an IPv4 address.
+- `socks4a://example.org:1080`: SOCKS4A server. The implementation is SOCKS4-compatible when requesting an IPv4 address.
 - `socks5://example.org:1080`: SOCKS5 server.
 - `http://example.org:8080`: HTTP/1.1 CONNECT server.
 
@@ -615,10 +615,10 @@ async(function(addr)
     local begin = neosocksd.now()
     local ok, result = await.invoke([[await.sleep(1); return "ok"]], addr)
     if not ok then
-        -- on failure, the result is string
+        -- on failure, the result is a string
         error("invocation failed: " .. result)
     end
-    -- on success, the result is function
+    -- on success, the result is a function
     ok, result = result()
     if not ok then
         error("remote error: " .. result)

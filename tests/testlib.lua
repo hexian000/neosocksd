@@ -34,15 +34,16 @@ function M:atest(name, fn)
     end
 end
 
--- bench measures throughput; iters is the total number of operations fn performs.
+-- bench registers a benchmark; iters is the total number of operations fn performs.
 -- bench must be called from within an async context.
--- Benchmarks are deferred and only run after all tests pass.
+-- Benchmarks are deferred. They only run when all tests pass AND the BENCH
+-- environment variable is set (e.g. BENCH=1 neosocksd -c tests/main.lua).
 function M:bench(name, iters, fn)
     table.insert(self.benches, { name = name, iters = iters, fn = fn })
 end
 
--- runbenches executes all deferred benchmarks. Called automatically by report()
--- when all tests have passed.
+-- runbenches executes all deferred benchmarks. Called by report() when
+-- all tests have passed and the BENCH environment variable is set.
 function M:runbenches()
     for _, b in ipairs(self.benches) do
         local begin = neosocksd.now()
@@ -85,7 +86,7 @@ function M:sub(name)
 end
 
 function M:report()
-    if self.failed == 0 and #self.benches > 0 then
+    if self.failed == 0 and #self.benches > 0 and os.getenv("BENCH") then
         printf("[%s] all tests passed, running %d benchmark(s)...", self.name, #self.benches)
         self:runbenches()
     end

@@ -28,7 +28,7 @@ Status: **Stable**
 
 - Protocols: SOCKS4, SOCKS4A, SOCKS5 (CONNECT), HTTP CONNECT, transparent proxy (Linux).
 - 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024).
-- ~650 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
+- ~600 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
 - Lua scripting on the control plane with extensive RPC support.
 - RESTful API for live monitoring and hot-reloading Lua modules without restarts.
 - Full IPv6 support; horizontal scalability.
@@ -149,9 +149,9 @@ Set up on each node:
 
 ### Runtime Dependencies
 
-**Statically-linked setup**: Download a `-static` build from the [Releases](https://github.com/hexian000/neosocksd/releases) section — no additional runtime dependencies are needed.
+**Statically linked setup**: Download a `-static` build from the [Releases](https://github.com/hexian000/neosocksd/releases) section — no additional runtime dependencies are needed.
 
-**Dynamically-linked setup**: Install the following runtime dependencies.
+**Dynamically linked setup**: Install the following runtime dependencies.
 
 ```sh
 # Debian / Ubuntu

@@ -3,8 +3,12 @@
 
 #include "transfer.h"
 
+#include "io/io.h"
+#include "os/clock.h"
 #include "os/socket.h"
 #include "util.h"
+
+#define UTILS_MEASURE_H
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -118,7 +122,7 @@ static void set_nonblock(const int fd)
  * Bidirectional transfer: write uplink payload from acc_peer and downlink
  * payload from dial_peer; verify both arrive at the opposite peers.
  */
-T_DECLARE_CASE(test_transfer_moves_payload)
+T_DECLARE_CASE(transfer_moves_payload)
 {
 	static const char uplink[] = "neosocksd-uplink";
 	static const char downlink[] = "downlink-data";
@@ -198,7 +202,7 @@ T_DECLARE_CASE(test_transfer_moves_payload)
 #if WITH_SPLICE
 /* The normal FINISHED path must also release splice pipes, not only the
  * cancellation path. */
-T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
+T_DECLARE_CASE(transfer_splice_releases_pipes_on_finish)
 {
 	static const char uplink[] = "splice-uplink";
 	static const char downlink[] = "splice-downlink";
@@ -277,7 +281,7 @@ T_DECLARE_CASE(test_transfer_splice_releases_pipes_on_finish)
  * internal resources.  transfer_free() joins the xfer thread and drains
  * main_disp, so after it returns, no callback will arrive.
  */
-T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
+T_DECLARE_CASE(transfer_ctx_cancel_no_callback)
 {
 	int acc_peer = -1, acc_fd = -1;
 	int dial_fd = -1, dial_peer = -1;
@@ -319,7 +323,7 @@ T_DECLARE_CASE(test_transfer_ctx_cancel_no_callback)
  * If the uplink destination has no reader, writes fail immediately.
  * The transfer must detect the error and call on_finished.
  */
-T_DECLARE_CASE(test_transfer_dst_error_finishes)
+T_DECLARE_CASE(transfer_dst_error_finishes)
 {
 	int acc_peer = -1, acc_fd = -1;
 	int dial_fd = -1, dial_peer = -1;
@@ -364,7 +368,7 @@ T_DECLARE_CASE(test_transfer_dst_error_finishes)
  * Pre-fill the uplink send buffer to exercise the EV_WRITE / backpressure
  * code path; verify the payload still arrives after the buffer is drained.
  */
-T_DECLARE_CASE(test_transfer_backpressure_completes)
+T_DECLARE_CASE(transfer_backpressure_completes)
 {
 	static const char fill[] = "backpressure-fill";
 	int acc_peer = -1, acc_fd = -1;
@@ -440,7 +444,7 @@ T_DECLARE_CASE(test_transfer_backpressure_completes)
  * This simulates a server under high churn where connections are
  * accepted and immediately closed.
  */
-T_DECLARE_CASE(test_transfer_serve_join_rapid_cycles)
+T_DECLARE_CASE(transfer_serve_join_rapid_cycles)
 {
 	static const int CYCLES = 50;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -487,7 +491,7 @@ T_DECLARE_CASE(test_transfer_serve_join_rapid_cycles)
  * When both uplink and downlink close their write ends, the transfer
  * must complete and decrement num_sessions exactly once, not twice.
  */
-T_DECLARE_CASE(test_transfer_both_halves_close_normally)
+T_DECLARE_CASE(transfer_both_halves_close_normally)
 {
 	int acc_peer = -1, acc_fd = -1;
 	int dial_fd = -1, dial_peer = -1;
@@ -569,22 +573,113 @@ T_DECLARE_CASE(transfer_pipe_shrink)
 #endif /* WITH_ALLOC_CACHE */
 #endif /* WITH_SPLICE */
 
+/*
+ * Shared benchmark driver.  Each iteration transfers a small payload
+ * through a fresh socketpair, runs the event loop to completion, and
+ * verifies the result.  When @p use_splice is true the splice path is
+ * exercised; otherwise the standard recv/send path is used.
+ */
+static void
+bench_transfer_impl(struct testing_bench *restrict _b_, const bool use_splice)
+{
+	static unsigned char payload[IO_BUFSIZE];
+	static bool payload_init = false;
+	if (!payload_init) {
+		memset(payload, 0xAA, IO_BUFSIZE);
+		payload_init = true;
+	}
+	enum { PAYLOAD_SZ = IO_BUFSIZE };
+
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct transfer *xfer = transfer_create(loop, 1);
+	T_CHECK(xfer != NULL);
+
+	for (uint_fast64_t i = 0; i < _b_->N; i++) {
+		int acc_peer, acc_fd, dial_fd, dial_peer;
+		struct test_xfer_state state = { .num_sessions = 1 };
+
+		make_socketpair(&acc_peer, &acc_fd);
+		make_socketpair(&dial_fd, &dial_peer);
+		set_nonblock(acc_fd);
+		set_nonblock(dial_fd);
+
+		T_CHECK(send(acc_peer, payload, PAYLOAD_SZ, 0) ==
+			(ssize_t)PAYLOAD_SZ);
+		T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+		T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
+
+		struct transfer_opts opts = {
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.num_sessions = &state.num_sessions,
+		};
+#if WITH_SPLICE
+		opts.use_splice = use_splice;
+#else
+		UNUSED(use_splice);
+#endif
+		T_CHECK(transfer_serve(xfer, acc_fd, dial_fd, &opts));
+
+		while (state.num_sessions > 0) {
+			ev_run(loop, EVRUN_ONCE);
+		}
+
+		char out[PAYLOAD_SZ];
+		size_t got = 0;
+		while (got < PAYLOAD_SZ) {
+			const ssize_t n =
+				recv(dial_peer, out + got, PAYLOAD_SZ - got, 0);
+			if (n <= 0) {
+				break;
+			}
+			got += (size_t)n;
+		}
+
+		SOCKET_CLOSE_FD(acc_peer);
+		SOCKET_CLOSE_FD(dial_peer);
+	}
+
+	transfer_join(xfer);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_BENCH(bench_transfer_recvsend)
+{
+	bench_transfer_impl(_b_, false);
+}
+
+#if WITH_SPLICE
+T_DECLARE_BENCH(bench_transfer_splice)
+{
+	bench_transfer_impl(_b_, true);
+}
+#endif /* WITH_SPLICE */
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
 
-	T_RUN_CASE(t, test_transfer_moves_payload);
+	T_RUN_CASE(t, transfer_moves_payload);
 #if WITH_SPLICE
 	T_RUN_CASE(t, transfer_pipe_new_close);
 #if WITH_ALLOC_CACHE
 	T_RUN_CASE(t, transfer_pipe_shrink);
 #endif
-	T_RUN_CASE(t, test_transfer_splice_releases_pipes_on_finish);
+	T_RUN_CASE(t, transfer_splice_releases_pipes_on_finish);
 #endif
-	T_RUN_CASE(t, test_transfer_ctx_cancel_no_callback);
-	T_RUN_CASE(t, test_transfer_dst_error_finishes);
-	T_RUN_CASE(t, test_transfer_backpressure_completes);
-	T_RUN_CASE(t, test_transfer_serve_join_rapid_cycles);
-	T_RUN_CASE(t, test_transfer_both_halves_close_normally);
+	T_RUN_CASE(t, transfer_ctx_cancel_no_callback);
+	T_RUN_CASE(t, transfer_dst_error_finishes);
+	T_RUN_CASE(t, transfer_backpressure_completes);
+	T_RUN_CASE(t, transfer_serve_join_rapid_cycles);
+	T_RUN_CASE(t, transfer_both_halves_close_normally);
+
+	if (getenv("BENCH")) {
+		T_RUN_BENCH(t, bench_transfer_recvsend);
+#if WITH_SPLICE
+		T_RUN_BENCH(t, bench_transfer_splice);
+#endif
+	}
+
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

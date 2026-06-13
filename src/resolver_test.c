@@ -238,5 +238,5 @@ int main(void)
 	T_RUN_CASE(t, resolve_success_ipv6);
 	T_RUN_CASE(t, resolve_success_unspec);
 	resolver_cleanup();
-	return !T_RESULT(t);
+	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

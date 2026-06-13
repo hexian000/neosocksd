@@ -30,7 +30,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
 
 #if defined(WIN32)
 #define PATH_SEPARATOR '\\'

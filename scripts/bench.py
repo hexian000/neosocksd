@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import shutil
@@ -40,6 +41,8 @@ class ScenarioResult:
     total_bits_per_second: float
     sent_bits_per_second: float
     received_bits_per_second: float
+    stddev_bits_per_second: float
+    interval_throughputs: List[float]
     duration_seconds: float
 
 
@@ -378,6 +381,60 @@ def format_bits_per_second(bits_per_second: float) -> str:
     return "0.00 bit/s"
 
 
+def extract_interval_throughputs(report: Dict[str, object]) -> List[float]:
+    """Return per-interval total bits_per_second values from an iperf3 JSON report."""
+    intervals = report.get("intervals", [])
+    if not isinstance(intervals, list):
+        return []
+    values: List[float] = []
+    for interval in intervals:
+        if not isinstance(interval, dict):
+            continue
+        total = 0.0
+        sum_obj = interval.get("sum")
+        if isinstance(sum_obj, dict):
+            bps = sum_obj.get("bits_per_second")
+            if isinstance(bps, (int, float)):
+                total = float(bps)
+        if total == 0.0:
+            streams = interval.get("streams")
+            if isinstance(streams, list):
+                for stream in streams:
+                    if isinstance(stream, dict):
+                        bps = stream.get("bits_per_second")
+                        if isinstance(bps, (int, float)):
+                            total += float(bps)
+        values.append(total)
+    return values
+
+
+def compute_stddev(values: Sequence[float]) -> float:
+    """Return sample standard deviation of the given values."""
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return math.sqrt(variance)
+
+
+def compute_combined_stddev(
+        reports: Sequence[Dict[str, object]],
+) -> float:
+    """Compute stddev of per-interval throughput across all reports."""
+    all_intervals = collect_interval_throughputs(reports)
+    return compute_stddev(all_intervals)
+
+
+def collect_interval_throughputs(
+        reports: Sequence[Dict[str, object]],
+) -> List[float]:
+    """Gather per-interval throughput values across all reports."""
+    all_intervals: List[float] = []
+    for report in reports:
+        all_intervals.extend(extract_interval_throughputs(report))
+    return all_intervals
+
+
 def maybe_reexec_in_netns(netem_delay: Optional[str]) -> None:
     if not netem_delay or os.environ.get(BENCH_NETNS_ENV) == "1":
         return
@@ -488,6 +545,7 @@ def render_markdown_report(
         duration: int,
         parallel: int,
         netem_delay: Optional[str],
+        pipe: bool,
     command_timeout_seconds: float,
     shutdown_budget: ProcessShutdownBudget,
 ) -> str:
@@ -502,6 +560,7 @@ def render_markdown_report(
         "| Duration per run | %d s |" % duration,
         "| Parallel streams | %d |" % parallel,
         "| Netem delay | %s |" % (netem_delay or "off"),
+        "| Pipe mode | %s |" % ("on" if pipe else "off"),
         "| Benchmark timeout | %.1f s per scenario |" % command_timeout_seconds,
         "| Shutdown grace | SIGINT %.1f s, terminate %.1f s |"
         % (
@@ -512,8 +571,8 @@ def render_markdown_report(
         "",
         "## Throughput",
         "",
-        "| Scenario | Total Throughput | Sent | Received | Duration | Logs |",
-        "| --- | ---: | ---: | ---: | ---: | --- |",
+        "| Scenario | Total Throughput | Sent | Received | StdDev | Duration | Logs |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for result in results:
         log_parts: List[str] = []
@@ -539,12 +598,13 @@ def render_markdown_report(
             )
         log_text = ", ".join(log_parts)
         lines.append(
-            "| %s | %s | %s | %s | %.2f s | %s |"
+            "| %s | %s | %s | %s | %s | %.2f s | %s |"
             % (
                 result.scenario.label,
                 format_bits_per_second(result.total_bits_per_second),
                 format_bits_per_second(result.sent_bits_per_second),
                 format_bits_per_second(result.received_bits_per_second),
+                format_bits_per_second(result.stddev_bits_per_second),
                 result.duration_seconds,
                 log_text,
             )
@@ -553,6 +613,19 @@ def render_markdown_report(
     for result in results:
         lines.append("- %s: `%s`" %
                      (result.scenario.label, " ; ".join(result.command_texts)))
+
+    lines.extend(["", "## Per-Second Throughput", ""])
+    for result in results:
+        lines.append("### %s" % result.scenario.label)
+        lines.append("")
+        if not result.interval_throughputs:
+            lines.append("*(no interval data)*")
+        else:
+            lines.append("| Second | Throughput |")
+            lines.append("| ---: | ---: |")
+            for index, bps in enumerate(result.interval_throughputs, start=1):
+                lines.append("| %d | %s |" % (index, format_bits_per_second(bps)))
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -590,6 +663,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--netem-delay",
         help="optional tc netem delay applied to the proxy listen port, for example 100ms",
+    )
+    parser.add_argument(
+        "--pipe",
+        default=False,
+        action="store_true",
+        help="pass --pipe to neosocksd",
     )
     parser.add_argument("--iperf3", default="iperf3",
                         help="iperf3 executable name")
@@ -645,6 +724,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "-f", "127.0.0.1:5201",
             "--loglevel", "0",
         ]
+        if args.pipe:
+            proxy_command.append("--pipe")
         log("+ %s" % quote_command(proxy_command))
         proxy_proc = subprocess.Popen(
             proxy_command,
@@ -692,6 +773,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ]
             total, sent, received, seconds = combine_throughput(
                 reports, scenario)
+            stddev = compute_combined_stddev(reports)
+            intervals = collect_interval_throughputs(reports)
             results.append(
                 ScenarioResult(
                     scenario=scenario,
@@ -702,6 +785,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     total_bits_per_second=total,
                     sent_bits_per_second=sent,
                     received_bits_per_second=received,
+                    stddev_bits_per_second=stddev,
+                    interval_throughputs=intervals,
                     duration_seconds=seconds,
                 )
             )
@@ -729,6 +814,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         duration=args.duration,
         parallel=args.parallel,
         netem_delay=args.netem_delay,
+        pipe=args.pipe,
         command_timeout_seconds=command_timeout_seconds,
         shutdown_budget=shutdown_budget,
     )

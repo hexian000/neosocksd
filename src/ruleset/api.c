@@ -14,7 +14,6 @@
 #include "net/addr.h"
 #include "os/clock.h"
 #include "os/socket.h"
-#include "utils/minmax.h"
 #include "utils/serialize.h"
 
 #include <ev.h>

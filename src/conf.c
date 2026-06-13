@@ -6,9 +6,7 @@
 #include "utils/slog.h"
 
 #if WITH_LUA
-#include <lauxlib.h>
 #include <lua.h>
-#include <lualib.h>
 #endif
 
 #include <inttypes.h>
@@ -571,7 +569,7 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			print_usage();
 			return false;
 		}
-#if WITH_LUA
+#if WITH_RULESET
 		if (strcmp(argv[i], "-c") == 0 ||
 		    strcmp(argv[i], "--config") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);

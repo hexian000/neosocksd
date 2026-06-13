@@ -44,7 +44,8 @@ case "$1" in
         -DENABLE_RULESET=OFF \
         ..
     cp compile_commands.json ../
-    cmake --build . -t neosocksd
+    cmake --build . -j"$(nproc)"
+    ctest -j"$(nproc)"
     ls -lh bin/neosocksd
     ;;
 "posix")
@@ -56,7 +57,8 @@ case "$1" in
         -DFORCE_POSIX=ON \
         ..
     cp compile_commands.json ../
-    cmake --build . -t neosocksd
+    cmake --build . -j"$(nproc)"
+    ctest -j"$(nproc)"
     ls -lh bin/neosocksd
     ;;
 "clang")
@@ -113,7 +115,8 @@ case "$1" in
         -DENABLE_SANITIZERS=ON \
         ..
     cp compile_commands.json ../
-    cmake --build . -t neosocksd
+    cmake --build . -j"$(nproc)"
+    ctest -j"$(nproc)"
     ls -lh bin/neosocksd
     ;;
 "min")
@@ -134,7 +137,8 @@ case "$1" in
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
         -DENABLE_THREADS=ON \
         ..
-    cmake --build . -t neosocksd
+    cmake --build . -j"$(nproc)"
+    ctest -j"$(nproc)"
     (cd bin && objdump -drwS neosocksd >neosocksd.S)
     ls -lh bin/neosocksd
     ;;
@@ -147,7 +151,8 @@ case "$1" in
         -DENABLE_THREADS=ON \
         ..
     cp compile_commands.json ../
-    cmake --build . -t neosocksd
+    cmake --build . -j"$(nproc)"
+    ctest -j"$(nproc)"
     ls -lh bin/neosocksd
     ;;
 "d")

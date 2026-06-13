@@ -38,13 +38,11 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 	size_t remain = *len;
 
 	while (remain > 0 && z->status == TDEFL_STATUS_OKAY) {
-		/* If output buffer has space, compress more data */
 		if (z->dstlen < sizeof(z->dstbuf)) {
 			size_t srclen = remain;
 			unsigned char *dst = z->dstbuf + z->dstlen;
 			size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
 
-			/* Compress data into output buffer */
 			z->status = tdefl_compress(
 				&z->deflator, src, &srclen, dst, &dstlen,
 				TDEFL_NO_FLUSH);
@@ -53,7 +51,6 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 			nwritten += srclen;
 		}
 
-		/* Write compressed data from buffer to base stream */
 		unsigned char *avail = z->dstbuf + z->dstpos;
 		size_t n = z->dstlen - z->dstpos;
 		const int err = stream_write(z->base, avail, &n);
@@ -62,10 +59,8 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 			return err;
 		}
 		if (z->dstpos < z->dstlen) {
-			/* Short write - base stream is full */
 			return -1;
 		}
-		/* All output written, reset buffer for next iteration */
 		z->dstpos = z->dstlen = 0;
 	}
 
@@ -76,28 +71,16 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 	return 0;
 }
 
-/**
- * @brief Internal flush function for DEFLATE stream
- * @param z Pointer to deflate_stream structure
- * @param flush Type of flush operation to perform
- * @return 0 on success, error code on failure
- *
- * This function flushes any pending compressed data from the compressor
- * to the base stream. Different flush modes control how the compressor
- * handles remaining data (sync flush vs final finish).
- */
 static int
 deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 {
 	do {
-		/* Flush any remaining compressed data from compressor */
 		unsigned char *buf = z->dstbuf + z->dstlen;
 		size_t n = sizeof(z->dstbuf) - z->dstlen;
 		z->status = tdefl_compress(
 			&z->deflator, NULL, NULL, buf, &n, flush);
 		z->dstlen += n;
 
-		/* Write flushed data to base stream */
 		buf = z->dstbuf + z->dstpos;
 		n = z->dstlen - z->dstpos;
 		const int err = stream_write(z->base, buf, &n);
@@ -106,7 +89,6 @@ deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 			return err;
 		}
 		if (z->dstpos < z->dstlen) {
-			/* Short write - base stream is full */
 			return -1;
 		}
 		z->dstpos = z->dstlen = 0;
@@ -118,14 +100,7 @@ deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 	return 0;
 }
 
-/**
- * @brief Flush DEFLATE stream (full flush)
- * @param p Pointer to deflate_stream structure
- * @return 0 on success, error code on failure
- *
- * Performs a full flush, emitting a sync point so that the decompressor
- * can restart from this point.  The base stream is also flushed.
- */
+/* full flush: emit a sync point so the decompressor can restart here */
 static int deflate_flush(void *p)
 {
 	struct deflate_stream *restrict z = p;
@@ -136,14 +111,6 @@ static int deflate_flush(void *p)
 	return ret;
 }
 
-/**
- * @brief Close DEFLATE stream and clean up resources
- * @param p Pointer to deflate_stream structure
- * @return 0 on success, error code on failure
- *
- * Finishes the compression process, flushes all remaining data,
- * closes the base stream, and frees allocated memory.
- */
 static int deflate_close(void *p)
 {
 	struct deflate_stream *restrict z = p;
@@ -153,16 +120,6 @@ static int deflate_close(void *p)
 	return flusherr != 0 ? flusherr : err;
 }
 
-/**
- * @brief Create a DEFLATE compression writer (internal function)
- * @param base Base stream to write compressed data to
- * @param zlib Whether to use zlib format (true) or raw DEFLATE (false)
- * @return New compression stream, or NULL on error
- *
- * This internal function creates either a zlib or raw DEFLATE compression
- * stream. The zlib format includes headers and checksums, while raw DEFLATE
- * contains only the compressed data blocks.
- */
 static struct stream *deflate_writer(struct stream *base, const bool zlib)
 {
 	if (base == NULL) {
@@ -176,7 +133,6 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 		return NULL;
 	}
 
-	/* Set up virtual function table for stream interface */
 	static const struct stream_vftable vftable = {
 		.write = deflate_write,
 		.flush = deflate_flush,
@@ -186,7 +142,6 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 	z->base = base;
 	z->status = TDEFL_STATUS_OKAY;
 
-	/* Configure compression flags - zlib header if requested */
 	const int flags =
 		(zlib ? TDEFL_WRITE_ZLIB_HEADER : 0) | TDEFL_DEFAULT_MAX_PROBES;
 	const tdefl_status status = tdefl_init(&z->deflator, NULL, NULL, flags);
@@ -196,12 +151,9 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 		return NULL;
 	}
 
-	/* Initialize output buffer state */
 	z->dstpos = z->dstlen = 0;
 	return (struct stream *)z;
 }
-
-/* Public API wrapper functions */
 
 struct stream *codec_zlib_writer(struct stream *base)
 {
@@ -213,13 +165,6 @@ struct stream *codec_deflate_writer(struct stream *base)
 	return deflate_writer(base, false);
 }
 
-/**
- * @brief DEFLATE decompression stream implementation
- *
- * This structure wraps a base stream to provide DEFLATE decompression.
- * It maintains internal buffers for both input and output data, managing
- * the decompression process incrementally.
- */
 struct inflate_stream {
 	struct stream s;
 	struct stream *base;
@@ -235,22 +180,10 @@ struct inflate_stream {
 };
 ASSERT_SUPER(struct stream, struct inflate_stream, s);
 
-/**
- * @brief Direct read from DEFLATE decompression stream
- * @param p Pointer to inflate_stream structure
- * @param buf Pointer to buffer pointer; set to point to available data
- * @param len Pointer to length; updated with available data length
- * @return 0 on success, error code on failure
- *
- * This function provides direct access to decompressed data without copying.
- * It manages the decompression pipeline: reading compressed data, decompressing
- * it, and providing pointers to the decompressed output buffer.
- */
 static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 {
 	struct inflate_stream *restrict z = p;
 	do {
-		/* If source buffer is empty and not at EOF, read more input */
 		if (z->srclen == 0 && !z->srceof) {
 			const void *srcbuf;
 			size_t n = IO_BUFSIZE;
@@ -267,7 +200,6 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 			z->dstpos = z->dstlen = 0;
 		}
 
-		/* If we have input data and output space, decompress */
 		if (z->srclen > 0 && z->dstlen < sizeof(z->dstbuf) &&
 		    z->status > TINFL_STATUS_DONE) {
 			const unsigned char *src = z->srcbuf;
@@ -276,12 +208,10 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 			size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
 			int flags = z->flags;
 
-			/* Tell decompressor if more input is available */
 			if (!z->srceof) {
 				flags |= TINFL_FLAG_HAS_MORE_INPUT;
 			}
 
-			/* Decompress data */
 			z->status = tinfl_decompress(
 				&z->inflator, src, &srclen, z->dstbuf, dst,
 				&dstlen, flags);
@@ -290,7 +220,6 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 			z->dstlen += dstlen;
 		}
 
-		/* If we have output data available, return it */
 		if (z->dstpos < z->dstlen) {
 			const size_t maxread = *len;
 			size_t n = z->dstlen - z->dstpos;
@@ -307,7 +236,6 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 		}
 	} while (z->status > TINFL_STATUS_DONE && !z->srceof);
 
-	/* No more data available */
 	*len = 0;
 	if (z->status != TINFL_STATUS_DONE) {
 		return z->status;
@@ -315,13 +243,6 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 	return 0;
 }
 
-/**
- * @brief Close inflate stream and clean up resources
- * @param p Pointer to inflate_stream structure
- * @return 0 on success, error code on failure
- *
- * Closes the base stream and frees allocated memory.
- */
 static int inflate_close(void *p)
 {
 	struct inflate_stream *restrict z = p;
@@ -330,16 +251,6 @@ static int inflate_close(void *p)
 	return err;
 }
 
-/**
- * @brief Create a DEFLATE decompression reader (internal function)
- * @param base Base stream to read compressed data from
- * @param zlib Whether to expect zlib format (true) or raw DEFLATE (false)
- * @return New decompression stream, or NULL on error
- *
- * This internal function creates either a zlib or raw DEFLATE decompression
- * stream. The zlib format includes headers and checksums, while raw DEFLATE
- * contains only the compressed data blocks.
- */
 static struct stream *inflate_reader(struct stream *base, const bool zlib)
 {
 	if (base == NULL) {
@@ -361,7 +272,6 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 		return NULL;
 	}
 
-	/* Set up virtual function table for stream interface */
 	static const struct stream_vftable vftable = {
 		.direct_read = inflate_direct_read,
 		.close = inflate_close,
@@ -372,17 +282,13 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 	z->srcerr = 0;
 	z->srclen = 0;
 
-	/* Configure decompression flags - zlib header parsing if requested */
 	z->flags = zlib ? TINFL_FLAG_PARSE_ZLIB_HEADER : 0;
 	z->status = TINFL_STATUS_NEEDS_MORE_INPUT;
 	tinfl_init(&z->inflator);
 
-	/* Initialize output buffer state */
 	z->dstpos = z->dstlen = 0;
 	return (struct stream *)z;
 }
-
-/* Public API wrapper functions */
 
 struct stream *codec_zlib_reader(struct stream *base)
 {
@@ -396,12 +302,8 @@ struct stream *codec_inflate_reader(struct stream *base)
 
 /* RFC 1952 - gzip format implementation */
 
-/**
- * @brief gzip compression stream implementation
- *
- * Identical layout to deflate_stream, extended with running CRC-32 and
- * uncompressed byte count for the gzip trailer.
- */
+/* same as deflate_stream, extended with running CRC-32 and
+ * uncompressed byte count for the gzip trailer */
 struct gzip_wstream {
 	struct stream s;
 	struct stream *base;
@@ -459,7 +361,6 @@ static int gzip_write(void *p, const void *buf, size_t *restrict len)
 			z->status = tdefl_compress(
 				&z->deflator, src, &srclen, dst, &dstlen,
 				TDEFL_NO_FLUSH);
-			/* Update CRC-32 and size over the consumed input */
 			z->crc = (uint_least32_t)mz_crc32(z->crc, src, srclen);
 			z->isize += (uint_least32_t)srclen;
 			src += srclen, remain -= srclen;
@@ -624,11 +525,7 @@ struct stream *codec_gzip_writer(struct stream *base)
 	return (struct stream *)z;
 }
 
-/**
- * @brief gzip header flag bits (RFC 1952)
- *
- * These flags indicate which optional fields are present in the gzip header.
- */
+/* gzip header flag bits (RFC 1952) */
 enum gzip_flags {
 	/* File is probably ASCII text */
 	GZIP_FTEXT = 1 << 0,
@@ -642,9 +539,6 @@ enum gzip_flags {
 	GZIP_FCOMMENT = 1 << 4,
 };
 
-/**
- * @brief gzip decompression stream states
- */
 enum gzip_rstate {
 	/* Parsing gzip member header */
 	GZIP_R_HEADER,
@@ -654,11 +548,7 @@ enum gzip_rstate {
 	GZIP_R_TRAILER,
 };
 
-/**
- * @brief gzip header parser sub-phases
- *
- * These phases track parsing of optional fields within the gzip header.
- */
+/* gzip header parser sub-phases */
 enum gzip_hphase {
 	/* Accumulating fixed 10-byte header */
 	GZIP_HPASE_HEADER,
@@ -680,12 +570,8 @@ enum gzip_hphase {
 	GZIP_HPASE_XLEN_2 = 100,
 };
 
-/**
- * @brief gzip decompression stream implementation
- *
- * Wraps inflate_stream fields with a state machine that handles the gzip
- * header, body, and trailer for each member, supporting multiframe streams.
- */
+/* inflate_stream fields plus a state machine that handles the header,
+ * body and trailer of each member; supports multi-member streams */
 struct gzip_rstream {
 	struct stream s;
 	struct stream *base;
@@ -739,7 +625,6 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 			if (z->hdrpos < 10) {
 				break;
 			}
-			/* Validate magic and compression method */
 			if (z->hdrbuf[0] != 0x1f || z->hdrbuf[1] != 0x8b ||
 			    z->hdrbuf[2] != 0x08) {
 				LOGD("gzip: invalid magic");
@@ -913,7 +798,6 @@ static bool gzip_decompress_body(
 		z->dstpos = z->dstlen = 0;
 	}
 
-	/* Decompress if input and output space are available */
 	if (z->srclen > 0 && z->dstlen < sizeof(z->dstbuf) &&
 	    z->status > TINFL_STATUS_DONE) {
 		const unsigned char *src = z->srcbuf;
@@ -939,7 +823,6 @@ static bool gzip_decompress_body(
 		if (n > maxread) {
 			n = maxread;
 		}
-		/* Update CRC-32 and size before returning */
 		z->crc = (uint_least32_t)mz_crc32(
 			z->crc, z->dstbuf + z->dstpos, n);
 		z->isize += (uint_least32_t)n;
@@ -979,7 +862,6 @@ static bool gzip_decompress_body(
 
 static bool gzip_validate_trailer(struct gzip_rstream *z, size_t *len, int *ret)
 {
-	/* Consume 8 trailer bytes */
 	while (z->trailpos < 8 && z->srclen > 0) {
 		z->trail[z->trailpos++] = *z->srcbuf;
 		z->srcbuf++, z->srclen--;
@@ -994,7 +876,6 @@ static bool gzip_validate_trailer(struct gzip_rstream *z, size_t *len, int *ret)
 		}
 		return false;
 	}
-	/* Validate CRC-32 */
 	const uint_least32_t stored_crc =
 		(uint_least32_t)read_uint32_le(z->trail);
 	if (stored_crc != z->crc) {
@@ -1004,7 +885,6 @@ static bool gzip_validate_trailer(struct gzip_rstream *z, size_t *len, int *ret)
 		*ret = -1;
 		return true;
 	}
-	/* Validate ISIZE */
 	const uint_least32_t stored_isize =
 		(uint_least32_t)read_uint32_le(z->trail + 4);
 	if (stored_isize != z->isize) {
@@ -1032,7 +912,6 @@ static int gzip_direct_read(void *p, const void **buf, size_t *restrict len)
 {
 	struct gzip_rstream *restrict z = p;
 	for (;;) {
-		/* Refill source buffer when empty */
 		if (z->srclen == 0 && !z->srceof) {
 			const void *srcbuf;
 			size_t n = IO_BUFSIZE;

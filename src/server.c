@@ -35,7 +35,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 
 static bool is_startup_limited(const struct server *restrict s)
 {
@@ -234,14 +233,8 @@ static bool add_listener(
 }
 
 #if WITH_RULESET
-/**
- * @brief Rebuild the base dial request after a configuration reload.
- *
- * The boot configuration may change the forward/proxy settings, so the base
- * dial request must be rebuilt to reflect the effective configuration. On
- * success the previous request is freed and both the server and the attached
- * ruleset (if any) are updated; on failure the existing request is kept.
- */
+/* The boot configuration may change the forward/proxy settings, so the
+ * base dial request is rebuilt on reload; on failure the old one is kept. */
 static void server_reload_basereq(struct server *restrict s)
 {
 	struct dialreq *restrict newbasereq =
@@ -263,11 +256,11 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_SIGNAL);
 
-	struct server *restrict s = watcher->data;
 	switch (watcher->signum) {
 	case SIGHUP: {
 		(void)systemd_notify(DAEMON_SYSTEMD_STATE_RELOADING);
 #if WITH_RULESET
+		struct server *restrict s = watcher->data;
 		if (s->ruleset != NULL) {
 			struct ruleset *restrict ruleset = s->ruleset;
 			bool ok = true;

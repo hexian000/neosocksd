@@ -375,35 +375,6 @@ T_DECLARE_CASE(content_writer_roundtrip_deflate)
 	VBUF_FREE(vbuf);
 }
 
-T_DECLARE_CASE(http_resp_established_success)
-{
-	int sv[2] = { -1, -1 };
-	unsigned char rsp[128] = { 0 };
-	struct http_conn p = { 0 };
-
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	p.fd = sv[0];
-	T_EXPECT(http_resp_established(&p));
-
-	const ssize_t n = recv_nowait(sv[1], rsp, sizeof(rsp));
-	T_EXPECT(n > 0);
-	T_EXPECT(
-		memmem(rsp, (size_t)n, "200 Connection established", 26) !=
-		NULL);
-
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
-}
-
-T_DECLARE_CASE(http_resp_established_failure)
-{
-	struct http_conn p = {
-		.fd = -1,
-	};
-
-	T_EXPECT(!http_resp_established(&p));
-}
-
 T_DECLARE_CASE(http_resp_errpage_normal_and_fallback)
 {
 	struct http_conn p = { 0 };
@@ -485,7 +456,9 @@ T_DECLARE_CASE(http_conn_recv_bad_version)
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), -1);
+	/* request-mode: bad version → STATE_PARSE_ERROR + 0 (not -1) */
+	T_EXPECT_EQ(http_conn_recv(&p), 0);
+	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
 
 	T_CHECK(close(sv[0]) == 0);
 	T_CHECK(close(sv[1]) == 0);
@@ -925,8 +898,6 @@ int main(void)
 	T_RUN_CASE(t, content_reader_gzip);
 	T_RUN_CASE(t, content_writer_roundtrip_none);
 	T_RUN_CASE(t, content_writer_roundtrip_deflate);
-	T_RUN_CASE(t, http_resp_established_success);
-	T_RUN_CASE(t, http_resp_established_failure);
 	T_RUN_CASE(t, http_resp_errpage_normal_and_fallback);
 	T_RUN_CASE(t, http_conn_recv_request_ok);
 	T_RUN_CASE(t, http_conn_recv_response_ok);

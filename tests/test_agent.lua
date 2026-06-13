@@ -24,6 +24,15 @@ return function(T)
     local orig_unix       = time.unix
     time.unix             = function() return 10000 end
 
+    -- agent.maintenance() samples dial-failure counters from
+    -- neosocksd.stats(); stub them so real server traffic from earlier
+    -- test modules cannot leak into the probe-interval assertions
+    local fake_rejects    = 0
+    local orig_stats      = neosocksd.stats
+    neosocksd.stats       = function()
+        return { num_reject_upstream = fake_rejects, num_reject_timeout = 0 }
+    end
+
     -- ------------------------------------------------------------------ --
     -- 2. Load agent.lua with a minimal, isolated config
     -- ------------------------------------------------------------------ --
@@ -34,11 +43,11 @@ return function(T)
 
     _G.peerdb             = {}
     _G.agent              = {
-        peername     = "self",
-        conns        = {},
-        hosts        = { "self-host" },
-        verbose      = false,
-        passive      = true, -- prevent main() from starting background mainloop
+        peername = "self",
+        conns    = {},
+        hosts    = { "self-host" },
+        verbose  = false,
+        passive  = true, -- prevent main() from starting background mainloop
     }
 
     -- loadfile (not require) bypasses package cache, giving a fresh module
@@ -84,6 +93,7 @@ return function(T)
         ag.hosts  = { "self-host" }
         for k in pairs(ag.conn_state) do ag.conn_state[k] = nil end
         t_clock = 0
+        fake_rejects = 0
         await.rpcall = orig_rpcall -- undo any per-test mock
         -- Most tests assert single-round failure effects; the multi-failure
         -- tolerance is covered by its own dedicated tests that opt back in.
@@ -106,7 +116,7 @@ return function(T)
                 for id, conn in pairs(ag.conns) do
                     if conn[1] == conn_proxy then
                         local handler = handlers[func]
-                        if handler then return handler(id) end
+                        if handler then return handler(id, ...) end
                         return false, "no handler for " .. func
                     end
                 end
@@ -138,7 +148,7 @@ return function(T)
         -- anti-entropy could not propagate their data.
         reset()
         _G.peerdb["peer2"] = mkpeer(10)
-        local _, delta = rpc.sync("caller", D{ peer2 = 10 })
+        local _, delta = rpc.sync("caller", D { peer2 = 10 })
         assert(delta["peer2"] ~= nil,
             "entry at same version must appear in delta (>= regression)")
     end)
@@ -146,14 +156,14 @@ return function(T)
     T:test("sync: newer entry IS included", function()
         reset()
         _G.peerdb["peer2"] = mkpeer(11)
-        local _, delta = rpc.sync("caller", D{ peer2 = 10 })
+        local _, delta = rpc.sync("caller", D { peer2 = 10 })
         assert(delta["peer2"] ~= nil)
     end)
 
     T:test("sync: older entry is excluded", function()
         reset()
         _G.peerdb["peer2"] = mkpeer(9)
-        local _, delta = rpc.sync("caller", D{ peer2 = 10 })
+        local _, delta = rpc.sync("caller", D { peer2 = 10 })
         assert(delta["peer2"] == nil,
             "entry older than caller's known version must be excluded")
     end)
@@ -175,7 +185,7 @@ return function(T)
         t_clock = 1000
         local peer2_data = mkpeer(42, { "h2" }, {})
         with_rpcall({
-            probe = function() return true, "peer2", D{ peer2 = 42 } end,
+            probe = function() return true, "peer2", D { peer2 = 42 } end,
             sync  = function() return true, "peer2", { peer2 = peer2_data } end,
         }, function()
             ag.maintenance()
@@ -186,8 +196,6 @@ return function(T)
             "peer2 timestamp must be set by mkpeer (time.unix=mock:10000)")
     end)
 
-
-
     T:atest("maintenance: older version in delta is ignored", function()
         reset()
         t_clock = 1000
@@ -195,7 +203,7 @@ return function(T)
         ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
         with_rpcall({
             -- remote has version 9, local has version 10: no sync triggered
-            probe = function() return true, "peer2", D{ peer2 = 9 } end,
+            probe = function() return true, "peer2", D { peer2 = 9 } end,
         }, function()
             ag.maintenance()
         end)
@@ -204,7 +212,6 @@ return function(T)
         assert(_G.peerdb["peer2"].version == 10,
             "peerdb must not be downgraded to an older version")
     end)
-
 
     -- ------------------------------------------------------------------ --
     -- 6. expire() via maintenance
@@ -235,7 +242,7 @@ return function(T)
         reset()
         -- Self entry is guarded by peer ~= agent.peername in expire(),
         -- so it is never removed even with an ancient timestamp.
-        _G.peerdb["self"] = mkpeer(1, {"self-host"}, {})
+        _G.peerdb["self"] = mkpeer(1, { "self-host" }, {})
         _G.peerdb["self"].timestamp = 0
         with_rpcall({ probe = function() return false, "no route" end }, function()
             ag.maintenance()
@@ -428,19 +435,21 @@ return function(T)
     -- 8. Self-entry version management
     -- ------------------------------------------------------------------ --
 
-    T:atest("self-entry: version starts at 1 on first publish", function()
+    T:atest("self-entry: first publish is wall-clock seeded", function()
+        -- Versions are seeded with time.unix() so a fresh boot supersedes
+        -- stale copies of our entry left in the network by a previous boot.
         reset()
         _G.peerdb["self"] = nil
         with_rpcall({ probe = function() return false, "no route" end }, function()
             ag.maintenance()
         end)
         assert(_G.peerdb["self"] ~= nil, "self entry must be created by maintenance")
-        assert(_G.peerdb["self"].version == 1,
-            "initial version must be 1, got " ..
+        assert(_G.peerdb["self"].version == 10000,
+            "initial version must be time.unix(), got " ..
             tostring(_G.peerdb["self"].version))
     end)
 
-    T:atest("self-entry: version increments when content changes", function()
+    T:atest("self-entry: version below wall clock jumps to wall clock on change", function()
         reset()
         t_clock = 1000
         _G.peerdb["self"] = mkpeer(50, { "self-host" }, {})
@@ -449,9 +458,50 @@ return function(T)
             ag.maintenance()
         end)
         ag.hosts = { "self-host" }
-        assert(_G.peerdb["self"].version == 51,
-            "version must increment when hosts change, got " ..
+        assert(_G.peerdb["self"].version == 10000,
+            "version must jump to time.unix() when below it, got " ..
             tostring(_G.peerdb["self"].version))
+    end)
+
+    T:atest("self-entry: version stays monotone when the clock is behind", function()
+        -- After a backwards clock step, max(ver + 1, time.unix()) must keep
+        -- publishing strictly increasing versions, never regress.
+        reset()
+        t_clock = 1000
+        _G.peerdb["self"] = mkpeer(20000, { "self-host" }, {}) -- ahead of time.unix()=10000
+        ag.hosts = { "self-host", "added-host" }               -- trigger a change
+        with_rpcall({ probe = function() return false, "no route" end }, function()
+            ag.maintenance()
+        end)
+        ag.hosts = { "self-host" }
+        assert(_G.peerdb["self"].version == 20001,
+            "version must increment past the stored value when the clock is behind, got " ..
+            tostring(_G.peerdb["self"].version))
+    end)
+
+    T:atest("apply_delta: restarted peer's wall-clock version supersedes stale entry", function()
+        -- A peer that restarted publishes version = time.unix(), which must
+        -- replace the stale high-counter entry other nodes still hold.
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        t_clock = 1000
+        _G.peerdb["peer2"] = mkpeer(50, { "old-host" }, {}) -- stale pre-restart copy
+        with_rpcall({
+            probe = function()
+                t_clock = t_clock + 0.002
+                return true, "peer2", D { peer2 = 10000 }
+            end,
+            sync = function()
+                return true, "peer2", { peer2 = mkpeer(10000, { "new-host" }, {}) }
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+        assert(_G.peerdb["peer2"].version == 10000,
+            "restarted peer's entry must supersede the stale copy, got v" ..
+            tostring(_G.peerdb["peer2"].version))
+        assert(_G.peerdb["peer2"].hosts[1] == "new-host",
+            "entry content must be replaced along with the version")
     end)
 
     T:atest("self-entry: version stable when content unchanged", function()
@@ -548,7 +598,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1 }
+                return true, "peer2", D { peer2 = 1 }
             end,
             sync = function()
                 return true, "peer2", { peer2 = mkpeer(1, { "peer2-host" }, {}) }
@@ -577,7 +627,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1, peer3 = 1 }
+                return true, "peer2", D { peer2 = 1, peer3 = 1 }
             end,
             sync = function()
                 return true, "peer2", sync_data
@@ -604,7 +654,7 @@ return function(T)
         with_rpcall({
             probe = function(id)
                 t_clock = t_clock + (id == 1 and 0.010 or 0.012) -- 10ms vs 12ms
-                return true, "peer2", D{ peer2 = 1 }
+                return true, "peer2", D { peer2 = 1 }
             end,
             sync = function()
                 return true, "peer2", { peer2 = peer2_data }
@@ -621,7 +671,7 @@ return function(T)
             -- peer2 already known at version 1: no sync triggered
             probe = function(id)
                 t_clock = t_clock + (id == 1 and 0.010 or 0.011) -- conn[2] marginally faster
-                return true, "peer2", D{}
+                return true, "peer2", D {}
             end,
         }, function()
             ag.maintenance()
@@ -685,7 +735,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1, peer3 = 1, peer4 = 1 }
+                return true, "peer2", D { peer2 = 1, peer3 = 1, peer4 = 1 }
             end,
             sync = function()
                 return true, "peer2", sync_data
@@ -719,7 +769,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1, peer3 = 1, peer4 = 1, peer5 = 1 }
+                return true, "peer2", D { peer2 = 1, peer3 = 1, peer4 = 1, peer5 = 1 }
             end,
             sync = function()
                 return true, "peer2", sync_data
@@ -749,7 +799,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1, peer3 = 1, peer4 = 1 }
+                return true, "peer2", D { peer2 = 1, peer3 = 1, peer4 = 1 }
             end,
             sync = function()
                 return true, "peer2", sync_data
@@ -794,7 +844,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 2, peer3 = 2, peer4 = 2 }
+                return true, "peer2", D { peer2 = 2, peer3 = 2, peer4 = 2 }
             end,
             sync = function()
                 return true, "peer2", sync_data
@@ -828,7 +878,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 2, peer3 = 2 }
+                return true, "peer2", D { peer2 = 2, peer3 = 2 }
             end,
             sync = function() return true, "peer2", round1_sync end,
         }, function()
@@ -849,7 +899,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 3, peer3 = 3 }
+                return true, "peer2", D { peer2 = 3, peer3 = 3 }
             end,
             sync = function() return true, "peer2", round2_sync end,
         }, function()
@@ -943,7 +993,7 @@ return function(T)
             probe = function(id)
                 t_clock = t_clock + 0.002
                 return true, id == 1 and "peer2" or "peer3",
-                    D{ peer2 = 1, peer3 = 1, peer4 = 1 }
+                    D { peer2 = 1, peer3 = 1, peer4 = 1 }
             end,
             sync = function(id)
                 return true, id == 1 and "peer2" or "peer3", sync_data
@@ -980,7 +1030,7 @@ return function(T)
         with_rpcall({
             probe = function(id)
                 t_clock = t_clock + (id == 1 and 0.001 or 0.010)
-                return true, id == 1 and "peer2" or "peer3", D{ peer2 = 1, peer3 = 1 }
+                return true, id == 1 and "peer2" or "peer3", D { peer2 = 1, peer3 = 1 }
             end,
             sync = function() return true, "peer2", sync_data end,
         }, function()
@@ -997,7 +1047,7 @@ return function(T)
         with_rpcall({
             probe = function(id)
                 t_clock = t_clock + (id == 1 and 0.001 or 0.010)
-                return true, id == 1 and "peer2" or "peer3", D{ peer2 = 1, peer3 = 1 }
+                return true, id == 1 and "peer2" or "peer3", D { peer2 = 1, peer3 = 1 }
             end,
             sync = function() return true, "peer2", sync_data end,
         }, function()
@@ -1025,7 +1075,7 @@ return function(T)
         with_rpcall({
             probe = function(id)
                 t_clock = t_clock + (id == 1 and 0.001 or 0.010)
-                return true, id == 1 and "peer2" or "peer3", D{ peer2 = 1, peer3 = 1 }
+                return true, id == 1 and "peer2" or "peer3", D { peer2 = 1, peer3 = 1 }
             end,
             sync = function() return true, "peer2", sync_data end,
         }, function()
@@ -1039,7 +1089,7 @@ return function(T)
             probe = function(id)
                 t_clock = t_clock + 0.001
                 if id == 1 then
-                    return true, "peer2", D{ peer2 = 1, peer3 = 1 }
+                    return true, "peer2", D { peer2 = 1, peer3 = 1 }
                 else
                     return false, "connection refused" -- direct C failed
                 end
@@ -1084,7 +1134,7 @@ return function(T)
             probe = function(id)
                 t_clock = t_clock + (id == 1 and 0.010 or 0.005)
                 return true, id == 1 and "peer2" or "peer3",
-                    D{ peer2 = 1, peer3 = 1, peer4 = 1 }
+                    D { peer2 = 1, peer3 = 1, peer4 = 1 }
             end,
             sync = function(id)
                 return true, id == 1 and "peer2" or "peer3", sync_data_r1
@@ -1113,7 +1163,7 @@ return function(T)
                 if id == 1 then
                     return false, "connection refused" -- A failed
                 end
-                return true, "peer3", D{ peer3 = 2, peer4 = 2 }
+                return true, "peer3", D { peer3 = 2, peer4 = 2 }
             end,
             sync = function(id)
                 if id == 1 then return false, "no route" end
@@ -1152,7 +1202,7 @@ return function(T)
             probe = function(id)
                 t_clock = t_clock + 0.005
                 if id == 1 then return false, "timeout" end
-                return true, "peer3", D{ peer3 = 1, peer4 = 1 }
+                return true, "peer3", D { peer3 = 1, peer4 = 1 }
             end,
             sync = function(id)
                 if id == 1 then return false, "no route" end
@@ -1178,7 +1228,7 @@ return function(T)
             probe = function(id)
                 t_clock = t_clock + 0.005
                 return true, id == 1 and "peer2" or "peer3",
-                    D{ peer2 = 2, peer3 = 2, peer4 = 2 }
+                    D { peer2 = 2, peer3 = 2, peer4 = 2 }
             end,
             sync = function(id)
                 return true, id == 1 and "peer2" or "peer3", sync_data_r2
@@ -1218,7 +1268,7 @@ return function(T)
             probe = function(id)
                 t_clock = t_clock + 0.005
                 return true, id == 1 and "peer2" or "peer3",
-                    D{ peer2 = 1, peer3 = 1, peer4 = 1 }
+                    D { peer2 = 1, peer3 = 1, peer4 = 1 }
             end,
             sync = function(id)
                 return true, id == 1 and "peer2" or "peer3", sync_data_r1
@@ -1245,7 +1295,7 @@ return function(T)
             probe = function(id)
                 t_clock = t_clock + 0.005
                 return true, id == 1 and "peer2" or "peer3",
-                    D{ peer2 = 2, peer3 = 2, peer4 = 2 }
+                    D { peer2 = 2, peer3 = 2, peer4 = 2 }
             end,
             sync = function(id)
                 return true, id == 1 and "peer2" or "peer3", sync_data_r2
@@ -1282,12 +1332,12 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1 }
+                return true, "peer2", D { peer2 = 1 }
             end,
             sync = function()
                 -- Include "peer2" in hosts so resolve_internal can find it
                 return true, "peer2", {
-                    peer2 = mkpeer(1, {"peer2-host", "peer2"}, {}),
+                    peer2 = mkpeer(1, { "peer2-host", "peer2" }, {}),
                 }
             end,
         }, function()
@@ -1336,7 +1386,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1 }
+                return true, "peer2", D { peer2 = 1 }
             end,
             sync = function()
                 return true, "peer2", {
@@ -1365,10 +1415,10 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1 }
+                return true, "peer2", D { peer2 = 1 }
             end,
             sync = function()
-                return true, "peer2", { peer2 = mkpeer(1, {"peer2-host"}, {}) }
+                return true, "peer2", { peer2 = mkpeer(1, { "peer2-host" }, {}) }
             end,
         }, function()
             ag.maintenance()
@@ -1401,7 +1451,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.010
-                return true, "peer2", D{ peer2 = 1 }
+                return true, "peer2", D { peer2 = 1 }
             end,
             sync = function() return true, "peer2", sync_data end,
         }, function()
@@ -1434,12 +1484,12 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.010
-                return true, "peer2", D{ peer2 = 1 }
+                return true, "peer2", D { peer2 = 1 }
             end,
             sync = function()
                 return true, "peer2", {
-                    peer2 = mkpeer(1, {"peer2-host"}, {}),
-                    peer3 = mkpeer(1, {"peer3-host"}, {}),
+                    peer2 = mkpeer(1, { "peer2-host" }, {}),
+                    peer3 = mkpeer(1, { "peer3-host" }, {}),
                 }
             end,
         }, function()
@@ -1478,7 +1528,7 @@ return function(T)
             probe = function()
                 t_clock = t_clock + 0.002
                 -- remote digest carries peer3 with t=10000 (newer than local 5000)
-                return true, "peer2", D{ peer2 = 1, peer3 = 1 }
+                return true, "peer2", D { peer2 = 1, peer3 = 1 }
             end,
         }, function()
             ag.maintenance()
@@ -1503,7 +1553,7 @@ return function(T)
         with_rpcall({
             probe = function()
                 t_clock = t_clock + 0.002
-                return true, "peer2", D{ peer2 = 1, peer3 = 1 }
+                return true, "peer2", D { peer2 = 1, peer3 = 1 }
             end,
         }, function()
             ag.maintenance()
@@ -1527,7 +1577,7 @@ return function(T)
             probe = function()
                 t_clock = t_clock + 0.002
                 -- same version (1) but newer timestamp
-                return true, "peer2", D{ peer2 = 1, peer3 = 1 }
+                return true, "peer2", D { peer2 = 1, peer3 = 1 }
             end,
             sync = function()
                 sync_called = true
@@ -1557,7 +1607,7 @@ return function(T)
             probe = function()
                 t_clock = t_clock + 0.002
                 -- remote reports its own timestamp as t=3000 (stale)
-                return true, "peer2", D{ peer2 = 1 }
+                return true, "peer2", D { peer2 = 1 }
             end,
         }, function()
             ag.maintenance()
@@ -1570,12 +1620,409 @@ return function(T)
     end)
 
     -- ------------------------------------------------------------------ --
-    -- 19. Cleanup
+    -- 19. Fast failure confirmation & bidirectional digest propagation
+    -- ------------------------------------------------------------------ --
+
+    T:atest("probe interval: a tolerated miss resets the interval to MIN", function()
+        reset()
+        ag.CONN_FAILURE_LIMIT = 2
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        t_clock = 1000
+        local function ok_probe()
+            t_clock = t_clock + 0.002
+            return true, "peer2", {}
+        end
+        -- Round 1: self entry is created (changed) → interval = MIN (10s)
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        -- Round 2: quiescent → interval backs off to 10 * 1.5 = 15s
+        t_clock = 1100
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        assert(ag.stats(0):find("probe=15s", 1, true),
+            "interval must back off when quiescent\n" .. ag.stats(0))
+        -- Round 3: a tolerated miss must reset the interval to MIN so the
+        -- suspected conn loss is confirmed promptly, not after a backed-off
+        -- round (worst case CONN_FAILURE_LIMIT * PROBE_INTERVAL_MAX)
+        t_clock = 1200
+        with_rpcall({ probe = function() return false, "refused" end }, function()
+            ag.maintenance()
+        end)
+        assert(ag.conn_state[1] and ag.conn_state[1].fails == 1,
+            "miss must be tolerated below the limit")
+        assert(ag.stats(0):find("probe=10s", 1, true),
+            "a miss must reset the interval to MIN\n" .. ag.stats(0))
+    end)
+
+    T:atest("probe: outgoing probe carries the local digest", function()
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        _G.peerdb["peer3"] = mkpeer(7)
+        t_clock = 1000
+        local captured
+        with_rpcall({
+            probe = function(_, peername, digest)
+                captured = { peername, digest }
+                return true, "peer2", {}
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+        assert(captured, "a probe must have been issued")
+        assert(captured[1] == "self", "first probe arg must be the peername")
+        local digest = captured[2]
+        assert(type(digest) == "table" and type(digest["peer3"]) == "table",
+            "probe must carry a digest of known peers")
+        assert(digest["peer3"].v == 7 and digest["peer3"].t == 10000,
+            "digest entries must carry version and timestamp")
+    end)
+
+    T:atest("rpc.probe: pulls back when the caller is ahead", function()
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        ag.conn_state[1] = { peername = "peer2", rtt_win = {} }
+        with_rpcall({
+            sync = function()
+                return true, "peer2", { peer3 = mkpeer(5, { "peer3-host" }, {}) }
+            end,
+        }, function()
+            local name, digest = rpc.probe("peer2", D { peer3 = 5 })
+            assert(name == "self" and type(digest) == "table")
+        end)
+        assert(_G.peerdb["peer3"] ~= nil and _G.peerdb["peer3"].version == 5,
+            "rpc.probe must pull missing entries back from the caller")
+    end)
+
+    T:atest("rpc.probe: no pull-back when the caller is not ahead", function()
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        ag.conn_state[1] = { peername = "peer2", rtt_win = {} }
+        _G.peerdb["peer3"] = mkpeer(5)
+        local sync_called = false
+        with_rpcall({
+            sync = function()
+                sync_called = true
+                return true, "peer2", {}
+            end,
+        }, function()
+            rpc.probe("peer2", D { peer3 = 5 })
+        end)
+        assert(not sync_called,
+            "a digest with no newer entries must not trigger a pull-back")
+    end)
+
+    T:atest("rpc.probe: expired digest entries do not trigger pull-back", function()
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        ag.conn_state[1] = { peername = "peer2", rtt_win = {} }
+        local threshold = ag.PEERDB_EXPIRY_TIME + ag.PEERDB_EXPIRY_TOLERANCE
+        local sync_called = false
+        with_rpcall({
+            sync = function()
+                sync_called = true
+                return true, "peer2", {}
+            end,
+        }, function()
+            rpc.probe("peer2", { peer3 = { v = 5, t = 10000 - threshold - 1 } })
+        end)
+        assert(not sync_called,
+            "entries already past expiry must not be pulled back")
+    end)
+
+    T:atest("rpc.probe: digest merges newer third-party timestamps", function()
+        reset()
+        _G.peerdb["peer3"] = mkpeer(5)
+        _G.peerdb["peer3"].timestamp = 5000
+        rpc.probe("peer2", D { peer3 = 5 })
+        assert(_G.peerdb["peer3"].timestamp == 10000,
+            "newer third-party timestamp must be merged from the digest, got " ..
+            tostring(_G.peerdb["peer3"].timestamp))
+    end)
+
+    -- ------------------------------------------------------------------ --
+    -- 20. Demand-driven recovery & data-plane activity
+    -- ------------------------------------------------------------------ --
+
+    T:atest("probe interval: data-plane activity caps the backed-off interval", function()
+        reset()
+        local saved_active = ag.PROBE_INTERVAL_ACTIVE
+        ag.PROBE_INTERVAL_ACTIVE = 12 -- between MIN (10) and the first backoff (15)
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {})
+        t_clock = 1000
+        local function ok_probe()
+            t_clock = t_clock + 0.002
+            return true, "peer2", {}
+        end
+        -- Round 1: self entry is created (changed) → interval = MIN (10s)
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        -- Data-plane demand: route a connection through the mesh
+        local handler = ag.matcher("peer2-host.internal:80")
+        assert(type(handler) == "function", "peer2-host must be routable")
+        -- Round 2: quiescent backoff would give 15s, but recent activity
+        -- caps the interval at ACTIVE so a failing conn cannot blackhole
+        -- live traffic for up to PROBE_INTERVAL_MAX
+        t_clock = 1100
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        assert(ag.stats(0):find("probe=12s", 1, true),
+            "interval must be capped at ACTIVE while routes are in use\n" .. ag.stats(0))
+        -- Round 3: no further activity → backoff resumes (12 * 1.5 = 18s)
+        t_clock = 1200
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        assert(ag.stats(0):find("probe=18s", 1, true),
+            "an idle mesh must resume backing off\n" .. ag.stats(0))
+        ag.PROBE_INTERVAL_ACTIVE = saved_active
+    end)
+
+    T:atest("resolve: failed demand wakes the control loop", function()
+        reset()
+        -- known peer, but no conns at all → no route
+        _G.peerdb["peer9"] = mkpeer(1, { "peer9-host" }, {})
+        ag.maintenance() -- no conns: just rebuilds the index
+        local woken = 0
+        local orig_wake = ag.wake
+        ag.wake = function() woken = woken + 1 end
+        local result, conn = ag._resolve_internal("peer9-host", 80)
+        assert(result == "peer not reachable" and conn == nil)
+        assert(woken == 1, "unreachable demand must wake the control loop")
+        result, conn = ag._resolve_internal("no-such-host", 80)
+        assert(result == "unknown host" and conn == nil)
+        assert(woken == 2, "unknown-host demand must wake the control loop")
+        -- relay forwarding without a 1-hop route must also wake
+        local ok = pcall(ag.matcher, "x.peer9.relay.neosocksd.internal:80")
+        assert(not ok, "relay without a route must throw")
+        assert(woken == 3, "failed relay demand must wake the control loop")
+        ag.wake = orig_wake
+    end)
+
+    T:atest("probe interval: dial failures on an active mesh reset to MIN", function()
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {})
+        t_clock = 1000
+        local function ok_probe()
+            t_clock = t_clock + 0.002
+            return true, "peer2", {}
+        end
+        -- Round 1: self entry is created (changed) → interval = MIN (10s)
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        -- Round 2: usage but no dial failures → plain backoff applies
+        assert(type(ag.matcher("peer2-host.internal:80")) == "function")
+        t_clock = 1100
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        assert(ag.stats(0):find("probe=15s", 1, true),
+            "usage without failures must back off normally\n" .. ag.stats(0))
+        -- Round 3: usage AND rising dial-failure count → the route may be
+        -- broken even though probes look healthy: reset to MIN
+        assert(type(ag.matcher("peer2-host.internal:80")) == "function")
+        fake_rejects = fake_rejects + 3
+        t_clock = 1200
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        assert(ag.stats(0):find("probe=10s", 1, true),
+            "dial failures on an active mesh must reset the interval\n" .. ag.stats(0))
+        -- Round 4: failures keep rising but the mesh is idle → the failures
+        -- are not attributable to mesh routes, back off normally
+        fake_rejects = fake_rejects + 3
+        t_clock = 1300
+        with_rpcall({ probe = ok_probe }, function() ag.maintenance() end)
+        assert(ag.stats(0):find("probe=15s", 1, true),
+            "failures on an idle mesh must not reset the interval\n" .. ag.stats(0))
+    end)
+
+    T:atest("routing: a probe miss diverts traffic to a healthy parallel conn", function()
+        reset()
+        ag.CONN_FAILURE_LIMIT = 2
+        -- two parallel conns to the same neighbor (e.g. different ISPs)
+        ag.conns = {
+            [1] = { "socks4a://line1.internal:1080" }, -- fast
+            [2] = { "socks4a://line2.internal:1080" }, -- slow
+        }
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {})
+        t_clock = 1000
+        -- Round 1: both healthy → fastest conn wins
+        with_rpcall({
+            probe = function(id)
+                t_clock = t_clock + (id == 1 and 0.002 or 0.010)
+                return true, "peer2", {}
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+        local _, conn = ag._resolve_internal("peer2-host", 80)
+        assert(conn == ag.conns[1], "round1: fastest healthy conn must be chosen")
+        -- Round 2: conn 1 misses one probe (tolerated, stays advertised for
+        -- route stability) → local traffic must divert to the healthy conn 2
+        t_clock = 1100
+        with_rpcall({
+            probe = function(id)
+                if id == 1 then return false, "connection refused" end
+                t_clock = t_clock + 0.010
+                return true, "peer2", {}
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+        assert(ag.conn_state[1] and ag.conn_state[1].fails == 1,
+            "round2: the miss must be tolerated below the limit")
+        _, conn = ag._resolve_internal("peer2-host", 80)
+        assert(conn == ag.conns[2],
+            "round2: traffic must divert to the healthy parallel conn")
+        -- Round 3: conn 1 recovers → traffic returns to the faster conn
+        t_clock = 1200
+        with_rpcall({
+            probe = function(id)
+                t_clock = t_clock + (id == 1 and 0.002 or 0.010)
+                return true, "peer2", {}
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+        _, conn = ag._resolve_internal("peer2-host", 80)
+        assert(conn == ag.conns[1],
+            "round3: traffic must return to the recovered faster conn")
+    end)
+
+    T:atest("timestamp: future timestamps are clamped to the local clock", function()
+        -- A peer with a fast wall clock must not outlive its expiry window
+        -- on this node; both merge paths clamp to local time.unix().
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        t_clock = 1000
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {})
+        _G.peerdb["peer3"] = mkpeer(1, { "peer3-host" }, {})
+        _G.peerdb["peer3"].timestamp = 5000
+        local peer4_data = mkpeer(1, { "peer4-host" }, {})
+        peer4_data.timestamp = 99999 -- far in the future (now = 10000)
+        with_rpcall({
+            probe = function()
+                t_clock = t_clock + 0.002
+                -- digest merge path: peer3 reported with a future timestamp
+                return true, "peer2", {
+                    peer2 = { v = 1, t = 10000 },
+                    peer3 = { v = 1, t = 99999 },
+                    peer4 = { v = 1, t = 10000 },
+                }
+            end,
+            -- apply_delta path: new entry carrying a future timestamp
+            sync = function() return true, "peer2", { peer4 = peer4_data } end,
+        }, function()
+            ag.maintenance()
+        end)
+        assert(_G.peerdb["peer3"].timestamp == 10000,
+            "digest merge must clamp future timestamps, got " ..
+            tostring(_G.peerdb["peer3"].timestamp))
+        assert(_G.peerdb["peer4"] and _G.peerdb["peer4"].timestamp == 10000,
+            "apply_delta must clamp future timestamps, got " ..
+            tostring(table.get(_G.peerdb, "peer4", "timestamp")))
+    end)
+
+    T:test("build_index: conn removed from config produces no route", function()
+        -- Regression: the persisted self entry may advertise a conn that a
+        -- config change has removed; such a conn cannot be dialed and used
+        -- to yield routes with conn = nil that made the matcher throw.
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        _G.peerdb["self"] = mkpeer(3, { "self-host" }, {
+            [1] = { peername = "peer2", rtt = 0.010 },
+            [2] = { peername = "peer2", rtt = 0.005 }, -- conn 2 was removed
+        })
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {})
+        local _, routes = ag._build_index(_G.peerdb)
+        local route = routes["peer2"]
+        assert(route, "peer2 must remain routable via the remaining conn")
+        assert(route.conn == ag.conns[1],
+            "route must use the conn that still exists, not the removed one")
+        -- when every advertised conn is gone, the peer must be unroutable
+        -- instead of producing a route that cannot be dialed
+        ag.conns = {}
+        local _, routes2 = ag._build_index(_G.peerdb)
+        assert(routes2["peer2"] == nil,
+            "no dialable conn must mean no route")
+    end)
+
+    -- ------------------------------------------------------------------ --
+    -- 21. Hot reload (/ruleset/update?module=agent)
+    -- ------------------------------------------------------------------ --
+
+    T:atest("hot reload: module update stops old instance and migrates state", function()
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {})
+        t_clock = 1000
+        with_rpcall({
+            probe = function()
+                t_clock = t_clock + 0.002
+                return true, "peer2", {}
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+        -- runtime configuration applied by the operator's ruleset
+        ag.api_endpoint = "127.0.1.1:9080"
+        local function callback() end
+        ag.on_updated = callback
+        local old_chain = ag.chain
+        -- simulate /ruleset/update?module=agent: package.replace re-runs the
+        -- chunk while _G.agent still points at the previous instance
+        local saved = _G.agent
+        _G.agent = ag
+        local reload = assert(loadfile("agent.lua"))
+        local ag2 = reload()
+        _G.agent = saved
+        assert(not rawequal(ag, ag2), "a reload must create a fresh module table")
+        assert(ag.running == false, "the previous instance must be stopped")
+        assert(ag2.running == true, "the new instance must be running")
+        -- compatible fields must be migrated, not reset to defaults
+        assert(ag2.api_endpoint == "127.0.1.1:9080",
+            "api_endpoint must be migrated, got " .. tostring(ag2.api_endpoint))
+        assert(ag2.peername == "self", "peername must be migrated")
+        assert(ag2.passive == true, "passive must be migrated (or a mainloop leaks)")
+        assert(ag2.on_updated == callback, "on_updated must be migrated")
+        assert(rawequal(ag2.conn_state, ag.conn_state),
+            "conn_state must be migrated")
+        assert(ag2.conn_state[1] and ag2.conn_state[1].peername == "peer2",
+            "probe history must be migrated")
+        -- the data plane must keep routing immediately after the reload,
+        -- without waiting for the next maintenance round
+        local addr, conn = ag2._resolve_internal("peer2-host", 80)
+        assert(addr == "peer2-host.internal:80" and conn == ag2.conns[1],
+            "routes must be rebuilt from migrated state at load time")
+        -- the new instance learns a peer the old instance never saw
+        t_clock = 1100
+        with_rpcall({
+            probe = function()
+                t_clock = t_clock + 0.002
+                return true, "peer2", D { peer2 = 2, peer3 = 1 }
+            end,
+            sync = function()
+                return true, "peer2", {
+                    peer2 = mkpeer(2, { "peer2-host" }, {
+                        [1] = { peername = "self", rtt = 0.002 },
+                        [2] = { peername = "peer3", rtt = 0.003 },
+                    }),
+                    peer3 = mkpeer(1, { "peer3-host" }, {}),
+                }
+            end,
+        }, function()
+            ag2.maintenance()
+        end)
+        -- a chain captured from the OLD instance (e.g. by the ruleset's
+        -- composite.subchain at boot) must dispatch into the newest module
+        -- via _G.agent, so it can route to the newly learned peer
+        _G.agent = ag2
+        local entry = old_chain[1][1]
+        local handler = entry("peer3-host.internal:80")
+        _G.agent = saved
+        assert(type(handler) == "function",
+            "a captured chain must dispatch into the reloaded module")
+    end)
+
+    -- ------------------------------------------------------------------ --
+    -- 22. Cleanup
     -- ------------------------------------------------------------------ --
 
     ag.stop() -- signal the sleeping mainloop to exit on wake
-    time.unix      = orig_unix
-    time.monotonic = orig_monotonic
-    _G.peerdb      = saved_peerdb
-    _G.agent       = saved_agent
+    neosocksd.stats = orig_stats
+    time.unix       = orig_unix
+    time.monotonic  = orig_monotonic
+    _G.peerdb       = saved_peerdb
+    _G.agent        = saved_agent
 end

@@ -134,6 +134,8 @@ struct http_body_data_cb {
  */
 struct http_conn {
 	enum http_conn_state state;
+	/* initial state, distinguishes request/response parsing */
+	enum http_conn_state mode;
 	int http_status;
 	int fd;
 	uint_least64_t *byt_recv, *byt_sent;
@@ -310,16 +312,6 @@ const char *parsehdr_connection_token(
  * @param code HTTP status code
  */
 void http_resp_errpage(struct http_conn *restrict p, uint_fast16_t code);
-
-/**
- * @brief Send HTTP 200 Connection established response
- *
- * Used for CONNECT method tunneling.
- *
- * @param p Parser instance
- * @return true if response sent successfully
- */
-bool http_resp_established(struct http_conn *restrict p);
 
 /**
  * @brief Create content reader stream with decompression

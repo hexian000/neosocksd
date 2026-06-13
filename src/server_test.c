@@ -238,7 +238,7 @@ static bool listener_backing_off(void *data)
 	return !ev_is_active(&l->w_accept) && ev_is_active(&l->w_timer);
 }
 
-T_DECLARE_CASE(test_server_start_accept_and_stop)
+T_DECLARE_CASE(server_start_accept_and_stop)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -262,7 +262,7 @@ T_DECLARE_CASE(test_server_start_accept_and_stop)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(test_server_rejects_when_session_limit_exceeded)
+T_DECLARE_CASE(server_rejects_when_session_limit_exceeded)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -286,7 +286,7 @@ T_DECLARE_CASE(test_server_rejects_when_session_limit_exceeded)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(test_server_rejects_when_full_startup_limit_exceeded)
+T_DECLARE_CASE(server_rejects_when_full_startup_limit_exceeded)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -310,7 +310,7 @@ T_DECLARE_CASE(test_server_rejects_when_full_startup_limit_exceeded)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(test_server_rejects_when_probabilistic_startup_limit_hits)
+T_DECLARE_CASE(server_rejects_when_probabilistic_startup_limit_hits)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -335,7 +335,7 @@ T_DECLARE_CASE(test_server_rejects_when_probabilistic_startup_limit_hits)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(test_server_accept_error_restarts_listener)
+T_DECLARE_CASE(server_accept_error_restarts_listener)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -380,7 +380,7 @@ T_DECLARE_CASE(test_server_accept_error_restarts_listener)
  * max_sessions concurrent sessions are allowed, and the next is
  * rejected.
  */
-T_DECLARE_CASE(test_server_allows_when_at_max_sessions)
+T_DECLARE_CASE(server_allows_when_at_max_sessions)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -408,7 +408,7 @@ T_DECLARE_CASE(test_server_allows_when_at_max_sessions)
 /*
  * max_sessions == 0 means unlimited.
  */
-T_DECLARE_CASE(test_server_zero_max_sessions_allows_unlimited)
+T_DECLARE_CASE(server_zero_max_sessions_allows_unlimited)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -436,7 +436,7 @@ T_DECLARE_CASE(test_server_zero_max_sessions_allows_unlimited)
 /*
  * Two listeners (proxy + http) on the same server must work independently.
  */
-T_DECLARE_CASE(test_server_dual_listener_independent_accepts)
+T_DECLARE_CASE(server_dual_listener_independent_accepts)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -487,14 +487,13 @@ int main(void)
 {
 	T_DECLARE_CTX(t);
 
-	T_RUN_CASE(t, test_server_start_accept_and_stop);
-	T_RUN_CASE(t, test_server_rejects_when_session_limit_exceeded);
-	T_RUN_CASE(t, test_server_allows_when_at_max_sessions);
-	T_RUN_CASE(t, test_server_zero_max_sessions_allows_unlimited);
-	T_RUN_CASE(t, test_server_rejects_when_full_startup_limit_exceeded);
-	T_RUN_CASE(
-		t, test_server_rejects_when_probabilistic_startup_limit_hits);
-	T_RUN_CASE(t, test_server_accept_error_restarts_listener);
-	T_RUN_CASE(t, test_server_dual_listener_independent_accepts);
+	T_RUN_CASE(t, server_start_accept_and_stop);
+	T_RUN_CASE(t, server_rejects_when_session_limit_exceeded);
+	T_RUN_CASE(t, server_allows_when_at_max_sessions);
+	T_RUN_CASE(t, server_zero_max_sessions_allows_unlimited);
+	T_RUN_CASE(t, server_rejects_when_full_startup_limit_exceeded);
+	T_RUN_CASE(t, server_rejects_when_probabilistic_startup_limit_hits);
+	T_RUN_CASE(t, server_accept_error_restarts_listener);
+	T_RUN_CASE(t, server_dual_listener_independent_accepts);
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

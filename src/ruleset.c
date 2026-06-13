@@ -66,11 +66,6 @@ l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 	return ret;
 }
 
-/**
- * @brief Lua panic handler
- * @param L Lua state
- * @return Always returns 0
- */
 static int l_panic(lua_State *L)
 {
 	const char *msg = (lua_type(L, -1) == LUA_TSTRING) ?
@@ -82,20 +77,6 @@ static int l_panic(lua_State *L)
 	return 0;
 }
 
-/**
- * @brief Initialize Lua environment for ruleset
- *
- * Sets up the Lua virtual machine with necessary registry tables,
- * standard libraries, and built-in extensions. This includes:
- * - Constant strings table for error messages
- * - Await context table for asynchronous operations
- * - Idle thread table for thread management
- * - Standard Lua libraries with restricted package paths
- * - Built-in extension libraries (await, marshal, regex, etc.)
- *
- * @param L Lua state to initialize
- * @return Always returns 0
- */
 static int ruleset_luainit(lua_State *restrict L)
 {
 	/* init registry */
@@ -144,17 +125,7 @@ static int ruleset_luainit(lua_State *restrict L)
 	return 0;
 }
 
-/**
- * @brief Timer callback for periodic ruleset operations
- *
- * This callback is invoked periodically (every second) to trigger
- * maintenance operations in the Lua ruleset. It starts an idle watcher
- * to defer the actual work to avoid blocking the event loop.
- *
- * @param loop Event loop
- * @param watcher Timer watcher that triggered
- * @param revents Event flags (should be EV_TIMER)
- */
+/* defer ruleset.tick() to the idle watcher */
 static void tick_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
@@ -162,17 +133,6 @@ static void tick_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	ev_idle_start(loop, &r->w_idle);
 }
 
-/**
- * @brief Idle callback for deferred ruleset tick processing
- *
- * This callback performs the actual periodic maintenance work for the
- * ruleset. It calls the Lua ruleset.tick() function with the current
- * timestamp, allowing the script to perform housekeeping tasks.
- *
- * @param loop Event loop
- * @param watcher Idle watcher that triggered
- * @param revents Event flags (should be EV_IDLE)
- */
 static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_IDLE);
@@ -268,12 +228,7 @@ void ruleset_setbasereq(
 	r->basereq = basereq;
 }
 
-/**
- * @brief Macro to create constant length string
- *
- * Helper macro that returns a constant string and optionally sets its length.
- * Used for efficient string literals with known lengths.
- */
+/* return a string literal and optionally set its length */
 #define CONST_LSTRING(s, len)                                                  \
 	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
 

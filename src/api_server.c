@@ -30,7 +30,6 @@
 
 #include <ev.h>
 
-#include <errno.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
@@ -952,122 +951,151 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 
-/* name: full metric name; type: "gauge"/"counter"/etc.;
+/* name: metric name suffix (prefix "neosocksd_" is added automatically);
+ * type: "gauge"/"counter"/etc.;
  * help: description; fmt: printf format for the value(s); ...: value(s). */
-#define APPEND_METRIC(name, type, help, fmt, ...)                              \
+/* Emit HELP + TYPE header only (use once before multiple metric lines) */
+#define APPEND_METRIC_HDR(name, type, help)                                    \
 	(void)io_bufprintf(                                                    \
 		w,                                                             \
-		"# HELP %s %s\n"                                               \
-		"# TYPE %s %s\n"                                               \
-		"%s " fmt "\n",                                                \
-		name, help, name, type, name, __VA_ARGS__)
+		"# HELP neosocksd_%s %s\n"                                     \
+		"# TYPE neosocksd_%s %s\n",                                    \
+		name, help, name, type)
+
+/* Emit one metric line without HELP/TYPE */
+#define APPEND_METRIC(name, fmt, ...)                                          \
+	(void)io_bufprintf(w, "neosocksd_%s " fmt "\n", name, __VA_ARGS__)
+
+/* Emit one labeled metric line without HELP/TYPE */
+#define APPEND_METRIC_L(name, labels, fmt, ...)                                \
+	(void)io_bufprintf(                                                    \
+		w, "neosocksd_%s{" labels "} " fmt "\n", name, __VA_ARGS__)
 
 	/* Gauges */
-	APPEND_METRIC(
-		"neosocksd_sessions_active", "gauge",
-		"Number of active proxy sessions.", "%zu", agg.num_sessions);
-	APPEND_METRIC(
-		"neosocksd_sessions_peak", "gauge",
-		"Peak concurrent proxy sessions since start.", "%zu",
-		agg.num_sessions_peak);
-	APPEND_METRIC(
-		"neosocksd_halfopen_connections", "gauge",
-		"Connections in handshake/ruleset/dial phase.", "%zu",
-		agg.num_halfopen);
-	APPEND_METRIC(
-		"neosocksd_uptime_seconds", "gauge",
-		"Seconds since server start.", "%g", uptime);
+	APPEND_METRIC_HDR(
+		"sessions_active", "gauge", "Number of active proxy sessions.");
+	APPEND_METRIC("sessions_active", "%zu", agg.num_sessions);
+	APPEND_METRIC_HDR(
+		"sessions_peak", "gauge",
+		"Peak concurrent proxy sessions since start.");
+	APPEND_METRIC("sessions_peak", "%zu", agg.num_sessions_peak);
+	APPEND_METRIC_HDR(
+		"halfopen_connections", "gauge",
+		"Connections in handshake/ruleset/dial phase.");
+	APPEND_METRIC("halfopen_connections", "%zu", agg.num_halfopen);
+	APPEND_METRIC_HDR(
+		"uptime_seconds", "gauge", "Seconds since server start.");
+	APPEND_METRIC("uptime_seconds", "%g", uptime);
 
 	/* Counters */
 	if (have_cpu) {
+		APPEND_METRIC_HDR(
+			"process_cpu_seconds_total", "counter",
+			"Total CPU time consumed by the process.");
 		APPEND_METRIC(
-			"neosocksd_process_cpu_seconds_total", "counter",
-			"Total CPU time consumed by the process.", "%g",
+			"process_cpu_seconds_total", "%g",
 			(double)TIMESPEC_NANO(cpu_ts) * 1e-9);
 	}
+	APPEND_METRIC_HDR(
+		"connections_accepted_total", "counter",
+		"Connections accepted by the listener.");
 	APPEND_METRIC(
-		"neosocksd_connections_accepted_total", "counter",
-		"Connections accepted by the listener.", "%" PRIuLEAST64,
-		agg.num_accept);
+		"connections_accepted_total", "%" PRIuLEAST64, agg.num_accept);
+	APPEND_METRIC_HDR(
+		"connections_served_total", "counter",
+		"Connections upgraded to proxy sessions.");
 	APPEND_METRIC(
-		"neosocksd_connections_served_total", "counter",
-		"Connections upgraded to proxy sessions.", "%" PRIuLEAST64,
-		agg.num_serve);
+		"connections_served_total", "%" PRIuLEAST64, agg.num_serve);
+	APPEND_METRIC_HDR(
+		"requests_total", "counter", "Total proxy requests processed.");
+	APPEND_METRIC("requests_total", "%" PRIuLEAST64, agg.num_request);
+	APPEND_METRIC_HDR(
+		"requests_success_total", "counter",
+		"Proxy requests completed successfully.");
 	APPEND_METRIC(
-		"neosocksd_requests_total", "counter",
-		"Total proxy requests processed.", "%" PRIuLEAST64,
-		agg.num_request);
+		"requests_success_total", "%" PRIuLEAST64, agg.num_success);
+	APPEND_METRIC_HDR(
+		"rejects_ruleset_total", "counter",
+		"Connections rejected by the ruleset.");
 	APPEND_METRIC(
-		"neosocksd_requests_success_total", "counter",
-		"Proxy requests completed successfully.", "%" PRIuLEAST64,
-		agg.num_success);
-	APPEND_METRIC(
-		"neosocksd_rejects_ruleset_total", "counter",
-		"Connections rejected by the ruleset.", "%" PRIuLEAST64,
+		"rejects_ruleset_total", "%" PRIuLEAST64,
 		agg.num_reject_ruleset);
+	APPEND_METRIC_HDR(
+		"rejects_timeout_total", "counter",
+		"Connections timed out before becoming active.");
 	APPEND_METRIC(
-		"neosocksd_rejects_timeout_total", "counter",
-		"Connections timed out before becoming active.",
-		"%" PRIuLEAST64, agg.num_reject_timeout);
+		"rejects_timeout_total", "%" PRIuLEAST64,
+		agg.num_reject_timeout);
+	APPEND_METRIC_HDR(
+		"rejects_upstream_total", "counter",
+		"Connections failed during upstream dial.");
 	APPEND_METRIC(
-		"neosocksd_rejects_upstream_total", "counter",
-		"Connections failed during upstream dial.", "%" PRIuLEAST64,
+		"rejects_upstream_total", "%" PRIuLEAST64,
 		agg.num_reject_upstream);
+	APPEND_METRIC_HDR(
+		"dns_queries_total", "counter", "DNS queries issued.");
 	APPEND_METRIC(
-		"neosocksd_dns_queries_total", "counter", "DNS queries issued.",
-		"%" PRIuLEAST64, resolv_stats->num_query);
+		"dns_queries_total", "%" PRIuLEAST64, resolv_stats->num_query);
+	APPEND_METRIC_HDR(
+		"dns_success_total", "counter",
+		"DNS queries resolved successfully.");
 	APPEND_METRIC(
-		"neosocksd_dns_success_total", "counter",
-		"DNS queries resolved successfully.", "%" PRIuLEAST64,
+		"dns_success_total", "%" PRIuLEAST64,
 		resolv_stats->num_success);
+	APPEND_METRIC_HDR(
+		"api_requests_total", "counter", "API requests received.");
 	APPEND_METRIC(
-		"neosocksd_api_requests_total", "counter",
-		"API requests received.", "%" PRIuLEAST64,
+		"api_requests_total", "%" PRIuLEAST64,
 		apistats->num_api_request);
+	APPEND_METRIC_HDR(
+		"api_requests_success_total", "counter",
+		"API requests completed successfully.");
 	APPEND_METRIC(
-		"neosocksd_api_requests_success_total", "counter",
-		"API requests completed successfully.", "%" PRIuLEAST64,
+		"api_requests_success_total", "%" PRIuLEAST64,
 		apistats->num_api_success);
-	APPEND_METRIC(
-		"neosocksd_uplink_bytes_total", "counter",
-		"Total bytes of proxied payload sent to upstream.",
-		"%" PRIuLEAST64, agg.byt_up);
-	APPEND_METRIC(
-		"neosocksd_downlink_bytes_total", "counter",
-		"Total bytes of proxied payload received from upstream.",
-		"%" PRIuLEAST64, agg.byt_down);
+	APPEND_METRIC_HDR(
+		"uplink_bytes_total", "counter",
+		"Total bytes of proxied payload sent to upstream.");
+	APPEND_METRIC("uplink_bytes_total", "%" PRIuLEAST64, agg.byt_up);
+	APPEND_METRIC_HDR(
+		"downlink_bytes_total", "counter",
+		"Total bytes of proxied payload received from upstream.");
+	APPEND_METRIC("downlink_bytes_total", "%" PRIuLEAST64, agg.byt_down);
 	/* neosocksd_protocol_bytes_total: per-module protocol overhead */
-	(void)io_bufprintf(
-		w,
-		"# HELP neosocksd_protocol_bytes_total Total bytes of protocol overhead, by direction and module.\n"
-		"# TYPE neosocksd_protocol_bytes_total counter\n"
-		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"api_server\"} %" PRIuLEAST64
-		"\n"
-		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_server\"} %" PRIuLEAST64
-		"\n"
-		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"proxy_server\"} %" PRIuLEAST64
-		"\n"
-		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"proxy_server\"} %" PRIuLEAST64
-		"\n"
-		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"proxy_client\"} %" PRIuLEAST64
-		"\n"
-		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"proxy_client\"} %" PRIuLEAST64
-		"\n",
-		apistats->api_byt_recv, apistats->api_byt_send,
-		agg.byt_client_recv, agg.byt_client_send, agg.byt_dial_recv,
-		agg.byt_dial_send);
+	APPEND_METRIC_HDR(
+		"protocol_bytes_total", "counter",
+		"Total bytes of protocol overhead, by direction and module.");
+	APPEND_METRIC_L(
+		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
+		"%" PRIuLEAST64, "rx", "api_server", apistats->api_byt_recv);
+	APPEND_METRIC_L(
+		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
+		"%" PRIuLEAST64, "tx", "api_server", apistats->api_byt_send);
+	APPEND_METRIC_L(
+		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
+		"%" PRIuLEAST64, "rx", "proxy_server", agg.byt_client_recv);
+	APPEND_METRIC_L(
+		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
+		"%" PRIuLEAST64, "tx", "proxy_server", agg.byt_client_send);
+	APPEND_METRIC_L(
+		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
+		"%" PRIuLEAST64, "rx", "proxy_client", agg.byt_dial_recv);
+	APPEND_METRIC_L(
+		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
+		"%" PRIuLEAST64, "tx", "proxy_client", agg.byt_dial_send);
 #if WITH_RULESET
+	APPEND_METRIC_HDR(
+		"api_client_requests_total", "counter",
+		"API client requests issued by the ruleset.");
 	APPEND_METRIC(
-		"neosocksd_api_client_requests_total", "counter",
-		"API client requests issued by the ruleset.", "%" PRIuLEAST64,
+		"api_client_requests_total", "%" PRIuLEAST64,
 		agg.num_api_client_request);
-	(void)io_bufprintf(
-		w,
-		"neosocksd_protocol_bytes_total{direction=\"rx\",module=\"api_client\"} %" PRIuLEAST64
-		"\n"
-		"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_client\"} %" PRIuLEAST64
-		"\n",
-		agg.api_client_byt_recv, agg.api_client_byt_send);
+	APPEND_METRIC_L(
+		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
+		"%" PRIuLEAST64, "rx", "api_client", agg.api_client_byt_recv);
+	APPEND_METRIC_L(
+		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
+		"%" PRIuLEAST64, "tx", "api_client", agg.api_client_byt_send);
 #endif
 
 	/* Connect latency summary */
@@ -1075,16 +1103,21 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		const struct percentiles p = calc_percentiles(
 			ARRAY_SIZE(agg.connect_ns), agg.num_connects,
 			agg.connect_ns);
-		(void)io_bufprintf(
-			w,
-			"# HELP neosocksd_connect_latency_seconds Connection establishment latency.\n"
-			"# TYPE neosocksd_connect_latency_seconds summary\n"
-			"neosocksd_connect_latency_seconds{quantile=\"0.5\"} %g\n"
-			"neosocksd_connect_latency_seconds{quantile=\"0.9\"} %g\n"
-			"neosocksd_connect_latency_seconds{quantile=\"0.99\"} %g\n"
-			"neosocksd_connect_latency_seconds_count %zu\n",
-			(double)p.p50 * 1e-9, (double)p.p90 * 1e-9,
-			(double)p.p99 * 1e-9, agg.num_connects);
+		APPEND_METRIC_HDR(
+			"connect_latency_seconds", "summary",
+			"Connection establishment latency.");
+		APPEND_METRIC_L(
+			"connect_latency_seconds", "quantile=\"%s\"", "%g",
+			"0.5", (double)p.p50 * 1e-9);
+		APPEND_METRIC_L(
+			"connect_latency_seconds", "quantile=\"%s\"", "%g",
+			"0.9", (double)p.p90 * 1e-9);
+		APPEND_METRIC_L(
+			"connect_latency_seconds", "quantile=\"%s\"", "%g",
+			"0.99", (double)p.p99 * 1e-9);
+		APPEND_METRIC(
+			"connect_latency_seconds_count", "%zu",
+			agg.num_connects);
 	}
 
 #if WITH_RULESET
@@ -1094,22 +1127,23 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		if (ruleset != NULL) {
 			ruleset_vmstats(ruleset, &vmstats);
 		}
+		APPEND_METRIC_HDR(
+			"lua_memory_bytes", "gauge",
+			"Bytes allocated by the Lua VM.");
+		APPEND_METRIC("lua_memory_bytes", "%zu", vmstats.byt_allocated);
+		APPEND_METRIC_HDR(
+			"lua_objects", "gauge", "Number of live Lua objects.");
+		APPEND_METRIC("lua_objects", "%zu", vmstats.num_object);
+		APPEND_METRIC_HDR(
+			"lua_threads_active", "gauge",
+			"Lua coroutines currently dispatched.");
 		APPEND_METRIC(
-			"neosocksd_lua_memory_bytes", "gauge",
-			"Bytes allocated by the Lua VM.", "%zu",
-			vmstats.byt_allocated);
+			"lua_threads_active", "%zu", vmstats.num_thread_active);
+		APPEND_METRIC_HDR(
+			"lua_threads_peak", "gauge",
+			"Peak concurrent dispatched Lua coroutines since start.");
 		APPEND_METRIC(
-			"neosocksd_lua_objects", "gauge",
-			"Number of live Lua objects.", "%zu",
-			vmstats.num_object);
-		APPEND_METRIC(
-			"neosocksd_lua_threads_active", "gauge",
-			"Lua coroutines currently dispatched.", "%zu",
-			vmstats.num_thread_active);
-		APPEND_METRIC(
-			"neosocksd_lua_threads_peak", "gauge",
-			"Peak concurrent dispatched Lua coroutines since start.",
-			"%zu", vmstats.num_thread_peak);
+			"lua_threads_peak", "%zu", vmstats.num_thread_peak);
 	}
 	{
 		struct ruleset *restrict ruleset = s->ruleset;
@@ -1131,8 +1165,10 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			}
 		}
 	}
-#endif
+#endif /* WITH_RULESET */
+#undef APPEND_METRIC_HDR
 #undef APPEND_METRIC
+#undef APPEND_METRIC_L
 
 	const int err = stream_close(w);
 	if (err != 0) {

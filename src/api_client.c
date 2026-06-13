@@ -20,6 +20,7 @@
 #include "utils/formats.h"
 #include "utils/gc.h"
 #include "utils/intcast.h"
+#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <ev.h>
