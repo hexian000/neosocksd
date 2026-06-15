@@ -170,7 +170,7 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
-    (cd .. && build/bin/neosocksd -c tests/main.lua)
+    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 *)

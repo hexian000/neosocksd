@@ -140,6 +140,12 @@ bool ruleset_loadconfig(
 	return false;
 }
 
+bool ruleset_isvalid(struct ruleset *restrict r)
+{
+	(void)r;
+	return false;
+}
+
 const char *
 ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 {

@@ -249,6 +249,56 @@ static void server_reload_basereq(struct server *restrict s)
 		ruleset_setbasereq(s->ruleset, newbasereq);
 	}
 }
+
+/* Reload the ruleset from the single file given on the command line; `-c' and
+ * `-r' are mutually exclusive, so reload re-reads only that one file. Returns
+ * false if the reload was aborted, in which case the previous ruleset (if any)
+ * is left in place. */
+static bool server_reload_ruleset(struct server *restrict s)
+{
+	if (s->conf->boot == NULL && s->conf->ruleset == NULL) {
+		return true;
+	}
+	struct ruleset *restrict ruleset = s->ruleset;
+	const bool created = (ruleset == NULL);
+	if (created) {
+		ruleset =
+			ruleset_new(s->loop, s->conf, s->resolver, s->basereq);
+		if (ruleset == NULL) {
+			LOGOOM();
+			return false;
+		}
+	}
+	bool ok;
+	if (s->conf->boot != NULL) {
+		ok = ruleset_loadconfig(ruleset, s->conf->boot);
+		if (!ok) {
+			LOGW_F("reload: config error: %s",
+			       ruleset_geterror(ruleset, NULL));
+		}
+	} else {
+		ok = ruleset_loadfile(ruleset, s->conf->ruleset);
+		if (!ok) {
+			LOGW_F("reload: ruleset error: %s",
+			       ruleset_geterror(ruleset, NULL));
+		}
+	}
+	if (!ok) {
+		if (created) {
+			ruleset_free(ruleset);
+		}
+		return false;
+	}
+	/* drop the engine if no ruleset was installed */
+	if (!ruleset_isvalid(ruleset)) {
+		ruleset_free(ruleset);
+		s->ruleset = NULL;
+	} else if (created) {
+		ruleset_setserver(ruleset, s);
+		s->ruleset = ruleset;
+	}
+	return true;
+}
 #endif
 
 static void
@@ -261,63 +311,9 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 		(void)systemd_notify(DAEMON_SYSTEMD_STATE_RELOADING);
 #if WITH_RULESET
 		struct server *restrict s = watcher->data;
-		if (s->ruleset != NULL) {
-			struct ruleset *restrict ruleset = s->ruleset;
-			bool ok = true;
-			if (s->conf->boot != NULL) {
-				ok = ruleset_loadconfig(ruleset, s->conf->boot);
-				if (!ok) {
-					LOGW_F("reload: config error: %s",
-					       ruleset_geterror(ruleset, NULL));
-				}
-			}
-			if (ok && s->conf->ruleset != NULL) {
-				ok = ruleset_loadfile(
-					ruleset, s->conf->ruleset);
-				if (!ok) {
-					LOGW_F("reload: ruleset error: %s",
-					       ruleset_geterror(ruleset, NULL));
-				}
-			}
-			if (!ok) {
-				(void)systemd_notify(
-					DAEMON_SYSTEMD_STATE_READY);
-				break;
-			}
-			if (s->conf->ruleset == NULL) {
-				ruleset_free(ruleset);
-				s->ruleset = NULL;
-			}
-		} else if (s->conf->boot != NULL) {
-			struct ruleset *restrict ruleset = ruleset_new(
-				s->loop, s->conf, s->resolver, s->basereq);
-			if (ruleset == NULL) {
-				LOGOOM();
-				break;
-			}
-			bool ok = ruleset_loadconfig(ruleset, s->conf->boot);
-			if (!ok) {
-				LOGW_F("reload: config error: %s",
-				       ruleset_geterror(ruleset, NULL));
-				ruleset_free(ruleset);
-				break;
-			}
-			if (s->conf->ruleset != NULL) {
-				ok = ruleset_loadfile(
-					ruleset, s->conf->ruleset);
-				if (!ok) {
-					LOGW_F("reload: ruleset error: %s",
-					       ruleset_geterror(ruleset, NULL));
-					ruleset_free(ruleset);
-					break;
-				}
-			}
-			if (s->conf->ruleset == NULL) {
-				ruleset_free(ruleset);
-			} else {
-				ruleset_setserver(ruleset, s);
-				s->ruleset = ruleset;
-			}
+		if (!server_reload_ruleset(s)) {
+			(void)systemd_notify(DAEMON_SYSTEMD_STATE_READY);
+			break;
 		}
 		if (s->conf->boot != NULL) {
 			server_reload_basereq(s);
@@ -421,9 +417,8 @@ bool server_init(
 			return false;
 		}
 		const enum ipclass cls = sa_ipclassify(&apiaddr.sa);
-		if (cls != IPCLASS_LOOPBACK && cls != IPCLASS_LINKLOCAL &&
-		    cls != IPCLASS_SITELOCAL) {
-			LOGW("binding API server to non-local address may be insecure");
+		if (cls != IPCLASS_LOOPBACK) {
+			LOGW("binding API server to non-loopback address may be insecure");
 		}
 		if (!add_listener(s, &apiaddr.sa, api_serve)) {
 			return false;

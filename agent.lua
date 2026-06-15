@@ -30,25 +30,25 @@ local function connid_of(v)
 end
 
 -- _G.peerdb[peername] = { version = N, timestamp = T, hosts = { "host1", ... }, conns = { [id] = { peername = "peer1", rtt = 0 } } }
-_G.peerdb                   = _G.peerdb or {}
+_G.peerdb                     = _G.peerdb or {}
 
-agent.API_ENDPOINT          = "api.neosocksd.internal:80"
-agent.INTERNAL_DOMAIN       = ".internal"
+agent.API_ENDPOINT            = "api.neosocksd.internal:80"
+agent.INTERNAL_DOMAIN         = ".internal"
 -- <host>.peerN.peer2.peer1.relay.neosocksd.internal
-agent.RELAY_DOMAIN          = ".relay.neosocksd.internal"
+agent.RELAY_DOMAIN            = ".relay.neosocksd.internal"
 
-agent.BOOTSTRAP_DELAY       = 10
+agent.BOOTSTRAP_DELAY         = 10
 -- adaptive probe interval: reset to MIN on any change or probe miss,
 -- exponentially back off to MAX when the topology is quiescent
 -- (jitter +/-10% applied each round)
-agent.PROBE_INTERVAL_MIN    = 10
-agent.PROBE_INTERVAL_MAX    = 600
+agent.PROBE_INTERVAL_MIN      = 10
+agent.PROBE_INTERVAL_MAX      = 600
 -- while the data plane is carrying traffic, the interval is capped at
 -- ACTIVE so that a failing conn is detected promptly instead of
 -- blackholing connections for up to MAX; an idle mesh still backs off
-agent.PROBE_INTERVAL_ACTIVE = 60
-agent.PROBE_BACKOFF         = 1.5
-agent.PROBE_JITTER          = 0.1
+agent.PROBE_INTERVAL_ACTIVE   = 60
+agent.PROBE_BACKOFF           = 1.5
+agent.PROBE_JITTER            = 0.1
 
 -- treat a conn as lost only after this many consecutive failed probes, so a
 -- transient outage (e.g. a peer restarting) does not flap the route
@@ -442,8 +442,8 @@ local function apply_delta(from, delta)
                 _G.peerdb[peer] = data
                 changed = true
                 if agent.verbose then
-                    evlogf("peerdb: updated %q v%.0f from %q (time=%s)",
-                        peer, data.version, from,
+                    evlogf("peerdb: updated %q from %q (version=%d time=%s)",
+                        peer, from, data.version,
                         data.timestamp and format_timestamp(data.timestamp) or "?")
                 end
                 -- an older-or-equal entry carries no fresher timestamp, so it
@@ -488,7 +488,7 @@ local function next_version()
     -- restart supersede stale copies from previous boots that may still
     -- circulate in the network; max() keeps the version monotone while
     -- the clock is stepped backwards
-    return math.max(ver + 1, time.unix())
+    return math.floor(math.max(ver + 1, time.unix()))
 end
 
 -- scan a digest received from a peer: merge third-party timestamps and

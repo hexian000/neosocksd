@@ -182,12 +182,17 @@ int cfunc_loadconfig(lua_State *restrict L)
 	}
 
 	/* a `ruleset` table field is installed as _G.ruleset and removed here so
-	 * conf_loadfromtable() ignores it; a string field is left as a filename */
+	 * conf_loadfromtable() ignores it; a string path is not allowed -- use the
+	 * `-r'/`--ruleset' command-line option for a standalone ruleset file */
 	lua_getfield(L, -1, "ruleset");
 	if (lua_istable(L, -1)) {
 		lua_setglobal(L, "ruleset");
 		lua_pushnil(L);
 		lua_setfield(L, -2, "ruleset");
+	} else if (!lua_isnil(L, -1)) {
+		return luaL_error(
+			L,
+			"config: `ruleset' must be a table; use `-r' for a standalone ruleset file");
 	} else {
 		lua_pop(L, 1);
 	}

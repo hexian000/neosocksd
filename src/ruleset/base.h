@@ -7,6 +7,7 @@
 #include "ruleset.h"
 
 #include <ev.h>
+#include <lauxlib.h>
 #include <lua.h>
 
 #include <assert.h>
@@ -14,6 +15,13 @@
 #include <stddef.h>
 
 static_assert(LUA_VERSION_NUM >= 503, "ruleset requires Lua >= 5.3");
+
+/* luaL_intop performs wrap-around integer arithmetic; it is only provided by
+ * lauxlib.h since Lua 5.4, so define a fallback for Lua 5.3 compatibility. */
+#ifndef luaL_intop
+#define luaL_intop(op, v1, v2)                                                 \
+	((lua_Integer)((lua_Unsigned)(v1)op(lua_Unsigned)(v2)))
+#endif
 
 struct config;
 struct dialreq;

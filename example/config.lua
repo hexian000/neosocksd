@@ -5,7 +5,9 @@
 -- inherited from command-line arguments (or defaults).
 --
 -- To install a ruleset, set `_G.ruleset` in this script's body, or set the
--- `ruleset` field below (a table is used directly; a string is a path).
+-- `ruleset` field below to a table.  For a standalone ruleset file, use the
+-- `-r'/`--ruleset' command-line option instead (`-c' and `-r' are mutually
+-- exclusive).
 
 -- [[ optional: read extra arguments from the command line ]] --
 -- Example: neosocksd -c config.lua --dev eth0
@@ -58,13 +60,11 @@ return {
     -- Ruleset (requires WITH_RULESET build)                               --
     -- ------------------------------------------------------------------ --
 
-    -- The ruleset: a string path to a Lua file, or a table used directly as
-    -- _G.ruleset (e.g. require("libruleset")).  When active, it overrides the
-    -- proxy above.  Incompatible with socks5_bind and socks5_udp.
-    -- ruleset = "/etc/neosocksd/ruleset.lua",
-
-    -- Path to boot config file (loaded by -c).  Usually set via CLI only.
-    -- boot = nil,
+    -- The ruleset: a table used directly as _G.ruleset
+    -- (e.g. require("libruleset")).  When active, it overrides the proxy above.
+    -- Incompatible with socks5_bind and socks5_udp.  For a standalone ruleset
+    -- file, use `-r'/`--ruleset' on the command line instead.
+    -- ruleset = require("libruleset"),
 
     -- Print a full Lua traceback on ruleset errors (useful for debugging).
     -- traceback = false,
@@ -136,9 +136,6 @@ return {
     -- ------------------------------------------------------------------ --
     -- Connection management                                               --
     -- ------------------------------------------------------------------ --
-
-    -- Cache and reuse idle outbound connections (recommended: true).
-    conn_cache          = true,
 
     -- Enable SOCKS5 BIND command.  Incompatible with ruleset and proxy.
     socks5_bind         = false,

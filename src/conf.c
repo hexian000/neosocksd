@@ -266,8 +266,10 @@ static const struct metaconfig conf_fields[] = {
 	{ "restapi", CONF_STRING, offsetof(struct config, restapi) },
 	{ "http_listen", CONF_STRING, offsetof(struct config, http_listen) },
 #if WITH_RULESET
-	{ "ruleset", CONF_STRING, offsetof(struct config, ruleset) },
-	{ "boot", CONF_STRING, offsetof(struct config, boot) },
+/* "ruleset" and "boot" are intentionally omitted. The boot config installs
+	 * its ruleset inline via _G.ruleset (handled in cfunc_loadconfig); a
+	 * standalone ruleset file comes only from the -r CLI flag. The boot config
+	 * path itself comes only from -c and must stay stable across hot reloads. */
 #endif
 	{ "user_name", CONF_STRING, offsetof(struct config, user_name) },
 #if WITH_CARES
@@ -813,6 +815,12 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 
 #undef OPT_REQUIRE_ARG
 #undef OPT_ARG_ERROR
+#if WITH_RULESET
+	if (conf->boot != NULL && conf->ruleset != NULL) {
+		LOGF("`-c'/`--config' and `-r'/`--ruleset' are mutually exclusive");
+		return false;
+	}
+#endif
 	if (http_only) {
 		conf->http_listen = conf->listen;
 		conf->listen = NULL;

@@ -1,12 +1,17 @@
 -- neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
 -- This code is licensed under MIT license (see LICENSE for details)
 
--- [[ tests/ruleset.lua: main test entry point ]] --
+-- [[ tests/boot.lua: test suite boot config + ruleset ]] --
 --
 -- Usage:
---   neosocksd -c tests/main.lua
+--   neosocksd -c tests/boot.lua
 --
--- package.path is "?.lua" relative to the working directory (project root).
+-- Loaded in "config" mode: it returns the configuration table and installs the
+-- test ruleset inline via the `ruleset` field. package.path is "?.lua" relative
+-- to the working directory (project root).
+
+local mode = ...
+assert(mode == "config")
 
 _G.libruleset = require("libruleset")
 
@@ -14,9 +19,15 @@ local testlib = require("tests.testlib")
 
 pcall(collectgarbage, "generational")
 
+-- Listener addresses; reused by both the config table and the ruleset below.
+-- The config has not been applied yet while this chunk runs, so the ruleset
+-- refers to these locals instead of neosocksd.config().
+local LISTEN       = "127.0.1.1:31080"
+local RESTAPI      = "127.0.1.1:39080"
+
 local ruleset      = {}
 local API_ENDPOINT = "api.neosocksd.internal:80"
-local API_TARGET   = { neosocksd.config().restapi }
+local API_TARGET   = { RESTAPI }
 
 -- Require test_rpc early so RPC handlers are registered before the
 -- event loop starts processing incoming connections.
@@ -59,7 +70,7 @@ end)
 -- Ruleset boilerplate required by neosocksd --
 
 _G.redirect_name = {
-    { match.exact(API_ENDPOINT), rule.redirect(neosocksd.config().restapi) },
+    { match.exact(API_ENDPOINT), rule.redirect(RESTAPI) },
 }
 _G.route_default = { lb.roundrobin({
     rule.redirect("127.0.0.1:30001"),
@@ -74,7 +85,7 @@ local FAILOVER_NAME = "failover.test:80"
 local POLICYREJECT_NAME = "policyreject.test:80"
 function ruleset.resolve(addr, username, password)
     if addr == FAILOVER_NAME then
-        return libruleset.failover(neosocksd.config().restapi, {
+        return libruleset.failover(RESTAPI, {
             { "socks5://127.0.0.1:1" }, -- connection refused: this fails
             {},                         -- direct to the API: this succeeds
         })
@@ -86,14 +97,17 @@ function ruleset.resolve(addr, username, password)
     return libruleset.resolve(addr, username, password)
 end
 
-local function main(...)
-    neosocksd.setinterval(0.0)
-    return setmetatable(ruleset, {
-        __index = function(_, k)
-            return _G.libruleset[k]
-        end,
-    })
-end
+neosocksd.setinterval(0.0)
+setmetatable(ruleset, {
+    __index = function(_, k)
+        return _G.libruleset[k]
+    end,
+})
 
-logf("ruleset loaded, interpreter: %s", _VERSION)
-return main(...)
+logf("boot loaded, interpreter: %s", _VERSION)
+return {
+    listen    = LISTEN,
+    restapi   = RESTAPI,
+    traceback = true,
+    ruleset   = ruleset,
+}

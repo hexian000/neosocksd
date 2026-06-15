@@ -3,17 +3,46 @@
 
 -- [[ test_codec.lua: tests for marshal/unmarshal and zlib ]] --
 
+-- deepequal compares values structurally. marshal does not guarantee a stable
+-- key order for the hash part of a table (lua_next iteration order is
+-- unspecified and varies across Lua versions), so the round-trip must be
+-- checked semantically rather than by comparing re-marshaled bytes.
+local function deepequal(a, b)
+    if type(a) ~= type(b) then
+        return false
+    end
+    if type(a) ~= "table" then
+        return a == b or (a ~= a and b ~= b) -- treat NaN as equal to NaN
+    end
+    for k, v in pairs(a) do
+        if not deepequal(v, b[k]) then
+            return false
+        end
+    end
+    for k in pairs(b) do
+        if a[k] == nil then
+            return false
+        end
+    end
+    return true
+end
+
 return function(T)
     T:test("marshal/unmarshal round-trip", function()
-        local s = marshal(
+        local args = table.pack(
             { [9] = 99, 1, 0, math.pi, -3, 999999999999, 1000000000000, ["a"] = "b" },
             "e\"cho", "e",
             { "c", ["h"] = "🍌\n\0" },
             math.mininteger)
+        local s = marshal(table.unpack(args, 1, args.n))
         assert(type(s) == "string" and #s > 0)
-        local s2 = marshal(unmarshal(s))
-        assert(s == s2, string.format(
-            "remarshal mismatch\n  original: %s\n  got:      %s", s, s2))
+        local got = table.pack(unmarshal(s))
+        assert(got.n == args.n, string.format(
+            "value count mismatch: %d vs %d", args.n, got.n))
+        for i = 1, args.n do
+            assert(deepequal(args[i], got[i]), string.format(
+                "round-trip mismatch at argument %d", i))
+        end
     end)
 
     T:test("marshal special float values", function()

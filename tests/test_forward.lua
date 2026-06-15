@@ -28,7 +28,7 @@ return function(T, api_endpoint)
     end)
 
     T:atest("await.forward failover reaches a working upstream", function()
-        -- routed (in tests/ruleset.lua) through a bad proxy, then direct
+        -- routed (in tests/boot.lua) through a bad proxy, then direct
         local target = { "failover.test:80", socks_proxy }
         local ok, ret = await.rpcall(target, "echo", "failover-ok")
         assert(ok, "failover rpcall failed: " .. tostring(ret))

@@ -37,7 +37,7 @@ end
 -- bench registers a benchmark; iters is the total number of operations fn performs.
 -- bench must be called from within an async context.
 -- Benchmarks are deferred. They only run when all tests pass AND the BENCH
--- environment variable is set (e.g. BENCH=1 neosocksd -c tests/main.lua).
+-- environment variable is set (e.g. BENCH=1 neosocksd -c tests/boot.lua).
 function M:bench(name, iters, fn)
     table.insert(self.benches, { name = name, iters = iters, fn = fn })
 end
