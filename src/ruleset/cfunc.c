@@ -17,11 +17,21 @@
 #include <lauxlib.h>
 #include <lua.h>
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 
 #define MT_RULESET_STATE "ruleset_state"
+
+/* Detach @p state from its callback and notify the event loop that the
+ * asynchronous operation has finished. */
+static void state_complete(lua_State *restrict L, struct ruleset_state *state)
+{
+	const struct ruleset *restrict r = aux_getruleset(L);
+	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
+	state->cb = NULL;
+}
 
 static int ruleset_state_gc(lua_State *restrict L)
 {
@@ -31,9 +41,7 @@ static int ruleset_state_gc(lua_State *restrict L)
 	}
 	state->cb->rpcall.result = NULL;
 	state->cb->rpcall.resultlen = 0;
-	const struct ruleset *restrict r = aux_getruleset(L);
-	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
-	state->cb = NULL;
+	state_complete(L, state);
 	return 0;
 }
 
@@ -63,6 +71,21 @@ static void check_memlimit(lua_State *restrict L)
 	(void)lua_gc(L, LUA_GCCOLLECT, 0);
 }
 
+/* Install a fresh sandbox `_ENV` (indexing _G) as upvalue 1 of the chunk on
+ * the top of the stack. */
+static void aux_setsandboxenv(lua_State *restrict L)
+{
+	lua_newtable(L);
+	lua_newtable(L);
+	aux_getregtable(L, LUA_RIDX_GLOBALS);
+	/* lua stack: ... chunk env mt _G */
+	lua_setfield(L, -2, "__index");
+	lua_setmetatable(L, -2);
+	const char *upvalue = lua_setupvalue(L, -2, 1);
+	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	UNUSED(upvalue);
+}
+
 /* finish(ok, ...) */
 static int request_finish(lua_State *restrict L)
 {
@@ -73,7 +96,6 @@ static int request_finish(lua_State *restrict L)
 	if (state->cb == NULL) {
 		return 0;
 	}
-	const struct ruleset *restrict r = aux_getruleset(L);
 	struct dialreq *req = NULL;
 	if (lua_toboolean(L, 1)) {
 		const int n = lua_gettop(L) - 1;
@@ -94,11 +116,10 @@ static int request_finish(lua_State *restrict L)
 			LOGD("ruleset: request rejected");
 		}
 	} else {
-		LOGE_F("ruleset error: %s", lua_tostring(L, 2));
+		LOGE_F("ruleset error: %s", luaL_tolstring(L, 2, NULL));
 	}
 	state->cb->request.req = req;
-	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
-	state->cb = NULL;
+	state_complete(L, state);
 	return 0;
 }
 
@@ -205,8 +226,13 @@ int cfunc_loadconfig(lua_State *restrict L)
 	/* Extract memlimit and traceback into r->config */
 	lua_getfield(L, -1, "memlimit");
 	if (!lua_isnil(L, -1)) {
-		const int mb = (int)luaL_checkinteger(L, -1);
-		r->config.memlimit_kb = (mb > 0) ? (mb << 10u) : 0;
+		/* memlimit is in MiB; keep the arithmetic in lua_Integer and reject
+		 * values that would overflow the KiB field. Non-positive disables. */
+		const lua_Integer mb = luaL_checkinteger(L, -1);
+		if (mb > (INT_MAX >> 10)) {
+			return luaL_error(L, "config: memlimit too large");
+		}
+		r->config.memlimit_kb = (mb > 0) ? (int)(mb << 10) : 0;
 	}
 	lua_pop(L, 1);
 
@@ -230,15 +256,7 @@ int cfunc_invoke(lua_State *restrict L)
 	if (lua_load(L, aux_reader, stream, "=(invoke)", "t")) {
 		return lua_error(L);
 	}
-	lua_newtable(L);
-	lua_newtable(L);
-	aux_getregtable(L, LUA_RIDX_GLOBALS);
-	/* lua stack: chunk env mt _G */
-	lua_setfield(L, -2, "__index");
-	lua_setmetatable(L, -2);
-	const char *upvalue = lua_setupvalue(L, -2, 1);
-	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
-	UNUSED(upvalue);
+	aux_setsandboxenv(L);
 	lua_call(L, 0, 0);
 	return 0;
 }
@@ -262,9 +280,7 @@ static int rpcall_finish(lua_State *restrict L)
 	const char *s = lua_tolstring(L, 1, &len);
 	state->cb->rpcall.result = s;
 	state->cb->rpcall.resultlen = len;
-	const struct ruleset *restrict r = aux_getruleset(L);
-	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
-	state->cb = NULL;
+	state_complete(L, state);
 	return 0;
 }
 
@@ -287,16 +303,8 @@ int cfunc_rpcall(lua_State *restrict L)
 	if (lua_load(L, aux_reader, stream, "=(rpc)", "t")) {
 		return lua_error(L);
 	}
-	lua_newtable(L);
-	lua_newtable(L);
-	aux_getregtable(L, LUA_RIDX_GLOBALS);
-	/* lua stack: state co finish nil chunk env mt _G */
-	lua_setfield(L, -2, "__index");
-	lua_setmetatable(L, -2);
-	const char *upvalue = lua_setupvalue(L, -2, 1);
-	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
-	UNUSED(upvalue);
 	/* lua stack: state co finish chunk */
+	aux_setsandboxenv(L);
 
 	state->cb = in_cb;
 	*pstate = state;
@@ -410,7 +418,15 @@ int cfunc_stats(lua_State *restrict L)
 	const char *query = lua_touserdata(L, 2);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, "stats");
-	lua_copy(L, -1, 1);
+	if (!lua_isfunction(L, -1)) {
+		/* No stats hook: return an empty result, not zero results.
+		 * ruleset_stats() reserves a NULL return for genuine errors, which
+		 * the /stats handler surfaces via ruleset_geterror(); a missing hook
+		 * must not trip that error path. */
+		lua_pushliteral(L, "");
+		return 1;
+	}
+	lua_replace(L, 1);
 	lua_settop(L, 1);
 
 	lua_pushnumber(L, dt);
