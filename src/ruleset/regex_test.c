@@ -1,6 +1,15 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * regex_test - white-box unit tests for ruleset/regex.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   ruleset/regex.c  module under test
+ * Leaf libraries: Lua. regex.c has no stateful collaborator to mock; the mock
+ * section only holds shared Lua test fixtures.
+ */
+
 #include "ruleset/regex.h"
 
 #include "lauxlib.h"
@@ -11,6 +20,10 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - shared Lua test fixtures (regex.c has no collaborator to mock).
+ * ---------------------------------------------------------------------- */
 
 static lua_State *new_lua(void)
 {
@@ -33,6 +46,14 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 	const int status_call = lua_pcall(L, 0, LUA_MULTRET, 0);
 	return status_call == LUA_OK;
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - pattern compile/match cases.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(regex_module_opens)
 {
@@ -181,6 +202,14 @@ T_DECLARE_CASE(regex_gmatch_iterator)
 
 	lua_close(L);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

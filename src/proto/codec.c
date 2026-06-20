@@ -771,13 +771,16 @@ static bool gzip_parse_header(struct gzip_rstream *z, size_t *len, int *ret)
 		return true;
 	}
 	if (hr == 0) {
-		if (z->srceof) {
-			/* Truncated header */
+		if (z->srceof && z->srclen == 0) {
+			/* Truncated header: no more input to complete it */
 			*len = 0;
 			z->rderr = -1;
 			*ret = -1;
 			return true;
 		}
+		/* The optional-field parser yields per byte; as long as input
+		 * remains buffered (srclen > 0) it can still make progress,
+		 * even after the base stream has signalled EOF. */
 		return false;
 	}
 	/* Header complete - initialise DEFLATE decompressor */

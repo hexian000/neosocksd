@@ -1,15 +1,36 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * conf_test - white-box unit tests for conf.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   conf.c           module under test
+ *   proto/codec.c    leaf (transfer codecs)
+ *   version.c        leaf (neosocksd_version)
+ * conf.c parses argv/config into struct config and has no stateful
+ * collaborator module to mock; the mock section only holds shared fixtures.
+ */
+
 #include "conf.h"
 
 #include "utils/slog.h"
 #include "utils/testing.h"
 
+#if WITH_LUA
+#include "lauxlib.h"
+#include "lua.h"
+#endif
+
 #include <sys/socket.h>
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - shared test fixtures (conf.c has no collaborator to mock).
+ * ---------------------------------------------------------------------- */
 
 static struct config make_valid_conf(void)
 {
@@ -17,6 +38,14 @@ static struct config make_valid_conf(void)
 	conf.listen = "127.0.0.1:1080";
 	return conf;
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - defaults, argv parsing and validation cases.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(conf_default_has_expected_values)
 {
@@ -267,11 +296,12 @@ T_DECLARE_CASE(parseargs_user_daemonize_color)
 			 "-u",
 			 "nobody:nogroup",
 			 "-d",
-			 "-C",
+			 "--log",
+			 "terminal",
 			 "--enable-socks5-bind",
 			 "--enable-socks5-udp" };
 
-	T_EXPECT(conf_parseargs(&conf, 9, argv));
+	T_EXPECT(conf_parseargs(&conf, 10, argv));
 	T_EXPECT_STREQ(conf.user_name, "nobody:nogroup");
 	T_EXPECT(conf.daemonize);
 	T_EXPECT(conf.socks5_bind);
@@ -423,6 +453,42 @@ T_DECLARE_CASE(parseargs_double_dash_and_unknown)
 	}
 }
 
+T_DECLARE_CASE(parseargs_log_outputs)
+{
+	static const char *const sinks[] = { "stdout", "stderr", "syslog",
+					     "discard" };
+	for (size_t i = 0; i < sizeof(sinks) / sizeof(sinks[0]); i++) {
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--log",
+				 (char *)sinks[i] };
+		T_EXPECT(conf_parseargs(&conf, 5, argv));
+	}
+	{
+		/* unknown --log sink is rejected */
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--log",
+				 "nowhere" };
+		T_EXPECT(!conf_parseargs(&conf, 5, argv));
+	}
+	/* restore a sane logging sink for the remainder of the test run */
+	{
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--log",
+				 "terminal" };
+		T_EXPECT(conf_parseargs(&conf, 5, argv));
+	}
+}
+
+#if WITH_RULESET
+T_DECLARE_CASE(parseargs_dump_config_deprecated)
+{
+	/* --dump-config is accepted but deprecated (no-op) */
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--dump-config" };
+	T_EXPECT(conf_parseargs(&conf, 4, argv));
+}
+#endif /* WITH_RULESET */
+
 #if WITH_CARES
 T_DECLARE_CASE(parseargs_nameserver)
 {
@@ -521,6 +587,183 @@ T_DECLARE_CASE(parseargs_ruleset)
 }
 #endif /* WITH_RULESET */
 
+T_DECLARE_CASE(parseargs_forward_flag)
+{
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "-f",
+			 "127.0.0.1:8080" };
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
+	T_EXPECT(
+		conf.forward != NULL &&
+		strcmp(conf.forward, "127.0.0.1:8080") == 0);
+}
+
+T_DECLARE_CASE(parseargs_block_multicast_token)
+{
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+			 "--block-outbound", "multicast" };
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
+	T_EXPECT(conf.block_multicast);
+	T_EXPECT(!conf.block_loopback);
+}
+
+#if WITH_RULESET
+T_DECLARE_CASE(parseargs_config_flag)
+{
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "-c",
+			 "boot.lua" };
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
+	T_EXPECT(conf.boot != NULL && strcmp(conf.boot, "boot.lua") == 0);
+}
+
+T_DECLARE_CASE(parseargs_config_and_ruleset_mutually_exclusive)
+{
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "-c",
+			 "boot.lua",  "-r", "ruleset.lua" };
+	T_EXPECT(!conf_parseargs(&conf, 7, argv));
+}
+
+T_DECLARE_CASE(parseargs_memlimit_negative_clamped)
+{
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--memlimit",
+			 "-5" };
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
+	T_EXPECT_EQ(conf.memlimit, 0);
+}
+#endif /* WITH_RULESET */
+
+#if WITH_LUA
+/* conf_loadfromtable tests */
+
+static lua_State *new_conf_table(void)
+{
+	lua_State *L = luaL_newstate();
+	if (L == NULL) {
+		return NULL;
+	}
+	lua_newtable(L);
+	return L;
+}
+
+T_DECLARE_CASE(loadtable_applies_typed_fields)
+{
+	lua_State *L = new_conf_table();
+	T_CHECK(L != NULL);
+
+	lua_pushstring(L, "0.0.0.0:1080");
+	lua_setfield(L, -2, "listen");
+	lua_pushinteger(L, 5);
+	lua_setfield(L, -2, "loglevel");
+	lua_pushnumber(L, 12.5);
+	lua_setfield(L, -2, "timeout");
+	lua_pushboolean(L, 1);
+	lua_setfield(L, -2, "auth_required");
+	lua_pushinteger(L, 4242);
+	lua_setfield(L, -2, "max_sessions");
+
+	struct config conf = conf_default();
+	T_EXPECT(conf_loadfromtable(L, &conf));
+	T_EXPECT(
+		conf.listen != NULL &&
+		strcmp(conf.listen, "0.0.0.0:1080") == 0);
+	T_EXPECT_EQ(conf.loglevel, 5);
+	T_EXPECT(conf.timeout == 12.5);
+	T_EXPECT(conf.auth_required);
+	T_EXPECT_EQ(conf.max_sessions, 4242);
+
+	free(conf.strings);
+	lua_close(L);
+}
+
+T_DECLARE_CASE(loadtable_empty_preserves_defaults)
+{
+	lua_State *L = new_conf_table();
+	T_CHECK(L != NULL);
+
+	const struct config def = conf_default();
+	struct config conf = conf_default();
+	/* nil for every field must keep the existing values */
+	T_EXPECT(conf_loadfromtable(L, &conf));
+	T_EXPECT_EQ(conf.loglevel, def.loglevel);
+	T_EXPECT_EQ(conf.max_sessions, def.max_sessions);
+	T_EXPECT(conf.timeout == def.timeout);
+
+	free(conf.strings);
+	lua_close(L);
+}
+
+T_DECLARE_CASE(loadtable_rejects_wrong_types)
+{
+	/* integer field with a non-integer value */
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushstring(L, "notanint");
+		lua_setfield(L, -2, "loglevel");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
+	}
+	/* integer field out of the int range */
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushinteger(L, (lua_Integer)INT_MAX + 1);
+		lua_setfield(L, -2, "max_sessions");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
+	}
+	/* double field with a non-number value */
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushboolean(L, 1);
+		lua_setfield(L, -2, "timeout");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
+	}
+	/* boolean field with a non-boolean value */
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushinteger(L, 1);
+		lua_setfield(L, -2, "auth_required");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
+	}
+	/* string field with a non-string value */
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushinteger(L, 1);
+		lua_setfield(L, -2, "listen");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
+	}
+}
+#endif /* WITH_LUA */
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -556,6 +799,7 @@ int main(void)
 	T_RUN_CASE(t, parseargs_user_daemonize_color);
 	T_RUN_CASE(t, parseargs_timeout);
 	T_RUN_CASE(t, parseargs_loglevel);
+	T_RUN_CASE(t, parseargs_log_outputs);
 	T_RUN_CASE(t, parseargs_block_outbound);
 	T_RUN_CASE(t, parseargs_max_sessions);
 	T_RUN_CASE(t, parseargs_max_startups);
@@ -580,6 +824,19 @@ int main(void)
 #endif
 #if WITH_RULESET
 	T_RUN_CASE(t, parseargs_ruleset);
+	T_RUN_CASE(t, parseargs_dump_config_deprecated);
+#endif
+	T_RUN_CASE(t, parseargs_forward_flag);
+	T_RUN_CASE(t, parseargs_block_multicast_token);
+#if WITH_RULESET
+	T_RUN_CASE(t, parseargs_config_flag);
+	T_RUN_CASE(t, parseargs_config_and_ruleset_mutually_exclusive);
+	T_RUN_CASE(t, parseargs_memlimit_negative_clamped);
+#endif
+#if WITH_LUA
+	T_RUN_CASE(t, loadtable_applies_typed_fields);
+	T_RUN_CASE(t, loadtable_empty_preserves_defaults);
+	T_RUN_CASE(t, loadtable_rejects_wrong_types);
 #endif
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

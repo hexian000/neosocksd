@@ -1,6 +1,20 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * cfunc_test - white-box unit tests for ruleset/cfunc.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   ruleset/cfunc.c  module under test
+ *   ruleset.c        ruleset host
+ *   ruleset/base.c   ruleset Lua substrate
+ *   conf.c           config data
+ *   proto/codec.c    leaf
+ *   version.c        leaf
+ * The luaopen_* module entry points are replaced by the mocks in the mock
+ * section below.
+ */
+
 #include "conf.h"
 #include "dialer.h"
 #include "io/stream.h"
@@ -16,7 +30,6 @@
 
 #include <arpa/inet.h>
 #include <ev.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -26,6 +39,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - luaopen_* stubs and shared fixtures.
+ * ---------------------------------------------------------------------- */
 
 static const ev_tstamp TEST_WAIT_SEC = 0.128;
 
@@ -408,6 +425,14 @@ static void seed_global_module(lua_State *restrict L, const char *restrict name)
 	lua_pop(L, 2);
 }
 
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - sandboxed C-function dispatch and stats cases.
+ * ---------------------------------------------------------------------- */
+
 T_DECLARE_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed)
 {
 	static const char file_chunk[] =
@@ -656,6 +681,14 @@ T_DECLARE_CASE(cfunc_rpcall_marshals_results_and_keeps_env_local)
 
 	free_ruleset(loop, r);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

@@ -53,7 +53,7 @@ agent.PROBE_JITTER            = 0.1
 -- treat a conn as lost only after this many consecutive failed probes, so a
 -- transient outage (e.g. a peer restarting) does not flap the route
 agent.CONN_FAILURE_LIMIT      = 2
--- windowed minimum RTT window size in seconds (Kathleen Nichols, 2012)
+-- windowed minimum RTT window size in seconds
 agent.RTT_WINDOW              = 600
 -- only switch the chosen route when a candidate is at least this much faster
 agent.ROUTE_HYSTERESIS        = 0.2
@@ -64,8 +64,8 @@ agent.PEERDB_EXPIRY_TIME      = 3600
 agent.PEERDB_EXPIRY_TOLERANCE = 600
 
 agent.verbose                 = table.get(_G.agent, "verbose")
--- when set, do not run the maintenance mainloop on this node
-agent.passive                 = table.get(_G.agent, "passive")
+-- nil or <0 refuses to relay; 0 relays freely; >0 relays with a transit cost
+agent.relay_cost              = table.get(_G.agent, "relay_cost")
 -- optional callback invoked after every maintenance round
 agent.on_updated              = table.get(_G.agent, "on_updated")
 
@@ -111,38 +111,55 @@ local function dijkstra(peerdb, source)
 
     if not nodes[source] then return {} end
 
-    local dist, prev, visited = {}, {}, {}
+    -- the routing metric is lexicographic (cost, rtt): a path's total relay
+    -- cost dominates, and RTT only decides among equal-cost paths. Both are
+    -- additive and non-negative, so Dijkstra's greedy extraction still holds.
+    local cost, rtt, prev, visited = {}, {}, {}, {}
     for node, _ in pairs(nodes) do
-        dist[node] = math.huge
+        cost[node] = math.huge
+        rtt[node] = math.huge
         prev[node] = nil
         visited[node] = false
     end
-    dist[source] = 0
+    cost[source] = 0
+    rtt[source] = 0
 
     while true do
-        -- find the unvisited node with the smallest distance
-        local min_dist, u = math.huge, nil
+        -- extract the unvisited node with the smallest (cost, rtt)
+        local min_cost, min_rtt, u = math.huge, math.huge, nil
         for node, _ in pairs(nodes) do
-            if not visited[node] and dist[node] < min_dist then
-                min_dist = dist[node]
-                u = node
+            if not visited[node] then
+                local c, r = cost[node], rtt[node]
+                if c < min_cost or (c == min_cost and r < min_rtt) then
+                    min_cost, min_rtt, u = c, r, node
+                end
             end
         end
 
         -- all nodes visited or remaining nodes unreachable
-        if not u then break end
+        if not u or min_cost == math.huge then break end
         visited[u] = true
 
         -- update neighbor nodes' distance
         local u_info = peerdb[u]
-        if u_info and u_info.conns then
+        -- transit through u is governed by its relay_cost; the source is exempt
+        -- as it relays nothing of its own. relaying is opt-in: nil or <0 refuses
+        -- (edges not relaxed, so u can still be an endpoint); >0 adds to the cost
+        local rc = u_info and u_info.relay_cost
+        local norelay = u ~= source and not (type(rc) == "number" and rc >= 0)
+        if u_info and u_info.conns and not norelay then
+            local penalty = (u ~= source and rc > 0) and rc or 0
             for _, conn in pairs(u_info.conns) do
                 local v = conn.peername
                 local weight = conn.rtt
                 if not visited[v] then
-                    local alt = dist[u] + weight
-                    if alt < dist[v] then
-                        dist[v] = alt
+                    local altcost = cost[u] + penalty
+                    local altrtt = rtt[u] + weight
+                    -- lower cost always wins; equal cost is decided by RTT
+                    if altcost < cost[v] or
+                        (altcost == cost[v] and altrtt < rtt[v]) then
+                        cost[v] = altcost
+                        rtt[v] = altrtt
                         prev[v] = u
                     end
                 end
@@ -153,7 +170,7 @@ local function dijkstra(peerdb, source)
     -- build relay paths
     local paths = {}
     for node, _ in pairs(nodes) do
-        if node ~= source and dist[node] < math.huge then
+        if node ~= source and cost[node] < math.huge then
             local path, n = {}, 1
             local curr = node
             while curr ~= source do
@@ -161,7 +178,8 @@ local function dijkstra(peerdb, source)
                 n = n + 1
                 curr = prev[curr]
             end
-            paths[node] = { path = path, rtt = dist[node] }
+            -- report the real RTT, not the cost-inflated routing metric
+            paths[node] = { path = path, rtt = rtt[node] }
         end
     end
 
@@ -365,6 +383,9 @@ function agent.matcher(addr)
         end
     end
     -- resolve relay
+    if not (type(agent.relay_cost) == "number" and agent.relay_cost >= 0) then
+        error(string.format("%q: relay disabled", fqdn)) -- break matching
+    end
     local remain, peername = sub:match("^(.+)%.([^.]+)$")
     local domain
     if remain then
@@ -478,6 +499,29 @@ local function build_digest()
     return digest
 end
 
+-- entries we hold that `digest` lacks or is behind on. `strict` decides the
+-- boundary at equal versions: a pull response includes them (false) so
+-- anti-entropy can repair lost content, while a push offer excludes them
+-- (true) so a converged link carries nothing
+local function delta_for(digest, strict)
+    local delta = {}
+    if type(digest) ~= "table" then
+        for peer, data in pairs(_G.peerdb) do
+            delta[peer] = data
+        end
+        return delta
+    end
+    for peer, data in pairs(_G.peerdb) do
+        local known = digest[peer]
+        local kv = type(known) == "table" and known.v
+        if not kv or (strict and data.version > kv) or
+            (not strict and data.version >= kv) then
+            delta[peer] = data
+        end
+    end
+    return delta
+end
+
 local function next_version()
     local selfinfo = _G.peerdb[agent.peername]
     local ver = selfinfo and selfinfo.version
@@ -528,89 +572,37 @@ end
 
 local probe_interval = agent.PROBE_INTERVAL_MIN
 
--- digest pull-backs in flight, keyed by peername
-local pulling = {}
-
--- pull entries from a peer whose digest is ahead of ours, then rebuild the
--- routing index immediately so stale routes are replaced without waiting
--- for the next probe round
-local function pull_from(peername)
-    if pulling[peername] then
-        return
-    end
-    local conn
-    for connid, state in pairs(agent.conn_state) do
-        if state.peername == peername and agent.conns[connid] then
-            conn = agent.conns[connid]
-            break
-        end
-    end
-    if not conn then
-        -- no direct conn to the sender; let the next round pull via probes
-        agent.wake()
-        return
-    end
-    pulling[peername] = true
-    async(function()
-        local ok, err = pcall(function()
-            local ok2, result, delta = callbyconn(conn, "sync", agent.peername, build_digest())
-            if not ok2 then
-                error(result)
-            end
-            if type(delta) == "table" and apply_delta(peername, delta) then
-                hosts, routes = build_index(_G.peerdb, routes)
-                probe_interval = agent.PROBE_INTERVAL_MIN
-                agent.wake()
-            end
-        end)
-        pulling[peername] = nil
-        if not ok then
-            evlogf("pull error: %q %s", peername, oneline(err))
-        end
-    end)
-end
-
 -- probe: cheap liveness check and RTT measurement; returns own digest so the
--- caller can decide whether a full rpc.sync is worth the extra round trip.
--- the caller's digest is inspected so updates propagate in both directions:
--- when the caller is ahead, pull from it instead of waiting to probe that
--- link ourselves at a possibly backed-off interval.
+-- caller can decide whether an rpc.sync is worth the extra round trip. The
+-- caller's digest is merged for third-party timestamps; data reconciliation
+-- is left to the caller-driven sync below.
 function rpc.probe(peername, digest)
     if not agent.peername then
         error("peer is not available for relay")
     end
-    if type(peername) == "string" and inspect_digest(digest, peername) then
-        pull_from(peername)
+    if type(peername) == "string" then
+        inspect_digest(digest, peername)
     end
     return agent.peername, build_digest()
 end
 
--- digest-pull: the caller sends its versions, the callee returns entries the
--- caller is missing or has an older version of. Because every link is probed
--- from both ends each interval, both directions converge without a separate
--- gossip fanout.
-function rpc.sync(peername, digest)
+-- bidirectional anti-entropy in one round-trip: the caller pushes entries it
+-- holds that we lack (`delta`) and sends its `digest`; we ingest the push and
+-- return entries the caller is missing. This is the only data-moving path, so
+-- a peer that cannot dial out (e.g. a passive hub) still syncs both ways from
+-- the connections dialed into it.
+function rpc.sync(peername, digest, delta)
     if not agent.peername then
         error("peer is not available for relay")
     end
-    if type(peername) == "string" and inspect_digest(digest, peername) then
-        pull_from(peername)
-    end
-    local delta = {}
-    if type(digest) == "table" then
-        for peer, data in pairs(_G.peerdb) do
-            local known = digest[peer]
-            local known_ver = type(known) == "table" and known.v
-            if not known_ver or data.version >= known_ver then
-                delta[peer] = data
-            end
-        end
-    else
-        for peer, data in pairs(_G.peerdb) do
-            delta[peer] = data
+    if type(peername) == "string" and type(delta) == "table" then
+        if apply_delta(peername, delta) then
+            hosts, routes = build_index(_G.peerdb, routes)
+            probe_interval = agent.PROBE_INTERVAL_MIN
+            agent.wake()
         end
     end
-    return agent.peername, delta
+    return agent.peername, delta_for(digest, false)
 end
 
 local function probe_via(conn)
@@ -628,11 +620,14 @@ local function probe_via(conn)
             entry.timestamp = time.unix()
         end
     end
-    -- only pull a full delta when remote has entries we are missing or behind on;
-    -- inspect_digest merges timestamps independently of the sync decision
+    -- reconcile in one round-trip: push entries the remote lacks and pull the
+    -- ones we lack. inspect_digest merges third-party timestamps and reports
+    -- whether the remote is ahead of us; delta_for(strict) is what we can offer
     local changed = false
-    if inspect_digest(remote_digest, peername) then
-        local ok2, _, delta = callbyconn(conn, "sync", agent.peername, digest)
+    local need_pull = inspect_digest(remote_digest, peername)
+    local push = delta_for(remote_digest, true)
+    if need_pull or next(push) then
+        local ok2, _, delta = callbyconn(conn, "sync", agent.peername, digest, push)
         if ok2 and type(delta) == "table" then
             changed = apply_delta(peername, delta)
         end
@@ -672,9 +667,7 @@ function agent.maintenance()
     -- this round is collected for the next one
     local used = active
     active = false
-    -- a rising dial-failure count while mesh routes are in use is treated
-    -- like a probe miss: the route may be broken even though the last
-    -- probe round looked healthy
+    -- a rise since last round is treated like a probe miss
     local rejects = count_rejects()
     local failures = used and last_rejects ~= nil and rejects > last_rejects
     if failures and agent.verbose then
@@ -692,7 +685,12 @@ function agent.maintenance()
     -- fold probe results into conn_state and build the advertised conns map
     local selfentry = agent.peername and _G.peerdb[agent.peername]
     local prev_conns = selfentry and selfentry.conns or {}
-    local changed = not selfentry or selfentry.hosts ~= agent.hosts
+    -- advertise the cost only when relaying (>= 0); refusal is the absence of
+    -- an entry, which peers already read as non-transit
+    local relay_cost = (type(agent.relay_cost) == "number" and
+        agent.relay_cost >= 0) and agent.relay_cost or nil
+    local changed = not selfentry or selfentry.hosts ~= agent.hosts or
+        selfentry.relay_cost ~= relay_cost
     local any_delta = false
     local any_miss = false
     local conns = {}
@@ -722,9 +720,6 @@ function agent.maintenance()
                 changed = true
             end
         elseif state then
-            -- tolerate transient failures: only treat the conn as lost after
-            -- CONN_FAILURE_LIMIT consecutive misses, so a brief outage (e.g. a
-            -- peer restarting) does not flap the route
             local fails = (state.fails or 0) + 1
             if fails >= agent.CONN_FAILURE_LIMIT then
                 evlogf("conn lost: [%s] %q (%s) [%d/%d]",
@@ -763,6 +758,7 @@ function agent.maintenance()
                 timestamp = time.unix(),
                 hosts = agent.hosts,
                 conns = conns,
+                relay_cost = relay_cost,
             }
         end
     end
@@ -774,8 +770,6 @@ function agent.maintenance()
     else
         probe_interval = math.min(probe_interval * agent.PROBE_BACKOFF, agent.PROBE_INTERVAL_MAX)
     end
-    -- bound failure detection while routes are in use; an idle mesh is
-    -- allowed to back off all the way to MAX
     if used then
         probe_interval = math.min(probe_interval, agent.PROBE_INTERVAL_ACTIVE)
     end
@@ -835,6 +829,12 @@ function agent.stats(dt)
     if agent.peername then
         title = title .. string.format(" (self=%q)", agent.peername)
     end
+    local rc = agent.relay_cost
+    if type(rc) ~= "number" or rc < 0 then
+        title = title .. " norelay"
+    elseif rc > 0 then
+        title = title .. string.format(" relay_cost=%g", rc)
+    end
     title = title .. string.format(" probe=%.0fs", probe_interval)
     return title .. "\n" .. w:sort():concat("\n")
 end
@@ -853,9 +853,7 @@ local function main(...)
             evlogf("agent.stop: %s", err)
         end
     end
-    if not agent.passive then
-        async(mainloop)
-    end
+    async(mainloop)
     return agent
 end
 

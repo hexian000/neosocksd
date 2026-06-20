@@ -231,9 +231,10 @@ static void print_usage(void)
 		"  --api <bind_address>       RESTful API listen address\n"
 		"  -t, --timeout <seconds>    maximum time in seconds that a halfopen connection\n"
 		"                             can take (default: 60.0)\n"
+		"  --log <output>             log destination: stdout, stderr, terminal (colorized\n"
+		"                             stderr), syslog or discard\n"
 		"  --loglevel <level>         0-8 are Silence, Fatal, Error, Warning, Notice, Info,\n"
 		"                             Debug, Verbose, VeryVerbose respectively (default: 4)\n"
-		"  -C, --color                colorized log output using ANSI escape sequences\n"
 		"  -d, --daemonize            run in background and write logs to syslog\n"
 		"  -u, --user [user][:[group]]\n"
 		"                             run as the specified identity, e.g. `nobody:nogroup'\n"
@@ -711,6 +712,25 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			}
 			continue;
 		}
+		if (strcmp(argv[i], "--log") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			if (strcmp(argv[i], "stdout") == 0) {
+				slog_setoutput(SLOG_OUTPUT_FILE, stdout);
+			} else if (strcmp(argv[i], "stderr") == 0) {
+				slog_setoutput(SLOG_OUTPUT_FILE, stderr);
+			} else if (strcmp(argv[i], "terminal") == 0) {
+				slog_setoutput(SLOG_OUTPUT_TERMINAL, stderr);
+			} else if (strcmp(argv[i], "syslog") == 0) {
+				slog_setoutput(
+					SLOG_OUTPUT_SYSLOG, PROJECT_NAME);
+			} else if (strcmp(argv[i], "discard") == 0) {
+				slog_setoutput(SLOG_OUTPUT_DISCARD);
+			} else {
+				OPT_ARG_ERROR(argv, i);
+			}
+			continue;
+		}
 		if (strcmp(argv[i], "--loglevel") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
@@ -720,11 +740,6 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 				OPT_ARG_ERROR(argv, i);
 			}
 			conf->loglevel = (int)value;
-			continue;
-		}
-		if (strcmp(argv[i], "-C") == 0 ||
-		    strcmp(argv[i], "--color") == 0) {
-			slog_setoutput(SLOG_OUTPUT_TERMINAL, stderr);
 			continue;
 		}
 		if (strcmp(argv[i], "-d") == 0 ||

@@ -14,6 +14,8 @@ agent.conns = {
 }
 -- route "peer0.internal" to current peer
 agent.hosts = { "peer0" }
+-- relays with a cost of 1 per hop
+agent.relay_cost = 1
 
 -- [[ basic authentication, pass --auth-required to enforce ]] --
 _G.secrets = {
@@ -129,7 +131,7 @@ _G.route_default = { rule.proxy("socks5://user:pass@gateway.lan:1080"), "wan" }
 
 -- [[ optional: failover with await.forward ]] --
 -- Uncomment to try the gateway, then a backup proxy, then direct, resolving
--- the address with ruleset.decide.route:
+-- the address with libruleset.decide.route:
 --
 -- function ruleset.route(addr)
 --     local resolved = libruleset.decide.route(addr)
@@ -169,12 +171,12 @@ local mode = ...
 -- "config" mode (-c): return a config table whose `ruleset` field is the
 -- ruleset. "ruleset" mode (-r): return the ruleset table.
 if mode == "config" then
-	return {
-		listen   = "0.0.0.0:1080",
-		restapi  = "127.0.1.1:9080",
-		traceback = nil,
-		memlimit = nil,
-		ruleset = main(mode),
-	}
+    return {
+        listen    = "0.0.0.0:1080",
+        restapi   = "127.0.1.1:9080",
+        traceback = nil,
+        memlimit  = nil,
+        ruleset   = main(mode),
+    }
 end
 return main(...)

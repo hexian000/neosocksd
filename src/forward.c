@@ -265,13 +265,8 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ctx->ruleset_state = NULL;
 	struct dialreq *req = ctx->ruleset_callback.request.req;
 	if (req == NULL) {
-		/* a recorded await.forward() dial error means an upstream
-		 * rejection; otherwise the ruleset rejected by policy */
-		if (ctx->ruleset_callback.request.fwd_err != DIALER_OK) {
-			ctx->s->stats.num_reject_upstream++;
-		} else {
-			ctx->s->stats.num_reject_ruleset++;
-		}
+		/* the ruleset gave up: reject by policy */
+		ctx->s->stats.num_reject_ruleset++;
 		gc_unref(&ctx->gcbase);
 		return;
 	}

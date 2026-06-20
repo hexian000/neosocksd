@@ -14,30 +14,35 @@ local API_ENDPOINT = "api.neosocksd.internal:80"
 _G.redirect_name = {
     { match.domain({ ".local", ".lan", ".internal" }), rule.reject() },
 
-    { composite.maybe(_G, "biglist_name"),             rule.direct(), "chn" },
+    { composite.maybe(_G, "biglist_name"),             rule.direct(), "biglist" },
 }
 
 _G.redirect = {
 }
 
 _G.route = {
-    -- reject non-global
-    { inet.subnet("224.0.0.0/4"),     rule.reject() },
+    -- reject every non-globally-reachable range (RFC 6890 special-purpose)
     { inet.subnet("0.0.0.0/8"),       rule.reject() },
-    { inet.subnet("127.0.0.0/8"),     rule.reject() },
     { inet.subnet("10.0.0.0/8"),      rule.reject() },
-    { inet.subnet("172.16.0.0/12"),   rule.reject() },
-    { inet.subnet("169.254.0.0/16"),  rule.reject() },
-    { inet.subnet("192.168.0.0/16"),  rule.reject() },
-    { inet.subnet("192.0.0.0/24"),    rule.reject() },
+    { inet.subnet("100.64.0.0/10"),   rule.reject() },
     { inet.subnet("127.0.0.0/8"),     rule.reject() },
     { inet.subnet("169.254.0.0/16"),  rule.reject() },
+    { inet.subnet("172.16.0.0/12"),   rule.reject() },
+    { inet.subnet("192.0.0.0/24"),    rule.reject() },
+    { inet.subnet("192.0.2.0/24"),    rule.reject() },
+    { inet.subnet("192.88.99.0/24"),  rule.reject() },
+    { inet.subnet("192.168.0.0/16"),  rule.reject() },
+    { inet.subnet("198.18.0.0/15"),   rule.reject() },
+    { inet.subnet("198.51.100.0/24"), rule.reject() },
+    { inet.subnet("203.0.113.0/24"),  rule.reject() },
+    { inet.subnet("224.0.0.0/4"),     rule.reject() },
+    { inet.subnet("240.0.0.0/4"),     rule.reject() },
     -- custom rules
-    { composite.maybe(_G, "biglist"), rule.direct(), "chn" },
+    { composite.maybe(_G, "biglist"), rule.direct(), "biglist" },
 }
 
 _G.route6 = {
-    { composite.maybe(_G, "biglist6"), rule.direct(), "chn" },
+    { composite.maybe(_G, "biglist6"), rule.direct(), "biglist" },
     { match.any(),                     rule.direct() },
 }
 

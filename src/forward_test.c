@@ -1,6 +1,15 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * forward_test - white-box unit tests for forward.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   forward.c        module under test
+ * All stateful collaborators of forward.c (dialer, transfer, ruleset) are
+ * replaced by the mocks in the mock section below.
+ */
+
 #include "forward.h"
 
 #include "conf.h"
@@ -10,14 +19,12 @@
 #include "transfer.h"
 #include "util.h"
 
-#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <arpa/inet.h>
 #include <ev.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 #include <errno.h>
@@ -30,11 +37,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*
+/* -------------------------------------------------------------------------
+ * mock - collaborator stubs (dialer, transfer, ruleset) and shared fixtures.
+ *
  * These tests isolate the state machine in forward.c. Dialer, transfer, and
  * ruleset dependencies are stubbed so connection accounting and callback
  * sequencing can be asserted without real network activity.
- */
+ * ---------------------------------------------------------------------- */
 
 static struct config test_conf = {
 	.timeout = 1.0,
@@ -59,6 +68,8 @@ enum stub_dialer_mode {
 enum stub_ruleset_mode {
 	STUB_RULESET_FAIL,
 	STUB_RULESET_ASYNC_OK,
+	/* completes asynchronously with no dialreq (a policy rejection) */
+	STUB_RULESET_ASYNC_REJECT,
 };
 #endif
 
@@ -211,8 +222,15 @@ static void set_ipv4_addr(struct dialaddr *restrict addr, const uint16_t port)
 	addr->port = port;
 	addr->in.s_addr = htonl(INADDR_LOOPBACK);
 }
-
 #if WITH_RULESET
+static void set_ipv6_addr(struct dialaddr *restrict addr, const uint16_t port)
+{
+	memset(addr, 0, sizeof(*addr));
+	addr->type = ATYP_INET6;
+	addr->port = port;
+	addr->in6 = in6addr_loopback;
+}
+
 static void set_domain_addr(
 	struct dialaddr *restrict addr, const char *restrict name,
 	const uint16_t port)
@@ -473,6 +491,13 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 static bool ruleset_stub_start(
 	struct ruleset_state **state, struct ruleset_callback *callback)
 {
+	if (STUB.ruleset_mode == STUB_RULESET_ASYNC_REJECT) {
+		/* simulate a ruleset that completes without a dialreq */
+		callback->request.req = NULL;
+		*state = (struct ruleset_state *)&stub_ruleset_state_tag;
+		STUB.ruleset_pending_cb = callback;
+		return true;
+	}
 	if (STUB.ruleset_mode != STUB_RULESET_ASYNC_OK) {
 		return false;
 	}
@@ -533,6 +558,14 @@ static void complete_pending_ruleset(struct ev_loop *loop)
 	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
 }
 #endif
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - dialer/ruleset outcomes and connection accounting.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(forward_dialer_fail_updates_stats)
 {
@@ -708,6 +741,118 @@ T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 	T_EXPECT_EQ(STUB.dialreq_free_calls, 1);
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * An IPv4 base address routes through ruleset_route(); an IPv6 base address
+ * routes through ruleset_route6(). Both then dial the ruleset-supplied request.
+ */
+T_DECLARE_SUBCASE(forward_ruleset_route_case, const bool ipv6)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = {
+		.sin_family = AF_INET,
+	};
+	struct dialreq base_req = { 0 };
+	int accepted_fd = -1;
+	int peer_fd = -1;
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.ruleset_mode = STUB_RULESET_ASYNC_OK;
+	if (ipv6) {
+		set_ipv6_addr(&base_req.addr, 443);
+	} else {
+		set_ipv4_addr(&base_req.addr, 443);
+	}
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	s.basereq = &base_req;
+	s.ruleset = (struct ruleset *)&s;
+	make_socketpair(&accepted_fd, &peer_fd);
+
+	forward_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
+
+	T_EXPECT_EQ(STUB.ruleset_resolve_calls, 0);
+	if (ipv6) {
+		T_EXPECT_EQ(STUB.ruleset_route_calls, 0);
+		T_EXPECT_EQ(STUB.ruleset_route6_calls, 1);
+	} else {
+		T_EXPECT_EQ(STUB.ruleset_route_calls, 1);
+		T_EXPECT_EQ(STUB.ruleset_route6_calls, 0);
+	}
+
+	complete_pending_ruleset(loop);
+
+	/* the ruleset-supplied request is dialed; the dialer then fails */
+	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
+	T_EXPECT_EQ(s.stats.num_request, 1);
+	T_EXPECT_EQ(s.stats.num_success, 0);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(forward_ruleset_route_ipv4)
+{
+	T_CALL_SUBCASE(forward_ruleset_route_case, false);
+}
+
+T_DECLARE_CASE(forward_ruleset_route_ipv6)
+{
+	T_CALL_SUBCASE(forward_ruleset_route_case, true);
+}
+
+/*
+ * When the ruleset completes without a dialreq the connection is rejected
+ * by policy.
+ */
+T_DECLARE_CASE(forward_ruleset_reject)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = {
+		.sin_family = AF_INET,
+	};
+	struct dialreq base_req = { 0 };
+	int accepted_fd = -1;
+	int peer_fd = -1;
+
+	stub_reset();
+	STUB.ruleset_mode = STUB_RULESET_ASYNC_REJECT;
+	set_ipv4_addr(&base_req.addr, 80);
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	s.basereq = &base_req;
+	s.ruleset = (struct ruleset *)&s;
+	make_socketpair(&accepted_fd, &peer_fd);
+
+	forward_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
+	T_EXPECT_EQ(STUB.ruleset_route_calls, 1);
+
+	complete_pending_ruleset(loop);
+
+	/* rejection: no dial attempt, the connection is dropped */
+	T_EXPECT_EQ(STUB.dialer_do_calls, 0);
+	T_EXPECT_EQ(s.stats.num_reject_ruleset, (uint_least64_t)1);
+	T_EXPECT_EQ(s.stats.num_reject_upstream, (uint_least64_t)0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
 	T_EXPECT_EQ(s.num_sessions, 0);
 
@@ -909,6 +1054,49 @@ T_DECLARE_CASE(forward_timeout_stops_pending_dialer_once)
 
 #if WITH_TPROXY && WITH_RULESET
 /*
+ * tproxy with a ruleset: tproxy_process_cb reads the original destination via
+ * getsockname() and routes it through ruleset_route() for an IPv4 socket.
+ */
+T_DECLARE_CASE(tproxy_ruleset_route_ipv4)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = {
+		.sin_family = AF_INET,
+	};
+	int accepted_fd = -1;
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.ruleset_mode = STUB_RULESET_ASYNC_OK;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	accepted_fd = make_bound_ipv4_socket();
+	s.ruleset = (struct ruleset *)&s;
+
+	tproxy_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
+
+	/* the bound IPv4 destination is routed via ruleset_route() */
+	T_EXPECT_EQ(STUB.ruleset_route_calls, 1);
+	T_EXPECT_EQ(STUB.ruleset_route6_calls, 0);
+	T_EXPECT(STUB.ruleset_pending_cb != NULL);
+
+	complete_pending_ruleset(loop);
+
+	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
+	T_EXPECT_EQ(s.stats.num_request, 1);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
+
+	ev_loop_destroy(loop);
+}
+
+/*
  * SIGHUP variant for tproxy: ruleset is cleared between forward_serve
  * and tproxy_process_cb.  The callback must reject cleanly instead
  * of dereferencing NULL.
@@ -996,6 +1184,9 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 #if WITH_RULESET
 #define FORWARD_RULESET_TESTS(X)                                               \
 	X(forward_ruleset_async_then_dialer_fail);                             \
+	X(forward_ruleset_route_ipv4);                                         \
+	X(forward_ruleset_route_ipv6);                                         \
+	X(forward_ruleset_reject);                                             \
 	X(forward_ruleset_null_after_sighup)
 #else
 #define FORWARD_RULESET_TESTS(X)
@@ -1008,10 +1199,20 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 #endif
 
 #if WITH_TPROXY && WITH_RULESET
-#define FORWARD_TPROXY_RULESET_TESTS(X) X(tproxy_ruleset_null_after_sighup)
+#define FORWARD_TPROXY_RULESET_TESTS(X)                                        \
+	X(tproxy_ruleset_route_ipv4);                                          \
+	X(tproxy_ruleset_null_after_sighup)
 #else
 #define FORWARD_TPROXY_RULESET_TESTS(X)
 #endif
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

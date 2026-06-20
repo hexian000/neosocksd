@@ -1,18 +1,27 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * http_proxy_test - white-box unit tests for http_proxy.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   http_proxy.c     module under test
+ *   proto/http.c     leaf (HTTP message framing)
+ *   proto/codec.c    leaf (transfer codecs)
+ * All stateful collaborators of http_proxy.c (dialer, transfer, ruleset,
+ * server) are replaced by the mocks in the mock section below.
+ */
+
 #include "http_proxy.h"
 
 #include "conf.h"
 #include "dialer.h"
-#include "proto/http.h"
 #include "ruleset.h"
 #include "server.h"
 #include "transfer.h"
 #include "util.h"
 
 #include "os/socket.h"
-#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -28,6 +37,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - collaborator stubs (dialer, transfer, ruleset, server), a
+ * portability shim and shared fixtures.
+ * ---------------------------------------------------------------------- */
 
 #if !defined(_GNU_SOURCE)
 static void *test_memmem(
@@ -137,7 +151,7 @@ static size_t num_dialreq_allocations = 0;
 static void reset_dialreq_allocations(void)
 {
 	num_dialreq_allocations = 0;
-	memset(dialreq_allocations, 0, sizeof(dialreq_allocations));
+	memset((void *)dialreq_allocations, 0, sizeof(dialreq_allocations));
 }
 
 static void track_dialreq_allocation(struct dialreq *restrict req)
@@ -414,9 +428,6 @@ bool ruleset_resolve(
 		return false;
 	}
 	callback->request.req = NULL;
-	/* cleared by cfunc_request() in the real path */
-	callback->request.fwd_err = 0;
-	callback->request.fwd_syserr = 0;
 	if (S.ruleset_reply_with_req) {
 		callback->request.req = dialreq_new(NULL, 0);
 	}
@@ -682,6 +693,14 @@ static void make_fd_pair(int *restrict a, int *restrict b)
 	*a = sv[0];
 	*b = sv[1];
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - request-form handling, CONNECT tunneling and proxy behavior.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(plain_http_origin_form_returns_400)
 {
@@ -1297,6 +1316,50 @@ T_DECLARE_CASE(plain_http_post_with_body_forwarded)
 	ev_loop_destroy(loop);
 }
 
+/* A request carrying "Expect: 100-continue" with a body is forwarded to the
+ * upstream; this exercises the Expect header handling path. */
+T_DECLARE_CASE(plain_http_expect_100_continue_with_body_forwarded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char buf[4096];
+	const char req[] = "POST http://example.com/submit HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Expect: 100-continue\r\n"
+			   "Content-Length: 7\r\n"
+			   "\r\n"
+			   "a=b&c=d";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	{
+		const ssize_t n =
+			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 25);
+		T_EXPECT(n >= 25);
+		T_EXPECT(
+			memmem(buf, (size_t)n, "POST /submit HTTP/1.1", 21) !=
+			NULL);
+		T_EXPECT(memmem(buf, (size_t)n, "a=b&c=d", 7) != NULL);
+		(void)shutdown(upstream_fd, SHUT_WR);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 /* Verify that the HTTP version from the client request is preserved in the
  * forwarded request line, not hard-coded to HTTP/1.1. */
 T_DECLARE_CASE(plain_http_version_preserved_in_forwarded_request)
@@ -1757,6 +1820,14 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
 	ev_loop_destroy(loop);
 }
 
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -1768,6 +1839,7 @@ int main(void)
 	T_RUN_CASE(t, plain_http_absolute_url_dialer_error_returns_502);
 	T_RUN_CASE(t, plain_http_absolute_url_established);
 	T_RUN_CASE(t, plain_http_post_with_body_forwarded);
+	T_RUN_CASE(t, plain_http_expect_100_continue_with_body_forwarded);
 	T_RUN_CASE(t, plain_http_version_preserved_in_forwarded_request);
 	T_RUN_CASE(t, plain_http_te_chunked_forwarded_to_upstream);
 	T_RUN_CASE(t, plain_http_dynamic_hop_by_hop_not_forwarded);

@@ -274,7 +274,7 @@ static void addrinfo_cb(
 void resolver_init(void)
 {
 #if WITH_CARES
-	LOGD_F("c-ares: %s", ares_version(NULL));
+	LOGI_F("c-ares %s", ares_version(NULL));
 #if CARES_HAVE_ARES_LIBRARY_INIT
 	const int ret = ares_library_init(ARES_LIB_INIT_ALL);
 	CHECKMSGF(

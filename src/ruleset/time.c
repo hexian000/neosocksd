@@ -79,7 +79,7 @@ static int time_measure(lua_State *restrict L)
 	if (!ok) {
 		return nres;
 	}
-	lua_pushnumber(L, TIMESPEC_DIFF(ts0, ts1) * 1e-9);
+	lua_pushnumber(L, TIMESPEC_DIFF(ts1, ts0) * 1e-9);
 	lua_replace(L, 1);
 	return nres;
 }

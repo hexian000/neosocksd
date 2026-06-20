@@ -37,6 +37,29 @@ return function(T)
         assert(m == nil)
     end)
 
+    T:test("regex.find on empty string", function()
+        -- empty subject exercises the len==0 position-clamp path
+        local reg = regex.compile("a*")
+        local s, e = reg:find("")
+        assert(s == 1 and e == 0, string.format("got s=%s e=%s", tostring(s), tostring(e)))
+    end)
+
+    T:test("regex.find with negative init underflow clamps to start", function()
+        local reg = regex.compile("a")
+        -- |init| far exceeds the string length; must clamp to the start
+        local s, e = reg:find("xax", -100)
+        assert(s == 2 and e == 2, string.format("got s=%s e=%s", tostring(s), tostring(e)))
+    end)
+
+    T:test("regex.match yields nil for non-participating capture group", function()
+        -- alternation: matching "b" leaves group 1 absent (POSIX rm_so == -1)
+        local reg = regex.compile("(a)|(b)")
+        local m0, m1, m2 = reg:match("b")
+        assert(m0 == "b", string.format("full match: got %q", tostring(m0)))
+        assert(m1 == nil, string.format("group1 should be nil, got %q", tostring(m1)))
+        assert(m2 == "b", string.format("group2: got %q", tostring(m2)))
+    end)
+
     T:test("regex.gmatch full match then captures each iteration", function()
         local reg = regex.compile("a(a)(a)")
         local results = {}

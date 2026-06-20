@@ -151,7 +151,8 @@ static int api_splithostport(lua_State *restrict L)
 	const char *restrict s = luaL_checklstring(L, 1, &len);
 	/* FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")) {
-		(void)lua_pushfstring(L, "address too long: %zu bytes", len);
+		(void)lua_pushfstring(
+			L, "address too long: %d bytes", (int)len);
 		return lua_error(L);
 	}
 	char buf[len + 1];

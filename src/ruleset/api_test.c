@@ -1,6 +1,16 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * api_test - white-box unit tests for ruleset/api.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   ruleset/api.c    module under test
+ *   ruleset/base.c   ruleset Lua substrate
+ * The dialer/resolver/api_client/server symbols bound by api.c are replaced
+ * by the mocks in the mock section below.
+ */
+
 #include "ruleset/api.h"
 
 #include "ruleset/base.h"
@@ -18,12 +28,16 @@
 #include "utils/testing.h"
 
 #include <arpa/inet.h>
-#include <netinet/in.h>
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - collaborator stubs (dialer, resolver, api_client, server) and
+ * shared fixtures.
+ * ---------------------------------------------------------------------- */
 
 static struct {
 	bool invoke_called;
@@ -324,6 +338,14 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 
 /* ---- tests ---- */
 
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - neosocksd Lua API binding cases.
+ * ---------------------------------------------------------------------- */
+
 T_DECLARE_CASE(api_module_opens)
 {
 	lua_State *restrict L = new_lua();
@@ -461,6 +483,27 @@ T_DECLARE_CASE(api_splithostport_invalid)
 	lua_close(L);
 }
 
+T_DECLARE_CASE(api_splithostport_too_long)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* An address longer than FQDN_MAX_LENGTH + ":65535" must raise. */
+	const int rc_load = luaL_loadstring(
+		L, "local s = string.rep('a', 512)..':80' "
+		   "local ok, err = pcall(neosocksd.splithostport, s) "
+		   "return ok, err");
+	T_EXPECT_EQ(rc_load, LUA_OK);
+	const int rc_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(rc_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT(lua_type(L, 2) == LUA_TSTRING);
+	T_EXPECT(strstr(lua_tostring(L, 2), "too long") != NULL);
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(api_traceback_string)
 {
 	lua_State *restrict L = new_lua();
@@ -582,11 +625,36 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
 	T_EXPECT(lua_toboolean(L, 2) != 0);
 	T_EXPECT(lua_toboolean(L, 3) != 0);
 	T_EXPECT_EQ(lua_tointeger(L, 4), 7);
+	lua_settop(L, 0);
+
+	/* invoke with an unparseable target raises ERR_INVALID_ADDR */
+	T_EXPECT(run_chunk(
+		L, "local ok, err = pcall(neosocksd.invoke, 'return 1', "
+		   "'this is not an address') "
+		   "return ok, type(err)"));
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
+	lua_settop(L, 0);
+
+	/* invoke with a nil target also raises ERR_INVALID_ADDR */
+	T_EXPECT(run_chunk(
+		L, "local ok = pcall(neosocksd.invoke, 'return 1', nil) "
+		   "return ok"));
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	lua_settop(L, 0);
 
 	lua_close(L);
 	ev_loop_destroy(loop);
 	reset_globals();
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {
@@ -599,6 +667,7 @@ int main(void)
 	T_RUN_CASE(t, api_splithostport_simple);
 	T_RUN_CASE(t, api_splithostport_ipv6);
 	T_RUN_CASE(t, api_splithostport_invalid);
+	T_RUN_CASE(t, api_splithostport_too_long);
 	T_RUN_CASE(t, api_traceback_string);
 	T_RUN_CASE(t, api_config_reflects_ruleset_conf);
 	T_RUN_CASE(t, api_stats_now_and_setinterval_use_ruleset_state);

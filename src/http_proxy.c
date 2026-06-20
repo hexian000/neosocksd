@@ -354,16 +354,9 @@ ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ctx->dialreq = ctx->ruleset_callback.request.req;
 	ctx->ruleset_state = NULL;
 	if (ctx->dialreq == NULL) {
-		/* a recorded await.forward() dial error means an upstream
-		 * rejection (502); otherwise a policy rejection (403) */
-		const int fwd_err = ctx->ruleset_callback.request.fwd_err;
-		if (fwd_err != DIALER_OK) {
-			ctx->s->stats.num_reject_upstream++;
-			send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
-		} else {
-			ctx->s->stats.num_reject_ruleset++;
-			send_errpage(loop, ctx, HTTP_FORBIDDEN);
-		}
+		/* the ruleset gave up: reject by policy (403) */
+		ctx->s->stats.num_reject_ruleset++;
+		send_errpage(loop, ctx, HTTP_FORBIDDEN);
 		return;
 	}
 	http_connect(loop, ctx);

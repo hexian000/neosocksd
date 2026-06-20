@@ -324,7 +324,7 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 	} break;
 	case SIGINT:
 	case SIGTERM:
-		LOGD_F("signal %d received, breaking", watcher->signum);
+		LOGD_F("signal %d received, shutting down", watcher->signum);
 		(void)systemd_notify(DAEMON_SYSTEMD_STATE_STOPPING);
 		ev_break(loop, EVBREAK_ALL);
 		break;
@@ -418,7 +418,7 @@ bool server_init(
 		}
 		const enum ipclass cls = sa_ipclassify(&apiaddr.sa);
 		if (cls != IPCLASS_LOOPBACK) {
-			LOGW("binding API server to non-loopback address may be insecure");
+			LOGW("binding API server to non-loopback address is insecure: the API allows any client to execute arbitrary code");
 		}
 		if (!add_listener(s, &apiaddr.sa, api_serve)) {
 			return false;

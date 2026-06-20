@@ -1,6 +1,18 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * api_server_test - white-box unit tests for api_server.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   api_server.c     module under test
+ *   proto/http.c     leaf (HTTP message framing)
+ *   proto/codec.c    leaf (transfer codecs)
+ *   version.c        leaf (neosocksd_version)
+ * All stateful collaborators of api_server.c (server, ruleset, resolver) are
+ * replaced by the mocks in the mock section below.
+ */
+
 #include "api_server.h"
 
 #include "conf.h"
@@ -8,11 +20,9 @@
 #include "resolver.h"
 #include "ruleset.h"
 #include "server.h"
-#include "util.h"
 
 #include "os/clock.h"
 #include "os/socket.h"
-#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -27,6 +37,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - collaborator stubs (server, ruleset, resolver) and shared fixtures.
+ * ---------------------------------------------------------------------- */
 
 static struct config test_conf = {
 	.timeout = 1.0,
@@ -62,15 +76,6 @@ void server_stats(
 	out->byt_up = s->byt_up;
 	out->byt_down = s->byt_down;
 }
-
-#if WITH_SPLICE && WITH_ALLOC_CACHE
-struct pipe_cache; /* forward declaration for the stub below */
-void pipe_shrink(struct pipe_cache *cache, size_t count)
-{
-	(void)cache;
-	(void)count;
-}
-#endif
 
 #if WITH_RULESET
 static struct {
@@ -122,12 +127,12 @@ static struct {
 	.vmstats_count = 0,
 	.vmstats_before = {
 		.num_object = 128,
-		.byt_allocated = 1024 * 1024,
+		.byt_allocated = (size_t)1024 * 1024,
 		.num_events = 0,
 	},
 	.vmstats_after = {
 		.num_object = 64,
-		.byt_allocated = 512 * 1024,
+		.byt_allocated = (size_t)512 * 1024,
 		.num_events = 0,
 	},
 	.rpcstate = NULL,
@@ -157,12 +162,12 @@ static void reset_ruleset_stub(void)
 	RS.vmstats_count = 0;
 	RS.vmstats_before = (struct ruleset_vmstats){
 		.num_object = 128,
-		.byt_allocated = 1024 * 1024,
+		.byt_allocated = (size_t)1024 * 1024,
 		.num_events = 0,
 	};
 	RS.vmstats_after = (struct ruleset_vmstats){
 		.num_object = 64,
-		.byt_allocated = 512 * 1024,
+		.byt_allocated = (size_t)512 * 1024,
 		.num_events = 0,
 	};
 	RS.rpcstate = NULL;
@@ -499,6 +504,14 @@ static bool assert_status(
 {
 	return find_bytes(rsp, n, code);
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - REST/RPC endpoints, keepalive and error responses.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 {
@@ -1229,6 +1242,14 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 	ev_loop_destroy(loop);
 }
 #endif
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

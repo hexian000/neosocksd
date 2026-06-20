@@ -7,6 +7,7 @@
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
+#include "ruleset.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
 #include "server.h"
@@ -348,15 +349,19 @@ struct await_forward_userdata {
 	struct ruleset_state *state;
 	struct dialreq *req;
 	struct dialer dialer;
+	ev_timer w_timeout;
 	int fd;
 	bool dialing;
+	bool timed_out;
 };
 
 static int await_forward_close(lua_State *restrict L)
 {
 	struct await_forward_userdata *restrict ud = lua_touserdata(L, 1);
+	struct ev_loop *loop = ud->ruleset->loop;
+	ev_timer_stop(loop, &ud->w_timeout);
 	if (ud->dialing) {
-		dialer_cancel(&ud->dialer, ud->ruleset->loop);
+		dialer_cancel(&ud->dialer, loop);
 		ud->dialing = false;
 	}
 	if (ud->fd != -1) {
@@ -374,10 +379,29 @@ static int await_forward_close(lua_State *restrict L)
 
 static void forward_dialer_cb(struct ev_loop *loop, void *data, const int fd)
 {
-	UNUSED(loop);
 	struct await_forward_userdata *restrict ud = data;
+	ev_timer_stop(loop, &ud->w_timeout);
 	ud->dialing = false;
 	ud->fd = fd;
+	ruleset_resume(ud->ruleset, ud, 0);
+}
+
+/* The dialer has no internal timeout; it is normally bounded by the
+ * originating session's half-open timeout. Once that session is cancelled the
+ * dialer would otherwise run unbounded (a silent upstream during the proxy
+ * handshake has no kernel timeout), so bound it here as well. */
+static void
+forward_timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_TIMER);
+	ev_timer_stop(loop, watcher);
+	struct await_forward_userdata *restrict ud = watcher->data;
+	if (ud->dialing) {
+		dialer_cancel(&ud->dialer, loop);
+		ud->dialing = false;
+	}
+	ud->fd = -1;
+	ud->timed_out = true;
 	ruleset_resume(ud->ruleset, ud, 0);
 }
 
@@ -396,12 +420,12 @@ await_forward_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	bool ok = false;
 	const char *err = NULL;
 	if (ud->fd < 0) {
-		/* dial failed: record the error and report it */
-		if (cb != NULL) {
-			cb->request.fwd_err = (int)ud->dialer.err;
-			cb->request.fwd_syserr = ud->dialer.syserr;
+		/* dial failed (or timed out): report the error to the routine */
+		if (ud->timed_out) {
+			err = "timeout";
+		} else {
+			err = dialer_strerror(ud->dialer.err);
 		}
-		err = dialer_strerror(ud->dialer.err);
 	} else if (cb != NULL) {
 		/* hand the fd to the session; this may free it, so cb must not
 		 * be touched afterwards */
@@ -471,7 +495,11 @@ static int await_forward(lua_State *restrict L)
 		.req = req,
 		.fd = -1,
 		.dialing = false,
+		.timed_out = false,
 	};
+	ev_timer_init(
+		&ud->w_timeout, forward_timeout_cb, r->conf->timeout, 0.0);
+	ud->w_timeout.data = ud;
 	aux_toclose(L, -1, MT_AWAIT_FORWARD, await_forward_close);
 
 	struct server *restrict server = r->server;
@@ -485,6 +513,7 @@ static int await_forward(lua_State *restrict L)
 		server != NULL ? &server->stats.byt_dial_recv : NULL);
 	ud->dialing = true;
 	dialer_do(&ud->dialer, r->loop, ud->req, r->conf, r->resolver, server);
+	ev_timer_start(r->loop, &ud->w_timeout);
 
 	context_pin(L, ud);
 	/* lua stack: ud */

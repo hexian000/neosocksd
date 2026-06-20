@@ -152,10 +152,6 @@ struct ruleset_callback {
 	union {
 		struct {
 			struct dialreq *req;
-			/* last await.forward() dial error (an `enum dialer_error`,
-			 * DIALER_OK if none), reported on a later rejection */
-			int fwd_err;
-			int fwd_syserr;
 		} request;
 		struct {
 			const char *result;

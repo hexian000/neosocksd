@@ -36,25 +36,26 @@ return function(T, api_endpoint)
             string.format("expected 'failover-ok', got %q", tostring(ret)))
     end)
 
-    T:atest("await.forward failure is counted as an upstream reject", function()
+    T:atest("await.forward failure is counted as a ruleset reject", function()
         -- falls through to route_default backends with no listener; the
-        -- forward fails and the rpcall errors
+        -- forward fails and the handler gives up, so the request is rejected
+        -- by policy (a ruleset reject) and the rpcall errors
         local before = neosocksd.stats()
         local target = { "unreachable.invalid:80", socks_proxy }
         local ok = await.rpcall(target, "echo", "denied")
         assert(not ok,
             "expected the unreachable request to fail, but it succeeded")
         local after = neosocksd.stats()
-        assert(after.num_reject_upstream >= before.num_reject_upstream + 1,
-            "a failed forward must count as num_reject_upstream")
-        assert(after.num_reject_ruleset == before.num_reject_ruleset,
-            "a failed forward must not count as num_reject_ruleset")
+        assert(after.num_reject_ruleset >= before.num_reject_ruleset + 1,
+            "a failed forward must count as num_reject_ruleset")
+        assert(after.num_reject_upstream == before.num_reject_upstream,
+            "a failed forward must not count as num_reject_upstream")
     end)
 
     T:atest("policy reject after a failed forward is a ruleset reject", function()
-        -- the handler forwards (fails), then returns nil to reject by policy;
-        -- the stale forward error must be cleared so it counts as a ruleset
-        -- reject, not an upstream failure.
+        -- the handler forwards (fails), then returns nil; giving up without a
+        -- successful forward always rejects by policy (a ruleset reject), never
+        -- an upstream failure.
         local before = neosocksd.stats()
         local target = { "policyreject.test:80", socks_proxy }
         local ok = await.rpcall(target, "echo", "denied")

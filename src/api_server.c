@@ -30,6 +30,7 @@
 
 #include <ev.h>
 
+#include <errno.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
@@ -532,7 +533,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		size_t n = len;
 		const int err = stream_write(w, s, &n);
 		if (n < len || err != 0) {
-			LOGE_F("stream_write error: %d, %zu/%zu", err, n, len);
+			LOGE_F("stream_write: error %d, %zu/%zu", err, n, len);
 			(void)stream_close(w);
 			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
@@ -542,7 +543,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	const int err = stream_close(w);
 	if (err != 0) {
-		LOGE_F("stream_close error: %d", err);
+		LOGE_F("stream_close: error %d", err);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
@@ -828,7 +829,7 @@ static void handle_ruleset_gc(
 	{
 		const int err = stream_close(w);
 		if (err != 0) {
-			LOGE_F("stream_close error: %d", err);
+			LOGE_F("stream_close: error %d", err);
 			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
@@ -1154,7 +1155,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 				size_t n = len;
 				const int werr = stream_write(w, m, &n);
 				if (n < len || werr != 0) {
-					LOGE_F("stream_write error: %d, %zu/%zu",
+					LOGE_F("stream_write: error %d, %zu/%zu",
 					       werr, n, len);
 					(void)stream_close(w);
 					send_errpage(
@@ -1172,7 +1173,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	const int err = stream_close(w);
 	if (err != 0) {
-		LOGE_F("stream_close error: %d", err);
+		LOGE_F("stream_close: error %d", err);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}

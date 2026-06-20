@@ -54,10 +54,6 @@ if(NOT FORCE_POSIX)
     endif()
 endif()
 
-if(ENABLE_ALLOC_CACHE)
-    set(WITH_ALLOC_CACHE TRUE)
-endif()
-
 target_compile_options(neosocksd PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
 # be strict with original sources
 target_compile_options(neosocksd PRIVATE -pedantic -Wall -Wextra -Werror)
@@ -287,12 +283,19 @@ add_unit_test(http_test
     SRCS proto/http_test.c proto/http.c proto/codec.c)
 add_unit_test(codec_test
     SRCS proto/codec_test.c proto/codec.c)
-add_unit_test(fuzz_test
-    SRCS fuzz_test.c socks.c proto/http.c proto/codec.c)
-add_unit_test(dialer_test
-    SRCS dialer_test.c dialer.c util.c resolver.c
+# main_test: black-box / integration tests against the real modules, plus the
+# project fuzz suite. This is the only test executable that links several real
+# modules together instead of mocking collaborators.
+add_unit_test(main_test
+    SRCS main_test.c dialer.c util.c resolver.c
          server.c server.h socks.c socks.h http_proxy.c http_proxy.h
          transfer.c transfer.h proto/http.c proto/http.h proto/codec.c proto/codec.h
+         "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    WITH_RULESET WITH_THREADS WITH_CARES)
+# dialer_test: isolated white-box tests for dialer.c; collaborators are mocked
+# or driven through raw loopback peers, so only leaf modules are linked.
+add_unit_test(dialer_test
+    SRCS dialer_test.c dialer.c util.c resolver.c
          "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_RULESET WITH_THREADS WITH_CARES)
 add_unit_test(resolver_test
@@ -347,3 +350,18 @@ set_tests_properties(neosocksd_no_listen PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
 # Unknown argument: conf_parseargs returns false immediately.
 add_test(NAME neosocksd_bad_arg COMMAND neosocksd --zz-invalid-arg)
 set_tests_properties(neosocksd_bad_arg PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
+
+# Full bootstrap: start a server on ephemeral ports, let the event loop run,
+# then SIGTERM it. Covers app_run() setup, the main event loop, the SIGTERM
+# handler and the graceful shutdown / cleanup path in main.c.
+add_test(NAME neosocksd_run_and_terminate
+    COMMAND sh -c "'$<TARGET_FILE:neosocksd>' -l 127.0.0.1:0 --http 127.0.0.1:0 --api 127.0.0.1:0 & pid=$!; sleep 1; kill -TERM $pid; wait $pid")
+set_tests_properties(neosocksd_run_and_terminate PROPERTIES TIMEOUT 20)
+
+if(WITH_RULESET)
+    # Boot config: covers the ruleset/boot bootstrap path in main.c and runs
+    # the in-tree Lua integration suite, which self-terminates via os.exit(0).
+    add_test(NAME neosocksd_boot_config COMMAND neosocksd -c tests/boot.lua)
+    set_tests_properties(neosocksd_boot_config PROPERTIES
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 60)
+endif()

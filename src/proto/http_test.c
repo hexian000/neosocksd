@@ -1,9 +1,25 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * http_test - white-box unit tests for proto/http.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   proto/http.c     module under test
+ *   proto/codec.c    leaf (transfer codecs)
+ * Leaf libraries: csnippets (io/stream).
+ * http.c has no stateful collaborator module to mock; the mock section only
+ * holds a portability shim. Randomized HTTP parsing is fuzzed by main_test
+ * (fuzz_http_req, fuzz_http_resp, fuzz_parsehdr).
+ */
+
 #include "http.h"
 
 #include "io/stream.h"
+#include "os/clock.h"
+#include "utils/buffer.h"
+
+#define UTILS_MEASURE_H
 #include "utils/testing.h"
 
 #include <fcntl.h>
@@ -18,6 +34,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - portability shim only (http.c has no collaborator to mock).
+ * ---------------------------------------------------------------------- */
 
 #if !defined(_GNU_SOURCE)
 static void *test_memmem(
@@ -160,6 +180,14 @@ static bool stream_write_all(
 	}
 	return n == len;
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - randomized HTTP inputs are exercised by main_test; none here.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - message framing, header parsing and codec selection cases.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(http_conn_init_request)
 {
@@ -882,6 +910,112 @@ T_DECLARE_CASE(http_body_chunked_data_cb_reject)
 	static const unsigned char chunk[] = "3\r\nabc\r\n0\r\n\r\n";
 	T_EXPECT(!http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
 }
+T_DECLARE_CASE(http_body_chunked_lowercase_hex)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Lowercase hex size: "a" = 10 bytes */
+	static const unsigned char chunk[] = "a\r\n0123456789\r\n0\r\n\r\n";
+	T_EXPECT(http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
+	T_EXPECT(d.done);
+	T_EXPECT_EQ(sink.len, (size_t)10);
+}
+
+T_DECLARE_CASE(http_body_chunked_size_value_overflow)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* A 17-digit hex chunk size overflows size_t and must be rejected. */
+	static const unsigned char bad[] = "fffffffffffffffff\r\n";
+	T_EXPECT(!http_body_consume(&d, bad, sizeof(bad) - 1, cb));
+}
+
+T_DECLARE_CASE(http_body_chunked_size_trailing_ws)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Trailing spaces/tabs after the size are tolerated. */
+	static const unsigned char chunk[] = "5 \t\r\nhello\r\n0\r\n\r\n";
+	T_EXPECT(http_body_consume(&d, chunk, sizeof(chunk) - 1, cb));
+	T_EXPECT(d.done);
+	T_EXPECT_EQ(sink.len, (size_t)5);
+	T_EXPECT_MEMEQ(sink.buf, "hello", 5);
+}
+
+T_DECLARE_CASE(http_body_chunked_size_trailing_junk)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = &sink };
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* Non-hex, non-extension junk after the size must be rejected. */
+	static const unsigned char bad[] = "5x\r\nhello\r\n";
+	T_EXPECT(!http_body_consume(&d, bad, sizeof(bad) - 1, cb));
+}
+
+/* -------------------------------------------------------------------------
+ * bench - end-to-end recv + parse of a representative keep-alive request.
+ * Gated behind the BENCH env var so it does not run during normal ctest.
+ * ---------------------------------------------------------------------- */
+
+static const char BENCH_REQUEST[] = "GET /path/to/resource?query=1 HTTP/1.1\r\n"
+				    "Host: example.com\r\n"
+				    "User-Agent: neosocksd-bench/1.0\r\n"
+				    "Accept: */*\r\n"
+				    "Accept-Encoding: gzip, deflate\r\n"
+				    "Connection: keep-alive\r\n"
+				    "Content-Length: 0\r\n"
+				    "\r\n";
+
+T_DECLARE_BENCH(bench_parse_request)
+{
+	int sv[2];
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+
+	for (uint_fast64_t iter = 0; iter < _b_->N; ++iter) {
+		const char *p = BENCH_REQUEST;
+		size_t left = sizeof(BENCH_REQUEST) - 1;
+		while (left > 0) {
+			const ssize_t n = write(sv[1], p, left);
+			T_CHECK(n > 0);
+			p += n;
+			left -= (size_t)n;
+		}
+
+		struct http_conn conn = { 0 };
+		struct header_cb_ctx cb = { 0 };
+		conn_init_for_test(&conn, sv[0], STATE_PARSE_REQUEST, &cb);
+		for (int k = 0; k < 16 && http_conn_recv(&conn) == 1; ++k) {
+		}
+		VBUF_FREE(conn.cbuf);
+	}
+
+	T_CHECK(close(sv[0]) == 0);
+	T_CHECK(close(sv[1]) == 0);
+}
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {
@@ -923,6 +1057,14 @@ int main(void)
 	T_RUN_CASE(t, http_body_chunked_missing_cr_after_data);
 	T_RUN_CASE(t, http_body_chunked_extra_data_after_done);
 	T_RUN_CASE(t, http_body_chunked_data_cb_reject);
+	T_RUN_CASE(t, http_body_chunked_lowercase_hex);
+	T_RUN_CASE(t, http_body_chunked_size_value_overflow);
+	T_RUN_CASE(t, http_body_chunked_size_trailing_ws);
+	T_RUN_CASE(t, http_body_chunked_size_trailing_junk);
+
+	if (getenv("BENCH") != NULL) {
+		T_RUN_BENCH(t, bench_parse_request);
+	}
 
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -1,6 +1,18 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * socks_test - white-box unit tests for socks.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   socks.c          module under test
+ * All stateful collaborators of socks.c (dialer, transfer, ruleset) are
+ * replaced by the mocks in the mock section below; randomized socks parsing
+ * is fuzzed by the fuzz section's fuzz_socks case, which drives the real
+ * socks.c parser against the stubbed dialer/transfer (the real-module
+ * main_test cannot run this safely).
+ */
+
 #include "socks.h"
 
 #include "conf.h"
@@ -11,7 +23,6 @@
 #include "transfer.h"
 #include "util.h"
 
-#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -29,11 +40,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*
+/* -------------------------------------------------------------------------
+ * mock - collaborator stubs (dialer, transfer, ruleset) and shared fixtures.
+ *
  * These tests focus on protocol parsing paths in socks.c. Dependencies for
  * dialing and transfer are stubbed so parser behavior can be asserted in
  * isolation.
- */
+ * ---------------------------------------------------------------------- */
 
 /* test-only definition of struct globals, used to stub G.conf/G.ruleset */
 struct globals {
@@ -542,6 +555,344 @@ static void serve_payload_split(
 
 	*peer_fd = sv[1];
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - randomized SOCKS4/4a/5 handshake bytes driven through socks_serve
+ * against the stubbed dialer/transfer/ruleset above. Tunable via the
+ * FUZZ_SEED and FUZZ_ITER environment variables.
+ * ---------------------------------------------------------------------- */
+
+#define FUZZ_DEFAULT_ITERATIONS 1000
+#define FUZZ_MAX_CODEC_INPUT 512
+#define FUZZ_MAX_HEADER_VALUE 256
+#define FUZZ_MAX_HTTP_INPUT 1024
+#define FUZZ_MAX_SOCKS_INPUT 512
+#define FUZZ_MAX_STREAM_OUTPUT 65536
+
+struct prng {
+	uint64_t state[4];
+};
+
+static uint64_t fuzz_seed = UINT64_C(0x42);
+static size_t fuzz_iterations = FUZZ_DEFAULT_ITERATIONS;
+
+static uint64_t splitmix64_next(uint64_t *restrict state)
+{
+	uint64_t z = (*state += UINT64_C(0x9e3779b97f4a7c15));
+	z = (z ^ (z >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+	z = (z ^ (z >> 27)) * UINT64_C(0x94d049bb133111eb);
+	return z ^ (z >> 31);
+}
+
+static void prng_seed(struct prng *restrict p, const uint64_t seed)
+{
+	uint64_t state = seed;
+	for (size_t i = 0; i < 4; i++) {
+		p->state[i] = splitmix64_next(&state);
+	}
+}
+
+static uint64_t rotl64(const uint64_t x, const int k)
+{
+	return (x << k) | (x >> (64 - k));
+}
+
+static uint64_t prng_next(struct prng *restrict p)
+{
+	const uint64_t result = rotl64(p->state[1] * 5, 7) * 9;
+	const uint64_t t = p->state[1] << 17;
+
+	p->state[2] ^= p->state[0];
+	p->state[3] ^= p->state[1];
+	p->state[1] ^= p->state[2];
+	p->state[0] ^= p->state[3];
+	p->state[2] ^= t;
+	p->state[3] = rotl64(p->state[3], 45);
+
+	return result;
+}
+
+static void
+prng_fill(struct prng *restrict p, void *restrict buf, const size_t len)
+{
+	unsigned char *restrict out = buf;
+	size_t pos = 0;
+	while (pos < len) {
+		uint64_t value = prng_next(p);
+		for (size_t i = 0; i < sizeof(value) && pos < len; i++) {
+			out[pos++] = (unsigned char)(value & UINT64_C(0xff));
+			value >>= 8;
+		}
+	}
+}
+
+static size_t
+prng_size(struct prng *restrict p, const size_t min, const size_t max)
+{
+	if (max <= min) {
+		return min;
+	}
+	return min + (size_t)(prng_next(p) % (uint64_t)(max - min + 1));
+}
+
+static bool prng_bool(struct prng *restrict p)
+{
+	return (prng_next(p) & 1) != 0;
+}
+
+static bool read_uintmax_env(const char *restrict name, uintmax_t *restrict out)
+{
+	const char *const value = getenv(name);
+	if (value == NULL || value[0] == '\0') {
+		return false;
+	}
+
+	errno = 0;
+	char *end = NULL;
+	const uintmax_t parsed = strtoumax(value, &end, 0);
+	if (errno != 0 || end == value || *end != '\0') {
+		return false;
+	}
+	*out = parsed;
+	return true;
+}
+
+static uint64_t read_seed(void)
+{
+	uintmax_t value;
+	if (!read_uintmax_env("FUZZ_SEED", &value) || value > UINT64_MAX) {
+		return UINT64_C(0x42);
+	}
+	return (uint64_t)value;
+}
+
+static size_t read_iterations(void)
+{
+	uintmax_t value;
+	if (!read_uintmax_env("FUZZ_ITER", &value) || value > SIZE_MAX) {
+		return FUZZ_DEFAULT_ITERATIONS;
+	}
+	return (size_t)value;
+}
+
+static uint64_t fuzz_case_seed(const uint64_t tag)
+{
+	return fuzz_seed ^ (tag * UINT64_C(0x9e3779b97f4a7c15));
+}
+
+static size_t fuzz_append_random(
+	struct prng *restrict p, unsigned char *restrict buf, size_t len,
+	const size_t cap, const size_t max_tail)
+{
+	const size_t space = cap - len;
+	const size_t tail =
+		prng_size(p, 0, space < max_tail ? space : max_tail);
+	prng_fill(p, buf + len, tail);
+	return len + tail;
+}
+
+static void fuzz_printable(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		buf[i] = (unsigned char)('a' + (prng_next(p) % 26));
+	}
+}
+
+static size_t make_socks5_ipv4(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
+{
+	static const unsigned char prefix[] = {
+		SOCKS5,
+		0x01,
+		SOCKS5AUTH_NOAUTH,
+		SOCKS5,
+		SOCKS5CMD_CONNECT,
+		0x00,
+		SOCKS5ADDR_IPV4,
+	};
+	(void)memcpy(buf, prefix, sizeof(prefix));
+	size_t len = sizeof(prefix);
+	prng_fill(p, buf + len, 6);
+	len += 6;
+	return fuzz_append_random(p, buf, len, cap, 16);
+}
+
+static size_t make_socks5_domain(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
+{
+	static const unsigned char prefix[] = {
+		SOCKS5,
+		0x01,
+		SOCKS5AUTH_NOAUTH,
+		SOCKS5,
+		SOCKS5CMD_CONNECT,
+		0x00,
+		SOCKS5ADDR_DOMAIN,
+	};
+	(void)memcpy(buf, prefix, sizeof(prefix));
+	size_t len = sizeof(prefix);
+	const size_t domain_len = prng_size(p, 1, 32);
+	buf[len++] = (unsigned char)domain_len;
+	fuzz_printable(p, buf + len, domain_len);
+	len += domain_len;
+	prng_fill(p, buf + len, 2);
+	len += 2;
+	return fuzz_append_random(p, buf, len, cap, 16);
+}
+
+static size_t make_socks5_userpass(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
+{
+	static const unsigned char prefix[] = {
+		SOCKS5,
+		0x01,
+		SOCKS5AUTH_USERPASS,
+		0x01,
+	};
+	(void)memcpy(buf, prefix, sizeof(prefix));
+	size_t len = sizeof(prefix);
+	const size_t user_len = prng_size(p, 1, 16);
+	const size_t pass_len = prng_size(p, 1, 16);
+	buf[len++] = (unsigned char)user_len;
+	fuzz_printable(p, buf + len, user_len);
+	len += user_len;
+	buf[len++] = (unsigned char)pass_len;
+	fuzz_printable(p, buf + len, pass_len);
+	len += pass_len;
+	static const unsigned char req[] = {
+		SOCKS5,
+		SOCKS5CMD_CONNECT,
+		0x00,
+		SOCKS5ADDR_IPV4,
+	};
+	(void)memcpy(buf + len, req, sizeof(req));
+	len += sizeof(req);
+	prng_fill(p, buf + len, 6);
+	len += 6;
+	return fuzz_append_random(p, buf, len, cap, 16);
+}
+
+static size_t make_socks5_unsupported(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
+{
+	static const unsigned char prefix[] = {
+		SOCKS5,		0x01, SOCKS5AUTH_NOAUTH, SOCKS5,
+		SOCKS5CMD_BIND, 0x00, SOCKS5ADDR_IPV4,
+	};
+	(void)memcpy(buf, prefix, sizeof(prefix));
+	size_t len = sizeof(prefix);
+	prng_fill(p, buf + len, 6);
+	len += 6;
+	return fuzz_append_random(p, buf, len, cap, 16);
+}
+
+static size_t make_socks4(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
+{
+	buf[0] = SOCKS4;
+	buf[1] = SOCKS4CMD_CONNECT;
+	prng_fill(p, buf + 2, 6);
+	size_t len = SOCKS4_HDR_LEN;
+	const size_t user_len = prng_size(p, 0, 32);
+	fuzz_printable(p, buf + len, user_len);
+	len += user_len;
+	buf[len++] = '\0';
+	return fuzz_append_random(p, buf, len, cap, 16);
+}
+
+static size_t make_socks4a(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
+{
+	buf[0] = SOCKS4;
+	buf[1] = SOCKS4CMD_CONNECT;
+	prng_fill(p, buf + 2, 2);
+	buf[4] = 0x00;
+	buf[5] = 0x00;
+	buf[6] = 0x00;
+	buf[7] = 0x01;
+	size_t len = SOCKS4_HDR_LEN;
+	buf[len++] = 'u';
+	buf[len++] = '\0';
+	const size_t domain_len = prng_size(p, 1, 32);
+	fuzz_printable(p, buf + len, domain_len);
+	len += domain_len;
+	buf[len++] = '\0';
+	return fuzz_append_random(p, buf, len, cap, 16);
+}
+
+static size_t make_socks_payload(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
+{
+	switch (prng_next(p) % 8) {
+	case 0: {
+		const size_t len = prng_size(p, 0, cap);
+		prng_fill(p, buf, len);
+		return len;
+	}
+	case 1:
+		return make_socks5_ipv4(p, buf, cap);
+	case 2:
+		return make_socks5_domain(p, buf, cap);
+	case 3:
+		return make_socks5_userpass(p, buf, cap);
+	case 4:
+		return make_socks5_unsupported(p, buf, cap);
+	case 5:
+		return make_socks4(p, buf, cap);
+	case 6:
+		return make_socks4a(p, buf, cap);
+	default:
+		buf[0] = SOCKS5;
+		return fuzz_append_random(p, buf, 1, cap, 32);
+	}
+}
+
+static void fuzz_socks_once(struct prng *restrict p)
+{
+	int sv[2] = { -1, -1 };
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in sa = {
+		.sin_family = AF_INET,
+	};
+	unsigned char input[FUZZ_MAX_SOCKS_INPUT];
+	const size_t len = make_socks_payload(p, input, sizeof(input));
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.timeout = 1.0;
+	test_conf.auth_required = prng_bool(p);
+	test_conf.socks5_bind = false;
+	test_conf.socks5_udp = false;
+	test_server_init(&s);
+
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	socks_serve(&s, loop, sv[0], (const struct sockaddr *)&sa);
+	sv[0] = -1;
+	T_CHECK(write_all(sv[1], input, len) == 0);
+	T_CHECK(shutdown(sv[1], SHUT_WR) == 0);
+	ev_run(loop, 0);
+
+	T_CHECK(close(sv[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(fuzz_socks)
+{
+	UNUSED(_t_);
+
+	struct prng p;
+	prng_seed(&p, fuzz_case_seed(7));
+	for (size_t i = 0; i < fuzz_iterations; i++) {
+		fuzz_socks_once(&p);
+	}
+}
+
+/* -------------------------------------------------------------------------
+ * regression - protocol handshake, addressing, auth, bind/udp and dialer
+ * error cases driven over a socketpair.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(invalid_version_rejected)
 {
@@ -2113,6 +2464,185 @@ T_DECLARE_CASE(socks4_bind_command_rejected)
 }
 
 /*
+ * SOCKS4 CONNECT to an IPv4 target that dials successfully must be granted
+ * with VN=0x00 and CD=0x5A (SOCKS4RSP_GRANTED), per the SOCKS4 spec.
+ */
+T_DECLARE_CASE(socks4_connect_success_granted)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		SOCKS4, SOCKS4CMD_CONNECT,
+		0x00,	0x50, /* port 80 */
+		0x7f,	0x00,
+		0x00,	0x01, /* 127.0.0.1 */
+		'u',	's',
+		'e',	'r',
+		0x00,
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
+		T_EXPECT_EQ(rsp[0], 0x00);
+		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * The SOCKS4 USERID field is optional; a request carrying only the NULL
+ * terminator must still be accepted and granted on a successful dial.
+ */
+T_DECLARE_CASE(socks4_empty_userid_connect_success_granted)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		SOCKS4, SOCKS4CMD_CONNECT,
+		0x00,	0x50, /* port 80 */
+		0x7f,	0x00,
+		0x00,	0x01, /* 127.0.0.1 */
+		0x00, /* empty USERID */
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
+		T_EXPECT_EQ(rsp[0], 0x00);
+		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * A SOCKS4 request split across two writes must be reassembled and parsed
+ * incrementally, then granted on a successful dial.
+ */
+T_DECLARE_CASE(socks4_split_request_connect_success_granted)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* split mid-header: VN+CD+port, then DSTIP+USERID+NULL */
+	const unsigned char part1[] = {
+		SOCKS4,
+		SOCKS4CMD_CONNECT,
+		0x00,
+		0x50,
+	};
+	const unsigned char part2[] = {
+		0x7f, 0x00, 0x00, 0x01, 'u', 's', 'r', 0x00,
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload_split(
+		loop, &s, part1, sizeof(part1), part2, sizeof(part2), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
+		T_EXPECT_EQ(rsp[0], 0x00);
+		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * SOCKS4A: a DSTIP of 0.0.0.x signals that DSTADDR carries a domain name.
+ * A successful dial must be granted with VN=0x00 and CD=0x5A.
+ */
+T_DECLARE_CASE(socks4a_domain_connect_success_granted)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		SOCKS4, SOCKS4CMD_CONNECT,
+		0x01,	0xbb, /* port 443 */
+		0x00,	0x00,
+		0x00,	0x01, /* 0.0.0.1 -> SOCKS4A marker */
+		'u',	0x00, /* USERID "u" + NULL */
+		'a',	'.',
+		'c',	'o',
+		'm',	0x00, /* domain + NULL */
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
+		T_EXPECT_EQ(rsp[0], 0x00);
+		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
  * SOCKS5 CONNECT with ATYP=DOMAIN and a zero-length domain name must be
  * rejected gracefully rather than crashing.
  */
@@ -2155,8 +2685,22 @@ T_DECLARE_CASE(socks5_zero_length_domain_rejected)
 	ev_loop_destroy(loop);
 }
 
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
+
 int main(void)
 {
+	fuzz_seed = read_seed();
+	fuzz_iterations = read_iterations();
+	(void)fprintf(
+		stderr, "fuzz seed=0x%016" PRIx64 " iter=%zu\n", fuzz_seed,
+		fuzz_iterations);
+
 	T_DECLARE_CTX(t);
 	T_RUN_CASE(t, invalid_version_rejected);
 	T_RUN_CASE(t, socks5_unsupported_command_rsp);
@@ -2180,6 +2724,10 @@ int main(void)
 	T_RUN_CASE(t, socks5_dialer_err_blocked_noallowed);
 	T_RUN_CASE(t, socks5_unknown_command_cmdnosupport);
 	T_RUN_CASE(t, socks4_bind_command_rejected);
+	T_RUN_CASE(t, socks4_connect_success_granted);
+	T_RUN_CASE(t, socks4_empty_userid_connect_success_granted);
+	T_RUN_CASE(t, socks4_split_request_connect_success_granted);
+	T_RUN_CASE(t, socks4a_domain_connect_success_granted);
 	T_RUN_CASE(t, socks5_dialer_success_transfer_finished);
 	T_RUN_CASE(t, socks5_dialer_success_connected_transition);
 	T_RUN_CASE(t, socks5_bind_disabled_cmdnosupport);
@@ -2194,6 +2742,8 @@ int main(void)
 	T_RUN_CASE(t, socks5_udp_frag_two_parts);
 	T_RUN_CASE(t, socks5_udp_frag_discard_out_of_order);
 	T_RUN_CASE(t, socks5_zero_length_domain_rejected);
+
+	T_RUN_CASE(t, fuzz_socks);
 
 	const bool ok = T_RESULT(t);
 	stub_reset();

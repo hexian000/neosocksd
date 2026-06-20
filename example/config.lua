@@ -28,7 +28,7 @@ end
 -- [[ return the effective configuration table ]] --
 return {
     -- ------------------------------------------------------------------ --
-    -- Listener addresses (host:port or [host]:port for IPv6)              --
+    -- Listener addresses (host:port or [host]:port for IPv6)             --
     -- ------------------------------------------------------------------ --
 
     -- SOCKS 4/4a/5 proxy listen address (required unless http_listen is set)
@@ -47,7 +47,7 @@ return {
     restapi             = "127.0.1.1:9080",
 
     -- ------------------------------------------------------------------ --
-    -- Outbound                                                             --
+    -- Outbound                                                           --
     -- ------------------------------------------------------------------ --
 
     -- Upstream proxy chain (comma-separated, evaluated left-to-right).
@@ -57,7 +57,7 @@ return {
     -- proxy = "socks4a://proxy1:1080,socks4a://proxy2:1080",
 
     -- ------------------------------------------------------------------ --
-    -- Ruleset (requires WITH_RULESET build)                               --
+    -- Ruleset (requires a build with Lua scripting support)              --
     -- ------------------------------------------------------------------ --
 
     -- The ruleset: a table used directly as _G.ruleset
@@ -73,14 +73,14 @@ return {
     -- memlimit = 64,
 
     -- ------------------------------------------------------------------ --
-    -- Authentication (requires WITH_RULESET; pass --auth-required to     --
-    -- enforce; credentials are validated inside the ruleset)              --
+    -- Authentication (pass --auth-required to enforce; credentials       --
+    -- are validated inside the ruleset)                                  --
     -- ------------------------------------------------------------------ --
 
     -- auth_required = false,
 
     -- ------------------------------------------------------------------ --
-    -- DNS resolution                                                       --
+    -- DNS resolution                                                     --
     -- ------------------------------------------------------------------ --
 
     -- Address family used when resolving domain names requested by clients.
@@ -89,18 +89,18 @@ return {
     --   10 = PF_INET6   (IPv6 only, equivalent to -6)
     resolve_pf          = 0,
 
-    -- Custom nameserver address (requires WITH_CARES build).
+    -- Custom nameserver address (needs a build with asynchronous DNS support).
     -- nameserver = "8.8.8.8",
 
     -- ------------------------------------------------------------------ --
-    -- Network device binding (requires WITH_NETDEVICE build)             --
+    -- Network device binding (GNU/Linux only)                            --
     -- ------------------------------------------------------------------ --
 
     -- Bind all outgoing connections to this network interface.
     netdev              = netdev, -- nil unless --dev was passed on the command line
 
     -- ------------------------------------------------------------------ --
-    -- TCP options                                                          --
+    -- TCP options                                                        --
     -- ------------------------------------------------------------------ --
 
     -- Disable Nagle's algorithm; reduces latency at the cost of bandwidth.
@@ -109,10 +109,10 @@ return {
     -- Enable SO_KEEPALIVE; helps detect dead peers.
     tcp_keepalive       = true,
 
-    -- Server-side TCP Fast Open (RFC 7413).  Requires WITH_TCP_FASTOPEN.
+    -- Server-side TCP Fast Open (RFC 7413).  Requires Linux 3.7 or later.
     -- tcp_fastopen = true,
 
-    -- Client-side TCP Fast Open.  Requires WITH_TCP_FASTOPEN_CONNECT.
+    -- Client-side TCP Fast Open.  Requires Linux 4.11 or later.
     -- May cause issues with --pipe and server-speaks-first protocols.
     -- tcp_fastopen_connect = false,
 
@@ -121,20 +121,20 @@ return {
     tcp_sndbuf          = 0,
     tcp_rcvbuf          = 0,
 
-    -- Use splice(2)/pipes to move data between connections.
-    -- Requires WITH_SPLICE build.
+    -- Use splice(2)/pipes to move data between connections (GNU/Linux only).
+    -- Trade-off: uses 2 extra fds per connection, but improves throughput.
     -- pipe = false,
 
     -- Allow multiple neosocksd instances to share the same listen port.
-    -- Requires WITH_REUSEPORT build.
+    -- Requires Linux 3.9 or later.
     -- reuseport = false,
 
-    -- Enable transparent proxy mode (requires WITH_TPROXY build).
+    -- Enable transparent proxy mode (GNU/Linux only).
     -- Incompatible with http_listen and forward.
     -- transparent = false,
 
     -- ------------------------------------------------------------------ --
-    -- Connection management                                               --
+    -- Connection management                                              --
     -- ------------------------------------------------------------------ --
 
     -- Enable SOCKS5 BIND command.  Incompatible with ruleset and proxy.
@@ -160,7 +160,7 @@ return {
     timeout             = 60.0,
 
     -- ------------------------------------------------------------------ --
-    -- Outbound address filtering                                          --
+    -- Outbound address filtering                                         --
     -- ------------------------------------------------------------------ --
 
     -- Block connections destined for loopback addresses (127.0.0.0/8, ::1).
@@ -179,7 +179,7 @@ return {
     block_global        = false,
 
     -- ------------------------------------------------------------------ --
-    -- Logging and process management                                      --
+    -- Logging and process management                                     --
     -- ------------------------------------------------------------------ --
 
     -- Log verbosity level:

@@ -1,6 +1,16 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * transfer_test - white-box unit tests for transfer.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   transfer.c       module under test
+ * Leaf libraries: csnippets (io, os).
+ * transfer.c moves bytes between socket pairs and has no stateful collaborator
+ * module to mock; the mock section only holds shared test fixtures.
+ */
+
 #include "transfer.h"
 
 #include "io/io.h"
@@ -25,6 +35,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - shared test fixtures (transfer.c has no collaborator to mock).
+ * ---------------------------------------------------------------------- */
 
 struct test_xfer_state {
 #if WITH_THREADS
@@ -122,6 +136,14 @@ static void set_nonblock(const int fd)
  * Bidirectional transfer: write uplink payload from acc_peer and downlink
  * payload from dial_peer; verify both arrive at the opposite peers.
  */
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - payload movement, shutdown and accounting cases.
+ * ---------------------------------------------------------------------- */
+
 T_DECLARE_CASE(transfer_moves_payload)
 {
 	static const char uplink[] = "neosocksd-uplink";
@@ -549,28 +571,6 @@ T_DECLARE_CASE(transfer_pipe_new_close)
 	T_EXPECT_EQ(p.fd[1], -1);
 }
 
-#if WITH_ALLOC_CACHE
-T_DECLARE_CASE(transfer_pipe_shrink)
-{
-	struct pipe_cache cache = { .cap = PIPE_MAXCACHED, .len = 0 };
-	struct pipe_cache *restrict pc = &cache;
-
-	/* Manually place two fresh pipes into the cache */
-	struct splice_pipe p1 = { .fd = { -1, -1 } };
-	struct splice_pipe p2 = { .fd = { -1, -1 } };
-	T_CHECK(pipe_new(&p1));
-	T_CHECK(pipe_new(&p2));
-	pc->pipes[0] = p1;
-	pc->pipes[1] = p2;
-	pc->len = 2;
-
-	pipe_shrink(pc, 1);
-	T_EXPECT_EQ(pc->len, (size_t)1);
-
-	pipe_shrink(pc, SIZE_MAX);
-	T_EXPECT_EQ(pc->len, (size_t)0);
-}
-#endif /* WITH_ALLOC_CACHE */
 #endif /* WITH_SPLICE */
 
 /*
@@ -644,6 +644,10 @@ bench_transfer_impl(struct testing_bench *restrict _b_, const bool use_splice)
 	ev_loop_destroy(loop);
 }
 
+/* -------------------------------------------------------------------------
+ * bench - throughput of the recv/send fast path.
+ * ---------------------------------------------------------------------- */
+
 T_DECLARE_BENCH(bench_transfer_recvsend)
 {
 	bench_transfer_impl(_b_, false);
@@ -656,6 +660,10 @@ T_DECLARE_BENCH(bench_transfer_splice)
 }
 #endif /* WITH_SPLICE */
 
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -663,9 +671,6 @@ int main(void)
 	T_RUN_CASE(t, transfer_moves_payload);
 #if WITH_SPLICE
 	T_RUN_CASE(t, transfer_pipe_new_close);
-#if WITH_ALLOC_CACHE
-	T_RUN_CASE(t, transfer_pipe_shrink);
-#endif
 	T_RUN_CASE(t, transfer_splice_releases_pipes_on_finish);
 #endif
 	T_RUN_CASE(t, transfer_ctx_cancel_no_callback);

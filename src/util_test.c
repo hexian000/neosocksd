@@ -1,6 +1,16 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * util_test - white-box unit tests for util.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   util.c           module under test
+ *   version.c        leaf (neosocksd_version)
+ * The dialer/resolver symbols referenced by util.c are stubbed in the mock
+ * section below.
+ */
+
 #include "util.h"
 
 #include "dialer.h"
@@ -12,10 +22,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <errno.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - stubs for the dialer/resolver symbols referenced by util.c.
+ * ---------------------------------------------------------------------- */
 
 static struct {
 	int dialreq_format_len_override;
@@ -64,7 +77,13 @@ void resolver_cleanup(void)
 {
 }
 
-/* Tests */
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - io-event helpers and formatting cases.
+ * ---------------------------------------------------------------------- */
 
 static void dummy_io_cb(struct ev_loop *loop, ev_io *w, const int revents)
 {
@@ -212,6 +231,14 @@ T_DECLARE_CASE(util_socket_bind_netdev_empty_name)
 	socket_bind_netdev(-1, "");
 	T_EXPECT(true);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

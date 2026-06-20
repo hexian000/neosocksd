@@ -269,7 +269,7 @@ bool dialreq_addproxy(
 			port = "1080";
 		}
 	} else {
-		LOGE_F("dialer: unknown proxy scheme `%s'", uri.scheme);
+		LOGE_F("unknown proxy scheme `%s'", uri.scheme);
 		return false;
 	}
 	char *endptr;
@@ -1442,7 +1442,7 @@ static bool connect_sa(
 	if (LOGLEVEL(VERBOSE)) {
 		char addr_str[64];
 		sa_format(addr_str, sizeof(addr_str), sa);
-		LOG_F(VERBOSE, "dialer: connect %s", addr_str);
+		LOG_F(VERBOSE, "connect %s", addr_str);
 	}
 	d->state = STATE_CONNECT;
 	if (connect(fd, sa, sa_len(sa)) != 0) {

@@ -47,7 +47,6 @@ return function(T)
         conns    = {},
         hosts    = { "self-host" },
         verbose  = false,
-        passive  = true, -- prevent main() from starting background mainloop
     }
 
     -- loadfile (not require) bypasses package cache, giving a fresh module
@@ -71,8 +70,16 @@ return function(T)
     -- to 1 (single-round failure semantics) for the routing/conn_state tests.
     local DEFAULT_CONN_FAILURE_LIMIT = ag.CONN_FAILURE_LIMIT
 
+    -- relaying is opt-in (relay_cost >= 0); fixtures model ordinary relaying
+    -- peers, so they advertise a zero cost unless a test overrides it
     local function mkpeer(ver, hosts, conns)
-        return { version = ver, timestamp = time.unix(), hosts = hosts or {}, conns = conns or {} }
+        return {
+            version = ver,
+            timestamp = time.unix(),
+            hosts = hosts or {},
+            conns = conns or {},
+            relay_cost = 0,
+        }
     end
 
     -- Convert old-style digest { [peer] = version } to new-style
@@ -95,6 +102,8 @@ return function(T)
         t_clock = 0
         fake_rejects = 0
         await.rpcall = orig_rpcall -- undo any per-test mock
+        ag.running = true          -- a prior hot-reload test may have stopped it
+        ag.relay_cost = nil        -- relay freely unless a test opts out
         -- Most tests assert single-round failure effects; the multi-failure
         -- tolerance is covered by its own dedicated tests that opt back in.
         ag.CONN_FAILURE_LIMIT = 1
@@ -1381,6 +1390,7 @@ return function(T)
 
     T:atest("matcher: RELAY_DOMAIN single-label final hop", function()
         reset()
+        ag.relay_cost = 0 -- opt in to relaying
         ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
         t_clock = 1000
         with_rpcall({
@@ -1410,6 +1420,7 @@ return function(T)
 
     T:atest("matcher: RELAY_DOMAIN multi-label relay forwarding", function()
         reset()
+        ag.relay_cost = 0 -- opt in to relaying
         ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
         t_clock = 1000
         with_rpcall({
@@ -1675,56 +1686,88 @@ return function(T)
             "digest entries must carry version and timestamp")
     end)
 
-    T:atest("rpc.probe: pulls back when the caller is ahead", function()
+    T:test("rpc.probe: does not reconcile data (push replaces the reverse pull)", function()
         reset()
-        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
-        ag.conn_state[1] = { peername = "peer2", rtt_win = {} }
-        with_rpcall({
-            sync = function()
-                return true, "peer2", { peer3 = mkpeer(5, { "peer3-host" }, {}) }
-            end,
-        }, function()
-            local name, digest = rpc.probe("peer2", D { peer3 = 5 })
-            assert(name == "self" and type(digest) == "table")
-        end)
+        -- a caller ahead of us used to trigger a pull-back; reconciliation is
+        -- now caller-driven via sync, so probe stays a pure digest exchange
+        local name, digest = rpc.probe("peer2", D { peer3 = 5 })
+        assert(name == "self" and type(digest) == "table")
+        assert(_G.peerdb["peer3"] == nil,
+            "rpc.probe must not ingest or pull entries on its own")
+    end)
+
+    T:test("rpc.sync: ingests entries pushed by the caller", function()
+        reset()
+        -- the caller pushes peer3 (which we lack) and asks for what it lacks
+        local name, delta = rpc.sync("peer2", D { self = 0 },
+            { peer3 = mkpeer(5, { "peer3-host" }, {}) })
+        assert(name == "self")
         assert(_G.peerdb["peer3"] ~= nil and _G.peerdb["peer3"].version == 5,
-            "rpc.probe must pull missing entries back from the caller")
+            "a pushed entry must be ingested")
+        assert(type(delta) == "table",
+            "sync must still return the entries the caller is missing")
     end)
 
-    T:atest("rpc.probe: no pull-back when the caller is not ahead", function()
+    T:test("rpc.sync: ingestion needs no outbound conn (passive hub)", function()
         reset()
-        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
-        ag.conn_state[1] = { peername = "peer2", rtt_win = {} }
-        _G.peerdb["peer3"] = mkpeer(5)
-        local sync_called = false
-        with_rpcall({
-            sync = function()
-                sync_called = true
-                return true, "peer2", {}
-            end,
-        }, function()
-            rpc.probe("peer2", D { peer3 = 5 })
-        end)
-        assert(not sync_called,
-            "a digest with no newer entries must not trigger a pull-back")
+        -- no conns and no conn_state: a passive hub cannot dial out, yet a
+        -- pushed delta must still be ingested from the inbound connection
+        ag.conns = {}
+        for k in pairs(ag.conn_state) do ag.conn_state[k] = nil end
+        rpc.sync("peer2", nil, { peer3 = mkpeer(5, { "peer3-host" }, {}) })
+        assert(_G.peerdb["peer3"] ~= nil,
+            "a passive node must ingest pushed entries without dialing")
     end)
 
-    T:atest("rpc.probe: expired digest entries do not trigger pull-back", function()
+    T:test("rpc.sync: an expired pushed entry is not ingested", function()
         reset()
-        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
-        ag.conn_state[1] = { peername = "peer2", rtt_win = {} }
         local threshold = ag.PEERDB_EXPIRY_TIME + ag.PEERDB_EXPIRY_TOLERANCE
-        local sync_called = false
+        local stale = mkpeer(5, { "peer3-host" }, {})
+        stale.timestamp = 10000 - threshold - 1
+        rpc.sync("peer2", nil, { peer3 = stale })
+        assert(_G.peerdb["peer3"] == nil,
+            "an entry already past expiry must not be added via push")
+    end)
+
+    T:atest("maintenance: probe_via pushes entries the remote is missing", function()
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        -- we already hold peer9, which the remote's digest will not list
+        _G.peerdb["peer9"] = mkpeer(4, { "peer9-host" }, {})
+        t_clock = 1000
+        local pushed
         with_rpcall({
-            sync = function()
-                sync_called = true
+            probe = function()
+                t_clock = t_clock + 0.002
+                return true, "peer2", D {} -- remote knows nothing
+            end,
+            sync = function(_, _, _, delta)
+                pushed = delta
                 return true, "peer2", {}
             end,
         }, function()
-            rpc.probe("peer2", { peer3 = { v = 5, t = 10000 - threshold - 1 } })
+            ag.maintenance()
         end)
-        assert(not sync_called,
-            "entries already past expiry must not be pulled back")
+        assert(pushed and pushed["peer9"] and pushed["peer9"].version == 4,
+            "probe_via must push entries the remote is missing")
+    end)
+
+    T:test("rpc.sync: a passive hub relays data between two active peers", function()
+        reset()
+        -- this node is a passive hub: no conns, cannot dial out. Active A and
+        -- B both dial in. A pushes its entry; later B syncs (pushing its own
+        -- and pulling what it lacks) and must receive A's entry from the hub.
+        ag.conns = {}
+        for k in pairs(ag.conn_state) do ag.conn_state[k] = nil end
+        -- A dials in and pushes its entry
+        rpc.sync("A", D { self = 0 }, { A = mkpeer(3, { "A-host" }, {}) })
+        assert(_G.peerdb["A"] ~= nil, "hub must store A's entry")
+        -- B dials in: pushes B, and its digest lacks A
+        local _, delta = rpc.sync("B", D { self = 0, B = 1 },
+            { B = mkpeer(2, { "B-host" }, {}) })
+        assert(_G.peerdb["B"] ~= nil, "hub must store B's entry")
+        assert(delta["A"] ~= nil and delta["A"].version == 3,
+            "the hub must relay A's entry to B in the sync response")
     end)
 
     T:atest("rpc.probe: digest merges newer third-party timestamps", function()
@@ -1774,6 +1817,7 @@ return function(T)
 
     T:atest("resolve: failed demand wakes the control loop", function()
         reset()
+        ag.relay_cost = 0 -- opt in so a relay miss reaches the reachability check
         -- known peer, but no conns at all → no route
         _G.peerdb["peer9"] = mkpeer(1, { "peer9-host" }, {})
         ag.maintenance() -- no conns: just rebuilds the index
@@ -1974,7 +2018,6 @@ return function(T)
         assert(ag2.api_endpoint == "127.0.1.1:9080",
             "api_endpoint must be migrated, got " .. tostring(ag2.api_endpoint))
         assert(ag2.peername == "self", "peername must be migrated")
-        assert(ag2.passive == true, "passive must be migrated (or a mainloop leaks)")
         assert(ag2.on_updated == callback, "on_updated must be migrated")
         assert(rawequal(ag2.conn_state, ag.conn_state),
             "conn_state must be migrated")
@@ -2013,6 +2056,165 @@ return function(T)
         _G.agent = saved
         assert(type(handler) == "function",
             "a captured chain must dispatch into the reloaded module")
+        -- main() started a mainloop for ag2; retire it so the background task
+        -- does not outlive the test
+        ag2.stop()
+    end)
+
+    -- ------------------------------------------------------------------ --
+    -- 21b. relay_cost: limit or refuse transit traffic for other peers
+    --   nil/0 relay freely; > 0 transit penalty; < 0 refuse relay
+    -- ------------------------------------------------------------------ --
+
+    T:test("relay_cost < 0: a node is an endpoint but not a relay hop", function()
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        _G.peerdb["self"] = mkpeer(3, { "self-host" }, {
+            [1] = { peername = "peer2", rtt = 0.005 },
+        })
+        -- peer2 refuses relay: reachable directly, but Dijkstra must not
+        -- route any transit traffic (e.g. to peer3) through it
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {
+            [1] = { peername = "peer3", rtt = 0.005 },
+        })
+        _G.peerdb["peer2"].relay_cost = -1
+        _G.peerdb["peer3"] = mkpeer(1, { "peer3-host" }, {})
+        local _, routes = ag._build_index(_G.peerdb)
+        assert(routes["peer2"],
+            "a relay-refusing node must still be reachable as an endpoint")
+        assert(not routes["peer3"],
+            "traffic must not transit through a relay-refusing node")
+    end)
+
+    T:test("relay_cost < 0: a node still routes its own traffic", function()
+        reset()
+        -- the source's own outgoing edges are always relaxed, so refusing
+        -- relay locally only blocks others from transiting through this node
+        ag.relay_cost = -1
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        _G.peerdb["self"] = mkpeer(3, { "self-host" }, {
+            [1] = { peername = "peer2", rtt = 0.005 },
+        })
+        _G.peerdb["self"].relay_cost = -1
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {
+            [1] = { peername = "peer3", rtt = 0.005 },
+        })
+        _G.peerdb["peer3"] = mkpeer(1, { "peer3-host" }, {})
+        local _, routes = ag._build_index(_G.peerdb)
+        assert(routes["peer2"] and routes["peer3"],
+            "a relay-refusing node must still reach the mesh for its own traffic")
+    end)
+
+    T:test("relay_cost > 0: a costly node is avoided when an alternative exists", function()
+        reset()
+        -- self reaches peer4 two ways: direct via peer2 (fast link but peer2
+        -- charges a large transit cost) or via peer3 (slower links, no cost).
+        -- The cost must make Dijkstra prefer the nominally slower peer3 path.
+        ag.conns = {
+            [1] = { "socks4a://peer2.internal:1080" },
+            [2] = { "socks4a://peer3.internal:1080" },
+        }
+        _G.peerdb["self"] = mkpeer(3, { "self-host" }, {
+            [1] = { peername = "peer2", rtt = 0.001 },
+            [2] = { peername = "peer3", rtt = 0.010 },
+        })
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {
+            [1] = { peername = "peer4", rtt = 0.001 },
+        })
+        _G.peerdb["peer2"].relay_cost = 1 -- 1s transit penalty
+        _G.peerdb["peer3"] = mkpeer(1, { "peer3-host" }, {
+            [1] = { peername = "peer4", rtt = 0.010 },
+        })
+        _G.peerdb["peer4"] = mkpeer(1, { "peer4-host" }, {})
+        local _, routes = ag._build_index(_G.peerdb)
+        local route = routes["peer4"]
+        assert(route, "peer4 must remain reachable")
+        -- chosen first hop is route.path[#route.path]
+        assert(route.path[#route.path] == "peer3",
+            "the costly node must be avoided in favour of peer3")
+        -- reported RTT must be the real path RTT (20ms), not cost-inflated
+        assert(math.abs(route.rtt - 0.020) < 1e-6,
+            "reported rtt must exclude the synthetic relay cost, got " ..
+            tostring(route.rtt))
+    end)
+
+    T:test("relay_cost > 0: a costly node is still used as a last resort", function()
+        reset()
+        -- only path to peer4 is through the costly peer2; it must still be used
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        _G.peerdb["self"] = mkpeer(3, { "self-host" }, {
+            [1] = { peername = "peer2", rtt = 0.001 },
+        })
+        _G.peerdb["peer2"] = mkpeer(1, { "peer2-host" }, {
+            [1] = { peername = "peer4", rtt = 0.001 },
+        })
+        _G.peerdb["peer2"].relay_cost = 1
+        _G.peerdb["peer4"] = mkpeer(1, { "peer4-host" }, {})
+        local _, routes = ag._build_index(_G.peerdb)
+        assert(routes["peer4"], "a costly node must still relay when it is the only path")
+        assert(routes["peer4"].path[#routes["peer4"].path] == "peer2")
+    end)
+
+    T:atest("relay_cost < 0: matcher refuses relay forwarding but allows own traffic", function()
+        reset()
+        ag.relay_cost = -1
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        t_clock = 1000
+        with_rpcall({
+            probe = function()
+                t_clock = t_clock + 0.002
+                return true, "peer2", D { peer2 = 1 }
+            end,
+            sync = function()
+                return true, "peer2", { peer2 = mkpeer(1, { "peer2-host" }, {}) }
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+        -- a relay request that would forward through this node must be refused
+        local ok, err = pcall(ag.matcher, "peer3-host.peer2.relay.neosocksd.internal:80")
+        assert(not ok, "relay_cost < 0 must refuse relay forwarding")
+        assert(tostring(err):find("relay disabled"),
+            "error must mention 'relay disabled', got: " .. tostring(err))
+        -- the node's own outbound resolution must keep working
+        local handler = ag.matcher("peer2-host.internal:80")
+        assert(type(handler) == "function",
+            "refusing relay must not block the node's own outbound traffic")
+    end)
+
+    T:atest("relay_cost: self entry advertises the cost and toggling republishes", function()
+        reset()
+        t_clock = 1000
+        with_rpcall({ probe = function() return false, "no route" end }, function()
+            ag.maintenance()
+        end)
+        -- relaying is opt-in: an unset cost means refuse, advertised as the
+        -- absence of an entry so peers read this node as non-transit
+        assert(_G.peerdb["self"].relay_cost == nil,
+            "self entry must not advertise a cost when relaying is refused")
+        local ver1 = _G.peerdb["self"].version
+        -- opting in with a free relay (0) must be advertised so peers route
+        -- through this node again, and must bump the version
+        ag.relay_cost = 0
+        t_clock = 1010
+        with_rpcall({ probe = function() return false, "no route" end }, function()
+            ag.maintenance()
+        end)
+        assert(_G.peerdb["self"].relay_cost == 0,
+            "a zero (free) relay cost must be advertised")
+        assert(_G.peerdb["self"].version > ver1,
+            "opting in to relaying must bump the version so peers learn it")
+        local ver2 = _G.peerdb["self"].version
+        -- raising the cost must republish so peers re-run Dijkstra
+        ag.relay_cost = 0.5
+        t_clock = 1020
+        with_rpcall({ probe = function() return false, "no route" end }, function()
+            ag.maintenance()
+        end)
+        assert(_G.peerdb["self"].relay_cost == 0.5,
+            "self entry must advertise the relay cost once set")
+        assert(_G.peerdb["self"].version > ver2,
+            "changing relay_cost must bump the version so peers learn it")
     end)
 
     -- ------------------------------------------------------------------ --

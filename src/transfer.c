@@ -33,7 +33,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 
 #if WITH_THREADS
 #define THRD_ASSERT(expr)                                                      \
@@ -62,6 +61,8 @@ static const char *const xfer_state_str[] = {
 
 /* ---------------------------------------------------------------- xfer_half */
 
+#define XFER_BUFSIZE 16384
+
 /*
  * Single-direction transfer half.  All fields accessed exclusively on the
  * xfer thread after task_xfer_start enqueues the initial ev_io_start calls.
@@ -83,7 +84,7 @@ struct xfer_half {
 	size_t pos;
 	struct {
 		BUFFER_HDR;
-		unsigned char data[IO_BUFSIZE];
+		unsigned char data[XFER_BUFSIZE];
 	} buf;
 	/* back-pointer; set once at construction, then read-only */
 	struct transfer_ctx *owner;
@@ -127,9 +128,6 @@ struct xfer_worker {
 	atomic_bool stop;
 	/* worker thread only; no locking needed */
 	struct transfer_ctx *active_list;
-#if WITH_SPLICE && WITH_ALLOC_CACHE
-	struct pipe_cache cache;
-#endif
 };
 #endif /* WITH_THREADS */
 
@@ -145,9 +143,6 @@ struct transfer {
 	struct ev_loop *loop;
 	/* loop thread only; no locking needed */
 	struct transfer_ctx *active_list;
-#if WITH_SPLICE && WITH_ALLOC_CACHE
-	struct pipe_cache cache;
-#endif
 #endif
 };
 
@@ -233,16 +228,12 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 		LOGW_F("pipe2: (%d) %s", err, strerror(err));
 		return false;
 	}
-#if WITH_ALLOC_CACHE
 	int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, 262144);
 	if (pipe_cap < 0) {
 		const int err = errno;
 		LOGD_F("fcntl: (%d) %s", err, strerror(err));
 	}
 	pipe_cap = fcntl(pipe->fd[0], F_GETPIPE_SZ, 0);
-#else
-	int pipe_cap = fcntl(pipe->fd[0], F_GETPIPE_SZ, 0);
-#endif
 	if (pipe_cap < 0) {
 		const int err = errno;
 		LOGW_F("fcntl: (%d) %s", err, strerror(err));
@@ -259,39 +250,6 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 	return true;
 }
 
-#if WITH_ALLOC_CACHE
-void pipe_shrink(struct pipe_cache *restrict cache, const size_t count)
-{
-	size_t n = cache->len;
-	const size_t stop = count < n ? n - count : 0;
-	while (n > stop) {
-		pipe_close(&cache->pipes[--n]);
-	}
-	cache->len = n;
-}
-#endif
-
-#if WITH_ALLOC_CACHE
-static bool
-pipe_get(struct pipe_cache *restrict cache, struct splice_pipe *restrict pipe)
-{
-	if (cache->len == 0) {
-		return pipe_new(pipe);
-	}
-	*pipe = cache->pipes[--cache->len];
-	return true;
-}
-
-static void
-pipe_put(struct pipe_cache *restrict cache, struct splice_pipe *restrict pipe)
-{
-	if (pipe->len > 0 || cache->len == cache->cap) {
-		pipe_close(pipe);
-		return;
-	}
-	cache->pipes[cache->len++] = *pipe;
-}
-#else
 static bool pipe_get(struct splice_pipe *restrict pipe)
 {
 	return pipe_new(pipe);
@@ -301,19 +259,6 @@ static void pipe_put(struct splice_pipe *restrict pipe)
 {
 	pipe_close(pipe);
 }
-#endif /* WITH_ALLOC_CACHE */
-
-/* Returns the pipe cache that owns the given transfer context. */
-#if WITH_ALLOC_CACHE
-static struct pipe_cache *xfer_cache(struct transfer_ctx *restrict t)
-{
-#if WITH_THREADS
-	return &t->worker->cache;
-#else
-	return &t->xfer->cache;
-#endif
-}
-#endif /* WITH_ALLOC_CACHE */
 #endif /* WITH_SPLICE */
 
 /* ---------------------------------------------------------------- set_state */
@@ -347,18 +292,10 @@ static void set_state(
 
 #if WITH_SPLICE
 	if (t->up.pipe.fd[0] != -1) {
-		pipe_put(
-#if WITH_ALLOC_CACHE
-			xfer_cache(t),
-#endif
-			&t->up.pipe);
+		pipe_put(&t->up.pipe);
 	}
 	if (t->down.pipe.fd[0] != -1) {
-		pipe_put(
-#if WITH_ALLOC_CACHE
-			xfer_cache(t),
-#endif
-			&t->down.pipe);
+		pipe_put(&t->down.pipe);
 	}
 #endif
 
@@ -647,22 +584,14 @@ static void task_xfer_start(void *data)
 #if WITH_SPLICE
 	if (t->up.use_splice) {
 		struct splice_pipe pipe;
-		if (pipe_get(
-#if WITH_ALLOC_CACHE
-			    xfer_cache(t),
-#endif
-			    &pipe)) {
+		if (pipe_get(&pipe)) {
 			ev_set_cb(&t->up.w_socket, pipe_cb);
 			t->up.pipe = pipe;
 		}
 	}
 	if (t->down.use_splice) {
 		struct splice_pipe pipe;
-		if (pipe_get(
-#if WITH_ALLOC_CACHE
-			    xfer_cache(t),
-#endif
-			    &pipe)) {
+		if (pipe_get(&pipe)) {
 			ev_set_cb(&t->down.w_socket, pipe_cb);
 			t->down.pipe = pipe;
 		}
@@ -685,18 +614,10 @@ task_xfer_stop(struct ev_loop *restrict loop, struct transfer_ctx *restrict t)
 
 #if WITH_SPLICE
 	if (t->up.pipe.fd[0] != -1) {
-		pipe_put(
-#if WITH_ALLOC_CACHE
-			xfer_cache(t),
-#endif
-			&t->up.pipe);
+		pipe_put(&t->up.pipe);
 	}
 	if (t->down.pipe.fd[0] != -1) {
-		pipe_put(
-#if WITH_ALLOC_CACHE
-			xfer_cache(t),
-#endif
-			&t->down.pipe);
+		pipe_put(&t->down.pipe);
 	}
 #endif /* WITH_SPLICE */
 
@@ -774,10 +695,6 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 		w->active_list = NULL;
 		w->disp = NULL;
 		w->loop = NULL;
-#if WITH_SPLICE && WITH_ALLOC_CACHE
-		w->cache =
-			(struct pipe_cache){ .cap = PIPE_MAXCACHED, .len = 0 };
-#endif
 
 		w->disp = dispatcher_create(16);
 		if (w->disp == NULL) {
@@ -810,9 +727,6 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 	UNUSED(nworkers);
 	xfer->loop = loop;
 	xfer->active_list = NULL;
-#if WITH_SPLICE && WITH_ALLOC_CACHE
-	xfer->cache = (struct pipe_cache){ .cap = PIPE_MAXCACHED, .len = 0 };
-#endif
 #endif /* WITH_THREADS */
 	return xfer;
 }
@@ -850,15 +764,6 @@ void transfer_join(struct transfer *restrict xfer)
 	}
 	xfer->active_list = NULL;
 #endif /* WITH_THREADS */
-#if WITH_SPLICE && WITH_ALLOC_CACHE
-#if WITH_THREADS
-	for (unsigned int i = 0; i < xfer->nworkers; i++) {
-		pipe_shrink(&xfer->workers[i].cache, SIZE_MAX);
-	}
-#else
-	pipe_shrink(&xfer->cache, SIZE_MAX);
-#endif
-#endif /* WITH_SPLICE && WITH_ALLOC_CACHE */
 	free(xfer);
 }
 

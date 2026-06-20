@@ -1,6 +1,19 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * server_test - white-box unit tests for server.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   server.c         module under test
+ *   conf.c           config data
+ *   proto/codec.c    leaf
+ *   version.c        leaf
+ * All stateful collaborators of server.c (socks, http_proxy, forward,
+ * api_server, ruleset, dialer, transfer) are replaced by the mocks in the
+ * mock section below.
+ */
+
 #include "server.h"
 
 #include "api_server.h"
@@ -14,7 +27,6 @@
 #include "os/socket.h"
 #include "utils/testing.h"
 
-#include <arpa/inet.h>
 #include <ev.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -23,6 +35,28 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - collaborator stubs (socks, http_proxy, forward, api_server,
+ * ruleset, dialer, transfer) and shared fixtures.
+ *
+ * Knobs to steer the stubbed dependencies for the reload tests. Defaults
+ * (all zero/false) preserve the original behaviour used by the other cases.
+ * ---------------------------------------------------------------------- */
+
+static struct {
+	bool dialreq_parse_ok;
+#if WITH_RULESET
+	bool ruleset_new_ok;
+	bool ruleset_load_ok;
+	bool ruleset_valid;
+	int ruleset_setserver_calls;
+	int ruleset_setbasereq_calls;
+	int ruleset_free_calls;
+#endif
+} CONTROL;
+
+static int dialreq_dummy_tag;
 
 void socket_set_transparent(const int fd, const bool tproxy)
 {
@@ -35,7 +69,10 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 {
 	(void)addr;
 	(void)csv;
-	return NULL;
+	if (!CONTROL.dialreq_parse_ok) {
+		return NULL;
+	}
+	return (struct dialreq *)&dialreq_dummy_tag;
 }
 
 void dialreq_free(struct dialreq *req)
@@ -96,6 +133,8 @@ void tproxy_serve(
 #endif /* WITH_TPROXY */
 
 #if WITH_RULESET
+static int ruleset_dummy_tag;
+
 struct ruleset *ruleset_new(
 	struct ev_loop *restrict loop, struct config *restrict conf,
 	struct resolver *restrict resolver, struct dialreq *restrict basereq)
@@ -104,13 +143,17 @@ struct ruleset *ruleset_new(
 	(void)conf;
 	(void)resolver;
 	(void)basereq;
-	return NULL;
+	if (!CONTROL.ruleset_new_ok) {
+		return NULL;
+	}
+	return (struct ruleset *)&ruleset_dummy_tag;
 }
 
 void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s)
 {
 	(void)r;
 	(void)s;
+	CONTROL.ruleset_setserver_calls++;
 }
 
 void ruleset_setbasereq(
@@ -118,18 +161,20 @@ void ruleset_setbasereq(
 {
 	(void)r;
 	(void)basereq;
+	CONTROL.ruleset_setbasereq_calls++;
 }
 
 void ruleset_free(struct ruleset *restrict r)
 {
 	(void)r;
+	CONTROL.ruleset_free_calls++;
 }
 
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 {
 	(void)r;
 	(void)filename;
-	return false;
+	return CONTROL.ruleset_load_ok;
 }
 
 bool ruleset_loadconfig(
@@ -137,13 +182,13 @@ bool ruleset_loadconfig(
 {
 	(void)r;
 	(void)filename;
-	return false;
+	return CONTROL.ruleset_load_ok;
 }
 
 bool ruleset_isvalid(struct ruleset *restrict r)
 {
 	(void)r;
-	return false;
+	return CONTROL.ruleset_valid;
 }
 
 const char *
@@ -204,7 +249,7 @@ static bool test_wait_until(
 
 static uint16_t bound_port(const int fd)
 {
-	struct sockaddr_in addr;
+	struct sockaddr_in addr = { 0 };
 	socklen_t len = sizeof(addr);
 
 	T_CHECK(getsockname(fd, (struct sockaddr *)&addr, &len) == 0);
@@ -243,6 +288,14 @@ static bool listener_backing_off(void *data)
 	const struct listener *l = data;
 	return !ev_is_active(&l->w_accept) && ev_is_active(&l->w_timer);
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - listener lifecycle, accept dispatch and reload cases.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(server_start_accept_and_stop)
 {
@@ -489,6 +542,165 @@ T_DECLARE_CASE(server_dual_listener_independent_accepts)
 	ev_loop_destroy(loop);
 }
 
+static void control_reset(void)
+{
+	memset(&CONTROL, 0, sizeof(CONTROL));
+}
+
+/*
+ * Exercise the listener-setup branches of server_init() for the forward,
+ * HTTP and REST API modes, including the wildcard / non-loopback warnings.
+ */
+T_DECLARE_CASE(server_init_multi_mode_listeners)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("0.0.0.0:0");
+	conf.forward = "127.0.0.1:8080";
+	conf.http_listen = "0.0.0.0:0";
+	conf.restapi = "0.0.0.0:0";
+	struct server s;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	/* proxy (forward) + http + api */
+	T_EXPECT_EQ(s.num_listeners, (size_t)3);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/* resolve_addr() rejects malformed listen addresses. */
+T_DECLARE_CASE(server_init_rejects_bad_addresses)
+{
+	{
+		struct ev_loop *loop = ev_loop_new(0);
+		T_CHECK(loop != NULL);
+		control_reset();
+		/* longer than FQDN_MAX_LENGTH + ":65535" */
+		char addr[600];
+		memset(addr, 'a', sizeof(addr) - 1);
+		addr[sizeof(addr) - 1] = '\0';
+		struct config conf = make_conf(addr);
+		struct server s;
+		T_EXPECT(!server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+		ev_loop_destroy(loop);
+	}
+	{
+		struct ev_loop *loop = ev_loop_new(0);
+		T_CHECK(loop != NULL);
+		control_reset();
+		struct config conf = make_conf("not a valid address");
+		struct server s;
+		T_EXPECT(!server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+		ev_loop_destroy(loop);
+	}
+}
+
+/* server_stats() aggregates per-listener accept/serve counters. */
+T_DECLARE_CASE(server_stats_aggregates_listeners)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	conf.http_listen = "127.0.0.1:0";
+	struct server s;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT_EQ(s.num_listeners, (size_t)2);
+	s.listeners[0].stats.num_accept = 3;
+	s.listeners[0].stats.num_serve = 2;
+	s.listeners[1].stats.num_accept = 5;
+	s.listeners[1].stats.num_serve = 4;
+
+	struct server_stats out;
+	server_stats(&s, &out);
+	T_EXPECT_EQ(out.num_accept, (uint_least64_t)8);
+	T_EXPECT_EQ(out.num_serve, (uint_least64_t)6);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+#if WITH_RULESET
+/*
+ * SIGHUP drives ruleset reload: a failed engine creation leaves the ruleset
+ * unset; a successful reload installs it. SIGINT then breaks the loop.
+ */
+T_DECLARE_CASE(server_signal_reload_ruleset)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	conf.ruleset = "ruleset.lua";
+	struct server s;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+
+	/* engine creation fails -> reload aborts, ruleset stays unset */
+	CONTROL.ruleset_new_ok = false;
+	ev_feed_event(loop, &s.w_sighup, EV_SIGNAL);
+	ev_run(loop, EVRUN_NOWAIT);
+	T_EXPECT(s.ruleset == NULL);
+
+	/* engine creation + load succeed -> ruleset installed */
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = true;
+	CONTROL.ruleset_valid = true;
+	ev_feed_event(loop, &s.w_sighup, EV_SIGNAL);
+	ev_run(loop, EVRUN_NOWAIT);
+	T_EXPECT(s.ruleset != NULL);
+	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 1);
+
+	/* SIGINT breaks the event loop */
+	ev_feed_event(loop, &s.w_sigint, EV_SIGNAL);
+	ev_run(loop, EVRUN_NOWAIT);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * SIGHUP with a boot config also reloads the base dial request and pushes it
+ * into the live ruleset.
+ */
+T_DECLARE_CASE(server_signal_reload_boot_basereq)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	conf.boot = "boot.lua";
+	struct server s;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = true;
+	CONTROL.ruleset_valid = true;
+	CONTROL.dialreq_parse_ok = true;
+	ev_feed_event(loop, &s.w_sighup, EV_SIGNAL);
+	ev_run(loop, EVRUN_NOWAIT);
+
+	T_EXPECT(s.ruleset != NULL);
+	/* the boot config path rebuilds and re-applies the base request */
+	T_EXPECT_EQ(CONTROL.ruleset_setbasereq_calls, 1);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+#endif /* WITH_RULESET */
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
+
 int main(void)
 {
 	T_DECLARE_CTX(t);
@@ -501,5 +713,12 @@ int main(void)
 	T_RUN_CASE(t, server_rejects_when_probabilistic_startup_limit_hits);
 	T_RUN_CASE(t, server_accept_error_restarts_listener);
 	T_RUN_CASE(t, server_dual_listener_independent_accepts);
+	T_RUN_CASE(t, server_init_multi_mode_listeners);
+	T_RUN_CASE(t, server_init_rejects_bad_addresses);
+	T_RUN_CASE(t, server_stats_aggregates_listeners);
+#if WITH_RULESET
+	T_RUN_CASE(t, server_signal_reload_ruleset);
+	T_RUN_CASE(t, server_signal_reload_boot_basereq);
+#endif
 	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

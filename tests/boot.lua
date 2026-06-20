@@ -80,8 +80,8 @@ _G.route_default = { lb.roundrobin({
 -- failover demo for tests/test_forward.lua: try an unreachable proxy, then
 -- fall back to a direct connection to the API endpoint
 local FAILOVER_NAME = "failover.test:80"
--- a failed forward followed by a policy rejection (return nil): the rejection
--- must be reported as a ruleset reject, not an upstream failure.
+-- a failed forward followed by giving up (return nil): the request is
+-- rejected by policy (a ruleset reject), never an upstream failure.
 local POLICYREJECT_NAME = "policyreject.test:80"
 function ruleset.resolve(addr, username, password)
     if addr == FAILOVER_NAME then
@@ -91,8 +91,8 @@ function ruleset.resolve(addr, username, password)
         })
     end
     if addr == POLICYREJECT_NAME then
-        await.forward("127.0.0.1:1") -- refused; sets the forward error
-        return nil                   -- policy reject; the error is cleared
+        await.forward("127.0.0.1:1") -- refused; the error is reported only here
+        return nil                   -- give up: rejected by policy
     end
     return libruleset.resolve(addr, username, password)
 end

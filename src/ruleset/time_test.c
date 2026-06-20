@@ -1,6 +1,15 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * time_test - white-box unit tests for ruleset/time.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   ruleset/time.c   module under test
+ * Leaf libraries: Lua. time.c has no stateful collaborator to mock; the mock
+ * section only holds shared Lua test fixtures.
+ */
+
 #include "ruleset/time.h"
 
 #include "lauxlib.h"
@@ -10,6 +19,10 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+
+/* -------------------------------------------------------------------------
+ * mock - shared Lua test fixtures (time.c has no collaborator to mock).
+ * ---------------------------------------------------------------------- */
 
 static lua_State *new_lua(void)
 {
@@ -32,6 +45,14 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 	const int status_call = lua_pcall(L, 0, LUA_MULTRET, 0);
 	return status_call == LUA_OK;
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - time formatting/parsing cases.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(time_module_opens)
 {
@@ -125,6 +146,14 @@ T_DECLARE_CASE(time_measure_passes_results)
 
 	lua_close(L);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

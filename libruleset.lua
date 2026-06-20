@@ -856,7 +856,6 @@ function default_(addr)
 end
 
 function route_(addr)
-    -- check redirect table
     local redirtab = _G.redirect
     if redirtab then
         local action, tag = runchain_(redirtab, addr)
@@ -867,7 +866,6 @@ function route_(addr)
             return action(addr)
         end
     end
-    -- check route table
     local routetab = _G.route
     if routetab then
         local host, _ = splithostport(addr)
@@ -880,7 +878,6 @@ function route_(addr)
             return action(addr)
         end
     end
-    -- global default
     return default_(addr)
 end
 
@@ -921,7 +918,6 @@ function resolve_(addr)
             return action(addr)
         end
     end
-    -- lookup in hosts table
     local host, port = splithostport(addr)
     host = string.lower(host)
     local hosts = _G.hosts
@@ -997,7 +993,6 @@ end
 
 local function with_authenticate(f)
     if not config.auth_required then
-        -- authenticate is not required
         return function(addr, username, password)
             _G.num_requests = _G.num_requests + 1
             _G.num_authorized = _G.num_authorized + 1
@@ -1033,8 +1028,8 @@ ruleset.decide = {
 }
 
 -- forward `addr` through each proxy chain until one connects; each chain is a
--- proxy-URI list (empty = direct). returns true on success, false if all fail
--- (false reports the upstream error; return nil to reject by policy instead).
+-- proxy-URI list (empty = direct). returns true on success, false if every
+-- chain fails (the request is then rejected by policy).
 function ruleset.failover(addr, chains)
     for _, chain in ipairs(chains) do
         if await.forward(addr, table.unpack(chain)) then

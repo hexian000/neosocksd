@@ -99,20 +99,11 @@ static int request_finish(lua_State *restrict L)
 	struct dialreq *req = NULL;
 	if (lua_toboolean(L, 1)) {
 		const int n = lua_gettop(L) - 1;
-		/* a `false` first return value means await.forward() was tried and
-		 * failed; keep request.fwd_err so the rejection reports the
-		 * upstream error. Any other rejection is by policy: clear it. */
-		const bool forward_failed =
-			(n >= 1 && lua_type(L, 2) == LUA_TBOOLEAN &&
-			 !lua_toboolean(L, 2));
 		if (n > 0 && aux_todialreq(L, n)) {
 			req = lua_touserdata(L, -1);
 		}
-		if (req == NULL && !forward_failed) {
-			state->cb->request.fwd_err = 0;
-			state->cb->request.fwd_syserr = 0;
-		}
 		if (req == NULL) {
+			/* the routine gave up without forwarding: reject by policy */
 			LOGD("ruleset: request rejected");
 		}
 	} else {
@@ -135,8 +126,6 @@ int cfunc_request(lua_State *restrict L)
 	const char *username = lua_touserdata(L, 4);
 	const char *password = lua_touserdata(L, 5);
 	struct ruleset_callback *restrict in_cb = lua_touserdata(L, 6);
-	in_cb->request.fwd_err = 0;
-	in_cb->request.fwd_syserr = 0;
 	lua_settop(L, 0);
 
 	struct ruleset_state *restrict state = new_ruleset_state(L);

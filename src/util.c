@@ -70,11 +70,11 @@ void loadlibs(void)
 {
 	srand64((uint_fast64_t)time(NULL));
 
-	LOGD_F("%s: %s", PROJECT_NAME, PROJECT_VER);
-	LOGD_F("libev: %d.%d", ev_version_major(), ev_version_minor());
+	LOGI_F("%s %s", PROJECT_NAME, PROJECT_VER);
+	LOGI_F("libev %d.%d", ev_version_major(), ev_version_minor());
 	resolver_init();
 #if WITH_RULESET
-	LOGD("ruleset interpreter: " LUA_RELEASE);
+	LOGI("ruleset interpreter: " LUA_RELEASE);
 #endif
 }
 

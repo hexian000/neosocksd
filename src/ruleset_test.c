@@ -1,6 +1,20 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * ruleset_test - white-box unit tests for ruleset.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   ruleset.c        module under test
+ *   ruleset/base.c   ruleset Lua substrate
+ *   ruleset/cfunc.c  ruleset C-function dispatch
+ *   conf.c           config data
+ *   proto/codec.c    leaf
+ *   version.c        leaf
+ * The luaopen_* module entry points are replaced by the mocks in the mock
+ * section below.
+ */
+
 #include "ruleset.h"
 
 #include "conf.h"
@@ -16,7 +30,6 @@
 
 #include <arpa/inet.h>
 #include <ev.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -26,6 +39,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - luaopen_* stubs and shared fixtures.
+ * ---------------------------------------------------------------------- */
 
 static const ev_tstamp TEST_WAIT_SEC = 0.128;
 
@@ -387,6 +404,14 @@ static void free_ruleset(struct ev_loop *loop, struct ruleset *restrict r)
 	ev_loop_destroy(loop);
 }
 
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - ruleset load/update/dispatch lifecycle cases.
+ * ---------------------------------------------------------------------- */
+
 T_DECLARE_CASE(ruleset_loadfile_dispatches_requests)
 {
 	static const char script[] =
@@ -665,6 +690,14 @@ T_DECLARE_CASE(ruleset_geterror_variants)
 	ruleset_free(NULL);
 	free_ruleset(loop, r);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

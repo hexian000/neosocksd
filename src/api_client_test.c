@@ -1,6 +1,18 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * api_client_test - white-box unit tests for api_client.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   api_client.c     module under test
+ *   http_client.c    linked as the transport the api client drives
+ *   proto/http.c     leaf (HTTP message framing)
+ *   proto/codec.c    leaf (transfer codecs)
+ * The dialer is the network boundary and is replaced by the mocks in the
+ * mock section below.
+ */
+
 #include "api_client.h"
 
 #include "conf.h"
@@ -9,7 +21,6 @@
 #include "util.h"
 
 #include "io/stream.h"
-#include "utils/gc.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -28,6 +39,10 @@
 #include <string.h>
 
 #if WITH_RULESET
+
+/* -------------------------------------------------------------------------
+ * mock - dialer (network boundary) stub and shared fixtures.
+ * ---------------------------------------------------------------------- */
 
 static struct config test_conf = {
 	.timeout = 0.2,
@@ -374,6 +389,14 @@ bool check_rpcall_mime(char *mime_type)
 	}
 	return strcasecmp(mime_type, MIME_RPCALL) == 0;
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - RPC call/invoke lifecycle, errors and connection reuse.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(rpcall_success_returns_stream)
 {
@@ -739,6 +762,14 @@ T_DECLARE_CASE(connection_close_not_recycled)
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner (a trivial runner is used when ruleset is disabled).
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

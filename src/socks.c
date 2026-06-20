@@ -1552,17 +1552,7 @@ static void ruleset_cb(
 	ctx->dialreq = ctx->ruleset_callback.request.req;
 	ctx->ruleset_state = NULL;
 	if (ctx->dialreq == NULL) {
-		/* a recorded await.forward() dial error means an upstream
-		 * rejection; otherwise the ruleset rejected by policy */
-		const int fwd_err = ctx->ruleset_callback.request.fwd_err;
-		if (fwd_err != DIALER_OK) {
-			ctx->s->stats.num_reject_upstream++;
-			socks_senderr(
-				ctx, (enum dialer_error)fwd_err,
-				ctx->ruleset_callback.request.fwd_syserr);
-			gc_unref(&ctx->gcbase);
-			return;
-		}
+		/* the ruleset gave up: reject by policy */
 		ctx->s->stats.num_reject_ruleset++;
 	}
 	socks_connect(loop, ctx);

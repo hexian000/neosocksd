@@ -1,6 +1,19 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * zlib_test - white-box unit tests for ruleset/zlib.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   ruleset/zlib.c   module under test
+ *   ruleset/base.c   ruleset Lua substrate
+ *   proto/codec.c    leaf
+ *   util.c           leaf
+ *   dialer.c, resolver.c  linked for symbols bound by the Lua base library
+ *   version.c        leaf
+ * No stateful collaborator to mock; the mock section holds Lua fixtures.
+ */
+
 #include "ruleset/zlib.h"
 
 #include "lauxlib.h"
@@ -10,6 +23,10 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+
+/* -------------------------------------------------------------------------
+ * mock - shared Lua test fixtures (zlib.c has no collaborator to mock).
+ * ---------------------------------------------------------------------- */
 
 static lua_State *new_lua(void)
 {
@@ -32,6 +49,14 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 	const int status_call = lua_pcall(L, 0, LUA_MULTRET, 0);
 	return status_call == LUA_OK;
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - compress/decompress binding cases.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(zlib_module_opens)
 {
@@ -211,6 +236,14 @@ T_DECLARE_CASE(gunzip_crc_mismatch)
 
 	lua_close(L);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

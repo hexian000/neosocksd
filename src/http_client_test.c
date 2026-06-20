@@ -1,6 +1,16 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * http_client_test - white-box unit tests for http_client.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   http_client.c    module under test
+ *   proto/http.c     leaf (HTTP message framing)
+ *   proto/codec.c    leaf (transfer codecs)
+ * The dialer collaborator is replaced by the mocks in the mock section below.
+ */
+
 #include "http_client.h"
 
 #include "conf.h"
@@ -11,8 +21,6 @@
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <errno.h>
 #include <stdbool.h>
@@ -20,11 +28,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*
- * These tests isolate http_client.c. The dialer and dialreq
- * are stubbed so connection accounting and state transitions can be
- * asserted without real network activity.
- */
+/* -------------------------------------------------------------------------
+ * mock - dialer/dialreq stubs and shared fixtures.
+ *
+ * These tests isolate http_client.c. The dialer and dialreq are stubbed so
+ * connection accounting and state transitions can be asserted without real
+ * network activity.
+ * ---------------------------------------------------------------------- */
 
 static struct config test_conf = {
 	.timeout = 0.2,
@@ -125,6 +135,14 @@ static void capture_cb(
 
 /* ---- tests ---- */
 
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - request lifecycle and dialer-outcome handling.
+ * ---------------------------------------------------------------------- */
+
 T_DECLARE_CASE(http_client_init_state)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -205,6 +223,14 @@ T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
 
 	ev_loop_destroy(loop);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {

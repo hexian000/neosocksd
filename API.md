@@ -318,7 +318,36 @@ end
 
 **Description**
 
-Returns a table of server configuration values.
+Returns a table reflecting the effective server configuration. Fields mirror the
+corresponding command-line options.
+
+**Returns**
+
+Fields marked † are present only when the corresponding build feature is enabled.
+
+Addresses (string, or `nil` if unset):
+
+- `listen`, `forward`, `proxy`, `restapi`, `http_listen`
+- `ruleset`†, `nameserver`†, `netdev`†, `user_name`
+
+Numbers:
+
+- `loglevel`: log verbosity level.
+- `resolve_pf`: preferred address family for name resolution (a `PF_*` value; `0` means no preference).
+- `timeout`: connection timeout in seconds.
+- `memlimit`†: soft limit on total Lua object size, in MiB.
+
+Booleans:
+
+- `auth_required`, `tcp_nodelay`, `tcp_keepalive`, `socks5_bind`, `socks5_udp`,
+  `daemonize`, `block_loopback`, `block_multicast`, `block_local`, `block_global`
+- `pipe`†, `reuseport`†, `tcp_fastopen`†, `tcp_fastopen_connect`†, `transparent`†, `traceback`†
+
+Tuning (integer):
+
+- `tcp_sndbuf`, `tcp_rcvbuf`: socket buffer sizes in bytes (`0` means system default).
+- `max_sessions`: session count limit (`0` means unlimited).
+- `startup_limit_start`, `startup_limit_rate`, `startup_limit_full`: accept rate-limiting parameters.
 
 
 ### neosocksd.resolve
@@ -427,7 +456,7 @@ Low-level API for starting an asynchronous routine. Asynchronous routines use Lu
 **Synopsis**
 
 ```Lua
--- neosocksd.invoke(code, host, proxyN, ..., proxy1)
+-- neosocksd.invoke(code, addr, proxyN, ..., proxy1)
 neosocksd.invoke([[log("test rpc")]], "api.neosocksd.internal:80", "socks4a://127.0.0.1:1080")
 ```
 
@@ -449,6 +478,54 @@ local t = neosocksd.stats()
 **Description**
 
 Returns a table of raw statistics. During the initial loading phase, unavailable fields are set to zero.
+
+**Returns**
+
+General:
+
+- `uptime`: nanoseconds elapsed since the server started.
+- `lasterror`: the most recent uncaught error message from a ruleset routine, or `nil`.
+
+Proxy sessions:
+
+- `num_halfopen`: connections still in handshake (not yet relaying).
+- `num_sessions`: active relay sessions.
+- `num_sessions_peak`: peak concurrent sessions.
+
+Proxy requests:
+
+- `num_request`: total proxy requests processed.
+- `num_success`: successful proxy requests.
+- `num_reject_ruleset`: requests rejected by the ruleset.
+- `num_reject_timeout`: requests that timed out before becoming ready.
+- `num_reject_upstream`: requests that failed while dialing upstream.
+
+Traffic:
+
+- `byt_up`: bytes uploaded.
+- `byt_down`: bytes downloaded.
+
+Listeners:
+
+- `num_accept`: connections accepted.
+- `num_serve`: connections handed to a protocol handler.
+
+API server:
+
+- `num_api_request`: RESTful API requests received.
+- `num_api_success`: successful RESTful API requests.
+
+Name resolution:
+
+- `num_dns_query`: name resolution queries issued.
+- `num_dns_success`: successful name resolutions.
+
+Ruleset VM:
+
+- `bytes_allocated`: bytes currently allocated by the ruleset Lua VM.
+- `num_object`: live Lua objects.
+- `num_thread_active`: asynchronous routines currently in flight.
+- `num_thread_peak`: peak concurrent asynchronous routines.
 
 
 ### neosocksd.now
@@ -505,6 +582,27 @@ end
 **Description**
 
 Lua interface for [POSIX Regular Expressions](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap09.html#tag_09).
+
+`regex.compile(pattern [, cflags])` compiles `pattern` into a reusable object and raises an error if the pattern is invalid. `cflags` defaults to `regex.EXTENDED | regex.NEWLINE`.
+
+**Flags**
+
+Compilation flags, combined with bitwise or:
+
+- `regex.EXTENDED`: use Extended Regular Expression syntax.
+- `regex.ICASE`: case-insensitive matching.
+- `regex.NEWLINE`: make `.` and bracket expressions stop at newlines, and anchor `^`/`$` to line boundaries.
+- `regex.NOSUB`: report only whether a match exists; subexpressions are not captured.
+
+**Methods**
+
+On a compiled pattern `reg`:
+
+- `reg:find(s [, init])`: returns the start and end positions (1-based, inclusive) of the first match, or no values if there is no match.
+- `reg:match(s [, init])`: returns the whole match followed by any captured subexpressions (`nil` for groups that did not participate), or no values if there is no match.
+- `reg:gmatch(s [, init])`: returns an iterator that yields successive matches as `reg:match` would.
+
+`init` is an optional 1-based start offset (negative counts from the end of `s`); it defaults to the start of `s`. Each method is also callable in function form, e.g. `regex.find(reg, s [, init])`.
 
 
 ### time.\*
@@ -669,11 +767,12 @@ await.forward(nil)                        -- reject (nothing is dialed)
   [ruleset.route6](#rulesetroute6)); calling it elsewhere raises an error.
 - Once a forward succeeds, the request is committed; a further `await.forward`
   in the same routine raises an error.
-- When the handler gives up without forwarding, its return value selects the
-  rejection reason: returning `false` reports the upstream dial error (and
-  counts as an upstream rejection), while returning `nil` rejects by policy.
-  `ruleset.failover` follows this convention (it returns `false` if every chain
-  fails); return `nil` to reject by policy instead.
+- The request is forwarded only when the handler returns a valid decision
+  (an `addr`, optionally followed by a proxy chain). Otherwise the handler has
+  given up — returning `nil`, `false`, nothing, or an address that fails to
+  parse — and the request is rejected by policy. A failed `await.forward`
+  reports its error only to the routine through the returned `err`; it does not
+  affect how the rejection is reported.
 - The shipped `libruleset.lua` already forwards through this function. Its
   `rule.*` actions still return routing decisions; the `ruleset.resolve`,
   `ruleset.route`, and `ruleset.route6` callbacks wrap the pure decision

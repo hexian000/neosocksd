@@ -50,7 +50,7 @@ _G.route6         = {
     -- go to _G.route_default
 }
 
--- 4. Default for unmatched requests
+-- 5. Default for unmatched requests
 _G.route_default  = { rule.proxy("socks5://user:pass@gateway.lan:1080"), "gateway" }
 
 local function main(...)

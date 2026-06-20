@@ -1,6 +1,19 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+/*
+ * base_test - white-box unit tests for ruleset/base.c.
+ *
+ * Linked translation units (see CMakeLists.txt):
+ *   ruleset/base.c   module under test
+ *   util.c           leaf
+ *   dialer.c         linked for the symbols bound by the Lua base library
+ *   resolver.c       linked for the symbols bound by the Lua base library
+ *   version.c        leaf
+ * base.c has no stateful collaborator to mock; the mock section only holds
+ * shared Lua test fixtures.
+ */
+
 #include "ruleset/base.h"
 
 #include "dialer.h"
@@ -18,6 +31,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* -------------------------------------------------------------------------
+ * mock - shared Lua test fixtures (base.c has no collaborator to mock).
+ * ---------------------------------------------------------------------- */
 
 static int g_close_called;
 static int test_close(lua_State *restrict L)
@@ -63,6 +80,14 @@ static lua_State *new_ruleset_lua(struct ruleset *restrict r)
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
 	return L;
 }
+
+/* -------------------------------------------------------------------------
+ * fuzz - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * regression - auxiliary table/helper and GC integration cases.
+ * ---------------------------------------------------------------------- */
 
 T_DECLARE_CASE(base_aux_newweaktable_v)
 {
@@ -258,12 +283,20 @@ T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 	lua_settop(L, 0);
 
 	co2 = aux_getthread(L);
-	T_EXPECT_EQ((void *)co2, (void *)co1);
+	T_EXPECT_EQ(co2, co1);
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
 	T_EXPECT_EQ(r.vmstats.num_thread_peak, (size_t)1);
 
 	lua_close(L);
 }
+
+/* -------------------------------------------------------------------------
+ * bench - none.
+ * ---------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------
+ * main - test runner.
+ * ---------------------------------------------------------------------- */
 
 int main(void)
 {
