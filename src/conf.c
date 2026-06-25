@@ -717,7 +717,7 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 				slog_setoutput(SLOG_OUTPUT_TERMINAL, stderr);
 			} else if (strcmp(argv[i], "syslog") == 0) {
 				slog_setoutput(
-					SLOG_OUTPUT_SYSLOG, PROJECT_NAME);
+					SLOG_OUTPUT_SYSLOG, PROJECT_NAME, NULL);
 			} else if (strcmp(argv[i], "discard") == 0) {
 				slog_setoutput(SLOG_OUTPUT_DISCARD);
 			} else {
