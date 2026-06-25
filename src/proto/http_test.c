@@ -23,6 +23,7 @@
 #include "utils/testing.h"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -96,6 +97,74 @@ static ssize_t recv_nowait(const int fd, void *buf, const size_t len)
 		}
 		return n;
 	}
+}
+
+/*
+ * Cygwin/MSYS socketpairs deliver one write as several delayed fragments, so a
+ * single http_conn_recv() may report "need more" (1) before the whole message
+ * has arrived. These helpers poll the connection fd so the tests never depend
+ * on a write being delivered atomically; they also evaluate http_conn_recv()
+ * exactly once, since it has side effects.
+ */
+#define TEST_RECV_BUDGET_MS 4000
+#define TEST_RECV_QUIET_MS 200
+
+/* Receive until the parser reaches a terminal state (0 = done, -1 = error).
+ * Use when the complete message or EOF has been written and must arrive. */
+static int http_recv_until_done(struct http_conn *restrict p)
+{
+	for (int waited = 0; waited < TEST_RECV_BUDGET_MS;) {
+		const int ret = http_conn_recv(p);
+		if (ret <= 0) {
+			return ret;
+		}
+		struct pollfd pfd = { .fd = p->fd, .events = POLLIN };
+		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
+			waited += TEST_RECV_QUIET_MS;
+		}
+	}
+	return 1;
+}
+
+/* Receive every fragment currently available, then return the parser result
+ * once the connection goes quiet. Use when only a partial message has been
+ * written and the parser is expected to still need more input. */
+static int http_recv_drain(struct http_conn *restrict p)
+{
+	for (;;) {
+		const int ret = http_conn_recv(p);
+		if (ret <= 0) {
+			return ret;
+		}
+		struct pollfd pfd = { .fd = p->fd, .events = POLLIN };
+		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
+			return ret;
+		}
+	}
+}
+
+/*
+ * socketpair() can fail transiently with EMFILE/ENFILE/ENOBUFS under the
+ * resource pressure of a parallel `ctest -j` run on socket emulations such as
+ * Cygwin/MSYS. Retry briefly so a test does not abort on a momentary shortage;
+ * a persistent failure still aborts after the budget is exhausted.
+ */
+static void make_socketpair(int sv[2])
+{
+	bool ok = false;
+	for (int attempt = 0; attempt < 100; attempt++) {
+		ok = (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+		if (ok) {
+			return;
+		}
+		const int err = errno;
+		if (err != EMFILE && err != ENFILE && err != ENOBUFS &&
+		    err != EINTR) {
+			break;
+		}
+		(void)poll(NULL, 0, 10);
+	}
+	T_CHECK(ok);
 }
 
 static bool fd_set_nonblock(const int fd)
@@ -434,12 +503,13 @@ T_DECLARE_CASE(http_conn_recv_request_ok)
 				  "Host: test\r\n"
 				  "\r\n";
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 0);
+	const int ret = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret, 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
 	T_EXPECT_STREQ(p.msg.req.method, "GET");
 	T_EXPECT_STREQ(p.msg.req.url, "/hello");
@@ -457,12 +527,13 @@ T_DECLARE_CASE(http_conn_recv_response_ok)
 				  "Date: Wed, 01 Jan 2025 00:00:00 GMT\r\n"
 				  "\r\n";
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	conn_init_for_test(&p, sv[0], STATE_PARSE_RESPONSE, &cb);
 
 	T_CHECK(write_all(sv[1], rsp, sizeof(rsp) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 0);
+	const int ret = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret, 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
 	T_EXPECT_STREQ(p.msg.rsp.version, "HTTP/1.1");
 	T_EXPECT_STREQ(p.msg.rsp.code, "204");
@@ -479,13 +550,14 @@ T_DECLARE_CASE(http_conn_recv_bad_version)
 	struct header_cb_ctx cb = { 0 };
 	static const char req[] = "GET / HTTP/2.0\r\n\r\n";
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
 	/* request-mode: bad version → STATE_PARSE_ERROR + 0 (not -1) */
-	T_EXPECT_EQ(http_conn_recv(&p), 0);
+	const int ret = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret, 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
 
 	T_CHECK(close(sv[0]) == 0);
@@ -501,14 +573,16 @@ T_DECLARE_CASE(http_conn_recv_incremental)
 				   "Host: a\r\n";
 	static const char req2[] = "\r\n";
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 1);
+	const int ret1 = http_recv_drain(&p);
+	T_EXPECT_EQ(ret1, 1);
 	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 0);
+	const int ret2 = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret2, 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
 
 	T_CHECK(close(sv[0]) == 0);
@@ -526,17 +600,19 @@ T_DECLARE_CASE(http_conn_recv_content_incomplete_then_complete)
 				   "he";
 	static const char req2[] = "llo";
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 1);
+	const int ret1 = http_recv_drain(&p);
+	T_EXPECT_EQ(ret1, 1);
 	T_CHECK(p.cbuf != NULL);
 	T_EXPECT_EQ(VBUF_LEN(p.cbuf), 2);
 
 	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 0);
+	const int ret2 = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret2, 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
 	T_EXPECT_EQ(VBUF_LEN(p.cbuf), 5);
 	T_EXPECT_MEMEQ(VBUF_DATA(p.cbuf), "hello", 5);
@@ -558,20 +634,35 @@ T_DECLARE_CASE(http_conn_recv_expect_continue)
 				   "\r\n";
 	static const char req2[] = "hello";
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 1);
+	const int ret1 = http_recv_drain(&p);
+	T_EXPECT_EQ(ret1, 1);
 	T_EXPECT(p.expect_continue);
 
-	const ssize_t n = recv_nowait(sv[1], rsp, sizeof(rsp));
-	T_EXPECT(n > 0);
-	T_EXPECT(memmem(rsp, (size_t)n, "100 Continue", 12) != NULL);
+	/* read the 100-continue reply, tolerating fragmented delivery */
+	size_t rsplen = 0;
+	for (int waited = 0; waited < TEST_RECV_BUDGET_MS &&
+			     memmem(rsp, rsplen, "100 Continue", 12) == NULL;) {
+		struct pollfd pfd = { .fd = sv[1], .events = POLLIN };
+		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
+			waited += TEST_RECV_QUIET_MS;
+			continue;
+		}
+		const ssize_t n =
+			recv_nowait(sv[1], rsp + rsplen, sizeof(rsp) - rsplen);
+		if (n > 0) {
+			rsplen += (size_t)n;
+		}
+	}
+	T_EXPECT(memmem(rsp, rsplen, "100 Continue", 12) != NULL);
 
 	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 0);
+	const int ret2 = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret2, 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
 
 	VBUF_FREE(p.cbuf);
@@ -589,7 +680,7 @@ T_DECLARE_CASE(http_conn_recv_content_early_eof)
 				  "\r\n"
 				  "he";
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
@@ -612,7 +703,7 @@ T_DECLARE_CASE(http_conn_recv_header_callback_reject)
 				  "Host: reject\r\n"
 				  "\r\n";
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 	cb.reject = true;
@@ -988,7 +1079,7 @@ static const char BENCH_REQUEST[] = "GET /path/to/resource?query=1 HTTP/1.1\r\n"
 T_DECLARE_BENCH(bench_parse_request)
 {
 	int sv[2];
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
 
 	for (uint_fast64_t iter = 0; iter < _b_->N; ++iter) {

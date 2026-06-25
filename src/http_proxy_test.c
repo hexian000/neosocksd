@@ -90,6 +90,13 @@ static struct config test_conf = {
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.016;
 static const ev_tstamp TEST_WAIT_RECV_SEC = 0.128;
+/* Upper bound on how long ev_run() may sleep while a helper polls a socket
+ * that is not registered with the event loop, so fragmented/delayed peer
+ * writes (e.g. the MSYS2/Cygwin socket emulation) are observed promptly. */
+static const ev_tstamp TEST_TICK_SEC = 0.002;
+/* Consecutive idle polls (each ~TEST_TICK_SEC apart) with no new bytes that
+ * mark the end of a received burst. */
+#define TEST_RECV_QUIET_TICKS 6
 
 static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
 {
@@ -499,6 +506,15 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
+static void
+test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+{
+	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
+	(void)loop;
+	(void)w;
+	(void)revents;
+}
+
 static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
@@ -572,12 +588,15 @@ static ssize_t recv_at_least(
 	const size_t cap, const size_t min_bytes)
 {
 	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
+	struct ev_timer w_timeout, w_tick;
 	size_t off = 0;
+	int_fast32_t idle = 0;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_RECV_SEC, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
+	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
+	ev_timer_start(loop, &w_tick);
 	while (!watchdog.fired && off < cap) {
 		const ssize_t n = recv(fd, buf + off, cap - off, MSG_DONTWAIT);
 		if (n < 0) {
@@ -585,13 +604,17 @@ static ssize_t recv_at_least(
 				continue;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				/* Exit early if minimum met; otherwise wait for more */
-				if (off >= min_bytes) {
+				/* Once the minimum is met, allow a short quiet window
+				 * for trailing fragments (the peer may split a reply
+				 * across writes) before returning. */
+				if (off >= min_bytes &&
+				    ++idle >= TEST_RECV_QUIET_TICKS) {
 					break;
 				}
 				ev_run(loop, EVRUN_ONCE);
 				continue;
 			}
+			ev_timer_stop(loop, &w_tick);
 			ev_timer_stop(loop, &w_timeout);
 			return -1;
 		}
@@ -599,7 +622,9 @@ static ssize_t recv_at_least(
 			break;
 		}
 		off += (size_t)n;
+		idle = 0;
 	}
+	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	return (ssize_t)off;
 }

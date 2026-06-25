@@ -360,10 +360,10 @@ struct stream *content_writer(
 		(buf).len = 0;                                                 \
 		BUF_APPENDF(                                                   \
 			(buf),                                                 \
-			"HTTP/1.1 %" PRIu16 " %s\r\n"                          \
+			"HTTP/1.1 %" PRIuFAST16 " %s\r\n"                      \
 			"Date: %.*s\r\n",                                      \
-			(code), status ? status : "", (int)date_len,           \
-			date_str);                                             \
+			(uint_fast16_t)(code), status ? status : "",           \
+			(int)date_len, date_str);                              \
 	} while (0)
 
 /** @brief Add plain text content type headers */

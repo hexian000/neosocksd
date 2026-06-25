@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -44,13 +45,25 @@
  * mock - dialer (network boundary) stub and shared fixtures.
  * ---------------------------------------------------------------------- */
 
+/* The http_client enforces conf.timeout over the whole request/response
+ * round-trip. The default must comfortably exceed that round-trip so it never
+ * fires spuriously; a refused/slow round-trip over the MSYS2/Cygwin socket
+ * emulation can take far longer than on Linux. Tests that exercise the timeout
+ * (e.g. rpcall_timeout) override this to a small value after reset_stub_state.
+ * The wait windows below are only ceilings, so a larger value never slows a
+ * passing test. */
 static struct config test_conf = {
-	.timeout = 0.2,
+	.timeout = 1.0,
 };
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
-static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 0.256;
-static const ev_tstamp TEST_WAIT_LONG_SEC = 0.512;
+static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 1.0;
+static const ev_tstamp TEST_WAIT_LONG_SEC = 2.0;
+/* Upper bound on how long ev_run() may sleep while a helper polls a socket
+ * that is not registered with the event loop, so fragmented/delayed peer
+ * writes (e.g. the MSYS2/Cygwin socket emulation) are observed promptly
+ * instead of waiting out the watchdog. */
+static const ev_tstamp TEST_TICK_SEC = 0.002;
 
 struct cb_result {
 	bool called;
@@ -99,7 +112,7 @@ static void reset_stub_state(void)
 	S.close_fd_on_conn_put = true;
 	S.pending_loop = NULL;
 	S.pending_dialer = NULL;
-	test_conf.timeout = 0.2;
+	test_conf.timeout = 1.0;
 }
 
 static bool fd_set_nonblock(const int fd)
@@ -201,19 +214,34 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
+static void
+test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+{
+	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
+	(void)loop;
+	(void)w;
+	(void)revents;
+}
+
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *data,
 	const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
+	struct ev_timer w_timeout, w_tick;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
+	/* The predicate may poll a socket that is not registered with the loop
+	 * (e.g. fd_closed_predicate); bound ev_run() so it is re-checked
+	 * promptly instead of sleeping until the watchdog. */
+	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
+	ev_timer_start(loop, &w_tick);
 	while (!watchdog.fired && !predicate(data)) {
 		ev_run(loop, EVRUN_ONCE);
 	}
+	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	return predicate(data);
 }
@@ -249,7 +277,7 @@ static bool read_request_headers(
 	const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
+	struct ev_timer w_timeout, w_tick;
 	size_t off = 0;
 
 	if (cap == 0) {
@@ -258,28 +286,31 @@ static bool read_request_headers(
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired) {
-		if (off + 1 >= cap) {
-			break;
-		}
+	/* fd is not registered with the loop; bound ev_run() so we keep
+	 * re-polling and pick up the request even when the peer's write lands
+	 * a little later (as it does under the MSYS2/Cygwin socket emulation). */
+	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
+	ev_timer_start(loop, &w_tick);
+	while (!watchdog.fired && off + 1 < cap) {
 		const ssize_t n = recv_nowait(fd, buf + off, cap - off - 1);
 		if (n > 0) {
 			off += (size_t)n;
 			buf[off] = '\0';
 			if (strstr(buf, "\r\n\r\n") != NULL) {
-				return true;
+				break;
 			}
 			continue;
 		}
 		if (n == 0) {
-			break;
+			break; /* EOF */
 		}
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			ev_run(loop, EVRUN_ONCE);
 			continue;
 		}
-		break;
+		break; /* hard error */
 	}
+	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	buf[off] = '\0';
 	return strstr(buf, "\r\n\r\n") != NULL;
@@ -773,6 +804,14 @@ T_DECLARE_CASE(connection_close_not_recycled)
 
 int main(void)
 {
+	/* Mirror production (see init() in util.c): ignore SIGPIPE so that a
+	 * write to a peer that has already closed its read end returns EPIPE
+	 * and is handled gracefully, instead of killing the test process. This
+	 * close/write race is timed differently under the MSYS2/Cygwin socket
+	 * emulation, where it would otherwise raise SIGPIPE. */
+	const struct sigaction ignore = { .sa_handler = SIG_IGN };
+	(void)sigaction(SIGPIPE, &ignore, NULL);
+
 	T_DECLARE_CTX(t);
 	T_RUN_CASE(t, rpcall_success_returns_stream);
 	T_RUN_CASE(t, invoke_uses_invoke_path);

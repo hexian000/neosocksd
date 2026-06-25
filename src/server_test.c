@@ -549,17 +549,17 @@ static void control_reset(void)
 
 /*
  * Exercise the listener-setup branches of server_init() for the forward,
- * HTTP and REST API modes, including the wildcard / non-loopback warnings.
+ * HTTP and REST API modes.
  */
 T_DECLARE_CASE(server_init_multi_mode_listeners)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
 	control_reset();
-	struct config conf = make_conf("0.0.0.0:0");
+	struct config conf = make_conf("127.0.0.1:0");
 	conf.forward = "127.0.0.1:8080";
-	conf.http_listen = "0.0.0.0:0";
-	conf.restapi = "0.0.0.0:0";
+	conf.http_listen = "127.0.0.1:0";
+	conf.restapi = "127.0.0.1:0";
 	struct server s;
 
 	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));

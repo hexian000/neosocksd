@@ -66,6 +66,14 @@ static struct config test_conf = {
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.016;
 static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 0.128;
+/* Upper bound on how long ev_run() may sleep while a helper polls a socket
+ * that is not registered with the event loop. Keeps the loop re-polling so
+ * fragmented/delayed peer writes (e.g. the MSYS2/Cygwin socket emulation) are
+ * observed promptly instead of waiting out the watchdog. */
+static const ev_tstamp TEST_TICK_SEC = 0.002;
+/* Consecutive idle polls (each ~TEST_TICK_SEC apart) with no new bytes that
+ * mark the end of a received burst once at least some data has arrived. */
+#define TEST_RECV_QUIET_TICKS 6
 
 static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
 {
@@ -455,27 +463,58 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
+static void
+test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+{
+	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
+	(void)loop;
+	(void)w;
+	(void)revents;
+}
+
+/* Accumulate from fd until the peer goes quiet (no new bytes for a short
+ * window), reaches EOF, or fills the buffer. fd is not registered with the
+ * loop, so a tick timer keeps ev_run() from sleeping past TEST_TICK_SEC and
+ * lets us collect every fragment of a reply that the peer may split across
+ * multiple writes. */
 static ssize_t recv_after_readable(
 	struct ev_loop *loop, const int fd, void *buf, const size_t len,
 	const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
+	struct ev_timer w_timeout, w_tick;
+	size_t off = 0;
+	int_fast32_t idle = 0;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired) {
-		const ssize_t n = recv_nowait(fd, buf, len);
-		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-			ev_run(loop, EVRUN_ONCE);
+	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
+	ev_timer_start(loop, &w_tick);
+	while (!watchdog.fired && off < len) {
+		const ssize_t n = recv_nowait(fd, (char *)buf + off, len - off);
+		if (n > 0) {
+			off += (size_t)n;
+			idle = 0;
 			continue;
 		}
-		ev_timer_stop(loop, &w_timeout);
-		return n;
+		if (n == 0) {
+			break; /* EOF */
+		}
+		if (errno != EAGAIN && errno != EWOULDBLOCK) {
+			if (off == 0) {
+				off = (size_t)-1; /* report the hard error */
+			}
+			break;
+		}
+		if (off > 0 && ++idle >= TEST_RECV_QUIET_TICKS) {
+			break;
+		}
+		ev_run(loop, EVRUN_ONCE);
 	}
+	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
-	return recv_nowait(fd, buf, len);
+	return (ssize_t)off;
 }
 
 static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)

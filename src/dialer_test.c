@@ -50,6 +50,13 @@ static struct config test_conf = {
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
 static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 0.256;
+/* Upper bound on how long ev_run() may sleep while test_wait_until() drives a
+ * mock server (the step callback) that is not registered with the event loop.
+ * Without this the loop can sleep until the watchdog when the dialer is idle
+ * waiting on a reply the step has not produced yet, which happens when the
+ * peer's writes are fragmented/delayed (e.g. the MSYS2/Cygwin socket
+ * emulation). */
+static const ev_tstamp TEST_TICK_SEC = 0.002;
 
 struct dialer_result {
 	bool called;
@@ -137,23 +144,37 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
+static void
+test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+{
+	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
+	(void)loop;
+	(void)w;
+	(void)revents;
+}
+
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *predicate_data,
 	const ev_tstamp timeout_sec, bool (*step)(void *), void *step_data)
 {
 	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
+	struct ev_timer w_timeout, w_tick;
 	bool ok = true;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
+	/* Bound ev_run() sleeps so the step callback (an unwatched mock server)
+	 * keeps getting serviced even while the dialer waits on a reply. */
+	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
+	ev_timer_start(loop, &w_tick);
 	while (!watchdog.fired && !predicate(predicate_data) && ok) {
 		ev_run(loop, EVRUN_ONCE);
 		if (step != NULL) {
 			ok = step(step_data);
 		}
 	}
+	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	return ok && predicate(predicate_data);
 }
@@ -208,7 +229,7 @@ static int make_listener6(uint_least16_t *restrict port)
 	const int enable = 1;
 	struct sockaddr_in6 addr = {
 		.sin6_family = AF_INET6,
-		.sin6_addr = IN6ADDR_LOOPBACK_INIT,
+		.sin6_addr = in6addr_loopback,
 		.sin6_port = 0,
 	};
 	struct sockaddr_in6 bound_addr = { 0 };
@@ -343,7 +364,7 @@ T_DECLARE_CASE(dialaddr_set_and_copy)
 	struct sockaddr_in6 in6 = {
 		.sin6_family = AF_INET6,
 		.sin6_port = htons(UINT16_C(8443)),
-		.sin6_addr = IN6ADDR_LOOPBACK_INIT,
+		.sin6_addr = in6addr_loopback,
 	};
 	struct dialaddr addr = { 0 };
 	struct dialaddr copied = { 0 };

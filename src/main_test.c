@@ -43,6 +43,7 @@
 #include <ev.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -68,6 +69,18 @@ static struct config test_conf = {
 
 static struct config proxy_conf = {
 	.timeout = 0.5,
+};
+
+/* The connrefused tests dial through a real proxy to a closed port. The dialer
+ * has no timeout of its own (in production the session layer enforces one), so
+ * the proxy's session timeout must outlive the refused connect and forward it
+ * as a SOCKS/HTTP error rather than time out first. A refused loopback connect
+ * is instant on Linux but takes ~2s under the MSYS2/Cygwin socket emulation
+ * (measured: ECONNREFUSED after 2033ms), so this is a ceiling well above that;
+ * the proxy still replies the instant the refusal arrives, so it does not slow
+ * the test on Linux. */
+static struct config connrefused_proxy_conf = {
+	.timeout = 5.0,
 };
 
 void api_serve(
@@ -104,6 +117,10 @@ void tproxy_serve(
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
 static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 0.256;
+/* Upper bound for the connrefused tests; only a ceiling, so the test returns
+ * as soon as the dialer completes. Must exceed connrefused_proxy_conf.timeout
+ * so a refused reply (not a proxy-side timeout) is what completes the dial. */
+static const ev_tstamp TEST_WAIT_CONNREFUSED_SEC = 6.0;
 
 struct dialer_result {
 	bool called;
@@ -262,7 +279,7 @@ static int make_listener6(uint_least16_t *restrict port)
 	const int enable = 1;
 	struct sockaddr_in6 addr = {
 		.sin6_family = AF_INET6,
-		.sin6_addr = IN6ADDR_LOOPBACK_INIT,
+		.sin6_addr = in6addr_loopback,
 		.sin6_port = 0,
 	};
 	struct sockaddr_in6 bound_addr = { 0 };
@@ -393,7 +410,7 @@ T_DECLARE_CASE(dialaddr_set_and_copy)
 	struct sockaddr_in6 in6 = {
 		.sin6_family = AF_INET6,
 		.sin6_port = htons(UINT16_C(8443)),
-		.sin6_addr = IN6ADDR_LOOPBACK_INIT,
+		.sin6_addr = in6addr_loopback,
 	};
 	struct dialaddr addr = { 0 };
 	struct dialaddr copied = { 0 };
@@ -960,7 +977,8 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, false, &proxy_conf);
+	proxy_port =
+		start_proxy(&proxy_s, loop, false, &connrefused_proxy_conf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)closed_port) > 0);
@@ -978,8 +996,8 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result,
+		TEST_WAIT_CONNREFUSED_SEC, NULL, NULL);
 	err = d.err;
 	dialreq_free(req);
 	drain_loop(loop, TEST_WAIT_SHORT_SEC);
@@ -1657,7 +1675,7 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, true, &proxy_conf);
+	proxy_port = start_proxy(&proxy_s, loop, true, &connrefused_proxy_conf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)closed_port) > 0);
@@ -1675,8 +1693,8 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result,
+		TEST_WAIT_CONNREFUSED_SEC, NULL, NULL);
 	err = d.err;
 	dialreq_free(req);
 	drain_loop(loop, TEST_WAIT_SHORT_SEC);
@@ -2186,6 +2204,30 @@ static void close_checked(int *restrict fd)
 	T_CHECK(close(closing) == 0);
 }
 
+/*
+ * socketpair() can fail transiently with EMFILE/ENFILE/ENOBUFS under the
+ * resource pressure of a parallel `ctest -j` run on socket emulations such as
+ * Cygwin/MSYS. Retry briefly so the fuzz harness does not abort on a momentary
+ * shortage; a persistent failure still aborts after the budget is exhausted.
+ */
+static void make_socketpair(int sv[2])
+{
+	bool ok = false;
+	for (int attempt = 0; attempt < 100; attempt++) {
+		ok = (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+		if (ok) {
+			return;
+		}
+		const int err = errno;
+		if (err != EMFILE && err != ENFILE && err != ENOBUFS &&
+		    err != EINTR) {
+			break;
+		}
+		(void)poll(NULL, 0, 10);
+	}
+	T_CHECK(ok);
+}
+
 static void drain_stream(struct stream *restrict s)
 {
 	size_t total = 0;
@@ -2282,7 +2324,7 @@ fuzz_http_conn(struct prng *restrict p, const enum http_conn_state mode)
 	const size_t len = prng_size(p, 0, sizeof(input));
 	prng_fill(p, input, len);
 
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	make_socketpair(sv);
 	T_CHECK(write_all(sv[1], input, len));
 	T_CHECK(shutdown(sv[1], SHUT_WR) == 0);
 	http_conn_init(&conn, sv[0], mode, cb, NULL, NULL);

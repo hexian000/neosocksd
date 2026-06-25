@@ -46,6 +46,7 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
+    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 "posix")
@@ -59,6 +60,7 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
+    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 "clang")
@@ -117,6 +119,7 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
+    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 "min")
@@ -139,6 +142,7 @@ case "$1" in
         ..
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
+    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     (cd bin && objdump -drwS neosocksd >neosocksd.S)
     ls -lh bin/neosocksd
     ;;
@@ -153,6 +157,7 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
+    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 "d")
