@@ -29,7 +29,7 @@ Status: **Stable**
 - Protocols: [SOCKS4](https://www.openssh.com/txt/socks4.protocol)/[SOCKS4A](https://www.openssh.com/txt/socks4a.protocol) (Ying-Da Lee / NEC), SOCKS5 ([RFC 1928](https://datatracker.ietf.org/doc/html/rfc1928), with [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929) auth), HTTP CONNECT ([RFC 9110 §9.3.6](https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.6)).
 - Transparent proxy: Linux [TPROXY](https://docs.kernel.org/networking/tproxy.html).
 - 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024).
-- ~600 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
+- ~650 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
 - Lua scripting on the control plane with extensive RPC support.
 - RESTful API for live monitoring and hot-reloading Lua modules without restarts.
 - Full IPv6 support; horizontal scalability.

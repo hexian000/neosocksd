@@ -63,6 +63,9 @@ struct config {
 	bool block_multicast;
 	bool block_local;
 	bool block_global;
+#if WITH_LUA
+	bool dump_config;
+#endif
 
 	int tcp_sndbuf, tcp_rcvbuf;
 
@@ -86,5 +89,11 @@ struct lua_State;
  * stack. Nil fields keep their current value. Returns false on type error.
  * This is called from cfunc_loadconfig within the ruleset Lua VM. */
 bool conf_loadfromtable(struct lua_State *L, struct config *restrict conf);
+
+#if WITH_LUA
+/* Print the effective configuration to stdout as a Lua table literal.
+ * Returns false on output error. */
+bool conf_print(const struct config *conf);
+#endif
 
 #endif /* CONF_H */

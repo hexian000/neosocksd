@@ -479,15 +479,16 @@ T_DECLARE_CASE(parseargs_log_outputs)
 	}
 }
 
-#if WITH_RULESET
-T_DECLARE_CASE(parseargs_dump_config_deprecated)
+#if WITH_LUA
+T_DECLARE_CASE(parseargs_dump_config)
 {
-	/* --dump-config is accepted but deprecated (no-op) */
+	/* --dump-config sets the dump flag for deferred handling in main */
 	struct config conf = conf_default();
 	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--dump-config" };
 	T_EXPECT(conf_parseargs(&conf, 4, argv));
+	T_EXPECT(conf.dump_config);
 }
-#endif /* WITH_RULESET */
+#endif /* WITH_LUA */
 
 #if WITH_CARES
 T_DECLARE_CASE(parseargs_nameserver)
@@ -824,7 +825,6 @@ int main(void)
 #endif
 #if WITH_RULESET
 	T_RUN_CASE(t, parseargs_ruleset);
-	T_RUN_CASE(t, parseargs_dump_config_deprecated);
 #endif
 	T_RUN_CASE(t, parseargs_forward_flag);
 	T_RUN_CASE(t, parseargs_block_multicast_token);
@@ -834,6 +834,7 @@ int main(void)
 	T_RUN_CASE(t, parseargs_memlimit_negative_clamped);
 #endif
 #if WITH_LUA
+	T_RUN_CASE(t, parseargs_dump_config);
 	T_RUN_CASE(t, loadtable_applies_typed_fields);
 	T_RUN_CASE(t, loadtable_empty_preserves_defaults);
 	T_RUN_CASE(t, loadtable_rejects_wrong_types);

@@ -1131,7 +1131,7 @@ static int lua_close(void *p)
 	return rderr != 0 ? rderr : err;
 }
 
-struct stream *lua_reader_new(struct stream *base)
+static struct stream *lua_reader_new(struct stream *base)
 {
 	if (base == NULL) {
 		return NULL;

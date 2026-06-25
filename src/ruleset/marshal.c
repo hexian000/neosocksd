@@ -289,7 +289,7 @@ static int marshal_value(lua_State *restrict L)
 
 /* marshal(...): marshal values into a comma-separated string
  * that can be loaded back by Lua */
-int api_marshal(lua_State *restrict L)
+static int api_marshal(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
 

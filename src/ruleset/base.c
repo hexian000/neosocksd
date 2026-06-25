@@ -74,7 +74,7 @@ void aux_close(lua_State *restrict L, int idx)
 	lua_pushnil(L);
 	lua_copy(L, -1, idx);
 	lua_pop(L, 2);
-#endif
+#endif /* HAVE_LUA_TOCLOSE */
 }
 
 void aux_getregtable(lua_State *restrict L, const int ridx)

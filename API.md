@@ -101,7 +101,7 @@ Loads the posted script and applies it as follows:
 
 1. If `module` is not specified, replace the active ruleset.
 2. If `module` is specified, replace the named Lua module.
-3. If the updated module returns a table, it is installed as `_G[modname]` in addition to being reloaded in `package.loaded`.
+3. Replacing a module always refreshes `package.loaded[modname]` (set to the module's return value, or `true` if it returns nothing). The global `_G[modname]` is updated to the new module only if it currently aliases the previously loaded module; otherwise it is left unchanged.
 
 ### /ruleset/gc
 
@@ -129,7 +129,7 @@ Exposes built-in server metrics in [Prometheus text exposition format](https://p
 **Synopsis**
 
 ```Lua
-function ruleset.resolve(domain)
+function ruleset.resolve(domain, username, password)
     return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4a://[2001:DB8::1]:1080"
 end
 ```
@@ -146,6 +146,10 @@ Handles a hostname request. Specifically:
 **Params**
 
 - `domain`: fully qualified domain name and port (e.g., `"www.example.org:80"`)
+- `username`, `password`: credentials supplied with the proxy request, or `nil`
+  when none were provided. The source is the SOCKS4 user ID (`password` is then
+  always `nil`), the SOCKS5 username/password authentication method, or the HTTP
+  `Proxy-Authorization: Basic` header.
 
 **Returns**
 
@@ -180,7 +184,7 @@ internally while keeping the return-value style for its `rule.*` actions.
 **Synopsis**
 
 ```Lua
-function ruleset.route(addr)
+function ruleset.route(addr, username, password)
     return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4a://[2001:DB8::1]:1080"
 end
 ```
@@ -196,6 +200,7 @@ Handles an IPv4 request. Specifically:
 **Params**
 
 - `addr`: address and port (e.g., `"203.0.113.1:80"`)
+- `username`, `password`: see [ruleset.resolve](#rulesetresolve)
 
 **Returns**
 
@@ -207,7 +212,7 @@ See [ruleset.resolve](#rulesetresolve)
 **Synopsis**
 
 ```Lua
-function ruleset.route6(addr)
+function ruleset.route6(addr, username, password)
     return "www.example.org:80", "http://203.0.113.1:8080", ..., "socks4a://[2001:DB8::1]:1080"
 end
 ```
@@ -223,6 +228,7 @@ Handles an IPv6 request. Specifically:
 **Params**
 
 - `addr`: address and port (e.g., `"[2001:DB8::1]:80"`)
+- `username`, `password`: see [ruleset.resolve](#rulesetresolve)
 
 **Returns**
 
@@ -412,7 +418,8 @@ end
 
 **Description**
 
-Parses an IPv6 address into two integers. Returns nil on failure.
+Parses an IPv6 address into two integers (or four, on Lua builds with 32-bit
+integers). Returns nil on failure.
 
 
 ### neosocksd.setinterval
@@ -661,12 +668,15 @@ Data compression interface for the gzip format (RFC 1952).
 
 ```Lua
 local s = marshal("a", {"b", ["c"] = "d"})
-log(s) -- "a",{"b",["c"]="d"}
+log(s) -- "a",{"b",["c"]="d",}
 ```
 
 **Description**
 
-Serializes all parameters into Lua syntax.
+Serializes all parameters into Lua syntax. Multiple parameters are separated by
+commas. Tables are emitted in constructor form with a trailing separator after
+every element (e.g., `marshal({1, 2, 3})` yields `{1,2,3,}`); the result is still
+valid Lua and round-trips through `load`.
 
 The complementary `_G.unmarshal(s)` is defined in `libruleset.lua`.
 

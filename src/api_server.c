@@ -123,7 +123,7 @@ bool check_rpcall_mime(char *s)
 	}
 	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
 }
-#endif
+#endif /* WITH_RULESET */
 
 static int comp_intleast64(const void *a, const void *b)
 {
@@ -205,7 +205,7 @@ static void append_vmstats(
 		p50_str, p90_str, p99_str, pmax_str);
 }
 
-#endif
+#endif /* WITH_RULESET */
 
 static double process_load(void)
 {
@@ -382,7 +382,7 @@ static void append_server_stats(
 			" reqs, Rx %s, Tx %s\n",
 			agg.num_api_client_request, cli_recv, cli_send);
 	}
-#endif
+#endif /* WITH_RULESET */
 
 #if WITH_RULESET
 	const struct ruleset *ruleset = s->ruleset;
@@ -539,7 +539,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			return;
 		}
 	}
-#endif
+#endif /* WITH_RULESET */
 
 	const int err = stream_close(w);
 	if (err != 0) {
@@ -1097,7 +1097,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	APPEND_METRIC_L(
 		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
 		"%" PRIuLEAST64, "tx", "api_client", agg.api_client_byt_send);
-#endif
+#endif /* WITH_RULESET */
 
 	/* Connect latency summary */
 	if (agg.num_connects > 0) {
@@ -1372,7 +1372,7 @@ static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_recv);
 }
 
-void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 	struct api_ctx *restrict ctx = watcher->data;
@@ -1404,7 +1404,7 @@ void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	api_handle(loop, ctx);
 }
 
-void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct api_ctx *restrict ctx = watcher->data;

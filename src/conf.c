@@ -118,7 +118,7 @@ bool conf_check(const struct config *restrict conf)
 		(conf->forward == NULL && !conf->transparent);
 #else
 	const bool auth_supported = (conf->forward == NULL);
-#endif
+#endif /* WITH_TPROXY */
 	if (conf->block_global && conf->block_local) {
 		LOGE("incompatible outbound policies are specified");
 		return false;
@@ -159,7 +159,7 @@ bool conf_check(const struct config *restrict conf)
 			return false;
 		}
 	}
-#endif
+#endif /* WITH_RULESET */
 	if (conf->auth_required) {
 		if (!auth_supported) {
 			LOGE("authentication is not supported in current mode");
@@ -266,12 +266,6 @@ static const struct metaconfig conf_fields[] = {
 	{ "proxy", CONF_STRING, offsetof(struct config, proxy) },
 	{ "restapi", CONF_STRING, offsetof(struct config, restapi) },
 	{ "http_listen", CONF_STRING, offsetof(struct config, http_listen) },
-#if WITH_RULESET
-/* "ruleset" and "boot" are intentionally omitted. The boot config installs
-	 * its ruleset inline via _G.ruleset (handled in cfunc_loadconfig); a
-	 * standalone ruleset file comes only from the -r CLI flag. The boot config
-	 * path itself comes only from -c and must stay stable across hot reloads. */
-#endif
 	{ "user_name", CONF_STRING, offsetof(struct config, user_name) },
 #if WITH_CARES
 	{ "nameserver", CONF_STRING, offsetof(struct config, nameserver) },
@@ -459,7 +453,6 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 	return true;
 }
 
-#if 0
 /* Write a Lua double-quoted string literal for s. */
 static bool lutil_printstring(const char *restrict s)
 {
@@ -525,7 +518,7 @@ static bool lutil_printfield(
 	return fputs(",\n", stdout) != EOF;
 }
 
-static bool conf_print(const struct config *restrict conf)
+bool conf_print(const struct config *restrict conf)
 {
 	bool ok = fputs("return {\n", stdout) != EOF;
 	for (const struct metaconfig *field = conf_fields;
@@ -537,7 +530,6 @@ static bool conf_print(const struct config *restrict conf)
 	}
 	return ok;
 }
-#endif /* 0 */
 #endif /* WITH_LUA */
 
 bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
@@ -575,11 +567,13 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			conf->boot = argv[++i];
 			continue;
 		}
+#endif /* WITH_RULESET */
+#if WITH_LUA
 		if (strcmp(argv[i], "--dump-config") == 0) {
-			LOGW("--dump-config is deprecated");
+			conf->dump_config = true;
 			continue;
 		}
-#endif
+#endif /* WITH_LUA */
 		if (strcmp(argv[i], "-4") == 0) {
 			conf->resolve_pf = PF_INET;
 			continue;
@@ -693,7 +687,7 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			conf->memlimit = (int)soft;
 			continue;
 		}
-#endif
+#endif /* WITH_RULESET */
 		if (strcmp(argv[i], "-u") == 0 ||
 		    strcmp(argv[i], "--user") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);

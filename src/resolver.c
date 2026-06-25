@@ -281,7 +281,7 @@ void resolver_init(void)
 		ret == ARES_SUCCESS, "c-ares: (%d) %s", ret,
 		ares_strerror(ret));
 #endif
-#endif
+#endif /* WITH_CARES */
 }
 
 void resolver_cleanup(void)
@@ -365,7 +365,7 @@ resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf)
 	r->async_enabled = resolver_async_init(r, conf);
 #else
 	UNUSED(conf);
-#endif
+#endif /* WITH_CARES */
 	return r;
 }
 
@@ -374,7 +374,8 @@ const struct resolver_stats *resolver_stats(const struct resolver *restrict r)
 	return &r->stats;
 }
 
-void resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
+static void
+resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
 {
 	LOGD_F("resolve `%s:%s': start pf=%d", q->name, q->service, q->family);
 	r->stats.num_query++;

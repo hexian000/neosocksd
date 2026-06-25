@@ -22,6 +22,7 @@
 #include "io/stream.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
+#include "utils/mcache.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -37,19 +38,20 @@ static void *
 l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 {
 	struct ruleset *restrict r = ud;
+	struct mmcache *restrict cache = r->mcache;
 	if (nsize == 0) {
 		/* free */
 		if (ptr == NULL) {
 			return NULL;
 		}
-		free(ptr);
+		mmcache_put(cache, ptr, osize);
 		r->vmstats.byt_allocated -= osize;
 		r->vmstats.num_object--;
 		return NULL;
 	}
 	if (ptr == NULL) {
-		/* malloc */
-		void *ret = malloc(nsize);
+		/* malloc; osize is the object type tag here, not a size */
+		void *ret = mmcache_get(cache, nsize);
 		if (ret == NULL) {
 			return NULL;
 		}
@@ -58,9 +60,26 @@ l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 		return ret;
 	}
 	/* realloc */
-	void *ret = realloc(ptr, nsize);
-	if (ret == NULL) {
-		return NULL;
+	const size_t oldshift = mmcache_shift(cache, osize);
+	const size_t newshift = mmcache_shift(cache, nsize);
+	void *ret;
+	if (oldshift == newshift && newshift <= cache->max_shift) {
+		/* same size class: the existing block already fits */
+		ret = ptr;
+	} else {
+		/*
+		 * Crossing a size class: the block is always a plain malloc'd
+		 * pointer, so realloc can extend it in place. Grow to the class
+		 * size (not nsize) so it still satisfies the cache's per-class
+		 * size invariant when it is later returned via mmcache_put().
+		 */
+		const size_t newsize = (newshift <= cache->max_shift) ?
+					       ((size_t)1 << newshift) :
+					       nsize;
+		ret = realloc(ptr, newsize);
+		if (ret == NULL) {
+			return NULL;
+		}
 	}
 	r->vmstats.byt_allocated = r->vmstats.byt_allocated - osize + nsize;
 	return ret;
@@ -172,6 +191,13 @@ struct ruleset *ruleset_new(
 	r->server = NULL;
 	r->basereq = basereq;
 
+	/* cache freed blocks in [16, 256] bytes to cut allocator churn */
+	r->mcache = mmcache_new(4, 8, 16);
+	if (r->mcache == NULL) {
+		free(r);
+		return NULL;
+	}
+
 	/* initialize in advance to prevent undefined behavior */
 	ev_timer_init(&r->w_ticker, tick_cb, 1.0, 1.0);
 	r->w_ticker.data = r;
@@ -185,6 +211,7 @@ struct ruleset *ruleset_new(
 		lua_newstate(l_alloc, r);
 #endif
 	if (L == NULL) {
+		mmcache_free(r->mcache);
 		free(r);
 		return NULL;
 	}
@@ -217,6 +244,7 @@ void ruleset_free(struct ruleset *restrict r)
 	ev_timer_stop(r->loop, &r->w_ticker);
 	ev_idle_stop(r->loop, &r->w_idle);
 	lua_close(r->L);
+	mmcache_free(r->mcache);
 	free(r);
 }
 

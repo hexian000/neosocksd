@@ -84,8 +84,6 @@ static int time_measure(lua_State *restrict L)
 	return nres;
 }
 
-#undef READ_TIMESPEC
-
 int luaopen_time(lua_State *restrict L)
 {
 	const luaL_Reg timelib[] = {

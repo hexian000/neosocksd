@@ -1438,7 +1438,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
-#endif
+#endif /* WITH_RULESET */
 	/* Dispatch SOCKS5 BIND and UDP ASSOCIATE before dialing */
 	if (read_uint8(ctx->rbuf.data) == SOCKS5) {
 		struct socks5_hdr h;
@@ -1605,7 +1605,7 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 		return;
 	}
 }
-#endif
+#endif /* WITH_RULESET */
 
 static void socks_ctx_finalize(struct gcbase *restrict obj)
 {

@@ -299,7 +299,7 @@ static bool server_reload_ruleset(struct server *restrict s)
 	}
 	return true;
 }
-#endif
+#endif /* WITH_RULESET */
 
 static void
 signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
@@ -491,5 +491,5 @@ void server_stats(
 	out->num_sessions = s->num_sessions;
 	out->byt_up = s->byt_up;
 	out->byt_down = s->byt_down;
-#endif
+#endif /* WITH_THREADS */
 }

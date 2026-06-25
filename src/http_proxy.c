@@ -446,7 +446,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		return;
 	}
 }
-#endif
+#endif /* WITH_RULESET */
 
 /* Normalize "host[:port]" into buf, appending ":80" when the port is
  * absent. Returns false when buf is too small or host is malformed. */

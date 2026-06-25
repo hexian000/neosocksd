@@ -128,7 +128,7 @@ void socket_bind_netdev(int fd, const char *netdev)
 	if (netdev[0] != '\0') {
 		LOGW_F("SO_BINDTODEVICE: %s", "not supported in current build");
 	}
-#endif
+#endif /* SO_BINDTODEVICE */
 }
 
 void socket_set_transparent(int fd, bool tproxy)
@@ -145,5 +145,5 @@ void socket_set_transparent(int fd, bool tproxy)
 	CHECKMSGF(
 		!tproxy, "IP_TRANSPARENT: %s",
 		"not supported in current build");
-#endif
+#endif /* IP_TRANSPARENT */
 }

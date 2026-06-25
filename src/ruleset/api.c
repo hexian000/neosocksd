@@ -118,7 +118,7 @@ static int api_parse_ipv6(lua_State *restrict L)
 	lua_pushinteger(L, (lua_Integer)read_uint64(addr));
 	lua_pushinteger(L, (lua_Integer)read_uint64(addr + 8));
 	return 2;
-#endif
+#endif /* LUA_32BITS */
 }
 
 /* neosocksd.setinterval(interval) */

@@ -196,7 +196,7 @@ static void update_stats(
 	if (byt != NULL) {
 		*byt += nbsend;
 	}
-#endif
+#endif /* WITH_THREADS */
 	if (buffered > 0) {
 		XFER_HALF_LOG_F(
 			VERYVERBOSE, h,
@@ -579,7 +579,7 @@ static void task_xfer_start(void *data)
 	/* Prepend to active list before starting I/O watchers. */
 	t->next = xfer->active_list;
 	xfer->active_list = t;
-#endif
+#endif /* WITH_THREADS */
 
 #if WITH_SPLICE
 	if (t->up.use_splice) {
@@ -845,6 +845,6 @@ bool transfer_serve(
 	ev_async_send(worker->loop, &worker->w_invoke);
 #else
 	task_xfer_start(t);
-#endif
+#endif /* WITH_THREADS */
 	return true;
 }

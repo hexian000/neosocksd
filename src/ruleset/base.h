@@ -45,6 +45,7 @@ struct ruleset {
 	struct resolver *resolver;
 	struct server *server;
 	struct dialreq *basereq;
+	struct mmcache *mcache;
 	lua_State *L;
 	ev_timer w_ticker;
 	ev_idle w_idle;

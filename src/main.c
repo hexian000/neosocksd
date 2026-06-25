@@ -36,6 +36,14 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 	struct config *restrict conf = &app.conf;
+#if WITH_LUA
+	if (conf->dump_config) {
+		if (!conf_check(conf) || !conf_print(conf)) {
+			LOGF("dump configuration failed");
+		}
+		exit(EXIT_FAILURE);
+	}
+#endif
 #if WITH_RULESET
 	/* A boot config may fill in required fields, so defer the check. */
 	const bool defer_check = (conf->boot != NULL);
@@ -99,7 +107,7 @@ int main(int argc, char *argv[])
 	}
 #else
 	xfer = transfer_create(loop, 1);
-#endif
+#endif /* WITH_THREADS */
 	CHECKOOM(xfer);
 
 #if WITH_RULESET
@@ -156,7 +164,7 @@ int main(int argc, char *argv[])
 	}
 #else
 	struct ruleset *ruleset = NULL;
-#endif
+#endif /* WITH_RULESET */
 
 	struct server *s = &app.server;
 	if (!server_init(s, loop, conf, resolver, xfer, basereq, ruleset)) {
