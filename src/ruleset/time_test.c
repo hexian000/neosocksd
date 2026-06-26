@@ -12,10 +12,11 @@
 
 #include "ruleset/time.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
 #include "utils/testing.h"
+
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -155,14 +156,17 @@ T_DECLARE_CASE(time_measure_passes_results)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(time_module_opens),
+	T_CASE(time_monotonic_positive),
+	T_CASE(time_unix_sanity),
+	T_CASE(time_process_and_thread),
+	T_CASE(time_measure_basic),
+	T_CASE(time_measure_passes_results),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, time_module_opens);
-	T_RUN_CASE(t, time_monotonic_positive);
-	T_RUN_CASE(t, time_unix_sanity);
-	T_RUN_CASE(t, time_process_and_thread);
-	T_RUN_CASE(t, time_measure_basic);
-	T_RUN_CASE(t, time_measure_passes_results);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

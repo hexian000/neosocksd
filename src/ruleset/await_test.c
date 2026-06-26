@@ -13,31 +13,32 @@
 
 #include "ruleset/await.h"
 
-#include "ruleset/base.h"
-#include "ruleset/cfunc.h"
-
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
-#include "io/stream.h"
-#include "os/socket.h"
 #include "resolver.h"
+#include "ruleset/base.h"
+#include "ruleset/cfunc.h"
 #include "server.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
+#include "io/stream.h"
+#include "os/socket.h"
+#include "utils/arraysize.h"
 #include "utils/testing.h"
 
-#include <arpa/inet.h>
-#include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
 
+#include <ev.h>
+
+#include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (dialer, resolver, api_client, server) and
@@ -569,7 +570,7 @@ T_DECLARE_CASE(await_module_opens)
 
 	const char *const fns[] = { "sleep", "resolve", "invoke", "execute",
 				    "forward" };
-	for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(fns); i++) {
 		lua_getfield(L, -1, fns[i]);
 		T_EXPECT(lua_isfunction(L, -1));
 		lua_pop(L, 1);
@@ -896,19 +897,22 @@ T_DECLARE_CASE(await_forward_rejects_outside_request)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(await_module_opens),
+	T_CASE(await_sleep_rejects_non_coroutine),
+	T_CASE(await_resolve_rejects_non_coroutine),
+	T_CASE(await_invoke_rejects_non_coroutine),
+	T_CASE(await_sleep_real_paths),
+	T_CASE(await_resolve_real_path),
+	T_CASE(await_invoke_real_path),
+	T_CASE(await_execute_reports_exit_status),
+	T_CASE(await_forward_commits_on_success),
+	T_CASE(await_forward_reports_dial_failure),
+	T_CASE(await_forward_rejects_outside_request),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, await_module_opens);
-	T_RUN_CASE(t, await_sleep_rejects_non_coroutine);
-	T_RUN_CASE(t, await_resolve_rejects_non_coroutine);
-	T_RUN_CASE(t, await_invoke_rejects_non_coroutine);
-	T_RUN_CASE(t, await_sleep_real_paths);
-	T_RUN_CASE(t, await_resolve_real_path);
-	T_RUN_CASE(t, await_invoke_real_path);
-	T_RUN_CASE(t, await_execute_reports_exit_status);
-	T_RUN_CASE(t, await_forward_commits_on_success);
-	T_RUN_CASE(t, await_forward_reports_dial_failure);
-	T_RUN_CASE(t, await_forward_rejects_outside_request);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

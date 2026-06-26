@@ -116,11 +116,7 @@ struct server {
 	struct server_stats stats;
 	void *data;
 
-	/*
-	 * Counters written by the transfer thread (or main thread when
-	 * WITH_THREADS is disabled); must be accessed atomically in
-	 * multi-threaded builds.  Exposed as plain values via server_stats().
-	 */
+	/* Transfer-thread counters; atomic in multi-threaded builds. */
 #if WITH_THREADS
 	atomic_size_t num_sessions;
 	atomic_uint_least64_t byt_up, byt_down;

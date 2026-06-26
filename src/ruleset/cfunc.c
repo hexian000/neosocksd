@@ -4,7 +4,6 @@
 #include "ruleset/cfunc.h"
 
 #include "conf.h"
-#include "proto/codec.h"
 #include "ruleset.h"
 #include "ruleset/base.h"
 #include "util.h"
@@ -14,6 +13,7 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
 #include <lauxlib.h>
 #include <lua.h>
 
@@ -45,19 +45,6 @@ static int ruleset_state_gc(lua_State *restrict L)
 	return 0;
 }
 
-static struct ruleset_state *new_ruleset_state(lua_State *restrict L)
-{
-	struct ruleset_state *restrict state =
-		lua_newuserdata(L, sizeof(struct ruleset_state));
-	*state = (struct ruleset_state){ 0 };
-	if (luaL_newmetatable(L, MT_RULESET_STATE)) {
-		lua_pushcfunction(L, ruleset_state_gc);
-		lua_setfield(L, -2, "__gc");
-	}
-	lua_setmetatable(L, -2);
-	return state;
-}
-
 static void check_memlimit(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
@@ -71,19 +58,17 @@ static void check_memlimit(lua_State *restrict L)
 	(void)lua_gc(L, LUA_GCCOLLECT, 0);
 }
 
-/* Install a fresh sandbox `_ENV` (indexing _G) as upvalue 1 of the chunk on
- * the top of the stack. */
-static void aux_setsandboxenv(lua_State *restrict L)
+static struct ruleset_state *new_ruleset_state(lua_State *restrict L)
 {
-	lua_newtable(L);
-	lua_newtable(L);
-	aux_getregtable(L, LUA_RIDX_GLOBALS);
-	/* lua stack: ... chunk env mt _G */
-	lua_setfield(L, -2, "__index");
+	struct ruleset_state *restrict state =
+		lua_newuserdata(L, sizeof(struct ruleset_state));
+	*state = (struct ruleset_state){ 0 };
+	if (luaL_newmetatable(L, MT_RULESET_STATE)) {
+		lua_pushcfunction(L, ruleset_state_gc);
+		lua_setfield(L, -2, "__gc");
+	}
 	lua_setmetatable(L, -2);
-	const char *upvalue = lua_setupvalue(L, -2, 1);
-	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
-	UNUSED(upvalue);
+	return state;
 }
 
 /* finish(ok, ...) */
@@ -119,13 +104,13 @@ int cfunc_request(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 6);
-	struct ruleset_state *restrict *restrict pstate =
+	struct ruleset_state *restrict *restrict const pstate =
 		(struct ruleset_state *restrict *restrict)lua_touserdata(L, 1);
-	const char *func = lua_touserdata(L, 2);
-	const char *request = lua_touserdata(L, 3);
-	const char *username = lua_touserdata(L, 4);
-	const char *password = lua_touserdata(L, 5);
-	struct ruleset_callback *restrict in_cb = lua_touserdata(L, 6);
+	const char *const func = lua_touserdata(L, 2);
+	const char *const request = lua_touserdata(L, 3);
+	const char *const username = lua_touserdata(L, 4);
+	const char *const password = lua_touserdata(L, 5);
+	struct ruleset_callback *restrict const in_cb = lua_touserdata(L, 6);
 	lua_settop(L, 0);
 
 	struct ruleset_state *restrict state = new_ruleset_state(L);
@@ -158,7 +143,7 @@ int cfunc_loadfile(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
-	struct stream *restrict s = lua_touserdata(L, 1);
+	struct stream *restrict const s = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
 	if (lua_load(L, aux_reader, s, "=ruleset", "t")) {
@@ -175,7 +160,7 @@ int cfunc_loadconfig(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
-	struct stream *restrict s = lua_touserdata(L, 1);
+	struct stream *restrict const s = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
 	if (lua_load(L, aux_reader, s, "=config", "t")) {
@@ -191,9 +176,7 @@ int cfunc_loadconfig(lua_State *restrict L)
 			luaL_typename(L, -1));
 	}
 
-	/* a `ruleset` table field is installed as _G.ruleset and removed here so
-	 * conf_loadfromtable() ignores it; a string path is not allowed -- use the
-	 * `-r'/`--ruleset' command-line option for a standalone ruleset file */
+	/* extract `ruleset` table before conf_loadfromtable sees it */
 	lua_getfield(L, -1, "ruleset");
 	if (lua_istable(L, -1)) {
 		lua_setglobal(L, "ruleset");
@@ -234,12 +217,27 @@ int cfunc_loadconfig(lua_State *restrict L)
 	return 0;
 }
 
+/* Install a fresh sandbox `_ENV` (indexing _G) as upvalue 1 of the chunk on
+ * the top of the stack. */
+static void aux_setsandboxenv(lua_State *restrict L)
+{
+	lua_newtable(L);
+	lua_newtable(L);
+	aux_getregtable(L, LUA_RIDX_GLOBALS);
+	/* lua stack: ... chunk env mt _G */
+	lua_setfield(L, -2, "__index");
+	lua_setmetatable(L, -2);
+	const char *const upvalue = lua_setupvalue(L, -2, 1);
+	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	(void)upvalue;
+}
+
 /* invoke(codestream) */
 int cfunc_invoke(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
-	void *stream = lua_touserdata(L, 1);
+	void *const stream = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
 	if (lua_load(L, aux_reader, stream, "=(invoke)", "t")) {
@@ -278,10 +276,10 @@ int cfunc_rpcall(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 3);
-	struct ruleset_state *restrict *restrict pstate =
+	struct ruleset_state *restrict *restrict const pstate =
 		(struct ruleset_state *restrict *restrict)lua_touserdata(L, 1);
-	struct stream *stream = lua_touserdata(L, 2);
-	struct ruleset_callback *restrict in_cb = lua_touserdata(L, 3);
+	struct stream *const stream = lua_touserdata(L, 2);
+	struct ruleset_callback *restrict const in_cb = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
 	struct ruleset_state *restrict state = new_ruleset_state(L);
@@ -368,7 +366,7 @@ int cfunc_update(lua_State *restrict L)
 	ASSERT(lua_gettop(L) == 3);
 	const char *modname = lua_touserdata(L, 1);
 	const char *chunkname = lua_touserdata(L, 2);
-	void *stream = lua_touserdata(L, 3);
+	void *const stream = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 
 	if (modname != NULL) {
@@ -404,14 +402,11 @@ int cfunc_stats(lua_State *restrict L)
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 2);
 	const double dt = *(double *)lua_touserdata(L, 1);
-	const char *query = lua_touserdata(L, 2);
+	const char *const query = lua_touserdata(L, 2);
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, "stats");
 	if (!lua_isfunction(L, -1)) {
-		/* No stats hook: return an empty result, not zero results.
-		 * ruleset_stats() reserves a NULL return for genuine errors, which
-		 * the /stats handler surfaces via ruleset_geterror(); a missing hook
-		 * must not trip that error path. */
+		/* no hook: empty string (NULL = error) */
 		lua_pushliteral(L, "");
 		return 1;
 	}

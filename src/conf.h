@@ -77,7 +77,7 @@ struct config {
 
 struct config conf_default(void);
 
-bool conf_check(const struct config *conf);
+bool conf_check(const struct config *restrict conf);
 
 /* Parse command line arguments into *conf.
  * On error, logs a message and returns false; the caller should exit. */
@@ -88,12 +88,13 @@ struct lua_State;
 /* Extract config fields from a Lua table at the top of the ruleset VM's
  * stack. Nil fields keep their current value. Returns false on type error.
  * This is called from cfunc_loadconfig within the ruleset Lua VM. */
-bool conf_loadfromtable(struct lua_State *L, struct config *restrict conf);
+bool conf_loadfromtable(
+	struct lua_State *restrict L, struct config *restrict conf);
 
 #if WITH_LUA
 /* Print the effective configuration to stdout as a Lua table literal.
  * Returns false on output error. */
-bool conf_print(const struct config *conf);
+bool conf_print(const struct config *restrict conf);
 #endif
 
 #endif /* CONF_H */

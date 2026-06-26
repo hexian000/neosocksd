@@ -5,10 +5,10 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "proto/http.h"
 #include "util.h"
 
 #include "os/socket.h"
+#include "proto/http.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
@@ -91,7 +91,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	http_client_stop(loop, ctx);
 	ctx->state = STATE_CLIENT_INIT;
 
-	int fd = watcher->fd;
+	const int fd = watcher->fd;
 	watcher->fd = -1;
 	SOCKET_CLOSE_FD(fd);
 	const struct http_client_cb cb = ctx->cb;
@@ -124,8 +124,9 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 				ctx->resolver, NULL);
 			return;
 		}
-		const char *strerr = strerror(err);
+		const char *const strerr = strerror(err);
 		const size_t errlen = strlen(strerr);
+		ASSERT(errlen < 256);
 		char errmsg[errlen + 1];
 		memcpy(errmsg, strerr, errlen + 1);
 		finish_error(ctx, errmsg, errlen);
@@ -175,7 +176,7 @@ static void http_client_timeout_cb(
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct http_client_ctx *restrict ctx = watcher->data;
-	UNUSED(loop);
+	(void)loop;
 	finish_error(ctx, "timeout", sizeof("timeout") - 1);
 }
 
@@ -221,14 +222,17 @@ void http_client_init(
 	dialer_init(
 		&ctx->dialer, &dialer_cb_conf, dialer_byt_sent,
 		dialer_byt_recv);
-	const struct http_parsehdr_cb hdr_cb = { http_client_on_header, ctx };
+	const struct http_parsehdr_cb hdr_cb = {
+		.func = http_client_on_header,
+		.ctx = ctx,
+	};
 	http_conn_init(
 		&ctx->conn, -1, STATE_PARSE_RESPONSE, hdr_cb, byt_recv,
 		byt_sent);
 }
 
 void http_client_do(
-	struct ev_loop *loop, struct http_client_ctx *ctx,
+	struct http_client_ctx *ctx, struct ev_loop *loop,
 	struct dialreq *restrict req)
 {
 	ASSERT(ctx->state == STATE_CLIENT_INIT);
@@ -239,8 +243,8 @@ void http_client_do(
 	dialer_do(&ctx->dialer, loop, req, ctx->conf, ctx->resolver, NULL);
 }
 
-void http_client_cancel(struct ev_loop *loop, struct http_client_ctx *ctx)
+void http_client_cancel(struct http_client_ctx *ctx, struct ev_loop *loop)
 {
-	UNUSED(loop);
+	(void)loop;
 	http_client_cleanup(ctx);
 }

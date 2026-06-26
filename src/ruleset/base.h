@@ -7,6 +7,7 @@
 #include "ruleset.h"
 
 #include <ev.h>
+
 #include <lauxlib.h>
 #include <lua.h>
 
@@ -28,17 +29,12 @@ struct dialreq;
 struct resolver;
 struct server;
 
-/**
- * @brief Main ruleset structure
- *
- * Contains the complete state of a ruleset instance, including the
- * Lua virtual machine, event loop integration, and configuration.
- */
+/** @brief Main ruleset structure */
 struct ruleset {
 	struct ev_loop *loop;
 	struct ruleset_vmstats vmstats;
 	struct {
-		int memlimit_kb;
+		int_least32_t memlimit_kb;
 		bool traceback;
 	} config;
 	struct config *conf;
@@ -51,12 +47,7 @@ struct ruleset {
 	ev_idle w_idle;
 };
 
-/**
- * @brief Registry indices for Lua registry tables
- *
- * These indices are used to store various tables and values in the
- * Lua registry for efficient access during ruleset operations.
- */
+/** @brief Registry indices for Lua registry tables */
 enum ruleset_ridx {
 	/* t[idx] = short string */
 	RIDX_CONSTANT = LUA_RIDX_LAST + 1,
@@ -85,14 +76,14 @@ enum ruleset_ridx {
  * @param L Lua state
  * @return Ruleset instance
  */
-struct ruleset *aux_getruleset(lua_State *L);
+struct ruleset *aux_getruleset(lua_State *restrict L);
 
 /**
  * @brief Create a new weak table
  * @param L Lua state
  * @param mode Weak reference mode ("k", "v", or "kv")
  */
-void aux_newweaktable(lua_State *L, const char *mode);
+void aux_newweaktable(lua_State *restrict L, const char *mode);
 
 /**
  * @brief Mark value as to-be-closed (Lua 5.4+)
@@ -101,14 +92,15 @@ void aux_newweaktable(lua_State *L, const char *mode);
  * @param tname Type name for error messages
  * @param close Close function
  */
-void aux_toclose(lua_State *L, int idx, const char *tname, lua_CFunction close);
+void aux_toclose(
+	lua_State *restrict L, int idx, const char *tname, lua_CFunction close);
 
 /**
  * @brief Close a to-be-closed value
  * @param L Lua state
  * @param idx Stack index
  */
-void aux_close(lua_State *L, int idx);
+void aux_close(lua_State *restrict L, int idx);
 
 /**
  * @brief Get registry table by index
@@ -118,7 +110,7 @@ void aux_close(lua_State *L, int idx);
  * @param L Lua state
  * @param ridx Registry index
  */
-void aux_getregtable(lua_State *L, int ridx);
+void aux_getregtable(lua_State *restrict L, int ridx);
 
 /**
  * @brief Get or create thread for async operations
@@ -128,7 +120,7 @@ void aux_getregtable(lua_State *L, int ridx);
  * @param L Lua state
  * @return Thread state
  */
-lua_State *aux_getthread(lua_State *L);
+lua_State *aux_getthread(lua_State *restrict L);
 
 /**
  * @brief Stream reader function for Lua
@@ -137,7 +129,7 @@ lua_State *aux_getthread(lua_State *L);
  * @param sz Output parameter for chunk size
  * @return Pointer to data chunk, or NULL on EOF
  */
-const char *aux_reader(lua_State *L, void *ud, size_t *sz);
+const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz);
 
 /**
  * @brief Format address for display
@@ -147,7 +139,7 @@ const char *aux_reader(lua_State *L, void *ud, size_t *sz);
  * @param L Lua state
  * @return Number of results (1)
  */
-int aux_format_addr(lua_State *L);
+int aux_format_addr(lua_State *restrict L);
 
 /**
  * @brief Convert Lua values to dial request
@@ -158,7 +150,7 @@ int aux_format_addr(lua_State *L);
  * @param n Number of arguments to convert
  * @return true on success, false on error
  */
-bool aux_todialreq(lua_State *L, int n);
+bool aux_todialreq(lua_State *restrict L, int n);
 
 /**
  * @brief Generate Lua stack traceback
@@ -168,7 +160,7 @@ bool aux_todialreq(lua_State *L, int n);
  * @param L Lua state
  * @return Number of results (1)
  */
-int aux_traceback(lua_State *L);
+int aux_traceback(lua_State *restrict L);
 
 /**
  * @brief Resume Lua coroutine
@@ -180,7 +172,7 @@ int aux_traceback(lua_State *L);
  * @param narg Number of arguments
  * @return Lua result code
  */
-int aux_resume(lua_State *L, lua_State *from, int narg);
+int aux_resume(lua_State *restrict L, lua_State *restrict from, int narg);
 
 /**
  * @brief Set (or clear, when @p state is NULL) coroutine @p co's request state
@@ -193,7 +185,7 @@ void aux_setforward(lua_State *L, lua_State *co, void *state);
 /**
  * @brief Get the request state of the running coroutine @p L, or NULL
  */
-void *aux_getforward(lua_State *L);
+void *aux_getforward(lua_State *restrict L);
 
 /**
  * @brief Start asynchronous operation
@@ -206,13 +198,12 @@ void *aux_getforward(lua_State *L);
  * @param finishidx Finish callback index
  * @return Lua result code
  */
-int aux_async(lua_State *L, lua_State *from, int narg, int finishidx);
+int aux_async(
+	lua_State *restrict L, lua_State *restrict from, int narg,
+	int finishidx);
 
 /**
- * @brief Call Lua function with protected call
- *
- * Main routine for synchronous operations.
- *
+ * @brief Protected call into a Lua C function (synchronous operations)
  * @param r Ruleset instance
  * @param func C function to call
  * @param nargs Number of arguments
@@ -221,18 +212,16 @@ int aux_async(lua_State *L, lua_State *from, int narg, int finishidx);
  * @return true on success, false on error
  */
 bool ruleset_pcall(
-	struct ruleset *r, lua_CFunction func, int nargs, int nresults, ...);
+	struct ruleset *restrict r, lua_CFunction func, int nargs, int nresults,
+	...);
 
 /**
- * @brief Resume asynchronous Lua operation
- *
- * Used for continuing async operations after I/O completion.
- *
+ * @brief Resume a suspended async Lua coroutine after I/O completion
  * @param r Ruleset instance
  * @param ctx Operation context
  * @param narg Number of arguments
  * @param ... Variable arguments to pass
  */
-void ruleset_resume(struct ruleset *r, void *ctx, int narg, ...);
+void ruleset_resume(struct ruleset *restrict r, void *ctx, int narg, ...);
 
 #endif /* RULESET_BASE_H */

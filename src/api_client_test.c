@@ -1,17 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/*
- * api_client_test - white-box unit tests for api_client.c.
- *
- * Linked translation units (see CMakeLists.txt):
- *   api_client.c     module under test
- *   http_client.c    linked as the transport the api client drives
- *   proto/http.c     leaf (HTTP message framing)
- *   proto/codec.c    leaf (transfer codecs)
- * The dialer is the network boundary and is replaced by the mocks in the
- * mock section below.
- */
+/* Unit tests for api_client.c; mocked: dialer. */
 
 #include "api_client.h"
 
@@ -24,13 +14,9 @@
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <fcntl.h>
-#include <strings.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -38,6 +24,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #if WITH_RULESET
 
@@ -45,13 +35,8 @@
  * mock - dialer (network boundary) stub and shared fixtures.
  * ---------------------------------------------------------------------- */
 
-/* The http_client enforces conf.timeout over the whole request/response
- * round-trip. The default must comfortably exceed that round-trip so it never
- * fires spuriously; a refused/slow round-trip over the MSYS2/Cygwin socket
- * emulation can take far longer than on Linux. Tests that exercise the timeout
- * (e.g. rpcall_timeout) override this to a small value after reset_stub_state.
- * The wait windows below are only ceilings, so a larger value never slows a
- * passing test. */
+/* conf.timeout ceiling; tests that exercise the timeout (e.g. rpcall_timeout)
+ * set a small value; generous default covers MSYS2/Cygwin emulation delays. */
 static struct config test_conf = {
 	.timeout = 1.0,
 };
@@ -59,10 +44,8 @@ static struct config test_conf = {
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
 static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 1.0;
 static const ev_tstamp TEST_WAIT_LONG_SEC = 2.0;
-/* Upper bound on how long ev_run() may sleep while a helper polls a socket
- * that is not registered with the event loop, so fragmented/delayed peer
- * writes (e.g. the MSYS2/Cygwin socket emulation) are observed promptly
- * instead of waiting out the watchdog. */
+/* Short tick so ev_run() wakes promptly when mock servers write in fragments
+ * (needed for MSYS2/Cygwin socket emulation). */
 static const ev_tstamp TEST_TICK_SEC = 0.002;
 
 struct cb_result {
@@ -802,28 +785,28 @@ T_DECLARE_CASE(connection_close_not_recycled)
  * main - test runner (a trivial runner is used when ruleset is disabled).
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(rpcall_success_returns_stream),
+	T_CASE(invoke_uses_invoke_path),
+	T_CASE(rpcall_unsupported_content_type),
+	T_CASE(rpcall_dialer_failure),
+	T_CASE(rpcall_timeout),
+	T_CASE(rpcall_http_error_status_line),
+	T_CASE(rpcall_structured_error_body),
+	T_CASE(cancel_during_connect_calls_dialer_cancel),
+	T_CASE(connection_keep_alive_recycled),
+	T_CASE(connection_close_not_recycled),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	/* Mirror production (see init() in util.c): ignore SIGPIPE so that a
-	 * write to a peer that has already closed its read end returns EPIPE
-	 * and is handled gracefully, instead of killing the test process. This
-	 * close/write race is timed differently under the MSYS2/Cygwin socket
-	 * emulation, where it would otherwise raise SIGPIPE. */
+	/* Ignore SIGPIPE: write to closed peer returns EPIPE instead of killing
+	 * the process; MSYS2/Cygwin emulation raises it on close/write races. */
 	const struct sigaction ignore = { .sa_handler = SIG_IGN };
 	(void)sigaction(SIGPIPE, &ignore, NULL);
 
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, rpcall_success_returns_stream);
-	T_RUN_CASE(t, invoke_uses_invoke_path);
-	T_RUN_CASE(t, rpcall_unsupported_content_type);
-	T_RUN_CASE(t, rpcall_dialer_failure);
-	T_RUN_CASE(t, rpcall_timeout);
-	T_RUN_CASE(t, rpcall_http_error_status_line);
-	T_RUN_CASE(t, rpcall_structured_error_body);
-	T_RUN_CASE(t, cancel_during_connect_calls_dialer_cancel);
-	T_RUN_CASE(t, connection_keep_alive_recycled);
-	T_RUN_CASE(t, connection_close_not_recycled);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }
 
 #else
@@ -833,4 +816,4 @@ int main(void)
 	return 0;
 }
 
-#endif
+#endif /* WITH_RULESET */

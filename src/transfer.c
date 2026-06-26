@@ -63,10 +63,7 @@ static const char *const xfer_state_str[] = {
 
 #define XFER_BUFSIZE 16384
 
-/*
- * Single-direction transfer half.  All fields accessed exclusively on the
- * xfer thread after task_xfer_start enqueues the initial ev_io_start calls.
- */
+/* Single-direction transfer half; all fields xfer-thread-only after task_xfer_start. */
 struct xfer_half {
 	enum xfer_half_state state;
 	int src_fd, dst_fd;
@@ -113,10 +110,7 @@ struct transfer_ctx {
 /* ---------------------------------------------------------------- xfer_worker (WITH_THREADS only) */
 
 #if WITH_THREADS
-/*
- * One worker thread owns one ev_loop, one dispatcher, and its own active_list.
- * Workers are created by transfer_create() and destroyed by transfer_free().
- */
+/* Per-worker state: one ev_loop, one dispatcher, one active_list. */
 struct xfer_worker {
 	struct transfer *xfer;
 	thrd_t thread;
@@ -164,62 +158,7 @@ struct transfer {
 #define XFER_HALF_LOG(level, h, message)                                       \
 	XFER_HALF_LOG_F(level, h, "%s", message)
 
-/* ---------------------------------------------------------------- xfer_half I/O helpers */
-
-static void update_watcher(
-	struct xfer_half *restrict h, struct ev_loop *restrict loop,
-	const int events)
-{
-	ASSERT(events == EV_READ || events == EV_WRITE);
-	ev_io *restrict w = &h->w_socket;
-	const int cur = w->events & (EV_READ | EV_WRITE);
-	if (cur == events) {
-		return;
-	}
-	const int fd = (events & EV_WRITE) ? h->dst_fd : h->src_fd;
-	ev_io_stop(loop, w);
-	ev_io_set(w, fd, events);
-	ev_io_start(loop, w);
-}
-
-static void update_stats(
-	const struct xfer_half *restrict h, const size_t nbsend,
-	const size_t buffered)
-{
-#if WITH_THREADS
-	atomic_uint_least64_t *restrict byt = h->byt_transferred;
-	if (byt != NULL) {
-		atomic_fetch_add_explicit(byt, nbsend, memory_order_relaxed);
-	}
-#else
-	uint_least64_t *restrict byt = h->byt_transferred;
-	if (byt != NULL) {
-		*byt += nbsend;
-	}
-#endif /* WITH_THREADS */
-	if (buffered > 0) {
-		XFER_HALF_LOG_F(
-			VERYVERBOSE, h,
-			"%zu bytes transmitted (%zu bytes buffered)", nbsend,
-			buffered);
-		return;
-	}
-	XFER_HALF_LOG_F(VERYVERBOSE, h, "%zu bytes transmitted", nbsend);
-}
-
 #if WITH_SPLICE
-
-void pipe_close(struct splice_pipe *restrict pipe)
-{
-	if (pipe->fd[0] != -1) {
-		SOCKET_CLOSE_FD(pipe->fd[0]);
-		pipe->fd[0] = -1;
-	}
-	if (pipe->fd[1] != -1) {
-		SOCKET_CLOSE_FD(pipe->fd[1]);
-		pipe->fd[1] = -1;
-	}
-}
 
 bool pipe_new(struct splice_pipe *restrict pipe)
 {
@@ -250,6 +189,18 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 	return true;
 }
 
+void pipe_close(struct splice_pipe *restrict pipe)
+{
+	if (pipe->fd[0] != -1) {
+		SOCKET_CLOSE_FD(pipe->fd[0]);
+		pipe->fd[0] = -1;
+	}
+	if (pipe->fd[1] != -1) {
+		SOCKET_CLOSE_FD(pipe->fd[1]);
+		pipe->fd[1] = -1;
+	}
+}
+
 static bool pipe_get(struct splice_pipe *restrict pipe)
 {
 	return pipe_new(pipe);
@@ -263,15 +214,12 @@ static void pipe_put(struct splice_pipe *restrict pipe)
 
 /* ---------------------------------------------------------------- set_state */
 
-/*
- * set_state must be called from the xfer thread only.
- * When both halves reach XFER_FINISHED the transfer is self-freed here.
- */
+/* Xfer-thread only. Self-frees when both halves reach XFER_FINISHED. */
 static void set_state(
 	struct xfer_half *restrict h, struct ev_loop *restrict loop,
 	const enum xfer_half_state new_state)
 {
-	UNUSED(loop);
+	(void)loop;
 	if (h->state == new_state) {
 		return;
 	}
@@ -383,6 +331,47 @@ static void send_eof(struct xfer_half *restrict h)
 		return;
 	}
 	XFER_HALF_LOG(VERYVERBOSE, h, "shutdown: send operations disabled");
+}
+
+static void update_watcher(
+	struct xfer_half *restrict h, struct ev_loop *restrict loop,
+	const int events)
+{
+	ASSERT(events == EV_READ || events == EV_WRITE);
+	ev_io *restrict w = &h->w_socket;
+	const int cur = w->events & (EV_READ | EV_WRITE);
+	if (cur == events) {
+		return;
+	}
+	const int fd = (events & EV_WRITE) ? h->dst_fd : h->src_fd;
+	ev_io_stop(loop, w);
+	ev_io_set(w, fd, events);
+	ev_io_start(loop, w);
+}
+
+static void update_stats(
+	const struct xfer_half *restrict h, const size_t nbsend,
+	const size_t buffered)
+{
+#if WITH_THREADS
+	atomic_uint_least64_t *restrict byt = h->byt_transferred;
+	if (byt != NULL) {
+		atomic_fetch_add_explicit(byt, nbsend, memory_order_relaxed);
+	}
+#else
+	uint_least64_t *restrict byt = h->byt_transferred;
+	if (byt != NULL) {
+		*byt += nbsend;
+	}
+#endif /* WITH_THREADS */
+	if (buffered > 0) {
+		XFER_HALF_LOG_F(
+			VERYVERBOSE, h,
+			"%zu bytes transmitted (%zu bytes buffered)", nbsend,
+			buffered);
+		return;
+	}
+	XFER_HALF_LOG_F(VERYVERBOSE, h, "%zu bytes transmitted", nbsend);
 }
 
 static void
@@ -602,10 +591,7 @@ static void task_xfer_start(void *data)
 	ev_io_start(loop, &t->down.w_socket);
 }
 
-/*
- * task_xfer_stop: cancel a single in-flight transfer from the xfer thread.
- * Called during engine shutdown for every entry in active_list.
- */
+/* Cancel one in-flight transfer during engine shutdown. */
 static void
 task_xfer_stop(struct ev_loop *restrict loop, struct transfer_ctx *restrict t)
 {
@@ -638,7 +624,7 @@ task_xfer_stop(struct ev_loop *restrict loop, struct transfer_ctx *restrict t)
 static void
 w_invoke_cb(struct ev_loop *restrict loop, ev_async *watcher, const int revents)
 {
-	UNUSED(revents);
+	(void)revents;
 	struct xfer_worker *restrict worker = watcher->data;
 	dispatcher_tick(worker->disp);
 	if (atomic_load_explicit(&worker->stop, memory_order_acquire)) {
@@ -724,7 +710,7 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 		w->thread_started = true;
 	}
 #else
-	UNUSED(nworkers);
+	(void)nworkers;
 	xfer->loop = loop;
 	xfer->active_list = NULL;
 #endif /* WITH_THREADS */
@@ -792,7 +778,11 @@ static void xfer_half_init(
 	h->owner = owner;
 #if WITH_SPLICE
 	h->use_splice = use_splice;
-	h->pipe = (struct splice_pipe){ .fd = { -1, -1 }, .cap = 0, .len = 0 };
+	h->pipe = (struct splice_pipe){
+		.fd = { -1, -1 },
+		.cap = 0,
+		.len = 0,
+	};
 #endif
 	h->pos = 0;
 	BUF_INIT(h->buf, 0);
@@ -837,8 +827,10 @@ bool transfer_serve(
 #if WITH_THREADS
 	struct xfer_worker *restrict worker = t->worker;
 	if (!dispatcher_invoke(
-		    worker->disp,
-		    (struct task){ .func = task_xfer_start, .data = t })) {
+		    worker->disp, (struct task){
+					  .func = task_xfer_start,
+					  .data = t,
+				  })) {
 		free(t);
 		return false;
 	}

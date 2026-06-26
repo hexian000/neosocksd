@@ -11,19 +11,20 @@
  * only holds shared test fixtures.
  */
 
-#include "conf.h"
 #include "resolver.h"
+
+#include "conf.h"
 
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared test fixtures (resolver.c has no collaborator to mock).
@@ -35,7 +36,7 @@ struct resolve_result {
 	bool called;
 	bool ok;
 	int family;
-	unsigned port;
+	uint_least16_t port;
 };
 
 struct test_watchdog {
@@ -366,19 +367,22 @@ T_DECLARE_CASE(resolve_via_fake_nameserver)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
-{
-	T_DECLARE_CTX(t);
-
-	resolver_init();
-	T_RUN_CASE(t, resolve_success_ipv4);
-	T_RUN_CASE(t, resolve_failure_invalid_name);
-	T_RUN_CASE(t, resolve_cancel_suppresses_callback);
-	T_RUN_CASE(t, resolve_success_ipv6);
-	T_RUN_CASE(t, resolve_success_unspec);
+static const struct testing_suite suite[] = {
+	T_CASE(resolve_success_ipv4),
+	T_CASE(resolve_failure_invalid_name),
+	T_CASE(resolve_cancel_suppresses_callback),
+	T_CASE(resolve_success_ipv6),
+	T_CASE(resolve_success_unspec),
 #if WITH_CARES
-	T_RUN_CASE(t, resolve_via_fake_nameserver);
+	T_CASE(resolve_via_fake_nameserver),
 #endif
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
+{
+	resolver_init();
+	const int ret = testing_main(argc, argv, suite);
 	resolver_cleanup();
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return ret;
 }

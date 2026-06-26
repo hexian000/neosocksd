@@ -1,32 +1,23 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/*
- * conf_test - white-box unit tests for conf.c.
- *
- * Linked translation units (see CMakeLists.txt):
- *   conf.c           module under test
- *   proto/codec.c    leaf (transfer codecs)
- *   version.c        leaf (neosocksd_version)
- * conf.c parses argv/config into struct config and has no stateful
- * collaborator module to mock; the mock section only holds shared fixtures.
- */
+/* Unit tests for conf.c; no stateful collaborators to mock. */
 
 #include "conf.h"
 
+#include "utils/arraysize.h"
 #include "utils/slog.h"
 #include "utils/testing.h"
 
 #if WITH_LUA
-#include "lauxlib.h"
-#include "lua.h"
+#include <lauxlib.h>
+#include <lua.h>
 #endif
-
-#include <sys/socket.h>
 
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared test fixtures (conf.c has no collaborator to mock).
@@ -457,7 +448,7 @@ T_DECLARE_CASE(parseargs_log_outputs)
 {
 	static const char *const sinks[] = { "stdout", "stderr", "syslog",
 					     "discard" };
-	for (size_t i = 0; i < sizeof(sinks) / sizeof(sinks[0]); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(sinks); i++) {
 		struct config conf = conf_default();
 		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--log",
 				 (char *)sinks[i] };
@@ -765,79 +756,81 @@ T_DECLARE_CASE(loadtable_rejects_wrong_types)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
-{
-	T_DECLARE_CTX(t);
-
-	T_RUN_CASE(t, conf_default_has_expected_values);
-	T_RUN_CASE(t, conf_requires_listen);
-	T_RUN_CASE(t, conf_rejects_incompatible_modes);
-	T_RUN_CASE(t, conf_rejects_timeout_out_of_range);
-	T_RUN_CASE(t, conf_rejects_startup_limits_out_of_range);
-	T_RUN_CASE(t, conf_rejects_proxy_with_socks5_extensions);
-	T_RUN_CASE(t, conf_accepts_valid_configuration);
-	T_RUN_CASE(t, conf_warns_small_tcp_buffers);
-	T_RUN_CASE(t, conf_rejects_block_global_and_local);
+static const struct testing_suite suite[] = {
+	T_CASE(conf_default_has_expected_values),
+	T_CASE(conf_requires_listen),
+	T_CASE(conf_rejects_incompatible_modes),
+	T_CASE(conf_rejects_timeout_out_of_range),
+	T_CASE(conf_rejects_startup_limits_out_of_range),
+	T_CASE(conf_rejects_proxy_with_socks5_extensions),
+	T_CASE(conf_accepts_valid_configuration),
+	T_CASE(conf_warns_small_tcp_buffers),
+	T_CASE(conf_rejects_block_global_and_local),
 #if WITH_TPROXY
-	T_RUN_CASE(t, conf_rejects_http_with_tproxy);
-	T_RUN_CASE(t, conf_rejects_forward_with_tproxy);
+	T_CASE(conf_rejects_http_with_tproxy),
+	T_CASE(conf_rejects_forward_with_tproxy),
 #endif
 #if WITH_RULESET
-	T_RUN_CASE(t, conf_warns_ruleset_overrides_proxy);
-	T_RUN_CASE(t, conf_rejects_ruleset_with_socks5_bind);
-	T_RUN_CASE(t, conf_rejects_ruleset_with_socks5_udp);
+	T_CASE(conf_warns_ruleset_overrides_proxy),
+	T_CASE(conf_rejects_ruleset_with_socks5_bind),
+	T_CASE(conf_rejects_ruleset_with_socks5_udp),
 #endif
-	T_RUN_CASE(t, conf_rejects_auth_required_in_forward_mode);
+	T_CASE(conf_rejects_auth_required_in_forward_mode),
 #if WITH_RULESET
-	T_RUN_CASE(t, conf_defers_auth_required_ruleset_check);
+	T_CASE(conf_defers_auth_required_ruleset_check),
 #endif
-	T_RUN_CASE(t, parseargs_help_returns_false);
-	T_RUN_CASE(t, parseargs_resolve_pf_flags);
-	T_RUN_CASE(t, parseargs_http_with_address);
-	T_RUN_CASE(t, parseargs_http_only);
-	T_RUN_CASE(t, parseargs_proxy_and_api);
-	T_RUN_CASE(t, parseargs_auth_required);
-	T_RUN_CASE(t, parseargs_user_daemonize_color);
-	T_RUN_CASE(t, parseargs_timeout);
-	T_RUN_CASE(t, parseargs_loglevel);
-	T_RUN_CASE(t, parseargs_log_outputs);
-	T_RUN_CASE(t, parseargs_block_outbound);
-	T_RUN_CASE(t, parseargs_max_sessions);
-	T_RUN_CASE(t, parseargs_max_startups);
-	T_RUN_CASE(t, parseargs_double_dash_and_unknown);
+	T_CASE(parseargs_help_returns_false),
+	T_CASE(parseargs_resolve_pf_flags),
+	T_CASE(parseargs_http_with_address),
+	T_CASE(parseargs_http_only),
+	T_CASE(parseargs_proxy_and_api),
+	T_CASE(parseargs_auth_required),
+	T_CASE(parseargs_user_daemonize_color),
+	T_CASE(parseargs_timeout),
+	T_CASE(parseargs_loglevel),
+	T_CASE(parseargs_log_outputs),
+	T_CASE(parseargs_block_outbound),
+	T_CASE(parseargs_max_sessions),
+	T_CASE(parseargs_max_startups),
+	T_CASE(parseargs_double_dash_and_unknown),
 #if WITH_CARES
-	T_RUN_CASE(t, parseargs_nameserver);
+	T_CASE(parseargs_nameserver),
 #endif
 #if WITH_TPROXY
-	T_RUN_CASE(t, parseargs_tproxy);
+	T_CASE(parseargs_tproxy),
 #endif
 #if WITH_NETDEVICE
-	T_RUN_CASE(t, parseargs_netdev);
+	T_CASE(parseargs_netdev),
 #endif
 #if WITH_REUSEPORT
-	T_RUN_CASE(t, parseargs_reuseport);
+	T_CASE(parseargs_reuseport),
 #endif
 #if WITH_SPLICE
-	T_RUN_CASE(t, parseargs_pipe);
+	T_CASE(parseargs_pipe),
 #endif
 #if WITH_TCP_FASTOPEN
-	T_RUN_CASE(t, parseargs_no_fastopen);
+	T_CASE(parseargs_no_fastopen),
 #endif
 #if WITH_RULESET
-	T_RUN_CASE(t, parseargs_ruleset);
+	T_CASE(parseargs_ruleset),
 #endif
-	T_RUN_CASE(t, parseargs_forward_flag);
-	T_RUN_CASE(t, parseargs_block_multicast_token);
+	T_CASE(parseargs_forward_flag),
+	T_CASE(parseargs_block_multicast_token),
 #if WITH_RULESET
-	T_RUN_CASE(t, parseargs_config_flag);
-	T_RUN_CASE(t, parseargs_config_and_ruleset_mutually_exclusive);
-	T_RUN_CASE(t, parseargs_memlimit_negative_clamped);
+	T_CASE(parseargs_config_flag),
+	T_CASE(parseargs_config_and_ruleset_mutually_exclusive),
+	T_CASE(parseargs_memlimit_negative_clamped),
 #endif
 #if WITH_LUA
-	T_RUN_CASE(t, parseargs_dump_config);
-	T_RUN_CASE(t, loadtable_applies_typed_fields);
-	T_RUN_CASE(t, loadtable_empty_preserves_defaults);
-	T_RUN_CASE(t, loadtable_rejects_wrong_types);
+	T_CASE(parseargs_dump_config),
+	T_CASE(loadtable_applies_typed_fields),
+	T_CASE(loadtable_empty_preserves_defaults),
+	T_CASE(loadtable_rejects_wrong_types),
 #endif
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
+{
+	return testing_main(argc, argv, suite);
 }

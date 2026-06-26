@@ -23,22 +23,23 @@
 #include "transfer.h"
 #include "util.h"
 
+#include "utils/arraysize.h"
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include <errno.h>
 #include <inttypes.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (dialer, transfer, ruleset) and shared fixtures.
@@ -328,26 +329,25 @@ struct stub_xfer_ctx {
 struct transfer *
 transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
-	UNUSED(loop);
-	UNUSED(nworkers);
+	(void)loop;
+	(void)nworkers;
 	static int token;
 	return (struct transfer *)&token;
 }
 
 void transfer_join(struct transfer *restrict xfer)
 {
-	UNUSED(xfer);
+	(void)xfer;
 }
 
 bool transfer_serve(
 	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
 	const struct transfer_opts *restrict opts)
 {
-	UNUSED(xfer);
-	UNUSED(acc_fd);
-	UNUSED(dial_fd);
-	T_CHECK(stub_xfer_ctx_count <
-		(int)(sizeof(stub_xfer_ctxs) / sizeof(stub_xfer_ctxs[0])));
+	(void)xfer;
+	(void)acc_fd;
+	(void)dial_fd;
+	T_CHECK(stub_xfer_ctx_count < (int)ARRAY_SIZE(stub_xfer_ctxs));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
 		return false;
@@ -919,7 +919,7 @@ static void fuzz_socks_once(struct prng *restrict p)
 
 T_DECLARE_CASE(fuzz_socks)
 {
-	UNUSED(_t_);
+	(void)_t_;
 
 	struct prng p;
 	prng_seed(&p, fuzz_case_seed(7));
@@ -2732,7 +2732,52 @@ T_DECLARE_CASE(socks5_zero_length_domain_rejected)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(invalid_version_rejected),
+	T_CASE(socks5_unsupported_command_rsp),
+	T_CASE(socks5_unsupported_atyp_rsp),
+	T_CASE(socks5_userpass_empty_username_fails),
+	T_CASE(socks5_no_acceptable_auth_method),
+	T_CASE(socks5_valid_ipv4_request_connect_fail_rsp),
+	T_CASE(socks5_userpass_domain_request_connect_fail_rsp),
+	T_CASE(socks5_valid_ipv6_request_connect_fail_rsp),
+	T_CASE(socks4_long_userid_rejected),
+	T_CASE(socks4_valid_connect_rejected_when_dialreq_unavailable),
+	T_CASE(socks4a_domain_connect_dialer_fail_rejected),
+	T_CASE(socks5_split_payload_connect_fail_rsp),
+	T_CASE(socks5_connect_timeout_rsp_ttl_expired),
+	T_CASE(socks5_ruleset_reject_rsp_fail),
+	T_CASE(socks5_ruleset_async_then_dialer_fail_noallowed),
+	T_CASE(socks5_dialer_system_error_netunreach),
+	T_CASE(socks5_dialer_err_resolve_hostunreach),
+	T_CASE(socks5_dialer_err_system_hostunreach),
+	T_CASE(socks5_dialer_err_proxy_refused_connrefused),
+	T_CASE(socks5_dialer_err_blocked_noallowed),
+	T_CASE(socks5_unknown_command_cmdnosupport),
+	T_CASE(socks4_bind_command_rejected),
+	T_CASE(socks4_connect_success_granted),
+	T_CASE(socks4_empty_userid_connect_success_granted),
+	T_CASE(socks4_split_request_connect_success_granted),
+	T_CASE(socks4a_domain_connect_success_granted),
+	T_CASE(socks5_dialer_success_transfer_finished),
+	T_CASE(socks5_dialer_success_connected_transition),
+	T_CASE(socks5_bind_disabled_cmdnosupport),
+	T_CASE(socks5_udp_disabled_cmdnosupport),
+	T_CASE(socks5_bind_first_reply_succeeded),
+	T_CASE(socks5_bind_full_flow),
+	T_CASE(socks5_bind_mismatch_allows),
+	T_CASE(socks5_bind_timeout_ttlexpired),
+	T_CASE(socks5_udp_first_reply_succeeded),
+	T_CASE(socks5_udp_relay_roundtrip),
+	T_CASE(socks5_udp_tcp_close_teardown),
+	T_CASE(socks5_udp_frag_two_parts),
+	T_CASE(socks5_udp_frag_discard_out_of_order),
+	T_CASE(socks5_zero_length_domain_rejected),
+	T_CASE(fuzz_socks),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
 	fuzz_seed = read_seed();
 	fuzz_iterations = read_iterations();
@@ -2740,51 +2785,7 @@ int main(void)
 		stderr, "fuzz seed=0x%016" PRIx64 " iter=%zu\n", fuzz_seed,
 		fuzz_iterations);
 
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, invalid_version_rejected);
-	T_RUN_CASE(t, socks5_unsupported_command_rsp);
-	T_RUN_CASE(t, socks5_unsupported_atyp_rsp);
-	T_RUN_CASE(t, socks5_userpass_empty_username_fails);
-	T_RUN_CASE(t, socks5_no_acceptable_auth_method);
-	T_RUN_CASE(t, socks5_valid_ipv4_request_connect_fail_rsp);
-	T_RUN_CASE(t, socks5_userpass_domain_request_connect_fail_rsp);
-	T_RUN_CASE(t, socks5_valid_ipv6_request_connect_fail_rsp);
-	T_RUN_CASE(t, socks4_long_userid_rejected);
-	T_RUN_CASE(t, socks4_valid_connect_rejected_when_dialreq_unavailable);
-	T_RUN_CASE(t, socks4a_domain_connect_dialer_fail_rejected);
-	T_RUN_CASE(t, socks5_split_payload_connect_fail_rsp);
-	T_RUN_CASE(t, socks5_connect_timeout_rsp_ttl_expired);
-	T_RUN_CASE(t, socks5_ruleset_reject_rsp_fail);
-	T_RUN_CASE(t, socks5_ruleset_async_then_dialer_fail_noallowed);
-	T_RUN_CASE(t, socks5_dialer_system_error_netunreach);
-	T_RUN_CASE(t, socks5_dialer_err_resolve_hostunreach);
-	T_RUN_CASE(t, socks5_dialer_err_system_hostunreach);
-	T_RUN_CASE(t, socks5_dialer_err_proxy_refused_connrefused);
-	T_RUN_CASE(t, socks5_dialer_err_blocked_noallowed);
-	T_RUN_CASE(t, socks5_unknown_command_cmdnosupport);
-	T_RUN_CASE(t, socks4_bind_command_rejected);
-	T_RUN_CASE(t, socks4_connect_success_granted);
-	T_RUN_CASE(t, socks4_empty_userid_connect_success_granted);
-	T_RUN_CASE(t, socks4_split_request_connect_success_granted);
-	T_RUN_CASE(t, socks4a_domain_connect_success_granted);
-	T_RUN_CASE(t, socks5_dialer_success_transfer_finished);
-	T_RUN_CASE(t, socks5_dialer_success_connected_transition);
-	T_RUN_CASE(t, socks5_bind_disabled_cmdnosupport);
-	T_RUN_CASE(t, socks5_udp_disabled_cmdnosupport);
-	T_RUN_CASE(t, socks5_bind_first_reply_succeeded);
-	T_RUN_CASE(t, socks5_bind_full_flow);
-	T_RUN_CASE(t, socks5_bind_mismatch_allows);
-	T_RUN_CASE(t, socks5_bind_timeout_ttlexpired);
-	T_RUN_CASE(t, socks5_udp_first_reply_succeeded);
-	T_RUN_CASE(t, socks5_udp_relay_roundtrip);
-	T_RUN_CASE(t, socks5_udp_tcp_close_teardown);
-	T_RUN_CASE(t, socks5_udp_frag_two_parts);
-	T_RUN_CASE(t, socks5_udp_frag_discard_out_of_order);
-	T_RUN_CASE(t, socks5_zero_length_domain_rejected);
-
-	T_RUN_CASE(t, fuzz_socks);
-
-	const bool ok = T_RESULT(t);
+	const int ret = testing_main(argc, argv, suite);
 	stub_reset();
-	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+	return ret;
 }

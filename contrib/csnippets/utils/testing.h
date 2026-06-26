@@ -64,6 +64,29 @@
  *         return T_RESULT(t);
  *     }
  *
+ * DEFAULT MAIN (testing_main)
+ *   testing_main() (defined in testing.c) is a ready-made entry point.  Pass it
+ *   a NUL-terminated array of `struct testing_suite` entries built with T_CASE
+ *   and T_BENCH and terminated with T_SUITE_END:
+ *
+ *     static const struct testing_suite suite[] = {
+ *         T_CASE(test_add),
+ *         T_CASE(test_range),
+ *         T_BENCH(bench_add),
+ *         T_SUITE_END,
+ *     };
+ *
+ *     int main(int argc, char **argv)
+ *     {
+ *         return testing_main(argc, argv, suite);
+ *     }
+ *
+ *   With no filter it runs every case and skips all benches.  A POSIX extended
+ *   regular expression - given as `--run <ere>` (or the TESTING_FILTER
+ *   environment variable when --run is absent) - selects entries by name
+ *   (unanchored substring match): matching cases run first, then matching
+ *   benches run last.  It returns EXIT_SUCCESS when no case failed.
+ *
  * CASE OUTCOMES
  *   Each case has one of three outcomes printed by T_RUN_CASE:
  *     [PASS]  normal return, not marked failed or skipped.
@@ -101,10 +124,12 @@
  *         return T_RESULT(t);
  *     }
  *
- *   T_DECLARE_BENCH and T_RUN_BENCH are available only when measure.h is
- *   included before testing.h (they require clock_monotonic_ns()).
- *   Benchmarks do not affect the passed/failed/skipped counters; the
- *   benched counter in struct testing_ctx is incremented instead.
+ *   T_DECLARE_BENCH is always available.  The inline T_RUN_BENCH macro requires
+ *   measure.h to be included before testing.h (it expands clock_monotonic_ns()
+ *   directly); testing_main() runs benches without that include, since the
+ *   timing lives in testing.c.  Benchmarks do not affect the
+ *   passed/failed/skipped counters; the benched counter in struct testing_ctx
+ *   is incremented instead.
  */
 
 #ifndef UTILS_TESTING_H
@@ -128,6 +153,15 @@ struct testing_ctx {
 	volatile bool case_failed : 1;
 	volatile bool case_skipped : 1;
 	jmp_buf case_jmp;
+};
+
+/*
+ * Benchmark context.  Passed via the implicit `_b_` parameter inside a
+ * T_DECLARE_BENCH body, whose loop must run the benchmarked operation exactly
+ * `_b_->N` times.
+ */
+struct testing_bench {
+	uint_fast64_t N;
 };
 
 /*
@@ -201,6 +235,82 @@ struct testing_ctx {
  *   Intended for boolean success checks.
  */
 #define T_RESULT(ctx_) ((ctx_).failed == 0)
+
+/* -------------------------------------------------------------------------
+ * Benchmark case definition - always available.  Actually running a benchmark
+ * requires a monotonic clock, provided either by T_RUN_BENCH (needs measure.h,
+ * see the bottom of this header) or by testing_main (see testing.c).
+ * ---------------------------------------------------------------------- */
+
+/*
+ * T_DECLARE_BENCH(name)
+ *   Begins the definition of a static benchmark function named `name`.
+ *   Expands to: static void _benchcase_name_(struct testing_bench *_b_)
+ *   The body must run the benchmarked operation exactly _b_->N times.
+ */
+#define T_DECLARE_BENCH(name_)                                                 \
+	static void _benchcase_##name_##_(struct testing_bench *_b_)
+
+/* -------------------------------------------------------------------------
+ * Test suite - a NUL-terminated array of cases and benches consumed by
+ * testing_main().  Build entries with T_CASE / T_BENCH and terminate with
+ * T_SUITE_END:
+ *
+ *     static const struct testing_suite suite[] = {
+ *         T_CASE(test_add), T_BENCH(bench_add), T_SUITE_END,
+ *     };
+ * ---------------------------------------------------------------------- */
+
+/* Whether a suite entry is a test case or a benchmark. */
+enum testing_kind {
+	TESTING_CASE,
+	TESTING_BENCH,
+};
+
+/* One entry of a suite array.  The active `fn` member is selected by `kind`. */
+struct testing_suite {
+	const char *name;
+	enum testing_kind kind;
+	union {
+		void (*test)(struct testing_ctx *);
+		void (*bench)(struct testing_bench *);
+	} fn;
+};
+
+/*
+ * T_CASE(name) / T_BENCH(name)
+ *   Build a struct testing_suite entry referring to a case declared with
+ *   T_DECLARE_CASE or a benchmark declared with T_DECLARE_BENCH.
+ * T_SUITE_END
+ *   The required terminating entry (name == NULL).
+ */
+#define T_CASE(name_)                                                          \
+	{                                                                      \
+		.name = #name_, .kind = TESTING_CASE,                          \
+		.fn = {.test = _testcase_##name_##_ }                          \
+	}
+#define T_BENCH(name_)                                                         \
+	{                                                                      \
+		.name = #name_, .kind = TESTING_BENCH,                         \
+		.fn = {.bench = _benchcase_##name_##_ }                        \
+	}
+#define T_SUITE_END                                                            \
+	{                                                                      \
+		0                                                              \
+	}
+
+/*
+ * testing_main(argc, argv, suite)
+ *   Default test entry point.  Runs the NUL-terminated `suite`:
+ *     - with no filter, every case runs and benches are skipped;
+ *     - with a filter (the `--run <ere>` option, or the TESTING_FILTER
+ *       environment variable when --run is absent), cases whose name matches
+ *       run first, then matching benches run last.
+ *   The filter is a POSIX extended regular expression matched as an unanchored
+ *   substring.  Returns EXIT_SUCCESS when no case failed, else EXIT_FAILURE;
+ *   a usage error or an invalid regex also returns EXIT_FAILURE.
+ */
+int testing_main(int argc, char *const *argv, const struct testing_suite *suite);
 
 /* -------------------------------------------------------------------------
  * Logging macros - print a message to out with file and line number.
@@ -368,25 +478,12 @@ struct testing_ctx {
 	} while (0)
 
 /* -------------------------------------------------------------------------
- * Benchmark support - available only when measure.h is included first,
- * since T_RUN_BENCH requires clock_monotonic_ns().
+ * Inline benchmark runner - available only when measure.h is included before
+ * testing.h, since T_RUN_BENCH expands clock_monotonic_ns() directly.  For a
+ * runner that does not need measure.h in the test file, see testing_main().
  * ---------------------------------------------------------------------- */
 
 #ifdef UTILS_MEASURE_H
-
-/* Benchmark context.  Passed via implicit _b_ inside T_DECLARE_BENCH. */
-struct testing_bench {
-	uint_fast64_t N;
-};
-
-/*
- * T_DECLARE_BENCH(name)
- *   Begins the definition of a static benchmark function named `name`.
- *   Expands to: static void _benchcase_name_(struct testing_bench *_b_)
- *   The body must run the benchmarked operation exactly _b_->N times.
- */
-#define T_DECLARE_BENCH(name_)                                                 \
-	static void _benchcase_##name_##_(struct testing_bench *_b_)
 
 /*
  * T_RUN_BENCH(ctx, name)

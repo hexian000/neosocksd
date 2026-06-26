@@ -61,8 +61,8 @@ void aux_toclose(
 void aux_close(lua_State *restrict L, int idx)
 {
 #if HAVE_LUA_TOCLOSE
-	UNUSED(L);
-	UNUSED(idx);
+	(void)L;
+	(void)idx;
 #else
 	idx = lua_absindex(L, idx);
 	if (!lua_getmetatable(L, idx)) {
@@ -160,7 +160,7 @@ lua_State *aux_getthread(lua_State *restrict L)
 		lua_pushcfunction(co, thread_main);
 		const int status = aux_resume(co, L, 0);
 		ASSERT(status == LUA_YIELD);
-		UNUSED(status);
+		(void)status;
 	}
 	r->vmstats.num_thread_active++;
 	if (r->vmstats.num_thread_active > r->vmstats.num_thread_peak) {
@@ -171,8 +171,8 @@ lua_State *aux_getthread(lua_State *restrict L)
 
 const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 {
-	UNUSED(L);
-	struct stream *s = ud;
+	(void)L;
+	struct stream *const s = ud;
 	const void *buf;
 	/* Lua allows arbitrary length. */
 	*sz = SIZE_MAX;
@@ -251,7 +251,7 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 	}
 
 	/* no lua errors now */
-	struct ruleset *restrict r = aux_getruleset(L);
+	struct ruleset *restrict const r = aux_getruleset(L);
 	struct dialreq *restrict req = dialreq_new(r->basereq, (size_t)(n - 1));
 	if (req == NULL) {
 		LOGOOM();
@@ -300,7 +300,19 @@ int aux_traceback(lua_State *restrict L)
 	return 1;
 }
 
-void aux_setforward(lua_State *restrict L, lua_State *restrict co, void *state)
+int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
+{
+	int status;
+#if LUA_VERSION_NUM >= 504
+	int nres;
+	status = lua_resume(L, from, narg, &nres);
+#else
+	status = lua_resume(L, from, narg);
+#endif
+	return status;
+}
+
+void aux_setforward(lua_State *L, lua_State *co, void *state)
 {
 	aux_getregtable(L, RIDX_FORWARD_CONTEXT);
 	if (state != NULL) {
@@ -319,18 +331,6 @@ void *aux_getforward(lua_State *restrict L)
 	void *const state = lua_touserdata(L, -1);
 	lua_pop(L, 2);
 	return state;
-}
-
-int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)
-{
-	int status;
-#if LUA_VERSION_NUM >= 504
-	int nres;
-	status = lua_resume(L, from, narg, &nres);
-#else
-	status = lua_resume(L, from, narg);
-#endif
-	return status;
 }
 
 int aux_async(
@@ -370,7 +370,7 @@ static bool ruleset_pcallv(
 	const struct ruleset *restrict r, const lua_CFunction func,
 	const int nargs, const int nresults, va_list *args)
 {
-	lua_State *restrict L = r->L;
+	lua_State *restrict const L = r->L;
 	lua_settop(L, 0);
 	int errfunc = 0;
 	if (r->config.traceback) {
@@ -406,7 +406,7 @@ bool ruleset_pcall(
 void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 {
 	const int_fast64_t time_begin = clock_monotonic_ns();
-	lua_State *restrict L = r->L;
+	lua_State *restrict const L = r->L;
 	lua_settop(L, 0);
 	va_list args;
 	va_start(args, narg);
@@ -419,7 +419,7 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 		return;
 	}
 	lua_rawgetp(L, -1, ctx);
-	lua_State *restrict co = lua_tothread(L, -1);
+	lua_State *restrict const co = lua_tothread(L, -1);
 	if (co == NULL) {
 		lua_pop(L, 2);
 		LOGD_F("async context lost: %p", ctx);

@@ -11,6 +11,7 @@
 #include "util.h"
 
 #include "os/socket.h"
+#include "proto/domain.h"
 #include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
@@ -125,7 +126,7 @@ static void forward_ctx_finalize(struct gcbase *restrict obj)
 static void
 timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
-	UNUSED(loop);
+	(void)loop;
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct forward_ctx *restrict ctx = watcher->data;
 
@@ -157,20 +158,14 @@ static void forward_commit(
 
 	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
 	ctx->accepted_fd = ctx->dialed_fd = -1;
-	/*
-	 * Transition to STATE_BIDIRECTIONAL before transfer_start so that
-	 * forward_ctx_stop becomes a no-op if gc_unref is called below.
-	 */
+	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->num_halfopen--;
 
 	FW_CTX_LOG_F(DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	/*
-	 * Increment num_sessions before transfer_start so the xfer thread's
-	 * decrement can never precede our increment. Undo on OOM.
-	 */
+	/* Increment before transfer_start — xfer decrement can't precede ours. Undo on OOM. */
 #if WITH_THREADS
 	const size_t cur =
 		atomic_fetch_add_explicit(
@@ -209,6 +204,19 @@ static void forward_commit(
 	gc_unref(&ctx->gcbase);
 }
 
+#if WITH_RULESET
+/* await.forward() commit hook */
+static void forward_forward_commit(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb,
+	const int fd)
+{
+	struct forward_ctx *restrict ctx = cb->w_finish.data;
+	ASSERT(ctx->state == STATE_PROCESS);
+	ctx->ruleset_state = NULL;
+	forward_commit(loop, ctx, fd);
+}
+#endif /* WITH_RULESET */
+
 static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 {
 	struct forward_ctx *restrict ctx = data;
@@ -231,18 +239,38 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	forward_commit(loop, ctx, fd);
 }
 
-#if WITH_RULESET
-/* await.forward() commit hook */
-static void forward_forward_commit(
-	struct ev_loop *loop, struct ruleset_callback *restrict cb,
-	const int fd)
+static struct forward_ctx *
+forward_ctx_new(struct server *restrict s, const int accepted_fd)
 {
-	struct forward_ctx *restrict ctx = cb->w_finish.data;
-	ASSERT(ctx->state == STATE_PROCESS);
+	struct forward_ctx *restrict ctx = malloc(sizeof(struct forward_ctx));
+	if (ctx == NULL) {
+		return NULL;
+	}
+	ctx->s = s;
+	ctx->state = STATE_INIT;
+	ctx->accepted_fd = accepted_fd;
+	ctx->dialed_fd = -1;
+
+	ev_timer_init(&ctx->w_timeout, timeout_cb, s->conf->timeout, 0.0);
+	ctx->w_timeout.data = ctx;
+#if WITH_RULESET
+	ev_idle_init(&ctx->w_process, NULL);
+	ctx->w_process.data = ctx;
+	ev_init(&ctx->ruleset_callback.w_finish, NULL);
+	ctx->ruleset_callback.w_finish.data = ctx;
+	ctx->ruleset_callback.forward = forward_forward_commit;
 	ctx->ruleset_state = NULL;
-	forward_commit(loop, ctx, fd);
+#endif
+
+	ctx->dialreq = NULL;
+	const struct dialer_cb cb = {
+		.func = dialer_cb,
+		.data = ctx,
+	};
+	dialer_init(&ctx->dialer, &cb, NULL, NULL);
+	gc_register(&ctx->gcbase, forward_ctx_finalize);
+	return ctx;
 }
-#endif /* WITH_RULESET */
 
 static void forward_ctx_start(
 	struct ev_loop *loop, struct forward_ctx *restrict ctx,
@@ -297,6 +325,7 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 
 	const size_t cap =
 		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
+	ASSERT(cap <= FQDN_MAX_LENGTH + 7);
 	char request[cap];
 	const int len = dialaddr_format(request, cap, addr);
 	CHECK(len >= 0 && (size_t)len < cap);
@@ -326,39 +355,6 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	}
 }
 #endif /* WITH_RULESET */
-
-static struct forward_ctx *
-forward_ctx_new(struct server *restrict s, const int accepted_fd)
-{
-	struct forward_ctx *restrict ctx = malloc(sizeof(struct forward_ctx));
-	if (ctx == NULL) {
-		return NULL;
-	}
-	ctx->s = s;
-	ctx->state = STATE_INIT;
-	ctx->accepted_fd = accepted_fd;
-	ctx->dialed_fd = -1;
-
-	ev_timer_init(&ctx->w_timeout, timeout_cb, s->conf->timeout, 0.0);
-	ctx->w_timeout.data = ctx;
-#if WITH_RULESET
-	ev_idle_init(&ctx->w_process, NULL);
-	ctx->w_process.data = ctx;
-	ev_init(&ctx->ruleset_callback.w_finish, NULL);
-	ctx->ruleset_callback.w_finish.data = ctx;
-	ctx->ruleset_callback.forward = forward_forward_commit;
-	ctx->ruleset_state = NULL;
-#endif
-
-	ctx->dialreq = NULL;
-	const struct dialer_cb cb = {
-		.func = dialer_cb,
-		.data = ctx,
-	};
-	dialer_init(&ctx->dialer, &cb, NULL, NULL);
-	gc_register(&ctx->gcbase, forward_ctx_finalize);
-	return ctx;
-}
 
 void forward_serve(
 	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,

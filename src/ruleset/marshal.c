@@ -20,12 +20,9 @@
 
 #define MT_MARSHAL_BUFFER "marshal_buffer"
 
-static int marshal_buffer_close(lua_State *restrict L)
-{
-	struct vbuffer **pvbuf = (struct vbuffer **)lua_touserdata(L, 1);
-	VBUF_FREE(*pvbuf);
-	return 0;
-}
+#define IDX_BUFFER (lua_upvalueindex(1))
+#define IDX_VISITED (lua_upvalueindex(2))
+#define IDX_MARSHAL (lua_upvalueindex(3))
 
 static void
 marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
@@ -181,10 +178,6 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	VBUF_APPEND(*pvbuf, estr, bufend - estr);
 }
 
-#define IDX_BUFFER (lua_upvalueindex(1))
-#define IDX_VISITED (lua_upvalueindex(2))
-#define IDX_MARSHAL (lua_upvalueindex(3))
-
 /* marshal a table into constructor syntax: {value1,value2,[key]=value,...} */
 static void
 marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
@@ -287,6 +280,13 @@ static int marshal_value(lua_State *restrict L)
 	return 0;
 }
 
+static int marshal_buffer_close(lua_State *restrict L)
+{
+	struct vbuffer **pvbuf = (struct vbuffer **)lua_touserdata(L, 1);
+	VBUF_FREE(*pvbuf);
+	return 0;
+}
+
 /* marshal(...): marshal values into a comma-separated string
  * that can be loaded back by Lua */
 static int api_marshal(lua_State *restrict L)
@@ -321,9 +321,9 @@ static int api_marshal(lua_State *restrict L)
 
 	/* Set up self-reference for recursive calls */
 	lua_pushvalue(L, -1);
-	const char *upvalue = lua_setupvalue(L, -2, 3);
+	const char *const upvalue = lua_setupvalue(L, -2, 3);
 	ASSERT(upvalue != NULL);
-	UNUSED(upvalue);
+	(void)upvalue;
 
 	/* lua stack: args... buffer closure */
 

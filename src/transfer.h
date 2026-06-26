@@ -21,9 +21,14 @@
 
 #include <ev.h>
 
-#if WITH_SPLICE
+#if WITH_THREADS
+#include <stdatomic.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+
+#if WITH_SPLICE
 
 struct splice_pipe {
 	int fd[2];
@@ -34,12 +39,6 @@ bool pipe_new(struct splice_pipe *pipe);
 
 void pipe_close(struct splice_pipe *pipe);
 #endif /* WITH_SPLICE */
-
-#if WITH_THREADS
-#include <stdatomic.h>
-#endif
-#include <stdbool.h>
-#include <stdint.h>
 
 struct transfer;
 

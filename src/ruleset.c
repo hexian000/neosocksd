@@ -26,6 +26,7 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
@@ -67,12 +68,7 @@ l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 		/* same size class: the existing block already fits */
 		ret = ptr;
 	} else {
-		/*
-		 * Crossing a size class: the block is always a plain malloc'd
-		 * pointer, so realloc can extend it in place. Grow to the class
-		 * size (not nsize) so it still satisfies the cache's per-class
-		 * size invariant when it is later returned via mmcache_put().
-		 */
+		/* Grow to class size, not nsize — preserves per-class invariant for mmcache_put(). */
 		const size_t newsize = (newshift <= cache->max_shift) ?
 					       ((size_t)1 << newshift) :
 					       nsize;
@@ -236,6 +232,17 @@ struct ruleset *ruleset_new(
 	return r;
 }
 
+void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s)
+{
+	r->server = s;
+}
+
+void ruleset_setbasereq(
+	struct ruleset *restrict r, struct dialreq *restrict basereq)
+{
+	r->basereq = basereq;
+}
+
 void ruleset_free(struct ruleset *restrict r)
 {
 	if (r == NULL) {
@@ -248,17 +255,6 @@ void ruleset_free(struct ruleset *restrict r)
 	free(r);
 }
 
-void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s)
-{
-	r->server = s;
-}
-
-void ruleset_setbasereq(
-	struct ruleset *restrict r, struct dialreq *restrict basereq)
-{
-	r->basereq = basereq;
-}
-
 /* return a string literal and optionally set its length */
 #define CONST_LSTRING(s, len)                                                  \
 	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
@@ -266,7 +262,7 @@ void ruleset_setbasereq(
 const char *
 ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 {
-	lua_State *restrict L = r->L;
+	lua_State *restrict const L = r->L;
 	const char *s = NULL;
 	switch (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR)) {
 	case LUA_TNIL:
@@ -315,7 +311,7 @@ bool ruleset_update(
 
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 {
-	struct stream *restrict s = codec_lua_reader(filename);
+	struct stream *restrict const s = codec_lua_reader(filename);
 	if (s == NULL) {
 		return false;
 	}
@@ -327,7 +323,7 @@ bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 bool ruleset_loadconfig(
 	struct ruleset *restrict r, const char *restrict filename)
 {
-	struct stream *restrict s = codec_lua_reader(filename);
+	struct stream *restrict const s = codec_lua_reader(filename);
 	if (s == NULL) {
 		return false;
 	}
@@ -336,17 +332,17 @@ bool ruleset_loadconfig(
 	return ok;
 }
 
-bool ruleset_gc(struct ruleset *restrict r)
-{
-	return ruleset_pcall(r, cfunc_gc, 0, 0);
-}
-
 bool ruleset_isvalid(struct ruleset *restrict r)
 {
-	lua_State *restrict L = r->L;
+	lua_State *restrict const L = r->L;
 	const bool valid = (lua_getglobal(L, "ruleset") == LUA_TTABLE);
 	lua_pop(L, 1);
 	return valid;
+}
+
+bool ruleset_gc(struct ruleset *restrict r)
+{
+	return ruleset_pcall(r, cfunc_gc, 0, 0);
 }
 
 static bool dispatch_request(
@@ -403,7 +399,7 @@ const char *ruleset_stats(
 	struct ruleset *restrict r, const double dt, const char *restrict query,
 	size_t *len)
 {
-	lua_State *restrict L = r->L;
+	lua_State *restrict const L = r->L;
 	const bool ok =
 		ruleset_pcall(r, cfunc_stats, 2, 1, (void *)&dt, (void *)query);
 	if (!ok) {
@@ -415,7 +411,7 @@ const char *ruleset_stats(
 
 const char *ruleset_metrics(struct ruleset *restrict r, size_t *len)
 {
-	lua_State *restrict L = r->L;
+	lua_State *restrict const L = r->L;
 	const bool ok = ruleset_pcall(r, cfunc_metrics, 0, 1);
 	if (!ok) {
 		LOGW_F("ruleset.metrics: %s", ruleset_geterror(r, NULL));

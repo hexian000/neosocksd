@@ -42,7 +42,6 @@
 #include <strings.h>
 #include <time.h>
 
-/* State machine progression - never rollback to previous states */
 enum api_state {
 	STATE_INIT,
 	STATE_REQUEST,
@@ -154,9 +153,9 @@ static struct percentiles calc_percentiles(
 		samples[i] = stats[idx];
 	}
 	qsort(samples, n, sizeof(int_least64_t), comp_intleast64);
-	const int i50 = (int)floor((double)n * 0.50);
-	const int i90 = (int)floor((double)n * 0.90);
-	const int i99 = (int)floor((double)n * 0.99);
+	const size_t i50 = (size_t)floor((double)n * 0.50);
+	const size_t i90 = (size_t)floor((double)n * 0.90);
+	const size_t i99 = (size_t)floor((double)n * 0.99);
 	return (struct percentiles){
 		.p50 = samples[i50],
 		.p90 = samples[i90],
@@ -392,8 +391,8 @@ static void append_server_stats(
 		append_vmstats(w, &vmstats, s->conf);
 	}
 #else
-	UNUSED(runtime);
-#endif
+	(void)runtime;
+#endif /* WITH_RULESET */
 
 	if (agg.num_connects > 0) {
 		const struct percentiles p = calc_percentiles(
@@ -414,13 +413,6 @@ static void append_server_stats(
 	if (dt > 0) {
 		server_stats_stateful(w, api, dt);
 	}
-}
-
-static bool parse_bool(const char *s)
-{
-	return strcmp(s, "1") == 0 || strcmp(s, "y") == 0 ||
-	       strcmp(s, "yes") == 0 || strcmp(s, "on") == 0 ||
-	       strcmp(s, "t") == 0 || strcmp(s, "true") == 0;
 }
 
 static void
@@ -444,6 +436,13 @@ static void send_errpage(
 	send_response(loop, ctx, false);
 }
 
+static bool parse_bool(const char *s)
+{
+	return strcmp(s, "1") == 0 || strcmp(s, "y") == 0 ||
+	       strcmp(s, "yes") == 0 || strcmp(s, "on") == 0 ||
+	       strcmp(s, "t") == 0 || strcmp(s, "true") == 0;
+}
+
 static void
 http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
@@ -451,7 +450,11 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		bool nobanner : 1;
 		bool server : 1;
 		bool runtime : 1;
-	} opt = { false, true, false };
+	} opt = {
+		.nobanner = false,
+		.server = true,
+		.runtime = false,
+	};
 #if WITH_RULESET
 	const char *query = NULL;
 #endif
@@ -486,7 +489,6 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 
-	/* Use compression if client supports it */
 	const enum content_encodings encoding =
 		(ctx->conn.hdr.accept_encoding == CENCODING_DEFLATE) ?
 			CENCODING_DEFLATE :
@@ -614,67 +616,6 @@ static void send_errmsg(
 		(loop), (ctx), HTTP_INTERNAL_SERVER_ERROR, ("" str),           \
 		sizeof(str) - 1)
 
-/* Asynchronous callback for RPC call completion */
-static void
-rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_CUSTOM);
-	struct api_ctx *restrict ctx = watcher->data;
-	ASSERT(ctx->state == STATE_PROCESS);
-	ctx->rpcstate = NULL;
-	if (ctx->rpcreturn.rpcall.result == NULL) {
-		SEND_ERRSTR(loop, ctx, "rpcall did not return");
-		return;
-	}
-	const char *result = ctx->rpcreturn.rpcall.result;
-	const size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
-	if (LOGLEVEL(VERBOSE)) {
-		FORMAT_BYTES(clen, ctx->rpcreturn.rpcall.resultlen);
-		API_CTX_LOG_F(VERBOSE, ctx, "api response: content %s", clen);
-		LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall result:");
-	}
-	/* Compress response if client supports it and payload is large enough */
-	const enum content_encodings encoding =
-		(ctx->conn.hdr.accept_encoding != CENCODING_DEFLATE) ||
-				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
-			CENCODING_NONE :
-			CENCODING_DEFLATE;
-	struct stream *writer =
-		content_writer(&ctx->conn.cbuf, resultlen, encoding);
-	if (writer == NULL) {
-		LOGOOM();
-		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
-	size_t n = resultlen;
-	int err = stream_write(writer, result, &n);
-	if (err != 0) {
-		LOGW_F("stream_write: error %d, %zu/%zu", err, n, resultlen);
-		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
-	err = stream_close(writer);
-	if (err != 0) {
-		LOGW_F("stream_close: error %d", err);
-		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
-	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
-	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-	} else {
-		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-	}
-	RESPHDR_CTYPE(ctx->conn.wbuf, MIME_RPCALL);
-	const char *encoding_str = http_content_encoding_str[encoding];
-	if (encoding_str != NULL) {
-		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
-	}
-	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
-	RESPHDR_FINISH(ctx->conn.wbuf);
-	send_response(loop, ctx, true);
-}
-
 static void handle_ruleset_rpcall(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *ruleset)
@@ -698,7 +639,6 @@ static void handle_ruleset_rpcall(
 		ruleset, &ctx->rpcstate, reader, &ctx->rpcreturn);
 	stream_close(reader);
 	if (!ok) {
-		/* Synchronous error - no async callback will be invoked */
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
@@ -770,6 +710,7 @@ static void handle_ruleset_update(
 		const int bodylen = snprintf(
 			body, sizeof(body), "Time Cost           : %s\n",
 			timecost);
+		ASSERT(bodylen > 0 && (size_t)bodylen < sizeof(body));
 		RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 		if (ctx->keepalive) {
 			RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
@@ -1311,10 +1252,7 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "TE") == 0) {
-		/* Record chunked TE if offered; ignore unsupported tokens —
-		 * the API server is an endpoint, not an intermediary, so it
-		 * must not reject clients that advertise encodings it does not
-		 * support (e.g. Prometheus sending "TE: trailers"). */
+		/* RFC 7230: endpoint accepts any TE token */
 		(void)parsehdr_accept_te(p, value);
 		return true;
 	}
@@ -1346,17 +1284,6 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	return true;
 }
 
-/* Returns true when HTTP/1.1 and the client did not request Connection: close */
-static bool api_should_keepalive(const struct api_ctx *restrict ctx)
-{
-	const char *version = ctx->conn.msg.req.version;
-	if (strncmp(version, "HTTP/1.1", 8) != 0) {
-		return false;
-	}
-	const char *conn = ctx->conn.hdr.connection;
-	return conn == NULL || strcasecmp(conn, "close") != 0;
-}
-
 /* Reset parser and state machine for reuse on the same TCP connection */
 static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
@@ -1370,6 +1297,16 @@ static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	ctx->state = STATE_REQUEST;
 	ev_timer_again(loop, &ctx->w_timeout);
 	ev_io_start(loop, &ctx->w_recv);
+}
+
+static bool api_should_keepalive(const struct api_ctx *restrict ctx)
+{
+	const char *version = ctx->conn.msg.req.version;
+	if (strncmp(version, "HTTP/1.1", 8) != 0) {
+		return false;
+	}
+	const char *conn = ctx->conn.hdr.connection;
+	return conn == NULL || strcasecmp(conn, "close") != 0;
 }
 
 static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
@@ -1457,7 +1394,6 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		}
 	}
 
-	/* Reuse or close the connection based on keep-alive negotiation */
 	if (ctx->keepalive) {
 		ev_io_stop(loop, watcher);
 		api_ctx_reset(loop, ctx);
@@ -1469,11 +1405,73 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 static void
 timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
-	UNUSED(loop);
+	(void)loop;
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct api_ctx *restrict ctx = watcher->data;
 	gc_unref(&ctx->gcbase);
 }
+
+#if WITH_RULESET
+static void
+rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_CUSTOM);
+	struct api_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_PROCESS);
+	ctx->rpcstate = NULL;
+	if (ctx->rpcreturn.rpcall.result == NULL) {
+		SEND_ERRSTR(loop, ctx, "rpcall did not return");
+		return;
+	}
+	const char *result = ctx->rpcreturn.rpcall.result;
+	const size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
+	if (LOGLEVEL(VERBOSE)) {
+		FORMAT_BYTES(clen, ctx->rpcreturn.rpcall.resultlen);
+		API_CTX_LOG_F(VERBOSE, ctx, "api response: content %s", clen);
+		LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall result:");
+	}
+	/* Compress response if client supports it and payload is large enough */
+	const enum content_encodings encoding =
+		(ctx->conn.hdr.accept_encoding != CENCODING_DEFLATE) ||
+				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
+			CENCODING_NONE :
+			CENCODING_DEFLATE;
+	struct stream *writer =
+		content_writer(&ctx->conn.cbuf, resultlen, encoding);
+	if (writer == NULL) {
+		LOGOOM();
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	size_t n = resultlen;
+	int err = stream_write(writer, result, &n);
+	if (err != 0) {
+		LOGW_F("stream_write: error %d, %zu/%zu", err, n, resultlen);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	err = stream_close(writer);
+	if (err != 0) {
+		LOGW_F("stream_close: error %d", err);
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
+	if (ctx->keepalive) {
+		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
+	} else {
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
+	}
+	RESPHDR_CTYPE(ctx->conn.wbuf, MIME_RPCALL);
+	const char *encoding_str = http_content_encoding_str[encoding];
+	if (encoding_str != NULL) {
+		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
+	}
+	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
+	RESPHDR_FINISH(ctx->conn.wbuf);
+	send_response(loop, ctx, true);
+}
+#endif /* WITH_RULESET */
 
 static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 {

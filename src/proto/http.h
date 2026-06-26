@@ -39,12 +39,7 @@ enum content_encodings {
 /** String representations of content encodings */
 extern const char *http_content_encoding_str[];
 
-/**
- * @brief Parsed HTTP headers structure
- *
- * Contains parsed values from common HTTP headers organized by category.
- * Only headers that require special processing are stored here.
- */
+/** @brief Parsed HTTP headers structure */
 struct http_headers {
 	/* hop-by-hop headers */
 	char *connection;
@@ -84,11 +79,7 @@ enum http_conn_state {
 	STATE_PARSE_OK,
 };
 
-/**
- * @brief Callback structure for header parsing
- *
- * Allows custom handling of HTTP headers during parsing.
- */
+/** @brief Callback for custom header processing during parsing */
 struct http_parsehdr_cb {
 	bool (*func)(void *ctx, const char *key, char *value);
 	void *ctx;
@@ -126,12 +117,7 @@ struct http_body_data_cb {
 	void *ctx;
 };
 
-/**
- * @brief HTTP connection state and buffers
- *
- * Main connection structure containing all state needed for streaming
- * HTTP message parsing. Supports both request and response parsing.
- */
+/** @brief HTTP connection state and I/O buffers for streaming message parsing */
 struct http_conn {
 	enum http_conn_state state;
 	/* initial state, distinguishes request/response parsing */
@@ -154,135 +140,100 @@ struct http_conn {
 };
 
 /**
- * @brief Initialize HTTP connection
- *
- * @param p Connection instance to initialize
+ * @brief Initialize HTTP connection.
+ * @param p Connection instance
  * @param fd Socket file descriptor
- * @param mode Initial connection state (request or response)
- * @param on_header Callback for processing headers
+ * @param mode Initial parse state (request or response)
+ * @param on_header Header processing callback
  */
 void http_conn_init(
-	struct http_conn *restrict p, int fd, enum http_conn_state mode,
-	struct http_parsehdr_cb on_header, uint_least64_t *byt_recv,
-	uint_least64_t *byt_sent);
+	struct http_conn *restrict p, const int fd,
+	const enum http_conn_state mode,
+	const struct http_parsehdr_cb on_header, uint_least64_t *const byt_recv,
+	uint_least64_t *const byt_sent);
 
 /**
- * @brief Receive and parse HTTP data
- *
- * @param p Connection instance
+ * @brief Receive and parse HTTP data.
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
 int http_conn_recv(struct http_conn *restrict p);
 
 /**
- * @brief Send pending HTTP data from connection buffers
- *
- * Drains response/request header buffer first, then optional content buffer.
- *
+ * @brief Send pending HTTP data (header buffer first, then content buffer).
  * @param p Connection instance
  * @param fd Socket file descriptor
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
-int http_conn_send(struct http_conn *restrict p, int fd);
+int http_conn_send(struct http_conn *restrict p, const int fd);
 
 void http_body_init(
-	struct http_body *restrict d, enum http_body_mode mode,
-	size_t content_length);
+	struct http_body *restrict d, const enum http_body_mode mode,
+	const size_t content_length);
 
 bool http_body_consume(
 	struct http_body *restrict d, const unsigned char *restrict data,
-	size_t len, struct http_body_data_cb on_data);
+	const size_t len, const struct http_body_data_cb on_data);
 
 bool http_body_finish(struct http_body *restrict d);
 
 /**
- * @brief Parse Accept-TE header
- *
- * Processes the TE (Transfer-Encoding) header to determine what
- * transfer encodings the client accepts. Currently supports
- * chunked encoding detection.
- *
+ * @brief Parse Accept-TE header. Currently detects chunked encoding.
  * @param p Parser instance
- * @param value Header value to parse
- * @return true if parsed successfully
+ * @param value Header value
+ * @return true on success
  */
 bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value);
 
 /**
- * @brief Parse Transfer-Encoding header
- *
- * Processes the Transfer-Encoding header to determine how the
- * message body is encoded for transmission. Currently supports
- * chunked encoding detection.
- *
+ * @brief Parse Transfer-Encoding header. Currently detects chunked.
  * @param p Parser instance
- * @param value Header value to parse
- * @return true if parsed successfully
+ * @param value Header value
+ * @return true on success
  */
 bool parsehdr_transfer_encoding(
 	struct http_conn *restrict p, char *restrict value);
 
 /**
- * @brief Parse Accept-Encoding header
+ * @brief Parse Accept-Encoding header; ignores quality values.
  *
- * Processes the Accept-Encoding header to determine what content
- * encodings the client accepts. Parses comma-separated encoding
- * list and ignores quality values. Currently supports deflate.
+ * Currently supports deflate.
  *
  * @param p Parser instance
- * @param value Header value to parse
+ * @param value Header value
  * @return true if at least one supported encoding found
  */
 bool parsehdr_accept_encoding(
 	struct http_conn *restrict p, char *restrict value);
 
 /**
- * @brief Parse Content-Length header
- *
- * Parses the Content-Length header value and validates it.
- * CONNECT method requests must not have Content-Length.
- *
+ * @brief Parse Content-Length header. CONNECT requests must not carry one.
  * @param p Parser instance
- * @param value Header value to parse
+ * @param value Header value
  * @return true if parsed and valid
  */
 bool parsehdr_content_length(
 	struct http_conn *restrict p, const char *restrict value);
 
 /**
- * @brief Parse Content-Encoding header
- *
- * Processes the Content-Encoding header to determine how the
- * content body is compressed. Sets error status if encoding
- * is not supported.
- *
+ * @brief Parse Content-Encoding header; sets error status if unsupported.
  * @param p Parser instance
- * @param value Header value to parse
+ * @param value Header value
  * @return true if encoding is supported
  */
 bool parsehdr_content_encoding(
 	struct http_conn *restrict p, const char *restrict value);
 
 /**
- * @brief Parse Expect header
- *
- * Processes the Expect header. Currently only supports the
- * "100-continue" expectation. Sets appropriate error status
- * for unsupported expectations.
- *
+ * @brief Parse Expect header. Only "100-continue" is supported;
+ *        sets error status for any other expectation.
  * @param p Parser instance
- * @param value Header value to parse
+ * @param value Header value
  * @return true if expectation is supported
  */
 bool parsehdr_expect(struct http_conn *restrict p, char *restrict value);
 
 /**
- * @brief Parse Connection header
- *
- * Records the Connection header value for hop-by-hop token lookup.
- *
- * @param p Parser instance
- * @param value Header value to parse
+ * @brief Record Connection header value for hop-by-hop token lookup.
  * @return true always
  */
 bool parsehdr_connection(struct http_conn *restrict p, char *restrict value);
@@ -305,50 +256,36 @@ const char *parsehdr_connection_token(
 	const char *restrict p, const char **restrict tok,
 	size_t *restrict toklen);
 
-/**
- * @brief Generate HTTP error response page
- *
- * @param p Parser instance
- * @param code HTTP status code
- */
-void http_resp_errpage(struct http_conn *restrict p, uint_fast16_t code);
+/** @brief Write an HTTP error response page into @p p's write buffer. */
+void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code);
 
 /**
- * @brief Create content reader stream with decompression
- *
- * Creates a stream reader that automatically decompresses content
- * based on the specified encoding. Handles gzip header removal
- * and sets up appropriate decompression filters.
- *
+ * @brief Create a decompressing stream reader over a content buffer.
  * @param buf Content buffer to read from
  * @param len Length of content buffer
  * @param encoding Content encoding type
  * @return Stream for reading decoded content, or NULL on error
  */
 struct stream *content_reader(
-	const void *restrict buf, size_t len, enum content_encodings encoding);
+	const void *restrict buf, const size_t len,
+	const enum content_encodings encoding);
 
 /**
- * @brief Create content writer stream with compression
+ * @brief Create a compressing stream writer into a vbuffer.
  *
- * Creates a stream writer that automatically compresses content
- * based on the specified encoding. The output buffer may be
- * reallocated as needed during writing.
+ * @p *pvbuf may be reallocated as output grows.
  *
- * @param pvbuf Pointer to buffer pointer (may be reallocated)
+ * @param pvbuf Pointer to vbuffer pointer (may be reallocated)
  * @param bufsize Initial buffer size
  * @param encoding Content encoding type
  * @return Stream for writing encoded content
  */
 struct stream *content_writer(
-	struct vbuffer **pvbuf, size_t bufsize,
-	enum content_encodings encoding);
+	struct vbuffer **restrict pvbuf, const size_t bufsize,
+	const enum content_encodings encoding);
 
 /**
- * @brief Begin HTTP response header
- *
- * Initializes response with status line, date, and connection headers.
- *
+ * @brief Begin HTTP response header (status line + Date header).
  * @param buf Buffer to write response headers
  * @param code HTTP status code
  */
@@ -408,12 +345,7 @@ struct stream *content_writer(
 	MIME_RPCALL_TYPE "/" MIME_RPCALL_SUBTYPE                               \
 			 "; version=" MIME_RPCALL_VERSION
 
-/**
- * @brief Check if MIME type matches RPC call format
- *
- * @param mime_type MIME type string to check
- * @return true if matches RPC call MIME type
- */
+/** @brief Return true if @p mime_type matches the RPC call MIME type. */
 bool check_rpcall_mime(char *mime_type);
 
 /** Minimum size threshold for RPC call compression */

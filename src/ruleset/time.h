@@ -6,6 +6,6 @@
 
 #include <lua.h>
 
-int luaopen_time(lua_State *L);
+int luaopen_time(lua_State *restrict L);
 
 #endif /* RULESET_TIME_H */

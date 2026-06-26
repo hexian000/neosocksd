@@ -5,6 +5,7 @@ target_sources(csnippets
     "${CMAKE_CURRENT_SOURCE_DIR}/formats.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/gc.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/slog.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/testing.c"
     PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/arraysize.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/ascii.h"
@@ -17,4 +18,5 @@ target_sources(csnippets
     "${CMAKE_CURRENT_SOURCE_DIR}/mcache.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/minmax.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/slog.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/testing.h"
 )

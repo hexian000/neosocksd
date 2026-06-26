@@ -16,10 +16,11 @@
 
 #include "ruleset/zlib.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
 #include "utils/testing.h"
+
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -245,19 +246,16 @@ T_DECLARE_CASE(gunzip_crc_mismatch)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(zlib_module_opens),	 T_CASE(zlib_roundtrip_small),
+	T_CASE(zlib_roundtrip_large),	 T_CASE(zlib_empty_string),
+	T_CASE(zlib_uncompress_invalid), T_CASE(gzip_module_has_funcs),
+	T_CASE(gzip_roundtrip_small),	 T_CASE(gzip_roundtrip_large),
+	T_CASE(gzip_empty_string),	 T_CASE(gunzip_invalid),
+	T_CASE(gunzip_crc_mismatch),	 T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, zlib_module_opens);
-	T_RUN_CASE(t, zlib_roundtrip_small);
-	T_RUN_CASE(t, zlib_roundtrip_large);
-	T_RUN_CASE(t, zlib_empty_string);
-	T_RUN_CASE(t, zlib_uncompress_invalid);
-	T_RUN_CASE(t, gzip_module_has_funcs);
-	T_RUN_CASE(t, gzip_roundtrip_small);
-	T_RUN_CASE(t, gzip_roundtrip_large);
-	T_RUN_CASE(t, gzip_empty_string);
-	T_RUN_CASE(t, gunzip_invalid);
-	T_RUN_CASE(t, gunzip_crc_mismatch);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

@@ -12,13 +12,13 @@
 
 #include "ruleset/regex.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
 #include "utils/testing.h"
 
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
+
 #include <stdbool.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* -------------------------------------------------------------------------
@@ -211,17 +211,15 @@ T_DECLARE_CASE(regex_gmatch_iterator)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(regex_module_opens),    T_CASE(regex_compile_basic),
+	T_CASE(regex_compile_invalid), T_CASE(regex_find_match),
+	T_CASE(regex_find_nomatch),    T_CASE(regex_find_with_init),
+	T_CASE(regex_match_captures),  T_CASE(regex_match_nomatch),
+	T_CASE(regex_gmatch_iterator), T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, regex_module_opens);
-	T_RUN_CASE(t, regex_compile_basic);
-	T_RUN_CASE(t, regex_compile_invalid);
-	T_RUN_CASE(t, regex_find_match);
-	T_RUN_CASE(t, regex_find_nomatch);
-	T_RUN_CASE(t, regex_find_with_init);
-	T_RUN_CASE(t, regex_match_captures);
-	T_RUN_CASE(t, regex_match_nomatch);
-	T_RUN_CASE(t, regex_gmatch_iterator);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

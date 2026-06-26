@@ -14,14 +14,13 @@
 #include "transfer.h"
 
 #include "io/io.h"
-#include "os/clock.h"
 #include "os/socket.h"
 #include "util.h"
 
-#define UTILS_MEASURE_H
 #include "utils/testing.h"
 
 #include <ev.h>
+
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -43,12 +42,12 @@
 struct test_xfer_state {
 #if WITH_THREADS
 	atomic_size_t num_sessions;
-	atomic_uintmax_t byt_up;
-	atomic_uintmax_t byt_down;
+	atomic_uint_least64_t byt_up;
+	atomic_uint_least64_t byt_down;
 #else
 	size_t num_sessions;
-	uintmax_t byt_up;
-	uintmax_t byt_down;
+	uint_least64_t byt_up;
+	uint_least64_t byt_down;
 #endif
 };
 
@@ -72,16 +71,16 @@ watchdog_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	struct test_watchdog *const watchdog = watcher->data;
 
-	UNUSED(revents);
+	(void)revents;
 	watchdog->fired = true;
 	ev_break(loop, EVBREAK_ONE);
 }
 
 static void poll_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
-	UNUSED(loop);
-	UNUSED(watcher);
-	UNUSED(revents);
+	(void)loop;
+	(void)watcher;
+	(void)revents;
 	ev_break(loop, EVBREAK_ONE);
 }
 
@@ -296,7 +295,7 @@ T_DECLARE_CASE(transfer_splice_releases_pipes_on_finish)
 	SOCKET_CLOSE_FD(dial_peer);
 	ev_loop_destroy(loop);
 }
-#endif
+#endif /* WITH_SPLICE */
 
 /*
  * Cancel must suppress the on_finished callback but still clean up all
@@ -617,7 +616,7 @@ bench_transfer_impl(struct testing_bench *restrict _b_, const bool use_splice)
 #if WITH_SPLICE
 		opts.use_splice = use_splice;
 #else
-		UNUSED(use_splice);
+		(void)use_splice;
 #endif
 		T_CHECK(transfer_serve(xfer, acc_fd, dial_fd, &opts));
 
@@ -664,27 +663,25 @@ T_DECLARE_BENCH(bench_transfer_splice)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(transfer_moves_payload),
+#if WITH_SPLICE
+	T_CASE(transfer_pipe_new_close),
+	T_CASE(transfer_splice_releases_pipes_on_finish),
+#endif
+	T_CASE(transfer_ctx_cancel_no_callback),
+	T_CASE(transfer_dst_error_finishes),
+	T_CASE(transfer_backpressure_completes),
+	T_CASE(transfer_serve_join_rapid_cycles),
+	T_CASE(transfer_both_halves_close_normally),
+	T_BENCH(bench_transfer_recvsend),
+#if WITH_SPLICE
+	T_BENCH(bench_transfer_splice),
+#endif
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-
-	T_RUN_CASE(t, transfer_moves_payload);
-#if WITH_SPLICE
-	T_RUN_CASE(t, transfer_pipe_new_close);
-	T_RUN_CASE(t, transfer_splice_releases_pipes_on_finish);
-#endif
-	T_RUN_CASE(t, transfer_ctx_cancel_no_callback);
-	T_RUN_CASE(t, transfer_dst_error_finishes);
-	T_RUN_CASE(t, transfer_backpressure_completes);
-	T_RUN_CASE(t, transfer_serve_join_rapid_cycles);
-	T_RUN_CASE(t, transfer_both_halves_close_normally);
-
-	if (getenv("BENCH")) {
-		T_RUN_BENCH(t, bench_transfer_recvsend);
-#if WITH_SPLICE
-		T_RUN_BENCH(t, bench_transfer_splice);
-#endif
-	}
-
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

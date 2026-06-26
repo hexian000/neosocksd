@@ -13,6 +13,7 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
 #if WITH_RULESET
 #include <lua.h>
 #endif
@@ -39,8 +40,8 @@
 
 void init(int argc, char *const restrict argv[])
 {
-	UNUSED(argc);
-	UNUSED(argv);
+	(void)argc;
+	(void)argv;
 	(void)setlocale(LC_ALL, "");
 	(void)setvbuf(stderr, NULL, _IONBF, 0);
 	slog_setoutput(SLOG_OUTPUT_FILE, stderr);
@@ -54,9 +55,7 @@ void init(int argc, char *const restrict argv[])
 	}
 	slog_setlevel(LOG_LEVEL_VERBOSE);
 
-	struct sigaction ignore = {
-		.sa_handler = SIG_IGN,
-	};
+	const struct sigaction ignore = { .sa_handler = SIG_IGN };
 	if (sigaction(SIGPIPE, &ignore, NULL) != 0) {
 		const int err = errno;
 		FAILMSGF("sigaction: (%d) %s", err, strerror(err));

@@ -6,6 +6,6 @@
 
 #include <lua.h>
 
-int luaopen_regex(lua_State *L);
+int luaopen_regex(lua_State *restrict L);
 
 #endif /* RULESET_REGEX_H */

@@ -1,15 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/*
- * util_test - white-box unit tests for util.c.
- *
- * Linked translation units (see CMakeLists.txt):
- *   util.c           module under test
- *   version.c        leaf (neosocksd_version)
- * The dialer/resolver symbols referenced by util.c are stubbed in the mock
- * section below.
- */
+/* Unit tests for util.c; mocked: dialreq_format, resolver; links version.c. */
 
 #include "util.h"
 
@@ -19,12 +11,11 @@
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <stddef.h>
-#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - stubs for the dialer/resolver symbols referenced by util.c.
@@ -32,16 +23,7 @@
 
 static struct {
 	int dialreq_format_len_override;
-} STUB = {
-	.dialreq_format_len_override = -1,
-};
-
-/*
- * Stubs for symbols in util.c that are outside the scope of these tests.
- * neosocksd_version() is provided by version.c (compiled separately).
- * The functions below are only reachable via loadlibs/unloadlibs, which the
- * test runner never calls.
- */
+} STUB = { .dialreq_format_len_override = -1 };
 
 int dialreq_format(
 	char *restrict s, const size_t maxlen, const struct dialreq *restrict r)
@@ -174,7 +156,6 @@ T_DECLARE_CASE(util_modify_io_events_no_op_stop)
 
 T_DECLARE_CASE(util_modify_io_events_start_inactive)
 {
-	/* Starting a watcher that is currently inactive. */
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	struct ev_loop *loop = ev_loop_new(0);
@@ -240,17 +221,20 @@ T_DECLARE_CASE(util_socket_bind_netdev_empty_name)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(util_modify_io_events_stop),
+	T_CASE(util_modify_io_events_change),
+	T_CASE(util_modify_io_events_no_op_stop),
+	T_CASE(util_modify_io_events_start_inactive),
+	T_CASE(util_modify_io_events_same_events_noop),
+	T_CASE(util_init_runs_without_crash),
+	T_CASE(util_loadlibs_unloadlibs),
+	T_CASE(util_socket_bind_netdev_invalid_fd),
+	T_CASE(util_socket_bind_netdev_empty_name),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, util_modify_io_events_stop);
-	T_RUN_CASE(t, util_modify_io_events_change);
-	T_RUN_CASE(t, util_modify_io_events_no_op_stop);
-	T_RUN_CASE(t, util_modify_io_events_start_inactive);
-	T_RUN_CASE(t, util_modify_io_events_same_events_noop);
-	T_RUN_CASE(t, util_init_runs_without_crash);
-	T_RUN_CASE(t, util_loadlibs_unloadlibs);
-	T_RUN_CASE(t, util_socket_bind_netdev_invalid_fd);
-	T_RUN_CASE(t, util_socket_bind_netdev_empty_name);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

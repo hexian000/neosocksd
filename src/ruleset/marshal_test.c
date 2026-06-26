@@ -15,14 +15,11 @@
 
 #include "ruleset/marshal.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
-
-#include "os/clock.h"
-
-#define UTILS_MEASURE_H
 #include "utils/testing.h"
+
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -271,8 +268,8 @@ T_DECLARE_CASE(marshal_table_with_metatable_warns)
 
 /* -------------------------------------------------------------------------
  * bench - marshal (encode to Lua source) + decode round-trip of a mixed
- * table, the shape used by RPC/gossip payloads. Gated behind the BENCH env
- * var so it does not run during normal ctest.
+ * table, the shape used by RPC/gossip payloads. Runs only when a name filter
+ * selects it (e.g. --run bench); a plain ctest run skips it.
  * ---------------------------------------------------------------------- */
 
 T_DECLARE_BENCH(bench_marshal_roundtrip)
@@ -303,25 +300,24 @@ T_DECLARE_BENCH(bench_marshal_roundtrip)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(marshal_module_opens),
+	T_CASE(marshal_nil_and_bool),
+	T_CASE(marshal_integer_and_roundtrip),
+	T_CASE(marshal_number_specials),
+	T_CASE(marshal_float_roundtrip),
+	T_CASE(marshal_large_integer_hex),
+	T_CASE(marshal_float_zero),
+	T_CASE(marshal_string_roundtrip),
+	T_CASE(marshal_table_roundtrip),
+	T_CASE(marshal_unsupported_type),
+	T_CASE(marshal_circular_table_rejected),
+	T_CASE(marshal_table_with_metatable_warns),
+	T_BENCH(bench_marshal_roundtrip),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, marshal_module_opens);
-	T_RUN_CASE(t, marshal_nil_and_bool);
-	T_RUN_CASE(t, marshal_integer_and_roundtrip);
-	T_RUN_CASE(t, marshal_number_specials);
-	T_RUN_CASE(t, marshal_float_roundtrip);
-	T_RUN_CASE(t, marshal_large_integer_hex);
-	T_RUN_CASE(t, marshal_float_zero);
-	T_RUN_CASE(t, marshal_string_roundtrip);
-	T_RUN_CASE(t, marshal_table_roundtrip);
-	T_RUN_CASE(t, marshal_unsupported_type);
-	T_RUN_CASE(t, marshal_circular_table_rejected);
-	T_RUN_CASE(t, marshal_table_with_metatable_warns);
-
-	if (getenv("BENCH") != NULL) {
-		T_RUN_BENCH(t, bench_marshal_roundtrip);
-	}
-
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

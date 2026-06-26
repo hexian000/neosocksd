@@ -1,25 +1,12 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/*
- * main_test - black-box / integration tests against the real modules.
- *
- * Unlike the per-module {M}_test.c files, which isolate a single module and
- * mock its collaborators, this test links the real implementations together
- * and exercises them end to end. It also hosts the project fuzz suite.
- *
- * Linked translation units (see CMakeLists.txt):
- *   dialer.c, socks.c, http_proxy.c, server.c, transfer.c,
- *   resolver.c, util.c, proto/http.c, proto/codec.c, version.c
- * The ruleset host and the server's forward/api/tproxy entry points are the
- * only collaborators stubbed (see the mock section), so the dialer can reach
- * the real socks/http proxy handlers over loopback.
- */
-
-#include "dialer.h"
+/* Integration tests: real socks/http_proxy/server/dialer over loopback;
+ * mocked: ruleset host and forward/api/tproxy entry points. */
 
 #include "api_server.h"
 #include "conf.h"
+#include "dialer.h"
 #include "forward.h"
 #include "proto/codec.h"
 #include "proto/http.h"
@@ -41,15 +28,12 @@
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -57,31 +41,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - the ruleset host and the server's forward/api/tproxy entry points are
  * stubbed; everything else is the real module. Shared fixtures live here too.
  * ---------------------------------------------------------------------- */
 
-static struct config test_conf = {
-	.timeout = 0.2,
-};
+static struct config test_conf = { .timeout = 0.2 };
 
-static struct config proxy_conf = {
-	.timeout = 0.5,
-};
+static struct config proxy_conf = { .timeout = 0.5 };
 
-/* The connrefused tests dial through a real proxy to a closed port. The dialer
- * has no timeout of its own (in production the session layer enforces one), so
- * the proxy's session timeout must outlive the refused connect and forward it
- * as a SOCKS/HTTP error rather than time out first. A refused loopback connect
- * is instant on Linux but takes ~2s under the MSYS2/Cygwin socket emulation
- * (measured: ECONNREFUSED after 2033ms), so this is a ceiling well above that;
- * the proxy still replies the instant the refusal arrives, so it does not slow
- * the test on Linux. */
-static struct config connrefused_proxy_conf = {
-	.timeout = 5.0,
-};
+/* proxy.timeout must outlive the refused connect so the proxy returns a SOCKS/
+ * HTTP error; loopback ECONNREFUSED takes ~2s on MSYS2/Cygwin emulation. */
+static struct config connrefused_proxy_conf = { .timeout = 5.0 };
 
 void api_serve(
 	struct server *s, struct ev_loop *loop, int accepted_fd,
@@ -249,7 +224,7 @@ static int accept_nowait(const int listener_fd)
 	}
 }
 
-static int make_listener(uint_least16_t *restrict port)
+static int make_listener(uint_fast16_t *restrict port)
 {
 	const int fd = socket(AF_INET, SOCK_STREAM, 0);
 	const int enable = 1;
@@ -273,7 +248,7 @@ static int make_listener(uint_least16_t *restrict port)
 	return fd;
 }
 
-static int make_listener6(uint_least16_t *restrict port)
+static int make_listener6(uint_fast16_t *restrict port)
 {
 	const int fd = socket(AF_INET6, SOCK_STREAM, 0);
 	const int enable = 1;
@@ -539,7 +514,7 @@ T_DECLARE_CASE(dialer_strerror_known_and_unknown)
 
 T_DECLARE_CASE(direct_connect_reports_success)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	const int listener_fd = make_listener(&port);
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -624,7 +599,7 @@ T_DECLARE_CASE(local_address_blocked_by_egress_policy)
 
 T_DECLARE_CASE(http_connect_success_sends_expected_request)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -680,7 +655,7 @@ T_DECLARE_CASE(http_connect_success_sends_expected_request)
 
 T_DECLARE_CASE(http_connect_407_maps_to_proxy_auth)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -842,7 +817,7 @@ ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 /* Start a proxy server on an ephemeral loopback port and return that port.
  * Sets conf->listen or conf->http_listen to "127.0.0.1:0" depending on
  * use_http; conf must outlive the server. */
-static uint_least16_t start_proxy_ex(
+static uint_fast16_t start_proxy_ex(
 	struct server *restrict s, struct ev_loop *restrict loop,
 	const bool use_http, struct config *restrict conf,
 	struct resolver *restrict resolver)
@@ -865,7 +840,7 @@ static uint_least16_t start_proxy_ex(
 	return ntohs(bound_addr.sin_port);
 }
 
-static uint_least16_t start_proxy(
+static uint_fast16_t start_proxy(
 	struct server *restrict s, struct ev_loop *restrict loop,
 	const bool use_http, struct config *restrict conf)
 {
@@ -896,9 +871,9 @@ static void drain_loop(struct ev_loop *restrict loop, const ev_tstamp sec)
 
 /* Bind a listener on an ephemeral loopback port, immediately close it, and
  * return the port so that any connection attempt will be refused. */
-static uint_least16_t make_closed_port(void)
+static uint_fast16_t make_closed_port(void)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	const int fd = make_listener(&port);
 
 	T_CHECK(close(fd) == 0);
@@ -907,7 +882,7 @@ static uint_least16_t make_closed_port(void)
 
 T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
 {
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -965,8 +940,8 @@ T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
 
 T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 {
-	uint_least16_t proxy_port;
-	const uint_least16_t closed_port = make_closed_port();
+	uint_fast16_t proxy_port;
+	const uint_fast16_t closed_port = make_closed_port();
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -1013,7 +988,7 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 T_DECLARE_CASE(socks5_noauth_rejected_when_auth_required)
 {
 	struct config auth_conf = proxy_conf;
-	uint_least16_t proxy_port;
+	uint_fast16_t proxy_port;
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -1058,7 +1033,7 @@ T_DECLARE_CASE(socks5_noauth_rejected_when_auth_required)
 T_DECLARE_CASE(socks5_credentials_accepted_when_auth_required)
 {
 	struct config auth_conf = proxy_conf;
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1118,7 +1093,7 @@ T_DECLARE_CASE(socks5_credentials_accepted_when_auth_required)
 
 T_DECLARE_CASE(socks4a_connect_success_via_real_proxy)
 {
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1176,7 +1151,7 @@ T_DECLARE_CASE(socks4a_connect_success_via_real_proxy)
 
 T_DECLARE_CASE(http_proxy_connect_success_via_real_proxy)
 {
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1234,7 +1209,7 @@ T_DECLARE_CASE(http_proxy_connect_success_via_real_proxy)
 
 T_DECLARE_CASE(http_connect_403_maps_to_proxy_reject)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -1283,7 +1258,7 @@ T_DECLARE_CASE(http_connect_403_maps_to_proxy_reject)
 
 T_DECLARE_CASE(http_connect_502_maps_to_proxy_refused)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -1332,7 +1307,7 @@ T_DECLARE_CASE(http_connect_502_maps_to_proxy_refused)
 
 T_DECLARE_CASE(http_connect_non_200_maps_to_proxy_proto)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -1459,7 +1434,7 @@ static bool socks4_raw_pump(void *data)
 
 T_DECLARE_CASE(socks4a_rejected_maps_to_proxy_refused)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	struct socks4_raw_server server = {
 		.listener_fd = make_listener(&port),
 		.peer_fd = -1,
@@ -1615,7 +1590,7 @@ static bool socks5_raw_pump(void *data)
 
 T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	struct socks5_raw_server server = {
 		.listener_fd = make_listener(&port),
 		.peer_fd = -1,
@@ -1663,8 +1638,8 @@ T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
 
 T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 {
-	uint_least16_t proxy_port;
-	const uint_least16_t closed_port = make_closed_port();
+	uint_fast16_t proxy_port;
+	const uint_fast16_t closed_port = make_closed_port();
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -1709,7 +1684,7 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 
 T_DECLARE_CASE(direct_connect_ipv6_reports_success)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	const int listener_fd = make_listener6(&port);
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -1799,7 +1774,7 @@ T_DECLARE_SUBCASE(
 
 T_DECLARE_CASE(socks5_connect_ipv6_target_via_real_proxy)
 {
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener6(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1827,7 +1802,7 @@ T_DECLARE_CASE(socks5_connect_ipv6_target_via_real_proxy)
 
 T_DECLARE_CASE(http_proxy_connect_ipv6_target_via_real_proxy)
 {
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener6(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1855,7 +1830,7 @@ T_DECLARE_CASE(http_proxy_connect_ipv6_target_via_real_proxy)
 
 T_DECLARE_CASE(http_proxy_connect_with_credentials_via_real_proxy)
 {
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1890,7 +1865,7 @@ T_DECLARE_CASE(http_proxy_connect_with_credentials_via_real_proxy)
 T_DECLARE_SUBCASE(
 	run_chain_success, const bool first_http, const bool second_http)
 {
-	uint_least16_t port1, port2, final_port;
+	uint_fast16_t port1, port2, final_port;
 	int final_fd = make_listener(&final_port);
 	struct server proxy1, proxy2;
 	struct config conf1 = proxy_conf, conf2 = proxy_conf;
@@ -1939,7 +1914,7 @@ T_DECLARE_CASE(chain_socks5_to_socks5_connect_success)
 T_DECLARE_CASE(direct_connect_domain_resolves_and_succeeds)
 {
 	struct config conf = test_conf;
-	uint_least16_t final_port;
+	uint_fast16_t final_port;
 	int final_fd = make_listener(&final_port);
 	struct ev_loop *loop = ev_loop_new(0);
 	struct resolver *resolver;
@@ -1966,7 +1941,7 @@ T_DECLARE_CASE(direct_connect_domain_resolves_and_succeeds)
 T_DECLARE_CASE(socks5_connect_domain_target_via_real_proxy)
 {
 	struct config server_conf = proxy_conf;
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -2003,7 +1978,7 @@ T_DECLARE_CASE(socks5_connect_domain_target_via_real_proxy)
 T_DECLARE_CASE(socks4a_connect_ipv6_target_via_real_proxy)
 {
 	struct config server_conf = proxy_conf;
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener6(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -2038,7 +2013,7 @@ T_DECLARE_CASE(socks4a_connect_ipv6_target_via_real_proxy)
 T_DECLARE_CASE(socks4a_connect_domain_target_via_real_proxy)
 {
 	struct config server_conf = proxy_conf;
-	uint_least16_t proxy_port, final_port;
+	uint_fast16_t proxy_port, final_port;
 	int final_fd = make_listener(&final_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
@@ -2204,12 +2179,7 @@ static void close_checked(int *restrict fd)
 	T_CHECK(close(closing) == 0);
 }
 
-/*
- * socketpair() can fail transiently with EMFILE/ENFILE/ENOBUFS under the
- * resource pressure of a parallel `ctest -j` run on socket emulations such as
- * Cygwin/MSYS. Retry briefly so the fuzz harness does not abort on a momentary
- * shortage; a persistent failure still aborts after the budget is exhausted.
- */
+/* Retry on transient EMFILE/ENFILE/ENOBUFS under `ctest -j` load. */
 static void make_socketpair(int sv[2])
 {
 	bool ok = false;
@@ -2313,9 +2283,7 @@ fuzz_http_conn(struct prng *restrict p, const enum http_conn_state mode)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn conn = { 0 };
-	struct header_cb_ctx cbctx = {
-		.conn = &conn,
-	};
+	struct header_cb_ctx cbctx = { .conn = &conn };
 	const struct http_parsehdr_cb cb = {
 		.func = parse_header_cb,
 		.ctx = &cbctx,
@@ -2401,7 +2369,7 @@ static void fuzz_http_headers_once(struct prng *restrict p)
 }
 T_DECLARE_CASE(fuzz_inflate)
 {
-	UNUSED(_t_);
+	(void)_t_;
 
 	struct prng p;
 	prng_seed(&p, fuzz_case_seed(1));
@@ -2412,7 +2380,7 @@ T_DECLARE_CASE(fuzz_inflate)
 
 T_DECLARE_CASE(fuzz_zlib)
 {
-	UNUSED(_t_);
+	(void)_t_;
 
 	struct prng p;
 	prng_seed(&p, fuzz_case_seed(2));
@@ -2423,7 +2391,7 @@ T_DECLARE_CASE(fuzz_zlib)
 
 T_DECLARE_CASE(fuzz_gzip)
 {
-	UNUSED(_t_);
+	(void)_t_;
 
 	struct prng p;
 	prng_seed(&p, fuzz_case_seed(3));
@@ -2434,7 +2402,7 @@ T_DECLARE_CASE(fuzz_gzip)
 
 T_DECLARE_CASE(fuzz_http_req)
 {
-	UNUSED(_t_);
+	(void)_t_;
 
 	struct prng p;
 	prng_seed(&p, fuzz_case_seed(4));
@@ -2445,7 +2413,7 @@ T_DECLARE_CASE(fuzz_http_req)
 
 T_DECLARE_CASE(fuzz_http_resp)
 {
-	UNUSED(_t_);
+	(void)_t_;
 
 	struct prng p;
 	prng_seed(&p, fuzz_case_seed(5));
@@ -2456,7 +2424,7 @@ T_DECLARE_CASE(fuzz_http_resp)
 
 T_DECLARE_CASE(fuzz_parsehdr)
 {
-	UNUSED(_t_);
+	(void)_t_;
 
 	struct prng p;
 	prng_seed(&p, fuzz_case_seed(6));
@@ -2472,7 +2440,53 @@ T_DECLARE_CASE(fuzz_parsehdr)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(dialaddr_parse_and_format_variants),
+	T_CASE(dialaddr_set_and_copy),
+	T_CASE(dialreq_parse_and_format_proxy_chain),
+	T_CASE(dialreq_parse_scheme_default_ports),
+	T_CASE(dialreq_parse_rejects_bad_proxy_uris),
+	T_CASE(dialreq_parse_rejects_overlong_proxy_uri),
+	T_CASE(dialreq_new_copies_base_request),
+	T_CASE(dialer_strerror_known_and_unknown),
+	T_CASE(direct_connect_reports_success),
+	T_CASE(direct_connect_ipv6_reports_success),
+	T_CASE(local_address_blocked_by_egress_policy),
+	T_CASE(http_connect_success_sends_expected_request),
+	T_CASE(http_connect_407_maps_to_proxy_auth),
+	T_CASE(socks5_connect_success_via_real_proxy),
+	T_CASE(socks5_connrefused_proxied_correctly),
+	T_CASE(socks5_noauth_rejected_when_auth_required),
+	T_CASE(socks5_credentials_accepted_when_auth_required),
+	T_CASE(socks4a_connect_success_via_real_proxy),
+	T_CASE(http_proxy_connect_success_via_real_proxy),
+	T_CASE(http_proxy_connrefused_proxied_correctly),
+	T_CASE(http_connect_403_maps_to_proxy_reject),
+	T_CASE(http_connect_502_maps_to_proxy_refused),
+	T_CASE(http_connect_non_200_maps_to_proxy_proto),
+	T_CASE(socks4a_rejected_maps_to_proxy_refused),
+	T_CASE(socks5_noallowed_maps_to_proxy_reject),
+	T_CASE(socks5_connect_ipv6_target_via_real_proxy),
+	T_CASE(http_proxy_connect_ipv6_target_via_real_proxy),
+	T_CASE(http_proxy_connect_with_credentials_via_real_proxy),
+	T_CASE(chain_socks5_to_http_connect_success),
+	T_CASE(chain_http_to_socks5_connect_success),
+	T_CASE(chain_socks5_to_socks5_connect_success),
+	T_CASE(direct_connect_domain_resolves_and_succeeds),
+	T_CASE(socks5_connect_domain_target_via_real_proxy),
+	T_CASE(socks4a_connect_ipv6_target_via_real_proxy),
+	T_CASE(socks4a_connect_domain_target_via_real_proxy),
+	/* fuzz cases */
+	T_CASE(fuzz_inflate),
+	T_CASE(fuzz_zlib),
+	T_CASE(fuzz_gzip),
+	T_CASE(fuzz_http_req),
+	T_CASE(fuzz_http_resp),
+	T_CASE(fuzz_parsehdr),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
 	fuzz_seed = read_seed();
 	fuzz_iterations = read_iterations();
@@ -2480,52 +2494,8 @@ int main(void)
 		stderr, "fuzz seed=0x%016" PRIx64 " iter=%zu\n", fuzz_seed,
 		fuzz_iterations);
 
-	T_DECLARE_CTX(t);
 	resolver_init();
-	T_RUN_CASE(t, dialaddr_parse_and_format_variants);
-	T_RUN_CASE(t, dialaddr_set_and_copy);
-	T_RUN_CASE(t, dialreq_parse_and_format_proxy_chain);
-	T_RUN_CASE(t, dialreq_parse_scheme_default_ports);
-	T_RUN_CASE(t, dialreq_parse_rejects_bad_proxy_uris);
-	T_RUN_CASE(t, dialreq_parse_rejects_overlong_proxy_uri);
-	T_RUN_CASE(t, dialreq_new_copies_base_request);
-	T_RUN_CASE(t, dialer_strerror_known_and_unknown);
-	T_RUN_CASE(t, direct_connect_reports_success);
-	T_RUN_CASE(t, direct_connect_ipv6_reports_success);
-	T_RUN_CASE(t, local_address_blocked_by_egress_policy);
-	T_RUN_CASE(t, http_connect_success_sends_expected_request);
-	T_RUN_CASE(t, http_connect_407_maps_to_proxy_auth);
-	T_RUN_CASE(t, socks5_connect_success_via_real_proxy);
-	T_RUN_CASE(t, socks5_connrefused_proxied_correctly);
-	T_RUN_CASE(t, socks5_noauth_rejected_when_auth_required);
-	T_RUN_CASE(t, socks5_credentials_accepted_when_auth_required);
-	T_RUN_CASE(t, socks4a_connect_success_via_real_proxy);
-	T_RUN_CASE(t, http_proxy_connect_success_via_real_proxy);
-	T_RUN_CASE(t, http_proxy_connrefused_proxied_correctly);
-	T_RUN_CASE(t, http_connect_403_maps_to_proxy_reject);
-	T_RUN_CASE(t, http_connect_502_maps_to_proxy_refused);
-	T_RUN_CASE(t, http_connect_non_200_maps_to_proxy_proto);
-	T_RUN_CASE(t, socks4a_rejected_maps_to_proxy_refused);
-	T_RUN_CASE(t, socks5_noallowed_maps_to_proxy_reject);
-	T_RUN_CASE(t, socks5_connect_ipv6_target_via_real_proxy);
-	T_RUN_CASE(t, http_proxy_connect_ipv6_target_via_real_proxy);
-	T_RUN_CASE(t, http_proxy_connect_with_credentials_via_real_proxy);
-	T_RUN_CASE(t, chain_socks5_to_http_connect_success);
-	T_RUN_CASE(t, chain_http_to_socks5_connect_success);
-	T_RUN_CASE(t, chain_socks5_to_socks5_connect_success);
-	T_RUN_CASE(t, direct_connect_domain_resolves_and_succeeds);
-	T_RUN_CASE(t, socks5_connect_domain_target_via_real_proxy);
-	T_RUN_CASE(t, socks4a_connect_ipv6_target_via_real_proxy);
-	T_RUN_CASE(t, socks4a_connect_domain_target_via_real_proxy);
-
-	T_RUN_CASE(t, fuzz_inflate);
-	T_RUN_CASE(t, fuzz_zlib);
-	T_RUN_CASE(t, fuzz_gzip);
-	T_RUN_CASE(t, fuzz_http_req);
-	T_RUN_CASE(t, fuzz_http_resp);
-	T_RUN_CASE(t, fuzz_parsehdr);
-
-	const bool ok = T_RESULT(t);
+	const int ret = testing_main(argc, argv, suite);
 	resolver_cleanup();
-	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+	return ret;
 }

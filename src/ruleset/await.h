@@ -6,6 +6,6 @@
 
 #include <lua.h>
 
-int luaopen_await(lua_State *L);
+int luaopen_await(lua_State *restrict L);
 
 #endif /* RULESET_AWAIT_H */

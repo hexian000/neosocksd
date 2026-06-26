@@ -18,18 +18,16 @@
 
 #include "dialer.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
 #include "utils/testing.h"
 
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
+
 #include <arpa/inet.h>
-
 #include <netinet/in.h>
-
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* -------------------------------------------------------------------------
@@ -298,20 +296,23 @@ T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(base_aux_newweaktable_v),
+	T_CASE(base_aux_newweaktable_k),
+	T_CASE(base_aux_toclose_sets_gc),
+	T_CASE(base_aux_close_behavior),
+	T_CASE(base_aux_format_addr_ipv4),
+	T_CASE(base_aux_format_addr_ipv6),
+	T_CASE(base_aux_format_addr_null),
+	T_CASE(base_aux_format_addr_unknown_family),
+	T_CASE(base_aux_traceback_string),
+	T_CASE(base_aux_todialreq_builds_request),
+	T_CASE(base_aux_todialreq_nil_returns_null),
+	T_CASE(base_aux_async_reuses_idle_thread),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, base_aux_newweaktable_v);
-	T_RUN_CASE(t, base_aux_newweaktable_k);
-	T_RUN_CASE(t, base_aux_toclose_sets_gc);
-	T_RUN_CASE(t, base_aux_close_behavior);
-	T_RUN_CASE(t, base_aux_format_addr_ipv4);
-	T_RUN_CASE(t, base_aux_format_addr_ipv6);
-	T_RUN_CASE(t, base_aux_format_addr_null);
-	T_RUN_CASE(t, base_aux_format_addr_unknown_family);
-	T_RUN_CASE(t, base_aux_traceback_string);
-	T_RUN_CASE(t, base_aux_todialreq_builds_request);
-	T_RUN_CASE(t, base_aux_todialreq_nil_returns_null);
-	T_RUN_CASE(t, base_aux_async_reuses_idle_thread);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

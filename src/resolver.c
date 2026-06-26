@@ -16,6 +16,7 @@
 
 #include <ares.h>
 #endif
+
 #include <ev.h>
 
 #include <netinet/in.h>
@@ -24,10 +25,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #if WITH_CARES
 #include <sys/time.h>
 #endif
-#include <sys/socket.h>
 
 struct io_node {
 	ev_io watcher;
@@ -91,7 +92,7 @@ finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 static void
 socket_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 {
-	UNUSED(loop);
+	(void)loop;
 	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
 	struct resolver *restrict r = watcher->data;
 	const int fd = watcher->fd;
@@ -149,7 +150,7 @@ timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 	/* Process c-ares timeouts (no specific sockets) */
 	ares_process_fd(r->channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
 
-	size_t num_purged = purge_watchers(r);
+	const size_t num_purged = purge_watchers(r);
 	if (num_purged > 0) {
 		LOGD_F("resolve: %zu inactive watchers purged", num_purged);
 	}
@@ -246,7 +247,7 @@ static void addrinfo_cb(
 	void *arg, const int status, const int timeouts,
 	struct ares_addrinfo *info)
 {
-	UNUSED(timeouts);
+	(void)timeouts;
 	struct resolve_query *restrict q = arg;
 
 	switch (status) {
@@ -291,24 +292,6 @@ void resolver_cleanup(void)
 #endif
 }
 
-void resolver_free(struct resolver *restrict r)
-{
-	if (r == NULL) {
-		return;
-	}
-#if WITH_CARES
-	if (r->async_enabled) {
-		ares_destroy(r->channel);
-		(void)purge_watchers(r);
-
-		ASSERT(!ev_is_active(&r->sockets.watcher));
-		ASSERT(!ev_is_pending(&r->sockets.watcher));
-		ASSERT(r->sockets.next == NULL);
-	}
-#endif
-	free(r);
-}
-
 #if WITH_CARES
 static bool resolver_async_init(
 	struct resolver *restrict r, const struct config *restrict conf)
@@ -327,7 +310,7 @@ static bool resolver_async_init(
 	ev_timer_init(&r->w_timeout, timeout_cb, 0.0, 0.0);
 	r->w_timeout.data = r;
 
-	const char *nameserver = conf->nameserver;
+	const char *const nameserver = conf->nameserver;
 	if (nameserver == NULL) {
 		return true;
 	}
@@ -364,7 +347,7 @@ resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf)
 
 	r->async_enabled = resolver_async_init(r, conf);
 #else
-	UNUSED(conf);
+	(void)conf;
 #endif /* WITH_CARES */
 	return r;
 }
@@ -372,6 +355,24 @@ resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf)
 const struct resolver_stats *resolver_stats(const struct resolver *restrict r)
 {
 	return &r->stats;
+}
+
+void resolver_free(struct resolver *restrict r)
+{
+	if (r == NULL) {
+		return;
+	}
+#if WITH_CARES
+	if (r->async_enabled) {
+		ares_destroy(r->channel);
+		(void)purge_watchers(r);
+
+		ASSERT(!ev_is_active(&r->sockets.watcher));
+		ASSERT(!ev_is_pending(&r->sockets.watcher));
+		ASSERT(r->sockets.next == NULL);
+	}
+#endif /* WITH_CARES */
+	free(r);
 }
 
 static void

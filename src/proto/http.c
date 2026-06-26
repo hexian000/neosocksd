@@ -45,6 +45,57 @@ static int hex_digit(const unsigned char c)
 	return -1;
 }
 
+void http_conn_init(
+	struct http_conn *restrict p, const int fd,
+	const enum http_conn_state mode,
+	const struct http_parsehdr_cb on_header, uint_least64_t *const byt_recv,
+	uint_least64_t *const byt_sent)
+{
+	p->state = mode;
+	p->mode = mode;
+	p->http_status = HTTP_BAD_REQUEST;
+	p->fd = fd;
+
+	p->msg = (struct http_message){ 0 };
+	p->next = NULL;
+	p->expect_continue = false;
+
+	p->hdr = (struct http_headers){ 0 };
+	p->on_header = on_header;
+
+	p->wpos = p->cpos = 0;
+	p->cbuf = NULL;
+
+	BUF_INIT(p->rbuf, 0);
+	BUF_INIT(p->wbuf, 0);
+	p->byt_recv = byt_recv;
+	p->byt_sent = byt_sent;
+}
+
+void http_body_init(
+	struct http_body *restrict d, const enum http_body_mode mode,
+	const size_t content_length)
+{
+	*d = (struct http_body){
+		.mode = mode,
+	};
+	switch (mode) {
+	case HTTP_BODY_NONE:
+		d->done = true;
+		return;
+	case HTTP_BODY_CONTENT_LENGTH:
+		d->content_length = content_length;
+		d->done = (content_length == 0);
+		return;
+	case HTTP_BODY_CHUNKED:
+		d->chunk_state = HTTP_BODY_CHUNK_SIZE_LINE;
+		return;
+	case HTTP_BODY_EOF:
+		return;
+	}
+	FAILMSG("unexpected http body mode");
+}
+
 static bool
 parse_chunk_size_line(const char *restrict line, size_t *restrict out_size)
 {
@@ -74,30 +125,6 @@ parse_chunk_size_line(const char *restrict line, size_t *restrict out_size)
 	}
 	*out_size = (size_t)v;
 	return true;
-}
-
-void http_body_init(
-	struct http_body *restrict d, const enum http_body_mode mode,
-	const size_t content_length)
-{
-	*d = (struct http_body){
-		.mode = mode,
-	};
-	switch (mode) {
-	case HTTP_BODY_NONE:
-		d->done = true;
-		return;
-	case HTTP_BODY_CONTENT_LENGTH:
-		d->content_length = content_length;
-		d->done = (content_length == 0);
-		return;
-	case HTTP_BODY_CHUNKED:
-		d->chunk_state = HTTP_BODY_CHUNK_SIZE_LINE;
-		return;
-	case HTTP_BODY_EOF:
-		return;
-	}
-	FAILMSG("unexpected http body mode");
 }
 
 bool http_body_consume(
@@ -245,29 +272,9 @@ void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 	LOG_STACK_F(VERBOSE, 0, "http: response error page %" PRIuFAST16, code);
 }
 
-/* send a short message directly to the socket, bypassing the buffers */
-static bool reply_short(struct http_conn *restrict p, const char *s)
-{
-	const size_t n = strlen(s);
-	ASSERT(n < 256);
-	LOG_BIN_F(VERBOSE, s, n, 0, "reply_short: [fd:%d] %zu bytes", p->fd, n);
-
-	const ssize_t nsend = send(p->fd, s, n, 0);
-	if (nsend < 0) {
-		const int err = errno;
-		LOGW_F("send: [fd:%d] (%d) %s", p->fd, err, strerror(err));
-		return false;
-	}
-	if ((size_t)nsend != n) {
-		LOGW_F("send: [fd:%d] short send %zu < %zu", p->fd,
-		       (size_t)nsend, n);
-		return false;
-	}
-	return true;
-}
-
 struct stream *content_reader(
-	const void *buf, size_t len, const enum content_encodings encoding)
+	const void *restrict buf, const size_t len,
+	const enum content_encodings encoding)
 {
 	struct stream *r = NULL;
 
@@ -413,6 +420,27 @@ static int parse_header(struct http_conn *restrict p)
 		return 0;
 	}
 	return 0;
+}
+
+/* send a short message directly to the socket, bypassing the buffers */
+static bool reply_short(struct http_conn *restrict p, const char *s)
+{
+	const size_t n = strlen(s);
+	ASSERT(n < 256);
+	LOG_BIN_F(VERBOSE, s, n, 0, "reply_short: [fd:%d] %zu bytes", p->fd, n);
+
+	const ssize_t nsend = send(p->fd, s, n, 0);
+	if (nsend < 0) {
+		const int err = errno;
+		LOGW_F("send: [fd:%d] (%d) %s", p->fd, err, strerror(err));
+		return false;
+	}
+	if ((size_t)nsend != n) {
+		LOGW_F("send: [fd:%d] short send %zu < %zu", p->fd,
+		       (size_t)nsend, n);
+		return false;
+	}
+	return true;
 }
 
 static int parse_content(struct http_conn *restrict p)
@@ -768,31 +796,4 @@ const char *parsehdr_connection_token(
 	*tok = start;
 	*toklen = (size_t)(p - start);
 	return p;
-}
-
-void http_conn_init(
-	struct http_conn *restrict p, const int fd,
-	const enum http_conn_state mode,
-	const struct http_parsehdr_cb on_header, uint_least64_t *const byt_recv,
-	uint_least64_t *const byt_sent)
-{
-	p->state = mode;
-	p->mode = mode;
-	p->http_status = HTTP_BAD_REQUEST;
-	p->fd = fd;
-
-	p->msg = (struct http_message){ 0 };
-	p->next = NULL;
-	p->expect_continue = false;
-
-	p->hdr = (struct http_headers){ 0 };
-	p->on_header = on_header;
-
-	p->wpos = p->cpos = 0;
-	p->cbuf = NULL;
-
-	BUF_INIT(p->rbuf, 0);
-	BUF_INIT(p->wbuf, 0);
-	p->byt_recv = byt_recv;
-	p->byt_sent = byt_sent;
 }

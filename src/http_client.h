@@ -5,16 +5,13 @@
 #define HTTP_CLIENT_H
 
 #include "dialer.h"
+
 #include "proto/http.h"
 
 #include <ev.h>
 
 #include <stdbool.h>
 #include <stddef.h>
-
-struct config;
-struct dialreq;
-struct resolver;
 
 enum http_client_state {
 	STATE_CLIENT_INIT,
@@ -54,8 +51,8 @@ void http_client_init(
 
 /* Takes ownership of req. */
 void http_client_do(
-	struct ev_loop *loop, struct http_client_ctx *ctx, struct dialreq *req);
+	struct http_client_ctx *ctx, struct ev_loop *loop, struct dialreq *req);
 
-void http_client_cancel(struct ev_loop *loop, struct http_client_ctx *ctx);
+void http_client_cancel(struct http_client_ctx *ctx, struct ev_loop *loop);
 
 #endif /* HTTP_CLIENT_H */

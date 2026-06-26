@@ -1,17 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/*
- * api_server_test - white-box unit tests for api_server.c.
- *
- * Linked translation units (see CMakeLists.txt):
- *   api_server.c     module under test
- *   proto/http.c     leaf (HTTP message framing)
- *   proto/codec.c    leaf (transfer codecs)
- *   version.c        leaf (neosocksd_version)
- * All stateful collaborators of api_server.c (server, ruleset, resolver) are
- * replaced by the mocks in the mock section below.
- */
+/* Unit tests for api_server.c; mocked: server, ruleset, resolver. */
 
 #include "api_server.h"
 
@@ -26,17 +16,17 @@
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <errno.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (server, ruleset, resolver) and shared fixtures.
@@ -308,43 +298,7 @@ const char *ruleset_metrics(struct ruleset *restrict r, size_t *len)
 	}
 	return RS.metrics_str;
 }
-#endif
-
-static int write_all(const int fd, const void *buf, size_t len)
-{
-	const unsigned char *p = buf;
-	while (len > 0) {
-		const ssize_t n = write(fd, p, len);
-		if (n < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			return -1;
-		}
-		if (n == 0) {
-			return -1;
-		}
-		p += (size_t)n;
-		len -= (size_t)n;
-	}
-	return 0;
-}
-
-static bool find_bytes(
-	const unsigned char *restrict haystack, const size_t haystack_len,
-	const char *restrict needle)
-{
-	const size_t needle_len = strlen(needle);
-	if (needle_len == 0 || haystack_len < needle_len) {
-		return false;
-	}
-	for (size_t i = 0; i + needle_len <= haystack_len; i++) {
-		if (memcmp(haystack + i, needle, needle_len) == 0) {
-			return true;
-		}
-	}
-	return false;
-}
+#endif /* WITH_RULESET */
 
 struct test_watchdog {
 	bool fired;
@@ -366,43 +320,6 @@ test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	(void)loop;
 	(void)w;
 	(void)revents;
-}
-
-static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
-{
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired) {
-		ev_run(loop, EVRUN_ONCE);
-	}
-	ev_timer_stop(loop, &w_timeout);
-}
-
-static bool test_wait_until(
-	struct ev_loop *loop, bool (*predicate)(void *), void *data,
-	const ev_tstamp timeout_sec)
-{
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired && !predicate(data)) {
-		ev_run(loop, EVRUN_ONCE);
-	}
-	ev_timer_stop(loop, &w_timeout);
-	return predicate(data);
-}
-
-static bool ruleset_rpcall_pending(void *data)
-{
-	(void)data;
-	return RS.pending_rpcall != NULL;
 }
 
 static ssize_t recv_all_with_timeout(
@@ -449,6 +366,43 @@ static ssize_t recv_all_with_timeout(
 	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	return (ssize_t)off;
+}
+
+static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
+{
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	while (!watchdog.fired) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	ev_timer_stop(loop, &w_timeout);
+}
+
+static bool test_wait_until(
+	struct ev_loop *loop, bool (*predicate)(void *), void *data,
+	const ev_tstamp timeout_sec)
+{
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+
+	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	while (!watchdog.fired && !predicate(data)) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	ev_timer_stop(loop, &w_timeout);
+	return predicate(data);
+}
+
+static bool ruleset_rpcall_pending(void *data)
+{
+	(void)data;
+	return RS.pending_rpcall != NULL;
 }
 
 static void init_server_pair(
@@ -515,9 +469,45 @@ static void start_api(
 	*peer_fd = sv[1];
 }
 
+static int write_all(const int fd, const void *buf, size_t len)
+{
+	const unsigned char *p = buf;
+	while (len > 0) {
+		const ssize_t n = write(fd, p, len);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return -1;
+		}
+		if (n == 0) {
+			return -1;
+		}
+		p += (size_t)n;
+		len -= (size_t)n;
+	}
+	return 0;
+}
+
 static bool send_request(const int peer_fd, const char *restrict req)
 {
 	return write_all(peer_fd, req, strlen(req)) == 0;
+}
+
+static bool find_bytes(
+	const unsigned char *restrict haystack, const size_t haystack_len,
+	const char *restrict needle)
+{
+	const size_t needle_len = strlen(needle);
+	if (needle_len == 0 || haystack_len < needle_len) {
+		return false;
+	}
+	for (size_t i = 0; i + needle_len <= haystack_len; i++) {
+		if (memcmp(haystack + i, needle, needle_len) == 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static bool assert_status(
@@ -1262,7 +1252,7 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 }
-#endif
+#endif /* WITH_RULESET */
 
 /* -------------------------------------------------------------------------
  * bench - none.
@@ -1272,37 +1262,37 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
-{
-	T_DECLARE_CTX(t);
-
-	T_RUN_CASE(t, healthy_keepalive_reuse_connection);
-	T_RUN_CASE(t, healthy_connection_close_header);
-	T_RUN_CASE(t, api_stats_do_not_pollute_proxy_stats_in_unified_server);
-	T_RUN_CASE(t, metrics_keep_proxy_and_api_request_totals_separate);
-	T_RUN_CASE(t, metrics_unsupported_accept_encoding_and_te_returns_200);
-	T_RUN_CASE(t, metrics_appends_ruleset_metrics_when_defined);
-	T_RUN_CASE(t, stats_get_ok_with_nocache);
-	T_RUN_CASE(t, stats_output_format_has_no_raw_specifiers);
-	T_RUN_CASE(t, stats_post_ok_without_nocache);
-	T_RUN_CASE(t, stats_bad_method_405);
-	T_RUN_CASE(t, stats_bad_query_400);
-	T_RUN_CASE(t, stats_deflate_response_header);
-	T_RUN_CASE(t, not_found_404);
-	T_RUN_CASE(t, stats_connect_latency_shows_percentiles);
-	T_RUN_CASE(t, stats_nobanner_option_suppresses_banner);
-
+static const struct testing_suite suite[] = {
+	T_CASE(healthy_keepalive_reuse_connection),
+	T_CASE(healthy_connection_close_header),
+	T_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server),
+	T_CASE(metrics_keep_proxy_and_api_request_totals_separate),
+	T_CASE(metrics_unsupported_accept_encoding_and_te_returns_200),
+	T_CASE(metrics_appends_ruleset_metrics_when_defined),
+	T_CASE(stats_get_ok_with_nocache),
+	T_CASE(stats_output_format_has_no_raw_specifiers),
+	T_CASE(stats_post_ok_without_nocache),
+	T_CASE(stats_bad_method_405),
+	T_CASE(stats_bad_query_400),
+	T_CASE(stats_deflate_response_header),
+	T_CASE(not_found_404),
+	T_CASE(stats_connect_latency_shows_percentiles),
+	T_CASE(stats_nobanner_option_suppresses_banner),
 #if WITH_RULESET
-	T_RUN_CASE(t, stats_post_with_ruleset_q);
-	T_RUN_CASE(t, ruleset_disabled_returns_500);
-	T_RUN_CASE(t, ruleset_invoke_ok_200);
-	T_RUN_CASE(t, ruleset_invoke_length_required_411);
-	T_RUN_CASE(t, ruleset_update_ok_contains_time_cost);
-	T_RUN_CASE(t, ruleset_gc_ok_contains_report);
-	T_RUN_CASE(t, ruleset_rpcall_bad_mime_400);
-	T_RUN_CASE(t, ruleset_rpcall_ok_deflate_response);
-	T_RUN_CASE(t, ruleset_rpcall_sync_fail_500);
-#endif
+	T_CASE(stats_post_with_ruleset_q),
+	T_CASE(ruleset_disabled_returns_500),
+	T_CASE(ruleset_invoke_ok_200),
+	T_CASE(ruleset_invoke_length_required_411),
+	T_CASE(ruleset_update_ok_contains_time_cost),
+	T_CASE(ruleset_gc_ok_contains_report),
+	T_CASE(ruleset_rpcall_bad_mime_400),
+	T_CASE(ruleset_rpcall_ok_deflate_response),
+	T_CASE(ruleset_rpcall_sync_fail_500),
+#endif /* WITH_RULESET */
+	T_SUITE_END,
+};
 
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+int main(int argc, char **argv)
+{
+	return testing_main(argc, argv, suite);
 }

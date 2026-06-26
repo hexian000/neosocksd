@@ -13,22 +13,22 @@
 
 #include "ruleset/api.h"
 
-#include "ruleset/base.h"
-
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
+#include "ruleset/base.h"
 #include "server.h"
 #include "util.h"
 
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
+#include "utils/arraysize.h"
 #include "utils/testing.h"
 
-#include <arpa/inet.h>
+#include <lauxlib.h>
+#include <lua.h>
+#include <lualib.h>
 
+#include <arpa/inet.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -359,7 +359,7 @@ T_DECLARE_CASE(api_module_opens)
 		"parse_ipv4",	 "parse_ipv6", "resolve",   "setinterval",
 		"splithostport", "stats",      "traceback",
 	};
-	for (size_t i = 0; i < sizeof(fns) / sizeof(fns[0]); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(fns); i++) {
 		lua_getfield(L, -1, fns[i]);
 		T_EXPECT(lua_isfunction(L, -1));
 		lua_pop(L, 1);
@@ -416,7 +416,7 @@ T_DECLARE_CASE(api_parse_ipv6_valid)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), (lua_Integer)0);
 	T_EXPECT_EQ(lua_tointeger(L, 2), (lua_Integer)1);
-#endif
+#endif /* LUA_32BITS */
 
 	lua_close(L);
 }
@@ -656,21 +656,24 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(api_module_opens),
+	T_CASE(api_parse_ipv4_valid),
+	T_CASE(api_parse_ipv4_invalid),
+	T_CASE(api_parse_ipv6_valid),
+	T_CASE(api_parse_ipv6_invalid),
+	T_CASE(api_splithostport_simple),
+	T_CASE(api_splithostport_ipv6),
+	T_CASE(api_splithostport_invalid),
+	T_CASE(api_splithostport_too_long),
+	T_CASE(api_traceback_string),
+	T_CASE(api_config_reflects_ruleset_conf),
+	T_CASE(api_stats_now_and_setinterval_use_ruleset_state),
+	T_CASE(api_invoke_and_async_real_paths),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, api_module_opens);
-	T_RUN_CASE(t, api_parse_ipv4_valid);
-	T_RUN_CASE(t, api_parse_ipv4_invalid);
-	T_RUN_CASE(t, api_parse_ipv6_valid);
-	T_RUN_CASE(t, api_parse_ipv6_invalid);
-	T_RUN_CASE(t, api_splithostport_simple);
-	T_RUN_CASE(t, api_splithostport_ipv6);
-	T_RUN_CASE(t, api_splithostport_invalid);
-	T_RUN_CASE(t, api_splithostport_too_long);
-	T_RUN_CASE(t, api_traceback_string);
-	T_RUN_CASE(t, api_config_reflects_ruleset_conf);
-	T_RUN_CASE(t, api_stats_now_and_setinterval_use_ruleset_state);
-	T_RUN_CASE(t, api_invoke_and_async_real_paths);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

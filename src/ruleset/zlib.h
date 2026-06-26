@@ -6,6 +6,6 @@
 
 #include <lua.h>
 
-int luaopen_zlib(lua_State *L);
+int luaopen_zlib(lua_State *restrict L);
 
 #endif /* RULESET_ZLIB_H */

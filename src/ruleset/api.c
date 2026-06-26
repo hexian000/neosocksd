@@ -17,6 +17,7 @@
 #include "utils/serialize.h"
 
 #include <ev.h>
+
 #include <lauxlib.h>
 #include <lua.h>
 
@@ -34,7 +35,7 @@ static int api_async(lua_State *restrict L)
 	luaL_checktype(L, 1, LUA_TFUNCTION);
 	luaL_checkany(L, 2);
 	const int narg = lua_gettop(L) - 2;
-	lua_State *restrict co = aux_getthread(L);
+	lua_State *restrict const co = aux_getthread(L);
 	lua_insert(L, 1);
 	const int status = aux_async(co, L, narg, 2);
 	if (status != LUA_OK && status != LUA_YIELD) {
@@ -55,7 +56,7 @@ static int api_invoke(lua_State *restrict L)
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
-	struct dialreq *restrict req = lua_touserdata(L, -1);
+	struct dialreq *restrict const req = lua_touserdata(L, -1);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
@@ -70,7 +71,7 @@ static int api_invoke(lua_State *restrict L)
 /* neosocksd.resolve(host) */
 static int api_resolve(lua_State *restrict L)
 {
-	const char *restrict name = luaL_checkstring(L, 1);
+	const char *restrict const name = luaL_checkstring(L, 1);
 	const struct ruleset *restrict r = aux_getruleset(L);
 	union sockaddr_max addr;
 	if (!sa_resolve(
@@ -84,7 +85,7 @@ static int api_resolve(lua_State *restrict L)
 /* neosocksd.parse_ipv4(ipv4) */
 static int api_parse_ipv4(lua_State *restrict L)
 {
-	const char *restrict s = lua_tostring(L, 1);
+	const char *restrict const s = lua_tostring(L, 1);
 	if (s == NULL) {
 		return 0;
 	}
@@ -99,7 +100,7 @@ static int api_parse_ipv4(lua_State *restrict L)
 /* neosocksd.parse_ipv6(ipv6) */
 static int api_parse_ipv6(lua_State *restrict L)
 {
-	const char *restrict s = lua_tostring(L, 1);
+	const char *restrict const s = lua_tostring(L, 1);
 	if (s == NULL) {
 		return 0;
 	}
@@ -107,7 +108,7 @@ static int api_parse_ipv6(lua_State *restrict L)
 	if (inet_pton(AF_INET6, s, &in6) != 1) {
 		return 0;
 	}
-	const uint_least8_t *addr = (const void *)&in6;
+	const uint_least8_t *const addr = (const void *)&in6;
 #if LUA_32BITS
 	lua_pushinteger(L, (lua_Integer)read_uint32(addr));
 	lua_pushinteger(L, (lua_Integer)read_uint32(addr + 4));
@@ -125,7 +126,7 @@ static int api_parse_ipv6(lua_State *restrict L)
 static int api_setinterval(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TNUMBER);
-	double interval = lua_tonumber(L, 1);
+	const double interval = lua_tonumber(L, 1);
 
 	struct ruleset *restrict r = aux_getruleset(L);
 	ev_timer_stop(r->loop, &r->w_ticker);
@@ -148,7 +149,7 @@ static int api_setinterval(lua_State *restrict L)
 static int api_splithostport(lua_State *restrict L)
 {
 	size_t len;
-	const char *restrict s = luaL_checklstring(L, 1, &len);
+	const char *restrict const s = luaL_checklstring(L, 1, &len);
 	/* FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")) {
 		(void)lua_pushfstring(

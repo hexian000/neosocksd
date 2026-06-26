@@ -1,18 +1,6 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/*
- * State Machine Flow:
- * 1. STATE_INIT -> STATE_RESOLVE (for domain names) or STATE_CONNECT (for IPs)
- * 2. STATE_RESOLVE -> STATE_CONNECT (after DNS resolution)
- * 3. STATE_CONNECT -> STATE_HANDSHAKE1 (connection established, start proxy handshake)
- * 4. STATE_HANDSHAKE1 -> STATE_HANDSHAKE2 (SOCKS5 auth) or STATE_HANDSHAKE3 (direct to request)
- * 5. STATE_HANDSHAKE2 -> STATE_HANDSHAKE3 (SOCKS5 after auth)
- * 6. STATE_HANDSHAKE3 -> next proxy or STATE_DONE
- *
- * The dialer can traverse multiple proxies in sequence.
- */
-
 #include "dialer.h"
 
 #include "conf.h"
@@ -54,28 +42,6 @@ char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
 };
-
-static const char *dialer_error_strs[DIALER_ERR_MAX] = {
-	[DIALER_OK] = "success",
-	[DIALER_CANCELLED] = "operation cancelled",
-	[DIALER_ERR_SYSTEM] = "system error",
-	[DIALER_ERR_RESOLVE] = "name resolution failed",
-	[DIALER_ERR_CONNECT] = "connection failed",
-	[DIALER_ERR_PROXY_PROTO] = "proxy protocol error",
-	[DIALER_ERR_PROXY_AUTH] = "proxy authentication failed",
-	[DIALER_ERR_PROXY_REFUSED] = "proxy refused connection",
-	[DIALER_ERR_PROXY_REJECT] = "request rejected by proxy",
-	[DIALER_ERR_EOF] = "unexpected end of connection",
-	[DIALER_ERR_BLOCKED] = "connection blocked by policy",
-};
-
-const char *dialer_strerror(const enum dialer_error err)
-{
-	if (err < DIALER_ERR_MAX && dialer_error_strs[err] != NULL) {
-		return dialer_error_strs[err];
-	}
-	return "unknown error";
-}
 
 static bool dialaddr_sethostport(
 	struct dialaddr *restrict addr, const char *restrict host,
@@ -207,6 +173,31 @@ int dialaddr_format(
 	FAILMSGF("unexpected address type: %d", addr->type);
 }
 
+static const char *dialer_error_strs[DIALER_ERR_MAX] = {
+	[DIALER_OK] = "success",
+	[DIALER_CANCELLED] = "operation cancelled",
+	[DIALER_ERR_SYSTEM] = "system error",
+	[DIALER_ERR_RESOLVE] = "name resolution failed",
+	[DIALER_ERR_CONNECT] = "connection failed",
+	[DIALER_ERR_PROXY_PROTO] = "proxy protocol error",
+	[DIALER_ERR_PROXY_AUTH] = "proxy authentication failed",
+	[DIALER_ERR_PROXY_REFUSED] = "proxy refused connection",
+	[DIALER_ERR_PROXY_REJECT] = "request rejected by proxy",
+	[DIALER_ERR_EOF] = "unexpected end of connection",
+	[DIALER_ERR_BLOCKED] = "connection blocked by policy",
+};
+
+const char *dialer_strerror(const enum dialer_error err)
+{
+	if (err < DIALER_ERR_MAX && dialer_error_strs[err] != NULL) {
+		return dialer_error_strs[err];
+	}
+	return "unknown error";
+}
+
+#define DIALREQ_NEW(n)                                                         \
+	(malloc(sizeof(struct dialreq) + sizeof(struct proxyreq) * (n)))
+
 static bool proxy_set_credential(
 	struct proxyreq *restrict proxy, const char *restrict username,
 	const char *restrict password)
@@ -229,6 +220,33 @@ static bool proxy_set_credential(
 		proxy->password = NULL;
 	}
 	return true;
+}
+
+static void
+proxy_copy(struct proxyreq *restrict dst, const struct proxyreq *restrict src)
+{
+	dst->proto = src->proto;
+	dialaddr_copy(&dst->addr, &src->addr);
+	(void)proxy_set_credential(dst, src->username, src->password);
+}
+
+struct dialreq *
+dialreq_new(const struct dialreq *restrict base, const size_t num_proxy)
+{
+	const size_t num_base_proxy = (base != NULL) ? base->num_proxy : 0;
+	struct dialreq *restrict req = DIALREQ_NEW(num_base_proxy + num_proxy);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	req->num_proxy = num_base_proxy;
+	if (base != NULL) {
+		dialaddr_copy(&req->addr, &base->addr);
+		for (size_t i = 0; i < num_base_proxy; i++) {
+			proxy_copy(&req->proxy[i], &base->proxy[i]);
+		}
+	}
+	return req;
 }
 
 bool dialreq_addproxy(
@@ -298,9 +316,6 @@ bool dialreq_addproxy(
 	return true;
 }
 
-#define DIALREQ_NEW(n)                                                         \
-	(malloc(sizeof(struct dialreq) + sizeof(struct proxyreq) * (n)))
-
 struct dialreq *
 dialreq_parse(const char *restrict addr, const char *restrict csv)
 {
@@ -335,7 +350,7 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 	}
 	req->num_proxy = 0;
 	if (n > 0) {
-		ASSERT(len < (1u << 16));
+		ASSERT(len <= UINT16_MAX);
 		char buf[len + 1];
 		(void)memcpy(buf, csv, len + 1);
 		for (const char *tok = strtok(buf, ","); tok != NULL;
@@ -347,14 +362,6 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 		}
 	}
 	return req;
-}
-
-static void
-proxy_copy(struct proxyreq *restrict dst, const struct proxyreq *restrict src)
-{
-	dst->proto = src->proto;
-	dialaddr_copy(&dst->addr, &src->addr);
-	(void)proxy_set_credential(dst, src->username, src->password);
 }
 
 static int format_proxyreq(
@@ -408,25 +415,6 @@ int dialreq_format(
 	}
 	n += ret;
 	return n;
-}
-
-struct dialreq *
-dialreq_new(const struct dialreq *restrict base, const size_t num_proxy)
-{
-	const size_t num_base_proxy = (base != NULL) ? base->num_proxy : 0;
-	struct dialreq *restrict req = DIALREQ_NEW(num_base_proxy + num_proxy);
-	if (req == NULL) {
-		LOGOOM();
-		return NULL;
-	}
-	req->num_proxy = num_base_proxy;
-	if (base != NULL) {
-		dialaddr_copy(&req->addr, &base->addr);
-		for (size_t i = 0; i < num_base_proxy; i++) {
-			proxy_copy(&req->proxy[i], &base->proxy[i]);
-		}
-	}
-	return req;
 }
 
 void dialreq_free(struct dialreq *restrict req)
@@ -1486,7 +1474,7 @@ static void resolve_cb(
 {
 	struct dialer *restrict d = ctx;
 	ASSERT(q == d->resolve_query);
-	UNUSED(q);
+	(void)q;
 	d->resolve_query = NULL;
 
 	const struct dialaddr *restrict dialaddr =
@@ -1525,6 +1513,30 @@ static void resolve_cb(
 		ev_invoke(loop, &d->w_finish, EV_CUSTOM);
 		return;
 	}
+}
+
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uint_least64_t *const byt_sent, uint_least64_t *const byt_recv)
+{
+	d->req = NULL;
+	d->resolve_query = NULL;
+	d->jump = 0;
+	d->state = STATE_INIT;
+	d->err = DIALER_OK;
+	d->syserr = 0;
+
+	ev_io_init(&d->w_socket, socket_cb, -1, EV_NONE);
+	d->w_socket.data = d;
+	d->dialed_fd = -1;
+	ev_init(&d->w_finish, finish_cb);
+	d->w_finish.data = d;
+
+	d->finish_cb = *callback;
+	d->byt_sent = byt_sent;
+	d->byt_recv = byt_recv;
+	d->next = d->rbuf.data;
+	BUF_INIT(d->rbuf, 0);
 }
 
 static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
@@ -1577,30 +1589,6 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 	default:
 		FAILMSGF("unexpected address type: %d", addr->type);
 	}
-}
-
-void dialer_init(
-	struct dialer *restrict d, const struct dialer_cb *callback,
-	uint_least64_t *const byt_sent, uint_least64_t *const byt_recv)
-{
-	d->req = NULL;
-	d->resolve_query = NULL;
-	d->jump = 0;
-	d->state = STATE_INIT;
-	d->err = DIALER_OK;
-	d->syserr = 0;
-
-	ev_io_init(&d->w_socket, socket_cb, -1, EV_NONE);
-	d->w_socket.data = d;
-	d->dialed_fd = -1;
-	ev_init(&d->w_finish, finish_cb);
-	d->w_finish.data = d;
-
-	d->finish_cb = *callback;
-	d->byt_sent = byt_sent;
-	d->byt_recv = byt_recv;
-	d->next = d->rbuf.data;
-	BUF_INIT(d->rbuf, 0);
 }
 
 void dialer_do(

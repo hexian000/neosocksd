@@ -6,6 +6,6 @@
 
 #include <lua.h>
 
-int luaopen_marshal(lua_State *L);
+int luaopen_marshal(lua_State *restrict L);
 
 #endif /* RULESET_MARSHAL_H */

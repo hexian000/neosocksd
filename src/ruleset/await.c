@@ -18,6 +18,7 @@
 #include "utils/slog.h"
 
 #include <ev.h>
+
 #include <lauxlib.h>
 #include <lua.h>
 
@@ -104,8 +105,8 @@ static int
 await_sleep_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
-	UNUSED(status);
-	UNUSED(ctx);
+	(void)status;
+	(void)ctx;
 	/* lua stack: ud */
 	ASSERT(lua_gettop(L) == 1);
 	aux_close(L, 1);
@@ -169,7 +170,7 @@ static void resolve_cb(
 {
 	struct await_resolve_userdata *restrict ud = data;
 	ASSERT(ud->query == q);
-	UNUSED(q);
+	(void)q;
 	ud->query = NULL;
 	sa_copy(&ud->sa.sa, sa);
 	ev_idle_start(loop, &ud->w_idle);
@@ -189,8 +190,8 @@ static int
 await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
-	UNUSED(status);
-	UNUSED(ctx);
+	(void)status;
+	(void)ctx;
 	/* lua stack: hostname ud sa */
 	ASSERT(lua_gettop(L) == 3);
 	aux_close(L, 2);
@@ -252,10 +253,10 @@ static void invoke_cb(
 	struct api_client_ctx *ctx, struct ev_loop *loop, void *data,
 	const char *err, const size_t errlen, struct stream *stream)
 {
-	UNUSED(loop);
+	(void)loop;
 	struct await_invoke_userdata *restrict ud = data;
 	ASSERT(ud->ctx == ctx);
-	UNUSED(ctx);
+	(void)ctx;
 	ud->ctx = NULL;
 	ruleset_resume(
 		ud->ruleset, ud, 3, (void *)err, (void *)&errlen,
@@ -266,14 +267,14 @@ static int
 await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
-	UNUSED(status);
-	UNUSED(ctx);
+	(void)status;
+	(void)ctx;
 	/* lua stack: code ud *err *errlen *stream */
 	ASSERT(lua_gettop(L) == 5);
 	aux_close(L, 2);
-	const char *errmsg = lua_touserdata(L, 3);
+	const char *const errmsg = lua_touserdata(L, 3);
 	const size_t errlen = *(size_t *)lua_touserdata(L, 4);
-	struct stream *stream = lua_touserdata(L, 5);
+	struct stream *const stream = lua_touserdata(L, 5);
 	lua_settop(L, 0);
 
 	if (errmsg != NULL) {
@@ -291,9 +292,9 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	/* lua stack: ok chunk env mt _G */
 	lua_setfield(L, -2, "__index");
 	lua_setmetatable(L, -2);
-	const char *upvalue = lua_setupvalue(L, -2, 1);
+	const char *const upvalue = lua_setupvalue(L, -2, 1);
 	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
-	UNUSED(upvalue);
+	(void)upvalue;
 	return 2;
 }
 
@@ -302,13 +303,13 @@ static int await_invoke(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
 	size_t len;
-	const char *restrict code = luaL_checklstring(L, 1, &len);
+	const char *restrict const code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L) - 1;
 	if (!aux_todialreq(L, n)) {
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
-	struct dialreq *req = lua_touserdata(L, -1);
+	struct dialreq *const req = lua_touserdata(L, -1);
 	if (req == NULL) {
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
@@ -386,10 +387,7 @@ static void forward_dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	ruleset_resume(ud->ruleset, ud, 0);
 }
 
-/* The dialer has no internal timeout; it is normally bounded by the
- * originating session's half-open timeout. Once that session is cancelled the
- * dialer would otherwise run unbounded (a silent upstream during the proxy
- * handshake has no kernel timeout), so bound it here as well. */
+/* No kernel timeout during proxy handshake; bound it here. */
 static void
 forward_timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
@@ -409,8 +407,8 @@ static int
 await_forward_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
-	UNUSED(status);
-	UNUSED(ctx);
+	(void)status;
+	(void)ctx;
 	/* lua stack: ud */
 	ASSERT(lua_gettop(L) == 1);
 	struct await_forward_userdata *restrict ud = lua_touserdata(L, 1);
@@ -427,15 +425,14 @@ await_forward_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 			err = dialer_strerror(ud->dialer.err);
 		}
 	} else if (cb != NULL) {
-		/* hand the fd to the session; this may free it, so cb must not
-		 * be touched afterwards */
+		/* forward() may free cb; don't touch it afterwards */
 		const int fd = ud->fd;
 		ud->fd = -1;
 		cb->forward(ud->ruleset->loop, cb, fd);
-		state->cb = NULL; /* makes request_finish() a no-op */
+		state->cb = NULL;
 		ok = true;
 	} else {
-		/* session gone; await_forward_close() drops the fd */
+		/* session cancelled */
 		err = "request cancelled";
 	}
 
@@ -453,14 +450,14 @@ await_forward_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 static int await_forward(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
-	struct ruleset_state *restrict state = aux_getforward(L);
+	struct ruleset_state *restrict const state = aux_getforward(L);
 	if (state == NULL) {
 		lua_pushliteral(
 			L,
 			"await.forward must be called from a ruleset request handler");
 		return lua_error(L);
 	}
-	struct ruleset_callback *restrict cb = state->cb;
+	struct ruleset_callback *restrict const cb = state->cb;
 	if (cb == NULL || cb->forward == NULL) {
 		lua_pushliteral(
 			L, "await.forward: the request is not forwardable");
@@ -477,7 +474,7 @@ static int await_forward(lua_State *restrict L)
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
-	struct dialreq *restrict req = lua_touserdata(L, -1);
+	struct dialreq *restrict const req = lua_touserdata(L, -1);
 	if (req == NULL) {
 		/* reject: nil address */
 		lua_settop(L, 0);
@@ -568,8 +565,8 @@ static int
 await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 {
 	ASSERT(status == LUA_YIELD);
-	UNUSED(status);
-	UNUSED(ctx);
+	(void)status;
+	(void)ctx;
 	/* lua stack: command ud */
 	ASSERT(lua_gettop(L) == 2);
 	const struct await_execute_userdata *restrict ud = lua_touserdata(L, 2);
@@ -603,7 +600,7 @@ static int await_execute(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
 	size_t len;
-	const char *command = luaL_checklstring(L, 1, &len);
+	const char *const command = luaL_checklstring(L, 1, &len);
 	lua_settop(L, 1);
 
 	struct ruleset *restrict r = aux_getruleset(L);
@@ -619,7 +616,7 @@ static int await_execute(lua_State *restrict L)
 	const pid_t pid = fork();
 	if (pid < 0) {
 		const int err = errno;
-		const char *errmsg = strerror(err);
+		const char *const errmsg = strerror(err);
 		LOGW_F("fork: (%d) %s", err, errmsg);
 		lua_pushstring(L, errmsg);
 		return lua_error(L);
@@ -630,7 +627,7 @@ static int await_execute(lua_State *restrict L)
 			LOGW_F("setsid: (%d) %s", err, strerror(err));
 		}
 		const char *argv[] = { "sh", "-c", command, NULL };
-		execv("/bin/sh", (char **)argv);
+		execv("/bin/sh", (char *const *)argv);
 		const int err = errno;
 		FAILMSGF("execv: (%d) %s", err, strerror(err));
 	}

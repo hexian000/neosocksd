@@ -6,12 +6,8 @@
 
 /**
  * @file ruleset.h
- * @brief Lua-based ruleset engine
- *
- * This module provides a Lua-based scripting engine that allows dynamic
- * configuration and control of proxy routing behavior. The ruleset engine
- * can process connection requests, resolve domain names, route connections
- * through proxy chains, and provide runtime statistics.
+ * @brief Lua-based ruleset engine: route connections, resolve domains,
+ *        run RPC calls, and report runtime statistics.
  */
 
 #include <ev.h>
@@ -50,12 +46,7 @@ struct ruleset_vmstats {
 };
 
 /**
- * @brief Create a new ruleset instance
- *
- * Initializes a new Lua-based ruleset engine with the specified event loop.
- * The ruleset includes a Lua virtual machine with built-in libraries and
- * memory tracking capabilities.
- *
+ * @brief Create a new ruleset instance with a Lua VM.
  * @param loop Event loop for asynchronous operations
  * @param conf Configuration for the ruleset
  * @param resolver DNS resolver for name resolution
@@ -69,8 +60,7 @@ struct ruleset *ruleset_new(
 /**
  * @brief Attach the proxy server instance to the ruleset.
  *
- * Must be called after the main server is started so that Lua statistics
- * queries (neosocksd.stats()) can return live session counters.
+ * Must be called after the main server is started.
  *
  * @param r Ruleset instance
  * @param s Main proxy server (may be NULL to detach)
@@ -80,8 +70,6 @@ void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s);
 /**
  * @brief Replace the base dial request used for outbound connections.
  *
- * Used to keep the ruleset's base dial request in sync after the
- * configuration (and therefore the forward/proxy chain) is reloaded.
  * The ruleset does not take ownership of @p basereq.
  *
  * @param r Ruleset instance
@@ -91,34 +79,25 @@ void ruleset_setbasereq(
 	struct ruleset *restrict r, struct dialreq *restrict basereq);
 
 /**
- * @brief Free a ruleset instance
- *
- * Releases all resources associated with the ruleset, including the
- * Lua virtual machine and any pending operations.
- *
- * @param r Ruleset instance to free (may be NULL)
+ * @brief Free a ruleset instance. NULL-safe.
+ * @param r Ruleset instance to free
  */
 void ruleset_free(struct ruleset *restrict r);
 
 /**
- * @brief Get the last error message from the ruleset
+ * @brief Get the last error message from the ruleset.
  *
- * Retrieves the most recent error message from Lua script execution.
  * The returned string is valid until the next ruleset operation.
  *
  * @param r Ruleset instance
- * @param len Optional output parameter for message length
+ * @param len Optional output for message length
  * @return Error message string, or "(nil)" if no error
  */
 const char *
 ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len);
 
 /**
- * @brief Execute Lua code synchronously
- *
- * Runs the provided Lua script in the ruleset environment. This is a
- * synchronous operation that blocks until completion.
- *
+ * @brief Execute Lua code synchronously (blocks until completion).
  * @param r Ruleset instance
  * @param code Stream containing Lua script code
  * @return true on success, false on error
@@ -131,22 +110,13 @@ bool ruleset_invoke(struct ruleset *restrict r, struct stream *code);
 struct ruleset_state;
 
 /**
- * @brief Cancel an ongoing asynchronous ruleset operation
- *
- * Cancels a pending asynchronous operation and cleans up associated
- * resources. Safe to call even if the operation has already completed.
- *
+ * @brief Cancel an ongoing asynchronous ruleset operation. Idempotent.
  * @param loop Event loop
  * @param state Operation state to cancel
  */
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state);
 
-/**
- * @brief Callback structure for asynchronous ruleset operations
- *
- * Contains the result of an asynchronous ruleset operation and event
- * handling data. The callback is invoked when the operation completes.
- */
+/** @brief Callback structure for asynchronous ruleset operations */
 struct ruleset_callback {
 	ev_watcher w_finish;
 	union {
@@ -169,13 +139,9 @@ struct ruleset_callback {
 };
 
 /**
- * @brief Execute remote procedure call asynchronously
- *
- * Performs an asynchronous RPC call using the provided Lua code.
- * The callback will be invoked when the operation completes.
- *
+ * @brief Execute remote procedure call asynchronously.
  * @param r Ruleset instance
- * @param state Output parameter for operation state (for cancellation)
+ * @param state Output for operation state (for cancellation)
  * @param code Stream containing Lua RPC code
  * @param callback Callback structure for result notification
  * @return true if operation started successfully, false on immediate error
@@ -185,11 +151,7 @@ bool ruleset_rpcall(
 	struct stream *code, struct ruleset_callback *callback);
 
 /**
- * @brief Update or load a Lua module
- *
- * Loads new Lua code and updates the specified module or the main ruleset.
- * This allows for dynamic updates without restarting the server.
- *
+ * @brief Update or load a Lua module without restarting the server.
  * @param r Ruleset instance
  * @param modname Module name to update, or NULL for main ruleset
  * @param chunkname Chunk name for debugging (stack traces)
@@ -201,11 +163,7 @@ bool ruleset_update(
 	const char *restrict chunkname, struct stream *code);
 
 /**
- * @brief Load ruleset from file
- *
- * Loads and executes Lua code from the specified file to initialize
- * or update the ruleset.
- *
+ * @brief Load and execute Lua code from a file.
  * @param r Ruleset instance
  * @param filename Path to Lua file
  * @return true on success, false on error
@@ -213,10 +171,9 @@ bool ruleset_update(
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename);
 
 /**
- * @brief Load config from a Lua file into the ruleset
+ * @brief Load config from a Lua file into the ruleset.
  *
- * Opens the file via codec_lua_reader, executes it in "config" mode
- * (chunk("config")), extracts configuration fields into the C config
+ * Executes the file in "config" mode, extracts fields into the C config
  * struct, and optionally sets the ruleset module from the returned table.
  *
  * @param r Ruleset instance
@@ -235,24 +192,16 @@ bool ruleset_loadconfig(
 bool ruleset_isvalid(struct ruleset *restrict r);
 
 /**
- * @brief Trigger garbage collection
- *
- * Forces the Lua garbage collector to run, freeing unused memory.
- * This can be useful for memory management in long-running processes.
- *
+ * @brief Trigger a full Lua garbage collection cycle.
  * @param r Ruleset instance
  * @return true on success, false on error
  */
 bool ruleset_gc(struct ruleset *restrict r);
 
 /**
- * @brief Resolve domain name asynchronously
- *
- * Calls the ruleset.resolve() function to process a domain name request.
- * Used for SOCKS5 hostname requests, SOCKS4A, and HTTP CONNECT with domains.
- *
+ * @brief Invoke ruleset.resolve() for a domain name request asynchronously.
  * @param r Ruleset instance
- * @param state Output parameter for operation state (for cancellation)
+ * @param state Output for operation state (for cancellation)
  * @param request Domain name and port (e.g., "www.example.org:80")
  * @param username SOCKS authentication username (may be NULL)
  * @param password SOCKS authentication password (may be NULL)
@@ -265,13 +214,9 @@ bool ruleset_resolve(
 	const char *restrict password, struct ruleset_callback *callback);
 
 /**
- * @brief Route IPv4 address asynchronously
- *
- * Calls the ruleset.route() function to determine routing for an IPv4 address.
- * Used for direct IP connections through the proxy.
- *
+ * @brief Invoke ruleset.route() for an IPv4 address asynchronously.
  * @param r Ruleset instance
- * @param state Output parameter for operation state (for cancellation)
+ * @param state Output for operation state (for cancellation)
  * @param request IPv4 address and port (e.g., "192.168.1.1:80")
  * @param username SOCKS authentication username (may be NULL)
  * @param password SOCKS authentication password (may be NULL)
@@ -284,13 +229,9 @@ bool ruleset_route(
 	const char *restrict password, struct ruleset_callback *callback);
 
 /**
- * @brief Route IPv6 address asynchronously
- *
- * Calls the ruleset.route6() function to determine routing for an IPv6 address.
- * Used for direct IPv6 connections through the proxy.
- *
+ * @brief Invoke ruleset.route6() for an IPv6 address asynchronously.
  * @param r Ruleset instance
- * @param state Output parameter for operation state (for cancellation)
+ * @param state Output for operation state (for cancellation)
  * @param request IPv6 address and port (e.g., "[2001:db8::1]:80")
  * @param username SOCKS authentication username (may be NULL)
  * @param password SOCKS authentication password (may be NULL)
@@ -303,27 +244,19 @@ bool ruleset_route6(
 	const char *restrict password, struct ruleset_callback *callback);
 
 /**
- * @brief Get virtual machine statistics
- *
- * Retrieves current memory usage statistics for the Lua virtual machine.
- *
+ * @brief Get Lua VM memory and coroutine statistics.
  * @param r Ruleset instance
- * @param s Output parameter for statistics
+ * @param s Output for statistics
  */
 void ruleset_vmstats(
 	const struct ruleset *restrict r, struct ruleset_vmstats *restrict s);
 
 /**
- * @brief Get ruleset statistics
- *
- * Calls the ruleset.stats() function to generate runtime statistics.
- * The statistics can include performance metrics, connection counts,
- * or any custom data defined in the Lua ruleset.
- *
+ * @brief Invoke ruleset.stats() and return the result string.
  * @param r Ruleset instance
- * @param dt Time delta since last statistics call
- * @param query Optional query parameter for specific statistics
- * @param len Output parameter for result length
+ * @param dt Time delta since last call
+ * @param query Optional filter query (may be NULL)
+ * @param len Output for result length
  * @return Statistics string, or NULL on error
  */
 const char *ruleset_stats(
@@ -331,15 +264,10 @@ const char *ruleset_stats(
 	size_t *len);
 
 /**
- * @brief Get ruleset metrics
- *
- * Calls the optional ruleset.metrics() function to append custom text to
- * the Prometheus metrics output. The ruleset is not required to define this
- * callback; if it is absent the function returns NULL without logging an error.
- *
+ * @brief Invoke ruleset.metrics() for Prometheus output.
  * @param r Ruleset instance
- * @param len Output parameter for result length
- * @return Metrics string, or NULL if the callback is not defined or on error
+ * @param len Output for result length
+ * @return Metrics string, or NULL if the callback is absent or on error
  */
 const char *ruleset_metrics(struct ruleset *restrict r, size_t *len);
 

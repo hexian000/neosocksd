@@ -1,10 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/**
- * @file util.h
- * @brief Public utilities, globals, and helpers.
- */
+/* Public utilities, globals, and helpers. */
 
 #ifndef UTIL_H
 #define UTIL_H
@@ -23,41 +20,14 @@
 
 struct dialreq;
 
-/**
- * @brief Compile-time length of a string literal excluding the null terminator.
- * @param s String literal.
- */
+/* Compile-time length of a string literal excluding the null terminator. */
 #define CONSTSTRLEN(s) (sizeof(s "") - sizeof(""))
 
-/**
- * @brief Mark a variable as intentionally unused and silence compiler warnings.
- * @param x Variable expression to be marked unused.
- */
-#define UNUSED(x) ((void)(x))
-
-/**
- * @brief Sentinel value representing an invalid or unavailable timestamp.
- */
+/* Sentinel value representing an invalid or unavailable timestamp. */
 #define TSTAMP_NIL (-1.0)
 
-/**
- * @brief Update a libev I/O watcher to the desired read/write event mask.
- * @param loop Event loop the watcher is attached to.
- * @param watcher I/O watcher to modify.
- * @param events Bitmask of accepted events (EV_READ | EV_WRITE).
- */
-void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
-
-/**
- * @brief Validate revents against accepted mask, log EV_ERROR, and early-return.
- *
- * If `revents` contains EV_ERROR, logs the error; asserts that only
- * `(accept | EV_ERROR)` bits are present; returns from the current function
- * when none of the accepted bits are set.
- *
- * @param revents Event bits received from libev callbacks.
- * @param accept Accepted event mask (subset of EV_READ | EV_WRITE).
- */
+/* Validate revents against accepted mask, log EV_ERROR, and early-return when
+ * none of the accepted bits are set. */
 #define CHECK_REVENTS(revents, accept)                                         \
 	do {                                                                   \
 		if (((revents) & EV_ERROR) != 0) {                             \
@@ -70,14 +40,19 @@ void modify_io_events(struct ev_loop *loop, struct ev_io *watcher, int events);
 		}                                                              \
 	} while (0)
 
-/** Process-level initializations. */
+/* Process-level initializations. */
 void init(int argc, char *const restrict argv[]);
 
-/** Load libraries and initialize global subsystems. */
+/* Load libraries and initialize global subsystems. */
 void loadlibs(void);
 
-/** Clean up and unload global subsystems and resources. */
+/* Clean up and unload global subsystems and resources. */
 void unloadlibs(void);
+
+/* Update a libev I/O watcher to the desired read/write event mask. */
+void modify_io_events(
+	struct ev_loop *restrict loop, struct ev_io *restrict watcher,
+	int events);
 
 /* socket utilities */
 void socket_bind_netdev(int fd, const char *netdev);

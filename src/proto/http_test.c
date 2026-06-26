@@ -16,25 +16,22 @@
 #include "http.h"
 
 #include "io/stream.h"
-#include "os/clock.h"
 #include "utils/buffer.h"
 
-#define UTILS_MEASURE_H
 #include "utils/testing.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <strings.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - portability shim only (http.c has no collaborator to mock).
@@ -61,7 +58,7 @@ static void *test_memmem(
 	return NULL;
 }
 #define memmem test_memmem
-#endif
+#endif /* !defined(_GNU_SOURCE) */
 
 struct header_cb_ctx {
 	struct http_conn *p;
@@ -118,7 +115,10 @@ static int http_recv_until_done(struct http_conn *restrict p)
 		if (ret <= 0) {
 			return ret;
 		}
-		struct pollfd pfd = { .fd = p->fd, .events = POLLIN };
+		struct pollfd pfd = {
+			.fd = p->fd,
+			.events = POLLIN,
+		};
 		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
 			waited += TEST_RECV_QUIET_MS;
 		}
@@ -136,7 +136,10 @@ static int http_recv_drain(struct http_conn *restrict p)
 		if (ret <= 0) {
 			return ret;
 		}
-		struct pollfd pfd = { .fd = p->fd, .events = POLLIN };
+		struct pollfd pfd = {
+			.fd = p->fd,
+			.events = POLLIN,
+		};
 		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
 			return ret;
 		}
@@ -647,7 +650,10 @@ T_DECLARE_CASE(http_conn_recv_expect_continue)
 	size_t rsplen = 0;
 	for (int waited = 0; waited < TEST_RECV_BUDGET_MS &&
 			     memmem(rsp, rsplen, "100 Continue", 12) == NULL;) {
-		struct pollfd pfd = { .fd = sv[1], .events = POLLIN };
+		struct pollfd pfd = {
+			.fd = sv[1],
+			.events = POLLIN,
+		};
 		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
 			waited += TEST_RECV_QUIET_MS;
 			continue;
@@ -744,8 +750,10 @@ T_DECLARE_CASE(http_body_none)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_NONE, 0);
 	T_EXPECT(d.done);
@@ -763,8 +771,10 @@ T_DECLARE_CASE(http_body_content_length)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 	static const unsigned char data[] = "hello";
 
 	http_body_init(&d, HTTP_BODY_CONTENT_LENGTH, 5);
@@ -789,8 +799,10 @@ T_DECLARE_CASE(http_body_content_length_overflow)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 	static const unsigned char data[] = "hello world";
 
 	http_body_init(&d, HTTP_BODY_CONTENT_LENGTH, 5);
@@ -802,8 +814,10 @@ T_DECLARE_CASE(http_body_content_length_cb_reject)
 {
 	struct http_body d;
 	struct body_sink sink = { .reject = true };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 	static const unsigned char data[] = "hello";
 
 	http_body_init(&d, HTTP_BODY_CONTENT_LENGTH, 5);
@@ -814,8 +828,10 @@ T_DECLARE_CASE(http_body_eof)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 	static const unsigned char data[] = "stream";
 
 	http_body_init(&d, HTTP_BODY_EOF, 0);
@@ -833,8 +849,10 @@ T_DECLARE_CASE(http_body_eof_cb_reject)
 {
 	struct http_body d;
 	struct body_sink sink = { .reject = true };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 	static const unsigned char data[] = "stream";
 
 	http_body_init(&d, HTTP_BODY_EOF, 0);
@@ -845,8 +863,10 @@ T_DECLARE_CASE(http_body_chunked_simple)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 	T_EXPECT(!d.done);
@@ -864,8 +884,10 @@ T_DECLARE_CASE(http_body_chunked_split_input)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -883,8 +905,10 @@ T_DECLARE_CASE(http_body_chunked_uppercase_hex)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -899,8 +923,10 @@ T_DECLARE_CASE(http_body_chunked_with_extension)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -915,8 +941,10 @@ T_DECLARE_CASE(http_body_chunked_trailer)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -931,8 +959,10 @@ T_DECLARE_CASE(http_body_chunked_no_hex_digit_fails)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -945,8 +975,10 @@ T_DECLARE_CASE(http_body_chunked_size_line_too_long)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -962,8 +994,10 @@ T_DECLARE_CASE(http_body_chunked_missing_cr_after_data)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -977,8 +1011,10 @@ T_DECLARE_CASE(http_body_chunked_extra_data_after_done)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 	static const unsigned char chunk[] = "0\r\n\r\n";
@@ -994,8 +1030,10 @@ T_DECLARE_CASE(http_body_chunked_data_cb_reject)
 {
 	struct http_body d;
 	struct body_sink sink = { .reject = true };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 	static const unsigned char chunk[] = "3\r\nabc\r\n0\r\n\r\n";
@@ -1005,8 +1043,10 @@ T_DECLARE_CASE(http_body_chunked_lowercase_hex)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -1021,8 +1061,10 @@ T_DECLARE_CASE(http_body_chunked_size_value_overflow)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -1035,8 +1077,10 @@ T_DECLARE_CASE(http_body_chunked_size_trailing_ws)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -1052,8 +1096,10 @@ T_DECLARE_CASE(http_body_chunked_size_trailing_junk)
 {
 	struct http_body d;
 	struct body_sink sink = { 0 };
-	const struct http_body_data_cb cb = { .func = body_sink_cb,
-					      .ctx = &sink };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
 
 	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 
@@ -1064,7 +1110,8 @@ T_DECLARE_CASE(http_body_chunked_size_trailing_junk)
 
 /* -------------------------------------------------------------------------
  * bench - end-to-end recv + parse of a representative keep-alive request.
- * Gated behind the BENCH env var so it does not run during normal ctest.
+ * Runs only when a name filter selects it (e.g. --run bench); a plain ctest
+ * run skips it.
  * ---------------------------------------------------------------------- */
 
 static const char BENCH_REQUEST[] = "GET /path/to/resource?query=1 HTTP/1.1\r\n"
@@ -1108,54 +1155,53 @@ T_DECLARE_BENCH(bench_parse_request)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(http_conn_init_request),
+	T_CASE(http_conn_init_response),
+	T_CASE(parsehdr_accept_te_cases),
+	T_CASE(parsehdr_transfer_encoding_cases),
+	T_CASE(parsehdr_accept_encoding_cases),
+	T_CASE(parsehdr_content_length_cases),
+	T_CASE(parsehdr_content_encoding_cases),
+	T_CASE(parsehdr_expect_cases),
+	T_CASE(content_reader_none),
+	T_CASE(content_reader_gzip),
+	T_CASE(content_writer_roundtrip_none),
+	T_CASE(content_writer_roundtrip_deflate),
+	T_CASE(http_resp_errpage_normal_and_fallback),
+	T_CASE(http_conn_recv_request_ok),
+	T_CASE(http_conn_recv_response_ok),
+	T_CASE(http_conn_recv_bad_version),
+	T_CASE(http_conn_recv_incremental),
+	T_CASE(http_conn_recv_content_incomplete_then_complete),
+	T_CASE(http_conn_recv_expect_continue),
+	T_CASE(http_conn_recv_content_early_eof),
+	T_CASE(http_conn_recv_header_callback_reject),
+	T_CASE(http_body_none),
+	T_CASE(http_body_content_length),
+	T_CASE(http_body_content_length_overflow),
+	T_CASE(http_body_content_length_cb_reject),
+	T_CASE(http_body_eof),
+	T_CASE(http_body_eof_cb_reject),
+	T_CASE(http_body_chunked_simple),
+	T_CASE(http_body_chunked_split_input),
+	T_CASE(http_body_chunked_uppercase_hex),
+	T_CASE(http_body_chunked_with_extension),
+	T_CASE(http_body_chunked_trailer),
+	T_CASE(http_body_chunked_no_hex_digit_fails),
+	T_CASE(http_body_chunked_size_line_too_long),
+	T_CASE(http_body_chunked_missing_cr_after_data),
+	T_CASE(http_body_chunked_extra_data_after_done),
+	T_CASE(http_body_chunked_data_cb_reject),
+	T_CASE(http_body_chunked_lowercase_hex),
+	T_CASE(http_body_chunked_size_value_overflow),
+	T_CASE(http_body_chunked_size_trailing_ws),
+	T_CASE(http_body_chunked_size_trailing_junk),
+	T_BENCH(bench_parse_request),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, http_conn_init_request);
-	T_RUN_CASE(t, http_conn_init_response);
-	T_RUN_CASE(t, parsehdr_accept_te_cases);
-	T_RUN_CASE(t, parsehdr_transfer_encoding_cases);
-	T_RUN_CASE(t, parsehdr_accept_encoding_cases);
-	T_RUN_CASE(t, parsehdr_content_length_cases);
-	T_RUN_CASE(t, parsehdr_content_encoding_cases);
-	T_RUN_CASE(t, parsehdr_expect_cases);
-	T_RUN_CASE(t, content_reader_none);
-	T_RUN_CASE(t, content_reader_gzip);
-	T_RUN_CASE(t, content_writer_roundtrip_none);
-	T_RUN_CASE(t, content_writer_roundtrip_deflate);
-	T_RUN_CASE(t, http_resp_errpage_normal_and_fallback);
-	T_RUN_CASE(t, http_conn_recv_request_ok);
-	T_RUN_CASE(t, http_conn_recv_response_ok);
-	T_RUN_CASE(t, http_conn_recv_bad_version);
-	T_RUN_CASE(t, http_conn_recv_incremental);
-	T_RUN_CASE(t, http_conn_recv_content_incomplete_then_complete);
-	T_RUN_CASE(t, http_conn_recv_expect_continue);
-	T_RUN_CASE(t, http_conn_recv_content_early_eof);
-	T_RUN_CASE(t, http_conn_recv_header_callback_reject);
-	T_RUN_CASE(t, http_body_none);
-	T_RUN_CASE(t, http_body_content_length);
-	T_RUN_CASE(t, http_body_content_length_overflow);
-	T_RUN_CASE(t, http_body_content_length_cb_reject);
-	T_RUN_CASE(t, http_body_eof);
-	T_RUN_CASE(t, http_body_eof_cb_reject);
-	T_RUN_CASE(t, http_body_chunked_simple);
-	T_RUN_CASE(t, http_body_chunked_split_input);
-	T_RUN_CASE(t, http_body_chunked_uppercase_hex);
-	T_RUN_CASE(t, http_body_chunked_with_extension);
-	T_RUN_CASE(t, http_body_chunked_trailer);
-	T_RUN_CASE(t, http_body_chunked_no_hex_digit_fails);
-	T_RUN_CASE(t, http_body_chunked_size_line_too_long);
-	T_RUN_CASE(t, http_body_chunked_missing_cr_after_data);
-	T_RUN_CASE(t, http_body_chunked_extra_data_after_done);
-	T_RUN_CASE(t, http_body_chunked_data_cb_reject);
-	T_RUN_CASE(t, http_body_chunked_lowercase_hex);
-	T_RUN_CASE(t, http_body_chunked_size_value_overflow);
-	T_RUN_CASE(t, http_body_chunked_size_trailing_ws);
-	T_RUN_CASE(t, http_body_chunked_size_trailing_junk);
-
-	if (getenv("BENCH") != NULL) {
-		T_RUN_BENCH(t, bench_parse_request);
-	}
-
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

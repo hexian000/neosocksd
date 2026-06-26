@@ -54,50 +54,40 @@ ASSERT_SUPER(struct gcbase, struct api_client_ctx, gcbase);
 	char name[16];                                                         \
 	(void)format_iec_bytes(name, sizeof(name), (value))
 
+static bool parse_header(void *ctx, const char *key, char *value)
+{
+	struct api_client_ctx *restrict c = ctx;
+	ASSERT(c->hctx.state != STATE_CLIENT_INIT);
+	struct http_conn *restrict p = &c->hctx.conn;
+
+	/* hop-by-hop headers */
+	if (strcasecmp(key, "Transfer-Encoding") == 0) {
+		return parsehdr_transfer_encoding(p, value);
+	}
+
+	/* representation headers */
+	if (strcasecmp(key, "Content-Length") == 0) {
+		return parsehdr_content_length(p, value);
+	}
+	if (strcasecmp(key, "Content-Type") == 0) {
+		p->hdr.content.type = value;
+		return true;
+	}
+	if (strcasecmp(key, "Content-Encoding") == 0) {
+		return parsehdr_content_encoding(p, value);
+	}
+
+	LOGVV_F("unknown http header: `%s' = `%s'", key, value);
+	return true;
+}
+
 static void
 api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 {
 	if (ctx->hctx.state != STATE_CLIENT_INIT) {
-		http_client_cancel(loop, &ctx->hctx);
+		http_client_cancel(&ctx->hctx, loop);
 	}
 	ev_idle_stop(loop, &ctx->w_process);
-}
-
-static void api_client_finalize(struct gcbase *restrict obj)
-{
-	struct api_client_ctx *restrict ctx =
-		DOWNCAST(struct gcbase, struct api_client_ctx, gcbase, obj);
-
-	api_client_stop(ctx->loop, ctx);
-	if (ctx->result.stream != NULL) {
-		stream_close(ctx->result.stream);
-		ctx->result.stream = NULL;
-	}
-	VBUF_FREE(ctx->result.content);
-}
-
-static void
-process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_IDLE);
-	ev_idle_stop(loop, watcher);
-	struct api_client_ctx *restrict ctx = watcher->data;
-
-	if (ctx->cb.func != NULL) {
-		ctx->cb.func(
-			ctx, loop, ctx->cb.data, ctx->result.errmsg,
-			ctx->result.errlen, ctx->result.stream);
-	} else if (ctx->result.errmsg != NULL) {
-		LOGW_F("api invoke: %.*s", (int)ctx->result.errlen,
-		       ctx->result.errmsg);
-	}
-	if (ctx->result.stream != NULL) {
-		stream_close(ctx->result.stream);
-		ctx->result.stream = NULL;
-	}
-	VBUF_FREE(ctx->result.content);
-
-	gc_unref(&ctx->gcbase);
 }
 
 static void api_client_finish(
@@ -244,31 +234,41 @@ static bool make_request(
 	return true;
 }
 
-static bool parse_header(void *ctx, const char *key, char *value)
+static void
+process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
-	struct api_client_ctx *restrict c = ctx;
-	ASSERT(c->hctx.state != STATE_CLIENT_INIT);
-	struct http_conn *restrict p = &c->hctx.conn;
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct api_client_ctx *restrict ctx = watcher->data;
 
-	/* hop-by-hop headers */
-	if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		return parsehdr_transfer_encoding(p, value);
+	if (ctx->cb.func != NULL) {
+		ctx->cb.func(
+			ctx, loop, ctx->cb.data, ctx->result.errmsg,
+			ctx->result.errlen, ctx->result.stream);
+	} else if (ctx->result.errmsg != NULL) {
+		LOGW_F("api invoke: %.*s", (int)ctx->result.errlen,
+		       ctx->result.errmsg);
 	}
+	if (ctx->result.stream != NULL) {
+		stream_close(ctx->result.stream);
+		ctx->result.stream = NULL;
+	}
+	VBUF_FREE(ctx->result.content);
 
-	/* representation headers */
-	if (strcasecmp(key, "Content-Length") == 0) {
-		return parsehdr_content_length(p, value);
-	}
-	if (strcasecmp(key, "Content-Type") == 0) {
-		p->hdr.content.type = value;
-		return true;
-	}
-	if (strcasecmp(key, "Content-Encoding") == 0) {
-		return parsehdr_content_encoding(p, value);
-	}
+	gc_unref(&ctx->gcbase);
+}
 
-	LOGVV_F("unknown http header: `%s' = `%s'", key, value);
-	return true;
+static void api_client_finalize(struct gcbase *restrict obj)
+{
+	struct api_client_ctx *restrict ctx =
+		DOWNCAST(struct gcbase, struct api_client_ctx, gcbase, obj);
+
+	api_client_stop(ctx->loop, ctx);
+	if (ctx->result.stream != NULL) {
+		stream_close(ctx->result.stream);
+		ctx->result.stream = NULL;
+	}
+	VBUF_FREE(ctx->result.content);
 }
 
 static bool api_client_do(
@@ -320,7 +320,7 @@ static bool api_client_do(
 	if (pctx != NULL) {
 		*pctx = ctx;
 	}
-	http_client_do(loop, &ctx->hctx, req);
+	http_client_do(&ctx->hctx, loop, req);
 	return true;
 }
 
@@ -332,7 +332,11 @@ void api_client_invoke(
 {
 	(void)api_client_do(
 		loop, NULL, req, "/ruleset/invoke", payload, len,
-		&(struct api_client_cb){ NULL, NULL }, conf, resolver, stats);
+		&(struct api_client_cb){
+			.func = NULL,
+			.data = NULL,
+		},
+		conf, resolver, stats);
 }
 
 bool api_client_rpcall(
@@ -351,7 +355,7 @@ bool api_client_rpcall(
 void api_client_cancel(
 	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx)
 {
-	UNUSED(loop);
+	(void)loop;
 	gc_unref(&ctx->gcbase);
 }
 

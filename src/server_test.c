@@ -24,17 +24,19 @@
 #include "ruleset.h"
 #endif
 #include "socks.h"
+
 #include "os/socket.h"
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
+#include <netinet/in.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (socks, http_proxy, forward, api_server,
@@ -247,7 +249,7 @@ static bool test_wait_until(
 	return predicate(data);
 }
 
-static uint16_t bound_port(const int fd)
+static uint_fast16_t bound_port(const int fd)
 {
 	struct sockaddr_in addr = { 0 };
 	socklen_t len = sizeof(addr);
@@ -256,7 +258,7 @@ static uint16_t bound_port(const int fd)
 	return ntohs(addr.sin_port);
 }
 
-static int connect_loopback(const uint16_t port)
+static int connect_loopback(const uint_fast16_t port)
 {
 	const int fd = socket(AF_INET, SOCK_STREAM, 0);
 	struct sockaddr_in addr;
@@ -265,7 +267,7 @@ static int connect_loopback(const uint16_t port)
 	addr = (struct sockaddr_in){
 		.sin_family = AF_INET,
 		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
-		.sin_port = htons(port),
+		.sin_port = htons((uint16_t)port),
 	};
 	T_CHECK(connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0);
 	return fd;
@@ -303,7 +305,7 @@ T_DECLARE_CASE(server_start_accept_and_stop)
 	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	uint16_t port;
+	uint_fast16_t port;
 	int client_fd = -1;
 
 	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
@@ -327,7 +329,7 @@ T_DECLARE_CASE(server_rejects_when_session_limit_exceeded)
 	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	uint16_t port;
+	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.max_sessions = 1;
@@ -351,7 +353,7 @@ T_DECLARE_CASE(server_rejects_when_full_startup_limit_exceeded)
 	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	uint16_t port;
+	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.startup_limit_full = 1;
@@ -375,7 +377,7 @@ T_DECLARE_CASE(server_rejects_when_probabilistic_startup_limit_hits)
 	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	uint16_t port;
+	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.startup_limit_start = 1;
@@ -401,7 +403,7 @@ T_DECLARE_CASE(server_accept_error_restarts_listener)
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
 	struct listener *l;
-	uint16_t port;
+	uint_fast16_t port;
 	int pipefd[2] = { -1, -1 };
 	int client_fd = -1;
 	int listener_fd;
@@ -445,7 +447,7 @@ T_DECLARE_CASE(server_allows_when_at_max_sessions)
 	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	uint16_t port;
+	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.max_sessions = 1;
@@ -473,7 +475,7 @@ T_DECLARE_CASE(server_zero_max_sessions_allows_unlimited)
 	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	uint16_t port;
+	uint_fast16_t port;
 	int client_fd = -1;
 
 	/* max_sessions=0: no limit.  Use a large num_sessions to
@@ -501,7 +503,7 @@ T_DECLARE_CASE(server_dual_listener_independent_accepts)
 	T_CHECK(loop != NULL);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
-	uint16_t port_a, port_b;
+	uint_fast16_t port_a, port_b;
 	int client_fd = -1;
 
 	conf.http_listen = "127.0.0.1:0";
@@ -701,24 +703,26 @@ T_DECLARE_CASE(server_signal_reload_boot_basereq)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
-{
-	T_DECLARE_CTX(t);
-
-	T_RUN_CASE(t, server_start_accept_and_stop);
-	T_RUN_CASE(t, server_rejects_when_session_limit_exceeded);
-	T_RUN_CASE(t, server_allows_when_at_max_sessions);
-	T_RUN_CASE(t, server_zero_max_sessions_allows_unlimited);
-	T_RUN_CASE(t, server_rejects_when_full_startup_limit_exceeded);
-	T_RUN_CASE(t, server_rejects_when_probabilistic_startup_limit_hits);
-	T_RUN_CASE(t, server_accept_error_restarts_listener);
-	T_RUN_CASE(t, server_dual_listener_independent_accepts);
-	T_RUN_CASE(t, server_init_multi_mode_listeners);
-	T_RUN_CASE(t, server_init_rejects_bad_addresses);
-	T_RUN_CASE(t, server_stats_aggregates_listeners);
+static const struct testing_suite suite[] = {
+	T_CASE(server_start_accept_and_stop),
+	T_CASE(server_rejects_when_session_limit_exceeded),
+	T_CASE(server_allows_when_at_max_sessions),
+	T_CASE(server_zero_max_sessions_allows_unlimited),
+	T_CASE(server_rejects_when_full_startup_limit_exceeded),
+	T_CASE(server_rejects_when_probabilistic_startup_limit_hits),
+	T_CASE(server_accept_error_restarts_listener),
+	T_CASE(server_dual_listener_independent_accepts),
+	T_CASE(server_init_multi_mode_listeners),
+	T_CASE(server_init_rejects_bad_addresses),
+	T_CASE(server_stats_aggregates_listeners),
 #if WITH_RULESET
-	T_RUN_CASE(t, server_signal_reload_ruleset);
-	T_RUN_CASE(t, server_signal_reload_boot_basereq);
+	T_CASE(server_signal_reload_ruleset),
+	T_CASE(server_signal_reload_boot_basereq),
 #endif
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
+{
+	return testing_main(argc, argv, suite);
 }

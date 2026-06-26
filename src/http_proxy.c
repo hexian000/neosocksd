@@ -5,8 +5,6 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "proto/domain.h"
-#include "proto/http.h"
 #include "ruleset.h"
 #include "server.h"
 #include "transfer.h"
@@ -16,6 +14,8 @@
 #include "net/http.h"
 #include "net/url.h"
 #include "os/socket.h"
+#include "proto/domain.h"
+#include "proto/http.h"
 #include "utils/arraysize.h"
 #include "utils/ascii.h"
 #include "utils/buffer.h"
@@ -39,8 +39,6 @@
 #include <string.h>
 #include <strings.h>
 
-struct http_ctx;
-
 /* never rollback */
 enum http_state {
 	STATE_INIT,
@@ -55,8 +53,6 @@ enum http_state {
 
 /* maximum number of forwarded end-to-end headers */
 enum { PROXY_MAX_HEADERS = 100 };
-
-struct server;
 
 struct http_ctx {
 	struct gcbase gcbase;
@@ -190,29 +186,21 @@ static void http_ctx_finalize(struct gcbase *restrict obj)
 	}
 }
 
-/* Transitions ctx to STATE_BIDIRECTIONAL and starts bidirectional transfer
- * between ctx->accepted_fd and ctx->dialed_fd. Handles session counters and
- * always calls gc_unref before returning. The caller must stop any active
- * watchers and release dialreq / cbuf before calling this. */
+/* Start bidirectional transfer; always calls gc_unref.
+ * Caller must stop watchers and release dialreq/cbuf first. */
 static void
 http_ctx_start_transfer(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
 	ctx->accepted_fd = ctx->dialed_fd = -1;
-	/*
-	 * Transition to STATE_BIDIRECTIONAL before transfer_start so that
-	 * http_ctx_stop becomes a no-op if gc_unref is called below.
-	 */
+	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
 	struct server_stats *restrict stats = &ctx->s->stats;
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	stats->num_halfopen--;
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	/*
-	 * Increment num_sessions before transfer_start so the xfer thread's
-	 * decrement can never precede our increment. Undo on OOM.
-	 */
+	/* Increment before transfer_start — xfer decrement can't precede ours. Undo on OOM. */
 #if WITH_THREADS
 	const size_t cur =
 		atomic_fetch_add_explicit(
@@ -294,6 +282,28 @@ http_ctx_forward(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_send);
 }
 
+/* commit a connected upstream: for CONNECT queue the 200 response, otherwise
+ * replay the buffered request to the upstream; takes ownership of @p fd */
+static void
+http_commit(struct ev_loop *loop, struct http_ctx *restrict ctx, const int fd)
+{
+	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
+	ctx->dialed_fd = fd;
+
+	if (strcmp(ctx->conn.msg.req.method, "CONNECT") == 0) {
+		/* CONNECT tunnel: queue the 200 response */
+		ASSERT(ctx->conn.wbuf.len == 0);
+		BUF_APPENDSTR(
+			ctx->conn.wbuf,
+			"HTTP/1.1 200 Connection established\r\n\r\n");
+		ctx->state = STATE_ESTABLISHED;
+		ev_io_start(loop, &ctx->w_send);
+		return;
+	}
+	/* plain HTTP: forward the buffered request to upstream */
+	http_ctx_forward(loop, ctx);
+}
+
 static void send_response(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	ctx->state = STATE_RESPONSE;
@@ -320,28 +330,6 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	dialer_do(
 		&ctx->dialer, loop, ctx->dialreq, ctx->s->conf,
 		ctx->s->resolver, ctx->s);
-}
-
-/* commit a connected upstream: for CONNECT queue the 200 response, otherwise
- * replay the buffered request to the upstream; takes ownership of @p fd */
-static void
-http_commit(struct ev_loop *loop, struct http_ctx *restrict ctx, const int fd)
-{
-	HTTP_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
-	ctx->dialed_fd = fd;
-
-	if (strcmp(ctx->conn.msg.req.method, "CONNECT") == 0) {
-		/* CONNECT tunnel: queue the 200 response */
-		ASSERT(ctx->conn.wbuf.len == 0);
-		BUF_APPENDSTR(
-			ctx->conn.wbuf,
-			"HTTP/1.1 200 Connection established\r\n\r\n");
-		ctx->state = STATE_ESTABLISHED;
-		ev_io_start(loop, &ctx->w_send);
-		return;
-	}
-	/* plain HTTP: forward the buffered request to upstream */
-	http_ctx_forward(loop, ctx);
 }
 
 #if WITH_RULESET
@@ -389,9 +377,9 @@ static void parse_proxy_auth(
 		    strlen(credentials))) {
 		return;
 	}
-	char *s = (char *)buf;
+	char *const s = (char *)buf;
 	s[dstlen] = '\0';
-	char *sep = strchr(s, ':');
+	char *const sep = strchr(s, ':');
 	if (sep == NULL) {
 		return;
 	}
@@ -458,7 +446,7 @@ static bool hostport_normalize(
 		return false;
 	}
 	memcpy(buf, host, hlen + 1);
-	const char *portcheck = (buf[0] == '[') ? strchr(buf, ']') : buf;
+	const char *const portcheck = (buf[0] == '[') ? strchr(buf, ']') : buf;
 	if (portcheck == NULL) {
 		return false;
 	}
@@ -507,8 +495,8 @@ connection_lists(const char *restrict connection, const char *restrict key)
 static uint_fast16_t build_forward_req(struct http_ctx *restrict ctx)
 {
 	struct http_conn *restrict p = &ctx->conn;
-	const char *method = p->msg.req.method;
-	const char *version = p->msg.req.version;
+	const char *const method = p->msg.req.method;
+	const char *const version = p->msg.req.version;
 
 	/* RFC 9112 §3.2.2: a proxy accepts absolute-form only */
 	const size_t urllen = strlen(p->msg.req.url);
@@ -527,7 +515,7 @@ static uint_fast16_t build_forward_req(struct http_ctx *restrict ctx)
 	}
 
 	/* request line, origin-form */
-	const char *path = (parsed.path != NULL) ? parsed.path : "";
+	const char *const path = (parsed.path != NULL) ? parsed.path : "";
 	bool ok = fwd_append(p, method) && fwd_append(p, " /") &&
 		  fwd_append(p, path);
 	if (parsed.query != NULL) {
@@ -540,7 +528,7 @@ static uint_fast16_t build_forward_req(struct http_ctx *restrict ctx)
 	     fwd_append(p, "\r\n");
 	/* end-to-end headers, except those listed in Connection */
 	for (size_t i = 0; ok && i < ctx->num_fwd_hdr; i++) {
-		const char *key = ctx->fwd_hdr[i].key;
+		const char *const key = ctx->fwd_hdr[i].key;
 		if (connection_lists(p->hdr.connection, key)) {
 			continue;
 		}
@@ -629,7 +617,7 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 
-	const char *addr_str = ctx->conn.msg.req.url;
+	const char *const addr_str = ctx->conn.msg.req.url;
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "http: CONNECT `%s'", addr_str);
 #if WITH_RULESET
 	const struct ruleset *restrict ruleset = ctx->s->ruleset;
@@ -677,7 +665,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 static void
 timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
-	UNUSED(loop);
+	(void)loop;
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct http_ctx *restrict ctx = watcher->data;
 	ctx->s->stats.num_reject_timeout++;
@@ -706,10 +694,7 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	http_commit(loop, ctx, fd);
 }
 
-/* Handles proxy_pass-specific header processing for parse_header().
- * Called when the request is not CONNECT and all hop-by-hop headers have
- * already been handled by parse_header(). Validates and records end-to-end
- * headers for the later rebuild in build_forward_req(). */
+/* Handle end-to-end headers for proxy_pass mode; validates and records for build_forward_req(). */
 static bool parse_header_proxy_pass(
 	struct http_ctx *restrict ctx, struct http_conn *restrict p,
 	const char *key, char *value)
@@ -795,7 +780,7 @@ static bool parse_header(void *data, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "Proxy-Authorization") == 0) {
-		char *sep = strchr(value, ' ');
+		char *const sep = strchr(value, ' ');
 		if (sep == NULL) {
 			return false;
 		}
@@ -837,7 +822,7 @@ static bool parse_header(void *data, const char *key, char *value)
 	if (is_connect) {
 		/* CONNECT: only parse Authorization for auth check; ignore rest */
 		if (strcasecmp(key, "Authorization") == 0) {
-			char *sep = strchr(value, ' ');
+			char *const sep = strchr(value, ' ');
 			if (sep == NULL) {
 				return false;
 			}
@@ -887,7 +872,10 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	dialer_init(
 		&ctx->dialer, &cb, &s->stats.byt_dial_send,
 		&s->stats.byt_dial_recv);
-	const struct http_parsehdr_cb on_header = { parse_header, ctx };
+	const struct http_parsehdr_cb on_header = {
+		.func = parse_header,
+		.ctx = ctx,
+	};
 	http_conn_init(
 		&ctx->conn, fd, STATE_PARSE_REQUEST, on_header,
 		&s->stats.byt_client_recv, &s->stats.byt_client_send);

@@ -250,10 +250,7 @@ static void server_reload_basereq(struct server *restrict s)
 	}
 }
 
-/* Reload the ruleset from the single file given on the command line; `-c' and
- * `-r' are mutually exclusive, so reload re-reads only that one file. Returns
- * false if the reload was aborted, in which case the previous ruleset (if any)
- * is left in place. */
+/* Reload ruleset from the command-line file; previous ruleset kept on failure. */
 static bool server_reload_ruleset(struct server *restrict s)
 {
 	if (s->conf->boot == NULL && s->conf->ruleset == NULL) {
@@ -361,7 +358,7 @@ bool server_init(
 	struct config *restrict conf, struct resolver *resolver,
 	struct transfer *xfer, struct dialreq *basereq, struct ruleset *ruleset)
 {
-	UNUSED(ruleset);
+	(void)ruleset;
 	*s = (struct server){
 		.loop = loop,
 		.conf = conf,

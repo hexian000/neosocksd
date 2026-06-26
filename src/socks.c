@@ -140,57 +140,6 @@ static int format_status(
 #define SOCKS_CTX_LOG(level, ctx, message)                                     \
 	SOCKS_CTX_LOG_F(level, ctx, "%s", message)
 
-static void
-socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
-{
-	ev_timer_stop(loop, &ctx->w_timeout);
-
-	struct server_stats *restrict stats = &ctx->s->stats;
-	switch (ctx->state) {
-	case STATE_INIT:
-		return;
-	case STATE_HANDSHAKE1:
-	case STATE_HANDSHAKE2:
-	case STATE_HANDSHAKE3:
-		ev_io_stop(loop, &ctx->w_socket);
-		stats->num_halfopen--;
-		return;
-	case STATE_PROCESS:
-#if WITH_RULESET
-		ev_idle_stop(loop, &ctx->w_process);
-		if (ctx->ruleset_state != NULL) {
-			ruleset_cancel(loop, ctx->ruleset_state);
-			ctx->ruleset_state = NULL;
-		}
-#endif
-		stats->num_halfopen--;
-		return;
-	case STATE_CONNECT:
-		dialer_cancel(&ctx->dialer, loop);
-		stats->num_halfopen--;
-		return;
-	case STATE_BIND:
-		ev_io_stop(loop, &ctx->w_socket);
-		stats->num_halfopen--;
-		return;
-	case STATE_BIDIRECTIONAL:
-		/* transfer_ctx is self-owned; nothing to do */
-		return;
-	case STATE_UDP_RELAY:
-		ev_io_stop(loop, &ctx->w_udp);
-		ev_io_stop(loop, &ctx->w_tcp);
-#if WITH_THREADS
-		atomic_fetch_sub_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed);
-#else
-		ctx->s->num_sessions--;
-#endif
-		return;
-	default:
-		FAILMSGF("unexpected state: %d", ctx->state);
-	}
-}
-
 static bool
 send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 {
@@ -217,7 +166,10 @@ static bool
 socks4_sendrsp(struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 {
 	unsigned char buf[SOCKS4_HDR_LEN];
-	const struct socks4_hdr h = { .version = 0, .command = rsp };
+	const struct socks4_hdr h = {
+		.version = 0,
+		.command = rsp,
+	};
 	socks4hdr_write(buf, &h);
 	return send_rsp(ctx, buf, SOCKS4_HDR_LEN);
 }
@@ -238,9 +190,11 @@ socks5_sendrsp(struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 		}
 	}
 	unsigned char buf[SOCKS5_RSP_MAXLEN];
-	struct socks5_hdr h = { .version = SOCKS5,
-				.command = rsp,
-				.reserved = 0 };
+	struct socks5_hdr h = {
+		.version = SOCKS5,
+		.command = rsp,
+		.reserved = 0,
+	};
 	size_t len = SOCKS5_HDR_LEN;
 	unsigned char *const restrict addrbuf = buf + len;
 	switch (addr.sa.sa_family) {
@@ -347,10 +301,7 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 {
 	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
 	ctx->accepted_fd = ctx->dialed_fd = -1;
-	/*
-	 * Transition to STATE_BIDIRECTIONAL before transfer_start so that
-	 * socks_ctx_stop becomes a no-op if gc_unref is called below.
-	 */
+	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
 	struct server_stats *restrict stats = &ctx->s->stats;
 	stats->byt_client_recv += (uint_least64_t)ctx->rbuf.len;
 	ctx->state = STATE_BIDIRECTIONAL;
@@ -358,10 +309,7 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	stats->num_halfopen--;
 	SOCKS_CTX_LOG_F(
 		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	/*
-	 * Increment num_sessions before transfer_start so the xfer thread's
-	 * decrement can never precede our increment. Undo on OOM.
-	 */
+	/* Increment before transfer_start — xfer decrement can't precede ours. Undo on OOM. */
 #if WITH_THREADS
 	const size_t cur =
 		atomic_fetch_add_explicit(
@@ -402,7 +350,7 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 
 static int socks4a_req(struct socks_ctx *restrict ctx)
 {
-	const char *restrict name = (const char *)ctx->next;
+	const char *const restrict name = (const char *)ctx->next;
 	const size_t maxlen = ctx->rbuf.len - (ctx->next - ctx->rbuf.data);
 	const size_t namelen = strnlen(name, maxlen);
 	if (namelen > FQDN_MAX_LENGTH) {
@@ -441,7 +389,7 @@ static int socks4_req(struct socks_ctx *restrict ctx)
 		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		return -1;
 	}
-	const char *userid = (const char *)hdr + SOCKS4_HDR_LEN;
+	const char *const userid = (const char *)hdr + SOCKS4_HDR_LEN;
 	const size_t maxlen = ctx->rbuf.len - SOCKS4_HDR_LEN;
 	const size_t idlen = strnlen(userid, maxlen);
 	if (idlen >= 256) {
@@ -621,13 +569,13 @@ static int socks5_auth(struct socks_ctx *restrict ctx)
 		return -1;
 	}
 	/* rewrite the buffer as null-terminated string */
-	const char *req_user = (const char *)req + 2;
+	const char *const req_user = (const char *)req + 2;
 	char *username = (char *)ctx->next;
 	for (size_t i = 0; i < ulen; i++) {
 		username[i] = req_user[i];
 	}
 	username[ulen] = '\0';
-	const char *req_pass = (const char *)req + 2 + ulen + 1;
+	const char *const req_pass = (const char *)req + 2 + ulen + 1;
 	char *password = username + ulen + 1;
 	for (size_t i = 0; i < plen; i++) {
 		password[i] = req_pass[i];
@@ -683,8 +631,10 @@ static int socks5_authmethod(struct socks_ctx *restrict ctx)
 		break;
 	}
 	unsigned char wbuf[SOCKS5_AUTH_RSP_LEN];
-	const struct socks5_auth_rsp ar = { .version = SOCKS5,
-					    .method = method };
+	const struct socks5_auth_rsp ar = {
+		.version = SOCKS5,
+		.method = method,
+	};
 	socks5authrsp_write(wbuf, &ar);
 	if (!send_rsp(ctx, wbuf, SOCKS5_AUTH_RSP_LEN)) {
 		return -1;
@@ -791,9 +741,11 @@ static bool socks5_sendrsp_addr(
 	const union sockaddr_max *restrict addr)
 {
 	unsigned char buf[SOCKS5_RSP_MAXLEN];
-	struct socks5_hdr h = { .version = SOCKS5,
-				.command = rsp,
-				.reserved = 0 };
+	struct socks5_hdr h = {
+		.version = SOCKS5,
+		.command = rsp,
+		.reserved = 0,
+	};
 	size_t len = SOCKS5_HDR_LEN;
 	unsigned char *const restrict addrbuf = buf + len;
 	switch (addr->sa.sa_family) {
@@ -1034,10 +986,7 @@ static int udp_hdr_len(const unsigned char *restrict buf, const size_t buflen)
 	}
 }
 
-/* Parses the SOCKS5 UDP header address and port from buf into *sa / *salen,
- * and writes the total header length into *hdr_len_out.
- * Returns false if the buffer is too short or the address type is unsupported.
- */
+/* Parse SOCKS5 UDP header into *sa, *salen, and *hdr_len_out. */
 static bool udp_parse_addr(
 	const unsigned char *restrict buf, const size_t buflen,
 	union sockaddr_max *restrict sa, socklen_t *restrict salen,
@@ -1103,13 +1052,10 @@ static void udp_frag_flush(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		}
 	}
 	udp_frag_reset(ctx);
-	UNUSED(loop);
+	(void)loop;
 }
 
-/* Handles a fragmented UDP datagram from the client (frag != 0).
- * Assembles fragments into frag_buf and forwards the reassembled payload once
- * the last fragment arrives. Out-of-order or overflowing sequences are
- * discarded. */
+/* Fragment assembly: reassemble into frag_buf, forward on last fragment; discard out-of-order/overflow. */
 static void udp_frag_client_recv(
 	struct ev_loop *loop, struct socks_ctx *restrict ctx,
 	const size_t nrecv, const uint_fast8_t frag)
@@ -1261,8 +1207,10 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		/* Target -> client: prepend SOCKS5 UDP header and send */
 		unsigned char hdr_buf[SOCKS5_UDP_HDR_MAXLEN];
 		size_t hdr_len;
-		struct socks5_udp_hdr udph = { .reserved = { 0, 0 },
-					       .frag = 0 };
+		struct socks5_udp_hdr udph = {
+			.reserved = { 0, 0 },
+			.frag = 0,
+		};
 		switch (from_sa.sa.sa_family) {
 		case AF_INET:
 			udph.addrtype = SOCKS5ADDR_IPV4;
@@ -1317,7 +1265,7 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			}
 		}
 	}
-	UNUSED(loop);
+	(void)loop;
 }
 
 static void
@@ -1346,7 +1294,7 @@ tcp_monitor_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 	SOCKS_CTX_LOG(VERBOSE, ctx, "UDP ASSOCIATE: TCP control closed");
 	gc_unref(&ctx->gcbase);
-	UNUSED(loop);
+	(void)loop;
 }
 
 static void
@@ -1431,10 +1379,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 #if WITH_RULESET
 	struct ruleset *restrict ruleset = ctx->s->ruleset;
 	if (ruleset != NULL) {
-		/* BIND and UDP ASSOCIATE are not supported with a ruleset.
-		 * All commands are routed uniformly through the ruleset and
-		 * then dialed as TCP CONNECT; the special-case dispatch below
-		 * is intentionally skipped. */
+		/* With ruleset: all commands route as TCP CONNECT; skip special-case dispatch below. */
 		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
@@ -1459,7 +1404,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 static void
 timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 {
-	UNUSED(loop);
+	(void)loop;
 	CHECK_REVENTS(revents, EV_TIMER);
 
 	struct socks_ctx *restrict ctx = watcher->data;
@@ -1571,12 +1516,13 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 	const struct dialaddr *restrict addr = &ctx->addr;
 	const size_t cap =
 		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
+	ASSERT(cap <= FQDN_MAX_LENGTH + 7);
 	char request[cap];
 	const int n = dialaddr_format(request, cap, addr);
 	ASSERT(n >= 0 && (size_t)n < cap);
-	UNUSED(n);
-	const char *username = ctx->auth.username;
-	const char *password = ctx->auth.password;
+	(void)n;
+	const char *const username = ctx->auth.username;
+	const char *const password = ctx->auth.password;
 	SOCKS_CTX_LOG_F(
 		VERBOSE, ctx, "request: username=%s `%s'", username, request);
 	bool ok;
@@ -1606,6 +1552,57 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 	}
 }
 #endif /* WITH_RULESET */
+
+static void
+socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
+{
+	ev_timer_stop(loop, &ctx->w_timeout);
+
+	struct server_stats *restrict stats = &ctx->s->stats;
+	switch (ctx->state) {
+	case STATE_INIT:
+		return;
+	case STATE_HANDSHAKE1:
+	case STATE_HANDSHAKE2:
+	case STATE_HANDSHAKE3:
+		ev_io_stop(loop, &ctx->w_socket);
+		stats->num_halfopen--;
+		return;
+	case STATE_PROCESS:
+#if WITH_RULESET
+		ev_idle_stop(loop, &ctx->w_process);
+		if (ctx->ruleset_state != NULL) {
+			ruleset_cancel(loop, ctx->ruleset_state);
+			ctx->ruleset_state = NULL;
+		}
+#endif /* WITH_RULESET */
+		stats->num_halfopen--;
+		return;
+	case STATE_CONNECT:
+		dialer_cancel(&ctx->dialer, loop);
+		stats->num_halfopen--;
+		return;
+	case STATE_BIND:
+		ev_io_stop(loop, &ctx->w_socket);
+		stats->num_halfopen--;
+		return;
+	case STATE_BIDIRECTIONAL:
+		/* transfer_ctx is self-owned; nothing to do */
+		return;
+	case STATE_UDP_RELAY:
+		ev_io_stop(loop, &ctx->w_udp);
+		ev_io_stop(loop, &ctx->w_tcp);
+#if WITH_THREADS
+		atomic_fetch_sub_explicit(
+			&ctx->s->num_sessions, 1, memory_order_relaxed);
+#else
+		ctx->s->num_sessions--;
+#endif /* WITH_THREADS */
+		return;
+	default:
+		FAILMSGF("unexpected state: %d", ctx->state);
+	}
+}
 
 static void socks_ctx_finalize(struct gcbase *restrict obj)
 {

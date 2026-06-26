@@ -138,7 +138,10 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 		.flush = deflate_flush,
 		.close = deflate_close,
 	};
-	z->s = (struct stream){ &vftable, NULL };
+	z->s = (struct stream){
+		.vftable = &vftable,
+		.data = NULL,
+	};
 	z->base = base;
 	z->status = TDEFL_STATUS_OKAY;
 
@@ -188,7 +191,7 @@ static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
 			const void *srcbuf;
 			size_t n = IO_BUFSIZE;
 			z->srcerr = stream_direct_read(z->base, &srcbuf, &n);
-			if (n < sizeof(z->srcbuf) || z->srcerr != 0) {
+			if (n < IO_BUFSIZE || z->srcerr != 0) {
 				z->srceof = true;
 			}
 			z->srclen = n;
@@ -276,7 +279,10 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 		.direct_read = inflate_direct_read,
 		.close = inflate_close,
 	};
-	z->s = (struct stream){ &vftable, NULL };
+	z->s = (struct stream){
+		.vftable = &vftable,
+		.data = NULL,
+	};
 	z->base = base;
 	z->srceof = false;
 	z->srcerr = 0;
@@ -416,10 +422,7 @@ static int gzip_flush_(struct gzip_wstream *restrict z, const tdefl_flush flush)
 	return 0;
 }
 
-/*
- * Write the 8-byte gzip trailer (CRC-32 then ISIZE) to the base stream.
- * Returns 0 on success, error code on failure.
- */
+/* Write 8-byte gzip trailer (CRC-32 then ISIZE). */
 static int gzip_write_trailer(struct gzip_wstream *restrict z)
 {
 	unsigned char trailer[8];
@@ -433,11 +436,7 @@ static int gzip_write_trailer(struct gzip_wstream *restrict z)
 	return ret;
 }
 
-/*
- * Finish the current gzip member: flush the DEFLATE stream, write the
- * trailer, and mark the stream as finished.  The next write will start
- * a new gzip member.  The base stream is also flushed.
- */
+/* Flush DEFLATE, write trailer, mark finished; base stream also flushed. Next write starts new member. */
 static int gzip_flush(void *p)
 {
 	struct gzip_wstream *restrict z = p;
@@ -506,7 +505,10 @@ struct stream *codec_gzip_writer(struct stream *base)
 		.flush = gzip_flush,
 		.close = gzip_wclose,
 	};
-	z->s = (struct stream){ &vftable, NULL };
+	z->s = (struct stream){
+		.vftable = &vftable,
+		.data = NULL,
+	};
 	z->base = base;
 	z->finished = false;
 	z->status = TDEFL_STATUS_OKAY;
@@ -551,23 +553,23 @@ enum gzip_rstate {
 /* gzip header parser sub-phases */
 enum gzip_hphase {
 	/* Accumulating fixed 10-byte header */
-	GZIP_HPASE_HEADER,
+	GZIP_HPHASE_HEADER,
 	/* FEXTRA: reading 2-byte xlen (low) */
-	GZIP_HPASE_FEXTRA_1,
+	GZIP_HPHASE_FEXTRA_1,
 	/* FEXTRA: skipping xlen bytes */
-	GZIP_HPASE_FEXTRA_2,
+	GZIP_HPHASE_FEXTRA_2,
 	/* FNAME: skipping until NUL */
-	GZIP_HPASE_FNAME,
+	GZIP_HPHASE_FNAME,
 	/* FCOMMENT: skipping until NUL */
-	GZIP_HPASE_FCOMMENT,
+	GZIP_HPHASE_FCOMMENT,
 	/* FHCRC: reading low byte */
-	GZIP_HPASE_FHCRC_1,
+	GZIP_HPHASE_FHCRC_1,
 	/* FHCRC: reading high byte and validating */
-	GZIP_HPASE_FHCRC_2,
+	GZIP_HPHASE_FHCRC_2,
 	/* Header parsing complete */
-	GZIP_HPASE_DONE,
+	GZIP_HPHASE_DONE,
 	/* Special: waiting for second xlen byte */
-	GZIP_HPASE_XLEN_2 = 100,
+	GZIP_HPHASE_XLEN_2 = 100,
 };
 
 /* inflate_stream fields plus a state machine that handles the header,
@@ -605,18 +607,14 @@ struct gzip_rstream {
 };
 ASSERT_SUPER(struct stream, struct gzip_rstream, s);
 
-/*
- * Consume bytes from z->srcbuf to parse the gzip member header.
- * Returns 1 when header is fully parsed, 0 if more input is needed,
- * -1 on format error.
- */
+/* Parse gzip member header from z->srcbuf. Returns 1=done, 0=needs-more-input, -1=format-error. */
 static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 {
 	while (z->srclen > 0) {
 		unsigned char b = *z->srcbuf;
 
 		switch (z->hphase) {
-		case GZIP_HPASE_HEADER:
+		case GZIP_HPHASE_HEADER:
 			z->hdrbuf[z->hdrpos] = b;
 			z->hdrcrc = (uint_least32_t)mz_crc32(
 				z->hdrcrc, z->srcbuf, 1);
@@ -632,11 +630,11 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 			}
 			z->hdrflg = z->hdrbuf[3];
 			/* Advance to first applicable optional-field phase */
-			z->hphase = GZIP_HPASE_FEXTRA_1;
+			z->hphase = GZIP_HPHASE_FEXTRA_1;
 			/* fallthrough */
-		case GZIP_HPASE_FEXTRA_1:
+		case GZIP_HPHASE_FEXTRA_1:
 			if (!(z->hdrflg & GZIP_FEXTRA)) {
-				z->hphase = GZIP_HPASE_FNAME;
+				z->hphase = GZIP_HPHASE_FNAME;
 				break;
 			}
 			if (z->srclen < 2) {
@@ -649,7 +647,7 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				z->hdrcrc = (uint_least32_t)mz_crc32(
 					z->hdrcrc, z->srcbuf, 1);
 				z->srcbuf++, z->srclen--;
-				z->hphase = GZIP_HPASE_XLEN_2;
+				z->hphase = GZIP_HPHASE_XLEN_2;
 				return 0;
 			}
 			z->xlen_remain =
@@ -657,9 +655,9 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 			z->hdrcrc = (uint_least32_t)mz_crc32(
 				z->hdrcrc, z->srcbuf, 2);
 			z->srcbuf += 2, z->srclen -= 2;
-			z->hphase = GZIP_HPASE_FEXTRA_2;
+			z->hphase = GZIP_HPHASE_FEXTRA_2;
 			/* fallthrough */
-		case GZIP_HPASE_FEXTRA_2:
+		case GZIP_HPHASE_FEXTRA_2:
 			if (z->xlen_remain > 0) {
 				size_t skip = z->xlen_remain < z->srclen ?
 						      z->xlen_remain :
@@ -672,11 +670,11 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 					return 0;
 				}
 			}
-			z->hphase = GZIP_HPASE_FNAME;
+			z->hphase = GZIP_HPHASE_FNAME;
 			/* fallthrough */
-		case GZIP_HPASE_FNAME:
+		case GZIP_HPHASE_FNAME:
 			if (!(z->hdrflg & GZIP_FNAME)) {
-				z->hphase = GZIP_HPASE_FCOMMENT;
+				z->hphase = GZIP_HPHASE_FCOMMENT;
 				break;
 			}
 			z->hdrcrc = (uint_least32_t)mz_crc32(
@@ -686,11 +684,11 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				/* still inside filename */
 				return 0;
 			}
-			z->hphase = GZIP_HPASE_FCOMMENT;
+			z->hphase = GZIP_HPHASE_FCOMMENT;
 			break;
-		case GZIP_HPASE_FCOMMENT:
+		case GZIP_HPHASE_FCOMMENT:
 			if (!(z->hdrflg & GZIP_FCOMMENT)) {
-				z->hphase = GZIP_HPASE_FHCRC_1;
+				z->hphase = GZIP_HPHASE_FHCRC_1;
 				break;
 			}
 			z->hdrcrc = (uint_least32_t)mz_crc32(
@@ -699,18 +697,18 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 			if (b != 0x00) {
 				return 0;
 			}
-			z->hphase = GZIP_HPASE_FHCRC_1;
+			z->hphase = GZIP_HPHASE_FHCRC_1;
 			break;
-		case GZIP_HPASE_FHCRC_1:
+		case GZIP_HPHASE_FHCRC_1:
 			if (!(z->hdrflg & GZIP_FHCRC)) {
-				z->hphase = GZIP_HPASE_DONE;
+				z->hphase = GZIP_HPHASE_DONE;
 				return 1;
 			}
 			z->hdrbuf[0] = b;
 			z->srcbuf++, z->srclen--;
-			z->hphase = GZIP_HPASE_FHCRC_2;
+			z->hphase = GZIP_HPHASE_FHCRC_2;
 			return 0;
-		case GZIP_HPASE_FHCRC_2: {
+		case GZIP_HPHASE_FHCRC_2: {
 			const uint_fast16_t stored =
 				(uint_fast16_t)z->hdrbuf[0] |
 				((uint_fast16_t)b << 8);
@@ -722,34 +720,34 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				return -1;
 			}
 		}
-			z->hphase = GZIP_HPASE_DONE;
+			z->hphase = GZIP_HPHASE_DONE;
 			return 1;
-		case GZIP_HPASE_DONE:
+		case GZIP_HPHASE_DONE:
 			return 1;
-		case GZIP_HPASE_XLEN_2:
+		case GZIP_HPHASE_XLEN_2:
 			z->xlen_remain = (uint_fast16_t)z->hdrbuf[0] |
 					 ((uint_fast16_t)b << 8);
 			z->hdrcrc = (uint_least32_t)mz_crc32(
 				z->hdrcrc, z->srcbuf, 1);
 			z->srcbuf++, z->srclen--;
-			z->hphase = GZIP_HPASE_FEXTRA_2;
+			z->hphase = GZIP_HPHASE_FEXTRA_2;
 			break;
 		default:
 			return -1;
 		}
 	}
 
-	if (z->hphase == GZIP_HPASE_DONE) {
+	if (z->hphase == GZIP_HPHASE_DONE) {
 		return 1;
 	}
 	/* Handle phases that don't consume bytes but need to advance */
-	if (z->hphase == GZIP_HPASE_FNAME && !(z->hdrflg & GZIP_FNAME)) {
-		z->hphase = GZIP_HPASE_FCOMMENT;
+	if (z->hphase == GZIP_HPHASE_FNAME && !(z->hdrflg & GZIP_FNAME)) {
+		z->hphase = GZIP_HPHASE_FCOMMENT;
 	}
-	if (z->hphase == GZIP_HPASE_FCOMMENT && !(z->hdrflg & GZIP_FCOMMENT)) {
-		z->hphase = GZIP_HPASE_FHCRC_1;
+	if (z->hphase == GZIP_HPHASE_FCOMMENT && !(z->hdrflg & GZIP_FCOMMENT)) {
+		z->hphase = GZIP_HPHASE_FHCRC_1;
 	}
-	if (z->hphase == GZIP_HPASE_FHCRC_1 && !(z->hdrflg & GZIP_FHCRC)) {
+	if (z->hphase == GZIP_HPHASE_FHCRC_1 && !(z->hdrflg & GZIP_FHCRC)) {
 		return 1;
 	}
 	return 0;
@@ -905,7 +903,7 @@ static bool gzip_validate_trailer(struct gzip_rstream *z, size_t *len, int *ret)
 	}
 	/* Reset header parser for next member */
 	z->hdrpos = 0;
-	z->hphase = GZIP_HPASE_HEADER;
+	z->hphase = GZIP_HPHASE_HEADER;
 	z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
 	z->rstate = GZIP_R_HEADER;
 	return false;
@@ -978,7 +976,10 @@ struct stream *codec_gzip_reader(struct stream *base)
 		.direct_read = gzip_direct_read,
 		.close = gzip_rclose,
 	};
-	z->s = (struct stream){ &vftable, NULL };
+	z->s = (struct stream){
+		.vftable = &vftable,
+		.data = NULL,
+	};
 	z->base = base;
 	z->srceof = false;
 	z->srcerr = 0;
@@ -989,7 +990,7 @@ struct stream *codec_gzip_reader(struct stream *base)
 	z->isize = 0;
 	z->trailpos = 0;
 	z->hdrpos = 0;
-	z->hphase = GZIP_HPASE_HEADER;
+	z->hphase = GZIP_HPHASE_HEADER;
 	z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
 	z->dstpos = z->dstlen = 0;
 	return (struct stream *)z;
@@ -1011,11 +1012,7 @@ struct lua_rstream {
 };
 ASSERT_SUPER(struct stream, struct lua_rstream, s);
 
-/*
- * Check the first few bytes for a BOM.  Sets *offset to 3 (UTF-8 BOM
- * skipped) or 0 and transitions z->state to LUA_SKIP_SHEBANG.
- * Returns false if a non-UTF-8 BOM is detected (z->rderr already set).
- */
+/* Skip UTF-8 BOM if present; transition to LUA_SKIP_SHEBANG. Returns false for non-UTF-8 BOM. */
 static bool lua_skip_bom(
 	struct lua_rstream *z, const unsigned char *p, size_t n, size_t *offset)
 {
@@ -1049,13 +1046,8 @@ static bool lua_skip_bom(
 	return true;
 }
 
-/*
- * Check for a shebang line starting at p[*offset] and update *offset past
- * the terminating newline if found.  If no newline is found within the chunk
- * the shebang spans the entire chunk and z->state remains LUA_SKIP_SHEBANG;
- * the caller must read more data and retry.  Otherwise transitions to
- * LUA_PASSTHROUGH.
- */
+/* Skip shebang from p[*offset]; transition to LUA_PASSTHROUGH.
+ * State stays LUA_SKIP_SHEBANG if no newline in chunk — caller retries. */
 static void lua_skip_shebang(
 	struct lua_rstream *z, const unsigned char *p, size_t n, size_t *offset)
 {
@@ -1173,7 +1165,10 @@ static struct stream *lua_reader_new(struct stream *base)
 		.direct_read = lua_direct_read,
 		.close = lua_close,
 	};
-	z->s = (struct stream){ &vftable, NULL };
+	z->s = (struct stream){
+		.vftable = &vftable,
+		.data = NULL,
+	};
 	z->inner = inner;
 	z->state = LUA_SKIP_BOM;
 	z->rderr = 0;

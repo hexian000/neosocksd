@@ -1,16 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/*
- * http_proxy_test - white-box unit tests for http_proxy.c.
- *
- * Linked translation units (see CMakeLists.txt):
- *   http_proxy.c     module under test
- *   proto/http.c     leaf (HTTP message framing)
- *   proto/codec.c    leaf (transfer codecs)
- * All stateful collaborators of http_proxy.c (dialer, transfer, ruleset,
- * server) are replaced by the mocks in the mock section below.
- */
+/* Unit tests for http_proxy.c; mocked: dialer, transfer, ruleset, server. */
 
 #include "http_proxy.h"
 
@@ -22,25 +13,25 @@
 #include "util.h"
 
 #include "os/socket.h"
+#include "utils/arraysize.h"
 #include "utils/testing.h"
 
 #include <ev.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <errno.h>
 #include <inttypes.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
- * mock - collaborator stubs (dialer, transfer, ruleset, server), a
- * portability shim and shared fixtures.
+ * mock - collaborator stubs (dialer, transfer, ruleset, server) and shared fixtures.
  * ---------------------------------------------------------------------- */
 
 #if !defined(_GNU_SOURCE)
@@ -64,13 +55,7 @@ static void *test_memmem(
 	return NULL;
 }
 #define memmem test_memmem
-#endif
-
-/*
- * These tests focus on HTTP parser/proxy request handling in http_proxy.c.
- * Dialer, transfer and ruleset are stubbed so the tests can isolate protocol
- * parsing and error response paths.
- */
+#endif /* !defined(_GNU_SOURCE) */
 
 /* test-only definition of struct globals, used to stub G.conf/G.ruleset */
 struct globals {
@@ -151,7 +136,7 @@ static struct stub_state S = {
 	.dialer_do_calls = 0,
 };
 
-static int_least32_t ruleset_state_token = 0;
+static int_fast32_t ruleset_state_token = 0;
 static struct dialreq *dialreq_allocations[32];
 static size_t num_dialreq_allocations = 0;
 
@@ -163,8 +148,7 @@ static void reset_dialreq_allocations(void)
 
 static void track_dialreq_allocation(struct dialreq *restrict req)
 {
-	T_CHECK(num_dialreq_allocations <
-		(sizeof(dialreq_allocations) / sizeof(dialreq_allocations[0])));
+	T_CHECK(num_dialreq_allocations < ARRAY_SIZE(dialreq_allocations));
 	dialreq_allocations[num_dialreq_allocations++] = req;
 }
 
@@ -379,15 +363,15 @@ struct stub_xfer_ctx {
 struct transfer *
 transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
-	UNUSED(loop);
-	UNUSED(nworkers);
+	(void)loop;
+	(void)nworkers;
 	static int token;
 	return (struct transfer *)&token;
 }
 
 void transfer_join(struct transfer *restrict xfer)
 {
-	UNUSED(xfer);
+	(void)xfer;
 }
 
 bool transfer_serve(
@@ -397,8 +381,7 @@ bool transfer_serve(
 	(void)xfer;
 	(void)acc_fd;
 	(void)dial_fd;
-	T_CHECK(stub_xfer_ctx_count <
-		(int)(sizeof(stub_xfer_ctxs) / sizeof(stub_xfer_ctxs[0])));
+	T_CHECK(stub_xfer_ctx_count < (int)ARRAY_SIZE(stub_xfer_ctxs));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
 		return false;
@@ -473,26 +456,6 @@ bool ruleset_route6(
 	return false;
 }
 
-static int write_all(const int fd, const void *buf, size_t len)
-{
-	const unsigned char *p = buf;
-	while (len > 0) {
-		const ssize_t n = write(fd, p, len);
-		if (n < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			return -1;
-		}
-		if (n == 0) {
-			return -1;
-		}
-		p += (size_t)n;
-		len -= (size_t)n;
-	}
-	return 0;
-}
-
 struct test_watchdog {
 	bool fired;
 };
@@ -504,15 +467,6 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	(void)revents;
 	watchdog->fired = true;
 	ev_break(loop, EVBREAK_ONE);
-}
-
-static void
-test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
-{
-	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
-	(void)loop;
-	(void)w;
-	(void)revents;
 }
 
 static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
@@ -543,6 +497,15 @@ test_step_timed_out(struct ev_loop *loop, const ev_tstamp timeout_sec)
 	return watchdog.fired;
 }
 
+static void drive_loop(struct ev_loop *loop)
+{
+	for (int_fast32_t i = 0; i < 16; i++) {
+		if (test_step_timed_out(loop, TEST_WAIT_SHORT_SEC)) {
+			break;
+		}
+	}
+}
+
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *data,
 	const ev_tstamp timeout_sec)
@@ -571,13 +534,80 @@ static bool server_success_reached(void *data)
 	return (int_fast32_t)ctx->s->stats.num_success >= ctx->expected;
 }
 
-static void drive_loop(struct ev_loop *loop)
+static void init_server(struct ev_loop **loop, struct server *restrict s)
 {
-	for (int_fast32_t i = 0; i < 16; i++) {
-		if (test_step_timed_out(loop, TEST_WAIT_SHORT_SEC)) {
-			break;
+	*loop = ev_loop_new(0);
+	T_CHECK(*loop != NULL);
+	s->loop = *loop;
+	test_server_init(s);
+}
+
+static void start_serve(
+	struct ev_loop *loop, struct server *restrict s, int *restrict peer_fd)
+{
+	int sv[2] = { -1, -1 };
+	struct sockaddr_in sa = {
+		.sin_family = AF_INET,
+	};
+
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(socket_set_cloexec(sv[0]) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
+	T_CHECK(socket_set_cloexec(sv[1]) == 0);
+	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	S.ruleset_loop = loop;
+	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
+	*peer_fd = sv[1];
+}
+
+static int write_all(const int fd, const void *buf, size_t len)
+{
+	const unsigned char *p = buf;
+	while (len > 0) {
+		const ssize_t n = write(fd, p, len);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return -1;
 		}
+		if (n == 0) {
+			return -1;
+		}
+		p += (size_t)n;
+		len -= (size_t)n;
 	}
+	return 0;
+}
+
+static void serve_payload(
+	struct ev_loop *loop, struct server *restrict s,
+	const char *restrict req, int *restrict peer_fd)
+{
+	int sv[2] = { -1, -1 };
+	struct sockaddr_in sa = {
+		.sin_family = AF_INET,
+	};
+
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(socket_set_cloexec(sv[0]) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
+	T_CHECK(socket_set_cloexec(sv[1]) == 0);
+	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	S.ruleset_loop = loop;
+	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
+	T_CHECK(write_all(sv[1], req, strlen(req)) == 0);
+
+	*peer_fd = sv[1];
+}
+
+static void
+test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+{
+	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
+	(void)loop;
+	(void)w;
+	(void)revents;
 }
 
 /* Receive at least min_bytes from fd, up to cap bytes.
@@ -629,27 +659,6 @@ static ssize_t recv_at_least(
 	return (ssize_t)off;
 }
 
-static void serve_payload(
-	struct ev_loop *loop, struct server *restrict s,
-	const char *restrict req, int *restrict peer_fd)
-{
-	int sv[2] = { -1, -1 };
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
-
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]) == 0);
-	T_CHECK(socket_set_cloexec(sv[1]) == 0);
-	T_CHECK(socket_set_nonblock(sv[1]) == 0);
-	S.ruleset_loop = loop;
-	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
-	T_CHECK(write_all(sv[1], req, strlen(req)) == 0);
-
-	*peer_fd = sv[1];
-}
-
 static bool has_http_status(
 	const unsigned char *restrict rsp, const size_t n,
 	const char *restrict code_str)
@@ -665,32 +674,6 @@ static bool has_http_status(
 		return false;
 	}
 	return true;
-}
-
-static void init_server(struct ev_loop **loop, struct server *restrict s)
-{
-	*loop = ev_loop_new(0);
-	T_CHECK(*loop != NULL);
-	s->loop = *loop;
-	test_server_init(s);
-}
-
-static void start_serve(
-	struct ev_loop *loop, struct server *restrict s, int *restrict peer_fd)
-{
-	int sv[2] = { -1, -1 };
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
-
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]) == 0);
-	T_CHECK(socket_set_cloexec(sv[1]) == 0);
-	T_CHECK(socket_set_nonblock(sv[1]) == 0);
-	S.ruleset_loop = loop;
-	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
-	*peer_fd = sv[1];
 }
 
 static bool assert_response_status(
@@ -1019,7 +1002,7 @@ T_DECLARE_CASE(ruleset_auth_required_without_basic_credentials_returns_407)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	int_least32_t ruleset_stub = 0;
+	int_fast32_t ruleset_stub = 0;
 	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
 			   "Proxy-Authorization: Bearer token\r\n"
 			   "\r\n";
@@ -1042,7 +1025,7 @@ T_DECLARE_CASE(ruleset_auth_required_with_invalid_basic_returns_407)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	int_least32_t ruleset_stub = 0;
+	int_fast32_t ruleset_stub = 0;
 	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
 			   "Proxy-Authorization: Basic dXNlcm9ubHk=\r\n"
 			   "\r\n";
@@ -1065,7 +1048,7 @@ T_DECLARE_CASE(ruleset_resolve_failure_returns_500)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	int_least32_t ruleset_stub = 0;
+	int_fast32_t ruleset_stub = 0;
 	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
 			   "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"
 			   "\r\n";
@@ -1089,7 +1072,7 @@ T_DECLARE_CASE(ruleset_finish_without_req_returns_403)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	int_least32_t ruleset_stub = 0;
+	int_fast32_t ruleset_stub = 0;
 	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
 			   "\r\n";
 
@@ -1113,7 +1096,7 @@ T_DECLARE_CASE(ruleset_finish_with_req_and_dialer_error_returns_502)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	int_least32_t ruleset_stub = 0;
+	int_fast32_t ruleset_stub = 0;
 	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
 			   "\r\n";
 
@@ -1140,7 +1123,7 @@ T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	int_least32_t ruleset_stub = 0;
+	int_fast32_t ruleset_stub = 0;
 	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
 			   "\r\n";
 
@@ -1853,50 +1836,50 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
-{
-	T_DECLARE_CTX(t);
-	reset_stub_state();
-	T_RUN_CASE(t, plain_http_origin_form_returns_400);
-	T_RUN_CASE(t, split_request_is_parsed_incrementally);
-	T_RUN_CASE(t, plain_http_absolute_url_no_dialreq_returns_500);
-	T_RUN_CASE(t, plain_http_absolute_url_no_host_returns_400);
-	T_RUN_CASE(t, plain_http_absolute_url_dialer_error_returns_502);
-	T_RUN_CASE(t, plain_http_absolute_url_established);
-	T_RUN_CASE(t, plain_http_post_with_body_forwarded);
-	T_RUN_CASE(t, plain_http_expect_100_continue_with_body_forwarded);
-	T_RUN_CASE(t, plain_http_version_preserved_in_forwarded_request);
-	T_RUN_CASE(t, plain_http_te_chunked_forwarded_to_upstream);
-	T_RUN_CASE(t, plain_http_dynamic_hop_by_hop_not_forwarded);
-	T_RUN_CASE(t, plain_http_proxy_authorization_not_forwarded);
-	T_RUN_CASE(t, plain_http_forward_success_counted_once);
-	T_RUN_CASE(t, malformed_proxy_authorization_returns_400);
-	T_RUN_CASE(t, invalid_te_returns_400);
-	T_RUN_CASE(t, connect_with_invalid_target_returns_500);
-	T_RUN_CASE(t, valid_connect_dialer_error_returns_502);
-	T_RUN_CASE(t, valid_connect_established_with_hijack);
-	T_RUN_CASE(
-		t, connect_hijack_finalize_does_not_touch_overwritten_dialreq);
-	T_RUN_CASE(t, connect_with_transfer_encoding_chunked_is_accepted);
-	T_RUN_CASE(t, connect_success_counted_once);
-	T_RUN_CASE(t, authorization_header_without_space_returns_400);
-	T_RUN_CASE(
-		t, ruleset_auth_required_without_basic_credentials_returns_407);
-	T_RUN_CASE(t, ruleset_auth_required_with_invalid_basic_returns_407);
-	T_RUN_CASE(t, ruleset_resolve_failure_returns_500);
-	T_RUN_CASE(t, ruleset_finish_without_req_returns_403);
-	T_RUN_CASE(t, ruleset_finish_with_req_and_dialer_error_returns_502);
-	T_RUN_CASE(t, timeout_in_process_state_cancels_ruleset);
-	T_RUN_CASE(t, timeout_in_connect_state_cancels_dialer);
-	T_RUN_CASE(t, request_with_cl_and_te_is_rejected);
-	T_RUN_CASE(t, request_with_te_and_cl_is_rejected);
-	T_RUN_CASE(t, request_with_duplicate_cl_is_rejected);
-	T_RUN_CASE(t, request_with_invalid_cl_is_rejected);
-	T_RUN_CASE(t, request_header_value_with_bare_cr_is_rejected);
-	T_RUN_CASE(t, request_header_value_with_ctl_is_rejected);
-	T_RUN_CASE(t, request_header_name_with_invalid_token_is_rejected);
+static const struct testing_suite suite[] = {
+	T_CASE(plain_http_origin_form_returns_400),
+	T_CASE(split_request_is_parsed_incrementally),
+	T_CASE(plain_http_absolute_url_no_dialreq_returns_500),
+	T_CASE(plain_http_absolute_url_no_host_returns_400),
+	T_CASE(plain_http_absolute_url_dialer_error_returns_502),
+	T_CASE(plain_http_absolute_url_established),
+	T_CASE(plain_http_post_with_body_forwarded),
+	T_CASE(plain_http_expect_100_continue_with_body_forwarded),
+	T_CASE(plain_http_version_preserved_in_forwarded_request),
+	T_CASE(plain_http_te_chunked_forwarded_to_upstream),
+	T_CASE(plain_http_dynamic_hop_by_hop_not_forwarded),
+	T_CASE(plain_http_proxy_authorization_not_forwarded),
+	T_CASE(plain_http_forward_success_counted_once),
+	T_CASE(malformed_proxy_authorization_returns_400),
+	T_CASE(invalid_te_returns_400),
+	T_CASE(connect_with_invalid_target_returns_500),
+	T_CASE(valid_connect_dialer_error_returns_502),
+	T_CASE(valid_connect_established_with_hijack),
+	T_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq),
+	T_CASE(connect_with_transfer_encoding_chunked_is_accepted),
+	T_CASE(connect_success_counted_once),
+	T_CASE(authorization_header_without_space_returns_400),
+	T_CASE(ruleset_auth_required_without_basic_credentials_returns_407),
+	T_CASE(ruleset_auth_required_with_invalid_basic_returns_407),
+	T_CASE(ruleset_resolve_failure_returns_500),
+	T_CASE(ruleset_finish_without_req_returns_403),
+	T_CASE(ruleset_finish_with_req_and_dialer_error_returns_502),
+	T_CASE(timeout_in_process_state_cancels_ruleset),
+	T_CASE(timeout_in_connect_state_cancels_dialer),
+	T_CASE(request_with_cl_and_te_is_rejected),
+	T_CASE(request_with_te_and_cl_is_rejected),
+	T_CASE(request_with_duplicate_cl_is_rejected),
+	T_CASE(request_with_invalid_cl_is_rejected),
+	T_CASE(request_header_value_with_bare_cr_is_rejected),
+	T_CASE(request_header_value_with_ctl_is_rejected),
+	T_CASE(request_header_name_with_invalid_token_is_rejected),
+	T_SUITE_END,
+};
 
-	const bool ok = T_RESULT(t);
+int main(int argc, char **argv)
+{
 	reset_stub_state();
-	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+	const int ret = testing_main(argc, argv, suite);
+	reset_stub_state();
+	return ret;
 }

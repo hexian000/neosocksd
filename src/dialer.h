@@ -3,15 +3,7 @@
 
 /**
  * @file dialer.h
- * @brief Network dialer for establishing connections through proxy chains
- *
- * This module provides functionality for establishing network connections
- * either directly or through a chain of proxy servers. It supports multiple
- * proxy protocols including HTTP CONNECT, SOCKS4A, and SOCKS5.
- *
- * The dialer uses an asynchronous state machine to handle connection
- * establishment and proxy handshakes, integrating with libev for event-driven
- * operation.
+ * @brief Async state-machine dialer: direct TCP or HTTP/SOCKS4A/SOCKS5 proxy chains.
  */
 
 #ifndef DIALER_H
@@ -24,16 +16,16 @@
 #include "utils/buffer.h"
 #include "utils/minmax.h"
 
-struct config;
-struct resolver;
-struct server;
-
 #include <ev.h>
 
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+struct config;
+struct resolver;
+struct server;
 
 /**
  * @brief Address types supported by the dialer
@@ -108,13 +100,7 @@ enum proxy_protocol {
 	PROTO_MAX,
 };
 
-/**
- * @brief Dialer error codes for detailed error reporting
- *
- * These error codes provide more granular information about connection
- * failures than a simple system errno. Use dialer_error_str() to get
- * a human-readable description.
- */
+/** @brief Dialer error codes; use dialer_strerror() for descriptions */
 enum dialer_error {
 	/** No error, operation successful. */
 	DIALER_OK = 0,
@@ -230,12 +216,7 @@ struct dialer_cb {
 	void *data;
 };
 
-/**
- * @brief Dialer state machine structure
- *
- * This structure maintains the state of an ongoing dial operation,
- * including proxy chain traversal and protocol handshakes.
- */
+/** @brief Dialer state machine */
 struct dialer {
 	const struct dialreq *req;
 	const struct config *conf;

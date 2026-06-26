@@ -6,6 +6,6 @@
 
 #include <lua.h>
 
-int luaopen_neosocksd(lua_State *L);
+int luaopen_neosocksd(lua_State *restrict L);
 
 #endif /* RULESET_API_H */

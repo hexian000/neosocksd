@@ -1,23 +1,15 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/*
- * http_client_test - white-box unit tests for http_client.c.
- *
- * Linked translation units (see CMakeLists.txt):
- *   http_client.c    module under test
- *   proto/http.c     leaf (HTTP message framing)
- *   proto/codec.c    leaf (transfer codecs)
- * The dialer collaborator is replaced by the mocks in the mock section below.
- */
+/* Unit tests for http_client.c; mocked: dialer. */
 
 #include "http_client.h"
 
 #include "conf.h"
 #include "dialer.h"
-#include "proto/http.h"
 #include "util.h"
 
+#include "proto/http.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -30,10 +22,6 @@
 
 /* -------------------------------------------------------------------------
  * mock - dialer/dialreq stubs and shared fixtures.
- *
- * These tests isolate http_client.c. The dialer and dialreq are stubbed so
- * connection accounting and state transitions can be asserted without real
- * network activity.
  * ---------------------------------------------------------------------- */
 
 static struct config test_conf = {
@@ -184,7 +172,7 @@ T_DECLARE_CASE(http_client_cancel_noop)
 	http_client_init(
 		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
 		NULL);
-	http_client_cancel(loop, &ctx);
+	http_client_cancel(&ctx, loop);
 	/* cancel should not invoke the user callback */
 	T_EXPECT(!result.called);
 	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
@@ -214,7 +202,7 @@ T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
 	/* dialer_do stub immediately fires finish_cb with fd=-1 */
-	http_client_do(loop, &ctx, req);
+	http_client_do(&ctx, loop, req);
 
 	T_EXPECT(result.called);
 	T_EXPECT(result.errmsg != NULL);
@@ -232,11 +220,14 @@ T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(http_client_init_state),
+	T_CASE(http_client_cancel_noop),
+	T_CASE(http_client_dialer_fail_calls_cb),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, http_client_init_state);
-	T_RUN_CASE(t, http_client_cancel_noop);
-	T_RUN_CASE(t, http_client_dialer_fail_calls_cb);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

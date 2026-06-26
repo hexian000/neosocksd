@@ -17,10 +17,8 @@
 #include "io/memory.h"
 #include "io/stream.h"
 #include "miniz.h"
-#include "os/clock.h"
 #include "utils/buffer.h"
 
-#define UTILS_MEASURE_H
 #include "utils/testing.h"
 
 #include <stdbool.h>
@@ -544,8 +542,9 @@ T_DECLARE_CASE(codec_gzip_bad_magic)
 }
 
 /* -------------------------------------------------------------------------
- * bench - compress + decompress round-trip throughput (per message). Gated
- * behind the BENCH env var so it does not run during normal ctest.
+ * bench - compress + decompress round-trip throughput (per message). Benches
+ * run only when a name filter selects them (e.g. --run bench); a plain ctest
+ * run skips them.
  * ---------------------------------------------------------------------- */
 
 /* Fill a buffer with moderately compressible data. */
@@ -608,26 +607,24 @@ T_DECLARE_BENCH(bench_gzip_roundtrip)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(codec_null_base),
+	T_CASE(codec_zlib_roundtrip),
+	T_CASE(codec_deflate_roundtrip),
+	T_CASE(codec_gzip_roundtrip),
+	T_CASE(codec_gzip_multiframe),
+	T_CASE(codec_gzip_crc_error),
+	T_CASE(codec_gzip_flush_multiframe),
+	T_CASE(codec_gzip_flush_empty),
+	T_CASE(codec_gzip_optional_headers),
+	T_CASE(codec_gzip_hcrc_mismatch),
+	T_CASE(codec_gzip_bad_magic),
+	T_BENCH(bench_zlib_roundtrip),
+	T_BENCH(bench_gzip_roundtrip),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-
-	T_RUN_CASE(t, codec_null_base);
-	T_RUN_CASE(t, codec_zlib_roundtrip);
-	T_RUN_CASE(t, codec_deflate_roundtrip);
-	T_RUN_CASE(t, codec_gzip_roundtrip);
-	T_RUN_CASE(t, codec_gzip_multiframe);
-	T_RUN_CASE(t, codec_gzip_crc_error);
-	T_RUN_CASE(t, codec_gzip_flush_multiframe);
-	T_RUN_CASE(t, codec_gzip_flush_empty);
-	T_RUN_CASE(t, codec_gzip_optional_headers);
-	T_RUN_CASE(t, codec_gzip_hcrc_mismatch);
-	T_RUN_CASE(t, codec_gzip_bad_magic);
-
-	if (getenv("BENCH") != NULL) {
-		T_RUN_BENCH(t, bench_zlib_roundtrip);
-		T_RUN_BENCH(t, bench_gzip_roundtrip);
-	}
-
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }

@@ -22,11 +22,7 @@ struct stream;
 /**
  * @brief Create a zlib compression writer stream
  * @param base The base stream to write compressed data to
- * @return A new stream that compresses data using zlib format, or NULL on error
- *
- * Creates a compression stream that accepts uncompressed data and writes
- * zlib-formatted compressed data to the base stream. The zlib format includes
- * a header and adler32 checksum for data integrity.
+ * @return New stream, or NULL on error
  *
  * Flushing performs a full DEFLATE flush (emitting a sync point) and
  * propagates the flush to the base stream.
@@ -36,11 +32,7 @@ struct stream *codec_zlib_writer(struct stream *base);
 /**
  * @brief Create a zlib decompression reader stream
  * @param base The base stream to read compressed data from
- * @return A new stream that decompresses zlib data, or NULL on error
- *
- * Creates a decompression stream that reads zlib-formatted compressed data
- * from the base stream and provides uncompressed data through the read interface.
- * Validates the zlib header and adler32 checksum.
+ * @return New stream, or NULL on error; validates zlib header and adler32 checksum
  */
 struct stream *codec_zlib_reader(struct stream *base);
 
@@ -49,12 +41,9 @@ struct stream *codec_zlib_reader(struct stream *base);
 /**
  * @brief Create a raw DEFLATE compression writer stream
  * @param base The base stream to write compressed data to
- * @return A new stream that compresses data using raw DEFLATE, or NULL on error
+ * @return New stream, or NULL on error
  *
- * Creates a compression stream that accepts uncompressed data and writes
- * raw DEFLATE compressed data to the base stream. This format has no header
- * or checksum - just the compressed data blocks.
- *
+ * No header or checksum — raw compressed data blocks only.
  * Flushing performs a full DEFLATE flush (emitting a sync point) and
  * propagates the flush to the base stream.
  */
@@ -63,11 +52,7 @@ struct stream *codec_deflate_writer(struct stream *base);
 /**
  * @brief Create a raw DEFLATE decompression reader stream
  * @param base The base stream to read compressed data from
- * @return A new stream that decompresses raw DEFLATE data, or NULL on error
- *
- * Creates a decompression stream that reads raw DEFLATE compressed data
- * from the base stream and provides uncompressed data. Expects no header
- * or checksum validation.
+ * @return New stream, or NULL on error; no header or checksum validation
  */
 struct stream *codec_inflate_reader(struct stream *base);
 
@@ -76,44 +61,28 @@ struct stream *codec_inflate_reader(struct stream *base);
 /**
  * @brief Create a gzip compression writer stream
  * @param base The base stream to write compressed data to
- * @return A new stream that compresses data using gzip format, or NULL on error
+ * @return New stream, or NULL on error
  *
- * Creates a compression stream that writes gzip members with a static 10-byte
- * header (MTIME=0, OS=0xff), raw DEFLATE compressed data, and an 8-byte
- * trailer containing CRC-32 and ISIZE of the uncompressed input.
- *
- * Flushing finishes the current gzip member (DEFLATE finish + trailer) and
- * starts a new one on the next write, producing a multi-member gzip stream.
- * The base stream is also flushed.
+ * Writes gzip members with a static 10-byte header (MTIME=0, OS=0xff) and
+ * an 8-byte trailer (CRC-32 + ISIZE). Flushing finishes the current member
+ * and starts a new one on the next write (multi-member gzip stream).
  */
 struct stream *codec_gzip_writer(struct stream *base);
 
 /**
  * @brief Create a gzip decompression reader stream
  * @param base The base stream to read compressed data from
- * @return A new stream that decompresses gzip data, or NULL on error
+ * @return New stream, or NULL on error
  *
- * Creates a decompression stream that reads one or more concatenated gzip
- * members, verifying each member's CRC-32 and ISIZE trailer fields.
- * Supports all standard gzip header optional fields (FEXTRA, FNAME, FCOMMENT,
- * FHCRC). Returns an error if any checksum does not match.
+ * Reads concatenated gzip members; verifies CRC-32 and ISIZE per member.
+ * Supports all standard header optional fields (FEXTRA, FNAME, FCOMMENT, FHCRC).
  */
 struct stream *codec_gzip_reader(struct stream *base);
 
 /**
- * @brief Create a Lua source reader stream from a file path
- * @param path File path.
- * @return A stream with ownership transferred to the caller, or NULL on error.
- *
- * Opens the file, auto-detects gzip compression by peeking at the first two
- * bytes. If the stream starts with the gzip magic (0x1f 0x8b), it is
- * transparently decompressed via codec_gzip_reader().
- *
- * After decompression (if applicable), strips a leading UTF-8 BOM
- * (EF BB BF) and a shebang line (#!...\\n). Non-UTF-8 BOMs
- * (UTF-16 BE/LE, UTF-32 BE/LE) are rejected with an error.
- *
- * The caller must stream_close() the returned stream.
+ * @brief Create a Lua source reader; auto-detects gzip, strips UTF-8 BOM and shebang
+ * @param path File path
+ * @return Stream (caller owns; close with stream_close()), or NULL on error
  */
 struct stream *codec_lua_reader(const char *path);
 

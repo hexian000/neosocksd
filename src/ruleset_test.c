@@ -19,26 +19,27 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "io/stream.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
 #include "server.h"
+
+#include "io/stream.h"
 #include "utils/testing.h"
 
-#include "lauxlib.h"
-#include "lua.h"
+#include <lauxlib.h>
+#include <lua.h>
+
+#include <ev.h>
 
 #include <arpa/inet.h>
-#include <ev.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - luaopen_* stubs and shared fixtures.
@@ -699,15 +700,16 @@ T_DECLARE_CASE(ruleset_geterror_variants)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
-int main(void)
+static const struct testing_suite suite[] = {
+	T_CASE(ruleset_loadfile_dispatches_requests),
+	T_CASE(ruleset_update_invoke_rpcall_stats_and_tick),
+	T_CASE(ruleset_metrics_returns_string_when_defined_and_null_when_absent),
+	T_CASE(ruleset_cancel_pending_request_clears_callback),
+	T_CASE(ruleset_geterror_variants),
+	T_SUITE_END,
+};
+
+int main(int argc, char **argv)
 {
-	T_DECLARE_CTX(t);
-	T_RUN_CASE(t, ruleset_loadfile_dispatches_requests);
-	T_RUN_CASE(t, ruleset_update_invoke_rpcall_stats_and_tick);
-	T_RUN_CASE(
-		t,
-		ruleset_metrics_returns_string_when_defined_and_null_when_absent);
-	T_RUN_CASE(t, ruleset_cancel_pending_request_clears_callback);
-	T_RUN_CASE(t, ruleset_geterror_variants);
-	return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
+	return testing_main(argc, argv, suite);
 }
