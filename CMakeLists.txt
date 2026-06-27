@@ -61,6 +61,7 @@ option(ENABLE_THREADS "Enable thread offloading" OFF)
 option(LINK_STATIC_LIBS "Link against static libraries" OFF)
 option(ENABLE_SYSTEMD "Enable systemd integration" OFF)
 option(ENABLE_RULESET "Enable ruleset scripting (requires Lua)" ON)
+option(ENABLE_ALLOC_CACHE "Enable the Lua allocator cache" OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

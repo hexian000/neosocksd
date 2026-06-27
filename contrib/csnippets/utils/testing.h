@@ -113,8 +113,18 @@
  *
  * RUNNING BENCHMARKS
  *   Use T_RUN_BENCH(ctx, name) to run a benchmark.  It auto-calibrates the
- *   iteration count by doubling N each round until at least 1 second of
- *   wall time has elapsed, then reports the result as ns/op:
+ *   iteration count by doubling N each round until at least 1 second of wall
+ *   time has elapsed, then reports the per-op time alongside the per-op heap
+ *   footprint and allocation count, e.g.:
+ *
+ *     --- BENCH bench_add  73400320  13.6ns/op  0/op  0 allocs/op
+ *
+ *   The time and byte columns are rendered with utils/formats.h (SI-prefixed
+ *   durations like 13.6ns/op, IEC byte counts like 1.50KiB/op), so the runner
+ *   pulls in libm.  Memory columns are zero unless the benchmark reports
+ *   allocations (see T_BENCH_MALLOC and T_BENCH_REPORT below); a throughput
+ *   column (e.g. 2.33GB/s) appears only when the benchmark calls
+ *   T_BENCH_SET_BYTES.
  *
  *     int main(void)
  *     {
@@ -124,10 +134,9 @@
  *         return T_RESULT(t);
  *     }
  *
- *   T_DECLARE_BENCH is always available.  The inline T_RUN_BENCH macro requires
- *   measure.h to be included before testing.h (it expands clock_monotonic_ns()
- *   directly); testing_main() runs benches without that include, since the
- *   timing lives in testing.c.  Benchmarks do not affect the
+ *   T_DECLARE_BENCH and T_RUN_BENCH are always available; the monotonic clock
+ *   lives in testing.c, so test files need not include measure.h.  testing_main()
+ *   runs benches the same way.  Benchmarks do not affect the
  *   passed/failed/skipped counters; the benched counter in struct testing_ctx
  *   is incremented instead.
  */
@@ -159,9 +168,25 @@ struct testing_ctx {
  * Benchmark context.  Passed via the implicit `_b_` parameter inside a
  * T_DECLARE_BENCH body, whose loop must run the benchmarked operation exactly
  * `_b_->N` times.
+ *
+ * `bytes` and `allocs` are running totals reported by the benchmark (see
+ * T_BENCH_MALLOC and friends).  `bytes` is the heap memory requested; `allocs`
+ * counts allocator calls - malloc/calloc/realloc as well as free, since in C a
+ * free is itself a call worth measuring.  The runner divides them by the total
+ * iteration count to print `B/op` and `allocs/op`, in the spirit of Go's
+ * `-benchmem`.  They accumulate across calibration rounds, exactly like the
+ * elapsed time used for the per-op timing, so per-op figures stay correct.
+ *
+ * `set_bytes` is the number of bytes processed by a single operation, set with
+ * T_BENCH_SET_BYTES (like Go's b.SetBytes).  When non-zero the runner adds a
+ * throughput column.  Unlike `bytes`/`allocs` it is a per-op value, not a
+ * running total.
  */
 struct testing_bench {
 	uint_fast64_t N;
+	uint_fast64_t bytes;
+	uint_fast64_t allocs;
+	uint_fast64_t set_bytes;
 };
 
 /*
@@ -237,9 +262,8 @@ struct testing_bench {
 #define T_RESULT(ctx_) ((ctx_).failed == 0)
 
 /* -------------------------------------------------------------------------
- * Benchmark case definition - always available.  Actually running a benchmark
- * requires a monotonic clock, provided either by T_RUN_BENCH (needs measure.h,
- * see the bottom of this header) or by testing_main (see testing.c).
+ * Benchmark case definition.  Run a benchmark with T_RUN_BENCH or testing_main;
+ * both rely on the monotonic clock that lives in testing.c.
  * ---------------------------------------------------------------------- */
 
 /*
@@ -250,6 +274,108 @@ struct testing_bench {
  */
 #define T_DECLARE_BENCH(name_)                                                 \
 	static void _benchcase_##name_##_(struct testing_bench *_b_)
+
+/* -------------------------------------------------------------------------
+ * Benchmark memory reporting - opt-in, mirrors Go's `-benchmem`.
+ *
+ * C has no runtime that tracks allocations, so a benchmark must report them
+ * itself.  The counting wrappers below stand in for the standard allocators
+ * (malloc/calloc/realloc/aligned_alloc/free): each records one allocator call
+ * into the implicit `_b_` before delegating to the standard function.
+ * Allocations also add their requested size to `bytes`; T_BENCH_FREE counts the
+ * call but adds no bytes.  Pair every counted allocation with a counted
+ * T_BENCH_FREE so frees show up in the allocs column too.
+ *
+ *     T_DECLARE_BENCH(bench_dup)
+ *     {
+ *         for (uint_fast64_t i = 0; i < _b_->N; i++) {
+ *             void *p = T_BENCH_MALLOC(64);
+ *             T_BENCH_FREE(p);
+ *         }
+ *     }
+ *
+ * For a custom allocator, call T_BENCH_REPORT(nbytes) to record one allocator
+ * call moving `nbytes` bytes - use 0 for a free.  Benchmarks that report nothing
+ * print a zero memory column.  To add a throughput column, call
+ * T_BENCH_SET_BYTES with the bytes processed per operation.
+ * ---------------------------------------------------------------------- */
+
+/* Record one allocator call moving `nbytes_` bytes into `_b_` (0 for a free). */
+#define T_BENCH_REPORT(nbytes_)                                                \
+	do {                                                                   \
+		(_b_)->allocs++;                                               \
+		(_b_)->bytes += (uint_fast64_t)(nbytes_);                      \
+	} while (0)
+
+/* Counting wrappers over the standard allocators; record into `b` on success. */
+static inline void *testing_bench_malloc(struct testing_bench *b, size_t size)
+{
+	void *const p = malloc(size);
+	if (p != NULL) {
+		b->allocs++;
+		b->bytes += size;
+	}
+	return p;
+}
+
+static inline void *
+testing_bench_calloc(struct testing_bench *b, size_t nmemb, size_t size)
+{
+	void *const p = calloc(nmemb, size);
+	if (p != NULL) {
+		b->allocs++;
+		b->bytes += (uint_fast64_t)nmemb * size;
+	}
+	return p;
+}
+
+static inline void *
+testing_bench_realloc(struct testing_bench *b, void *ptr, size_t size)
+{
+	void *const p = realloc(ptr, size);
+	if (p != NULL) {
+		b->allocs++;
+		b->bytes += size;
+	}
+	return p;
+}
+
+static inline void *testing_bench_aligned_alloc(
+	struct testing_bench *b, size_t alignment, size_t size)
+{
+	void *const p = aligned_alloc(alignment, size);
+	if (p != NULL) {
+		b->allocs++;
+		b->bytes += size;
+	}
+	return p;
+}
+
+/* Count one free as an allocator call (no bytes), then release `ptr`. */
+static inline void testing_bench_free(struct testing_bench *b, void *ptr)
+{
+	b->allocs++;
+	free(ptr);
+}
+
+/* Convenience macros injecting the implicit `_b_`, like the standard allocators. */
+#define T_BENCH_MALLOC(size_) (testing_bench_malloc((_b_), (size_)))
+#define T_BENCH_CALLOC(nmemb_, size_)                                          \
+	(testing_bench_calloc((_b_), (nmemb_), (size_)))
+#define T_BENCH_REALLOC(ptr_, size_)                                           \
+	(testing_bench_realloc((_b_), (ptr_), (size_)))
+#define T_BENCH_ALIGNED_ALLOC(alignment_, size_)                               \
+	(testing_bench_aligned_alloc((_b_), (alignment_), (size_)))
+#define T_BENCH_FREE(ptr_) (testing_bench_free((_b_), (ptr_)))
+
+/*
+ * T_BENCH_SET_BYTES(nbytes_)
+ *   Declare that one operation processes `nbytes_` bytes (like Go's
+ *   b.SetBytes).  The runner then prints a throughput column.  This is a per-op
+ *   value; setting it repeatedly to the same number is harmless.
+ */
+#define T_BENCH_SET_BYTES(nbytes_)                                             \
+	((void)((_b_)->set_bytes = (uint_fast64_t)(nbytes_)))
 
 /* -------------------------------------------------------------------------
  * Test suite - a NUL-terminated array of cases and benches consumed by
@@ -311,6 +437,27 @@ struct testing_suite {
  *   a usage error or an invalid regex also returns EXIT_FAILURE.
  */
 int testing_main(int argc, char *const *argv, const struct testing_suite *suite);
+
+/*
+ * testing_bench_run(ctx, name, bench)
+ *   Runs benchmark function `bench` (reported under `name`), auto-calibrating
+ *   by doubling N each round until at least 1 second of wall time has elapsed.
+ *   Reports per-op time, per-op bytes/allocs and optional throughput (see the
+ *   RUNNING BENCHMARKS notes), and increments ctx.benched.  Does not affect
+ *   passed/failed/skipped.  Backs the T_RUN_BENCH macro; the monotonic clock
+ *   lives in testing.c so callers need not include measure.h.
+ */
+void testing_bench_run(
+	struct testing_ctx *ctx, const char *name,
+	void (*bench)(struct testing_bench *));
+
+/*
+ * T_RUN_BENCH(ctx, name)
+ *   Runs benchmark `name` via testing_bench_run.  Always available; unlike the
+ *   former inline form it does not require measure.h to be included first.
+ */
+#define T_RUN_BENCH(ctx_, name_)                                               \
+	(testing_bench_run(&(ctx_), #name_, _benchcase_##name_##_))
 
 /* -------------------------------------------------------------------------
  * Logging macros - print a message to out with file and line number.
@@ -476,44 +623,5 @@ int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
 				(size_t)(size_));                              \
 		}                                                              \
 	} while (0)
-
-/* -------------------------------------------------------------------------
- * Inline benchmark runner - available only when measure.h is included before
- * testing.h, since T_RUN_BENCH expands clock_monotonic_ns() directly.  For a
- * runner that does not need measure.h in the test file, see testing_main().
- * ---------------------------------------------------------------------- */
-
-#ifdef UTILS_MEASURE_H
-
-/*
- * T_RUN_BENCH(ctx, name)
- *   Runs benchmark `name`, auto-calibrating by doubling N each round until
- *   at least 1 second of wall time has elapsed.  Reports the result as
- *   ns/op and increments ctx.benched.  Does not affect passed/failed/skipped.
- */
-#define T_RUN_BENCH(ctx_, name_)                                               \
-	do {                                                                   \
-		(void)fprintf((ctx_).out, "=== RUN   %s\n", #name_);           \
-		(void)fflush((ctx_).out);                                      \
-		struct testing_bench _b_ = { 0 };                              \
-		const int_least64_t _bstart_ = clock_monotonic_ns();           \
-		int_least64_t _belapsed_;                                      \
-		uint_fast64_t _bN_ = 1;                                        \
-		do {                                                           \
-			_b_.N = _bN_;                                          \
-			_benchcase_##name_##_(&_b_);                           \
-			_bN_ <<= 1u;                                           \
-			_belapsed_ = clock_monotonic_ns() - _bstart_;          \
-		} while (_bN_ && _belapsed_ < 1000000000 /* 1s */);            \
-		const double _bnsop_ =                                         \
-			(double)_belapsed_ / (double)(_bN_ - 1);               \
-		(void)fprintf(                                                 \
-			(ctx_).out, "--- BENCH %s\t%ju\t%.2f ns/op\n", #name_, \
-			(uintmax_t)(_bN_ - 1), _bnsop_);                       \
-		(void)fflush((ctx_).out);                                      \
-		(ctx_).benched++;                                              \
-	} while (0)
-
-#endif /* UTILS_MEASURE_H */
 
 #endif /* UTILS_TESTING_H */

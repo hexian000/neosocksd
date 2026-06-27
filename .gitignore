@@ -7,7 +7,7 @@
 
 /cmake-*
 /build
-/build-gcov
+/build-*
 /xbuild
 /scripts/__pycache__
 /compile_commands.json

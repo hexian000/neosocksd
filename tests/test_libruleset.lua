@@ -679,4 +679,74 @@ return function(T)
             string.format("missing events header in stats: %q", s))
     end)
 
+    -- [[ rule chain throughput benchmarks ]] --
+    -- Deferred by the framework: run only when selected by TESTING_FILTER
+    -- (e.g. TESTING_FILTER=. runs every case and bench).
+    -- Each chain is sized so the matching rule sits last, so every decision
+    -- walks the whole chain (worst case) and the cost reflects per-rule
+    -- traversal of runchain_ rather than an early hit.
+
+    local BENCH_ITERS = 100000
+    local CHAIN_LEN   = 16
+
+    -- redirect chain: string-address matchers (each rule calls splithostport)
+    T:bench("decide.route redirect chain", BENCH_ITERS, function()
+        local saved_redirect      = _G.redirect
+        local saved_route         = _G.route
+        local saved_route_default = _G.route_default
+        local chain = {}
+        for i = 1, CHAIN_LEN - 1 do
+            chain[i] = { match.host(string.format("noexist%d.example", i)), rule.reject() }
+        end
+        chain[CHAIN_LEN] = { match.exact("example.com:80"), rule.redirect("10.0.0.1:8080") }
+        _G.redirect      = chain
+        _G.route         = nil
+        _G.route_default = nil
+        for _ = 1, BENCH_ITERS do
+            libruleset.decide.route("example.com:80")
+        end
+        _G.redirect      = saved_redirect
+        _G.route         = saved_route
+        _G.route_default = saved_route_default
+    end)
+
+    -- route chain: IPv4 subnet matchers over a parsed address
+    T:bench("decide.route subnet chain", BENCH_ITERS, function()
+        local saved_redirect      = _G.redirect
+        local saved_route         = _G.route
+        local saved_route_default = _G.route_default
+        local chain = {}
+        for i = 1, CHAIN_LEN - 1 do
+            chain[i] = { inet.subnet(string.format("10.%d.0.0/16", i)), rule.direct() }
+        end
+        chain[CHAIN_LEN] = { inet.subnet("192.168.0.0/16"), rule.direct() }
+        _G.redirect      = nil
+        _G.route         = chain
+        _G.route_default = nil
+        for _ = 1, BENCH_ITERS do
+            libruleset.decide.route("192.168.1.1:80")
+        end
+        _G.redirect      = saved_redirect
+        _G.route         = saved_route
+        _G.route_default = saved_route_default
+    end)
+
+    -- resolve chain: domain matchers, the common name-based routing path
+    T:bench("decide.resolve domain chain", BENCH_ITERS, function()
+        local saved_redirect_name = _G.redirect_name
+        local saved_route_default = _G.route_default
+        local chain = {}
+        for i = 1, CHAIN_LEN - 1 do
+            chain[i] = { match.domain(string.format("noexist%d.example", i)), rule.reject() }
+        end
+        chain[CHAIN_LEN] = { match.domain("example.com"), rule.direct() }
+        _G.redirect_name = chain
+        _G.route_default = nil
+        for _ = 1, BENCH_ITERS do
+            libruleset.decide.resolve("host.example.com:80")
+        end
+        _G.redirect_name = saved_redirect_name
+        _G.route_default = saved_route_default
+    end)
+
 end

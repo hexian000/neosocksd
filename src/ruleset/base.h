@@ -33,6 +33,9 @@ struct server;
 struct ruleset {
 	struct ev_loop *loop;
 	struct ruleset_vmstats vmstats;
+#if WITH_ALLOC_CACHE
+	struct mmcache *vmcache;
+#endif
 	struct {
 		int_least32_t memlimit_kb;
 		bool traceback;
@@ -41,7 +44,6 @@ struct ruleset {
 	struct resolver *resolver;
 	struct server *server;
 	struct dialreq *basereq;
-	struct mmcache *mcache;
 	lua_State *L;
 	ev_timer w_ticker;
 	ev_idle w_idle;

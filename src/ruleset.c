@@ -22,7 +22,9 @@
 #include "io/stream.h"
 #include "utils/arraysize.h"
 #include "utils/debug.h"
+#if WITH_ALLOC_CACHE
 #include "utils/mcache.h"
+#endif
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -39,7 +41,8 @@ static void *
 l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 {
 	struct ruleset *restrict r = ud;
-	struct mmcache *restrict cache = r->mcache;
+#if WITH_ALLOC_CACHE
+	struct mmcache *restrict cache = r->vmcache;
 	if (nsize == 0) {
 		/* free */
 		if (ptr == NULL) {
@@ -79,6 +82,35 @@ l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 	}
 	r->vmstats.byt_allocated = r->vmstats.byt_allocated - osize + nsize;
 	return ret;
+#else /* WITH_ALLOC_CACHE */
+	if (nsize == 0) {
+		/* free */
+		if (ptr == NULL) {
+			return NULL;
+		}
+		free(ptr);
+		r->vmstats.byt_allocated -= osize;
+		r->vmstats.num_object--;
+		return NULL;
+	}
+	if (ptr == NULL) {
+		/* malloc; osize is the object type tag here, not a size */
+		void *ret = malloc(nsize);
+		if (ret == NULL) {
+			return NULL;
+		}
+		r->vmstats.num_object++;
+		r->vmstats.byt_allocated += nsize;
+		return ret;
+	}
+	/* realloc */
+	void *ret = realloc(ptr, nsize);
+	if (ret == NULL) {
+		return NULL;
+	}
+	r->vmstats.byt_allocated = r->vmstats.byt_allocated - osize + nsize;
+	return ret;
+#endif /* WITH_ALLOC_CACHE */
 }
 
 static int l_panic(lua_State *L)
@@ -187,12 +219,14 @@ struct ruleset *ruleset_new(
 	r->server = NULL;
 	r->basereq = basereq;
 
+#if WITH_ALLOC_CACHE
 	/* cache freed blocks in [16, 256] bytes to cut allocator churn */
-	r->mcache = mmcache_new(4, 8, 16);
-	if (r->mcache == NULL) {
+	r->vmcache = mmcache_new(4, 8, 16);
+	if (r->vmcache == NULL) {
 		free(r);
 		return NULL;
 	}
+#endif
 
 	/* initialize in advance to prevent undefined behavior */
 	ev_timer_init(&r->w_ticker, tick_cb, 1.0, 1.0);
@@ -207,7 +241,9 @@ struct ruleset *ruleset_new(
 		lua_newstate(l_alloc, r);
 #endif
 	if (L == NULL) {
-		mmcache_free(r->mcache);
+#if WITH_ALLOC_CACHE
+		mmcache_free(r->vmcache);
+#endif
 		free(r);
 		return NULL;
 	}
@@ -251,7 +287,9 @@ void ruleset_free(struct ruleset *restrict r)
 	ev_timer_stop(r->loop, &r->w_ticker);
 	ev_idle_stop(r->loop, &r->w_idle);
 	lua_close(r->L);
-	mmcache_free(r->mcache);
+#if WITH_ALLOC_CACHE
+	mmcache_free(r->vmcache);
+#endif
 	free(r);
 }
 

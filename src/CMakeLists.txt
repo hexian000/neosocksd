@@ -156,6 +156,10 @@ if(ENABLE_RULESET)
     set(WITH_RULESET TRUE)
 endif()
 
+if(ENABLE_ALLOC_CACHE)
+    set(WITH_ALLOC_CACHE TRUE)
+endif()
+
 if(WITH_THREADS)
     target_link_libraries(neosocksd PRIVATE Threads::Threads)
 endif()

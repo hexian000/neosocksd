@@ -3,6 +3,8 @@
 
 #include "testing.h"
 
+#include "formats.h"
+
 #ifdef _WIN32
 #include "wintime.h"
 #else
@@ -47,11 +49,15 @@ static void run_case(struct testing_ctx *t, const struct testing_suite *e)
 	(void)fflush(t->out);
 }
 
-/* Run a single benchmark, mirroring the T_RUN_BENCH macro: double N until at
- * least one second of wall time has elapsed, then report ns/op. */
-static void run_bench(struct testing_ctx *t, const struct testing_suite *e)
+/* Run a single benchmark: double N until at least one second of wall time has
+ * elapsed, then report ns/op alongside B/op and allocs/op.  This backs the
+ * T_RUN_BENCH macro, so the monotonic clock stays here and test files need not
+ * include measure.h. */
+void testing_bench_run(
+	struct testing_ctx *t, const char *name,
+	void (*bench)(struct testing_bench *))
 {
-	(void)fprintf(t->out, "=== RUN   %s\n", e->name);
+	(void)fprintf(t->out, "=== RUN   %s\n", name);
 	(void)fflush(t->out);
 	struct testing_bench b = { 0 };
 	const int_fast64_t start = clock_monotonic_ns();
@@ -59,16 +65,45 @@ static void run_bench(struct testing_ctx *t, const struct testing_suite *e)
 	uint_fast64_t n = 1;
 	do {
 		b.N = n;
-		e->fn.bench(&b);
+		bench(&b);
 		n <<= 1u;
 		elapsed = clock_monotonic_ns() - start;
 	} while (n != 0 && elapsed < 1000000000 /* 1s */);
-	const double nsop = (double)elapsed / (double)(n - 1);
+	const uint_fast64_t iters = n - 1;
+
+	/* per-op wall time, rendered as an SI-prefixed duration (e.g. 28.1µs/op) */
+	char timebuf[32];
+	(void)format_si_prefix(
+		timebuf, sizeof(timebuf),
+		(double)elapsed / (double)iters * 1e-9);
+	/* per-op heap footprint, rendered with IEC units (e.g. 1.50KiB/op) */
+	char membuf[32];
+	(void)format_iec_bytes(
+		membuf, sizeof(membuf), (double)b.bytes / (double)iters);
+
 	(void)fprintf(
-		t->out, "--- BENCH %s\t%ju\t%.2f ns/op\n", e->name,
-		(uintmax_t)(n - 1), nsop);
+		t->out, "--- BENCH %s\t%ju\t%ss/op", name, (uintmax_t)iters,
+		timebuf);
+	if (b.set_bytes != 0) {
+		/* throughput in bytes per second, SI-prefixed (e.g. 2.33GB/s) */
+		char tputbuf[32];
+		(void)format_si_prefix(
+			tputbuf, sizeof(tputbuf),
+			(double)b.set_bytes * (double)iters / (double)elapsed *
+				1e9);
+		(void)fprintf(t->out, "\t%sB/s", tputbuf);
+	}
+	(void)fprintf(
+		t->out, "\t%s/op\t%ju allocs/op\n", membuf,
+		(uintmax_t)(b.allocs / iters));
 	(void)fflush(t->out);
 	t->benched++;
+}
+
+/* Run a benchmark suite entry through testing_bench_run. */
+static void run_bench(struct testing_ctx *t, const struct testing_suite *e)
+{
+	testing_bench_run(t, e->name, e->fn.bench);
 }
 
 int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
