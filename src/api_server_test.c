@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -103,6 +104,9 @@ static struct {
 	const char *metrics_str;
 	size_t metrics_len;
 	size_t metrics_call_count;
+	const char *healthy_str;
+	size_t healthy_len;
+	size_t healthy_call_count;
 	struct ev_loop *loop;
 } RS = {
 	.invoke_ok = true,
@@ -119,6 +123,8 @@ static struct {
 	.metrics_ok = false,
 	.metrics_str = "custom_metric 1\n",
 	.metrics_len = sizeof("custom_metric 1\n") - 1,
+	.healthy_str = NULL,
+	.healthy_len = 0,
 	.rpcall_result = "ok",
 	.rpcall_resultlen = 2,
 	.vmstats_count = 0,
@@ -175,6 +181,9 @@ static void reset_ruleset_stub(void)
 	RS.metrics_str = "custom_metric 1\n";
 	RS.metrics_len = sizeof("custom_metric 1\n") - 1;
 	RS.metrics_call_count = 0;
+	RS.healthy_str = NULL;
+	RS.healthy_len = 0;
+	RS.healthy_call_count = 0;
 	RS.loop = NULL;
 }
 
@@ -297,6 +306,19 @@ const char *ruleset_metrics(struct ruleset *restrict r, size_t *len)
 		*len = RS.metrics_len;
 	}
 	return RS.metrics_str;
+}
+
+const char *ruleset_healthy(struct ruleset *restrict r, size_t *len)
+{
+	(void)r;
+	RS.healthy_call_count++;
+	if (RS.healthy_str == NULL) {
+		return NULL;
+	}
+	if (len != NULL) {
+		*len = RS.healthy_len;
+	}
+	return RS.healthy_str;
 }
 #endif /* WITH_RULESET */
 
@@ -456,9 +478,7 @@ static void start_api(
 	int *restrict peer_fd)
 {
 	int sv[2] = { -1, -1 };
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	T_CHECK(socket_set_cloexec(sv[0]) == 0);
@@ -989,6 +1009,37 @@ T_DECLARE_CASE(stats_post_with_ruleset_q)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(healthy_unhealthy_returns_503)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.healthy_str = "db down";
+	RS.healthy_len = sizeof("db down") - 1;
+	init_server_pair(&api, &core, loop);
+	api.ruleset = (struct ruleset *)&ruleset_tag;
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 503 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "db down"));
+		T_EXPECT(RS.healthy_call_count > 0);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(ruleset_disabled_returns_500)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1280,6 +1331,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(stats_nobanner_option_suppresses_banner),
 #if WITH_RULESET
 	T_CASE(stats_post_with_ruleset_q),
+	T_CASE(healthy_unhealthy_returns_503),
 	T_CASE(ruleset_disabled_returns_500),
 	T_CASE(ruleset_invoke_ok_200),
 	T_CASE(ruleset_invoke_length_required_411),

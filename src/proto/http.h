@@ -346,7 +346,7 @@ struct stream *content_writer(
 			 "; version=" MIME_RPCALL_VERSION
 
 /** @brief Return true if @p mime_type matches the RPC call MIME type. */
-bool check_rpcall_mime(char *mime_type);
+bool check_rpcall_mime(char *restrict mime_type);
 
 /** Minimum size threshold for RPC call compression */
 #define RPCALL_COMPRESS_THRESHOLD 256

@@ -66,26 +66,26 @@ enum stub_ruleset_mode {
 static struct {
 	bool dialreq_available;
 	bool dialaddr_set_ok;
-	int dialaddr_set_calls;
-	int dialreq_free_calls;
+	int_least32_t dialaddr_set_calls;
+	int_least32_t dialreq_free_calls;
 
 	enum stub_dialer_mode dialer_mode;
 	enum dialer_error dialer_err;
 	int dialer_syserr;
 	int dialer_result_fd;
-	int dialer_do_calls;
-	int dialer_cancel_calls;
+	int_least32_t dialer_do_calls;
+	int_least32_t dialer_cancel_calls;
 
 	struct stub_xfer_ctx *xfer_ctxs[2];
-	int xfer_count;
+	int_least32_t xfer_count;
 
 #if WITH_RULESET
 	enum stub_ruleset_mode ruleset_mode;
 	struct ruleset_callback *ruleset_pending_cb;
-	int ruleset_resolve_calls;
-	int ruleset_route_calls;
-	int ruleset_route6_calls;
-	int ruleset_cancel_calls;
+	int_least32_t ruleset_resolve_calls;
+	int_least32_t ruleset_route_calls;
+	int_least32_t ruleset_route6_calls;
+	int_least32_t ruleset_cancel_calls;
 #endif
 } STUB = {
 	.dialreq_available = false,
@@ -126,7 +126,7 @@ static void stub_reset(void)
 	STUB.dialer_result_fd = -1;
 	STUB.dialer_do_calls = 0;
 	STUB.dialer_cancel_calls = 0;
-	for (int i = 0; i < STUB.xfer_count; i++) {
+	for (int_fast32_t i = 0; i < STUB.xfer_count; i++) {
 		free(STUB.xfer_ctxs[i]);
 		STUB.xfer_ctxs[i] = NULL;
 	}
@@ -232,7 +232,7 @@ static void set_domain_addr(
 	memset(addr, 0, sizeof(*addr));
 	addr->type = ATYP_DOMAIN;
 	addr->port = port;
-	addr->domain.len = len;
+	addr->domain.len = (uint_least8_t)len;
 	(void)memcpy(addr->domain.name, name, len);
 }
 #endif /* WITH_RULESET */
@@ -447,7 +447,7 @@ bool transfer_serve(
 	(void)xfer;
 	(void)acc_fd;
 	(void)dial_fd;
-	T_CHECK(STUB.xfer_count < (int)ARRAY_SIZE(STUB.xfer_ctxs));
+	T_CHECK(STUB.xfer_count < (int_fast32_t)ARRAY_SIZE(STUB.xfer_ctxs));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
 		return false;
@@ -460,7 +460,7 @@ bool transfer_serve(
 static void stub_fire_all_xfer_finished(struct ev_loop *loop)
 {
 	(void)loop;
-	for (int i = 0; i < STUB.xfer_count; i++) {
+	for (int_fast32_t i = 0; i < STUB.xfer_count; i++) {
 		struct stub_xfer_ctx *restrict xctx = STUB.xfer_ctxs[i];
 #if WITH_THREADS
 		atomic_fetch_sub_explicit(
@@ -562,9 +562,7 @@ T_DECLARE_CASE(forward_dialer_fail_updates_stats)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int peer_fd = -1;
@@ -599,9 +597,7 @@ T_DECLARE_CASE(forward_timeout_cancels_pending_dialer)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int peer_fd = -1;
@@ -647,9 +643,7 @@ T_DECLARE_CASE(forward_bidir_timeout_connected_then_finished)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int accepted_peer_fd = -1;
@@ -695,9 +689,7 @@ T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int peer_fd = -1;
@@ -744,9 +736,7 @@ T_DECLARE_SUBCASE(forward_ruleset_route_case, const bool ipv6)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int peer_fd = -1;
@@ -809,9 +799,7 @@ T_DECLARE_CASE(forward_ruleset_reject)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int peer_fd = -1;
@@ -852,9 +840,7 @@ T_DECLARE_CASE(forward_ruleset_null_after_sighup)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int peer_fd = -1;
@@ -961,9 +947,7 @@ T_DECLARE_CASE(forward_timeout_stops_pending_dialer_once)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int peer_fd = -1;
@@ -1012,9 +996,7 @@ T_DECLARE_CASE(tproxy_ruleset_route_ipv4)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	int accepted_fd = -1;
 
 	stub_reset();
@@ -1052,9 +1034,7 @@ T_DECLARE_CASE(tproxy_ruleset_null_after_sighup)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	int accepted_fd = -1;
 
 	stub_reset();
@@ -1088,9 +1068,7 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
 	int accepted_fd = -1;
 
 	stub_reset();

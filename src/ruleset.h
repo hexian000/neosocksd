@@ -271,4 +271,13 @@ const char *ruleset_stats(
  */
 const char *ruleset_metrics(struct ruleset *restrict r, size_t *len);
 
+/**
+ * @brief Invoke ruleset.healthy() to check service health.
+ * @param r Ruleset instance
+ * @param len Output for message length
+ * @return NULL if healthy (callback absent, or returns nil/empty); otherwise the
+ * unhealthy reason string (also returned if the callback raises an error)
+ */
+const char *ruleset_healthy(struct ruleset *restrict r, size_t *len);
+
 #endif /* RULESET_H */

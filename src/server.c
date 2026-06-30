@@ -315,7 +315,7 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 		if (s->conf->boot != NULL) {
 			server_reload_basereq(s);
 		}
-#endif
+#endif /* WITH_RULESET */
 		LOGN("reload: config successfully reloaded");
 		(void)systemd_notify(DAEMON_SYSTEMD_STATE_READY);
 	} break;
@@ -342,7 +342,7 @@ resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
 	char buf[bufsize];
 	memcpy(buf, addrstr, addrlen + 1);
 	char *host, *port;
-	if (!addr_splithostport(buf, &host, &port)) {
+	if (!splithostport(buf, &host, &port)) {
 		LOGF_F("unable to parse address: %s", addrstr);
 		return false;
 	}

@@ -219,18 +219,16 @@ static bool find_addrinfo(
 		switch (it->ai_family) {
 		case AF_INET:
 			if (it->ai_addrlen != sizeof(struct sockaddr_in)) {
-				LOGE_F("resolve: invalid ai_addrlen %ju (af=%d)",
-				       (uintmax_t)it->ai_addrlen,
-				       it->ai_family);
+				LOGE_F("resolve: invalid ai_addrlen %zu (af=%d)",
+				       (size_t)it->ai_addrlen, it->ai_family);
 				continue;
 			}
 			addr->in = *(struct sockaddr_in *)it->ai_addr;
 			break;
 		case AF_INET6:
 			if (it->ai_addrlen != sizeof(struct sockaddr_in6)) {
-				LOGE_F("resolve: invalid ai_addrlen %ju (af=%d)",
-				       (uintmax_t)it->ai_addrlen,
-				       it->ai_family);
+				LOGE_F("resolve: invalid ai_addrlen %zu (af=%d)",
+				       (size_t)it->ai_addrlen, it->ai_family);
 				continue;
 			}
 			addr->in6 = *(struct sockaddr_in6 *)it->ai_addr;
@@ -333,9 +331,7 @@ resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf)
 		return NULL;
 	}
 
-	*r = (struct resolver){
-		.loop = loop,
-	};
+	*r = (struct resolver){ .loop = loop };
 
 #if WITH_CARES
 	/* Initialize the head socket watcher (used as list head) */

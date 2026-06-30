@@ -46,9 +46,11 @@ enum socks_state {
 	STATE_HANDSHAKE3,
 	STATE_PROCESS,
 	STATE_CONNECT,
-	STATE_BIND, /* waiting for remote to connect to our listen socket */
+	/* waiting for remote to connect to our listen socket */
+	STATE_BIND,
 	STATE_BIDIRECTIONAL,
-	STATE_UDP_RELAY, /* relaying UDP datagrams */
+	/* relaying UDP datagrams */
+	STATE_UDP_RELAY,
 };
 
 struct socks_ctx {
@@ -158,7 +160,7 @@ send_rsp(struct socks_ctx *restrict ctx, const void *buf, const size_t len)
 		SOCKS_CTX_LOG_F(DEBUG, ctx, "send: %zd < %zu", nsend, len);
 		return false;
 	}
-	ctx->s->stats.byt_client_send += len;
+	ctx->s->stats.byt_client_send += (uint_least64_t)len;
 	return true;
 }
 
@@ -277,75 +279,6 @@ socks5_dialerr2rsp(const enum dialer_error err, const int syserr)
 		break;
 	}
 	return SOCKS5RSP_FAIL;
-}
-
-static void socks_senderr(
-	struct socks_ctx *restrict ctx, const enum dialer_error err,
-	const int syserr)
-{
-	const uint_fast8_t version = read_uint8(ctx->rbuf.data);
-	switch (version) {
-	case SOCKS4:
-		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
-		break;
-	case SOCKS5:
-		socks5_sendrsp(ctx, socks5_dialerr2rsp(err, syserr));
-		break;
-	default:
-		FAILMSGF("unexpected socks version: %d", version);
-	}
-}
-
-static void
-socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
-{
-	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
-	ctx->accepted_fd = ctx->dialed_fd = -1;
-	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
-	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->byt_client_recv += (uint_least64_t)ctx->rbuf.len;
-	ctx->state = STATE_BIDIRECTIONAL;
-	ev_timer_stop(loop, &ctx->w_timeout);
-	stats->num_halfopen--;
-	SOCKS_CTX_LOG_F(
-		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	/* Increment before transfer_start — xfer decrement can't precede ours. Undo on OOM. */
-#if WITH_THREADS
-	const size_t cur =
-		atomic_fetch_add_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed) +
-		1;
-#else
-	const size_t cur = ++ctx->s->num_sessions;
-#endif
-	if (!transfer_serve(
-		    ctx->s->xfer, acc_fd, dial_fd,
-		    &(struct transfer_opts){
-			    .byt_up = &ctx->s->byt_up,
-			    .byt_down = &ctx->s->byt_down,
-#if WITH_SPLICE
-			    .use_splice = ctx->s->conf->pipe,
-#endif
-			    .num_sessions = &ctx->s->num_sessions,
-		    })) {
-#if WITH_THREADS
-		atomic_fetch_sub_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed);
-#else
-		ctx->s->num_sessions--;
-#endif
-		LOGOOM();
-		SOCKET_CLOSE_FD(acc_fd);
-		SOCKET_CLOSE_FD(dial_fd);
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (cur > stats->num_sessions_peak) {
-		stats->num_sessions_peak = cur;
-	}
-	stats->num_success++;
-	SOCKS_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
-	gc_unref(&ctx->gcbase);
 }
 
 static int socks4a_req(struct socks_ctx *restrict ctx)
@@ -814,6 +747,58 @@ static bool bind_peer_matches_request(
 }
 
 static void
+socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
+{
+	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
+	ctx->accepted_fd = ctx->dialed_fd = -1;
+	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
+	struct server_stats *restrict stats = &ctx->s->stats;
+	stats->byt_client_recv += (uint_least64_t)ctx->rbuf.len;
+	ctx->state = STATE_BIDIRECTIONAL;
+	ev_timer_stop(loop, &ctx->w_timeout);
+	stats->num_halfopen--;
+	SOCKS_CTX_LOG_F(
+		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
+	/* Increment before transfer_start — xfer decrement can't precede ours. Undo on OOM. */
+#if WITH_THREADS
+	const size_t cur =
+		atomic_fetch_add_explicit(
+			&ctx->s->num_sessions, 1, memory_order_relaxed) +
+		1;
+#else
+	const size_t cur = ++ctx->s->num_sessions;
+#endif
+	if (!transfer_serve(
+		    ctx->s->xfer, acc_fd, dial_fd,
+		    &(struct transfer_opts){
+			    .byt_up = &ctx->s->byt_up,
+			    .byt_down = &ctx->s->byt_down,
+#if WITH_SPLICE
+			    .use_splice = ctx->s->conf->pipe,
+#endif
+			    .num_sessions = &ctx->s->num_sessions,
+		    })) {
+#if WITH_THREADS
+		atomic_fetch_sub_explicit(
+			&ctx->s->num_sessions, 1, memory_order_relaxed);
+#else
+		ctx->s->num_sessions--;
+#endif
+		LOGOOM();
+		SOCKET_CLOSE_FD(acc_fd);
+		SOCKET_CLOSE_FD(dial_fd);
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (cur > stats->num_sessions_peak) {
+		stats->num_sessions_peak = cur;
+	}
+	stats->num_success++;
+	SOCKS_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
+	gc_unref(&ctx->gcbase);
+}
+
+static void
 bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
@@ -963,29 +948,6 @@ socks_bind_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ev_io_start(loop, &ctx->w_socket);
 }
 
-/* Returns the total UDP header length for the given datagram buffer, or -1 if
- * the buffer is too short or the address type is unsupported. */
-static int udp_hdr_len(const unsigned char *restrict buf, const size_t buflen)
-{
-	if (buflen < SOCKS5_UDP_HDR_LEN) {
-		return -1;
-	}
-	struct socks5_udp_hdr h;
-	socks5udphdr_read(&h, buf);
-	switch (h.addrtype) {
-	case SOCKS5ADDR_IPV4:
-		return buflen >= SOCKS5_UDP_HDR_IPV4LEN ?
-			       (int)SOCKS5_UDP_HDR_IPV4LEN :
-			       -1;
-	case SOCKS5ADDR_IPV6:
-		return buflen >= SOCKS5_UDP_HDR_IPV6LEN ?
-			       (int)SOCKS5_UDP_HDR_IPV6LEN :
-			       -1;
-	default:
-		return -1;
-	}
-}
-
 /* Parse SOCKS5 UDP header into *sa, *salen, and *hdr_len_out. */
 static bool udp_parse_addr(
 	const unsigned char *restrict buf, const size_t buflen,
@@ -1053,6 +1015,29 @@ static void udp_frag_flush(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	}
 	udp_frag_reset(ctx);
 	(void)loop;
+}
+
+/* Returns the total UDP header length for the given datagram buffer, or -1 if
+ * the buffer is too short or the address type is unsupported. */
+static int udp_hdr_len(const unsigned char *restrict buf, const size_t buflen)
+{
+	if (buflen < SOCKS5_UDP_HDR_LEN) {
+		return -1;
+	}
+	struct socks5_udp_hdr h;
+	socks5udphdr_read(&h, buf);
+	switch (h.addrtype) {
+	case SOCKS5ADDR_IPV4:
+		return buflen >= SOCKS5_UDP_HDR_IPV4LEN ?
+			       (int)SOCKS5_UDP_HDR_IPV4LEN :
+			       -1;
+	case SOCKS5ADDR_IPV6:
+		return buflen >= SOCKS5_UDP_HDR_IPV6LEN ?
+			       (int)SOCKS5_UDP_HDR_IPV6LEN :
+			       -1;
+	default:
+		return -1;
+	}
 }
 
 /* Fragment assembly: reassemble into frag_buf, forward on last fragment; discard out-of-order/overflow. */
@@ -1451,6 +1436,23 @@ static void socks_commit(
 	ctx->dialreq = NULL;
 
 	socks_start_transfer(loop, ctx);
+}
+
+static void socks_senderr(
+	struct socks_ctx *restrict ctx, const enum dialer_error err,
+	const int syserr)
+{
+	const uint_fast8_t version = read_uint8(ctx->rbuf.data);
+	switch (version) {
+	case SOCKS4:
+		socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
+		break;
+	case SOCKS5:
+		socks5_sendrsp(ctx, socks5_dialerr2rsp(err, syserr));
+		break;
+	default:
+		FAILMSGF("unexpected socks version: %d", version);
+	}
 }
 
 static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)

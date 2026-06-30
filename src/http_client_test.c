@@ -32,9 +32,9 @@ static struct {
 	int dialer_result_fd;
 	enum dialer_error dialer_err;
 	int dialer_syserr;
-	int dialer_do_calls;
-	int dialer_cancel_calls;
-	int dialreq_free_calls;
+	int_least32_t dialer_do_calls;
+	int_least32_t dialer_cancel_calls;
+	int_least32_t dialreq_free_calls;
 } S = {
 	.dialer_result_fd = -1,
 	.dialer_err = DIALER_ERR_CONNECT,

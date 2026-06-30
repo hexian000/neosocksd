@@ -55,7 +55,7 @@ void modify_io_events(
 	int events);
 
 /* socket utilities */
-void socket_bind_netdev(int fd, const char *netdev);
+void socket_bind_netdev(int fd, const char *restrict netdev);
 void socket_set_transparent(int fd, bool tproxy);
 
 #endif /* UTIL_H */

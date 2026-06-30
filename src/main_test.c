@@ -1362,7 +1362,7 @@ struct socks4_raw_server {
 	bool request_complete;
 	bool response_sent;
 	bool failed;
-	unsigned char rsp_code;
+	uint_least8_t rsp_code;
 };
 
 /* Returns true when a complete SOCKS4/4a request has been accumulated. */
@@ -1494,7 +1494,7 @@ struct socks5_raw_server {
 	enum socks5_pump_phase phase;
 	bool response_sent;
 	bool failed;
-	unsigned char rsp_code;
+	uint_least8_t rsp_code;
 };
 
 static bool socks5_raw_pump(void *data)

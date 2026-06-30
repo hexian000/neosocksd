@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #define MT_RULESET_STATE "ruleset_state"
@@ -48,7 +49,7 @@ static int ruleset_state_gc(lua_State *restrict L)
 static void check_memlimit(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
-	const int memlimit_kb = r->config.memlimit_kb;
+	const int_fast32_t memlimit_kb = r->config.memlimit_kb;
 	if (memlimit_kb <= 0) {
 		return;
 	}
@@ -204,7 +205,8 @@ int cfunc_loadconfig(lua_State *restrict L)
 		if (mb > (INT_MAX >> 10)) {
 			return luaL_error(L, "config: memlimit too large");
 		}
-		r->config.memlimit_kb = (mb > 0) ? (int)(mb << 10) : 0;
+		r->config.memlimit_kb =
+			(mb > 0) ? (int_least32_t)(mb << 10) : 0;
 	}
 	lua_pop(L, 1);
 
@@ -447,6 +449,21 @@ int cfunc_tick(lua_State *restrict L)
 	lua_replace(L, 1);
 	lua_call(L, 0, 0);
 	return 0;
+}
+
+/* healthy() */
+int cfunc_healthy(lua_State *restrict L)
+{
+	check_memlimit(L);
+	ASSERT(lua_gettop(L) == 0);
+	(void)lua_getglobal(L, "ruleset");
+	(void)lua_getfield(L, -1, "healthy");
+	if (!lua_isfunction(L, -1)) {
+		return 0; /* absent: healthy */
+	}
+	lua_replace(L, 1);
+	lua_call(L, 0, 1);
+	return 1;
 }
 
 /* gc() */

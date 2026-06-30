@@ -128,7 +128,7 @@ static void on_http_client_done(
 	{
 		const uintmax_t status = strtoumax(msg->rsp.code, NULL, 10);
 		if (UINTCAST_CHECK(code, status)) {
-			code = status;
+			code = (uint16_t)status;
 		}
 	}
 	if (BETWEEN(code, 200, 299)) {
@@ -143,15 +143,16 @@ static void on_http_client_done(
 			VBUF_FREE(content);
 			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
 		}
-	} else if (
-		content != NULL && VBUF_LEN(content) > 0 &&
-		check_rpcall_mime(conn->hdr.content.type)) {
-		/* Server returned structured error in RPC format */
-		ctx->result.content = content;
-		api_client_finish(
-			loop, ctx, VBUF_DATA(content), VBUF_LEN(content), NULL);
-		return;
 	} else {
+		if (content != NULL && VBUF_LEN(content) > 0 &&
+		    check_rpcall_mime(conn->hdr.content.type)) {
+			/* Server returned structured error in RPC format */
+			ctx->result.content = content;
+			api_client_finish(
+				loop, ctx, VBUF_DATA(content),
+				VBUF_LEN(content), NULL);
+			return;
+		}
 		/* Generic HTTP error response */
 		VBUF_RESERVE(content, 64);
 		if (content == NULL) {
@@ -199,9 +200,10 @@ static bool make_request(
 	const void *restrict content, const size_t len)
 {
 	/* Compress large payloads to reduce traffic */
-	const enum content_encodings encoding =
-		(len < RPCALL_COMPRESS_THRESHOLD) ? CENCODING_NONE :
-						    CENCODING_DEFLATE;
+	enum content_encodings encoding = CENCODING_NONE;
+	if (len >= RPCALL_COMPRESS_THRESHOLD) {
+		encoding = CENCODING_DEFLATE;
+	}
 	struct stream *s = content_writer(&p->cbuf, len, encoding);
 	if (s == NULL) {
 		return false;
@@ -234,6 +236,16 @@ static bool make_request(
 	return true;
 }
 
+/* Close a stream on a best-effort cleanup path, logging at debug level when the
+ * close reports an error that is non-actionable here. */
+static void close_stream(struct stream *restrict s)
+{
+	const int err = stream_close(s);
+	if (err != 0) {
+		LOGD_F("stream_close: error %d", err);
+	}
+}
+
 static void
 process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
@@ -250,7 +262,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		       ctx->result.errmsg);
 	}
 	if (ctx->result.stream != NULL) {
-		stream_close(ctx->result.stream);
+		close_stream(ctx->result.stream);
 		ctx->result.stream = NULL;
 	}
 	VBUF_FREE(ctx->result.content);
@@ -265,7 +277,7 @@ static void api_client_finalize(struct gcbase *restrict obj)
 
 	api_client_stop(ctx->loop, ctx);
 	if (ctx->result.stream != NULL) {
-		stream_close(ctx->result.stream);
+		close_stream(ctx->result.stream);
 		ctx->result.stream = NULL;
 	}
 	VBUF_FREE(ctx->result.content);
@@ -293,7 +305,10 @@ static bool api_client_do(
 	ctx->result.errlen = 0;
 	ctx->result.stream = NULL;
 	ctx->result.content = NULL;
-	const struct http_parsehdr_cb on_header = { parse_header, ctx };
+	const struct http_parsehdr_cb on_header = {
+		.func = parse_header,
+		.ctx = ctx,
+	};
 	const struct http_client_cb hcb = {
 		.func = on_http_client_done,
 		.data = ctx,

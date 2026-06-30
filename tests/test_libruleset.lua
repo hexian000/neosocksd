@@ -680,8 +680,8 @@ return function(T)
     end)
 
     -- [[ rule chain throughput benchmarks ]] --
-    -- Deferred by the framework: run only when selected by TESTING_FILTER
-    -- (e.g. TESTING_FILTER=. runs every case and bench).
+    -- Deferred by the framework: run only when selected by TESTING_BENCH
+    -- (e.g. TESTING_BENCH=. runs every bench).
     -- Each chain is sized so the matching rule sits last, so every decision
     -- walks the whole chain (worst case) and the cost reflects per-rule
     -- traversal of runchain_ rather than an early hit.

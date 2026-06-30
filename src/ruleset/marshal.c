@@ -4,7 +4,6 @@
 #include "ruleset/marshal.h"
 
 #include "ruleset/base.h"
-#include "util.h"
 
 #include "utils/ascii.h"
 #include "utils/buffer.h"
@@ -32,7 +31,7 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	const char *restrict str = lua_tolstring(L, idx, &len);
 
 	VBUF_APPENDSTR(*pvbuf, "\"");
-	while (len--) {
+	for (; len--; str++) {
 		const unsigned char ch = *str;
 		if (ch == '"' || ch == '\\' || ch == '\n') {
 			const unsigned char buf[2] = { '\\', ch };
@@ -43,17 +42,18 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			uint_fast8_t x = ch;
 
 			/* Build decimal representation backwards: \ddd */
-			*--s = '0' + x % 10, x /= 10;
-			*--s = '0' + x % 10, x /= 10;
-			*--s = '0' + x % 10;
+			*--s = (unsigned char)('0' + x % 10);
+			x /= 10;
+			*--s = (unsigned char)('0' + x % 10);
+			x /= 10;
+			*--s = (unsigned char)('0' + x % 10);
 			/* Escape prefix. */
-			*--s = '\\';
+			*--s = (unsigned char)'\\';
 
 			VBUF_APPEND(*pvbuf, buf, sizeof(buf));
 		} else {
 			VBUF_APPEND(*pvbuf, &ch, sizeof(ch));
 		}
-		str++;
 	}
 	VBUF_APPENDSTR(*pvbuf, "\"");
 }
@@ -93,12 +93,12 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			/* Skip the "0x" prefix. */
 			pend -= 2;
 			do {
-				*--s = '0' + y % 10;
+				*--s = (unsigned char)('0' + y % 10);
 				y /= 10;
 			} while (y);
 		} else {
 			do {
-				*--s = xdigits[(y & 0xf)];
+				*--s = (unsigned char)xdigits[(y & 0xf)];
 				y >>= 4;
 			} while (y);
 		}
@@ -152,24 +152,24 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	unsigned char *const bufend = &buf[sizeof(buf)];
 	unsigned char *estr = bufend;
 	for (int r = e2 < 0 ? -e2 : e2; r; r /= 10) {
-		*--estr = '0' + r % 10;
+		*--estr = (unsigned char)('0' + r % 10);
 	}
 	if (estr == bufend) {
 		/* Exponent is 0. */
-		*--estr = '0';
+		*--estr = (unsigned char)'0';
 	}
-	*--estr = (e2 < 0 ? '-' : '+');
+	*--estr = (unsigned char)(e2 < 0 ? '-' : '+');
 	/* Binary exponent marker. */
-	*--estr = 'p';
+	*--estr = (unsigned char)'p';
 
 	do {
 		const int i = (int)x;
-		*s++ = xdigits[i];
+		*s++ = (unsigned char)xdigits[i];
 		/* Extract the next hex digit. */
 		x = 16 * (x - i);
 
 		if (s - buf == 1 && x) {
-			*s++ = '.';
+			*s++ = (unsigned char)'.';
 		}
 	} while (x);
 

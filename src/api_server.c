@@ -95,7 +95,7 @@ ASSERT_SUPER(struct gcbase, struct api_ctx, gcbase);
 	(void)format_duration(name, sizeof(name), (value))
 
 #if WITH_RULESET
-bool check_rpcall_mime(char *s)
+bool check_rpcall_mime(char *restrict s)
 {
 	if (s == NULL) {
 		return false;
@@ -126,8 +126,8 @@ bool check_rpcall_mime(char *s)
 
 static int comp_intleast64(const void *a, const void *b)
 {
-	const int_least64_t va = *(const int_least64_t *)a;
-	const int_least64_t vb = *(const int_least64_t *)b;
+	const int_fast64_t va = *(const int_least64_t *)a;
+	const int_fast64_t vb = *(const int_least64_t *)b;
 	if (va < vb) {
 		return -1;
 	}
@@ -164,48 +164,6 @@ static struct percentiles calc_percentiles(
 	};
 }
 
-#if WITH_RULESET
-static void append_vmstats(
-	struct stream *restrict w, const struct ruleset_vmstats *vm,
-	const struct config *restrict conf)
-{
-	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
-	FORMAT_SI(objects, (double)vm->num_object);
-
-	const int memlimit_mb = conf->memlimit;
-	if (memlimit_mb > 0) {
-		FORMAT_BYTES(memlimit, ((double)memlimit_mb) * 0x1p20);
-		(void)io_bufprintf(
-			w, "%-20s: %s < %s (%s objects)\n", "Ruleset Allocated",
-			allocated, memlimit, objects);
-	} else {
-		(void)io_bufprintf(
-			w, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
-			allocated, objects);
-	}
-	(void)io_bufprintf(
-		w, "%-20s: %zu (peak %zu)\n", "Ruleset Threads",
-		vm->num_thread_active, vm->num_thread_peak);
-
-	if (vm->num_events == 0) {
-		(void)io_bufprintf(
-			w, "%-20s: %s\n", "Ruleset Events", "(never)");
-		return;
-	}
-
-	const struct percentiles p = calc_percentiles(
-		ARRAY_SIZE(vm->event_ns), vm->num_events, vm->event_ns);
-	FORMAT_DURATION(p50_str, make_duration_nanos(p.p50));
-	FORMAT_DURATION(p90_str, make_duration_nanos(p.p90));
-	FORMAT_DURATION(p99_str, make_duration_nanos(p.p99));
-	FORMAT_DURATION(pmax_str, make_duration_nanos(p.pmax));
-	(void)io_bufprintf(
-		w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Ruleset Events",
-		p50_str, p90_str, p99_str, pmax_str);
-}
-
-#endif /* WITH_RULESET */
-
 static double process_load(void)
 {
 	static struct {
@@ -221,9 +179,9 @@ static double process_load(void)
 		return load;
 	}
 	if (last.set) {
-		const int_least64_t total =
+		const int_fast64_t total =
 			TIMESPEC_DIFF(monotime, last.monotime);
-		const int_least64_t busy = TIMESPEC_DIFF(cputime, last.cputime);
+		const int_fast64_t busy = TIMESPEC_DIFF(cputime, last.cputime);
 		if (busy > 0 && total > 0) {
 			load = (double)busy / (double)total;
 		}
@@ -258,7 +216,7 @@ static void server_stats_stateful(
 	FORMAT_BYTES(
 		xfer_rate_down, (double)(agg.byt_down - last.xfer_down) / dt);
 
-	const uint_least64_t num_reject = agg.num_accept - agg.num_serve;
+	const uint_fast64_t num_reject = agg.num_accept - agg.num_serve;
 	const double accept_rate =
 		(double)(agg.num_accept - last.num_accept) / dt;
 	const double reject_rate = (double)(num_reject - last.num_reject) / dt;
@@ -304,6 +262,47 @@ static void server_stats_stateful(
 	last.num_reject_timeout = agg.num_reject_timeout;
 	last.num_reject_upstream = agg.num_reject_upstream;
 }
+
+#if WITH_RULESET
+static void append_vmstats(
+	struct stream *restrict w, const struct ruleset_vmstats *vm,
+	const struct config *restrict conf)
+{
+	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
+	FORMAT_SI(objects, (double)vm->num_object);
+
+	const int memlimit_mb = conf->memlimit;
+	if (memlimit_mb > 0) {
+		FORMAT_BYTES(memlimit, ((double)memlimit_mb) * 0x1p20);
+		(void)io_bufprintf(
+			w, "%-20s: %s < %s (%s objects)\n", "Ruleset Allocated",
+			allocated, memlimit, objects);
+	} else {
+		(void)io_bufprintf(
+			w, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
+			allocated, objects);
+	}
+	(void)io_bufprintf(
+		w, "%-20s: %zu (peak %zu)\n", "Ruleset Threads",
+		vm->num_thread_active, vm->num_thread_peak);
+
+	if (vm->num_events == 0) {
+		(void)io_bufprintf(
+			w, "%-20s: %s\n", "Ruleset Events", "(never)");
+		return;
+	}
+
+	const struct percentiles p = calc_percentiles(
+		ARRAY_SIZE(vm->event_ns), vm->num_events, vm->event_ns);
+	FORMAT_DURATION(p50_str, make_duration_nanos(p.p50));
+	FORMAT_DURATION(p90_str, make_duration_nanos(p.p90));
+	FORMAT_DURATION(p99_str, make_duration_nanos(p.p99));
+	FORMAT_DURATION(pmax_str, make_duration_nanos(p.pmax));
+	(void)io_bufprintf(
+		w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Ruleset Events",
+		p50_str, p90_str, p99_str, pmax_str);
+}
+#endif /* WITH_RULESET */
 
 static void append_server_stats(
 	struct stream *restrict w, const struct server *restrict api,
@@ -436,11 +435,24 @@ static void send_errpage(
 	send_response(loop, ctx, false);
 }
 
-static bool parse_bool(const char *s)
+static bool parse_bool(const char *restrict s)
 {
 	return strcmp(s, "1") == 0 || strcmp(s, "y") == 0 ||
 	       strcmp(s, "yes") == 0 || strcmp(s, "on") == 0 ||
 	       strcmp(s, "t") == 0 || strcmp(s, "true") == 0;
+}
+
+/* Select the response content encoding: deflate when the client accepts it and
+ * the payload is at least the given threshold. A zero threshold always
+ * compresses when accepted, for streamed responses of unknown length. */
+static enum content_encodings negotiate_encoding(
+	const enum content_encodings accepted, const size_t len,
+	const size_t threshold)
+{
+	if (accepted != CENCODING_DEFLATE || len < threshold) {
+		return CENCODING_NONE;
+	}
+	return CENCODING_DEFLATE;
 }
 
 static void
@@ -490,9 +502,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 	const enum content_encodings encoding =
-		(ctx->conn.hdr.accept_encoding == CENCODING_DEFLATE) ?
-			CENCODING_DEFLATE :
-			CENCODING_NONE;
+		negotiate_encoding(ctx->conn.hdr.accept_encoding, 0, 0);
 	struct stream *w = io_bufwriter(
 		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, encoding),
 		IO_BUFSIZE);
@@ -616,9 +626,19 @@ static void send_errmsg(
 		(loop), (ctx), HTTP_INTERNAL_SERVER_ERROR, ("" str),           \
 		sizeof(str) - 1)
 
+/* Close a stream on a best-effort cleanup path, logging at debug level when the
+ * close reports an error that is non-actionable here. */
+static void close_stream(struct stream *restrict s)
+{
+	const int err = stream_close(s);
+	if (err != 0) {
+		LOGD_F("stream_close: error %d", err);
+	}
+}
+
 static void handle_ruleset_rpcall(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct ruleset *ruleset)
+	struct ruleset *restrict ruleset)
 {
 	char *mime_type = ctx->conn.hdr.content.type;
 	if (!check_rpcall_mime(mime_type)) {
@@ -637,7 +657,7 @@ static void handle_ruleset_rpcall(
 	ctx->state = STATE_PROCESS;
 	const bool ok = ruleset_rpcall(
 		ruleset, &ctx->rpcstate, reader, &ctx->rpcreturn);
-	stream_close(reader);
+	close_stream(reader);
 	if (!ok) {
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
@@ -649,7 +669,7 @@ static void handle_ruleset_rpcall(
 
 static void handle_ruleset_invoke(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct ruleset *ruleset)
+	struct ruleset *restrict ruleset)
 {
 	struct stream *reader = content_reader(
 		VBUF_DATA(ctx->conn.cbuf), VBUF_LEN(ctx->conn.cbuf),
@@ -660,7 +680,7 @@ static void handle_ruleset_invoke(
 		return;
 	}
 	const bool ok = ruleset_invoke(ruleset, reader);
-	stream_close(reader);
+	close_stream(reader);
 	VBUF_FREE(ctx->conn.cbuf);
 	if (!ok) {
 		size_t len;
@@ -682,7 +702,8 @@ static void handle_ruleset_invoke(
 
 static void handle_ruleset_update(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct ruleset *ruleset, const char *module, const char *chunkname)
+	struct ruleset *restrict ruleset, const char *restrict module,
+	const char *restrict chunkname)
 {
 	const int_fast64_t start = clock_monotonic_ns();
 	struct stream *reader = content_reader(
@@ -694,7 +715,7 @@ static void handle_ruleset_update(
 		return;
 	}
 	const bool ok = ruleset_update(ruleset, module, chunkname, reader);
-	stream_close(reader);
+	close_stream(reader);
 	VBUF_FREE(ctx->conn.cbuf);
 	if (!ok) {
 		size_t len;
@@ -727,7 +748,7 @@ static void handle_ruleset_update(
 
 static void handle_ruleset_gc(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
-	struct ruleset *ruleset)
+	struct ruleset *restrict ruleset)
 {
 	struct ruleset_vmstats before;
 	ruleset_vmstats(ruleset, &before);
@@ -753,11 +774,13 @@ static void handle_ruleset_gc(
 	}
 	{
 		FORMAT_BYTES(
-			freed_bytes, (double)((intmax_t)vmstats.byt_allocated -
-					      (intmax_t)before.byt_allocated));
+			freed_bytes,
+			(double)((int_fast64_t)vmstats.byt_allocated -
+				 (int_fast64_t)before.byt_allocated));
 		FORMAT_SI(
-			freed_objects, (double)((intmax_t)vmstats.num_object -
-						(intmax_t)before.num_object));
+			freed_objects,
+			(double)((int_fast64_t)vmstats.num_object -
+				 (int_fast64_t)before.num_object));
 		(void)io_bufprintf(
 			w, "%-20s: %s (%s objects)\n", "Difference",
 			freed_bytes, freed_objects);
@@ -882,9 +905,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	const bool have_cpu = clock_process(&cpu_ts);
 
 	const enum content_encodings encoding =
-		(ctx->conn.hdr.accept_encoding == CENCODING_DEFLATE) ?
-			CENCODING_DEFLATE :
-			CENCODING_NONE;
+		negotiate_encoding(ctx->conn.hdr.accept_encoding, 0, 0);
 	struct stream *w = io_bufwriter(
 		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, encoding),
 		IO_BUFSIZE);
@@ -1160,6 +1181,19 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		if (!restapi_check(loop, ctx, NULL, false)) {
 			return;
 		}
+#if WITH_RULESET
+		struct ruleset *ruleset = ctx->s->ruleset;
+		if (ruleset != NULL) {
+			size_t len;
+			const char *msg = ruleset_healthy(ruleset, &len);
+			if (msg != NULL) {
+				send_errmsg(
+					loop, ctx, HTTP_SERVICE_UNAVAILABLE,
+					msg, len);
+				return;
+			}
+		}
+#endif
 		RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 		if (ctx->keepalive) {
 			RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
@@ -1288,7 +1322,10 @@ static bool parse_header(void *ctx, const char *key, char *value)
 static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	VBUF_FREE(ctx->conn.cbuf);
-	const struct http_parsehdr_cb on_header = { parse_header, ctx };
+	const struct http_parsehdr_cb on_header = {
+		.func = parse_header,
+		.ctx = ctx,
+	};
 	http_conn_init(
 		&ctx->conn, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header,
 		&ctx->s->stats.api_byt_recv, &ctx->s->stats.api_byt_send);
@@ -1431,11 +1468,9 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall result:");
 	}
 	/* Compress response if client supports it and payload is large enough */
-	const enum content_encodings encoding =
-		(ctx->conn.hdr.accept_encoding != CENCODING_DEFLATE) ||
-				(resultlen < RPCALL_COMPRESS_THRESHOLD) ?
-			CENCODING_NONE :
-			CENCODING_DEFLATE;
+	const enum content_encodings encoding = negotiate_encoding(
+		ctx->conn.hdr.accept_encoding, resultlen,
+		RPCALL_COMPRESS_THRESHOLD);
 	struct stream *writer =
 		content_writer(&ctx->conn.cbuf, resultlen, encoding);
 	if (writer == NULL) {
@@ -1498,7 +1533,10 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ctx->rpcreturn.forward = NULL;
 	ctx->rpcstate = NULL;
 #endif
-	const struct http_parsehdr_cb on_header = { parse_header, ctx };
+	const struct http_parsehdr_cb on_header = {
+		.func = parse_header,
+		.ctx = ctx,
+	};
 	http_conn_init(
 		&ctx->conn, fd, STATE_PARSE_REQUEST, on_header,
 		&s->stats.api_byt_recv, &s->stats.api_byt_send);

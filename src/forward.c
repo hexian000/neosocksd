@@ -424,8 +424,8 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		break;
 	default:
 		FW_CTX_LOG_F(
-			ERROR, ctx, "tproxy: unsupported af:%jd",
-			(intmax_t)dest.sa.sa_family);
+			ERROR, ctx, "tproxy: unsupported af:%u",
+			(unsigned int)dest.sa.sa_family);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -471,8 +471,8 @@ static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
 	}
 	if (!dialaddr_set(&req->addr, &dest.sa, len)) {
 		FW_CTX_LOG_F(
-			ERROR, ctx, "tproxy: unsupported af:%jd",
-			(intmax_t)dest.sa.sa_family);
+			ERROR, ctx, "tproxy: unsupported af:%u",
+			(unsigned int)dest.sa.sa_family);
 		dialreq_free(req);
 		return NULL;
 	}

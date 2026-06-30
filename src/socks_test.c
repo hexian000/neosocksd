@@ -109,11 +109,11 @@ static struct {
 	enum dialer_error dialer_err;
 	int dialer_syserr;
 	int dialer_success_fd;
-	size_t dialer_cancel_count;
+	uint_least32_t dialer_cancel_count;
 
 	enum stub_ruleset_mode ruleset_mode;
 	struct ruleset_callback *ruleset_pending_cb;
-	size_t ruleset_cancel_count;
+	uint_least32_t ruleset_cancel_count;
 } STUB = {
 	.dialreq_available = false,
 	.dialer_mode = STUB_DIALER_NONE,
@@ -129,7 +129,7 @@ static int stub_ruleset_state_tag = 0;
 
 struct stub_xfer_ctx;
 static struct stub_xfer_ctx *stub_xfer_ctxs[8];
-static int stub_xfer_ctx_count = 0;
+static int_least32_t stub_xfer_ctx_count = 0;
 
 static void stub_reset(void)
 {
@@ -139,7 +139,7 @@ static void stub_reset(void)
 	STUB.dialer_syserr = 0;
 	STUB.dialer_success_fd = -1;
 	STUB.dialer_cancel_count = 0;
-	for (int i = 0; i < stub_xfer_ctx_count; i++) {
+	for (int_fast32_t i = 0; i < stub_xfer_ctx_count; i++) {
 		free(stub_xfer_ctxs[i]);
 		stub_xfer_ctxs[i] = NULL;
 	}
@@ -347,7 +347,7 @@ bool transfer_serve(
 	(void)xfer;
 	(void)acc_fd;
 	(void)dial_fd;
-	T_CHECK(stub_xfer_ctx_count < (int)ARRAY_SIZE(stub_xfer_ctxs));
+	T_CHECK(stub_xfer_ctx_count < (int_fast32_t)ARRAY_SIZE(stub_xfer_ctxs));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
 		return false;
@@ -560,9 +560,7 @@ static void serve_payload(
 	int *restrict peer_fd)
 {
 	int sv[2] = { -1, -1 };
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	socks_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
@@ -578,9 +576,7 @@ static void serve_payload_split(
 	int *restrict peer_fd)
 {
 	int sv[2] = { -1, -1 };
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	socks_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
@@ -892,9 +888,7 @@ static void fuzz_socks_once(struct prng *restrict p)
 	int sv[2] = { -1, -1 };
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in sa = { .sin_family = AF_INET };
 	unsigned char input[FUZZ_MAX_SOCKS_INPUT];
 	const size_t len = make_socks_payload(p, input, sizeof(input));
 

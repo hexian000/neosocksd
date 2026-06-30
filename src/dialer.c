@@ -81,7 +81,7 @@ bool dialaddr_parse(
 	buf[len] = '\0';
 
 	char *host, *port;
-	if (!addr_splithostport(buf, &host, &port)) {
+	if (!splithostport(buf, &host, &port)) {
 		LOGE_F("invalid address: `%s'", s);
 		return false;
 	}
@@ -270,19 +270,19 @@ bool dialreq_addproxy(
 	char *host, *port;
 	if (strcmp(uri.scheme, proxy_protocol_str[PROTO_HTTP]) == 0) {
 		protocol = PROTO_HTTP;
-		if (!addr_splithostport(uri.host, &host, &port)) {
+		if (!splithostport(uri.host, &host, &port)) {
 			host = uri.host;
 			port = "80";
 		}
 	} else if (strcmp(uri.scheme, proxy_protocol_str[PROTO_SOCKS4A]) == 0) {
 		protocol = PROTO_SOCKS4A;
-		if (!addr_splithostport(uri.host, &host, &port)) {
+		if (!splithostport(uri.host, &host, &port)) {
 			host = uri.host;
 			port = "1080";
 		}
 	} else if (strcmp(uri.scheme, proxy_protocol_str[PROTO_SOCKS5]) == 0) {
 		protocol = PROTO_SOCKS5;
-		if (!addr_splithostport(uri.host, &host, &port)) {
+		if (!splithostport(uri.host, &host, &port)) {
 			host = uri.host;
 			port = "1080";
 		}
@@ -380,15 +380,24 @@ static int format_proxyreq(
 	return url_build(s, maxlen, &u);
 }
 
+/* Remaining writable capacity at offset n, snprintf-style: zero when the buffer
+ * is absent or already full. */
+static size_t
+format_avail(const char *restrict s, const int n, const size_t maxlen)
+{
+	if (s == NULL || (size_t)n >= maxlen) {
+		return 0;
+	}
+	return maxlen - (size_t)n;
+}
+
 int dialreq_format(
 	char *restrict s, size_t maxlen, const struct dialreq *restrict r)
 {
 	int n = 0;
 	for (size_t i = 0; i < r->num_proxy; i++) {
 		{
-			const size_t avail = (s != NULL && (size_t)n < maxlen) ?
-						     maxlen - (size_t)n :
-						     0;
+			const size_t avail = format_avail(s, n, maxlen);
 			const int ret = format_proxyreq(
 				avail > 0 ? s + n : NULL, avail, &r->proxy[i]);
 			if (ret < 0) {
@@ -397,17 +406,14 @@ int dialreq_format(
 			n += ret;
 		}
 		{
-			const size_t avail = (s != NULL && (size_t)n < maxlen) ?
-						     maxlen - (size_t)n :
-						     0;
+			const size_t avail = format_avail(s, n, maxlen);
 			const int ret =
 				snprintf(avail > 0 ? s + n : NULL, avail, "->");
 			ASSERT(ret > 0);
 			n += ret;
 		}
 	}
-	const size_t avail =
-		(s != NULL && (size_t)n < maxlen) ? maxlen - (size_t)n : 0;
+	const size_t avail = format_avail(s, n, maxlen);
 	const int ret =
 		dialaddr_format(avail > 0 ? s + n : NULL, avail, &r->addr);
 	if (ret < 0) {
@@ -553,7 +559,7 @@ static bool dialer_send(
 		return false;
 	}
 	if (d->byt_sent != NULL) {
-		*d->byt_sent += (size_t)nsend;
+		*d->byt_sent += (uint_least64_t)nsend;
 	}
 	return true;
 }
@@ -849,7 +855,7 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 	}
 	d->next += n;
 	if (d->byt_recv != NULL) {
-		*d->byt_recv += n;
+		*d->byt_recv += (uint_least64_t)n;
 	}
 	return true;
 }

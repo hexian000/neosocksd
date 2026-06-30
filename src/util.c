@@ -110,7 +110,7 @@ void modify_io_events(
 	}
 }
 
-void socket_bind_netdev(int fd, const char *netdev)
+void socket_bind_netdev(int fd, const char *restrict netdev)
 {
 #ifdef SO_BINDTODEVICE
 	char ifname[IFNAMSIZ];

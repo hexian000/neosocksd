@@ -327,19 +327,17 @@ static_assert(
  */
 #if UINTMAX_MAX > ULLONG_MAX
 #define intlog2(x)                                                             \
-	_Generic(                                                              \
-		(x),                                                           \
-		unsigned int: log2u,                                           \
-		unsigned long: log2ul,                                         \
-		unsigned long long: log2ull,                                   \
-		uintmax_t: log2umax)(x)
+	_Generic((x), unsigned int                                             \
+		 : log2u, unsigned long                                        \
+		 : log2ul, unsigned long long                                  \
+		 : log2ull, uintmax_t                                          \
+		 : log2umax)(x)
 #else
 #define intlog2(x)                                                             \
-	_Generic(                                                              \
-		(x),                                                           \
-		unsigned int: log2u,                                           \
-		unsigned long: log2ul,                                         \
-		unsigned long long: log2ull)(x)
+	_Generic((x), unsigned int                                             \
+		 : log2u, unsigned long                                        \
+		 : log2ul, unsigned long long                                  \
+		 : log2ull)(x)
 #endif /* UINTMAX_MAX > ULLONG_MAX */
 
 /**
@@ -348,19 +346,17 @@ static_assert(
  */
 #if UINTMAX_MAX > ULLONG_MAX
 #define countr_zero(x)                                                         \
-	_Generic(                                                              \
-		(x),                                                           \
-		unsigned int: countr_zerou,                                    \
-		unsigned long: countr_zeroul,                                  \
-		unsigned long long: countr_zeroull,                            \
-		uintmax_t: countr_zeromax)(x)
+	_Generic((x), unsigned int                                             \
+		 : countr_zerou, unsigned long                                 \
+		 : countr_zeroul, unsigned long long                           \
+		 : countr_zeroull, uintmax_t                                   \
+		 : countr_zeromax)(x)
 #else
 #define countr_zero(x)                                                         \
-	_Generic(                                                              \
-		(x),                                                           \
-		unsigned int: countr_zerou,                                    \
-		unsigned long: countr_zeroul,                                  \
-		unsigned long long: countr_zeroull)(x)
+	_Generic((x), unsigned int                                             \
+		 : countr_zerou, unsigned long                                 \
+		 : countr_zeroul, unsigned long long                           \
+		 : countr_zeroull)(x)
 #endif /* UINTMAX_MAX > ULLONG_MAX */
 
 /**
@@ -369,19 +365,17 @@ static_assert(
  */
 #if UINTMAX_MAX > ULLONG_MAX
 #define countl_zero(x)                                                         \
-	_Generic(                                                              \
-		(x),                                                           \
-		unsigned int: countl_zerou,                                    \
-		unsigned long: countl_zeroul,                                  \
-		unsigned long long: countl_zeroull,                            \
-		uintmax_t: countl_zeromax)(x)
+	_Generic((x), unsigned int                                             \
+		 : countl_zerou, unsigned long                                 \
+		 : countl_zeroul, unsigned long long                           \
+		 : countl_zeroull, uintmax_t                                   \
+		 : countl_zeromax)(x)
 #else
 #define countl_zero(x)                                                         \
-	_Generic(                                                              \
-		(x),                                                           \
-		unsigned int: countl_zerou,                                    \
-		unsigned long: countl_zeroul,                                  \
-		unsigned long long: countl_zeroull)(x)
+	_Generic((x), unsigned int                                             \
+		 : countl_zerou, unsigned long                                 \
+		 : countl_zeroul, unsigned long long                           \
+		 : countl_zeroull)(x)
 #endif /* UINTMAX_MAX > ULLONG_MAX */
 
 /* size_t must alias unsigned int, long, or long long for the

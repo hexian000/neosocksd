@@ -17,6 +17,7 @@ Version: dev
   - [ruleset.tick](#rulesettick)
   - [ruleset.stats](#rulesetstats)
   - [ruleset.metrics](#rulesetmetrics)
+  - [ruleset.healthy](#rulesethealthy)
 - [Lua API](#lua-api)
   - [neosocksd.config](#neosocksdconfig)
   - [neosocksd.resolve](#neosocksdresolve)
@@ -51,9 +52,12 @@ Version: dev
 ### /healthy
 
 - **Method**: Any
-- **Status**: HTTP 200
+- **Status**: HTTP 200 (healthy), HTTP 503 (unhealthy)
+- **Response**: When unhealthy, the reason reported by [ruleset.healthy](#rulesethealthy) (`text/plain`).
 
-Health check.
+Health check. If the [ruleset.healthy](#rulesethealthy) callback is defined and returns a
+non-empty string, the endpoint responds with HTTP 503 and that string as the body. Otherwise
+it responds with HTTP 200 and an empty body.
 
 ### /stats
 
@@ -307,6 +311,33 @@ The returned string is appended verbatim after all built-in Prometheus metrics, 
 **Returns**
 
 A string in Prometheus text format to append to the `/metrics` response.
+
+
+### ruleset.healthy
+
+**Synopsis**
+
+```Lua
+function ruleset.healthy()
+    if not database_connected() then
+        return "database unreachable"
+    end
+    -- return nil or "" when healthy
+end
+```
+
+**Description**
+
+Reports service health for the [/healthy](#healthy) API. This callback is optional; if it is not defined, the service is always considered healthy.
+
+Return a non-empty string to mark the service unhealthy; the string becomes the `/healthy` error message (HTTP 503 response body). Return `nil` or an empty string to indicate health (HTTP 200). If the callback itself raises an error, the service is considered unhealthy and the error message is reported.
+
+*This callback is NOT called from an asynchronous routine.*
+
+**Returns**
+
+- `nil` or `""`: healthy
+- a non-empty string: unhealthy; the string is the reported reason
 
 
 ## Lua API

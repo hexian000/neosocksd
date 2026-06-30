@@ -621,6 +621,77 @@ T_DECLARE_CASE(ruleset_metrics_returns_string_when_defined_and_null_when_absent)
 	free_ruleset(loop, r);
 }
 
+T_DECLARE_CASE(ruleset_healthy_reports_unhealthy_string_and_null_when_ok)
+{
+#define HEALTHY_PRELUDE                                                        \
+	"local name = ... "                                                    \
+	"  local ruleset = {} "                                                \
+	"  function ruleset.resolve(request, username, password) "             \
+	"    return request "                                                  \
+	"  end "                                                               \
+	"  function ruleset.route(request, username, password) "               \
+	"    return request "                                                  \
+	"  end "                                                               \
+	"  function ruleset.route6(request, username, password) "              \
+	"    return request "                                                  \
+	"  end "                                                               \
+	"  function ruleset.stats(dt, query) return '' end "                   \
+	"  function ruleset.tick() end "
+#define HEALTHY_CHUNK(body) HEALTHY_PRELUDE body "  return ruleset "
+	static const char unhealthy_chunk[] = HEALTHY_CHUNK(
+		"function ruleset.healthy() return 'down: db' end ");
+	static const char empty_chunk[] =
+		HEALTHY_CHUNK("function ruleset.healthy() return '' end ");
+	static const char nil_chunk[] =
+		HEALTHY_CHUNK("function ruleset.healthy() return nil end ");
+	static const char error_chunk[] =
+		HEALTHY_CHUNK("function ruleset.healthy() error('boom') end ");
+	static const char without_chunk[] = HEALTHY_CHUNK("");
+#undef HEALTHY_CHUNK
+#undef HEALTHY_PRELUDE
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+	size_t len = 0;
+	const char *s;
+
+	/* a non-empty string marks the service unhealthy */
+	T_EXPECT(ruleset_update(
+		r, NULL, NULL, string_stream_open(&stream, unhealthy_chunk)));
+	s = ruleset_healthy(r, &len);
+	T_CHECK(s != NULL);
+	T_EXPECT_EQ(len, strlen("down: db"));
+	T_EXPECT_MEMEQ(s, "down: db", len);
+
+	/* an empty string means healthy */
+	T_EXPECT(ruleset_update(
+		r, NULL, NULL, string_stream_open(&stream, empty_chunk)));
+	s = ruleset_healthy(r, &len);
+	T_EXPECT_EQ(s, NULL);
+
+	/* nil means healthy */
+	T_EXPECT(ruleset_update(
+		r, NULL, NULL, string_stream_open(&stream, nil_chunk)));
+	s = ruleset_healthy(r, &len);
+	T_EXPECT_EQ(s, NULL);
+
+	/* an absent callback means healthy */
+	T_EXPECT(ruleset_update(
+		r, NULL, NULL, string_stream_open(&stream, without_chunk)));
+	s = ruleset_healthy(r, &len);
+	T_EXPECT_EQ(s, NULL);
+
+	/* a callback that raises is reported as unhealthy */
+	T_EXPECT(ruleset_update(
+		r, NULL, NULL, string_stream_open(&stream, error_chunk)));
+	s = ruleset_healthy(r, &len);
+	T_CHECK(s != NULL);
+	T_CHECK(strstr(s, "boom") != NULL);
+
+	free_ruleset(loop, r);
+}
+
 T_DECLARE_CASE(ruleset_cancel_pending_request_clears_callback)
 {
 	static const char update_chunk[] =
@@ -704,6 +775,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_loadfile_dispatches_requests),
 	T_CASE(ruleset_update_invoke_rpcall_stats_and_tick),
 	T_CASE(ruleset_metrics_returns_string_when_defined_and_null_when_absent),
+	T_CASE(ruleset_healthy_reports_unhealthy_string_and_null_when_ok),
 	T_CASE(ruleset_cancel_pending_request_clears_callback),
 	T_CASE(ruleset_geterror_variants),
 	T_SUITE_END,

@@ -41,6 +41,7 @@ check_symbol_exists(syslog "syslog.h" HAVE_SYSLOG)
 check_symbol_exists(gmtime_r "time.h" HAVE_GMTIME_R)
 check_symbol_exists(localtime_r "time.h" HAVE_LOCALTIME_R)
 check_symbol_exists(wcwidth "wchar.h" HAVE_WCWIDTH)
+check_symbol_exists(regcomp "regex.h" HAVE_REGEX_H)
 check_symbol_exists(backtrace "execinfo.h" HAVE_BACKTRACE)
 check_symbol_exists(backtrace_symbols "execinfo.h" HAVE_BACKTRACE_SYMBOLS)
 

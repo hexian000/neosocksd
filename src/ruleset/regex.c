@@ -94,7 +94,7 @@ static size_t check_matches(lua_State *restrict L, const regex_t *restrict preg)
 	const size_t nmatch = preg->re_nsub + 1;
 	if (nmatch >= INT_MAX) {
 		lua_pushliteral(L, "too many subexpressions");
-		return lua_error(L);
+		return (size_t)lua_error(L);
 	}
 	luaL_checkstack(L, (int)nmatch + 1, "too many subexpressions");
 	return nmatch;

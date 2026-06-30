@@ -134,39 +134,32 @@ bool conf_check(const struct config *restrict conf)
 		LOGW("the proxy will be overwritten by ruleset");
 	}
 #endif
-	if (conf->proxy != NULL) {
-		if (conf->socks5_bind) {
-			LOGE_F("%s is incompatible with forwarding proxy",
-			       "SOCKS5 BIND");
-			return false;
-		}
-		if (conf->socks5_udp) {
-			LOGE_F("%s is incompatible with forwarding proxy",
-			       "SOCKS5 UDPASSOCIATE");
-			return false;
-		}
+	if (conf->proxy != NULL && conf->socks5_bind) {
+		LOGE_F("%s is incompatible with forwarding proxy",
+		       "SOCKS5 BIND");
+		return false;
+	}
+	if (conf->proxy != NULL && conf->socks5_udp) {
+		LOGE_F("%s is incompatible with forwarding proxy",
+		       "SOCKS5 UDPASSOCIATE");
+		return false;
 	}
 #if WITH_RULESET
-	if (conf->ruleset != NULL) {
-		if (conf->socks5_bind) {
-			LOGE_F("%s is incompatible with ruleset",
-			       "SOCKS5 BIND");
-			return false;
-		}
-		if (conf->socks5_udp) {
-			LOGE_F("%s is incompatible with ruleset",
-			       "SOCKS5 UDPASSOCIATE");
-			return false;
-		}
+	if (conf->ruleset != NULL && conf->socks5_bind) {
+		LOGE_F("%s is incompatible with ruleset", "SOCKS5 BIND");
+		return false;
+	}
+	if (conf->ruleset != NULL && conf->socks5_udp) {
+		LOGE_F("%s is incompatible with ruleset",
+		       "SOCKS5 UDPASSOCIATE");
+		return false;
 	}
 #endif /* WITH_RULESET */
-	if (conf->auth_required) {
-		if (!auth_supported) {
-			LOGE("authentication is not supported in current mode");
-			return false;
-		}
-		/* the ruleset requirement is checked in main() after loading */
+	if (conf->auth_required && !auth_supported) {
+		LOGE("authentication is not supported in current mode");
+		return false;
 	}
+	/* the ruleset requirement is checked in main() after loading */
 
 	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
 	       RANGE_CHECK(
@@ -405,7 +398,8 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			++i;
 			char *endptr = NULL;
 			intmax_t soft = strtoimax(argv[i], &endptr, 10);
-			if (soft > INT_MAX / 1024) {
+			if (*endptr != '\0' || endptr == argv[i] ||
+			    soft > INT_MAX / 1024) {
 				OPT_ARG_ERROR(argv, i);
 			} else if (soft < 0) {
 				soft = 0;
@@ -644,14 +638,21 @@ static bool lutil_loadfield(
 		if (!isnil && !lua_isinteger(L, -1)) {
 			LOGE_F("boot: field `%s' must be an integer", f->key);
 			ok = false;
-		} else if (!isnil) {
+			break;
+		}
+		if (isnil) {
+			break;
+		}
+		{
 			const lua_Integer v = lua_tointeger(L, -1);
 			if (v < (lua_Integer)INT_MIN ||
 			    v > (lua_Integer)INT_MAX) {
 				LOGE_F("boot: field `%s' is out of range",
 				       f->key);
 				ok = false;
-			} else if (apply) {
+				break;
+			}
+			if (apply) {
 				*(int *)((char *)conf + f->offset) = (int)v;
 			}
 		}
@@ -660,7 +661,9 @@ static bool lutil_loadfield(
 		if (!isnil && !lua_isnumber(L, -1)) {
 			LOGE_F("boot: field `%s' must be a number", f->key);
 			ok = false;
-		} else if (!isnil && apply) {
+			break;
+		}
+		if (!isnil && apply) {
 			*(double *)((char *)conf + f->offset) =
 				(double)lua_tonumber(L, -1);
 		}
@@ -669,7 +672,9 @@ static bool lutil_loadfield(
 		if (!isnil && lua_type(L, -1) != LUA_TBOOLEAN) {
 			LOGE_F("boot: field `%s' must be a boolean", f->key);
 			ok = false;
-		} else if (!isnil && apply) {
+			break;
+		}
+		if (!isnil && apply) {
 			*(bool *)((char *)conf + f->offset) =
 				lua_toboolean(L, -1) != 0;
 		}

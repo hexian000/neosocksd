@@ -160,7 +160,7 @@ static int api_splithostport(lua_State *restrict L)
 	memcpy(buf, s, len);
 	buf[len] = '\0';
 	char *host, *port;
-	if (!addr_splithostport(buf, &host, &port)) {
+	if (!splithostport(buf, &host, &port)) {
 		return luaL_error(L, "invalid address: `%s'", s);
 	}
 	lua_pushstring(L, host);
@@ -276,7 +276,7 @@ static int api_stats(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
 	struct server_stats stats = { 0 };
-	uint_least64_t num_dns_query = 0, num_dns_success = 0;
+	uint_fast64_t num_dns_query = 0, num_dns_success = 0;
 	{
 		const struct server *restrict s = r->server;
 		if (s != NULL) {

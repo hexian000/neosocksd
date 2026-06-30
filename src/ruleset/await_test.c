@@ -492,9 +492,7 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 
 static void trigger_resolve_ipv4(const char *restrict ip)
 {
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(STUB.resolve_query != NULL);
 	T_CHECK(inet_pton(AF_INET, ip, &sa.sin_addr) == 1);

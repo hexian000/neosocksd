@@ -30,6 +30,8 @@ int cfunc_metrics(lua_State *restrict L);
 
 int cfunc_tick(lua_State *restrict L);
 
+int cfunc_healthy(lua_State *restrict L);
+
 int cfunc_gc(lua_State *restrict L);
 
 #endif /* RULESET_CFUNC_H */

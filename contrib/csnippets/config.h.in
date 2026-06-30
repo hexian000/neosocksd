@@ -10,6 +10,7 @@
 #cmakedefine01 HAVE_GMTIME_R
 #cmakedefine01 HAVE_LOCALTIME_R
 #cmakedefine01 HAVE_WCWIDTH
+#cmakedefine01 HAVE_REGEX_H
 #cmakedefine01 HAVE_BACKTRACE
 #cmakedefine01 HAVE_BACKTRACE_SYMBOLS
 

@@ -525,13 +525,13 @@ static bool test_wait_until(
 
 struct server_success_wait_ctx {
 	const struct server *s;
-	int_fast32_t expected;
+	int_least32_t expected;
 };
 
 static bool server_success_reached(void *data)
 {
 	const struct server_success_wait_ctx *const ctx = data;
-	return (int_fast32_t)ctx->s->stats.num_success >= ctx->expected;
+	return (int_least32_t)ctx->s->stats.num_success >= ctx->expected;
 }
 
 static void init_server(struct ev_loop **loop, struct server *restrict s)
@@ -546,9 +546,7 @@ static void start_serve(
 	struct ev_loop *loop, struct server *restrict s, int *restrict peer_fd)
 {
 	int sv[2] = { -1, -1 };
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	T_CHECK(socket_set_cloexec(sv[0]) == 0);
@@ -585,9 +583,7 @@ static void serve_payload(
 	const char *restrict req, int *restrict peer_fd)
 {
 	int sv[2] = { -1, -1 };
-	struct sockaddr_in sa = {
-		.sin_family = AF_INET,
-	};
+	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	T_CHECK(socket_set_cloexec(sv[0]) == 0);

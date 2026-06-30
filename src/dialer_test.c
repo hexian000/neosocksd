@@ -137,7 +137,7 @@ static bool fd_set_nonblock(const int fd)
 	return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
-static int make_listener(uint_least16_t *restrict port)
+static int make_listener(uint_fast16_t *restrict port)
 {
 	const int fd = socket(AF_INET, SOCK_STREAM, 0);
 	const int enable = 1;
@@ -161,7 +161,7 @@ static int make_listener(uint_least16_t *restrict port)
 	return fd;
 }
 
-static int make_listener6(uint_least16_t *restrict port)
+static int make_listener6(uint_fast16_t *restrict port)
 {
 	const int fd = socket(AF_INET6, SOCK_STREAM, 0);
 	const int enable = 1;
@@ -477,7 +477,7 @@ T_DECLARE_CASE(dialer_strerror_known_and_unknown)
 
 T_DECLARE_CASE(direct_connect_reports_success)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	const int listener_fd = make_listener(&port);
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -555,7 +555,7 @@ T_DECLARE_CASE(local_address_blocked_by_egress_policy)
 
 T_DECLARE_CASE(http_connect_success_sends_expected_request)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -608,7 +608,7 @@ T_DECLARE_CASE(http_connect_success_sends_expected_request)
 
 T_DECLARE_CASE(http_connect_407_maps_to_proxy_auth)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -656,7 +656,7 @@ T_DECLARE_CASE(http_connect_407_maps_to_proxy_auth)
 
 T_DECLARE_CASE(http_connect_403_maps_to_proxy_reject)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -703,7 +703,7 @@ T_DECLARE_CASE(http_connect_403_maps_to_proxy_reject)
 
 T_DECLARE_CASE(http_connect_502_maps_to_proxy_refused)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -750,7 +750,7 @@ T_DECLARE_CASE(http_connect_502_maps_to_proxy_refused)
 
 T_DECLARE_CASE(http_connect_non_200_maps_to_proxy_proto)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	int listener_fd = make_listener(&port);
 	struct proxy_server server = {
 		.listener_fd = listener_fd,
@@ -874,7 +874,7 @@ static bool socks4_raw_pump(void *data)
 
 T_DECLARE_CASE(socks4a_rejected_maps_to_proxy_refused)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	struct socks4_raw_server server = {
 		.listener_fd = make_listener(&port),
 		.peer_fd = -1,
@@ -1027,7 +1027,7 @@ static bool socks5_raw_pump(void *data)
 
 T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	struct socks5_raw_server server = {
 		.listener_fd = make_listener(&port),
 		.peer_fd = -1,
@@ -1073,7 +1073,7 @@ T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
 
 T_DECLARE_CASE(direct_connect_ipv6_reports_success)
 {
-	uint_least16_t port = 0;
+	uint_fast16_t port = 0;
 	const int listener_fd = make_listener6(&port);
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -1157,7 +1157,7 @@ T_DECLARE_SUBCASE(
 T_DECLARE_CASE(direct_connect_domain_resolves_and_succeeds)
 {
 	struct config conf = test_conf;
-	uint_least16_t final_port;
+	uint_fast16_t final_port;
 	int final_fd = make_listener(&final_port);
 	struct ev_loop *loop = ev_loop_new(0);
 	struct resolver *resolver;

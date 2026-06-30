@@ -721,8 +721,7 @@ static bool parse_header_proxy_pass(
 		}
 		char *end;
 		const uintmax_t cl = strtoumax(value, &end, 10);
-		while (*end == ' ' || *end == '\t') {
-			end++;
+		for (; *end == ' ' || *end == '\t'; end++) {
 		}
 		if (*end != '\0' || cl > (uintmax_t)SIZE_MAX) {
 			return false;
@@ -803,12 +802,11 @@ static bool parse_header(void *data, const char *key, char *value)
 		if (!parsehdr_transfer_encoding(p, value)) {
 			return false;
 		}
+		/* RFC 9112 §6.3: CL+TE coexistence must be rejected */
 		if (!is_connect &&
-		    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
-			/* RFC 9112 §6.3: CL+TE coexistence must be rejected */
-			if (ctx->req_content_length_known) {
-				return false;
-			}
+		    p->hdr.transfer.encoding == TENCODING_CHUNKED &&
+		    ctx->req_content_length_known) {
+			return false;
 		}
 		return true;
 	}

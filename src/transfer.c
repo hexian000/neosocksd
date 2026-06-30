@@ -137,7 +137,7 @@ struct transfer {
 	struct ev_loop *loop;
 	/* loop thread only; no locking needed */
 	struct transfer_ctx *active_list;
-#endif
+#endif /* WITH_THREADS */
 };
 
 /* ---------------------------------------------------------------- logging */
@@ -356,12 +356,13 @@ static void update_stats(
 #if WITH_THREADS
 	atomic_uint_least64_t *restrict byt = h->byt_transferred;
 	if (byt != NULL) {
-		atomic_fetch_add_explicit(byt, nbsend, memory_order_relaxed);
+		atomic_fetch_add_explicit(
+			byt, (uint_least64_t)nbsend, memory_order_relaxed);
 	}
 #else
 	uint_least64_t *restrict byt = h->byt_transferred;
 	if (byt != NULL) {
-		*byt += nbsend;
+		*byt += (uint_least64_t)nbsend;
 	}
 #endif /* WITH_THREADS */
 	if (buffered > 0) {

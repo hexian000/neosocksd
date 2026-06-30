@@ -37,6 +37,32 @@
 #include <stddef.h>
 #include <stdlib.h>
 
+/* defer ruleset.tick() to the idle watcher */
+static void tick_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_TIMER);
+	struct ruleset *restrict r = watcher->data;
+	ev_idle_start(loop, &r->w_idle);
+}
+
+static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	struct ruleset *restrict r = watcher->data;
+	/*
+	 * Negative interval intentionally keeps idle watcher active so
+	 * ruleset.tick runs on each idle iteration.
+	 */
+	if (r->w_ticker.repeat > 0) {
+		ev_idle_stop(loop, watcher);
+	}
+	const bool ok = ruleset_pcall(r, cfunc_tick, 0, 0);
+	if (!ok) {
+		LOGW_F("ruleset.tick: %s", ruleset_geterror(r, NULL));
+		return;
+	}
+}
+
 static void *
 l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 {
@@ -72,9 +98,12 @@ l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 		ret = ptr;
 	} else {
 		/* Grow to class size, not nsize — preserves per-class invariant for mmcache_put(). */
-		const size_t newsize = (newshift <= cache->max_shift) ?
-					       ((size_t)1 << newshift) :
-					       nsize;
+		size_t newsize;
+		if (newshift <= cache->max_shift) {
+			newsize = (size_t)1 << newshift;
+		} else {
+			newsize = nsize;
+		}
 		ret = realloc(ptr, newsize);
 		if (ret == NULL) {
 			return NULL;
@@ -115,9 +144,12 @@ l_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 
 static int l_panic(lua_State *L)
 {
-	const char *msg = (lua_type(L, -1) == LUA_TSTRING) ?
-				  lua_tostring(L, -1) :
-				  "error object is not a string";
+	const char *msg;
+	if (lua_type(L, -1) == LUA_TSTRING) {
+		msg = lua_tostring(L, -1);
+	} else {
+		msg = "error object is not a string";
+	}
 	LOG_STACK_F(
 		FATAL, 0, "PANIC: unprotected error in call to Lua API (%s)",
 		msg);
@@ -173,32 +205,6 @@ static int ruleset_luainit(lua_State *restrict L)
 		lua_pop(L, 1);
 	}
 	return 0;
-}
-
-/* defer ruleset.tick() to the idle watcher */
-static void tick_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_TIMER);
-	struct ruleset *restrict r = watcher->data;
-	ev_idle_start(loop, &r->w_idle);
-}
-
-static void idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_IDLE);
-	struct ruleset *restrict r = watcher->data;
-	/*
-	 * Negative interval intentionally keeps idle watcher active so
-	 * ruleset.tick runs on each idle iteration.
-	 */
-	if (r->w_ticker.repeat > 0) {
-		ev_idle_stop(loop, watcher);
-	}
-	const bool ok = ruleset_pcall(r, cfunc_tick, 0, 0);
-	if (!ok) {
-		LOGW_F("ruleset.tick: %s", ruleset_geterror(r, NULL));
-		return;
-	}
 }
 
 struct ruleset *ruleset_new(
@@ -456,6 +462,30 @@ const char *ruleset_metrics(struct ruleset *restrict r, size_t *len)
 		return NULL;
 	}
 	return lua_tolstring(L, -1, len);
+}
+
+const char *ruleset_healthy(struct ruleset *restrict r, size_t *len)
+{
+	lua_State *restrict const L = r->L;
+	const bool ok = ruleset_pcall(r, cfunc_healthy, 0, 1);
+	if (!ok) {
+		/* the health check itself failed: report it as unhealthy */
+		const char *err = ruleset_geterror(r, len);
+		LOGW_F("ruleset.healthy: %s", err);
+		return err;
+	}
+	size_t n;
+	const char *s = lua_tolstring(L, -1, &n);
+	if (s == NULL || n == 0) {
+		if (len != NULL) {
+			*len = 0;
+		}
+		return NULL; /* undefined / nil / empty: healthy */
+	}
+	if (len != NULL) {
+		*len = n;
+	}
+	return s; /* unhealthy: error message */
 }
 
 #endif /* WITH_RULESET */
