@@ -503,6 +503,16 @@ static void trigger_resolve_ipv4(const char *restrict ip)
 	STUB.resolve_query = NULL;
 }
 
+static void trigger_resolve_failure(void)
+{
+	T_CHECK(STUB.resolve_query != NULL);
+	/* sa is NULL when name resolution fails */
+	STUB.resolve_cb.func(
+		STUB.resolve_query, STUB.loop, STUB.resolve_cb.data, NULL);
+	free(STUB.resolve_query);
+	STUB.resolve_query = NULL;
+}
+
 static void trigger_invoke_success(const char *restrict chunk)
 {
 	struct string_stream stream;
@@ -690,6 +700,37 @@ T_DECLARE_CASE(await_resolve_real_path)
 	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, TEST_WAIT_SEC));
 	lua_getglobal(L, "resolve_result");
 	T_EXPECT_STREQ(lua_tostring(L, -1), "127.0.0.1");
+	lua_pop(L, 1);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_resolve_failure_returns_nil)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct lua_global_pred pred = {
+		.L = L,
+		.name = "resolve_done",
+	};
+
+	reset_stub_state();
+	T_EXPECT(run_chunk(
+		L,
+		"co = coroutine.create(function() "
+		"local addr = await.resolve('bad.invalid') "
+		"_G.resolve_done = (addr == nil) and 'nil' or addr end) "
+		"return coroutine.resume(co)"));
+	/* resolution failure must not crash; await.resolve returns nil */
+	trigger_resolve_failure();
+	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, TEST_WAIT_SEC));
+	lua_getglobal(L, "resolve_done");
+	T_EXPECT_STREQ(lua_tostring(L, -1), "nil");
 	lua_pop(L, 1);
 
 	lua_close(L);
@@ -902,6 +943,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_invoke_rejects_non_coroutine),
 	T_CASE(await_sleep_real_paths),
 	T_CASE(await_resolve_real_path),
+	T_CASE(await_resolve_failure_returns_nil),
 	T_CASE(await_invoke_real_path),
 	T_CASE(await_execute_reports_exit_status),
 	T_CASE(await_forward_commits_on_success),

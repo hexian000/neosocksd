@@ -149,6 +149,7 @@ struct await_resolve_userdata {
 	struct ruleset *ruleset;
 	struct resolve_query *query;
 	ev_idle w_idle;
+	bool ok;
 	union sockaddr_max sa;
 };
 
@@ -172,7 +173,11 @@ static void resolve_cb(
 	ASSERT(ud->query == q);
 	(void)q;
 	ud->query = NULL;
-	sa_copy(&ud->sa.sa, sa);
+	/* sa is NULL when name resolution fails */
+	ud->ok = (sa != NULL);
+	if (ud->ok) {
+		sa_copy(&ud->sa.sa, sa);
+	}
 	ev_idle_start(loop, &ud->w_idle);
 }
 
@@ -182,7 +187,7 @@ resolve_finish_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	CHECK_REVENTS(revents, EV_IDLE);
 	ev_idle_stop(loop, watcher);
 	struct await_resolve_userdata *restrict ud = watcher->data;
-	const struct sockaddr *sa = &ud->sa.sa;
+	const struct sockaddr *sa = ud->ok ? &ud->sa.sa : NULL;
 	ruleset_resume(ud->ruleset, ud, 1, (void *)sa);
 }
 
@@ -208,6 +213,7 @@ static int await_resolve(lua_State *restrict L)
 		lua_newuserdata(L, sizeof(struct await_resolve_userdata));
 	ud->ruleset = aux_getruleset(L);
 	ud->query = NULL;
+	ud->ok = false;
 	ev_idle_init(&ud->w_idle, resolve_finish_cb);
 	ud->w_idle.data = ud;
 	aux_toclose(L, -1, MT_AWAIT_RESOLVE, await_resolve_close);
