@@ -12,7 +12,7 @@ _G.marshal = marshal
 
 local await = {}
 
-function await.execute(command) return 0 end
+function await.execute(command) return true, "exit", 0 end
 
 function await.forward(addr, ...) return false, "" end
 
@@ -90,7 +90,7 @@ function time.process() return -1 end
 
 function time.thread() return -1 end
 
-function time.wall() return -1 end
+function time.unix() return -1 end
 
 function time.measure(f, ...) return -1, f(...) end
 
@@ -102,5 +102,9 @@ local zlib = {}
 function zlib.compress(s) return "" end
 
 function zlib.uncompress(z) return "" end
+
+function zlib.gzip(s) return "" end
+
+function zlib.gunzip(z) return "" end
 
 _G.zlib = zlib

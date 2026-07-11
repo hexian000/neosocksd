@@ -238,6 +238,28 @@ T_DECLARE_CASE(gunzip_crc_mismatch)
 	lua_close(L);
 }
 
+/*
+ * Repeatedly drive the error path (which unwinds through the to-be-closed
+ * __close over two streams and a vbuffer) to catch leaks or double-frees in
+ * the cleanup path under a leak-detecting build.
+ */
+T_DECLARE_CASE(zlib_repeated_failure_no_leak)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "for _ = 1, 100 do "
+		   "  assert(not pcall(zlib.uncompress, 'not-zlib-data')) "
+		   "  assert(not pcall(zlib.gunzip, 'not-gzip-data')) "
+		   "end "
+		   "return true"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+
+	lua_close(L);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -247,12 +269,19 @@ T_DECLARE_CASE(gunzip_crc_mismatch)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
-	T_CASE(zlib_module_opens),	 T_CASE(zlib_roundtrip_small),
-	T_CASE(zlib_roundtrip_large),	 T_CASE(zlib_empty_string),
-	T_CASE(zlib_uncompress_invalid), T_CASE(gzip_module_has_funcs),
-	T_CASE(gzip_roundtrip_small),	 T_CASE(gzip_roundtrip_large),
-	T_CASE(gzip_empty_string),	 T_CASE(gunzip_invalid),
-	T_CASE(gunzip_crc_mismatch),	 T_SUITE_END,
+	T_CASE(zlib_module_opens),
+	T_CASE(zlib_roundtrip_small),
+	T_CASE(zlib_roundtrip_large),
+	T_CASE(zlib_empty_string),
+	T_CASE(zlib_uncompress_invalid),
+	T_CASE(gzip_module_has_funcs),
+	T_CASE(gzip_roundtrip_small),
+	T_CASE(gzip_roundtrip_large),
+	T_CASE(gzip_empty_string),
+	T_CASE(gunzip_invalid),
+	T_CASE(gunzip_crc_mismatch),
+	T_CASE(zlib_repeated_failure_no_leak),
+	T_SUITE_END,
 };
 
 int main(int argc, char **argv)

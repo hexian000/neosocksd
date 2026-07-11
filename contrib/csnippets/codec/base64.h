@@ -36,8 +36,8 @@
  * @endcode
  */
 bool base64_encode(
-	unsigned char *dst, size_t *dstlen, const unsigned char *src,
-	size_t srclen);
+	unsigned char *restrict dst, size_t *restrict dstlen,
+	const unsigned char *restrict src, size_t srclen);
 
 /**
  * @brief Decode data with Base64.
@@ -63,7 +63,7 @@ bool base64_encode(
  * @endcode
  */
 bool base64_decode(
-	unsigned char *dst, size_t *dstlen, const unsigned char *src,
+	unsigned char *dst, size_t *restrict dstlen, const unsigned char *src,
 	size_t srclen);
 
 /** @} */

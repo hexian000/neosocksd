@@ -13,14 +13,14 @@
 #include "util.h"
 
 #include "io/stream.h"
+#include "meta/class.h"
+#include "meta/intcast.h"
+#include "meta/minmax.h"
 #include "net/http.h"
 #include "utils/buffer.h"
-#include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/formats.h"
 #include "utils/gc.h"
-#include "utils/intcast.h"
-#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -36,8 +36,6 @@
 struct api_client_ctx {
 	struct gcbase gcbase;
 	struct ev_loop *loop;
-	const struct config *conf;
-	struct server_stats *stats;
 	struct api_client_cb cb;
 	ev_idle w_process;
 	struct http_client_ctx hctx;
@@ -109,6 +107,29 @@ static void api_client_finish(
 		return;                                                        \
 	} while (false)
 
+/* Copy a completion error message into ctx-owned storage, then defer the
+ * result. The message may point into the caller's stack frame (http_client.c's
+ * strerror-based write-error path builds it in a stack buffer), which unwinds
+ * before the deferred process_cb reads it; storing it in result.content keeps
+ * it valid until then, mirroring the structured-error path. */
+static void api_client_finish_errmsg(
+	struct ev_loop *loop, struct api_client_ctx *restrict ctx,
+	const char *restrict errmsg, const size_t errlen)
+{
+	struct vbuffer *emsg = VBUF_NEW(errlen);
+	if (emsg != NULL) {
+		VBUF_APPEND(emsg, errmsg, errlen);
+	}
+	if (VBUF_HAS_OOM(emsg)) {
+		LOGOOM();
+		VBUF_FREE(emsg);
+		api_client_finish(loop, ctx, NULL, 0, NULL);
+		return;
+	}
+	ctx->result.content = emsg;
+	api_client_finish(loop, ctx, VBUF_DATA(emsg), VBUF_LEN(emsg), NULL);
+}
+
 static void on_http_client_done(
 	struct ev_loop *loop, void *data, const char *errmsg,
 	const size_t errlen, struct http_conn *conn)
@@ -116,7 +137,7 @@ static void on_http_client_done(
 	struct api_client_ctx *restrict ctx = data;
 
 	if (errmsg != NULL) {
-		api_client_finish(loop, ctx, errmsg, errlen, NULL);
+		api_client_finish_errmsg(loop, ctx, errmsg, errlen);
 		return;
 	}
 	ASSERT(conn != NULL);
@@ -124,11 +145,11 @@ static void on_http_client_done(
 	conn->cbuf = NULL;
 
 	const struct http_message *restrict msg = &conn->msg;
-	uint16_t code = 0;
+	uint_fast16_t code = 0;
 	{
 		const uintmax_t status = strtoumax(msg->rsp.code, NULL, 10);
 		if (UINTCAST_CHECK(code, status)) {
-			code = (uint16_t)status;
+			code = (uint_fast16_t)status;
 		}
 	}
 	if (BETWEEN(code, 200, 299)) {
@@ -178,12 +199,15 @@ static void on_http_client_done(
 	}
 
 	if (LOGLEVEL(VERBOSE)) {
-		FORMAT_BYTES(clen, VBUF_LEN(content));
+		FORMAT_BYTES(clen, content != NULL ? VBUF_LEN(content) : 0);
 		LOGV_F("response: content %s", clen);
 	}
 
+	/* Content-Length: 0 leaves content unallocated; io_memreader() requires
+	 * a non-NULL buffer even for a zero-length read, so substitute "". */
 	struct stream *r = content_reader(
-		VBUF_DATA(content), VBUF_LEN(content),
+		content != NULL ? VBUF_DATA(content) : "",
+		content != NULL ? VBUF_LEN(content) : 0,
 		conn->hdr.content.encoding);
 	if (r == NULL) {
 		LOGOOM();
@@ -206,19 +230,23 @@ static bool make_request(
 	}
 	struct stream *s = content_writer(&p->cbuf, len, encoding);
 	if (s == NULL) {
+		/* content_writer may have reserved p->cbuf before the stream
+		 * wrapper itself failed to allocate */
+		VBUF_FREE(p->cbuf);
 		return false;
 	}
 	size_t n = len;
 	const int err1 = stream_write(s, content, &n);
 	const int err2 = stream_close(s);
 	if (p->cbuf == NULL || err1 != 0 || n != len || err2 != 0) {
+		VBUF_FREE(p->cbuf);
 		return false;
 	}
 	BUF_APPENDF(
 		p->wbuf,
 		"POST %s HTTP/1.1\r\n"
 		"Accept-Encoding: deflate\r\n"
-		"Connection: keep-alive\r\n"
+		"Connection: close\r\n"
 		"Content-Length: %zu\r\n"
 		"Content-Type: %s\r\n",
 		uri, VBUF_LEN(p->cbuf), MIME_RPCALL);
@@ -299,8 +327,6 @@ static bool api_client_do(
 		return false;
 	}
 	ctx->loop = loop;
-	ctx->conf = conf;
-	ctx->stats = stats;
 	ctx->result.errmsg = NULL;
 	ctx->result.errlen = 0;
 	ctx->result.stream = NULL;
@@ -313,9 +339,6 @@ static bool api_client_do(
 		.func = on_http_client_done,
 		.data = ctx,
 	};
-	if (stats != NULL) {
-		stats->num_api_client_request++;
-	}
 	http_client_init(
 		&ctx->hctx, loop, on_header, &hcb, conf, resolver,
 		stats != NULL ? &stats->api_client_byt_recv : NULL,
@@ -327,6 +350,11 @@ static bool api_client_do(
 		dialreq_free(req);
 		free(ctx);
 		return false;
+	}
+	/* count only requests that are actually issued (make_request can fail
+	 * building/compressing the body before anything is sent) */
+	if (stats != NULL) {
+		stats->num_api_client_request++;
 	}
 	ctx->cb = *in_cb;
 	ev_idle_init(&ctx->w_process, process_cb);

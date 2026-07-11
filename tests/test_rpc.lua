@@ -21,10 +21,6 @@ function rpc.test_error()
     error("TEST")
 end
 
-function rpc.test_timeout()
-    await.sleep(61)
-end
-
 return function(T, api_target)
     rpc_target = api_target
 
@@ -53,6 +49,34 @@ return function(T, api_target)
         assert(marshal(r1) == marshal(obj),
             string.format("obj mismatch: %s vs %s", marshal(obj), marshal(r1)))
         assert(r2 == payload, "payload mismatch")
+    end)
+
+    T:atest("await.rpcall does not execute code spliced via a malicious function name", function()
+        local evil_ran = false
+        _G.rpc_test_evil_marker = function() evil_ran = true end
+        local func = "echo and (function() rpc_test_evil_marker() end)() --"
+        local ok, err = await.rpcall(rpc_target, func, "ping")
+        _G.rpc_test_evil_marker = nil
+        assert(not evil_ran, "injected code executed")
+        assert(not ok, "expected rpcall to fail for a nonexistent function name")
+        assert(err and #err > 0,
+            string.format("expected non-empty error, got %q", tostring(err)))
+    end)
+
+    T:atest("neosocksd.sendmsg does not execute code spliced via a malicious function name", function()
+        -- sendmsg's generated code has no `return` prefix, so a bare
+        -- `X and Y()` (valid after await.rpcall's `return`) is a syntax
+        -- error here regardless of the fix; this payload instead nests the
+        -- injected call as nop's own argument, which pre-fix runs cleanly
+        -- (no error at all) before the trailing `--` comments out the real
+        -- marshaled argument.
+        local evil_ran = false
+        _G.rpc_test_evil_marker = function() evil_ran = true end
+        local func = "nop((function() rpc_test_evil_marker() end)()) --"
+        neosocksd.sendmsg(rpc_target, func, "ping")
+        await.sleep(0)
+        _G.rpc_test_evil_marker = nil
+        assert(not evil_ran, "injected code executed")
     end)
 
     T:atest("rpc.test_error propagates error to caller", function()

@@ -3,7 +3,6 @@ add_executable(neosocksd
     conf.c conf.h
     dialer.c dialer.h
     resolver.c resolver.h
-    ruleset.c ruleset.h
     transfer.c transfer.h
     http_client.c http_client.h
     forward.c forward.h
@@ -73,7 +72,7 @@ if(EXISTS "${LIBEV_INCLUDE_DIR}/ev.h")
     set(EV_VERSION_MINOR ${CMAKE_MATCH_1})
     set(LIBEV_VERSION "${EV_VERSION_MAJOR}.${EV_VERSION_MINOR}")
 endif()
-if((NOT ${LIBEV_VERSION} VERSION_GREATER_EQUAL "4.31") OR (NOT EXISTS ${LIBEV_LIBRARY}))
+if((NOT "${LIBEV_VERSION}" VERSION_GREATER_EQUAL "4.31") OR (NOT EXISTS ${LIBEV_LIBRARY}))
     message(FATAL_ERROR "libev (>= 4.31) not found")
 endif()
 message(STATUS "libev ${LIBEV_VERSION}: ${LIBEV_LIBRARY}")
@@ -92,7 +91,7 @@ if(EXISTS "${LIBCARES_INCLUDE_DIR}/ares_version.h")
     string(REGEX MATCH "#define ARES_VERSION_STR[ \t]+\"([^\n]*)\"" _ ${LIBCARES_VERSION_STR})
     set(LIBCARES_VERSION ${CMAKE_MATCH_1})
 endif()
-if((NOT ${LIBCARES_VERSION} VERSION_GREATER_EQUAL "1.16.0") OR (NOT EXISTS ${LIBCARES_LIBRARY}))
+if((NOT "${LIBCARES_VERSION}" VERSION_GREATER_EQUAL "1.16.0") OR (NOT EXISTS ${LIBCARES_LIBRARY}))
     message(WARNING "c-ares (>= 1.16.0) not found, asynchronous name resolution is unavailable")
 else()
     message(STATUS "c-ares ${LIBCARES_VERSION}: ${LIBCARES_LIBRARY}")
@@ -234,6 +233,24 @@ if(ENABLE_RULESET)
     add_subdirectory(ruleset)
 endif()
 
+# find systemd
+if(ENABLE_SYSTEMD)
+    find_path(SYSTEMD_INCLUDE_DIR NAMES systemd/sd-daemon.h)
+    find_library(SYSTEMD_LIBRARY NAMES systemd)
+    if((EXISTS ${SYSTEMD_INCLUDE_DIR}) AND (EXISTS ${SYSTEMD_LIBRARY}))
+        message(STATUS "systemd: ${SYSTEMD_LIBRARY}")
+        set(WITH_SYSTEMD TRUE)
+        target_include_directories(neosocksd SYSTEM PRIVATE ${SYSTEMD_INCLUDE_DIR})
+        target_link_libraries(neosocksd PRIVATE ${SYSTEMD_LIBRARY})
+    else()
+        message(WARNING "systemd not found")
+    endif()
+endif()
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    set(WITH_CRASH_HANDLER TRUE)
+endif()
+
 if(ENABLE_MIMALLOC)
     find_package(mimalloc)
     if(EXISTS "${MIMALLOC_OBJECT_DIR}/mimalloc.o")
@@ -327,16 +344,17 @@ if(WITH_LUA)
              util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         WITH_LUA WITH_CARES)
+    # marshal_test's OOM cases interpose realloc() to fail the vbuffer's
+    # initial realloc(NULL, size). At -O2 the compiler folds that call to a
+    # malloc() builtin, bypassing the interposer and leaving marshal()'s
+    # out-of-memory branches unverified. Keep it a real realloc() call.
+    target_compile_options(marshal_test PRIVATE
+        -fno-builtin-malloc -fno-builtin-realloc)
     add_unit_test(zlib_test
         SRCS ruleset/zlib_test.c ruleset/zlib.c ruleset/base.c
              proto/codec.c util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         WITH_LUA WITH_CARES)
-    if(WITH_RULESET)
-        add_unit_test(ruleset_test
-            SRCS ruleset_test.c ruleset.c ruleset/base.c ruleset/cfunc.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
-            WITH_LUA)
-    endif()
 endif()
 
 # neosocksd binary early-exit integration tests.
@@ -354,6 +372,14 @@ set_tests_properties(neosocksd_no_listen PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
 # Unknown argument: conf_parseargs returns false immediately.
 add_test(NAME neosocksd_bad_arg COMMAND neosocksd --zz-invalid-arg)
 set_tests_properties(neosocksd_bad_arg PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
+
+# --dump-config: a successful dump must exit 0, not break scripted use
+# (e.g. `neosocksd --dump-config > out.lua && ...`).
+if(WITH_LUA)
+    add_test(NAME neosocksd_dump_config
+        COMMAND neosocksd -l 127.0.0.1:1080 --dump-config)
+    set_tests_properties(neosocksd_dump_config PROPERTIES TIMEOUT 5)
+endif()
 
 # Full bootstrap: start a server on ephemeral ports, let the event loop run,
 # then SIGTERM it. Covers app_run() setup, the main event loop, the SIGTERM

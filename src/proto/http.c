@@ -9,6 +9,7 @@
 #include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
+#include "net/mime.h"
 #include "os/socket.h"
 #include "utils/ascii.h"
 #include "utils/buffer.h"
@@ -30,20 +31,6 @@ const char *http_content_encoding_str[] = {
 	[CENCODING_DEFLATE] = "deflate",
 	[CENCODING_GZIP] = "gzip",
 };
-
-static int hex_digit(const unsigned char c)
-{
-	if ('0' <= c && c <= '9') {
-		return c - '0';
-	}
-	if ('a' <= c && c <= 'f') {
-		return 10 + (c - 'a');
-	}
-	if ('A' <= c && c <= 'F') {
-		return 10 + (c - 'A');
-	}
-	return -1;
-}
 
 void http_conn_init(
 	struct http_conn *restrict p, const int fd,
@@ -153,6 +140,11 @@ static int parse_header(struct http_conn *restrict p)
 	}
 
 	if (next == p->next) {
+		if (p->rbuf.len + 1 >= p->rbuf.cap) {
+			p->http_status = HTTP_ENTITY_TOO_LARGE;
+			p->state = STATE_PARSE_ERROR;
+			return 0;
+		}
 		return 1;
 	}
 
@@ -172,23 +164,32 @@ static int parse_header(struct http_conn *restrict p)
 	return 0;
 }
 
-/* send a short message directly to the socket, bypassing the buffers */
+/* send a short message directly to the socket, bypassing the buffers;
+ * loops on a short send (retrying immediately, not via the event loop)
+ * since the caller has no mechanism to resume this later, and gives up
+ * only on a hard error or persistent backpressure */
 static bool reply_short(struct http_conn *restrict p, const char *s)
 {
 	const size_t n = strlen(s);
 	ASSERT(n < 256);
 	LOG_BIN_F(VERBOSE, s, n, 0, "reply_short: [fd:%d] %zu bytes", p->fd, n);
 
-	const ssize_t nsend = send(p->fd, s, n, 0);
-	if (nsend < 0) {
-		const int err = errno;
-		LOGW_F("send: [fd:%d] (%d) %s", p->fd, err, strerror(err));
-		return false;
-	}
-	if ((size_t)nsend != n) {
-		LOGW_F("send: [fd:%d] short send %zu < %zu", p->fd,
-		       (size_t)nsend, n);
-		return false;
+	size_t pos = 0;
+	while (pos < n) {
+		size_t len = n - pos;
+		const int err = socket_send(p->fd, s + pos, &len);
+		if (err != 0) {
+			if (err == EAGAIN || err == EWOULDBLOCK ||
+			    err == ENOBUFS || err == ENOMEM) {
+				LOGW_F("send: [fd:%d] blocked after %zu/%zu bytes",
+				       p->fd, pos, n);
+				return false;
+			}
+			LOGW_F("send: [fd:%d] (%d) %s", p->fd, err,
+			       strerror(err));
+			return false;
+		}
+		pos += len;
 	}
 	return true;
 }
@@ -219,9 +220,15 @@ static int parse_content(struct http_conn *restrict p)
 			return -1;
 		}
 
-		/* Copy any content already in read buffer */
-		const size_t pos = (unsigned char *)p->next - p->rbuf.data;
-		const size_t len = p->rbuf.len - pos;
+		/* Copy any content already in read buffer, never more than
+		 * declared: trailing bytes past content_length belong to a
+		 * later message (or are bogus), not to this body. */
+		const size_t pos =
+			(size_t)((unsigned char *)p->next - p->rbuf.data);
+		size_t len = p->rbuf.len - pos;
+		if (len > content_length) {
+			len = content_length;
+		}
 		VBUF_APPEND(p->cbuf, p->next, len);
 
 		if (p->expect_continue) {
@@ -248,11 +255,11 @@ static int recv_request(struct http_conn *restrict p)
 		if (err == EAGAIN || err == EWOULDBLOCK) {
 			return 0;
 		}
-		LOGD_F("recv: (%d) %s", err, strerror(err));
+		LOGD_F("recv: [fd:%d] (%d) %s", p->fd, err, strerror(err));
 		return -1;
 	}
 	if (n == 0) {
-		LOGD("recv: early EOF");
+		LOGD_F("recv: [fd:%d] early EOF", p->fd);
 		return -1;
 	}
 
@@ -275,11 +282,11 @@ static int recv_content(const struct http_conn *restrict p)
 		if (err == EAGAIN || err == EWOULDBLOCK) {
 			return 0;
 		}
-		LOGD_F("recv: (%d) %s", err, strerror(err));
+		LOGD_F("recv: [fd:%d] (%d) %s", p->fd, err, strerror(err));
 		return -1;
 	}
 	if (n == 0) {
-		LOGD("recv: early EOF");
+		LOGD_F("recv: [fd:%d] early EOF", p->fd);
 		return -1;
 	}
 
@@ -328,40 +335,48 @@ int http_conn_recv(struct http_conn *restrict p)
 			if (ret != 0) {
 				return ret;
 			}
-			break;
+			continue;
 		case STATE_PARSE_HEADER:
 			ret = parse_header(p);
 			if (ret != 0) {
 				return ret;
 			}
-			break;
+			continue;
 		case STATE_PARSE_CONTENT:
 			ret = parse_content(p);
 			if (ret != 0) {
 				return ret;
 			}
-			p->state = STATE_PARSE_OK;
-			/* fallthrough */
+			/* parse_content may have set STATE_PARSE_ERROR (e.g.
+			 * Content-Length over HTTP_MAX_CONTENT); only advance to
+			 * OK when the body actually completed */
+			if (p->state == STATE_PARSE_CONTENT) {
+				p->state = STATE_PARSE_OK;
+			}
+			return 0;
 		case STATE_PARSE_ERROR:
 		case STATE_PARSE_OK:
 			return 0;
-		default:
-			FAILMSGF("unexpected http parser state: %d", p->state);
 		}
+		/* no default: -Wswitch guards new enumerators; this is
+		 * unreachable for the current enum */
+		FAILMSGF("unexpected http parser state: %d", p->state);
 	}
 }
 
-int http_conn_send(struct http_conn *restrict p, const int fd)
+int http_conn_send(struct http_conn *restrict p, const int fd, int *restrict err)
 {
+	*err = 0;
 	{
 		const unsigned char *buf = p->wbuf.data + p->wpos;
 		size_t len = p->wbuf.len - p->wpos;
-		const int err = socket_send(fd, buf, &len);
-		if (err != 0) {
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == ENOBUFS || err == ENOMEM) {
+		const int serr = socket_send(fd, buf, &len);
+		if (serr != 0) {
+			if (serr == EAGAIN || serr == EWOULDBLOCK ||
+			    serr == ENOBUFS || serr == ENOMEM) {
 				return 1;
 			}
+			*err = serr;
 			return -1;
 		}
 		p->wpos += len;
@@ -381,12 +396,13 @@ int http_conn_send(struct http_conn *restrict p, const int fd)
 		const unsigned char *buf;
 		size_t len;
 		VBUF_VIEW(buf, len, p->cbuf, p->cpos);
-		const int err = socket_send(fd, buf, &len);
-		if (err != 0) {
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == ENOBUFS || err == ENOMEM) {
+		const int serr = socket_send(fd, buf, &len);
+		if (serr != 0) {
+			if (serr == EAGAIN || serr == EWOULDBLOCK ||
+			    serr == ENOBUFS || serr == ENOMEM) {
 				return 1;
 			}
+			*err = serr;
 			return -1;
 		}
 		p->cpos += len;
@@ -424,6 +440,20 @@ void http_body_init(
 	FAILMSG("unexpected http body mode");
 }
 
+static int hex_digit(const unsigned char c)
+{
+	if ('0' <= c && c <= '9') {
+		return c - '0';
+	}
+	if ('a' <= c && c <= 'f') {
+		return 10 + (c - 'a');
+	}
+	if ('A' <= c && c <= 'F') {
+		return 10 + (c - 'A');
+	}
+	return -1;
+}
+
 static bool
 parse_chunk_size_line(const char *restrict line, size_t *restrict out_size)
 {
@@ -455,9 +485,10 @@ parse_chunk_size_line(const char *restrict line, size_t *restrict out_size)
 
 bool http_body_consume(
 	struct http_body *restrict d, const unsigned char *restrict data,
-	const size_t len, const struct http_body_data_cb on_data)
+	size_t *restrict len, const struct http_body_data_cb on_data)
 {
-	if (len == 0) {
+	const size_t total = *len;
+	if (total == 0) {
 		return true;
 	}
 	switch (d->mode) {
@@ -468,29 +499,29 @@ bool http_body_consume(
 			return false;
 		}
 		const size_t remain = d->content_length - d->consumed;
-		if (len > remain) {
+		if (total > remain) {
 			return false;
 		}
-		if (!on_data.func(on_data.ctx, data, len)) {
+		if (!on_data.func(on_data.ctx, data, total)) {
 			return false;
 		}
-		d->consumed += len;
+		d->consumed += total;
 		if (d->consumed == d->content_length) {
 			d->done = true;
 		}
 		return true;
 	}
 	case HTTP_BODY_EOF:
-		if (!on_data.func(on_data.ctx, data, len)) {
+		if (!on_data.func(on_data.ctx, data, total)) {
 			return false;
 		}
-		d->consumed += len;
+		d->consumed += total;
 		return true;
 	case HTTP_BODY_CHUNKED:
 		break;
 	}
 
-	for (size_t i = 0; i < len; i++) {
+	for (size_t i = 0; i < total; i++) {
 		const unsigned char c = data[i];
 		switch (d->chunk_state) {
 		case HTTP_BODY_CHUNK_SIZE_LINE:
@@ -524,12 +555,18 @@ bool http_body_consume(
 			if (d->line_len == 0) {
 				d->chunk_state = HTTP_BODY_CHUNK_DONE;
 				d->done = true;
-				return (i + 1 == len);
+				/* trailing bytes past the terminator belong to
+				 * whatever follows (e.g. a pipelined next
+				 * message), not to this body -- report how
+				 * much was actually consumed instead of
+				 * treating leftovers as a parse failure */
+				*len = i + 1;
+				return true;
 			}
 			d->line_len = 0;
 			continue;
 		case HTTP_BODY_CHUNK_DATA: {
-			const size_t remain = len - i;
+			const size_t remain = total - i;
 			size_t n = d->chunk_left;
 			if (n > remain) {
 				n = remain;
@@ -579,6 +616,26 @@ bool http_body_finish(struct http_body *restrict d)
 	FAILMSG("unexpected http body mode");
 }
 
+size_t http_chunk_header(char *restrict buf, size_t datalen)
+{
+	static const char xdigits[] = "0123456789abcdef";
+	ASSERT(datalen > 0);
+	/* build the hex digits backwards, then emit big-endian */
+	char hex[16];
+	size_t ndigit = 0;
+	do {
+		hex[ndigit++] = xdigits[datalen & 0xf];
+		datalen >>= 4;
+	} while (datalen != 0);
+	size_t pos = 0;
+	while (ndigit > 0) {
+		buf[pos++] = hex[--ndigit];
+	}
+	buf[pos++] = '\r';
+	buf[pos++] = '\n';
+	return pos;
+}
+
 bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
@@ -607,6 +664,11 @@ bool parsehdr_transfer_encoding(
 	}
 
 	if (strcmp(value, "chunked") == 0) {
+		/* RFC 9112 §6.3: Content-Length + Transfer-Encoding: chunked
+		 * is an ambiguous framing and must be rejected */
+		if (p->hdr.content.has_length) {
+			return false;
+		}
 		p->hdr.transfer.encoding = TENCODING_CHUNKED;
 		return true;
 	}
@@ -616,11 +678,6 @@ bool parsehdr_transfer_encoding(
 
 bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value)
 {
-	if (strcmp(value, "*") == 0) {
-		p->hdr.accept_encoding = CENCODING_DEFLATE;
-		return true;
-	}
-
 	const char *deflate = http_content_encoding_str[CENCODING_DEFLATE];
 	for (char *token = strtok(value, ","); token != NULL;
 	     token = strtok(NULL, ",")) {
@@ -631,7 +688,11 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 		}
 
 		token = strtrimspace(token);
-		if (strcasecmp(token, deflate) == 0) {
+		/* RFC 9110 §12.5.3: `*` is a wildcard for any encoding, whether
+		 * it is the whole value or one token among a comma-separated
+		 * list (e.g. "gzip, *") */
+		if (strcmp(token, "*") == 0 ||
+		    strcasecmp(token, deflate) == 0) {
 			p->hdr.accept_encoding = CENCODING_DEFLATE;
 			return true;
 		}
@@ -644,6 +705,20 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 bool parsehdr_content_length(
 	struct http_conn *restrict p, const char *restrict value)
 {
+	/* RFC 9112 §6.3: reject a duplicate Content-Length, or one that
+	 * conflicts with an already-seen Transfer-Encoding: chunked */
+	if (p->hdr.content.has_length ||
+	    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
+		return false;
+	}
+
+	/* RFC 9110 §8.6: Content-Length = 1*DIGIT, no sign of either kind;
+	 * strtoumax alone would accept a leading '-' (wrapping to a huge
+	 * value) or '+', and an empty value (consuming nothing) as 0 */
+	if (!isdigit(value[0])) {
+		return false;
+	}
+
 	char *endptr;
 	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
 
@@ -653,8 +728,10 @@ bool parsehdr_content_length(
 
 	const size_t content_length = (size_t)lenvalue;
 
-	/* CONNECT method must not have Content-Length */
-	if (strcmp(p->msg.req.method, "CONNECT") == 0) {
+	/* CONNECT method must not have Content-Length. p->msg is a union whose
+	 * req.method aliases rsp.version, so only test it in request mode. */
+	if (p->mode == STATE_PARSE_REQUEST &&
+	    strcmp(p->msg.req.method, "CONNECT") == 0) {
 		return false;
 	}
 
@@ -738,9 +815,43 @@ void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 		RESPHDR_FINISH(p->wbuf);
 		return;
 	}
-	p->wbuf.len += len;
+	/* http_error is snprintf-style: its return can exceed cap on
+	 * truncation, so add only the bytes actually written */
+	if (cap > 0) {
+		p->wbuf.len += ((size_t)len < cap) ? (size_t)len : cap - 1;
+	}
 	LOG_STACK_F(VERBOSE, 0, "http: response error page %" PRIuFAST16, code);
 }
+
+#if WITH_RULESET
+bool check_rpcall_mime(char *restrict s)
+{
+	if (s == NULL) {
+		return false;
+	}
+	char *type, *subtype;
+	s = mime_parse(s, &type, &subtype);
+	if (s == NULL || strcmp(type, MIME_RPCALL_TYPE) != 0 ||
+	    strcmp(subtype, MIME_RPCALL_SUBTYPE) != 0) {
+		return false;
+	}
+	const char *version = NULL;
+	char *key, *value;
+	for (;;) {
+		s = mime_parseparam(s, &key, &value);
+		if (s == NULL) {
+			return false;
+		}
+		if (key == NULL) {
+			break;
+		}
+		if (strcmp(key, "version") == 0) {
+			version = value;
+		}
+	}
+	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
+}
+#endif /* WITH_RULESET */
 
 struct stream *content_reader(
 	const void *restrict buf, const size_t len,
@@ -787,6 +898,8 @@ struct stream *content_writer(
 		return io_heapwriter(pvbuf);
 	case CENCODING_DEFLATE:
 		return codec_zlib_writer(io_heapwriter(pvbuf));
+	case CENCODING_GZIP:
+		return codec_gzip_writer(io_heapwriter(pvbuf));
 	default:
 		break;
 	}

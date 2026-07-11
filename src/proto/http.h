@@ -162,19 +162,49 @@ int http_conn_recv(struct http_conn *restrict p);
  * @brief Send pending HTTP data (header buffer first, then content buffer).
  * @param p Connection instance
  * @param fd Socket file descriptor
+ * @param[out] err Set to the socket_send() error code when -1 is returned
+ * (0 otherwise); lets callers branch on the failure without reading errno.
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
-int http_conn_send(struct http_conn *restrict p, const int fd);
+int http_conn_send(
+	struct http_conn *restrict p, const int fd, int *restrict err);
 
 void http_body_init(
 	struct http_body *restrict d, const enum http_body_mode mode,
 	const size_t content_length);
 
+/**
+ * @brief Feed data to a body parser.
+ * @param len Input: bytes available in data. Output: bytes actually
+ *     consumed as body content, which may be less than the input value
+ *     when the body (e.g. a chunked terminator) ends partway through --
+ *     the remaining bytes belong to whatever follows and are left for
+ *     the caller to reprocess, not treated as a parse failure.
+ * @return false only on a genuine parse error or a nonzero-length call
+ *     after the body is already done. A zero-length call (*len == 0) is
+ *     always a no-op that returns true, even after the body has finished.
+ */
 bool http_body_consume(
 	struct http_body *restrict d, const unsigned char *restrict data,
-	const size_t len, const struct http_body_data_cb on_data);
+	size_t *restrict len, const struct http_body_data_cb on_data);
 
 bool http_body_finish(struct http_body *restrict d);
+
+/** Maximum length of a chunk-size line "<hex>\r\n" (16 hex digits + CRLF). */
+#define HTTP_CHUNK_HEADER_MAX (16 + 2)
+
+/** Chunked-transfer terminator: the final empty chunk (no trailers). */
+#define HTTP_CHUNK_TERMINATOR "0\r\n\r\n"
+
+/**
+ * @brief Write a chunked-transfer chunk-size line "<hex>\r\n" for a chunk of
+ * @p datalen bytes (the inverse of the http_body chunked dechunker).
+ * @param buf Destination; must hold at least HTTP_CHUNK_HEADER_MAX bytes.
+ * @param datalen Chunk data length; must be nonzero (the terminator is
+ *     HTTP_CHUNK_TERMINATOR).
+ * @return Number of bytes written (no NUL terminator).
+ */
+size_t http_chunk_header(char *restrict buf, size_t datalen);
 
 /**
  * @brief Parse Accept-TE header. Currently detects chunked encoding.

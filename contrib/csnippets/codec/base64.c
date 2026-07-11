@@ -13,8 +13,8 @@ static const unsigned char encoding_table[] =
 	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 bool base64_encode(
-	unsigned char *dst, size_t *dstlen, const unsigned char *src,
-	const size_t srclen)
+	unsigned char *restrict dst, size_t *restrict dstlen,
+	const unsigned char *restrict src, const size_t srclen)
 {
 	assert(dst == NULL || dst != src);
 	const size_t outlen = 4 * ((srclen + 2) / 3);
@@ -82,7 +82,7 @@ static const unsigned char decoding_table[] = {
 };
 
 bool base64_decode(
-	unsigned char *dst, size_t *dstlen, const unsigned char *src,
+	unsigned char *dst, size_t *restrict dstlen, const unsigned char *src,
 	const size_t srclen)
 {
 	assert(dst == NULL || dst == src || dst + *dstlen <= src ||

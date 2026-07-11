@@ -7,13 +7,13 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 #include "transfer.h"
 #include "util.h"
 
+#include "meta/arraysize.h"
 #include "os/socket.h"
-#include "utils/arraysize.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -92,7 +92,7 @@ static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
 	return wait_sec;
 }
 
-char *const proxy_protocol_str[PROTO_MAX] = {
+const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -116,6 +116,9 @@ struct stub_state {
 	int_least32_t ruleset_cancel_calls;
 	int_least32_t dialer_cancel_calls;
 	int_least32_t dialer_do_calls;
+	bool captured_creds;
+	char captured_username[64];
+	char captured_password[64];
 };
 
 static struct stub_state S = {
@@ -205,6 +208,9 @@ static void reset_stub_state(void)
 	S.ruleset_cancel_calls = 0;
 	S.dialer_cancel_calls = 0;
 	S.dialer_do_calls = 0;
+	S.captured_creds = false;
+	S.captured_username[0] = '\0';
+	S.captured_password[0] = '\0';
 	reset_dialreq_allocations();
 	test_conf.timeout = 1.0;
 	test_conf.auth_required = false;
@@ -405,8 +411,13 @@ bool ruleset_resolve(
 {
 	(void)r;
 	(void)request;
-	(void)username;
-	(void)password;
+	S.captured_creds = true;
+	(void)snprintf(
+		S.captured_username, sizeof(S.captured_username), "%s",
+		username != NULL ? username : "");
+	(void)snprintf(
+		S.captured_password, sizeof(S.captured_password), "%s",
+		password != NULL ? password : "");
 	if (S.ruleset_state_nonnull) {
 		S.ruleset_state_ptr =
 			(struct ruleset_state *)&ruleset_state_token;
@@ -549,10 +560,10 @@ static void start_serve(
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]) == 0);
-	T_CHECK(socket_set_cloexec(sv[1]) == 0);
-	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	T_CHECK(socket_set_cloexec(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_cloexec(sv[1]));
+	T_CHECK(socket_set_nonblock(sv[1]));
 	S.ruleset_loop = loop;
 	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
 	*peer_fd = sv[1];
@@ -586,10 +597,10 @@ static void serve_payload(
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]) == 0);
-	T_CHECK(socket_set_cloexec(sv[1]) == 0);
-	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	T_CHECK(socket_set_cloexec(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_cloexec(sv[1]));
+	T_CHECK(socket_set_nonblock(sv[1]));
 	S.ruleset_loop = loop;
 	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
 	T_CHECK(write_all(sv[1], req, strlen(req)) == 0);
@@ -655,6 +666,30 @@ static ssize_t recv_at_least(
 	return (ssize_t)off;
 }
 
+/* Drive the loop and read from fd until EOF (or cap/timeout). */
+static size_t recv_all(
+	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
+	const size_t cap)
+{
+	size_t off = 0;
+	for (int i = 0; i < 4096 && off < cap; i++) {
+		const ssize_t n = recv(fd, buf + off, cap - off, 0);
+		if (n > 0) {
+			off += (size_t)n;
+			continue;
+		}
+		if (n == 0) {
+			break; /* EOF */
+		}
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			(void)test_step_timed_out(loop, TEST_WAIT_SHORT_SEC);
+			continue;
+		}
+		break;
+	}
+	return off;
+}
+
 static bool has_http_status(
 	const unsigned char *restrict rsp, const size_t n,
 	const char *restrict code_str)
@@ -690,10 +725,10 @@ static void make_fd_pair(int *restrict a, int *restrict b)
 {
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]) == 0);
-	T_CHECK(socket_set_cloexec(sv[1]) == 0);
-	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	T_CHECK(socket_set_cloexec(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_cloexec(sv[1]));
+	T_CHECK(socket_set_nonblock(sv[1]));
 	*a = sv[0];
 	*b = sv[1];
 }
@@ -732,6 +767,786 @@ T_DECLARE_CASE(plain_http_origin_form_returns_400)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Regression: bytes past a Content-Length-bounded body are a pipelined
+ * second request; the proxy must reject (400) rather than smuggle them
+ * upstream as body content. */
+/* proxy_pass forwards a Content-Length request body to the upstream and the
+ * Content-Length response body back to the client through the framing pumps. */
+T_DECLARE_CASE(proxy_pass_forwards_content_length)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "POST http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Content-Length: 5\r\n"
+			   "\r\n"
+			   "hello";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* the upstream receives the rebuilt request line + headers + body */
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "POST / HTTP/1.1", 15) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "Content-Length: 5", 17) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "hello", 5) != NULL);
+
+	/* upstream replies with a Content-Length response */
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	/* the client receives the rebuilt response + body */
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "Content-Length: 3", 17) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "abc", 3) != NULL);
+
+	/* traffic is counted per direction */
+	T_EXPECT((uintmax_t)s.byt_up >= 5); /* request body "hello" */
+	T_EXPECT((uintmax_t)s.byt_down >= 3); /* response body "abc" */
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A chunked request body is dechunked/rechunked to the upstream, and bytes
+ * after the chunk terminator (a pipelined second request) are NOT forwarded. */
+T_DECLARE_CASE(proxy_pass_chunked_request_discards_surplus)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "POST http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Transfer-Encoding: chunked\r\n"
+			   "\r\n"
+			   "5\r\nhello\r\n0\r\n\r\n"
+			   "GET http://example.com/admin HTTP/1.1\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(
+		memmem(up, (size_t)un, "Transfer-Encoding: chunked", 26) !=
+		NULL);
+	T_EXPECT(memmem(up, (size_t)un, "hello", 5) != NULL);
+	/* the pipelined request past the chunk terminator is discarded */
+	T_EXPECT(memmem(up, (size_t)un, "admin", 5) == NULL);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A bodyless request followed by a pipelined second request: the second
+ * request must not reach the upstream. */
+T_DECLARE_CASE(proxy_pass_bodyless_pipelined_not_forwarded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n"
+			   "GET http://example.com/admin HTTP/1.1\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "GET / HTTP/1.1", 14) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "admin", 5) == NULL);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A chunked upstream response is re-chunked to the client. */
+T_DECLARE_CASE(proxy_pass_chunked_response)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Transfer-Encoding: chunked\r\n"
+				   "\r\n"
+				   "3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	T_EXPECT(
+		memmem(cl, (size_t)cn, "Transfer-Encoding: chunked", 26) !=
+		NULL);
+	/* the re-chunked body carries the original decoded bytes, terminated */
+	T_EXPECT(memmem(cl, (size_t)cn, "abc", 3) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "defg", 4) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "0\r\n\r\n", 5) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A malformed chunked request body is answered with a 400 and closed. */
+T_DECLARE_CASE(proxy_pass_malformed_chunked_request_returns_400)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "POST http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Transfer-Encoding: chunked\r\n"
+			   "\r\n"
+			   "ZZZ\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* the client receives a 400 error page, then the connection closes */
+	unsigned char b[256];
+	const ssize_t n = recv_at_least(loop, peer_fd, b, sizeof(b), 1);
+	T_EXPECT(n > 0);
+	T_EXPECT(has_http_status(b, (size_t)n, "400"));
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* An EOF-delimited upstream response (no Content-Length, no chunked) is
+ * forwarded to the client and bounded by the upstream close. */
+T_DECLARE_CASE(proxy_pass_eof_response)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nclose-bound";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "Connection: close", 17) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "close-bound", 11) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A HEAD response is bodiless even when it carries a Content-Length. */
+T_DECLARE_CASE(proxy_pass_head_response_bodiless)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "HEAD http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* upstream sends a HEAD response: headers with Content-Length, no body */
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 42\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "Content-Length: 42", 18) != NULL);
+	/* the client response ends at the header terminator: no body bytes */
+	unsigned char *const end = memmem(cl, (size_t)cn, "\r\n\r\n", 4);
+	T_CHECK(end != NULL);
+	T_EXPECT_EQ((size_t)(end + 4 - cl), (size_t)cn);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* An interim 1xx (100 Continue) response is relayed to the client ahead of the
+ * final response. */
+T_DECLARE_CASE(proxy_pass_forwards_100_continue)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "POST http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Content-Length: 5\r\n"
+			   "Expect: 100-continue\r\n"
+			   "\r\n"
+			   "hello";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* upstream sends 100 Continue, then the final response */
+	static const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, cont, sizeof(cont) - 1) == 0);
+	drive_loop(loop);
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	unsigned char *const p100 = memmem(cl, (size_t)cn, "100 Continue", 12);
+	unsigned char *const p200 = memmem(cl, (size_t)cn, "200 OK", 6);
+	T_CHECK(p100 != NULL);
+	T_CHECK(p200 != NULL);
+	T_EXPECT(p100 < p200); /* interim precedes the final response */
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Several pipelined 1xx interim responses arriving in one read must all be
+ * forwarded ahead of the final response; the rsp phase machine iterates over
+ * them (previously it recursed one frame per interim). */
+T_DECLARE_CASE(proxy_pass_multiple_interim_responses)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* three interims then the final response, all in a single write */
+	static const char resp[] =
+		"HTTP/1.1 103 Early Hints\r\n\r\n"
+		"HTTP/1.1 103 Early Hints\r\n\r\n"
+		"HTTP/1.1 100 Continue\r\n\r\n"
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	unsigned char *const p100 = memmem(cl, (size_t)cn, "100 Continue", 12);
+	unsigned char *const p200 = memmem(cl, (size_t)cn, "200 OK", 6);
+	T_CHECK(p100 != NULL);
+	T_CHECK(p200 != NULL);
+	/* every pipelined interim must be forwarded (as a canonical 1xx status
+	 * line -- the proxy re-emits the reason phrase from http_status(), which
+	 * has no entry for 103, so match on the status-line prefix): both 103
+	 * interims precede the 100 Continue, which precedes the final 200 OK */
+	unsigned char *const p103a = memmem(cl, (size_t)cn, "HTTP/1.1 103", 12);
+	T_CHECK(p103a != NULL);
+	const size_t off103a = (size_t)(p103a + 12 - cl);
+	unsigned char *const p103b =
+		memmem(p103a + 12, (size_t)cn - off103a, "HTTP/1.1 103", 12);
+	T_CHECK(p103b != NULL);
+	T_EXPECT(p103a < p103b);
+	T_EXPECT(p103b < p100); /* both interims precede the 100 Continue */
+	T_EXPECT(p100 < p200); /* interims precede the final response */
+	T_EXPECT(memmem(cl, (size_t)cn, "ok", 2) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Regression: framing headers on a 1xx interim response must not leak into the
+ * following final response. A 103 carrying Transfer-Encoding: chunked ahead of
+ * a Content-Length final response previously left rsp_chunked set, so the final
+ * body was (mis)dechunked and the response corrupted. */
+T_DECLARE_CASE(proxy_pass_interim_framing_does_not_leak)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	static const char interim[] = "HTTP/1.1 103 Early Hints\r\n"
+				      "Transfer-Encoding: chunked\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, interim, sizeof(interim) - 1) == 0);
+	drive_loop(loop);
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the final response must be forwarded intact and Content-Length framed;
+	 * the interim's chunked framing must not have leaked onto it */
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "Content-Length: 5", 17) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "hello", 5) != NULL);
+	T_EXPECT(
+		memmem(cl, (size_t)cn, "Transfer-Encoding: chunked", 26) ==
+		NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Regression: an upstream Content-Length with a leading sign must be rejected
+ * (502), not fed through strtoumax where "-1" wraps to SIZE_MAX. */
+T_DECLARE_CASE(proxy_pass_negative_content_length_rejected)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) != NULL);
+	/* the wrapped SIZE_MAX must never be emitted as the client's framing */
+	T_EXPECT(memmem(cl, (size_t)cn, "18446744073709551615", 20) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Regression: an upstream response header value containing a control char must
+ * be rejected (502), matching the request-side field validation, not forwarded
+ * verbatim to the client. */
+T_DECLARE_CASE(proxy_pass_response_control_char_header_rejected)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* a bare control char (0x01) inside the header value; http_parsehdr keeps
+	 * it since it only splits on CRLF */
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "X-Bad: va\x01lue\r\n"
+				   "Content-Length: 0\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) != NULL);
+	/* the injected control char must never reach the client */
+	T_EXPECT(memmem(cl, (size_t)cn, "\x01", 1) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Regression: more upstream response headers than the forwarding table holds
+ * must be a fatal error (502), matching the request side, not silently dropped. */
+T_DECLARE_CASE(proxy_pass_too_many_response_headers_rejected)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* 101 forwardable headers > PROXY_MAX_HEADERS (100) */
+	char *const resp = malloc(8192);
+	T_CHECK(resp != NULL);
+	int off = snprintf(resp, 8192, "HTTP/1.1 200 OK\r\n");
+	for (int i = 0; i < 101; i++) {
+		off += snprintf(
+			resp + off, (size_t)(8192 - off), "X-H%d: v\r\n", i);
+	}
+	off += snprintf(resp + off, (size_t)(8192 - off), "\r\n");
+	T_CHECK(write_all(upstream_fd, resp, (size_t)off) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	free(resp);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A request body larger than the pump buffer round-trips byte-for-byte
+ * (multi-cycle forwarding with bounded memory). */
+T_DECLARE_CASE(proxy_pass_large_body_integrity)
+{
+	enum { LARGE_BODY = 50000 };
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+
+	char *const reqbuf = malloc(LARGE_BODY + 256);
+	T_CHECK(reqbuf != NULL);
+	const int hlen = snprintf(
+		reqbuf, 256,
+		"POST http://example.com/ HTTP/1.1\r\n"
+		"Host: example.com\r\nContent-Length: %d\r\n\r\n",
+		(int)LARGE_BODY);
+	for (int i = 0; i < LARGE_BODY; i++) {
+		reqbuf[hlen + i] = (char)('A' + (i % 26));
+	}
+	reqbuf[hlen + LARGE_BODY] = '\0';
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, reqbuf, &peer_fd);
+
+	/* read the whole forwarded request from the upstream (headers + body) */
+	unsigned char *const up = malloc(LARGE_BODY + 512);
+	T_CHECK(up != NULL);
+	const size_t un =
+		recv_all(loop, upstream_fd, up, (size_t)LARGE_BODY + 512);
+	unsigned char *const body = memmem(up, un, "\r\n\r\n", 4);
+	T_CHECK(body != NULL);
+	const size_t bodyoff = (size_t)(body - up) + 4;
+	T_EXPECT_EQ(un - bodyoff, (size_t)LARGE_BODY);
+	bool intact = true;
+	for (int i = 0; i < LARGE_BODY; i++) {
+		if (up[bodyoff + (size_t)i] !=
+		    (unsigned char)('A' + (i % 26))) {
+			intact = false;
+			break;
+		}
+	}
+	T_EXPECT(intact);
+
+	free(reqbuf);
+	free(up);
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* An established stream with an unresponsive upstream is bounded by the global
+ * timeout used as an idle timeout, and closes without counting as a reject. */
+T_DECLARE_CASE(proxy_pass_idle_stream_times_out)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	test_conf.timeout = 0.05;
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	/* let the stream establish (request forwarded to the upstream) */
+	struct server_success_wait_ctx wc = { .s = &s, .expected = 1 };
+	T_EXPECT(test_wait_until(loop, server_success_reached, &wc, 1.0));
+
+	/* the upstream never responds: the idle timeout must close the stream */
+	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
+
+	unsigned char b[64];
+	const ssize_t n = recv(peer_fd, b, sizeof(b), 0);
+	T_EXPECT_EQ(n, (ssize_t)0); /* connection closed by the idle timeout */
+	/* an established-then-idle stream is not a rejected connection */
+	T_EXPECT_EQ((uintmax_t)s.stats.num_reject_timeout, (uintmax_t)0);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Once the response body is streaming, the idle timeout is released: a quiet
+ * period longer than the timeout must NOT close a long-lived stream (SSE). */
+T_DECLARE_CASE(proxy_pass_streaming_response_survives_idle)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	test_conf.timeout = 0.05;
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	/* upstream sends a streaming (event-stream) response header, no body yet:
+	 * this drives the proxy into RSP_BODY, which releases the idle timeout */
+	static const char hdr[] = "HTTP/1.1 200 OK\r\n"
+				  "Content-Type: text/event-stream\r\n"
+				  "Transfer-Encoding: chunked\r\n\r\n";
+	unsigned char up[256];
+	(void)recv_at_least(
+		loop, upstream_fd, up, sizeof(up), 1); /* the request */
+	T_CHECK(write_all(upstream_fd, hdr, sizeof(hdr) - 1) == 0);
+	drive_loop(loop);
+
+	/* the client sees the response header block */
+	unsigned char cl[256];
+	ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "text/event-stream", 17) != NULL);
+
+	/* a quiet period longer than the idle timeout must not tear it down */
+	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
+	T_EXPECT_EQ((uintmax_t)s.stats.num_reject_timeout, (uintmax_t)0);
+
+	/* the stream is still alive: a late event is delivered to the client */
+	static const char event[] = "7\r\ndata: 1\r\n"; /* one chunked event */
+	T_CHECK(write_all(upstream_fd, event, sizeof(event) - 1) == 0);
+	drive_loop(loop);
+	unsigned char ev[256];
+	cn = recv_at_least(loop, peer_fd, ev, sizeof(ev), 1);
+	T_EXPECT(cn > 0); /* not EOF -> the connection stayed open */
+	T_EXPECT(memmem(ev, (size_t)cn, "data: 1", 7) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
 	ev_loop_destroy(loop);
 }
 
@@ -1034,6 +1849,37 @@ T_DECLARE_CASE(ruleset_auth_required_with_invalid_basic_returns_407)
 	serve_payload(loop, &s, req, &peer_fd);
 
 	T_EXPECT(assert_response_status(loop, peer_fd, "407"));
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* auth_required with valid Basic credentials: the decoded username/password
+ * must reach the ruleset verbatim (exercises parse_proxy_auth's decode/split). */
+T_DECLARE_CASE(ruleset_auth_required_valid_basic_decodes_credentials)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	/* "user:pass" base64-encoded */
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+			   "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	test_conf.auth_required = true;
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.ruleset_resolve_ok = true;
+	S.ruleset_state_nonnull = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT(S.captured_creds);
+	T_EXPECT_STREQ(S.captured_username, "user");
+	T_EXPECT_STREQ(S.captured_password, "pass");
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -1569,6 +2415,55 @@ T_DECLARE_CASE(plain_http_forward_success_counted_once)
 	ev_loop_destroy(loop);
 }
 
+/*
+ * Regression: a client that doesn't wait for the "200 Connection
+ * established" reply before sending payload (e.g. TCP fast open) has its
+ * CONNECT request and payload delivered in a single recv(). Unlike
+ * proxy_pass, a CONNECT tunnel has no build_forward_req()/cbuf salvage step,
+ * so any bytes past the request/headers were silently dropped instead of
+ * being forwarded to the upstream once the tunnel opens.
+ */
+T_DECLARE_CASE(connect_pipelined_bytes_forwarded_to_upstream)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	static const char payload[] = "hello upstream";
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n\r\n"
+			   "hello upstream";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	T_EXPECT(test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC));
+
+	T_EXPECT(s.stats.num_success == 1);
+	{
+		unsigned char got[sizeof(payload) - 1] = { 0 };
+		const ssize_t n = recv_at_least(
+			loop, upstream_fd, got, sizeof(got), sizeof(got));
+		T_EXPECT_EQ(n, (ssize_t)sizeof(got));
+		T_EXPECT(memcmp(got, payload, sizeof(got)) == 0);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 /* A successful CONNECT tunnel must count exactly one success (dialer_cb must
  * not double-increment before mark_ready). */
 T_DECLARE_CASE(connect_success_counted_once)
@@ -1834,6 +2729,22 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
 
 static const struct testing_suite suite[] = {
 	T_CASE(plain_http_origin_form_returns_400),
+	T_CASE(proxy_pass_forwards_content_length),
+	T_CASE(proxy_pass_chunked_request_discards_surplus),
+	T_CASE(proxy_pass_bodyless_pipelined_not_forwarded),
+	T_CASE(proxy_pass_chunked_response),
+	T_CASE(proxy_pass_malformed_chunked_request_returns_400),
+	T_CASE(proxy_pass_eof_response),
+	T_CASE(proxy_pass_head_response_bodiless),
+	T_CASE(proxy_pass_forwards_100_continue),
+	T_CASE(proxy_pass_multiple_interim_responses),
+	T_CASE(proxy_pass_interim_framing_does_not_leak),
+	T_CASE(proxy_pass_negative_content_length_rejected),
+	T_CASE(proxy_pass_response_control_char_header_rejected),
+	T_CASE(proxy_pass_too_many_response_headers_rejected),
+	T_CASE(proxy_pass_large_body_integrity),
+	T_CASE(proxy_pass_idle_stream_times_out),
+	T_CASE(proxy_pass_streaming_response_survives_idle),
 	T_CASE(split_request_is_parsed_incrementally),
 	T_CASE(plain_http_absolute_url_no_dialreq_returns_500),
 	T_CASE(plain_http_absolute_url_no_host_returns_400),
@@ -1854,9 +2765,11 @@ static const struct testing_suite suite[] = {
 	T_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq),
 	T_CASE(connect_with_transfer_encoding_chunked_is_accepted),
 	T_CASE(connect_success_counted_once),
+	T_CASE(connect_pipelined_bytes_forwarded_to_upstream),
 	T_CASE(authorization_header_without_space_returns_400),
 	T_CASE(ruleset_auth_required_without_basic_credentials_returns_407),
 	T_CASE(ruleset_auth_required_with_invalid_basic_returns_407),
+	T_CASE(ruleset_auth_required_valid_basic_decodes_credentials),
 	T_CASE(ruleset_resolve_failure_returns_500),
 	T_CASE(ruleset_finish_without_req_returns_403),
 	T_CASE(ruleset_finish_with_req_and_dialer_error_returns_502),

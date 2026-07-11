@@ -44,8 +44,13 @@ _G.route          = {
 }
 
 _G.route6         = {
+    -- reject unspecified, multicast, loopback, local or v4-mapped
+    { inet6.subnet("::/128"),          rule.reject() },
     { inet6.subnet("::1/128"),         rule.reject() },
     { inet6.subnet("fe80::/10"),       rule.reject() },
+    { inet6.subnet("fc00::/7"),        rule.reject() },
+    { inet6.subnet("ff00::/8"),        rule.reject() },
+    { inet6.subnet("::ffff:0:0/96"),   rule.reject() },
     { composite.maybe(_G, "biglist6"), front_proxy,  "biglist" },
     -- go to _G.route_default
 }

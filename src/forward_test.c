@@ -7,12 +7,12 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 #include "transfer.h"
 #include "util.h"
 
-#include "utils/arraysize.h"
+#include "meta/arraysize.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -42,7 +42,7 @@ static struct config test_conf = {
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.032;
 static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 0.128;
 
-char *const proxy_protocol_str[PROTO_MAX] = {
+const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -78,6 +78,7 @@ static struct {
 
 	struct stub_xfer_ctx *xfer_ctxs[2];
 	int_least32_t xfer_count;
+	bool xfer_serve_fail;
 
 #if WITH_RULESET
 	enum stub_ruleset_mode ruleset_mode;
@@ -100,6 +101,7 @@ static struct {
 	.dialer_cancel_calls = 0,
 	.xfer_ctxs = { NULL, NULL },
 	.xfer_count = 0,
+	.xfer_serve_fail = false,
 #if WITH_RULESET
 	.ruleset_mode = STUB_RULESET_FAIL,
 	.ruleset_pending_cb = NULL,
@@ -131,6 +133,7 @@ static void stub_reset(void)
 		STUB.xfer_ctxs[i] = NULL;
 	}
 	STUB.xfer_count = 0;
+	STUB.xfer_serve_fail = false;
 #if WITH_RULESET
 	STUB.ruleset_mode = STUB_RULESET_FAIL;
 	STUB.ruleset_pending_cb = NULL;
@@ -447,6 +450,9 @@ bool transfer_serve(
 	(void)xfer;
 	(void)acc_fd;
 	(void)dial_fd;
+	if (STUB.xfer_serve_fail) {
+		return false;
+	}
 	T_CHECK(STUB.xfer_count < (int_fast32_t)ARRAY_SIZE(STUB.xfer_ctxs));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
@@ -684,6 +690,48 @@ T_DECLARE_CASE(forward_bidir_timeout_connected_then_finished)
 	ev_loop_destroy(loop);
 }
 
+/* forward_commit's transfer_serve()-failure recovery: undo the session
+ * increment, close both fds, and drop the context. */
+T_DECLARE_CASE(forward_commit_xfer_serve_failure_recovers)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
+	struct dialreq base_req = { 0 };
+	int accepted_fd = -1;
+	int accepted_peer_fd = -1;
+	int dialed_fd = -1;
+	int dialed_peer_fd = -1;
+
+	stub_reset();
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+	STUB.xfer_serve_fail = true;
+	set_ipv4_addr(&base_req.addr, 443);
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	s.basereq = &base_req;
+	make_socketpair(&accepted_fd, &accepted_peer_fd);
+	make_socketpair(&dialed_fd, &dialed_peer_fd);
+	STUB.dialer_result_fd = dialed_fd;
+
+	forward_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+
+	/* transfer_serve failed: no active transfer, session count unwound. */
+	T_EXPECT_EQ(STUB.xfer_count, 0);
+	T_EXPECT_EQ(s.stats.num_request, 1);
+	T_EXPECT_EQ(s.stats.num_success, 0);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT_EQ(s.num_sessions, (size_t)0);
+
+	/* accepted_fd and dialed_fd were closed by the recovery path. */
+	T_CHECK(close(accepted_peer_fd) == 0);
+	T_CHECK(close(dialed_peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 #if WITH_RULESET
 T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 {
@@ -826,6 +874,44 @@ T_DECLARE_CASE(forward_ruleset_reject)
 	T_EXPECT_EQ(STUB.dialer_do_calls, 0);
 	T_EXPECT_EQ(s.stats.num_reject_ruleset, (uint_least64_t)1);
 	T_EXPECT_EQ(s.stats.num_reject_upstream, (uint_least64_t)0);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Synchronous ruleset-dispatch failure (STUB_RULESET_FAIL) must still count a
+ * rejection, keeping num_success + num_reject_* == num_request. */
+T_DECLARE_CASE(forward_ruleset_sync_dispatch_fail_counts_reject)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
+	struct dialreq base_req = { 0 };
+	int accepted_fd = -1;
+	int peer_fd = -1;
+
+	stub_reset();
+	/* STUB_RULESET_FAIL is the default: ruleset_route returns false
+	 * synchronously. */
+	set_ipv4_addr(&base_req.addr, 80);
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	s.basereq = &base_req;
+	s.ruleset = (struct ruleset *)&s;
+	make_socketpair(&accepted_fd, &peer_fd);
+
+	forward_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
+
+	T_EXPECT_EQ(STUB.ruleset_route_calls, 1);
+	T_EXPECT_EQ(STUB.dialer_do_calls, 0);
+	T_EXPECT_EQ(s.stats.num_request, (uint_least64_t)1);
+	T_EXPECT_EQ(s.stats.num_reject_ruleset, (uint_least64_t)1);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
 	T_EXPECT_EQ(s.num_sessions, 0);
 
@@ -1094,6 +1180,37 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 
 	ev_loop_destroy(loop);
 }
+
+/* No-ruleset tproxy path where tproxy_makereq() fails (dialaddr_set rejects
+ * the destination): the req == NULL cleanup branch must unwind cleanly. */
+T_DECLARE_CASE(tproxy_makereq_failure_cleans_up)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
+	int accepted_fd = -1;
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialaddr_set_ok = false;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	accepted_fd = make_bound_ipv4_socket();
+
+	tproxy_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+
+	T_EXPECT_EQ(STUB.dialaddr_set_calls, 1);
+	T_EXPECT_EQ(STUB.dialer_do_calls, 0);
+	T_EXPECT_EQ(s.stats.num_request, 1);
+	T_EXPECT_EQ(s.stats.num_success, 0);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
+
+	ev_loop_destroy(loop);
+}
 #endif /* WITH_TPROXY */
 
 /* -------------------------------------------------------------------------
@@ -1108,6 +1225,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(forward_dialer_fail_updates_stats),
 	T_CASE(forward_timeout_cancels_pending_dialer),
 	T_CASE(forward_bidir_timeout_connected_then_finished),
+	T_CASE(forward_commit_xfer_serve_failure_recovers),
 	T_CASE(forward_num_halfopen_no_underflow),
 	T_CASE(forward_timeout_stops_pending_dialer_once),
 #if WITH_RULESET
@@ -1115,10 +1233,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(forward_ruleset_route_ipv4),
 	T_CASE(forward_ruleset_route_ipv6),
 	T_CASE(forward_ruleset_reject),
+	T_CASE(forward_ruleset_sync_dispatch_fail_counts_reject),
 	T_CASE(forward_ruleset_null_after_sighup),
 #endif /* WITH_RULESET */
 #if WITH_TPROXY
 	T_CASE(tproxy_dialer_fail_uses_socket_destination),
+	T_CASE(tproxy_makereq_failure_cleans_up),
 #endif
 #if WITH_TPROXY && WITH_RULESET
 	T_CASE(tproxy_ruleset_route_ipv4),

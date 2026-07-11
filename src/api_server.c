@@ -4,28 +4,26 @@
 #include "api_server.h"
 
 #include "conf.h"
-#include "dialer.h"
 #include "proto/http.h"
 #include "resolver.h"
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 #include "util.h"
 
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
+#include "meta/arraysize.h"
+#include "meta/class.h"
+#include "meta/minmax.h"
 #include "net/http.h"
-#include "net/mime.h"
 #include "net/url.h"
 #include "os/clock.h"
 #include "os/socket.h"
-#include "utils/arraysize.h"
 #include "utils/buffer.h"
-#include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/formats.h"
 #include "utils/gc.h"
-#include "utils/minmax.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -53,7 +51,7 @@ struct api_ctx {
 	struct gcbase gcbase;
 	struct server *s;
 	enum api_state state;
-	int accepted_fd, dialed_fd;
+	int accepted_fd;
 	union sockaddr_max accepted_sa;
 	ev_timer w_timeout;
 	ev_io w_recv, w_send;
@@ -62,7 +60,6 @@ struct api_ctx {
 	struct ruleset_callback rpcreturn;
 	struct ruleset_state *rpcstate;
 #endif
-	struct dialreq *dialreq;
 	struct http_conn conn;
 	struct url uri;
 	bool keepalive : 1;
@@ -94,35 +91,15 @@ ASSERT_SUPER(struct gcbase, struct api_ctx, gcbase);
 	char name[16];                                                         \
 	(void)format_duration(name, sizeof(name), (value))
 
-#if WITH_RULESET
-bool check_rpcall_mime(char *restrict s)
+/* Emit the response's Connection header per the negotiated keep-alive state. */
+static void resphdr_conn(struct api_ctx *restrict ctx)
 {
-	if (s == NULL) {
-		return false;
+	if (ctx->keepalive) {
+		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
+	} else {
+		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
 	}
-	char *type, *subtype;
-	s = mime_parse(s, &type, &subtype);
-	if (s == NULL || strcmp(type, MIME_RPCALL_TYPE) != 0 ||
-	    strcmp(subtype, MIME_RPCALL_SUBTYPE) != 0) {
-		return false;
-	}
-	const char *version = NULL;
-	char *key, *value;
-	for (;;) {
-		s = mime_parseparam(s, &key, &value);
-		if (s == NULL) {
-			return false;
-		}
-		if (key == NULL) {
-			break;
-		}
-		if (strcmp(key, "version") == 0) {
-			version = value;
-		}
-	}
-	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
 }
-#endif /* WITH_RULESET */
 
 static int comp_intleast64(const void *a, const void *b)
 {
@@ -389,7 +366,7 @@ static void append_server_stats(
 		ruleset_vmstats(ruleset, &vmstats);
 		append_vmstats(w, &vmstats, s->conf);
 	}
-#else
+#else /* WITH_RULESET */
 	(void)runtime;
 #endif /* WITH_RULESET */
 
@@ -561,11 +538,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
-	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-	} else {
-		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-	}
+	resphdr_conn(ctx);
 	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
 	if (stateless) {
 		RESPHDR_NOCACHE(ctx->conn.wbuf);
@@ -600,6 +573,14 @@ static bool restapi_check(
 }
 
 #if WITH_RULESET
+/* Upper bound for "Content-Length: <digits>\r\n" plus the blank-line
+ * terminator RESPHDR_FINISH adds after it, reserved out of wbuf before the
+ * body length is decided below. */
+#define ERRMSG_TAIL_RESERVE                                                    \
+	(CONSTSTRLEN("Content-Length: ") +                                     \
+	 CONSTSTRLEN("18446744073709551615") /* max size_t decimal digits */ + \
+	 CONSTSTRLEN("\r\n") + CONSTSTRLEN("\r\n"))
+
 static void send_errmsg(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	const uint_fast16_t code, const char *msg, const size_t len)
@@ -609,15 +590,18 @@ static void send_errmsg(
 	}
 	VBUF_FREE(ctx->conn.cbuf);
 	RESPHDR_BEGIN(ctx->conn.wbuf, code);
-	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-	} else {
-		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-	}
+	resphdr_conn(ctx);
 	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
-	RESPHDR_CLENGTH(ctx->conn.wbuf, len);
+	/* clamp the body so the declared Content-Length always matches what
+	 * actually fits in wbuf; msg (e.g. a Lua traceback) can exceed the
+	 * remaining space even though the buffer itself never overflows */
+	const size_t room = ctx->conn.wbuf.cap - ctx->conn.wbuf.len;
+	const size_t body_len = room > ERRMSG_TAIL_RESERVE ?
+					MIN(len, room - ERRMSG_TAIL_RESERVE) :
+					0;
+	RESPHDR_CLENGTH(ctx->conn.wbuf, body_len);
 	RESPHDR_FINISH(ctx->conn.wbuf);
-	BUF_APPEND(ctx->conn.wbuf, msg, len);
+	BUF_APPEND(ctx->conn.wbuf, msg, body_len);
 	send_response(loop, ctx, 1 <= (code / 100) && (code / 100) <= 3);
 }
 
@@ -636,6 +620,17 @@ static void close_stream(struct stream *restrict s)
 	}
 }
 
+/* Build a content_reader over the request body. Content-Length: 0 leaves cbuf
+ * unallocated; io_memreader() requires a non-NULL buffer even for a zero-length
+ * read, so substitute "". Returns NULL on OOM. */
+static struct stream *ctx_content_reader(struct api_ctx *restrict ctx)
+{
+	return content_reader(
+		ctx->conn.cbuf != NULL ? VBUF_DATA(ctx->conn.cbuf) : "",
+		ctx->conn.cbuf != NULL ? VBUF_LEN(ctx->conn.cbuf) : 0,
+		ctx->conn.hdr.content.encoding);
+}
+
 static void handle_ruleset_rpcall(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *restrict ruleset)
@@ -646,9 +641,7 @@ static void handle_ruleset_rpcall(
 		send_errpage(loop, ctx, HTTP_BAD_REQUEST);
 		return;
 	}
-	struct stream *reader = content_reader(
-		VBUF_DATA(ctx->conn.cbuf), VBUF_LEN(ctx->conn.cbuf),
-		ctx->conn.hdr.content.encoding);
+	struct stream *reader = ctx_content_reader(ctx);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -671,9 +664,7 @@ static void handle_ruleset_invoke(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *restrict ruleset)
 {
-	struct stream *reader = content_reader(
-		VBUF_DATA(ctx->conn.cbuf), VBUF_LEN(ctx->conn.cbuf),
-		ctx->conn.hdr.content.encoding);
+	struct stream *reader = ctx_content_reader(ctx);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -690,11 +681,7 @@ static void handle_ruleset_invoke(
 		return;
 	}
 	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
-	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-	} else {
-		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-	}
+	resphdr_conn(ctx);
 	RESPHDR_CLENGTH(ctx->conn.wbuf, 0);
 	RESPHDR_FINISH(ctx->conn.wbuf);
 	send_response(loop, ctx, true);
@@ -706,9 +693,7 @@ static void handle_ruleset_update(
 	const char *restrict chunkname)
 {
 	const int_fast64_t start = clock_monotonic_ns();
-	struct stream *reader = content_reader(
-		VBUF_DATA(ctx->conn.cbuf), VBUF_LEN(ctx->conn.cbuf),
-		ctx->conn.hdr.content.encoding);
+	struct stream *reader = ctx_content_reader(ctx);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -733,11 +718,7 @@ static void handle_ruleset_update(
 			timecost);
 		ASSERT(bodylen > 0 && (size_t)bodylen < sizeof(body));
 		RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
-		if (ctx->keepalive) {
-			RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-		} else {
-			RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-		}
+		resphdr_conn(ctx);
 		RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
 		RESPHDR_CLENGTH(ctx->conn.wbuf, (size_t)bodylen);
 		RESPHDR_FINISH(ctx->conn.wbuf);
@@ -799,11 +780,7 @@ static void handle_ruleset_gc(
 		}
 	}
 	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
-	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-	} else {
-		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-	}
+	resphdr_conn(ctx);
 	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
 	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
 	RESPHDR_FINISH(ctx->conn.wbuf);
@@ -1141,11 +1118,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
-	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-	} else {
-		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-	}
+	resphdr_conn(ctx);
 	RESPHDR_NOCACHE(ctx->conn.wbuf);
 	RESPHDR_CTYPE(
 		ctx->conn.wbuf, "text/plain; version=0.0.4; charset=utf-8");
@@ -1178,28 +1151,25 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 	if (strcmp(segment, "healthy") == 0) {
-		if (!restapi_check(loop, ctx, NULL, false)) {
+		/* a health check is read-only: restrict to GET */
+		if (!restapi_check(loop, ctx, "GET", false)) {
 			return;
 		}
 #if WITH_RULESET
 		struct ruleset *ruleset = ctx->s->ruleset;
 		if (ruleset != NULL) {
 			size_t len;
-			const char *msg = ruleset_healthy(ruleset, &len);
-			if (msg != NULL) {
+			const char *unhealthy = ruleset_healthy(ruleset, &len);
+			if (unhealthy != NULL) {
 				send_errmsg(
 					loop, ctx, HTTP_SERVICE_UNAVAILABLE,
-					msg, len);
+					unhealthy, len);
 				return;
 			}
 		}
-#endif
+#endif /* WITH_RULESET */
 		RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
-		if (ctx->keepalive) {
-			RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-		} else {
-			RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-		}
+		resphdr_conn(ctx);
 		RESPHDR_CLENGTH(ctx->conn.wbuf, 0);
 		RESPHDR_FINISH(ctx->conn.wbuf);
 		send_response(loop, ctx, true);
@@ -1232,7 +1202,6 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
 
-	const struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
 	case STATE_INIT:
 		return;
@@ -1245,16 +1214,33 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		if (ctx->rpcstate != NULL) {
 			ruleset_cancel(loop, ctx->rpcstate);
 			ctx->rpcstate = NULL;
+			/* rpcall_finish() may have already fired w_finish (and
+			 * allocated a result) before this teardown runs --
+			 * ruleset_cancel() only clears the pending event while
+			 * its own state->cb is still attached, which is already
+			 * NULL once finished. Clear it unconditionally so the
+			 * event loop can never dispatch to this ctx after it's
+			 * freed, and drop any result rpcall_cb() will now never
+			 * get to consume. */
+			ev_clear_pending(loop, &ctx->rpcreturn.w_finish);
+			free((void *)ctx->rpcreturn.rpcall.result);
+			ctx->rpcreturn.rpcall.result = NULL;
 		}
-#endif
+#endif /* WITH_RULESET */
 		break;
 	case STATE_RESPONSE:
 		ev_io_stop(loop, &ctx->w_send);
 		break;
 	}
-	API_CTX_LOG_F(
-		VERYVERBOSE, ctx, "closed, %zu active api",
-		stats->num_sessions);
+	if (LOGLEVEL(VERYVERBOSE)) {
+		/* The live session count is the atomic top-level field, not the
+		 * dead embedded stats copy; read it through server_stats(). */
+		struct server_stats agg;
+		server_stats(ctx->s->data, &agg);
+		API_CTX_LOG_F(
+			VERYVERBOSE, ctx, "closed, %zu active",
+			agg.num_sessions);
+	}
 }
 
 static void api_ctx_finalize(struct gcbase *restrict obj)
@@ -1265,12 +1251,8 @@ static void api_ctx_finalize(struct gcbase *restrict obj)
 
 	api_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
-		SOCKET_CLOSE_FD(ctx->accepted_fd);
+		socket_close(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
-	}
-	if (ctx->dialed_fd != -1) {
-		SOCKET_CLOSE_FD(ctx->dialed_fd);
-		ctx->dialed_fd = -1;
 	}
 
 	VBUF_FREE(ctx->conn.cbuf);
@@ -1456,14 +1438,18 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
 	ctx->rpcstate = NULL;
-	if (ctx->rpcreturn.rpcall.result == NULL) {
+	/* rpcall_finish() hands off a malloc()'d copy via state_complete();
+	 * take ownership immediately so ctx->rpcreturn.rpcall.result is never
+	 * left pointing at memory this function is about to free. */
+	char *const result = (char *)ctx->rpcreturn.rpcall.result;
+	const size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
+	ctx->rpcreturn.rpcall.result = NULL;
+	if (result == NULL) {
 		SEND_ERRSTR(loop, ctx, "rpcall did not return");
 		return;
 	}
-	const char *result = ctx->rpcreturn.rpcall.result;
-	const size_t resultlen = ctx->rpcreturn.rpcall.resultlen;
 	if (LOGLEVEL(VERBOSE)) {
-		FORMAT_BYTES(clen, ctx->rpcreturn.rpcall.resultlen);
+		FORMAT_BYTES(clen, resultlen);
 		API_CTX_LOG_F(VERBOSE, ctx, "api response: content %s", clen);
 		LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall result:");
 	}
@@ -1474,14 +1460,17 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	struct stream *writer =
 		content_writer(&ctx->conn.cbuf, resultlen, encoding);
 	if (writer == NULL) {
+		free(result);
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 	size_t n = resultlen;
 	int err = stream_write(writer, result, &n);
+	free(result);
 	if (err != 0) {
 		LOGW_F("stream_write: error %d, %zu/%zu", err, n, resultlen);
+		(void)stream_close(writer);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
@@ -1492,11 +1481,7 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		return;
 	}
 	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
-	if (ctx->keepalive) {
-		RESPHDR_CONN_KEEPALIVE(ctx->conn.wbuf);
-	} else {
-		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
-	}
+	resphdr_conn(ctx);
 	RESPHDR_CTYPE(ctx->conn.wbuf, MIME_RPCALL);
 	const char *encoding_str = http_content_encoding_str[encoding];
 	if (encoding_str != NULL) {
@@ -1517,7 +1502,6 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ctx->s = s;
 	ctx->state = STATE_INIT;
 	ctx->accepted_fd = fd;
-	ctx->dialed_fd = -1;
 
 	ev_timer_init(&ctx->w_timeout, timeout_cb, 0.0, s->conf->timeout);
 	ctx->w_timeout.data = ctx;
@@ -1559,7 +1543,7 @@ void api_serve(
 	struct api_ctx *restrict ctx = api_ctx_new(s, accepted_fd);
 	if (ctx == NULL) {
 		LOGOOM();
-		SOCKET_CLOSE_FD(accepted_fd);
+		socket_close(accepted_fd);
 		return;
 	}
 	sa_copy(&ctx->accepted_sa.sa, accepted_sa);

@@ -5,14 +5,14 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "ruleset.h"
+#include "proto/domain.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 #include "transfer.h"
 #include "util.h"
 
+#include "meta/class.h"
 #include "os/socket.h"
-#include "proto/domain.h"
-#include "utils/class.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
 #include "utils/slog.h"
@@ -110,11 +110,11 @@ static void forward_ctx_finalize(struct gcbase *restrict obj)
 
 	forward_ctx_stop(ctx->s->loop, ctx);
 	if (ctx->accepted_fd != -1) {
-		SOCKET_CLOSE_FD(ctx->accepted_fd);
+		socket_close(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
 	}
 	if (ctx->dialed_fd != -1) {
-		SOCKET_CLOSE_FD(ctx->dialed_fd);
+		socket_close(ctx->dialed_fd);
 		ctx->dialed_fd = -1;
 	}
 
@@ -191,8 +191,8 @@ static void forward_commit(
 		ctx->s->num_sessions--;
 #endif
 		LOGOOM();
-		SOCKET_CLOSE_FD(acc_fd);
-		SOCKET_CLOSE_FD(dial_fd);
+		socket_close(acc_fd);
+		socket_close(dial_fd);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -267,8 +267,32 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 		.func = dialer_cb,
 		.data = ctx,
 	};
-	dialer_init(&ctx->dialer, &cb, NULL, NULL);
+	dialer_init(
+		&ctx->dialer, &cb, &s->stats.byt_dial_send,
+		&s->stats.byt_dial_recv);
 	gc_register(&ctx->gcbase, forward_ctx_finalize);
+	return ctx;
+}
+
+/* Create a context for a newly accepted connection, copy the peer address, and
+ * enter STATE_PROCESS with the half-open accounting started. Returns NULL (and
+ * closes accepted_fd) on OOM. Shared by forward_serve and tproxy_serve. */
+static struct forward_ctx *forward_ctx_accept(
+	struct server *restrict s, struct ev_loop *restrict loop,
+	const int accepted_fd, const struct sockaddr *restrict accepted_sa)
+{
+	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
+	if (ctx == NULL) {
+		LOGOOM();
+		socket_close(accepted_fd);
+		return NULL;
+	}
+	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
+
+	ctx->state = STATE_PROCESS;
+	ev_timer_start(loop, &ctx->w_timeout);
+	ctx->s->stats.num_halfopen++;
+	ctx->s->stats.num_request++;
 	return ctx;
 }
 
@@ -350,6 +374,7 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		FAILMSGF("unexpected address type: %d", addr->type);
 	}
 	if (!ok) {
+		ctx->s->stats.num_reject_ruleset++;
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -360,18 +385,11 @@ void forward_serve(
 	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa)
 {
-	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
+	struct forward_ctx *restrict ctx =
+		forward_ctx_accept(s, loop, accepted_fd, accepted_sa);
 	if (ctx == NULL) {
-		LOGOOM();
-		SOCKET_CLOSE_FD(accepted_fd);
 		return;
 	}
-	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
-
-	ctx->state = STATE_PROCESS;
-	ev_timer_start(loop, &ctx->w_timeout);
-	ctx->s->stats.num_halfopen++;
-	ctx->s->stats.num_request++;
 
 #if WITH_RULESET
 	const struct ruleset *ruleset = ctx->s->ruleset;
@@ -387,6 +405,23 @@ void forward_serve(
 }
 
 #if WITH_TPROXY
+
+/* Read the original destination address of the transparently-intercepted
+ * connection into a zero-initialized *dest, logging on failure. */
+static bool tproxy_getdest(
+	const struct forward_ctx *restrict ctx,
+	union sockaddr_max *restrict dest, socklen_t *restrict len)
+{
+	*dest = (union sockaddr_max){ 0 };
+	*len = sizeof(*dest);
+	if (getsockname(ctx->accepted_fd, &dest->sa, len) != 0) {
+		const int err = errno;
+		FW_CTX_LOG_F(
+			ERROR, ctx, "getsockname: (%d) %s", err, strerror(err));
+		return false;
+	}
+	return true;
+}
 
 #if WITH_RULESET
 static void
@@ -407,25 +442,8 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	}
 
 	union sockaddr_max dest;
-	socklen_t len = sizeof(dest);
-	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
-		const int err = errno;
-		FW_CTX_LOG_F(
-			ERROR, ctx, "getsockname: (%d) %s", err, strerror(err));
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	switch (dest.sa.sa_family) {
-	case AF_INET:
-		CHECK(len >= sizeof(struct sockaddr_in));
-		break;
-	case AF_INET6:
-		CHECK(len >= sizeof(struct sockaddr_in6));
-		break;
-	default:
-		FW_CTX_LOG_F(
-			ERROR, ctx, "tproxy: unsupported af:%u",
-			(unsigned int)dest.sa.sa_family);
+	socklen_t len;
+	if (!tproxy_getdest(ctx, &dest, &len)) {
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -435,19 +453,26 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	bool ok;
 	switch (dest.sa.sa_family) {
 	case AF_INET:
+		CHECK(len >= sizeof(struct sockaddr_in));
 		ok = ruleset_route(
 			ruleset, &ctx->ruleset_state, addr_str, NULL, NULL,
 			&ctx->ruleset_callback);
 		break;
 	case AF_INET6:
+		CHECK(len >= sizeof(struct sockaddr_in6));
 		ok = ruleset_route6(
 			ruleset, &ctx->ruleset_state, addr_str, NULL, NULL,
 			&ctx->ruleset_callback);
 		break;
 	default:
-		FAILMSGF("unexpected address family: %d", dest.sa.sa_family);
+		FW_CTX_LOG_F(
+			ERROR, ctx, "tproxy: unsupported af:%u",
+			(unsigned int)dest.sa.sa_family);
+		gc_unref(&ctx->gcbase);
+		return;
 	}
 	if (!ok) {
+		ctx->s->stats.num_reject_ruleset++;
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -456,12 +481,9 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 
 static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
 {
-	union sockaddr_max dest = { 0 };
-	socklen_t len = sizeof(dest);
-	if (getsockname(ctx->accepted_fd, &dest.sa, &len) != 0) {
-		const int err = errno;
-		FW_CTX_LOG_F(
-			ERROR, ctx, "getsockname: (%d) %s", err, strerror(err));
+	union sockaddr_max dest;
+	socklen_t len;
+	if (!tproxy_getdest(ctx, &dest, &len)) {
 		return NULL;
 	}
 	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
@@ -483,18 +505,11 @@ void tproxy_serve(
 	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
 	const struct sockaddr *accepted_sa)
 {
-	struct forward_ctx *restrict ctx = forward_ctx_new(s, accepted_fd);
+	struct forward_ctx *restrict ctx =
+		forward_ctx_accept(s, loop, accepted_fd, accepted_sa);
 	if (ctx == NULL) {
-		LOGOOM();
-		SOCKET_CLOSE_FD(accepted_fd);
 		return;
 	}
-	sa_copy(&ctx->accepted_sa.sa, accepted_sa);
-
-	ctx->state = STATE_PROCESS;
-	ev_timer_start(loop, &ctx->w_timeout);
-	ctx->s->stats.num_halfopen++;
-	ctx->s->stats.num_request++;
 
 #if WITH_RULESET
 	const struct ruleset *ruleset = ctx->s->ruleset;

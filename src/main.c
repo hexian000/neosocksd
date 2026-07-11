@@ -4,7 +4,7 @@
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 #include "transfer.h"
 #include "util.h"
@@ -29,6 +29,29 @@ static struct {
 	struct server server;
 } app = { 0 };
 
+/* Build *basereq from conf->forward/conf->proxy, replacing any previous
+ * value (a boot config may change forward/proxy after the initial parse).
+ * Exits the process on failure. */
+static void rebuild_basereq(
+	struct dialreq **restrict basereq, const struct config *restrict conf)
+{
+	if (!dialreq_replace(basereq, conf->forward, conf->proxy)) {
+		LOGF("unable to parse outbound configuration");
+		exit(EXIT_FAILURE);
+	}
+}
+
+/* Run conf_check on a fully-populated config, exiting the process on failure. */
+static void check_config_or_exit(
+	const struct config *restrict conf, const char *restrict argv0)
+{
+	if (!conf_check(conf)) {
+		LOGF_F("configuration check failed, try \"%s --help\" for more information",
+		       argv0);
+		exit(EXIT_FAILURE);
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	init(argc, argv);
@@ -40,28 +63,24 @@ int main(int argc, char *argv[])
 	if (conf->dump_config) {
 		if (!conf_check(conf) || !conf_print(conf)) {
 			LOGF("dump configuration failed");
+			exit(EXIT_FAILURE);
 		}
-		exit(EXIT_FAILURE);
+		exit(EXIT_SUCCESS);
 	}
 #endif
-#if WITH_RULESET
+#if WITH_LUA
 	/* A boot config may fill in required fields, so defer the check. */
 	const bool defer_check = (conf->boot != NULL);
 #else
 	const bool defer_check = false;
 #endif
-	if (!defer_check && !conf_check(conf)) {
-		LOGF_F("configuration check failed, try \"%s --help\" for more information",
-		       argv[0]);
-		exit(EXIT_FAILURE);
+	if (!defer_check) {
+		check_config_or_exit(conf, argv[0]);
 	}
 	loadlibs();
 
-	struct dialreq *basereq = dialreq_parse(conf->forward, conf->proxy);
-	if (basereq == NULL) {
-		LOGF("unable to parse outbound configuration");
-		exit(EXIT_FAILURE);
-	}
+	struct dialreq *basereq = NULL;
+	rebuild_basereq(&basereq, conf);
 
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);
@@ -105,7 +124,7 @@ int main(int argc, char *argv[])
 				strerror(err));
 		}
 	}
-#else
+#else /* WITH_THREADS */
 	xfer = transfer_create(loop, 1);
 #endif /* WITH_THREADS */
 	CHECKOOM(xfer);
@@ -123,17 +142,7 @@ int main(int argc, char *argv[])
 				LOGF_F("unable to load config: %s", conf->boot);
 				exit(EXIT_FAILURE);
 			}
-			/* The boot config may change forward/proxy, so rebuild
-			 * the base dial request to reflect the effective
-			 * configuration. */
-			struct dialreq *restrict newbasereq =
-				dialreq_parse(conf->forward, conf->proxy);
-			if (newbasereq == NULL) {
-				LOGF("unable to parse outbound configuration");
-				exit(EXIT_FAILURE);
-			}
-			dialreq_free(basereq);
-			basereq = newbasereq;
+			rebuild_basereq(&basereq, conf);
 			ruleset_setbasereq(ruleset, basereq);
 		}
 		if (conf->ruleset != NULL) {
@@ -147,11 +156,7 @@ int main(int argc, char *argv[])
 				exit(EXIT_FAILURE);
 			}
 		}
-		if (!conf_check(conf)) {
-			LOGF_F("configuration check failed, try \"%s --help\" for more information",
-			       argv[0]);
-			exit(EXIT_FAILURE);
-		}
+		check_config_or_exit(conf, argv[0]);
 		/* drop the engine if no ruleset was installed */
 		if (!ruleset_isvalid(ruleset)) {
 			ruleset_free(ruleset);
@@ -162,9 +167,27 @@ int main(int argc, char *argv[])
 		LOGF("authentication requires a ruleset");
 		exit(EXIT_FAILURE);
 	}
-#else
+#else /* WITH_RULESET */
 	struct ruleset *ruleset = NULL;
+#if WITH_LUA
+	if (conf->boot != NULL) {
+		if (!conf_loadboot(conf, conf->boot)) {
+			LOGF_F("unable to load config: %s", conf->boot);
+			exit(EXIT_FAILURE);
+		}
+		rebuild_basereq(&basereq, conf);
+		check_config_or_exit(conf, argv[0]);
+	}
+#endif /* WITH_LUA */
 #endif /* WITH_RULESET */
+
+	/* loglevel and nameserver were latched from CLI values before any boot
+	 * config was loaded (slog in conf_parseargs, the c-ares servers in
+	 * resolver_new, which must precede privilege drop). Re-apply them now so a
+	 * value set only in a boot config still takes effect. Both are idempotent
+	 * when the boot config left them unchanged. */
+	slog_setlevel(conf->loglevel);
+	resolver_setnameserver(resolver, conf);
 
 	struct server *s = &app.server;
 	if (!server_init(s, loop, conf, resolver, xfer, basereq, ruleset)) {

@@ -20,6 +20,7 @@
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+#include <malloc.h>
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -49,6 +50,72 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 	}
 	const int status_call = lua_pcall(L, 0, LUA_MULTRET, 0);
 	return status_call == LUA_OK;
+}
+
+/* ---- realloc fault injection ----
+ * marshal()'s vbuffer calls libc realloc() directly, so interposing realloc()
+ * here drives its out-of-memory branches. To keep it deterministic the OOM
+ * tests run on a Lua state whose allocator never calls realloc()
+ * (isolated_alloc below), so an armed failure hits only the vbuffer and never
+ * a Lua-internal allocation. The passthrough is reimplemented over
+ * malloc()/free() so it needs no libc-internal symbol. */
+static unsigned g_realloc_calls;
+static unsigned
+	g_realloc_fail_from; /* 0 = disabled; else fail call number >= N */
+
+void *realloc(void *ptr, size_t size)
+{
+	g_realloc_calls++;
+	if (g_realloc_fail_from != 0 &&
+	    g_realloc_calls >= g_realloc_fail_from) {
+		return NULL;
+	}
+	if (size == 0) {
+		free(ptr);
+		return NULL;
+	}
+	void *const np = malloc(size);
+	if (np == NULL) {
+		return NULL;
+	}
+	if (ptr != NULL) {
+		const size_t oldsize = malloc_usable_size(ptr);
+		memcpy(np, ptr, oldsize < size ? oldsize : size);
+		free(ptr);
+	}
+	return np;
+}
+
+/* A Lua allocator that never calls realloc(), so the fault injection above
+ * only ever affects marshal()'s vbuffer. */
+static void *isolated_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+{
+	(void)ud;
+	if (nsize == 0) {
+		free(ptr);
+		return NULL;
+	}
+	void *const np = malloc(nsize);
+	if (np == NULL) {
+		return NULL;
+	}
+	if (ptr != NULL) {
+		memcpy(np, ptr, osize < nsize ? osize : nsize);
+		free(ptr);
+	}
+	return np;
+}
+
+static lua_State *new_lua_isolated(void)
+{
+	lua_State *restrict L = lua_newstate(isolated_alloc, NULL);
+	if (L == NULL) {
+		return NULL;
+	}
+	luaL_openlibs(L);
+	(void)luaopen_marshal(L);
+	lua_setglobal(L, "marshal");
+	return L;
 }
 
 /* -------------------------------------------------------------------------
@@ -177,6 +244,15 @@ T_DECLARE_CASE(marshal_float_zero)
 	T_EXPECT(run_chunk(L, "return marshal(0.0)"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT_STREQ(lua_tostring(L, 1), "0");
+	lua_settop(L, 0);
+
+	/* Regression: -0.0 must keep its sign (round-trips to negative zero,
+	 * i.e. 1 / v == -inf), not collapse to +0/integer 0 like +0.0. */
+	T_EXPECT(run_chunk(
+		L, "local v = assert(load('return '..marshal(-0.0)))() "
+		   "return 1 / v == -math.huge"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
 
 	lua_close(L);
 }
@@ -193,6 +269,16 @@ T_DECLARE_CASE(marshal_string_roundtrip)
 		   "return f() == s"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
+	lua_settop(L, 0);
+
+	/* multi-byte safe runs batched around escapes must round-trip and a
+	 * plain string with no escapes is emitted verbatim between quotes */
+	T_EXPECT(run_chunk(
+		L, "local s = 'hello \"world\"\\n\\tfoo bar' "
+		   "local f = assert(load('return '..marshal(s))) "
+		   "return f() == s, marshal('plain text')"));
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "\"plain text\"");
 
 	lua_close(L);
 }
@@ -247,6 +333,44 @@ T_DECLARE_CASE(marshal_circular_table_rejected)
 	lua_close(L);
 }
 
+T_DECLARE_CASE(marshal_shared_table_not_rejected)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* Regression: a table referenced twice from two different places (a
+	 * DAG, not a cycle) must not be rejected as circular -- an ordinary
+	 * shape for shared config/record sub-tables, not an adversarial one. */
+	T_EXPECT(run_chunk(
+		L, "local shared = {1, 2, 3} "
+		   "local m = marshal({a = shared, b = shared}) "
+		   "local r = assert(load('return '..m))() "
+		   "return r.a[1] == 1 and r.a[3] == 3 "
+		   "and r.b[1] == 1 and r.b[3] == 3"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(marshal_shared_table_across_top_level_arguments)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* Same table passed as two separate top-level arguments to marshal(). */
+	T_EXPECT(run_chunk(
+		L,
+		"local shared = {1, 2, 3} "
+		"local m = marshal(shared, shared) "
+		"local a, b = load('return '..m)() "
+		"return a[1] == 1 and a[3] == 3 and b[1] == 1 and b[3] == 3"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(marshal_table_with_metatable_warns)
 {
 	lua_State *restrict L = new_lua();
@@ -296,6 +420,46 @@ T_DECLARE_BENCH(bench_marshal_roundtrip)
 	lua_close(L);
 }
 
+/* marshal() reports ERR_MEMORY when the initial buffer allocation fails. */
+T_DECLARE_CASE(marshal_reports_oom_on_buffer_alloc)
+{
+	lua_State *restrict L = new_lua_isolated();
+	T_CHECK(L != NULL);
+
+	/* precompile so the armed window contains only the marshal() call */
+	T_CHECK(luaL_loadstring(L, "return marshal('x')") == LUA_OK);
+	g_realloc_calls = 0;
+	g_realloc_fail_from = 1; /* fail VBUF_NEW, the first vbuffer realloc */
+	const int status = lua_pcall(L, 0, LUA_MULTRET, 0);
+	g_realloc_fail_from = 0;
+
+	T_EXPECT_EQ(status, LUA_ERRRUN);
+	T_EXPECT(strstr(lua_tostring(L, -1), "out of memory") != NULL);
+
+	lua_close(L);
+}
+
+/* marshal() reports ERR_MEMORY when growing the buffer fails mid-value. */
+T_DECLARE_CASE(marshal_reports_oom_on_buffer_grow)
+{
+	lua_State *restrict L = new_lua_isolated();
+	T_CHECK(L != NULL);
+
+	/* a value larger than the 1KiB initial buffer forces a grow */
+	T_CHECK(run_chunk(L, "big = string.rep('x', 4096)"));
+	T_CHECK(luaL_loadstring(L, "return marshal(big)") == LUA_OK);
+	g_realloc_calls = 0;
+	g_realloc_fail_from =
+		2; /* VBUF_NEW succeeds; the grow (and after) fail */
+	const int status = lua_pcall(L, 0, LUA_MULTRET, 0);
+	g_realloc_fail_from = 0;
+
+	T_EXPECT_EQ(status, LUA_ERRRUN);
+	T_EXPECT(strstr(lua_tostring(L, -1), "out of memory") != NULL);
+
+	lua_close(L);
+}
+
 /* -------------------------------------------------------------------------
  * main - test runner.
  * ---------------------------------------------------------------------- */
@@ -312,7 +476,11 @@ static const struct testing_suite suite[] = {
 	T_CASE(marshal_table_roundtrip),
 	T_CASE(marshal_unsupported_type),
 	T_CASE(marshal_circular_table_rejected),
+	T_CASE(marshal_shared_table_not_rejected),
+	T_CASE(marshal_shared_table_across_top_level_arguments),
 	T_CASE(marshal_table_with_metatable_warns),
+	T_CASE(marshal_reports_oom_on_buffer_alloc),
+	T_CASE(marshal_reports_oom_on_buffer_grow),
 	T_BENCH(bench_marshal_roundtrip),
 	T_SUITE_END,
 };

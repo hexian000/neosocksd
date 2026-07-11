@@ -13,19 +13,16 @@
 
 #include "transfer.h"
 
-#include "io/io.h"
-#include "os/socket.h"
 #include "util.h"
 
+#include "io/io.h"
+#include "os/socket.h"
 #include "utils/testing.h"
 
 #include <ev.h>
 
 #include <fcntl.h>
 #include <signal.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #if WITH_THREADS
 #include <stdatomic.h>
 #endif
@@ -34,6 +31,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared test fixtures (transfer.c has no collaborator to mock).
@@ -215,8 +214,8 @@ T_DECLARE_CASE(transfer_moves_payload)
 	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
 	transfer_join(xfer);
-	SOCKET_CLOSE_FD(acc_peer);
-	SOCKET_CLOSE_FD(dial_peer);
+	socket_close(acc_peer);
+	socket_close(dial_peer);
 	ev_loop_destroy(loop);
 }
 
@@ -291,8 +290,8 @@ T_DECLARE_CASE(transfer_splice_releases_pipes_on_finish)
 	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
 	transfer_join(xfer);
-	SOCKET_CLOSE_FD(acc_peer);
-	SOCKET_CLOSE_FD(dial_peer);
+	socket_close(acc_peer);
+	socket_close(dial_peer);
 	ev_loop_destroy(loop);
 }
 #endif /* WITH_SPLICE */
@@ -335,8 +334,8 @@ T_DECLARE_CASE(transfer_ctx_cancel_no_callback)
 	transfer_join(xfer);
 	T_EXPECT_EQ(state.num_sessions, (size_t)0);
 
-	SOCKET_CLOSE_FD(acc_peer);
-	SOCKET_CLOSE_FD(dial_peer);
+	socket_close(acc_peer);
+	socket_close(dial_peer);
 	ev_loop_destroy(loop);
 }
 
@@ -363,7 +362,7 @@ T_DECLARE_CASE(transfer_dst_error_finishes)
 	T_CHECK(send(acc_peer, "x", 1, 0) == 1);
 	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
 	/* Close the read end of the uplink destination. */
-	SOCKET_CLOSE_FD(dial_peer);
+	socket_close(dial_peer);
 
 	state.num_sessions = 1;
 	struct transfer *restrict xfer = transfer_create(loop, 1);
@@ -381,7 +380,7 @@ T_DECLARE_CASE(transfer_dst_error_finishes)
 	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
 
 	transfer_join(xfer);
-	SOCKET_CLOSE_FD(acc_peer);
+	socket_close(acc_peer);
 	ev_loop_destroy(loop);
 }
 
@@ -455,8 +454,166 @@ T_DECLARE_CASE(transfer_backpressure_completes)
 	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)1);
 
 	transfer_join(xfer);
-	SOCKET_CLOSE_FD(acc_peer);
-	SOCKET_CLOSE_FD(dial_peer);
+	socket_close(acc_peer);
+	socket_close(dial_peer);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * A payload larger than XFER_BUFSIZE while the destination is blocked drives
+ * xfer_recv()'s receive buffer to saturation, exercising its `cap == 0`
+ * early-return (receive-side backpressure), distinct from the send-side
+ * backpressure covered above.
+ */
+T_DECLARE_CASE(transfer_recv_buffer_saturates_completes)
+{
+	enum { PAYLOAD_SZ = 24000 }; /* > XFER_BUFSIZE (16384) */
+	static unsigned char payload[PAYLOAD_SZ];
+	static const char fill[] = "recv-saturate-fill";
+	int acc_peer = -1, acc_fd = -1;
+	int dial_fd = -1, dial_peer = -1;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct test_xfer_state state = { 0 };
+	char drain[4096];
+
+	for (size_t i = 0; i < PAYLOAD_SZ; i++) {
+		payload[i] = (unsigned char)(i & 0xff);
+	}
+
+	make_socketpair(&acc_peer, &acc_fd);
+	make_socketpair(&dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+	set_nonblock(dial_peer);
+
+	/* Block the downstream so the xfer cannot drain its receive buffer. */
+	size_t fill_bytes = 0;
+	while (send(dial_fd, fill, sizeof(fill), MSG_DONTWAIT) > 0) {
+		fill_bytes += sizeof(fill);
+	}
+
+	/* Buffer the whole (> XFER_BUFSIZE) payload on the accepted side; with
+	 * the downstream blocked, the xfer fills its buffer and hits cap == 0. */
+	T_CHECK(send(acc_peer, payload, PAYLOAD_SZ, 0) == (ssize_t)PAYLOAD_SZ);
+	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
+
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_create(loop, 1);
+	T_CHECK(xfer != NULL);
+
+	T_CHECK(transfer_serve(
+		xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.num_sessions = &state.num_sessions,
+		}));
+	acc_fd = dial_fd = -1;
+
+	/* Relieve backpressure by draining the pre-fill bytes; the xfer then
+	 * forwards the whole payload. */
+	{
+		size_t remaining = fill_bytes;
+		while (remaining > 0) {
+			const size_t ask = remaining < sizeof(drain) ?
+						   remaining :
+						   sizeof(drain);
+			const ssize_t n = recv(dial_peer, drain, ask, 0);
+			if (n <= 0) {
+				break;
+			}
+			remaining -= (size_t)n;
+		}
+	}
+
+	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 2.0));
+
+	/* All payload bytes must have arrived at dial_peer. */
+	size_t got = 0;
+	while (got < PAYLOAD_SZ) {
+		const ssize_t n =
+			recv(dial_peer, drain, sizeof(drain), MSG_DONTWAIT);
+		if (n <= 0) {
+			break;
+		}
+		got += (size_t)n;
+	}
+	T_EXPECT_EQ((uintmax_t)got, (uintmax_t)PAYLOAD_SZ);
+	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)PAYLOAD_SZ);
+
+	transfer_join(xfer);
+	socket_close(acc_peer);
+	socket_close(dial_peer);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * With more than one worker, transfers are round-robin distributed across
+ * per-worker loops/active-lists. Run several concurrent transfers through a
+ * multi-worker engine and verify each completes with correct byte accounting,
+ * exercising the distribution path and per-worker state independence that a
+ * single-worker engine never reaches.
+ */
+T_DECLARE_CASE(transfer_multi_worker_all_complete)
+{
+	enum { NWORKERS = 4, NCONN = 8 };
+	static const char uplink[] = "multi-worker-uplink";
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct test_xfer_state state = { 0 };
+	int acc_peer[NCONN], dial_peer[NCONN];
+
+	state.num_sessions = NCONN;
+	struct transfer *restrict xfer = transfer_create(loop, NWORKERS);
+	T_CHECK(xfer != NULL);
+
+	for (int i = 0; i < NCONN; i++) {
+		int acc_fd = -1, dial_fd = -1;
+		make_socketpair(&acc_peer[i], &acc_fd);
+		make_socketpair(&dial_fd, &dial_peer[i]);
+		set_nonblock(acc_fd);
+		set_nonblock(dial_fd);
+
+		T_CHECK(send(acc_peer[i], uplink, sizeof(uplink), 0) ==
+			(ssize_t)sizeof(uplink));
+		T_CHECK(shutdown(acc_peer[i], SHUT_WR) == 0);
+		T_CHECK(shutdown(dial_peer[i], SHUT_WR) == 0);
+
+		T_CHECK(transfer_serve(
+			xfer, acc_fd, dial_fd,
+			&(struct transfer_opts){
+				.byt_up = &state.byt_up,
+				.byt_down = &state.byt_down,
+				.num_sessions = &state.num_sessions,
+			}));
+	}
+
+	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 2.0));
+	T_EXPECT_EQ(
+		(uintmax_t)state.byt_up, (uintmax_t)(NCONN * sizeof(uplink)));
+
+	for (int i = 0; i < NCONN; i++) {
+		char out[sizeof(uplink)] = { 0 };
+		size_t got = 0;
+		while (got < sizeof(out)) {
+			const ssize_t n = recv(
+				dial_peer[i], out + got, sizeof(out) - got, 0);
+			if (n <= 0) {
+				break;
+			}
+			got += (size_t)n;
+		}
+		T_EXPECT_EQ(got, sizeof(uplink));
+		T_EXPECT_MEMEQ(out, uplink, sizeof(uplink));
+	}
+
+	transfer_join(xfer);
+	for (int i = 0; i < NCONN; i++) {
+		socket_close(acc_peer[i]);
+		socket_close(dial_peer[i]);
+	}
 	ev_loop_destroy(loop);
 }
 
@@ -501,8 +658,8 @@ T_DECLARE_CASE(transfer_serve_join_rapid_cycles)
 		/* num_sessions must reach exactly zero, never negative. */
 		T_EXPECT_EQ((size_t)state.num_sessions, (size_t)0);
 
-		SOCKET_CLOSE_FD(acc_peer);
-		SOCKET_CLOSE_FD(dial_peer);
+		socket_close(acc_peer);
+		socket_close(dial_peer);
 	}
 
 	ev_loop_destroy(loop);
@@ -546,8 +703,8 @@ T_DECLARE_CASE(transfer_both_halves_close_normally)
 	T_EXPECT_EQ((size_t)state.num_sessions, (size_t)0);
 
 	transfer_join(xfer);
-	SOCKET_CLOSE_FD(acc_peer);
-	SOCKET_CLOSE_FD(dial_peer);
+	socket_close(acc_peer);
+	socket_close(dial_peer);
 	ev_loop_destroy(loop);
 }
 
@@ -620,9 +777,7 @@ bench_transfer_impl(struct testing_bench *restrict _b_, const bool use_splice)
 #endif
 		T_CHECK(transfer_serve(xfer, acc_fd, dial_fd, &opts));
 
-		while (state.num_sessions > 0) {
-			ev_run(loop, EVRUN_ONCE);
-		}
+		T_CHECK(test_wait_until(loop, xfer_finished, &state, 1.0));
 
 		char out[PAYLOAD_SZ];
 		size_t got = 0;
@@ -635,8 +790,8 @@ bench_transfer_impl(struct testing_bench *restrict _b_, const bool use_splice)
 			got += (size_t)n;
 		}
 
-		SOCKET_CLOSE_FD(acc_peer);
-		SOCKET_CLOSE_FD(dial_peer);
+		socket_close(acc_peer);
+		socket_close(dial_peer);
 	}
 
 	transfer_join(xfer);
@@ -672,6 +827,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(transfer_ctx_cancel_no_callback),
 	T_CASE(transfer_dst_error_finishes),
 	T_CASE(transfer_backpressure_completes),
+	T_CASE(transfer_recv_buffer_saturates_completes),
+	T_CASE(transfer_multi_worker_all_complete),
 	T_CASE(transfer_serve_join_rapid_cycles),
 	T_CASE(transfer_both_halves_close_normally),
 	T_BENCH(bench_transfer_recvsend),

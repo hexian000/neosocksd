@@ -73,8 +73,9 @@ return {
     -- memlimit = 64,
 
     -- ------------------------------------------------------------------ --
-    -- Authentication (pass --auth-required to enforce; credentials       --
-    -- are validated inside the ruleset)                                  --
+    -- Authentication (requires a build with Lua scripting support; pass  --
+    -- --auth-required to enforce; credentials are validated inside the   --
+    -- ruleset)                                                           --
     -- ------------------------------------------------------------------ --
 
     -- auth_required = false,

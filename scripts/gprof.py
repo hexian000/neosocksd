@@ -236,14 +236,26 @@ def remove_stale_profile_data(profile_build_dir: Path) -> int:
     return removed
 
 
-def collect_profile_files(profile_build_dir: Path) -> List[Path]:
-    paths: List[Path] = []
-    for pattern in ("proxy-gmon.*", "gmon.out", "gmon.out.*"):
-        for path in sorted(profile_build_dir.glob(pattern)):
-            if path.is_file():
-                paths.append(path)
+def relocate_root_profile_data(profile_build_dir: Path) -> List[Path]:
+    """Move any gmon.out(.*) a -pg binary dropped at the repo root (its
+    default write location when run with cwd=ROOT) under profile_build_dir,
+    so profiling output always ends up under build/ instead of littering
+    the working tree."""
+    relocated: List[Path] = []
     for pattern in ("gmon.out", "gmon.out.*"):
         for path in sorted(ROOT.glob(pattern)):
+            if not path.is_file():
+                continue
+            destination = profile_build_dir / path.name
+            path.rename(destination)
+            relocated.append(destination)
+    return relocated
+
+
+def collect_profile_files(profile_build_dir: Path) -> List[Path]:
+    paths: List[Path] = list(relocate_root_profile_data(profile_build_dir))
+    for pattern in ("proxy-gmon.*", "gmon.out", "gmon.out.*"):
+        for path in sorted(profile_build_dir.glob(pattern)):
             if path.is_file():
                 paths.append(path)
     seen = set()

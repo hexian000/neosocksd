@@ -49,6 +49,12 @@ Version: dev
 2. The maximum request body size is 4 MiB.
 3. Requests and responses support `deflate` compression when the appropriate headers are present (`Content-Encoding` on request bodies, `Accept-Encoding` on response bodies).
 
+> **Security:** This API has no built-in authentication. [/ruleset/invoke](#rulesetinvoke)
+> and [/ruleset/update](#rulesetupdate) execute or replace arbitrary Lua code,
+> so anyone able to reach this API can control ruleset behavior and thus
+> outbound traffic. Bind `--api` to loopback or a trusted, firewalled network —
+> never expose it to an untrusted network.
+
 ### /healthy
 
 - **Method**: Any

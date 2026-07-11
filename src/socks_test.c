@@ -18,12 +18,12 @@
 #include "conf.h"
 #include "dialer.h"
 #include "proto/socks.h"
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 #include "transfer.h"
 #include "util.h"
 
-#include "utils/arraysize.h"
+#include "meta/arraysize.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -85,7 +85,7 @@ static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
 	return wait_sec;
 }
 
-char *const proxy_protocol_str[PROTO_MAX] = {
+const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -1093,6 +1093,12 @@ T_DECLARE_CASE(socks5_valid_ipv4_request_connect_fail_rsp)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	stub_reset();
+	/* parse succeeds and a dialreq is built, so SOCKS5RSP_FAIL comes from
+	 * the dialer failing -- not from dialreq_new() returning NULL */
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.dialer_err = DIALER_ERR_PROXY_PROTO;
 	test_conf.auth_required = false;
 	test_server_init(&s);
 
@@ -1127,6 +1133,10 @@ T_DECLARE_CASE(socks5_userpass_domain_request_connect_fail_rsp)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.dialer_err = DIALER_ERR_PROXY_PROTO;
 	test_conf.auth_required = true;
 	test_server_init(&s);
 
@@ -1162,6 +1172,10 @@ T_DECLARE_CASE(socks5_valid_ipv6_request_connect_fail_rsp)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.dialer_err = DIALER_ERR_PROXY_PROTO;
 	test_conf.auth_required = false;
 	test_server_init(&s);
 
@@ -1399,7 +1413,6 @@ T_DECLARE_CASE(socks5_ruleset_reject_rsp_fail)
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
 	test_server_init(&s);
-	s.ruleset = (struct ruleset *)&test_conf;
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -1436,13 +1449,13 @@ T_DECLARE_CASE(socks5_ruleset_async_then_dialer_fail_noallowed)
 	STUB.dialer_mode = STUB_DIALER_FAIL;
 	STUB.dialer_err = DIALER_ERR_PROXY_AUTH;
 	STUB.dialer_syserr = 0;
+	G.ruleset = (struct ruleset *)&test_conf;
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 1.0;
 	test_server_init(&s);
-	s.ruleset = (struct ruleset *)&test_conf;
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 	drive_loop(loop);
@@ -1538,6 +1551,92 @@ T_DECLARE_CASE(socks5_dialer_success_transfer_finished)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Regression: a client that doesn't wait for the SOCKS reply before sending
+ * payload (e.g. TCP fast open) has its request and payload delivered in a
+ * single recv(). The auth negotiation message precedes the connect request
+ * in rbuf, so ctx->next has already advanced past it by the time socks5_req
+ * finishes -- the forwarded byte count must account for that offset, not
+ * just the connect request's own size, or pipelined bytes are computed from
+ * the wrong position (or a bogus, oversized count) and never reach upstream.
+ */
+T_DECLARE_CASE(socks5_pipelined_bytes_forwarded_to_upstream)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int listen_fd = -1, upstream_fd = -1, upstream_peer_fd = -1;
+	static const unsigned char payload[] = "hello upstream";
+	const unsigned char
+		req[] = {
+			0x05, 0x01, 0x00, /* auth negotiation: NOAUTH */
+			0x05, 0x01, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04,
+			0x00, 0x50, /* connect 1.2.3.4:80 */
+			'h',  'e',  'l',  'l',	'o',  ' ',  'u',  'p',
+			's',  't',  'r',  'e',	'a',  'm', /* pipelined payload */
+		};
+
+	/* socks5_sendrsp() calls getsockname() on the dialed fd to report a
+	 * bound address, and only understands AF_INET/AF_INET6 -- so the
+	 * stubbed upstream must be a real loopback TCP connection, not an
+	 * AF_UNIX socketpair. */
+	listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(listen_fd >= 0);
+	struct sockaddr_in listen_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	T_CHECK(bind(listen_fd, (struct sockaddr *)&listen_sa,
+		     sizeof(listen_sa)) == 0);
+	T_CHECK(listen(listen_fd, 1) == 0);
+	socklen_t listen_sa_len = sizeof(listen_sa);
+	T_CHECK(getsockname(
+			listen_fd, (struct sockaddr *)&listen_sa,
+			&listen_sa_len) == 0);
+	upstream_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(upstream_fd >= 0);
+	T_CHECK(connect(upstream_fd, (struct sockaddr *)&listen_sa,
+			sizeof(listen_sa)) == 0);
+	upstream_peer_fd = accept(listen_fd, NULL, NULL);
+	T_CHECK(upstream_peer_fd >= 0);
+	T_CHECK(close(listen_fd) == 0);
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+	STUB.dialer_success_fd = upstream_fd;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 6);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	}
+	{
+		unsigned char got[sizeof(payload) - 1] = { 0 };
+		const ssize_t n = recv_after_readable(
+			loop, upstream_peer_fd, got, sizeof(got),
+			TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT_EQ(n, (ssize_t)sizeof(got));
+		T_EXPECT(memcmp(got, payload, sizeof(got)) == 0);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	T_CHECK(close(upstream_peer_fd) == 0);
 	ev_loop_destroy(loop);
 }
 
@@ -2630,6 +2729,58 @@ T_DECLARE_CASE(socks4_split_request_connect_success_granted)
 }
 
 /*
+ * Regression: splitting a SOCKS4A request between the userid-terminating
+ * NULL and the domain name must not corrupt or misparse the domain. Before
+ * the fix, socks4_req() advanced ctx->next past the userid before the first
+ * call returned "need more data", so the second call -- re-entered from
+ * scratch, as socks_dispatch() has no SOCKS4/4A sub-state -- computed the
+ * domain offset/length relative to the wrong base.
+ */
+T_DECLARE_CASE(socks4a_split_after_userid_connect_success_granted)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	/* split exactly at the userid NULL / domain name boundary */
+	const unsigned char part1[] = {
+		SOCKS4, SOCKS4CMD_CONNECT,
+		0x01,	0xbb, /* port 443 */
+		0x00,	0x00,
+		0x00,	0x01, /* 0.0.0.1 -> SOCKS4A marker */
+		'u',	0x00, /* USERID "u" + NULL */
+	};
+	const unsigned char part2[] = {
+		'a', '.', 'c', 'o', 'm', 0x00, /* domain + NULL */
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload_split(
+		loop, &s, part1, sizeof(part1), part2, sizeof(part2), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
+		T_EXPECT_EQ(rsp[0], 0x00);
+		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
  * SOCKS4A: a DSTIP of 0.0.0.x signals that DSTADDR carries a domain name.
  * A successful dial must be granted with VN=0x00 and CD=0x5A.
  */
@@ -2679,7 +2830,138 @@ T_DECLARE_CASE(socks4a_domain_connect_success_granted)
  * SOCKS5 CONNECT with ATYP=DOMAIN and a zero-length domain name must be
  * rejected gracefully rather than crashing.
  */
-T_DECLARE_CASE(socks5_zero_length_domain_rejected)
+/* A successful CONNECT must send SOCKS5RSP_SUCCEEDED and start exactly one
+ * transfer (exercises the previously-dead stub_xfer capture). */
+T_DECLARE_CASE(socks5_connect_success_starts_transfer)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x00, 0x50,
+	};
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+	test_conf.auth_required = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 6);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	}
+	T_EXPECT_EQ(stub_xfer_ctx_count, 1);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* SOCKS5 CONNECT to a 255-byte (max) domain must parse without overrunning
+ * the char[255] domain buffer. */
+T_DECLARE_CASE(socks5_domain_max_length_parses)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	unsigned char req[3 + 4 + 1 + 255 + 2];
+	size_t off = 0;
+
+	req[off++] = 0x05;
+	req[off++] = 0x01;
+	req[off++] = 0x00; /* auth: 1 method, NOAUTH */
+	req[off++] = SOCKS5;
+	req[off++] = 0x01; /* CONNECT */
+	req[off++] = 0x00; /* reserved */
+	req[off++] = 0x03; /* ATYP domain */
+	req[off++] = 0xff; /* domain length 255 */
+	memset(req + off, 'a', 255);
+	off += 255;
+	req[off++] = 0x00;
+	req[off++] = 0x50; /* port 80 */
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	stub_reset();
+	STUB.dialer_mode = STUB_DIALER_NONE; /* dialreq_new NULL -> FAIL rsp */
+	test_conf.auth_required = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, off, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 6);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_FAIL);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* SOCKS4A with an over-255-byte domain must be rejected (not silently
+ * dropped) -- exercises socks4a_req's namelen > FQDN_MAX_LENGTH guard. */
+T_DECLARE_CASE(socks4a_overlong_domain_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	unsigned char req[8 + 1 + 300 + 1];
+	size_t off = 0;
+
+	req[off++] = 0x04;
+	req[off++] = 0x01; /* CONNECT */
+	req[off++] = 0x00;
+	req[off++] = 0x50; /* port 80 */
+	req[off++] = 0x00;
+	req[off++] = 0x00;
+	req[off++] = 0x00;
+	req[off++] = 0x01; /* 0.0.0.1 -> SOCKS4A domain follows */
+	req[off++] = 0x00; /* empty userid */
+	memset(req + off, 'a', 300);
+	off += 300;
+	req[off++] = 0x00; /* domain terminator */
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	stub_reset();
+	test_conf.auth_required = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, off, &peer_fd);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 2);
+		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(socks5_zero_length_domain_parses_then_fails)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
@@ -2705,13 +2987,13 @@ T_DECLARE_CASE(socks5_zero_length_domain_rejected)
 		/* Must at least reply with auth method selection (2 bytes)
 		 * plus a CONNECT response header (4+ bytes). */
 		T_EXPECT(n >= (ssize_t)(2 + 4));
-		/* Verify the server responded without crashing.  The exact
-		 * error code may vary depending on internal handling of
-		 * zero-length domains. */
-		T_EXPECT(rsp[0] == SOCKS5);
-		T_EXPECT(rsp[1] == SOCKS5AUTH_NOAUTH);
-		T_EXPECT(rsp[2] == SOCKS5);
-		T_EXPECT(rsp[3] != SOCKS5RSP_SUCCEEDED);
+		/* socks5_req() parses the zero-length domain without error; the
+		 * failure is deterministic SOCKS5RSP_FAIL from the default stub
+		 * (dialreq_new returns NULL), not a domain-length rejection. */
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_FAIL);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -2753,7 +3035,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks4_empty_userid_connect_success_granted),
 	T_CASE(socks4_split_request_connect_success_granted),
 	T_CASE(socks4a_domain_connect_success_granted),
+	T_CASE(socks4a_split_after_userid_connect_success_granted),
 	T_CASE(socks5_dialer_success_transfer_finished),
+	T_CASE(socks5_pipelined_bytes_forwarded_to_upstream),
 	T_CASE(socks5_dialer_success_connected_transition),
 	T_CASE(socks5_bind_disabled_cmdnosupport),
 	T_CASE(socks5_udp_disabled_cmdnosupport),
@@ -2766,7 +3050,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_udp_tcp_close_teardown),
 	T_CASE(socks5_udp_frag_two_parts),
 	T_CASE(socks5_udp_frag_discard_out_of_order),
-	T_CASE(socks5_zero_length_domain_rejected),
+	T_CASE(socks5_connect_success_starts_transfer),
+	T_CASE(socks5_domain_max_length_parses),
+	T_CASE(socks4a_overlong_domain_rejected),
+	T_CASE(socks5_zero_length_domain_parses_then_fails),
 	T_CASE(fuzz_socks),
 	T_SUITE_END,
 };

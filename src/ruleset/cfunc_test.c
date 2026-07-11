@@ -15,20 +15,20 @@
  * section below.
  */
 
+#include "cfunc.h"
+
 #include "conf.h"
 #include "dialer.h"
 #include "proto/codec.h"
-#include "ruleset.h"
 #include "ruleset/base.h"
-#include "ruleset/cfunc.h"
+#include "ruleset/ruleset.h"
 
 #include "io/stream.h"
 #include "utils/testing.h"
 
+#include <ev.h>
 #include <lauxlib.h>
 #include <lua.h>
-
-#include <ev.h>
 
 #include <arpa/inet.h>
 #include <stdbool.h>
@@ -242,7 +242,7 @@ int luaopen_zlib(lua_State *restrict L)
 	return 1;
 }
 
-char *const proxy_protocol_str[PROTO_MAX] = {
+const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -674,12 +674,267 @@ T_DECLARE_CASE(cfunc_rpcall_marshals_results_and_keeps_env_local)
 	T_EXPECT(strstr(result.result, "7") != NULL);
 	T_EXPECT(strstr(result.result, "ok") != NULL);
 	T_EXPECT(strstr(result.result, "false") != NULL);
+	free((void *)result.result);
 
 	lua_getglobal(r->L, "shadow");
 	T_EXPECT(lua_isnil(r->L, -1));
 	lua_pop(r->L, 1);
 
 	free_ruleset(loop, r);
+}
+
+/*
+ * Regression: rpcall_finish() used to store a raw pointer into a Lua
+ * string that lived only on the coroutine's stack. thread_call_k() pops
+ * it via lua_settop() right after rpcall_finish() returns -- dropping the
+ * sole reference -- while the deferred w_finish event reads the result
+ * later; any Lua GC cycle in that window could collect the string out
+ * from under the still-pending pointer. Force a full GC cycle right
+ * after the event fires (standing in for an intervening Lua allocation
+ * in production) to prove the result now survives it: it must be a
+ * malloc()'d copy, not a borrowed reference into Lua-owned memory.
+ */
+T_DECLARE_CASE(cfunc_rpcall_result_survives_gc_before_read)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+	struct ruleset_callback cb = { 0 };
+	struct ruleset_state *state = NULL;
+	struct rpcall_result result = {
+		.callback = &cb,
+	};
+
+	ev_init(&cb.w_finish, rpcall_finish_cb);
+	cb.w_finish.data = &result;
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_rpcall, 3, 1, &state,
+		string_stream_open(&stream, "return string.rep('x', 1000)"),
+		&cb));
+	lua_pop(r->L, 1);
+	T_EXPECT(wait_until(loop, rpcall_fired, &result, TEST_WAIT_SEC));
+	T_EXPECT(result.result != NULL);
+
+	/* If result.result still borrowed Lua-owned memory, this collects it
+	 * out from under the pointer; ASan would catch the reads below as a
+	 * use-after-free. */
+	lua_gc(r->L, LUA_GCCOLLECT, 0);
+
+	T_EXPECT(strstr(result.result, "return ") == result.result);
+	size_t x_count = 0;
+	for (size_t i = 0; i < result.resultlen; i++) {
+		if (result.result[i] == 'x') {
+			x_count++;
+		}
+	}
+	T_EXPECT_EQ(x_count, 1000);
+	free((void *)result.result);
+
+	free_ruleset(loop, r);
+}
+
+/*
+ * Regression: an rpcall whose return value fails to marshal (e.g. a
+ * function, which marshal() does not support) must still complete the
+ * caller's callback with an error result -- not silently drop it. Before
+ * the fix, marshal()'s error propagated straight out of rpcall_finish via
+ * lua_call(), skipping state_complete() entirely; the caller would then
+ * hang until an unrelated GC eventually collected the orphaned state.
+ */
+T_DECLARE_CASE(cfunc_rpcall_unmarshalable_result_reports_error)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+	struct ruleset_callback cb = { 0 };
+	struct ruleset_state *state = NULL;
+	struct rpcall_result result = {
+		.callback = &cb,
+	};
+
+	ev_init(&cb.w_finish, rpcall_finish_cb);
+	cb.w_finish.data = &result;
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_rpcall, 3, 1, &state,
+		string_stream_open(&stream, "return function() end"), &cb));
+	lua_pop(r->L, 1);
+	/* Must complete within the short timeout, not hang. */
+	T_EXPECT(wait_until(loop, rpcall_fired, &result, TEST_WAIT_SEC));
+	T_EXPECT_EQ(result.result, NULL);
+	T_EXPECT_EQ(result.resultlen, 0);
+
+	free_ruleset(loop, r);
+}
+
+T_DECLARE_CASE(cfunc_rpcall_chunk_error_reports_failure)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+	struct ruleset_callback cb = { 0 };
+	struct ruleset_state *state = NULL;
+	struct rpcall_result result = {
+		.callback = &cb,
+	};
+
+	ev_init(&cb.w_finish, rpcall_finish_cb);
+	cb.w_finish.data = &result;
+	/* a chunk that raises must surface as an rpcall failure, not a
+	 * marshalled (false, "boom") "successful" result */
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_rpcall, 3, 1, &state,
+		string_stream_open(&stream, "error('boom')"), &cb));
+	lua_pop(r->L, 1);
+	T_EXPECT(wait_until(loop, rpcall_fired, &result, TEST_WAIT_SEC));
+	T_EXPECT_EQ(result.result, NULL);
+	T_EXPECT_EQ(result.resultlen, 0);
+
+	free_ruleset(loop, r);
+}
+
+/*
+ * Regression: a client rpcall chunk with a syntax error makes lua_load()
+ * raise before aux_async() runs. The coroutine must be checked out only
+ * after that, so num_thread_active stays balanced -- otherwise a client
+ * submitting malformed code repeatedly inflates the gauge without bound and
+ * drops a coroutine from the idle pool on every attempt.
+ */
+T_DECLARE_CASE(cfunc_rpcall_syntax_error_does_not_leak_thread)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+	struct ruleset_callback cb = { 0 };
+	struct ruleset_state *state = NULL;
+	struct rpcall_result result = {
+		.callback = &cb,
+	};
+
+	ev_init(&cb.w_finish, rpcall_finish_cb);
+	cb.w_finish.data = &result;
+	T_EXPECT_EQ(r->vmstats.num_thread_active, 0);
+	/* "return (" fails to compile: cfunc_rpcall must raise (pcall reports
+	 * failure) without having checked out a coroutine */
+	T_EXPECT(!ruleset_pcall(
+		r, cfunc_rpcall, 3, 1, &state,
+		string_stream_open(&stream, "return ("), &cb));
+	T_EXPECT_EQ(r->vmstats.num_thread_active, 0);
+	/* the callback must never fire for a chunk that did not load */
+	T_EXPECT(!result.fired);
+
+	free_ruleset(loop, r);
+}
+
+T_DECLARE_CASE(cfunc_request_malformed_dial_spec_is_rejected)
+{
+	static const char ruleset_chunk[] =
+		"local ruleset = {} "
+		"function ruleset.resolve(request, username, password) return request end "
+		"function ruleset.route(request, username, password) return 'bogus' end "
+		"function ruleset.route6(request, username, password) return request end "
+		"return ruleset";
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset_callback cb = { 0 };
+	struct ruleset_state *state = NULL;
+	struct request_result result = {
+		.callback = &cb,
+	};
+
+	T_EXPECT(install_ruleset(r, ruleset_chunk));
+	ev_init(&cb.w_finish, request_finish_cb);
+	cb.w_finish.data = &result;
+	/* route() returns an address aux_todialreq cannot parse: the request
+	 * must degrade to "rejected" (req == NULL) rather than misbehave */
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_request, 6, 1, &state, "route", "127.0.0.1:80", NULL,
+		NULL, &cb));
+	lua_pop(r->L, 1);
+	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
+	T_EXPECT_EQ(result.req, NULL);
+
+	free_ruleset(loop, r);
+}
+
+T_DECLARE_CASE(cfunc_loadconfig_extracts_ruleset_and_settings)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_loadconfig, 1, 0,
+		string_stream_open(
+			&stream,
+			"return { ruleset = { tag = 1 }, memlimit = 4, traceback = true }")));
+	/* the `ruleset' table is promoted to the global and removed from the
+	 * config table; memlimit (MiB) and traceback land in r->config */
+	lua_getglobal(r->L, "ruleset");
+	T_EXPECT(lua_istable(r->L, -1));
+	lua_pop(r->L, 1);
+	T_EXPECT_EQ(r->config.memlimit_kb, (int_least32_t)(4 << 10));
+	T_EXPECT(r->config.traceback);
+
+	free_ruleset(loop, r);
+	free(conf.strings);
+}
+
+T_DECLARE_CASE(cfunc_loadconfig_rejects_non_table)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+
+	T_EXPECT(!ruleset_pcall(
+		r, cfunc_loadconfig, 1, 0,
+		string_stream_open(&stream, "return 42")));
+	T_EXPECT(strstr(ruleset_geterror(r, NULL), "expected table") != NULL);
+
+	free_ruleset(loop, r);
+	free(conf.strings);
+}
+
+T_DECLARE_CASE(cfunc_loadconfig_rejects_wrong_type_ruleset)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+
+	T_EXPECT(!ruleset_pcall(
+		r, cfunc_loadconfig, 1, 0,
+		string_stream_open(&stream, "return { ruleset = 5 }")));
+	T_EXPECT(strstr(ruleset_geterror(r, NULL), "must be a table") != NULL);
+
+	free_ruleset(loop, r);
+	free(conf.strings);
+}
+
+T_DECLARE_CASE(cfunc_loadconfig_rejects_memlimit_overflow)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+
+	/* memlimit is MiB; a value above INT_MAX>>10 would overflow the KiB
+	 * field and must be rejected */
+	T_EXPECT(!ruleset_pcall(
+		r, cfunc_loadconfig, 1, 0,
+		string_stream_open(&stream, "return { memlimit = 9999999 }")));
+	T_EXPECT(
+		strstr(ruleset_geterror(r, NULL), "memlimit too large") !=
+		NULL);
+
+	free_ruleset(loop, r);
+	free(conf.strings);
 }
 
 /* -------------------------------------------------------------------------
@@ -697,6 +952,15 @@ static const struct testing_suite suite[] = {
 	T_CASE(cfunc_request_accepts_and_rejects),
 	T_CASE(cfunc_request_reports_lua_error_via_callback),
 	T_CASE(cfunc_rpcall_marshals_results_and_keeps_env_local),
+	T_CASE(cfunc_rpcall_result_survives_gc_before_read),
+	T_CASE(cfunc_rpcall_unmarshalable_result_reports_error),
+	T_CASE(cfunc_rpcall_chunk_error_reports_failure),
+	T_CASE(cfunc_rpcall_syntax_error_does_not_leak_thread),
+	T_CASE(cfunc_request_malformed_dial_spec_is_rejected),
+	T_CASE(cfunc_loadconfig_extracts_ruleset_and_settings),
+	T_CASE(cfunc_loadconfig_rejects_non_table),
+	T_CASE(cfunc_loadconfig_rejects_wrong_type_ruleset),
+	T_CASE(cfunc_loadconfig_rejects_memlimit_overflow),
 	T_SUITE_END,
 };
 

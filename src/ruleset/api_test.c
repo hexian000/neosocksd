@@ -21,7 +21,7 @@
 #include "server.h"
 #include "util.h"
 
-#include "utils/arraysize.h"
+#include "meta/arraysize.h"
 #include "utils/testing.h"
 
 #include <lauxlib.h>
@@ -148,7 +148,7 @@ static bool parse_hostport(
 
 /* ---- dialer stubs (required by base.c's aux_todialreq) ---- */
 
-char *const proxy_protocol_str[PROTO_MAX] = {
+const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -412,7 +412,7 @@ T_DECLARE_CASE(api_parse_ipv6_valid)
 	T_EXPECT_EQ(lua_tointeger(L, 2), (lua_Integer)0);
 	T_EXPECT_EQ(lua_tointeger(L, 3), (lua_Integer)0);
 	T_EXPECT_EQ(lua_tointeger(L, 4), (lua_Integer)1);
-#else
+#else /* LUA_32BITS */
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), (lua_Integer)0);
 	T_EXPECT_EQ(lua_tointeger(L, 2), (lua_Integer)1);
@@ -571,19 +571,31 @@ T_DECLARE_CASE(api_stats_now_and_setinterval_use_ruleset_state)
 		.num_sessions = 3,
 		.byt_up = 11,
 		.byt_down = 22,
+		.started = 1,
 	};
 	ev_now_update(loop);
 
 	T_EXPECT(run_chunk(
 		L,
 		"local s = neosocksd.stats() "
-		"return s.num_sessions, s.num_dns_query, s.num_dns_success, s.bytes_allocated, s.num_object, neosocksd.now()"));
+		"return s.num_sessions, s.num_dns_query, s.num_dns_success, s.bytes_allocated, s.num_object, neosocksd.now(), s.uptime"));
 	T_EXPECT_EQ(lua_tointeger(L, 1), 3);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 7);
 	T_EXPECT_EQ(lua_tointeger(L, 3), 5);
 	T_EXPECT_EQ(lua_tointeger(L, 4), 4096);
 	T_EXPECT_EQ(lua_tointeger(L, 5), 33);
 	T_EXPECT(lua_tonumber(L, 6) > 0.0);
+	/* server started (started > 0): uptime is a real elapsed duration */
+	T_EXPECT(lua_tonumber(L, 7) > 0.0);
+	lua_settop(L, 0);
+
+	/* no server attached: uptime falls back to 0 instead of a raw
+	 * monotonic clock reading */
+	r.server = NULL;
+	T_EXPECT(run_chunk(L, "return neosocksd.stats().uptime"));
+	T_EXPECT(lua_tonumber(L, 1) == 0.0);
+	lua_settop(L, 0);
+	r.server = &server;
 
 	T_EXPECT(run_chunk(L, "return neosocksd.setinterval(-1)"));
 	T_EXPECT(ev_is_active(&r.w_idle));
@@ -613,7 +625,7 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
 		L,
 		"neosocksd.invoke('return 1', '127.0.0.1:80') "
 		"local co, err = neosocksd.async(function(ok, value) _G.async_ok = ok; _G.async_value = value end, function() return 7 end) "
-		"return co ~= nil, err == nil, _G.async_ok, _G.async_value"));
+		"return co ~= nil, type(co) == 'thread', err == nil, _G.async_ok, _G.async_value"));
 	T_EXPECT(G.invoke_called);
 	T_CHECK(G.req != NULL);
 	T_EXPECT_STREQ(G.payload, "return 1");
@@ -622,9 +634,11 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
 	T_EXPECT_EQ(G.conf, &conf);
 	T_EXPECT_EQ(G.resolver, r.resolver);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
+	/* async() must return the coroutine itself, not the leftover finish fn */
 	T_EXPECT(lua_toboolean(L, 2) != 0);
 	T_EXPECT(lua_toboolean(L, 3) != 0);
-	T_EXPECT_EQ(lua_tointeger(L, 4), 7);
+	T_EXPECT(lua_toboolean(L, 4) != 0);
+	T_EXPECT_EQ(lua_tointeger(L, 5), 7);
 	lua_settop(L, 0);
 
 	/* invoke with an unparseable target raises ERR_INVALID_ADDR */
@@ -639,6 +653,14 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
 	/* invoke with a nil target also raises ERR_INVALID_ADDR */
 	T_EXPECT(run_chunk(
 		L, "local ok = pcall(neosocksd.invoke, 'return 1', nil) "
+		   "return ok"));
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	lua_settop(L, 0);
+
+	/* invoke with no address argument at all raises ERR_INVALID_ADDR
+	 * instead of aborting via ASSERT(n > 0) in aux_todialreq */
+	T_EXPECT(run_chunk(
+		L, "local ok = pcall(neosocksd.invoke, 'return 1') "
 		   "return ok"));
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	lua_settop(L, 0);

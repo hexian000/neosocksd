@@ -9,6 +9,9 @@
 /**
  * @file gc.h
  * @brief Garbage collection utilities for reference-counted objects.
+ * @details None of the APIs are thread-safe; add external synchronization
+ * if objects are registered, referenced, or unreferenced from multiple
+ * threads.
  */
 
 struct gcbase;
@@ -29,7 +32,8 @@ struct gcbase {
 
 /**
  * @brief Registers an object for garbage collection.
- * @param obj The object to register.
+ * @param obj The object to register; must point to the start of its own
+ * heap allocation, as it is later freed directly via free().
  * @param finalizer The finalizer function, or NULL.
  */
 void gc_register(struct gcbase *restrict obj, gc_finalizer finalizer);
@@ -48,6 +52,12 @@ void gc_unref(struct gcbase *restrict obj);
 
 /**
  * @brief Finalizes all remaining garbage-collected objects.
+ * @details Disregards refs: every registered object is finalized and
+ * freed unconditionally, even those with outstanding references. This
+ * is intended for unconditional teardown (e.g. at process exit), not
+ * as a refcount-aware "collect what's now unreachable" pass; callers
+ * still holding a reference to a finalized object are left with a
+ * dangling pointer.
  * @return The number of objects finalized.
  */
 size_t gc_finalizeall(void);

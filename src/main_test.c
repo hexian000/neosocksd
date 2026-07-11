@@ -13,7 +13,7 @@
 #include "proto/socks.h"
 #include "resolver.h"
 #if WITH_RULESET
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #endif
 #include "server.h"
 #include "socks.h"
@@ -24,7 +24,6 @@
 #include "io/stream.h"
 #include "utils/buffer.h"
 #include "utils/gc.h"
-
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -50,13 +49,16 @@
  * stubbed; everything else is the real module. Shared fixtures live here too.
  * ---------------------------------------------------------------------- */
 
-static struct config test_conf = { .timeout = 0.2 };
+static const struct config test_conf = { .timeout = 0.2 };
 
-static struct config proxy_conf = { .timeout = 0.5 };
+/* Read-only fixture templates: start_proxy mutates the config it is given
+ * (its .listen/.http_listen), so callers copy these into a local first --
+ * const here makes that copy-before-use compiler-enforced. */
+static const struct config proxy_conf = { .timeout = 0.5 };
 
 /* proxy.timeout must outlive the refused connect so the proxy returns a SOCKS/
  * HTTP error; loopback ECONNREFUSED takes ~2s on MSYS2/Cygwin emulation. */
-static struct config connrefused_proxy_conf = { .timeout = 5.0 };
+static const struct config connrefused_proxy_conf = { .timeout = 5.0 };
 
 void api_serve(
 	struct server *s, struct ev_loop *loop, int accepted_fd,
@@ -475,6 +477,7 @@ T_DECLARE_CASE(dialreq_parse_rejects_overlong_proxy_uri)
 {
 	char uri[1100];
 	const int n = snprintf(uri, sizeof(uri), "socks5://");
+	T_CHECK(n > 0 && (size_t)n < sizeof(uri));
 	memset(uri + n, 'a', sizeof(uri) - 1 - (size_t)n);
 	uri[sizeof(uri) - 1] = '\0';
 	T_EXPECT_EQ(dialreq_parse("example.com:443", uri), NULL);
@@ -898,7 +901,8 @@ T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, false, &proxy_conf);
+	struct config pconf = proxy_conf;
+	proxy_port = start_proxy(&proxy_s, loop, false, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
@@ -952,8 +956,8 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port =
-		start_proxy(&proxy_s, loop, false, &connrefused_proxy_conf);
+	struct config pconf = connrefused_proxy_conf;
+	proxy_port = start_proxy(&proxy_s, loop, false, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)closed_port) > 0);
@@ -1109,7 +1113,8 @@ T_DECLARE_CASE(socks4a_connect_success_via_real_proxy)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, false, &proxy_conf);
+	struct config pconf = proxy_conf;
+	proxy_port = start_proxy(&proxy_s, loop, false, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
@@ -1167,7 +1172,8 @@ T_DECLARE_CASE(http_proxy_connect_success_via_real_proxy)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, true, &proxy_conf);
+	struct config pconf = proxy_conf;
+	proxy_port = start_proxy(&proxy_s, loop, true, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
@@ -1650,7 +1656,8 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, true, &connrefused_proxy_conf);
+	struct config pconf = connrefused_proxy_conf;
+	proxy_port = start_proxy(&proxy_s, loop, true, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)closed_port) > 0);
@@ -1782,7 +1789,8 @@ T_DECLARE_CASE(socks5_connect_ipv6_target_via_real_proxy)
 	char proxy_uri[64], target_addr[48];
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, false, &proxy_conf);
+	struct config pconf = proxy_conf;
+	proxy_port = start_proxy(&proxy_s, loop, false, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "[::1]:%u",
 			(unsigned)final_port) > 0);
@@ -1810,7 +1818,8 @@ T_DECLARE_CASE(http_proxy_connect_ipv6_target_via_real_proxy)
 	char proxy_uri[64], target_addr[48];
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, true, &proxy_conf);
+	struct config pconf = proxy_conf;
+	proxy_port = start_proxy(&proxy_s, loop, true, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "[::1]:%u",
 			(unsigned)final_port) > 0);
@@ -1838,7 +1847,8 @@ T_DECLARE_CASE(http_proxy_connect_with_credentials_via_real_proxy)
 	char proxy_uri[128], target_addr[32];
 
 	T_CHECK(loop != NULL);
-	proxy_port = start_proxy(&proxy_s, loop, true, &proxy_conf);
+	struct config pconf = proxy_conf;
+	proxy_port = start_proxy(&proxy_s, loop, true, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
@@ -2169,16 +2179,6 @@ static uint64_t fuzz_case_seed(const uint64_t tag)
 	return fuzz_seed ^ (tag * UINT64_C(0x9e3779b97f4a7c15));
 }
 
-static void close_checked(int *restrict fd)
-{
-	if (*fd < 0) {
-		return;
-	}
-	const int closing = *fd;
-	*fd = -1;
-	T_CHECK(close(closing) == 0);
-}
-
 /* Retry on transient EMFILE/ENFILE/ENOBUFS under `ctest -j` load. */
 static void make_socketpair(int sv[2])
 {
@@ -2305,8 +2305,8 @@ fuzz_http_conn(struct prng *restrict p, const enum http_conn_state mode)
 	}
 
 	VBUF_FREE(conn.cbuf);
-	close_checked(&sv[0]);
-	close_checked(&sv[1]);
+	close_if_open(&sv[0]);
+	close_if_open(&sv[1]);
 }
 
 static void fuzz_parsehdr_value(

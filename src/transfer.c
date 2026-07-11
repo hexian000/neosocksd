@@ -95,8 +95,10 @@ struct transfer_ctx {
 	/* which worker owns this ctx; set once at construction, then read-only */
 	struct xfer_worker *worker;
 #endif
-	/* intrusive singly-linked list; xfer thread only */
+	/* intrusive doubly-linked active list (xfer thread only): plink points
+	 * at whichever pointer references this node, for O(1) unlink */
 	struct transfer_ctx *next;
+	struct transfer_ctx **plink;
 	struct xfer_half up, down;
 	unsigned n_finished;
 	/* session counter to decrement when both halves finish */
@@ -129,11 +131,10 @@ struct xfer_worker {
 
 struct transfer {
 #if WITH_THREADS
-	struct ev_loop *main_loop;
 	unsigned int nworkers;
 	atomic_uint next_worker;
 	struct xfer_worker workers[];
-#else
+#else /* WITH_THREADS */
 	struct ev_loop *loop;
 	/* loop thread only; no locking needed */
 	struct transfer_ctx *active_list;
@@ -192,11 +193,11 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 void pipe_close(struct splice_pipe *restrict pipe)
 {
 	if (pipe->fd[0] != -1) {
-		SOCKET_CLOSE_FD(pipe->fd[0]);
+		socket_close(pipe->fd[0]);
 		pipe->fd[0] = -1;
 	}
 	if (pipe->fd[1] != -1) {
-		SOCKET_CLOSE_FD(pipe->fd[1]);
+		socket_close(pipe->fd[1]);
 		pipe->fd[1] = -1;
 	}
 }
@@ -214,12 +215,33 @@ static void pipe_put(struct splice_pipe *restrict pipe)
 
 /* ---------------------------------------------------------------- set_state */
 
-/* Xfer-thread only. Self-frees when both halves reach XFER_FINISHED. */
-static void set_state(
-	struct xfer_half *restrict h, struct ev_loop *restrict loop,
-	const enum xfer_half_state new_state)
+/* Release both splice pipes, close both source fds, decrement the session
+ * counter, and free the context. Shared by the normal-completion and
+ * shutdown-cancel teardown paths. */
+static void release_ctx(struct transfer_ctx *restrict t)
 {
-	(void)loop;
+#if WITH_SPLICE
+	if (t->up.pipe.fd[0] != -1) {
+		pipe_put(&t->up.pipe);
+	}
+	if (t->down.pipe.fd[0] != -1) {
+		pipe_put(&t->down.pipe);
+	}
+#endif
+	socket_close(t->up.src_fd);
+	socket_close(t->down.src_fd);
+#if WITH_THREADS
+	atomic_fetch_sub_explicit(t->num_sessions, 1, memory_order_relaxed);
+#else
+	(*t->num_sessions)--;
+#endif
+	free(t);
+}
+
+/* Xfer-thread only. Self-frees when both halves reach XFER_FINISHED. */
+static void
+set_state(struct xfer_half *restrict h, const enum xfer_half_state new_state)
+{
 	if (h->state == new_state) {
 		return;
 	}
@@ -238,36 +260,13 @@ static void set_state(
 		return;
 	}
 
-#if WITH_SPLICE
-	if (t->up.pipe.fd[0] != -1) {
-		pipe_put(&t->up.pipe);
+	/* Both halves finished: unlink from the active list in O(1), then
+	 * release everything. */
+	*t->plink = t->next;
+	if (t->next != NULL) {
+		t->next->plink = t->plink;
 	}
-	if (t->down.pipe.fd[0] != -1) {
-		pipe_put(&t->down.pipe);
-	}
-#endif
-
-	/* Both halves finished: close fds, decrement counter, free. */
-	SOCKET_CLOSE_FD(t->up.src_fd);
-	SOCKET_CLOSE_FD(t->down.src_fd);
-	/* Remove from active_list. */
-#if WITH_THREADS
-	struct transfer_ctx **pp = &t->worker->active_list;
-#else
-	struct transfer_ctx **pp = &t->xfer->active_list;
-#endif
-	for (; *pp != NULL; pp = &(*pp)->next) {
-		if (*pp == t) {
-			*pp = t->next;
-			break;
-		}
-	}
-#if WITH_THREADS
-	atomic_fetch_sub_explicit(t->num_sessions, 1, memory_order_relaxed);
-#else
-	(*t->num_sessions)--;
-#endif
-	free(t);
+	release_ctx(t);
 }
 
 /* ---------------------------------------------------------------- xfer_half I/O */
@@ -359,7 +358,7 @@ static void update_stats(
 		atomic_fetch_add_explicit(
 			byt, (uint_least64_t)nbsend, memory_order_relaxed);
 	}
-#else
+#else /* WITH_THREADS */
 	uint_least64_t *restrict byt = h->byt_transferred;
 	if (byt != NULL) {
 		*byt += (uint_least64_t)nbsend;
@@ -431,7 +430,7 @@ transfer_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 	default:
 		FAILMSGF("unexpected state: %d", state);
 	}
-	set_state(h, loop, state);
+	set_state(h, state);
 }
 
 #if WITH_SPLICE
@@ -547,7 +546,7 @@ pipe_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 	default:
 		FAILMSGF("unexpected state: %d", state);
 	}
-	set_state(h, loop, state);
+	set_state(h, state);
 }
 
 #endif /* WITH_SPLICE */
@@ -560,16 +559,19 @@ static void task_xfer_start(void *data)
 #if WITH_THREADS
 	struct xfer_worker *restrict worker = t->worker;
 	struct ev_loop *restrict loop = worker->loop;
-	/* Prepend to active list before starting I/O watchers. */
-	t->next = worker->active_list;
-	worker->active_list = t;
-#else
+	struct transfer_ctx **restrict head = &worker->active_list;
+#else /* WITH_THREADS */
 	struct transfer *restrict xfer = t->xfer;
 	struct ev_loop *restrict loop = xfer->loop;
-	/* Prepend to active list before starting I/O watchers. */
-	t->next = xfer->active_list;
-	xfer->active_list = t;
+	struct transfer_ctx **restrict head = &xfer->active_list;
 #endif /* WITH_THREADS */
+	/* Prepend to the active list before starting I/O watchers. */
+	t->next = *head;
+	if (t->next != NULL) {
+		t->next->plink = &t->next;
+	}
+	t->plink = head;
+	*head = t;
 
 #if WITH_SPLICE
 	if (t->up.use_splice) {
@@ -598,24 +600,7 @@ task_xfer_stop(struct ev_loop *restrict loop, struct transfer_ctx *restrict t)
 {
 	ev_io_stop(loop, &t->up.w_socket);
 	ev_io_stop(loop, &t->down.w_socket);
-
-#if WITH_SPLICE
-	if (t->up.pipe.fd[0] != -1) {
-		pipe_put(&t->up.pipe);
-	}
-	if (t->down.pipe.fd[0] != -1) {
-		pipe_put(&t->down.pipe);
-	}
-#endif /* WITH_SPLICE */
-
-	SOCKET_CLOSE_FD(t->up.src_fd);
-	SOCKET_CLOSE_FD(t->down.src_fd);
-#if WITH_THREADS
-	atomic_fetch_sub_explicit(t->num_sessions, 1, memory_order_relaxed);
-#else
-	(*t->num_sessions)--;
-#endif
-	free(t);
+	release_ctx(t);
 }
 
 /* ---------------------------------------------------------------- engine callbacks */
@@ -669,7 +654,7 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 	}
 
 #if WITH_THREADS
-	xfer->main_loop = loop;
+	(void)loop; /* workers run their own loops; the caller's is not used */
 	xfer->nworkers = nworkers;
 	atomic_init(&xfer->next_worker, 0u);
 	memset(xfer->workers, 0, nworkers * sizeof(struct xfer_worker));
@@ -710,7 +695,7 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 		}
 		w->thread_started = true;
 	}
-#else
+#else /* WITH_THREADS */
 	(void)nworkers;
 	xfer->loop = loop;
 	xfer->active_list = NULL;
@@ -742,7 +727,7 @@ void transfer_join(struct transfer *restrict xfer)
 			dispatcher_destroy(w->disp);
 		}
 	}
-#else
+#else /* WITH_THREADS */
 	/* Cancel any in-flight transfers. */
 	for (struct transfer_ctx *t = xfer->active_list; t != NULL;) {
 		struct transfer_ctx *next = t->next;
@@ -836,7 +821,7 @@ bool transfer_serve(
 		return false;
 	}
 	ev_async_send(worker->loop, &worker->w_invoke);
-#else
+#else /* WITH_THREADS */
 	task_xfer_start(t);
 #endif /* WITH_THREADS */
 	return true;

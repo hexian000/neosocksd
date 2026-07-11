@@ -105,6 +105,53 @@ T_DECLARE_CASE(regex_compile_invalid)
 	lua_close(L);
 }
 
+/*
+ * Regression: an embedded NUL in the pattern must be rejected, not silently
+ * truncate regcomp()'s view of the pattern. Pre-fix, regcomp() only ever
+ * saw "a" (the bytes up to the NUL) via the NUL-terminated C string, so
+ * this compiled successfully instead of erroring.
+ */
+T_DECLARE_CASE(regex_compile_rejects_embedded_nul)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	const int status_load = luaL_loadstring(
+		L, "local pattern = 'a' .. string.char(0) .. 'b' "
+		   "local ok, err = pcall(regex.compile, pattern) "
+		   "return ok, type(err)");
+	T_EXPECT_EQ(status_load, LUA_OK);
+	const int status_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(status_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
+
+	lua_close(L);
+}
+
+/*
+ * Regression: compiling many invalid patterns must not leak the partial
+ * internal state some libc regex implementations allocate before rejecting
+ * a pattern (only observable under a leak-detecting build, e.g. `m.sh d`).
+ */
+T_DECLARE_CASE(regex_compile_invalid_repeated_no_leak)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "for _ = 1, 100 do "
+		   "  local ok = pcall(regex.compile, '[') "
+		   "  assert(not ok) "
+		   "end "
+		   "return true"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(regex_find_match)
 {
 	lua_State *restrict L = new_lua();
@@ -151,6 +198,138 @@ T_DECLARE_CASE(regex_find_with_init)
 	T_EXPECT_EQ(lua_tointeger(L, 4), 7);
 	T_EXPECT_EQ(lua_tointeger(L, 5), 7);
 	T_EXPECT_EQ(lua_tointeger(L, 6), 8);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(regex_find_init_out_of_range)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* init past the end clamps to end-of-string: no match, no results */
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('ab+') "
+		   "return regex.find(r, 'ab abbb', 100)"));
+	T_EXPECT_EQ(lua_gettop(L), 0);
+
+	/* init 0 clamps to the start: matches from position 1 */
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('ab+') "
+		   "return (regex.find(r, 'ab abbb', 0))"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT_EQ(lua_tointeger(L, 1), 1);
+
+	lua_close(L);
+}
+
+/*
+ * Regression: an embedded NUL in the subject must be rejected, not silently
+ * truncate regexec()'s view of the subject. Pre-fix, regexec() only ever
+ * saw "a" (the bytes up to the NUL), so an anchored '^a$' pattern matched a
+ * 3-byte subject "a\0b" as if it were just "a".
+ */
+T_DECLARE_CASE(regex_find_rejects_embedded_nul_subject)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	const int status_load = luaL_loadstring(
+		L, "local r = regex.compile('^a$') "
+		   "local subject = 'a' .. string.char(0) .. 'b' "
+		   "local ok, err = pcall(regex.find, r, subject) "
+		   "return ok, type(err)");
+	T_EXPECT_EQ(status_load, LUA_OK);
+	const int status_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(status_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(regex_match_rejects_embedded_nul_subject)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	const int status_load = luaL_loadstring(
+		L, "local r = regex.compile('^a$') "
+		   "local subject = 'a' .. string.char(0) .. 'b' "
+		   "local ok, err = pcall(regex.match, r, subject) "
+		   "return ok, type(err)");
+	T_EXPECT_EQ(status_load, LUA_OK);
+	const int status_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(status_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(regex_gmatch_rejects_embedded_nul_subject)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* the subject is NUL-checked up front by regex.gmatch (once, not per
+	 * iteration), so the rejection surfaces at iterator creation */
+	const int status_load = luaL_loadstring(
+		L, "local r = regex.compile('.') "
+		   "local subject = 'a' .. string.char(0) .. 'b' "
+		   "local ok, err = pcall(regex.gmatch, r, subject) "
+		   "return ok, type(err)");
+	T_EXPECT_EQ(status_load, LUA_OK);
+	const int status_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(status_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
+
+	lua_close(L);
+}
+
+/* Regression: gmatch's exhausted-iterator sentinel (LUA_MININTEGER) must not
+ * collide with a huge-negative init; the init is normalized to the string
+ * start, so iteration proceeds instead of returning nothing. */
+T_DECLARE_CASE(regex_gmatch_mininteger_init_iterates)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('a') "
+		   "local n = 0 "
+		   "for _ in regex.gmatch(r, 'aaa', math.mininteger) do "
+		   "  n = n + 1 "
+		   "end "
+		   "return n == 3"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+
+	lua_close(L);
+}
+
+/* Regression: gmatch's up-front embedded-NUL scan must cover only the active
+ * suffix [init, len), matching find()/match(); a NUL *before* the init start
+ * offset is never seen by regexec() and must not abort iteration. */
+T_DECLARE_CASE(regex_gmatch_init_past_leading_nul_iterates)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('a') "
+		   "local subject = string.char(0) .. 'aa' "
+		   "local n = 0 "
+		   "for _ in regex.gmatch(r, subject, 2) do "
+		   "  n = n + 1 "
+		   "end "
+		   "return n == 2"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
 
 	lua_close(L);
 }
@@ -203,6 +382,36 @@ T_DECLARE_CASE(regex_gmatch_iterator)
 	lua_close(L);
 }
 
+/*
+ * Regression: a pattern that can match empty (here, always-empty) must not
+ * loop forever -- Lua's own string.gmatch advances by at least one byte
+ * after a zero-width match, and this port must too. The loop bound (20) is
+ * a safety margin, not a reliance on hanging: even against the pre-fix
+ * code this test terminates promptly (it just never observes `done`).
+ */
+T_DECLARE_CASE(regex_gmatch_empty_match_terminates)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('x*') "
+		   "local it = regex.gmatch(r, 'abc') "
+		   "local count, done = 0, false "
+		   "for _ = 1, 20 do "
+		   "  local m = it() "
+		   "  if m == nil then done = true break end "
+		   "  count = count + 1 "
+		   "end "
+		   "return done, count"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+	/* "abc" has 4 positions (0,1,2,3) where "x*" matches empty. */
+	T_EXPECT_EQ(lua_tointeger(L, 2), 4);
+
+	lua_close(L);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -212,11 +421,25 @@ T_DECLARE_CASE(regex_gmatch_iterator)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
-	T_CASE(regex_module_opens),    T_CASE(regex_compile_basic),
-	T_CASE(regex_compile_invalid), T_CASE(regex_find_match),
-	T_CASE(regex_find_nomatch),    T_CASE(regex_find_with_init),
-	T_CASE(regex_match_captures),  T_CASE(regex_match_nomatch),
-	T_CASE(regex_gmatch_iterator), T_SUITE_END,
+	T_CASE(regex_module_opens),
+	T_CASE(regex_compile_basic),
+	T_CASE(regex_compile_invalid),
+	T_CASE(regex_compile_rejects_embedded_nul),
+	T_CASE(regex_compile_invalid_repeated_no_leak),
+	T_CASE(regex_find_match),
+	T_CASE(regex_find_nomatch),
+	T_CASE(regex_find_with_init),
+	T_CASE(regex_find_init_out_of_range),
+	T_CASE(regex_find_rejects_embedded_nul_subject),
+	T_CASE(regex_match_rejects_embedded_nul_subject),
+	T_CASE(regex_gmatch_rejects_embedded_nul_subject),
+	T_CASE(regex_gmatch_mininteger_init_iterates),
+	T_CASE(regex_gmatch_init_past_leading_nul_iterates),
+	T_CASE(regex_match_captures),
+	T_CASE(regex_match_nomatch),
+	T_CASE(regex_gmatch_iterator),
+	T_CASE(regex_gmatch_empty_match_terminates),
+	T_SUITE_END,
 };
 
 int main(int argc, char **argv)

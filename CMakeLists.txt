@@ -26,6 +26,9 @@ function(get_git_version)
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         OUTPUT_VARIABLE GIT_VERSION
         OUTPUT_STRIP_TRAILING_WHITESPACE)
+    # 2+ tags on HEAD means one line per tag; a raw embedded newline would
+    # break the C string literal this is substituted into (version.c.in).
+    string(REPLACE "\n" ", " GIT_VERSION "${GIT_VERSION}")
     if("${GIT_VERSION}" STREQUAL "")
         execute_process(
             COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
@@ -49,8 +52,6 @@ if("${PROJECT_VERSION_STRING}" STREQUAL "")
     get_git_version()
 endif()
 message(STATUS "Project version: ${PROJECT_VERSION_STRING}")
-
-include(CTest)
 
 option(ENABLE_SANITIZERS "Enable address, leak, undefined sanitizer" OFF)
 option(BUILD_STATIC "Build a static executable" OFF)
@@ -144,6 +145,8 @@ if(ENABLE_THREADS)
     find_package(Threads)
     if(Threads_FOUND)
         set(WITH_THREADS TRUE)
+    else()
+        message(WARNING "threads not found, thread offloading is unavailable")
     endif()
 endif()
 

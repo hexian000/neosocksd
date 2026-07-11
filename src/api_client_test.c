@@ -11,6 +11,7 @@
 #include "util.h"
 
 #include "io/stream.h"
+#include "utils/buffer.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -60,12 +61,14 @@ struct cb_result {
 struct stub_state {
 	bool dialer_defer;
 	int dialer_result_fd;
+	/* used on the 2nd dialer_do call instead of dialer_result_fd, when
+	 * >= 0 -- lets a test drive a stale-connection retry to a second fd */
+	int dialer_result_fd2;
 	enum dialer_error dialer_err;
 	int dialer_syserr;
 	int_least32_t dialer_do_calls;
 	int_least32_t dialer_cancel_calls;
 	int_least32_t dialreq_free_calls;
-	bool close_fd_on_conn_put;
 	struct ev_loop *pending_loop;
 	struct dialer *pending_dialer;
 };
@@ -73,12 +76,12 @@ struct stub_state {
 static struct stub_state S = {
 	.dialer_defer = false,
 	.dialer_result_fd = -1,
+	.dialer_result_fd2 = -1,
 	.dialer_err = DIALER_ERR_CONNECT,
 	.dialer_syserr = ECONNREFUSED,
 	.dialer_do_calls = 0,
 	.dialer_cancel_calls = 0,
 	.dialreq_free_calls = 0,
-	.close_fd_on_conn_put = true,
 	.pending_loop = NULL,
 	.pending_dialer = NULL,
 };
@@ -87,12 +90,12 @@ static void reset_stub_state(void)
 {
 	S.dialer_defer = false;
 	S.dialer_result_fd = -1;
+	S.dialer_result_fd2 = -1;
 	S.dialer_err = DIALER_ERR_CONNECT;
 	S.dialer_syserr = ECONNREFUSED;
 	S.dialer_do_calls = 0;
 	S.dialer_cancel_calls = 0;
 	S.dialreq_free_calls = 0;
-	S.close_fd_on_conn_put = true;
 	S.pending_loop = NULL;
 	S.pending_dialer = NULL;
 	test_conf.timeout = 1.0;
@@ -343,6 +346,30 @@ static bool send_response(
 	return true;
 }
 
+/* Like send_response but adds a Content-Encoding header; the body is written
+ * verbatim (already encoded by the caller). */
+static bool send_encoded_response(
+	const int fd, const char *content_type, const char *encoding,
+	const void *body, const size_t body_len)
+{
+	char hdr[256];
+	const int n = snprintf(
+		hdr, sizeof(hdr),
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: %s\r\n"
+		"Content-Encoding: %s\r\n"
+		"Connection: close\r\n"
+		"Content-Length: %zu\r\n\r\n",
+		content_type, encoding, body_len);
+	if (n <= 0 || (size_t)n >= sizeof(hdr)) {
+		return false;
+	}
+	if (!write_all(fd, hdr, (size_t)n)) {
+		return false;
+	}
+	return body_len == 0 || write_all(fd, body, body_len);
+}
+
 static struct dialreq *new_test_dialreq(void)
 {
 	return calloc(1, sizeof(struct dialreq));
@@ -380,7 +407,10 @@ void dialer_do(
 		S.pending_dialer = d;
 		return;
 	}
-	d->finish_cb.func(loop, d->finish_cb.data, S.dialer_result_fd);
+	const int fd = (S.dialer_do_calls == 2 && S.dialer_result_fd2 >= 0) ?
+			       S.dialer_result_fd2 :
+			       S.dialer_result_fd;
+	d->finish_cb.func(loop, d->finish_cb.data, fd);
 }
 
 void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
@@ -396,13 +426,7 @@ void dialreq_free(struct dialreq *req)
 	free(req);
 }
 
-bool check_rpcall_mime(char *mime_type)
-{
-	if (mime_type == NULL) {
-		return false;
-	}
-	return strcasecmp(mime_type, MIME_RPCALL) == 0;
-}
+/* check_rpcall_mime is the real proto/http.c implementation (linked in). */
 
 /* -------------------------------------------------------------------------
  * fuzz - none.
@@ -455,6 +479,53 @@ T_DECLARE_CASE(rpcall_success_returns_stream)
 	T_EXPECT(out.has_stream);
 	T_EXPECT_EQ(out.stream_len, sizeof(rsp_body) - 1);
 	T_EXPECT_MEMEQ(out.stream_buf, rsp_body, sizeof(rsp_body) - 1);
+
+	T_CHECK(close(sv[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(rpcall_success_empty_body_ok)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct cb_result out = { 0 };
+	struct api_client_ctx *ctx = NULL;
+	struct dialreq *req = NULL;
+	int sv[2] = { -1, -1 };
+	char reqbuf[512] = { 0 };
+	static const char payload[] = "{}";
+	const struct api_client_cb cb = {
+		.func = capture_cb,
+		.data = &out,
+	};
+
+	T_CHECK(loop != NULL);
+	reset_stub_state();
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	T_CHECK(fd_set_nonblock(sv[1]));
+	S.dialer_result_fd = sv[0];
+	req = new_test_dialreq();
+	T_CHECK(req != NULL);
+
+	T_CHECK(api_client_rpcall(
+		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
+		NULL, NULL));
+	T_CHECK(ctx != NULL);
+	T_CHECK(read_request_headers(
+		loop, sv[1], reqbuf, sizeof(reqbuf), TEST_WAIT_RESPONSE_SEC));
+	T_EXPECT(strstr(reqbuf, "POST /ruleset/rpcall HTTP/1.1") != NULL);
+	/* Regression: a 2xx rpcall response with Content-Length: 0 leaves the
+	 * content vbuffer unallocated (NULL); this must not crash the caller. */
+	T_CHECK(send_response(
+		sv[1], "200 OK", MIME_RPCALL, "keep-alive", NULL, 0));
+	T_CHECK(test_wait_until(
+		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
+
+	T_EXPECT(out.called);
+	T_EXPECT_EQ(out.errlen, 0);
+	T_EXPECT(out.errmsg[0] == '\0');
+	T_EXPECT(out.has_stream);
+	T_EXPECT_EQ(out.stream_len, 0);
 
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
@@ -703,13 +774,17 @@ T_DECLARE_CASE(cancel_during_connect_calls_dialer_cancel)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(connection_keep_alive_recycled)
+/* The client never pools connections, so every request advertises
+ * Connection: close and the exchange completes regardless of what the peer
+ * offers in its own Connection header. */
+T_DECLARE_CASE(request_advertises_connection_close)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct cb_result out = { 0 };
 	struct api_client_ctx *ctx = NULL;
 	struct dialreq *req = NULL;
 	int sv[2] = { -1, -1 };
+	char reqbuf[512] = { 0 };
 	static const char payload[] = "{}";
 	static const char rsp_body[] = "ok";
 	const struct api_client_cb cb = {
@@ -729,25 +804,86 @@ T_DECLARE_CASE(connection_keep_alive_recycled)
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
 		NULL, NULL));
+	T_CHECK(read_request_headers(
+		loop, sv[1], reqbuf, sizeof(reqbuf), TEST_WAIT_RESPONSE_SEC));
+	T_EXPECT(strstr(reqbuf, "Connection: close") != NULL);
+	T_EXPECT(strstr(reqbuf, "keep-alive") == NULL);
+
+	/* peer offers keep-alive; the client must still finish normally */
 	T_CHECK(send_response(
 		sv[1], "200 OK", MIME_RPCALL, "keep-alive", rsp_body,
 		sizeof(rsp_body) - 1));
 	T_CHECK(test_wait_until(
 		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
 	T_EXPECT(out.called);
+	T_EXPECT_EQ(out.errlen, 0);
 
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(connection_close_not_recycled)
+/*
+ * Regression: send_cb's generic write-error path builds the error message in a
+ * stack buffer and finishes synchronously, but api_client defers the callback
+ * to an ev_idle, so the message must be copied into ctx-owned storage before
+ * that stack frame unwinds. Dial to two sockets whose peers are both closed:
+ * the first write fails with EPIPE and retries, the retry redials to a second
+ * dead-peer fd and fails with the retry flag set, so the generic path runs.
+ * A dangling read in process_cb would be caught here under the sanitizers.
+ */
+T_DECLARE_CASE(rpcall_write_error_reports_message)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct cb_result out = { 0 };
+	struct api_client_ctx *ctx = NULL;
+	struct dialreq *req = NULL;
+	int sv1[2] = { -1, -1 };
+	int sv2[2] = { -1, -1 };
+	static const char payload[] = "{}";
+	const struct api_client_cb cb = {
+		.func = capture_cb,
+		.data = &out,
+	};
+
+	T_CHECK(loop != NULL);
+	reset_stub_state();
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv1) == 0);
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv2) == 0);
+	T_CHECK(fd_set_nonblock(sv1[0]));
+	T_CHECK(fd_set_nonblock(sv2[0]));
+	T_CHECK(close(sv1[1]) == 0);
+	T_CHECK(close(sv2[1]) == 0);
+	S.dialer_result_fd = sv1[0];
+	S.dialer_result_fd2 = sv2[0];
+	req = new_test_dialreq();
+	T_CHECK(req != NULL);
+
+	T_CHECK(api_client_rpcall(
+		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
+		NULL, NULL));
+	T_CHECK(test_wait_until(
+		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
+	T_EXPECT(out.called);
+	T_EXPECT(out.errlen > 0);
+	T_EXPECT(out.errmsg[0] != '\0');
+	T_EXPECT_EQ(S.dialer_do_calls, 2);
+
+	ev_loop_destroy(loop);
+}
+
+/* A payload >= RPCALL_COMPRESS_THRESHOLD must be deflate-compressed on the
+ * wire (make_request's content_writer path) and advertised via
+ * Content-Encoding. Every other case sends "{}" (below the threshold), so
+ * this compression path was unexercised. */
+T_DECLARE_CASE(rpcall_large_payload_is_deflate_compressed)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct cb_result out = { 0 };
 	struct api_client_ctx *ctx = NULL;
 	struct dialreq *req = NULL;
 	int sv[2] = { -1, -1 };
-	static const char payload[] = "{}";
+	char reqbuf[1024] = { 0 };
+	char payload[RPCALL_COMPRESS_THRESHOLD + 64];
 	static const char rsp_body[] = "ok";
 	const struct api_client_cb cb = {
 		.func = capture_cb,
@@ -756,6 +892,68 @@ T_DECLARE_CASE(connection_close_not_recycled)
 
 	T_CHECK(loop != NULL);
 	reset_stub_state();
+	/* highly compressible payload above the threshold */
+	memset(payload, 'a', sizeof(payload));
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	T_CHECK(fd_set_nonblock(sv[1]));
+	S.dialer_result_fd = sv[0];
+	req = new_test_dialreq();
+	T_CHECK(req != NULL);
+
+	T_CHECK(api_client_rpcall(
+		loop, &ctx, req, payload, sizeof(payload), &cb, &test_conf,
+		NULL, NULL));
+	T_CHECK(read_request_headers(
+		loop, sv[1], reqbuf, sizeof(reqbuf), TEST_WAIT_RESPONSE_SEC));
+	T_EXPECT(strstr(reqbuf, "POST /ruleset/rpcall HTTP/1.1") != NULL);
+	T_EXPECT(strstr(reqbuf, "Content-Encoding: deflate") != NULL);
+
+	/* respond so the exchange completes cleanly */
+	T_CHECK(send_response(
+		sv[1], "200 OK", MIME_RPCALL, "close", rsp_body,
+		sizeof(rsp_body) - 1));
+	T_CHECK(test_wait_until(
+		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
+	T_EXPECT(out.called);
+	T_EXPECT_EQ(out.errlen, 0);
+
+	T_CHECK(close(sv[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A Content-Encoding: deflate response body must be decoded before reaching
+ * the caller (on_http_client_done's content_reader path). Every other case
+ * returns identity-encoded bodies, so this decode path was unexercised. */
+T_DECLARE_CASE(rpcall_deflate_response_is_decoded)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct cb_result out = { 0 };
+	struct api_client_ctx *ctx = NULL;
+	struct dialreq *req = NULL;
+	int sv[2] = { -1, -1 };
+	static const char payload[] = "{}";
+	static const char plain[] = "decoded rpcall response body";
+	struct vbuffer *cbuf = NULL;
+	const struct api_client_cb cb = {
+		.func = capture_cb,
+		.data = &out,
+	};
+
+	T_CHECK(loop != NULL);
+	reset_stub_state();
+
+	/* deflate-compress the known plaintext to use as the response body */
+	struct stream *w =
+		content_writer(&cbuf, sizeof(plain) - 1, CENCODING_DEFLATE);
+	T_CHECK(w != NULL);
+	size_t wn = sizeof(plain) - 1;
+	T_CHECK(stream_write(w, plain, &wn) == 0);
+	T_CHECK(wn == sizeof(plain) - 1);
+	T_CHECK(stream_close(w) == 0);
+	T_CHECK(cbuf != NULL);
+	T_CHECK(VBUF_LEN(cbuf) > 0);
+
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	T_CHECK(fd_set_nonblock(sv[1]));
@@ -766,13 +964,19 @@ T_DECLARE_CASE(connection_close_not_recycled)
 	T_CHECK(api_client_rpcall(
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
 		NULL, NULL));
-	T_CHECK(send_response(
-		sv[1], "200 OK", MIME_RPCALL, "close", rsp_body,
-		sizeof(rsp_body) - 1));
+	T_CHECK(send_encoded_response(
+		sv[1], MIME_RPCALL, "deflate", VBUF_DATA(cbuf),
+		VBUF_LEN(cbuf)));
 	T_CHECK(test_wait_until(
 		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
-	T_EXPECT(out.called);
 
+	T_EXPECT(out.called);
+	T_EXPECT_EQ(out.errlen, 0);
+	T_EXPECT(out.has_stream);
+	T_EXPECT_EQ(out.stream_len, sizeof(plain) - 1);
+	T_EXPECT_MEMEQ(out.stream_buf, plain, sizeof(plain) - 1);
+
+	VBUF_FREE(cbuf);
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
 }
@@ -787,6 +991,7 @@ T_DECLARE_CASE(connection_close_not_recycled)
 
 static const struct testing_suite suite[] = {
 	T_CASE(rpcall_success_returns_stream),
+	T_CASE(rpcall_success_empty_body_ok),
 	T_CASE(invoke_uses_invoke_path),
 	T_CASE(rpcall_unsupported_content_type),
 	T_CASE(rpcall_dialer_failure),
@@ -794,8 +999,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(rpcall_http_error_status_line),
 	T_CASE(rpcall_structured_error_body),
 	T_CASE(cancel_during_connect_calls_dialer_cancel),
-	T_CASE(connection_keep_alive_recycled),
-	T_CASE(connection_close_not_recycled),
+	T_CASE(request_advertises_connection_close),
+	T_CASE(rpcall_write_error_reports_message),
+	T_CASE(rpcall_large_payload_is_deflate_compressed),
+	T_CASE(rpcall_deflate_response_is_decoded),
 	T_SUITE_END,
 };
 
@@ -809,7 +1016,7 @@ int main(int argc, char **argv)
 	return testing_main(argc, argv, suite);
 }
 
-#else
+#else /* WITH_RULESET */
 
 int main(void)
 {

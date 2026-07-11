@@ -4,12 +4,17 @@
 #ifndef RULESET_CFUNC_H
 #define RULESET_CFUNC_H
 
-#include "ruleset.h"
-
 #include <lua.h>
+
+struct ruleset_callback;
 
 struct ruleset_state {
 	struct ruleset_callback *cb;
+	/* Address of the caller's own storage slot for this state (e.g.
+	 * &ctx->ruleset_state), so state_complete() can synchronously detach
+	 * it the moment the routine finishes. See state_complete() in
+	 * cfunc.c for why this matters. */
+	struct ruleset_state **selfptr;
 };
 
 int cfunc_request(lua_State *restrict L);

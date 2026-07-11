@@ -48,6 +48,20 @@ struct resolver *
 resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf);
 
 /**
+ * @brief Re-apply the configured nameserver to an existing resolver.
+ *
+ * resolver_new() snapshots conf->nameserver at creation, which happens before
+ * a boot config is loaded; call this afterwards so a nameserver that appears
+ * only in the boot config still takes effect. No-op without c-ares, when async
+ * resolution is unavailable, or when no nameserver is configured.
+ *
+ * @param r Resolver instance
+ * @param conf Configuration carrying the (possibly boot-updated) nameserver
+ */
+void resolver_setnameserver(
+	struct resolver *restrict r, const struct config *restrict conf);
+
+/**
  * @brief Get resolver statistics
  * @param r Resolver instance
  * @return Pointer valid until resolver is freed
@@ -105,6 +119,6 @@ struct resolve_query *resolve_do(
  *
  * @warning Do not call from within the query's own callback.
  */
-void resolve_cancel(struct resolve_query *q);
+void resolve_cancel(struct resolve_query *restrict q);
 
 #endif /* RESOLVER_H */

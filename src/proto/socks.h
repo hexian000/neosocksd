@@ -6,7 +6,7 @@
 
 #include "domain.h"
 
-#include "utils/serialize.h"
+#include "binary/serialize.h"
 
 #include <netinet/in.h>
 #include <stdint.h>
@@ -137,7 +137,7 @@ struct socks5_hdr {
 	(SOCKS5_HDR_LEN + sizeof(struct in6_addr) + sizeof(in_port_t))
 
 #define SOCKS4A_REQ_MAXLEN                                                     \
-	(SOCKS4_HDR_LEN + 512 + /* ident */                                    \
+	(SOCKS4_HDR_LEN + 256 + /* ident (socks4_req rejects idlen >= 256) */  \
 	 (FQDN_MAX_LENGTH + 1))
 
 #define SOCKS4_RSP_MINLEN SOCKS4_HDR_LEN

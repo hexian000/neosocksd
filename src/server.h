@@ -114,6 +114,12 @@ struct listener {
 struct server {
 	struct ev_loop *loop;
 	struct server_stats stats;
+	/* Back-pointer to the "core" proxy server whose stats should be
+	 * reported. In production every server is its own core, so this is
+	 * self-referential (server_init sets s->data = s). It only differs when
+	 * an API server and the core proxy server are separate instances (as in
+	 * api_server_test.c); api_server.c reads ctx->s->data expecting the core
+	 * server, so it must never be NULL. */
 	void *data;
 
 	/* Transfer-thread counters; atomic in multi-threaded builds. */
@@ -155,7 +161,10 @@ void server_stop(struct server *restrict s);
  *
  * Callers should use this instead of reading @c s->stats directly whenever
  * @c num_accept or @c num_serve are needed, as those counters live on the
- * individual listeners.
+ * individual listeners. The same applies to @c num_sessions, @c byt_up and
+ * @c byt_down: the authoritative values are the atomic top-level fields on
+ * @c struct @c server, and the identically-named members embedded in
+ * @c s->stats stay zero until this function fills @p out from them.
  */
 void server_stats(
 	const struct server *restrict s, struct server_stats *restrict out);

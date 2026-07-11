@@ -61,7 +61,9 @@ static char *parse_key(char *s, char **restrict key)
 {
 	*key = s;
 	s = next_token(s);
-	if (*s != '=') {
+	if (s == *key || *s != '=') {
+		/* the attribute name must have at least one token character,
+		 * mirroring the type/subtype checks in mime_parse */
 		return NULL;
 	}
 	*s = '\0';
@@ -83,6 +85,7 @@ static char *parse_value(char *s, char **restrict value)
 		return s + 1;
 	}
 	s++;
+	/* unescape the quoted-string in place: w <= r always */
 	unsigned char *w = (unsigned char *)s;
 	for (char *r = s; *r; r++) {
 		unsigned char ch = *r;
@@ -99,6 +102,9 @@ static char *parse_value(char *s, char **restrict value)
 			if (*(r + 1)) {
 				r++;
 				ch = *r;
+				if (ch == '\r' || ch == '\n') {
+					return NULL;
+				}
 			}
 			break;
 		case '\r':
@@ -133,9 +139,9 @@ static char *parse_param(char *s, char **restrict key, char **restrict value)
 	return next;
 }
 
-char *mime_parseparam(char *buf, char **restrict key, char **restrict value)
+char *mime_parseparam(char *s, char **restrict key, char **restrict value)
 {
-	char *next = parse_param(buf, key, value);
+	char *next = parse_param(s, key, value);
 	if (next == NULL) {
 		return NULL;
 	}

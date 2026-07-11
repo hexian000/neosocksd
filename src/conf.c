@@ -3,11 +3,17 @@
 
 #include "conf.h"
 
-#include "utils/slog.h"
-
 #if WITH_LUA
+#include "proto/codec.h"
+
+#include "io/stream.h"
+
+#include <lauxlib.h>
 #include <lua.h>
+#include <lualib.h>
 #endif
+
+#include "utils/slog.h"
 
 #include <inttypes.h>
 #include <limits.h>
@@ -116,7 +122,7 @@ bool conf_check(const struct config *restrict conf)
 	}
 	const bool auth_supported =
 		(conf->forward == NULL && !conf->transparent);
-#else
+#else /* WITH_TPROXY */
 	const bool auth_supported = (conf->forward == NULL);
 #endif /* WITH_TPROXY */
 	if (conf->block_global && conf->block_local) {
@@ -164,14 +170,18 @@ bool conf_check(const struct config *restrict conf)
 	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
 	       RANGE_CHECK(
 		       "startup_limit_start", conf->startup_limit_start, 0,
-		       conf->startup_limit_full) &&
+		       conf->startup_limit_full > 0 ? conf->startup_limit_full :
+						      INT_MAX) &&
 	       RANGE_CHECK(
 		       "startup_limit_rate", conf->startup_limit_rate, 0,
 		       100) &&
-	       RANGE_CHECK(
-		       "startup_limit_full", conf->startup_limit_full,
-		       conf->startup_limit_start,
-		       conf->max_sessions > 0 ? conf->max_sessions : INT_MAX);
+	       /* startup_limit_full == 0 means "unlimited"; the start bound
+		* above already enforces start <= full when full > 0 */
+	       (conf->startup_limit_full == 0 ||
+		RANGE_CHECK(
+			"startup_limit_full", conf->startup_limit_full,
+			conf->startup_limit_start,
+			conf->max_sessions > 0 ? conf->max_sessions : INT_MAX));
 }
 
 static void print_usage(void)
@@ -184,14 +194,18 @@ static void print_usage(void)
 		stderr, "%s",
 		"  -h, --help                 show usage and exit\n"
 #if WITH_LUA
-		"  -c, --config <config.lua>  load configuration from Lua script;\n"
+		"  -c, --config <config.lua>  load configuration from Lua script\n"
+#if WITH_RULESET
 		"                             the script may also set the ruleset via _G.ruleset\n"
-		"  --dump-config              dump effective configuration as Lua and exit\n"
-#endif
-		"  -4, -6                     resolve requested doamin name as IPv4/IPv6 only\n"
+#endif /* WITH_RULESET */
+		"  --dump-config              dump the command-line configuration as Lua and exit\n"
+#endif /* WITH_LUA */
+		"  -4, -6                     resolve requested domain name as IPv4/IPv6 only\n"
 		"  -l, --listen <address>     proxy listen address\n"
 		"  --http [address]           run an HTTP proxy; if address is omitted, use -l\n"
+#if WITH_RULESET
 		"  --auth-required            require basic authentication\n"
+#endif
 		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
 		"  -x, --proxy proxy1[,...[,proxyN]]\n"
 		"                             forward outbound connection over proxy chain\n"
@@ -218,7 +232,6 @@ static void print_usage(void)
 		"  --traceback                print ruleset error traceback (for debugging)\n"
 		"  --memlimit <size>          set a soft limit on the total Lua object size in MiB\n"
 #endif
-		"  --no-conn-cache            disable upstream connection cache\n"
 		"  --enable-socks5-bind       enable SOCKS5 BIND command (incompatible with -r/-x)\n"
 		"  --enable-socks5-udp        enable SOCKS5 UDP ASSOCIATE command (incompatible with -r/-x)\n"
 		"  --api <bind_address>       RESTful API listen address\n"
@@ -279,14 +292,14 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			print_usage();
 			return false;
 		}
-#if WITH_RULESET
+#if WITH_LUA
 		if (strcmp(argv[i], "-c") == 0 ||
 		    strcmp(argv[i], "--config") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			conf->boot = argv[++i];
 			continue;
 		}
-#endif /* WITH_RULESET */
+#endif /* WITH_LUA */
 #if WITH_LUA
 		if (strcmp(argv[i], "--dump-config") == 0) {
 			conf->dump_config = true;
@@ -334,10 +347,12 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			}
 			continue;
 		}
+#if WITH_RULESET
 		if (strcmp(argv[i], "--auth-required") == 0) {
 			conf->auth_required = true;
 			continue;
 		}
+#endif /* WITH_RULESET */
 #if WITH_TPROXY
 		if (strcmp(argv[i], "--tproxy") == 0) {
 			conf->transparent = true;
@@ -421,7 +436,7 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			const size_t n = strlen(argv[i]);
 			char *endptr = NULL;
 			conf->timeout = strtod(argv[i], &endptr);
-			if (argv[i] + n != endptr) {
+			if (endptr == argv[i] || argv[i] + n != endptr) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			continue;
@@ -450,7 +465,7 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			++i;
 			char *endptr;
 			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
-			if (*endptr || value > INT_MAX) {
+			if (endptr == argv[i] || *endptr || value > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			conf->loglevel = (int)value;
@@ -496,7 +511,7 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			++i;
 			char *endptr;
 			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
-			if (*endptr || value > INT_MAX) {
+			if (endptr == argv[i] || *endptr || value > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			conf->max_sessions = (int)value;
@@ -508,17 +523,20 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			const char *nptr = argv[i];
 			char *endptr = NULL;
 			const uintmax_t start = strtoumax(nptr, &endptr, 10);
-			if (*endptr != ':' || start > INT_MAX) {
+			if (endptr == nptr || *endptr != ':' ||
+			    start > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			nptr = endptr + 1;
 			const uintmax_t rate = strtoumax(nptr, &endptr, 10);
-			if (*endptr != ':' || rate > INT_MAX) {
+			if (endptr == nptr || *endptr != ':' ||
+			    rate > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			nptr = endptr + 1;
 			const uintmax_t full = strtoumax(nptr, &endptr, 10);
-			if (*endptr != '\0' || full > INT_MAX) {
+			if (endptr == nptr || *endptr != '\0' ||
+			    full > INT_MAX) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			conf->startup_limit_start = (int)start;
@@ -578,8 +596,8 @@ static const struct metaconfig conf_fields[] = {
 	{ "timeout", CONF_DOUBLE, offsetof(struct config, timeout) },
 #if WITH_RULESET
 	{ "memlimit", CONF_INT, offsetof(struct config, memlimit) },
-#endif
 	{ "auth_required", CONF_BOOL, offsetof(struct config, auth_required) },
+#endif
 #if WITH_SPLICE
 	{ "pipe", CONF_BOOL, offsetof(struct config, pipe) },
 #endif
@@ -623,7 +641,7 @@ static const struct metaconfig conf_fields[] = {
 };
 
 /* Validate or apply one non-string config field from Lua stack top; not for CONF_STRING. */
-static bool lutil_loadfield(
+static bool load_field(
 	lua_State *restrict L, const struct metaconfig *restrict f,
 	struct config *restrict conf, const bool apply)
 {
@@ -658,7 +676,9 @@ static bool lutil_loadfield(
 		}
 		break;
 	case CONF_DOUBLE:
-		if (!isnil && !lua_isnumber(L, -1)) {
+		/* lua_type, not lua_isnumber: the latter also accepts a numeric
+		 * string, unlike the strict CONF_INT/CONF_BOOL checks. */
+		if (!isnil && lua_type(L, -1) != LUA_TNUMBER) {
 			LOGE_F("boot: field `%s' must be a number", f->key);
 			ok = false;
 			break;
@@ -686,26 +706,24 @@ static bool lutil_loadfield(
 
 bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 {
-	/* Validate non-string fields first (read-only) to avoid partial updates
-	 * on failure, which would leave the config in an inconsistent state. */
+	/* Validate every field first (read-only): non-string fields, then
+	 * string fields together with measuring the replacement string
+	 * block below. No field is mutated until all of them check out, so
+	 * a failure anywhere never leaves the config partially updated. */
 	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
 		if (f->type == CONF_STRING) {
 			continue;
 		}
-		if (!lutil_loadfield(L, f, conf, false)) {
+		if (!load_field(L, f, conf, false)) {
 			return false;
 		}
 	}
-	/* Apply non-string fields */
-	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
-		if (f->type == CONF_STRING) {
-			continue;
-		}
-		(void)lutil_loadfield(L, f, conf, true);
-	}
 
-	/* Pass 1: measure the block size for Lua-provided string fields only.
-	 * Nil fields keep their existing pointer; only type errors abort. */
+	/* Measure the block size for string fields. A Lua-provided string
+	 * needs room for its own bytes; a nil value carries the field's
+	 * current string forward (if any) instead of leaving it pointing
+	 * into the old block this call frees below, which would dangle the
+	 * moment a later call's table nils out a field a prior call set. */
 	size_t total = 0;
 	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
 		if (f->type != CONF_STRING) {
@@ -713,7 +731,12 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 		}
 		lua_getfield(L, -1, f->key);
 		if (lua_isnil(L, -1)) {
-			/* existing pointer preserved; no allocation needed */
+			const char *const *const fptr =
+				(const char *const *)((const char *)conf +
+						      f->offset);
+			if (*fptr != NULL) {
+				total += strlen(*fptr) + 1;
+			}
 		} else if (lua_type(L, -1) == LUA_TSTRING) {
 			size_t len;
 			lua_tolstring(L, -1, &len);
@@ -733,7 +756,17 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 		return false;
 	}
 
-	/* Pass 2: copy Lua-provided strings into block; nil fields unchanged */
+	/* Every field has now been validated; apply non-string fields. */
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		if (f->type == CONF_STRING) {
+			continue;
+		}
+		(void)load_field(L, f, conf, true);
+	}
+
+	/* Copy string fields into the new block: a Lua-provided string
+	 * replaces the field; a nil value carries the field's current
+	 * string forward so it never dangles into the block freed below. */
 	if (total > 0) {
 		char *pos = block;
 		for (const struct metaconfig *f = conf_fields; f->key != NULL;
@@ -744,7 +777,14 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 			const char **fptr =
 				(const char **)((char *)conf + f->offset);
 			lua_getfield(L, -1, f->key);
-			if (!lua_isnil(L, -1)) {
+			if (lua_isnil(L, -1)) {
+				if (*fptr != NULL) {
+					const size_t len = strlen(*fptr);
+					memcpy(pos, *fptr, len + 1);
+					*fptr = pos;
+					pos += len + 1;
+				}
+			} else {
 				size_t len;
 				const char *restrict s =
 					lua_tolstring(L, -1, &len);
@@ -762,7 +802,7 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 }
 
 /* Write a Lua double-quoted string literal for s. */
-static bool lutil_printstring(const char *restrict s)
+static bool print_string(const char *restrict s)
 {
 	if (fputc('"', stdout) == EOF) {
 		return false;
@@ -774,7 +814,11 @@ static bool lutil_printstring(const char *restrict s)
 				return false;
 			}
 		} else if (c < 0x20 || c == 0x7f) {
-			if (fprintf(stdout, "\\%u", (unsigned int)c) < 0) {
+			/* zero-padded to exactly 3 digits: Lua's decimal escape
+			 * greedily consumes up to 3 following digits, so an
+			 * unpadded \7 followed by a literal '1' re-parses as
+			 * the single escape \71 instead of \7 then '1' */
+			if (fprintf(stdout, "\\%03u", (unsigned int)c) < 0) {
 				return false;
 			}
 		} else {
@@ -787,7 +831,7 @@ static bool lutil_printstring(const char *restrict s)
 }
 
 /* Print one config field as a Lua table entry. */
-static bool lutil_printfield(
+static bool print_field(
 	const struct metaconfig *restrict field,
 	const struct config *restrict conf)
 {
@@ -802,7 +846,7 @@ static bool lutil_printfield(
 			if (fputs("nil", stdout) == EOF) {
 				return false;
 			}
-		} else if (!lutil_printstring(s)) {
+		} else if (!print_string(s)) {
 			return false;
 		}
 	} break;
@@ -812,7 +856,9 @@ static bool lutil_printfield(
 		}
 		break;
 	case CONF_DOUBLE:
-		if (fprintf(stdout, "%g", *(const double *)ptr) < 0) {
+		/* %g's default 6 significant digits truncates the value;
+		 * 17 significant digits always round-trip a double exactly */
+		if (fprintf(stdout, "%.17g", *(const double *)ptr) < 0) {
 			return false;
 		}
 		break;
@@ -831,11 +877,72 @@ bool conf_print(const struct config *restrict conf)
 	bool ok = fputs("return {\n", stdout) != EOF;
 	for (const struct metaconfig *field = conf_fields;
 	     ok && field->key != NULL; field++) {
-		ok = lutil_printfield(field, conf);
+		ok = print_field(field, conf);
 	}
 	if (ok) {
 		ok = fputs("}\n", stdout) != EOF;
 	}
+	return ok;
+}
+
+/* lua_Reader callback that streams a boot config file into the Lua parser. */
+static const char *
+boot_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
+{
+	(void)L;
+	struct stream *const s = ud;
+	const void *buf;
+	*sz = SIZE_MAX;
+	const int err = stream_direct_read(s, &buf, sz);
+	if (err != 0) {
+		LOGE_F("config: read error %d", err);
+	}
+	if (*sz == 0) {
+		return NULL;
+	}
+	return buf;
+}
+
+bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
+{
+	struct stream *restrict const s = codec_lua_reader(filename);
+	if (s == NULL) {
+		return false;
+	}
+	lua_State *restrict const L = luaL_newstate();
+	if (L == NULL) {
+		stream_close(s);
+		LOGE("config: out of memory");
+		return false;
+	}
+	luaL_openlibs(L);
+	const int status = lua_load(L, boot_reader, s, "=config", "t");
+	stream_close(s);
+	if (status != LUA_OK) {
+		LOGE_F("config: %s", lua_tostring(L, -1));
+		lua_close(L);
+		return false;
+	}
+	lua_pushliteral(L, "config");
+	if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+		LOGE_F("config: %s", lua_tostring(L, -1));
+		lua_close(L);
+		return false;
+	}
+	if (!lua_istable(L, -1)) {
+		LOGE_F("config: expected table, got %s", luaL_typename(L, -1));
+		lua_close(L);
+		return false;
+	}
+	lua_getfield(L, -1, "ruleset");
+	if (!lua_isnil(L, -1)) {
+		LOGE("config: `ruleset' field requires a build with ruleset support");
+		lua_close(L);
+		return false;
+	}
+	lua_pop(L, 1);
+	const bool ok = conf_loadfromtable(L, conf);
+	lua_close(L);
 	return ok;
 }
 #endif /* WITH_LUA */

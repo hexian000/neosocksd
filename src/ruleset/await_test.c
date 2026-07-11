@@ -22,19 +22,19 @@
 #include "server.h"
 
 #include "io/stream.h"
+#include "meta/arraysize.h"
 #include "os/socket.h"
-#include "utils/arraysize.h"
 #include "utils/testing.h"
 
+#include <ev.h>
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
 
-#include <ev.h>
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -250,7 +250,7 @@ static bool parse_hostport(
 
 /* ---- dialer stubs (required by base.c's aux_todialreq) ---- */
 
-char *const proxy_protocol_str[PROTO_MAX] = {
+const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -408,12 +408,16 @@ bool api_client_rpcall(
 	(void)conf;
 	(void)resolver;
 	(void)stats;
+	/* mirror api_client_do: req ownership transfers here and it is freed
+	 * on every failure path */
 	if (!STUB.api_start_ok) {
+		dialreq_free(req);
 		return false;
 	}
 	STUB.loop = loop;
 	STUB.api_ctx = malloc(1);
 	if (STUB.api_ctx == NULL) {
+		dialreq_free(req);
 		return false;
 	}
 	*pctx = STUB.api_ctx;
@@ -721,11 +725,10 @@ T_DECLARE_CASE(await_resolve_failure_returns_nil)
 
 	reset_stub_state();
 	T_EXPECT(run_chunk(
-		L,
-		"co = coroutine.create(function() "
-		"local addr = await.resolve('bad.invalid') "
-		"_G.resolve_done = (addr == nil) and 'nil' or addr end) "
-		"return coroutine.resume(co)"));
+		L, "co = coroutine.create(function() "
+		   "local addr = await.resolve('bad.invalid') "
+		   "_G.resolve_done = (addr == nil) and 'nil' or addr end) "
+		   "return coroutine.resume(co)"));
 	/* resolution failure must not crash; await.resolve returns nil */
 	trigger_resolve_failure();
 	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, TEST_WAIT_SEC));
@@ -769,6 +772,37 @@ T_DECLARE_CASE(await_invoke_real_path)
 	lua_pop(L, 1);
 	lua_getglobal(L, "invoke_value");
 	T_EXPECT_EQ(lua_tointeger(L, -1), 42);
+	lua_pop(L, 1);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+	reset_stub_state();
+}
+
+/*
+ * Regression: await.invoke with no address argument at all used to abort
+ * the whole process via ASSERT(n > 0) in aux_todialreq instead of raising
+ * a catchable Lua error. The invalid-address check runs synchronously
+ * before any yield, so no dial stub/trigger is needed here.
+ */
+T_DECLARE_CASE(await_invoke_without_address_raises_error)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  local ok = pcall(await.invoke, 'return 1') "
+		   "  _G.invoke_pcall_ok = ok "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	lua_getglobal(L, "invoke_pcall_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
 	lua_pop(L, 1);
 
 	lua_close(L);
@@ -851,7 +885,7 @@ T_DECLARE_CASE(await_forward_commits_on_success)
 	T_EXPECT(lua_toboolean(L, -1) != 0);
 	lua_pop(L, 1);
 
-	SOCKET_CLOSE_FD(fd);
+	socket_close(fd);
 	lua_close(L);
 	ev_loop_destroy(loop);
 }
@@ -928,6 +962,316 @@ T_DECLARE_CASE(await_forward_rejects_outside_request)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(await_forward_rejects_non_coroutine)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* AWAIT_CHECK_YIELDABLE rejects the call before any dial is attempted */
+	T_EXPECT(run_chunk(
+		L, "local ok, err = pcall(await.forward, '1.2.3.4:80') "
+		   "return ok, err"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *restrict err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "not in asynchronous routine") != NULL);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(await_execute_rejects_non_coroutine)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* AWAIT_CHECK_YIELDABLE rejects the call before fork() runs */
+	T_EXPECT(run_chunk(
+		L, "local ok, err = pcall(await.execute, 'true') "
+		   "return ok, err"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *restrict err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "not in asynchronous routine") != NULL);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(await_sleep_rejects_bad_argument)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	/* negative, non-finite and out-of-range durations fail luaL_argcheck
+	 * synchronously, before any timer is started */
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  _G.s_neg, _G.s_err = pcall(await.sleep, -1) "
+		   "  _G.s_inf = pcall(await.sleep, 1/0) "
+		   "  _G.s_nan = pcall(await.sleep, 0/0) "
+		   "  _G.s_big = pcall(await.sleep, 2e9) "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	lua_getglobal(L, "s_neg");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+	lua_getglobal(L, "s_err");
+	const char *const err = lua_tostring(L, -1);
+	T_CHECK(err != NULL);
+	/* the message states the actual constraint, not "(null)" */
+	T_EXPECT(strstr(err, "finite") != NULL);
+	lua_pop(L, 1);
+	const char *const names[] = { "s_inf", "s_nan", "s_big" };
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+		lua_getglobal(L, names[i]);
+		T_EXPECT(lua_toboolean(L, -1) == 0);
+		lua_pop(L, 1);
+	}
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_resolve_reports_start_failure)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	STUB.resolve_start_ok = false;
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  _G.r_ok, _G.r_err = pcall(await.resolve, 'example.com') "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	lua_getglobal(L, "r_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+	lua_getglobal(L, "r_err");
+	T_CHECK(lua_tostring(L, -1) != NULL);
+	lua_pop(L, 1);
+	/* nothing was started, so nothing is cancelled */
+	T_EXPECT(!STUB.resolve_cancelled);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_invoke_reports_start_failure)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	STUB.api_start_ok = false;
+	T_EXPECT(run_chunk(
+		L,
+		"co = coroutine.create(function() "
+		"  _G.i_ok, _G.i_err = pcall(await.invoke, 'return 1', '127.0.0.1:80') "
+		"end) "
+		"return coroutine.resume(co)"));
+	lua_getglobal(L, "i_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+	lua_getglobal(L, "i_err");
+	T_CHECK(lua_tostring(L, -1) != NULL);
+	lua_pop(L, 1);
+	T_EXPECT(!STUB.api_cancelled);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_forward_reports_timeout)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+		.timeout = 0.001,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct ruleset_callback mock_cb = { 0 };
+	mock_cb.forward = mock_forward_commit;
+	struct ruleset_state mock_state = { .cb = &mock_cb };
+	struct lua_global_pred pred = {
+		.L = L,
+		.name = "fwd_err",
+	};
+
+	reset_stub_state();
+	g_committed_fd = -1;
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  _G.fwd_ok, _G.fwd_err = await.forward('1.2.3.4:80') "
+		   "end)"));
+	lua_getglobal(L, "co");
+	lua_State *const co = lua_tothread(L, -1);
+	lua_pop(L, 1);
+	aux_setforward(L, co, &mock_state);
+
+	T_EXPECT(run_chunk(L, "return coroutine.resume(co)"));
+	T_CHECK(STUB.dial_pending);
+	/* no dial callback ever fires: the handshake timeout must resume the
+	 * routine with the distinct "timeout" error */
+	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, TEST_WAIT_SEC));
+	T_EXPECT(STUB.dial_cancelled); /* the pending dial was cancelled */
+	T_EXPECT(!STUB.dial_pending);
+	T_EXPECT_EQ(g_committed_fd, -1);
+	lua_getglobal(L, "fwd_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+	lua_getglobal(L, "fwd_err");
+	T_EXPECT_STREQ(lua_tostring(L, -1), "timeout");
+	lua_pop(L, 1);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_execute_reports_signal)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = EV_DEFAULT;
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct lua_global_pred pred = {
+		.L = L,
+		.name = "exec_kind",
+	};
+
+	reset_stub_state();
+	/* a child killed by a signal reports (nil, "signal", WTERMSIG) */
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  local ok, kind, code = await.execute('kill -9 $$') "
+		   "  _G.exec_ok = ok ~= nil "
+		   "  _G.exec_kind = kind "
+		   "  _G.exec_code = code "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, 1.0));
+	lua_getglobal(L, "exec_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+	lua_getglobal(L, "exec_kind");
+	T_EXPECT_STREQ(lua_tostring(L, -1), "signal");
+	lua_pop(L, 1);
+	lua_getglobal(L, "exec_code");
+	T_EXPECT_EQ(lua_tointeger(L, -1), SIGKILL);
+	lua_pop(L, 1);
+
+	lua_close(L);
+}
+
+#if HAVE_LUA_TOCLOSE
+/*
+ * The module's __close/__gc design exists to cancel a pending async op when
+ * its coroutine is abandoned. coroutine.close() runs the to-be-closed
+ * handler; each of these asserts the matching cancel path fires.
+ */
+T_DECLARE_CASE(await_resolve_abandoned_cancels_query)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  await.resolve('example.com') "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	T_CHECK(STUB.resolve_query != NULL); /* yielded with a pending query */
+
+	T_EXPECT(run_chunk(L, "return coroutine.close(co)"));
+	T_EXPECT(STUB.resolve_cancelled);
+	T_EXPECT(STUB.resolve_query == NULL);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_invoke_abandoned_cancels_request)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  await.invoke('return 1', '127.0.0.1:80') "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	T_CHECK(STUB.api_ctx != NULL); /* yielded with a pending request */
+
+	T_EXPECT(run_chunk(L, "return coroutine.close(co)"));
+	T_EXPECT(STUB.api_cancelled);
+	T_EXPECT(STUB.api_ctx == NULL);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(await_forward_abandoned_cancels_dial)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct ruleset_callback mock_cb = { 0 };
+	mock_cb.forward = mock_forward_commit;
+	struct ruleset_state mock_state = { .cb = &mock_cb };
+
+	reset_stub_state();
+	g_committed_fd = -1;
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  await.forward('1.2.3.4:80') "
+		   "end)"));
+	lua_getglobal(L, "co");
+	lua_State *const co = lua_tothread(L, -1);
+	lua_pop(L, 1);
+	aux_setforward(L, co, &mock_state);
+
+	T_EXPECT(run_chunk(L, "return coroutine.resume(co)"));
+	T_CHECK(STUB.dial_pending); /* yielded with a pending dial */
+
+	T_EXPECT(run_chunk(L, "return coroutine.close(co)"));
+	T_EXPECT(STUB.dial_cancelled);
+	T_EXPECT(!STUB.dial_pending);
+	T_EXPECT_EQ(g_committed_fd, -1); /* nothing committed */
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+#endif /* HAVE_LUA_TOCLOSE */
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -945,10 +1289,23 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_resolve_real_path),
 	T_CASE(await_resolve_failure_returns_nil),
 	T_CASE(await_invoke_real_path),
+	T_CASE(await_invoke_without_address_raises_error),
 	T_CASE(await_execute_reports_exit_status),
+	T_CASE(await_execute_reports_signal),
 	T_CASE(await_forward_commits_on_success),
 	T_CASE(await_forward_reports_dial_failure),
+	T_CASE(await_forward_reports_timeout),
 	T_CASE(await_forward_rejects_outside_request),
+	T_CASE(await_forward_rejects_non_coroutine),
+	T_CASE(await_execute_rejects_non_coroutine),
+	T_CASE(await_sleep_rejects_bad_argument),
+	T_CASE(await_resolve_reports_start_failure),
+	T_CASE(await_invoke_reports_start_failure),
+#if HAVE_LUA_TOCLOSE
+	T_CASE(await_resolve_abandoned_cancels_query),
+	T_CASE(await_invoke_abandoned_cancels_request),
+	T_CASE(await_forward_abandoned_cancels_dial),
+#endif /* HAVE_LUA_TOCLOSE */
 	T_SUITE_END,
 };
 

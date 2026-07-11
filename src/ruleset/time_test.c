@@ -148,6 +148,24 @@ T_DECLARE_CASE(time_measure_passes_results)
 	lua_close(L);
 }
 
+T_DECLARE_CASE(time_measure_rejects_missing_function)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* no function argument: must raise rather than call a bogus slot */
+	T_EXPECT(run_chunk(
+		L, "local ok, err = pcall(time.measure) "
+		   "return ok, err"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *const err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "function expected") != NULL);
+
+	lua_close(L);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -163,6 +181,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(time_process_and_thread),
 	T_CASE(time_measure_basic),
 	T_CASE(time_measure_passes_results),
+	T_CASE(time_measure_rejects_missing_function),
 	T_SUITE_END,
 };
 

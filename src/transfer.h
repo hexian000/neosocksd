@@ -51,9 +51,9 @@ struct transfer;
  * When WITH_THREADS is disabled, @p nworkers is ignored and transfers are
  * registered as I/O watchers on the caller-supplied ev_loop.
  *
- * @param loop     Main event loop (must outlive the returned engine; used
- *                 directly when threads are disabled, stored for reference
- *                 otherwise).
+ * @param loop     Main event loop (used directly when threads are disabled;
+ *                 ignored when threads are enabled, since each worker runs its
+ *                 own loop).
  * @param nworkers Number of I/O worker threads to spawn (ignored when
  *                 WITH_THREADS is disabled; must be >= 1).
  * @return Heap-allocated engine, or NULL on allocation / thread failure.

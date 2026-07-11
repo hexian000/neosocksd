@@ -18,13 +18,14 @@
 #include "io/stream.h"
 #include "miniz.h"
 #include "utils/buffer.h"
-
 #include "utils/testing.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - codec.c has no stateful collaborators; nothing to mock.
@@ -75,6 +76,149 @@ static bool stream_read_exact(
 		total += n;
 	}
 	return true;
+}
+
+static int write_tempfile(char *restrict tmpl, const void *content, size_t len)
+{
+	const int fd = mkstemp(tmpl);
+	if (fd < 0) {
+		return -1;
+	}
+	if ((size_t)write(fd, content, len) != len) {
+		(void)close(fd);
+		(void)unlink(tmpl);
+		return -1;
+	}
+	return close(fd);
+}
+
+static bool read_lua_source(
+	const char *restrict path, char *restrict out, const size_t cap,
+	size_t *restrict out_len)
+{
+	struct stream *restrict r = codec_lua_reader(path);
+	if (r == NULL) {
+		return false;
+	}
+	size_t total = 0;
+	for (;;) {
+		size_t n = cap - total;
+		if (n == 0 || stream_read(r, out + total, &n) != 0) {
+			stream_close(r);
+			return false;
+		}
+		if (n == 0) {
+			break;
+		}
+		total += n;
+	}
+	*out_len = total;
+	return stream_close(r) == 0;
+}
+
+/*
+ * Regression: a real shebang line ("#!/usr/bin/env lua\n") is longer than
+ * the reader's old 4-byte BOM-detection peek, so lua_skip_shebang never
+ * saw the newline within that window and the raw "#!/u" bytes were
+ * emitted as if they were Lua source.
+ */
+T_DECLARE_CASE(codec_lua_reader_strips_shebang)
+{
+	char path[] = "/tmp/codec_test_XXXXXX";
+	static const char content[] =
+		"#!/usr/bin/env lua --with-a-fairly-long-set-of-flags-here\n"
+		"return 1\n";
+	T_CHECK(write_tempfile(path, content, sizeof(content) - 1) == 0);
+
+	char out[128];
+	size_t len;
+	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
+	T_EXPECT_EQ(len, strlen("return 1\n"));
+	T_EXPECT_MEMEQ(out, "return 1\n", len);
+
+	(void)unlink(path);
+}
+
+/*
+ * Regression: a UTF-8 BOM followed immediately by "#!" leaves only 1 byte
+ * of the 4-byte peek for the shebang-prefix check, so lua_skip_shebang
+ * used to give up before it could even confirm a shebang was present.
+ */
+T_DECLARE_CASE(codec_lua_reader_strips_bom_and_shebang)
+{
+	char path[] = "/tmp/codec_test_XXXXXX";
+	static const char content[] = "\xEF\xBB\xBF"
+				      "#!/usr/bin/env lua\n"
+				      "return 1\n";
+	T_CHECK(write_tempfile(path, content, sizeof(content) - 1) == 0);
+
+	char out[128];
+	size_t len;
+	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
+	T_EXPECT_EQ(len, strlen("return 1\n"));
+	T_EXPECT_MEMEQ(out, "return 1\n", len);
+
+	(void)unlink(path);
+}
+
+T_DECLARE_CASE(codec_lua_reader_strips_bom_only)
+{
+	char path[] = "/tmp/codec_test_XXXXXX";
+	static const char content[] = "\xEF\xBB\xBF"
+				      "return 1\n";
+	T_CHECK(write_tempfile(path, content, sizeof(content) - 1) == 0);
+
+	char out[128];
+	size_t len;
+	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
+	T_EXPECT_EQ(len, strlen("return 1\n"));
+	T_EXPECT_MEMEQ(out, "return 1\n", len);
+
+	(void)unlink(path);
+}
+
+/* Regression: the first read (the BOM peek) must not return more bytes than
+ * the caller requested; a sub-LUA_PEEK_SIZE first stream_read() on a BOM-less
+ * file would otherwise over-copy LUA_PEEK_SIZE bytes into the smaller buffer. */
+T_DECLARE_CASE(codec_lua_reader_small_first_read)
+{
+	char path[] = "/tmp/codec_test_XXXXXX";
+	static const char content[] = "return 1234\n"; /* no BOM, no shebang */
+	T_CHECK(write_tempfile(path, content, sizeof(content) - 1) == 0);
+
+	struct stream *restrict r = codec_lua_reader(path);
+	T_CHECK(r != NULL);
+
+	/* exact-sized heap buffer (< LUA_PEEK_SIZE) so ASan flags any over-copy */
+	enum { SMALL = 4 };
+	unsigned char *const buf = malloc(SMALL);
+	T_CHECK(buf != NULL);
+	size_t n = SMALL;
+	T_EXPECT_EQ(stream_read(r, buf, &n), 0);
+	T_EXPECT(n > 0);
+	T_EXPECT(
+		n <=
+		(size_t)SMALL); /* direct_read must not exceed the request */
+	T_EXPECT_MEMEQ(buf, content, n);
+
+	free(buf);
+	(void)stream_close(r);
+	(void)unlink(path);
+}
+
+T_DECLARE_CASE(codec_lua_reader_passthrough_plain_file)
+{
+	char path[] = "/tmp/codec_test_XXXXXX";
+	static const char content[] = "return 1\n";
+	T_CHECK(write_tempfile(path, content, sizeof(content) - 1) == 0);
+
+	char out[128];
+	size_t len;
+	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
+	T_EXPECT_EQ(len, sizeof(content) - 1);
+	T_EXPECT_MEMEQ(out, content, len);
+
+	(void)unlink(path);
 }
 
 T_DECLARE_CASE(codec_null_base)
@@ -502,6 +646,124 @@ T_DECLARE_CASE(codec_gzip_optional_headers)
 	VBUF_FREE(g);
 }
 
+/* Regression: an empty FNAME immediately after FEXTRA. The header parser must
+ * read the FNAME terminator from srcbuf, not the stale once-per-iteration byte
+ * (the nonzero OS byte) carried through the FEXTRA fallthrough. */
+T_DECLARE_CASE(codec_gzip_empty_fname_after_fextra)
+{
+	enum { N = 2048 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 23U + 5U) & 0xffU);
+	}
+
+	struct vbuffer *plain = gzip_make_member(src, N);
+	T_CHECK(plain != NULL);
+	const unsigned char *p = VBUF_DATA(plain);
+	const size_t plen = VBUF_LEN(plain);
+	T_CHECK(plen >= 10);
+
+	static const unsigned char extra[] = { 'A', 'B', 'C', 'D' };
+	struct vbuffer *g = VBUF_NEW(plen + 8);
+	T_CHECK(g != NULL);
+	unsigned char hdr[10];
+	memcpy(hdr, p, sizeof(hdr));
+	hdr[3] = GZIP_FEXTRA | GZIP_FNAME;
+	hdr[9] = 0xff; /* OS byte: the (nonzero) stale byte reached at FNAME */
+	VBUF_APPEND(g, hdr, sizeof(hdr));
+	const unsigned char xlen[2] = { (unsigned char)sizeof(extra), 0x00 };
+	VBUF_APPEND(g, xlen, sizeof(xlen));
+	VBUF_APPEND(g, extra, sizeof(extra));
+	static const unsigned char empty_name[] = { 0x00 }; /* empty FNAME */
+	VBUF_APPEND(g, empty_name, sizeof(empty_name));
+	VBUF_APPEND(g, p + 10, plen - 10); /* deflate body + trailer */
+	T_CHECK(!VBUF_HAS_OOM(g));
+	VBUF_FREE(plain);
+
+	struct stream *r =
+		codec_gzip_reader(io_memreader(VBUF_DATA(g), VBUF_LEN(g)));
+	T_CHECK(r != NULL);
+	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_MEMEQ(out, src, N);
+	VBUF_FREE(g);
+}
+
+/* Regression: a full flush on a zlib/deflate writer must complete instead of
+ * looping forever (TDEFL_FULL_FLUSH never reaches TDEFL_STATUS_DONE), and the
+ * stream must still decode correctly after the flush and subsequent writes. */
+T_DECLARE_CASE(codec_zlib_flush_then_continue)
+{
+	enum { N = 4096 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 37U) & 0xffU);
+	}
+
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	struct stream *w = codec_zlib_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src, N / 2));
+	T_EXPECT_EQ(stream_flush(w), 0);
+	T_EXPECT(stream_write_all(w, src + (N / 2), N - (N / 2)));
+	T_EXPECT_EQ(stream_close(w), 0);
+
+	struct stream *r = codec_zlib_reader(
+		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
+	T_CHECK(r != NULL);
+	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_MEMEQ(out, src, N);
+	VBUF_FREE(compressed);
+}
+
+/* Corrupt-input coverage for the zlib reader (parallel to the gzip cases): an
+ * invalid zlib header and a truncated stream must both fail the read. */
+T_DECLARE_CASE(codec_zlib_corrupt_input_fails)
+{
+	enum { N = 1024 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 11U + 3U) & 0xffU);
+	}
+
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	struct stream *w = codec_zlib_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src, N));
+	T_EXPECT_EQ(stream_close(w), 0);
+	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 10);
+
+	/* corrupt the zlib header (byte 0 holds CMF) */
+	{
+		unsigned char *d = VBUF_DATA(compressed);
+		const unsigned char saved = d[0];
+		d[0] ^= 0xffu;
+		struct stream *r = codec_zlib_reader(
+			io_memreader(d, VBUF_LEN(compressed)));
+		if (r != NULL) {
+			T_EXPECT(!stream_read_exact(r, out, N));
+			(void)stream_close(r);
+		}
+		d[0] = saved;
+	}
+	/* truncated stream: only the first few bytes */
+	{
+		struct stream *r = codec_zlib_reader(
+			io_memreader(VBUF_DATA(compressed), 5));
+		if (r != NULL) {
+			T_EXPECT(!stream_read_exact(r, out, N));
+			(void)stream_close(r);
+		}
+	}
+	VBUF_FREE(compressed);
+}
+
 T_DECLARE_CASE(codec_gzip_hcrc_mismatch)
 {
 	enum { N = 256 };
@@ -608,6 +870,11 @@ T_DECLARE_BENCH(bench_gzip_roundtrip)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(codec_lua_reader_strips_shebang),
+	T_CASE(codec_lua_reader_strips_bom_and_shebang),
+	T_CASE(codec_lua_reader_strips_bom_only),
+	T_CASE(codec_lua_reader_small_first_read),
+	T_CASE(codec_lua_reader_passthrough_plain_file),
 	T_CASE(codec_null_base),
 	T_CASE(codec_zlib_roundtrip),
 	T_CASE(codec_deflate_roundtrip),
@@ -617,6 +884,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_gzip_flush_multiframe),
 	T_CASE(codec_gzip_flush_empty),
 	T_CASE(codec_gzip_optional_headers),
+	T_CASE(codec_gzip_empty_fname_after_fextra),
+	T_CASE(codec_zlib_flush_then_continue),
+	T_CASE(codec_zlib_corrupt_input_fails),
 	T_CASE(codec_gzip_hcrc_mismatch),
 	T_CASE(codec_gzip_bad_magic),
 	T_BENCH(bench_zlib_roundtrip),

@@ -3,13 +3,13 @@
 
 #include "codec.h"
 
+#include "binary/serialize.h"
 #include "io/file.h"
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
+#include "meta/class.h"
 #include "miniz.h"
-#include "utils/class.h"
-#include "utils/serialize.h"
 #include "utils/slog.h"
 
 #include <errno.h>
@@ -30,7 +30,8 @@ struct deflate_stream {
 };
 ASSERT_SUPER(struct stream, struct deflate_stream, s);
 
-static int deflate_write(void *p, const void *buf, size_t *restrict len)
+static int
+deflate_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct deflate_stream *restrict z = p;
 	size_t nwritten = 0;
@@ -56,9 +57,11 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 		const int err = stream_write(z->base, avail, &n);
 		z->dstpos += n;
 		if (err != 0) {
+			*len = nwritten;
 			return err;
 		}
 		if (z->dstpos < z->dstlen) {
+			*len = nwritten;
 			return -1;
 		}
 		z->dstpos = z->dstlen = 0;
@@ -74,17 +77,18 @@ static int deflate_write(void *p, const void *buf, size_t *restrict len)
 static int
 deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 {
-	do {
+	for (;;) {
 		unsigned char *buf = z->dstbuf + z->dstlen;
-		size_t n = sizeof(z->dstbuf) - z->dstlen;
+		const size_t avail = sizeof(z->dstbuf) - z->dstlen;
+		size_t n = avail;
 		z->status = tdefl_compress(
 			&z->deflator, NULL, NULL, buf, &n, flush);
 		z->dstlen += n;
 
 		buf = z->dstbuf + z->dstpos;
-		n = z->dstlen - z->dstpos;
-		const int err = stream_write(z->base, buf, &n);
-		z->dstpos += n;
+		size_t w = z->dstlen - z->dstpos;
+		const int err = stream_write(z->base, buf, &w);
+		z->dstpos += w;
 		if (err != 0) {
 			return err;
 		}
@@ -96,7 +100,14 @@ deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 		if (z->status < TDEFL_STATUS_OKAY) {
 			return z->status;
 		}
-	} while (z->status != TDEFL_STATUS_DONE);
+		/* TDEFL_FINISH reaches DONE; TDEFL_FULL_FLUSH never does (it
+		 * re-emits an empty sync marker each call), so also stop once a
+		 * call no longer fills the output buffer -- i.e. all pending
+		 * output plus the flush marker has been emitted. */
+		if (z->status == TDEFL_STATUS_DONE || n < avail) {
+			break;
+		}
+	}
 	return 0;
 }
 
@@ -183,7 +194,8 @@ struct inflate_stream {
 };
 ASSERT_SUPER(struct stream, struct inflate_stream, s);
 
-static int inflate_direct_read(void *p, const void **buf, size_t *restrict len)
+static int
+inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct inflate_stream *restrict z = p;
 	do {
@@ -324,7 +336,7 @@ struct gzip_wstream {
 };
 ASSERT_SUPER(struct stream, struct gzip_wstream, s);
 
-static int gzip_write(void *p, const void *buf, size_t *restrict len)
+static int gzip_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct gzip_wstream *restrict z = p;
 
@@ -379,9 +391,11 @@ static int gzip_write(void *p, const void *buf, size_t *restrict len)
 		const int err = stream_write(z->base, avail, &n);
 		z->dstpos += n;
 		if (err != 0) {
+			*len = nwritten;
 			return err;
 		}
 		if (z->dstpos < z->dstlen) {
+			*len = nwritten;
 			return -1;
 		}
 		z->dstpos = z->dstlen = 0;
@@ -603,7 +617,7 @@ struct gzip_rstream {
 	uint_fast16_t xlen_remain;
 	uint_least32_t hdrcrc;
 	/* Header parser sub-phase (see enum gzip_hphase) */
-	uint_fast8_t hphase;
+	uint_least8_t hphase;
 };
 ASSERT_SUPER(struct stream, struct gzip_rstream, s);
 
@@ -642,8 +656,11 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				if (z->srclen == 0) {
 					return 0;
 				}
-				/* only 1 byte available - stash and wait */
-				z->hdrbuf[0] = b;
+				/* only 1 byte available - stash and wait. Read
+				 * from srcbuf directly: b is the once-per-loop
+				 * byte and is stale here after the HEADER phase
+				 * fell through and advanced srcbuf. */
+				z->hdrbuf[0] = *z->srcbuf;
 				z->hdrcrc = (uint_least32_t)mz_crc32(
 					z->hdrcrc, z->srcbuf, 1);
 				z->srcbuf++, z->srclen--;
@@ -677,12 +694,17 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				z->hphase = GZIP_HPHASE_FCOMMENT;
 				break;
 			}
-			z->hdrcrc = (uint_least32_t)mz_crc32(
-				z->hdrcrc, z->srcbuf, 1);
-			z->srcbuf++, z->srclen--;
-			if (b != 0x00) {
-				/* still inside filename */
-				return 0;
+			{
+				/* read the terminator byte from srcbuf directly:
+				 * b is stale when FEXTRA_2 fell through here */
+				const unsigned char c = *z->srcbuf;
+				z->hdrcrc = (uint_least32_t)mz_crc32(
+					z->hdrcrc, z->srcbuf, 1);
+				z->srcbuf++, z->srclen--;
+				if (c != 0x00) {
+					/* still inside filename */
+					return 0;
+				}
 			}
 			z->hphase = GZIP_HPHASE_FCOMMENT;
 			break;
@@ -691,11 +713,14 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				z->hphase = GZIP_HPHASE_FHCRC_1;
 				break;
 			}
-			z->hdrcrc = (uint_least32_t)mz_crc32(
-				z->hdrcrc, z->srcbuf, 1);
-			z->srcbuf++, z->srclen--;
-			if (b != 0x00) {
-				return 0;
+			{
+				const unsigned char c = *z->srcbuf;
+				z->hdrcrc = (uint_least32_t)mz_crc32(
+					z->hdrcrc, z->srcbuf, 1);
+				z->srcbuf++, z->srclen--;
+				if (c != 0x00) {
+					return 0;
+				}
 			}
 			z->hphase = GZIP_HPHASE_FHCRC_1;
 			break;
@@ -792,7 +817,8 @@ static bool gzip_parse_header(struct gzip_rstream *z, size_t *len, int *ret)
 }
 
 static bool gzip_decompress_body(
-	struct gzip_rstream *z, const void **buf, size_t *len, int *ret)
+	struct gzip_rstream *z, const void **restrict buf, size_t *len,
+	int *ret)
 {
 	/* Wrap around sliding window when fully consumed */
 	if (z->dstpos == z->dstlen && z->dstlen == sizeof(z->dstbuf)) {
@@ -909,7 +935,8 @@ static bool gzip_validate_trailer(struct gzip_rstream *z, size_t *len, int *ret)
 	return false;
 }
 
-static int gzip_direct_read(void *p, const void **buf, size_t *restrict len)
+static int
+gzip_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct gzip_rstream *restrict z = p;
 	for (;;) {
@@ -936,6 +963,10 @@ static int gzip_direct_read(void *p, const void **buf, size_t *restrict len)
 		case GZIP_R_TRAILER:
 			done = gzip_validate_trailer(z, len, &ret);
 			break;
+		default:
+			/* unreachable: rstate only holds the three states above;
+			 * return an error rather than read done/ret uninitialized */
+			return -1;
 		}
 		if (done) {
 			return ret;
@@ -1008,9 +1039,15 @@ struct lua_rstream {
 	struct stream s;
 	struct stream *inner;
 	enum lua_rstate state;
+	bool shebang_confirmed;
 	int rderr;
 };
 ASSERT_SUPER(struct stream, struct lua_rstream, s);
+
+/* Initial peek size: enough to see the longest BOM (4 bytes, UTF-32) and
+ * the 2-byte "#!" shebang prefix that may immediately follow it in the
+ * same read. */
+#define LUA_PEEK_SIZE 8
 
 /* Skip UTF-8 BOM if present; transition to LUA_SKIP_SHEBANG. Returns false for non-UTF-8 BOM. */
 static bool lua_skip_bom(
@@ -1046,25 +1083,36 @@ static bool lua_skip_bom(
 	return true;
 }
 
-/* Skip shebang from p[*offset]; transition to LUA_PASSTHROUGH.
- * State stays LUA_SKIP_SHEBANG if no newline in chunk — caller retries. */
+/* Skip shebang from p[*offset]; transition to LUA_PASSTHROUGH once the
+ * terminating newline is found. If no newline appears in this chunk,
+ * *offset is advanced to n (the whole chunk was shebang content) and the
+ * state stays LUA_SKIP_SHEBANG for the caller to retry with more data;
+ * the "#!" prefix is only ever checked once (shebang_confirmed latches
+ * it), since a retry's chunk starts mid-line, not at "#!" again. */
 static void lua_skip_shebang(
 	struct lua_rstream *z, const unsigned char *p, size_t n, size_t *offset)
 {
-	if (n - *offset < 2 || p[*offset] != '#' || p[*offset + 1] != '!') {
-		z->state = LUA_PASSTHROUGH;
-		return;
+	if (!z->shebang_confirmed) {
+		if (n - *offset < 2 || p[*offset] != '#' ||
+		    p[*offset + 1] != '!') {
+			z->state = LUA_PASSTHROUGH;
+			return;
+		}
+		z->shebang_confirmed = true;
+		*offset += 2;
 	}
-	for (size_t i = *offset + 2; i < n; i++) {
+	for (size_t i = *offset; i < n; i++) {
 		if (p[i] == '\n') {
 			*offset = i + 1;
 			z->state = LUA_PASSTHROUGH;
 			return;
 		}
 	}
+	*offset = n;
 }
 
-static int lua_direct_read(void *p, const void **buf, size_t *restrict len)
+static int
+lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct lua_rstream *restrict z = p;
 
@@ -1078,7 +1126,15 @@ static int lua_direct_read(void *p, const void **buf, size_t *restrict len)
 
 	for (;;) {
 		const void *data;
-		size_t n = (z->state == LUA_SKIP_BOM) ? 4 : *len;
+		/* Only the very first read (still looking for a BOM) is
+		 * capped; once past it, a long shebang line needs a full-size
+		 * read to find its terminating newline. The peek is also bounded
+		 * by the caller's *len so a sub-LUA_PEEK_SIZE request can never
+		 * return more bytes than the caller's buffer holds. */
+		size_t n =
+			(z->state == LUA_SKIP_BOM) ?
+				(*len < LUA_PEEK_SIZE ? *len : LUA_PEEK_SIZE) :
+				*len;
 		const int err = stream_direct_read(z->inner, &data, &n);
 
 		if (err != 0) {
@@ -1104,6 +1160,13 @@ static int lua_direct_read(void *p, const void **buf, size_t *restrict len)
 		}
 		if (z->state == LUA_SKIP_SHEBANG) {
 			lua_skip_shebang(z, p, n, &offset);
+			if (z->state == LUA_SKIP_SHEBANG) {
+				/* no newline in this chunk yet: the whole
+				 * chunk was shebang content (already
+				 * discarded via offset == n) and must not be
+				 * emitted as Lua source; read more */
+				continue;
+			}
 		}
 
 		if (offset < n) {
@@ -1171,6 +1234,7 @@ static struct stream *lua_reader_new(struct stream *base)
 	};
 	z->inner = inner;
 	z->state = LUA_SKIP_BOM;
+	z->shebang_confirmed = false;
 	z->rderr = 0;
 	return (struct stream *)z;
 }

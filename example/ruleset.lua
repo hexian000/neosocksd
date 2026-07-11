@@ -118,7 +118,7 @@ _G.route6 = {
     { inet6.subnet("::1/128"),         rule.reject() },
     { inet6.subnet("fe80::/10"),       rule.reject() },
     { inet6.subnet("fc00::/7"),        rule.reject() },
-    { inet6.subnet("ff::/8"),          rule.reject() },
+    { inet6.subnet("ff00::/8"),        rule.reject() },
     { inet6.subnet("::ffff:0:0/96"),   rule.reject() },
     -- dynamically loaded big IP ranges list
     { composite.maybe(_G, "biglist6"), rule.direct(), "biglist" },

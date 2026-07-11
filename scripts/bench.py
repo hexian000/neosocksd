@@ -624,7 +624,8 @@ def render_markdown_report(
             lines.append("| Second | Throughput |")
             lines.append("| ---: | ---: |")
             for index, bps in enumerate(result.interval_throughputs, start=1):
-                lines.append("| %d | %s |" % (index, format_bits_per_second(bps)))
+                lines.append("| %d | %s |" %
+                             (index, format_bits_per_second(bps)))
         lines.append("")
     return "\n".join(lines) + "\n"
 

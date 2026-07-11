@@ -7,8 +7,8 @@
 #include "util.h"
 
 #include "io/stream.h"
+#include "meta/arraysize.h"
 #include "os/clock.h"
-#include "utils/arraysize.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
@@ -63,7 +63,7 @@ void aux_close(lua_State *restrict L, int idx)
 #if HAVE_LUA_TOCLOSE
 	(void)L;
 	(void)idx;
-#else
+#else /* HAVE_LUA_TOCLOSE */
 	idx = lua_absindex(L, idx);
 	if (!lua_getmetatable(L, idx)) {
 		return;
@@ -83,6 +83,19 @@ void aux_getregtable(lua_State *restrict L, const int ridx)
 		lua_pushliteral(L, ERR_BAD_REGISTRY);
 		lua_error(L);
 	}
+}
+
+void aux_setsandboxenv(lua_State *restrict L)
+{
+	lua_newtable(L);
+	lua_newtable(L);
+	aux_getregtable(L, LUA_RIDX_GLOBALS);
+	/* lua stack: ... chunk env mt _G */
+	lua_setfield(L, -2, "__index");
+	lua_setmetatable(L, -2);
+	const char *const upvalue = lua_setupvalue(L, -2, 1);
+	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
+	(void)upvalue;
 }
 
 static int thread_main_k(lua_State *L, int status, lua_KContext ctx);
@@ -110,13 +123,17 @@ thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 		}
 	}
 
-	/* thread transitions from active to idle */
-	r->vmstats.num_thread_active--;
 	/* cache the thread for reuse */
 	aux_getregtable(L, RIDX_IDLE_THREAD);
 	lua_pushthread(L);
 	lua_pushboolean(L, 1);
 	lua_rawset(L, -3);
+	/* thread transitions from active to idle -- decrement only after the
+	 * caching above succeeds. aux_getregtable may raise ERR_BAD_REGISTRY
+	 * and unwind out of lua_resume; the callers then treat the non-OK
+	 * status as "died without reaching here" and decrement themselves, so
+	 * decrementing before it would double-count. */
+	r->vmstats.num_thread_active--;
 	lua_settop(L, 0);
 	return lua_yieldk(L, 0, ctx, thread_main_k);
 }
@@ -169,21 +186,51 @@ lua_State *aux_getthread(lua_State *restrict L)
 	return co;
 }
 
-const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
+struct aux_reader_state {
+	struct stream *stream;
+	int err;
+};
+
+static const char *
+aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 {
 	(void)L;
-	struct stream *const s = ud;
+	struct aux_reader_state *restrict rs = ud;
 	const void *buf;
 	/* Lua allows arbitrary length. */
 	*sz = SIZE_MAX;
-	const int err = stream_direct_read(s, &buf, sz);
+	const int err = stream_direct_read(rs->stream, &buf, sz);
 	if (err != 0) {
 		LOGE_F("read_stream: error %d", err);
+		/* lua_Reader has no error channel; record it and stop so
+		 * aux_load() can turn it into a load failure instead of letting
+		 * lua_load() treat the truncated input as a clean EOF. */
+		rs->err = err;
+		return NULL;
 	}
 	if (*sz == 0) {
 		return NULL;
 	}
 	return buf;
+}
+
+int aux_load(
+	lua_State *restrict L, struct stream *restrict stream,
+	const char *restrict chunkname)
+{
+	struct aux_reader_state rs = { .stream = stream, .err = 0 };
+	const int status = lua_load(L, aux_reader, &rs, chunkname, "t");
+	if (status != LUA_OK) {
+		/* compile error: message is already on the stack */
+		return status;
+	}
+	if (rs.err != 0) {
+		/* the chunk lua_load() compiled is truncated by a read error */
+		lua_pop(L, 1);
+		lua_pushfstring(L, "read error (%d)", rs.err);
+		return LUA_ERRERR;
+	}
+	return LUA_OK;
 }
 
 /* addr = format_addr(sa) */
@@ -236,6 +283,7 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 		return true;
 	}
 	if (n > 255) {
+		lua_pop(L, n);
 		return false;
 	}
 	struct {
@@ -333,6 +381,19 @@ void *aux_getforward(lua_State *restrict L)
 	return state;
 }
 
+/* Remove a pointer-keyed entry from a registry table without raising, for use
+ * on failure paths where raising would be unsafe. A missing/corrupt table is
+ * treated as "nothing to clear". */
+static void
+clear_context_entry(lua_State *restrict L, const int ridx, const void *key)
+{
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, ridx) == LUA_TTABLE) {
+		lua_pushnil(L);
+		lua_rawsetp(L, -2, key);
+	}
+	lua_pop(L, 1);
+}
+
 int aux_async(
 	lua_State *restrict L, lua_State *restrict from, const int narg,
 	const int finishidx)
@@ -349,8 +410,13 @@ int aux_async(
 	lua_xmove(from, L, 1 + narg);
 	const int status = aux_resume(L, from, 4 + narg);
 	if (status != LUA_OK && status != LUA_YIELD) {
-		/* catastrophic failure: thread died without passing through thread_call_k */
+		/* catastrophic failure: thread died without passing through
+		 * thread_call_k, so its bookkeeping was never cleared. Drop the
+		 * active count and remove the forward-context entry keyed by the
+		 * coroutine pointer, so a later lua_newthread() reusing that
+		 * address cannot alias a stale ruleset_state. */
 		r->vmstats.num_thread_active--;
+		clear_context_entry(from, RIDX_FORWARD_CONTEXT, L);
 	}
 	return status;
 }
@@ -382,7 +448,6 @@ static bool ruleset_pcallv(
 		lua_pushlightuserdata(L, va_arg(*args, void *));
 	}
 	if (lua_pcall(L, nargs, nresults, errfunc) != LUA_OK) {
-		lua_pushvalue(L, -1);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		return false;
 	}
@@ -434,8 +499,14 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	const int status = aux_resume(co, NULL, narg);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
-		/* catastrophic failure: thread died without passing through thread_call_k */
+		/* catastrophic failure: thread died without passing through
+		 * thread_call_k. Drop the active count and clear the registry
+		 * entries keyed by the abandoned coroutine (forward context) and
+		 * the async userdata (await context), so a reused pointer cannot
+		 * alias a stale entry. */
 		r->vmstats.num_thread_active--;
+		clear_context_entry(L, RIDX_FORWARD_CONTEXT, co);
+		clear_context_entry(L, RIDX_AWAIT_CONTEXT, ctx);
 	}
 	const int_fast64_t time_end = clock_monotonic_ns();
 	record_event_time(r, time_end - time_begin, time_end);

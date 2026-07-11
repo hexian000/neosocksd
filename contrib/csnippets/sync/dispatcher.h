@@ -38,7 +38,7 @@ struct dispatcher *dispatcher_create(size_t capacity);
  * 
  * @param d Dispatcher instance.
  * @param task Task to enqueue.
- * @return true on success, false if allocation fails or dispatcher is shutting down.
+ * @return true on success, false if allocation fails.
  */
 bool dispatcher_invoke(struct dispatcher *d, struct task task);
 

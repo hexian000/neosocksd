@@ -5,7 +5,6 @@
 #define HTTP_CLIENT_H
 
 #include "dialer.h"
-
 #include "proto/http.h"
 
 #include <ev.h>

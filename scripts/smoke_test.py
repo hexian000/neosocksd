@@ -86,7 +86,8 @@ def recv_exact(sock: socket.socket, count: int) -> bytes:
         chunk = sock.recv(remaining)
         if not chunk:
             raise AssertionError(
-                "connection closed after %d/%d bytes" % (count - remaining, count)
+                "connection closed after %d/%d bytes" % (
+                    count - remaining, count)
             )
         chunks.append(chunk)
         remaining -= len(chunk)
@@ -258,17 +259,103 @@ def http_connect(
         raise
 
 
-def http_forward_get(
-    proxy_host: str, proxy_port: int, dst_host: str, dst_port: int, path: str = "/"
-) -> Tuple[int, bytes]:
-    """Perform an absolute-URI GET through an HTTP forward proxy."""
+def _encode_chunked(body: bytes, parts: int = 3) -> bytes:
+    """Frame `body` as HTTP/1.1 chunked transfer coding (at least one chunk)."""
+    if not body:
+        return b"0\r\n\r\n"
+    step = max(1, -(-len(body) // parts))  # ceil division into `parts` chunks
+    out = bytearray()
+    for off in range(0, len(body), step):
+        piece = body[off:off + step]
+        out += b"%X\r\n" % len(piece) + piece + b"\r\n"
+    out += b"0\r\n\r\n"
+    return bytes(out)
+
+
+def _decode_chunked(data: bytes) -> bytes:
+    """Decode a chunked-framed body, ignoring chunk extensions and trailers."""
+    out = bytearray()
+    i = 0
+    while True:
+        eol = data.index(b"\r\n", i)
+        size = int(data[i:eol].split(b";", 1)[0], 16)
+        i = eol + 2
+        if size == 0:
+            break
+        out += data[i:i + size]
+        i += size + 2  # trailing CRLF after the chunk data
+    return bytes(out)
+
+
+def _parse_http_response(data: bytes, method: str) -> Tuple[int, dict, bytes]:
+    """Split a full HTTP/1.1 response into (status, headers, decoded body).
+
+    The body is delimited by Transfer-Encoding: chunked, Content-Length, or EOF,
+    in that order of precedence; a HEAD response is always bodiless.
+    """
+    head, _, rest = data.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    parts = lines[0].split(b" ", 2)
+    if len(parts) < 2:
+        raise SocksError("malformed HTTP response: %r" % lines[0])
+    status = int(parts[1])
+    headers: dict = {}
+    for line in lines[1:]:
+        key, _, value = line.partition(b":")
+        headers[key.strip().lower()] = value.strip()
+    if method == "HEAD":
+        body = b""
+    elif b"chunked" in headers.get(b"transfer-encoding", b"").lower():
+        body = _decode_chunked(rest)
+    elif b"content-length" in headers:
+        body = rest[: int(headers[b"content-length"])]
+    else:
+        body = rest  # length delimited by connection close
+    return status, headers, body
+
+
+def http_forward(
+    proxy_host: str,
+    proxy_port: int,
+    dst_host: str,
+    dst_port: int,
+    path: str = "/",
+    *,
+    method: str = "GET",
+    body: Optional[bytes] = None,
+    chunked: bool = False,
+    extra_headers: Optional[List[Tuple[str, str]]] = None,
+    raw_target: Optional[str] = None,
+) -> Tuple[int, dict, bytes]:
+    """Drive one proxy_pass (absolute-URI) exchange through the HTTP proxy.
+
+    Reads the whole response -- the proxy answers with `Connection: close` -- and
+    decodes the body per its framing. `raw_target` overrides the request target
+    verbatim to exercise malformed-request handling.
+    """
     sock = _connect(proxy_host, proxy_port)
     try:
-        url = "http://%s:%d%s" % (dst_host, dst_port, path)
-        request = (
-            "GET %s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n\r\n"
-            % (url, dst_host, dst_port)
-        ).encode()
+        target = (
+            raw_target
+            if raw_target is not None
+            else "http://%s:%d%s" % (dst_host, dst_port, path)
+        )
+        head = [
+            "%s %s HTTP/1.1" % (method, target),
+            "Host: %s:%d" % (dst_host, dst_port),
+            "Connection: close",
+        ]
+        for key, value in extra_headers or []:
+            head.append("%s: %s" % (key, value))
+        payload = b""
+        if body is not None:
+            if chunked:
+                head.append("Transfer-Encoding: chunked")
+                payload = _encode_chunked(body)
+            else:
+                head.append("Content-Length: %d" % len(body))
+                payload = body
+        request = ("\r\n".join(head) + "\r\n\r\n").encode() + payload
         sock.sendall(request)
         data = b""
         while True:
@@ -276,14 +363,19 @@ def http_forward_get(
             if not chunk:
                 break
             data += chunk
-        head, _, body = data.partition(b"\r\n\r\n")
-        status_line = head.split(b"\r\n", 1)[0]
-        parts = status_line.split(b" ", 2)
-        if len(parts) < 2:
-            raise SocksError("malformed HTTP response: %r" % status_line)
-        return int(parts[1]), body
+        return _parse_http_response(data, method)
     finally:
         sock.close()
+
+
+def http_forward_get(
+    proxy_host: str, proxy_port: int, dst_host: str, dst_port: int, path: str = "/"
+) -> Tuple[int, bytes]:
+    """Perform an absolute-URI GET through an HTTP forward proxy."""
+    status, _headers, body = http_forward(
+        proxy_host, proxy_port, dst_host, dst_port, path
+    )
+    return status, body
 
 
 # --------------------------------------------------------------------------- #
@@ -310,16 +402,77 @@ class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
 
 
 class _HTTPHandler(BaseHTTPRequestHandler):
+    """Proxy destination for proxy_pass tests.
+
+    Routes by path/method so a single instance exercises request-body forwarding
+    (POST echo), response re-framing (chunked), bodiless HEAD responses, and
+    header rewriting (`/echo-headers` reflects what the proxy forwarded).
+    """
+
     protocol_version = "HTTP/1.1"
 
-    def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
+    def _read_request_body(self) -> bytes:
+        te = self.headers.get("Transfer-Encoding", "")
+        if "chunked" in te.lower():
+            body = bytearray()
+            while True:
+                size_line = self.rfile.readline()
+                size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
+                if size == 0:
+                    # consume optional trailers up to the terminating blank line
+                    while self.rfile.readline().strip():
+                        pass
+                    break
+                body += self.rfile.read(size)
+                self.rfile.read(2)  # CRLF following the chunk data
+            return bytes(body)
+        length = self.headers.get("Content-Length")
+        if length is not None:
+            return self.rfile.read(int(length))
+        return b""
+
+    def _respond(self, body: bytes, *, chunked: bool = False) -> None:
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", "application/octet-stream")
+        if chunked:
+            self.send_header("Transfer-Encoding", "chunked")
+        else:
+            self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if chunked:
+            step = max(1, -(-len(body) // 3))  # split into ~3 chunks
+            for off in range(0, len(body), step):
+                piece = body[off:off + step]
+                self.wfile.write(b"%X\r\n" % len(piece) + piece + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        else:
+            self.wfile.write(body)
+        self.close_connection = True
+
+    def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
+        self._read_request_body()  # drain any body to keep framing correct
+        if self.path == "/chunked":
+            self._respond(HTTP_BODY, chunked=True)
+        elif self.path == "/echo-headers":
+            reflected = "".join(
+                "%s: %s\n" % (k, v) for k, v in self.headers.items()
+            ).encode()
+            self._respond(reflected)
+        else:
+            self._respond(HTTP_BODY)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        # advertise a body via Content-Length but send none, per HTTP semantics
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(HTTP_BODY)))
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(HTTP_BODY)
         self.close_connection = True
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._respond(self._read_request_body())
 
     def log_message(self, *args) -> None:  # silence
         pass
@@ -687,7 +840,8 @@ def t_auth_rejects_noauth(ctx: Context) -> None:
     ruleset = write_ruleset(ctx.tmpdir, "direct.lua", direct_ruleset())
     with Daemon(
         ctx.binary,
-        ["-l", "%s:%d" % (HOST, listen), "--auth-required", "-r", str(ruleset)],
+        ["-l", "%s:%d" % (HOST, listen), "--auth-required",
+         "-r", str(ruleset)],
         listen_port=listen,
         loglevel=ctx.loglevel,
     ):
@@ -706,7 +860,8 @@ def t_auth_accepts_userpass(ctx: Context) -> None:
     ruleset = write_ruleset(ctx.tmpdir, "direct.lua", direct_ruleset())
     with Daemon(
         ctx.binary,
-        ["-l", "%s:%d" % (HOST, listen), "--auth-required", "-r", str(ruleset)],
+        ["-l", "%s:%d" % (HOST, listen), "--auth-required",
+         "-r", str(ruleset)],
         listen_port=listen,
         loglevel=ctx.loglevel,
     ):
@@ -724,25 +879,29 @@ def t_auth_accepts_userpass(ctx: Context) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# D. HTTP proxy (CONNECT + forward)
+# D. HTTP proxy (CONNECT + proxy_pass)
 # --------------------------------------------------------------------------- #
+
+
+def _http_daemon(ctx: Context, extra: Tuple[str, ...] = ()) -> Tuple[Daemon, int]:
+    """Start a daemon with a SOCKS listener and an HTTP proxy port."""
+    listen = free_port()
+    http_port = free_port()
+    args = [
+        "-l", "%s:%d" % (HOST, listen),
+        "--http", "%s:%d" % (HOST, http_port),
+    ]
+    args += list(extra)
+    d = Daemon(
+        ctx.binary, args, listen_port=http_port, loglevel=ctx.loglevel
+    )
+    return d, http_port
 
 
 @test("http/connect")
 def t_http_connect(ctx: Context) -> None:
-    listen = free_port()
-    http_port = free_port()
-    with Daemon(
-        ctx.binary,
-        [
-            "-l",
-            "%s:%d" % (HOST, listen),
-            "--http",
-            "%s:%d" % (HOST, http_port),
-        ],
-        listen_port=http_port,
-        loglevel=ctx.loglevel,
-    ):
+    d, http_port = _http_daemon(ctx)
+    with d:
         sock = http_connect(HOST, http_port, HOST, ctx.echo_port)
         with sock:
             echo_roundtrip(sock)
@@ -750,22 +909,121 @@ def t_http_connect(ctx: Context) -> None:
 
 @test("http/forward")
 def t_http_forward(ctx: Context) -> None:
-    listen = free_port()
-    http_port = free_port()
-    with Daemon(
-        ctx.binary,
-        [
-            "-l",
-            "%s:%d" % (HOST, listen),
-            "--http",
-            "%s:%d" % (HOST, http_port),
-        ],
-        listen_port=http_port,
-        loglevel=ctx.loglevel,
-    ):
+    d, http_port = _http_daemon(ctx)
+    with d:
         status, body = http_forward_get(HOST, http_port, HOST, ctx.http_port)
         assert status == 200, "forward proxy returned status %d" % status
         assert HTTP_BODY in body, "forward proxy body mismatch: %r" % body
+
+
+@test("http/proxy-pass-post-echo")
+def t_http_proxy_pass_post(ctx: Context) -> None:
+    """A Content-Length request body is forwarded intact and echoed back."""
+    d, http_port = _http_daemon(ctx)
+    payload = random.randbytes(2048)
+    with d:
+        status, _hdr, body = http_forward(
+            HOST, http_port, HOST, ctx.http_port, "/echo",
+            method="POST", body=payload,
+        )
+        assert status == 200, "POST proxy_pass returned %d" % status
+        assert body == payload, "request body not forwarded verbatim"
+
+
+@test("http/proxy-pass-chunked-request")
+def t_http_proxy_pass_chunked_request(ctx: Context) -> None:
+    """A chunked request body is dechunked/re-framed and forwarded intact."""
+    d, http_port = _http_daemon(ctx)
+    payload = random.randbytes(5000)
+    with d:
+        status, _hdr, body = http_forward(
+            HOST, http_port, HOST, ctx.http_port, "/echo",
+            method="POST", body=payload, chunked=True,
+        )
+        assert status == 200, "chunked POST proxy_pass returned %d" % status
+        assert body == payload, "chunked request body not forwarded verbatim"
+
+
+@test("http/proxy-pass-chunked-response")
+def t_http_proxy_pass_chunked_response(ctx: Context) -> None:
+    """A chunked upstream response is re-framed and reaches the client whole."""
+    d, http_port = _http_daemon(ctx)
+    with d:
+        status, _hdr, body = http_forward(
+            HOST, http_port, HOST, ctx.http_port, "/chunked"
+        )
+        assert status == 200, "chunked-response proxy_pass returned %d" % status
+        assert body == HTTP_BODY, "chunked response body mismatch: %r" % body
+
+
+@test("http/proxy-pass-head")
+def t_http_proxy_pass_head(ctx: Context) -> None:
+    """A HEAD response carries headers but no body across the proxy."""
+    d, http_port = _http_daemon(ctx)
+    with d:
+        status, _hdr, body = http_forward(
+            HOST, http_port, HOST, ctx.http_port, "/", method="HEAD"
+        )
+        assert status == 200, "HEAD proxy_pass returned %d" % status
+        assert body == b"", "HEAD response leaked a body: %r" % body
+
+
+@test("http/proxy-pass-large-body")
+def t_http_proxy_pass_large_body(ctx: Context) -> None:
+    """A megabyte-scale body survives a proxy_pass round trip byte-for-byte."""
+    d, http_port = _http_daemon(ctx)
+    payload = random.randbytes(1 << 20)
+    with d:
+        status, _hdr, body = http_forward(
+            HOST, http_port, HOST, ctx.http_port, "/echo",
+            method="POST", body=payload,
+        )
+        assert status == 200, "large-body proxy_pass returned %d" % status
+        assert body == payload, "large body corrupted (%d bytes)" % len(body)
+
+
+@test("http/proxy-pass-header-rewrite")
+def t_http_proxy_pass_headers(ctx: Context) -> None:
+    """The proxy regenerates Host, appends Via, and forwards custom headers."""
+    d, http_port = _http_daemon(ctx)
+    with d:
+        status, _hdr, body = http_forward(
+            HOST, http_port, HOST, ctx.http_port, "/echo-headers",
+            extra_headers=[("X-Smoke-Test", "hello")],
+        )
+        assert status == 200, "header-rewrite proxy_pass returned %d" % status
+        reflected = body.lower()
+        assert b"via: 1.1 neosocksd" in reflected, "Via header not appended"
+        assert b"x-smoke-test: hello" in reflected, "custom header not forwarded"
+        assert b"host: %s:%d" % (HOST.encode(), ctx.http_port) in reflected, (
+            "Host not regenerated from the request target"
+        )
+
+
+@test("http/proxy-pass-bad-target")
+def t_http_proxy_pass_bad_target(ctx: Context) -> None:
+    """A non-absolute request target is rejected with 400 (proxy needs a URI)."""
+    d, http_port = _http_daemon(ctx)
+    with d:
+        status, _hdr, _body = http_forward(
+            HOST, http_port, HOST, ctx.http_port, raw_target="/relative-path"
+        )
+        assert status == 400, "expected 400 for non-absolute target, got %d" % status
+
+
+@test("http/proxy-pass-ruleset-redirect")
+def t_http_proxy_pass_ruleset(ctx: Context) -> None:
+    """proxy_pass honors a ruleset that redirects the target host."""
+    http_addr = "%s:%d" % (HOST, ctx.http_port)
+    ruleset = write_ruleset(
+        ctx.tmpdir, "http_redirect.lua",
+        redirect_ruleset("smoke.test:80", http_addr),
+    )
+    d, http_port = _http_daemon(ctx, ("-r", str(ruleset)))
+    with d:
+        status, _hdr, body = http_forward(HOST, http_port, "smoke.test", 80)
+        assert status == 200, "ruleset proxy_pass returned %d" % status
+        assert body == HTTP_BODY, "ruleset proxy_pass body mismatch: %r" % body
 
 
 # --------------------------------------------------------------------------- #
@@ -831,7 +1089,8 @@ def t_ruleset_redirect(ctx: Context) -> None:
     listen = free_port()
     api = free_port()
     ruleset = write_ruleset(
-        ctx.tmpdir, "redirect.lua", redirect_ruleset("smoke.test:80", ctx.echo_addr)
+        ctx.tmpdir, "redirect.lua", redirect_ruleset(
+            "smoke.test:80", ctx.echo_addr)
     )
     with Daemon(
         ctx.binary,
@@ -850,7 +1109,8 @@ def t_ruleset_reject(ctx: Context) -> None:
     listen = free_port()
     api = free_port()
     ruleset = write_ruleset(
-        ctx.tmpdir, "redirect.lua", redirect_ruleset("smoke.test:80", ctx.echo_addr)
+        ctx.tmpdir, "redirect.lua", redirect_ruleset(
+            "smoke.test:80", ctx.echo_addr)
     )
     with Daemon(
         ctx.binary,
@@ -915,7 +1175,8 @@ def t_api_invoke(ctx: Context) -> None:
         api_port=api,
         loglevel=ctx.loglevel,
     ):
-        status, _ = api_request(api, "POST", "/ruleset/invoke", b"_G.smoke_ok = true")
+        status, _ = api_request(
+            api, "POST", "/ruleset/invoke", b"_G.smoke_ok = true")
         assert status == 200, "invoke (set) returned %d" % status
         # read back: assert fails -> HTTP 500 if state did not persist
         status, body = api_request(
@@ -1030,9 +1291,10 @@ def run_cases(ctx: Context, cases: List[Case], keep_going: bool) -> List[Result]
         res.duration = time.monotonic() - start
         results.append(res)
 
-        marker = {"PASS": "ok  ", "FAIL": "FAIL", "SKIP": "skip"}[res.status]
-        suffix = "" if not res.detail else "  -- %s" % res.detail.splitlines()[0]
-        log("[%s] %-40s %6.2fs%s" % (marker, case.name, res.duration, suffix))
+        suffix = "" if not res.detail else "  -- %s" % res.detail.splitlines()[
+            0]
+        log("[%s] %-40s %6.2fs%s" %
+            (res.status, case.name, res.duration, suffix))
         if res.status == "FAIL" and not keep_going:
             log("aborting on first failure (use -k to keep going)")
             break
@@ -1064,12 +1326,18 @@ def write_report(path: Path, results: List[Result]) -> None:
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--build", default=str(DEFAULT_BUILD_DIR), help="build dir")
-    parser.add_argument("--binary", default=None, help="path to neosocksd binary")
-    parser.add_argument("--loglevel", type=int, default=4, help="daemon loglevel")
-    parser.add_argument("--filter", default=None, help="run tests matching SUBSTR")
-    parser.add_argument("--list", action="store_true", help="list tests and exit")
-    parser.add_argument("-o", "--output", default=None, help="markdown report path")
+    parser.add_argument(
+        "--build", default=str(DEFAULT_BUILD_DIR), help="build dir")
+    parser.add_argument("--binary", default=None,
+                        help="path to neosocksd binary")
+    parser.add_argument("--loglevel", type=int,
+                        default=4, help="daemon loglevel")
+    parser.add_argument("--filter", default=None,
+                        help="run tests matching SUBSTR")
+    parser.add_argument("--list", action="store_true",
+                        help="list tests and exit")
+    parser.add_argument("-o", "--output", default=None,
+                        help="markdown report path")
     parser.add_argument(
         "-k", "--keep-going", action="store_true", help="run all tests on failure"
     )

@@ -8,7 +8,7 @@
 #include "conf.h"
 #include "proto/http.h"
 #include "resolver.h"
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 
 #include "os/clock.h"
@@ -243,7 +243,11 @@ bool ruleset_rpcall(
 		callback->rpcall.result = NULL;
 		callback->rpcall.resultlen = 0;
 	} else {
-		callback->rpcall.result = RS.rpcall_result;
+		/* mirror rpcall_finish()'s contract: rpcall_cb() free()s this */
+		char *const copy = malloc(RS.rpcall_resultlen);
+		T_CHECK(copy != NULL);
+		memcpy(copy, RS.rpcall_result, RS.rpcall_resultlen);
+		callback->rpcall.result = copy;
 		callback->rpcall.resultlen = RS.rpcall_resultlen;
 	}
 	RS.rpcstate = (struct ruleset_state *)&ruleset_state_tag;
@@ -481,10 +485,10 @@ static void start_api(
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]) == 0);
-	T_CHECK(socket_set_cloexec(sv[1]) == 0);
-	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	T_CHECK(socket_set_cloexec(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_cloexec(sv[1]));
+	T_CHECK(socket_set_nonblock(sv[1]));
 	api_serve(api, loop, sv[0], (const struct sockaddr *)&sa);
 	*peer_fd = sv[1];
 }
@@ -534,6 +538,48 @@ static bool assert_status(
 	const unsigned char *restrict rsp, const size_t n, const char *code)
 {
 	return find_bytes(rsp, n, code);
+}
+
+static bool parse_content_length(
+	const unsigned char *restrict rsp, const size_t n,
+	size_t *restrict out_value)
+{
+	static const char key[] = "Content-Length: ";
+	const size_t keylen = sizeof(key) - 1;
+	for (size_t i = 0; i + keylen <= n; i++) {
+		if (memcmp(rsp + i, key, keylen) != 0) {
+			continue;
+		}
+		size_t pos = i + keylen;
+		size_t value = 0;
+		bool has_digit = false;
+		while (pos < n && '0' <= rsp[pos] && rsp[pos] <= '9') {
+			value = value * 10 + (size_t)(rsp[pos] - '0');
+			has_digit = true;
+			pos++;
+		}
+		if (!has_digit) {
+			return false;
+		}
+		*out_value = value;
+		return true;
+	}
+	return false;
+}
+
+static bool find_body_offset(
+	const unsigned char *restrict rsp, const size_t n,
+	size_t *restrict out_offset)
+{
+	static const char sep[] = "\r\n\r\n";
+	const size_t seplen = sizeof(sep) - 1;
+	for (size_t i = 0; i + seplen <= n; i++) {
+		if (memcmp(rsp + i, sep, seplen) == 0) {
+			*out_offset = i + seplen;
+			return true;
+		}
+	}
+	return false;
 }
 
 /* -------------------------------------------------------------------------
@@ -922,6 +968,31 @@ T_DECLARE_CASE(not_found_404)
 	ev_loop_destroy(loop);
 }
 
+/* api_handle()'s url_parse() failure path: invalid percent-encoding in the
+ * authority makes url_parse reject the request target -> 400. */
+T_DECLARE_CASE(malformed_url_400)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET http://%zz/ HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 400 "));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1071,6 +1142,34 @@ T_DECLARE_CASE(ruleset_disabled_returns_500)
 	ev_loop_destroy(loop);
 }
 
+/* process_cb()'s fallback 404 for an unrecognized /ruleset/<action>. */
+T_DECLARE_CASE(ruleset_unknown_action_404)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	init_server_pair(&api, &core, loop);
+	api.ruleset = (struct ruleset *)&ruleset_tag;
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "POST /ruleset/bogus HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 404 "));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(ruleset_invoke_ok_200)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1096,6 +1195,93 @@ T_DECLARE_CASE(ruleset_invoke_ok_200)
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
 		T_EXPECT(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.invoke_ok = true;
+	init_server_pair(&api, &core, loop);
+	api.ruleset = (struct ruleset *)&ruleset_tag;
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	/* Regression: Content-Length: 0 leaves conn.cbuf unallocated (NULL);
+	 * this must not crash the server. */
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n"
+			 "Content-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Regression: send_errmsg declared the full, unclamped error length in
+ * Content-Length while BUF_APPEND silently truncated the body to whatever
+ * room remained in the fixed-size wbuf (e.g. a Lua traceback exceeding
+ * ~8KB). A keep-alive-tolerant client relying on Content-Length (rather
+ * than EOF) to know when the response ends would read a truncated body.
+ */
+T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	int ruleset_tag = 0;
+	static unsigned char rsp[16384];
+	static char big_err[10000];
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	for (size_t i = 0; i < sizeof(big_err); i++) {
+		big_err[i] = (char)('a' + (i % 26));
+	}
+	RS.invoke_ok = false;
+	RS.errstr = big_err;
+	RS.errlen = sizeof(big_err);
+	init_server_pair(&api, &core, loop);
+	api.ruleset = (struct ruleset *)&ruleset_tag;
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n"
+			 "Content-Length: 1\r\n\r\n"
+			 "x"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
+
+		size_t declared_len = 0;
+		T_CHECK(parse_content_length(rsp, (size_t)n, &declared_len));
+		size_t body_off = 0;
+		T_CHECK(find_body_offset(rsp, (size_t)n, &body_off));
+		const size_t actual_body_len = (size_t)n - body_off;
+
+		/* confirm the message was actually too large to fit whole,
+		 * and that Content-Length always matches what was sent */
+		T_EXPECT(declared_len < sizeof(big_err));
+		T_EXPECT_EQ(actual_body_len, declared_len);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1156,6 +1342,39 @@ T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 		T_EXPECT(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Time Cost"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.update_ok = true;
+	init_server_pair(&api, &core, loop);
+	api.ruleset = (struct ruleset *)&ruleset_tag;
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	/* Regression: Content-Length: 0 leaves conn.cbuf unallocated (NULL);
+	 * this must not crash the server. */
+	T_CHECK(send_request(
+		peer_fd,
+		"POST /ruleset/update?module=libruleset&chunkname=%40x.lua HTTP/1.1\r\n"
+		"Content-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1223,6 +1442,54 @@ T_DECLARE_CASE(ruleset_rpcall_bad_mime_400)
 	ev_loop_destroy(loop);
 }
 
+/*
+ * Regression: connection teardown while an rpcall is still pending (its
+ * finish event never fed) must not crash or leak the buffered result --
+ * api_ctx_stop() must clear ctx->rpcreturn.rpcall.result itself, since
+ * rpcall_cb() will now never run to free it.
+ */
+static bool ruleset_cancelled_once(void *data)
+{
+	(void)data;
+	return RS.cancel_count >= 1;
+}
+
+T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.loop = loop;
+	RS.rpcall_ok = true;
+	RS.rpcall_auto_finish = false;
+	test_conf.timeout = 0.02;
+	init_server_pair(&api, &core, loop);
+	api.ruleset = (struct ruleset *)&ruleset_tag;
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+			 "Content-Length: 1\r\n"
+			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
+			 "x"));
+	T_CHECK(test_wait_until(
+		loop, ruleset_rpcall_pending, NULL, TEST_WAIT_RECV_SEC));
+
+	/* Let the request timeout fire while the rpcall is still pending. */
+	T_EXPECT(test_wait_until(
+		loop, ruleset_cancelled_once, NULL, TEST_WAIT_RECV_SEC));
+	T_EXPECT_EQ(RS.cancel_count, (size_t)1);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.timeout = 1.0;
+}
+
 T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1263,6 +1530,44 @@ T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 			rsp, (size_t)n, "Content-Type: " MIME_RPCALL "\r\n"));
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "Content-Encoding: deflate\r\n"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(ruleset_rpcall_empty_body_ok)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.loop = loop;
+	RS.rpcall_ok = true;
+	RS.rpcall_auto_finish = false;
+	init_server_pair(&api, &core, loop);
+	api.ruleset = (struct ruleset *)&ruleset_tag;
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	/* Regression: Content-Length: 0 leaves conn.cbuf unallocated (NULL);
+	 * this must not crash the server. */
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+			 "Content-Length: 0\r\n"
+			 "Content-Type: " MIME_RPCALL "\r\n\r\n"));
+	T_CHECK(test_wait_until(
+		loop, ruleset_rpcall_pending, NULL, TEST_WAIT_RECV_SEC));
+	finish_rpcall(loop);
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1327,18 +1632,25 @@ static const struct testing_suite suite[] = {
 	T_CASE(stats_bad_query_400),
 	T_CASE(stats_deflate_response_header),
 	T_CASE(not_found_404),
+	T_CASE(malformed_url_400),
 	T_CASE(stats_connect_latency_shows_percentiles),
 	T_CASE(stats_nobanner_option_suppresses_banner),
 #if WITH_RULESET
 	T_CASE(stats_post_with_ruleset_q),
 	T_CASE(healthy_unhealthy_returns_503),
 	T_CASE(ruleset_disabled_returns_500),
+	T_CASE(ruleset_unknown_action_404),
 	T_CASE(ruleset_invoke_ok_200),
+	T_CASE(ruleset_invoke_empty_body_ok_200),
+	T_CASE(errmsg_content_length_matches_truncated_body),
 	T_CASE(ruleset_invoke_length_required_411),
 	T_CASE(ruleset_update_ok_contains_time_cost),
+	T_CASE(ruleset_update_empty_body_ok_200),
 	T_CASE(ruleset_gc_ok_contains_report),
 	T_CASE(ruleset_rpcall_bad_mime_400),
+	T_CASE(ruleset_rpcall_pending_torn_down_by_timeout),
 	T_CASE(ruleset_rpcall_ok_deflate_response),
+	T_CASE(ruleset_rpcall_empty_body_ok),
 	T_CASE(ruleset_rpcall_sync_fail_500),
 #endif /* WITH_RULESET */
 	T_SUITE_END,

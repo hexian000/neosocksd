@@ -10,13 +10,6 @@
 #include "utils/debug.h"
 #include "utils/slog.h"
 
-#if WITH_CARES
-/* under strict POSIX feature macros, ares.h needs fd_set from sys/select.h */
-#include <sys/select.h>
-
-#include <ares.h>
-#endif
-
 #include <ev.h>
 
 #include <netinet/in.h>
@@ -25,6 +18,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if WITH_CARES
+/* under strict POSIX feature macros, ares.h needs fd_set from sys/select.h */
+#include <sys/select.h>
+
+#include <ares.h>
+#endif
 #include <sys/socket.h>
 #if WITH_CARES
 #include <sys/time.h>
@@ -38,6 +37,10 @@ struct io_node {
 struct resolver {
 	struct ev_loop *loop;
 	struct resolver_stats stats;
+	/* queries whose deferred finish event has been fed to the loop but not
+	 * yet dispatched; drained by resolver_free() so a teardown before the
+	 * event fires neither leaks the query nor invokes its callback */
+	struct resolve_query *pending;
 #if WITH_CARES
 	bool async_enabled;
 	ares_channel channel;
@@ -49,6 +52,7 @@ struct resolver {
 
 struct resolve_query {
 	struct resolver *resolver;
+	struct resolve_query *next;
 	struct resolve_cb done_cb;
 	ev_watcher w_finish;
 	bool ok : 1;
@@ -58,17 +62,45 @@ struct resolve_query {
 	char buf[];
 };
 
+/* Track a completed query on the resolver's pending list and schedule its
+ * deferred completion callback. It stays on the list until finish_cb
+ * dispatches it, letting resolver_free() reclaim any still-undispatched query
+ * at teardown. */
+static void finish_defer(struct resolve_query *restrict q)
+{
+	struct resolver *restrict r = q->resolver;
+	q->next = r->pending;
+	r->pending = q;
+	ev_feed_event(r->loop, &q->w_finish, EV_CUSTOM);
+}
+
+/* Remove a query from the resolver's pending list. */
+static void finish_unlink(struct resolve_query *restrict q)
+{
+	struct resolve_query **pp = &q->resolver->pending;
+	for (struct resolve_query *it = *pp; it != NULL;
+	     pp = &it->next, it = it->next) {
+		if (it == q) {
+			*pp = it->next;
+			return;
+		}
+	}
+}
+
 static void
 finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct resolve_query *restrict q = watcher->data;
+	finish_unlink(q);
+	const char *const name = q->name != NULL ? q->name : "";
+	const char *const service = q->service != NULL ? q->service : "";
 	if (q->ok) {
 		char addr[64];
 		sa_format(addr, sizeof(addr), &q->addr.sa);
-		LOGD_F("resolve `%s:%s': %s", q->name, q->service, addr);
+		LOGD_F("resolve `%s:%s': %s", name, service, addr);
 	} else {
-		LOGD_F("resolve `%s:%s': failed", q->name, q->service);
+		LOGD_F("resolve `%s:%s': failed", name, service);
 	}
 
 	/* Check if query was cancelled */
@@ -256,7 +288,11 @@ static void addrinfo_cb(
 		}
 		break;
 	case ARES_EDESTRUCTION:
-		/* c-ares channel is being destroyed, don't process */
+		/* resolver_free() cancels pending queries without invoking
+		 * callbacks (see resolver.h); free the query directly since
+		 * finish_cb -- which normally does so -- is never reached
+		 * from this path. */
+		free(q);
 		return;
 	default:
 		LOGW_F("c-ares: resolve error: (%d) %s", status,
@@ -266,7 +302,7 @@ static void addrinfo_cb(
 
 	/* Trigger query completion callback (deferred, matching the synchronous
 	 * path, so callers can reliably set their query pointer before it fires) */
-	ev_feed_event(q->resolver->loop, &q->w_finish, EV_CUSTOM);
+	finish_defer(q);
 }
 #endif /* WITH_CARES */
 
@@ -291,6 +327,22 @@ void resolver_cleanup(void)
 }
 
 #if WITH_CARES
+/* (Re)configure the c-ares channel's upstream servers from a CSV nameserver
+ * string; a NULL string leaves the current (system-default) servers in place. */
+static void resolver_apply_nameserver(
+	struct resolver *restrict r, const char *restrict nameserver)
+{
+	if (nameserver == NULL) {
+		return;
+	}
+	const int ret = ares_set_servers_ports_csv(r->channel, nameserver);
+	if (ret != ARES_SUCCESS) {
+		LOGE_F("c-ares: failed to set nameserver `%s': (%d) %s",
+		       nameserver, ret, ares_strerror(ret));
+		/* Continue with default nameservers */
+	}
+}
+
 static bool resolver_async_init(
 	struct resolver *restrict r, const struct config *restrict conf)
 {
@@ -308,17 +360,7 @@ static bool resolver_async_init(
 	ev_timer_init(&r->w_timeout, timeout_cb, 0.0, 0.0);
 	r->w_timeout.data = r;
 
-	const char *const nameserver = conf->nameserver;
-	if (nameserver == NULL) {
-		return true;
-	}
-	ret = ares_set_servers_ports_csv(r->channel, nameserver);
-	if (ret != ARES_SUCCESS) {
-		LOGE_F("c-ares: failed to set nameserver `%s': (%d) %s",
-		       nameserver, ret, ares_strerror(ret));
-		/* Continue with default nameservers */
-		return true;
-	}
+	resolver_apply_nameserver(r, conf->nameserver);
 	return true;
 }
 #endif /* WITH_CARES */
@@ -342,10 +384,24 @@ resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf)
 	}
 
 	r->async_enabled = resolver_async_init(r, conf);
-#else
+#else /* WITH_CARES */
 	(void)conf;
 #endif /* WITH_CARES */
 	return r;
+}
+
+void resolver_setnameserver(
+	struct resolver *restrict r, const struct config *restrict conf)
+{
+#if WITH_CARES
+	if (!r->async_enabled) {
+		return;
+	}
+	resolver_apply_nameserver(r, conf->nameserver);
+#else /* WITH_CARES */
+	(void)r;
+	(void)conf;
+#endif /* WITH_CARES */
 }
 
 const struct resolver_stats *resolver_stats(const struct resolver *restrict r)
@@ -368,13 +424,23 @@ void resolver_free(struct resolver *restrict r)
 		ASSERT(r->sockets.next == NULL);
 	}
 #endif /* WITH_CARES */
+	/* Reclaim queries that completed but whose deferred finish event has
+	 * not been dispatched yet: clear the pending event and free them
+	 * without invoking their callbacks, per this function's contract. */
+	for (struct resolve_query *q = r->pending; q != NULL;) {
+		struct resolve_query *const next = q->next;
+		ev_clear_pending(r->loop, &q->w_finish);
+		free(q);
+		q = next;
+	}
 	free(r);
 }
 
 static void
 resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
 {
-	LOGD_F("resolve `%s:%s': start pf=%d", q->name, q->service, q->family);
+	LOGD_F("resolve `%s:%s': start pf=%d", q->name != NULL ? q->name : "",
+	       q->service != NULL ? q->service : "", q->family);
 	r->stats.num_query++;
 
 #if WITH_CARES
@@ -400,7 +466,7 @@ resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
 	/* Fall back to synchronous resolution */
 	q->ok = sa_resolve(
 		&q->addr, q->name, q->service, SA_RESOLVE_TCP, q->family);
-	ev_feed_event(r->loop, &q->w_finish, EV_CUSTOM);
+	finish_defer(q);
 }
 
 struct resolve_query *resolve_do(
@@ -445,7 +511,8 @@ void resolve_cancel(struct resolve_query *restrict q)
 	if (q == NULL) {
 		return;
 	}
-	LOGD_F("resolve `%s:%s': cancel", q->name, q->service);
+	LOGD_F("resolve `%s:%s': cancel", q->name != NULL ? q->name : "",
+	       q->service != NULL ? q->service : "");
 
 	/* Clear the callback to indicate cancellation */
 	q->done_cb = (struct resolve_cb){

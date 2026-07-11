@@ -10,16 +10,16 @@
 #include "server.h"
 #include "util.h"
 
+#include "binary/serialize.h"
 #include "codec/base64.h"
+#include "meta/arraysize.h"
 #include "net/addr.h"
 #include "net/http.h"
 #include "net/url.h"
 #include "os/clock.h"
 #include "os/socket.h"
-#include "utils/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
-#include "utils/serialize.h"
 #include "utils/slog.h"
 
 #include <ev.h>
@@ -37,7 +37,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-char *const proxy_protocol_str[PROTO_MAX] = {
+const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -350,7 +350,11 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 	}
 	req->num_proxy = 0;
 	if (n > 0) {
-		ASSERT(len <= UINT16_MAX);
+		if (len > UINT16_MAX) {
+			LOGE_F("proxy chain too long: %zu bytes", len);
+			dialreq_free(req);
+			return NULL;
+		}
 		char buf[len + 1];
 		(void)memcpy(buf, csv, len + 1);
 		for (const char *tok = strtok(buf, ","); tok != NULL;
@@ -374,7 +378,9 @@ static int format_proxyreq(
 		return nhost;
 	}
 	const struct url u = {
-		.scheme = proxy_protocol_str[req->proto],
+		/* url_build reads the struct as const; scheme is char * only
+		 * because struct url predates const-correctness */
+		.scheme = (char *)proxy_protocol_str[req->proto],
 		.host = host,
 	};
 	return url_build(s, maxlen, &u);
@@ -428,6 +434,19 @@ void dialreq_free(struct dialreq *restrict req)
 	free(req);
 }
 
+bool dialreq_replace(
+	struct dialreq **restrict req, const char *restrict addr,
+	const char *restrict csv)
+{
+	struct dialreq *restrict newreq = dialreq_parse(addr, csv);
+	if (newreq == NULL) {
+		return false;
+	}
+	dialreq_free(*req);
+	*req = newreq;
+	return true;
+}
+
 enum dialer_state {
 	/* Initial state, not yet started. */
 	STATE_INIT,
@@ -470,7 +489,7 @@ static void dialer_stop(struct dialer *restrict d, struct ev_loop *loop)
 
 	/* Close socket if connection wasn't successful */
 	if (d->dialed_fd == -1 && d->w_socket.fd != -1) {
-		SOCKET_CLOSE_FD(d->w_socket.fd);
+		socket_close(d->w_socket.fd);
 	}
 	d->state = STATE_DONE;
 }
@@ -501,7 +520,7 @@ static int format_status(
 	const size_t jump = d->jump;
 	const struct dialreq *restrict req = d->req;
 	ASSERT(jump < req->num_proxy);
-	char raddr[64], proxy[256];
+	char raddr[FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")], proxy[256];
 	const struct dialaddr *restrict addr = &req->addr;
 	if (jump + 1 < req->num_proxy) {
 		addr = &req->proxy[jump + 1].addr;
@@ -520,17 +539,21 @@ static int format_status(
 		jump, nproxy, proxy);
 }
 
-#define DIALER_LOG_F(level, d, format, ...)                                    \
-	do {                                                                   \
-		if (!LOGLEVEL(level)) {                                        \
-			break;                                                 \
-		}                                                              \
-		char status_str[256];                                          \
-		const int nstatus =                                            \
-			format_status(status_str, sizeof(status_str), (d));    \
-		ASSERT(nstatus > 0);                                           \
-		LOG_F(level, "%.*s: " format, nstatus, status_str,             \
-		      __VA_ARGS__);                                            \
+#define DIALER_LOG_F(level, d, format, ...)                                      \
+	do {                                                                     \
+		if (!LOGLEVEL(level)) {                                          \
+			break;                                                   \
+		}                                                                \
+		char status_str[256];                                            \
+		const int nstatus =                                              \
+			format_status(status_str, sizeof(status_str), (d));      \
+		if (nstatus < 0) {                                               \
+			/* format_status left status_str unwritten; skip       \
+			 * rather than feed a negative %.*s precision */ \
+			break;                                                   \
+		}                                                                \
+		LOG_F(level, "%.*s: " format, nstatus, status_str,               \
+		      __VA_ARGS__);                                              \
 	} while (0)
 #define DIALER_LOG(level, d, message) DIALER_LOG_F(level, d, "%s", message)
 
@@ -540,7 +563,10 @@ static bool dialer_send(
 {
 	const int fd = d->w_socket.fd;
 	LOG_BIN_F(VERYVERBOSE, buf, len, 0, "send: [fd:%d] %zu bytes", fd, len);
-	const ssize_t nsend = send(fd, buf, len, 0);
+	ssize_t nsend;
+	do {
+		nsend = send(fd, buf, len, 0);
+	} while (nsend < 0 && errno == EINTR);
 	if (nsend < 0) {
 		const int err = errno;
 		DIALER_LOG_F(
@@ -582,6 +608,8 @@ static bool send_http_req(
 	do {                                                                   \
 		if ((b) + CONSTSTRLEN(s) > buf + sizeof(buf)) {                \
 			DIALER_LOG(DEBUG, d, "buffer overflow");               \
+			d->err = DIALER_ERR_PROXY_PROTO;                       \
+			d->syserr = 0;                                         \
 			return false;                                          \
 		}                                                              \
 		memcpy((b), (s), CONSTSTRLEN(s));                              \
@@ -592,6 +620,8 @@ static bool send_http_req(
 	const int n = dialaddr_format(b, sizeof(buf) - (b - buf), addr);
 	if (n < 0 || (size_t)n >= sizeof(buf) - (b - buf)) {
 		DIALER_LOG(DEBUG, d, "failed to format host address");
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return false;
 	}
 	b += n;
@@ -613,6 +643,8 @@ static bool send_http_req(
 			base64_encode((unsigned char *)b, &len, src, srclen);
 		if (!ok || b + len > buf + sizeof(buf)) {
 			DIALER_LOG(DEBUG, d, "failed to format credential");
+			d->err = DIALER_ERR_PROXY_PROTO;
+			d->syserr = 0;
 			return false;
 		}
 		b += len;
@@ -624,7 +656,8 @@ static bool send_http_req(
 	if (!dialer_send(d, (unsigned char *)buf, (size_t)(b - buf))) {
 		return false;
 	}
-	socket_rcvlowat(d->w_socket.fd, HTTP_RSP_MINLEN);
+	/* SO_RCVLOWAT is a wakeup hint; failure only affects efficiency */
+	(void)socket_rcvlowat(d->w_socket.fd, HTTP_RSP_MINLEN);
 	return true;
 }
 
@@ -693,7 +726,7 @@ static bool send_socks4a_req(
 	if (!dialer_send(d, buf, len)) {
 		return false;
 	}
-	socket_rcvlowat(d->w_socket.fd, SOCKS4_RSP_MINLEN);
+	(void)socket_rcvlowat(d->w_socket.fd, SOCKS4_RSP_MINLEN);
 	return true;
 }
 
@@ -722,6 +755,8 @@ static bool send_socks5_auth(
 		DIALER_LOG_F(
 			ERROR, d, "socks5 credentials too long: %zu, %zu", ulen,
 			plen);
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
 		return false;
 	}
 	const size_t len = 1 + 1 + ulen + 1 + plen;
@@ -802,7 +837,7 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 	if (!dialer_send(d, buf, len)) {
 		return false;
 	}
-	socket_rcvlowat(d->w_socket.fd, SOCKS5_RSP_MINLEN);
+	(void)socket_rcvlowat(d->w_socket.fd, SOCKS5_RSP_MINLEN);
 	return true;
 }
 
@@ -847,10 +882,14 @@ static bool consume_rcvbuf(struct dialer *restrict d, const size_t n)
 		DIALER_LOG_F(
 			DEBUG, d, "recv: [fd:%d] (%d) %s", fd, err,
 			strerror(err));
+		d->err = DIALER_ERR_SYSTEM;
+		d->syserr = err;
 		return false;
 	}
 	if ((size_t)nrecv != n) {
 		DIALER_LOG_F(DEBUG, d, "recv: [fd:%d] early EOF", fd);
+		d->err = DIALER_ERR_EOF;
+		d->syserr = 0;
 		return false;
 	}
 	d->next += n;
@@ -1017,7 +1056,7 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 	const size_t len = (d->rbuf.data + d->rbuf.len) - d->next;
 	size_t want = SOCKS5_HDR_LEN;
 	if (len < want) {
-		return (int)(want - len) + 1;
+		return (int)(want - len);
 	}
 
 	struct socks5_hdr h;
@@ -1148,6 +1187,17 @@ static int recv_socks5_authmethod(struct dialer *restrict d)
 		}
 		return recv_socks5_rsp(d);
 	case SOCKS5AUTH_USERPASS:
+		/* Only NOAUTH is offered when we have no credentials; a server
+		 * selecting USERPASS here picked a method we never advertised.
+		 * Acting on it would deref a NULL username in send_socks5_auth. */
+		if (d->req->proxy[d->jump].username == NULL) {
+			DIALER_LOG(
+				DEBUG, d,
+				"SOCKS5: server selected an auth method that was not offered");
+			d->err = DIALER_ERR_PROXY_PROTO;
+			d->syserr = 0;
+			return -1;
+		}
 		d->state = STATE_HANDSHAKE2;
 		if (!send_dispatch(d)) {
 			return -1;
@@ -1237,7 +1287,11 @@ static int dialer_recv(struct dialer *restrict d)
 		d->syserr = sockerr;
 		return -1;
 	}
-	d->rbuf.len += (size_t)nrecv;
+	/* MSG_PEEK never consumes, so a re-peek before the next
+	 * consume_rcvbuf() call re-reads the same bytes already counted in
+	 * rbuf.len; recompute the total relative to `buf` (== d->next)
+	 * instead of accumulating nrecv onto the previous length. */
+	d->rbuf.len = (size_t)(buf - d->rbuf.data) + (size_t)nrecv;
 	LOG_BIN_F(
 		VERYVERBOSE, buf, (size_t)nrecv, 0, "recv: %zu bytes",
 		(size_t)nrecv);
@@ -1248,7 +1302,7 @@ static int dialer_recv(struct dialer *restrict d)
 	}
 	if (ret == 0) {
 		/* restore default */
-		socket_rcvlowat(d->w_socket.fd, 1);
+		(void)socket_rcvlowat(d->w_socket.fd, 1);
 		return 0;
 	}
 	const size_t want = (d->rbuf.data + d->rbuf.len) - d->next + ret;
@@ -1258,7 +1312,7 @@ static int dialer_recv(struct dialer *restrict d)
 		d->syserr = 0;
 		return -1;
 	}
-	socket_rcvlowat(fd, (int)want);
+	(void)socket_rcvlowat(fd, (int)want);
 	return 1;
 }
 
@@ -1338,6 +1392,8 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 }
 
+/* Log a blocked-address message; the caller returns false regardless of the
+ * runtime log level (this macro must not carry the control flow itself). */
 #define LOG_BLOCKED(level, what, sa)                                           \
 	do {                                                                   \
 		if (LOGLEVEL(level)) {                                         \
@@ -1345,14 +1401,34 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			sa_format(addr_str, sizeof(addr_str), sa);             \
 			LOG_F(level, "blocked %s address: %s", what,           \
 			      addr_str);                                       \
-			return false;                                          \
 		}                                                              \
 	} while (0)
 
 static bool
 check_outbound_sa(struct dialer *restrict d, const struct sockaddr *restrict sa)
 {
-	switch (sa_ipclassify(sa)) {
+	/* sa_ipclassify() (vendored, read-only) has no IPv4-mapped awareness,
+	 * so a SOCKS5 ATYP_INET6 request for e.g. ::ffff:127.0.0.1 would
+	 * otherwise be classified IPCLASS_GLOBAL and bypass block_loopback/
+	 * block_local/block_multicast entirely. Classify the embedded IPv4
+	 * address instead; keep the original `sa` for logging so blocked
+	 * messages still show the real (mapped) address. */
+	struct sockaddr_in mapped;
+	const struct sockaddr *classify_sa = sa;
+	if (sa->sa_family == AF_INET6) {
+		const struct sockaddr_in6 *restrict sa6 =
+			(const struct sockaddr_in6 *)sa;
+		if (IN6_IS_ADDR_V4MAPPED(&sa6->sin6_addr)) {
+			mapped = (struct sockaddr_in){
+				.sin_family = AF_INET,
+				.sin_port = sa6->sin6_port,
+			};
+			memcpy(&mapped.sin_addr, &sa6->sin6_addr.s6_addr[12],
+			       sizeof(mapped.sin_addr));
+			classify_sa = (const struct sockaddr *)&mapped;
+		}
+	}
+	switch (sa_ipclassify(classify_sa)) {
 	case IPCLASS_LOOPBACK:
 		if (d->conf->block_loopback) {
 			LOG_BLOCKED(DEBUG, "loopback", sa);
@@ -1404,21 +1480,12 @@ static bool connect_sa(
 		return false;
 	}
 
-	{
-		int err = socket_set_cloexec(fd);
-		if (err != 0) {
-			SOCKET_CLOSE_FD(fd);
-			d->err = DIALER_ERR_SYSTEM;
-			d->syserr = err;
-			return false;
-		}
-		err = socket_set_nonblock(fd);
-		if (err != 0) {
-			SOCKET_CLOSE_FD(fd);
-			d->err = DIALER_ERR_SYSTEM;
-			d->syserr = err;
-			return false;
-		}
+	if (!socket_set_cloexec(fd) || !socket_set_nonblock(fd)) {
+		const int err = errno;
+		socket_close(fd);
+		d->err = DIALER_ERR_SYSTEM;
+		d->syserr = err;
+		return false;
 	}
 	const struct config *restrict conf = d->conf;
 #if WITH_NETDEVICE
@@ -1426,11 +1493,13 @@ static bool connect_sa(
 		socket_bind_netdev(fd, conf->netdev);
 	}
 #endif
-	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
-	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
+	/* best-effort tuning; failure does not affect correctness */
+	(void)socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
+	(void)socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 #if WITH_TCP_FASTOPEN_CONNECT
 	if (conf->tcp_fastopen_connect) {
-		socket_set_fastopen_connect(fd, true);
+		/* opportunistic; falls back to a normal handshake on failure */
+		(void)socket_set_fastopen_connect(fd, true);
 	}
 #endif
 	if (LOGLEVEL(VERBOSE)) {
@@ -1450,7 +1519,7 @@ static bool connect_sa(
 			}
 			d->err = DIALER_ERR_CONNECT;
 			d->syserr = err;
-			SOCKET_CLOSE_FD(fd);
+			socket_close(fd);
 			return false;
 		}
 		ev_io_set(&d->w_socket, fd, EV_WRITE);
@@ -1466,7 +1535,7 @@ static bool connect_sa(
 
 	d->state = STATE_HANDSHAKE1;
 	if (!send_dispatch(d)) {
-		SOCKET_CLOSE_FD(fd);
+		socket_close(fd);
 		return false;
 	}
 	ev_io_set(&d->w_socket, fd, EV_READ);
@@ -1521,9 +1590,10 @@ static void resolve_cb(
 	}
 }
 
-void dialer_init(
-	struct dialer *restrict d, const struct dialer_cb *callback,
-	uint_least64_t *const byt_sent, uint_least64_t *const byt_recv)
+/* Reset the per-dial state so a dialer can be re-driven by another dialer_do()
+ * without a fresh dialer_init(). The watchers, callback, and byte counters set
+ * up once by dialer_init() are left intact. */
+static void dialer_reset(struct dialer *restrict d)
 {
 	d->req = NULL;
 	d->resolve_query = NULL;
@@ -1531,18 +1601,25 @@ void dialer_init(
 	d->state = STATE_INIT;
 	d->err = DIALER_OK;
 	d->syserr = 0;
+	d->w_socket.fd = -1;
+	d->dialed_fd = -1;
+	d->next = d->rbuf.data;
+	BUF_INIT(d->rbuf, 0);
+}
 
+void dialer_init(
+	struct dialer *restrict d, const struct dialer_cb *callback,
+	uint_least64_t *const byt_sent, uint_least64_t *const byt_recv)
+{
 	ev_io_init(&d->w_socket, socket_cb, -1, EV_NONE);
 	d->w_socket.data = d;
-	d->dialed_fd = -1;
 	ev_init(&d->w_finish, finish_cb);
 	d->w_finish.data = d;
 
 	d->finish_cb = *callback;
 	d->byt_sent = byt_sent;
 	d->byt_recv = byt_recv;
-	d->next = d->rbuf.data;
-	BUF_INIT(d->rbuf, 0);
+	dialer_reset(d);
 }
 
 static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
@@ -1610,11 +1687,10 @@ void dialer_do(
 		      (void *)req, r, s);
 	}
 
+	dialer_reset(d);
 	d->req = req;
 	d->conf = conf;
 	d->resolver = resolver;
-	d->err = DIALER_OK;
-	d->syserr = 0;
 	d->start_ns = (int_least64_t)clock_monotonic_ns();
 	d->server = server;
 	dialer_start(d, loop);

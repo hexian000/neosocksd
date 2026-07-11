@@ -8,7 +8,6 @@
 
 #include <errno.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,9 +118,17 @@ unsigned char *io_readfile(const char *path, size_t *len)
 		return NULL;
 	}
 	const size_t nread = fread(buf, 1, *len, fp);
+	/* fread returns a short count for both clean EOF and a genuine read
+	 * error; ferror() must be checked before fclose() invalidates fp */
+	const bool read_error = ferror(fp) != 0;
 	if (fclose(fp) != 0) {
 		const int err = errno;
 		LOGE_F("fclose: (%d) %s", err, strerror(err));
+	}
+	if (read_error) {
+		LOGE("io_readfile: read error");
+		free(buf);
+		return NULL;
 	}
 	if (nread >= *len) {
 		free(buf);
@@ -148,16 +155,14 @@ bool io_writefile(
 		return false;
 	}
 	const size_t nwrite = fwrite(data, 1, *len, fp);
-	if (fclose(fp) != 0) {
+	const bool short_write = nwrite != *len;
+	const bool close_failed = fclose(fp) != 0;
+	if (close_failed) {
 		const int err = errno;
 		LOGE_F("fclose: (%d) %s", err, strerror(err));
 	}
-	if (nwrite != *len) {
-		*len = nwrite;
-		return false;
-	}
 	*len = nwrite;
-	return true;
+	return !short_write && !close_failed;
 }
 
 const char *io_readutf8(const unsigned char *data, size_t *len)
@@ -174,10 +179,11 @@ const char *io_readutf8(const unsigned char *data, size_t *len)
 			  (data[0] == 0xFE && data[1] == 0xFF))) {
 		return NULL;
 	}
-	if (*len >= 4 && ((data[0] == 0xFF && data[1] == 0xFE &&
-			   data[2] == 0x00 && data[3] == 0x00) ||
-			  (data[0] == 0x00 && data[1] == 0x00 &&
-			   data[2] == 0xFE && data[3] == 0xFF))) {
+	/* UTF-32BE BOM. The UTF-32LE BOM (FF FE 00 00) is already rejected by
+	 * the UTF-16LE check above (its FF FE prefix), so only the BE form
+	 * needs a dedicated test here. */
+	if (*len >= 4 && data[0] == 0x00 && data[1] == 0x00 &&
+	    data[2] == 0xFE && data[3] == 0xFF) {
 		return NULL;
 	}
 	return (const char *)data;

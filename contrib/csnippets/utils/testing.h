@@ -160,9 +160,9 @@
 #ifndef UTILS_TESTING_H
 #define UTILS_TESTING_H
 
-#include <inttypes.h>
 #include <setjmp.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -379,23 +379,24 @@ static inline void testing_keep_p_(const volatile void *v)
  *   to `value`, so the unselected branches need not type-check against it.
  */
 #define T_KEEP(value_)                                                         \
-	(_Generic((value_), float                                              \
-		  : testing_keep_f_, double                                    \
-		  : testing_keep_f_, long double                               \
-		  : testing_keep_f_, _Bool                                     \
-		  : testing_keep_u_, char                                      \
-		  : testing_keep_u_, signed char                               \
-		  : testing_keep_u_, unsigned char                             \
-		  : testing_keep_u_, short                                     \
-		  : testing_keep_u_, unsigned short                            \
-		  : testing_keep_u_, int                                       \
-		  : testing_keep_u_, unsigned int                              \
-		  : testing_keep_u_, long                                      \
-		  : testing_keep_u_, unsigned long                             \
-		  : testing_keep_u_, long long                                 \
-		  : testing_keep_u_, unsigned long long                        \
-		  : testing_keep_u_, default                                   \
-		  : testing_keep_p_)((value_)))
+	(_Generic(                                                             \
+		(value_),                                                      \
+		 float: testing_keep_f_,                                       \
+		 double: testing_keep_f_,                                      \
+		 long double: testing_keep_f_,                                 \
+		 _Bool: testing_keep_u_,                                       \
+		 char: testing_keep_u_,                                        \
+		 signed char: testing_keep_u_,                                 \
+		 unsigned char: testing_keep_u_,                               \
+		 short: testing_keep_u_,                                       \
+		 unsigned short: testing_keep_u_,                              \
+		 int: testing_keep_u_,                                         \
+		 unsigned int: testing_keep_u_,                                \
+		 long: testing_keep_u_,                                        \
+		 unsigned long: testing_keep_u_,                               \
+		 long long: testing_keep_u_,                                   \
+		 unsigned long long: testing_keep_u_,                          \
+		 default: testing_keep_p_)((value_)))
 
 /* -------------------------------------------------------------------------
  * Benchmark memory reporting - opt-in, mirrors Go's `-benchmem`.
@@ -585,10 +586,7 @@ struct testing_suite {
 		.name = #name_, .kind = TESTING_BENCH,                         \
 		.fn = {.bench = _benchcase_##name_##_ }                        \
 	}
-#define T_SUITE_END                                                            \
-	{                                                                      \
-		0                                                              \
-	}
+#define T_SUITE_END { 0 }
 
 /*
  * testing_main(argc, argv, suite)
@@ -728,65 +726,159 @@ void testing_bench_run(
 		}                                                              \
 	} while (0)
 
-/* Private helpers for T_EXPECT_EQ type-generic formatting. */
-#define T_EQ_FMT_(typ_)                                                        \
-	_Generic((typ_), signed char                                           \
-		 : "expect %jd, got %jd", signed short                         \
-		 : "expect %jd, got %jd", signed int                           \
-		 : "expect %jd, got %jd", signed long                          \
-		 : "expect %jd, got %jd", signed long long                     \
-		 : "expect %jd, got %jd", unsigned char                        \
-		 : "expect %ju, got %ju", unsigned short                       \
-		 : "expect %ju, got %ju", unsigned int                         \
-		 : "expect %ju, got %ju", unsigned long                        \
-		 : "expect %ju, got %ju", unsigned long long                   \
-		 : "expect %ju, got %ju", default                              \
-		 : "expect 0x%" PRIxPTR ", got 0x%" PRIxPTR)
+/*
+ * Compare and, on mismatch, report "expect X, got Y" to `out`.  Each variant
+ * takes its category's widest natural type (any narrower signed/unsigned/
+ * float operand promotes to it losslessly, so equality is preserved exactly)
+ * except _p_, which takes `const void *` for pointers: comparing converted
+ * pointers is equality-preserving by definition, and every object pointer
+ * type converts to it implicitly, unlike the integer types.
+ *
+ * T_EXPECT_EQ below selects one of these through plain, ungenerated _Generic
+ * associations -- each association names only the function, never `value_`/
+ * `expect_` -- and calls it with the two arguments passed as-is.  A function
+ * reference type-checks regardless of which branch _Generic ends up
+ * selecting, so, unlike a macro that casts its argument inside every
+ * association (rejected: e.g. a pointer cannot cast to long double, which
+ * would break the moment any branch mentions a floating-point target), this
+ * never requires an operand to satisfy an unrelated branch's type.  The
+ * actual argument conversion happens once, in the ordinary function call,
+ * to the single selected function's parameter type -- which is exactly why
+ * each argument is evaluated exactly once no matter the outcome, fixing a
+ * prior double-evaluation of both `value_` and `expect_` in the failure
+ * branch (dangerous when either is a side-effecting expression, e.g. a
+ * blocking read()).
+ */
+static inline bool testing_eq_report_i_(
+	FILE *out, const char *file, int line, intmax_t value, intmax_t expect)
+{
+	if (value == expect) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %jd, got %jd\n", file, line, expect,
+		value);
+	(void)fflush(out);
+	return false;
+}
 
-#define T_EQ_CAST_(v_, typ_)                                                   \
-	_Generic((typ_), signed char                                           \
-		 : (intmax_t)(v_), signed short                                \
-		 : (intmax_t)(v_), signed int                                  \
-		 : (intmax_t)(v_), signed long                                 \
-		 : (intmax_t)(v_), signed long long                            \
-		 : (intmax_t)(v_), unsigned char                               \
-		 : (uintmax_t)(v_), unsigned short                             \
-		 : (uintmax_t)(v_), unsigned int                               \
-		 : (uintmax_t)(v_), unsigned long                              \
-		 : (uintmax_t)(v_), unsigned long long                         \
-		 : (uintmax_t)(v_), default                                    \
-		 : (uintptr_t)(v_))
+static inline bool testing_eq_report_u_(
+	FILE *out, const char *file, int line, uintmax_t value,
+	uintmax_t expect)
+{
+	if (value == expect) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %ju, got %ju\n", file, line, expect,
+		value);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_eq_report_f_(
+	FILE *out, const char *file, int line, long double value,
+	long double expect)
+{
+	if (value == expect) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %Lg, got %Lg\n", file, line, expect,
+		value);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_eq_report_p_(
+	FILE *out, const char *file, int line, const void *value,
+	const void *expect)
+{
+	if (value == expect) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %p, got %p\n", file, line, expect,
+		value);
+	(void)fflush(out);
+	return false;
+}
 
 #define T_EXPECT_EQ(value_, expect_)                                           \
 	do {                                                                   \
-		if ((value_) != (expect_)) {                                   \
-			(void)fprintf(                                         \
-				(_t_)->out, "    %s:%d ", __FILE__, __LINE__); \
-			(void)fprintf(                                         \
-				(_t_)->out, T_EQ_FMT_(value_),                 \
-				T_EQ_CAST_(expect_, value_),                   \
-				T_EQ_CAST_(value_, value_));                   \
-			(void)fprintf((_t_)->out, "\n");                       \
-			(void)fflush((_t_)->out);                              \
+		if (!_Generic(                                                 \
+			    (value_),                                          \
+			    _Bool: testing_eq_report_u_,                       \
+			    char: testing_eq_report_i_,                        \
+			    signed char: testing_eq_report_i_,                 \
+			    signed short: testing_eq_report_i_,                \
+			    signed int: testing_eq_report_i_,                  \
+			    signed long: testing_eq_report_i_,                 \
+			    signed long long: testing_eq_report_i_,            \
+			    unsigned char: testing_eq_report_u_,               \
+			    unsigned short: testing_eq_report_u_,              \
+			    unsigned int: testing_eq_report_u_,                \
+			    unsigned long: testing_eq_report_u_,               \
+			    unsigned long long: testing_eq_report_u_,          \
+			    float: testing_eq_report_f_,                       \
+			    double: testing_eq_report_f_,                      \
+			    long double: testing_eq_report_f_,                 \
+			    default: testing_eq_report_p_)(                    \
+			    (_t_)->out, __FILE__, __LINE__, (value_),          \
+			    (expect_))) {                                      \
 			T_FAILNOW();                                           \
 		}                                                              \
 	} while (0)
 
+/*
+ * Unlike T_EXPECT_EQ, these two need no _Generic dispatch: their argument
+ * types are already fixed (const char * / const void *), so a single
+ * ordinary function per macro is enough to compare and conditionally report
+ * in one call, fixing the same class of failure-branch double-evaluation.
+ */
+static inline bool testing_streq_report_(
+	FILE *out, const char *file, int line, const char *value,
+	const char *expect)
+{
+	if (strcmp(value, expect) == 0) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect \"%s\", got \"%s\"\n", file, line,
+		expect, value);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_memeq_report_(
+	FILE *out, const char *file, int line, const void *value,
+	const void *expect, size_t size)
+{
+	if (memcmp(value, expect, size) == 0) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d memory mismatch: %zu bytes differ\n", file,
+		line, size);
+	(void)fflush(out);
+	return false;
+}
+
 #define T_EXPECT_STREQ(value_, expect_)                                        \
 	do {                                                                   \
-		if (strcmp((value_), (expect_)) != 0) {                        \
-			T_FATALF(                                              \
-				"expect \"%s\", got \"%s\"", (expect_),        \
-				(value_));                                     \
+		if (!testing_streq_report_(                                    \
+			    (_t_)->out, __FILE__, __LINE__, (value_),          \
+			    (expect_))) {                                      \
+			T_FAILNOW();                                           \
 		}                                                              \
 	} while (0)
 
 #define T_EXPECT_MEMEQ(value_, expect_, size_)                                 \
 	do {                                                                   \
-		if (memcmp((value_), (expect_), (size_)) != 0) {               \
-			T_FATALF(                                              \
-				"memory mismatch: %zu bytes differ",           \
-				(size_t)(size_));                              \
+		if (!testing_memeq_report_(                                    \
+			    (_t_)->out, __FILE__, __LINE__, (value_),          \
+			    (expect_), (size_t)(size_))) {                     \
+			T_FAILNOW();                                           \
 		}                                                              \
 	} while (0)
 

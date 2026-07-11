@@ -18,6 +18,7 @@
 
 #include "dialer.h"
 
+#include "io/stream.h"
 #include "utils/testing.h"
 
 #include <lauxlib.h>
@@ -51,6 +52,39 @@ static int async_finish(lua_State *restrict L)
 static int async_worker(lua_State *restrict L)
 {
 	lua_pushinteger(L, 99);
+	return 1;
+}
+
+static int pcall_push_result(lua_State *restrict L)
+{
+	lua_pushinteger(L, 7);
+	return 1;
+}
+
+static int pcall_raise_error(lua_State *restrict L)
+{
+	lua_pushliteral(L, "boom");
+	return lua_error(L);
+}
+
+static int
+resume_finish(lua_State *restrict L, int status, const lua_KContext ctx)
+{
+	(void)status;
+	(void)ctx;
+	lua_pushboolean(L, 1);
+	lua_setglobal(L, "resumed");
+	return 0;
+}
+
+static int resume_yield(lua_State *restrict L)
+{
+	return lua_yieldk(L, 0, 0, resume_finish);
+}
+
+static int getregtable_idle_thunk(lua_State *restrict L)
+{
+	aux_getregtable(L, RIDX_IDLE_THREAD);
 	return 1;
 }
 
@@ -262,6 +296,26 @@ T_DECLARE_CASE(base_aux_todialreq_nil_returns_null)
 	lua_close(L);
 }
 
+/* Regression: aux_todialreq must honor its documented [-n, ...] stack effect
+ * even on the n > 255 early-out, popping its arguments like every other
+ * failure path. */
+T_DECLARE_CASE(base_aux_todialreq_overflow_pops_stack)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+
+	const int base = lua_gettop(L);
+	const int n = 256; /* > 255 */
+	T_CHECK(lua_checkstack(L, n + 1));
+	for (int i = 0; i < n; i++) {
+		lua_pushstring(L, "example.com:80");
+	}
+	T_EXPECT(!aux_todialreq(L, n));
+	T_EXPECT_EQ(lua_gettop(L), base); /* the n arguments must be popped */
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 {
 	struct ruleset r = {
@@ -288,6 +342,202 @@ T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 	lua_close(L);
 }
 
+T_DECLARE_CASE(base_aux_getregtable_rejects_non_table)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+
+	/* a non-table registry slot must raise ERR_BAD_REGISTRY */
+	lua_pushboolean(L, 1);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+
+	lua_pushcfunction(L, getregtable_idle_thunk);
+	T_EXPECT_EQ(lua_pcall(L, 0, 1, 0), LUA_ERRRUN);
+	T_EXPECT(strstr(lua_tostring(L, -1), "registry is corrupted") != NULL);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(base_aux_forward_context_roundtrip)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+
+	/* nothing pinned yet */
+	T_EXPECT(aux_getforward(L) == NULL);
+
+	/* set -> get returns the same pointer (keyed by the current thread) */
+	int state = 0;
+	aux_setforward(L, L, &state);
+	T_EXPECT_EQ(aux_getforward(L), &state);
+
+	/* set NULL -> get returns NULL */
+	aux_setforward(L, L, NULL);
+	T_EXPECT(aux_getforward(L) == NULL);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(base_ruleset_pcall_success_and_error)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+	r.L = L;
+
+	/* success path returns true and records one event */
+	T_EXPECT(ruleset_pcall(&r, pcall_push_result, 0, 1));
+	T_EXPECT_EQ(r.vmstats.num_events, (size_t)1);
+
+	/* error path returns false, records another event, and stows the error
+	 * message in RIDX_LASTERROR */
+	T_EXPECT(!ruleset_pcall(&r, pcall_raise_error, 0, 0));
+	T_EXPECT_EQ(r.vmstats.num_events, (size_t)2);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	const char *const err = lua_tostring(L, -1);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "boom") != NULL);
+	lua_pop(L, 1);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(base_ruleset_resume_wakes_coroutine)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+	r.L = L;
+
+	/* create a coroutine that yields and pin it in the await context */
+	lua_State *const co = lua_newthread(L);
+	int ctx_key = 0;
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+	lua_pushvalue(L, -2); /* co */
+	lua_rawsetp(L, -2, &ctx_key);
+	lua_pop(L, 1); /* pop the await-context table; co ref remains */
+
+	lua_pushcfunction(co, resume_yield);
+	int nres;
+	T_CHECK(lua_resume(co, L, 0, &nres) == LUA_YIELD);
+	lua_pop(L,
+		1); /* drop the co reference (still kept alive by the table) */
+
+	/* ruleset_resume looks co up by ctx and drives it to completion */
+	ruleset_resume(&r, &ctx_key, 0);
+	T_EXPECT_EQ(r.vmstats.num_events, (size_t)1);
+	lua_getglobal(L, "resumed");
+	T_EXPECT(lua_toboolean(L, -1) != 0);
+	lua_pop(L, 1);
+
+	lua_close(L);
+}
+
+/*
+ * A catastrophic lua_resume failure (here forced by corrupting
+ * RIDX_IDLE_THREAD so thread_call_k's re-caching raises after the finish
+ * callback runs) must decrement num_thread_active exactly once and clear the
+ * abandoned coroutine's forward-context entry.
+ */
+T_DECLARE_CASE(base_aux_async_catastrophic_failure_cleanup)
+{
+	struct ruleset r = {
+		.config.traceback = false,
+	};
+	lua_State *restrict L = new_ruleset_lua(&r);
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+
+	lua_State *const co = aux_getthread(L);
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
+
+	/* register a forward context for co, as cfunc_request would */
+	int fwd_state = 0;
+	aux_setforward(L, co, &fwd_state);
+
+	/* corrupt the idle-thread cache so thread_call_k raises after decrement
+	 * point moves; forces the catastrophic-resume path */
+	lua_pushboolean(L, 1);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+
+	lua_pushcfunction(L, async_finish);
+	lua_pushcfunction(L, async_worker);
+	const int status = aux_async(co, L, 0, 1);
+	T_EXPECT(status != LUA_OK && status != LUA_YIELD);
+
+	/* decremented exactly once (0), not double-counted (SIZE_MAX) */
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+
+	lua_settop(L, 0);
+	/* the abandoned coroutine's forward-context entry is cleared */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+	lua_rawgetp(L, -1, co);
+	T_EXPECT(lua_isnil(L, -1));
+	lua_pop(L, 2);
+
+	lua_close(L);
+}
+
+/* A stream that yields a chunk on its first direct_read and then either EOF or
+ * a read error, to exercise aux_load()'s mid-stream error handling. */
+struct fault_stream {
+	struct stream stream;
+	const char *text;
+	size_t len;
+	bool fail;
+	int phase;
+};
+
+static int fault_stream_direct_read(void *data, const void **buf, size_t *len)
+{
+	struct fault_stream *const s = data;
+	if (s->phase++ == 0) {
+		*buf = s->text;
+		*len = s->len;
+		return 0;
+	}
+	*buf = NULL;
+	*len = 0;
+	return s->fail ? -1 : 0; /* -1: a mid-stream read error */
+}
+
+static const struct stream_vftable fault_stream_vftable = {
+	.direct_read = fault_stream_direct_read,
+};
+
+/* Regression: aux_load() must report a mid-stream read error as a load
+ * failure, not let lua_load() treat the truncated input as a clean EOF and
+ * compile the (valid-prefix) partial chunk. */
+T_DECLARE_CASE(base_aux_load_reports_mid_stream_read_error)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* control: a complete chunk with a clean EOF loads successfully */
+	struct fault_stream ok = {
+		.stream = { .vftable = &fault_stream_vftable, .data = &ok },
+		.text = "return 1",
+		.len = sizeof("return 1") - 1,
+		.fail = false,
+		.phase = 0,
+	};
+	T_EXPECT_EQ(aux_load(L, &ok.stream, "=ok"), LUA_OK);
+	lua_settop(L, 0);
+
+	/* a read error after that same valid prefix must fail the load */
+	struct fault_stream bad = {
+		.stream = { .vftable = &fault_stream_vftable, .data = &bad },
+		.text = "return 1",
+		.len = sizeof("return 1") - 1,
+		.fail = true,
+		.phase = 0,
+	};
+	T_EXPECT(aux_load(L, &bad.stream, "=bad") != LUA_OK);
+	lua_settop(L, 0);
+
+	lua_close(L);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -308,7 +558,14 @@ static const struct testing_suite suite[] = {
 	T_CASE(base_aux_traceback_string),
 	T_CASE(base_aux_todialreq_builds_request),
 	T_CASE(base_aux_todialreq_nil_returns_null),
+	T_CASE(base_aux_todialreq_overflow_pops_stack),
 	T_CASE(base_aux_async_reuses_idle_thread),
+	T_CASE(base_aux_getregtable_rejects_non_table),
+	T_CASE(base_aux_forward_context_roundtrip),
+	T_CASE(base_ruleset_pcall_success_and_error),
+	T_CASE(base_ruleset_resume_wakes_coroutine),
+	T_CASE(base_aux_async_catastrophic_failure_cleanup),
+	T_CASE(base_aux_load_reports_mid_stream_read_error),
 	T_SUITE_END,
 };
 

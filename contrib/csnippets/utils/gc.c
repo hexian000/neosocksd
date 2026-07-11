@@ -41,7 +41,7 @@ static void gc_unregister(struct gcbase *restrict obj)
 static void gc_finalize(struct gcbase *restrict obj)
 {
 	gc_unregister(obj);
-	if (obj->finalize) {
+	if (obj->finalize != NULL) {
 		obj->finalize(obj);
 	}
 	free(obj);

@@ -253,6 +253,60 @@ T_DECLARE_CASE(resolve_success_unspec)
 	free_test_resolver(resolver, loop);
 }
 
+T_DECLARE_CASE(resolve_success_null_service)
+{
+	struct ev_loop *loop = NULL;
+	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolve_result result = { 0 };
+	const struct resolver_stats *stats;
+
+	/* service == NULL is a documented valid input (resolver.h) and the
+	 * pattern production code actually uses (dialer.c dials a hostname with
+	 * no service string); exercises the NULL-service resolution path. */
+	T_CHECK(resolve_do(
+			resolver,
+			(struct resolve_cb){
+				.func = resolve_capture_cb,
+				.data = &result,
+			},
+			"127.0.0.1", NULL, AF_INET) != NULL);
+	T_EXPECT(wait_for_result(loop, &result));
+	T_EXPECT(result.ok);
+	T_EXPECT_EQ(result.family, AF_INET);
+	T_EXPECT_EQ(result.port, 0);
+
+	stats = resolver_stats(resolver);
+	T_EXPECT_EQ(stats->num_query, 1);
+	T_EXPECT_EQ(stats->num_success, 1);
+
+	free_test_resolver(resolver, loop);
+}
+
+/*
+ * Regression: a query that completes synchronously (a literal address is
+ * resolved inline) has its finish event deferred but not yet dispatched when
+ * resolver_free() runs with no intervening ev_run(). resolver_free() must
+ * reclaim it -- neither leaking the query (observable under `m.sh d`) nor
+ * invoking its callback.
+ */
+T_DECLARE_CASE(resolver_free_reclaims_completed_query)
+{
+	struct ev_loop *loop = NULL;
+	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolve_result result = { 0 };
+
+	T_CHECK(resolve_do(
+			resolver,
+			(struct resolve_cb){
+				.func = resolve_capture_cb,
+				.data = &result,
+			},
+			"127.0.0.1", "443", AF_INET) != NULL);
+	/* free without dispatching the deferred finish event */
+	free_test_resolver(resolver, loop);
+	T_EXPECT(!result.called);
+}
+
 #if WITH_CARES
 /*
  * A minimal UDP "DNS server" that answers a single A query, used to drive the
@@ -357,6 +411,126 @@ T_DECLARE_CASE(resolve_via_fake_nameserver)
 	resolver_free(resolver);
 	ev_loop_destroy(loop);
 }
+
+/*
+ * Regression: resolver_free() must not leak a query that is still in
+ * flight when the c-ares channel is destroyed. The "nameserver" here is
+ * a bound but unanswered UDP socket, so the query genuinely never
+ * completes on its own -- resolver_free() must be what ends it, via
+ * ARES_EDESTRUCTION. Per resolver.h, the callback must not fire either;
+ * the leak itself is only observable under a leak-detecting build (e.g.
+ * `m.sh d`).
+ */
+T_DECLARE_CASE(resolver_free_does_not_leak_inflight_query)
+{
+	struct ev_loop *const loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+
+	const int dns_fd = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(dns_fd >= 0);
+	struct sockaddr_in dns_addr = {
+		.sin_family = AF_INET,
+		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
+		.sin_port = 0,
+	};
+	T_CHECK(bind(dns_fd, (const struct sockaddr *)&dns_addr,
+		     sizeof(dns_addr)) == 0);
+	socklen_t addrlen = sizeof(dns_addr);
+	T_CHECK(getsockname(dns_fd, (struct sockaddr *)&dns_addr, &addrlen) ==
+		0);
+
+	char nameserver[32];
+	(void)snprintf(
+		nameserver, sizeof(nameserver), "127.0.0.1:%u",
+		(unsigned)ntohs(dns_addr.sin_port));
+	struct config conf = { .nameserver = nameserver };
+	struct resolver *const resolver = resolver_new(loop, &conf);
+	T_CHECK(resolver != NULL);
+
+	struct resolve_result result = { 0 };
+	T_CHECK(resolve_do(
+			resolver,
+			(struct resolve_cb){
+				.func = resolve_capture_cb,
+				.data = &result,
+			},
+			"test.invalid", "443", AF_INET) != NULL);
+
+	/* let the query reach the wire without ever answering it, then
+	 * destroy the resolver while it is still in flight */
+	ev_run(loop, EVRUN_NOWAIT);
+	resolver_free(resolver);
+	T_EXPECT(!result.called);
+
+	(void)close(dns_fd);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Regression: resolver_new() snapshots conf->nameserver at creation, before a
+ * boot config could supply one. resolver_setnameserver() must re-apply a
+ * nameserver provided only afterwards. The resolver is created with no
+ * nameserver, the fake server is applied via resolver_setnameserver(), and the
+ * lookup is then answered by it -- which happens only if the re-apply took
+ * effect (ares_set_servers_ports_csv replaces the server list).
+ */
+T_DECLARE_CASE(resolver_setnameserver_applies_after_new)
+{
+	struct ev_loop *const loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+
+	const int dns_fd = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(dns_fd >= 0);
+	struct sockaddr_in dns_addr = {
+		.sin_family = AF_INET,
+		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
+		.sin_port = 0,
+	};
+	T_CHECK(bind(dns_fd, (const struct sockaddr *)&dns_addr,
+		     sizeof(dns_addr)) == 0);
+	socklen_t addrlen = sizeof(dns_addr);
+	T_CHECK(getsockname(dns_fd, (struct sockaddr *)&dns_addr, &addrlen) ==
+		0);
+
+	char nameserver[32];
+	(void)snprintf(
+		nameserver, sizeof(nameserver), "127.0.0.1:%u",
+		(unsigned)ntohs(dns_addr.sin_port));
+
+	/* resolver_new sees no nameserver, as it does before a boot config loads */
+	struct config conf = { .nameserver = NULL };
+	struct resolver *const resolver = resolver_new(loop, &conf);
+	T_CHECK(resolver != NULL);
+	/* the nameserver becomes known only now, e.g. from a boot config */
+	conf.nameserver = nameserver;
+	resolver_setnameserver(resolver, &conf);
+
+	ev_io w_dns;
+	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
+	ev_io_start(loop, &w_dns);
+
+	struct resolve_result result = { 0 };
+	T_CHECK(resolve_do(
+			resolver,
+			(struct resolve_cb){
+				.func = resolve_capture_cb,
+				.data = &result,
+			},
+			"test.invalid", "443", AF_INET) != NULL);
+	T_EXPECT(wait_for_result(loop, &result));
+	T_EXPECT(result.ok);
+	T_EXPECT_EQ(result.family, AF_INET);
+	T_EXPECT_EQ(result.port, 443);
+
+	const struct resolver_stats *const stats = resolver_stats(resolver);
+	T_EXPECT_EQ(stats->num_query, 1);
+	T_EXPECT_EQ(stats->num_success, 1);
+
+	ev_io_stop(loop, &w_dns);
+	(void)close(dns_fd);
+	resolver_free(resolver);
+	ev_loop_destroy(loop);
+}
 #endif /* WITH_CARES */
 
 /* -------------------------------------------------------------------------
@@ -373,8 +547,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(resolve_cancel_suppresses_callback),
 	T_CASE(resolve_success_ipv6),
 	T_CASE(resolve_success_unspec),
+	T_CASE(resolve_success_null_service),
+	T_CASE(resolver_free_reclaims_completed_query),
 #if WITH_CARES
 	T_CASE(resolve_via_fake_nameserver),
+	T_CASE(resolver_free_does_not_leak_inflight_query),
+	T_CASE(resolver_setnameserver_applies_after_new),
 #endif
 	T_SUITE_END,
 };

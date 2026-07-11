@@ -298,6 +298,16 @@ return function(T)
         assert(not m("example.com:443"))
     end)
 
+    T:test("match.exact is case-insensitive", function()
+        -- Regression: a request must not dodge an exact-match rule (e.g. a
+        -- reject) by varying the hostname's case.
+        local m = match.exact("example.com:80")
+        assert(m("EXAMPLE.COM:80"))
+        assert(m("Example.Com:80"))
+        local mt = match.exact({ "example.com:80" })
+        assert(mt("EXAMPLE.COM:80"))
+    end)
+
     -- [[ match.host ]] --
 
     T:test("match.host single string", function()
@@ -312,6 +322,13 @@ return function(T)
         assert(m("example.com:80"))
         assert(m("other.com:443"))
         assert(not m("third.com:80"))
+    end)
+
+    T:test("match.host is case-insensitive", function()
+        local m = match.host("example.com")
+        assert(m("EXAMPLE.COM:80"))
+        local mt = match.host({ "example.com" })
+        assert(mt("EXAMPLE.COM:80"))
     end)
 
     -- [[ match.port ]] --
@@ -360,6 +377,18 @@ return function(T)
         assert(not m("third.net:80"))
     end)
 
+    T:test("match.domain is case-insensitive", function()
+        -- Regression: e.g. ruleset_ingress.lua/ruleset_egress.lua reject
+        -- ".internal"/".lan"/".local" via match.domain; requesting
+        -- "foo.INTERNAL" instead of "foo.internal" must not dodge that.
+        local m = match.domain("example.com")
+        assert(m("EXAMPLE.COM:80"))
+        assert(m("sub.EXAMPLE.com:80"))
+        local mt = match.domain({ "example.com" })
+        assert(mt("EXAMPLE.COM:80"))
+        assert(mt("sub.Example.Com:80"))
+    end)
+
     -- [[ match.domaintree ]] --
 
     T:test("match.domaintree manual tree", function()
@@ -373,6 +402,16 @@ return function(T)
         assert(not m("other.com:80"))
         -- "other.org" itself is not in the tree, only "sub.other.org" is
         assert(not m("other.org:80"))
+    end)
+
+    T:test("match.domaintree lowercases the queried address", function()
+        -- The tree itself is expected to already use lowercase keys (as
+        -- match.domain() above always produces); the incoming address is
+        -- still normalized so a mixed-case request still matches.
+        local tree = { com = { example = true } }
+        local m = match.domaintree(tree)
+        assert(m("EXAMPLE.COM:80"))
+        assert(m("Sub.Example.Com:80"))
     end)
 
     -- [[ match.pattern ]] --
@@ -553,6 +592,25 @@ return function(T)
         assert(f("test:80") == nil)
     end)
 
+    T:test("rule.default calls route_default's action, not the table itself", function()
+        local saved_route_default = _G.route_default
+        _G.route_default = { rule.direct(), "tag" }
+        local ok, dst = pcall(rule.default(), "example.com:80")
+        _G.route_default = saved_route_default
+        assert(ok, string.format("rule.default() raised: %s", tostring(dst)))
+        assert(dst == "example.com:80",
+            string.format("expected 'example.com:80', got %q", tostring(dst)))
+    end)
+
+    T:test("rule.default falls back to addr when route_default is nil", function()
+        local saved_route_default = _G.route_default
+        _G.route_default = nil
+        local dst = rule.default()("example.com:80")
+        _G.route_default = saved_route_default
+        assert(dst == "example.com:80",
+            string.format("expected 'example.com:80', got %q", tostring(dst)))
+    end)
+
     -- [[ load balancing ]] --
 
     T:test("lb.roundrobin cycles through all actions evenly", function()
@@ -578,6 +636,41 @@ return function(T)
         -- 2:1 weights over 3 calls gives {2, 1}
         assert(calls[1] == 2 and calls[2] == 1,
             string.format("expected {2,1}, got {%d,%d}", calls[1], calls[2]))
+    end)
+
+    T:test("lb.iwrr with all-zero weights does not hang", function()
+        -- Regression: max was computed as 0, dividing every weight into
+        -- NaN; the dispatcher's `until r < t[i][1]` then never became
+        -- true against NaN, spinning forever on the very first call.
+        local f = lb.iwrr({
+            { 0, function() return "a" end },
+        })
+        for _ = 1, 5 do
+            assert(f() == nil, "drained-to-zero dispatcher should reject")
+        end
+    end)
+
+    T:test("lb.iwrr excludes non-positive weights from rotation", function()
+        local calls = { 0, 0, 0 }
+        local f = lb.iwrr({
+            { 1, function() calls[1] = calls[1] + 1 end },
+            { 0, function() calls[2] = calls[2] + 1 end },
+            { -1, function() calls[3] = calls[3] + 1 end },
+        })
+        for _ = 1, 20 do f() end
+        assert(calls[2] == 0 and calls[3] == 0,
+            string.format(
+                "non-positive-weight backends must never be called, got {%d,%d}",
+                calls[2], calls[3]))
+        assert(calls[1] == 20,
+            string.format(
+                "the sole positive-weight backend should get every call, got %d",
+                calls[1]))
+    end)
+
+    T:test("lb.iwrr with an empty backend list does not error", function()
+        local f = lb.iwrr({})
+        assert(f() == nil)
     end)
 
     -- [[ ruleset callbacks (integration) ]] --

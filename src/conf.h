@@ -19,6 +19,8 @@ struct config {
 	const char *http_listen;
 #if WITH_RULESET
 	const char *ruleset;
+#endif
+#if WITH_LUA
 	const char *boot;
 #endif
 	const char *user_name;
@@ -85,16 +87,24 @@ bool conf_parseargs(struct config *restrict conf, int argc, char *argv[]);
 
 struct lua_State;
 
-/* Extract config fields from a Lua table at the top of the ruleset VM's
- * stack. Nil fields keep their current value. Returns false on type error.
- * This is called from cfunc_loadconfig within the ruleset Lua VM. */
+/* Extract config fields from a Lua table at the top of L's stack. Nil fields
+ * keep their current value. Returns false on type error. L may be the ruleset
+ * VM (cfunc_loadconfig) or a standalone state used for a boot config
+ * (conf_loadboot); this function assumes nothing about which. */
 bool conf_loadfromtable(
 	struct lua_State *restrict L, struct config *restrict conf);
 
 #if WITH_LUA
-/* Print the effective configuration to stdout as a Lua table literal.
+/* Print the command-line configuration to stdout as a Lua table literal.
  * Returns false on output error. */
 bool conf_print(const struct config *restrict conf);
-#endif
+
+/* Load config fields from a Lua script (`-c`/`--config`) in a standalone Lua
+ * state, for builds without the ruleset engine. A `ruleset` field in the
+ * returned table is rejected; builds with WITH_RULESET use the
+ * ruleset-aware loader in ruleset.c instead, which also accepts one.
+ * Returns false on error. */
+bool conf_loadboot(struct config *restrict conf, const char *restrict filename);
+#endif /* WITH_LUA */
 
 #endif /* CONF_H */

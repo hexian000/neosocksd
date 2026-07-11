@@ -121,6 +121,12 @@ curl "http://127.0.1.1:9080/ruleset/invoke" \
     -H "Content-Encoding: gzip" --data-binary @biglist.lua.gz
 ```
 
+> **Security note:** The RESTful API (`--api`) has no built-in authentication —
+> anyone who can reach it can execute arbitrary Lua code via `/ruleset/invoke`
+> or hot-swap the running ruleset via `/ruleset/update`. Bind it to loopback
+> or a trusted, firewalled network only; never expose `--api` to an
+> untrusted network.
+
 Provided scripts:
 
 | Script                                                     | Description                                                                               |
@@ -159,6 +165,10 @@ Set up on each node:
 2. Load `libruleset.lua` and `agent.lua`.
 3. The agent maintains peer state and relay paths automatically.
 4. Access remote targets through the local SOCKS/HTTP endpoint.
+
+The API must be reachable between nodes for peer discovery to work — see the
+[security note](#lua-ruleset) above. Restrict it to a trusted network (e.g. a
+VPN or private LAN link between nodes), not the public internet.
 
 
 ## Installation

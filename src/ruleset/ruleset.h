@@ -119,11 +119,18 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state);
 /** @brief Callback structure for asynchronous ruleset operations */
 struct ruleset_callback {
 	ev_watcher w_finish;
+	/* request.req and rpcall.result are both the first union member and
+	 * thus share offset 0; ruleset_state_gc relies on this to clear either
+	 * arm through rpcall.result. Keep them first if this union changes. */
 	union {
 		struct {
+			/* the resolved request; the consumer (forward.c/socks.c)
+			 * takes ownership and must dialreq_free() it */
 			struct dialreq *req;
 		} request;
 		struct {
+			/* malloc'd marshalled result; the consumer (api_server.c)
+			 * takes ownership and must free() it. NULL on failure. */
 			const char *result;
 			size_t resultlen;
 		} rpcall;

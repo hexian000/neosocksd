@@ -4,8 +4,8 @@
 #include "ruleset/cfunc.h"
 
 #include "conf.h"
-#include "ruleset.h"
 #include "ruleset/base.h"
+#include "ruleset/ruleset.h"
 #include "util.h"
 
 #include "io/stream.h"
@@ -13,7 +13,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-
 #include <lauxlib.h>
 #include <lua.h>
 
@@ -21,6 +20,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define MT_RULESET_STATE "ruleset_state"
@@ -32,6 +32,12 @@ static void state_complete(lua_State *restrict L, struct ruleset_state *state)
 	const struct ruleset *restrict r = aux_getruleset(L);
 	ev_feed_event(r->loop, &state->cb->w_finish, EV_CUSTOM);
 	state->cb = NULL;
+	/* Detach *selfptr synchronously: `state` becomes unreachable to Lua
+	 * once this closure returns, so any GC before the fed event fires could
+	 * free it, and ruleset_cancel() would then run on a dangling pointer. */
+	if (state->selfptr != NULL && *state->selfptr == state) {
+		*state->selfptr = NULL;
+	}
 }
 
 static int ruleset_state_gc(lua_State *restrict L)
@@ -40,6 +46,9 @@ static int ruleset_state_gc(lua_State *restrict L)
 	if (state->cb == NULL) {
 		return 0;
 	}
+	/* This finalizer runs for both request and rpcall states; clearing
+	 * rpcall.result also clears request.req, since both are the union's
+	 * first member and share offset 0 (see struct ruleset_callback). */
 	state->cb->rpcall.result = NULL;
 	state->cb->rpcall.resultlen = 0;
 	state_complete(L, state);
@@ -116,7 +125,6 @@ int cfunc_request(lua_State *restrict L)
 
 	struct ruleset_state *restrict state = new_ruleset_state(L);
 
-	lua_State *restrict co = aux_getthread(L);
 	lua_pushvalue(L, 1);
 	lua_pushcclosure(L, request_finish, 1);
 	(void)lua_getglobal(L, "ruleset");
@@ -124,10 +132,19 @@ int cfunc_request(lua_State *restrict L)
 	lua_pushstring(L, request);
 	lua_pushstring(L, username);
 	lua_pushstring(L, password);
+	/* lua stack: state finish ruleset func request username password */
+
+	/* Check out the coroutine only after the fallible stack setup above:
+	 * aux_getthread() increments num_thread_active and pulls a thread from
+	 * the idle pool, and nothing before aux_async() would return it if an
+	 * earlier step raised (e.g. LUA_ERRMEM from lua_pushstring). */
+	lua_State *restrict co = aux_getthread(L);
+	lua_insert(L, 2);
 	/* lua stack: state co finish ruleset func request username password */
 
 	state->cb = in_cb;
 	*pstate = state;
+	state->selfptr = (struct ruleset_state **)pstate;
 	/* register the request for await.forward() */
 	aux_setforward(L, co, state);
 	const int status = aux_async(co, L, 3, -6);
@@ -147,7 +164,7 @@ int cfunc_loadfile(lua_State *restrict L)
 	struct stream *restrict const s = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
-	if (lua_load(L, aux_reader, s, "=ruleset", "t")) {
+	if (aux_load(L, s, "=ruleset")) {
 		return lua_error(L);
 	}
 	lua_pushliteral(L, "ruleset");
@@ -164,7 +181,7 @@ int cfunc_loadconfig(lua_State *restrict L)
 	struct stream *restrict const s = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
-	if (lua_load(L, aux_reader, s, "=config", "t")) {
+	if (aux_load(L, s, "=config")) {
 		return lua_error(L);
 	}
 	lua_pushliteral(L, "config");
@@ -219,21 +236,6 @@ int cfunc_loadconfig(lua_State *restrict L)
 	return 0;
 }
 
-/* Install a fresh sandbox `_ENV` (indexing _G) as upvalue 1 of the chunk on
- * the top of the stack. */
-static void aux_setsandboxenv(lua_State *restrict L)
-{
-	lua_newtable(L);
-	lua_newtable(L);
-	aux_getregtable(L, LUA_RIDX_GLOBALS);
-	/* lua stack: ... chunk env mt _G */
-	lua_setfield(L, -2, "__index");
-	lua_setmetatable(L, -2);
-	const char *const upvalue = lua_setupvalue(L, -2, 1);
-	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
-	(void)upvalue;
-}
-
 /* invoke(codestream) */
 int cfunc_invoke(lua_State *restrict L)
 {
@@ -242,7 +244,7 @@ int cfunc_invoke(lua_State *restrict L)
 	void *const stream = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
-	if (lua_load(L, aux_reader, stream, "=(invoke)", "t")) {
+	if (aux_load(L, stream, "=(invoke)")) {
 		return lua_error(L);
 	}
 	aux_setsandboxenv(L);
@@ -258,16 +260,50 @@ static int rpcall_finish(lua_State *restrict L)
 	if (state->cb == NULL) {
 		return 0;
 	}
+	/* finish(ok, ...): a false ok means the rpc chunk raised, leaving
+	 * (false, errmsg) on the stack. Surface that as an rpcall failure
+	 * instead of marshalling it as a successful (false, "...") result. */
+	if (!lua_toboolean(L, 1)) {
+		LOGE_F("ruleset rpcall: %s", luaL_tolstring(L, 2, NULL));
+		state->cb->rpcall.result = NULL;
+		state->cb->rpcall.resultlen = 0;
+		state_complete(L, state);
+		return 0;
+	}
 	const int n = lua_gettop(L);
 	lua_pushliteral(L, "return ");
 	lua_getglobal(L, "marshal");
 	lua_rotate(L, 1, 2);
 	/* lua stack: "return " marshal ... */
-	lua_call(L, n, 1);
+	if (lua_pcall(L, n, 1, 0) != LUA_OK) {
+		/* marshal() can raise (e.g. an unmarshalable type); report a failed
+		 * result rather than letting the error escape and leave the
+		 * caller's callback pending. */
+		LOGE_F("ruleset rpcall: marshal failed: %s",
+		       luaL_tolstring(L, -1, NULL));
+		state->cb->rpcall.result = NULL;
+		state->cb->rpcall.resultlen = 0;
+		state_complete(L, state);
+		return 0;
+	}
 	lua_concat(L, 2);
 	size_t len;
 	const char *s = lua_tolstring(L, 1, &len);
-	state->cb->rpcall.result = s;
+	/* Copy the marshalled result into a C-owned buffer: `s` borrows Lua
+	 * memory freed once this closure returns, but rpcall_cb() reads it later
+	 * from the deferred event. The consumer takes ownership and frees it. */
+	char *result = malloc(len);
+	if (result == NULL && len > 0) {
+		LOGOOM();
+		state->cb->rpcall.result = NULL;
+		state->cb->rpcall.resultlen = 0;
+		state_complete(L, state);
+		return 0;
+	}
+	if (len > 0) {
+		(void)memcpy(result, s, len);
+	}
+	state->cb->rpcall.result = result;
 	state->cb->rpcall.resultlen = len;
 	state_complete(L, state);
 	return 0;
@@ -286,17 +322,26 @@ int cfunc_rpcall(lua_State *restrict L)
 
 	struct ruleset_state *restrict state = new_ruleset_state(L);
 
-	lua_State *restrict co = aux_getthread(L);
 	lua_pushvalue(L, 1);
 	lua_pushcclosure(L, rpcall_finish, 1);
-	if (lua_load(L, aux_reader, stream, "=(rpc)", "t")) {
+	if (aux_load(L, stream, "=(rpc)")) {
 		return lua_error(L);
 	}
-	/* lua stack: state co finish chunk */
+	/* lua stack: state finish chunk */
 	aux_setsandboxenv(L);
+
+	/* Check out the coroutine only after all fallible setup: aux_getthread()
+	 * increments num_thread_active and removes a thread from the idle pool,
+	 * but lua_load() (a client syntax error) and aux_setsandboxenv() may
+	 * raise before aux_async(), and nothing on that early-error path would
+	 * return the thread. */
+	lua_State *restrict co = aux_getthread(L);
+	lua_insert(L, 2);
+	/* lua stack: state co finish chunk */
 
 	state->cb = in_cb;
 	*pstate = state;
+	state->selfptr = (struct ruleset_state **)pstate;
 	const int status = aux_async(co, L, 0, -2);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_xmove(co, L, 1);
@@ -381,13 +426,20 @@ int cfunc_update(lua_State *restrict L)
 	} else {
 		chunkname = lua_pushfstring(L, "=%s", modname);
 	}
-	if (lua_load(L, aux_reader, stream, chunkname, "t")) {
+	if (aux_load(L, stream, chunkname)) {
 		return lua_error(L);
 	}
 	/* lua stack: modname chunkname chunk */
 	if (strcmp(modname, "ruleset") == 0) {
 		lua_pushvalue(L, 1);
 		lua_call(L, 1, 1);
+		if (!lua_istable(L, -1)) {
+			/* the caller (/ruleset/update) does not re-check validity, so
+			 * reject here rather than wire up a broken global ruleset */
+			return luaL_error(
+				L, "ruleset: expected table, got %s",
+				luaL_typename(L, -1));
+		}
 		lua_setglobal(L, modname);
 		return 0;
 	}
@@ -398,6 +450,22 @@ int cfunc_update(lua_State *restrict L)
 	return 0;
 }
 
+/* Look up the ruleset[name] hook. If it is a function, leave it alone at
+ * stack slot 1 (clearing everything else) and return true; otherwise clear
+ * the stack and return false. */
+static bool get_ruleset_hook(lua_State *restrict L, const char *name)
+{
+	(void)lua_getglobal(L, "ruleset");
+	(void)lua_getfield(L, -1, name);
+	if (!lua_isfunction(L, -1)) {
+		lua_settop(L, 0);
+		return false;
+	}
+	lua_replace(L, 1);
+	lua_settop(L, 1);
+	return true;
+}
+
 /* stats(dt, query) */
 int cfunc_stats(lua_State *restrict L)
 {
@@ -405,16 +473,11 @@ int cfunc_stats(lua_State *restrict L)
 	ASSERT(lua_gettop(L) == 2);
 	const double dt = *(double *)lua_touserdata(L, 1);
 	const char *const query = lua_touserdata(L, 2);
-	(void)lua_getglobal(L, "ruleset");
-	(void)lua_getfield(L, -1, "stats");
-	if (!lua_isfunction(L, -1)) {
+	if (!get_ruleset_hook(L, "stats")) {
 		/* no hook: empty string (NULL = error) */
 		lua_pushliteral(L, "");
 		return 1;
 	}
-	lua_replace(L, 1);
-	lua_settop(L, 1);
-
 	lua_pushnumber(L, dt);
 	lua_pushstring(L, query);
 	lua_call(L, 2, 1);
@@ -426,12 +489,9 @@ int cfunc_metrics(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 0);
-	(void)lua_getglobal(L, "ruleset");
-	(void)lua_getfield(L, -1, "metrics");
-	if (!lua_isfunction(L, -1)) {
+	if (!get_ruleset_hook(L, "metrics")) {
 		return 0;
 	}
-	lua_replace(L, 1);
 	lua_call(L, 0, 1);
 	return 1;
 }
@@ -441,12 +501,9 @@ int cfunc_tick(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 0);
-	(void)lua_getglobal(L, "ruleset");
-	(void)lua_getfield(L, -1, "tick");
-	if (!lua_isfunction(L, -1)) {
+	if (!get_ruleset_hook(L, "tick")) {
 		return 0;
 	}
-	lua_replace(L, 1);
 	lua_call(L, 0, 0);
 	return 0;
 }
@@ -456,12 +513,9 @@ int cfunc_healthy(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 0);
-	(void)lua_getglobal(L, "ruleset");
-	(void)lua_getfield(L, -1, "healthy");
-	if (!lua_isfunction(L, -1)) {
+	if (!get_ruleset_hook(L, "healthy")) {
 		return 0; /* absent: healthy */
 	}
-	lua_replace(L, 1);
 	lua_call(L, 0, 1);
 	return 1;
 }

@@ -42,8 +42,22 @@ _G.route = {
 }
 
 _G.route6 = {
+    -- reject every non-globally-reachable range (IANA IPv6 special-purpose
+    -- registry), including IPv4-mapped addresses that would otherwise
+    -- bypass the IPv4 rejects above via ATYP_INET6
+    { inet6.subnet("::/128"),          rule.reject() },
+    { inet6.subnet("::1/128"),         rule.reject() },
+    { inet6.subnet("::ffff:0:0/96"),   rule.reject() },
+    { inet6.subnet("64:ff9b::/96"),    rule.reject() },
+    { inet6.subnet("100::/64"),        rule.reject() },
+    { inet6.subnet("2001::/23"),       rule.reject() },
+    { inet6.subnet("2001:db8::/32"),   rule.reject() },
+    { inet6.subnet("2002::/16"),       rule.reject() },
+    { inet6.subnet("fc00::/7"),        rule.reject() },
+    { inet6.subnet("fe80::/10"),       rule.reject() },
+    { inet6.subnet("ff00::/8"),        rule.reject() },
+    -- custom rules
     { composite.maybe(_G, "biglist6"), rule.direct(), "biglist" },
-    { match.any(),                     rule.direct() },
 }
 
 _G.route_default = { rule.proxy("socks4a://127.0.1.1:1081"), "default" }

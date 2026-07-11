@@ -11,3 +11,8 @@
 /xbuild
 /scripts/__pycache__
 /compile_commands.json
+
+# scripts/gprof.py relocates these under build/gprof on its own; this only
+# catches a -pg binary run manually from the repo root, outside the script.
+/gmon.out
+/gmon.out.*

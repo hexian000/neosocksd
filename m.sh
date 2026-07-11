@@ -4,6 +4,10 @@ cd "$(dirname "$0")"
 set -ex
 
 case "$1" in
+"fmt")
+    # format code
+    python3 scripts/format.py .
+    ;;
 "c")
     # clean artifacts
     rm -rf build compile_commands.json
@@ -11,7 +15,10 @@ case "$1" in
 "doc")
     VERSION="dev"
     if git rev-parse --git-dir >/dev/null 2>&1; then
-        VERSION="$(git tag --points-at HEAD)"
+        # 2+ tags on HEAD means one line per tag; a raw embedded newline
+        # would break the single-line sed replacement below.
+        VERSION="$(git tag --points-at HEAD | tr '\n' ',')"
+        VERSION="${VERSION%,}"
         if [ -z "${VERSION}" ]; then
             VERSION="git-$(git rev-parse --short HEAD)"
         fi
@@ -25,6 +32,7 @@ case "$1" in
     ;;
 "x")
     # cross compiling, environment vars need to be set
+    : "${SYSROOT:?SYSROOT must be set}"
     rm -rf build && mkdir -p build && cd build
     cmake \
         -DCMAKE_BUILD_TYPE="Release" \
@@ -46,7 +54,6 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
-    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 "posix")
@@ -60,7 +67,6 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
-    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 "clang")
@@ -93,6 +99,9 @@ case "$1" in
     ;;
 "ndk")
     # rebuild with Android NDK
+    : "${ANDROID_API_LEVEL:?ANDROID_API_LEVEL must be set}"
+    : "${ANDROID_NDK_ROOT:?ANDROID_NDK_ROOT must be set}"
+    : "${ABI_NAME:?ABI_NAME must be set}"
     rm -rf build && mkdir -p build && cd build
     cmake \
         -DCMAKE_BUILD_TYPE="Release" \
@@ -119,7 +128,6 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
-    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 "min")
@@ -142,7 +150,6 @@ case "$1" in
         ..
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
-    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     (cd bin && objdump -drwS neosocksd >neosocksd.S)
     ls -lh bin/neosocksd
     ;;
@@ -157,14 +164,10 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
-    (cd .. && build/bin/neosocksd -c tests/boot.lua)
     ls -lh bin/neosocksd
     ;;
 "d")
     # rebuild for debug
-    if command -v clang-format >/dev/null; then
-        find src -type f -regex '.*\.[hc]' -exec clang-format -i {} +
-    fi
     rm -rf build && mkdir -p build && cd build
     cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
@@ -175,12 +178,15 @@ case "$1" in
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
     ctest -j"$(nproc)"
-    (cd .. && build/bin/neosocksd -c tests/boot.lua)
+    ls -lh bin/neosocksd
+    ;;
+"")
+    # incremental build
+    mkdir -p build && cd build
+    cmake .. && cmake --build .
     ls -lh bin/neosocksd
     ;;
 *)
-    cd build
-    cmake --build .
-    ls -lh bin/neosocksd
+    echo "Unknown option: $1"
     ;;
 esac

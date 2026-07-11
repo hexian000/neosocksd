@@ -2,9 +2,11 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 #include "sync/dispatcher.h"
+
 #include "sync/task.h"
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <threads.h>
 
@@ -19,6 +21,20 @@ struct task_item {
 	struct task task;
 	struct task_item *next;
 };
+
+/* C11 6.5.8p5: relational comparison between pointers to different
+ * array objects is UB (item may come from a separate malloc(), not
+ * pool[]). Converting to uintptr_t first compares addresses as
+ * integers instead, which isn't subject to that restriction. */
+static inline bool item_in_pool(
+	const struct task_item *restrict item,
+	const struct task_item *restrict pool, const size_t pool_capacity)
+{
+	const uintptr_t addr = (uintptr_t)item;
+	const uintptr_t start = (uintptr_t)pool;
+	const uintptr_t end = (uintptr_t)(pool + pool_capacity);
+	return addr >= start && addr < end;
+}
 
 struct dispatcher {
 	mtx_t mu;
@@ -47,7 +63,7 @@ static bool dequeue(struct dispatcher *d, struct task *task)
 	/* Return pool items to the free list; free heap-allocated items
 	 * after releasing the lock to avoid holding it during free() */
 	struct task_item *to_free;
-	if (item >= d->pool && item < d->pool + d->pool_capacity) {
+	if (item_in_pool(item, d->pool, d->pool_capacity)) {
 		item->next = d->pool_free;
 		d->pool_free = item;
 		to_free = NULL;
@@ -91,6 +107,10 @@ static bool enqueue(struct dispatcher *d, const struct task *task)
 
 struct dispatcher *dispatcher_create(const size_t capacity)
 {
+	if (capacity >
+	    (SIZE_MAX - sizeof(struct dispatcher)) / sizeof(struct task_item)) {
+		return NULL;
+	}
 	struct dispatcher *restrict d =
 		malloc(sizeof(struct dispatcher) +
 		       sizeof(struct task_item) * capacity);
@@ -144,7 +164,7 @@ void dispatcher_destroy(struct dispatcher *d)
 	struct task_item *item = d->queue.head;
 	while (item != NULL) {
 		struct task_item *next = item->next;
-		if (item < d->pool || item >= d->pool + d->pool_capacity) {
+		if (!item_in_pool(item, d->pool, d->pool_capacity)) {
 			free(item);
 		}
 		item = next;

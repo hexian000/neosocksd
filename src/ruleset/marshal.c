@@ -31,12 +31,22 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	const char *restrict str = lua_tolstring(L, idx, &len);
 
 	VBUF_APPENDSTR(*pvbuf, "\"");
-	for (; len--; str++) {
-		const unsigned char ch = *str;
+	const char *restrict const end = str + len;
+	/* start of the current run of bytes that need no escaping */
+	const char *restrict run = str;
+	for (const char *restrict p = str; p < end; p++) {
+		const unsigned char ch = (unsigned char)*p;
+		if (ch != '"' && ch != '\\' && !iscntrl(ch)) {
+			/* extend the safe run and batch it in one append */
+			continue;
+		}
+		if (p > run) {
+			VBUF_APPEND(*pvbuf, run, (size_t)(p - run));
+		}
 		if (ch == '"' || ch == '\\' || ch == '\n') {
 			const unsigned char buf[2] = { '\\', ch };
 			VBUF_APPEND(*pvbuf, buf, sizeof(buf));
-		} else if (iscntrl(ch)) {
+		} else {
 			unsigned char buf[4];
 			unsigned char *s = &buf[sizeof(buf)];
 			uint_fast8_t x = ch;
@@ -51,9 +61,11 @@ marshal_string(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			*--s = (unsigned char)'\\';
 
 			VBUF_APPEND(*pvbuf, buf, sizeof(buf));
-		} else {
-			VBUF_APPEND(*pvbuf, &ch, sizeof(ch));
 		}
+		run = p + 1;
+	}
+	if (end > run) {
+		VBUF_APPEND(*pvbuf, run, (size_t)(end - run));
 	}
 	VBUF_APPENDSTR(*pvbuf, "\"");
 }
@@ -122,6 +134,12 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		VBUF_APPENDSTR(*pvbuf, "1/0");
 		return;
 	case FP_ZERO:
+		/* +0.0 intentionally collapses to the integer-0 form; -0.0 must
+		 * keep its sign, which "0" (an integer) would lose. */
+		if (signbit(x)) {
+			VBUF_APPENDSTR(*pvbuf, "-0.0");
+			return;
+		}
 		VBUF_APPENDSTR(*pvbuf, "0");
 		return;
 	default:
@@ -191,6 +209,9 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		lua_error(L);
 		return;
 	}
+	/* discard the nil left by the not-visited lookup; the traversal below
+	 * pushes its own explicit nil as lua_next's first key */
+	lua_pop(L, 1);
 
 	lua_pushvalue(L, idx);
 	lua_pushboolean(L, 1);
@@ -199,6 +220,7 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	VBUF_APPENDSTR(*pvbuf, "{");
 	/* consecutive integer keys from 1 use array syntax */
 	lua_Integer i = 1;
+	lua_pushnil(L); /* first key for lua_next */
 	while (lua_next(L, idx) != 0) {
 		if (lua_isinteger(L, -2) && lua_tointeger(L, -2) == i) {
 			/* Increment the expected index. */
@@ -222,6 +244,16 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		lua_pop(L, 1);
 	}
 	VBUF_APPENDSTR(*pvbuf, "}");
+
+	/* Un-mark this table now that it (and everything reachable from it)
+	 * has been fully marshaled, so cycle detection reflects "currently
+	 * an ancestor on the recursion path" rather than "ever seen
+	 * anywhere in this call" -- otherwise an ordinary shared (but
+	 * non-cyclic) reference to the same table elsewhere in the
+	 * arguments would be misdiagnosed as circular. */
+	lua_pushvalue(L, idx);
+	lua_pushnil(L);
+	lua_rawset(L, IDX_VISITED);
 }
 
 static int marshal_value(lua_State *restrict L)
@@ -260,9 +292,10 @@ static int marshal_value(lua_State *restrict L)
 			lua_warning(L, "marshal: ", 1);
 			lua_warning(L, luaL_tolstring(L, idx, NULL), 1);
 			lua_warning(L, " has a metatable", 0);
-			lua_pop(L, 1);
+			/* pop both the metatable and luaL_tolstring's result */
+			lua_pop(L, 2);
 		}
-#endif
+#endif /* HAVE_LUA_WARNING */
 		marshal_table(L, pvbuf);
 		break;
 

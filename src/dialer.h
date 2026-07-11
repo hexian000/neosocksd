@@ -13,8 +13,8 @@
 #include "proto/socks.h"
 #include "util.h"
 
+#include "meta/minmax.h"
 #include "utils/buffer.h"
-#include "utils/minmax.h"
 
 #include <ev.h>
 
@@ -136,7 +136,7 @@ enum dialer_error {
 const char *dialer_strerror(enum dialer_error err);
 
 /** @brief String names for proxy protocols */
-extern char *const proxy_protocol_str[PROTO_MAX];
+extern const char *const proxy_protocol_str[PROTO_MAX];
 
 /**
  * @brief Proxy server request configuration
@@ -201,6 +201,17 @@ int dialreq_format(
  * @param req Dial request to free
  */
 void dialreq_free(struct dialreq *req);
+
+/**
+ * @brief Replace *req with a freshly parsed dial request, freeing the old one
+ * @param req Pointer to the dial request to replace; left unchanged on failure
+ * @param addr Target address string (may be NULL for wildcard)
+ * @param csv Comma-separated list of proxy URIs (may be NULL for direct connection)
+ * @return true on success, false if the new dial request could not be parsed
+ */
+bool dialreq_replace(
+	struct dialreq **restrict req, const char *restrict addr,
+	const char *restrict csv);
 
 /** @brief Size of dialer receive buffer (large enough for any protocol response) */
 #define DIALER_RBUF_SIZE                                                       \

@@ -346,7 +346,10 @@ end
 _G.rpc = rpc
 
 function await.rpcall(target, func, ...)
-    local code = strformat("return rpc.%s(%s)", func, marshal(...))
+    -- %q (not %s) so func is spliced in as a quoted string literal and
+    -- looked up via table indexing, never as raw code -- matches how
+    -- marshal(...) already safely encodes the other arguments
+    local code = strformat("return rpc[%q](%s)", func, marshal(...))
     local ok, result = await.invoke(code, table.unpack(target))
     if ok then return result() end
     return ok, result
@@ -359,7 +362,8 @@ end
 _G.msgh = msgh
 
 function neosocksd.sendmsg(target, func, ...)
-    local code = strformat("msgh.%s(%s)", func, marshal(...))
+    -- see await.rpcall above: %q + table indexing, not raw splicing
+    local code = strformat("msgh[%q](%s)", func, marshal(...))
     return neosocksd.invoke(code, table.unpack(target))
 end
 
@@ -474,37 +478,46 @@ function match.any(...)
     end
 end
 
+-- Hostnames are case-insensitive (RFC 4343); match.exact/host/domain/
+-- domaintree all normalize to lowercase, both when compiling the match
+-- table/tree and when reading the incoming address, so a request can't
+-- dodge a reject/redirect rule by varying case (e.g. "foo.INTERNAL" vs
+-- "foo.internal"). Ports and IP-literal digits/separators are unaffected
+-- by string.lower, so this is safe even when match.exact is used with an
+-- "ip:port" literal instead of a hostname.
 function match.exact(s)
     if type(s) ~= "table" then
         local _, _ = splithostport(s)
+        s = string.lower(s)
         return function(addr)
-            return addr == s
+            return string.lower(addr) == s
         end
     end
     local t = {}
     for _, v in pairs(s) do
         local _, _ = splithostport(v)
-        t[v] = true
+        t[string.lower(v)] = true
     end
     return function(addr)
-        return not not t[addr]
+        return not not t[string.lower(addr)]
     end
 end
 
 function match.host(s)
     if type(s) ~= "table" then
+        s = string.lower(s)
         return function(addr)
             local host, _ = splithostport(addr)
-            return host == s
+            return string.lower(host) == s
         end
     end
     local t = {}
     for _, v in pairs(s) do
-        t[v] = true
+        t[string.lower(v)] = true
     end
     return function(addr)
         local host, _ = splithostport(addr)
-        return t[host] ~= nil
+        return t[string.lower(host)] ~= nil
     end
 end
 
@@ -540,13 +553,17 @@ function match.domain(s)
         else
             suffix = "." .. s
         end
+        s = string.lower(s)
+        suffix = string.lower(suffix)
         return function(addr)
             local host, _ = splithostport(addr)
+            host = string.lower(host)
             return host == s or host:endswith(suffix)
         end
     end
     local tree = {}
     for _, v in pairs(s) do
+        v = string.lower(v)
         local path, n = {}, 0
         for seg in v:gmatch("[^.]+") do
             n = n + 1
@@ -563,12 +580,17 @@ function match.domain(s)
     return match.domaintree(tree)
 end
 
+-- Note: match.domaintree() lowercases only the queried address, not `tree`
+-- itself -- a manually-constructed tree (as opposed to one built by
+-- match.domain() above, which already normalizes) should use lowercase
+-- keys to match case-insensitively.
 function match.domaintree(tree)
     if type(tree) ~= "table" then
         error("domain tree should be a table", 2)
     end
     return function(addr)
         local host, _ = splithostport(addr)
+        host = string.lower(host)
         local path, n = {}, 0
         for seg in host:gmatch("[^.]+") do
             n = n + 1
@@ -716,11 +738,7 @@ end
 
 function rule.default()
     return function(addr)
-        local action = _G.route_default
-        if action then
-            return action(addr)
-        end
-        return addr
+        return default_(addr)
     end
 end
 
@@ -813,24 +831,34 @@ function lb.roundrobin(t)
 end
 
 -- interleaved weighted round robin
+-- Entries with a non-positive weight are excluded from rotation (e.g. to
+-- drain a backend to zero) rather than corrupting the ratio math: a zero
+-- max would otherwise divide every weight into NaN, which never satisfies
+-- the dispatcher's comparison and spins forever.
 function lb.iwrr(t, cyclesize)
-    local max = 0
+    local active, max = {}, 0
     for _, v in ipairs(t) do
-        max = math.max(max, v[1])
+        if v[1] > 0 then
+            max = math.max(max, v[1])
+            table.insert(active, v)
+        end
     end
-    for _, v in ipairs(t) do
+    if #active == 0 then
+        return function(...) end
+    end
+    for _, v in ipairs(active) do
         v[1] = v[1] / max
     end
     local step = 0.01
     if cyclesize then step = 1 / cyclesize end
-    local i, r, n = 0, 0, #t
+    local i, r, n = 0, 0, #active
     return function(...)
         repeat
             i = i % n + 1
-        until r < t[i][1]
+        until r < active[i][1]
         r = r + step
         if r >= 1 then r = r - 1 end
-        return t[i][2](...)
+        return active[i][2](...)
     end
 end
 

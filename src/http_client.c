@@ -5,10 +5,10 @@
 
 #include "conf.h"
 #include "dialer.h"
+#include "proto/http.h"
 #include "util.h"
 
 #include "os/socket.h"
-#include "proto/http.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
@@ -47,7 +47,7 @@ static void http_client_cleanup(struct http_client_ctx *restrict ctx)
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
 	if (ctx->w_socket.fd != -1) {
-		SOCKET_CLOSE_FD(ctx->w_socket.fd);
+		socket_close(ctx->w_socket.fd);
 		ctx->w_socket.fd = -1;
 	}
 	VBUF_FREE(ctx->conn.cbuf);
@@ -93,7 +93,7 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 
 	const int fd = watcher->fd;
 	watcher->fd = -1;
-	SOCKET_CLOSE_FD(fd);
+	socket_close(fd);
 	const struct http_client_cb cb = ctx->cb;
 	if (cb.func != NULL) {
 		cb.func(loop, cb.data, NULL, 0, &ctx->conn);
@@ -105,9 +105,9 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_WRITE);
 	struct http_client_ctx *restrict ctx = watcher->data;
-	const int ret = http_conn_send(&ctx->conn, watcher->fd);
+	int err = 0;
+	const int ret = http_conn_send(&ctx->conn, watcher->fd, &err);
 	if (ret < 0) {
-		const int err = errno;
 		if (ctx->state == STATE_CLIENT_REQUEST && !ctx->cache_retried &&
 		    (err == ECONNRESET || err == EPIPE || err == ECONNABORTED ||
 		     err == ENOTCONN || err == EBADF)) {
@@ -116,8 +116,13 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			const int stale_fd = watcher->fd;
 			ev_io_set(watcher, -1, EV_NONE);
 			if (stale_fd != -1) {
-				SOCKET_CLOSE_FD(stale_fd);
+				socket_close(stale_fd);
 			}
+			/* the fresh connection is a new peer with no bytes
+			 * of its own yet; resend the whole request instead
+			 * of resuming from the stale connection's offset */
+			ctx->conn.wpos = 0;
+			ctx->conn.cpos = 0;
 			ctx->state = STATE_CLIENT_CONNECT;
 			dialer_do(
 				&ctx->dialer, loop, ctx->dialreq, ctx->conf,
@@ -183,10 +188,6 @@ static void http_client_timeout_cb(
 static bool http_client_on_header(void *data, const char *key, char *value)
 {
 	struct http_client_ctx *restrict ctx = data;
-	if (strcasecmp(key, "Connection") == 0) {
-		ctx->conn.hdr.connection = value;
-		return true;
-	}
 	if (ctx->user_on_header.func != NULL) {
 		return ctx->user_on_header.func(
 			ctx->user_on_header.ctx, key, value);

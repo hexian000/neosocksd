@@ -6,6 +6,7 @@
 #ifndef UTIL_H
 #define UTIL_H
 
+#include "os/socket.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
@@ -51,11 +52,29 @@ void unloadlibs(void);
 
 /* Update a libev I/O watcher to the desired read/write event mask. */
 void modify_io_events(
-	struct ev_loop *restrict loop, struct ev_io *restrict watcher,
-	int events);
+	struct ev_loop *restrict loop, ev_io *restrict watcher, int events);
 
 /* socket utilities */
 void socket_bind_netdev(int fd, const char *restrict netdev);
 void socket_set_transparent(int fd, bool tproxy);
+
+/* Best-effort forward of already-buffered client bytes to a freshly dialed
+ * upstream connection, whose send buffer should be empty. A short send here
+ * (backpressure or error) is treated as failure rather than queued, since
+ * silently dropping these bytes would reproduce the bug this exists to fix. */
+static inline bool
+forward_readahead(const int fd, const void *restrict data, size_t len)
+{
+	const unsigned char *restrict p = data;
+	while (len > 0) {
+		size_t n = len;
+		if (socket_send(fd, p, &n) != 0 || n == 0) {
+			return false;
+		}
+		p += n;
+		len -= n;
+	}
+	return true;
+}
 
 #endif /* UTIL_H */

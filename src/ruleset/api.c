@@ -11,13 +11,12 @@
 #include "server.h"
 #include "util.h"
 
+#include "binary/serialize.h"
 #include "net/addr.h"
 #include "os/clock.h"
 #include "os/socket.h"
-#include "utils/serialize.h"
 
 #include <ev.h>
-
 #include <lauxlib.h>
 #include <lua.h>
 
@@ -43,6 +42,9 @@ static int api_async(lua_State *restrict L)
 		lua_xmove(co, L, 1);
 		return 2;
 	}
+	/* aux_async consumed func and its args, leaving [co, finish]; drop the
+	 * leftover finish so the returned value is co (the coroutine) */
+	lua_settop(L, 1);
 	return 1;
 }
 
@@ -52,7 +54,7 @@ static int api_invoke(lua_State *restrict L)
 	size_t len;
 	const char *restrict code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L) - 1;
-	if (!aux_todialreq(L, n)) {
+	if (n <= 0 || !aux_todialreq(L, n)) {
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
@@ -115,7 +117,7 @@ static int api_parse_ipv6(lua_State *restrict L)
 	lua_pushinteger(L, (lua_Integer)read_uint32(addr + 8));
 	lua_pushinteger(L, (lua_Integer)read_uint32(addr + 12));
 	return 4;
-#else
+#else /* LUA_32BITS */
 	lua_pushinteger(L, (lua_Integer)read_uint64(addr));
 	lua_pushinteger(L, (lua_Integer)read_uint64(addr + 8));
 	return 2;
@@ -275,7 +277,9 @@ static int api_config(lua_State *restrict L)
 static int api_stats(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
-	struct server_stats stats = { 0 };
+	/* started defaults to the "not started" sentinel so uptime reads 0 when
+	 * no server is attached yet (ruleset loads before ruleset_setserver) */
+	struct server_stats stats = { .started = -1 };
 	uint_fast64_t num_dns_query = 0, num_dns_success = 0;
 	{
 		const struct server *restrict s = r->server;
@@ -313,7 +317,11 @@ static int api_stats(lua_State *restrict L)
 	lua_setfield(L, -2, "byt_up");
 	lua_pushinteger(L, (lua_Integer)stats.byt_down);
 	lua_setfield(L, -2, "byt_down");
-	lua_pushnumber(L, (lua_Number)(clock_monotonic_ns() - stats.started));
+	const lua_Number uptime =
+		stats.started > 0 ?
+			(lua_Number)(clock_monotonic_ns() - stats.started) :
+			0.0;
+	lua_pushnumber(L, uptime);
 	lua_setfield(L, -2, "uptime");
 	lua_pushinteger(L, (lua_Integer)r->vmstats.byt_allocated);
 	lua_setfield(L, -2, "bytes_allocated");

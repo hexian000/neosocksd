@@ -8,13 +8,16 @@
 #include "dialer.h"
 #include "resolver.h"
 
+#include "utils/slog.h"
 #include "utils/testing.h"
 
 #include <ev.h>
 
+#include <signal.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -213,6 +216,27 @@ T_DECLARE_CASE(util_socket_bind_netdev_empty_name)
 	T_EXPECT(true);
 }
 
+T_DECLARE_CASE(util_socket_set_transparent_invalid_fd_aborts)
+{
+	/* socket_set_transparent is fatal-on-error by design. Requesting
+	 * transparency on an invalid fd must abort the process on every build:
+	 * setsockopt fails with EBADF where IP_TRANSPARENT exists, and the
+	 * CHECKMSGF guard fails where it does not. Fork so the abort is
+	 * contained, and assert the child died on SIGABRT. */
+	const pid_t pid = fork();
+	T_CHECK(pid >= 0);
+	if (pid == 0) {
+		/* child: suppress the expected fatal log, then trigger it */
+		slog_setoutput(SLOG_OUTPUT_DISCARD);
+		socket_set_transparent(-1, true);
+		_exit(EXIT_SUCCESS); /* not reached */
+	}
+	int status = 0;
+	T_CHECK(waitpid(pid, &status, 0) == pid);
+	T_EXPECT(WIFSIGNALED(status));
+	T_EXPECT_EQ(WTERMSIG(status), SIGABRT);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -231,6 +255,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(util_loadlibs_unloadlibs),
 	T_CASE(util_socket_bind_netdev_invalid_fd),
 	T_CASE(util_socket_bind_netdev_empty_name),
+	T_CASE(util_socket_set_transparent_invalid_fd_aborts),
 	T_SUITE_END,
 };
 

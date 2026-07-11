@@ -15,7 +15,7 @@
  * section below.
  */
 
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 
 #include "conf.h"
 #include "dialer.h"
@@ -26,10 +26,9 @@
 #include "io/stream.h"
 #include "utils/testing.h"
 
+#include <ev.h>
 #include <lauxlib.h>
 #include <lua.h>
-
-#include <ev.h>
 
 #include <arpa/inet.h>
 #include <stdbool.h>
@@ -245,7 +244,7 @@ int luaopen_zlib(lua_State *restrict L)
 	return 1;
 }
 
-char *const proxy_protocol_str[PROTO_MAX] = {
+const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
 	[PROTO_SOCKS4A] = "socks4a",
 	[PROTO_SOCKS5] = "socks5",
@@ -541,6 +540,7 @@ T_DECLARE_CASE(ruleset_update_invoke_rpcall_stats_and_tick)
 	T_EXPECT(strstr(rpc_result.result, "return ") == rpc_result.result);
 	T_EXPECT(strstr(rpc_result.result, "42") != NULL);
 	T_EXPECT(strstr(rpc_result.result, "done") != NULL);
+	free((void *)rpc_result.result);
 
 	s = ruleset_stats(r, 1.5, "alpha", &len);
 	T_CHECK(s != NULL);
@@ -730,7 +730,75 @@ T_DECLARE_CASE(ruleset_cancel_pending_request_clears_callback)
 	T_CHECK(state->cb == &cb);
 	ruleset_cancel(loop, state);
 	T_EXPECT_EQ(state->cb, NULL);
+	/* ruleset_cancel is documented idempotent: a second call is a safe
+	 * no-op (the state->cb == NULL guard) */
+	ruleset_cancel(loop, state);
+	T_EXPECT_EQ(state->cb, NULL);
 	T_EXPECT(!wait_until(loop, request_fired, &result, 0.016));
+
+	free_ruleset(loop, r);
+}
+
+/*
+ * Regression: ruleset_state must be detached from the caller's own storage
+ * slot (here, the local `state`) synchronously when the routine completes,
+ * not merely whenever the fed completion event happens to be dispatched.
+ * Before the fix, `state` stayed non-NULL until the event was processed, so
+ * a concurrent ruleset_cancel() racing with a GC cycle in that window could
+ * be handed a dangling pointer -- reproduced upstream under
+ * AddressSanitizer as a heap-use-after-free in ruleset_cancel().
+ */
+T_DECLARE_CASE(ruleset_state_detached_synchronously_on_completion)
+{
+	static const char update_chunk[] =
+		"local name = ... "
+		"  local ruleset = {} "
+		"  function ruleset.route(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.resolve(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.route6(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.stats(dt, query) return '' end "
+		"  function ruleset.tick() end "
+		"  return ruleset "
+		"";
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream update_stream;
+	struct ruleset_callback cb = { 0 };
+	struct ruleset_state *state = NULL;
+	struct request_result result = {
+		.callback = &cb,
+	};
+
+	T_EXPECT(ruleset_update(
+		r, NULL, NULL,
+		string_stream_open(&update_stream, update_chunk)));
+	ev_init(&cb.w_finish, request_finish_cb);
+	cb.w_finish.data = &result;
+
+	/* ruleset.route above does not yield, so request_finish() (and thus
+	 * state_complete()) runs synchronously inside this very call, before
+	 * ruleset_route() returns -- well before the fed completion event is
+	 * ever dispatched. */
+	T_EXPECT(ruleset_route(r, &state, "127.0.0.1:80", NULL, NULL, &cb));
+	T_EXPECT(state == NULL);
+
+	/* Force a full GC cycle: with the fix, there is nothing left for any
+	 * caller to dangle a pointer to; this must not crash (and would
+	 * report a heap-use-after-free under AddressSanitizer without the
+	 * fix, once combined with a stale ruleset_cancel() call). */
+	lua_gc(r->L, LUA_GCCOLLECT, 0);
+
+	/* The fed completion event must still be delivered normally. */
+	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
+	T_CHECK(result.req != NULL);
+	dialreq_free(result.req);
 
 	free_ruleset(loop, r);
 }
@@ -763,6 +831,44 @@ T_DECLARE_CASE(ruleset_geterror_variants)
 	free_ruleset(loop, r);
 }
 
+T_DECLARE_CASE(ruleset_isvalid_tracks_loaded_table)
+{
+	static const char script[] =
+		"local name = ... "
+		"  local ruleset = {} "
+		"  function ruleset.route(request) return request end "
+		"  return ruleset "
+		"";
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	char path[] = "/tmp/ruleset_test_XXXXXX";
+
+	/* a fresh ruleset has no `ruleset' global yet */
+	T_EXPECT(!ruleset_isvalid(r));
+
+	T_CHECK(write_tempfile(path, script) == 0);
+	T_EXPECT(ruleset_loadfile(r, path));
+	/* after loading a table-returning script it is valid */
+	T_EXPECT(ruleset_isvalid(r));
+
+	free_ruleset(loop, r);
+}
+
+T_DECLARE_CASE(ruleset_load_missing_file_returns_false)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+
+	/* codec_lua_reader() returns NULL for a nonexistent path; both loaders
+	 * must early-return false rather than crash */
+	T_EXPECT(!ruleset_loadfile(r, "/nonexistent/ruleset/path.lua"));
+	T_EXPECT(!ruleset_loadconfig(r, "/nonexistent/ruleset/config.lua"));
+
+	free_ruleset(loop, r);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -777,7 +883,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_metrics_returns_string_when_defined_and_null_when_absent),
 	T_CASE(ruleset_healthy_reports_unhealthy_string_and_null_when_ok),
 	T_CASE(ruleset_cancel_pending_request_clears_callback),
+	T_CASE(ruleset_state_detached_synchronously_on_completion),
 	T_CASE(ruleset_geterror_variants),
+	T_CASE(ruleset_isvalid_tracks_loaded_table),
+	T_CASE(ruleset_load_missing_file_returns_false),
 	T_SUITE_END,
 };
 

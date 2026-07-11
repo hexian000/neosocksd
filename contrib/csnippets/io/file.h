@@ -57,7 +57,8 @@ bool io_writefile(
 
 /**
  * @brief Read UTF-8 text data, handling the byte order mark (BOM).
- * @param[in,out] data The data buffer.
+ * @param[in] data The data buffer (passed by value; the BOM-adjusted pointer
+ *            is returned, not written back through this parameter).
  * @param[in,out] len The length of the data; adjusted for BOM removal.
  * @return A pointer to the UTF-8 text content, or NULL if the data starts with
  *         a UTF-16 or UTF-32 BOM (unsupported encodings).

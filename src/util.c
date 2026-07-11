@@ -13,7 +13,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-
 #if WITH_RULESET
 #include <lua.h>
 #endif
@@ -122,7 +121,7 @@ void socket_bind_netdev(int fd, const char *restrict netdev)
 		LOGW_F("[fd:%d] SO_BINDTODEVICE: (%d) %s", fd, err,
 		       strerror(err));
 	}
-#else
+#else /* SO_BINDTODEVICE */
 	(void)fd;
 	if (netdev[0] != '\0') {
 		LOGW_F("SO_BINDTODEVICE: %s", "not supported in current build");
@@ -137,9 +136,11 @@ void socket_set_transparent(int fd, bool tproxy)
 	if (setsockopt(fd, SOL_IP, IP_TRANSPARENT, &val, sizeof(val))) {
 		/* this is a fatal error */
 		const int err = errno;
-		FAILMSGF("IP_TRANSPARENT: (%d) %s", err, strerror(err));
+		FAILMSGF(
+			"[fd:%d] IP_TRANSPARENT: (%d) %s", fd, err,
+			strerror(err));
 	}
-#else
+#else /* IP_TRANSPARENT */
 	(void)fd;
 	CHECKMSGF(
 		!tproxy, "IP_TRANSPARENT: %s",

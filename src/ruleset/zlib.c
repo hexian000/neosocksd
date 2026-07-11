@@ -55,8 +55,13 @@ static int stream_copyall(struct stream_context *restrict s)
 	return ret;
 }
 
-/* z = zlib.compress(s) */
-static int zlib_compress(lua_State *restrict L)
+/* Run a zlib/gzip transform over the argument string and push the result.
+ * When @p encode is true, @p codec wraps the writer (compressing); otherwise
+ * it wraps the reader (decompressing). @p what names the operation for errors. */
+static int zlib_transcode(
+	lua_State *restrict L, const bool encode,
+	struct stream *(*const codec)(struct stream *base),
+	const char *restrict const what)
 {
 	size_t len;
 	const char *restrict const src = luaL_checklstring(L, 1, &len);
@@ -68,103 +73,48 @@ static int zlib_compress(lua_State *restrict L)
 	aux_toclose(L, -1, MT_STREAM_CONTEXT, stream_context_close);
 
 	s->out = VBUF_NEW(IO_BUFSIZE);
-	s->r = io_memreader(src, len);
-	s->w = codec_zlib_writer(io_heapwriter(&s->out));
+	if (encode) {
+		s->r = io_memreader(src, len);
+		s->w = codec(io_heapwriter(&s->out));
+	} else {
+		s->r = codec(io_memreader(src, len));
+		s->w = io_heapwriter(&s->out);
+	}
 	if (s->out == NULL || s->r == NULL || s->w == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
 	const int err = stream_copyall(s);
 	if (err != 0) {
-		return luaL_error(L, "compress error: %d", err);
+		return luaL_error(L, "%s error: %d", what, err);
 	}
 	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
 	aux_close(L, -2);
 	return 1;
+}
+
+/* z = zlib.compress(s) */
+static int zlib_compress(lua_State *restrict L)
+{
+	return zlib_transcode(L, true, codec_zlib_writer, "compress");
 }
 
 /* s = zlib.uncompress(z) */
 static int zlib_uncompress(lua_State *restrict L)
 {
-	size_t len;
-	const char *restrict const src = luaL_checklstring(L, 1, &len);
-	struct stream_context *restrict const s =
-		lua_newuserdata(L, sizeof(struct stream_context));
-	s->out = NULL;
-	s->r = NULL;
-	s->w = NULL;
-	aux_toclose(L, -1, MT_STREAM_CONTEXT, stream_context_close);
-
-	s->out = VBUF_NEW(IO_BUFSIZE);
-	s->r = codec_zlib_reader(io_memreader(src, len));
-	s->w = io_heapwriter(&s->out);
-	if (s->out == NULL || s->r == NULL || s->w == NULL) {
-		lua_pushliteral(L, ERR_MEMORY);
-		return lua_error(L);
-	}
-	const int err = stream_copyall(s);
-	if (err != 0) {
-		return luaL_error(L, "uncompress error: %d", err);
-	}
-	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
-	aux_close(L, -2);
-	return 1;
+	return zlib_transcode(L, false, codec_zlib_reader, "uncompress");
 }
 
 /* z = zlib.gzip(s) */
 static int zlib_gzip(lua_State *restrict L)
 {
-	size_t len;
-	const char *restrict const src = luaL_checklstring(L, 1, &len);
-	struct stream_context *restrict const s =
-		lua_newuserdata(L, sizeof(struct stream_context));
-	s->out = NULL;
-	s->r = NULL;
-	s->w = NULL;
-	aux_toclose(L, -1, MT_STREAM_CONTEXT, stream_context_close);
-
-	s->out = VBUF_NEW(IO_BUFSIZE);
-	s->r = io_memreader(src, len);
-	s->w = codec_gzip_writer(io_heapwriter(&s->out));
-	if (s->out == NULL || s->r == NULL || s->w == NULL) {
-		lua_pushliteral(L, ERR_MEMORY);
-		return lua_error(L);
-	}
-	const int err = stream_copyall(s);
-	if (err != 0) {
-		return luaL_error(L, "gzip error: %d", err);
-	}
-	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
-	aux_close(L, -2);
-	return 1;
+	return zlib_transcode(L, true, codec_gzip_writer, "gzip");
 }
 
 /* s = zlib.gunzip(z) */
 static int zlib_gunzip(lua_State *restrict L)
 {
-	size_t len;
-	const char *restrict const src = luaL_checklstring(L, 1, &len);
-	struct stream_context *restrict const s =
-		lua_newuserdata(L, sizeof(struct stream_context));
-	s->out = NULL;
-	s->r = NULL;
-	s->w = NULL;
-	aux_toclose(L, -1, MT_STREAM_CONTEXT, stream_context_close);
-
-	s->out = VBUF_NEW(IO_BUFSIZE);
-	s->r = codec_gzip_reader(io_memreader(src, len));
-	s->w = io_heapwriter(&s->out);
-	if (s->out == NULL || s->r == NULL || s->w == NULL) {
-		lua_pushliteral(L, ERR_MEMORY);
-		return lua_error(L);
-	}
-	const int err = stream_copyall(s);
-	if (err != 0) {
-		return luaL_error(L, "gunzip error: %d", err);
-	}
-	lua_pushlstring(L, VBUF_DATA(s->out), VBUF_LEN(s->out));
-	aux_close(L, -2);
-	return 1;
+	return zlib_transcode(L, false, codec_gzip_reader, "gunzip");
 }
 
 int luaopen_zlib(lua_State *restrict L)

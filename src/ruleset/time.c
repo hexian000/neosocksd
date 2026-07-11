@@ -11,57 +11,47 @@
 #include <stdbool.h>
 #include <time.h>
 
-/* time.monotonic() */
-static int time_monotonic(lua_State *restrict L)
+/* Push the given clock's reading in seconds, or -1 on failure. */
+static int
+push_clock(lua_State *restrict L, bool (*clock_fn)(struct timespec *restrict))
 {
 	struct timespec t;
-	if (!clock_monotonic(&t)) {
+	if (!clock_fn(&t)) {
 		lua_pushinteger(L, -1);
 		return 1;
 	}
 	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
 	return 1;
+}
+
+/* time.monotonic() */
+static int time_monotonic(lua_State *restrict L)
+{
+	return push_clock(L, clock_monotonic);
 }
 
 /* time.process() */
 static int time_process(lua_State *restrict L)
 {
-	struct timespec t;
-	if (!clock_process(&t)) {
-		lua_pushinteger(L, -1);
-		return 1;
-	}
-	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
-	return 1;
+	return push_clock(L, clock_process);
 }
 
 /* time.thread() */
 static int time_thread(lua_State *restrict L)
 {
-	struct timespec t;
-	if (!clock_thread(&t)) {
-		lua_pushinteger(L, -1);
-		return 1;
-	}
-	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
-	return 1;
+	return push_clock(L, clock_thread);
 }
 
 /* time.unix() */
 static int time_unix(lua_State *restrict L)
 {
-	struct timespec t;
-	if (!clock_unix(&t)) {
-		lua_pushinteger(L, -1);
-		return 1;
-	}
-	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
-	return 1;
+	return push_clock(L, clock_unix);
 }
 
 /* cost, ... = time.measure(f, ...) */
 static int time_measure(lua_State *restrict L)
 {
+	luaL_checktype(L, 1, LUA_TFUNCTION);
 	const int nargs = lua_gettop(L) - 1;
 	lua_pushinteger(L, -1);
 	lua_insert(L, 1);

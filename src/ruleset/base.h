@@ -4,10 +4,9 @@
 #ifndef RULESET_BASE_H
 #define RULESET_BASE_H
 
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 
 #include <ev.h>
-
 #include <lauxlib.h>
 #include <lua.h>
 
@@ -28,6 +27,7 @@ struct config;
 struct dialreq;
 struct resolver;
 struct server;
+struct stream;
 
 /** @brief Main ruleset structure */
 struct ruleset {
@@ -51,10 +51,8 @@ struct ruleset {
 
 /** @brief Registry indices for Lua registry tables */
 enum ruleset_ridx {
-	/* t[idx] = short string */
-	RIDX_CONSTANT = LUA_RIDX_LAST + 1,
 	/* last error */
-	RIDX_LASTERROR,
+	RIDX_LASTERROR = LUA_RIDX_LAST + 1,
 	/* t[lightuserdata] = thread */
 	RIDX_AWAIT_CONTEXT,
 	/* t[thread] = true */
@@ -93,6 +91,10 @@ void aux_newweaktable(lua_State *restrict L, const char *mode);
  * @param idx Stack index
  * @param tname Type name for error messages
  * @param close Close function
+ * @note @p close must be idempotent: it is installed as both @c __close and
+ * @c __gc, and on the pre-5.4 fallback @c aux_close runs it manually while the
+ * @c __gc copy still fires at collection, so it may be invoked more than once
+ * for the same object.
  */
 void aux_toclose(
 	lua_State *restrict L, int idx, const char *tname, lua_CFunction close);
@@ -115,6 +117,16 @@ void aux_close(lua_State *restrict L, int idx);
 void aux_getregtable(lua_State *restrict L, int ridx);
 
 /**
+ * @brief Install a fresh sandbox `_ENV` (a new table indexing `_G`) as upvalue
+ * 1 of the chunk on the top of the stack.
+ *
+ * Stack effect: [-0, +0, e] (the chunk stays on top).
+ *
+ * @param L Lua state
+ */
+void aux_setsandboxenv(lua_State *restrict L);
+
+/**
  * @brief Get or create thread for async operations
  *
  * Stack effect: [-0, +1, v]
@@ -125,13 +137,22 @@ void aux_getregtable(lua_State *restrict L, int ridx);
 lua_State *aux_getthread(lua_State *restrict L);
 
 /**
- * @brief Stream reader function for Lua
+ * @brief lua_load() a chunk from a struct stream.
+ *
+ * Wraps lua_load() with a reader that, unlike a bare lua_Reader, propagates a
+ * mid-stream read error (which would otherwise look like a clean EOF and
+ * compile a truncated chunk). On such an error the compiled chunk is dropped
+ * and an error message is left on the stack.
+ *
  * @param L Lua state
- * @param ud User data (stream pointer)
- * @param sz Output parameter for chunk size
- * @return Pointer to data chunk, or NULL on EOF
+ * @param stream Source stream
+ * @param chunkname Chunk name for diagnostics
+ * @return A lua_load()-style status: LUA_OK on success (compiled chunk on the
+ * stack), or non-zero on a compile or read error (message on the stack).
  */
-const char *aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz);
+int aux_load(
+	lua_State *restrict L, struct stream *restrict stream,
+	const char *restrict chunkname);
 
 /**
  * @brief Format address for display

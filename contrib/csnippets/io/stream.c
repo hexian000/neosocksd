@@ -13,7 +13,14 @@ int stream_direct_read(
 	struct stream *restrict s, const void **restrict buf,
 	size_t *restrict len)
 {
-	return s->vftable->direct_read(s, buf, len);
+	const io_direct_reader direct_read = s->vftable->direct_read;
+	if (direct_read == NULL) {
+		/* direct_read is optional; report unsupported instead of
+		 * dereferencing a NULL vftable entry */
+		*len = 0;
+		return -1;
+	}
+	return direct_read(s, buf, len);
 }
 
 int stream_read(
@@ -76,17 +83,23 @@ int stream_copy(
 	struct stream *restrict dst, struct stream *restrict src,
 	void *restrict buf, const size_t bufsize)
 {
-	size_t len;
+	size_t nread;
 	do {
-		len = bufsize;
-		const int srcerr = stream_read(src, buf, &len);
-		const int dsterr = stream_write(dst, buf, &len);
+		nread = bufsize;
+		const int srcerr = stream_read(src, buf, &nread);
+		size_t nwritten = nread;
+		const int dsterr = stream_write(dst, buf, &nwritten);
 		if (srcerr != 0) {
 			return srcerr;
 		}
 		if (dsterr != 0) {
 			return dsterr;
 		}
-	} while (len > 0);
+		if (nwritten < nread) {
+			/* short write: per stream_write's contract, the
+			 * caller must treat this as an error */
+			return -1;
+		}
+	} while (nread > 0);
 	return 0;
 }

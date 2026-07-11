@@ -21,5 +21,7 @@ const char *neosocksd_version(void);
 #cmakedefine01 WITH_RULESET
 #cmakedefine01 WITH_ALLOC_CACHE
 #cmakedefine01 WITH_THREADS
+#cmakedefine01 WITH_SYSTEMD
+#cmakedefine01 WITH_CRASH_HANDLER
 
 #endif /* CONFIG_H */

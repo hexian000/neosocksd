@@ -4,19 +4,17 @@
 #include "testing.h"
 
 #include "formats.h"
-
 #ifdef _WIN32
 #include "wintime.h"
 #else
 #include "os/clock.h"
 #endif
 
+#include <errno.h>
+#include <limits.h>
 #if HAVE_REGEX_H
 #include <regex.h>
 #endif
-
-#include <errno.h>
-#include <limits.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -59,10 +57,10 @@ filter_compile(struct filter *f, const char *pattern, const char *opt)
 			pattern, errbuf);
 		return false;
 	}
-#else
+#else /* HAVE_REGEX_H */
 	(void)opt;
 	f->pat = pattern;
-#endif
+#endif /* HAVE_REGEX_H */
 	f->active = true;
 	return true;
 }
@@ -369,6 +367,16 @@ parse_benchtime(const char *s, int_fast64_t *time_ns, uint_fast64_t *fixed_n)
 	return true;
 }
 
+/* Wraps opt_value so callers test a plain bool instead of assigning *r
+ * inside the condition itself. */
+static bool match_opt(
+	const char *flag, int argc, char *const *argv, int *i,
+	const char **value, int *r)
+{
+	*r = opt_value(flag, argc, argv, i, value);
+	return *r != 0;
+}
+
 int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
 {
 	/*
@@ -388,15 +396,13 @@ int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
 	for (int i = 1; i < argc; i++) {
 		const char *value = NULL;
 		int r;
-		if ((r = opt_value("--run", argc, argv, &i, &value)) != 0) {
+		if (match_opt("--run", argc, argv, &i, &value, &r)) {
 			run = value;
 			have_run = true;
-		} else if ((r = opt_value("--bench", argc, argv, &i, &value)) != 0) {
+		} else if (match_opt("--bench", argc, argv, &i, &value, &r)) {
 			bench = value;
 			have_bench = true;
-		} else if (
-			(r = opt_value(
-				 "--benchtime", argc, argv, &i, &value)) != 0) {
+		} else if (match_opt("--benchtime", argc, argv, &i, &value, &r)) {
 			if (r > 0 &&
 			    !parse_benchtime(
 				    value, &bench_time_ns, &bench_fixed_n)) {
@@ -406,7 +412,7 @@ int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
 					value);
 				return EXIT_FAILURE;
 			}
-		} else if ((r = opt_value("--count", argc, argv, &i, &value)) != 0) {
+		} else if (match_opt("--count", argc, argv, &i, &value, &r)) {
 			char *end = NULL;
 			errno = 0;
 			const long c = (r > 0) ? strtol(value, &end, 10) : 0;

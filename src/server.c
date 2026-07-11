@@ -10,7 +10,7 @@
 #include "http_proxy.h"
 #include "proto/domain.h"
 #if WITH_RULESET
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #endif
 #include "socks.h"
 #include "util.h"
@@ -48,20 +48,25 @@ static bool is_startup_limited(const struct server *restrict s)
 #else
 		const size_t n = s->num_sessions;
 #endif
-		if (n > (size_t)conf->max_sessions) {
+		/* count halfopen (accepted, not yet committed) connections
+		 * too: num_sessions alone only reflects fully committed
+		 * transfers, so a burst of connections that are all still
+		 * mid-dial would otherwise all pass this check and commit
+		 * past max_sessions at once. */
+		if (n + stats->num_halfopen >= (size_t)conf->max_sessions) {
 			LOGVV("session limit exceeded, rejecting new connection");
 			return true;
 		}
 	}
 
 	if (conf->startup_limit_full > 0 &&
-	    stats->num_halfopen > (size_t)conf->startup_limit_full) {
+	    stats->num_halfopen >= (size_t)conf->startup_limit_full) {
 		LOGVV("full startup limit exceeded, rejecting new connection");
 		return true;
 	}
 
 	if (conf->startup_limit_start > 0 &&
-	    stats->num_halfopen > (size_t)conf->startup_limit_start) {
+	    stats->num_halfopen >= (size_t)conf->startup_limit_start) {
 		if ((frand() * 100.0) < (double)conf->startup_limit_rate) {
 			LOGVV("startup limit reached, rejecting new connection");
 			return true;
@@ -109,24 +114,18 @@ static void accept_cb(
 		}
 
 		if (is_startup_limited(s)) {
-			SOCKET_CLOSE_FD(fd);
-			return;
+			socket_close(fd);
+			continue;
 		}
 
-		{
-			int err = socket_set_cloexec(fd);
-			if (err != 0) {
-				SOCKET_CLOSE_FD(fd);
-				return;
-			}
-			err = socket_set_nonblock(fd);
-			if (err != 0) {
-				SOCKET_CLOSE_FD(fd);
-				return;
-			}
+		if (!socket_set_cloexec(fd) || !socket_set_nonblock(fd)) {
+			socket_close(fd);
+			continue;
 		}
-		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
-		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
+		/* best-effort tuning; failure does not affect correctness */
+		(void)socket_set_tcp(
+			fd, conf->tcp_nodelay, conf->tcp_keepalive);
+		(void)socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 
 		l->stats.num_serve++;
 		l->serve(s, loop, fd, (const struct sockaddr *)&addr.sa);
@@ -134,8 +133,9 @@ static void accept_cb(
 }
 
 /* Restart the accept watcher after a temporary accept failure. */
-static void
-timer_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
+static void timer_cb(
+	struct ev_loop *restrict loop, ev_timer *restrict watcher,
+	const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	ev_timer_stop(loop, watcher);
@@ -156,43 +156,40 @@ static bool add_listener(
 	const int fd = socket(bindaddr->sa_family, SOCK_STREAM, 0);
 	if (fd < 0) {
 		const int err = errno;
-		LOGE_F("socket: (%d) %s", err, strerror(err));
+		LOGF_F("socket: (%d) %s", err, strerror(err));
 		return false;
 	}
 
-	{
-		int err = socket_set_cloexec(fd);
-		if (err != 0) {
-			SOCKET_CLOSE_FD(fd);
-			return false;
-		}
-		err = socket_set_nonblock(fd);
-		if (err != 0) {
-			SOCKET_CLOSE_FD(fd);
-			return false;
-		}
+	if (!socket_set_cloexec(fd) || !socket_set_nonblock(fd)) {
+		socket_close(fd);
+		return false;
 	}
 
 	const struct config *restrict conf = s->conf;
 
+	/* failure surfaces later via the bind() check below */
 #if WITH_REUSEPORT
-	socket_set_reuseport(fd, conf->reuseport);
+	(void)socket_set_reuseport(fd, conf->reuseport);
 #else
-	socket_set_reuseport(fd, false);
+	(void)socket_set_reuseport(fd, false);
 #endif
 #if WITH_TPROXY
-	if (conf->transparent) {
+	/* transparent mode applies only to the primary proxy listener, not to
+	 * a co-configured --api/--http listener */
+	if (conf->transparent && serve == tproxy_serve) {
 		socket_set_transparent(fd, true);
 	}
 #endif
 	const int backlog = SOMAXCONN;
 #if WITH_TCP_FASTOPEN
 	if (conf->tcp_fastopen) {
-		socket_set_fastopen(fd, backlog);
+		/* opportunistic; falls back to a normal handshake on failure */
+		(void)socket_set_fastopen(fd, backlog);
 	}
 #endif
-	socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
-	socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
+	/* best-effort tuning; failure does not affect correctness */
+	(void)socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
+	(void)socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 
 	if (LOGLEVEL(NOTICE)) {
 		char addr_str[64];
@@ -202,15 +199,15 @@ static bool add_listener(
 
 	if (bind(fd, bindaddr, sa_len(bindaddr)) != 0) {
 		const int err = errno;
-		LOGE_F("bind: (%d) %s", err, strerror(err));
-		SOCKET_CLOSE_FD(fd);
+		LOGF_F("bind: (%d) %s", err, strerror(err));
+		socket_close(fd);
 		return false;
 	}
 
 	if (listen(fd, backlog)) {
 		const int err = errno;
-		LOGE_F("listen: (%d) %s", err, strerror(err));
-		SOCKET_CLOSE_FD(fd);
+		LOGF_F("listen: (%d) %s", err, strerror(err));
+		socket_close(fd);
 		return false;
 	}
 
@@ -223,11 +220,7 @@ static bool add_listener(
 	ev_timer_init(&l->w_timer, timer_cb, 0.5, 0.0);
 	l->w_timer.data = l;
 
-	struct ev_loop *loop = s->loop;
-	if (s->num_listeners == 0) {
-		s->stats.started = (int_least64_t)clock_monotonic_ns();
-	}
-	ev_io_start(loop, &l->w_accept);
+	ev_io_start(s->loop, &l->w_accept);
 	s->num_listeners++;
 	return true;
 }
@@ -237,16 +230,12 @@ static bool add_listener(
  * base dial request is rebuilt on reload; on failure the old one is kept. */
 static void server_reload_basereq(struct server *restrict s)
 {
-	struct dialreq *restrict newbasereq =
-		dialreq_parse(s->conf->forward, s->conf->proxy);
-	if (newbasereq == NULL) {
+	if (!dialreq_replace(&s->basereq, s->conf->forward, s->conf->proxy)) {
 		LOGW("reload: unable to parse outbound configuration; keeping the previous one");
 		return;
 	}
-	dialreq_free(s->basereq);
-	s->basereq = newbasereq;
 	if (s->ruleset != NULL) {
-		ruleset_setbasereq(s->ruleset, newbasereq);
+		ruleset_setbasereq(s->ruleset, s->basereq);
 	}
 }
 
@@ -298,8 +287,9 @@ static bool server_reload_ruleset(struct server *restrict s)
 }
 #endif /* WITH_RULESET */
 
-static void
-signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
+static void signal_cb(
+	struct ev_loop *restrict loop, ev_signal *restrict watcher,
+	const int revents)
 {
 	CHECK_REVENTS(revents, EV_SIGNAL);
 
@@ -308,15 +298,19 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 		(void)systemd_notify(DAEMON_SYSTEMD_STATE_RELOADING);
 #if WITH_RULESET
 		struct server *restrict s = watcher->data;
-		if (!server_reload_ruleset(s)) {
-			(void)systemd_notify(DAEMON_SYSTEMD_STATE_READY);
-			break;
+		if (s->conf->boot != NULL || s->conf->ruleset != NULL) {
+			if (server_reload_ruleset(s)) {
+				if (s->conf->boot != NULL) {
+					server_reload_basereq(s);
+				}
+				LOGN("reload: config successfully reloaded");
+			}
+		} else {
+			LOGD("reload: no reloadable configuration");
 		}
-		if (s->conf->boot != NULL) {
-			server_reload_basereq(s);
-		}
+#else
+		LOGD("reload: no reloadable configuration");
 #endif /* WITH_RULESET */
-		LOGN("reload: config successfully reloaded");
 		(void)systemd_notify(DAEMON_SYSTEMD_STATE_READY);
 	} break;
 	case SIGINT:
@@ -331,7 +325,7 @@ signal_cb(struct ev_loop *loop, ev_signal *watcher, const int revents)
 }
 
 static bool
-resolve_addr(const char *restrict addrstr, union sockaddr_max *restrict out)
+resolve_addr(union sockaddr_max *restrict out, const char *restrict addrstr)
 {
 	const size_t bufsize = FQDN_MAX_LENGTH + sizeof(":65535");
 	const size_t addrlen = strlen(addrstr);
@@ -371,6 +365,10 @@ bool server_init(
 		.stats = { .started = -1 },
 	};
 	s->data = s;
+	/* mark the server started before adding listeners so server_stop()
+	 * always tears down (signal watchers, basereq) even with zero
+	 * listeners, and so uptime spans the whole server lifetime */
+	s->stats.started = (int_least64_t)clock_monotonic_ns();
 
 	if (conf->listen != NULL) {
 		serve_fn proxy_serve;
@@ -386,7 +384,7 @@ bool server_init(
 			proxy_serve = socks_serve;
 		}
 		union sockaddr_max bindaddr;
-		if (!resolve_addr(conf->listen, &bindaddr)) {
+		if (!resolve_addr(&bindaddr, conf->listen)) {
 			return false;
 		}
 		if (sa_ipclassify(&bindaddr.sa) == IPCLASS_UNSPECIFIED) {
@@ -398,7 +396,7 @@ bool server_init(
 	}
 	if (conf->http_listen != NULL) {
 		union sockaddr_max httpaddr;
-		if (!resolve_addr(conf->http_listen, &httpaddr)) {
+		if (!resolve_addr(&httpaddr, conf->http_listen)) {
 			return false;
 		}
 		if (sa_ipclassify(&httpaddr.sa) == IPCLASS_UNSPECIFIED) {
@@ -410,7 +408,7 @@ bool server_init(
 	}
 	if (conf->restapi != NULL) {
 		union sockaddr_max apiaddr;
-		if (!resolve_addr(conf->restapi, &apiaddr)) {
+		if (!resolve_addr(&apiaddr, conf->restapi)) {
 			return false;
 		}
 		const enum ipclass cls = sa_ipclassify(&apiaddr.sa);
@@ -456,7 +454,7 @@ void server_stop(struct server *restrict s)
 		struct listener *restrict l = &s->listeners[i];
 
 		ev_io_stop(loop, &l->w_accept);
-		SOCKET_CLOSE_FD(l->w_accept.fd);
+		socket_close(l->w_accept.fd);
 
 		ev_timer_stop(loop, &l->w_timer);
 	}
@@ -484,7 +482,7 @@ void server_stats(
 	out->byt_up = atomic_load_explicit(&s->byt_up, memory_order_relaxed);
 	out->byt_down =
 		atomic_load_explicit(&s->byt_down, memory_order_relaxed);
-#else
+#else /* WITH_THREADS */
 	out->num_sessions = s->num_sessions;
 	out->byt_up = s->byt_up;
 	out->byt_down = s->byt_down;

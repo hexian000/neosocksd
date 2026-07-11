@@ -7,9 +7,9 @@
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
-#include "ruleset.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 #include "util.h"
 
@@ -18,7 +18,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-
 #include <lauxlib.h>
 #include <lua.h>
 
@@ -29,6 +28,9 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _GNU_SOURCE
+#include <sys/syscall.h>
+#endif
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -47,20 +49,21 @@
 	} while (0)
 
 /* [-0, +0, m] */
-static void context_pin(lua_State *restrict L, const void *p)
+static void pin_context(lua_State *restrict L, const void *p)
 {
 	aux_getregtable(L, RIDX_AWAIT_CONTEXT);
-	if (lua_pushthread(L)) {
-		lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
-		lua_error(L);
-		return;
-	}
+	/* lua_pushthread pushes the coroutine and returns true only for the
+	 * main thread; every caller runs after AWAIT_CHECK_YIELDABLE, which
+	 * already rejects the (non-yieldable) main thread */
+	const int ismain = lua_pushthread(L);
+	ASSERT(!ismain);
+	(void)ismain;
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
 }
 
 /* [-0, +0, -] */
-static void context_unpin(lua_State *restrict L, const void *p)
+static void unpin_context(lua_State *restrict L, const void *p)
 {
 	aux_getregtable(L, RIDX_AWAIT_CONTEXT);
 	lua_pushnil(L);
@@ -80,7 +83,7 @@ static int await_sleep_close(lua_State *restrict L)
 	struct ev_loop *loop = ud->ruleset->loop;
 	ev_timer_stop(loop, &ud->w_timer);
 	ev_idle_stop(loop, &ud->w_idle);
-	context_unpin(L, ud);
+	unpin_context(L, ud);
 	return 0;
 }
 
@@ -118,7 +121,9 @@ static int await_sleep(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
 	const lua_Number n = luaL_checknumber(L, 1);
-	luaL_argcheck(L, isfinite(n) && 0 <= n && n <= 1e+9, 1, NULL);
+	luaL_argcheck(
+		L, isfinite(n) && 0 <= n && n <= 1e+9, 1,
+		"n must be finite and in [0, 1e9]");
 	lua_settop(L, 0);
 
 	struct ruleset *restrict r = aux_getruleset(L);
@@ -137,7 +142,7 @@ static int await_sleep(lua_State *restrict L)
 		ev_idle_start(r->loop, &ud->w_idle);
 	}
 
-	context_pin(L, ud);
+	pin_context(L, ud);
 	/* lua stack: ud */
 	ASSERT(lua_gettop(L) == 1);
 	lua_yieldk(L, 0, 0, await_sleep_k);
@@ -161,7 +166,7 @@ static int await_resolve_close(lua_State *restrict L)
 		ud->query = NULL;
 	}
 	ev_idle_stop(ud->ruleset->loop, &ud->w_idle);
-	context_unpin(L, ud);
+	unpin_context(L, ud);
 	return 0;
 }
 
@@ -230,7 +235,7 @@ static int await_resolve(lua_State *restrict L)
 		return lua_error(L);
 	}
 
-	context_pin(L, ud);
+	pin_context(L, ud);
 	/* lua stack: hostname ud */
 	ASSERT(lua_gettop(L) == 2);
 	lua_yieldk(L, 0, 0, await_resolve_k);
@@ -241,17 +246,17 @@ static int await_resolve(lua_State *restrict L)
 struct await_invoke_userdata {
 	struct ruleset *ruleset;
 	struct api_client_ctx *ctx;
+	size_t errlen;
 };
 
 static int await_invoke_close(lua_State *restrict L)
 {
 	struct await_invoke_userdata *restrict ud = lua_touserdata(L, 1);
 	if (ud->ctx != NULL) {
-		const struct ruleset *restrict r = aux_getruleset(L);
-		api_client_cancel(r->loop, ud->ctx);
+		api_client_cancel(ud->ruleset->loop, ud->ctx);
 		ud->ctx = NULL;
 	}
-	context_unpin(L, ud);
+	unpin_context(L, ud);
 	return 0;
 }
 
@@ -264,9 +269,10 @@ static void invoke_cb(
 	ASSERT(ud->ctx == ctx);
 	(void)ctx;
 	ud->ctx = NULL;
-	ruleset_resume(
-		ud->ruleset, ud, 3, (void *)err, (void *)&errlen,
-		(void *)stream);
+	/* store errlen in the userdata: passing &errlen (this frame's stack)
+	 * through ruleset_resume would dangle if resume were ever async */
+	ud->errlen = errlen;
+	ruleset_resume(ud->ruleset, ud, 2, (void *)err, (void *)stream);
 }
 
 static int
@@ -275,12 +281,13 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	ASSERT(status == LUA_YIELD);
 	(void)status;
 	(void)ctx;
-	/* lua stack: code ud *err *errlen *stream */
-	ASSERT(lua_gettop(L) == 5);
+	/* lua stack: code ud *err *stream */
+	ASSERT(lua_gettop(L) == 4);
+	const struct await_invoke_userdata *restrict ud = lua_touserdata(L, 2);
+	const size_t errlen = ud->errlen;
 	aux_close(L, 2);
 	const char *const errmsg = lua_touserdata(L, 3);
-	const size_t errlen = *(size_t *)lua_touserdata(L, 4);
-	struct stream *const stream = lua_touserdata(L, 5);
+	struct stream *const stream = lua_touserdata(L, 4);
 	lua_settop(L, 0);
 
 	if (errmsg != NULL) {
@@ -289,18 +296,10 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 		return 2;
 	}
 	lua_pushboolean(L, 1);
-	if (lua_load(L, aux_reader, (void *)stream, "=(rpc)", "t")) {
+	if (aux_load(L, stream, "=(rpc)")) {
 		return lua_error(L);
 	}
-	lua_newtable(L);
-	lua_newtable(L);
-	aux_getregtable(L, LUA_RIDX_GLOBALS);
-	/* lua stack: ok chunk env mt _G */
-	lua_setfield(L, -2, "__index");
-	lua_setmetatable(L, -2);
-	const char *const upvalue = lua_setupvalue(L, -2, 1);
-	ASSERT(upvalue != NULL && strcmp(upvalue, "_ENV") == 0);
-	(void)upvalue;
+	aux_setsandboxenv(L);
 	return 2;
 }
 
@@ -311,7 +310,7 @@ static int await_invoke(lua_State *restrict L)
 	size_t len;
 	const char *restrict const code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L) - 1;
-	if (!aux_todialreq(L, n)) {
+	if (n <= 0 || !aux_todialreq(L, n)) {
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
@@ -343,7 +342,7 @@ static int await_invoke(lua_State *restrict L)
 		return lua_error(L);
 	}
 
-	context_pin(L, ud);
+	pin_context(L, ud);
 	/* lua stack: code ud */
 	ASSERT(lua_gettop(L) == 2);
 	lua_yieldk(L, 0, 0, await_invoke_k);
@@ -373,14 +372,14 @@ static int await_forward_close(lua_State *restrict L)
 	}
 	if (ud->fd != -1) {
 		/* fd not handed off to a session: drop it */
-		SOCKET_CLOSE_FD(ud->fd);
+		socket_close(ud->fd);
 		ud->fd = -1;
 	}
 	if (ud->req != NULL) {
 		dialreq_free(ud->req);
 		ud->req = NULL;
 	}
-	context_unpin(L, ud);
+	unpin_context(L, ud);
 	return 0;
 }
 
@@ -518,7 +517,7 @@ static int await_forward(lua_State *restrict L)
 	dialer_do(&ud->dialer, r->loop, ud->req, r->conf, r->resolver, server);
 	ev_timer_start(r->loop, &ud->w_timeout);
 
-	context_pin(L, ud);
+	pin_context(L, ud);
 	/* lua stack: ud */
 	ASSERT(lua_gettop(L) == 1);
 	lua_yieldk(L, 0, 0, await_forward_k);
@@ -545,7 +544,7 @@ static int await_execute_close(lua_State *restrict L)
 		}
 		ud->w_child.pid = 0;
 	}
-	context_unpin(L, ud);
+	unpin_context(L, ud);
 	return 0;
 }
 
@@ -601,6 +600,27 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	return 3;
 }
 
+/* Close every inherited descriptor above stderr in the forked child before
+ * exec. Our own sockets are CLOEXEC, but descriptors we do not control (e.g.
+ * the resolver's) would otherwise leak into the spawned process tree and keep
+ * connections open for its lifetime. */
+static void close_inherited_fds(void)
+{
+	const int minfd = STDERR_FILENO + 1;
+#if defined(_GNU_SOURCE) && defined(SYS_close_range)
+	if (syscall(SYS_close_range, (unsigned int)minfd, ~0U, 0) == 0) {
+		return;
+	}
+#endif
+	long maxfd = sysconf(_SC_OPEN_MAX);
+	if (maxfd < minfd) {
+		maxfd = 1L << 16;
+	}
+	for (long fd = minfd; fd < maxfd; fd++) {
+		(void)close((int)fd);
+	}
+}
+
 /* status = await.execute(command) */
 static int await_execute(lua_State *restrict L)
 {
@@ -632,6 +652,13 @@ static int await_execute(lua_State *restrict L)
 			const int err = errno;
 			LOGW_F("setsid: (%d) %s", err, strerror(err));
 		}
+		/* restore the default SIGPIPE disposition: util.c ignores it
+		 * process-wide and an ignored disposition survives execv(),
+		 * unlike a normal shell, breaking pipelines that rely on
+		 * SIGPIPE to stop a writer (e.g. `yes | head`) */
+		const struct sigaction dfl = { .sa_handler = SIG_DFL };
+		(void)sigaction(SIGPIPE, &dfl, NULL);
+		close_inherited_fds();
 		const char *argv[] = { "sh", "-c", command, NULL };
 		execv("/bin/sh", (char *const *)argv);
 		const int err = errno;
@@ -640,7 +667,7 @@ static int await_execute(lua_State *restrict L)
 	ev_child_set(&ud->w_child, pid, 0);
 	ev_child_start(r->loop, &ud->w_child);
 
-	context_pin(L, ud);
+	pin_context(L, ud);
 	/* lua stack: command ud */
 	ASSERT(lua_gettop(L) == 2);
 	lua_yieldk(L, 0, 0, await_execute_k);

@@ -1,7 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 
 #if WITH_RULESET
 
@@ -20,7 +20,6 @@
 #include "util.h"
 
 #include "io/stream.h"
-#include "utils/arraysize.h"
 #include "utils/debug.h"
 #if WITH_ALLOC_CACHE
 #include "utils/mcache.h"
@@ -33,6 +32,7 @@
 #include <lua.h>
 #include <lualib.h>
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -158,20 +158,6 @@ static int l_panic(lua_State *L)
 
 static int ruleset_luainit(lua_State *restrict L)
 {
-	/* init registry */
-	const char *strings[] = {
-		ERR_MEMORY,
-		ERR_BAD_REGISTRY,
-		ERR_INVALID_ADDR,
-		ERR_NOT_ASYNC_ROUTINE,
-	};
-	const int nstrings = (int)ARRAY_SIZE(strings);
-	lua_createtable(L, nstrings, 0);
-	for (int i = 0; i < nstrings; i++) {
-		lua_pushstring(L, strings[i]);
-		lua_rawseti(L, -2, i + 1);
-	}
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_CONSTANT);
 	/* await context */
 	lua_newtable(L);
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
@@ -217,8 +203,15 @@ struct ruleset *ruleset_new(
 	}
 	r->loop = loop;
 	r->vmstats = (struct ruleset_vmstats){ 0 };
-	const int memlimit_mb = conf->memlimit;
-	r->config.memlimit_kb = (memlimit_mb > 0) ? (memlimit_mb << 10u) : 0;
+	int memlimit_mb = conf->memlimit;
+	if (memlimit_mb > (INT_MAX >> 10)) {
+		/* clamp to avoid signed overflow in the MiB->KiB shift: conf.c and
+		 * cfunc_loadconfig reject such values, but conf_loadfromtable's
+		 * generic validator does not, so a poisoned conf could reach here */
+		memlimit_mb = INT_MAX >> 10;
+	}
+	r->config.memlimit_kb =
+		(memlimit_mb > 0) ? (int_least32_t)(memlimit_mb << 10) : 0;
 	r->config.traceback = !!conf->traceback;
 	r->conf = conf;
 	r->resolver = resolver;
@@ -325,7 +318,7 @@ ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 
 bool ruleset_invoke(struct ruleset *restrict r, struct stream *code)
 {
-	return ruleset_pcall(r, cfunc_invoke, 1, 0, code);
+	return ruleset_pcall(r, cfunc_invoke, 1, 0, (void *)code);
 }
 
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
@@ -343,14 +336,18 @@ bool ruleset_rpcall(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	struct stream *code, struct ruleset_callback *callback)
 {
-	return ruleset_pcall(r, cfunc_rpcall, 3, 1, state, code, callback);
+	return ruleset_pcall(
+		r, cfunc_rpcall, 3, 1, (void *)state, (void *)code,
+		(void *)callback);
 }
 
 bool ruleset_update(
 	struct ruleset *restrict r, const char *restrict modname,
 	const char *restrict chunkname, struct stream *code)
 {
-	return ruleset_pcall(r, cfunc_update, 3, 0, modname, chunkname, code);
+	return ruleset_pcall(
+		r, cfunc_update, 3, 0, (void *)modname, (void *)chunkname,
+		(void *)code);
 }
 
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
@@ -359,7 +356,7 @@ bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 	if (s == NULL) {
 		return false;
 	}
-	const bool ok = ruleset_pcall(r, cfunc_loadfile, 1, 0, s);
+	const bool ok = ruleset_pcall(r, cfunc_loadfile, 1, 0, (void *)s);
 	stream_close(s);
 	return ok;
 }
@@ -371,7 +368,7 @@ bool ruleset_loadconfig(
 	if (s == NULL) {
 		return false;
 	}
-	const bool ok = ruleset_pcall(r, cfunc_loadconfig, 1, 0, s);
+	const bool ok = ruleset_pcall(r, cfunc_loadconfig, 1, 0, (void *)s);
 	stream_close(s);
 	return ok;
 }

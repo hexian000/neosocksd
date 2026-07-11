@@ -21,7 +21,7 @@
 #include "forward.h"
 #include "http_proxy.h"
 #if WITH_RULESET
-#include "ruleset.h"
+#include "ruleset/ruleset.h"
 #endif
 #include "socks.h"
 
@@ -80,6 +80,19 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 void dialreq_free(struct dialreq *req)
 {
 	(void)req;
+}
+
+bool dialreq_replace(
+	struct dialreq **restrict req, const char *restrict addr,
+	const char *restrict csv)
+{
+	struct dialreq *restrict newreq = dialreq_parse(addr, csv);
+	if (newreq == NULL) {
+		return false;
+	}
+	dialreq_free(*req);
+	*req = newreq;
+	return true;
 }
 
 void api_serve(
@@ -317,7 +330,7 @@ T_DECLARE_CASE(server_start_accept_and_stop)
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 	T_EXPECT(s.stats.started != -1);
 
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
 	server_stop(&s);
 	T_EXPECT_EQ(s.stats.started, -1);
 	ev_loop_destroy(loop);
@@ -342,7 +355,44 @@ T_DECLARE_CASE(server_rejects_when_session_limit_exceeded)
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
 
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * accept_cb must drain the whole backlog in one callback invocation
+ * instead of processing a single rejection and returning -- which would
+ * leave the rest queued for another event-loop tick each, one connection
+ * at a time, during exactly the overload condition the limiter exists to
+ * mitigate. All three connections are queued in the kernel accept
+ * backlog before the loop ever runs, so a single ev_run(EVRUN_ONCE) call
+ * -- one accept_cb invocation -- must drain and reject all three.
+ */
+T_DECLARE_CASE(server_accept_cb_drains_backlog_in_one_invocation)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint_fast16_t port;
+	int client_fd[3] = { -1, -1, -1 };
+
+	conf.max_sessions = 1;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	s.num_sessions = 1;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	for (size_t i = 0; i < 3; i++) {
+		client_fd[i] = connect_loopback(port);
+	}
+
+	ev_run(loop, EVRUN_ONCE);
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 3);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+
+	for (size_t i = 0; i < 3; i++) {
+		socket_close(client_fd[i]);
+	}
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
@@ -366,7 +416,7 @@ T_DECLARE_CASE(server_rejects_when_full_startup_limit_exceeded)
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
 
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
@@ -391,7 +441,7 @@ T_DECLARE_CASE(server_rejects_when_probabilistic_startup_limit_hits)
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
 
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
@@ -424,24 +474,23 @@ T_DECLARE_CASE(server_accept_error_restarts_listener)
 	T_EXPECT(ev_is_active(&l->w_timer));
 
 	ev_io_set(&l->w_accept, listener_fd, EV_READ);
-	SOCKET_CLOSE_FD(pipefd[0]);
-	SOCKET_CLOSE_FD(pipefd[1]);
+	socket_close(pipefd[0]);
+	socket_close(pipefd[1]);
 	client_fd = connect_loopback(port);
 	T_EXPECT(test_wait_until(loop, served_once, &s, 1.0));
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
 
 /*
- * max_sessions uses > (not >=) comparison.  Verify that exactly
- * max_sessions concurrent sessions are allowed, and the next is
- * rejected.
+ * max_sessions is a hard cap: at exactly max_sessions concurrent sessions,
+ * the next connection must be rejected (n >= max_sessions, not n >).
  */
-T_DECLARE_CASE(server_allows_when_at_max_sessions)
+T_DECLARE_CASE(server_rejects_when_at_max_sessions)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
@@ -452,7 +501,35 @@ T_DECLARE_CASE(server_allows_when_at_max_sessions)
 
 	conf.max_sessions = 1;
 	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	/* Exactly at the limit — should still accept. */
+	/* Exactly at the limit — the next connection must be rejected. */
+	s.num_sessions = 1;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+
+	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * One below max_sessions must still be allowed — guards against
+ * overshooting the >= fix into an off-by-one in the other direction.
+ */
+T_DECLARE_CASE(server_allows_when_below_max_sessions)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint_fast16_t port;
+	int client_fd = -1;
+
+	conf.max_sessions = 2;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
 	s.num_sessions = 1;
 	port = bound_port(s.listeners[0].w_accept.fd);
 	client_fd = connect_loopback(port);
@@ -461,7 +538,96 @@ T_DECLARE_CASE(server_allows_when_at_max_sessions)
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * max_sessions must also count halfopen (accepted, still mid-dial)
+ * connections: num_sessions alone is only incremented once a dial commits,
+ * so a burst of in-flight dials could otherwise all pass this check and
+ * overshoot the cap once they all commit.
+ */
+T_DECLARE_CASE(server_rejects_when_halfopen_reaches_max_sessions)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint_fast16_t port;
+	int client_fd = -1;
+
+	conf.max_sessions = 1;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	/* No committed sessions yet, but one connection is already mid-dial. */
+	s.num_sessions = 0;
+	s.stats.num_halfopen = 1;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+
+	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * startup_limit_full is also a hard cap: at exactly the threshold, the
+ * next connection must be rejected (>=, not >).
+ */
+T_DECLARE_CASE(server_rejects_when_at_full_startup_limit)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint_fast16_t port;
+	int client_fd = -1;
+
+	conf.startup_limit_full = 1;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	s.stats.num_halfopen = 1;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+
+	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * startup_limit_start's probabilistic rejection must already be active at
+ * exactly the threshold (>=, not >).
+ */
+T_DECLARE_CASE(server_rejects_when_at_probabilistic_startup_limit)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint_fast16_t port;
+	int client_fd = -1;
+
+	conf.startup_limit_start = 1;
+	conf.startup_limit_rate = 100;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	s.stats.num_halfopen = 1;
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+
+	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+
+	socket_close(client_fd);
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
@@ -489,7 +655,7 @@ T_DECLARE_CASE(server_zero_max_sessions_allows_unlimited)
 	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
@@ -520,7 +686,7 @@ T_DECLARE_CASE(server_dual_listener_independent_accepts)
 	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
 	T_EXPECT_EQ(s.listeners[1].stats.num_serve, 0);
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
 
 	/* Connect to the second listener. */
 	client_fd = connect_loopback(port_b);
@@ -538,7 +704,7 @@ T_DECLARE_CASE(server_dual_listener_independent_accepts)
 		T_EXPECT_EQ(s.listeners[0].stats.num_serve, num_serve);
 		T_EXPECT_EQ(s.listeners[1].stats.num_serve, 1);
 	}
-	SOCKET_CLOSE_FD(client_fd);
+	socket_close(client_fd);
 
 	server_stop(&s);
 	ev_loop_destroy(loop);
@@ -597,6 +763,31 @@ T_DECLARE_CASE(server_init_rejects_bad_addresses)
 		T_EXPECT(!server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
 		ev_loop_destroy(loop);
 	}
+}
+
+/*
+ * server_init() fails on a later listener after an earlier one already
+ * succeeded; the partially-initialized server must still tear down cleanly.
+ */
+T_DECLARE_CASE(server_init_partial_failure_cleanup)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	/* the proxy listener resolves and binds, but the HTTP listener address
+	 * is malformed, so server_init() aborts with one listener already up */
+	conf.http_listen = "not a valid address";
+	struct server s;
+
+	T_EXPECT(!server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT_EQ(s.num_listeners, (size_t)1);
+
+	/* server_stop() must release the already-opened listener socket (and
+	 * not touch the signal watchers that were never started) so no fd or
+	 * watcher leaks on the partial-init path */
+	server_stop(&s);
+	ev_loop_destroy(loop);
 }
 
 /* server_stats() aggregates per-listener accept/serve counters. */
@@ -693,6 +884,38 @@ T_DECLARE_CASE(server_signal_reload_boot_basereq)
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
+
+/*
+ * A boot config that fails to reparse forward/proxy must not push a stale
+ * base request into the ruleset: the reload should fail open, keeping the
+ * previous request and skipping ruleset_setbasereq.
+ */
+T_DECLARE_CASE(server_signal_reload_boot_basereq_parse_failure)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	conf.boot = "boot.lua";
+	struct server s;
+	struct dialreq *const original = (struct dialreq *)&dialreq_dummy_tag;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, original, NULL));
+
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = true;
+	CONTROL.ruleset_valid = true;
+	CONTROL.dialreq_parse_ok = false;
+	ev_feed_event(loop, &s.w_sighup, EV_SIGNAL);
+	ev_run(loop, EVRUN_NOWAIT);
+
+	T_EXPECT(s.ruleset != NULL);
+	T_EXPECT_EQ(CONTROL.ruleset_setbasereq_calls, 0);
+	T_EXPECT_EQ(s.basereq, original);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
 #endif /* WITH_RULESET */
 
 /* -------------------------------------------------------------------------
@@ -706,18 +929,25 @@ T_DECLARE_CASE(server_signal_reload_boot_basereq)
 static const struct testing_suite suite[] = {
 	T_CASE(server_start_accept_and_stop),
 	T_CASE(server_rejects_when_session_limit_exceeded),
-	T_CASE(server_allows_when_at_max_sessions),
+	T_CASE(server_accept_cb_drains_backlog_in_one_invocation),
+	T_CASE(server_rejects_when_at_max_sessions),
+	T_CASE(server_allows_when_below_max_sessions),
+	T_CASE(server_rejects_when_halfopen_reaches_max_sessions),
 	T_CASE(server_zero_max_sessions_allows_unlimited),
 	T_CASE(server_rejects_when_full_startup_limit_exceeded),
+	T_CASE(server_rejects_when_at_full_startup_limit),
 	T_CASE(server_rejects_when_probabilistic_startup_limit_hits),
+	T_CASE(server_rejects_when_at_probabilistic_startup_limit),
 	T_CASE(server_accept_error_restarts_listener),
 	T_CASE(server_dual_listener_independent_accepts),
 	T_CASE(server_init_multi_mode_listeners),
 	T_CASE(server_init_rejects_bad_addresses),
+	T_CASE(server_init_partial_failure_cleanup),
 	T_CASE(server_stats_aggregates_listeners),
 #if WITH_RULESET
 	T_CASE(server_signal_reload_ruleset),
 	T_CASE(server_signal_reload_boot_basereq),
+	T_CASE(server_signal_reload_boot_basereq_parse_failure),
 #endif
 	T_SUITE_END,
 };
