@@ -85,6 +85,49 @@ struct http_parsehdr_cb {
 	void *ctx;
 };
 
+/**
+ * @brief A resumable, buffer-agnostic HTTP message-head parser.
+ *
+ * Parses the start line (request or response) once, then each header field,
+ * invoking a callback per field, over a caller-owned NUL-terminated buffer that
+ * may grow between calls. Unlike ::http_conn it owns no buffer and drives no
+ * state machine, so it suits a caller that shares one buffer between the head
+ * and a streaming body (the proxy response path). It holds only a parse cursor,
+ * so it can be re-run after more bytes are appended.
+ */
+struct http_reader {
+	size_t pos; /**< parse cursor into the buffer */
+	bool line_done; /**< start line parsed */
+};
+
+/** @brief Outcome of ::http_reader_parse. */
+enum http_reader_state {
+	HTTP_READER_OK, /**< head complete; @c pos points at the body start */
+	HTTP_READER_MORE, /**< need more bytes appended to the buffer */
+	HTTP_READER_ERROR, /**< malformed line/header, or on_header rejected */
+};
+
+/** @brief Reset a reader to parse a fresh message from the buffer start. */
+void http_reader_init(struct http_reader *restrict r);
+
+/**
+ * @brief Parse as far as possible from @c base + @c pos.
+ *
+ * @param r Reader state (cursor); updated in place.
+ * @param base Buffer start; must be NUL-terminated at the end of the currently
+ *     available bytes.
+ * @param msg Receives the parsed start line.
+ * @param is_request true to validate/interpret a request line, false for a
+ *     response line (selects the version field to version-check).
+ * @param on_header Invoked once per header field; returning false aborts with
+ *     HTTP_READER_ERROR.
+ * @return See ::enum http_reader_state.
+ */
+enum http_reader_state http_reader_parse(
+	struct http_reader *restrict r, char *restrict base,
+	struct http_message *restrict msg, bool is_request,
+	struct http_parsehdr_cb on_header);
+
 enum http_body_mode {
 	HTTP_BODY_NONE,
 	HTTP_BODY_CONTENT_LENGTH,
@@ -206,6 +249,105 @@ bool http_body_finish(struct http_body *restrict d);
  */
 size_t http_chunk_header(char *restrict buf, size_t datalen);
 
+/** Bytes moved through the framer per input/output pass. */
+#define HTTP_FRAMER_BUFSIZE 16384
+/** Reserved prefix room in the output buffer for a prepended chunk-size line. */
+#define HTTP_FRAMER_HDR_ROOM HTTP_CHUNK_HEADER_MAX
+
+/**
+ * @brief The next action a framer needs from its I/O-owning caller.
+ * @see http_framer_run
+ */
+enum http_framer_op {
+	HTTP_FRAMER_SEND, /**< framed output ready: drain via http_framer_pending */
+	HTTP_FRAMER_FILL, /**< need input: fill via http_framer_inbuf + _filled/_eof */
+	HTTP_FRAMER_DONE, /**< body fully framed and drained */
+	HTTP_FRAMER_ERROR, /**< malformed input body */
+};
+
+/**
+ * @brief An I/O-free HTTP body framing filter.
+ *
+ * Decodes an input body (Content-Length / chunked / EOF / none) via
+ * ::http_body and re-encodes it as either chunked (::http_chunk_header) or
+ * length-delimited output, one bounded buffer-full at a time. The filter owns
+ * its input and output buffers but performs no I/O: the caller reads raw source
+ * bytes into the input buffer and drains framed bytes from the output buffer,
+ * driven by ::http_framer_run. Input is throttled to the output capacity, so a
+ * decode pass can never overflow the output.
+ *
+ * The struct is transparent so a caller sharing the input buffer with an inline
+ * header parser (the proxy response path) can fill @c in directly and hand the
+ * leftover body bytes to the filter via ::http_framer_seed.
+ */
+struct http_framer {
+	struct http_body body; /**< input decoder state */
+	bool rechunk; /**< true: emit chunked; false: pass length-framed */
+	bool done; /**< body decoded, output (incl. terminator) drained */
+	bool sending_term; /**< out[] holds the chunked terminator */
+	size_t in_pos, in_len; /**< unconsumed raw input in in[] */
+	size_t out_pos, out_end; /**< framed output pending in out[] */
+	size_t datalen; /**< decoded bytes staged at out[HTTP_FRAMER_HDR_ROOM..] */
+	unsigned char in[HTTP_FRAMER_BUFSIZE];
+	/* header room + data + trailing CRLF */
+	unsigned char out[HTTP_FRAMER_HDR_ROOM + HTTP_FRAMER_BUFSIZE + 2];
+};
+
+/**
+ * @brief Initialize a framer. Does not touch the input/output byte buffers.
+ * @param in_mode Input body framing (::enum http_body_mode).
+ * @param content_length Body length for HTTP_BODY_CONTENT_LENGTH (else ignored).
+ * @param rechunk true to emit chunked output; false to pass length-framed.
+ */
+void http_framer_init(
+	struct http_framer *restrict f, enum http_body_mode in_mode,
+	size_t content_length, bool rechunk);
+
+/**
+ * @brief Seed the filter with @p len bytes already present in its input buffer,
+ * of which the first @p pos have been consumed (used to adopt body bytes that
+ * arrived alongside a header block, or a request readahead).
+ */
+void http_framer_seed(struct http_framer *restrict f, size_t pos, size_t len);
+
+/**
+ * @brief Advance the filter to its next required I/O action.
+ * @return HTTP_FRAMER_SEND / _FILL / _DONE / _ERROR (see ::enum http_framer_op).
+ */
+enum http_framer_op http_framer_run(struct http_framer *restrict f);
+
+/**
+ * @brief View the framed output pending to send.
+ * @param[out] buf Set to the first unsent byte.
+ * @return Number of bytes pending (0 when none).
+ */
+size_t http_framer_pending(
+	const struct http_framer *restrict f,
+	const unsigned char **restrict buf);
+
+/** @brief Acknowledge @p n framed output bytes drained by the caller. */
+void http_framer_drained(struct http_framer *restrict f, size_t n);
+
+/**
+ * @brief Expose the input buffer for a fresh read.
+ * @param[out] buf Set to the first byte to fill.
+ * @param[out] cap Set to how many bytes may be read (throttled to output
+ *     capacity and, for Content-Length, to the remaining body).
+ */
+void http_framer_inbuf(
+	struct http_framer *restrict f, unsigned char **restrict buf,
+	size_t *restrict cap);
+
+/** @brief Record @p n bytes read into the input buffer via http_framer_inbuf. */
+void http_framer_filled(struct http_framer *restrict f, size_t n);
+
+/**
+ * @brief Signal end-of-input (source closed) to the filter.
+ * @return true if EOF is a valid body terminus (HTTP_BODY_EOF, now finished);
+ *     false if the body was truncated (the caller should fail the exchange).
+ */
+bool http_framer_eof(struct http_framer *restrict f);
+
 /**
  * @brief Parse Accept-TE header. Currently detects chunked encoding.
  * @param p Parser instance
@@ -234,6 +376,20 @@ bool parsehdr_transfer_encoding(
  */
 bool parsehdr_accept_encoding(
 	struct http_conn *restrict p, char *restrict value);
+
+/**
+ * @brief Validate a Content-Length field value and convert it to a size_t.
+ *
+ * RFC 9110 §8.6: Content-Length is 1*DIGIT with no sign, prefix, or trailing
+ * garbage. Rejects a value that overflows @c uintmax_t (ERANGE) or exceeds
+ * @c SIZE_MAX. Applies none of the RFC 9112 §6.3 framing rules (duplicate
+ * header, Transfer-Encoding conflict, CONNECT) — the caller owns those.
+ *
+ * @param value Field value (trailing OWS is expected to be already stripped).
+ * @param[out] out Receives the parsed length on success; untouched on failure.
+ * @return true if @p value is a well-formed length that fits in @c size_t.
+ */
+bool http_parse_content_length(const char *restrict value, size_t *restrict out);
 
 /**
  * @brief Parse Content-Length header. CONNECT requests must not carry one.
@@ -285,6 +441,83 @@ bool parsehdr_connection(struct http_conn *restrict p, char *restrict value);
 const char *parsehdr_connection_token(
 	const char *restrict p, const char **restrict tok,
 	size_t *restrict toklen);
+
+/**
+ * @brief Return true if @p connection (a Connection header value) lists the
+ * field name @p key as a hop-by-hop token (case-insensitive).
+ *
+ * @param connection Connection header value, or NULL (treated as no tokens).
+ * @param key Field name to search for.
+ */
+bool http_connection_lists(
+	const char *restrict connection, const char *restrict key);
+
+/**
+ * @brief Validate an HTTP header field for forwarding.
+ *
+ * RFC 7230 §3.2.6 / RFC 9110 §5.5: a field name must be tchar-only and a field
+ * value must contain no CTL other than HTAB.
+ *
+ * @return true if both @p key and @p value are well-formed.
+ */
+bool http_header_field_valid(
+	const char *restrict key, const char *restrict value);
+
+/**
+ * @brief Normalize "host[:port]" into @p buf, appending ":80" when the port is
+ * absent (bracketed IPv6 literals are handled).
+ *
+ * @param buf Destination buffer.
+ * @param cap Capacity of @p buf.
+ * @param host Source host, optionally with a port.
+ * @return false when @p buf is too small or @p host is malformed.
+ */
+bool http_hostport_normalize(
+	char *restrict buf, size_t cap, const char *restrict host);
+
+/**
+ * @brief Append a NUL-terminated string to a fixed buffer, failing instead of
+ * truncating.
+ *
+ * @param buf Destination fixed buffer.
+ * @param s String to append.
+ * @return false when @p s does not fit in the remaining capacity (the buffer
+ *     is left unchanged); true on success.
+ */
+bool http_append(struct buffer *restrict buf, const char *restrict s);
+
+/** @brief A recorded HTTP header field, for forwarding. */
+struct http_header_kv {
+	const char *key;
+	const char *value;
+};
+
+/**
+ * @brief Emit recorded end-to-end headers as "key: value\r\n" into @p buf,
+ * skipping any field name listed as hop-by-hop in the @p connection header
+ * value (see http_connection_lists).
+ *
+ * @param buf Destination fixed buffer.
+ * @param hdr Recorded header fields.
+ * @param n Number of fields in @p hdr.
+ * @param connection Connection header value, or NULL.
+ * @return false on overflow (partial output may have been written); true on
+ *     success.
+ */
+bool http_append_headers(
+	struct buffer *restrict buf, const struct http_header_kv *restrict hdr,
+	size_t n, const char *restrict connection);
+
+/**
+ * @brief Emit the body framing header into @p buf: "Transfer-Encoding:
+ * chunked\r\n" when @p chunked, otherwise "Content-Length: N\r\n" when
+ * @p clen_known, otherwise nothing.
+ *
+ * @return false on overflow; true otherwise.
+ */
+bool http_append_framing(
+	struct buffer *restrict buf, bool chunked, bool clen_known,
+	size_t content_length);
 
 /** @brief Write an HTTP error response page into @p p's write buffer. */
 void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code);

@@ -25,6 +25,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -1445,6 +1446,583 @@ T_DECLARE_CASE(http_chunk_header_roundtrip)
 	T_EXPECT_MEMEQ(sink.buf, expect, sizeof(expect) - 1);
 }
 
+T_DECLARE_CASE(http_header_field_valid_cases)
+{
+	/* tchar-only field name, no CTL-except-HTAB field value */
+	T_EXPECT(http_header_field_valid("Content-Type", "text/plain"));
+	/* every RFC 7230 tchar special is a legal field-name character */
+	T_EXPECT(http_header_field_valid("!#$%&'*+-.^_`|~", "x"));
+	/* HTAB is the one CTL allowed in a field value */
+	T_EXPECT(http_header_field_valid("X", "a\tb"));
+	/* a space in the field name is not a tchar */
+	T_EXPECT(!http_header_field_valid("Bad Name", "x"));
+	/* a colon in the field name is not a tchar */
+	T_EXPECT(!http_header_field_valid("Bad:Name", "x"));
+	/* CR/LF (and any other CTL) in the value is rejected */
+	T_EXPECT(!http_header_field_valid("X", "a\rb"));
+	T_EXPECT(!http_header_field_valid("X", "a\nb"));
+	T_EXPECT(!http_header_field_valid(
+		"X", "a\x01"
+		     "b"));
+}
+
+T_DECLARE_CASE(http_connection_lists_cases)
+{
+	/* NULL value lists nothing */
+	T_EXPECT(!http_connection_lists(NULL, "close"));
+	/* single token, case-insensitive */
+	T_EXPECT(http_connection_lists("close", "close"));
+	T_EXPECT(http_connection_lists("Close", "close"));
+	/* token in a comma+OWS separated list */
+	T_EXPECT(http_connection_lists("keep-alive, Upgrade", "upgrade"));
+	T_EXPECT(http_connection_lists("TE, Trailers", "te"));
+	/* absent token */
+	T_EXPECT(!http_connection_lists("keep-alive", "close"));
+	/* a prefix must not match a longer token */
+	T_EXPECT(!http_connection_lists("keep-alive", "keep"));
+	T_EXPECT(!http_connection_lists("close", "clos"));
+}
+
+T_DECLARE_CASE(http_hostport_normalize_cases)
+{
+	char buf[64];
+	/* bare host gains the default :80 */
+	T_EXPECT(http_hostport_normalize(buf, sizeof(buf), "example.com"));
+	T_EXPECT_STREQ(buf, "example.com:80");
+	/* an explicit port is preserved */
+	T_EXPECT(http_hostport_normalize(buf, sizeof(buf), "example.com:8080"));
+	T_EXPECT_STREQ(buf, "example.com:8080");
+	/* bracketed IPv6 literal without a port */
+	T_EXPECT(http_hostport_normalize(buf, sizeof(buf), "[::1]"));
+	T_EXPECT_STREQ(buf, "[::1]:80");
+	/* bracketed IPv6 literal with a port */
+	T_EXPECT(http_hostport_normalize(buf, sizeof(buf), "[::1]:443"));
+	T_EXPECT_STREQ(buf, "[::1]:443");
+	/* an unterminated bracket is malformed */
+	T_EXPECT(!http_hostport_normalize(buf, sizeof(buf), "[::1"));
+	/* too small to hold the host at all */
+	T_EXPECT(!http_hostport_normalize(buf, 4, "example.com"));
+	/* room for the host but not the appended :80 */
+	T_EXPECT(!http_hostport_normalize(buf, 13, "example.com"));
+}
+
+T_DECLARE_CASE(http_append_cases)
+{
+	struct {
+		BUFFER_HDR;
+		unsigned char data[16];
+	} buf;
+	BUF_INIT(buf, 0);
+
+	T_EXPECT(http_append((struct buffer *)&buf, "hello"));
+	T_EXPECT_EQ(buf.len, (size_t)5);
+	T_EXPECT_MEMEQ(buf.data, "hello", 5);
+
+	/* an append that would overflow fails and leaves the buffer unchanged */
+	T_EXPECT(!http_append((struct buffer *)&buf, "0123456789ab"));
+	T_EXPECT_EQ(buf.len, (size_t)5);
+
+	/* an exact-fit append (11 bytes into the remaining 11) succeeds */
+	T_EXPECT(http_append((struct buffer *)&buf, "0123456789a"));
+	T_EXPECT_EQ(buf.len, (size_t)16);
+	T_EXPECT_MEMEQ(buf.data, "hello0123456789a", 16);
+
+	/* nothing more fits */
+	T_EXPECT(!http_append((struct buffer *)&buf, "x"));
+	T_EXPECT_EQ(buf.len, (size_t)16);
+}
+
+T_DECLARE_CASE(http_append_headers_cases)
+{
+	static const struct http_header_kv hdr[] = {
+		{ "X-Keep", "1" },
+		{ "X-Drop", "2" },
+		{ "X-Also", "3" },
+	};
+	struct {
+		BUFFER_HDR;
+		unsigned char data[128];
+	} buf;
+	BUF_INIT(buf, 0);
+
+	/* "X-Drop" is listed as hop-by-hop in Connection and must be skipped */
+	T_EXPECT(http_append_headers((struct buffer *)&buf, hdr, 3, "X-Drop"));
+	static const char expect[] = "X-Keep: 1\r\nX-Also: 3\r\n";
+	T_EXPECT_EQ(buf.len, sizeof(expect) - 1);
+	T_EXPECT_MEMEQ(buf.data, expect, sizeof(expect) - 1);
+
+	/* a NULL Connection value drops nothing */
+	BUF_INIT(buf, 0);
+	T_EXPECT(http_append_headers((struct buffer *)&buf, hdr, 3, NULL));
+	static const char expect_all[] =
+		"X-Keep: 1\r\nX-Drop: 2\r\nX-Also: 3\r\n";
+	T_EXPECT_EQ(buf.len, sizeof(expect_all) - 1);
+	T_EXPECT_MEMEQ(buf.data, expect_all, sizeof(expect_all) - 1);
+
+	/* overflow is reported */
+	struct {
+		BUFFER_HDR;
+		unsigned char data[8];
+	} tiny;
+	BUF_INIT(tiny, 0);
+	T_EXPECT(!http_append_headers((struct buffer *)&tiny, hdr, 3, NULL));
+}
+
+T_DECLARE_CASE(http_append_framing_cases)
+{
+	struct {
+		BUFFER_HDR;
+		unsigned char data[64];
+	} buf;
+
+	/* chunked wins over any Content-Length */
+	BUF_INIT(buf, 0);
+	T_EXPECT(http_append_framing((struct buffer *)&buf, true, true, 1234));
+	static const char te[] = "Transfer-Encoding: chunked\r\n";
+	T_EXPECT_EQ(buf.len, sizeof(te) - 1);
+	T_EXPECT_MEMEQ(buf.data, te, sizeof(te) - 1);
+
+	/* known length, not chunked */
+	BUF_INIT(buf, 0);
+	T_EXPECT(http_append_framing((struct buffer *)&buf, false, true, 1234));
+	static const char cl[] = "Content-Length: 1234\r\n";
+	T_EXPECT_EQ(buf.len, sizeof(cl) - 1);
+	T_EXPECT_MEMEQ(buf.data, cl, sizeof(cl) - 1);
+
+	/* neither: emit nothing, still succeeds */
+	BUF_INIT(buf, 0);
+	T_EXPECT(http_append_framing((struct buffer *)&buf, false, false, 0));
+	T_EXPECT_EQ(buf.len, (size_t)0);
+
+	/* overflow is reported */
+	struct {
+		BUFFER_HDR;
+		unsigned char data[8];
+	} tiny;
+	BUF_INIT(tiny, 0);
+	T_EXPECT(!http_append_framing((struct buffer *)&tiny, true, false, 0));
+}
+
+T_DECLARE_CASE(http_parse_content_length_accepts)
+{
+	size_t out = 12345;
+	/* a bare decimal length is accepted */
+	T_EXPECT(http_parse_content_length("0", &out));
+	T_EXPECT_EQ(out, (size_t)0);
+	T_EXPECT(http_parse_content_length("42", &out));
+	T_EXPECT_EQ(out, (size_t)42);
+	/* SIZE_MAX itself fits exactly (boundary is inclusive) */
+	char max[32];
+	(void)snprintf(max, sizeof(max), "%zu", (size_t)SIZE_MAX);
+	T_EXPECT(http_parse_content_length(max, &out));
+	T_EXPECT_EQ(out, (size_t)SIZE_MAX);
+}
+
+T_DECLARE_CASE(http_parse_content_length_rejects)
+{
+	size_t out = 777;
+	/* empty, signed, or garbage-suffixed values are rejected; the helper does
+	 * not strip OWS (its callers rely on http_parsehdr having done so) */
+	T_EXPECT(!http_parse_content_length("", &out));
+	T_EXPECT(!http_parse_content_length("-1", &out));
+	T_EXPECT(!http_parse_content_length("+1", &out));
+	T_EXPECT(!http_parse_content_length("12x", &out));
+	T_EXPECT(!http_parse_content_length("12 ", &out));
+	/* a value overflowing uintmax_t is rejected (ERANGE), not clamped to
+	 * SIZE_MAX: on an LP64 target 2^64 would otherwise wrap past the
+	 * `> SIZE_MAX` guard and be silently accepted */
+	T_EXPECT(!http_parse_content_length("18446744073709551616", &out));
+	T_EXPECT(!http_parse_content_length(
+		"999999999999999999999999999999", &out));
+	/* on a rejected value *out is left untouched */
+	T_EXPECT_EQ(out, (size_t)777);
+}
+
+/* -------------------------------------------------------------------------
+ * http_framer tests - drive the I/O-free body framing filter against an
+ * in-memory source, collecting framed output, with no event loop. This is the
+ * exact transform the proxy_pass body pump runs; here it is exercised directly.
+ * ---------------------------------------------------------------------- */
+
+/* Drive @f to a terminal state: on FILL feed bytes from src[0..srclen) (and
+ * signal EOF once the source is exhausted), on SEND collect the framed output.
+ * Returns the terminal op, mapping a truncated body (an EOF the filter rejects)
+ * to HTTP_FRAMER_ERROR, as an I/O caller would treat it. @fillcap>0 throttles
+ * each FILL to exercise the incremental multi-fill path. */
+static enum http_framer_op framer_drive(
+	struct http_framer *restrict f, const unsigned char *restrict src,
+	const size_t srclen, unsigned char *restrict out, const size_t outcap,
+	size_t *restrict outlen, const size_t fillcap)
+{
+	size_t spos = 0;
+	*outlen = 0;
+	for (;;) {
+		const enum http_framer_op op = http_framer_run(f);
+		if (op == HTTP_FRAMER_SEND) {
+			const unsigned char *b;
+			const size_t n = http_framer_pending(f, &b);
+			T_CHECK(*outlen + n <= outcap);
+			memcpy(out + *outlen, b, n);
+			*outlen += n;
+			http_framer_drained(f, n);
+			continue;
+		}
+		if (op == HTTP_FRAMER_FILL) {
+			unsigned char *b;
+			size_t cap;
+			http_framer_inbuf(f, &b, &cap);
+			size_t n = srclen - spos;
+			if (fillcap > 0 && n > fillcap) {
+				n = fillcap;
+			}
+			if (n > cap) {
+				n = cap;
+			}
+			if (n == 0) {
+				if (!http_framer_eof(f)) {
+					return HTTP_FRAMER_ERROR;
+				}
+				continue;
+			}
+			memcpy(b, src + spos, n);
+			spos += n;
+			http_framer_filled(f, n);
+			continue;
+		}
+		return op; /* DONE or ERROR */
+	}
+}
+
+/* Dechunk @chunked into body_sink @sink; asserts a clean parse to completion. */
+static void framer_dechunk_into(
+	struct testing_ctx *_t_, struct body_sink *restrict sink,
+	const unsigned char *restrict chunked, const size_t clen)
+{
+	struct http_body d;
+	const struct http_body_data_cb cb = { .func = body_sink_cb,
+					      .ctx = sink };
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+	size_t n = clen;
+	T_EXPECT(http_body_consume(&d, chunked, &n, cb));
+	T_EXPECT_EQ(n, clen);
+	T_EXPECT(http_body_finish(&d));
+}
+
+T_DECLARE_CASE(http_framer_content_length_passthrough)
+{
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_CONTENT_LENGTH, 5, false);
+	unsigned char out[64];
+	size_t outlen;
+	const enum http_framer_op op = framer_drive(
+		&f, (const unsigned char *)"hello", 5, out, sizeof(out),
+		&outlen, 0);
+	T_EXPECT_EQ(op, HTTP_FRAMER_DONE);
+	T_EXPECT(f.done);
+	/* length-framed passthrough: output is the raw body, no chunk framing */
+	T_EXPECT_EQ(outlen, (size_t)5);
+	T_EXPECT_MEMEQ(out, "hello", 5);
+}
+
+T_DECLARE_CASE(http_framer_content_length_surplus_discarded)
+{
+	/* seed the input with body + surplus (a pipelined next request), exactly
+	 * as the request readahead / response body-prefix seeding does */
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_CONTENT_LENGTH, 5, false);
+	memcpy(f.in, "helloEXTRA", 10);
+	http_framer_seed(&f, 0, 10);
+	unsigned char out[64];
+	size_t outlen;
+	const enum http_framer_op op =
+		framer_drive(&f, NULL, 0, out, sizeof(out), &outlen, 0);
+	T_EXPECT_EQ(op, HTTP_FRAMER_DONE);
+	T_EXPECT_EQ(outlen, (size_t)5);
+	T_EXPECT_MEMEQ(out, "hello", 5);
+}
+
+T_DECLARE_CASE(http_framer_chunked_rechunk_roundtrip)
+{
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_CHUNKED, 0, true);
+	static const char src[] = "3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n";
+	unsigned char out[128];
+	size_t outlen;
+	const enum http_framer_op op = framer_drive(
+		&f, (const unsigned char *)src, sizeof(src) - 1, out,
+		sizeof(out), &outlen, 0);
+	T_EXPECT_EQ(op, HTTP_FRAMER_DONE);
+	/* re-chunked output must dechunk back to the original decoded bytes */
+	struct body_sink sink = { 0 };
+	framer_dechunk_into(_t_, &sink, out, outlen);
+	T_EXPECT_EQ(sink.len, (size_t)7);
+	T_EXPECT_MEMEQ(sink.buf, "abcdefg", 7);
+}
+
+T_DECLARE_CASE(http_framer_chunked_rechunk_byte_by_byte)
+{
+	/* fillcap=1 feeds the chunked stream one byte per FILL, exercising the
+	 * incremental decode/re-encode path across many run() iterations */
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_CHUNKED, 0, true);
+	static const char src[] = "3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n";
+	unsigned char out[512];
+	size_t outlen;
+	const enum http_framer_op op = framer_drive(
+		&f, (const unsigned char *)src, sizeof(src) - 1, out,
+		sizeof(out), &outlen, 1);
+	T_EXPECT_EQ(op, HTTP_FRAMER_DONE);
+	struct body_sink sink = { 0 };
+	framer_dechunk_into(_t_, &sink, out, outlen);
+	T_EXPECT_EQ(sink.len, (size_t)7);
+	T_EXPECT_MEMEQ(sink.buf, "abcdefg", 7);
+}
+
+T_DECLARE_CASE(http_framer_eof_passthrough)
+{
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_EOF, 0, false);
+	unsigned char out[64];
+	size_t outlen;
+	const enum http_framer_op op = framer_drive(
+		&f, (const unsigned char *)"streamed data", 13, out,
+		sizeof(out), &outlen, 0);
+	T_EXPECT_EQ(op, HTTP_FRAMER_DONE);
+	T_EXPECT_EQ(outlen, (size_t)13);
+	T_EXPECT_MEMEQ(out, "streamed data", 13);
+}
+
+T_DECLARE_CASE(http_framer_none_empty)
+{
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_NONE, 0, false);
+	unsigned char out[16];
+	size_t outlen;
+	const enum http_framer_op op =
+		framer_drive(&f, NULL, 0, out, sizeof(out), &outlen, 0);
+	T_EXPECT_EQ(op, HTTP_FRAMER_DONE);
+	T_EXPECT_EQ(outlen, (size_t)0);
+}
+
+T_DECLARE_CASE(http_framer_chunked_malformed)
+{
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_CHUNKED, 0, true);
+	unsigned char out[64];
+	size_t outlen;
+	/* "zz" is not a valid chunk size */
+	const enum http_framer_op op = framer_drive(
+		&f, (const unsigned char *)"zz\r\n", 4, out, sizeof(out),
+		&outlen, 0);
+	T_EXPECT_EQ(op, HTTP_FRAMER_ERROR);
+}
+
+T_DECLARE_CASE(http_framer_content_length_truncated)
+{
+	/* upstream/client closes before delivering the full declared body: the
+	 * bytes seen are forwarded, then the EOF is reported as a truncation */
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_CONTENT_LENGTH, 10, false);
+	unsigned char out[64];
+	size_t outlen;
+	const enum http_framer_op op = framer_drive(
+		&f, (const unsigned char *)"abcd", 4, out, sizeof(out), &outlen,
+		0);
+	T_EXPECT_EQ(op, HTTP_FRAMER_ERROR);
+	T_EXPECT_EQ(outlen, (size_t)4);
+	T_EXPECT_MEMEQ(out, "abcd", 4);
+}
+
+T_DECLARE_CASE(http_framer_large_content_length_multipass)
+{
+	/* a body larger than HTTP_FRAMER_BUFSIZE forces several fill/decode/send
+	 * passes; the length-framed passthrough must reproduce it byte-for-byte */
+	enum { BIG = HTTP_FRAMER_BUFSIZE * 2 + 4321 };
+	static unsigned char big[BIG];
+	static unsigned char out[BIG + 64];
+	for (size_t i = 0; i < BIG; i++) {
+		big[i] = (unsigned char)(i * 31u + 7u);
+	}
+	struct http_framer f;
+	http_framer_init(&f, HTTP_BODY_CONTENT_LENGTH, BIG, false);
+	size_t outlen;
+	const enum http_framer_op op =
+		framer_drive(&f, big, BIG, out, sizeof(out), &outlen, 0);
+	T_EXPECT_EQ(op, HTTP_FRAMER_DONE);
+	T_EXPECT_EQ(outlen, (size_t)BIG);
+	T_EXPECT_MEMEQ(out, big, BIG);
+}
+
+/* -------------------------------------------------------------------------
+ * http_reader tests - the resumable, buffer-agnostic head parser used by the
+ * proxy response path, exercised over an in-memory buffer with no event loop.
+ * ---------------------------------------------------------------------- */
+
+struct reader_hdr_ctx {
+	struct {
+		const char *key;
+		/* value points into the mutable parse buffer (kept non-const so
+		 * this callback matches the http_parsehdr_cb contract without
+		 * tripping readability-non-const-parameter) */
+		char *value;
+	} hdr[8];
+	size_t n;
+	bool reject;
+};
+
+static bool reader_hdr_cb(void *ctx, const char *key, char *value)
+{
+	struct reader_hdr_ctx *restrict c = ctx;
+	if (c->reject) {
+		return false;
+	}
+	if (c->n < 8) {
+		c->hdr[c->n].key = key;
+		c->hdr[c->n].value = value;
+		c->n++;
+	}
+	return true;
+}
+
+T_DECLARE_CASE(http_reader_response_ok)
+{
+	/* http_parse/http_parsehdr rewrite the buffer in place, so it must be
+	 * mutable (not a string literal). */
+	char buf[128];
+	static const char rsp[] = "HTTP/1.1 200 OK\r\n"
+				  "Content-Length: 5\r\n"
+				  "X-Test: v\r\n"
+				  "\r\n"
+				  "hello";
+	memcpy(buf, rsp, sizeof(rsp));
+
+	struct http_reader r;
+	http_reader_init(&r);
+	struct http_message msg;
+	struct reader_hdr_ctx cb = { 0 };
+	const struct http_parsehdr_cb on_header = { .func = reader_hdr_cb,
+						    .ctx = &cb };
+	T_EXPECT_EQ(
+		http_reader_parse(&r, buf, &msg, false, on_header),
+		HTTP_READER_OK);
+	T_EXPECT_STREQ(msg.rsp.version, "HTTP/1.1");
+	T_EXPECT_STREQ(msg.rsp.code, "200");
+	T_EXPECT_STREQ(msg.rsp.status, "OK");
+	T_EXPECT_EQ(cb.n, (size_t)2);
+	T_EXPECT_STREQ(cb.hdr[0].key, "Content-Length");
+	T_EXPECT_STREQ(cb.hdr[0].value, "5");
+	T_EXPECT_STREQ(cb.hdr[1].key, "X-Test");
+	T_EXPECT_STREQ(cb.hdr[1].value, "v");
+	/* pos points at the body start */
+	T_EXPECT_STREQ(buf + r.pos, "hello");
+}
+
+T_DECLARE_CASE(http_reader_request_ok)
+{
+	char buf[128];
+	static const char req[] = "GET /path HTTP/1.1\r\n"
+				  "Host: example.com\r\n"
+				  "\r\n";
+	memcpy(buf, req, sizeof(req));
+
+	struct http_reader r;
+	http_reader_init(&r);
+	struct http_message msg;
+	struct reader_hdr_ctx cb = { 0 };
+	const struct http_parsehdr_cb on_header = { .func = reader_hdr_cb,
+						    .ctx = &cb };
+	T_EXPECT_EQ(
+		http_reader_parse(&r, buf, &msg, true, on_header),
+		HTTP_READER_OK);
+	T_EXPECT_STREQ(msg.req.method, "GET");
+	T_EXPECT_STREQ(msg.req.url, "/path");
+	T_EXPECT_STREQ(msg.req.version, "HTTP/1.1");
+	T_EXPECT_EQ(cb.n, (size_t)1);
+	T_EXPECT_STREQ(cb.hdr[0].key, "Host");
+	T_EXPECT_STREQ(cb.hdr[0].value, "example.com");
+}
+
+T_DECLARE_CASE(http_reader_incremental)
+{
+	/* feed the head in two pieces: the reader returns MORE, then resumes
+	 * from its cursor once the rest is appended */
+	char buf[128];
+	static const char part1[] = "HTTP/1.1 200 OK\r\nX-A: 1\r\n";
+	static const char part2[] = "X-B: 2\r\n\r\n";
+	const size_t len1 = sizeof(part1) - 1;
+	memcpy(buf, part1, len1);
+	buf[len1] = '\0';
+
+	struct http_reader r;
+	http_reader_init(&r);
+	struct http_message msg;
+	struct reader_hdr_ctx cb = { 0 };
+	const struct http_parsehdr_cb on_header = { .func = reader_hdr_cb,
+						    .ctx = &cb };
+	T_EXPECT_EQ(
+		http_reader_parse(&r, buf, &msg, false, on_header),
+		HTTP_READER_MORE);
+	T_EXPECT_EQ(cb.n, (size_t)1);
+	T_EXPECT_STREQ(cb.hdr[0].key, "X-A");
+
+	memcpy(buf + len1, part2, sizeof(part2) - 1);
+	buf[len1 + sizeof(part2) - 1] = '\0';
+	T_EXPECT_EQ(
+		http_reader_parse(&r, buf, &msg, false, on_header),
+		HTTP_READER_OK);
+	T_EXPECT_EQ(cb.n, (size_t)2);
+	T_EXPECT_STREQ(cb.hdr[1].key, "X-B");
+	T_EXPECT_STREQ(cb.hdr[1].value, "2");
+}
+
+T_DECLARE_CASE(http_reader_bad_version)
+{
+	char buf[64];
+	static const char rsp[] = "HTTP/2.0 200 OK\r\n\r\n";
+	memcpy(buf, rsp, sizeof(rsp));
+	struct http_reader r;
+	http_reader_init(&r);
+	struct http_message msg;
+	struct reader_hdr_ctx cb = { 0 };
+	const struct http_parsehdr_cb on_header = { .func = reader_hdr_cb,
+						    .ctx = &cb };
+	T_EXPECT_EQ(
+		http_reader_parse(&r, buf, &msg, false, on_header),
+		HTTP_READER_ERROR);
+}
+
+T_DECLARE_CASE(http_reader_malformed_header)
+{
+	char buf[64];
+	static const char rsp[] = "HTTP/1.1 200 OK\r\nno-colon\r\n\r\n";
+	memcpy(buf, rsp, sizeof(rsp));
+	struct http_reader r;
+	http_reader_init(&r);
+	struct http_message msg;
+	struct reader_hdr_ctx cb = { 0 };
+	const struct http_parsehdr_cb on_header = { .func = reader_hdr_cb,
+						    .ctx = &cb };
+	T_EXPECT_EQ(
+		http_reader_parse(&r, buf, &msg, false, on_header),
+		HTTP_READER_ERROR);
+}
+
+T_DECLARE_CASE(http_reader_callback_reject)
+{
+	char buf[64];
+	static const char rsp[] = "HTTP/1.1 200 OK\r\nX-A: 1\r\n\r\n";
+	memcpy(buf, rsp, sizeof(rsp));
+	struct http_reader r;
+	http_reader_init(&r);
+	struct http_message msg;
+	struct reader_hdr_ctx cb = { .reject = true };
+	const struct http_parsehdr_cb on_header = { .func = reader_hdr_cb,
+						    .ctx = &cb };
+	T_EXPECT_EQ(
+		http_reader_parse(&r, buf, &msg, false, on_header),
+		HTTP_READER_ERROR);
+}
+
 /* -------------------------------------------------------------------------
  * bench - end-to-end recv + parse of a representative keep-alive request.
  * Runs only when a name filter selects it (e.g. --run bench); a plain ctest
@@ -1546,6 +2124,29 @@ static const struct testing_suite suite[] = {
 	T_CASE(http_body_chunked_size_trailing_junk),
 	T_CASE(http_chunk_header_format),
 	T_CASE(http_chunk_header_roundtrip),
+	T_CASE(http_header_field_valid_cases),
+	T_CASE(http_connection_lists_cases),
+	T_CASE(http_hostport_normalize_cases),
+	T_CASE(http_append_cases),
+	T_CASE(http_append_headers_cases),
+	T_CASE(http_append_framing_cases),
+	T_CASE(http_parse_content_length_accepts),
+	T_CASE(http_parse_content_length_rejects),
+	T_CASE(http_framer_content_length_passthrough),
+	T_CASE(http_framer_content_length_surplus_discarded),
+	T_CASE(http_framer_chunked_rechunk_roundtrip),
+	T_CASE(http_framer_chunked_rechunk_byte_by_byte),
+	T_CASE(http_framer_eof_passthrough),
+	T_CASE(http_framer_none_empty),
+	T_CASE(http_framer_chunked_malformed),
+	T_CASE(http_framer_content_length_truncated),
+	T_CASE(http_framer_large_content_length_multipass),
+	T_CASE(http_reader_response_ok),
+	T_CASE(http_reader_request_ok),
+	T_CASE(http_reader_incremental),
+	T_CASE(http_reader_bad_version),
+	T_CASE(http_reader_malformed_header),
+	T_CASE(http_reader_callback_reject),
 	T_BENCH(bench_parse_request),
 	T_SUITE_END,
 };

@@ -1035,19 +1035,26 @@ enum lua_rstate {
 	LUA_PASSTHROUGH,
 };
 
+/* Initial peek size: enough to see the longest BOM (4 bytes, UTF-32) and
+ * the 2-byte "#!" shebang prefix that may immediately follow it in the
+ * same read. */
+#define LUA_PEEK_SIZE 8
+
 struct lua_rstream {
 	struct stream s;
 	struct stream *inner;
 	enum lua_rstate state;
 	bool shebang_confirmed;
 	int rderr;
+	/* Prefix window: the first read is copied here (via stream_read, which
+	 * fills up to LUA_PEEK_SIZE) so BOM/shebang detection cannot be defeated
+	 * by a short read splitting the prefix across calls; any post-prefix
+	 * bytes are handed out from peekbuf[peekpos..peeklen). */
+	size_t peeklen;
+	size_t peekpos;
+	unsigned char peekbuf[LUA_PEEK_SIZE];
 };
 ASSERT_SUPER(struct stream, struct lua_rstream, s);
-
-/* Initial peek size: enough to see the longest BOM (4 bytes, UTF-32) and
- * the 2-byte "#!" shebang prefix that may immediately follow it in the
- * same read. */
-#define LUA_PEEK_SIZE 8
 
 /* Skip UTF-8 BOM if present; transition to LUA_SKIP_SHEBANG. Returns false for non-UTF-8 BOM. */
 static bool lua_skip_bom(
@@ -1111,32 +1118,81 @@ static void lua_skip_shebang(
 	*offset = n;
 }
 
+/* Hand out the next slice of the peek window, capped by the caller's request. */
+static int lua_serve_peek(
+	struct lua_rstream *restrict z, const void **restrict buf,
+	size_t *restrict len)
+{
+	const size_t avail = z->peeklen - z->peekpos;
+	const size_t n = (*len < avail) ? *len : avail;
+	*buf = z->peekbuf + z->peekpos;
+	*len = n;
+	z->peekpos += n;
+	return 0;
+}
+
 static int
 lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct lua_rstream *restrict z = p;
 
+	/* Serve any post-prefix bytes still buffered in the peek window. */
+	if (z->peekpos < z->peeklen) {
+		return lua_serve_peek(z, buf, len);
+	}
+
+	if (z->state == LUA_SKIP_BOM) {
+		/* Fill the peek window with a copying read rather than a single
+		 * direct read: a direct read may legitimately return fewer bytes
+		 * than requested (its contract only promises "> 0"), which could
+		 * split a multi-byte BOM or the "#!" prefix across reads and
+		 * defeat detection. stream_read loops the underlying reader and
+		 * only comes up short at EOF, so the window holds the whole
+		 * prefix whenever the source has that many bytes. */
+		z->peeklen = LUA_PEEK_SIZE;
+		z->peekpos = 0;
+		const int err = stream_read(z->inner, z->peekbuf, &z->peeklen);
+		if (err != 0) {
+			z->state = LUA_PASSTHROUGH;
+			z->rderr = err;
+			*len = 0;
+			return err;
+		}
+		if (z->peeklen == 0) {
+			z->state = LUA_PASSTHROUGH;
+			*len = 0;
+			return 0;
+		}
+		size_t offset = 0;
+		if (!lua_skip_bom(z, z->peekbuf, z->peeklen, &offset)) {
+			*len = 0;
+			return -1;
+		}
+		/* Skip the shebang if its start is within the window. If the line
+		 * runs past the window the state stays LUA_SKIP_SHEBANG and the
+		 * remainder is scanned directly from the inner stream below. */
+		lua_skip_shebang(z, z->peekbuf, z->peeklen, &offset);
+		z->peekpos = offset;
+		if (z->peekpos < z->peeklen) {
+			return lua_serve_peek(z, buf, len);
+		}
+	}
+
 	if (z->state == LUA_PASSTHROUGH) {
-		int err = stream_direct_read(z->inner, buf, len);
+		const int err = stream_direct_read(z->inner, buf, len);
 		if (err != 0) {
 			z->rderr = err;
 		}
 		return err;
 	}
 
+	/* LUA_SKIP_SHEBANG continuing beyond the peek window: scan the inner
+	 * stream directly for the terminating newline, discarding shebang
+	 * content, then hand back the first real source bytes. */
 	for (;;) {
 		const void *data;
-		/* Only the very first read (still looking for a BOM) is
-		 * capped; once past it, a long shebang line needs a full-size
-		 * read to find its terminating newline. The peek is also bounded
-		 * by the caller's *len so a sub-LUA_PEEK_SIZE request can never
-		 * return more bytes than the caller's buffer holds. */
-		size_t n =
-			(z->state == LUA_SKIP_BOM) ?
-				(*len < LUA_PEEK_SIZE ? *len : LUA_PEEK_SIZE) :
-				*len;
+		size_t n = *len;
 		const int err = stream_direct_read(z->inner, &data, &n);
-
 		if (err != 0) {
 			z->state = LUA_PASSTHROUGH;
 			z->rderr = err;
@@ -1148,29 +1204,22 @@ lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 			*len = 0;
 			return 0;
 		}
-
-		const unsigned char *p = data;
+		const unsigned char *q = data;
 		size_t offset = 0;
-
-		if (z->state == LUA_SKIP_BOM) {
-			if (!lua_skip_bom(z, p, n, &offset)) {
-				*len = 0;
-				return -1;
-			}
-		}
+		/* Only scan while still skipping the shebang: once its newline is
+		 * found the state flips to LUA_PASSTHROUGH, and if that newline was
+		 * the last byte of a chunk (offset == n) the loop re-iterates over
+		 * the next chunk of real source, which must be passed through, not
+		 * re-stripped. */
 		if (z->state == LUA_SKIP_SHEBANG) {
-			lua_skip_shebang(z, p, n, &offset);
+			lua_skip_shebang(z, q, n, &offset);
 			if (z->state == LUA_SKIP_SHEBANG) {
-				/* no newline in this chunk yet: the whole
-				 * chunk was shebang content (already
-				 * discarded via offset == n) and must not be
-				 * emitted as Lua source; read more */
+				/* whole chunk was shebang content; read more */
 				continue;
 			}
 		}
-
 		if (offset < n) {
-			*buf = p + offset;
+			*buf = q + offset;
 			*len = n - offset;
 			return 0;
 		}
@@ -1236,6 +1285,8 @@ static struct stream *lua_reader_new(struct stream *base)
 	z->state = LUA_SKIP_BOM;
 	z->shebang_confirmed = false;
 	z->rderr = 0;
+	z->peeklen = 0;
+	z->peekpos = 0;
 	return (struct stream *)z;
 }
 

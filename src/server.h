@@ -4,6 +4,9 @@
 #ifndef SERVER_H
 #define SERVER_H
 
+#include "conf.h"
+#include "transfer.h"
+
 #include <ev.h>
 
 #if WITH_THREADS
@@ -13,13 +16,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct config;
 struct dialreq;
 struct resolver;
 struct ruleset;
 struct sockaddr;
 struct server;
-struct transfer;
 
 struct server_stats {
 	/* Proxy service stats */
@@ -147,6 +148,105 @@ struct server {
 	struct listener listeners[SERVER_LISTENERS_MAX];
 	size_t num_listeners;
 };
+
+/**
+ * @brief Increment the active-session count and return the new value (>= 1).
+ *
+ * The matching decrement is issued by the transfer engine (or the relay/stream
+ * close path) when the session ends. Kept inline in the header, rather than in
+ * server.c, so every session-start site — the protocol handlers, each
+ * unit-tested against its own transfer_serve stub and linking only its own
+ * module — shares one copy of the drift-prone WITH_THREADS increment ladder
+ * without a link-time dependency on server.c.
+ */
+static inline size_t server_session_incr(struct server *restrict s)
+{
+#if WITH_THREADS
+	return atomic_fetch_add_explicit(
+		       &s->num_sessions, 1, memory_order_relaxed) +
+	       1;
+#else
+	return ++s->num_sessions;
+#endif
+}
+
+/**
+ * @brief Roll back a server_session_incr() when the session failed to start
+ * before it was committed to the stats (e.g. a transfer_serve OOM).
+ */
+static inline void server_session_rollback(struct server *restrict s)
+{
+#if WITH_THREADS
+	atomic_fetch_sub_explicit(&s->num_sessions, 1, memory_order_relaxed);
+#else
+	s->num_sessions--;
+#endif
+}
+
+/**
+ * @brief Record a successfully started session in the peak/total stats.
+ * @param cur The value returned by the paired server_session_incr().
+ */
+static inline void
+server_session_commit(struct server *restrict s, const size_t cur)
+{
+	if (cur > s->stats.num_sessions_peak) {
+		s->stats.num_sessions_peak = cur;
+	}
+	s->stats.num_success++;
+}
+
+/**
+ * @brief Account a session that starts without the transfer engine — the UDP
+ * ASSOCIATE relay and the HTTP proxy stream forward drive their own watchers
+ * rather than handing a fd pair to transfer_serve.
+ * @return New active-session count (>= 1).
+ */
+static inline size_t server_account_session(struct server *restrict s)
+{
+	const size_t cur = server_session_incr(s);
+	server_session_commit(s, cur);
+	return cur;
+}
+
+/**
+ * @brief Start a bidirectional transfer for a connected fd pair and account
+ * the new session.
+ *
+ * Hands @p acc_fd and @p dial_fd to the server's transfer engine. On success
+ * the transfer owns both descriptors; the active-session count is incremented,
+ * @c num_sessions_peak and @c num_success are updated, and the new count
+ * (>= 1) is returned. On failure (transfer_serve OOM) the session-count
+ * increment is rolled back and 0 is returned, leaving both descriptors open
+ * for the caller to close (transfer_serve does not close them). The caller
+ * owns its per-connection bookkeeping (state, timers, @c num_halfopen,
+ * logging, gc_unref) in either case.
+ *
+ * @return New active-session count on success, or 0 if the transfer could not
+ *     be started.
+ */
+static inline size_t server_start_session(
+	struct server *restrict s, const int acc_fd, const int dial_fd)
+{
+	/* Increment before transfer_serve so the transfer's own decrement can
+	 * never precede ours; roll back if the transfer fails to start. */
+	const size_t cur = server_session_incr(s);
+	if (!transfer_serve(
+		    s->xfer, acc_fd, dial_fd,
+		    &(struct transfer_opts){
+			    .byt_up = &s->byt_up,
+			    .byt_down = &s->byt_down,
+#if WITH_SPLICE
+			    .use_splice = s->conf->pipe,
+#endif
+			    .num_sessions = &s->num_sessions,
+		    })) {
+		server_session_rollback(s);
+		return 0;
+	}
+	server_session_commit(s, cur);
+	return cur;
+}
 
 bool server_init(
 	struct server *restrict s, struct ev_loop *loop,

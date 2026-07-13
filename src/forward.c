@@ -161,45 +161,17 @@ static void forward_commit(
 	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
-	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->num_halfopen--;
+	ctx->s->stats.num_halfopen--;
 
 	FW_CTX_LOG_F(DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	/* Increment before transfer_start — xfer decrement can't precede ours. Undo on OOM. */
-#if WITH_THREADS
-	const size_t cur =
-		atomic_fetch_add_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed) +
-		1;
-#else
-	const size_t cur = ++ctx->s->num_sessions;
-#endif
-	if (!transfer_serve(
-		    ctx->s->xfer, acc_fd, dial_fd,
-		    &(struct transfer_opts){
-			    .byt_up = &ctx->s->byt_up,
-			    .byt_down = &ctx->s->byt_down,
-#if WITH_SPLICE
-			    .use_splice = ctx->s->conf->pipe,
-#endif
-			    .num_sessions = &ctx->s->num_sessions,
-		    })) {
-#if WITH_THREADS
-		atomic_fetch_sub_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed);
-#else
-		ctx->s->num_sessions--;
-#endif
+	const size_t cur = server_start_session(ctx->s, acc_fd, dial_fd);
+	if (cur == 0) {
 		LOGOOM();
 		socket_close(acc_fd);
 		socket_close(dial_fd);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
-	if (cur > stats->num_sessions_peak) {
-		stats->num_sessions_peak = cur;
-	}
-	stats->num_success++;
 	FW_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
 	gc_unref(&ctx->gcbase);
 }

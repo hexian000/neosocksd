@@ -18,7 +18,6 @@
 #include "net/http.h"
 #include "net/url.h"
 #include "os/socket.h"
-#include "utils/ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
@@ -27,7 +26,6 @@
 #include <ev.h>
 
 #include <errno.h>
-#include <inttypes.h>
 #if WITH_THREADS
 #include <stdatomic.h>
 #endif
@@ -80,10 +78,7 @@ struct http_ctx {
 			struct http_conn conn;
 			size_t req_content_length;
 			/* end-to-end headers recorded for forwarding */
-			struct {
-				const char *key;
-				char *value;
-			} fwd_hdr[PROXY_MAX_HEADERS];
+			struct http_header_kv fwd_hdr[PROXY_MAX_HEADERS];
 			size_t num_fwd_hdr;
 			/* dial target hostport for proxy_pass requests */
 			char req_target[FQDN_MAX_LENGTH + sizeof(":65535")];
@@ -100,15 +95,15 @@ ASSERT_SUPER(struct gcbase, struct http_ctx, gcbase);
  * proxy_pass HTTP/1.1 framing forwarder types (logic follows below)
  * ---------------------------------------------------------------------- */
 
-#define PROXY_BODY_BUFSIZE 16384
-#define PROXY_HDR_ROOM HTTP_CHUNK_HEADER_MAX
-
-/* one-directional framing body forwarder */
+/* one-directional framing body forwarder: an http_framer (all HTTP framing
+ * logic, I/O-free) plus the socket/watcher plumbing that drives it. The
+ * response pump also uses framer.in as the receive buffer for the upstream
+ * header block before the body starts (see rsp_run / rsp_build_response). */
 struct http_pump {
 	struct http_stream *owner;
 	int src_fd, dst_fd;
 	ev_io w;
-	struct http_body body;
+	struct http_framer framer;
 	/* traffic counter for this direction (byt_up for the request pump,
 	 * byt_down for the response pump); counts framed bytes sent to dst_fd */
 #if WITH_THREADS
@@ -116,15 +111,7 @@ struct http_pump {
 #else
 	uint_least64_t *byt;
 #endif
-	bool rechunk; /* emit chunked framing on the output */
 	bool done; /* body complete, output flushed, dst write shut down */
-	bool sending_term; /* out[] currently holds the chunked terminator */
-	size_t in_pos, in_len; /* unconsumed raw src bytes in in[] */
-	size_t send_pos, send_end; /* framed bytes pending to dst_fd in out[] */
-	size_t datalen; /* decoded bytes at out[PROXY_HDR_ROOM ..] */
-	unsigned char in[PROXY_BODY_BUFSIZE];
-	/* header room + data + trailing CRLF */
-	unsigned char out[PROXY_HDR_ROOM + PROXY_BODY_BUFSIZE + 2];
 };
 
 enum rsp_phase {
@@ -139,8 +126,7 @@ struct http_stream {
 	struct http_pump rsp; /* upstream -> client  */
 	/* response header phase state */
 	enum rsp_phase rsp_phase;
-	size_t rsp_parse; /* parse cursor into rsp.in during RSP_HDR */
-	bool rsp_line; /* response status line parsed */
+	struct http_reader rsp_reader; /* incremental parse of rsp.framer.in */
 	bool head_request; /* request method was HEAD -> response is bodiless */
 	bool rsp_interim; /* the header block just sent was a 1xx interim */
 	bool rsp_started; /* at least one response header block reached client */
@@ -149,9 +135,7 @@ struct http_stream {
 	bool rsp_chunked;
 	bool rsp_clen_known;
 	size_t rsp_clen;
-	struct {
-		const char *key, *value;
-	} rsp_hdr[PROXY_MAX_HEADERS];
+	struct http_header_kv rsp_hdr[PROXY_MAX_HEADERS];
 	size_t rsp_nhdr;
 	size_t whdr_pos; /* client response-header send offset into conn.wbuf */
 };
@@ -276,47 +260,19 @@ http_ctx_start_transfer(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
 	ctx->accepted_fd = ctx->dialed_fd = -1;
 	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
-	struct server_stats *restrict stats = &ctx->s->stats;
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
-	stats->num_halfopen--;
+	ctx->s->stats.num_halfopen--;
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	/* Increment before transfer_start — xfer decrement can't precede ours. Undo on OOM. */
-#if WITH_THREADS
-	const size_t cur =
-		atomic_fetch_add_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed) +
-		1;
-#else
-	const size_t cur = ++ctx->s->num_sessions;
-#endif
-	if (!transfer_serve(
-		    ctx->s->xfer, acc_fd, dial_fd,
-		    &(struct transfer_opts){
-			    .byt_up = &ctx->s->byt_up,
-			    .byt_down = &ctx->s->byt_down,
-#if WITH_SPLICE
-			    .use_splice = ctx->s->conf->pipe,
-#endif
-			    .num_sessions = &ctx->s->num_sessions,
-		    })) {
-#if WITH_THREADS
-		atomic_fetch_sub_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed);
-#else
-		ctx->s->num_sessions--;
-#endif
+	const size_t cur = server_start_session(ctx->s, acc_fd, dial_fd);
+	if (cur == 0) {
 		LOGOOM();
 		socket_close(acc_fd);
 		socket_close(dial_fd);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
-	if (cur > stats->num_sessions_peak) {
-		stats->num_sessions_peak = cur;
-	}
-	stats->num_success++;
 	HTTP_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
 	gc_unref(&ctx->gcbase);
 }
@@ -331,8 +287,6 @@ static size_t readahead_len(const struct http_conn *restrict p)
 
 /* forward declarations (defined later in this file) */
 static bool fwd_append(struct http_conn *restrict p, const char *restrict s);
-static bool
-connection_lists(const char *restrict connection, const char *restrict key);
 
 /* -------------------------------------------------------------------------
  * proxy_pass HTTP/1.1 framing forwarder
@@ -419,15 +373,6 @@ static void pump_finished(struct ev_loop *loop, struct http_pump *restrict p)
 	}
 }
 
-static bool pump_on_data(void *ctx, const unsigned char *data, const size_t len)
-{
-	struct http_pump *restrict p = ctx;
-	/* the input is throttled so the decoded output always fits */
-	memcpy(p->out + PROXY_HDR_ROOM + p->datalen, data, len);
-	p->datalen += len;
-	return true;
-}
-
 /* Account bytes forwarded to dst_fd for this direction. */
 static void pump_count(struct http_pump *restrict p, const size_t n)
 {
@@ -439,16 +384,18 @@ static void pump_count(struct http_pump *restrict p, const size_t n)
 #endif
 }
 
-/* Drive one framing pump as far as it can go without blocking. */
+/* Drive one framing pump as far as it can go without blocking. All body framing
+ * lives in the http_framer; this shell only decides when to touch a socket. */
 static void
 pump_run(struct ev_loop *restrict loop, struct http_pump *restrict p)
 {
-	const struct http_body_data_cb cb = { .func = pump_on_data, .ctx = p };
+	struct http_framer *restrict f = &p->framer;
 	for (;;) {
-		if (p->send_pos < p->send_end) {
-			size_t n = p->send_end - p->send_pos;
-			const int err = socket_send(
-				p->dst_fd, p->out + p->send_pos, &n);
+		switch (http_framer_run(f)) {
+		case HTTP_FRAMER_SEND: {
+			const unsigned char *buf;
+			size_t n = http_framer_pending(f, &buf);
+			const int err = socket_send(p->dst_fd, buf, &n);
 			if (err != 0) {
 				if (err == EAGAIN || err == EWOULDBLOCK ||
 				    err == ENOBUFS || err == ENOMEM) {
@@ -458,43 +405,20 @@ pump_run(struct ev_loop *restrict loop, struct http_pump *restrict p)
 				stream_close(loop, p->owner);
 				return;
 			}
+			http_framer_drained(f, n);
 			pump_count(p, n);
 			stream_touch(loop, p->owner);
-			p->send_pos += n;
-			if (p->send_pos < p->send_end) {
+			if (http_framer_pending(f, &buf) > 0) {
 				pump_watch(loop, p, EV_WRITE);
-				return;
-			}
-			p->send_pos = p->send_end = 0;
-			if (p->sending_term) {
-				pump_finished(loop, p);
 				return;
 			}
 			continue;
 		}
-		if (p->body.done) {
-			if (p->rechunk) {
-				memcpy(p->out, HTTP_CHUNK_TERMINATOR,
-				       sizeof(HTTP_CHUNK_TERMINATOR) - 1);
-				p->send_pos = 0;
-				p->send_end = sizeof(HTTP_CHUNK_TERMINATOR) - 1;
-				p->sending_term = true;
-				continue;
-			}
-			pump_finished(loop, p);
-			return;
-		}
-		if (p->in_pos >= p->in_len) {
-			size_t want = sizeof(p->in);
-			if (p->body.mode == HTTP_BODY_CONTENT_LENGTH) {
-				const size_t remain = p->body.content_length -
-						      p->body.consumed;
-				if (want > remain) {
-					want = remain;
-				}
-			}
-			size_t n = want;
-			const int err = socket_recv(p->src_fd, p->in, &n);
+		case HTTP_FRAMER_FILL: {
+			unsigned char *buf;
+			size_t n;
+			http_framer_inbuf(f, &buf, &n);
+			const int err = socket_recv(p->src_fd, buf, &n);
 			if (err != 0) {
 				if (err == EAGAIN || err == EWOULDBLOCK) {
 					pump_watch(loop, p, EV_READ);
@@ -504,29 +428,20 @@ pump_run(struct ev_loop *restrict loop, struct http_pump *restrict p)
 				return;
 			}
 			if (n == 0) {
-				if (p->body.mode == HTTP_BODY_EOF) {
-					(void)http_body_finish(&p->body);
-					continue;
+				if (!http_framer_eof(f)) {
+					stream_close(loop, p->owner);
+					return;
 				}
-				stream_close(loop, p->owner);
-				return;
+				continue;
 			}
+			http_framer_filled(f, n);
 			stream_touch(loop, p->owner);
-			p->in_pos = 0;
-			p->in_len = n;
+			continue;
 		}
-		size_t avail = p->in_len - p->in_pos;
-		if (p->body.mode == HTTP_BODY_CONTENT_LENGTH) {
-			const size_t remain =
-				p->body.content_length - p->body.consumed;
-			if (avail > remain) {
-				avail = remain; /* discard surplus past CL */
-			}
-		}
-		p->datalen = 0;
-		size_t consumed = avail;
-		if (!http_body_consume(
-			    &p->body, p->in + p->in_pos, &consumed, cb)) {
+		case HTTP_FRAMER_DONE:
+			pump_finished(loop, p);
+			return;
+		case HTTP_FRAMER_ERROR: {
 			HTTP_CTX_LOG(WARNING, p->owner->ctx, "malformed body");
 			const bool is_request = (p == &p->owner->req);
 			stream_fail(
@@ -535,27 +450,9 @@ pump_run(struct ev_loop *restrict loop, struct http_pump *restrict p)
 					     HTTP_BAD_GATEWAY);
 			return;
 		}
-		p->in_pos += consumed;
-		if (p->body.done) {
-			/* surplus past the body (a pipelined next request) is
-			 * left unread and discarded -- no keep-alive here */
-			p->in_pos = p->in_len;
 		}
-		if (p->datalen == 0) {
-			continue; /* framing-only bytes produced no output */
-		}
-		if (p->rechunk) {
-			char hdr[HTTP_CHUNK_HEADER_MAX];
-			const size_t hlen = http_chunk_header(hdr, p->datalen);
-			memcpy(p->out + PROXY_HDR_ROOM - hlen, hdr, hlen);
-			p->out[PROXY_HDR_ROOM + p->datalen] = '\r';
-			p->out[PROXY_HDR_ROOM + p->datalen + 1] = '\n';
-			p->send_pos = PROXY_HDR_ROOM - hlen;
-			p->send_end = PROXY_HDR_ROOM + p->datalen + 2;
-		} else {
-			p->send_pos = PROXY_HDR_ROOM;
-			p->send_end = PROXY_HDR_ROOM + p->datalen;
-		}
+		/* no default: -Wswitch guards new enumerators; unreachable here */
+		FAILMSG("unexpected http_framer op");
 	}
 }
 
@@ -565,35 +462,29 @@ static void pump_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	pump_run(loop, watcher->data);
 }
 
-/* RFC 7230 §3.2.6 / RFC 9110 §5.5: a field name must be tchar-only and a field
- * value must contain no CTL other than HTAB. Applied to both request and
- * response headers before they are recorded/forwarded. */
-static bool
-header_field_valid(const char *restrict key, const char *restrict value)
+/* Case-insensitive substring test: true if needle occurs anywhere in haystack,
+ * ignoring ASCII case. A POSIX-clean stand-in for the GNU strcasestr(), used to
+ * spot a "chunked" transfer-coding in a possibly multi-value, mixed-case
+ * response Transfer-Encoding. */
+static bool str_contains_fold(const char *haystack, const char *needle)
 {
-	for (const unsigned char *c = (const unsigned char *)key; *c != '\0';
-	     c++) {
-		if (!isalnum(*c) && strchr("!#$%&'*+-.^_`|~", *c) == NULL) {
-			return false;
+	const size_t needle_len = strlen(needle);
+	for (; *haystack != '\0'; haystack++) {
+		if (strncasecmp(haystack, needle, needle_len) == 0) {
+			return true;
 		}
 	}
-	for (const unsigned char *c = (const unsigned char *)value; *c != '\0';
-	     c++) {
-		if (iscntrl(*c) && *c != '\t') {
-			return false;
-		}
-	}
-	return true;
+	return false;
 }
 
 /* Record one response header for forwarding, or capture the framing/hop-by-hop
  * headers we handle specially. Returns false to reject the whole response (bad
  * header characters, a malformed Content-Length, or header-table overflow),
  * which the caller maps to 502. */
-static bool
-rsp_record_header(struct http_stream *restrict s, const char *key, char *value)
+static bool rsp_record_header(void *ctx, const char *key, char *value)
 {
-	if (!header_field_valid(key, value)) {
+	struct http_stream *restrict s = ctx;
+	if (!http_header_field_valid(key, value)) {
 		return false;
 	}
 	if (strcasecmp(key, "Connection") == 0) {
@@ -601,24 +492,15 @@ rsp_record_header(struct http_stream *restrict s, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		if (strcasestr(value, "chunked") != NULL) {
+		if (str_contains_fold(value, "chunked")) {
 			s->rsp_chunked = true;
 		}
 		return true;
 	}
 	if (strcasecmp(key, "Content-Length") == 0) {
-		/* RFC 9110 §8.6: Content-Length = 1*DIGIT, no sign; strtoumax
-		 * would otherwise accept a leading '-' (wrapping to a huge
-		 * value) or '+', matching the request-side strictness. */
-		if (!isdigit((unsigned char)value[0])) {
+		if (!http_parse_content_length(value, &s->rsp_clen)) {
 			return false;
 		}
-		char *end;
-		const uintmax_t cl = strtoumax(value, &end, 10);
-		if (*end != '\0' || cl > (uintmax_t)SIZE_MAX) {
-			return false;
-		}
-		s->rsp_clen = (size_t)cl;
 		s->rsp_clen_known = true;
 		return true;
 	}
@@ -639,47 +521,27 @@ rsp_record_header(struct http_stream *restrict s, const char *key, char *value)
 	return true;
 }
 
-/* Parse the upstream response status line + headers accumulated in rsp.in.
- * Returns 0 when complete (rsp_parse points at the body start), 1 if more data
- * is needed, or -1 on a parse error. */
+/* Parse the upstream response status line + headers accumulated in rsp.framer.in
+ * via the shared incremental reader. Returns 0 when complete (rsp_reader.pos
+ * points at the body start), 1 if more data is needed, or -1 on a parse error
+ * (a malformed line/header or a header rejected by rsp_record_header). */
 static int rsp_parse_headers(struct http_stream *restrict s)
 {
-	struct http_pump *restrict rsp = &s->rsp;
-	char *const base = (char *)rsp->in;
-	char *next = base + s->rsp_parse;
-	if (!s->rsp_line) {
-		char *const p = http_parse(next, &s->rsp_msg);
-		if (p == NULL) {
-			return -1;
-		}
-		if (p == next) {
-			return 1;
-		}
-		if (strncmp(s->rsp_msg.rsp.version, "HTTP/1.", 7) != 0) {
-			return -1;
-		}
-		s->rsp_line = true;
-		s->rsp_parse = (size_t)(p - base);
-		next = p;
+	const struct http_parsehdr_cb on_header = {
+		.func = rsp_record_header,
+		.ctx = s,
+	};
+	switch (http_reader_parse(
+		&s->rsp_reader, (char *)s->rsp.framer.in, &s->rsp_msg, false,
+		on_header)) {
+	case HTTP_READER_OK:
+		return 0;
+	case HTTP_READER_MORE:
+		return 1;
+	case HTTP_READER_ERROR:
+		return -1;
 	}
-	for (;;) {
-		char *key, *value;
-		char *const p = http_parsehdr(next, &key, &value);
-		if (p == NULL) {
-			return -1;
-		}
-		if (p == next) {
-			return 1;
-		}
-		s->rsp_parse = (size_t)(p - base);
-		next = p;
-		if (key == NULL) {
-			return 0; /* end of headers */
-		}
-		if (!rsp_record_header(s, key, value)) {
-			return -1;
-		}
-	}
+	FAILMSG("unexpected http_reader state");
 }
 
 /* Emit a canonical interim (1xx) response to the client, then keep reading. */
@@ -706,32 +568,22 @@ static bool rsp_build_response(struct http_stream *restrict s)
 	const unsigned long code = strtoul(s->rsp_msg.rsp.code, NULL, 10);
 	const char *const status = s->rsp_msg.rsp.status;
 
+	struct buffer *restrict wbuf = (struct buffer *)&conn->wbuf;
 	bool ok = fwd_append(conn, "HTTP/1.1 ") &&
 		  fwd_append(conn, s->rsp_msg.rsp.code) &&
 		  fwd_append(conn, " ") &&
 		  fwd_append(conn, status != NULL ? status : "") &&
 		  fwd_append(conn, "\r\n");
-	for (size_t i = 0; ok && i < s->rsp_nhdr; i++) {
-		const char *const key = s->rsp_hdr[i].key;
-		if (connection_lists(s->rsp_connection, key)) {
-			continue;
-		}
-		ok = fwd_append(conn, key) && fwd_append(conn, ": ") &&
-		     fwd_append(conn, s->rsp_hdr[i].value) &&
-		     fwd_append(conn, "\r\n");
-	}
+	/* end-to-end headers, except those listed in Connection */
+	ok = ok && http_append_headers(
+			   wbuf, s->rsp_hdr, s->rsp_nhdr, s->rsp_connection);
 	/* Preserve the declared framing header even for a bodiless response
 	 * (e.g. a HEAD reply keeps its Content-Length); only the body is
 	 * suppressed below. */
 	const bool bodiless = s->head_request || code == 204 || code == 304;
-	if (s->rsp_chunked) {
-		ok = ok && fwd_append(conn, "Transfer-Encoding: chunked\r\n");
-	} else if (s->rsp_clen_known) {
-		char cl[sizeof("Content-Length: \r\n") + 20];
-		(void)snprintf(
-			cl, sizeof(cl), "Content-Length: %zu\r\n", s->rsp_clen);
-		ok = ok && fwd_append(conn, cl);
-	}
+	ok = ok &&
+	     http_append_framing(
+		     wbuf, s->rsp_chunked, s->rsp_clen_known, s->rsp_clen);
 	/* the upstream Connection/Keep-Alive headers were dropped above;
 	 * overwrite the client-facing connection disposition to close (no
 	 * keep-alive) since the connection is torn down after this response */
@@ -754,10 +606,12 @@ static bool rsp_build_response(struct http_stream *restrict s)
 	} else {
 		mode = HTTP_BODY_EOF; /* close-delimited */
 	}
-	http_body_init(&rsp->body, mode, clen);
-	rsp->rechunk = (mode == HTTP_BODY_CHUNKED);
-	/* the bytes after the header terminator are the start of the body */
-	rsp->in_pos = s->rsp_parse;
+	/* framer.in still holds the bytes read during RSP_HDR; the header block
+	 * ends at rsp_reader.pos, so seed the filter with [pos, in_len) as the
+	 * start of the body (init resets in_len, so capture it first) */
+	const size_t buffered = rsp->framer.in_len;
+	http_framer_init(&rsp->framer, mode, clen, mode == HTTP_BODY_CHUNKED);
+	http_framer_seed(&rsp->framer, s->rsp_reader.pos, buffered);
 	return true;
 }
 
@@ -796,16 +650,18 @@ rsp_run(struct ev_loop *restrict loop, struct http_stream *restrict s)
 				s->rsp_phase = RSP_SEND;
 				continue;
 			}
-			if (rsp->in_len + 1 >= sizeof(rsp->in)) {
+			if (rsp->framer.in_len + 1 >= sizeof(rsp->framer.in)) {
 				HTTP_CTX_LOG(
 					WARNING, s->ctx,
 					"response headers too large");
 				stream_fail(loop, s, HTTP_BAD_GATEWAY);
 				return;
 			}
-			size_t n = sizeof(rsp->in) - rsp->in_len - 1;
+			size_t n =
+				sizeof(rsp->framer.in) - rsp->framer.in_len - 1;
 			const int err = socket_recv(
-				rsp->src_fd, rsp->in + rsp->in_len, &n);
+				rsp->src_fd,
+				rsp->framer.in + rsp->framer.in_len, &n);
 			if (err != 0) {
 				if (err == EAGAIN || err == EWOULDBLOCK) {
 					pump_watch(loop, rsp, EV_READ);
@@ -822,8 +678,8 @@ rsp_run(struct ev_loop *restrict loop, struct http_stream *restrict s)
 				return;
 			}
 			stream_touch(loop, s);
-			rsp->in_len += n;
-			rsp->in[rsp->in_len] = '\0';
+			rsp->framer.in_len += n;
+			rsp->framer.in[rsp->framer.in_len] = '\0';
 			continue;
 		}
 		case RSP_SEND: {
@@ -856,16 +712,20 @@ rsp_run(struct ev_loop *restrict loop, struct http_stream *restrict s)
 				 * on a 1xx would make the following final response
 				 * be dechunked and misparsed. */
 				s->rsp_interim = false;
-				s->rsp_line = false;
 				s->rsp_chunked = false;
 				s->rsp_clen_known = false;
 				s->rsp_clen = 0;
 				s->rsp_connection = NULL;
-				const size_t rest = rsp->in_len - s->rsp_parse;
-				memmove(rsp->in, rsp->in + s->rsp_parse, rest);
-				rsp->in_len = rest;
-				rsp->in[rest] = '\0';
-				s->rsp_parse = 0;
+				const size_t rest =
+					rsp->framer.in_len - s->rsp_reader.pos;
+				memmove(rsp->framer.in,
+					rsp->framer.in + s->rsp_reader.pos,
+					rest);
+				rsp->framer.in_len = rest;
+				rsp->framer.in[rest] = '\0';
+				/* reset the reader (pos=0, line_done=false) to parse
+				 * the next response from the front of the buffer */
+				http_reader_init(&s->rsp_reader);
 				s->rsp_nhdr = 0;
 				s->rsp_phase = RSP_HDR;
 				continue;
@@ -928,12 +788,12 @@ http_ctx_start_stream(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	} else {
 		reqmode = HTTP_BODY_NONE;
 	}
-	http_body_init(&req->body, reqmode, reqclen);
-	req->rechunk = (reqmode == HTTP_BODY_CHUNKED);
+	http_framer_init(
+		&req->framer, reqmode, reqclen, reqmode == HTTP_BODY_CHUNKED);
 	const size_t readahead = readahead_len(conn);
 	if (readahead > 0) {
-		memcpy(req->in, conn->next, readahead);
-		req->in_len = readahead;
+		memcpy(req->framer.in, conn->next, readahead);
+		http_framer_seed(&req->framer, 0, readahead);
 	}
 	ev_io_init(&req->w, pump_cb, upstream_fd, EV_WRITE);
 	req->w.data = req;
@@ -965,18 +825,7 @@ http_ctx_start_stream(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ctx->w_timeout.repeat = ctx->s->conf->timeout;
 	ev_timer_again(loop, &ctx->w_timeout);
 	stats->num_halfopen--;
-#if WITH_THREADS
-	const size_t cur =
-		atomic_fetch_add_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed) +
-		1;
-#else
-	const size_t cur = ++ctx->s->num_sessions;
-#endif
-	if (cur > stats->num_sessions_peak) {
-		stats->num_sessions_peak = cur;
-	}
-	stats->num_success++;
+	(void)server_account_session(ctx->s);
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx, "stream start: [%d<->%d]", client_fd, upstream_fd);
 
@@ -1206,57 +1055,11 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 }
 #endif /* WITH_RULESET */
 
-/* Normalize "host[:port]" into buf, appending ":80" when the port is
- * absent. Returns false when buf is too small or host is malformed. */
-static bool hostport_normalize(
-	char *restrict buf, const size_t cap, const char *restrict host)
-{
-	const size_t hlen = strlen(host);
-	if (hlen >= cap) {
-		return false;
-	}
-	memcpy(buf, host, hlen + 1);
-	const char *const portcheck = (buf[0] == '[') ? strchr(buf, ']') : buf;
-	if (portcheck == NULL) {
-		return false;
-	}
-	if (strchr(portcheck, ':') != NULL) {
-		return true;
-	}
-	if (hlen + 3 >= cap) {
-		return false;
-	}
-	memcpy(buf + hlen, ":80", 4);
-	return true;
-}
-
-/* Append a string to wbuf, failing instead of truncating. */
+/* Append a string to the connection's write buffer, failing instead of
+ * truncating. */
 static bool fwd_append(struct http_conn *restrict p, const char *restrict s)
 {
-	const size_t n = strlen(s);
-	if (n > p->wbuf.cap - p->wbuf.len) {
-		return false;
-	}
-	BUF_APPEND(p->wbuf, s, n);
-	return true;
-}
-
-/* Checks whether the Connection header value lists the given field name. */
-static bool
-connection_lists(const char *restrict connection, const char *restrict key)
-{
-	const size_t keylen = strlen(key);
-	const char *tok;
-	size_t toklen;
-	for (const char *next =
-		     parsehdr_connection_token(connection, &tok, &toklen);
-	     tok != NULL;
-	     next = parsehdr_connection_token(next, &tok, &toklen)) {
-		if (toklen == keylen && strncasecmp(tok, key, keylen) == 0) {
-			return true;
-		}
-	}
-	return false;
+	return http_append((struct buffer *)&p->wbuf, s);
 }
 
 /* Rebuild the client request headers in wbuf for forwarding to the upstream
@@ -1280,7 +1083,7 @@ static uint_fast16_t build_forward_req(struct http_ctx *restrict ctx)
 	    parsed.host[0] == '\0') {
 		return HTTP_BAD_REQUEST;
 	}
-	if (!hostport_normalize(
+	if (!http_hostport_normalize(
 		    ctx->req_target, sizeof(ctx->req_target), parsed.host)) {
 		return HTTP_BAD_REQUEST;
 	}
@@ -1298,27 +1101,17 @@ static uint_fast16_t build_forward_req(struct http_ctx *restrict ctx)
 	ok = ok && fwd_append(p, "Host: ") && fwd_append(p, parsed.host) &&
 	     fwd_append(p, "\r\n");
 	/* end-to-end headers, except those listed in Connection */
-	for (size_t i = 0; ok && i < ctx->num_fwd_hdr; i++) {
-		const char *const key = ctx->fwd_hdr[i].key;
-		if (connection_lists(p->hdr.connection, key)) {
-			continue;
-		}
-		ok = fwd_append(p, key) && fwd_append(p, ": ") &&
-		     fwd_append(p, ctx->fwd_hdr[i].value) &&
-		     fwd_append(p, "\r\n");
-	}
+	struct buffer *restrict wbuf = (struct buffer *)&p->wbuf;
+	ok = ok &&
+	     http_append_headers(
+		     wbuf, ctx->fwd_hdr, ctx->num_fwd_hdr, p->hdr.connection);
 	/* RFC 9110 §7.6.3: append our Via entry after any client Via */
 	ok = ok && fwd_append(p, "Via: ") && fwd_append(p, version + 5) &&
 	     fwd_append(p, " neosocksd\r\n");
-	if (p->hdr.transfer.encoding == TENCODING_CHUNKED) {
-		ok = ok && fwd_append(p, "Transfer-Encoding: chunked\r\n");
-	} else if (ctx->req_content_length_known) {
-		char cl[sizeof("Content-Length: \r\n") + 20];
-		(void)snprintf(
-			cl, sizeof(cl), "Content-Length: %zu\r\n",
-			ctx->req_content_length);
-		ok = ok && fwd_append(p, cl);
-	}
+	ok = ok &&
+	     http_append_framing(
+		     wbuf, p->hdr.transfer.encoding == TENCODING_CHUNKED,
+		     ctx->req_content_length_known, ctx->req_content_length);
 	/* the client Connection/Keep-Alive headers were dropped above; overwrite
 	 * the upstream connection disposition to close (no keep-alive) to keep
 	 * the proxy stateless and bound the response by the upstream EOF */
@@ -1486,19 +1279,10 @@ static bool parse_header_proxy_pass(
 		    p->hdr.transfer.encoding == TENCODING_CHUNKED) {
 			return false;
 		}
-		/* require bare decimal digits; no sign, prefix, or list */
-		if ((unsigned char)value[0] < '0' ||
-		    (unsigned char)value[0] > '9') {
+		if (!http_parse_content_length(
+			    value, &ctx->req_content_length)) {
 			return false;
 		}
-		char *end;
-		const uintmax_t cl = strtoumax(value, &end, 10);
-		for (; *end == ' ' || *end == '\t'; end++) {
-		}
-		if (*end != '\0' || cl > (uintmax_t)SIZE_MAX) {
-			return false;
-		}
-		ctx->req_content_length = (size_t)cl;
 		ctx->req_content_length_known = true;
 		/* not recorded: the canonical value is emitted at rebuild */
 		return true;
@@ -1527,7 +1311,7 @@ static bool parse_header(void *data, const char *key, char *value)
 
 	/* RFC 7230 §3.2.6 / RFC 9112 §2.2: validate field name (tchar only)
 	 * and field value (no CTL except HTAB, no DEL). */
-	if (!header_field_valid(key, value)) {
+	if (!http_header_field_valid(key, value)) {
 		return false;
 	}
 

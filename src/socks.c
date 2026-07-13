@@ -757,41 +757,14 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	stats->num_halfopen--;
 	SOCKS_CTX_LOG_F(
 		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	/* Increment before transfer_start — xfer decrement can't precede ours. Undo on OOM. */
-#if WITH_THREADS
-	const size_t cur =
-		atomic_fetch_add_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed) +
-		1;
-#else
-	const size_t cur = ++ctx->s->num_sessions;
-#endif
-	if (!transfer_serve(
-		    ctx->s->xfer, acc_fd, dial_fd,
-		    &(struct transfer_opts){
-			    .byt_up = &ctx->s->byt_up,
-			    .byt_down = &ctx->s->byt_down,
-#if WITH_SPLICE
-			    .use_splice = ctx->s->conf->pipe,
-#endif
-			    .num_sessions = &ctx->s->num_sessions,
-		    })) {
-#if WITH_THREADS
-		atomic_fetch_sub_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed);
-#else
-		ctx->s->num_sessions--;
-#endif
+	const size_t cur = server_start_session(ctx->s, acc_fd, dial_fd);
+	if (cur == 0) {
 		LOGOOM();
 		socket_close(acc_fd);
 		socket_close(dial_fd);
 		gc_unref(&ctx->gcbase);
 		return;
 	}
-	if (cur > stats->num_sessions_peak) {
-		stats->num_sessions_peak = cur;
-	}
-	stats->num_success++;
 	SOCKS_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
 	gc_unref(&ctx->gcbase);
 }
@@ -1285,18 +1258,7 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ctx->state = STATE_UDP_RELAY;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	stats->num_halfopen--;
-#if WITH_THREADS
-	const size_t cur =
-		atomic_fetch_add_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed) +
-		1;
-#else
-	const size_t cur = ++ctx->s->num_sessions;
-#endif
-	if (cur > stats->num_sessions_peak) {
-		stats->num_sessions_peak = cur;
-	}
-	stats->num_success++;
+	const size_t cur = server_account_session(ctx->s);
 	ev_io_init(&ctx->w_udp, udp_relay_cb, udp_fd, EV_READ);
 	ctx->w_udp.data = ctx;
 	ev_io_start(loop, &ctx->w_udp);

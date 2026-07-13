@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
@@ -418,6 +419,55 @@ int http_conn_send(struct http_conn *restrict p, const int fd, int *restrict err
 	return 0;
 }
 
+void http_reader_init(struct http_reader *restrict r)
+{
+	r->pos = 0;
+	r->line_done = false;
+}
+
+enum http_reader_state http_reader_parse(
+	struct http_reader *restrict r, char *restrict base,
+	struct http_message *restrict msg, const bool is_request,
+	const struct http_parsehdr_cb on_header)
+{
+	char *next = base + r->pos;
+	if (!r->line_done) {
+		char *const p = http_parse(next, msg);
+		if (p == NULL) {
+			return HTTP_READER_ERROR;
+		}
+		if (p == next) {
+			return HTTP_READER_MORE;
+		}
+		const char *const version =
+			is_request ? msg->req.version : msg->rsp.version;
+		if (strncmp(version, "HTTP/1.", 7) != 0) {
+			return HTTP_READER_ERROR;
+		}
+		r->line_done = true;
+		r->pos = (size_t)(p - base);
+		next = p;
+	}
+	for (;;) {
+		char *key, *value;
+		char *const p = http_parsehdr(next, &key, &value);
+		if (p == NULL) {
+			return HTTP_READER_ERROR;
+		}
+		if (p == next) {
+			return HTTP_READER_MORE;
+		}
+		r->pos = (size_t)(p - base);
+		next = p;
+		if (key == NULL) {
+			return HTTP_READER_OK; /* end of headers */
+		}
+		if (!on_header.func(on_header.ctx, key, value)) {
+			return HTTP_READER_ERROR;
+		}
+	}
+}
+
 void http_body_init(
 	struct http_body *restrict d, const enum http_body_mode mode,
 	const size_t content_length)
@@ -636,6 +686,147 @@ size_t http_chunk_header(char *restrict buf, size_t datalen)
 	return pos;
 }
 
+void http_framer_init(
+	struct http_framer *restrict f, const enum http_body_mode in_mode,
+	const size_t content_length, const bool rechunk)
+{
+	http_body_init(&f->body, in_mode, content_length);
+	f->rechunk = rechunk;
+	f->done = false;
+	f->sending_term = false;
+	f->in_pos = f->in_len = 0;
+	f->out_pos = f->out_end = 0;
+	f->datalen = 0;
+}
+
+void http_framer_seed(
+	struct http_framer *restrict f, const size_t pos, const size_t len)
+{
+	f->in_pos = pos;
+	f->in_len = len;
+}
+
+static bool
+framer_on_data(void *ctx, const unsigned char *restrict data, const size_t len)
+{
+	struct http_framer *restrict f = ctx;
+	/* the input is throttled so the decoded output always fits */
+	memcpy(f->out + HTTP_FRAMER_HDR_ROOM + f->datalen, data, len);
+	f->datalen += len;
+	return true;
+}
+
+enum http_framer_op http_framer_run(struct http_framer *restrict f)
+{
+	const struct http_body_data_cb cb = { .func = framer_on_data,
+					      .ctx = f };
+	for (;;) {
+		if (f->out_pos < f->out_end) {
+			return HTTP_FRAMER_SEND;
+		}
+		if (f->done) {
+			return HTTP_FRAMER_DONE;
+		}
+		if (f->body.done) {
+			if (f->rechunk && !f->sending_term) {
+				memcpy(f->out, HTTP_CHUNK_TERMINATOR,
+				       sizeof(HTTP_CHUNK_TERMINATOR) - 1);
+				f->out_pos = 0;
+				f->out_end = sizeof(HTTP_CHUNK_TERMINATOR) - 1;
+				f->sending_term = true;
+				return HTTP_FRAMER_SEND;
+			}
+			f->done = true;
+			return HTTP_FRAMER_DONE;
+		}
+		if (f->in_pos >= f->in_len) {
+			return HTTP_FRAMER_FILL;
+		}
+		size_t avail = f->in_len - f->in_pos;
+		if (f->body.mode == HTTP_BODY_CONTENT_LENGTH) {
+			const size_t remain =
+				f->body.content_length - f->body.consumed;
+			if (avail > remain) {
+				avail = remain; /* discard surplus past CL */
+			}
+		}
+		f->datalen = 0;
+		size_t consumed = avail;
+		if (!http_body_consume(
+			    &f->body, f->in + f->in_pos, &consumed, cb)) {
+			return HTTP_FRAMER_ERROR;
+		}
+		f->in_pos += consumed;
+		if (f->body.done) {
+			/* surplus past the body (a pipelined next message) is
+			 * left unread and discarded -- no keep-alive here */
+			f->in_pos = f->in_len;
+		}
+		if (f->datalen == 0) {
+			continue; /* framing-only bytes produced no output */
+		}
+		if (f->rechunk) {
+			char hdr[HTTP_CHUNK_HEADER_MAX];
+			const size_t hlen = http_chunk_header(hdr, f->datalen);
+			memcpy(f->out + HTTP_FRAMER_HDR_ROOM - hlen, hdr, hlen);
+			f->out[HTTP_FRAMER_HDR_ROOM + f->datalen] = '\r';
+			f->out[HTTP_FRAMER_HDR_ROOM + f->datalen + 1] = '\n';
+			f->out_pos = HTTP_FRAMER_HDR_ROOM - hlen;
+			f->out_end = HTTP_FRAMER_HDR_ROOM + f->datalen + 2;
+		} else {
+			f->out_pos = HTTP_FRAMER_HDR_ROOM;
+			f->out_end = HTTP_FRAMER_HDR_ROOM + f->datalen;
+		}
+		return HTTP_FRAMER_SEND;
+	}
+}
+
+size_t http_framer_pending(
+	const struct http_framer *restrict f,
+	const unsigned char **restrict buf)
+{
+	*buf = f->out + f->out_pos;
+	return f->out_end - f->out_pos;
+}
+
+void http_framer_drained(struct http_framer *restrict f, const size_t n)
+{
+	f->out_pos += n;
+	if (f->out_pos >= f->out_end) {
+		f->out_pos = f->out_end = 0;
+	}
+}
+
+void http_framer_inbuf(
+	struct http_framer *restrict f, unsigned char **restrict buf,
+	size_t *restrict cap)
+{
+	*buf = f->in;
+	size_t want = sizeof(f->in);
+	if (f->body.mode == HTTP_BODY_CONTENT_LENGTH) {
+		const size_t remain = f->body.content_length - f->body.consumed;
+		if (want > remain) {
+			want = remain;
+		}
+	}
+	*cap = want;
+}
+
+void http_framer_filled(struct http_framer *restrict f, const size_t n)
+{
+	f->in_pos = 0;
+	f->in_len = n;
+}
+
+bool http_framer_eof(struct http_framer *restrict f)
+{
+	if (f->body.mode != HTTP_BODY_EOF) {
+		return false;
+	}
+	(void)http_body_finish(&f->body);
+	return true;
+}
+
 bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
@@ -702,6 +893,32 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 	return true;
 }
 
+bool http_parse_content_length(const char *restrict value, size_t *restrict out)
+{
+	/* RFC 9110 §8.6: Content-Length = 1*DIGIT, no sign of either kind;
+	 * strtoumax alone would accept a leading '-' (wrapping to a huge
+	 * value) or '+', and an empty value (consuming nothing) as 0 */
+	if (!isdigit((unsigned char)value[0])) {
+		return false;
+	}
+
+	char *endptr;
+	errno = 0;
+	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
+
+	/* Reject a value that overflows uintmax_t itself (strtoumax sets ERANGE
+	 * and returns UINTMAX_MAX) as well as one that merely exceeds SIZE_MAX.
+	 * On an LP64 target uintmax_t == size_t, so the two bounds coincide and
+	 * the `> SIZE_MAX` guard alone would let a 2^64 value slip through. */
+	if (errno == ERANGE || *endptr != '\0' ||
+	    lenvalue > (uintmax_t)SIZE_MAX) {
+		return false;
+	}
+
+	*out = (size_t)lenvalue;
+	return true;
+}
+
 bool parsehdr_content_length(
 	struct http_conn *restrict p, const char *restrict value)
 {
@@ -712,21 +929,10 @@ bool parsehdr_content_length(
 		return false;
 	}
 
-	/* RFC 9110 §8.6: Content-Length = 1*DIGIT, no sign of either kind;
-	 * strtoumax alone would accept a leading '-' (wrapping to a huge
-	 * value) or '+', and an empty value (consuming nothing) as 0 */
-	if (!isdigit(value[0])) {
+	size_t content_length;
+	if (!http_parse_content_length(value, &content_length)) {
 		return false;
 	}
-
-	char *endptr;
-	const uintmax_t lenvalue = strtoumax(value, &endptr, 10);
-
-	if (*endptr || lenvalue > SIZE_MAX) {
-		return false;
-	}
-
-	const size_t content_length = (size_t)lenvalue;
 
 	/* CONNECT method must not have Content-Length. p->msg is a union whose
 	 * req.method aliases rsp.version, so only test it in request mode. */
@@ -798,6 +1004,107 @@ const char *parsehdr_connection_token(
 	*tok = start;
 	*toklen = (size_t)(p - start);
 	return p;
+}
+
+bool http_connection_lists(
+	const char *restrict connection, const char *restrict key)
+{
+	const size_t keylen = strlen(key);
+	const char *tok;
+	size_t toklen;
+	for (const char *next =
+		     parsehdr_connection_token(connection, &tok, &toklen);
+	     tok != NULL;
+	     next = parsehdr_connection_token(next, &tok, &toklen)) {
+		if (toklen == keylen && strncasecmp(tok, key, keylen) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool http_header_field_valid(
+	const char *restrict key, const char *restrict value)
+{
+	for (const unsigned char *c = (const unsigned char *)key; *c != '\0';
+	     c++) {
+		if (!isalnum(*c) && strchr("!#$%&'*+-.^_`|~", *c) == NULL) {
+			return false;
+		}
+	}
+	for (const unsigned char *c = (const unsigned char *)value; *c != '\0';
+	     c++) {
+		if (iscntrl(*c) && *c != '\t') {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool http_hostport_normalize(
+	char *restrict buf, const size_t cap, const char *restrict host)
+{
+	const size_t hlen = strlen(host);
+	if (hlen >= cap) {
+		return false;
+	}
+	memcpy(buf, host, hlen + 1);
+	const char *const portcheck = (buf[0] == '[') ? strchr(buf, ']') : buf;
+	if (portcheck == NULL) {
+		return false;
+	}
+	if (strchr(portcheck, ':') != NULL) {
+		return true;
+	}
+	if (hlen + 3 >= cap) {
+		return false;
+	}
+	memcpy(buf + hlen, ":80", 4);
+	return true;
+}
+
+bool http_append(struct buffer *restrict buf, const char *restrict s)
+{
+	const size_t n = strlen(s);
+	if (n > buf->cap - buf->len) {
+		return false;
+	}
+	BUF_APPEND(*buf, s, n);
+	return true;
+}
+
+bool http_append_headers(
+	struct buffer *restrict buf, const struct http_header_kv *restrict hdr,
+	const size_t n, const char *restrict connection)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (http_connection_lists(connection, hdr[i].key)) {
+			continue;
+		}
+		if (!http_append(buf, hdr[i].key) || !http_append(buf, ": ") ||
+		    !http_append(buf, hdr[i].value) ||
+		    !http_append(buf, "\r\n")) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool http_append_framing(
+	struct buffer *restrict buf, const bool chunked, const bool clen_known,
+	const size_t content_length)
+{
+	if (chunked) {
+		return http_append(buf, "Transfer-Encoding: chunked\r\n");
+	}
+	if (clen_known) {
+		char cl[sizeof("Content-Length: \r\n") + 20];
+		(void)snprintf(
+			cl, sizeof(cl), "Content-Length: %zu\r\n",
+			content_length);
+		return http_append(buf, cl);
+	}
+	return true;
 }
 
 void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)

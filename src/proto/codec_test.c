@@ -14,6 +14,7 @@
 
 #include "codec.h"
 
+#include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "miniz.h"
@@ -217,6 +218,78 @@ T_DECLARE_CASE(codec_lua_reader_passthrough_plain_file)
 	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
 	T_EXPECT_EQ(len, sizeof(content) - 1);
 	T_EXPECT_MEMEQ(out, content, len);
+
+	(void)unlink(path);
+}
+
+/* A file that is nothing but a UTF-8 BOM is a valid (empty) chunk: the BOM is
+ * stripped and no source bytes are emitted. Exercises the peek window filling
+ * to exactly the BOM length and then hitting EOF. */
+T_DECLARE_CASE(codec_lua_reader_bom_only_no_content)
+{
+	char path[] = "/tmp/codec_test_XXXXXX";
+	static const char content[] =
+		"\xEF\xBB\xBF"; /* UTF-8 BOM, nothing after */
+	T_CHECK(write_tempfile(path, content, sizeof(content) - 1) == 0);
+
+	char out[128];
+	size_t len = 12345;
+	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
+	T_EXPECT_EQ(len, (size_t)0);
+
+	(void)unlink(path);
+}
+
+/* An empty source yields an empty chunk cleanly: a zero-length first read is
+ * EOF, not a state the reader must recover from. */
+T_DECLARE_CASE(codec_lua_reader_empty_stream)
+{
+	char path[] = "/tmp/codec_test_XXXXXX";
+	T_CHECK(write_tempfile(path, "", 0) == 0);
+
+	char out[128];
+	size_t len = 12345;
+	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
+	T_EXPECT_EQ(len, (size_t)0);
+
+	(void)unlink(path);
+}
+
+/*
+ * Regression: a shebang line longer than the peek window whose terminating
+ * newline falls exactly on a direct_read chunk boundary (offset == n). The
+ * bufreader serves the file in IO_BUFSIZE chunks after the 8-byte peek, so a
+ * shebang line of exactly IO_BUFSIZE bytes puts its '\n' as the last byte of
+ * the first post-peek chunk. lua_direct_read's continuation loop then flips to
+ * LUA_PASSTHROUGH but re-iterates; if it re-runs lua_skip_shebang on the next
+ * chunk of real source it strips that chunk's first line. The whole source
+ * ("return 42\n" + "return 7\n") must survive.
+ */
+T_DECLARE_CASE(codec_lua_reader_shebang_newline_on_chunk_boundary)
+{
+	char path[] = "/tmp/codec_test_XXXXXX";
+	enum { SHEBANG_LEN = IO_BUFSIZE };
+	static const char source[] = "return 42\nreturn 7\n";
+	const size_t total = SHEBANG_LEN + sizeof(source) - 1;
+	char *const content = malloc(total);
+	T_CHECK(content != NULL);
+	/* "#!" + filler + '\n', exactly IO_BUFSIZE bytes. */
+	content[0] = '#';
+	content[1] = '!';
+	memset(content + 2, 'x', SHEBANG_LEN - 3);
+	content[SHEBANG_LEN - 1] = '\n';
+	memcpy(content + SHEBANG_LEN, source, sizeof(source) - 1);
+	const int rc = write_tempfile(path, content, total);
+	free(content);
+	T_CHECK(rc == 0);
+
+	/* Read with a buffer larger than IO_BUFSIZE so the first post-peek chunk
+	 * spans the whole 4088-byte buffered remainder up to the boundary. */
+	char out[2 * IO_BUFSIZE];
+	size_t len;
+	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
+	T_EXPECT_EQ(len, sizeof(source) - 1);
+	T_EXPECT_MEMEQ(out, source, len);
 
 	(void)unlink(path);
 }
@@ -875,6 +948,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_lua_reader_strips_bom_only),
 	T_CASE(codec_lua_reader_small_first_read),
 	T_CASE(codec_lua_reader_passthrough_plain_file),
+	T_CASE(codec_lua_reader_bom_only_no_content),
+	T_CASE(codec_lua_reader_empty_stream),
+	T_CASE(codec_lua_reader_shebang_newline_on_chunk_boundary),
 	T_CASE(codec_null_base),
 	T_CASE(codec_zlib_roundtrip),
 	T_CASE(codec_deflate_roundtrip),

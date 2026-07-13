@@ -183,11 +183,17 @@ int main(int argc, char *argv[])
 
 	/* loglevel and nameserver were latched from CLI values before any boot
 	 * config was loaded (slog in conf_parseargs, the c-ares servers in
-	 * resolver_new, which must precede privilege drop). Re-apply them now so a
-	 * value set only in a boot config still takes effect. Both are idempotent
-	 * when the boot config left them unchanged. */
-	slog_setlevel(conf->loglevel);
-	resolver_setnameserver(resolver, conf);
+	 * resolver_new, which must precede privilege drop). Re-apply them here only
+	 * when a boot config was loaded, so a value set only there still takes
+	 * effect. Without a boot config both are already applied, so re-applying
+	 * would be redundant — and for an invalid --nameserver would log the c-ares
+	 * failure a second time. */
+#if WITH_LUA
+	if (conf->boot != NULL) {
+		slog_setlevel(conf->loglevel);
+		resolver_setnameserver(resolver, conf);
+	}
+#endif /* WITH_LUA */
 
 	struct server *s = &app.server;
 	if (!server_init(s, loop, conf, resolver, xfer, basereq, ruleset)) {
