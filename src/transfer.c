@@ -401,7 +401,9 @@ transfer_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 		}
 	}
 	if (nbsend > 0) {
-		update_stats(h, nbsend, h->buf.len);
+		/* the still-buffered amount is what was received but not yet
+		 * sent, not the whole buffer */
+		update_stats(h, nbsend, h->buf.len - h->pos);
 	}
 
 	const bool has_data = (h->pos < h->buf.len);

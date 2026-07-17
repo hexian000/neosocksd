@@ -221,6 +221,7 @@ static void sock_state_cb(
 		return;
 	}
 
+	bool was_active = false;
 	if (node == NULL) {
 		struct io_node *const new_node = malloc(sizeof(struct io_node));
 		if (new_node == NULL) {
@@ -233,12 +234,18 @@ static void sock_state_cb(
 		r->sockets.next = new_node;
 		node = new_node;
 	} else {
+		was_active = ev_is_active(&node->watcher);
 		ev_io_stop(r->loop, &node->watcher);
 		ev_io_set(&node->watcher, fd, events);
 	}
 
+	/* count only an inactive->active transition; a pure interest change on
+	 * an already-active watcher must not re-increment the counter */
+	if (!was_active) {
+		r->num_socket++;
+	}
 	LOGV_F("io: [fd:%d] events=0x%x num_socket=%zu", fd, events,
-	       ++r->num_socket);
+	       r->num_socket);
 	ev_io_start(r->loop, &node->watcher);
 }
 
