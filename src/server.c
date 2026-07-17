@@ -9,6 +9,7 @@
 #include "forward.h"
 #include "http_proxy.h"
 #include "proto/domain.h"
+#include "resolver.h"
 #if WITH_RULESET
 #include "ruleset/ruleset.h"
 #endif
@@ -16,6 +17,7 @@
 #include "util.h"
 
 #include "math/rand.h"
+#include "meta/arraysize.h"
 #include "net/addr.h"
 #include "os/clock.h"
 #include "os/daemon.h"
@@ -302,6 +304,11 @@ static void signal_cb(
 			if (server_reload_ruleset(s)) {
 				if (s->conf->boot != NULL) {
 					server_reload_basereq(s);
+					/* a boot config may change loglevel and
+					 * nameserver; re-apply them as startup does */
+					slog_setlevel(s->conf->loglevel);
+					resolver_setnameserver(
+						s->resolver, s->conf);
 				}
 				LOGN("reload: config successfully reloaded");
 			}
@@ -420,20 +427,20 @@ bool server_init(
 		}
 	}
 
-	ev_signal_init(&s->w_sighup, signal_cb, SIGHUP);
-	s->w_sighup.data = s;
-	ev_set_priority(&s->w_sighup, EV_MAXPRI);
-	ev_signal_start(loop, &s->w_sighup);
-
-	ev_signal_init(&s->w_sigint, signal_cb, SIGINT);
-	s->w_sigint.data = s;
-	ev_set_priority(&s->w_sigint, EV_MAXPRI);
-	ev_signal_start(loop, &s->w_sigint);
-
-	ev_signal_init(&s->w_sigterm, signal_cb, SIGTERM);
-	s->w_sigterm.data = s;
-	ev_set_priority(&s->w_sigterm, EV_MAXPRI);
-	ev_signal_start(loop, &s->w_sigterm);
+	const struct {
+		ev_signal *w;
+		int sig;
+	} sigwatchers[] = {
+		{ &s->w_sighup, SIGHUP },
+		{ &s->w_sigint, SIGINT },
+		{ &s->w_sigterm, SIGTERM },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(sigwatchers); i++) {
+		ev_signal_init(sigwatchers[i].w, signal_cb, sigwatchers[i].sig);
+		sigwatchers[i].w->data = s;
+		ev_set_priority(sigwatchers[i].w, EV_MAXPRI);
+		ev_signal_start(loop, sigwatchers[i].w);
+	}
 
 	return true;
 }

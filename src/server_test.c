@@ -55,6 +55,7 @@ static struct {
 	int ruleset_setserver_calls;
 	int ruleset_setbasereq_calls;
 	int ruleset_free_calls;
+	int resolver_setnameserver_calls;
 #endif
 } CONTROL;
 
@@ -169,6 +170,14 @@ void ruleset_setserver(struct ruleset *restrict r, struct server *restrict s)
 	(void)r;
 	(void)s;
 	CONTROL.ruleset_setserver_calls++;
+}
+
+void resolver_setnameserver(
+	struct resolver *restrict r, const struct config *restrict conf)
+{
+	(void)r;
+	(void)conf;
+	CONTROL.resolver_setnameserver_calls++;
 }
 
 void ruleset_setbasereq(
@@ -880,6 +889,8 @@ T_DECLARE_CASE(server_signal_reload_boot_basereq)
 	T_EXPECT(s.ruleset != NULL);
 	/* the boot config path rebuilds and re-applies the base request */
 	T_EXPECT_EQ(CONTROL.ruleset_setbasereq_calls, 1);
+	/* a boot config may change the nameserver, so it is re-applied too */
+	T_EXPECT_EQ(CONTROL.resolver_setnameserver_calls, 1);
 
 	server_stop(&s);
 	ev_loop_destroy(loop);
