@@ -837,6 +837,82 @@ T_DECLARE_CASE(codec_zlib_corrupt_input_fails)
 	VBUF_FREE(compressed);
 }
 
+/* codec_zlib_reader validates the trailing adler-32 (miniz enforces it via
+ * TINFL_FLAG_PARSE_ZLIB_HEADER); flipping it must make the read/close fail. */
+T_DECLARE_CASE(codec_zlib_adler32_mismatch)
+{
+	enum { N = 1024 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 11U + 3U) & 0xffU);
+	}
+
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	struct stream *w = codec_zlib_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src, N));
+	T_EXPECT_EQ(stream_close(w), 0);
+	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 6);
+
+	/* the adler-32 is the last 4 bytes; flip one so it no longer matches */
+	unsigned char *d = VBUF_DATA(compressed);
+	const size_t len = VBUF_LEN(compressed);
+	d[len - 1] ^= 0xffu;
+	struct stream *r = codec_zlib_reader(io_memreader(d, len));
+	T_CHECK(r != NULL);
+	/* Read to EOF: the mismatch is reported once all output is consumed
+	 * and the trailer is validated, as a real consumer draining the stream
+	 * would observe. */
+	bool read_failed = false;
+	for (;;) {
+		size_t n = sizeof(out);
+		const int rret = stream_read(r, out, &n);
+		if (rret != 0) {
+			read_failed = true;
+			break;
+		}
+		if (n == 0) {
+			break;
+		}
+	}
+	const int cret = stream_close(r);
+	T_EXPECT(read_failed || cret != 0);
+	VBUF_FREE(compressed);
+}
+
+/* A caller that reads exactly the decompressed length and then closes (without
+ * a trailing EOF read) must still see a corrupt adler-32: inflate_close()
+ * surfaces the decode status, mirroring the gzip reader. */
+T_DECLARE_CASE(codec_zlib_adler32_mismatch_surfaced_at_close)
+{
+	enum { N = 1024 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 11U + 3U) & 0xffU);
+	}
+
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	struct stream *w = codec_zlib_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src, N));
+	T_EXPECT_EQ(stream_close(w), 0);
+	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 6);
+
+	unsigned char *d = VBUF_DATA(compressed);
+	const size_t len = VBUF_LEN(compressed);
+	d[len - 1] ^= 0xffu;
+	struct stream *r = codec_zlib_reader(io_memreader(d, len));
+	T_CHECK(r != NULL);
+	/* read exactly the decompressed length, then close without a final read */
+	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_close(r) != 0);
+	VBUF_FREE(compressed);
+}
+
 T_DECLARE_CASE(codec_gzip_hcrc_mismatch)
 {
 	enum { N = 256 };
@@ -874,6 +950,46 @@ T_DECLARE_CASE(codec_gzip_bad_magic)
 	const int rret = stream_read(r, out, &n);
 	const int cret = stream_close(r);
 	T_EXPECT(rret != 0 || cret != 0);
+}
+
+/* Regression: a gzip header whose FEXTRA field ends exactly at end-of-input
+ * with the FNAME flag set must not read past the source buffer. The FEXTRA_2
+ * phase falls through to FNAME without re-checking the loop's srclen guard;
+ * before the fix this over-read *srcbuf and underflowed srclen. The exact-size
+ * heap buffer lets ASan catch any over-read. */
+T_DECLARE_CASE(codec_gzip_truncated_after_fextra)
+{
+	static const unsigned char trunc[] = {
+		/* 10-byte header, FLG = FEXTRA(0x04) | FNAME(0x08) */
+		0x1f,
+		0x8b,
+		0x08,
+		0x0c,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x00,
+		0x03,
+		/* XLEN = 4, a 4-byte extra field, then EOF (no name follows) */
+		0x04,
+		0x00,
+		0xaa,
+		0xbb,
+		0xcc,
+		0xdd,
+	};
+	unsigned char *const buf = malloc(sizeof(trunc));
+	T_CHECK(buf != NULL);
+	memcpy(buf, trunc, sizeof(trunc));
+	struct stream *r = codec_gzip_reader(io_memreader(buf, sizeof(trunc)));
+	T_CHECK(r != NULL);
+	unsigned char out[16];
+	size_t n = sizeof(out);
+	const int rret = stream_read(r, out, &n);
+	const int cret = stream_close(r);
+	T_EXPECT(rret != 0 || cret != 0);
+	free(buf);
 }
 
 /* -------------------------------------------------------------------------
@@ -963,8 +1079,11 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_gzip_empty_fname_after_fextra),
 	T_CASE(codec_zlib_flush_then_continue),
 	T_CASE(codec_zlib_corrupt_input_fails),
+	T_CASE(codec_zlib_adler32_mismatch),
+	T_CASE(codec_zlib_adler32_mismatch_surfaced_at_close),
 	T_CASE(codec_gzip_hcrc_mismatch),
 	T_CASE(codec_gzip_bad_magic),
+	T_CASE(codec_gzip_truncated_after_fextra),
 	T_BENCH(bench_zlib_roundtrip),
 	T_BENCH(bench_gzip_roundtrip),
 	T_SUITE_END,

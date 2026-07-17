@@ -261,9 +261,12 @@ inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 static int inflate_close(void *p)
 {
 	struct inflate_stream *restrict z = p;
+	/* surface a decode error (e.g. an adler-32 mismatch) even when the
+	 * caller closed without a final read to EOF, mirroring gzip_rclose */
+	const int rderr = (z->status < TINFL_STATUS_DONE) ? (int)z->status : 0;
 	const int err = stream_close(z->base);
 	free(z);
-	return err;
+	return rderr != 0 ? rderr : err;
 }
 
 static struct stream *inflate_reader(struct stream *base, const bool zlib)
@@ -693,6 +696,13 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 			if (!(z->hdrflg & GZIP_FNAME)) {
 				z->hphase = GZIP_HPHASE_FCOMMENT;
 				break;
+			}
+			if (z->srclen == 0) {
+				/* FEXTRA_2 falls through here without re-checking the
+				 * loop guard; the buffer may be exhausted exactly at
+				 * the FEXTRA boundary, so wait for more input before
+				 * reading the name byte */
+				return 0;
 			}
 			{
 				/* read the terminator byte from srcbuf directly:
@@ -1296,7 +1306,7 @@ struct stream *codec_lua_reader(const char *path)
 	if (strcmp(path, "-") == 0) {
 		f = stdin;
 	} else {
-		f = fopen(path, "r");
+		f = fopen(path, "rb");
 		if (f == NULL) {
 			LOGE_F("codec_lua_reader: fopen(\"%s\"): (%d) %s", path,
 			       errno, strerror(errno));
