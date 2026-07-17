@@ -24,6 +24,7 @@
 #include "util.h"
 
 #include "meta/arraysize.h"
+#include "os/socket.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -563,6 +564,9 @@ static void serve_payload(
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	/* production dispatches accepted fds non-blocking; match it so the
+	 * EAGAIN paths in socks_recv/send_rsp are exercised */
+	T_CHECK(socket_set_nonblock(sv[0]));
 	socks_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
 	T_CHECK(write_all(sv[1], payload, payload_len) == 0);
 
@@ -579,6 +583,7 @@ static void serve_payload_split(
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]));
 	socks_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
 	if (first_len > 0) {
 		T_CHECK(write_all(sv[1], first, first_len) == 0);
@@ -822,6 +827,27 @@ static size_t make_socks5_unsupported(
 	return fuzz_append_random(p, buf, len, cap, 16);
 }
 
+/* A SOCKS5 UDP ASSOCIATE request; with socks5_udp enabled it reaches
+ * socks_udp_start instead of being rejected as an unsupported command. */
+static size_t make_socks5_udp(
+	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
+{
+	static const unsigned char prefix[] = {
+		SOCKS5,
+		0x01,
+		SOCKS5AUTH_NOAUTH,
+		SOCKS5,
+		SOCKS5CMD_UDPASSOCIATE,
+		0x00,
+		SOCKS5ADDR_IPV4,
+	};
+	(void)memcpy(buf, prefix, sizeof(prefix));
+	size_t len = sizeof(prefix);
+	prng_fill(p, buf + len, 6);
+	len += 6;
+	return fuzz_append_random(p, buf, len, cap, 16);
+}
+
 static size_t make_socks4(
 	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
 {
@@ -859,7 +885,7 @@ static size_t make_socks4a(
 static size_t make_socks_payload(
 	struct prng *restrict p, unsigned char *restrict buf, const size_t cap)
 {
-	switch (prng_next(p) % 8) {
+	switch (prng_next(p) % 9) {
 	case 0: {
 		const size_t len = prng_size(p, 0, cap);
 		prng_fill(p, buf, len);
@@ -874,8 +900,10 @@ static size_t make_socks_payload(
 	case 4:
 		return make_socks5_unsupported(p, buf, cap);
 	case 5:
-		return make_socks4(p, buf, cap);
+		return make_socks5_udp(p, buf, cap);
 	case 6:
+		return make_socks4(p, buf, cap);
+	case 7:
 		return make_socks4a(p, buf, cap);
 	default:
 		buf[0] = SOCKS5;
@@ -894,13 +922,16 @@ static void fuzz_socks_once(struct prng *restrict p)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
-	test_conf.timeout = 1.0;
+	/* a short timeout keeps a BIND/UDP session (which waits for traffic that
+	 * never comes) from lingering across 1000 iterations */
+	test_conf.timeout = 0.02;
 	test_conf.auth_required = prng_bool(p);
-	test_conf.socks5_bind = false;
-	test_conf.socks5_udp = false;
+	test_conf.socks5_bind = prng_bool(p);
+	test_conf.socks5_udp = prng_bool(p);
 	test_server_init(&s);
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]));
 	socks_serve(&s, loop, sv[0], (const struct sockaddr *)&sa);
 	sv[0] = -1;
 	T_CHECK(write_all(sv[1], input, len) == 0);
