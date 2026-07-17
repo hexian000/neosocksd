@@ -1515,8 +1515,12 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	ev_init(&ctx->rpcreturn.w_finish, rpcall_cb);
 	ctx->rpcreturn.w_finish.data = ctx;
 	ctx->rpcreturn.forward = NULL;
+	/* a pending rpcall leaves the result unset until it completes; init it
+	 * so a teardown before completion frees NULL, not an indeterminate ptr */
+	ctx->rpcreturn.rpcall.result = NULL;
+	ctx->rpcreturn.rpcall.resultlen = 0;
 	ctx->rpcstate = NULL;
-#endif
+#endif /* WITH_RULESET */
 	const struct http_parsehdr_cb on_header = {
 		.func = parse_header,
 		.ctx = ctx,

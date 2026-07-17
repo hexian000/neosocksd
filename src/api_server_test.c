@@ -187,11 +187,31 @@ static void reset_ruleset_stub(void)
 	RS.loop = NULL;
 }
 
+/* Write the rpcall result into the callback. The real cfunc_rpcall() leaves
+ * rpcall.result untouched until completion (rpcall_finish), so this runs only
+ * when the call finishes -- never at ruleset_rpcall() return for a pending
+ * call -- keeping the stub faithful to the pending-teardown path. */
+static void set_rpcall_result(struct ruleset_callback *restrict callback)
+{
+	if (RS.rpcall_null_result) {
+		callback->rpcall.result = NULL;
+		callback->rpcall.resultlen = 0;
+		return;
+	}
+	/* rpcall_cb() takes ownership and free()s this */
+	char *const copy = malloc(RS.rpcall_resultlen);
+	T_CHECK(copy != NULL);
+	memcpy(copy, RS.rpcall_result, RS.rpcall_resultlen);
+	callback->rpcall.result = copy;
+	callback->rpcall.resultlen = RS.rpcall_resultlen;
+}
+
 static void finish_rpcall(struct ev_loop *loop)
 {
 	if (RS.pending_rpcall == NULL) {
 		return;
 	}
+	set_rpcall_result(RS.pending_rpcall);
 	ev_feed_event(loop, &RS.pending_rpcall->w_finish, EV_CUSTOM);
 	RS.pending_rpcall = NULL;
 }
@@ -239,23 +259,16 @@ bool ruleset_rpcall(
 	if (!RS.rpcall_ok) {
 		return false;
 	}
-	if (RS.rpcall_null_result) {
-		callback->rpcall.result = NULL;
-		callback->rpcall.resultlen = 0;
-	} else {
-		/* mirror rpcall_finish()'s contract: rpcall_cb() free()s this */
-		char *const copy = malloc(RS.rpcall_resultlen);
-		T_CHECK(copy != NULL);
-		memcpy(copy, RS.rpcall_result, RS.rpcall_resultlen);
-		callback->rpcall.result = copy;
-		callback->rpcall.resultlen = RS.rpcall_resultlen;
-	}
 	RS.rpcstate = (struct ruleset_state *)&ruleset_state_tag;
 	*state = RS.rpcstate;
 	if (RS.rpcall_auto_finish && RS.loop != NULL) {
+		/* completes immediately: set the result before firing w_finish,
+		 * as rpcall_finish() would */
+		set_rpcall_result(callback);
 		ev_feed_event(RS.loop, &callback->w_finish, EV_CUSTOM);
 		return true;
 	}
+	/* pending: leave callback->rpcall.result untouched until finish_rpcall */
 	RS.pending_rpcall = callback;
 	return true;
 }
