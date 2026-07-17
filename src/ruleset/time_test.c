@@ -20,6 +20,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared Lua test fixtures (time.c has no collaborator to mock).

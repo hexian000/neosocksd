@@ -901,6 +901,24 @@ T_DECLARE_CASE(cfunc_loadconfig_rejects_non_table)
 	free(conf.strings);
 }
 
+/* Regression: cfunc_loadfile must reject a chunk that returns a non-table
+ * rather than installing a broken global ruleset (like cfunc_loadconfig). */
+T_DECLARE_CASE(cfunc_loadfile_rejects_non_table)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+
+	T_EXPECT(!ruleset_pcall(
+		r, cfunc_loadfile, 1, 0,
+		string_stream_open(&stream, "return 42")));
+	T_EXPECT(strstr(ruleset_geterror(r, NULL), "expected table") != NULL);
+
+	free_ruleset(loop, r);
+	free(conf.strings);
+}
+
 T_DECLARE_CASE(cfunc_loadconfig_rejects_wrong_type_ruleset)
 {
 	struct config conf = make_conf();
@@ -959,6 +977,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(cfunc_request_malformed_dial_spec_is_rejected),
 	T_CASE(cfunc_loadconfig_extracts_ruleset_and_settings),
 	T_CASE(cfunc_loadconfig_rejects_non_table),
+	T_CASE(cfunc_loadfile_rejects_non_table),
 	T_CASE(cfunc_loadconfig_rejects_wrong_type_ruleset),
 	T_CASE(cfunc_loadconfig_rejects_memlimit_overflow),
 	T_SUITE_END,

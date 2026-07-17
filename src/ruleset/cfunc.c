@@ -101,11 +101,14 @@ static int request_finish(lua_State *restrict L)
 			/* the routine gave up without forwarding: reject by policy */
 			LOGD("ruleset: request rejected");
 		}
-	} else {
-		LOGE_F("ruleset error: %s", luaL_tolstring(L, 2, NULL));
 	}
 	state->cb->request.req = req;
 	state_complete(L, state);
+	if (!lua_toboolean(L, 1)) {
+		/* log the error only after completing: luaL_tolstring may invoke
+		 * a __tostring that raises, which must not orphan the async op */
+		LOGE_F("ruleset error: %s", luaL_tolstring(L, 2, NULL));
+	}
 	return 0;
 }
 
@@ -169,6 +172,13 @@ int cfunc_loadfile(lua_State *restrict L)
 	}
 	lua_pushliteral(L, "ruleset");
 	lua_call(L, 1, 1);
+	if (!lua_istable(L, -1)) {
+		/* a non-table result would install a broken global ruleset that
+		 * only fails later per-request; reject it now, like cfunc_update */
+		return luaL_error(
+			L, "ruleset: expected table, got %s",
+			luaL_typename(L, -1));
+	}
 	lua_setglobal(L, "ruleset");
 	return 0;
 }
@@ -264,10 +274,12 @@ static int rpcall_finish(lua_State *restrict L)
 	 * (false, errmsg) on the stack. Surface that as an rpcall failure
 	 * instead of marshalling it as a successful (false, "...") result. */
 	if (!lua_toboolean(L, 1)) {
-		LOGE_F("ruleset rpcall: %s", luaL_tolstring(L, 2, NULL));
 		state->cb->rpcall.result = NULL;
 		state->cb->rpcall.resultlen = 0;
 		state_complete(L, state);
+		/* log after completing: luaL_tolstring may invoke a __tostring
+		 * that raises, which must not orphan the async op */
+		LOGE_F("ruleset rpcall: %s", luaL_tolstring(L, 2, NULL));
 		return 0;
 	}
 	const int n = lua_gettop(L);
@@ -279,11 +291,13 @@ static int rpcall_finish(lua_State *restrict L)
 		/* marshal() can raise (e.g. an unmarshalable type); report a failed
 		 * result rather than letting the error escape and leave the
 		 * caller's callback pending. */
-		LOGE_F("ruleset rpcall: marshal failed: %s",
-		       luaL_tolstring(L, -1, NULL));
 		state->cb->rpcall.result = NULL;
 		state->cb->rpcall.resultlen = 0;
 		state_complete(L, state);
+		/* log after completing: luaL_tolstring may invoke a __tostring
+		 * that raises, which must not orphan the async op */
+		LOGE_F("ruleset rpcall: marshal failed: %s",
+		       luaL_tolstring(L, -1, NULL));
 		return 0;
 	}
 	lua_concat(L, 2);

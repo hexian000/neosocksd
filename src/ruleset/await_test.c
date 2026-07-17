@@ -1270,6 +1270,40 @@ T_DECLARE_CASE(await_forward_abandoned_cancels_dial)
 	lua_close(L);
 	ev_loop_destroy(loop);
 }
+
+/* await.execute forks a real child, so the abandon path (await_execute_close:
+ * ev_child_stop + SIGKILL) is exercised only here. Closing the suspended
+ * coroutine must run that handler cleanly and leave the coroutine dead.
+ * EV_DEFAULT is required for ev_child. */
+T_DECLARE_CASE(await_execute_abandoned_stops_child)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = EV_DEFAULT;
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	/* a command that would outlive the test unless the child is killed */
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  await.execute('sleep 30') "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	T_EXPECT(run_chunk(L, "return coroutine.status(co)"));
+	T_EXPECT_STREQ(lua_tostring(L, -1), "suspended");
+	lua_pop(L, 1);
+
+	/* coroutine.close runs await_execute_close */
+	T_EXPECT(run_chunk(L, "return coroutine.close(co)"));
+	T_EXPECT(lua_toboolean(L, -1));
+	lua_pop(L, 1);
+	T_EXPECT(run_chunk(L, "return coroutine.status(co)"));
+	T_EXPECT_STREQ(lua_tostring(L, -1), "dead");
+
+	lua_close(L);
+}
 #endif /* HAVE_LUA_TOCLOSE */
 
 /* -------------------------------------------------------------------------
@@ -1305,6 +1339,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_resolve_abandoned_cancels_query),
 	T_CASE(await_invoke_abandoned_cancels_request),
 	T_CASE(await_forward_abandoned_cancels_dial),
+	T_CASE(await_execute_abandoned_stops_child),
 #endif /* HAVE_LUA_TOCLOSE */
 	T_SUITE_END,
 };

@@ -115,8 +115,8 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 			} while (y);
 		}
 
-		VBUF_APPEND(*pvbuf, p, pend - p);
-		VBUF_APPEND(*pvbuf, s, bufend - s);
+		VBUF_APPEND(*pvbuf, p, (size_t)(pend - p));
+		VBUF_APPEND(*pvbuf, s, (size_t)(bufend - s));
 		return;
 	}
 
@@ -191,9 +191,9 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 		}
 	} while (x);
 
-	VBUF_APPEND(*pvbuf, p, pend - p);
-	VBUF_APPEND(*pvbuf, buf, s - buf);
-	VBUF_APPEND(*pvbuf, estr, bufend - estr);
+	VBUF_APPEND(*pvbuf, p, (size_t)(pend - p));
+	VBUF_APPEND(*pvbuf, buf, (size_t)(s - buf));
+	VBUF_APPEND(*pvbuf, estr, (size_t)(bufend - estr));
 }
 
 /* marshal a table into constructor syntax: {value1,value2,[key]=value,...} */
@@ -371,13 +371,10 @@ static int api_marshal(lua_State *restrict L)
 		VBUF_APPENDSTR(*pvbuf, ",");
 	}
 
-	/* Marshal the final argument without a trailing comma */
-	if (i == n) {
-		/* Push argument. */
-		lua_pushvalue(L, i);
-		/* Call the closure with the argument. */
-		lua_call(L, 1, 0);
-	}
+	/* Marshal the final argument (n >= 1, so the loop above always exits with
+	 * i == n) without a trailing comma. */
+	lua_pushvalue(L, i);
+	lua_call(L, 1, 0);
 
 	lua_pushlstring(L, VBUF_DATA(*pvbuf), VBUF_LEN(*pvbuf));
 	/* Clean up the buffer. */

@@ -342,6 +342,33 @@ T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 	lua_close(L);
 }
 
+/* Regression: aux_async() must grow the target coroutine's stack for the
+ * caller-controlled argument count before the lua_xmove(); without the
+ * lua_checkstack() a large narg overran a fresh coroutine's initial stack. */
+T_DECLARE_CASE(base_aux_async_grows_thread_stack_for_args)
+{
+	struct ruleset r = {
+		.config.traceback = false,
+	};
+	lua_State *restrict L = new_ruleset_lua(&r);
+
+	/* large enough that, without the checkstack, the xmove runs off the end
+	 * of a fresh coroutine's stack into unmapped memory (a smaller overrun
+	 * can land in allocator slack and go unnoticed) */
+	enum { NARG = 20000 };
+	lua_State *const co = aux_getthread(L);
+	T_CHECK(lua_checkstack(L, NARG + 2));
+	lua_pushcfunction(L, async_finish);
+	lua_pushcfunction(L, async_worker);
+	for (int i = 0; i < NARG; i++) {
+		lua_pushinteger(L, i);
+	}
+	T_EXPECT_EQ(aux_async(co, L, NARG, 1), LUA_YIELD);
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(base_aux_getregtable_rejects_non_table)
 {
 	struct ruleset r = { 0 };
@@ -418,8 +445,8 @@ T_DECLARE_CASE(base_ruleset_resume_wakes_coroutine)
 	lua_pop(L, 1); /* pop the await-context table; co ref remains */
 
 	lua_pushcfunction(co, resume_yield);
-	int nres;
-	T_CHECK(lua_resume(co, L, 0, &nres) == LUA_YIELD);
+	/* aux_resume wraps the 3-arg (Lua 5.3) vs 4-arg (5.4+) lua_resume split */
+	T_CHECK(aux_resume(co, L, 0) == LUA_YIELD);
 	lua_pop(L,
 		1); /* drop the co reference (still kept alive by the table) */
 
@@ -560,6 +587,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(base_aux_todialreq_nil_returns_null),
 	T_CASE(base_aux_todialreq_overflow_pops_stack),
 	T_CASE(base_aux_async_reuses_idle_thread),
+	T_CASE(base_aux_async_grows_thread_stack_for_args),
 	T_CASE(base_aux_getregtable_rejects_non_table),
 	T_CASE(base_aux_forward_context_roundtrip),
 	T_CASE(base_ruleset_pcall_success_and_error),

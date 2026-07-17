@@ -277,7 +277,8 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 {
 	ASSERT(n > 0);
 	/* lua stack: ... addr proxyN ... proxy1 */
-	if (n < 1 || lua_isnil(L, -n)) {
+	if (lua_isnil(L, -n)) {
+		/* a nil address means a direct connection (NULL dialreq) */
 		lua_pop(L, n);
 		lua_pushlightuserdata(L, NULL);
 		return true;
@@ -399,6 +400,15 @@ int aux_async(
 	const int finishidx)
 {
 	struct ruleset *restrict r = aux_getruleset(L);
+	/* grow the coroutine stack for errfunc + finish + placeholder + func +
+	 * narg args before the lua_xmove()s below, which do not grow the target
+	 * and whose bounds assert is compiled out in release builds. narg is
+	 * caller-controlled via neosocksd.async(). */
+	if (!lua_checkstack(L, narg + 4)) {
+		r->vmstats.num_thread_active--;
+		clear_context_entry(from, RIDX_FORWARD_CONTEXT, L);
+		return luaL_error(from, "async: too many arguments");
+	}
 	if (r->config.traceback) {
 		lua_pushcfunction(L, aux_traceback);
 	} else {
