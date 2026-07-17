@@ -18,6 +18,7 @@
 #include "net/http.h"
 #include "net/url.h"
 #include "os/socket.h"
+#include "utils/ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
@@ -462,21 +463,6 @@ static void pump_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	pump_run(loop, watcher->data);
 }
 
-/* Case-insensitive substring test: true if needle occurs anywhere in haystack,
- * ignoring ASCII case. A POSIX-clean stand-in for the GNU strcasestr(), used to
- * spot a "chunked" transfer-coding in a possibly multi-value, mixed-case
- * response Transfer-Encoding. */
-static bool str_contains_fold(const char *haystack, const char *needle)
-{
-	const size_t needle_len = strlen(needle);
-	for (; *haystack != '\0'; haystack++) {
-		if (strncasecmp(haystack, needle, needle_len) == 0) {
-			return true;
-		}
-	}
-	return false;
-}
-
 /* Record one response header for forwarding, or capture the framing/hop-by-hop
  * headers we handle specially. Returns false to reject the whole response (bad
  * header characters, a malformed Content-Length, or header-table overflow),
@@ -492,9 +478,13 @@ static bool rsp_record_header(void *ctx, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		if (str_contains_fold(value, "chunked")) {
-			s->rsp_chunked = true;
+		/* only a bare "chunked" transfer-coding is understood; reject
+		 * any other coding (or a coding list) rather than dropping the
+		 * header and mis-framing the body, mirroring the request side */
+		if (strcasecmp(strtrimspace(value), "chunked") != 0) {
+			return false;
 		}
+		s->rsp_chunked = true;
 		return true;
 	}
 	if (strcasecmp(key, "Content-Length") == 0) {
@@ -550,12 +540,18 @@ static bool rsp_build_interim(struct http_stream *restrict s)
 	struct http_conn *restrict conn = &s->ctx->conn;
 	conn->wbuf.len = 0;
 	s->whdr_pos = 0;
+	struct buffer *restrict wbuf = (struct buffer *)&conn->wbuf;
 	const char *const status = http_status(
 		(uint_fast16_t)strtoul(s->rsp_msg.rsp.code, NULL, 10));
+	/* forward the interim's end-to-end headers (e.g. Link: on 103 Early
+	 * Hints, whose headers are the whole point of the response) */
 	return fwd_append(conn, "HTTP/1.1 ") &&
 	       fwd_append(conn, s->rsp_msg.rsp.code) && fwd_append(conn, " ") &&
 	       fwd_append(conn, status != NULL ? status : "") &&
-	       fwd_append(conn, "\r\n\r\n");
+	       fwd_append(conn, "\r\n") &&
+	       http_append_headers(
+		       wbuf, s->rsp_hdr, s->rsp_nhdr, s->rsp_connection) &&
+	       fwd_append(conn, "\r\n");
 }
 
 /* Rebuild the final response headers for the client into conn.wbuf and decide
@@ -1357,21 +1353,13 @@ static bool parse_header(void *data, const char *key, char *value)
 	if (strcasecmp(key, "Upgrade") == 0) {
 		return true;
 	}
-	if (strcasecmp(key, "Trailers") == 0) {
+	if (strcasecmp(key, "Trailer") == 0) {
 		return true;
 	}
 
 	if (is_connect) {
-		/* CONNECT: only parse Authorization for auth check; ignore rest */
-		if (strcasecmp(key, "Authorization") == 0) {
-			char *const sep = strchr(value, ' ');
-			if (sep == NULL) {
-				return false;
-			}
-			*sep = '\0';
-			p->hdr.authorization.type = value;
-			p->hdr.authorization.credentials = sep + 1;
-		}
+		/* CONNECT sets up a tunnel; all remaining request headers are
+		 * ignored (proxy auth is handled via Proxy-Authorization) */
 		return true;
 	}
 	return parse_header_proxy_pass(ctx, p, key, value);

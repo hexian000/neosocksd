@@ -974,6 +974,49 @@ T_DECLARE_CASE(proxy_pass_chunked_response)
 	ev_loop_destroy(loop);
 }
 
+/* Regression: an upstream response with a transfer-coding other than "chunked"
+ * (and no Content-Length) cannot be framed, so it must be rejected with 502
+ * rather than forwarded with the header dropped and the body mis-framed. */
+T_DECLARE_CASE(proxy_pass_unknown_response_transfer_encoding_returns_502)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nxxxx";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 /* A malformed chunked request body is answered with a 400 and closed. */
 T_DECLARE_CASE(proxy_pass_malformed_chunked_request_returns_400)
 {
@@ -1138,6 +1181,63 @@ T_DECLARE_CASE(proxy_pass_forwards_100_continue)
 	T_CHECK(p100 != NULL);
 	T_CHECK(p200 != NULL);
 	T_EXPECT(p100 < p200); /* interim precedes the final response */
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Regression: an interim (1xx) response's end-to-end headers must be forwarded
+ * to the client -- a 103 Early Hints Link: header is the whole point of the
+ * response and was previously stripped. */
+T_DECLARE_CASE(proxy_pass_forwards_interim_headers)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* upstream sends 103 Early Hints with a Link header, then the final 200 */
+	static const char hints[] = "HTTP/1.1 103 Early Hints\r\n"
+				    "Link: </style.css>; rel=preload\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, hints, sizeof(hints) - 1) == 0);
+	drive_loop(loop);
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[2048];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the reason phrase is rebuilt from http_status(), so assert the code
+	 * and the forwarded Link header rather than the reason text */
+	unsigned char *const p103 = memmem(cl, (size_t)cn, "HTTP/1.1 103", 12);
+	unsigned char *const link =
+		memmem(cl, (size_t)cn, "Link: </style.css>", 18);
+	unsigned char *const p200 = memmem(cl, (size_t)cn, "200 OK", 6);
+	T_CHECK(p103 != NULL);
+	T_CHECK(link !=
+		NULL); /* the interim's Link header reached the client */
+	T_CHECK(p200 != NULL);
+	T_EXPECT(p103 < link && link < p200);
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -1789,22 +1889,44 @@ T_DECLARE_CASE(connect_with_transfer_encoding_chunked_is_accepted)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(authorization_header_without_space_returns_400)
+/* A CONNECT tunnel ignores request headers the proxy does not consume; an
+ * Authorization header (even a malformed one) must not fail the request. */
+T_DECLARE_CASE(connect_ignores_malformed_authorization)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char rsp[1024];
 	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
 			   "Authorization: BasicOnly\r\n"
 			   "\r\n";
 
 	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
 
-	T_EXPECT(assert_response_status(loop, peer_fd, "400"));
+	{
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 30);
+		T_EXPECT(n >= 30);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "200 Connection established",
+			       26) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
 
 	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
 	ev_loop_destroy(loop);
 }
 
@@ -2733,10 +2855,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(proxy_pass_chunked_request_discards_surplus),
 	T_CASE(proxy_pass_bodyless_pipelined_not_forwarded),
 	T_CASE(proxy_pass_chunked_response),
+	T_CASE(proxy_pass_unknown_response_transfer_encoding_returns_502),
 	T_CASE(proxy_pass_malformed_chunked_request_returns_400),
 	T_CASE(proxy_pass_eof_response),
 	T_CASE(proxy_pass_head_response_bodiless),
 	T_CASE(proxy_pass_forwards_100_continue),
+	T_CASE(proxy_pass_forwards_interim_headers),
 	T_CASE(proxy_pass_multiple_interim_responses),
 	T_CASE(proxy_pass_interim_framing_does_not_leak),
 	T_CASE(proxy_pass_negative_content_length_rejected),
@@ -2766,7 +2890,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(connect_with_transfer_encoding_chunked_is_accepted),
 	T_CASE(connect_success_counted_once),
 	T_CASE(connect_pipelined_bytes_forwarded_to_upstream),
-	T_CASE(authorization_header_without_space_returns_400),
+	T_CASE(connect_ignores_malformed_authorization),
 	T_CASE(ruleset_auth_required_without_basic_credentials_returns_407),
 	T_CASE(ruleset_auth_required_with_invalid_basic_returns_407),
 	T_CASE(ruleset_auth_required_valid_basic_decodes_credentials),
