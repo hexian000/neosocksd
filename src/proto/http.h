@@ -37,7 +37,7 @@ enum content_encodings {
 };
 
 /** String representations of content encodings */
-extern const char *http_content_encoding_str[];
+extern const char *const http_content_encoding_str[];
 
 /** @brief Parsed HTTP headers structure */
 struct http_headers {
@@ -58,10 +58,6 @@ struct http_headers {
 	struct {
 		enum content_encodings accept_encoding;
 		char *host;
-		struct {
-			char *type;
-			char *credentials;
-		} authorization;
 		struct {
 			char *type;
 			char *credentials;

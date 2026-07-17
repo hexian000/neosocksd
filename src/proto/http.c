@@ -27,7 +27,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-const char *http_content_encoding_str[] = {
+const char *const http_content_encoding_str[] = {
 	[CENCODING_NONE] = NULL,
 	[CENCODING_DEFLATE] = "deflate",
 	[CENCODING_GZIP] = "gzip",
@@ -869,24 +869,30 @@ bool parsehdr_transfer_encoding(
 
 bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value)
 {
-	const char *deflate = http_content_encoding_str[CENCODING_DEFLATE];
-	for (char *token = strtok(value, ","); token != NULL;
-	     token = strtok(NULL, ",")) {
-		/* Remove quality value if present */
-		char *q = strchr(token, ';');
-		if (q != NULL) {
-			*q = '\0';
+	const char *const deflate =
+		http_content_encoding_str[CENCODING_DEFLATE];
+	/* comma-split by hand rather than with the non-reentrant strtok(); each
+	 * element is a content-coding with an optional ";q=..." weight */
+	for (char *token = value; token != NULL;) {
+		char *const comma = strchr(token, ',');
+		if (comma != NULL) {
+			*comma = '\0';
 		}
-
-		token = strtrimspace(token);
+		/* drop the quality value if present */
+		char *const semi = strchr(token, ';');
+		if (semi != NULL) {
+			*semi = '\0';
+		}
+		const char *const coding = strtrimspace(token);
 		/* RFC 9110 §12.5.3: `*` is a wildcard for any encoding, whether
 		 * it is the whole value or one token among a comma-separated
 		 * list (e.g. "gzip, *") */
-		if (strcmp(token, "*") == 0 ||
-		    strcasecmp(token, deflate) == 0) {
+		if (strcmp(coding, "*") == 0 ||
+		    strcasecmp(coding, deflate) == 0) {
 			p->hdr.accept_encoding = CENCODING_DEFLATE;
 			return true;
 		}
+		token = (comma != NULL) ? comma + 1 : NULL;
 	}
 
 	/* Valid header, but no supported encoding — leave accept_encoding as CENCODING_NONE */
