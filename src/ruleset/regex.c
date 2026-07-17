@@ -51,8 +51,11 @@ static int regex_compile(lua_State *restrict L)
 	size_t len;
 	const char *restrict const pattern = luaL_checklstring(L, 1, &len);
 	check_no_nul(L, pattern, len);
-	const int cflags =
-		(int)luaL_optinteger(L, 2, REG_EXTENDED | REG_NEWLINE);
+	int cflags = (int)luaL_optinteger(L, 2, REG_EXTENDED | REG_NEWLINE);
+	/* find/match/gmatch all report match offsets, which REG_NOSUB makes
+	 * regexec() leave unset in pmatch; strip it so those offsets are never
+	 * read from an uninitialized regmatch_t */
+	cflags &= ~REG_NOSUB;
 	regex_t *restrict const preg = lua_newuserdata(L, sizeof(regex_t));
 	const int err = regcomp(preg, pattern, cflags);
 	if (err != 0) {

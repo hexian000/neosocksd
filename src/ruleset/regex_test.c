@@ -363,6 +363,59 @@ T_DECLARE_CASE(regex_match_nomatch)
 	lua_close(L);
 }
 
+/* regex.match honors the optional init (start) argument, like regex.find. */
+T_DECLARE_CASE(regex_match_with_init)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('a+') "
+		   "return regex.match(r, 'aaXaa', 3)"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT_STREQ(lua_tostring(L, 1), "aa");
+
+	lua_close(L);
+}
+
+/* regex.ICASE makes matching case-insensitive. */
+T_DECLARE_CASE(regex_icase_matches_mixed_case)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('hello', regex.ICASE) "
+		   "return regex.match(r, 'oh HELLO there')"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT_STREQ(lua_tostring(L, 1), "HELLO");
+
+	lua_close(L);
+}
+
+/* Regression: compiling with regex.NOSUB (which makes regexec() leave pmatch
+ * unfilled) must not make find/match read an uninitialized regmatch_t. The
+ * flag is stripped, so offsets and captures still work. */
+T_DECLARE_CASE(regex_nosub_is_neutralized)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L,
+		"local r = regex.compile('a(b+)c', regex.EXTENDED | regex.NOSUB) "
+		"local s, e = regex.find(r, 'xxabbbcyy') "
+		"local whole, cap = regex.match(r, 'xxabbbcyy') "
+		"return s, e, whole, cap"));
+	T_EXPECT_EQ(lua_gettop(L), 4);
+	T_EXPECT_EQ(lua_tointeger(L, 1), 3);
+	T_EXPECT_EQ(lua_tointeger(L, 2), 7);
+	T_EXPECT_STREQ(lua_tostring(L, 3), "abbbc");
+	T_EXPECT_STREQ(lua_tostring(L, 4), "bbb");
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(regex_gmatch_iterator)
 {
 	lua_State *restrict L = new_lua();
@@ -437,6 +490,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_gmatch_init_past_leading_nul_iterates),
 	T_CASE(regex_match_captures),
 	T_CASE(regex_match_nomatch),
+	T_CASE(regex_match_with_init),
+	T_CASE(regex_icase_matches_mixed_case),
+	T_CASE(regex_nosub_is_neutralized),
 	T_CASE(regex_gmatch_iterator),
 	T_CASE(regex_gmatch_empty_match_terminates),
 	T_SUITE_END,
