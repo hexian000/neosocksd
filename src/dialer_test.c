@@ -1169,6 +1169,8 @@ struct socks5_raw_server {
 	bool response_sent;
 	bool failed;
 	uint_least8_t rsp_code;
+	/* reply with a domain-form BND.ADDR instead of the default IPv4 one */
+	bool bnd_domain;
 	/* auth method offered in the negotiation reply (default 0 == NOAUTH) */
 	uint_least8_t auth_method;
 	/* additional handshakes to service on the same connection after the
@@ -1275,7 +1277,8 @@ static bool socks5_raw_pump(void *data)
 		if (s->buf_len < req_len) {
 			return true;
 		}
-		/* Respond with rsp_code; bind address 0.0.0.0:0 */
+		/* Respond with rsp_code. Default BND.ADDR is 0.0.0.0:0; the
+		 * bnd_domain variant replies with a domain-form BND.ADDR. */
 		const unsigned char connect_rsp
 			[SOCKS5_HDR_LEN + sizeof(struct in_addr) +
 			 sizeof(in_port_t)] = {
@@ -1283,7 +1286,15 @@ static bool socks5_raw_pump(void *data)
 				0,	0,	     0, 0,
 				0,	0,
 			};
-		if (!write_all(s->peer_fd, connect_rsp, sizeof(connect_rsp))) {
+		const unsigned char domain_rsp[] = {
+			SOCKS5, s->rsp_code, 0, SOCKS5ADDR_DOMAIN, 3, 'a', 'b',
+			'c',	0,	     0,
+		};
+		const unsigned char *const rsp =
+			s->bnd_domain ? domain_rsp : connect_rsp;
+		const size_t rsp_len = s->bnd_domain ? sizeof(domain_rsp) :
+						       sizeof(connect_rsp);
+		if (!write_all(s->peer_fd, rsp, rsp_len)) {
 			s->failed = true;
 			return false;
 		}
@@ -1356,6 +1367,57 @@ T_DECLARE_CASE(socks5_connect_success)
 		.peer_fd = -1,
 		.phase = SOCKS5_PHASE_AUTH,
 		.rsp_code = SOCKS5RSP_SUCCEEDED,
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[64];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "socks5://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("example.com:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		socks5_raw_pump, &server);
+	int client_fd = result.fd;
+	const enum dialer_error err = d.err;
+	close_if_open(&client_fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&server.listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT(!server.failed);
+	T_EXPECT(server.response_sent);
+	T_EXPECT(result.fd >= 0);
+	T_EXPECT_EQ(err, DIALER_OK);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
+/* Regression: RFC 1928 permits a domain-form BND.ADDR in a SUCCEEDED reply;
+ * recv_socks5_rsp must accept it, not reject the dial as a protocol error. */
+T_DECLARE_CASE(socks5_connect_success_domain_bnd_addr)
+{
+	uint_fast16_t port = 0;
+	struct socks5_raw_server server = {
+		.listener_fd = make_listener(&port),
+		.peer_fd = -1,
+		.phase = SOCKS5_PHASE_AUTH,
+		.rsp_code = SOCKS5RSP_SUCCEEDED,
+		.bnd_domain = true,
 	};
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -1869,6 +1931,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks4a_granted_reports_success),
 	T_CASE(socks5_noallowed_maps_to_proxy_reject),
 	T_CASE(socks5_connect_success),
+	T_CASE(socks5_connect_success_domain_bnd_addr),
 	T_CASE(socks5_oversized_username_fails),
 	T_CASE(socks5_userpass_auth_success),
 	T_CASE(socks5_unoffered_userpass_maps_to_proxy_proto),

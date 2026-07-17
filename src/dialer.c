@@ -1105,6 +1105,16 @@ static int recv_socks5_rsp(struct dialer *restrict d)
 	case SOCKS5ADDR_IPV6:
 		want += sizeof(struct in6_addr) + sizeof(in_port_t);
 		break;
+	case SOCKS5ADDR_DOMAIN: {
+		/* BND.ADDR is [len][domain][port]; the length byte follows the
+		 * fixed header, so it must be present before sizing the rest */
+		if (len < want + 1) {
+			return (int)(want + 1 - len);
+		}
+		const uint_fast8_t domlen = read_uint8(hdr + want);
+		want += 1 + (size_t)domlen + sizeof(in_port_t);
+		break;
+	}
 	default:
 		DIALER_LOG_F(
 			DEBUG, d, "unexpected SOCKS5 addrtype: %" PRIuFAST8,
@@ -1533,12 +1543,14 @@ static bool connect_sa(
 		return true;
 	}
 
+	/* install fd on the watcher before dispatching: send_dispatch() sends
+	 * the first handshake through d->w_socket.fd; on failure dialer_stop()
+	 * closes it (dialed_fd is still -1) */
 	d->state = STATE_HANDSHAKE1;
+	ev_io_set(&d->w_socket, fd, EV_READ);
 	if (!send_dispatch(d)) {
-		socket_close(fd);
 		return false;
 	}
-	ev_io_set(&d->w_socket, fd, EV_READ);
 	ev_io_start(loop, &d->w_socket);
 	return true;
 }
