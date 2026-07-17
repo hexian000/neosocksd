@@ -155,6 +155,18 @@ T_DECLARE_CASE(conf_rejects_timeout_out_of_range)
 	T_EXPECT(!conf_check(&conf));
 }
 
+T_DECLARE_CASE(conf_rejects_loglevel_out_of_range)
+{
+	struct config conf = make_valid_conf();
+
+	conf.loglevel = LOG_LEVEL_SILENCE - 1;
+	T_EXPECT(!conf_check(&conf));
+	conf.loglevel = LOG_LEVEL_VERYVERBOSE + 1;
+	T_EXPECT(!conf_check(&conf));
+	conf.loglevel = LOG_LEVEL_NOTICE;
+	T_EXPECT(conf_check(&conf));
+}
+
 T_DECLARE_CASE(conf_rejects_startup_limits_out_of_range)
 {
 	struct config conf = make_valid_conf();
@@ -1177,6 +1189,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(conf_requires_listen),
 	T_CASE(conf_rejects_incompatible_modes),
 	T_CASE(conf_rejects_timeout_out_of_range),
+	T_CASE(conf_rejects_loglevel_out_of_range),
 	T_CASE(conf_rejects_startup_limits_out_of_range),
 	T_CASE(conf_accepts_unlimited_startup_full),
 	T_CASE(parseargs_accepts_unlimited_max_startups),

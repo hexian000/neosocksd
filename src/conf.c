@@ -167,7 +167,10 @@ bool conf_check(const struct config *restrict conf)
 	}
 	/* the ruleset requirement is checked in main() after loading */
 
-	return RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
+	return RANGE_CHECK(
+		       "loglevel", conf->loglevel, LOG_LEVEL_SILENCE,
+		       LOG_LEVEL_VERYVERBOSE) &&
+	       RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
 	       RANGE_CHECK(
 		       "startup_limit_start", conf->startup_limit_start, 0,
 		       conf->startup_limit_full > 0 ? conf->startup_limit_full :
@@ -769,6 +772,7 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 	 * string forward so it never dangles into the block freed below. */
 	if (total > 0) {
 		char *pos = block;
+		char *const blockend = block + total;
 		for (const struct metaconfig *f = conf_fields; f->key != NULL;
 		     f++) {
 			if (f->type != CONF_STRING) {
@@ -777,20 +781,36 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 			const char **fptr =
 				(const char **)((char *)conf + f->offset);
 			lua_getfield(L, -1, f->key);
-			if (lua_isnil(L, -1)) {
-				if (*fptr != NULL) {
-					const size_t len = strlen(*fptr);
-					memcpy(pos, *fptr, len + 1);
+			const char *s;
+			size_t len = 0;
+			if (lua_type(L, -1) == LUA_TSTRING) {
+				s = lua_tolstring(L, -1, &len);
+			} else {
+				/* nil -- or a stateful __index that no longer
+				 * yields a string on this second lua_getfield --
+				 * carries the current value forward so *fptr never
+				 * dangles into the block freed below */
+				s = *fptr;
+				if (s != NULL) {
+					len = strlen(s);
+				}
+			}
+			if (s != NULL) {
+				/* clamp to the measured block: a stateful __index
+				 * could return a longer string on this second
+				 * lua_getfield, which must not overflow `block` */
+				const size_t avail = (size_t)(blockend - pos);
+				if (avail == 0) {
+					*fptr = "";
+				} else {
+					if (len + 1 > avail) {
+						len = avail - 1;
+					}
+					memcpy(pos, s, len);
+					pos[len] = '\0';
 					*fptr = pos;
 					pos += len + 1;
 				}
-			} else {
-				size_t len;
-				const char *restrict s =
-					lua_tolstring(L, -1, &len);
-				memcpy(pos, s, len + 1);
-				*fptr = pos;
-				pos += len + 1;
 			}
 			lua_pop(L, 1);
 		}
