@@ -17,6 +17,7 @@
 #include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
+#include "meta/arraysize.h"
 #include "miniz.h"
 #include "utils/buffer.h"
 #include "utils/testing.h"
@@ -204,6 +205,49 @@ T_DECLARE_CASE(codec_lua_reader_small_first_read)
 
 	free(buf);
 	(void)stream_close(r);
+	(void)unlink(path);
+}
+
+/*
+ * codec_lua_reader peeks two bytes and, on the gzip magic, wraps the base in
+ * codec_gzip_reader before the BOM/shebang stripper. Every other reader case
+ * feeds plaintext, and every other caller uses plaintext/"-"/nonexistent
+ * paths, so the documented "auto-detects gzip" feature -- loading a .lua.gz
+ * ruleset, including the compound path where the shebang is stripped by
+ * reading *through* the decompressor -- was entirely unverified.
+ */
+T_DECLARE_CASE(codec_lua_reader_gunzips_source)
+{
+	static const char content[] = "#!/usr/bin/env lua\n"
+				      "return 1\n";
+	struct vbuffer *gz = VBUF_NEW(64);
+	T_CHECK(gz != NULL);
+	{
+		struct stream *w = codec_gzip_writer(io_heapwriter(&gz));
+		T_CHECK(w != NULL);
+		T_EXPECT(stream_write_all(w, content, sizeof(content) - 1));
+		T_EXPECT_EQ(stream_close(w), 0);
+	}
+	T_CHECK(gz != NULL);
+	/* the magic the detector keys on */
+	T_CHECK(VBUF_LEN(gz) > 2);
+	{
+		const unsigned char *const magic = VBUF_DATA(gz);
+		T_EXPECT_EQ(magic[0], 0x1f);
+		T_EXPECT_EQ(magic[1], 0x8b);
+	}
+
+	char path[] = "/tmp/codec_test_XXXXXX";
+	T_CHECK(write_tempfile(path, VBUF_DATA(gz), VBUF_LEN(gz)) == 0);
+	VBUF_FREE(gz);
+
+	char out[128];
+	size_t len;
+	T_EXPECT(read_lua_source(path, out, sizeof(out), &len));
+	/* decompressed, and the shebang stripped through the decompressor */
+	T_EXPECT_EQ(len, strlen("return 1\n"));
+	T_EXPECT_MEMEQ(out, "return 1\n", len);
+
 	(void)unlink(path);
 }
 
@@ -412,6 +456,72 @@ T_DECLARE_CASE(codec_gzip_roundtrip)
 
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(compressed);
+}
+
+/*
+ * The decompressors reset their TINFL_LZ_DICT_SIZE (32 KiB) ring only once it
+ * is both completely full and completely drained. No other case decompresses
+ * more than 16 KiB in one run, so that reset -- and LZ back-references
+ * resolving across it, the subtlest correctness point in the module -- never
+ * ran, even though it is on the hot path for any HTTP body or gzip ruleset
+ * over 32 KiB decompressed. Read back in small chunks so the ring fills and
+ * wraps repeatedly.
+ */
+T_DECLARE_CASE(codec_decompress_ring_wraparound)
+{
+	enum { N = 100000 }; /* > TINFL_LZ_DICT_SIZE */
+	static const struct {
+		const char *name;
+		struct stream *(*writer)(struct stream *);
+		struct stream *(*reader)(struct stream *);
+	} variants[] = {
+		{ "zlib", codec_zlib_writer, codec_zlib_reader },
+		{ "deflate", codec_deflate_writer, codec_inflate_reader },
+		{ "gzip", codec_gzip_writer, codec_gzip_reader },
+	};
+	uint_least8_t *const src = malloc(N);
+	uint_least8_t *const out = malloc(N);
+	T_CHECK(src != NULL);
+	T_CHECK(out != NULL);
+	/* Moderately compressible: a repeating motif perturbed periodically, so
+	 * the encoder emits real back-references (some reaching across the ring
+	 * boundary) rather than one long run. */
+	for (size_t i = 0; i < (size_t)N; ++i) {
+		src[i] = (uint_least8_t)((i % 251U) ^ ((i / 1024U) & 0x0fU));
+	}
+
+	for (size_t v = 0; v < ARRAY_SIZE(variants); v++) {
+		struct vbuffer *compressed = VBUF_NEW(64);
+		T_CHECK(compressed != NULL);
+
+		struct stream *w =
+			variants[v].writer(io_heapwriter(&compressed));
+		T_CHECK(w != NULL);
+		T_EXPECT(stream_write_all(w, src, N));
+		T_EXPECT_EQ(stream_close(w), 0);
+		T_CHECK(compressed != NULL);
+		/* it really did compress, so back-references are in play */
+		T_EXPECT(VBUF_LEN(compressed) < (size_t)N);
+
+		struct stream *r = variants[v].reader(io_memreader(
+			VBUF_DATA(compressed), VBUF_LEN(compressed)));
+		T_CHECK(r != NULL);
+		memset(out, 0, N);
+		for (size_t off = 0; off < (size_t)N;) {
+			size_t n = (size_t)N - off;
+			if (n > 1000) {
+				n = 1000;
+			}
+			T_EXPECT(stream_read_exact(r, out + off, n));
+			off += n;
+		}
+		T_EXPECT_EQ(stream_close(r), 0);
+		T_EXPECT_MEMEQ(out, src, N);
+		VBUF_FREE(compressed);
+	}
+
+	free(src);
+	free(out);
 }
 
 T_DECLARE_CASE(codec_gzip_multiframe)
@@ -1063,6 +1173,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_lua_reader_strips_bom_and_shebang),
 	T_CASE(codec_lua_reader_strips_bom_only),
 	T_CASE(codec_lua_reader_small_first_read),
+	T_CASE(codec_lua_reader_gunzips_source),
 	T_CASE(codec_lua_reader_passthrough_plain_file),
 	T_CASE(codec_lua_reader_bom_only_no_content),
 	T_CASE(codec_lua_reader_empty_stream),
@@ -1071,6 +1182,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_zlib_roundtrip),
 	T_CASE(codec_deflate_roundtrip),
 	T_CASE(codec_gzip_roundtrip),
+	T_CASE(codec_decompress_ring_wraparound),
 	T_CASE(codec_gzip_multiframe),
 	T_CASE(codec_gzip_crc_error),
 	T_CASE(codec_gzip_flush_multiframe),

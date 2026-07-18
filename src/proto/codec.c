@@ -617,7 +617,7 @@ struct gzip_rstream {
 	unsigned char hdrbuf[10];
 	size_t hdrpos;
 	uint_least8_t hdrflg;
-	uint_fast16_t xlen_remain;
+	uint_least16_t xlen_remain;
 	uint_least32_t hdrcrc;
 	/* Header parser sub-phase (see enum gzip_hphase) */
 	uint_least8_t hphase;
@@ -671,7 +671,7 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				return 0;
 			}
 			z->xlen_remain =
-				(uint_fast16_t)read_uint16_le(z->srcbuf);
+				(uint_least16_t)read_uint16_le(z->srcbuf);
 			z->hdrcrc = (uint_least32_t)mz_crc32(
 				z->hdrcrc, z->srcbuf, 2);
 			z->srcbuf += 2, z->srclen -= 2;
@@ -685,7 +685,7 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				z->hdrcrc = (uint_least32_t)mz_crc32(
 					z->hdrcrc, z->srcbuf, skip);
 				z->srcbuf += skip, z->srclen -= skip;
-				z->xlen_remain -= (uint_fast16_t)skip;
+				z->xlen_remain -= (uint_least16_t)skip;
 				if (z->xlen_remain > 0) {
 					return 0;
 				}
@@ -760,8 +760,9 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 		case GZIP_HPHASE_DONE:
 			return 1;
 		case GZIP_HPHASE_XLEN_2:
-			z->xlen_remain = (uint_fast16_t)z->hdrbuf[0] |
-					 ((uint_fast16_t)b << 8);
+			z->xlen_remain =
+				(uint_least16_t)((uint_fast16_t)z->hdrbuf[0] |
+						 ((uint_fast16_t)b << 8));
 			z->hdrcrc = (uint_least32_t)mz_crc32(
 				z->hdrcrc, z->srcbuf, 1);
 			z->srcbuf++, z->srclen--;
