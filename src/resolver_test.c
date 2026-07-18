@@ -96,6 +96,17 @@ static bool wait_for_result(struct ev_loop *loop, struct resolve_result *result)
 	return result->called;
 }
 
+/* Dispatch the events already pending in the loop, without blocking.
+ * resolve_do() feeds the completion event before it returns, so a caller that
+ * asserts a callback did *not* run can drain it here rather than waiting out
+ * the watchdog (hitting which is always a failure, never an expected pass). */
+static void drain_pending(struct ev_loop *loop)
+{
+	while (ev_pending_count(loop) > 0) {
+		ev_invoke_pending(loop);
+	}
+}
+
 static struct resolver *new_test_resolver(struct ev_loop **loop_out)
 {
 	struct config conf = { 0 };
@@ -191,8 +202,13 @@ T_DECLARE_CASE(resolve_cancel_suppresses_callback)
 	T_CHECK(query != NULL);
 	resolve_cancel(query);
 	resolve_cancel(query);
-	T_EXPECT(!wait_for_result(loop, &result));
+	/* the completion event is still pending: cancelling only clears the
+	 * callback. Assert it really is pending (so this cannot pass by
+	 * draining nothing), dispatch it, and assert it stayed suppressed. */
+	T_EXPECT(ev_pending_count(loop) > 0u);
+	drain_pending(loop);
 	T_EXPECT(!result.called);
+	T_EXPECT_EQ(ev_pending_count(loop), 0u);
 
 	stats = resolver_stats(resolver);
 	T_EXPECT_EQ(stats->num_query, 1);

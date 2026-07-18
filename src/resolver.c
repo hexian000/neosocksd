@@ -336,8 +336,8 @@ void resolver_cleanup(void)
 #if WITH_CARES
 /* (Re)configure the c-ares channel's upstream servers from a CSV nameserver
  * string; a NULL string leaves the current (system-default) servers in place. */
-static void resolver_apply_nameserver(
-	struct resolver *restrict r, const char *restrict nameserver)
+static void
+apply_nameserver(struct resolver *restrict r, const char *restrict nameserver)
 {
 	if (nameserver == NULL) {
 		return;
@@ -350,8 +350,8 @@ static void resolver_apply_nameserver(
 	}
 }
 
-static bool resolver_async_init(
-	struct resolver *restrict r, const struct config *restrict conf)
+static bool
+async_init(struct resolver *restrict r, const struct config *restrict conf)
 {
 	int ret;
 	struct ares_options options;
@@ -367,7 +367,7 @@ static bool resolver_async_init(
 	ev_timer_init(&r->w_timeout, timeout_cb, 0.0, 0.0);
 	r->w_timeout.data = r;
 
-	resolver_apply_nameserver(r, conf->nameserver);
+	apply_nameserver(r, conf->nameserver);
 	return true;
 }
 #endif /* WITH_CARES */
@@ -390,7 +390,7 @@ resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf)
 		w_socket->data = r;
 	}
 
-	r->async_enabled = resolver_async_init(r, conf);
+	r->async_enabled = async_init(r, conf);
 #else /* WITH_CARES */
 	(void)conf;
 #endif /* WITH_CARES */
@@ -404,7 +404,7 @@ void resolver_setnameserver(
 	if (!r->async_enabled) {
 		return;
 	}
-	resolver_apply_nameserver(r, conf->nameserver);
+	apply_nameserver(r, conf->nameserver);
 #else /* WITH_CARES */
 	(void)r;
 	(void)conf;
