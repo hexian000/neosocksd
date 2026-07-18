@@ -94,7 +94,8 @@ struct transfer_opts {
  * Takes ownership of `acc_fd` and `dial_fd`; the caller must set both to -1
  * immediately after a successful call.  The transfer is self-owned: it is
  * freed internally once both halves finish, at which point *num_sessions is
- * decremented atomically.
+ * decremented (atomically when WITH_THREADS is enabled; a plain decrement
+ * otherwise, where there is no other thread to race with).
  *
  * @param xfer Engine.
  * @param acc_fd Accepted (client-side) file descriptor.

@@ -90,10 +90,13 @@ struct xfer_half {
 /* ---------------------------------------------------------------- transfer_ctx */
 
 struct transfer_ctx {
-	struct transfer *xfer;
 #if WITH_THREADS
 	/* which worker owns this ctx; set once at construction, then read-only */
 	struct xfer_worker *worker;
+#else
+	/* the engine owning this ctx; the threads build reaches it through
+	 * `worker` instead, so this exists only where it is read */
+	struct transfer *xfer;
 #endif
 	/* intrusive doubly-linked active list (xfer thread only): plink points
 	 * at whichever pointer references this node, for O(1) unlink */
@@ -114,7 +117,6 @@ struct transfer_ctx {
 #if WITH_THREADS
 /* Per-worker state: one ev_loop, one dispatcher, one active_list. */
 struct xfer_worker {
-	struct transfer *xfer;
 	thrd_t thread;
 	bool thread_started;
 	struct dispatcher *disp;
@@ -663,7 +665,6 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 
 	for (unsigned int i = 0; i < nworkers; i++) {
 		struct xfer_worker *restrict w = &xfer->workers[i];
-		w->xfer = xfer;
 		w->thread_started = false;
 		atomic_init(&w->stop, false);
 		w->active_list = NULL;
@@ -784,7 +785,9 @@ bool transfer_serve(
 	if (t == NULL) {
 		return false;
 	}
+#if !WITH_THREADS
 	t->xfer = xfer;
+#endif
 	t->next = NULL;
 	t->n_finished = 0;
 	t->num_sessions = opts->num_sessions;
