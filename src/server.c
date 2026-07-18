@@ -334,7 +334,7 @@ static void signal_cb(
 static bool
 resolve_addr(union sockaddr_max *restrict out, const char *restrict addrstr)
 {
-	const size_t bufsize = FQDN_MAX_LENGTH + sizeof(":65535");
+	const size_t bufsize = DIALADDR_STRLEN + 1;
 	const size_t addrlen = strlen(addrstr);
 	if (addrlen >= bufsize) {
 		LOGF_F("address too long: %s", addrstr);

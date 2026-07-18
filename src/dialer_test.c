@@ -357,6 +357,47 @@ T_DECLARE_CASE(dialaddr_parse_and_format_variants)
 	T_EXPECT(!dialaddr_parse(&addr, "127.0.0.1:70000", 15));
 }
 
+T_DECLARE_CASE(format_max_length_domain_fits_buffers)
+{
+	/* The longest dialaddr is a max-length (FQDN_MAX_LENGTH) domain with a
+	 * 5-digit port: it must format to exactly DIALADDR_STRLEN, and as a
+	 * socks4a proxy to exactly PROXYREQ_STRLEN. Every formatted-address log
+	 * buffer is now sized from these constants, so pin them to the real
+	 * maxima to guard the off-by-one that undersized proxy[]/status_str[]. */
+	char domain[FQDN_MAX_LENGTH + 1];
+	memset(domain, 'a', FQDN_MAX_LENGTH);
+	domain[FQDN_MAX_LENGTH] = '\0';
+
+	struct dialaddr addr = { 0 };
+	addr.type = ATYP_DOMAIN;
+	addr.port = UINT16_C(65535);
+	addr.domain.len = (uint_least8_t)FQDN_MAX_LENGTH;
+	memcpy(addr.domain.name, domain, FQDN_MAX_LENGTH);
+
+	char abuf[DIALADDR_STRLEN + 1];
+	T_EXPECT_EQ(
+		dialaddr_format(abuf, sizeof(abuf), &addr),
+		(int)DIALADDR_STRLEN);
+	T_EXPECT_EQ(strlen(abuf), DIALADDR_STRLEN);
+	T_EXPECT_STREQ(abuf + FQDN_MAX_LENGTH, ":65535");
+
+	char proxy_uri[512];
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "socks4a://%s:65535",
+			domain) > 0);
+	struct dialreq *req = dialreq_parse("127.0.0.1:80", proxy_uri);
+	T_CHECK(req != NULL);
+	T_EXPECT_EQ(req->num_proxy, (size_t)1);
+
+	char pbuf[512];
+	T_EXPECT(dialreq_format(pbuf, sizeof(pbuf), req) > 0);
+	const char *arrow = strstr(pbuf, "->");
+	T_CHECK(arrow != NULL);
+	/* the proxy URI portion is exactly PROXYREQ_STRLEN, not truncated */
+	T_EXPECT_EQ((size_t)(arrow - pbuf), PROXYREQ_STRLEN);
+	dialreq_free(req);
+}
+
 T_DECLARE_CASE(dialaddr_set_and_copy)
 {
 	struct sockaddr_in in = {
@@ -1907,6 +1948,7 @@ T_DECLARE_CASE(direct_connect_domain_resolves_and_succeeds)
 
 static const struct testing_suite suite[] = {
 	T_CASE(dialaddr_parse_and_format_variants),
+	T_CASE(format_max_length_domain_fits_buffers),
 	T_CASE(dialaddr_set_and_copy),
 	T_CASE(dialreq_parse_and_format_proxy_chain),
 	T_CASE(dialreq_parse_scheme_default_ports),

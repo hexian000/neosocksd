@@ -89,6 +89,21 @@ int dialaddr_format(
 	char *restrict s, size_t maxlen, const struct dialaddr *restrict addr);
 
 /**
+ * @brief Maximum length, excluding the NUL, of a dialaddr formatted by
+ * dialaddr_format() as "host:port": a max-length domain plus ":65535" (the
+ * IPv4/IPv6 forms are shorter). Size a buffer as DIALADDR_STRLEN + 1.
+ */
+#define DIALADDR_STRLEN (FQDN_MAX_LENGTH + CONSTSTRLEN(":65535"))
+
+/**
+ * @brief Maximum length, excluding the NUL, of a proxy request formatted by
+ * format_proxyreq() as "scheme://host:port": the longest proxy scheme
+ * ("socks4a"), "://", and a max-length dialaddr. Size a buffer as
+ * PROXYREQ_STRLEN + 1.
+ */
+#define PROXYREQ_STRLEN (CONSTSTRLEN("socks4a://") + DIALADDR_STRLEN)
+
+/**
  * @brief Supported proxy protocols
  */
 enum proxy_protocol {

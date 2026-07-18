@@ -72,7 +72,7 @@ bool dialaddr_parse(
 	struct dialaddr *restrict addr, const char *restrict s,
 	const size_t len)
 {
-	if (len > FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")) {
+	if (len > DIALADDR_STRLEN) {
 		LOG_TXT_F(ERROR, s, len, 0, "address too long: %zu bytes", len);
 		return false;
 	}
@@ -173,7 +173,7 @@ int dialaddr_format(
 	FAILMSGF("unexpected address type: %d", addr->type);
 }
 
-static const char *dialer_error_strs[DIALER_ERR_MAX] = {
+static const char *const dialer_error_strs[DIALER_ERR_MAX] = {
 	[DIALER_OK] = "success",
 	[DIALER_CANCELLED] = "operation cancelled",
 	[DIALER_ERR_SYSTEM] = "system error",
@@ -372,7 +372,7 @@ static int format_proxyreq(
 	char *restrict s, const size_t maxlen,
 	const struct proxyreq *restrict req)
 {
-	char host[FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")];
+	char host[DIALADDR_STRLEN + 1];
 	const int nhost = dialaddr_format(host, sizeof(host), &req->addr);
 	if (nhost < 0) {
 		return nhost;
@@ -520,7 +520,7 @@ static int format_status(
 	const size_t jump = d->jump;
 	const struct dialreq *restrict req = d->req;
 	ASSERT(jump < req->num_proxy);
-	char raddr[FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")], proxy[256];
+	char raddr[DIALADDR_STRLEN + 1], proxy[PROXYREQ_STRLEN + 1];
 	const struct dialaddr *restrict addr = &req->addr;
 	if (jump + 1 < req->num_proxy) {
 		addr = &req->proxy[jump + 1].addr;
@@ -539,12 +539,19 @@ static int format_status(
 		jump, nproxy, proxy);
 }
 
+/* Upper bound (excluding NUL) on the line format_status() builds: the fixed
+ * text, a proxy index (%zu), the destination dialaddr, and the proxy URI. */
+#define DIALER_STATUS_STRLEN                                                   \
+	(CONSTSTRLEN("connect `' over [] `'") +                                \
+	 CONSTSTRLEN("18446744073709551615") /* max size_t decimal digits */ + \
+	 DIALADDR_STRLEN + PROXYREQ_STRLEN)
+
 #define DIALER_LOG_F(level, d, format, ...)                                      \
 	do {                                                                     \
 		if (!LOGLEVEL(level)) {                                          \
 			break;                                                   \
 		}                                                                \
-		char status_str[256];                                            \
+		char status_str[DIALER_STATUS_STRLEN + 1];                       \
 		const int nstatus =                                              \
 			format_status(status_str, sizeof(status_str), (d));      \
 		if (nstatus < 0) {                                               \
@@ -1037,7 +1044,7 @@ static int recv_socks4a_rsp(struct dialer *restrict d)
 	return 0;
 }
 
-static const char *socks5_errorstr[] = {
+static const char *const socks5_errorstr[] = {
 	[SOCKS5RSP_SUCCEEDED] = "Succeeded",
 	[SOCKS5RSP_FAIL] = "General SOCKS server failure",
 	[SOCKS5RSP_NOALLOWED] = "Connection not allowed by ruleset",
@@ -1344,7 +1351,7 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 					req->num_proxy > 0 ?
 						&req->proxy[0].addr :
 						&req->addr;
-				char addr_str[64];
+				char addr_str[DIALADDR_STRLEN + 1];
 				dialaddr_format(
 					addr_str, sizeof(addr_str), addr);
 				LOG_F(WARNING, "connect `%s': (%d) %s",
@@ -1589,7 +1596,7 @@ static void resolve_cb(
 	}
 
 	if (LOGLEVEL(DEBUG)) {
-		char node_str[dialaddr->domain.len + sizeof(":65535")];
+		char node_str[DIALADDR_STRLEN + 1];
 		dialaddr_format(node_str, sizeof(node_str), dialaddr);
 		char addr_str[64];
 		sa_format(addr_str, sizeof(addr_str), &addr.sa);
