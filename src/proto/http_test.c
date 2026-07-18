@@ -16,6 +16,7 @@
 #include "http.h"
 
 #include "io/stream.h"
+#include "meta/arraysize.h"
 #include "utils/buffer.h"
 #include "utils/testing.h"
 
@@ -286,21 +287,29 @@ T_DECLARE_CASE(http_conn_init_response)
 
 T_DECLARE_CASE(parsehdr_accept_te_cases)
 {
-	struct http_conn p = { 0 };
-
-	{
-		char value[] = "   ";
+	/* TE only advertises what the client accepts, so every well-formed
+	 * value parses; only a `chunked` token sets the accepted encoding. */
+	static const struct {
+		const char *value;
+		enum transfer_encodings accept;
+	} cases[] = {
+		{ "   ", TENCODING_NONE },
+		{ " chunked ", TENCODING_CHUNKED },
+		{ "Chunked", TENCODING_CHUNKED },
+		/* a coding we do not offer is a hint, not an error */
+		{ "gzip", TENCODING_NONE },
+		/* RFC 9110 §10.1.4: "trailers" is a standard TE keyword */
+		{ "trailers", TENCODING_NONE },
+		{ "trailers, deflate", TENCODING_NONE },
+		{ "trailers, chunked;q=0.5", TENCODING_CHUNKED },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct http_conn p = { 0 };
+		char value[64];
+		T_CHECK(strlen(cases[i].value) < sizeof(value));
+		strcpy(value, cases[i].value);
 		T_EXPECT(parsehdr_accept_te(&p, value));
-		T_EXPECT_EQ(p.hdr.transfer.accept, TENCODING_NONE);
-	}
-	{
-		char value[] = " chunked ";
-		T_EXPECT(parsehdr_accept_te(&p, value));
-		T_EXPECT_EQ(p.hdr.transfer.accept, TENCODING_CHUNKED);
-	}
-	{
-		char value[] = "gzip";
-		T_EXPECT(!parsehdr_accept_te(&p, value));
+		T_EXPECT_EQ(p.hdr.transfer.accept, cases[i].accept);
 	}
 }
 
@@ -315,6 +324,13 @@ T_DECLARE_CASE(parsehdr_transfer_encoding_cases)
 	}
 	{
 		char value[] = "chunked";
+		T_EXPECT(parsehdr_transfer_encoding(&p, value));
+		T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
+	}
+	{
+		/* RFC 9112 §7: transfer-coding names are case-insensitive */
+		p.hdr.transfer.encoding = TENCODING_NONE;
+		char value[] = "Chunked";
 		T_EXPECT(parsehdr_transfer_encoding(&p, value));
 		T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
 	}
@@ -619,6 +635,43 @@ T_DECLARE_CASE(http_conn_recv_request_ok)
 	T_EXPECT_STREQ(p.msg.req.method, "GET");
 	T_EXPECT_STREQ(p.msg.req.url, "/hello");
 
+	T_CHECK(close(sv[0]) == 0);
+	T_CHECK(close(sv[1]) == 0);
+}
+
+/*
+ * Characterizes the http_conn_recv() body-framing contract: a chunked message
+ * parses OK but is NOT framed -- cbuf stays NULL and the body is left in rbuf
+ * for the caller to dechunk (proxy_pass does, via http_framer). A caller that
+ * reads cbuf must reject chunked itself or it silently sees an empty body;
+ * api_server answers 411 for the endpoints that need one. Pinned here so the
+ * invariant the other callers depend on is visible rather than incidental.
+ */
+T_DECLARE_CASE(http_conn_recv_chunked_body_is_not_framed)
+{
+	int sv[2] = { -1, -1 };
+	struct http_conn p = { 0 };
+	struct header_cb_ctx cb = { 0 };
+	static const char req[] = "POST /hello HTTP/1.1\r\n"
+				  "Host: test\r\n"
+				  "Transfer-Encoding: chunked\r\n"
+				  "\r\n"
+				  "5\r\nhello\r\n0\r\n\r\n";
+
+	make_socketpair(sv);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+
+	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
+	const int ret = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret, 0);
+	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
+	/* the headers parsed, but the body was not framed */
+	T_EXPECT(p.cbuf == NULL);
+	T_EXPECT(!p.hdr.content.has_length);
+
+	VBUF_FREE(p.cbuf);
 	T_CHECK(close(sv[0]) == 0);
 	T_CHECK(close(sv[1]) == 0);
 }
@@ -2089,6 +2142,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(content_writer_roundtrip_gzip),
 	T_CASE(http_resp_errpage_normal_and_fallback),
 	T_CASE(http_conn_recv_request_ok),
+	T_CASE(http_conn_recv_chunked_body_is_not_framed),
 	T_CASE(http_conn_recv_response_ok),
 	T_CASE(http_conn_recv_response_unsupported_version),
 	T_CASE(http_conn_recv_response_malformed_header),

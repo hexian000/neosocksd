@@ -193,6 +193,19 @@ void http_conn_init(
 
 /**
  * @brief Receive and parse HTTP data.
+ *
+ * Only a Content-Length delimited body is framed, into `cbuf`. A
+ * `Transfer-Encoding: chunked` message parses to STATE_PARSE_OK with
+ * `cbuf == NULL` and its body left unconsumed in `rbuf`: the one caller that
+ * accepts chunked (the proxy's proxy_pass) dechunks it itself through
+ * http_framer, so framing it here would be wasted work.
+ *
+ * A caller that consumes `cbuf` must therefore reject chunked itself, or it
+ * will silently see an empty body. Both do: api_server's `restapi_check`
+ * answers 501 for every REST endpoint, and api_client's `on_http_client_done`
+ * reports an error for a chunked rpcall/invoke response. Check
+ * `hdr.transfer.encoding` before relying on `cbuf`.
+ *
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
 int http_conn_recv(struct http_conn *restrict p);
@@ -345,10 +358,15 @@ void http_framer_filled(struct http_framer *restrict f, size_t n);
 bool http_framer_eof(struct http_framer *restrict f);
 
 /**
- * @brief Parse Accept-TE header. Currently detects chunked encoding.
+ * @brief Parse TE header, a list of accepted transfer-codings.
+ *
+ * Sets the accepted encoding to chunked if the list contains that coding.
+ * TE only advertises what the client accepts, so an unsupported coding is
+ * not an error.
+ *
  * @param p Parser instance
  * @param value Header value
- * @return true on success
+ * @return true for any well-formed value
  */
 bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value);
 
@@ -356,7 +374,8 @@ bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value);
  * @brief Parse Transfer-Encoding header. Currently detects chunked.
  * @param p Parser instance
  * @param value Header value
- * @return true on success
+ * @return true on success; false for a coding that cannot be framed, or for
+ *     an ambiguous Content-Length + chunked framing
  */
 bool parsehdr_transfer_encoding(
 	struct http_conn *restrict p, char *restrict value);

@@ -197,7 +197,10 @@ static bool reply_short(struct http_conn *restrict p, const char *s)
 
 static int parse_content(struct http_conn *restrict p)
 {
-	/* only Content-Length based content is handled here */
+	/* Only Content-Length based content is handled here. A chunked body is
+	 * deliberately left in rbuf for the caller to dechunk (proxy_pass does,
+	 * via http_framer); callers that read cbuf must reject chunked
+	 * themselves -- see the http_conn_recv() contract. */
 	if (!p->hdr.content.has_length) {
 		return 0;
 	}
@@ -829,19 +832,31 @@ bool http_framer_eof(struct http_framer *restrict f)
 
 bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value)
 {
-	value = strtrimspace(value);
-
-	if (value[0] == '\0') {
-		p->hdr.transfer.accept = TENCODING_NONE;
-		return true;
+	/* comma-split by hand rather than with the non-reentrant strtok(); each
+	 * element is a transfer-coding (or the "trailers" keyword) with an
+	 * optional ";q=..." weight */
+	for (char *token = value; token != NULL;) {
+		char *const comma = strchr(token, ',');
+		if (comma != NULL) {
+			*comma = '\0';
+		}
+		/* drop the quality value if present */
+		char *const semi = strchr(token, ';');
+		if (semi != NULL) {
+			*semi = '\0';
+		}
+		const char *const coding = strtrimspace(token);
+		if (strcasecmp(coding, "chunked") == 0) {
+			p->hdr.transfer.accept = TENCODING_CHUNKED;
+			return true;
+		}
+		token = (comma != NULL) ? comma + 1 : NULL;
 	}
 
-	if (strcmp(value, "chunked") == 0) {
-		p->hdr.transfer.accept = TENCODING_CHUNKED;
-		return true;
-	}
-
-	return false;
+	/* RFC 9110 §10.1.4: TE only advertises what the client is willing to
+	 * accept, so a coding we do not offer (or the "trailers" keyword) must
+	 * never fail the request — leave accept as TENCODING_NONE */
+	return true;
 }
 
 bool parsehdr_transfer_encoding(
@@ -854,7 +869,8 @@ bool parsehdr_transfer_encoding(
 		return true;
 	}
 
-	if (strcmp(value, "chunked") == 0) {
+	/* RFC 9112 §7: transfer-coding names are case-insensitive tokens */
+	if (strcasecmp(value, "chunked") == 0) {
 		/* RFC 9112 §6.3: Content-Length + Transfer-Encoding: chunked
 		 * is an ambiguous framing and must be rejected */
 		if (p->hdr.content.has_length) {
