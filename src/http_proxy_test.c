@@ -830,6 +830,256 @@ T_DECLARE_CASE(proxy_pass_forwards_content_length)
 	ev_loop_destroy(loop);
 }
 
+/*
+ * Regression: forwarding a request must not half-close the upstream write
+ * side. The request pump reaches HTTP_FRAMER_DONE as soon as the request is
+ * framed -- for a bodyless GET, right after the headers -- and a FIN there
+ * tells upstreams that watch the request connection for client disconnects
+ * (Go's net/http) to cancel the in-flight request. That raced against handler
+ * duration, so slow endpoints returned 500/502 while fast ones survived.
+ */
+T_DECLARE_CASE(proxy_pass_request_does_not_half_close_upstream)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* the whole request reaches the upstream */
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "GET / HTTP/1.1", 14) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "\r\n\r\n", 4) != NULL);
+
+	/* and the upstream's read side stays open: a further read must report
+	 * "nothing yet" rather than EOF, which is what a FIN would deliver */
+	drive_loop(loop);
+	unsigned char ch;
+	const ssize_t n = recv(upstream_fd, &ch, sizeof(ch), MSG_DONTWAIT);
+	T_EXPECT(n < 0);
+	T_EXPECT(errno == EAGAIN || errno == EWOULDBLOCK);
+
+	/* the upstream can still answer, and the response reaches the client */
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "abc", 3) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * http_parse splits the status line on spaces without validating it, so an
+ * upstream code is not known to be numeric. A malformed one must not reach the
+ * client; the caller turns the build failure into a 502.
+ */
+T_DECLARE_CASE(proxy_pass_response_bad_status_code_returns_502)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	static const char resp[] =
+		"HTTP/1.1 20X OK\r\nContent-Length: 0\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(has_http_status(cl, (size_t)cn, "502"));
+	T_EXPECT(memmem(cl, (size_t)cn, "20X", 3) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * The reason phrase is re-emitted canonically rather than forwarded, so a
+ * broken or hostile upstream cannot inject terminal escapes into the
+ * client-facing status line -- response *headers* are already rejected for
+ * control bytes, and RFC 9112 §4 makes the reason phrase advisory anyway.
+ */
+T_DECLARE_CASE(proxy_pass_response_reason_phrase_is_canonical)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* a bogus (but CTL-free) reason phrase; http_parse accepts it, so
+	 * neosocksd's re-canonicalization is what replaces it with "OK" */
+	static const char resp[] = "HTTP/1.1 200 PWNED\r\n"
+				   "Content-Length: 3\r\n\r\nabc";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the canonical reason, and no trace of the upstream's */
+	T_EXPECT(memmem(cl, (size_t)cn, "HTTP/1.1 200 OK\r\n", 17) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "PWNED", 5) == NULL);
+	/* the body is still forwarded */
+	T_EXPECT(memmem(cl, (size_t)cn, "abc", 3) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A control byte smuggled into the response reason phrase (an ANSI escape
+ * here) is rejected by http_parse itself -- the hardened parser refuses a bare
+ * CTL anywhere in the status line -- so the whole response is failed closed
+ * with a 502 rather than sanitized and forwarded. The smuggled bytes never
+ * reach the client either way. */
+T_DECLARE_CASE(proxy_pass_response_reason_phrase_ctl_returns_502)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	static const char resp[] = "HTTP/1.1 200 \x1b[31mPWNED\r\n"
+				   "Content-Length: 3\r\n\r\nabc";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the exchange fails closed with a 502, and neither the smuggled escape
+	 * nor its payload reaches the client */
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "PWNED", 5) == NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "\x1b", 1) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* RFC 9110 §10.1.4: TE advertises the transfer-codings the client accepts.
+ * It is a hint the proxy need not honor, so a TE it does not offer must not
+ * fail the request. */
+T_DECLARE_CASE(proxy_pass_accepts_te_hint)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "TE: trailers, deflate;q=0.5\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* the request reaches the upstream rather than being answered 400 */
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "GET / HTTP/1.1", 14) != NULL);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 /* A chunked request body is dechunked/rechunked to the upstream, and bytes
  * after the chunk terminator (a pipelined second request) are NOT forwarded. */
 T_DECLARE_CASE(proxy_pass_chunked_request_discards_surplus)
@@ -1181,6 +1431,154 @@ T_DECLARE_CASE(proxy_pass_forwards_100_continue)
 	T_CHECK(p100 != NULL);
 	T_CHECK(p200 != NULL);
 	T_EXPECT(p100 < p200); /* interim precedes the final response */
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A malformed interim (1xx) status code must not reach the client. Unlike the
+ * final path (which turns a bad code into a 502), an interim cannot be replaced
+ * mid-stream, so it is dropped and the following final response is forwarded. */
+T_DECLARE_CASE(proxy_pass_malformed_interim_dropped)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* an interim (strtoul -> 100) whose code is not a valid 3DIGIT status
+	 * ("100x"), then the valid final response. http_parse accepts the line
+	 * (no control bytes), so neosocksd's own status_code_valid() guard is
+	 * what recognizes the malformed interim and drops it. */
+	static const char interim[] = "HTTP/1.1 100x Malformed\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, interim, sizeof(interim) - 1) == 0);
+	drive_loop(loop);
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the final response and its body are forwarded */
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "abc", 3) != NULL);
+	/* the dropped interim's malformed status line does not reach the client */
+	T_EXPECT(memmem(cl, (size_t)cn, "100x", 4) == NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "Malformed", 9) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* An interim (1xx) whose status line carries a control byte (an ANSI escape
+ * here) is rejected by http_parse itself: the hardened parser refuses a bare
+ * CTL anywhere in the request/status line as a smuggling vector, so the parse
+ * fails before neosocksd's own status_code_valid() drop path runs and the
+ * exchange fails closed with a 502 rather than the interim being skipped. The
+ * smuggled bytes never reach the client. */
+T_DECLARE_CASE(proxy_pass_interim_ctl_status_line_returns_502)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	static const char interim[] = "HTTP/1.1 100\x1b[2J X\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, interim, sizeof(interim) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the exchange fails closed with a 502, and the smuggled control byte
+	 * never reaches the client */
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "\x1b", 1) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A syntactically valid but unlisted status code (451 here) passes
+ * status_code_valid() while http_status() has no entry for it: the code is
+ * forwarded and the reason phrase is canonicalized to empty, never the
+ * upstream's -- consistent with rsp_build_response's reason handling. */
+T_DECLARE_CASE(proxy_pass_unknown_status_code_forwarded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	static const char resp[] =
+		"HTTP/1.1 451 Unavailable For Legal Reasons\r\n"
+		"Content-Length: 0\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the code is forwarded with an empty (canonical) reason phrase */
+	T_EXPECT(memmem(cl, (size_t)cn, "HTTP/1.1 451 \r\n", 15) != NULL);
+	/* the upstream's reason phrase is not forwarded */
+	T_EXPECT(memmem(cl, (size_t)cn, "Unavailable", 11) == NULL);
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -1701,30 +2099,26 @@ T_DECLARE_CASE(malformed_proxy_authorization_returns_400)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(invalid_te_returns_400)
+/* A CONNECT carrying a TE the proxy does not offer must not fail the request:
+ * it reaches the dialer (502 here) rather than being rejected with a 400. */
+T_DECLARE_CASE(connect_with_te_hint_is_accepted)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
 	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
 			   "TE: gzip\r\n"
 			   "\r\n";
 
-	T_CHECK(loop != NULL);
-	s.loop = loop;
-	test_server_init(&s);
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	S.dialer_result_fd = -1;
 
+	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
-	{
-		unsigned char rsp[1024];
-		const ssize_t n =
-			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
-		T_EXPECT(n >= 17);
-		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
-		(void)shutdown(peer_fd, SHUT_WR);
-	}
+	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -2841,6 +3235,256 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
 	ev_loop_destroy(loop);
 }
 
+/* RFC 9110 §7.6.3 / RFC 9112 §3.2.2: an HTTP/1.0 absolute-form request is
+ * rewritten to origin-form with the version preserved and a Via entry naming
+ * the client's "1.0" protocol version. */
+T_DECLARE_CASE(proxy_pass_http_1_0_version_and_via_forwarded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/page HTTP/1.0\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "GET /page HTTP/1.0", 18) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "Via: 1.0 neosocksd", 18) != NULL);
+	(void)shutdown(upstream_fd, SHUT_WR);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* RFC 9110 §7.6.3 / RFC 9112 §3.2.2: an HTTP/1.1 absolute-form request is
+ * rewritten to origin-form with the version preserved and a Via entry appended
+ * naming the client's protocol version. */
+T_DECLARE_CASE(proxy_pass_http_1_1_version_and_via_forwarded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/page HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "GET /page HTTP/1.1", 18) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "Via: 1.1 neosocksd", 18) != NULL);
+	(void)shutdown(upstream_fd, SHUT_WR);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* RFC 9112 §2.3: the proxy speaks HTTP/1.x only. A request whose version is not
+ * HTTP/1.x must be rejected with 400 rather than forwarded or mis-parsed. */
+T_DECLARE_CASE(request_unsupported_http_version_returns_400)
+{
+	static const char *const versions[] = {
+		"HTTP/2.0", "HTTP/0.9",	 "HTTP/1",
+		"HTTP/3",   "HTTPS/1.1", "ICE/1.0",
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(versions); i++) {
+		struct ev_loop *loop = NULL;
+		struct server s = { 0 };
+		int peer_fd = -1;
+		char req[128];
+		(void)snprintf(
+			req, sizeof(req),
+			"GET http://example.com/ %s\r\n"
+			"Host: example.com\r\n\r\n",
+			versions[i]);
+
+		reset_stub_state();
+		init_server(&loop, &s);
+		serve_payload(loop, &s, req, &peer_fd);
+		drive_loop(loop);
+
+		unsigned char rsp[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		/* version `%s' must be rejected */
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
+		(void)shutdown(peer_fd, SHUT_WR);
+
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+	}
+}
+
+/* RFC 6455 §4 / RFC 9110 §7.8: a bodiless ws:// upgrade request (Connection
+ * lists "upgrade" and an Upgrade header is present) is forwarded to the upstream
+ * with the switch-protocol headers intact -- never the stateless Connection:
+ * close disposition -- and the connection is then relayed raw (as for CONNECT),
+ * so the upstream's 101 Switching Protocols and every WebSocket frame pass
+ * through untouched. */
+T_DECLARE_CASE(proxy_pass_websocket_upgrade_tunneled)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/chat HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Upgrade: websocket\r\n"
+			   "Connection: Upgrade\r\n"
+			   "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+			   "Sec-WebSocket-Version: 13\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	/* the upgrade is handed to the raw relay (transfer engine), like CONNECT */
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	T_EXPECT(test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC));
+	T_EXPECT_EQ(stub_xfer_ctx_count, 1);
+
+	/* the upstream receives the rewritten origin-form request with the
+	 * switch-protocol headers preserved and no forced connection close */
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "GET /chat HTTP/1.1", 18) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "Connection: upgrade", 19) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "Upgrade: websocket", 18) != NULL);
+	T_EXPECT(
+		memmem(up, (size_t)un,
+		       "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", 43) !=
+		NULL);
+	T_EXPECT(memmem(up, (size_t)un, "Connection: close", 17) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Bytes a client pipelines after the upgrade handshake (early WebSocket frames)
+ * must be replayed to the upstream when the raw relay takes over, not dropped. */
+T_DECLARE_CASE(proxy_pass_websocket_upgrade_forwards_pipelined_frames)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/chat HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Upgrade: websocket\r\n"
+			   "Connection: Upgrade\r\n"
+			   "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+			   "Sec-WebSocket-Version: 13\r\n\r\n"
+			   "FRAME-DATA"; /* pipelined post-handshake bytes */
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	T_EXPECT(test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC));
+	T_EXPECT_EQ(stub_xfer_ctx_count, 1);
+
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "GET /chat HTTP/1.1", 18) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "FRAME-DATA", 10) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A request that lists Upgrade but also declares a body is malformed for
+ * WebSocket; it must degrade to an ordinary framed forward -- the Upgrade
+ * header stripped, Connection: close forced, the body length-forwarded -- and
+ * must NOT be handed to the raw relay. */
+T_DECLARE_CASE(proxy_pass_upgrade_with_body_is_not_tunneled)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/chat HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Upgrade: websocket\r\n"
+			   "Connection: Upgrade\r\n"
+			   "Content-Length: 5\r\n\r\n"
+			   "hello";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "GET /chat HTTP/1.1", 18) != NULL);
+	/* degraded to a stateless framed forward, not an upgrade tunnel */
+	T_EXPECT(memmem(up, (size_t)un, "Connection: close", 17) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "Upgrade: websocket", 18) == NULL);
+	T_EXPECT(memmem(up, (size_t)un, "Content-Length: 5", 17) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "hello", 5) != NULL);
+	/* the raw relay was never engaged */
+	T_EXPECT_EQ(stub_xfer_ctx_count, 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -2852,6 +3496,11 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
 static const struct testing_suite suite[] = {
 	T_CASE(plain_http_origin_form_returns_400),
 	T_CASE(proxy_pass_forwards_content_length),
+	T_CASE(proxy_pass_request_does_not_half_close_upstream),
+	T_CASE(proxy_pass_response_bad_status_code_returns_502),
+	T_CASE(proxy_pass_response_reason_phrase_is_canonical),
+	T_CASE(proxy_pass_response_reason_phrase_ctl_returns_502),
+	T_CASE(proxy_pass_accepts_te_hint),
 	T_CASE(proxy_pass_chunked_request_discards_surplus),
 	T_CASE(proxy_pass_bodyless_pipelined_not_forwarded),
 	T_CASE(proxy_pass_chunked_response),
@@ -2860,6 +3509,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(proxy_pass_eof_response),
 	T_CASE(proxy_pass_head_response_bodiless),
 	T_CASE(proxy_pass_forwards_100_continue),
+	T_CASE(proxy_pass_malformed_interim_dropped),
+	T_CASE(proxy_pass_interim_ctl_status_line_returns_502),
+	T_CASE(proxy_pass_unknown_status_code_forwarded),
 	T_CASE(proxy_pass_forwards_interim_headers),
 	T_CASE(proxy_pass_multiple_interim_responses),
 	T_CASE(proxy_pass_interim_framing_does_not_leak),
@@ -2882,7 +3534,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(plain_http_proxy_authorization_not_forwarded),
 	T_CASE(plain_http_forward_success_counted_once),
 	T_CASE(malformed_proxy_authorization_returns_400),
-	T_CASE(invalid_te_returns_400),
+	T_CASE(connect_with_te_hint_is_accepted),
 	T_CASE(connect_with_invalid_target_returns_500),
 	T_CASE(valid_connect_dialer_error_returns_502),
 	T_CASE(valid_connect_established_with_hijack),
@@ -2906,6 +3558,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(request_header_value_with_bare_cr_is_rejected),
 	T_CASE(request_header_value_with_ctl_is_rejected),
 	T_CASE(request_header_name_with_invalid_token_is_rejected),
+	T_CASE(proxy_pass_http_1_0_version_and_via_forwarded),
+	T_CASE(proxy_pass_http_1_1_version_and_via_forwarded),
+	T_CASE(request_unsupported_http_version_returns_400),
+	T_CASE(proxy_pass_websocket_upgrade_tunneled),
+	T_CASE(proxy_pass_websocket_upgrade_forwards_pipelined_frames),
+	T_CASE(proxy_pass_upgrade_with_body_is_not_tunneled),
 	T_SUITE_END,
 };
 

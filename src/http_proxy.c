@@ -65,27 +65,33 @@ struct http_ctx {
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
 	ev_timer w_timeout;
-	union {
-		/* state < STATE_BIDIRECTIONAL */
-		struct {
-			ev_io w_recv, w_send;
+
+	/* Request/dial state. These are NOT storage-shared with `stream` below:
+	 * `conn` stays live throughout STATE_STREAM, which proxy_pass reads
+	 * while the stream runs. */
+	ev_io w_recv, w_send;
 #if WITH_RULESET
-			ev_idle w_process;
-			struct ruleset_callback ruleset_callback;
-			struct ruleset_state *ruleset_state;
+	ev_idle w_process;
+	struct ruleset_callback ruleset_callback;
+	struct ruleset_state *ruleset_state;
 #endif
-			struct dialreq *dialreq;
-			struct dialer dialer;
-			struct http_conn conn;
-			size_t req_content_length;
-			/* end-to-end headers recorded for forwarding */
-			struct http_header_kv fwd_hdr[PROXY_MAX_HEADERS];
-			size_t num_fwd_hdr;
-			/* dial target hostport for proxy_pass requests */
-			char req_target[FQDN_MAX_LENGTH + sizeof(":65535")];
-			bool req_content_length_known : 1;
-		};
-	};
+	struct dialreq *dialreq;
+	struct dialer dialer;
+	struct http_conn conn;
+	size_t req_content_length;
+	/* end-to-end headers recorded for forwarding */
+	struct http_header_kv fwd_hdr[PROXY_MAX_HEADERS];
+	size_t num_fwd_hdr;
+	/* dial target hostport for proxy_pass requests */
+	char req_target[DIALADDR_STRLEN + 1];
+	bool req_content_length_known : 1;
+	/* request switches protocols (Connection: upgrade + Upgrade) and carries
+	 * no body: it is forwarded verbatim then relayed raw, so the upstream's
+	 * 101 and every post-upgrade byte pass through untouched (see
+	 * build_forward_req and send_cb). Enables ws:// through proxy_pass. */
+	bool req_upgrade : 1;
+	const char *req_upgrade_value; /* client Upgrade value, forwarded as-is */
+
 	/* proxy_pass framing state (state == STATE_STREAM); heap-allocated at
 	 * stream start, freed on teardown */
 	struct http_stream *stream;
@@ -112,7 +118,9 @@ struct http_pump {
 #else
 	uint_least64_t *byt;
 #endif
-	bool done; /* body complete, output flushed, dst write shut down */
+	/* body complete and output flushed; for the response pump the dst write
+	 * side is also shut down (see pump_finished) */
+	bool done;
 };
 
 enum rsp_phase {
@@ -366,7 +374,18 @@ static void pump_finished(struct ev_loop *loop, struct http_pump *restrict p)
 {
 	struct http_stream *restrict s = p->owner;
 	ev_io_stop(loop, &p->w);
-	(void)socket_shutdown(p->dst_fd, SHUT_WR);
+	/* Only the response pump half-closes. Without keep-alive the FIN is what
+	 * tells the client its response is complete, so the response direction
+	 * needs it. The request direction does not: a request body is delimited
+	 * by Content-Length or Transfer-Encoding, never by connection close
+	 * (RFC 9112 6.3), so the upstream already knows where the request ends.
+	 * An early FIN there only tells upstreams that watch the request
+	 * connection for client disconnects (Go's net/http) to cancel the
+	 * in-flight request. stream_close() closes the socket once both
+	 * directions finish. */
+	if (p == &s->rsp) {
+		(void)socket_shutdown(p->dst_fd, SHUT_WR);
+	}
 	p->done = true;
 	if (s->req.done && s->rsp.done) {
 		HTTP_CTX_LOG(DEBUG, s->ctx, "stream complete");
@@ -534,12 +553,37 @@ static int rsp_parse_headers(struct http_stream *restrict s)
 	FAILMSG("unexpected http_reader state");
 }
 
+/* RFC 9112 §4: status-code = 3DIGIT. http_parse only splits the status line on
+ * spaces, so an upstream code reaching here is not yet known to be numeric. */
+static bool status_code_valid(const char *restrict s)
+{
+	size_t n;
+	for (n = 0; s[n] != '\0'; n++) {
+		if (!isdigit((unsigned char)s[n])) {
+			return false;
+		}
+	}
+	return n == 3;
+}
+
 /* Emit a canonical interim (1xx) response to the client, then keep reading. */
 static bool rsp_build_interim(struct http_stream *restrict s)
 {
 	struct http_conn *restrict conn = &s->ctx->conn;
 	conn->wbuf.len = 0;
 	s->whdr_pos = 0;
+	/* http_parse validates neither the code nor the reason phrase, so guard
+	 * the client-facing status line as rsp_build_response does for the final
+	 * one. A 502 cannot replace an interim (the final response may still be
+	 * coming, and an earlier interim may already be on the wire), so drop a
+	 * malformed interim -- emit nothing, read on -- rather than inject an
+	 * unvalidated code (with possible control bytes) into the status line. */
+	if (!status_code_valid(s->rsp_msg.rsp.code)) {
+		HTTP_CTX_LOG(
+			WARNING, s->ctx,
+			"malformed interim response status code, dropping");
+		return true;
+	}
 	struct buffer *restrict wbuf = (struct buffer *)&conn->wbuf;
 	const char *const status = http_status(
 		(uint_fast16_t)strtoul(s->rsp_msg.rsp.code, NULL, 10));
@@ -561,8 +605,19 @@ static bool rsp_build_response(struct http_stream *restrict s)
 	struct http_conn *restrict conn = &s->ctx->conn;
 	conn->wbuf.len = 0;
 	s->whdr_pos = 0;
+	/* http_parse validates neither the code nor the reason phrase, so a
+	 * broken or hostile upstream could otherwise put a non-numeric code or
+	 * control bytes into the client-facing status line -- inconsistent with
+	 * the response headers, which are rejected for CTLs. Fail a malformed
+	 * code (the caller turns that into a 502) and re-emit the canonical
+	 * reason instead of the upstream's, exactly as rsp_build_interim does.
+	 * RFC 9112 §4 makes the reason phrase advisory, so nothing is lost. */
+	if (!status_code_valid(s->rsp_msg.rsp.code)) {
+		HTTP_CTX_LOG(WARNING, s->ctx, "malformed response status code");
+		return false;
+	}
 	const unsigned long code = strtoul(s->rsp_msg.rsp.code, NULL, 10);
-	const char *const status = s->rsp_msg.rsp.status;
+	const char *const status = http_status((uint_fast16_t)code);
 
 	struct buffer *restrict wbuf = (struct buffer *)&conn->wbuf;
 	bool ok = fwd_append(conn, "HTTP/1.1 ") &&
@@ -871,10 +926,34 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		return;
 	}
 	case STATE_FORWARD:
+		ev_io_stop(loop, &ctx->w_send);
+		if (ctx->req_upgrade) {
+			/* WebSocket/Upgrade: the rewritten request has reached the
+			 * upstream. Hand both directions to the raw relay (as for
+			 * CONNECT) so the 101 response and every post-upgrade byte
+			 * pass through untouched. Replay any pipelined client bytes
+			 * to the upstream first, while both fds are still owned
+			 * here, then release dialreq/cbuf as start_stream would. */
+			dialreq_free(ctx->dialreq);
+			ctx->dialreq = NULL;
+			const size_t readahead = readahead_len(&ctx->conn);
+			if (readahead > 0 &&
+			    !forward_readahead(
+				    ctx->dialed_fd, ctx->conn.next,
+				    readahead)) {
+				HTTP_CTX_LOG(
+					WARNING, ctx,
+					"failed to forward pipelined bytes to upstream");
+				gc_unref(&ctx->gcbase);
+				return;
+			}
+			VBUF_FREE(ctx->conn.cbuf);
+			http_ctx_start_transfer(loop, ctx);
+			return;
+		}
 		/* proxy_pass request headers fully sent: enter the framing
 		 * forwarder. It takes over the readahead body and frees
 		 * cbuf/dialreq itself. */
-		ev_io_stop(loop, &ctx->w_send);
 		http_ctx_start_stream(loop, ctx);
 		return;
 	case STATE_RESPONSE:
@@ -1108,10 +1187,29 @@ static uint_fast16_t build_forward_req(struct http_ctx *restrict ctx)
 	     http_append_framing(
 		     wbuf, p->hdr.transfer.encoding == TENCODING_CHUNKED,
 		     ctx->req_content_length_known, ctx->req_content_length);
-	/* the client Connection/Keep-Alive headers were dropped above; overwrite
-	 * the upstream connection disposition to close (no keep-alive) to keep
-	 * the proxy stateless and bound the response by the upstream EOF */
-	ok = ok && fwd_append(p, "Connection: close\r\n\r\n");
+	/* RFC 9110 §7.8: a bodiless request that asks to switch protocols
+	 * (Connection lists "upgrade" and an Upgrade header is present) is
+	 * forwarded with those hop-by-hop headers intact and then tunneled raw
+	 * (see send_cb): the upstream's 101 Switching Protocols and every
+	 * post-upgrade byte pass through untouched. A body alongside the upgrade
+	 * is malformed for WebSocket and disables the upgrade, degrading to an
+	 * ordinary framed request. */
+	ctx->req_upgrade =
+		ctx->req_upgrade_value != NULL &&
+		http_connection_lists(p->hdr.connection, "upgrade") &&
+		!ctx->req_content_length_known &&
+		p->hdr.transfer.encoding != TENCODING_CHUNKED;
+	if (ctx->req_upgrade) {
+		ok = ok && fwd_append(p, "Connection: upgrade\r\nUpgrade: ") &&
+		     fwd_append(p, ctx->req_upgrade_value) &&
+		     fwd_append(p, "\r\n\r\n");
+	} else {
+		/* the client Connection/Keep-Alive headers were dropped above;
+		 * overwrite the upstream connection disposition to close (no
+		 * keep-alive) to keep the proxy stateless and bound the response
+		 * by the upstream EOF */
+		ok = ok && fwd_append(p, "Connection: close\r\n\r\n");
+	}
 	if (!ok) {
 		return HTTP_ENTITY_TOO_LARGE;
 	}
@@ -1351,6 +1449,10 @@ static bool parse_header(void *data, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "Upgrade") == 0) {
+		/* hop-by-hop, never forwarded verbatim; retained so a bodiless
+		 * upgrade request (e.g. WebSocket) can be re-emitted and tunneled
+		 * by build_forward_req */
+		ctx->req_upgrade_value = value;
 		return true;
 	}
 	if (strcasecmp(key, "Trailer") == 0) {
@@ -1394,6 +1496,8 @@ static struct http_ctx *http_ctx_new(struct server *restrict s, const int fd)
 	ctx->stream = NULL;
 	ctx->req_content_length = 0;
 	ctx->req_content_length_known = false;
+	ctx->req_upgrade = false;
+	ctx->req_upgrade_value = NULL;
 	ctx->num_fwd_hdr = 0;
 	ctx->req_target[0] = '\0';
 	const struct dialer_cb cb = {
