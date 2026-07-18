@@ -59,16 +59,19 @@ struct forward_ctx {
 };
 ASSERT_SUPER(struct gcbase, struct forward_ctx, gcbase);
 
-#define FW_CTX_LOG_F(level, ctx, format, ...)                                  \
+/* Log with an explicit fd for the correlation prefix, for the hand-off path
+ * that has already moved the accepted fd out of the context. */
+#define FW_FD_LOG_F(level, ctx, fd, format, ...)                               \
 	do {                                                                   \
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
 		char caddr[64];                                                \
 		sa_format(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
-		LOG_F(level, "[fd:%d] %s: " format, (ctx)->accepted_fd, caddr, \
-		      __VA_ARGS__);                                            \
+		LOG_F(level, "[fd:%d] %s: " format, (fd), caddr, __VA_ARGS__); \
 	} while (0)
+#define FW_CTX_LOG_F(level, ctx, format, ...)                                  \
+	FW_FD_LOG_F(level, ctx, (ctx)->accepted_fd, format, __VA_ARGS__)
 #define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
 
 static void
@@ -163,7 +166,9 @@ static void forward_commit(
 	ev_timer_stop(loop, &ctx->w_timeout);
 	ctx->s->stats.num_halfopen--;
 
-	FW_CTX_LOG_F(DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
+	FW_FD_LOG_F(
+		DEBUG, ctx, acc_fd, "transfer start: [%d<->%d]", acc_fd,
+		dial_fd);
 	const size_t cur = server_start_session(ctx->s, acc_fd, dial_fd);
 	if (cur == 0) {
 		LOGOOM();
@@ -172,7 +177,7 @@ static void forward_commit(
 		gc_unref(&ctx->gcbase);
 		return;
 	}
-	FW_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
+	FW_FD_LOG_F(DEBUG, ctx, acc_fd, "ready, %zu active sessions", cur);
 	gc_unref(&ctx->gcbase);
 }
 
@@ -319,12 +324,9 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	const struct dialreq *restrict req = ctx->s->basereq;
 	const struct dialaddr *restrict addr = &req->addr;
 
-	const size_t cap =
-		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
-	ASSERT(cap <= FQDN_MAX_LENGTH + 7);
-	char request[cap];
-	const int len = dialaddr_format(request, cap, addr);
-	CHECK(len >= 0 && (size_t)len < cap);
+	char request[DIALADDR_STRLEN + 1];
+	const int len = dialaddr_format(request, sizeof(request), addr);
+	CHECK(len >= 0 && (size_t)len < sizeof(request));
 	bool ok;
 	switch (addr->type) {
 	case ATYP_INET:

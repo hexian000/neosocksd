@@ -593,6 +593,8 @@ T_DECLARE_CASE(forward_dialer_fail_updates_stats)
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	/* the counter this path uniquely updates */
+	T_EXPECT_EQ(s.stats.num_reject_upstream, (uint_least64_t)1);
 	T_EXPECT_EQ(s.num_sessions, 0);
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1176,6 +1178,8 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	/* the counter this path uniquely updates */
+	T_EXPECT_EQ(s.stats.num_reject_upstream, (uint_least64_t)1);
 	T_EXPECT_EQ(s.num_sessions, 0);
 
 	ev_loop_destroy(loop);
