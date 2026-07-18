@@ -221,6 +221,27 @@ T_DECLARE_CASE(gunzip_invalid)
 	lua_close(L);
 }
 
+/* The zlib counterpart of gunzip_crc_mismatch: corrupt only the trailing
+ * adler-32 so the stream parses and inflates cleanly and only the checksum,
+ * verified at reader close, rejects it. zlib_uncompress_invalid cannot reach
+ * that path -- it fails at header parse. */
+T_DECLARE_CASE(zlib_uncompress_adler_mismatch)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local z = zlib.compress('hello') "
+		   "local bad = z:sub(1, #z - 4) .. string.rep('\\0', 4) "
+		   "local ok, err = pcall(zlib.uncompress, bad) "
+		   "return ok, type(err)"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(gunzip_crc_mismatch)
 {
 	lua_State *restrict L = new_lua();
@@ -279,6 +300,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(gzip_roundtrip_large),
 	T_CASE(gzip_empty_string),
 	T_CASE(gunzip_invalid),
+	T_CASE(zlib_uncompress_adler_mismatch),
 	T_CASE(gunzip_crc_mismatch),
 	T_CASE(zlib_repeated_failure_no_leak),
 	T_SUITE_END,

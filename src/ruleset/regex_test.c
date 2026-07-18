@@ -350,6 +350,39 @@ T_DECLARE_CASE(regex_match_captures)
 	lua_close(L);
 }
 
+/*
+ * An alternation leaves the branch that did not match as a non-participating
+ * subexpression (rm_so == -1), which push_matches reports as nil. That is a
+ * Lua-visible contract -- it also fixes the returned-value count -- and
+ * regex_match_captures cannot reach it, since both of its groups always
+ * participate.
+ */
+T_DECLARE_CASE(regex_match_absent_capture_is_nil)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('(a)|(b)') "
+		   "return regex.match(r, 'a')"));
+	T_EXPECT_EQ(lua_gettop(L), 3);
+	T_EXPECT_STREQ(lua_tostring(L, 1), "a");
+	T_EXPECT_STREQ(lua_tostring(L, 2), "a");
+	T_EXPECT(lua_isnil(L, 3));
+	lua_settop(L, 0);
+
+	/* the symmetric branch: now it is group 1 that is absent */
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('(a)|(b)') "
+		   "return regex.match(r, 'b')"));
+	T_EXPECT_EQ(lua_gettop(L), 3);
+	T_EXPECT_STREQ(lua_tostring(L, 1), "b");
+	T_EXPECT(lua_isnil(L, 2));
+	T_EXPECT_STREQ(lua_tostring(L, 3), "b");
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(regex_match_nomatch)
 {
 	lua_State *restrict L = new_lua();
@@ -489,6 +522,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_gmatch_mininteger_init_iterates),
 	T_CASE(regex_gmatch_init_past_leading_nul_iterates),
 	T_CASE(regex_match_captures),
+	T_CASE(regex_match_absent_capture_is_nil),
 	T_CASE(regex_match_nomatch),
 	T_CASE(regex_match_with_init),
 	T_CASE(regex_icase_matches_mixed_case),

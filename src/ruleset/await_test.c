@@ -528,6 +528,20 @@ static void trigger_invoke_success(const char *restrict chunk)
 	STUB.api_ctx = NULL;
 }
 
+/* Complete the pending invoke with an api_client-level error, as
+ * api_client_finish_errmsg does. errmsg is not NUL-terminated in general, so
+ * the length is passed explicitly and await.invoke must honor it. */
+static void
+trigger_invoke_failure(const char *restrict errmsg, const size_t errlen)
+{
+	T_CHECK(STUB.api_ctx != NULL);
+	STUB.api_cb.func(
+		STUB.api_ctx, STUB.loop, STUB.api_cb.data, errmsg, errlen,
+		NULL);
+	free(STUB.api_ctx);
+	STUB.api_ctx = NULL;
+}
+
 /* The connected fd handed to the most recent await.forward() commit. */
 static int g_committed_fd = -1;
 
@@ -780,6 +794,54 @@ T_DECLARE_CASE(await_invoke_real_path)
 }
 
 /*
+ * The asynchronous error return: when the api_client callback reports an
+ * error, await.invoke resumes as `false, <error>`. Only the synchronous start
+ * failure was covered, leaving both this contract and invoke_cb's errlen
+ * bookkeeping (whose comment flags a lifetime subtlety) unverified. The error
+ * message is deliberately not NUL-terminated at errlen, so a length mix-up
+ * over-reads into the trailing sentinel instead of going unnoticed.
+ */
+T_DECLARE_CASE(await_invoke_reports_async_error)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct lua_global_pred pred = {
+		.L = L,
+		.name = "invoke_err",
+	};
+	static const char errmsg[] = "connection refused!TRAILING";
+	static const size_t errlen = sizeof("connection refused") - 1;
+
+	reset_stub_state();
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  local ok, err = await.invoke('return 1', '127.0.0.1:80') "
+		   "  _G.invoke_ok = ok "
+		   "  _G.invoke_err = err "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	trigger_invoke_failure(errmsg, errlen);
+	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, TEST_WAIT_SEC));
+
+	lua_getglobal(L, "invoke_ok");
+	T_EXPECT(lua_isboolean(L, -1));
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+	/* exactly the reported bytes, neither truncated nor over-read */
+	lua_getglobal(L, "invoke_err");
+	T_EXPECT_STREQ(lua_tostring(L, -1), "connection refused");
+	lua_pop(L, 1);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+	reset_stub_state();
+}
+
+/*
  * Regression: await.invoke with no address argument at all used to abort
  * the whole process via ASSERT(n > 0) in aux_todialreq instead of raising
  * a catchable Lua error. The invalid-address check runs synchronously
@@ -841,6 +903,47 @@ T_DECLARE_CASE(await_execute_reports_exit_status)
 	lua_pop(L, 1);
 	lua_getglobal(L, "exec_code");
 	T_EXPECT_EQ(lua_tointeger(L, -1), 3);
+	lua_pop(L, 1);
+
+	lua_close(L);
+}
+
+/* The common case: a command exiting 0 returns true, "exit", 0. Only the
+ * failure sub-branches (non-zero exit, signal) were covered, so a regression
+ * flipping this boolean would have passed. */
+T_DECLARE_CASE(await_execute_reports_success)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = EV_DEFAULT;
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct lua_global_pred pred = {
+		.L = L,
+		.name = "exec_kind",
+	};
+
+	reset_stub_state();
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  local ok, kind, code = await.execute('exit 0') "
+		   "  _G.exec_ok = ok "
+		   "  _G.exec_kind = kind "
+		   "  _G.exec_code = code "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, 1.0));
+	/* true, not merely truthy: the failure paths return nil here */
+	lua_getglobal(L, "exec_ok");
+	T_EXPECT(lua_isboolean(L, -1));
+	T_EXPECT(lua_toboolean(L, -1) != 0);
+	lua_pop(L, 1);
+	lua_getglobal(L, "exec_kind");
+	T_EXPECT_STREQ(lua_tostring(L, -1), "exit");
+	lua_pop(L, 1);
+	lua_getglobal(L, "exec_code");
+	T_EXPECT_EQ(lua_tointeger(L, -1), 0);
 	lua_pop(L, 1);
 
 	lua_close(L);
@@ -1323,7 +1426,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_resolve_real_path),
 	T_CASE(await_resolve_failure_returns_nil),
 	T_CASE(await_invoke_real_path),
+	T_CASE(await_invoke_reports_async_error),
 	T_CASE(await_invoke_without_address_raises_error),
+	T_CASE(await_execute_reports_success),
 	T_CASE(await_execute_reports_exit_status),
 	T_CASE(await_execute_reports_signal),
 	T_CASE(await_forward_commits_on_success),

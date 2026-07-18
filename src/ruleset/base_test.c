@@ -43,9 +43,22 @@ static int test_close(lua_State *restrict L)
 	return 0;
 }
 
+/* thread_call_k dispatches the finish function as finish(ok, results...); this
+ * records that contract so a case can assert the dispatch actually happened. */
+struct async_finish_record {
+	bool called;
+	bool ok;
+	int nargs;
+	lua_Integer result;
+};
+static struct async_finish_record async_finish_state;
+
 static int async_finish(lua_State *restrict L)
 {
-	(void)L;
+	async_finish_state.called = true;
+	async_finish_state.nargs = lua_gettop(L);
+	async_finish_state.ok = lua_toboolean(L, 1);
+	async_finish_state.result = lua_tointeger(L, 2);
 	return 0;
 }
 
@@ -324,14 +337,22 @@ T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 	lua_State *restrict L = new_ruleset_lua(&r);
 	lua_State *co1, *co2;
 
+	async_finish_state = (struct async_finish_record){ 0 };
 	co1 = aux_getthread(L);
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
 	T_EXPECT_EQ(r.vmstats.num_thread_peak, (size_t)1);
+	/* aux_getthread leaves the coroutine at slot 1, so the finish function
+	 * pushed here is at slot 2 -- that is the index aux_async copies from. */
 	lua_pushcfunction(L, async_finish);
 	lua_pushcfunction(L, async_worker);
-	T_EXPECT_EQ(aux_async(co1, L, 0, 1), LUA_YIELD);
+	T_EXPECT_EQ(aux_async(co1, L, 0, 2), LUA_YIELD);
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
 	T_EXPECT_EQ(r.vmstats.num_thread_peak, (size_t)1);
+	/* the worker's return value is routed to finish as (ok, results...) */
+	T_EXPECT(async_finish_state.called);
+	T_EXPECT(async_finish_state.ok);
+	T_EXPECT_EQ(async_finish_state.nargs, 2);
+	T_EXPECT_EQ(async_finish_state.result, (lua_Integer)99);
 	lua_settop(L, 0);
 
 	co2 = aux_getthread(L);
@@ -356,6 +377,7 @@ T_DECLARE_CASE(base_aux_async_grows_thread_stack_for_args)
 	 * of a fresh coroutine's stack into unmapped memory (a smaller overrun
 	 * can land in allocator slack and go unnoticed) */
 	enum { NARG = 20000 };
+	async_finish_state = (struct async_finish_record){ 0 };
 	lua_State *const co = aux_getthread(L);
 	T_CHECK(lua_checkstack(L, NARG + 2));
 	lua_pushcfunction(L, async_finish);
@@ -363,8 +385,11 @@ T_DECLARE_CASE(base_aux_async_grows_thread_stack_for_args)
 	for (int i = 0; i < NARG; i++) {
 		lua_pushinteger(L, i);
 	}
-	T_EXPECT_EQ(aux_async(co, L, NARG, 1), LUA_YIELD);
+	T_EXPECT_EQ(aux_async(co, L, NARG, 2), LUA_YIELD);
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+	T_EXPECT(async_finish_state.called);
+	T_EXPECT(async_finish_state.ok);
+	T_EXPECT_EQ(async_finish_state.result, (lua_Integer)99);
 
 	lua_close(L);
 }
@@ -475,6 +500,7 @@ T_DECLARE_CASE(base_aux_async_catastrophic_failure_cleanup)
 	lua_newtable(L);
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
 
+	async_finish_state = (struct async_finish_record){ 0 };
 	lua_State *const co = aux_getthread(L);
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
 
@@ -489,8 +515,10 @@ T_DECLARE_CASE(base_aux_async_catastrophic_failure_cleanup)
 
 	lua_pushcfunction(L, async_finish);
 	lua_pushcfunction(L, async_worker);
-	const int status = aux_async(co, L, 0, 1);
+	const int status = aux_async(co, L, 0, 2);
 	T_EXPECT(status != LUA_OK && status != LUA_YIELD);
+	/* the raise happens in the re-caching after the finish dispatch */
+	T_EXPECT(async_finish_state.called);
 
 	/* decremented exactly once (0), not double-counted (SIZE_MAX) */
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
