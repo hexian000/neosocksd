@@ -987,6 +987,76 @@ T_DECLARE_CASE(invalid_version_rejected)
 	ev_loop_destroy(loop);
 }
 
+/*
+ * socks5_req() rejects a request whose own header version byte is not SOCKS5:
+ * it logs and drops the connection with no response. That is a distinct path
+ * from invalid_version_rejected, whose leading 0x06 is the *auth-negotiation*
+ * version and so never gets past socks_dispatch. Complete the auth first, then
+ * send a request header with a bad version.
+ */
+T_DECLARE_CASE(socks5_request_version_rejected)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		/* auth: version 5, 1 method, no-auth */
+		0x05,
+		0x01,
+		0x00,
+		/* request: version 4 (wrong), CONNECT, rsv, IPv4 1.2.3.4:80 */
+		0x04,
+		0x01,
+		0x00,
+		0x01,
+		0x01,
+		0x02,
+		0x03,
+		0x04,
+		0x00,
+		0x50,
+	};
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	/* Reset defensively: the regression-detecting power of this case relies
+	 * on dialreq_new() returning NULL (dialreq_available == false), so that a
+	 * bug letting the bad version through would build no dialreq and send a
+	 * failure reply of length != 2. Ambient STUB.dialreq_available == true
+	 * from a prior case would mask that, letting the case pass with the bug. */
+	stub_reset();
+	test_conf.auth_required = false;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+
+	{
+		/* the auth-method reply still arrives ... */
+		unsigned char rsp[64];
+		const ssize_t n = recv_after_readable(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		T_EXPECT(n >= 2);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		/* ... and nothing more: the bad request header is dropped
+		 * without a reply, unlike an unsupported command/atyp */
+		T_EXPECT_EQ(n, (ssize_t)2);
+	}
+	drive_loop(loop);
+	{
+		/* the connection is dropped, not left half-open: rejecting the bad
+		 * version finalizes the session synchronously (gc_unref -> finalize
+		 * -> socket_close in recv_cb), so the peer read observes EOF, not a
+		 * still-open EAGAIN */
+		unsigned char ch;
+		const ssize_t n = recv_nowait(peer_fd, &ch, sizeof(ch));
+		T_EXPECT_EQ(n, (ssize_t)0);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(socks5_unsupported_command_rsp)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -2405,6 +2475,275 @@ T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
 	test_conf.socks5_udp = false;
 }
 
+/* An in-progress fragment sequence followed by a new first fragment whose
+ * address is malformed exercises the restart path: the relay drops the old
+ * sequence before parsing (so a failed parse cannot leave it accumulating
+ * toward a zeroed target) and must recover so a fresh sequence reassembles
+ * normally. */
+T_DECLARE_CASE(socks5_udp_frag_restart_recovers)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_udp = true;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_after_readable(
+		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+
+	/* Bind a target UDP socket */
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	{
+		struct sockaddr_in target_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(target_udp, (const struct sockaddr *)&target_sa,
+			     sizeof(target_sa)) == 0);
+	}
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	/* Bind a client UDP socket */
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	{
+		struct sockaddr_in cli_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(client_udp, (const struct sockaddr *)&cli_sa,
+			     sizeof(cli_sa)) == 0);
+	}
+
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	/* Start a fragmented sequence but leave it incomplete. */
+	unsigned char frag1[10 + 3];
+	frag1[0] = 0;
+	frag1[1] = 0; /* RSV */
+	frag1[2] = 0x01; /* FRAG: first, more to come */
+	frag1[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag1 + 4, &target_bound.sin_addr, 4);
+	memcpy(frag1 + 8, &target_bound.sin_port, 2);
+	memcpy(frag1 + 10, "AAA", 3);
+	T_CHECK(sendto(client_udp, frag1, sizeof(frag1), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag1));
+	drive_loop(loop);
+
+	/* New first fragment with an unsupported ATYP: the restart drops the
+	 * in-progress sequence, then udp_parse_addr fails. */
+	const unsigned char bad[5] = { 0, 0, 0x01, 0x09, 0x00 };
+	T_CHECK(sendto(client_udp, bad, sizeof(bad), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(bad));
+	drive_loop(loop);
+
+	/* Nothing has been forwarded to the target yet. */
+	{
+		unsigned char buf[32];
+		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+	}
+
+	/* A fresh, complete sequence now reassembles and forwards normally. */
+	unsigned char frag_a[10 + 6];
+	frag_a[0] = 0;
+	frag_a[1] = 0; /* RSV */
+	frag_a[2] = 0x01; /* first */
+	frag_a[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag_a + 4, &target_bound.sin_addr, 4);
+	memcpy(frag_a + 8, &target_bound.sin_port, 2);
+	memcpy(frag_a + 10, "Hello ", 6);
+	T_CHECK(sendto(client_udp, frag_a, sizeof(frag_a), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag_a));
+	drive_loop(loop);
+
+	unsigned char frag_b[10 + 5];
+	frag_b[0] = 0;
+	frag_b[1] = 0; /* RSV */
+	frag_b[2] = 0x82; /* pos=2, last */
+	frag_b[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag_b + 4, &target_bound.sin_addr, 4);
+	memcpy(frag_b + 8, &target_bound.sin_port, 2);
+	memcpy(frag_b + 10, "World", 5);
+	T_CHECK(sendto(client_udp, frag_b, sizeof(frag_b), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag_b));
+	drive_loop(loop);
+
+	{
+		unsigned char buf[32];
+		const ssize_t n =
+			recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		T_EXPECT(n == 11);
+		T_EXPECT(memcmp(buf, "Hello World", 11) == 0);
+	}
+
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_udp = false;
+}
+
+/*
+ * Characterizes a documented limitation: RFC 1928 section 7 permits
+ * ATYP = DOMAINNAME in the UDP request header, but this relay resolves no
+ * domain targets, so such datagrams are dropped (now logged at debug level
+ * rather than vanishing silently). Pinned here so the behavior is a decision
+ * rather than an accident, and to show the drop does not wedge the relay: a
+ * following IPv4 datagram still gets through.
+ */
+T_DECLARE_CASE(socks5_udp_domain_target_discarded)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_udp = true;
+	test_conf.timeout = 1.0;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_after_readable(
+		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	{
+		struct sockaddr_in target_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(target_udp, (const struct sockaddr *)&target_sa,
+			     sizeof(target_sa)) == 0);
+	}
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	{
+		struct sockaddr_in cli_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(client_udp, (const struct sockaddr *)&cli_sa,
+			     sizeof(cli_sa)) == 0);
+	}
+
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	/* RSV(2) FRAG(1) ATYP=DOMAIN len(1) "localhost" port(2) payload */
+	unsigned char dom_pkt[4 + 1 + 9 + 2 + 4];
+	dom_pkt[0] = dom_pkt[1] = 0x00;
+	dom_pkt[2] = 0x00; /* not fragmented */
+	dom_pkt[3] = SOCKS5ADDR_DOMAIN;
+	dom_pkt[4] = 9;
+	memcpy(dom_pkt + 5, "localhost", 9);
+	memcpy(dom_pkt + 14, &target_bound.sin_port, 2);
+	memcpy(dom_pkt + 16, "nope", 4);
+	T_CHECK(sendto(client_udp, dom_pkt, sizeof(dom_pkt), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(dom_pkt));
+
+	drive_loop(loop);
+
+	/* dropped: the domain target is never resolved or forwarded to */
+	{
+		unsigned char buf[32];
+		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+	}
+
+	/* the relay survives it: an IPv4 datagram still forwards */
+	unsigned char ok_pkt[10 + 5];
+	ok_pkt[0] = ok_pkt[1] = 0x00;
+	ok_pkt[2] = 0x00;
+	ok_pkt[3] = SOCKS5ADDR_IPV4;
+	memcpy(ok_pkt + 4, &target_bound.sin_addr, 4);
+	memcpy(ok_pkt + 8, &target_bound.sin_port, 2);
+	memcpy(ok_pkt + 10, "hello", 5);
+	T_CHECK(sendto(client_udp, ok_pkt, sizeof(ok_pkt), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(ok_pkt));
+
+	drive_loop(loop);
+
+	{
+		unsigned char buf[32];
+		const ssize_t n =
+			recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		T_EXPECT(n == 5);
+		T_EXPECT(memcmp(buf, "hello", 5) == 0);
+	}
+
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	test_conf.socks5_udp = false;
+}
+
 T_DECLARE_CASE(socks5_dialer_err_resolve_hostunreach)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -3041,6 +3380,7 @@ T_DECLARE_CASE(socks5_zero_length_domain_parses_then_fails)
 
 static const struct testing_suite suite[] = {
 	T_CASE(invalid_version_rejected),
+	T_CASE(socks5_request_version_rejected),
 	T_CASE(socks5_unsupported_command_rsp),
 	T_CASE(socks5_unsupported_atyp_rsp),
 	T_CASE(socks5_userpass_empty_username_fails),
@@ -3056,6 +3396,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_ruleset_reject_rsp_fail),
 	T_CASE(socks5_ruleset_async_then_dialer_fail_noallowed),
 	T_CASE(socks5_dialer_system_error_netunreach),
+	T_CASE(socks5_udp_domain_target_discarded),
 	T_CASE(socks5_dialer_err_resolve_hostunreach),
 	T_CASE(socks5_dialer_err_system_hostunreach),
 	T_CASE(socks5_dialer_err_proxy_refused_connrefused),
@@ -3081,6 +3422,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_udp_tcp_close_teardown),
 	T_CASE(socks5_udp_frag_two_parts),
 	T_CASE(socks5_udp_frag_discard_out_of_order),
+	T_CASE(socks5_udp_frag_restart_recovers),
 	T_CASE(socks5_connect_success_starts_transfer),
 	T_CASE(socks5_domain_max_length_parses),
 	T_CASE(socks4a_overlong_domain_rejected),

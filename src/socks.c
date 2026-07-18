@@ -126,19 +126,27 @@ static int format_status(
 		return snprintf(
 			s, maxlen, "[fd:%d] %s", ctx->accepted_fd, caddr);
 	}
-	char saddr[64];
+	char saddr[DIALADDR_STRLEN + 1];
 	dialaddr_format(saddr, sizeof(saddr), &ctx->addr);
 	return snprintf(
 		s, maxlen, "[fd:%d] %s -> `%s'", ctx->accepted_fd, caddr,
 		saddr);
 }
 
+/* Upper bound (excluding NUL) on the line format_status() builds:
+ * "[fd:N] caddr -> `saddr'", where caddr is a sa_format() sockaddr (<= 63) and
+ * saddr a dialaddr. */
+#define SOCKS_STATUS_STRLEN                                                    \
+	(CONSTSTRLEN("[fd:] ") + CONSTSTRLEN("-2147483648") /* max int fd */ + \
+	 64 /* caddr sa_format buffer */ + CONSTSTRLEN(" -> `'") +             \
+	 DIALADDR_STRLEN)
+
 #define SOCKS_CTX_LOG_F(level, ctx, format, ...)                               \
 	do {                                                                   \
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
-		char status_str[256];                                          \
+		char status_str[SOCKS_STATUS_STRLEN + 1];                      \
 		const int nstatus =                                            \
 			format_status(status_str, sizeof(status_str), (ctx));  \
 		ASSERT(nstatus > 0);                                           \
@@ -795,7 +803,7 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	if (!bind_peer_matches_request(ctx, &peer_sa)) {
 		char peer_str[64];
 		sa_format(peer_str, sizeof(peer_str), &peer_sa.sa);
-		char expect_str[64];
+		char expect_str[DIALADDR_STRLEN + 1];
 		dialaddr_format(expect_str, sizeof(expect_str), &ctx->addr);
 		SOCKS_CTX_LOG_F(
 			WARNING, ctx,
@@ -993,7 +1001,12 @@ static int udp_hdr_len(const unsigned char *restrict buf, const size_t buflen)
 	}
 }
 
-/* Fragment assembly: reassemble into frag_buf, forward on last fragment; discard out-of-order/overflow. */
+/* Fragment assembly: reassemble into frag_buf, forward on last fragment;
+ * discard out-of-order/overflow. Every discard below is driven by remote client
+ * input and repeats per datagram, so they log at DEBUG -- like the
+ * non-fragmented unsupported-ATYP discard in udp_relay_cb -- rather than
+ * WARNING, which a client could stream malformed fragments to grow unbounded (a
+ * remote-triggerable log flood, since WARNING <= the default NOTICE loglevel). */
 static void udp_frag_client_recv(
 	struct socks_ctx *restrict ctx, const size_t nrecv,
 	const uint_fast8_t frag)
@@ -1006,8 +1019,13 @@ static void udp_frag_client_recv(
 		/* First fragment: save target address and start accumulation */
 		if (ctx->frag_next != 0) {
 			SOCKS_CTX_LOG(
-				WARNING, ctx,
+				DEBUG, ctx,
 				"UDP frag: new sequence discards in-progress one");
+			/* actually drop it before parsing: udp_parse_addr
+			 * clears frag_target and can then fail, which would
+			 * otherwise leave the old sequence accumulating toward
+			 * a zeroed target */
+			udp_frag_reset(ctx);
 		}
 		size_t hdr_len;
 		if (!udp_parse_addr(
@@ -1015,13 +1033,9 @@ static void udp_frag_client_recv(
 			    buf, nrecv)) {
 			return;
 		}
+		/* nrecv <= IO_BUFSIZE (the recvfrom bound) and hdr_len >=
+		 * SOCKS5_UDP_HDR_IPV4LEN, so payload_len always fits frag_buf */
 		const size_t payload_len = nrecv - hdr_len;
-		if (payload_len > IO_BUFSIZE) {
-			SOCKS_CTX_LOG(
-				WARNING, ctx,
-				"UDP frag: first fragment too large, discarding");
-			return;
-		}
 		BUF_INIT(ctx->frag_buf, 0);
 		memcpy(ctx->frag_buf.data, buf + hdr_len, payload_len);
 		ctx->frag_buf.len = payload_len;
@@ -1036,12 +1050,12 @@ static void udp_frag_client_recv(
 	if (pos == 0 || pos != ctx->frag_next) {
 		if (ctx->frag_next != 0) {
 			SOCKS_CTX_LOG(
-				WARNING, ctx,
+				DEBUG, ctx,
 				"UDP frag: out-of-order, discarding sequence");
 			udp_frag_reset(ctx);
 		} else {
 			SOCKS_CTX_LOG(
-				WARNING, ctx,
+				DEBUG, ctx,
 				"UDP frag: unexpected fragment, discarding");
 		}
 		return;
@@ -1052,7 +1066,7 @@ static void udp_frag_client_recv(
 	const int hl = udp_hdr_len(buf, nrecv);
 	if (hl < 0) {
 		SOCKS_CTX_LOG(
-			WARNING, ctx,
+			DEBUG, ctx,
 			"UDP frag: malformed fragment, discarding sequence");
 		udp_frag_reset(ctx);
 		return;
@@ -1061,7 +1075,7 @@ static void udp_frag_client_recv(
 	const size_t payload_len = nrecv - hdr_len;
 	if (payload_len > IO_BUFSIZE - ctx->frag_buf.len) {
 		SOCKS_CTX_LOG(
-			WARNING, ctx,
+			DEBUG, ctx,
 			"UDP frag: reassembly overflow, discarding sequence");
 		udp_frag_reset(ctx);
 		return;
@@ -1122,7 +1136,17 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		if (!udp_parse_addr(
 			    &target_sa, &target_len, &hdr_len, ctx->ubuf,
 			    (size_t)nrecv)) {
-			/* Unsupported address type, discard. */
+			/* RFC 1928 section 7 also permits ATYP = DOMAINNAME
+			 * here, which this relay does not resolve, so such a
+			 * datagram is dropped like a truncated one. Logged at
+			 * debug level rather than warning: a client using
+			 * domain targets repeats this for every datagram, and
+			 * the source is remote. */
+			SOCKS_CTX_LOG_F(
+				DEBUG, ctx,
+				"UDP: discarding datagram with an unsupported or truncated address (atyp %" PRIuFAST8
+				", %zu bytes)",
+				(uint_fast8_t)udph.addrtype, (size_t)nrecv);
 			return;
 		}
 		ssize_t nsend;
@@ -1471,12 +1495,9 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 	ASSERT(ctx->state == STATE_PROCESS);
 
 	const struct dialaddr *restrict addr = &ctx->addr;
-	const size_t cap =
-		addr->type == ATYP_DOMAIN ? addr->domain.len + 7 : 64;
-	ASSERT(cap <= FQDN_MAX_LENGTH + 7);
-	char request[cap];
-	const int n = dialaddr_format(request, cap, addr);
-	ASSERT(n >= 0 && (size_t)n < cap);
+	char request[DIALADDR_STRLEN + 1];
+	const int n = dialaddr_format(request, sizeof(request), addr);
+	ASSERT(n >= 0 && (size_t)n < sizeof(request));
 	(void)n;
 	const char *const username = ctx->auth.username;
 	const char *const password = ctx->auth.password;
