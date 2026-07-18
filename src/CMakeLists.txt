@@ -287,6 +287,13 @@ if(WITH_RULESET)
     add_unit_test(api_client_test
         SRCS api_client_test.c api_client.c http_client.c
              proto/http.c proto/codec.c)
+    # api_client_test's OOM case interposes realloc() to fail the error
+    # vbuffer's initial realloc(NULL, size). At -O2 the compiler folds that
+    # call to a malloc() builtin, bypassing the interposer and leaving the
+    # out-of-memory branch unverified. Keep it a real realloc() call, as in
+    # marshal_test.
+    target_compile_options(api_client_test PRIVATE
+        -fno-builtin-malloc -fno-builtin-realloc)
 endif()
 
 add_unit_test(forward_test

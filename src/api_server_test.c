@@ -11,6 +11,7 @@
 #include "ruleset/ruleset.h"
 #include "server.h"
 
+#include "meta/arraysize.h"
 #include "os/clock.h"
 #include "os/socket.h"
 #include "utils/testing.h"
@@ -908,6 +909,37 @@ T_DECLARE_CASE(stats_bad_method_405)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(chunked_request_rejected_501)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	/* http_conn frames only Content-Length bodies, so a chunked request body
+	 * is left unconsumed in rbuf and discarded on the keep-alive reset,
+	 * desyncing the stream. restapi_check must reject chunked with 501 and
+	 * close the connection rather than dispatch a no-body endpoint over it.
+	 * /stats is a require_content=false endpoint, the path the bug affected. */
+	T_CHECK(send_request(
+		peer_fd, "GET /stats HTTP/1.1\r\n"
+			 "Transfer-Encoding: chunked\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 501 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Connection: close\r\n"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(stats_bad_query_400)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -929,6 +961,42 @@ T_DECLARE_CASE(stats_bad_query_400)
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(stats_key_only_query_options)
+{
+	static const char *const requests[] = {
+		"GET /stats?nobanner HTTP/1.1\r\n\r\n",
+		"GET /stats?server HTTP/1.1\r\n\r\n",
+		"GET /stats?runtime HTTP/1.1\r\n\r\n",
+		"GET /stats?nobanner&server&runtime HTTP/1.1\r\n\r\n",
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(requests); i++) {
+		struct ev_loop *loop = ev_loop_new(0);
+		struct server api, core;
+		int peer_fd = -1;
+		unsigned char rsp[8192];
+
+		T_CHECK(loop != NULL);
+		init_server_pair(&api, &core, loop);
+		start_api(&api, loop, &peer_fd);
+
+		/* A key-only query component has a NULL value; it must be
+		 * treated as false rather than dereferenced. */
+		T_CHECK(send_request(peer_fd, requests[i]));
+		{
+			const ssize_t n = recv_all_with_timeout(
+				loop, peer_fd, rsp, sizeof(rsp),
+				TEST_WAIT_RECV_SEC);
+			T_EXPECT(n > 0);
+			T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+			/* nobanner stayed false, so the banner is still there */
+			T_EXPECT(find_bytes(rsp, (size_t)n, "neosocksd "));
+		}
+
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+	}
 }
 
 T_DECLARE_CASE(stats_deflate_response_header)
@@ -1643,6 +1711,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(stats_post_ok_without_nocache),
 	T_CASE(stats_bad_method_405),
 	T_CASE(stats_bad_query_400),
+	T_CASE(chunked_request_rejected_501),
+	T_CASE(stats_key_only_query_options),
 	T_CASE(stats_deflate_response_header),
 	T_CASE(not_found_404),
 	T_CASE(malformed_url_400),

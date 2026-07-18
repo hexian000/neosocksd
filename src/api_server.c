@@ -412,8 +412,13 @@ static void send_errpage(
 	send_response(loop, ctx, false);
 }
 
+/* s is NULL for a key-only query component, which is not an affirmative
+ * value. */
 static bool parse_bool(const char *restrict s)
 {
+	if (s == NULL) {
+		return false;
+	}
 	return strcmp(s, "1") == 0 || strcmp(s, "y") == 0 ||
 	       strcmp(s, "yes") == 0 || strcmp(s, "on") == 0 ||
 	       strcmp(s, "t") == 0 || strcmp(s, "true") == 0;
@@ -563,6 +568,15 @@ static bool restapi_check(
 	const struct http_message *restrict msg = &ctx->conn.msg;
 	if (method != NULL && strcmp(msg->req.method, method) != 0) {
 		send_errpage(loop, ctx, HTTP_METHOD_NOT_ALLOWED);
+		return false;
+	}
+	/* http_conn frames only Content-Length bodies; a chunked request parses
+	 * OK with its body left unconsumed in rbuf (see http_conn_recv), which the
+	 * keep-alive reset in api_ctx_reset would then discard, desyncing the
+	 * stream. The REST API decodes no request body of its own, so reject
+	 * chunked outright (send_errpage also closes the connection). */
+	if (ctx->conn.hdr.transfer.encoding == TENCODING_CHUNKED) {
+		send_errpage(loop, ctx, HTTP_NOT_IMPLEMENTED);
 		return false;
 	}
 	if (require_content && !ctx->conn.hdr.content.has_length) {
@@ -1135,7 +1149,7 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	const struct http_message *restrict msg = &ctx->conn.msg;
 	if (LOGLEVEL(VERBOSE)) {
-		FORMAT_BYTES(clen, ctx->conn.hdr.content.length);
+		FORMAT_BYTES(clen, (double)ctx->conn.hdr.content.length);
 		API_CTX_LOG_F(
 			VERBOSE, ctx, "api request `%s': content %s",
 			msg->req.url, clen);
@@ -1449,7 +1463,7 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		return;
 	}
 	if (LOGLEVEL(VERBOSE)) {
-		FORMAT_BYTES(clen, resultlen);
+		FORMAT_BYTES(clen, (double)resultlen);
 		API_CTX_LOG_F(VERBOSE, ctx, "api response: content %s", clen);
 		LOG_TXT(VERYVERBOSE, result, resultlen, "rpcall result:");
 	}

@@ -92,6 +92,10 @@ static void api_client_finish(
 	struct ev_loop *loop, struct api_client_ctx *restrict ctx,
 	const char *errmsg, const size_t errlen, struct stream *stream)
 {
+	/* A caller with a callback reads errmsg == NULL as success and then
+	 * consumes the stream, so it must never be handed both as NULL. Only a
+	 * fire-and-forget invoke (no callback) may finish with neither. */
+	ASSERT(errmsg != NULL || stream != NULL || ctx->cb.func == NULL);
 	ctx->result.errmsg = errmsg;
 	ctx->result.errlen = errlen;
 	ctx->result.stream = stream;
@@ -123,8 +127,7 @@ static void api_client_finish_errmsg(
 	if (VBUF_HAS_OOM(emsg)) {
 		LOGOOM();
 		VBUF_FREE(emsg);
-		api_client_finish(loop, ctx, NULL, 0, NULL);
-		return;
+		API_RETURN_ERROR(loop, ctx, "out of memory");
 	}
 	ctx->result.content = emsg;
 	api_client_finish(loop, ctx, VBUF_DATA(emsg), VBUF_LEN(emsg), NULL);
@@ -141,6 +144,15 @@ static void on_http_client_done(
 		return;
 	}
 	ASSERT(conn != NULL);
+	/* http_conn frames only Content-Length bodies; a chunked response parses
+	 * OK with cbuf == NULL and its body left unconsumed in rbuf (see
+	 * http_conn_recv). This path consumes cbuf directly and cannot dechunk, so
+	 * report an error rather than silently deliver an empty body. A stock
+	 * neosocksd peer never sends one (always Content-Length + Connection:
+	 * close), but a compatible/custom peer might. */
+	if (conn->hdr.transfer.encoding == TENCODING_CHUNKED) {
+		API_RETURN_ERROR(loop, ctx, "chunked response not supported");
+	}
 	struct vbuffer *content = conn->cbuf;
 	conn->cbuf = NULL;
 
@@ -178,9 +190,7 @@ static void on_http_client_done(
 		VBUF_RESERVE(content, 64);
 		if (content == NULL) {
 			LOGOOM();
-			VBUF_FREE(content);
-			api_client_finish(loop, ctx, NULL, 0, NULL);
-			return;
+			API_RETURN_ERROR(loop, ctx, "out of memory");
 		}
 		VBUF_RESET(content);
 		VBUF_APPENDF(
@@ -189,8 +199,7 @@ static void on_http_client_done(
 		if (VBUF_HAS_OOM(content)) {
 			LOGOOM();
 			VBUF_FREE(content);
-			api_client_finish(loop, ctx, NULL, 0, NULL);
-			return;
+			API_RETURN_ERROR(loop, ctx, "out of memory");
 		}
 		ctx->result.content = content;
 		api_client_finish(
@@ -232,13 +241,22 @@ static bool make_request(
 	if (s == NULL) {
 		/* content_writer may have reserved p->cbuf before the stream
 		 * wrapper itself failed to allocate */
+		LOGOOM();
 		VBUF_FREE(p->cbuf);
 		return false;
 	}
 	size_t n = len;
 	const int err1 = stream_write(s, content, &n);
 	const int err2 = stream_close(s);
-	if (p->cbuf == NULL || err1 != 0 || n != len || err2 != 0) {
+	if (p->cbuf == NULL) {
+		LOGOOM();
+		return false;
+	}
+	if (err1 != 0 || err2 != 0 || n != len) {
+		/* a codec error, not necessarily an allocation failure */
+		LOGE_F("api request: cannot build content, "
+		       "write error %d, close error %d, %zu of %zu bytes",
+		       err1, err2, n, len);
 		VBUF_FREE(p->cbuf);
 		return false;
 	}
@@ -346,7 +364,7 @@ static bool api_client_do(
 		stats != NULL ? &stats->byt_dial_send : NULL,
 		stats != NULL ? &stats->byt_dial_recv : NULL);
 	if (!make_request(&ctx->hctx.conn, uri, payload, len)) {
-		LOGOOM();
+		/* make_request logs its own specific cause */
 		dialreq_free(req);
 		free(ctx);
 		return false;

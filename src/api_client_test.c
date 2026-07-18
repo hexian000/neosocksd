@@ -15,6 +15,7 @@
 #include "utils/testing.h"
 
 #include <ev.h>
+#include <malloc.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -428,6 +429,55 @@ void dialreq_free(struct dialreq *req)
 
 /* check_rpcall_mime is the real proto/http.c implementation (linked in). */
 
+/* ---- realloc fault injection ----
+ * api_client's error paths build their message through vbuffer, which calls
+ * libc realloc() directly, so interposing realloc() here drives their
+ * out-of-memory branches. Arming is deliberately coarse ("fail everything from
+ * now on"): the branch under test is whichever vbuffer allocation comes first,
+ * and the asserted invariant holds for all of them -- the callback must report
+ * an error rather than deliver (NULL errmsg, NULL stream), which
+ * api_client_finish() also asserts. libev is taken out of the blast radius by
+ * ev_isolated_alloc below, since it aborts the process on a failed allocation.
+ * The passthrough is reimplemented over malloc()/free() so it needs no
+ * libc-internal symbol. */
+static bool g_realloc_fail;
+
+/* realloc() semantics over malloc()/free(), with an optional armed failure. */
+static void *realloc_impl(void *ptr, const size_t size, const bool may_fail)
+{
+	if (may_fail && g_realloc_fail) {
+		return NULL;
+	}
+	if (size == 0) {
+		free(ptr);
+		return NULL;
+	}
+	void *const np = malloc(size);
+	if (np == NULL) {
+		return NULL;
+	}
+	if (ptr != NULL) {
+		const size_t oldsize = malloc_usable_size(ptr);
+		memcpy(np, ptr, oldsize < size ? oldsize : size);
+		free(ptr);
+	}
+	return np;
+}
+
+void *realloc(void *ptr, size_t size)
+{
+	return realloc_impl(ptr, size, true);
+}
+
+/* libev's allocator, which bypasses the injection: libev aborts the whole
+ * process on an allocation failure, so an armed realloc() would kill the test
+ * run rather than exercise api_client. Interchangeable with the interposer
+ * above, as both are malloc()/free() underneath. */
+static void *ev_isolated_alloc(void *ptr, long size)
+{
+	return realloc_impl(ptr, (size_t)size, false);
+}
+
 /* -------------------------------------------------------------------------
  * fuzz - none.
  * ---------------------------------------------------------------------- */
@@ -479,6 +529,58 @@ T_DECLARE_CASE(rpcall_success_returns_stream)
 	T_EXPECT(out.has_stream);
 	T_EXPECT_EQ(out.stream_len, sizeof(rsp_body) - 1);
 	T_EXPECT_MEMEQ(out.stream_buf, rsp_body, sizeof(rsp_body) - 1);
+
+	T_CHECK(close(sv[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(rpcall_chunked_response_reports_error)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct cb_result out = { 0 };
+	struct api_client_ctx *ctx = NULL;
+	struct dialreq *req = NULL;
+	int sv[2] = { -1, -1 };
+	char reqbuf[512] = { 0 };
+	static const char payload[] = "{}";
+	/* A chunked 200 rpcall response: http_conn parses it to completion with
+	 * cbuf == NULL and the body left in rbuf, so on_http_client_done would
+	 * otherwise deliver an empty body. It must instead report an error rather
+	 * than silently lose the response. */
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Content-Type: " MIME_RPCALL "\r\n"
+				   "Transfer-Encoding: chunked\r\n"
+				   "Connection: close\r\n\r\n"
+				   "2\r\nok\r\n0\r\n\r\n";
+	const struct api_client_cb cb = {
+		.func = capture_cb,
+		.data = &out,
+	};
+
+	T_CHECK(loop != NULL);
+	reset_stub_state();
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	T_CHECK(fd_set_nonblock(sv[1]));
+	S.dialer_result_fd = sv[0];
+	req = new_test_dialreq();
+	T_CHECK(req != NULL);
+
+	T_CHECK(api_client_rpcall(
+		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
+		NULL, NULL));
+	T_CHECK(ctx != NULL);
+	T_CHECK(read_request_headers(
+		loop, sv[1], reqbuf, sizeof(reqbuf), TEST_WAIT_RESPONSE_SEC));
+	T_CHECK(write_all(sv[1], resp, sizeof(resp) - 1));
+	T_CHECK(test_wait_until(
+		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
+
+	T_EXPECT(out.called);
+	/* an error, not a silent empty-body success */
+	T_EXPECT(out.errlen > 0);
+	T_EXPECT(!out.has_stream);
+	T_EXPECT(strstr(out.errmsg, "chunked") != NULL);
 
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
@@ -700,6 +802,62 @@ T_DECLARE_CASE(rpcall_http_error_status_line)
 		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
 	T_EXPECT(out.called);
 	T_EXPECT(strstr(out.errmsg, "404") != NULL);
+
+	T_CHECK(close(sv[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Regression: an allocation failure while building a non-2xx error message must
+ * still report an error. These branches used to finish with both a NULL errmsg
+ * and a NULL stream, which a caller reads as success: ruleset/await.c's
+ * await_invoke_k then hands the NULL stream to aux_load() and crashes. The
+ * contract asserted here -- errmsg is non-NULL, so the caller reports the error
+ * -- is the one api_client_finish() also asserts.
+ */
+T_DECLARE_CASE(rpcall_oom_building_error_still_reports_error)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct cb_result out = { 0 };
+	struct api_client_ctx *ctx = NULL;
+	struct dialreq *req = NULL;
+	int sv[2] = { -1, -1 };
+	static const char payload[] = "{}";
+	const struct api_client_cb cb = {
+		.func = capture_cb,
+		.data = &out,
+	};
+
+	T_CHECK(loop != NULL);
+	reset_stub_state();
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	T_CHECK(fd_set_nonblock(sv[1]));
+	S.dialer_result_fd = sv[0];
+	req = new_test_dialreq();
+	T_CHECK(req != NULL);
+
+	T_CHECK(api_client_rpcall(
+		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
+		NULL, NULL));
+	T_CHECK(send_response(sv[1], "404 Not Found", NULL, "close", NULL, 0));
+
+	/* fail every allocation from here on, so building the error message
+	 * for the 404 cannot succeed */
+	g_realloc_fail = true;
+	const bool waited = test_wait_until(
+		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC);
+	g_realloc_fail = false;
+
+	T_CHECK(waited);
+	T_EXPECT(out.called);
+	/* the error must be reported, never delivered as a NULL/NULL success */
+	T_EXPECT(out.errlen > 0);
+	T_EXPECT(!out.has_stream);
+	/* and it must be the OOM-specific message, not the ordinary 404 error
+	 * page: this is what proves the OOM branch was exercised rather than the
+	 * case passing vacuously if the realloc injection ever stops firing */
+	T_EXPECT(strstr(out.errmsg, "out of memory") != NULL);
 
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
@@ -991,12 +1149,14 @@ T_DECLARE_CASE(rpcall_deflate_response_is_decoded)
 
 static const struct testing_suite suite[] = {
 	T_CASE(rpcall_success_returns_stream),
+	T_CASE(rpcall_chunked_response_reports_error),
 	T_CASE(rpcall_success_empty_body_ok),
 	T_CASE(invoke_uses_invoke_path),
 	T_CASE(rpcall_unsupported_content_type),
 	T_CASE(rpcall_dialer_failure),
 	T_CASE(rpcall_timeout),
 	T_CASE(rpcall_http_error_status_line),
+	T_CASE(rpcall_oom_building_error_still_reports_error),
 	T_CASE(rpcall_structured_error_body),
 	T_CASE(cancel_during_connect_calls_dialer_cancel),
 	T_CASE(request_advertises_connection_close),
@@ -1012,6 +1172,9 @@ int main(int argc, char **argv)
 	 * the process; MSYS2/Cygwin emulation raises it on close/write races. */
 	const struct sigaction ignore = { .sa_handler = SIG_IGN };
 	(void)sigaction(SIGPIPE, &ignore, NULL);
+
+	/* keep libev clear of the realloc fault injection (see above) */
+	ev_set_allocator(ev_isolated_alloc);
 
 	return testing_main(argc, argv, suite);
 }
