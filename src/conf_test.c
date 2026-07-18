@@ -5,14 +5,20 @@
 
 #include "conf.h"
 
+#if WITH_LUA
+#include "proto/codec.h"
+
+#include "io/memory.h"
+#include "io/stream.h"
+#include "utils/buffer.h"
+
+#include <lauxlib.h>
+#include <lua.h>
+#endif /* WITH_LUA */
+
 #include "meta/arraysize.h"
 #include "utils/slog.h"
 #include "utils/testing.h"
-
-#if WITH_LUA
-#include <lauxlib.h>
-#include <lua.h>
-#endif
 
 #include <limits.h>
 #include <stdio.h>
@@ -1081,6 +1087,63 @@ static int write_tempfile(char *restrict tmpl, const char *restrict content)
 	return close(fd);
 }
 
+static int write_tempfile_bin(
+	char *restrict tmpl, const void *restrict data, const size_t len)
+{
+	const int fd = mkstemp(tmpl);
+	if (fd < 0) {
+		return -1;
+	}
+	const ssize_t n = write(fd, data, len);
+	if (n < 0 || (size_t)n != len) {
+		(void)close(fd);
+		(void)unlink(tmpl);
+		return -1;
+	}
+	return close(fd);
+}
+
+/*
+ * Regression: a read error part-way through the config stream must fail the
+ * load, not silently compile whatever arrived first. lua_Reader has no error
+ * channel, so a reader that just logs and returns its buffer leaves lua_load()
+ * treating the truncation as a clean EOF.
+ *
+ * A gzip member with its 8-byte CRC/ISIZE trailer cut off drives exactly that:
+ * codec_lua_reader auto-detects gzip, the deflate data is intact so the full
+ * (valid, table-returning) source still reaches lua_load, and only then does
+ * the codec report the missing trailer. Before the fix conf_loadboot accepted
+ * this corrupt config.
+ */
+T_DECLARE_CASE(loadboot_rejects_truncated_stream)
+{
+	static const char src[] = "return { listen = \"0.0.0.0:1080\" }\n";
+	struct vbuffer *gz = VBUF_NEW(64);
+	T_CHECK(gz != NULL);
+	{
+		struct stream *restrict w =
+			codec_gzip_writer(io_heapwriter(&gz));
+		T_CHECK(w != NULL);
+		size_t n = sizeof(src) - 1;
+		T_EXPECT_EQ(stream_write(w, src, &n), 0);
+		T_EXPECT_EQ(n, sizeof(src) - 1);
+		T_EXPECT_EQ(stream_close(w), 0);
+	}
+	T_CHECK(gz != NULL);
+	/* the gzip trailer is the last 8 bytes (CRC-32 + ISIZE) */
+	T_CHECK(VBUF_LEN(gz) > 8);
+
+	char path[] = "/tmp/conf_test_XXXXXX";
+	T_CHECK(write_tempfile_bin(path, VBUF_DATA(gz), VBUF_LEN(gz) - 8) == 0);
+	VBUF_FREE(gz);
+
+	struct config conf = conf_default();
+	T_EXPECT(!conf_loadboot(&conf, path));
+
+	free(conf.strings);
+	(void)unlink(path);
+}
+
 T_DECLARE_CASE(loadboot_applies_config_table)
 {
 	char path[] = "/tmp/conf_test_XXXXXX";
@@ -1270,6 +1333,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(loadboot_auth_required_requires_ruleset),
 	T_CASE(loadboot_rejects_non_table_return),
 	T_CASE(loadboot_rejects_syntax_error),
+	T_CASE(loadboot_rejects_truncated_stream),
 	T_CASE(loadboot_rejects_missing_file),
 #endif /* WITH_LUA */
 	T_SUITE_END,

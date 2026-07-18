@@ -25,12 +25,6 @@
 #include <string.h>
 #include <sys/socket.h>
 
-/* Module-level state for conf_parseargs */
-static struct {
-	int argc;
-	char **argv;
-} args;
-
 #if WITH_LUA
 enum conf_type {
 	CONF_STRING, /* const char * */
@@ -187,12 +181,12 @@ bool conf_check(const struct config *restrict conf)
 			conf->max_sessions > 0 ? conf->max_sessions : INT_MAX));
 }
 
-static void print_usage(void)
+static void print_usage(const char *restrict argv0)
 {
 	(void)fprintf(
 		stderr, "%s %s\n  %s\n\n", PROJECT_NAME, PROJECT_VER,
 		PROJECT_HOMEPAGE);
-	(void)fprintf(stderr, "usage: %s <option>... \n", args.argv[0]);
+	(void)fprintf(stderr, "usage: %s <option>... \n", argv0);
 	(void)fprintf(
 		stderr, "%s",
 		"  -h, --help                 show usage and exit\n"
@@ -285,14 +279,12 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 		return false;                                                  \
 	} while (false)
 
-	args.argc = argc;
-	args.argv = argv;
 	*conf = conf_default();
 	bool http_only = false;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-h") == 0 ||
 		    strcmp(argv[i], "--help") == 0) {
-			print_usage();
+			print_usage(argv[0]);
 			return false;
 		}
 #if WITH_LUA
@@ -905,17 +897,27 @@ bool conf_print(const struct config *restrict conf)
 	return ok;
 }
 
+struct boot_reader_state {
+	struct stream *stream;
+	int err;
+};
+
 /* lua_Reader callback that streams a boot config file into the Lua parser. */
 static const char *
 boot_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 {
 	(void)L;
-	struct stream *const s = ud;
+	struct boot_reader_state *restrict rs = ud;
 	const void *buf;
 	*sz = SIZE_MAX;
-	const int err = stream_direct_read(s, &buf, sz);
+	const int err = stream_direct_read(rs->stream, &buf, sz);
 	if (err != 0) {
 		LOGE_F("config: read error %d", err);
+		/* lua_Reader has no error channel; record it and stop so
+		 * conf_loadboot() can turn it into a load failure instead of
+		 * letting lua_load() treat the truncated input as a clean EOF. */
+		rs->err = err;
+		return NULL;
 	}
 	if (*sz == 0) {
 		return NULL;
@@ -936,10 +938,24 @@ bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 		return false;
 	}
 	luaL_openlibs(L);
-	const int status = lua_load(L, boot_reader, s, "=config", "t");
-	stream_close(s);
+	struct boot_reader_state rs = { .stream = s, .err = 0 };
+	const int status = lua_load(L, boot_reader, &rs, "=config", "t");
+	/* the close carries errors the reader cannot see, e.g. a codec
+	 * detecting a truncated stream only as it finishes */
+	const int closeerr = stream_close(s);
 	if (status != LUA_OK) {
 		LOGE_F("config: %s", lua_tostring(L, -1));
+		lua_close(L);
+		return false;
+	}
+	if (rs.err != 0 || closeerr != 0) {
+		/* the chunk lua_load() compiled is truncated by a read error;
+		 * boot_reader already logged rs.err, so re-log only closeerr,
+		 * which the reader never sees (e.g. a codec detecting a
+		 * truncated stream as it finishes) */
+		if (rs.err == 0) {
+			LOGE_F("config: read error %d", closeerr);
+		}
 		lua_close(L);
 		return false;
 	}
