@@ -218,16 +218,44 @@ T_DECLARE_CASE(marshal_large_integer_hex)
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
 
-	/* Integers above 999999999999 are serialized as hex for compactness;
+	/* Integers whose magnitude exceeds the decimal cutoff are serialized as
+	 * hex for compactness; assert the form (not just the round-trip) so a
+	 * regression that dropped the optimization back to decimal is caught, and
 	 * they must still round-trip through load(). */
 	T_EXPECT(run_chunk(
 		L, "local vals = {1000000000000, 0x123456789abc, "
 		   "-0x7fffffffffffffff, math.maxinteger, math.mininteger} "
 		   "for _, v in ipairs(vals) do "
 		   "  local m = marshal(v) "
+		   "  if not m:find('0x', 1, true) then return false, v, m end "
 		   "  local f = assert(load('return '..m)) "
 		   "  if f() ~= v then return false, v, m end "
 		   "end "
+		   "return true"));
+	T_EXPECT(lua_gettop(L) >= 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(marshal_mininteger_uses_hex)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* math.mininteger has no positive counterpart, so marshal() drops the
+	 * sign and lets the value ride on the unsigned bit pattern, which
+	 * load() wraps back around. That only works in hex, at every
+	 * lua_Integer width: the decimal form would read back as a positive
+	 * float. Asserting the form (not just the round-trip) is what makes
+	 * this hold on a 32-bit lua_Integer build, where the bit pattern is
+	 * small enough to fall under marshal_number's decimal threshold. */
+	T_EXPECT(run_chunk(
+		L, "local m = marshal(math.mininteger) "
+		   "if not m:find('0x', 1, true) then return false, m end "
+		   "local v = assert(load('return '..m))() "
+		   "if v ~= math.mininteger then return false, m end "
+		   "if math.type(v) ~= 'integer' then return false, m end "
 		   "return true"));
 	T_EXPECT(lua_gettop(L) >= 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
@@ -471,6 +499,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(marshal_number_specials),
 	T_CASE(marshal_float_roundtrip),
 	T_CASE(marshal_large_integer_hex),
+	T_CASE(marshal_mininteger_uses_hex),
 	T_CASE(marshal_float_zero),
 	T_CASE(marshal_string_roundtrip),
 	T_CASE(marshal_table_roundtrip),

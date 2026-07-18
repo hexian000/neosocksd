@@ -100,8 +100,23 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 
 		lua_Unsigned y = x;
 
-		/* hexadecimal is more compact for large numbers */
-		if (y <= UINTMAX_C(999999999999)) {
+		/* Decimal is compact for small magnitudes; hexadecimal is more
+		 * compact for large ones and is the only correct form for a value
+		 * with no positive counterpart (LUA_MININTEGER, whose magnitude is
+		 * LUA_MAXINTEGER + 1): the sign was skipped above, so it rides on the
+		 * unsigned bit pattern, which load() wraps back around.
+		 *
+		 * Clamp the decimal cutoff to the widest positive integer. On a 64-bit
+		 * lua_Integer this is the bare 10^12 literal (behaviour unchanged); on
+		 * a 32-bit one it becomes LUA_MAXINTEGER, which keeps the comparison
+		 * from being a tautology (lua_Unsigned cannot reach 10^12 there) and
+		 * keeps the compactness optimization live. Either way LUA_MININTEGER's
+		 * magnitude exceeds the cutoff, so it needs no special case. */
+		const lua_Unsigned decimal_max =
+			(lua_Unsigned)LUA_MAXINTEGER < UINTMAX_C(999999999999) ?
+				(lua_Unsigned)LUA_MAXINTEGER :
+				(lua_Unsigned)UINTMAX_C(999999999999);
+		if (y <= decimal_max) {
 			/* Skip the "0x" prefix. */
 			pend -= 2;
 			do {

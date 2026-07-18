@@ -368,6 +368,51 @@ T_DECLARE_CASE(api_module_opens)
 	lua_close(L);
 }
 
+/*
+ * api.c links the real sa_resolve, so a numeric address resolves locally
+ * through getaddrinfo with no network and is deterministic. Every other
+ * neosocksd.* function has a case here; resolve was covered only by the
+ * daemon-level tests/test_rpc.lua, leaving a hole in api.c's white-box
+ * coverage.
+ */
+T_DECLARE_CASE(api_resolve_valid)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	/* api_resolve reads r->conf->resolve_pf, so it needs a live ruleset */
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(L, "return neosocksd.resolve('127.0.0.1')"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT_STREQ(lua_tostring(L, 1), "127.0.0.1");
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(api_resolve_invalid)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	T_CHECK(L != NULL);
+
+	/* sa_resolve fails -> the failure branch returns zero values */
+	T_EXPECT(
+		run_chunk(L, "return neosocksd.resolve('!!not a hostname!!')"));
+	T_EXPECT_EQ(lua_gettop(L), 0);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(api_parse_ipv4_valid)
 {
 	lua_State *restrict L = new_lua();
@@ -499,7 +544,12 @@ T_DECLARE_CASE(api_splithostport_too_long)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT(lua_type(L, 2) == LUA_TSTRING);
-	T_EXPECT(strstr(lua_tostring(L, 2), "too long") != NULL);
+	/* the exact count, not just "too long": this branch fires precisely
+	 * when len is large, so the reported value must not be narrowed. The
+	 * message also proves lua_pushfstring accepted the specifier -- it
+	 * implements its own limited formatter and raises "invalid option" on
+	 * printf-isms like %zu. */
+	T_EXPECT_STREQ(lua_tostring(L, 2), "address too long: 515 bytes");
 
 	lua_close(L);
 }
@@ -680,6 +730,8 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
 
 static const struct testing_suite suite[] = {
 	T_CASE(api_module_opens),
+	T_CASE(api_resolve_valid),
+	T_CASE(api_resolve_invalid),
 	T_CASE(api_parse_ipv4_valid),
 	T_CASE(api_parse_ipv4_invalid),
 	T_CASE(api_parse_ipv6_valid),

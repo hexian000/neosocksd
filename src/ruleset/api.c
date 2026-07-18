@@ -25,6 +25,7 @@
 #include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -154,8 +155,14 @@ static int api_splithostport(lua_State *restrict L)
 	const char *restrict const s = luaL_checklstring(L, 1, &len);
 	/* FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")) {
-		(void)lua_pushfstring(
-			L, "address too long: %d bytes", (int)len);
+		/* Format len with the standard %zu into a buffer, then pass it as
+		 * %s: lua_pushfstring implements its own limited formatter that
+		 * rejects %z, and its only integer form (%I) is lua_Integer, which
+		 * narrows a size_t past LUA_MAXINTEGER (an int on a LUA_32BITS
+		 * build) -- exactly this large-len branch. */
+		char lenbuf[24]; /* fits 2^64 in decimal */
+		(void)snprintf(lenbuf, sizeof(lenbuf), "%zu", len);
+		(void)lua_pushfstring(L, "address too long: %s bytes", lenbuf);
 		return lua_error(L);
 	}
 	char buf[len + 1];
