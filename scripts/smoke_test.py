@@ -20,9 +20,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import http.client
-import ipaddress
-import os
 import random
 import signal
 import socket
@@ -33,8 +33,7 @@ import sys
 import tempfile
 import threading
 import time
-import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -378,6 +377,58 @@ def http_forward_get(
     return status, body
 
 
+def http_websocket(
+    proxy_host: str,
+    proxy_port: int,
+    dst_host: str,
+    dst_port: int,
+    payload: bytes,
+) -> Tuple[str, bool, bytes]:
+    """Drive a ws:// (absolute-URI) upgrade through the HTTP forward proxy, then
+    exchange one payload over the resulting raw tunnel.
+
+    Returns (status_line, accept_valid, echoed_payload) where accept_valid is
+    whether the Sec-WebSocket-Accept matched the RFC 6455 key derivation.
+    """
+    key = base64.b64encode(bytes(random.getrandbits(8) for _ in range(16)))
+    expected = base64.b64encode(hashlib.sha1(key + _WS_GUID.encode()).digest())
+    sock = _connect(proxy_host, proxy_port)
+    try:
+        request = (
+            "GET http://%s:%d/chat HTTP/1.1\r\n" % (dst_host, dst_port)
+            + "Host: %s:%d\r\n" % (dst_host, dst_port)
+            + "Upgrade: websocket\r\n"
+            + "Connection: Upgrade\r\n"
+            + "Sec-WebSocket-Key: %s\r\n" % key.decode("ascii")
+            + "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode()
+        sock.sendall(request)
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise SocksError("connection closed during ws handshake")
+            head += chunk
+        header_block, _, rest = head.partition(b"\r\n\r\n")
+        status_line = header_block.split(b"\r\n", 1)[0].decode("latin-1")
+        accept = b""
+        for line in header_block.split(b"\r\n")[1:]:
+            name, _, value = line.partition(b":")
+            if name.strip().lower() == b"sec-websocket-accept":
+                accept = value.strip()
+        # send a post-upgrade payload; the raw tunnel must echo it back
+        sock.sendall(payload)
+        echoed = rest
+        while len(echoed) < len(payload):
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            echoed += chunk
+        return status_line, accept == expected, echoed
+    finally:
+        sock.close()
+
+
 # --------------------------------------------------------------------------- #
 # Local target servers (proxy destinations)
 # --------------------------------------------------------------------------- #
@@ -478,17 +529,80 @@ class _HTTPHandler(BaseHTTPRequestHandler):
         pass
 
 
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455 §4.2.2
+
+
+class _WebSocketHandler(socketserver.BaseRequestHandler):
+    """Raw ws:// origin: completes the RFC 6455 handshake it receives from the
+    proxy -- proving the proxy forwarded the origin-form request together with
+    the Connection/Upgrade switch-protocol headers -- then echoes the
+    post-upgrade byte stream, proving the connection became a raw tunnel.
+    """
+
+    def handle(self) -> None:
+        self.request.settimeout(IO_TIMEOUT)
+        try:
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = self.request.recv(4096)
+                if not chunk:
+                    return
+                head += chunk
+            header_block, _, rest = head.partition(b"\r\n\r\n")
+            lower = header_block.lower()
+            key = None
+            for line in header_block.split(b"\r\n")[1:]:
+                name, _, value = line.partition(b":")
+                if name.strip().lower() == b"sec-websocket-key":
+                    key = value.strip()
+            # only upgrade when the proxy actually forwarded both switch-protocol
+            # headers; otherwise the tunnel must not be established
+            if (
+                b"upgrade: websocket" not in lower
+                or b"connection: upgrade" not in lower
+                or key is None
+            ):
+                self.request.sendall(
+                    b"HTTP/1.1 426 Upgrade Required\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+                return
+            accept = base64.b64encode(
+                hashlib.sha1(key + _WS_GUID.encode()).digest()
+            )
+            self.request.sendall(
+                b"HTTP/1.1 101 Switching Protocols\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+            )
+            # raw tunnel established: echo everything, including any bytes the
+            # client pipelined right behind the handshake
+            if rest:
+                self.request.sendall(rest)
+            while True:
+                data = self.request.recv(65536)
+                if not data:
+                    break
+                self.request.sendall(data)
+        except OSError:
+            pass
+
+
 class Targets:
-    """Loopback echo + HTTP servers used as proxy destinations."""
+    """Loopback echo + HTTP + WebSocket servers used as proxy destinations."""
 
     def __init__(self) -> None:
         self.echo = _ThreadingTCPServer((HOST, 0), _EchoHandler)
         self.http = _ThreadingTCPServer((HOST, 0), _HTTPHandler)
+        self.ws = _ThreadingTCPServer((HOST, 0), _WebSocketHandler)
         self.echo_port = self.echo.server_address[1]
         self.http_port = self.http.server_address[1]
+        self.ws_port = self.ws.server_address[1]
         self._threads = [
             threading.Thread(target=self.echo.serve_forever, daemon=True),
             threading.Thread(target=self.http.serve_forever, daemon=True),
+            threading.Thread(target=self.ws.serve_forever, daemon=True),
         ]
 
     def start(self) -> "Targets":
@@ -497,7 +611,7 @@ class Targets:
         return self
 
     def stop(self) -> None:
-        for srv in (self.echo, self.http):
+        for srv in (self.echo, self.http, self.ws):
             try:
                 srv.shutdown()
                 srv.server_close()
@@ -681,6 +795,10 @@ class Context:
     @property
     def http_port(self) -> int:
         return self.targets.http_port
+
+    @property
+    def ws_port(self) -> int:
+        return self.targets.ws_port
 
     @property
     def echo_addr(self) -> str:
@@ -1024,6 +1142,21 @@ def t_http_proxy_pass_ruleset(ctx: Context) -> None:
         status, _hdr, body = http_forward(HOST, http_port, "smoke.test", 80)
         assert status == 200, "ruleset proxy_pass returned %d" % status
         assert body == HTTP_BODY, "ruleset proxy_pass body mismatch: %r" % body
+
+
+@test("http/websocket-upgrade")
+def t_http_websocket_upgrade(ctx: Context) -> None:
+    """A ws:// upgrade is forwarded with the switch-protocol headers intact and
+    the connection becomes a raw tunnel (101 handshake + echoed frame)."""
+    d, http_port = _http_daemon(ctx)
+    payload = b"\x81\x8bframe-over-the-tunnel"
+    with d:
+        status_line, accept_ok, echoed = http_websocket(
+            HOST, http_port, HOST, ctx.ws_port, payload
+        )
+        assert "101" in status_line, "ws upgrade returned %r" % status_line
+        assert accept_ok, "Sec-WebSocket-Accept mismatch (handshake not relayed)"
+        assert echoed == payload, "tunnel did not echo frame: %r" % echoed
 
 
 # --------------------------------------------------------------------------- #
