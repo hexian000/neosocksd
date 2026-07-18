@@ -26,9 +26,14 @@ struct task_item {
  * array objects is UB (item may come from a separate malloc(), not
  * pool[]). Converting to uintptr_t first compares addresses as
  * integers instead, which isn't subject to that restriction. */
+/* No restrict on either parameter: it would assert to the compiler that
+ * `item` and `pool[]` never alias, the negation of the very condition this
+ * returns true for. restrict is an access contract, not a bare non-aliasing
+ * assertion, so it says nothing here anyway -- neither pointer is ever
+ * dereferenced (both convert straight to uintptr_t). */
 static inline bool item_in_pool(
-	const struct task_item *restrict item,
-	const struct task_item *restrict pool, const size_t pool_capacity)
+	const struct task_item *item, const struct task_item *pool,
+	const size_t pool_capacity)
 {
 	const uintptr_t addr = (uintptr_t)item;
 	const uintptr_t start = (uintptr_t)pool;

@@ -33,6 +33,12 @@ int stream_read(
 		}
 	}
 	const io_direct_reader direct_read = s->vftable->direct_read;
+	if (direct_read == NULL) {
+		/* neither read slot is supported; report unsupported instead of
+		 * dereferencing a NULL vftable entry */
+		*len = 0;
+		return -1;
+	}
 	int err = 0;
 	size_t nread = 0;
 	unsigned char *dst = buf;
@@ -57,7 +63,14 @@ int stream_write(
 	struct stream *restrict s, const void *restrict buf,
 	size_t *restrict len)
 {
-	return s->vftable->write(s, buf, len);
+	const io_writer write = s->vftable->write;
+	if (write == NULL) {
+		/* write is optional; report unsupported instead of
+		 * dereferencing a NULL vftable entry */
+		*len = 0;
+		return -1;
+	}
+	return write(s, buf, len);
 }
 
 int stream_flush(struct stream *restrict s)

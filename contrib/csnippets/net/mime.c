@@ -60,48 +60,73 @@ static char *next_token(char *restrict s)
 static char *parse_key(char *s, char **restrict key)
 {
 	*key = s;
-	s = next_token(s);
-	if (s == *key || *s != '=') {
+	char *const end = next_token(s);
+	if (end == *key) {
 		/* the attribute name must have at least one token character,
 		 * mirroring the type/subtype checks in mime_parse */
 		return NULL;
 	}
-	*s = '\0';
+	/* LWSP may sit between the name and '=' (RFC 822 §3.1.4 free insertion),
+	 * so skip it before deciding, and only then terminate the name -- as in
+	 * end_value, trimming reads the byte the terminator would overwrite */
+	s = strtrimleftspace(end);
+	if (*s != '=') {
+		return NULL;
+	}
+	*end = '\0';
 	return s + 1;
+}
+
+/* Finish a parameter value after its last content byte: skip trailing LWSP,
+ * require a ';' separator or end of string (rejecting stray trailing content),
+ * consume the ';', then terminate the value at `end`.  `end` and `rest` may
+ * alias -- they do for an unquoted value -- so `rest` is read before `end` is
+ * written; the two are therefore not marked restrict. */
+static char *end_value(char *end, char *rest)
+{
+	rest = strtrimleftspace(rest);
+	if (*rest != ';' && *rest != '\0') {
+		return NULL;
+	}
+	if (*rest == ';') {
+		rest++;
+	}
+	*end = '\0';
+	return rest;
 }
 
 static char *parse_value(char *s, char **restrict value)
 {
 	if (*s != '\"') {
-		*value = s;
-		s = next_token(s);
-		if (*s == '\0') {
-			return s;
-		}
-		if (*s != ';') {
+		char *const end = next_token(s);
+		if (end == s) {
+			/* an unquoted value must have at least one token
+			 * character; only a quoted "" may be empty */
 			return NULL;
 		}
-		*s = '\0';
-		return s + 1;
+		char *const next = end_value(end, end);
+		if (next != NULL) {
+			*value = s;
+		}
+		return next;
 	}
 	s++;
 	/* unescape the quoted-string in place: w <= r always */
 	unsigned char *w = (unsigned char *)s;
 	for (char *r = s; *r; r++) {
-		unsigned char ch = *r;
+		unsigned char ch = (unsigned char)*r;
 		switch (ch) {
-		case '\"':
-			r = strtrimleftspace(r + 1);
-			if (*r == ';') {
-				r++;
+		case '\"': {
+			char *const next = end_value((char *)w, r + 1);
+			if (next != NULL) {
+				*value = s;
 			}
-			*w = '\0';
-			*value = s;
-			return r;
+			return next;
+		}
 		case '\\':
 			if (*(r + 1)) {
 				r++;
-				ch = *r;
+				ch = (unsigned char)*r;
 				if (ch == '\r' || ch == '\n') {
 					return NULL;
 				}

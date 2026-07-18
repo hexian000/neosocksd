@@ -50,13 +50,15 @@
 		 (ptr),                                                        \
 		 from *: (to *)(((unsigned char *)(ptr)) -                     \
 				offsetof(to, member)),                         \
-		 const from *: (const to *)(((unsigned char *)(ptr)) -         \
+		 const from *: (const to *)(((const unsigned char *)(ptr)) -   \
 					    offsetof(to, member)),             \
-		 volatile from *: (volatile to *)(((unsigned char *)(ptr)) -   \
-						  offsetof(to, member)),       \
+		 volatile from *: (                                            \
+			 volatile to *)(((volatile unsigned char *)(ptr)) -    \
+					offsetof(to, member)),                 \
 		 const volatile from *: (                                      \
-			 const volatile to *)(((unsigned char *)(ptr)) -       \
-					      offsetof(to, member))))
+			 const volatile to                                     \
+				 *)(((const volatile unsigned char *)(ptr)) -  \
+				    offsetof(to, member))))
 #endif /* DOWNCAST */
 
 /** @} */

@@ -38,6 +38,12 @@ static void gc_unregister(struct gcbase *restrict obj)
 	}
 }
 
+/* Every object actually finalized bumps this, on both the gc_unref and the
+ * gc_finalizeall path, so gc_finalizeall can count objects finalized as a side
+ * effect of a finalizer (e.g. one that gc_unref()s another object to zero) via
+ * the delta rather than only those it dequeued itself. */
+static size_t gc_finalized_total;
+
 static void gc_finalize(struct gcbase *restrict obj)
 {
 	gc_unregister(obj);
@@ -45,6 +51,7 @@ static void gc_finalize(struct gcbase *restrict obj)
 		obj->finalize(obj);
 	}
 	free(obj);
+	gc_finalized_total++;
 }
 
 void gc_ref(struct gcbase *restrict obj)
@@ -64,10 +71,10 @@ void gc_unref(struct gcbase *restrict obj)
 
 size_t gc_finalizeall(void)
 {
-	size_t count = 0;
+	const size_t before = gc_finalized_total;
 	while (gcroot != NULL) {
 		gc_finalize(gcroot);
-		count++;
 	}
-	return count;
+	/* the delta includes any object a finalizer finalized via gc_unref */
+	return gc_finalized_total - before;
 }

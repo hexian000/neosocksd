@@ -51,6 +51,11 @@ bool base64_encode(
  * @note No memory allocations are performed.
  * @note In-place decoding is supported (dst == src), since decoded data
  *       is always smaller than or equal to encoded data.
+ * @note Decoding is lenient about padding: the bits of a padded group that
+ *       belong to the dropped byte(s) are discarded without checking they are
+ *       zero, so a non-canonical encoding (e.g. "QR==" as well as "QQ==")
+ *       decodes to the same output rather than being rejected. RFC 4648 §3.5
+ *       only recommends rejecting such input.
  * @warning If dst != src, the buffers must not overlap.
  * @par Example
  * @code

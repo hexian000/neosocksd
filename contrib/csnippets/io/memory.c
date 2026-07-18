@@ -18,7 +18,14 @@
 
 struct memory_stream {
 	struct stream s;
-	unsigned char *buf;
+	/* the reader only ever advances this pointer (mem_direct_read never
+	 * writes through it) while the writer writes through it; the union lets
+	 * the reader keep a const view so io_memreader need not cast away the
+	 * caller's const */
+	union {
+		unsigned char *w; /* io_memwriter: written through */
+		const unsigned char *r; /* io_memreader: only advanced */
+	} buf;
 	size_t bufsize;
 	size_t *nwritten;
 };
@@ -33,8 +40,8 @@ mem_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 	if (n > remain) {
 		n = remain;
 	}
-	*buf = m->buf;
-	m->buf += n, m->bufsize -= n;
+	*buf = m->buf.r;
+	m->buf.r += n, m->bufsize -= n;
 	*len = n;
 	return 0;
 }
@@ -47,8 +54,8 @@ static int mem_write(void *p, const void *restrict buf, size_t *restrict len)
 	if (n > remain) {
 		n = remain;
 	}
-	memcpy(m->buf, buf, n);
-	m->buf += n, m->bufsize -= n;
+	memcpy(m->buf.w, buf, n);
+	m->buf.w += n, m->bufsize -= n;
 	*len = n;
 	size_t *restrict nwritten = m->nwritten;
 	if (nwritten != NULL) {
@@ -57,52 +64,56 @@ static int mem_write(void *p, const void *restrict buf, size_t *restrict len)
 	return 0;
 }
 
-static struct stream *
-io_memstream(void *buf, const size_t bufsize, size_t *nwritten)
+static struct memory_stream *
+io_memstream(const size_t bufsize, size_t *nwritten)
 {
-	if (buf == NULL) {
-		return NULL;
-	}
 	struct memory_stream *m = malloc(sizeof(struct memory_stream));
 	if (m == NULL) {
 		return NULL;
 	}
-	m->buf = buf;
 	m->bufsize = bufsize;
 	m->nwritten = nwritten;
-	return &m->s;
+	return m;
 }
 
 struct stream *io_memreader(const void *buf, const size_t bufsize)
 {
-	struct stream *s = io_memstream((void *)buf, bufsize, NULL);
-	if (s == NULL) {
+	if (buf == NULL) {
 		return NULL;
 	}
+	struct memory_stream *m = io_memstream(bufsize, NULL);
+	if (m == NULL) {
+		return NULL;
+	}
+	m->buf.r = buf;
 	static const struct stream_vftable vftable = {
 		.direct_read = mem_direct_read,
 	};
-	*s = (struct stream){
+	m->s = (struct stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
-	return s;
+	return &m->s;
 }
 
 struct stream *io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
 {
-	struct stream *s = io_memstream(buf, bufsize, nwritten);
-	if (s == NULL) {
+	if (buf == NULL) {
 		return NULL;
 	}
+	struct memory_stream *m = io_memstream(bufsize, nwritten);
+	if (m == NULL) {
+		return NULL;
+	}
+	m->buf.w = buf;
 	static const struct stream_vftable vftable = {
 		.write = mem_write,
 	};
-	*s = (struct stream){
+	m->s = (struct stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
-	return s;
+	return &m->s;
 }
 
 static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
@@ -217,33 +228,54 @@ static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 		b->err = 0;
 		return err;
 	}
-	if (b->pos == b->len) {
-		if (b->err != 0) {
-			const int err = b->err;
-			b->err = 0;
-			return err;
+	unsigned char *restrict dst = buf;
+	size_t nread = 0;
+	/* keep refilling until the caller's buffer is full or the base runs
+	 * dry; stream_read's contract lets the caller read a short return as
+	 * EOF, so stopping on a partial buffer would truncate the stream */
+	while (nread < want) {
+		const size_t avail = b->len - b->pos;
+		if (avail > 0) {
+			const size_t remain = want - nread;
+			const size_t n = avail < remain ? avail : remain;
+			memcpy(dst + nread, b->buf + b->pos, n);
+			b->pos += n;
+			nread += n;
+			continue;
 		}
-		if (want >= b->bufsize) {
-			return stream_read(b->base, buf, len);
+		if (b->err != 0) {
+			break;
+		}
+		const size_t remain = want - nread;
+		if (remain >= b->bufsize) {
+			/* the remainder alone fills the internal buffer; read
+			 * straight into the caller's to skip a copy */
+			size_t n = remain;
+			b->err = stream_read(b->base, dst + nread, &n);
+			nread += n;
+			if (n == 0) {
+				break;
+			}
+			continue;
 		}
 		b->pos = b->len = 0;
-		size_t nread = b->bufsize;
-		b->err = stream_read(b->base, b->buf, &nread);
-		if (nread == 0) {
-			*len = 0;
-			const int err = b->err;
-			b->err = 0;
-			return err;
+		size_t n = b->bufsize;
+		b->err = stream_read(b->base, b->buf, &n);
+		b->len = n;
+		if (n == 0) {
+			break;
 		}
-		b->len += nread;
 	}
-
-	const unsigned char *src = b->buf;
-	const size_t avail = b->len - b->pos;
-	const size_t n = avail < want ? avail : want;
-	memcpy(buf, src + b->pos, n);
-	b->pos += n;
-	*len = n;
+	*len = nread;
+	if (nread == 0) {
+		/* clear after reporting so a later read retries the base,
+		 * mirroring buf_direct_read / buf_peek */
+		const int err = b->err;
+		b->err = 0;
+		return err;
+	}
+	/* hand back the valid bytes now and defer any stashed error until the
+	 * buffer drains, mirroring buf_direct_read / buf_peek */
 	return 0;
 }
 
@@ -280,7 +312,11 @@ static int buf_peek(void *p, const void **restrict buf, size_t *restrict len)
 		b->err = 0;
 		return err;
 	}
-	return b->err;
+	/* the base returned data together with a possible stashed error: hand
+	 * back the valid peeked bytes now and defer the error (left in b->err)
+	 * until the buffer drains, mirroring buf_read / buf_direct_read rather
+	 * than reporting an error alongside good data */
+	return 0;
 }
 
 static int buf_flush_(struct buffered_stream *restrict b)
@@ -379,6 +415,10 @@ static int buf_vprintf(void *p, const char *restrict format, va_list args)
 		struct stream, struct buffered_stream, s, (struct stream *)p);
 	int ret = buf_flush_(b);
 	if (ret != 0) {
+		/* clear after reporting so a subsequent call retries the residual
+		 * instead of returning the stale error forever, matching
+		 * buf_write / buf_flush */
+		b->err = 0;
 		return ret;
 	}
 	char *s = (char *)b->buf + b->len;
@@ -508,6 +548,9 @@ metered_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct metered_stream *restrict m = p;
 	const int ret = stream_direct_read(m->base, buf, len);
+	/* *len is the transferred-byte count per the stream contract (accurate
+	 * even on an error return that also delivered data), so count it
+	 * unconditionally */
 	if (m->meter != NULL) {
 		*m->meter += *len;
 	}

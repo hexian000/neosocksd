@@ -42,7 +42,7 @@ struct stream *io_filewriter(FILE *f);
  * @details Never truncates: if the data is too large, the function
  *          returns NULL.
  */
-unsigned char *io_readfile(const char *path, size_t *len);
+unsigned char *io_readfile(const char *restrict path, size_t *restrict len);
 
 /**
  * @brief Write data to a file.
@@ -66,7 +66,8 @@ bool io_writefile(
  *       and any UTF-16/UTF-32 BOM causes a NULL return. Data without a BOM is
  *       assumed to be UTF-8 and returned as-is.
  */
-const char *io_readutf8(const unsigned char *data, size_t *len);
+const char *
+io_readutf8(const unsigned char *restrict data, size_t *restrict len);
 
 /** @} */
 

@@ -166,6 +166,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Test execution context.  Declare one locally in main() with T_DECLARE_CTX. */
 struct testing_ctx {
@@ -346,8 +347,10 @@ struct testing_bench {
  *         T_KEEP(h);                   // consume the final result
  *     }
  *
- * T_KEEP accepts any scalar or object-pointer value; its only cost is one
- * forced store.  Calling it once after the loop is enough when results
+ * T_KEEP accepts any standard arithmetic type or object-pointer value; its
+ * only cost is one forced store.  An enum-typed value has no matching _Generic
+ * branch (its type is distinct from its underlying integer type), so cast it to
+ * an integer type first.  Calling it once after the loop is enough when results
  * accumulate into a single variable.  To stop the optimizer hoisting a
  * loop-invariant input out of the loop, prefer feeding the loop index or the
  * previous result as input, as above.
@@ -374,7 +377,8 @@ static inline void testing_keep_p_(const volatile void *v)
 /*
  * T_KEEP(value)
  *   Force `value` - and the computation that produced it - to be evaluated,
- *   defeating dead-code elimination.  Accepts any scalar or object pointer.
+ *   defeating dead-code elimination.  Accepts any standard arithmetic type or
+ *   object pointer; cast an enum-typed value to an integer type first.
  *   The _Generic selects a sink function; only the selected branch is applied
  *   to `value`, so the unselected branches need not type-check against it.
  */
@@ -655,6 +659,34 @@ void testing_bench_run(
 			abort();                                               \
 		}                                                              \
 	} while (0)
+
+/* -------------------------------------------------------------------------
+ * Deadline helpers for bounded blocking waits (threaded suites).
+ *
+ * Reaching the deadline is a failure, not a tolerated outcome: the waits are
+ * satisfied promptly when the code under test is correct, so a deadline only
+ * ever fires on a real defect and keeps a regression from hanging CI instead of
+ * reporting. The clock is TIME_UTC (CLOCK_REALTIME) so the result can drive
+ * cnd_timedwait directly, which requires its own clock; do not substitute a
+ * monotonic clock.
+ * ---------------------------------------------------------------------- */
+
+enum { T_TIMEOUT_SECONDS = 10 };
+
+static inline void t_deadline_set(struct timespec *restrict deadline)
+{
+	T_CHECK(timespec_get(deadline, TIME_UTC) == TIME_UTC);
+	deadline->tv_sec += T_TIMEOUT_SECONDS;
+}
+
+static inline bool t_deadline_expired(const struct timespec *restrict deadline)
+{
+	struct timespec now;
+	T_CHECK(timespec_get(&now, TIME_UTC) == TIME_UTC);
+	return now.tv_sec > deadline->tv_sec ||
+	       (now.tv_sec == deadline->tv_sec &&
+		now.tv_nsec >= deadline->tv_nsec);
+}
 
 /* -------------------------------------------------------------------------
  * Failure / skip macros - require `struct testing_ctx *_t_` in scope.

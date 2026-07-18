@@ -12,39 +12,84 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Report a failed stdio transfer: log the real errno (ferror alone is a sticky
+ * boolean that discards it) and return it so the caller can tell a transient
+ * condition such as EINTR/EAGAIN from a permanent one. errno is zeroed before
+ * each transfer below, so a zero here means stdio failed without setting it
+ * rather than "Success". Clear the indicator once reported. */
+static int file_error(FILE *restrict f, const char *restrict what)
+{
+	const int err = errno;
+	if (err != 0) {
+		LOGE_F("%s: (%d) %s", what, err, strerror(err));
+	} else {
+		LOGE_F("%s: failed", what);
+	}
+	clearerr(f);
+	return err != 0 ? err : -1;
+}
+
 static int file_read(void *p, void *buf, size_t *restrict len)
 {
 	struct stream *restrict s = p;
 	FILE *f = s->data;
-	*len = fread(buf, sizeof(unsigned char), *len, f);
-	return ferror(f);
+	const size_t want = *len;
+	/* clear any indicator carried in on this stream (e.g. a logged and
+	 * ignored setvbuf failure) and zero errno, so ferror and errno below
+	 * reflect only this fread */
+	clearerr(f);
+	errno = 0;
+	*len = fread(buf, sizeof(unsigned char), want, f);
+	/* a short fread is legitimate EOF; only ferror marks a real failure */
+	if (ferror(f)) {
+		return file_error(f, "fread");
+	}
+	return 0;
 }
 
 static int file_write(void *p, const void *buf, size_t *restrict len)
 {
 	struct stream *restrict s = p;
 	FILE *f = s->data;
-	*len = fwrite(buf, sizeof(unsigned char), *len, f);
-	return ferror(f);
+	const size_t want = *len;
+	clearerr(f);
+	errno = 0;
+	*len = fwrite(buf, sizeof(unsigned char), want, f);
+	/* a short fwrite is unambiguously an error -- decide from the transfer's
+	 * own count rather than the sticky indicator */
+	if (*len < want) {
+		return file_error(f, "fwrite");
+	}
+	return 0;
 }
 
 static int file_flush(void *p)
 {
 	struct stream *restrict s = p;
 	FILE *f = s->data;
-	return fflush(f);
+	errno = 0;
+	if (fflush(f) != 0) {
+		return file_error(f, "fflush");
+	}
+	return 0;
+}
+
+/* Close f unless it is a standard stream: ISO C does not forbid fclose on
+ * stdin/stdout/stderr, but using them afterward is undefined behavior and the
+ * rest of the program still expects them. Shared by file_close and the
+ * constructors' cleanup so the policy cannot drift between them. */
+static int file_fclose(FILE *restrict f)
+{
+	if (f == stdin || f == stdout || f == stderr) {
+		return 0;
+	}
+	return fclose(f);
 }
 
 static int file_close(void *p)
 {
 	struct stream *restrict s = p;
-	int ret = 0;
-	FILE *f = s->data;
-	/* ISO C does not forbid calling fclose on stdin, stdout or stderr,
-	 * but using the streams afterward causes undefined behavior. */
-	if (f != stdin && f != stdout && f != stderr) {
-		ret = fclose(f);
-	}
+	const int ret = file_fclose(s->data);
 	free(s);
 	return ret;
 }
@@ -60,7 +105,7 @@ struct stream *io_filereader(FILE *f)
 	}
 	struct stream *restrict s = malloc(sizeof(struct stream));
 	if (s == NULL) {
-		if (fclose(f) != 0) {
+		if (file_fclose(f) != 0) {
 			const int err = errno;
 			LOGE_F("fclose: (%d) %s", err, strerror(err));
 		}
@@ -85,7 +130,7 @@ struct stream *io_filewriter(FILE *f)
 	}
 	struct stream *restrict s = malloc(sizeof(struct stream));
 	if (s == NULL) {
-		if (fclose(f) != 0) {
+		if (file_fclose(f) != 0) {
 			const int err = errno;
 			LOGE_F("fclose: (%d) %s", err, strerror(err));
 		}
@@ -100,12 +145,12 @@ struct stream *io_filewriter(FILE *f)
 	return s;
 }
 
-unsigned char *io_readfile(const char *path, size_t *len)
+unsigned char *io_readfile(const char *restrict path, size_t *restrict len)
 {
 	if (!path || !len) {
 		return NULL;
 	}
-	FILE *fp = fopen(path, "r");
+	FILE *fp = fopen(path, "rb");
 	if (!fp) {
 		return NULL;
 	}
@@ -150,12 +195,26 @@ bool io_writefile(
 	if (!path || !data || !len) {
 		return false;
 	}
-	FILE *fp = fopen(path, "w");
+	FILE *fp = fopen(path, "wb");
 	if (!fp) {
 		return false;
 	}
+	errno = 0;
 	const size_t nwrite = fwrite(data, 1, *len, fp);
 	const bool short_write = nwrite != *len;
+	if (short_write) {
+		/* capture errno now, before fclose can overwrite it; a short
+		 * fwrite (e.g. ENOSPC on a full filesystem) is unambiguously an
+		 * error, and every other error site in this module logs, so log
+		 * here too rather than returning a bare false. errno may be 0 if
+		 * stdio failed without setting it. */
+		const int err = errno;
+		if (err != 0) {
+			LOGE_F("fwrite: (%d) %s", err, strerror(err));
+		} else {
+			LOGE_F("%s", "fwrite: failed");
+		}
+	}
 	const bool close_failed = fclose(fp) != 0;
 	if (close_failed) {
 		const int err = errno;
@@ -165,7 +224,8 @@ bool io_writefile(
 	return !short_write && !close_failed;
 }
 
-const char *io_readutf8(const unsigned char *data, size_t *len)
+const char *
+io_readutf8(const unsigned char *restrict data, size_t *restrict len)
 {
 	if (!data || !len) {
 		return NULL;
