@@ -98,6 +98,17 @@ static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 0.256;
  * as soon as the dialer completes. Must exceed connrefused_proxy_conf.timeout
  * so a refused reply (not a proxy-side timeout) is what completes the dial. */
 static const ev_tstamp TEST_WAIT_CONNREFUSED_SEC = 6.0;
+/* Ceiling for draining sessions after a case completes. Only a ceiling: the
+ * poll timer below makes drain_sessions() return as soon as the sessions clear,
+ * so this budget is paid only when a session genuinely fails to tear down. It
+ * is generous because a worker thread's teardown can run long under a sanitizer
+ * build (WITH_THREADS). */
+static const ev_tstamp TEST_WAIT_DRAIN_SEC = 1.0;
+/* Re-check period while draining. Under WITH_THREADS a worker clears the session
+ * counter on its own thread without waking the main loop, so a plain
+ * ev_run(EVRUN_ONCE) would block on the watchdog instead of observing the drop;
+ * a short repeating timer wakes the loop so the predicate is re-polled. */
+static const ev_tstamp TEST_POLL_INTERVAL_SEC = 0.001;
 
 struct dialer_result {
 	bool called;
@@ -183,6 +194,16 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	(void)revents;
 	watchdog->fired = true;
 	ev_break(loop, EVBREAK_ONE);
+}
+
+static void
+test_poll_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+{
+	(void)loop;
+	(void)w;
+	(void)revents;
+	/* No-op: the timer exists only to wake ev_run(EVRUN_ONCE) so the wait
+	 * loop re-checks its predicate; see drain_sessions(). */
 }
 
 static bool test_wait_until(
@@ -858,18 +879,50 @@ static void stop_proxy(struct server *restrict s)
 	s->xfer = NULL;
 }
 
-/* Run the event loop for the given duration to allow sessions to drain. */
-static void drain_loop(struct ev_loop *restrict loop, const ev_tstamp sec)
+static size_t server_sessions(struct server *restrict s)
 {
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timer;
+#if WITH_THREADS
+	return atomic_load_explicit(&s->num_sessions, memory_order_relaxed);
+#else
+	return s->num_sessions;
+#endif
+}
 
-	ev_timer_init(&w_timer, test_watchdog_cb, sec, 0.0);
-	w_timer.data = &watchdog;
-	ev_timer_start(loop, &w_timer);
-	while (!watchdog.fired) {
-		ev_run(loop, EVRUN_ONCE);
-	}
+struct sessions_drained_ctx {
+	struct server *a, *b; /* b may be NULL */
+};
+
+static bool sessions_drained_predicate(void *data)
+{
+	const struct sessions_drained_ctx *const ctx = data;
+	return server_sessions(ctx->a) == 0 &&
+	       (ctx->b == NULL || server_sessions(ctx->b) == 0);
+}
+
+/* Pump the loop until the given proxies' sessions have torn down, so a caller
+ * can stop them cleanly. Returns as soon as they drain instead of blocking for
+ * a fixed duration; a false return means the timeout was hit, which is a
+ * failure rather than the expected outcome. Pass b = NULL for a single proxy.
+ *
+ * The result must be captured and asserted *after* the case's teardown rather
+ * than through an inline T_EXPECT: a T_EXPECT failure longjmps out of the case,
+ * and skipping teardown would leak the loop and, under WITH_THREADS, leave the
+ * worker threads unjoined and still writing the by-then-dead num_sessions slot. */
+static bool drain_sessions(
+	struct ev_loop *restrict loop, struct server *restrict a,
+	struct server *restrict b)
+{
+	struct sessions_drained_ctx ctx = { .a = a, .b = b };
+	struct ev_timer w_poll;
+	ev_timer_init(
+		&w_poll, test_poll_cb, TEST_POLL_INTERVAL_SEC,
+		TEST_POLL_INTERVAL_SEC);
+	ev_timer_start(loop, &w_poll);
+	const bool drained = test_wait_until(
+		loop, sessions_drained_predicate, &ctx, TEST_WAIT_DRAIN_SEC,
+		NULL, NULL);
+	ev_timer_stop(loop, &w_poll);
+	return drained;
 }
 
 /* Bind a listener on an ephemeral loopback port, immediately close it, and
@@ -930,11 +983,12 @@ T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 
+	T_EXPECT(drained);
 	T_EXPECT(completed);
 	T_EXPECT(has_client_fd);
 	T_EXPECT(has_accepted);
@@ -979,10 +1033,11 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 		TEST_WAIT_CONNREFUSED_SEC, NULL, NULL);
 	err = d.err;
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 
+	T_EXPECT(drained);
 	T_EXPECT(completed);
 	T_EXPECT_EQ(result.fd, -1);
 	T_EXPECT_EQ(err, DIALER_ERR_PROXY_REFUSED);
@@ -1024,10 +1079,11 @@ T_DECLARE_CASE(socks5_noauth_rejected_when_auth_required)
 		NULL, NULL);
 	err = d.err;
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 
+	T_EXPECT(drained);
 	T_EXPECT(completed);
 	T_EXPECT_EQ(result.fd, -1);
 	T_EXPECT_EQ(err, DIALER_ERR_PROXY_AUTH);
@@ -1083,11 +1139,12 @@ T_DECLARE_CASE(socks5_credentials_accepted_when_auth_required)
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 
+	T_EXPECT(drained);
 	T_EXPECT(completed);
 	T_EXPECT(has_client_fd);
 	T_EXPECT(has_accepted);
@@ -1142,11 +1199,12 @@ T_DECLARE_CASE(socks4a_connect_success_via_real_proxy)
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 
+	T_EXPECT(drained);
 	T_EXPECT(completed);
 	T_EXPECT(has_client_fd);
 	T_EXPECT(has_accepted);
@@ -1201,11 +1259,12 @@ T_DECLARE_CASE(http_proxy_connect_success_via_real_proxy)
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 
+	T_EXPECT(drained);
 	T_EXPECT(completed);
 	T_EXPECT(has_client_fd);
 	T_EXPECT(has_accepted);
@@ -1679,10 +1738,11 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 		TEST_WAIT_CONNREFUSED_SEC, NULL, NULL);
 	err = d.err;
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 
+	T_EXPECT(drained);
 	T_EXPECT(completed);
 	T_EXPECT_EQ(result.fd, -1);
 	T_EXPECT_EQ(err, DIALER_ERR_PROXY_REFUSED);
@@ -1802,10 +1862,11 @@ T_DECLARE_CASE(socks5_connect_ipv6_target_via_real_proxy)
 	T_CALL_SUBCASE(
 		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
+	T_EXPECT(drained);
 }
 
 T_DECLARE_CASE(http_proxy_connect_ipv6_target_via_real_proxy)
@@ -1831,10 +1892,11 @@ T_DECLARE_CASE(http_proxy_connect_ipv6_target_via_real_proxy)
 	T_CALL_SUBCASE(
 		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
+	T_EXPECT(drained);
 }
 
 T_DECLARE_CASE(http_proxy_connect_with_credentials_via_real_proxy)
@@ -1863,10 +1925,11 @@ T_DECLARE_CASE(http_proxy_connect_with_credentials_via_real_proxy)
 	T_CALL_SUBCASE(
 		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
+	T_EXPECT(drained);
 }
 
 /* Chain two real proxies of the given protocols and assert an end-to-end
@@ -1899,11 +1962,12 @@ T_DECLARE_SUBCASE(
 	T_CALL_SUBCASE(
 		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy2, &proxy1);
 	stop_proxy(&proxy2);
 	stop_proxy(&proxy1);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
+	T_EXPECT(drained);
 }
 
 T_DECLARE_CASE(chain_socks5_to_http_connect_success)
@@ -1976,11 +2040,12 @@ T_DECLARE_CASE(socks5_connect_domain_target_via_real_proxy)
 	T_CALL_SUBCASE(
 		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	resolver_free(resolver);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
+	T_EXPECT(drained);
 }
 
 /* SOCKS4a has no native IPv6: the client encodes an IPv6 target as a textual
@@ -2013,11 +2078,12 @@ T_DECLARE_CASE(socks4a_connect_ipv6_target_via_real_proxy)
 	T_CALL_SUBCASE(
 		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	resolver_free(resolver);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
+	T_EXPECT(drained);
 }
 
 T_DECLARE_CASE(socks4a_connect_domain_target_via_real_proxy)
@@ -2048,11 +2114,12 @@ T_DECLARE_CASE(socks4a_connect_domain_target_via_real_proxy)
 	T_CALL_SUBCASE(
 		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
 	dialreq_free(req);
-	drain_loop(loop, TEST_WAIT_SHORT_SEC);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	resolver_free(resolver);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
+	T_EXPECT(drained);
 }
 
 /* -------------------------------------------------------------------------
@@ -2065,7 +2132,6 @@ T_DECLARE_CASE(socks4a_connect_domain_target_via_real_proxy)
 #define FUZZ_MAX_CODEC_INPUT 512
 #define FUZZ_MAX_HEADER_VALUE 256
 #define FUZZ_MAX_HTTP_INPUT 1024
-#define FUZZ_MAX_SOCKS_INPUT 512
 #define FUZZ_MAX_STREAM_OUTPUT 65536
 
 struct prng {
