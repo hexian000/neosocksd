@@ -23,6 +23,7 @@
 #include <malloc.h>
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -108,7 +109,12 @@ static void *isolated_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 
 static lua_State *new_lua_isolated(void)
 {
-	lua_State *restrict L = lua_newstate(isolated_alloc, NULL);
+	lua_State *restrict L =
+#if LUA_VERSION_NUM >= 505
+		lua_newstate(isolated_alloc, NULL, luaL_makeseed(NULL));
+#else
+		lua_newstate(isolated_alloc, NULL);
+#endif
 	if (L == NULL) {
 		return NULL;
 	}
@@ -218,20 +224,30 @@ T_DECLARE_CASE(marshal_large_integer_hex)
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
 
-	/* Integers whose magnitude exceeds the decimal cutoff are serialized as
-	 * hex for compactness; assert the form (not just the round-trip) so a
-	 * regression that dropped the optimization back to decimal is caught, and
-	 * they must still round-trip through load(). */
-	T_EXPECT(run_chunk(
-		L, "local vals = {1000000000000, 0x123456789abc, "
-		   "-0x7fffffffffffffff, math.maxinteger, math.mininteger} "
-		   "for _, v in ipairs(vals) do "
-		   "  local m = marshal(v) "
-		   "  if not m:find('0x', 1, true) then return false, v, m end "
-		   "  local f = assert(load('return '..m)) "
-		   "  if f() ~= v then return false, v, m end "
-		   "end "
-		   "return true"));
+	/* These magnitudes exceed marshal_number's decimal cutoff on a 64-bit
+	 * lua_Integer, so each is serialized as hex for compactness; assert the
+	 * form there (not just the round-trip) so a regression that dropped the
+	 * optimization back to decimal is caught. On a LUA_32BITS build the hex
+	 * literals wrap and the decimal literal becomes a float, leaving most of
+	 * these under the cutoff and serialized as decimal, so the form check is
+	 * gated to the 64-bit width — math.mininteger, the one value that stays
+	 * hex after narrowing, is covered by marshal_mininteger_uses_hex. The
+	 * round-trip through load() must hold at both widths. The chunk is a
+	 * variable, not an inline macro argument, so the #if is not embedded in
+	 * the T_EXPECT macro's arguments (which would be undefined behavior). */
+	const char *const chunk =
+		"local vals = {1000000000000, 0x123456789abc, "
+		"-0x7fffffffffffffff, math.maxinteger, math.mininteger} "
+		"for _, v in ipairs(vals) do "
+		"  local m = marshal(v) "
+#if !LUA_32BITS
+		"  if not m:find('0x', 1, true) then return false, v, m end "
+#endif /* !LUA_32BITS */
+		"  local f = assert(load('return '..m)) "
+		"  if f() ~= v then return false, v, m end "
+		"end "
+		"return true";
+	T_EXPECT(run_chunk(L, chunk));
 	T_EXPECT(lua_gettop(L) >= 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
 
