@@ -26,12 +26,9 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdlib.h>
 #include <string.h>
-#ifdef _GNU_SOURCE
-#include <sys/syscall.h>
-#endif
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MT_AWAIT_SLEEP "await.sleep"
@@ -603,22 +600,20 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 /* Close every inherited descriptor above stderr in the forked child before
  * exec. Our own sockets are CLOEXEC, but descriptors we do not control (e.g.
  * the resolver's) would otherwise leak into the spawned process tree and keep
- * connections open for its lifetime. */
+ * connections open for its lifetime. This needs close_range(2); where it is
+ * unavailable we accept the leak (see below). */
 static void close_inherited_fds(void)
 {
-	const int minfd = STDERR_FILENO + 1;
-#if defined(_GNU_SOURCE) && defined(SYS_close_range)
-	if (syscall(SYS_close_range, (unsigned int)minfd, ~0U, 0) == 0) {
-		return;
-	}
-#endif
-	long maxfd = sysconf(_SC_OPEN_MAX);
-	if (maxfd < minfd) {
-		maxfd = 1L << 16;
-	}
-	for (long fd = minfd; fd < maxfd; fd++) {
-		(void)close((int)fd);
-	}
+#if WITH_CLOSE_RANGE
+	const unsigned int minfd = STDERR_FILENO + 1;
+	/* close_range(2) may still fail at runtime (e.g. ENOSYS on a kernel
+	 * older than the C library): accept the leak then, as in the #else. */
+	(void)close_range(minfd, ~0U, 0);
+#else
+	/* Without close_range(2) there is no race-free, portable way to close
+	 * those descriptors short of a brute-force close() loop over the whole
+	 * fd table; accept that they leak into the child. */
+#endif /* WITH_CLOSE_RANGE */
 }
 
 /* status = await.execute(command) */
