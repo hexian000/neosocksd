@@ -31,6 +31,19 @@ set_source_files_properties(
     PROPERTIES COMPILE_DEFINITIONS _XOPEN_SOURCE=700
 )
 
+# for setgroups()
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/os/daemon.c"
+    PROPERTIES COMPILE_DEFINITIONS _DEFAULT_SOURCE
+)
+
+# for sigaltstack()/SIGSTKSZ/SA_ONSTACK/SS_DISABLE (XSI, hidden under a bare
+# _POSIX_C_SOURCE=200809L which FORCE_POSIX sets)
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/os/signal.c"
+    PROPERTIES COMPILE_DEFINITIONS _XOPEN_SOURCE=700
+)
+
 include(CheckSymbolExists)
 if(FORCE_POSIX)
     list(APPEND CMAKE_REQUIRED_DEFINITIONS "-D_POSIX_C_SOURCE=200809L" "-D_XOPEN_SOURCE=700")
