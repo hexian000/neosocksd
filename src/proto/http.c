@@ -24,8 +24,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/socket.h>
-#include <sys/types.h>
 
 const char *const http_content_encoding_str[] = {
 	[CENCODING_NONE] = NULL,

@@ -8,12 +8,12 @@
 #include "dialer.h"
 #include "forward.h"
 #include "http_proxy.h"
-#include "proto/domain.h"
 #include "resolver.h"
 #if WITH_RULESET
 #include "ruleset/ruleset.h"
 #endif
 #include "socks.h"
+#include "transfer.h"
 #include "util.h"
 
 #include "math/rand.h"

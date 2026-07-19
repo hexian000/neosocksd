@@ -9,7 +9,6 @@
 #include "proto/socks.h"
 #include "ruleset/ruleset.h"
 #include "server.h"
-#include "transfer.h"
 #include "util.h"
 
 #include "binary/serialize.h"
@@ -36,7 +35,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/uio.h>
 
 /* never rollback */
 enum socks_state {

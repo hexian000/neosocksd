@@ -5,11 +5,9 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "proto/domain.h"
 #include "proto/http.h"
 #include "ruleset/ruleset.h"
 #include "server.h"
-#include "transfer.h"
 #include "util.h"
 
 #include "codec/base64.h"
@@ -26,7 +24,6 @@
 
 #include <ev.h>
 
-#include <errno.h>
 #if WITH_THREADS
 #include <stdatomic.h>
 #endif

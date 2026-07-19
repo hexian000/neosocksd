@@ -35,6 +35,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 /* defer ruleset.tick() to the idle watcher */

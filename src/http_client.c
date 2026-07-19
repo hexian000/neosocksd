@@ -15,11 +15,9 @@
 
 #include <ev.h>
 
-#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include <strings.h>
 
 static void
 http_client_stop(struct ev_loop *loop, struct http_client_ctx *restrict ctx)

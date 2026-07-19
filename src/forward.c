@@ -5,10 +5,8 @@
 
 #include "conf.h"
 #include "dialer.h"
-#include "proto/domain.h"
 #include "ruleset/ruleset.h"
 #include "server.h"
-#include "transfer.h"
 #include "util.h"
 
 #include "meta/class.h"
