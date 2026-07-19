@@ -33,6 +33,7 @@
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

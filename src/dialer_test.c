@@ -6,6 +6,7 @@
 #include "dialer.h"
 
 #include "conf.h"
+#include "proto/domain.h"
 #include "proto/socks.h"
 #include "resolver.h"
 #include "server.h"

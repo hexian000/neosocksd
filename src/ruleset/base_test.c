@@ -30,6 +30,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared Lua test fixtures (base.c has no collaborator to mock).

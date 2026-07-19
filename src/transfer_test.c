@@ -13,8 +13,6 @@
 
 #include "transfer.h"
 
-#include "util.h"
-
 #include "io/io.h"
 #include "os/socket.h"
 #include "utils/testing.h"

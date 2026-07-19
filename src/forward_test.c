@@ -18,7 +18,6 @@
 #include <ev.h>
 
 #include <arpa/inet.h>
-#include <errno.h>
 #include <netinet/in.h>
 #if WITH_THREADS
 #include <stdatomic.h>
@@ -26,6 +25,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>

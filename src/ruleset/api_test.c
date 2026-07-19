@@ -18,12 +18,14 @@
 #include "dialer.h"
 #include "resolver.h"
 #include "ruleset/base.h"
+#include "ruleset/ruleset.h"
 #include "server.h"
 #include "util.h"
 
 #include "meta/arraysize.h"
 #include "utils/testing.h"
 
+#include <ev.h>
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
@@ -31,8 +33,10 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (dialer, resolver, api_client, server) and

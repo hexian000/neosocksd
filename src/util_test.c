@@ -8,6 +8,7 @@
 #include "dialer.h"
 #include "resolver.h"
 
+#include "meta/minmax.h"
 #include "utils/slog.h"
 #include "utils/testing.h"
 
@@ -15,8 +16,10 @@
 
 #include <signal.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 

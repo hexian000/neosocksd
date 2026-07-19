@@ -19,7 +19,6 @@
 #include <lualib.h>
 
 #include <stdbool.h>
-#include <string.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared Lua test fixtures (regex.c has no collaborator to mock).
