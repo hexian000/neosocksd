@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -77,7 +78,10 @@ capture_fd(const int fd_no, bool (*action)(const void *), const void *data)
 		(void)fclose(tmp);
 		return NULL;
 	}
-	rewind(tmp);
+	if (fseek(tmp, 0, SEEK_SET) != 0) {
+		(void)fclose(tmp);
+		return NULL;
+	}
 	char *const buf = malloc((size_t)size + 1);
 	if (buf == NULL) {
 		(void)fclose(tmp);
