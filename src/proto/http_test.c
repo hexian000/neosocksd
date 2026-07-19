@@ -17,6 +17,7 @@
 
 #include "io/stream.h"
 #include "meta/arraysize.h"
+#include "net/http.h"
 #include "utils/buffer.h"
 #include "utils/testing.h"
 
@@ -306,8 +307,9 @@ T_DECLARE_CASE(parsehdr_accept_te_cases)
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
 		struct http_conn p = { 0 };
 		char value[64];
-		T_CHECK(strlen(cases[i].value) < sizeof(value));
-		strcpy(value, cases[i].value);
+		const size_t len = strlen(cases[i].value);
+		T_CHECK(len < sizeof(value));
+		memcpy(value, cases[i].value, len + 1);
 		T_EXPECT(parsehdr_accept_te(&p, value));
 		T_EXPECT_EQ(p.hdr.transfer.accept, cases[i].accept);
 	}
