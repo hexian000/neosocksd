@@ -142,12 +142,12 @@ static ssize_t recv_nowait(const int fd, void *buf, const size_t len)
 }
 
 static void
-read_stream_content(struct stream *stream, unsigned char *buf, size_t *len)
+read_stream_content(struct io_stream *stream, unsigned char *buf, size_t *len)
 {
 	size_t total = 0;
 	while (total < *len) {
 		size_t n = *len - total;
-		if (stream_read(stream, buf + total, &n) != 0) {
+		if (io_stream_read(stream, buf + total, &n) != 0) {
 			break;
 		}
 		if (n == 0) {
@@ -160,7 +160,7 @@ read_stream_content(struct stream *stream, unsigned char *buf, size_t *len)
 
 static void capture_cb(
 	struct api_client_ctx *ctx, struct ev_loop *loop, void *data,
-	const char *errmsg, size_t errlen, struct stream *stream)
+	const char *errmsg, size_t errlen, struct io_stream *stream)
 {
 	struct cb_result *const out = data;
 	(void)ctx;
@@ -349,18 +349,18 @@ static bool send_response(
 /* Like send_response but adds a Content-Encoding header; the body is written
  * verbatim (already encoded by the caller). */
 static bool send_encoded_response(
-	const int fd, const char *content_type, const char *encoding,
-	const void *body, const size_t body_len)
+	const int fd, const char *status_line, const char *content_type,
+	const char *encoding, const void *body, const size_t body_len)
 {
 	char hdr[256];
 	const int n = snprintf(
 		hdr, sizeof(hdr),
-		"HTTP/1.1 200 OK\r\n"
+		"HTTP/1.1 %s\r\n"
 		"Content-Type: %s\r\n"
 		"Content-Encoding: %s\r\n"
 		"Connection: close\r\n"
 		"Content-Length: %zu\r\n\r\n",
-		content_type, encoding, body_len);
+		status_line, content_type, encoding, body_len);
 	if (n <= 0 || (size_t)n >= sizeof(hdr)) {
 		return false;
 	}
@@ -444,11 +444,13 @@ static bool g_realloc_fail;
 /* realloc() semantics over malloc()/free(), with an optional armed failure. */
 static void *realloc_impl(void *ptr, const size_t size, const bool may_fail)
 {
-	if (may_fail && g_realloc_fail) {
-		return NULL;
-	}
+	/* realloc(ptr, 0) must free ptr even while a failure is armed, so the
+	 * free path precedes the fault-injection check */
 	if (size == 0) {
 		free(ptr);
+		return NULL;
+	}
+	if (may_fail && g_realloc_fail) {
 		return NULL;
 	}
 	void *const np = malloc(size);
@@ -751,7 +753,10 @@ T_DECLARE_CASE(rpcall_timeout)
 
 	T_CHECK(loop != NULL);
 	reset_stub_state();
-	test_conf.timeout = 0.005;
+	/* A zero timeout arms the request deadline to fire on the next event-loop
+	 * iteration, so the "timeout" result is reached deterministically without
+	 * waiting out a real wall-clock deadline. */
+	test_conf.timeout = 0;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	T_CHECK(fd_set_nonblock(sv[0]));
 	T_CHECK(fd_set_nonblock(sv[1]));
@@ -898,6 +903,65 @@ T_DECLARE_CASE(rpcall_structured_error_body)
 	T_EXPECT_STREQ(out.errmsg, rsp_body);
 	T_EXPECT(!out.has_stream);
 
+	T_CHECK(close(sv[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A structured (rpcall-MIME) error body carrying Content-Encoding: deflate must
+ * be decoded before reaching the caller, mirroring the success path; otherwise
+ * the raw compressed bytes were delivered as the error message. */
+T_DECLARE_CASE(rpcall_structured_error_body_deflate_is_decoded)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct cb_result out = { 0 };
+	struct api_client_ctx *ctx = NULL;
+	struct dialreq *req = NULL;
+	int sv[2] = { -1, -1 };
+	static const char payload[] = "{}";
+	static const char plain[] = "backend failed: structured error detail";
+	struct vbuffer *cbuf = NULL;
+	const struct api_client_cb cb = {
+		.func = capture_cb,
+		.data = &out,
+	};
+
+	T_CHECK(loop != NULL);
+	reset_stub_state();
+
+	/* deflate-compress the known error text to use as the response body */
+	struct io_stream *w =
+		content_writer(&cbuf, sizeof(plain) - 1, CENCODING_DEFLATE);
+	T_CHECK(w != NULL);
+	size_t wn = sizeof(plain) - 1;
+	T_CHECK(io_stream_write(w, plain, &wn) == 0);
+	T_CHECK(wn == sizeof(plain) - 1);
+	T_CHECK(io_stream_close(w) == 0);
+	T_CHECK(cbuf != NULL);
+	T_CHECK(VBUF_LEN(cbuf) > 0);
+
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	T_CHECK(fd_set_nonblock(sv[1]));
+	S.dialer_result_fd = sv[0];
+	req = new_test_dialreq();
+	T_CHECK(req != NULL);
+
+	T_CHECK(api_client_rpcall(
+		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
+		NULL, NULL));
+	T_CHECK(send_encoded_response(
+		sv[1], "500 Internal Server Error", MIME_RPCALL, "deflate",
+		VBUF_DATA(cbuf), VBUF_LEN(cbuf)));
+	T_CHECK(test_wait_until(
+		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
+
+	T_EXPECT(out.called);
+	/* the decoded plain text, not the raw deflate bytes */
+	T_EXPECT_EQ(out.errlen, sizeof(plain) - 1);
+	T_EXPECT_STREQ(out.errmsg, plain);
+	T_EXPECT(!out.has_stream);
+
+	VBUF_FREE(cbuf);
 	T_CHECK(close(sv[1]) == 0);
 	ev_loop_destroy(loop);
 }
@@ -1101,13 +1165,13 @@ T_DECLARE_CASE(rpcall_deflate_response_is_decoded)
 	reset_stub_state();
 
 	/* deflate-compress the known plaintext to use as the response body */
-	struct stream *w =
+	struct io_stream *w =
 		content_writer(&cbuf, sizeof(plain) - 1, CENCODING_DEFLATE);
 	T_CHECK(w != NULL);
 	size_t wn = sizeof(plain) - 1;
-	T_CHECK(stream_write(w, plain, &wn) == 0);
+	T_CHECK(io_stream_write(w, plain, &wn) == 0);
 	T_CHECK(wn == sizeof(plain) - 1);
-	T_CHECK(stream_close(w) == 0);
+	T_CHECK(io_stream_close(w) == 0);
 	T_CHECK(cbuf != NULL);
 	T_CHECK(VBUF_LEN(cbuf) > 0);
 
@@ -1122,7 +1186,7 @@ T_DECLARE_CASE(rpcall_deflate_response_is_decoded)
 		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
 		NULL, NULL));
 	T_CHECK(send_encoded_response(
-		sv[1], MIME_RPCALL, "deflate", VBUF_DATA(cbuf),
+		sv[1], "200 OK", MIME_RPCALL, "deflate", VBUF_DATA(cbuf),
 		VBUF_LEN(cbuf)));
 	T_CHECK(test_wait_until(
 		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC));
@@ -1157,6 +1221,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(rpcall_http_error_status_line),
 	T_CASE(rpcall_oom_building_error_still_reports_error),
 	T_CASE(rpcall_structured_error_body),
+	T_CASE(rpcall_structured_error_body_deflate_is_decoded),
 	T_CASE(cancel_during_connect_calls_dialer_cancel),
 	T_CASE(request_advertises_connection_close),
 	T_CASE(rpcall_write_error_reports_message),

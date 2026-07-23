@@ -13,12 +13,12 @@ struct dialreq;
 struct resolver;
 struct server_stats;
 struct api_client_ctx;
-struct stream;
+struct io_stream;
 
 struct api_client_cb {
 	void (*func)(
 		struct api_client_ctx *ctx, struct ev_loop *loop, void *data,
-		const char *errmsg, size_t errlen, struct stream *stream);
+		const char *errmsg, size_t errlen, struct io_stream *stream);
 	void *data;
 };
 

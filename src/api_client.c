@@ -12,6 +12,8 @@
 #include "server.h"
 #include "util.h"
 
+#include "io/io.h"
+#include "io/memory.h"
 #include "io/stream.h"
 #include "meta/class.h"
 #include "meta/intcast.h"
@@ -19,7 +21,7 @@
 #include "net/http.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
-#include "utils/formats.h"
+#include "strings/format.h"
 #include "utils/gc.h"
 #include "utils/slog.h"
 
@@ -42,7 +44,7 @@ struct api_client_ctx {
 	struct {
 		const char *errmsg;
 		size_t errlen;
-		struct stream *stream;
+		struct io_stream *stream;
 		struct vbuffer *content;
 	} result;
 };
@@ -58,21 +60,14 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	ASSERT(c->hctx.state != STATE_CLIENT_INIT);
 	struct http_conn *restrict p = &c->hctx.conn;
 
-	/* hop-by-hop headers */
-	if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		return parsehdr_transfer_encoding(p, value);
-	}
-
-	/* representation headers */
-	if (strcasecmp(key, "Content-Length") == 0) {
-		return parsehdr_content_length(p, value);
-	}
-	if (strcasecmp(key, "Content-Type") == 0) {
-		p->hdr.content.type = value;
+	/* message-framing / representation headers, shared with api_server */
+	switch (parsehdr_representation(p, key, value)) {
+	case PARSEHDR_OK:
 		return true;
-	}
-	if (strcasecmp(key, "Content-Encoding") == 0) {
-		return parsehdr_content_encoding(p, value);
+	case PARSEHDR_ERROR:
+		return false;
+	case PARSEHDR_UNHANDLED:
+		break;
 	}
 
 	LOGVV_F("unknown http header: `%s' = `%s'", key, value);
@@ -90,7 +85,7 @@ api_client_stop(struct ev_loop *loop, struct api_client_ctx *restrict ctx)
 
 static void api_client_finish(
 	struct ev_loop *loop, struct api_client_ctx *restrict ctx,
-	const char *errmsg, const size_t errlen, struct stream *stream)
+	const char *errmsg, const size_t errlen, struct io_stream *stream)
 {
 	/* A caller with a callback reads errmsg == NULL as success and then
 	 * consumes the stream, so it must never be handed both as NULL. Only a
@@ -131,6 +126,36 @@ static void api_client_finish_errmsg(
 	}
 	ctx->result.content = emsg;
 	api_client_finish(loop, ctx, VBUF_DATA(emsg), VBUF_LEN(emsg), NULL);
+}
+
+/* Materialize a Content-Encoding'd body into a freshly allocated buffer of
+ * decoded bytes, so a structured error can be handed to the caller as plain
+ * text (the caller receives errors as raw bytes, not a lazy stream). Borrows
+ * `content` (does not free it); returns NULL on OOM or a decode error. */
+static struct vbuffer *content_decode_vbuf(
+	const struct vbuffer *restrict content,
+	const enum content_encodings encoding)
+{
+	struct io_stream *r = content_reader_vbuf(content, encoding);
+	if (r == NULL) {
+		return NULL;
+	}
+	struct vbuffer *decoded = VBUF_NEW(VBUF_LEN(content));
+	struct io_stream *w = io_heapwriter(&decoded);
+	if (w == NULL) {
+		VBUF_FREE(decoded);
+		io_stream_close(r);
+		return NULL;
+	}
+	unsigned char buf[IO_BUFSIZE];
+	const int cerr = io_stream_copy(w, r, buf, sizeof(buf));
+	const int werr = io_stream_close(w);
+	const int rerr = io_stream_close(r);
+	if (cerr != 0 || werr != 0 || rerr != 0 || VBUF_HAS_OOM(decoded)) {
+		VBUF_FREE(decoded);
+		return NULL;
+	}
+	return decoded;
 }
 
 static void on_http_client_done(
@@ -179,7 +204,22 @@ static void on_http_client_done(
 	} else {
 		if (content != NULL && VBUF_LEN(content) > 0 &&
 		    check_rpcall_mime(conn->hdr.content.type)) {
-			/* Server returned structured error in RPC format */
+			/* Server returned a structured error in RPC format.
+			 * Decode any Content-Encoding so the caller sees the
+			 * plain error text, mirroring the success path below;
+			 * otherwise the raw compressed bytes would be delivered
+			 * as the message. */
+			if (conn->hdr.content.encoding != CENCODING_NONE) {
+				struct vbuffer *decoded = content_decode_vbuf(
+					content, conn->hdr.content.encoding);
+				VBUF_FREE(content);
+				if (decoded == NULL) {
+					API_RETURN_ERROR(
+						loop, ctx,
+						"cannot decode error content");
+				}
+				content = decoded;
+			}
 			ctx->result.content = content;
 			api_client_finish(
 				loop, ctx, VBUF_DATA(content),
@@ -212,12 +252,8 @@ static void on_http_client_done(
 		LOGV_F("response: content %s", clen);
 	}
 
-	/* Content-Length: 0 leaves content unallocated; io_memreader() requires
-	 * a non-NULL buffer even for a zero-length read, so substitute "". */
-	struct stream *r = content_reader(
-		content != NULL ? VBUF_DATA(content) : "",
-		content != NULL ? VBUF_LEN(content) : 0,
-		conn->hdr.content.encoding);
+	struct io_stream *r =
+		content_reader_vbuf(content, conn->hdr.content.encoding);
 	if (r == NULL) {
 		LOGOOM();
 		VBUF_FREE(content);
@@ -237,7 +273,7 @@ static bool make_request(
 	if (len >= RPCALL_COMPRESS_THRESHOLD) {
 		encoding = CENCODING_DEFLATE;
 	}
-	struct stream *s = content_writer(&p->cbuf, len, encoding);
+	struct io_stream *s = content_writer(&p->cbuf, len, encoding);
 	if (s == NULL) {
 		/* content_writer may have reserved p->cbuf before the stream
 		 * wrapper itself failed to allocate */
@@ -246,8 +282,8 @@ static bool make_request(
 		return false;
 	}
 	size_t n = len;
-	const int err1 = stream_write(s, content, &n);
-	const int err2 = stream_close(s);
+	const int err1 = io_stream_write(s, content, &n);
+	const int err2 = io_stream_close(s);
 	if (p->cbuf == NULL) {
 		LOGOOM();
 		return false;
@@ -284,11 +320,11 @@ static bool make_request(
 
 /* Close a stream on a best-effort cleanup path, logging at debug level when the
  * close reports an error that is non-actionable here. */
-static void close_stream(struct stream *restrict s)
+static void close_stream(struct io_stream *restrict s)
 {
-	const int err = stream_close(s);
+	const int err = io_stream_close(s);
 	if (err != 0) {
-		LOGD_F("stream_close: error %d", err);
+		LOGD_F("io_stream_close: error %d", err);
 	}
 }
 

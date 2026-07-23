@@ -22,7 +22,7 @@
 #include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
-#include "utils/formats.h"
+#include "strings/format.h"
 #include "utils/gc.h"
 #include "utils/slog.h"
 
@@ -169,7 +169,7 @@ static double process_load(void)
 }
 
 static void server_stats_stateful(
-	struct stream *restrict w, const struct server *restrict api,
+	struct io_stream *restrict w, const struct server *restrict api,
 	const double dt)
 {
 	const struct server *restrict s = api->data;
@@ -241,7 +241,7 @@ static void server_stats_stateful(
 
 #if WITH_RULESET
 static void append_vmstats(
-	struct stream *restrict w, const struct ruleset_vmstats *vm,
+	struct io_stream *restrict w, const struct ruleset_vmstats *vm,
 	const struct config *restrict conf)
 {
 	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
@@ -281,7 +281,7 @@ static void append_vmstats(
 #endif /* WITH_RULESET */
 
 static void append_server_stats(
-	struct stream *restrict w, const struct server *restrict api,
+	struct io_stream *restrict w, const struct server *restrict api,
 	const int_fast64_t uptime, const double dt, const bool runtime)
 {
 	const struct server_stats *restrict apistats = &api->stats;
@@ -484,7 +484,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	const enum content_encodings encoding =
 		negotiate_encoding(ctx->conn.hdr.accept_encoding, 0, 0);
-	struct stream *w = io_bufwriter(
+	struct io_stream *w = io_bufwriter(
 		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, encoding),
 		IO_BUFSIZE);
 	if (w == NULL) {
@@ -524,19 +524,19 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			s = ruleset_geterror(ruleset, &len);
 		}
 		size_t n = len;
-		const int err = stream_write(w, s, &n);
+		const int err = io_stream_write(w, s, &n);
 		if (n < len || err != 0) {
-			LOGE_F("stream_write: error %d, %zu/%zu", err, n, len);
-			(void)stream_close(w);
+			LOGE_F("io_stream_write: error %d, %zu/%zu", err, n, len);
+			(void)io_stream_close(w);
 			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
 	}
 #endif /* WITH_RULESET */
 
-	const int err = stream_close(w);
+	const int err = io_stream_close(w);
 	if (err != 0) {
-		LOGE_F("stream_close: error %d", err);
+		LOGE_F("io_stream_close: error %d", err);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
@@ -625,23 +625,20 @@ static void send_errmsg(
 
 /* Close a stream on a best-effort cleanup path, logging at debug level when the
  * close reports an error that is non-actionable here. */
-static void close_stream(struct stream *restrict s)
+static void close_stream(struct io_stream *restrict s)
 {
-	const int err = stream_close(s);
+	const int err = io_stream_close(s);
 	if (err != 0) {
-		LOGD_F("stream_close: error %d", err);
+		LOGD_F("io_stream_close: error %d", err);
 	}
 }
 
-/* Build a content_reader over the request body. Content-Length: 0 leaves cbuf
- * unallocated; io_memreader() requires a non-NULL buffer even for a zero-length
- * read, so substitute "". Returns NULL on OOM. */
-static struct stream *ctx_content_reader(struct api_ctx *restrict ctx)
+/* Build a content_reader over the request body; NULL cbuf reads as an empty
+ * body. Returns NULL on OOM. */
+static struct io_stream *ctx_content_reader(struct api_ctx *restrict ctx)
 {
-	return content_reader(
-		ctx->conn.cbuf != NULL ? VBUF_DATA(ctx->conn.cbuf) : "",
-		ctx->conn.cbuf != NULL ? VBUF_LEN(ctx->conn.cbuf) : 0,
-		ctx->conn.hdr.content.encoding);
+	return content_reader_vbuf(
+		ctx->conn.cbuf, ctx->conn.hdr.content.encoding);
 }
 
 static void handle_ruleset_rpcall(
@@ -654,7 +651,7 @@ static void handle_ruleset_rpcall(
 		send_errpage(loop, ctx, HTTP_BAD_REQUEST);
 		return;
 	}
-	struct stream *reader = ctx_content_reader(ctx);
+	struct io_stream *reader = ctx_content_reader(ctx);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -677,7 +674,7 @@ static void handle_ruleset_invoke(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *restrict ruleset)
 {
-	struct stream *reader = ctx_content_reader(ctx);
+	struct io_stream *reader = ctx_content_reader(ctx);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -706,7 +703,7 @@ static void handle_ruleset_update(
 	const char *restrict chunkname)
 {
 	const int_fast64_t start = clock_monotonic_ns();
-	struct stream *reader = ctx_content_reader(ctx);
+	struct io_stream *reader = ctx_content_reader(ctx);
 	if (reader == NULL) {
 		LOGOOM();
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
@@ -759,7 +756,7 @@ static void handle_ruleset_gc(
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
 
-	struct stream *w = io_bufwriter(
+	struct io_stream *w = io_bufwriter(
 		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, CENCODING_NONE),
 		IO_BUFSIZE);
 	if (w == NULL) {
@@ -785,9 +782,9 @@ static void handle_ruleset_gc(
 		(void)io_bufprintf(w, "Time Cost           : %s\n", timecost);
 	}
 	{
-		const int err = stream_close(w);
+		const int err = io_stream_close(w);
 		if (err != 0) {
-			LOGE_F("stream_close: error %d", err);
+			LOGE_F("io_stream_close: error %d", err);
 			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
 		}
@@ -896,7 +893,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 
 	const enum content_encodings encoding =
 		negotiate_encoding(ctx->conn.hdr.accept_encoding, 0, 0);
-	struct stream *w = io_bufwriter(
+	struct io_stream *w = io_bufwriter(
 		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, encoding),
 		IO_BUFSIZE);
 	if (w == NULL) {
@@ -1105,11 +1102,11 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			const char *m = ruleset_metrics(ruleset, &len);
 			if (m != NULL) {
 				size_t n = len;
-				const int werr = stream_write(w, m, &n);
+				const int werr = io_stream_write(w, m, &n);
 				if (n < len || werr != 0) {
-					LOGE_F("stream_write: error %d, %zu/%zu",
+					LOGE_F("io_stream_write: error %d, %zu/%zu",
 					       werr, n, len);
-					(void)stream_close(w);
+					(void)io_stream_close(w);
 					send_errpage(
 						loop, ctx,
 						HTTP_INTERNAL_SERVER_ERROR);
@@ -1123,9 +1120,9 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 #undef APPEND_METRIC
 #undef APPEND_METRIC_L
 
-	const int err = stream_close(w);
+	const int err = io_stream_close(w);
 	if (err != 0) {
-		LOGE_F("stream_close: error %d", err);
+		LOGE_F("io_stream_close: error %d", err);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
@@ -1285,20 +1282,15 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		(void)parsehdr_accept_te(p, value);
 		return true;
 	}
-	if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		return parsehdr_transfer_encoding(p, value);
-	}
 
-	/* representation headers */
-	if (strcasecmp(key, "Content-Length") == 0) {
-		return parsehdr_content_length(p, value);
-	}
-	if (strcasecmp(key, "Content-Type") == 0) {
-		p->hdr.content.type = value;
+	/* message-framing / representation headers, shared with api_client */
+	switch (parsehdr_representation(p, key, value)) {
+	case PARSEHDR_OK:
 		return true;
-	}
-	if (strcasecmp(key, "Content-Encoding") == 0) {
-		return parsehdr_content_encoding(p, value);
+	case PARSEHDR_ERROR:
+		return false;
+	case PARSEHDR_UNHANDLED:
+		break;
 	}
 
 	/* request headers */
@@ -1379,51 +1371,16 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_RESPONSE);
 
-	const int fd = watcher->fd;
-	{
-		const unsigned char *buf = ctx->conn.wbuf.data + ctx->conn.wpos;
-		size_t len = ctx->conn.wbuf.len - ctx->conn.wpos;
-		const int err = socket_send(fd, buf, &len);
-		if (err != 0) {
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == ENOBUFS || err == ENOMEM) {
-				return;
-			}
-			API_CTX_LOG_F(
-				WARNING, ctx, "send: (%d) %s", err,
-				strerror(err));
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		ctx->conn.wpos += len;
-		*ctx->conn.byt_sent += (uint_least64_t)len;
-		if (ctx->conn.wpos < ctx->conn.wbuf.len) {
-			return;
-		}
+	int err = 0;
+	const int ret = http_conn_send(&ctx->conn, watcher->fd, &err);
+	if (ret < 0) {
+		API_CTX_LOG_F(
+			WARNING, ctx, "send: (%d) %s", err, strerror(err));
+		gc_unref(&ctx->gcbase);
+		return;
 	}
-
-	/* Send response body after headers are fully sent */
-	if (ctx->conn.cbuf != NULL) {
-		const unsigned char *buf;
-		size_t len;
-		VBUF_VIEW(buf, len, ctx->conn.cbuf, ctx->conn.cpos);
-		const int err = socket_send(fd, buf, &len);
-		if (err != 0) {
-			if (err == EAGAIN || err == EWOULDBLOCK ||
-			    err == ENOBUFS || err == ENOMEM) {
-				return;
-			}
-			API_CTX_LOG_F(
-				WARNING, ctx, "send: (%d) %s", err,
-				strerror(err));
-			gc_unref(&ctx->gcbase);
-			return;
-		}
-		ctx->conn.cpos += len;
-		*ctx->conn.byt_sent += (uint_least64_t)len;
-		if (ctx->conn.cpos < VBUF_LEN(ctx->conn.cbuf)) {
-			return;
-		}
+	if (ret > 0) {
+		return;
 	}
 
 	if (ctx->keepalive) {
@@ -1470,7 +1427,7 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	const enum content_encodings encoding = negotiate_encoding(
 		ctx->conn.hdr.accept_encoding, resultlen,
 		RPCALL_COMPRESS_THRESHOLD);
-	struct stream *writer =
+	struct io_stream *writer =
 		content_writer(&ctx->conn.cbuf, resultlen, encoding);
 	if (writer == NULL) {
 		free(result);
@@ -1479,17 +1436,17 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 		return;
 	}
 	size_t n = resultlen;
-	int err = stream_write(writer, result, &n);
+	int err = io_stream_write(writer, result, &n);
 	free(result);
 	if (err != 0) {
-		LOGW_F("stream_write: error %d, %zu/%zu", err, n, resultlen);
-		(void)stream_close(writer);
+		LOGW_F("io_stream_write: error %d, %zu/%zu", err, n, resultlen);
+		(void)io_stream_close(writer);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
-	err = stream_close(writer);
+	err = io_stream_close(writer);
 	if (err != 0) {
-		LOGW_F("stream_close: error %d", err);
+		LOGW_F("io_stream_close: error %d", err);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}

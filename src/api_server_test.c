@@ -227,7 +227,7 @@ ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 	return RS.errstr;
 }
 
-bool ruleset_invoke(struct ruleset *restrict r, struct stream *code)
+bool ruleset_invoke(struct ruleset *restrict r, struct io_stream *code)
 {
 	(void)r;
 	(void)code;
@@ -236,7 +236,7 @@ bool ruleset_invoke(struct ruleset *restrict r, struct stream *code)
 
 bool ruleset_update(
 	struct ruleset *restrict r, const char *restrict modname,
-	const char *restrict chunkname, struct stream *code)
+	const char *restrict chunkname, struct io_stream *code)
 {
 	(void)r;
 	(void)modname;
@@ -253,7 +253,7 @@ bool ruleset_gc(struct ruleset *restrict r)
 
 bool ruleset_rpcall(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	struct stream *code, struct ruleset_callback *callback)
+	struct io_stream *code, struct ruleset_callback *callback)
 {
 	(void)r;
 	(void)code;
