@@ -22,6 +22,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 struct config;
 struct resolver;
@@ -299,5 +301,26 @@ void dialer_do(
  * @param loop libev event loop
  */
 void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop);
+
+/**
+ * @brief Describe a dialer's failure, appending the OS error when one is set.
+ * @param buf Caller-provided scratch buffer.
+ * @param bufsize Size of @p buf.
+ * @param d Dialer whose err/syserr to describe.
+ * @return @p buf when a syserr was appended, otherwise a static
+ *         dialer_strerror() string (@p buf then left untouched).
+ */
+static inline const char *dialer_errorstr(
+	char *buf, const size_t bufsize, const struct dialer *restrict d)
+{
+	const char *const errstr = dialer_strerror(d->err);
+	if (d->syserr == 0) {
+		return errstr;
+	}
+	(void)snprintf(
+		buf, bufsize, "%s (%d) %s", errstr, d->syserr,
+		strerror(d->syserr));
+	return buf;
+}
 
 #endif /* DIALER_H */

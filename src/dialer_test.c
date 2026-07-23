@@ -145,6 +145,32 @@ static bool fd_set_nonblock(const int fd)
 	return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+/* connect() interposer, installed via -Wl,--wrap=connect (linking connect()
+ * against libc as __real_connect). The dialer sets the socket non-blocking, so
+ * a real connect() to a loopback listener always returns EINPROGRESS,
+ * exercising only connect_sa()'s async EV_WRITE path. When g_force_sync_connect
+ * is set, block to completion so connect() returns 0 with a ready socket,
+ * driving the connect()-returns-0 + num_proxy>0 handshake branch instead.
+ * Default calls pass through unchanged. */
+extern int
+__real_connect(int fd, const struct sockaddr *addr, socklen_t addrlen);
+
+static bool g_force_sync_connect = false;
+static int g_sync_connect_ret = -2; /* sentinel: sync connect not attempted */
+
+int __wrap_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
+{
+	if (!g_force_sync_connect) {
+		return __real_connect(fd, addr, addrlen);
+	}
+	const int flags = fcntl(fd, F_GETFL, 0);
+	(void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+	const int ret = __real_connect(fd, addr, addrlen);
+	(void)fcntl(fd, F_SETFL, flags);
+	g_sync_connect_ret = ret;
+	return ret;
+}
+
 static int make_listener(uint_fast16_t *restrict port)
 {
 	const int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -774,6 +800,71 @@ T_DECLARE_CASE(http_connect_success_sends_expected_request)
 }
 
 /*
+ * A synchronous connect() success (connect() returns 0, not EINPROGRESS) into a
+ * proxied dial takes connect_sa()'s num_proxy>0 branch: STATE_HANDSHAKE1 with
+ * send_dispatch() sending the first handshake inline. Real loopback sockets
+ * always report EINPROGRESS, so this branch is otherwise never exercised; force
+ * it with the connect() interposer above and confirm the handshake completes.
+ */
+T_DECLARE_CASE(sync_connect_success_into_http_handshake)
+{
+	uint_fast16_t port = 0;
+	int listener_fd = make_listener(&port);
+	struct proxy_server server = {
+		.listener_fd = listener_fd,
+		.peer_fd = -1,
+		.response = "HTTP/1.1 200 Connection Established\r\n\r\n",
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[128];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("example.com:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+
+	g_sync_connect_ret = -2;
+	g_force_sync_connect = true;
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	g_force_sync_connect = false;
+
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		proxy_server_pump, &server);
+	int client_fd = result.fd;
+	const enum dialer_error err = d.err;
+	close_if_open(&client_fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&listener_fd);
+
+	/* connect() returned 0, so connect_sa() took the synchronous branch. */
+	T_EXPECT_EQ(g_sync_connect_ret, 0);
+	T_EXPECT(completed);
+	T_EXPECT(!server.failed);
+	T_EXPECT(server.request_complete);
+	T_EXPECT(server.response_sent);
+	T_EXPECT_STREQ(
+		server.request, "CONNECT example.com:443 HTTP/1.1\r\n\r\n");
+	T_EXPECT(result.fd >= 0);
+	T_EXPECT_EQ(err, DIALER_OK);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
+/*
  * Regression: a proxy reply delivered one byte at a time (as a slow/adversarial
  * upstream hop might) must still be parsed correctly. dialer_recv() peeks
  * (MSG_PEEK) rather than consumes, and nothing is consumed until the status
@@ -1024,6 +1115,56 @@ T_DECLARE_CASE(http_connect_non_200_maps_to_proxy_proto)
 	T_EXPECT_EQ(d.syserr, 0);
 }
 
+/* recv_http_rsp() rejects any response whose version is not HTTP/1.x; the
+ * version check runs before the status-code check, so a 200 with an
+ * unsupported version must still map to DIALER_ERR_PROXY_PROTO. */
+T_DECLARE_CASE(http_connect_unsupported_version_maps_to_proxy_proto)
+{
+	uint_fast16_t port = 0;
+	int listener_fd = make_listener(&port);
+	struct proxy_server server = {
+		.listener_fd = listener_fd,
+		.peer_fd = -1,
+		.response = "HTTP/0.9 200 OK\r\n\r\n",
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[96];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("example.com:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		proxy_server_pump, &server);
+	const enum dialer_error err = d.err;
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT(!server.failed);
+	T_EXPECT(server.request_complete);
+	T_EXPECT(server.response_sent);
+	T_EXPECT_EQ(result.fd, -1);
+	T_EXPECT_EQ(err, DIALER_ERR_PROXY_PROTO);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
 struct socks4_raw_server {
 	int listener_fd;
 	int peer_fd;
@@ -1190,6 +1331,64 @@ T_DECLARE_CASE(socks4a_granted_reports_success)
 	T_EXPECT(!server.failed);
 	T_EXPECT(server.request_complete);
 	T_EXPECT(server.response_sent);
+	T_EXPECT(result.fd >= 0);
+	T_EXPECT_EQ(err, DIALER_OK);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
+/* send_socks4a_req() encodes an IPv6-literal target as a SOCKS4a hostname (the
+ * ATYP_INET6 branch), which the domain-target cases never exercise: the request
+ * must carry the IPv6 address string in the hostname slot after the empty
+ * userid. */
+T_DECLARE_CASE(socks4a_ipv6_target_encodes_hostname)
+{
+	uint_fast16_t port = 0;
+	struct socks4_raw_server server = {
+		.listener_fd = make_listener(&port),
+		.peer_fd = -1,
+		.rsp_code = SOCKS4RSP_GRANTED,
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[64];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "socks4a://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("[2001:db8::1]:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		socks4_raw_pump, &server);
+	int client_fd = result.fd;
+	const enum dialer_error err = d.err;
+	/* no proxy userid, so the hostname starts right after the empty userid
+	 * NUL that follows the 8-byte header */
+	const bool host_encoded =
+		server.request_complete &&
+		strcmp((const char *)server.buf + SOCKS4_HDR_LEN + 1,
+		       "2001:db8::1") == 0;
+	close_if_open(&client_fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&server.listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT(!server.failed);
+	T_EXPECT(server.request_complete);
+	T_EXPECT(host_encoded);
 	T_EXPECT(result.fd >= 0);
 	T_EXPECT_EQ(err, DIALER_OK);
 	T_EXPECT_EQ(d.syserr, 0);
@@ -1711,6 +1910,53 @@ T_DECLARE_CASE(socks5_unoffered_userpass_maps_to_proxy_proto)
 	T_EXPECT_EQ(err, DIALER_ERR_PROXY_PROTO);
 }
 
+/* recv_socks5_authmethod() maps a server reply of 0xFF (NO ACCEPTABLE METHODS)
+ * to DIALER_ERR_PROXY_AUTH; the other auth-method cases never send 0xFF. */
+T_DECLARE_CASE(socks5_no_acceptable_method_maps_to_proxy_auth)
+{
+	uint_fast16_t port = 0;
+	struct socks5_raw_server server = {
+		.listener_fd = make_listener(&port),
+		.peer_fd = -1,
+		.phase = SOCKS5_PHASE_AUTH,
+		.rsp_code = SOCKS5RSP_SUCCEEDED,
+		.auth_method = SOCKS5AUTH_NOACCEPTABLE,
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[64];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "socks5://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("example.com:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	(void)test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		socks5_raw_pump, &server);
+	const enum dialer_error err = d.err;
+	const bool called = result.called;
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&server.listener_fd);
+
+	T_EXPECT(called);
+	T_EXPECT_EQ(result.fd, -1);
+	T_EXPECT_EQ(err, DIALER_ERR_PROXY_AUTH);
+}
+
 /* Regression: a dialer completing a proxied dial leaves jump == num_proxy and
  * a stale dialed_fd. Re-driving it with a second dialer_do() (as
  * http_client's stale-connection cache-retry does) without dialer_init() must
@@ -1965,19 +2211,23 @@ static const struct testing_suite suite[] = {
 	T_CASE(v4_mapped_local_address_blocked_by_egress_policy),
 	T_CASE(v4_mapped_loopback_address_blocked_by_egress_policy),
 	T_CASE(http_connect_success_sends_expected_request),
+	T_CASE(sync_connect_success_into_http_handshake),
 	T_CASE(http_connect_success_with_byte_at_a_time_response),
 	T_CASE(http_connect_407_maps_to_proxy_auth),
 	T_CASE(http_connect_403_maps_to_proxy_reject),
 	T_CASE(http_connect_502_maps_to_proxy_refused),
 	T_CASE(http_connect_non_200_maps_to_proxy_proto),
+	T_CASE(http_connect_unsupported_version_maps_to_proxy_proto),
 	T_CASE(socks4a_rejected_maps_to_proxy_refused),
 	T_CASE(socks4a_granted_reports_success),
+	T_CASE(socks4a_ipv6_target_encodes_hostname),
 	T_CASE(socks5_noallowed_maps_to_proxy_reject),
 	T_CASE(socks5_connect_success),
 	T_CASE(socks5_connect_success_domain_bnd_addr),
 	T_CASE(socks5_oversized_username_fails),
 	T_CASE(socks5_userpass_auth_success),
 	T_CASE(socks5_unoffered_userpass_maps_to_proxy_proto),
+	T_CASE(socks5_no_acceptable_method_maps_to_proxy_auth),
 	T_CASE(socks5_redial_after_success_resets_state),
 	T_CASE(socks5_chain_two_hops_success),
 	T_CASE(dialer_cancel_stops_in_flight_dial),

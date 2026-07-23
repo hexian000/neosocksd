@@ -330,6 +330,8 @@ add_unit_test(dialer_test
     SRCS dialer_test.c dialer.c util.c resolver.c
          "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_RULESET WITH_THREADS WITH_CARES)
+# dialer_test interposes connect() to force a synchronous-success handshake.
+target_link_options(dialer_test PRIVATE "LINKER:--wrap=connect")
 add_unit_test(resolver_test
     SRCS resolver_test.c resolver.c
     WITH_CARES)

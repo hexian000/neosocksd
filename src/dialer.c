@@ -68,6 +68,22 @@ static bool dialaddr_sethostport(
 	return true;
 }
 
+/* Parse a decimal port number in [0, UINT16_MAX]; log and return false on a
+ * trailing garbage or overflow. An empty port string parses as 0 (endptr stays
+ * at the start with no trailing char) — preserved from the original call sites;
+ * tightening that rejection now lives here alone. */
+static bool parse_port(const char *restrict port, uint_fast16_t *restrict out)
+{
+	char *endptr;
+	const uintmax_t portvalue = strtoumax(port, &endptr, 10);
+	if (*endptr || portvalue > UINT16_MAX) {
+		LOGE_F("unable to parse port number: `%s'", port);
+		return false;
+	}
+	*out = (uint_fast16_t)portvalue;
+	return true;
+}
+
 bool dialaddr_parse(
 	struct dialaddr *restrict addr, const char *restrict s,
 	const size_t len)
@@ -86,13 +102,11 @@ bool dialaddr_parse(
 		return false;
 	}
 
-	char *endptr;
-	const uintmax_t portvalue = strtoumax(port, &endptr, 10);
-	if (*endptr || portvalue > UINT16_MAX) {
-		LOGE_F("unable to parse port number: `%s'", port);
+	uint_fast16_t port_num;
+	if (!parse_port(port, &port_num)) {
 		return false;
 	}
-	return dialaddr_sethostport(addr, host, (uint_fast16_t)portvalue);
+	return dialaddr_sethostport(addr, host, port_num);
 }
 
 bool dialaddr_set(
@@ -105,16 +119,17 @@ bool dialaddr_set(
 			return false;
 		}
 		addr->type = ATYP_INET;
-		addr->in = ((struct sockaddr_in *)sa)->sin_addr;
-		addr->port = ntohs(((struct sockaddr_in *)sa)->sin_port);
+		addr->in = ((const struct sockaddr_in *)sa)->sin_addr;
+		addr->port = ntohs(((const struct sockaddr_in *)sa)->sin_port);
 		return true;
 	case AF_INET6:
 		if ((size_t)len < sizeof(struct sockaddr_in6)) {
 			return false;
 		}
 		addr->type = ATYP_INET6;
-		addr->in6 = ((struct sockaddr_in6 *)sa)->sin6_addr;
-		addr->port = ntohs(((struct sockaddr_in6 *)sa)->sin6_port);
+		addr->in6 = ((const struct sockaddr_in6 *)sa)->sin6_addr;
+		addr->port =
+			ntohs(((const struct sockaddr_in6 *)sa)->sin6_port);
 		return true;
 	default:;
 	}
@@ -290,16 +305,13 @@ bool dialreq_addproxy(
 		LOGE_F("unknown proxy scheme `%s'", uri.scheme);
 		return false;
 	}
-	char *endptr;
-	const uintmax_t portvalue = strtoumax(port, &endptr, 10);
-	if (*endptr || portvalue > UINT16_MAX) {
-		LOGE_F("unable to parse port number: `%s'", port);
+	uint_fast16_t port_num;
+	if (!parse_port(port, &port_num)) {
 		return false;
 	}
 	struct proxyreq *restrict proxy = &req->proxy[req->num_proxy];
 	proxy->proto = protocol;
-	if (!dialaddr_sethostport(
-		    &proxy->addr, host, (uint_fast16_t)portvalue)) {
+	if (!dialaddr_sethostport(&proxy->addr, host, port_num)) {
 		return false;
 	}
 	proxy->username = NULL;
@@ -355,15 +367,24 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 			dialreq_free(req);
 			return NULL;
 		}
-		char buf[len + 1];
+		/* up to UINT16_MAX bytes: heap-allocate rather than risk a large
+		 * stack VLA */
+		char *buf = malloc(len + 1);
+		if (buf == NULL) {
+			LOGOOM();
+			dialreq_free(req);
+			return NULL;
+		}
 		(void)memcpy(buf, csv, len + 1);
 		for (const char *tok = strtok(buf, ","); tok != NULL;
 		     tok = strtok(NULL, ",")) {
 			if (!dialreq_addproxy(req, tok, strlen(tok))) {
+				free(buf);
 				dialreq_free(req);
 				return NULL;
 			}
 		}
+		free(buf);
 	}
 	return req;
 }
@@ -1683,6 +1704,10 @@ static void dialer_start(struct dialer *restrict d, struct ev_loop *loop)
 			},
 			host, NULL, d->conf->resolve_pf);
 		if (q == NULL) {
+			/* the only failure is OOM; record it so the finished dial
+			 * reports an error rather than a bogus DIALER_OK */
+			d->err = DIALER_ERR_SYSTEM;
+			d->syserr = ENOMEM;
 			ev_feed_event(loop, &d->w_finish, EV_CUSTOM);
 			return;
 		}

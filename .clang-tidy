@@ -61,6 +61,13 @@ CheckOptions:
     value:           'false'
   - key:             cert-dcl16-c.NewSuffixes
     value:           'L;LL;LU;LLU'
+  # __wrap_/__real_ are the linker-mandated names for -Wl,--wrap symbol
+  # interposition (dialer_test's connect() mock); they are reserved by spec but
+  # required verbatim by the toolchain, so exempt exactly those two.
+  - key:             cert-dcl37-c.AllowedIdentifiers
+    value:           '__wrap_connect;__real_connect'
+  - key:             bugprone-reserved-identifier.AllowedIdentifiers
+    value:           '__wrap_connect;__real_connect'
   # C11 standard library + POSIX functions whose return value must be checked.
   # Windows-specific _s variants are omitted (not used in this POSIX project).
   - key:             cert-err33-c.CheckedFunctions
