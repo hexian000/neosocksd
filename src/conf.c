@@ -13,6 +13,8 @@
 #include <lualib.h>
 #endif
 
+#include "io/file.h"
+
 #include "utils/slog.h"
 
 #include <inttypes.h>
@@ -41,6 +43,21 @@ struct metaconfig {
 };
 
 #endif /* WITH_LUA */
+
+/* io_filewriter() heap-allocates a stream that slog only borrows for the
+ * process lifetime; cache one per standard stream so repeated --log switches
+ * neither leak the prior sink nor dangle. */
+static struct io_stream *log_filewriter(FILE *const f)
+{
+	static struct io_stream *stdout_writer = NULL;
+	static struct io_stream *stderr_writer = NULL;
+	struct io_stream **restrict slot =
+		(f == stdout) ? &stdout_writer : &stderr_writer;
+	if (*slot == NULL) {
+		*slot = io_filewriter(f);
+	}
+	return *slot;
+}
 
 struct config conf_default(void)
 {
@@ -261,6 +278,21 @@ static void print_usage(const char *restrict argv0)
 	(void)fflush(stderr);
 }
 
+/* Parse a non-negative decimal integer in [0, INT_MAX] at *s. On success store
+ * it in *out and advance *s past the consumed digits, leaving the terminator
+ * for the caller to check; return false on a missing digit or on overflow. */
+static bool opt_parse_int(const char **restrict s, int *restrict out)
+{
+	char *endptr;
+	const uintmax_t value = strtoumax(*s, &endptr, 10);
+	if (endptr == *s || value > INT_MAX) {
+		return false;
+	}
+	*s = endptr;
+	*out = (int)value;
+	return true;
+}
+
 bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 {
 #define OPT_REQUIRE_ARG(argc, argv, i)                                         \
@@ -440,9 +472,11 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
 			if (strcmp(argv[i], "stdout") == 0) {
-				slog_setoutput(SLOG_OUTPUT_FILE, stdout);
+				slog_setoutput(
+					SLOG_OUTPUT_WRITER, log_filewriter(stdout));
 			} else if (strcmp(argv[i], "stderr") == 0) {
-				slog_setoutput(SLOG_OUTPUT_FILE, stderr);
+				slog_setoutput(
+					SLOG_OUTPUT_WRITER, log_filewriter(stderr));
 			} else if (strcmp(argv[i], "terminal") == 0) {
 				slog_setoutput(SLOG_OUTPUT_TERMINAL, stderr);
 			} else if (strcmp(argv[i], "syslog") == 0) {
@@ -458,12 +492,10 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 		if (strcmp(argv[i], "--loglevel") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			char *endptr;
-			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
-			if (endptr == argv[i] || *endptr || value > INT_MAX) {
+			const char *s = argv[i];
+			if (!opt_parse_int(&s, &conf->loglevel) || *s != '\0') {
 				OPT_ARG_ERROR(argv, i);
 			}
-			conf->loglevel = (int)value;
 			continue;
 		}
 		if (strcmp(argv[i], "-d") == 0 ||
@@ -504,39 +536,31 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 		    strcmp(argv[i], "--max-sessions") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			char *endptr;
-			const uintmax_t value = strtoumax(argv[i], &endptr, 10);
-			if (endptr == argv[i] || *endptr || value > INT_MAX) {
+			const char *s = argv[i];
+			if (!opt_parse_int(&s, &conf->max_sessions) ||
+			    *s != '\0') {
 				OPT_ARG_ERROR(argv, i);
 			}
-			conf->max_sessions = (int)value;
 			continue;
 		}
 		if (strcmp(argv[i], "--max-startups") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			const char *nptr = argv[i];
-			char *endptr = NULL;
-			const uintmax_t start = strtoumax(nptr, &endptr, 10);
-			if (endptr == nptr || *endptr != ':' ||
-			    start > INT_MAX) {
+			const char *s = argv[i];
+			if (!opt_parse_int(&s, &conf->startup_limit_start) ||
+			    *s != ':') {
 				OPT_ARG_ERROR(argv, i);
 			}
-			nptr = endptr + 1;
-			const uintmax_t rate = strtoumax(nptr, &endptr, 10);
-			if (endptr == nptr || *endptr != ':' ||
-			    rate > INT_MAX) {
+			s++;
+			if (!opt_parse_int(&s, &conf->startup_limit_rate) ||
+			    *s != ':') {
 				OPT_ARG_ERROR(argv, i);
 			}
-			nptr = endptr + 1;
-			const uintmax_t full = strtoumax(nptr, &endptr, 10);
-			if (endptr == nptr || *endptr != '\0' ||
-			    full > INT_MAX) {
+			s++;
+			if (!opt_parse_int(&s, &conf->startup_limit_full) ||
+			    *s != '\0') {
 				OPT_ARG_ERROR(argv, i);
 			}
-			conf->startup_limit_start = (int)start;
-			conf->startup_limit_rate = (int)rate;
-			conf->startup_limit_full = (int)full;
 			continue;
 		}
 		if (strcmp(argv[i], "--enable-socks5-bind") == 0) {
@@ -898,7 +922,7 @@ bool conf_print(const struct config *restrict conf)
 }
 
 struct boot_reader_state {
-	struct stream *stream;
+	struct io_stream *stream;
 	int err;
 };
 
@@ -910,7 +934,7 @@ boot_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 	struct boot_reader_state *restrict rs = ud;
 	const void *buf;
 	*sz = SIZE_MAX;
-	const int err = stream_direct_read(rs->stream, &buf, sz);
+	const int err = io_stream_direct_read(rs->stream, &buf, sz);
 	if (err != 0) {
 		LOGE_F("config: read error %d", err);
 		/* lua_Reader has no error channel; record it and stop so
@@ -927,13 +951,13 @@ boot_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 
 bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 {
-	struct stream *restrict const s = codec_lua_reader(filename);
+	struct io_stream *restrict const s = codec_lua_reader(filename);
 	if (s == NULL) {
 		return false;
 	}
 	lua_State *restrict const L = luaL_newstate();
 	if (L == NULL) {
-		stream_close(s);
+		io_stream_close(s);
 		LOGE("config: out of memory");
 		return false;
 	}
@@ -942,7 +966,7 @@ bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 	const int status = lua_load(L, boot_reader, &rs, "=config", "t");
 	/* the close carries errors the reader cannot see, e.g. a codec
 	 * detecting a truncated stream only as it finishes */
-	const int closeerr = stream_close(s);
+	const int closeerr = io_stream_close(s);
 	if (status != LUA_OK) {
 		LOGE_F("config: %s", lua_tostring(L, -1));
 		lua_close(L);

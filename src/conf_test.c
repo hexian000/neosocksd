@@ -188,6 +188,13 @@ T_DECLARE_CASE(conf_rejects_startup_limits_out_of_range)
 	conf = make_valid_conf();
 	conf.startup_limit_rate = 101;
 	T_EXPECT(!conf_check(&conf));
+
+	/* startup_limit_full must not exceed a positive max_sessions */
+	conf = make_valid_conf();
+	conf.max_sessions = 100;
+	conf.startup_limit_start = 1;
+	conf.startup_limit_full = 200;
+	T_EXPECT(!conf_check(&conf));
 }
 
 T_DECLARE_CASE(conf_accepts_unlimited_startup_full)
@@ -295,7 +302,13 @@ T_DECLARE_CASE(conf_print_round_trips_control_char_before_digit)
 /*
  * Regression: %g's default 6 significant digits truncates timeout on a
  * --dump-config round trip; %.17g always recovers the exact double.
+ *
+ * Gated to a 64-bit lua_Number: on a LUA_32BITS build lua_Number is float,
+ * so the reload through Lua narrows the printed double to float precision and
+ * an exact round trip is impossible by construction. The %.17g print itself
+ * (the actual regression guard) is width-independent.
  */
+#if !LUA_32BITS
 T_DECLARE_CASE(conf_print_round_trips_double_precision)
 {
 	struct config conf = make_valid_conf();
@@ -315,6 +328,7 @@ T_DECLARE_CASE(conf_print_round_trips_double_precision)
 
 	lua_close(L);
 }
+#endif /* !LUA_32BITS */
 #endif /* WITH_LUA */
 
 T_DECLARE_CASE(conf_warns_small_tcp_buffers)
@@ -958,7 +972,12 @@ T_DECLARE_CASE(loadtable_rejects_wrong_types)
 		free(conf.strings);
 		lua_close(L);
 	}
-	/* integer field out of the int range */
+	/* integer field out of the int range. Gated to a 64-bit lua_Integer:
+	 * on a LUA_32BITS build lua_Integer is int, so no representable value
+	 * is out of int range (INT_MAX + 1 would overflow the constant), and
+	 * conf_loadfromtable's INT_MIN/INT_MAX bound is correctly unreachable
+	 * there -- there is nothing to reject. */
+#if !LUA_32BITS
 	{
 		lua_State *L = new_conf_table();
 		T_CHECK(L != NULL);
@@ -969,6 +988,7 @@ T_DECLARE_CASE(loadtable_rejects_wrong_types)
 		free(conf.strings);
 		lua_close(L);
 	}
+#endif /* !LUA_32BITS */
 	/* double field with a non-number value */
 	{
 		lua_State *L = new_conf_table();
@@ -1125,13 +1145,13 @@ T_DECLARE_CASE(loadboot_rejects_truncated_stream)
 	struct vbuffer *gz = VBUF_NEW(64);
 	T_CHECK(gz != NULL);
 	{
-		struct stream *restrict w =
+		struct io_stream *restrict w =
 			codec_gzip_writer(io_heapwriter(&gz));
 		T_CHECK(w != NULL);
 		size_t n = sizeof(src) - 1;
-		T_EXPECT_EQ(stream_write(w, src, &n), 0);
+		T_EXPECT_EQ(io_stream_write(w, src, &n), 0);
 		T_EXPECT_EQ(n, sizeof(src) - 1);
-		T_EXPECT_EQ(stream_close(w), 0);
+		T_EXPECT_EQ(io_stream_close(w), 0);
 	}
 	T_CHECK(gz != NULL);
 	/* the gzip trailer is the last 8 bytes (CRC-32 + ISIZE) */
@@ -1265,8 +1285,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(conf_accepts_valid_configuration),
 #if WITH_LUA
 	T_CASE(conf_print_round_trips_control_char_before_digit),
+#if !LUA_32BITS
 	T_CASE(conf_print_round_trips_double_precision),
 #endif
+#endif /* WITH_LUA */
 	T_CASE(conf_warns_small_tcp_buffers),
 	T_CASE(conf_rejects_block_global_and_local),
 #if WITH_TPROXY
