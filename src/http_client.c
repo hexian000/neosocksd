@@ -152,14 +152,9 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	struct http_client_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CLIENT_CONNECT);
 	if (fd < 0) {
-		const enum dialer_error err = ctx->dialer.err;
-		const int syserr = ctx->dialer.syserr;
-		if (syserr != 0) {
-			LOGE_F("dialer: %s (%d) %s", dialer_strerror(err),
-			       syserr, strerror(syserr));
-		} else {
-			LOGE_F("dialer: %s", dialer_strerror(err));
-		}
+		char errbuf[128];
+		LOGE_F("dialer: %s",
+		       dialer_errorstr(errbuf, sizeof(errbuf), &ctx->dialer));
 		finish_error(
 			ctx, "connection failed",
 			sizeof("connection failed") - 1);
