@@ -43,14 +43,14 @@
  * ---------------------------------------------------------------------- */
 
 static bool stream_write_all(
-	struct stream *restrict s, const void *restrict data, const size_t len)
+	struct io_stream *restrict s, const void *restrict data, const size_t len)
 {
 	size_t total = 0;
 	const unsigned char *p = data;
 
 	while (total < len) {
 		size_t n = len - total;
-		if (stream_write(s, p + total, &n) != 0) {
+		if (io_stream_write(s, p + total, &n) != 0) {
 			return false;
 		}
 		if (n == 0) {
@@ -62,14 +62,14 @@ static bool stream_write_all(
 }
 
 static bool stream_read_exact(
-	struct stream *restrict s, void *restrict out, const size_t len)
+	struct io_stream *restrict s, void *restrict out, const size_t len)
 {
 	size_t total = 0;
 	unsigned char *p = out;
 
 	while (total < len) {
 		size_t n = len - total;
-		if (stream_read(s, p + total, &n) != 0) {
+		if (io_stream_read(s, p + total, &n) != 0) {
 			return false;
 		}
 		if (n == 0) {
@@ -78,6 +78,108 @@ static bool stream_read_exact(
 		total += n;
 	}
 	return true;
+}
+
+/* A read-only stream over a fixed memory buffer that exposes only .read (no
+ * direct_read). Feeding it to codec_zlib_reader/codec_gzip_reader forces their
+ * io_bufreader-wrap fallback for a base stream lacking direct_read — the path
+ * that io_memreader (which implements direct_read) never triggers. */
+struct ro_memstream {
+	struct io_stream s;
+	const unsigned char *data;
+	size_t len;
+	size_t pos;
+};
+
+static int ro_mem_read(void *p, void *buf, size_t *restrict len)
+{
+	struct ro_memstream *restrict m = p;
+	size_t n = m->len - m->pos;
+	if (n > *len) {
+		n = *len;
+	}
+	memcpy(buf, m->data + m->pos, n);
+	m->pos += n;
+	*len = n;
+	return 0;
+}
+
+static int ro_mem_close(void *p)
+{
+	free(p);
+	return 0;
+}
+
+static struct io_stream *ro_memreader(const void *data, const size_t len)
+{
+	static const struct io_stream_vftable vftable = {
+		.read = ro_mem_read,
+		.close = ro_mem_close,
+	};
+	struct ro_memstream *restrict m = malloc(sizeof(*m));
+	if (m == NULL) {
+		return NULL;
+	}
+	m->s = (struct io_stream){ .vftable = &vftable, .data = NULL };
+	m->data = data;
+	m->len = len;
+	m->pos = 0;
+	return &m->s;
+}
+
+/* A read-only stream that implements direct_read but deliberately returns a
+ * short read (at most `chunk` bytes, fewer than requested) on every call while
+ * input remains, signalling EOF (n == 0) only once the buffer is exhausted.
+ * io/stream.h permits a base stream to short-read without being at EOF, but
+ * io_memreader never does; this exercises the codec readers on that contract. */
+struct drip_memstream {
+	struct io_stream s;
+	const unsigned char *data;
+	size_t len;
+	size_t pos;
+	size_t chunk;
+};
+
+static int
+drip_direct_read(void *p, const void **restrict buf, size_t *restrict len)
+{
+	struct drip_memstream *restrict m = p;
+	size_t n = m->len - m->pos;
+	if (n > *len) {
+		n = *len;
+	}
+	if (n > m->chunk) {
+		n = m->chunk; /* short even when more input remains */
+	}
+	*buf = m->data + m->pos;
+	m->pos += n;
+	*len = n;
+	return 0;
+}
+
+static int drip_mem_close(void *p)
+{
+	free(p);
+	return 0;
+}
+
+static struct io_stream *
+drip_memreader(const void *data, const size_t len, const size_t chunk)
+{
+	static const struct io_stream_vftable vftable = {
+		.direct_read = drip_direct_read,
+		.close = drip_mem_close,
+	};
+	struct drip_memstream *restrict m = malloc(sizeof(*m));
+	if (m == NULL) {
+		return NULL;
+	}
+	m->s = (struct io_stream){ .vftable = &vftable, .data = NULL };
+	m->data = data;
+	m->len = len;
+	m->pos = 0;
+	m->chunk = chunk;
+	return &m->s;
 }
 
 static int write_tempfile(char *restrict tmpl, const void *content, size_t len)
@@ -98,15 +200,15 @@ static bool read_lua_source(
 	const char *restrict path, char *restrict out, const size_t cap,
 	size_t *restrict out_len)
 {
-	struct stream *restrict r = codec_lua_reader(path);
+	struct io_stream *restrict r = codec_lua_reader(path);
 	if (r == NULL) {
 		return false;
 	}
 	size_t total = 0;
 	for (;;) {
 		size_t n = cap - total;
-		if (n == 0 || stream_read(r, out + total, &n) != 0) {
-			stream_close(r);
+		if (n == 0 || io_stream_read(r, out + total, &n) != 0) {
+			io_stream_close(r);
 			return false;
 		}
 		if (n == 0) {
@@ -115,7 +217,7 @@ static bool read_lua_source(
 		total += n;
 	}
 	*out_len = total;
-	return stream_close(r) == 0;
+	return io_stream_close(r) == 0;
 }
 
 /*
@@ -180,7 +282,7 @@ T_DECLARE_CASE(codec_lua_reader_strips_bom_only)
 }
 
 /* Regression: the first read (the BOM peek) must not return more bytes than
- * the caller requested; a sub-LUA_PEEK_SIZE first stream_read() on a BOM-less
+ * the caller requested; a sub-LUA_PEEK_SIZE first io_stream_read() on a BOM-less
  * file would otherwise over-copy LUA_PEEK_SIZE bytes into the smaller buffer. */
 T_DECLARE_CASE(codec_lua_reader_small_first_read)
 {
@@ -188,7 +290,7 @@ T_DECLARE_CASE(codec_lua_reader_small_first_read)
 	static const char content[] = "return 1234\n"; /* no BOM, no shebang */
 	T_CHECK(write_tempfile(path, content, sizeof(content) - 1) == 0);
 
-	struct stream *restrict r = codec_lua_reader(path);
+	struct io_stream *restrict r = codec_lua_reader(path);
 	T_CHECK(r != NULL);
 
 	/* exact-sized heap buffer (< LUA_PEEK_SIZE) so ASan flags any over-copy */
@@ -196,7 +298,7 @@ T_DECLARE_CASE(codec_lua_reader_small_first_read)
 	unsigned char *const buf = malloc(SMALL);
 	T_CHECK(buf != NULL);
 	size_t n = SMALL;
-	T_EXPECT_EQ(stream_read(r, buf, &n), 0);
+	T_EXPECT_EQ(io_stream_read(r, buf, &n), 0);
 	T_EXPECT(n > 0);
 	T_EXPECT(
 		n <=
@@ -204,7 +306,7 @@ T_DECLARE_CASE(codec_lua_reader_small_first_read)
 	T_EXPECT_MEMEQ(buf, content, n);
 
 	free(buf);
-	(void)stream_close(r);
+	(void)io_stream_close(r);
 	(void)unlink(path);
 }
 
@@ -223,10 +325,10 @@ T_DECLARE_CASE(codec_lua_reader_gunzips_source)
 	struct vbuffer *gz = VBUF_NEW(64);
 	T_CHECK(gz != NULL);
 	{
-		struct stream *w = codec_gzip_writer(io_heapwriter(&gz));
+		struct io_stream *w = codec_gzip_writer(io_heapwriter(&gz));
 		T_CHECK(w != NULL);
 		T_EXPECT(stream_write_all(w, content, sizeof(content) - 1));
-		T_EXPECT_EQ(stream_close(w), 0);
+		T_EXPECT_EQ(io_stream_close(w), 0);
 	}
 	T_CHECK(gz != NULL);
 	/* the magic the detector keys on */
@@ -354,8 +456,8 @@ T_DECLARE_CASE(codec_zlib_roundtrip)
 	uint_least8_t src[N];
 	uint_least8_t out[N];
 	struct vbuffer *compressed = NULL;
-	struct stream *w = NULL;
-	struct stream *r = NULL;
+	struct io_stream *w = NULL;
+	struct io_stream *r = NULL;
 	size_t i = 0;
 
 	for (i = 0; i < N; ++i) {
@@ -368,7 +470,7 @@ T_DECLARE_CASE(codec_zlib_roundtrip)
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N / 3));
 	T_EXPECT(stream_write_all(w, src + (N / 3), N - (N / 3)));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	w = NULL;
 
 	T_CHECK(compressed != NULL);
@@ -378,11 +480,121 @@ T_DECLARE_CASE(codec_zlib_roundtrip)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(compressed);
+}
+
+/* Feed a base stream lacking direct_read to codec_zlib_reader and
+ * codec_gzip_reader, exercising their io_bufreader-wrap fallback. */
+T_DECLARE_CASE(codec_reader_wraps_base_without_direct_read)
+{
+	enum { N = 4096 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 29U + 11U) & 0xffU);
+	}
+
+	struct io_stream *(*const readers[])(struct io_stream *) = {
+		codec_zlib_reader,
+		codec_gzip_reader,
+	};
+	struct io_stream *(*const writers[])(struct io_stream *) = {
+		codec_zlib_writer,
+		codec_gzip_writer,
+	};
+	for (size_t v = 0; v < ARRAY_SIZE(readers); ++v) {
+		struct vbuffer *compressed = VBUF_NEW(64);
+		T_CHECK(compressed != NULL);
+		struct io_stream *w = writers[v](io_heapwriter(&compressed));
+		T_CHECK(w != NULL);
+		T_EXPECT(stream_write_all(w, src, N));
+		T_EXPECT_EQ(io_stream_close(w), 0);
+		T_CHECK(compressed != NULL);
+		T_EXPECT(VBUF_LEN(compressed) > 0);
+
+		struct io_stream *base = ro_memreader(
+			VBUF_DATA(compressed), VBUF_LEN(compressed));
+		T_CHECK(base != NULL);
+		T_CHECK(base->vftable->direct_read == NULL);
+		struct io_stream *r = readers[v](base);
+		T_CHECK(r != NULL);
+		T_EXPECT(stream_read_exact(r, out, N));
+		T_EXPECT_EQ(io_stream_close(r), 0);
+		T_EXPECT_MEMEQ(out, src, N);
+		VBUF_FREE(compressed);
+	}
+}
+
+/* Regression: a base stream that returns short direct_reads (fewer bytes than
+ * requested) while more input remains must not make the inflate/gzip readers
+ * stop early and report a truncated stream. Before the fix, the first short
+ * read set srceof and dropped TINFL_FLAG_HAS_MORE_INPUT, so valid input decoded
+ * to a truncation error. */
+T_DECLARE_CASE(codec_reader_short_direct_read_is_not_eof)
+{
+	enum { N = 8192, CHUNK = 7 };
+	uint_least8_t src[N];
+	uint_least8_t out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 53U + 7U) & 0xffU);
+	}
+
+	struct io_stream *(*const readers[])(struct io_stream *) = {
+		codec_zlib_reader,
+		codec_gzip_reader,
+	};
+	struct io_stream *(*const writers[])(struct io_stream *) = {
+		codec_zlib_writer,
+		codec_gzip_writer,
+	};
+	for (size_t v = 0; v < ARRAY_SIZE(readers); ++v) {
+		struct vbuffer *compressed = VBUF_NEW(64);
+		T_CHECK(compressed != NULL);
+		struct io_stream *w = writers[v](io_heapwriter(&compressed));
+		T_CHECK(w != NULL);
+		T_EXPECT(stream_write_all(w, src, N));
+		T_EXPECT_EQ(io_stream_close(w), 0);
+		T_CHECK(compressed != NULL);
+		/* incompressible-ish input keeps the stream many chunks long */
+		T_EXPECT(VBUF_LEN(compressed) > CHUNK);
+
+		struct io_stream *base = drip_memreader(
+			VBUF_DATA(compressed), VBUF_LEN(compressed), CHUNK);
+		T_CHECK(base != NULL);
+		T_CHECK(base->vftable->direct_read != NULL);
+		struct io_stream *r = readers[v](base);
+		T_CHECK(r != NULL);
+		T_EXPECT(stream_read_exact(r, out, N));
+		T_EXPECT_EQ(io_stream_close(r), 0);
+		T_EXPECT_MEMEQ(out, src, N);
+		VBUF_FREE(compressed);
+	}
+}
+
+/* Regression guard for the fix above: now that a short read is no longer EOF, a
+ * gzip member header truncated mid-way must still be reported as an error when
+ * the base later signals EOF on a refill, not silently accepted as a clean
+ * end-of-stream. Feeds the truncated-after-FEXTRA input one byte per read. */
+T_DECLARE_CASE(codec_gzip_truncated_header_via_short_reads_fails)
+{
+	static const unsigned char trunc[] = {
+		/* 10-byte header, FLG = FEXTRA(0x04) | FNAME(0x08) */
+		0x1f, 0x8b, 0x08, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+		/* XLEN = 4, a 4-byte extra field, then EOF (no name follows) */
+		0x04, 0x00, 0xaa, 0xbb, 0xcc, 0xdd
+	};
+	struct io_stream *r =
+		codec_gzip_reader(drip_memreader(trunc, sizeof(trunc), 1));
+	T_CHECK(r != NULL);
+	unsigned char out[16];
+	size_t n = sizeof(out);
+	const int rret = io_stream_read(r, out, &n);
+	const int cret = io_stream_close(r);
+	T_EXPECT(rret != 0 || cret != 0);
 }
 
 T_DECLARE_CASE(codec_deflate_roundtrip)
@@ -391,8 +603,8 @@ T_DECLARE_CASE(codec_deflate_roundtrip)
 	uint_least8_t src[N];
 	uint_least8_t out[N];
 	struct vbuffer *compressed = NULL;
-	struct stream *w = NULL;
-	struct stream *r = NULL;
+	struct io_stream *w = NULL;
+	struct io_stream *r = NULL;
 	size_t i = 0;
 
 	for (i = 0; i < N; ++i) {
@@ -404,7 +616,7 @@ T_DECLARE_CASE(codec_deflate_roundtrip)
 	w = codec_deflate_writer(io_heapwriter(&compressed));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	w = NULL;
 
 	T_CHECK(compressed != NULL);
@@ -414,7 +626,7 @@ T_DECLARE_CASE(codec_deflate_roundtrip)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
 	T_EXPECT_MEMEQ(out, src, N);
@@ -427,8 +639,8 @@ T_DECLARE_CASE(codec_gzip_roundtrip)
 	uint_least8_t src[N];
 	uint_least8_t out[N];
 	struct vbuffer *compressed = NULL;
-	struct stream *w = NULL;
-	struct stream *r = NULL;
+	struct io_stream *w = NULL;
+	struct io_stream *r = NULL;
 	size_t i = 0;
 
 	for (i = 0; i < N; ++i) {
@@ -441,7 +653,7 @@ T_DECLARE_CASE(codec_gzip_roundtrip)
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N / 2));
 	T_EXPECT(stream_write_all(w, src + (N / 2), N - (N / 2)));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	w = NULL;
 
 	T_CHECK(compressed != NULL);
@@ -451,7 +663,7 @@ T_DECLARE_CASE(codec_gzip_roundtrip)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
 	T_EXPECT_MEMEQ(out, src, N);
@@ -472,8 +684,8 @@ T_DECLARE_CASE(codec_decompress_ring_wraparound)
 	enum { N = 100000 }; /* > TINFL_LZ_DICT_SIZE */
 	static const struct {
 		const char *name;
-		struct stream *(*writer)(struct stream *);
-		struct stream *(*reader)(struct stream *);
+		struct io_stream *(*writer)(struct io_stream *);
+		struct io_stream *(*reader)(struct io_stream *);
 	} variants[] = {
 		{ "zlib", codec_zlib_writer, codec_zlib_reader },
 		{ "deflate", codec_deflate_writer, codec_inflate_reader },
@@ -494,16 +706,16 @@ T_DECLARE_CASE(codec_decompress_ring_wraparound)
 		struct vbuffer *compressed = VBUF_NEW(64);
 		T_CHECK(compressed != NULL);
 
-		struct stream *w =
+		struct io_stream *w =
 			variants[v].writer(io_heapwriter(&compressed));
 		T_CHECK(w != NULL);
 		T_EXPECT(stream_write_all(w, src, N));
-		T_EXPECT_EQ(stream_close(w), 0);
+		T_EXPECT_EQ(io_stream_close(w), 0);
 		T_CHECK(compressed != NULL);
 		/* it really did compress, so back-references are in play */
 		T_EXPECT(VBUF_LEN(compressed) < (size_t)N);
 
-		struct stream *r = variants[v].reader(io_memreader(
+		struct io_stream *r = variants[v].reader(io_memreader(
 			VBUF_DATA(compressed), VBUF_LEN(compressed)));
 		T_CHECK(r != NULL);
 		memset(out, 0, N);
@@ -515,7 +727,7 @@ T_DECLARE_CASE(codec_decompress_ring_wraparound)
 			T_EXPECT(stream_read_exact(r, out + off, n));
 			off += n;
 		}
-		T_EXPECT_EQ(stream_close(r), 0);
+		T_EXPECT_EQ(io_stream_close(r), 0);
 		T_EXPECT_MEMEQ(out, src, N);
 		VBUF_FREE(compressed);
 	}
@@ -530,8 +742,8 @@ T_DECLARE_CASE(codec_gzip_multiframe)
 	uint_least8_t src1[N], src2[N];
 	uint_least8_t out[N * 2];
 	struct vbuffer *frame1 = NULL, *frame2 = NULL, *combined = NULL;
-	struct stream *w = NULL;
-	struct stream *r = NULL;
+	struct io_stream *w = NULL;
+	struct io_stream *r = NULL;
 	size_t i = 0;
 
 	for (i = 0; i < N; ++i) {
@@ -546,13 +758,13 @@ T_DECLARE_CASE(codec_gzip_multiframe)
 	w = codec_gzip_writer(io_heapwriter(&frame1));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src1, N));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	w = NULL;
 
 	w = codec_gzip_writer(io_heapwriter(&frame2));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src2, N));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	w = NULL;
 
 	/* Concatenate both gzip members into one buffer */
@@ -568,7 +780,7 @@ T_DECLARE_CASE(codec_gzip_multiframe)
 		io_memreader(VBUF_DATA(combined), VBUF_LEN(combined)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, (size_t)N * 2));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
 	T_EXPECT_MEMEQ(out, src1, N);
@@ -582,8 +794,8 @@ T_DECLARE_CASE(codec_gzip_crc_error)
 	uint_least8_t src[N];
 	uint_least8_t dummy[N];
 	struct vbuffer *compressed = NULL;
-	struct stream *w = NULL;
-	struct stream *r = NULL;
+	struct io_stream *w = NULL;
+	struct io_stream *r = NULL;
 	size_t i = 0;
 
 	for (i = 0; i < N; ++i) {
@@ -595,7 +807,7 @@ T_DECLARE_CASE(codec_gzip_crc_error)
 	w = codec_gzip_writer(io_heapwriter(&compressed));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	w = NULL;
 
 	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 8);
@@ -607,13 +819,13 @@ T_DECLARE_CASE(codec_gzip_crc_error)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	/* Read all body data, then probe for trailer to trigger validation */
-	(void)stream_read(r, dummy, &(size_t){ sizeof(dummy) });
+	(void)io_stream_read(r, dummy, &(size_t){ sizeof(dummy) });
 	{
 		unsigned char probe[1];
 		size_t n = sizeof(probe);
-		(void)stream_read(r, probe, &n);
+		(void)io_stream_read(r, probe, &n);
 	}
-	const int err = stream_close(r);
+	const int err = io_stream_close(r);
 	r = NULL;
 	VBUF_FREE(compressed);
 	T_EXPECT(err != 0);
@@ -625,8 +837,8 @@ T_DECLARE_CASE(codec_gzip_flush_multiframe)
 	uint_least8_t src1[N1], src2[N2];
 	uint_least8_t out[N1 + N2];
 	struct vbuffer *compressed = NULL;
-	struct stream *w = NULL;
-	struct stream *r = NULL;
+	struct io_stream *w = NULL;
+	struct io_stream *r = NULL;
 	size_t i = 0;
 
 	for (i = 0; i < N1; ++i) {
@@ -642,9 +854,9 @@ T_DECLARE_CASE(codec_gzip_flush_multiframe)
 	w = codec_gzip_writer(io_heapwriter(&compressed));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src1, N1));
-	T_EXPECT_EQ(stream_flush(w), 0);
+	T_EXPECT_EQ(io_stream_flush(w), 0);
 	T_EXPECT(stream_write_all(w, src2, N2));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	w = NULL;
 
 	T_CHECK(compressed != NULL);
@@ -672,7 +884,7 @@ T_DECLARE_CASE(codec_gzip_flush_multiframe)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N1 + N2));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
 	T_EXPECT_MEMEQ(out, src1, N1);
@@ -686,8 +898,8 @@ T_DECLARE_CASE(codec_gzip_flush_empty)
 	uint_least8_t src[N];
 	uint_least8_t out[N];
 	struct vbuffer *compressed = NULL;
-	struct stream *w = NULL;
-	struct stream *r = NULL;
+	struct io_stream *w = NULL;
+	struct io_stream *r = NULL;
 	size_t i = 0;
 
 	for (i = 0; i < N; ++i) {
@@ -700,8 +912,8 @@ T_DECLARE_CASE(codec_gzip_flush_empty)
 	w = codec_gzip_writer(io_heapwriter(&compressed));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N));
-	T_EXPECT_EQ(stream_flush(w), 0);
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_flush(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	w = NULL;
 
 	T_CHECK(compressed != NULL);
@@ -711,7 +923,7 @@ T_DECLARE_CASE(codec_gzip_flush_empty)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
 	T_EXPECT_MEMEQ(out, src, N);
@@ -733,12 +945,12 @@ static struct vbuffer *gzip_make_member(const void *src, const size_t srclen)
 	if (compressed == NULL) {
 		return NULL;
 	}
-	struct stream *w = codec_gzip_writer(io_heapwriter(&compressed));
+	struct io_stream *w = codec_gzip_writer(io_heapwriter(&compressed));
 	if (w == NULL) {
 		VBUF_FREE(compressed);
 		return NULL;
 	}
-	if (!stream_write_all(w, src, srclen) || stream_close(w) != 0) {
+	if (!stream_write_all(w, src, srclen) || io_stream_close(w) != 0) {
 		VBUF_FREE(compressed);
 		return NULL;
 	}
@@ -820,11 +1032,11 @@ T_DECLARE_CASE(codec_gzip_optional_headers)
 	struct vbuffer *g = gzip_with_opt_headers(src, N, false);
 	T_CHECK(g != NULL);
 
-	struct stream *r =
+	struct io_stream *r =
 		codec_gzip_reader(io_memreader(VBUF_DATA(g), VBUF_LEN(g)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(g);
 }
@@ -864,11 +1076,11 @@ T_DECLARE_CASE(codec_gzip_empty_fname_after_fextra)
 	T_CHECK(!VBUF_HAS_OOM(g));
 	VBUF_FREE(plain);
 
-	struct stream *r =
+	struct io_stream *r =
 		codec_gzip_reader(io_memreader(VBUF_DATA(g), VBUF_LEN(g)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(g);
 }
@@ -887,18 +1099,18 @@ T_DECLARE_CASE(codec_zlib_flush_then_continue)
 
 	struct vbuffer *compressed = VBUF_NEW(64);
 	T_CHECK(compressed != NULL);
-	struct stream *w = codec_zlib_writer(io_heapwriter(&compressed));
+	struct io_stream *w = codec_zlib_writer(io_heapwriter(&compressed));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N / 2));
-	T_EXPECT_EQ(stream_flush(w), 0);
+	T_EXPECT_EQ(io_stream_flush(w), 0);
 	T_EXPECT(stream_write_all(w, src + (N / 2), N - (N / 2)));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 
-	struct stream *r = codec_zlib_reader(
+	struct io_stream *r = codec_zlib_reader(
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(compressed);
 }
@@ -916,10 +1128,10 @@ T_DECLARE_CASE(codec_zlib_corrupt_input_fails)
 
 	struct vbuffer *compressed = VBUF_NEW(64);
 	T_CHECK(compressed != NULL);
-	struct stream *w = codec_zlib_writer(io_heapwriter(&compressed));
+	struct io_stream *w = codec_zlib_writer(io_heapwriter(&compressed));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 10);
 
 	/* corrupt the zlib header (byte 0 holds CMF) */
@@ -927,21 +1139,21 @@ T_DECLARE_CASE(codec_zlib_corrupt_input_fails)
 		unsigned char *d = VBUF_DATA(compressed);
 		const unsigned char saved = d[0];
 		d[0] ^= 0xffu;
-		struct stream *r = codec_zlib_reader(
+		struct io_stream *r = codec_zlib_reader(
 			io_memreader(d, VBUF_LEN(compressed)));
 		if (r != NULL) {
 			T_EXPECT(!stream_read_exact(r, out, N));
-			(void)stream_close(r);
+			(void)io_stream_close(r);
 		}
 		d[0] = saved;
 	}
 	/* truncated stream: only the first few bytes */
 	{
-		struct stream *r = codec_zlib_reader(
+		struct io_stream *r = codec_zlib_reader(
 			io_memreader(VBUF_DATA(compressed), 5));
 		if (r != NULL) {
 			T_EXPECT(!stream_read_exact(r, out, N));
-			(void)stream_close(r);
+			(void)io_stream_close(r);
 		}
 	}
 	VBUF_FREE(compressed);
@@ -960,17 +1172,17 @@ T_DECLARE_CASE(codec_zlib_adler32_mismatch)
 
 	struct vbuffer *compressed = VBUF_NEW(64);
 	T_CHECK(compressed != NULL);
-	struct stream *w = codec_zlib_writer(io_heapwriter(&compressed));
+	struct io_stream *w = codec_zlib_writer(io_heapwriter(&compressed));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 6);
 
 	/* the adler-32 is the last 4 bytes; flip one so it no longer matches */
 	unsigned char *d = VBUF_DATA(compressed);
 	const size_t len = VBUF_LEN(compressed);
 	d[len - 1] ^= 0xffu;
-	struct stream *r = codec_zlib_reader(io_memreader(d, len));
+	struct io_stream *r = codec_zlib_reader(io_memreader(d, len));
 	T_CHECK(r != NULL);
 	/* Read to EOF: the mismatch is reported once all output is consumed
 	 * and the trailer is validated, as a real consumer draining the stream
@@ -978,7 +1190,7 @@ T_DECLARE_CASE(codec_zlib_adler32_mismatch)
 	bool read_failed = false;
 	for (;;) {
 		size_t n = sizeof(out);
-		const int rret = stream_read(r, out, &n);
+		const int rret = io_stream_read(r, out, &n);
 		if (rret != 0) {
 			read_failed = true;
 			break;
@@ -987,7 +1199,7 @@ T_DECLARE_CASE(codec_zlib_adler32_mismatch)
 			break;
 		}
 	}
-	const int cret = stream_close(r);
+	const int cret = io_stream_close(r);
 	T_EXPECT(read_failed || cret != 0);
 	VBUF_FREE(compressed);
 }
@@ -1006,20 +1218,20 @@ T_DECLARE_CASE(codec_zlib_adler32_mismatch_surfaced_at_close)
 
 	struct vbuffer *compressed = VBUF_NEW(64);
 	T_CHECK(compressed != NULL);
-	struct stream *w = codec_zlib_writer(io_heapwriter(&compressed));
+	struct io_stream *w = codec_zlib_writer(io_heapwriter(&compressed));
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 6);
 
 	unsigned char *d = VBUF_DATA(compressed);
 	const size_t len = VBUF_LEN(compressed);
 	d[len - 1] ^= 0xffu;
-	struct stream *r = codec_zlib_reader(io_memreader(d, len));
+	struct io_stream *r = codec_zlib_reader(io_memreader(d, len));
 	T_CHECK(r != NULL);
 	/* read exactly the decompressed length, then close without a final read */
 	T_EXPECT(stream_read_exact(r, out, N));
-	T_EXPECT(stream_close(r) != 0);
+	T_EXPECT(io_stream_close(r) != 0);
 	VBUF_FREE(compressed);
 }
 
@@ -1035,13 +1247,13 @@ T_DECLARE_CASE(codec_gzip_hcrc_mismatch)
 	struct vbuffer *g = gzip_with_opt_headers(src, N, true);
 	T_CHECK(g != NULL);
 
-	struct stream *r =
+	struct io_stream *r =
 		codec_gzip_reader(io_memreader(VBUF_DATA(g), VBUF_LEN(g)));
 	T_CHECK(r != NULL);
 	/* The corrupt header CRC must make the read fail. */
 	size_t n = sizeof(out);
-	const int rret = stream_read(r, out, &n);
-	const int cret = stream_close(r);
+	const int rret = io_stream_read(r, out, &n);
+	const int cret = io_stream_close(r);
 	T_EXPECT(rret != 0 || cret != 0);
 	VBUF_FREE(g);
 }
@@ -1053,12 +1265,12 @@ T_DECLARE_CASE(codec_gzip_bad_magic)
 		0x1f, 0x00, 0x08, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
 	};
-	struct stream *r = codec_gzip_reader(io_memreader(bad, sizeof(bad)));
+	struct io_stream *r = codec_gzip_reader(io_memreader(bad, sizeof(bad)));
 	T_CHECK(r != NULL);
 	unsigned char out[16];
 	size_t n = sizeof(out);
-	const int rret = stream_read(r, out, &n);
-	const int cret = stream_close(r);
+	const int rret = io_stream_read(r, out, &n);
+	const int cret = io_stream_close(r);
 	T_EXPECT(rret != 0 || cret != 0);
 }
 
@@ -1092,14 +1304,84 @@ T_DECLARE_CASE(codec_gzip_truncated_after_fextra)
 	unsigned char *const buf = malloc(sizeof(trunc));
 	T_CHECK(buf != NULL);
 	memcpy(buf, trunc, sizeof(trunc));
-	struct stream *r = codec_gzip_reader(io_memreader(buf, sizeof(trunc)));
+	struct io_stream *r = codec_gzip_reader(io_memreader(buf, sizeof(trunc)));
 	T_CHECK(r != NULL);
 	unsigned char out[16];
 	size_t n = sizeof(out);
-	const int rret = stream_read(r, out, &n);
-	const int cret = stream_close(r);
+	const int rret = io_stream_read(r, out, &n);
+	const int cret = io_stream_close(r);
 	T_EXPECT(rret != 0 || cret != 0);
 	free(buf);
+}
+
+/*
+ * gzip_decompress_body's mid-stream-EOF path (srceof while the inflate still
+ * needs input) fires only when a full IO_BUFSIZE chunk is consumed with more
+ * expected (HAS_MORE_INPUT set -> NEEDS_MORE_INPUT) and the next read then hits
+ * EOF. Use incompressible data so the deflate body spans more than one chunk,
+ * and truncate the member at exactly IO_BUFSIZE.
+ */
+T_DECLARE_CASE(codec_gzip_truncated_body_fails)
+{
+	enum { N = 2 * IO_BUFSIZE };
+	unsigned char src[N];
+	uint_least32_t rng = 0x9e3779b9u;
+	for (size_t i = 0; i < (size_t)N; i++) {
+		rng ^= rng << 13;
+		rng ^= rng >> 17;
+		rng ^= rng << 5;
+		src[i] = (unsigned char)(rng & 0xffU);
+	}
+	struct vbuffer *member = gzip_make_member(src, N);
+	T_CHECK(member != NULL);
+	/* incompressible data: the body must exceed one IO_BUFSIZE chunk so the
+	 * truncation lands mid-body */
+	T_CHECK(VBUF_LEN(member) > (size_t)IO_BUFSIZE);
+
+	struct io_stream *r =
+		codec_gzip_reader(io_memreader(VBUF_DATA(member), IO_BUFSIZE));
+	T_CHECK(r != NULL);
+	unsigned char out[N];
+	/* the truncated deflate stream cannot yield all N bytes */
+	T_EXPECT(!stream_read_exact(r, out, N));
+	(void)io_stream_close(r);
+	VBUF_FREE(member);
+}
+
+/*
+ * gzip_validate_trailer's short-trailer path: the deflate body is intact but
+ * the trailing 8-byte CRC/ISIZE trailer is cut, so the reader must fail when it
+ * reaches trailer validation past the body.
+ */
+T_DECLARE_CASE(codec_gzip_short_trailer_fails)
+{
+	enum { N = 200 };
+	unsigned char src[N];
+	for (size_t i = 0; i < (size_t)N; i++) {
+		src[i] = (unsigned char)((i * 7U + 3U) & 0xffU);
+	}
+	struct vbuffer *member = gzip_make_member(src, N);
+	T_CHECK(member != NULL);
+	const size_t full = VBUF_LEN(member);
+	T_CHECK(full > 8);
+
+	/* drop 3 of the 8 trailer bytes: header and body intact, trailer short */
+	struct io_stream *r =
+		codec_gzip_reader(io_memreader(VBUF_DATA(member), full - 3));
+	T_CHECK(r != NULL);
+	unsigned char out[64];
+	int rret = 0;
+	for (;;) {
+		size_t n = sizeof(out);
+		rret = io_stream_read(r, out, &n);
+		if (rret != 0 || n == 0) {
+			break;
+		}
+	}
+	const int cret = io_stream_close(r);
+	/* the N body bytes decode; the short trailer surfaces as an error */
+	T_EXPECT(rret != 0 || cret != 0);
+	VBUF_FREE(member);
 }
 
 /* -------------------------------------------------------------------------
@@ -1126,16 +1408,16 @@ T_DECLARE_BENCH(bench_zlib_roundtrip)
 	for (uint_fast64_t iter = 0; iter < _b_->N; ++iter) {
 		struct vbuffer *compressed = VBUF_NEW(64);
 		T_CHECK(compressed != NULL);
-		struct stream *w =
+		struct io_stream *w =
 			codec_zlib_writer(io_heapwriter(&compressed));
 		T_CHECK(w != NULL);
 		T_CHECK(stream_write_all(w, src, N));
-		T_CHECK(stream_close(w) == 0);
-		struct stream *r = codec_zlib_reader(io_memreader(
+		T_CHECK(io_stream_close(w) == 0);
+		struct io_stream *r = codec_zlib_reader(io_memreader(
 			VBUF_DATA(compressed), VBUF_LEN(compressed)));
 		T_CHECK(r != NULL);
 		T_CHECK(stream_read_exact(r, out, N));
-		T_CHECK(stream_close(r) == 0);
+		T_CHECK(io_stream_close(r) == 0);
 		VBUF_FREE(compressed);
 	}
 }
@@ -1150,16 +1432,16 @@ T_DECLARE_BENCH(bench_gzip_roundtrip)
 	for (uint_fast64_t iter = 0; iter < _b_->N; ++iter) {
 		struct vbuffer *compressed = VBUF_NEW(64);
 		T_CHECK(compressed != NULL);
-		struct stream *w =
+		struct io_stream *w =
 			codec_gzip_writer(io_heapwriter(&compressed));
 		T_CHECK(w != NULL);
 		T_CHECK(stream_write_all(w, src, N));
-		T_CHECK(stream_close(w) == 0);
-		struct stream *r = codec_gzip_reader(io_memreader(
+		T_CHECK(io_stream_close(w) == 0);
+		struct io_stream *r = codec_gzip_reader(io_memreader(
 			VBUF_DATA(compressed), VBUF_LEN(compressed)));
 		T_CHECK(r != NULL);
 		T_CHECK(stream_read_exact(r, out, N));
-		T_CHECK(stream_close(r) == 0);
+		T_CHECK(io_stream_close(r) == 0);
 		VBUF_FREE(compressed);
 	}
 }
@@ -1180,6 +1462,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_lua_reader_shebang_newline_on_chunk_boundary),
 	T_CASE(codec_null_base),
 	T_CASE(codec_zlib_roundtrip),
+	T_CASE(codec_reader_wraps_base_without_direct_read),
+	T_CASE(codec_reader_short_direct_read_is_not_eof),
+	T_CASE(codec_gzip_truncated_header_via_short_reads_fails),
 	T_CASE(codec_deflate_roundtrip),
 	T_CASE(codec_gzip_roundtrip),
 	T_CASE(codec_decompress_ring_wraparound),
@@ -1196,6 +1481,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_gzip_hcrc_mismatch),
 	T_CASE(codec_gzip_bad_magic),
 	T_CASE(codec_gzip_truncated_after_fextra),
+	T_CASE(codec_gzip_truncated_body_fails),
+	T_CASE(codec_gzip_short_trailer_fails),
 	T_BENCH(bench_zlib_roundtrip),
 	T_BENCH(bench_gzip_roundtrip),
 	T_SUITE_END,

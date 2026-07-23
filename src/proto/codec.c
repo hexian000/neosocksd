@@ -21,14 +21,14 @@
 #include <string.h>
 
 struct deflate_stream {
-	struct stream s;
-	struct stream *base;
+	struct io_stream s;
+	struct io_stream *base;
 	tdefl_status status;
 	tdefl_compressor deflator;
 	size_t dstpos, dstlen;
 	unsigned char dstbuf[IO_BUFSIZE];
 };
-ASSERT_SUPER(struct stream, struct deflate_stream, s);
+ASSERT_SUPER(struct io_stream, struct deflate_stream, s);
 
 static int
 deflate_write(void *p, const void *restrict buf, size_t *restrict len)
@@ -54,7 +54,7 @@ deflate_write(void *p, const void *restrict buf, size_t *restrict len)
 
 		unsigned char *avail = z->dstbuf + z->dstpos;
 		size_t n = z->dstlen - z->dstpos;
-		const int err = stream_write(z->base, avail, &n);
+		const int err = io_stream_write(z->base, avail, &n);
 		z->dstpos += n;
 		if (err != 0) {
 			*len = nwritten;
@@ -87,7 +87,7 @@ deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 
 		buf = z->dstbuf + z->dstpos;
 		size_t w = z->dstlen - z->dstpos;
-		const int err = stream_write(z->base, buf, &w);
+		const int err = io_stream_write(z->base, buf, &w);
 		z->dstpos += w;
 		if (err != 0) {
 			return err;
@@ -117,7 +117,7 @@ static int deflate_flush(void *p)
 	struct deflate_stream *restrict z = p;
 	int ret = deflate_flush_(z, TDEFL_FULL_FLUSH);
 	if (ret == 0) {
-		ret = stream_flush(z->base);
+		ret = io_stream_flush(z->base);
 	}
 	return ret;
 }
@@ -126,12 +126,12 @@ static int deflate_close(void *p)
 {
 	struct deflate_stream *restrict z = p;
 	const int flusherr = deflate_flush_(z, TDEFL_FINISH);
-	const int err = stream_close(z->base);
+	const int err = io_stream_close(z->base);
 	free(z);
 	return flusherr != 0 ? flusherr : err;
 }
 
-static struct stream *deflate_writer(struct stream *base, const bool zlib)
+static struct io_stream *deflate_writer(struct io_stream *base, const bool zlib)
 {
 	if (base == NULL) {
 		return NULL;
@@ -140,16 +140,16 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 	struct deflate_stream *z = malloc(sizeof(struct deflate_stream));
 	if (z == NULL) {
 		LOGOOM();
-		stream_close(base);
+		io_stream_close(base);
 		return NULL;
 	}
 
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.write = deflate_write,
 		.flush = deflate_flush,
 		.close = deflate_close,
 	};
-	z->s = (struct stream){
+	z->s = (struct io_stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
@@ -160,28 +160,28 @@ static struct stream *deflate_writer(struct stream *base, const bool zlib)
 		(zlib ? TDEFL_WRITE_ZLIB_HEADER : 0) | TDEFL_DEFAULT_MAX_PROBES;
 	const tdefl_status status = tdefl_init(&z->deflator, NULL, NULL, flags);
 	if (status != TDEFL_STATUS_OKAY) {
-		stream_close(base);
+		io_stream_close(base);
 		free(z);
 		return NULL;
 	}
 
 	z->dstpos = z->dstlen = 0;
-	return (struct stream *)z;
+	return (struct io_stream *)z;
 }
 
-struct stream *codec_zlib_writer(struct stream *base)
+struct io_stream *codec_zlib_writer(struct io_stream *base)
 {
 	return deflate_writer(base, true);
 }
 
-struct stream *codec_deflate_writer(struct stream *base)
+struct io_stream *codec_deflate_writer(struct io_stream *base)
 {
 	return deflate_writer(base, false);
 }
 
 struct inflate_stream {
-	struct stream s;
-	struct stream *base;
+	struct io_stream s;
+	struct io_stream *base;
 	bool srceof : 1;
 	int srcerr;
 	size_t srclen;
@@ -192,7 +192,7 @@ struct inflate_stream {
 	size_t dstpos, dstlen;
 	unsigned char dstbuf[TINFL_LZ_DICT_SIZE];
 };
-ASSERT_SUPER(struct stream, struct inflate_stream, s);
+ASSERT_SUPER(struct io_stream, struct inflate_stream, s);
 
 static int
 inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
@@ -202,8 +202,13 @@ inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 		if (z->srclen == 0 && !z->srceof) {
 			const void *srcbuf;
 			size_t n = IO_BUFSIZE;
-			z->srcerr = stream_direct_read(z->base, &srcbuf, &n);
-			if (n < IO_BUFSIZE || z->srcerr != 0) {
+			z->srcerr = io_stream_direct_read(z->base, &srcbuf, &n);
+			/* io_stream_direct_read may return a short read that is not
+			 * EOF (io/stream.h: "any output length > 0 should be
+			 * considered normal"); only n == 0 (or an error) is EOF.
+			 * Treating a short read as EOF would drop
+			 * TINFL_FLAG_HAS_MORE_INPUT and mis-decode valid input. */
+			if (n == 0 || z->srcerr != 0) {
 				z->srceof = true;
 			}
 			z->srclen = n;
@@ -264,12 +269,12 @@ static int inflate_close(void *p)
 	/* surface a decode error (e.g. an adler-32 mismatch) even when the
 	 * caller closed without a final read to EOF, mirroring gzip_rclose */
 	const int rderr = (z->status < TINFL_STATUS_DONE) ? (int)z->status : 0;
-	const int err = stream_close(z->base);
+	const int err = io_stream_close(z->base);
 	free(z);
 	return rderr != 0 ? rderr : err;
 }
 
-static struct stream *inflate_reader(struct stream *base, const bool zlib)
+static struct io_stream *inflate_reader(struct io_stream *base, const bool zlib)
 {
 	if (base == NULL) {
 		return NULL;
@@ -286,15 +291,15 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 	struct inflate_stream *z = malloc(sizeof(struct inflate_stream));
 	if (z == NULL) {
 		LOGOOM();
-		stream_close(base);
+		io_stream_close(base);
 		return NULL;
 	}
 
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.direct_read = inflate_direct_read,
 		.close = inflate_close,
 	};
-	z->s = (struct stream){
+	z->s = (struct io_stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
@@ -308,15 +313,15 @@ static struct stream *inflate_reader(struct stream *base, const bool zlib)
 	tinfl_init(&z->inflator);
 
 	z->dstpos = z->dstlen = 0;
-	return (struct stream *)z;
+	return (struct io_stream *)z;
 }
 
-struct stream *codec_zlib_reader(struct stream *base)
+struct io_stream *codec_zlib_reader(struct io_stream *base)
 {
 	return inflate_reader(base, true);
 }
 
-struct stream *codec_inflate_reader(struct stream *base)
+struct io_stream *codec_inflate_reader(struct io_stream *base)
 {
 	return inflate_reader(base, false);
 }
@@ -326,8 +331,8 @@ struct stream *codec_inflate_reader(struct stream *base)
 /* same as deflate_stream, extended with running CRC-32 and
  * uncompressed byte count for the gzip trailer */
 struct gzip_wstream {
-	struct stream s;
-	struct stream *base;
+	struct io_stream s;
+	struct io_stream *base;
 	bool finished : 1;
 	tdefl_status status;
 	tdefl_compressor deflator;
@@ -337,7 +342,7 @@ struct gzip_wstream {
 	uint_least32_t crc;
 	uint_least32_t isize;
 };
-ASSERT_SUPER(struct stream, struct gzip_wstream, s);
+ASSERT_SUPER(struct io_stream, struct gzip_wstream, s);
 
 static int gzip_write(void *p, const void *restrict buf, size_t *restrict len)
 {
@@ -353,12 +358,29 @@ static int gzip_write(void *p, const void *restrict buf, size_t *restrict len)
 			0x00, /* XFL */
 			0xff, /* OS: unknown */
 		};
-		size_t hlen = sizeof(header);
-		const int herr = stream_write(z->base, header, &hlen);
-		if (herr != 0 || hlen < sizeof(header)) {
-			*len = 0;
-			return herr != 0 ? herr : -1;
+		/* Stage the header once, then drain it resumably (like the body
+		 * path below) so a partial write is resumed from where it stopped
+		 * rather than re-emitted whole on retry, which would corrupt the
+		 * member. dstbuf/dstpos/dstlen are idle here (the prior member
+		 * finished and reset them). */
+		if (z->dstlen == 0) {
+			memcpy(z->dstbuf, header, sizeof(header));
+			z->dstpos = 0;
+			z->dstlen = sizeof(header);
 		}
+		size_t hlen = z->dstlen - z->dstpos;
+		const int herr =
+			io_stream_write(z->base, z->dstbuf + z->dstpos, &hlen);
+		z->dstpos += hlen;
+		if (herr != 0) {
+			*len = 0;
+			return herr;
+		}
+		if (z->dstpos < z->dstlen) {
+			*len = 0;
+			return -1;
+		}
+		z->dstpos = z->dstlen = 0;
 		const tdefl_status status = tdefl_init(
 			&z->deflator, NULL, NULL, TDEFL_DEFAULT_MAX_PROBES);
 		if (status != TDEFL_STATUS_OKAY) {
@@ -366,7 +388,6 @@ static int gzip_write(void *p, const void *restrict buf, size_t *restrict len)
 			return status;
 		}
 		z->status = TDEFL_STATUS_OKAY;
-		z->dstpos = z->dstlen = 0;
 		z->finished = false;
 	}
 
@@ -391,7 +412,7 @@ static int gzip_write(void *p, const void *restrict buf, size_t *restrict len)
 
 		unsigned char *avail = z->dstbuf + z->dstpos;
 		size_t n = z->dstlen - z->dstpos;
-		const int err = stream_write(z->base, avail, &n);
+		const int err = io_stream_write(z->base, avail, &n);
 		z->dstpos += n;
 		if (err != 0) {
 			*len = nwritten;
@@ -422,7 +443,7 @@ static int gzip_flush_(struct gzip_wstream *restrict z, const tdefl_flush flush)
 
 		buf = z->dstbuf + z->dstpos;
 		n = z->dstlen - z->dstpos;
-		const int err = stream_write(z->base, buf, &n);
+		const int err = io_stream_write(z->base, buf, &n);
 		z->dstpos += n;
 		if (err != 0) {
 			return err;
@@ -446,7 +467,7 @@ static int gzip_write_trailer(struct gzip_wstream *restrict z)
 	write_uint32_le(trailer + 0, z->crc);
 	write_uint32_le(trailer + 4, z->isize);
 	size_t n = sizeof(trailer);
-	const int ret = stream_write(z->base, trailer, &n);
+	const int ret = io_stream_write(z->base, trailer, &n);
 	if (ret == 0 && n < sizeof(trailer)) {
 		return -1;
 	}
@@ -458,7 +479,7 @@ static int gzip_flush(void *p)
 {
 	struct gzip_wstream *restrict z = p;
 	if (z->finished) {
-		return stream_flush(z->base);
+		return io_stream_flush(z->base);
 	}
 	int ret = gzip_flush_(z, TDEFL_FINISH);
 	if (ret == 0) {
@@ -468,7 +489,7 @@ static int gzip_flush(void *p)
 		z->finished = true;
 		z->crc = MZ_CRC32_INIT;
 		z->isize = 0;
-		ret = stream_flush(z->base);
+		ret = io_stream_flush(z->base);
 	}
 	return ret;
 }
@@ -483,12 +504,12 @@ static int gzip_wclose(void *p)
 			ret = gzip_write_trailer(z);
 		}
 	}
-	const int err = stream_close(z->base);
+	const int err = io_stream_close(z->base);
 	free(z);
 	return ret != 0 ? ret : err;
 }
 
-struct stream *codec_gzip_writer(struct stream *base)
+struct io_stream *codec_gzip_writer(struct io_stream *base)
 {
 	if (base == NULL) {
 		return NULL;
@@ -504,25 +525,25 @@ struct stream *codec_gzip_writer(struct stream *base)
 		0xff, /* OS: unknown */
 	};
 	size_t hlen = sizeof(header);
-	const int herr = stream_write(base, header, &hlen);
+	const int herr = io_stream_write(base, header, &hlen);
 	if (herr != 0 || hlen < sizeof(header)) {
-		stream_close(base);
+		io_stream_close(base);
 		return NULL;
 	}
 
 	struct gzip_wstream *z = malloc(sizeof(struct gzip_wstream));
 	if (z == NULL) {
 		LOGOOM();
-		stream_close(base);
+		io_stream_close(base);
 		return NULL;
 	}
 
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.write = gzip_write,
 		.flush = gzip_flush,
 		.close = gzip_wclose,
 	};
-	z->s = (struct stream){
+	z->s = (struct io_stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
@@ -533,7 +554,7 @@ struct stream *codec_gzip_writer(struct stream *base)
 	const tdefl_status status =
 		tdefl_init(&z->deflator, NULL, NULL, TDEFL_DEFAULT_MAX_PROBES);
 	if (status != TDEFL_STATUS_OKAY) {
-		stream_close(base);
+		io_stream_close(base);
 		free(z);
 		return NULL;
 	}
@@ -541,7 +562,7 @@ struct stream *codec_gzip_writer(struct stream *base)
 	z->dstpos = z->dstlen = 0;
 	z->crc = MZ_CRC32_INIT;
 	z->isize = 0;
-	return (struct stream *)z;
+	return (struct io_stream *)z;
 }
 
 /* gzip header flag bits (RFC 1952) */
@@ -592,8 +613,8 @@ enum gzip_hphase {
 /* inflate_stream fields plus a state machine that handles the header,
  * body and trailer of each member; supports multi-member streams */
 struct gzip_rstream {
-	struct stream s;
-	struct stream *base;
+	struct io_stream s;
+	struct io_stream *base;
 	bool srceof : 1;
 	int srcerr;
 	size_t srclen;
@@ -622,7 +643,7 @@ struct gzip_rstream {
 	/* Header parser sub-phase (see enum gzip_hphase) */
 	uint_least8_t hphase;
 };
-ASSERT_SUPER(struct stream, struct gzip_rstream, s);
+ASSERT_SUPER(struct io_stream, struct gzip_rstream, s);
 
 /* Parse gzip member header from z->srcbuf. Returns 1=done, 0=needs-more-input, -1=format-error. */
 static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
@@ -789,12 +810,26 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 	return 0;
 }
 
-static bool gzip_parse_header(struct gzip_rstream *z, size_t *len, int *ret)
+static bool gzip_parse_header(
+	struct gzip_rstream *restrict z, size_t *restrict len,
+	int *restrict ret)
 {
 	if (z->srclen == 0 && z->srceof) {
-		/* Clean EOF between members */
+		if (z->hphase == GZIP_HPHASE_HEADER && z->hdrpos == 0) {
+			/* Clean EOF at a member boundary (end of stream, or an
+			 * empty stream): nothing of a new member has been read. */
+			*len = 0;
+			*ret = z->srcerr;
+			return true;
+		}
+		/* EOF partway through a member header. Now that a short read is
+		 * no longer treated as EOF, this check also fires when the base
+		 * signals EOF on a refill after a partial header was buffered, so
+		 * it must distinguish a member boundary (above) from a truncated
+		 * header (here) rather than silently accepting the truncation. */
 		*len = 0;
-		*ret = z->srcerr;
+		z->rderr = -1;
+		*ret = -1;
 		return true;
 	}
 	const int hr = gzip_rstream_parse_hdr(z);
@@ -828,8 +863,8 @@ static bool gzip_parse_header(struct gzip_rstream *z, size_t *len, int *ret)
 }
 
 static bool gzip_decompress_body(
-	struct gzip_rstream *z, const void **restrict buf, size_t *len,
-	int *ret)
+	struct gzip_rstream *restrict z, const void **restrict buf,
+	size_t *restrict len, int *restrict ret)
 {
 	/* Wrap around sliding window when fully consumed */
 	if (z->dstpos == z->dstlen && z->dstlen == sizeof(z->dstbuf)) {
@@ -898,7 +933,9 @@ static bool gzip_decompress_body(
 	return false;
 }
 
-static bool gzip_validate_trailer(struct gzip_rstream *z, size_t *len, int *ret)
+static bool gzip_validate_trailer(
+	struct gzip_rstream *restrict z, size_t *restrict len,
+	int *restrict ret)
 {
 	while (z->trailpos < 8 && z->srclen > 0) {
 		z->trail[z->trailpos++] = *z->srcbuf;
@@ -954,8 +991,10 @@ gzip_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 		if (z->srclen == 0 && !z->srceof) {
 			const void *srcbuf;
 			size_t n = IO_BUFSIZE;
-			z->srcerr = stream_direct_read(z->base, &srcbuf, &n);
-			if (n < IO_BUFSIZE || z->srcerr != 0) {
+			z->srcerr = io_stream_direct_read(z->base, &srcbuf, &n);
+			/* a short read is not EOF (see inflate_direct_read); only
+			 * n == 0 (or an error) ends the input */
+			if (n == 0 || z->srcerr != 0) {
 				z->srceof = true;
 			}
 			z->srclen = n;
@@ -989,12 +1028,12 @@ static int gzip_rclose(void *p)
 {
 	struct gzip_rstream *restrict z = p;
 	const int rderr = z->rderr;
-	const int err = stream_close(z->base);
+	const int err = io_stream_close(z->base);
 	free(z);
 	return rderr != 0 ? rderr : err;
 }
 
-struct stream *codec_gzip_reader(struct stream *base)
+struct io_stream *codec_gzip_reader(struct io_stream *base)
 {
 	if (base == NULL) {
 		return NULL;
@@ -1010,15 +1049,15 @@ struct stream *codec_gzip_reader(struct stream *base)
 	struct gzip_rstream *z = malloc(sizeof(struct gzip_rstream));
 	if (z == NULL) {
 		LOGOOM();
-		stream_close(base);
+		io_stream_close(base);
 		return NULL;
 	}
 
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.direct_read = gzip_direct_read,
 		.close = gzip_rclose,
 	};
-	z->s = (struct stream){
+	z->s = (struct io_stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
@@ -1035,7 +1074,7 @@ struct stream *codec_gzip_reader(struct stream *base)
 	z->hphase = GZIP_HPHASE_HEADER;
 	z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
 	z->dstpos = z->dstlen = 0;
-	return (struct stream *)z;
+	return (struct io_stream *)z;
 }
 
 /* codec_lua_reader: auto-detect gzip, skip BOM and shebang */
@@ -1052,12 +1091,12 @@ enum lua_rstate {
 #define LUA_PEEK_SIZE 8
 
 struct lua_rstream {
-	struct stream s;
-	struct stream *inner;
+	struct io_stream s;
+	struct io_stream *inner;
 	enum lua_rstate state;
 	bool shebang_confirmed;
 	int rderr;
-	/* Prefix window: the first read is copied here (via stream_read, which
+	/* Prefix window: the first read is copied here (via io_stream_read, which
 	 * fills up to LUA_PEEK_SIZE) so BOM/shebang detection cannot be defeated
 	 * by a short read splitting the prefix across calls; any post-prefix
 	 * bytes are handed out from peekbuf[peekpos..peeklen). */
@@ -1065,7 +1104,7 @@ struct lua_rstream {
 	size_t peekpos;
 	unsigned char peekbuf[LUA_PEEK_SIZE];
 };
-ASSERT_SUPER(struct stream, struct lua_rstream, s);
+ASSERT_SUPER(struct io_stream, struct lua_rstream, s);
 
 /* Skip UTF-8 BOM if present; transition to LUA_SKIP_SHEBANG. Returns false for non-UTF-8 BOM. */
 static bool lua_skip_bom(
@@ -1157,12 +1196,12 @@ lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 		 * direct read: a direct read may legitimately return fewer bytes
 		 * than requested (its contract only promises "> 0"), which could
 		 * split a multi-byte BOM or the "#!" prefix across reads and
-		 * defeat detection. stream_read loops the underlying reader and
+		 * defeat detection. io_stream_read loops the underlying reader and
 		 * only comes up short at EOF, so the window holds the whole
 		 * prefix whenever the source has that many bytes. */
 		z->peeklen = LUA_PEEK_SIZE;
 		z->peekpos = 0;
-		const int err = stream_read(z->inner, z->peekbuf, &z->peeklen);
+		const int err = io_stream_read(z->inner, z->peekbuf, &z->peeklen);
 		if (err != 0) {
 			z->state = LUA_PASSTHROUGH;
 			z->rderr = err;
@@ -1190,7 +1229,7 @@ lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 	}
 
 	if (z->state == LUA_PASSTHROUGH) {
-		const int err = stream_direct_read(z->inner, buf, len);
+		const int err = io_stream_direct_read(z->inner, buf, len);
 		if (err != 0) {
 			z->rderr = err;
 		}
@@ -1203,7 +1242,7 @@ lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 	for (;;) {
 		const void *data;
 		size_t n = *len;
-		const int err = stream_direct_read(z->inner, &data, &n);
+		const int err = io_stream_direct_read(z->inner, &data, &n);
 		if (err != 0) {
 			z->state = LUA_PASSTHROUGH;
 			z->rderr = err;
@@ -1241,12 +1280,12 @@ static int lua_close(void *p)
 {
 	struct lua_rstream *restrict z = p;
 	const int rderr = z->rderr;
-	const int err = stream_close(z->inner);
+	const int err = io_stream_close(z->inner);
 	free(z);
 	return rderr != 0 ? rderr : err;
 }
 
-static struct stream *lua_reader_new(struct stream *base)
+static struct io_stream *lua_reader_new(struct io_stream *base)
 {
 	if (base == NULL) {
 		return NULL;
@@ -1260,7 +1299,7 @@ static struct stream *lua_reader_new(struct stream *base)
 		}
 	}
 
-	struct stream *inner;
+	struct io_stream *inner;
 	{
 		const void *peek;
 		size_t peek_len = 2;
@@ -1280,15 +1319,15 @@ static struct stream *lua_reader_new(struct stream *base)
 	struct lua_rstream *z = malloc(sizeof(struct lua_rstream));
 	if (z == NULL) {
 		LOGOOM();
-		stream_close(inner);
+		io_stream_close(inner);
 		return NULL;
 	}
 
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.direct_read = lua_direct_read,
 		.close = lua_close,
 	};
-	z->s = (struct stream){
+	z->s = (struct io_stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
@@ -1298,10 +1337,10 @@ static struct stream *lua_reader_new(struct stream *base)
 	z->rderr = 0;
 	z->peeklen = 0;
 	z->peekpos = 0;
-	return (struct stream *)z;
+	return (struct io_stream *)z;
 }
 
-struct stream *codec_lua_reader(const char *path)
+struct io_stream *codec_lua_reader(const char *path)
 {
 	FILE *f;
 	if (strcmp(path, "-") == 0) {
@@ -1314,7 +1353,7 @@ struct stream *codec_lua_reader(const char *path)
 			return NULL;
 		}
 	}
-	struct stream *s = io_filereader(f);
+	struct io_stream *s = io_filereader(f);
 	if (s == NULL) {
 		LOGOOM();
 		if (f != stdin) {
