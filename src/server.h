@@ -7,6 +7,10 @@
 #include "conf.h"
 #include "transfer.h"
 
+#include "os/socket.h"
+#include "utils/gc.h"
+#include "utils/slog.h"
+
 #include <ev.h>
 
 #if WITH_THREADS
@@ -245,6 +249,30 @@ static inline size_t server_start_session(
 		return 0;
 	}
 	server_session_commit(s, cur);
+	return cur;
+}
+
+/**
+ * @brief Commit a fully-dialed session, folding in the OOM teardown.
+ *
+ * On success returns the new active-session count (nonzero) with ownership of
+ * both descriptors transferred to the transfer. On OOM (returns 0) it has
+ * already logged, closed both descriptors, and gc_unref'd @p gc; the caller
+ * must return immediately without touching either descriptor or @p gc again.
+ *
+ * @return New active-session count on success, or 0 after teardown on OOM.
+ */
+static inline size_t server_commit_session(
+	struct server *restrict s, struct gcbase *restrict gc, const int acc_fd,
+	const int dial_fd)
+{
+	const size_t cur = server_start_session(s, acc_fd, dial_fd);
+	if (cur == 0) {
+		LOGOOM();
+		socket_close(acc_fd);
+		socket_close(dial_fd);
+		gc_unref(gc);
+	}
 	return cur;
 }
 
