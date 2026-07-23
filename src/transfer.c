@@ -63,6 +63,13 @@ static const char *const xfer_state_str[] = {
 
 #define XFER_BUFSIZE 16384
 
+/* Per-callback byte cap. Once a pump has moved this many bytes in a single
+ * wakeup it yields (breaks the loop and re-arms its watcher) rather than
+ * draining the socket/pipe to exhaustion, so one high-throughput connection
+ * pair cannot keep a worker busy -- for a duration proportional to the kernel
+ * buffer/pipe size -- and starve the other sessions sharing that loop. */
+#define XFER_MAXSIZE 16777216
+
 /* Single-direction transfer half; all fields xfer-thread-only after task_xfer_start. */
 struct xfer_half {
 	enum xfer_half_state state;
@@ -163,6 +170,10 @@ struct transfer {
 
 #if WITH_SPLICE
 
+/* Target splice-pipe capacity: enlarge the kernel pipe buffer to 256 KiB so a
+ * splice pump can move more per wakeup than the default ~64 KiB. */
+#define XFER_PIPE_CAP (256 * 1024)
+
 bool pipe_new(struct splice_pipe *restrict pipe)
 {
 	if (pipe2(pipe->fd, O_NONBLOCK | O_CLOEXEC) != 0) {
@@ -170,7 +181,7 @@ bool pipe_new(struct splice_pipe *restrict pipe)
 		LOGW_F("pipe2: (%d) %s", err, strerror(err));
 		return false;
 	}
-	int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, 262144);
+	int pipe_cap = fcntl(pipe->fd[0], F_SETPIPE_SZ, XFER_PIPE_CAP);
 	if (pipe_cap < 0) {
 		const int err = errno;
 		LOGD_F("fcntl: (%d) %s", err, strerror(err));
@@ -203,16 +214,6 @@ void pipe_close(struct splice_pipe *restrict pipe)
 		pipe->fd[1] = -1;
 	}
 }
-
-static bool pipe_get(struct splice_pipe *restrict pipe)
-{
-	return pipe_new(pipe);
-}
-
-static void pipe_put(struct splice_pipe *restrict pipe)
-{
-	pipe_close(pipe);
-}
 #endif /* WITH_SPLICE */
 
 /* ---------------------------------------------------------------- set_state */
@@ -224,10 +225,10 @@ static void release_ctx(struct transfer_ctx *restrict t)
 {
 #if WITH_SPLICE
 	if (t->up.pipe.fd[0] != -1) {
-		pipe_put(&t->up.pipe);
+		pipe_close(&t->up.pipe);
 	}
 	if (t->down.pipe.fd[0] != -1) {
-		pipe_put(&t->down.pipe);
+		pipe_close(&t->down.pipe);
 	}
 #endif
 	socket_close(t->up.src_fd);
@@ -398,7 +399,8 @@ transfer_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 		} else {
 			nbsend += (size_t)nsend;
 		}
-		if ((h->pos < h->buf.len) || (nrecv <= 0 && nsend <= 0)) {
+		if ((h->pos < h->buf.len) || (nrecv <= 0 && nsend <= 0) ||
+		    nbsend >= XFER_MAXSIZE) {
 			break;
 		}
 	}
@@ -516,7 +518,8 @@ pipe_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
 		} else {
 			nbsend += (size_t)nsend;
 		}
-		if (h->pipe.len > 0 || (nrecv <= 0 && nsend <= 0)) {
+		if (h->pipe.len > 0 || (nrecv <= 0 && nsend <= 0) ||
+		    nbsend >= XFER_MAXSIZE) {
 			break;
 		}
 	}
@@ -580,14 +583,14 @@ static void task_xfer_start(void *data)
 #if WITH_SPLICE
 	if (t->up.use_splice) {
 		struct splice_pipe pipe;
-		if (pipe_get(&pipe)) {
+		if (pipe_new(&pipe)) {
 			ev_set_cb(&t->up.w_socket, pipe_cb);
 			t->up.pipe = pipe;
 		}
 	}
 	if (t->down.use_splice) {
 		struct splice_pipe pipe;
-		if (pipe_get(&pipe)) {
+		if (pipe_new(&pipe)) {
 			ev_set_cb(&t->down.w_socket, pipe_cb);
 			t->down.pipe = pipe;
 		}

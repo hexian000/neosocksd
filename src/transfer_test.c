@@ -178,7 +178,7 @@ T_DECLARE_CASE(transfer_moves_payload)
 			.byt_down = &state.byt_down,
 			.num_sessions = &state.num_sessions,
 		}));
-	/* transfer_ctx_new takes fd ownership */
+	/* transfer_serve takes fd ownership */
 	acc_fd = dial_fd = -1;
 
 	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 1.0));
@@ -296,8 +296,8 @@ T_DECLARE_CASE(transfer_splice_releases_pipes_on_finish)
 
 /*
  * Cancel must suppress the on_finished callback but still clean up all
- * internal resources.  transfer_free() joins the xfer thread and drains
- * main_disp, so after it returns, no callback will arrive.
+ * internal resources.  transfer_join() joins the xfer thread, so after it
+ * returns, no callback will arrive.
  */
 T_DECLARE_CASE(transfer_ctx_cancel_no_callback)
 {
@@ -326,7 +326,7 @@ T_DECLARE_CASE(transfer_ctx_cancel_no_callback)
 	acc_fd = dial_fd = -1;
 
 	/*
-	 * transfer_free joins the xfer thread; in-flight transfers are
+	 * transfer_join joins the xfer thread; in-flight transfers are
 	 * cancelled and their num_sessions decrements execute before return.
 	 */
 	transfer_join(xfer);
@@ -404,8 +404,13 @@ T_DECLARE_CASE(transfer_backpressure_completes)
 
 	/* Fill the dial_fd → dial_peer send buffer to create uplink backpressure. */
 	size_t fill_bytes = 0;
-	while (send(dial_fd, fill, sizeof(fill), MSG_DONTWAIT) > 0) {
-		fill_bytes += sizeof(fill);
+	for (;;) {
+		const ssize_t n =
+			send(dial_fd, fill, sizeof(fill), MSG_DONTWAIT);
+		if (n <= 0) {
+			break;
+		}
+		fill_bytes += (size_t)n;
 	}
 
 	/* One-byte uplink payload; no downlink data. */
@@ -487,8 +492,13 @@ T_DECLARE_CASE(transfer_recv_buffer_saturates_completes)
 
 	/* Block the downstream so the xfer cannot drain its receive buffer. */
 	size_t fill_bytes = 0;
-	while (send(dial_fd, fill, sizeof(fill), MSG_DONTWAIT) > 0) {
-		fill_bytes += sizeof(fill);
+	for (;;) {
+		const ssize_t n =
+			send(dial_fd, fill, sizeof(fill), MSG_DONTWAIT);
+		if (n <= 0) {
+			break;
+		}
+		fill_bytes += (size_t)n;
 	}
 
 	/* Buffer the whole (> XFER_BUFSIZE) payload on the accepted side; with
