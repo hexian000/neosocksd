@@ -5,7 +5,7 @@
 
 #include "ruleset/base.h"
 
-#include "utils/ascii.h"
+#include "utils/ctype_ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 

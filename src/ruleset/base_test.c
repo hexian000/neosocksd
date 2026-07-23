@@ -537,7 +537,7 @@ T_DECLARE_CASE(base_aux_async_catastrophic_failure_cleanup)
 /* A stream that yields a chunk on its first direct_read and then either EOF or
  * a read error, to exercise aux_load()'s mid-stream error handling. */
 struct fault_stream {
-	struct stream stream;
+	struct io_stream stream;
 	const char *text;
 	size_t len;
 	bool fail;
@@ -557,7 +557,7 @@ static int fault_stream_direct_read(void *data, const void **buf, size_t *len)
 	return s->fail ? -1 : 0; /* -1: a mid-stream read error */
 }
 
-static const struct stream_vftable fault_stream_vftable = {
+static const struct io_stream_vftable fault_stream_vftable = {
 	.direct_read = fault_stream_direct_read,
 };
 

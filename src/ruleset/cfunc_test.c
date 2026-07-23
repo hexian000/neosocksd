@@ -51,7 +51,7 @@ struct test_watchdog {
 };
 
 struct string_stream {
-	struct stream stream;
+	struct io_stream stream;
 	const char *text;
 	size_t len;
 	bool consumed;
@@ -133,11 +133,11 @@ static int string_stream_direct_read(void *data, const void **buf, size_t *len)
 	return 0;
 }
 
-static const struct stream_vftable string_stream_vftable = {
+static const struct io_stream_vftable string_stream_vftable = {
 	.direct_read = string_stream_direct_read,
 };
 
-static struct stream *
+static struct io_stream *
 string_stream_open(struct string_stream *restrict s, const char *restrict text)
 {
 	*s = (struct string_stream){
@@ -454,10 +454,10 @@ T_DECLARE_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed)
 	const char *s;
 
 	T_CHECK(write_tempfile(path, file_chunk) == 0);
-	struct stream *restrict code = codec_lua_reader(path);
+	struct io_stream *restrict code = codec_lua_reader(path);
 	T_CHECK(code != NULL);
 	T_EXPECT(ruleset_pcall(r, cfunc_loadfile, 1, 0, code));
-	stream_close(code);
+	io_stream_close(code);
 
 	T_EXPECT(ruleset_pcall(r, cfunc_stats, 2, 1, &dt, "alpha"));
 	s = lua_tolstring(r->L, -1, &len);

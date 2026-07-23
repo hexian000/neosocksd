@@ -317,7 +317,7 @@ ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 	return s;
 }
 
-bool ruleset_invoke(struct ruleset *restrict r, struct stream *code)
+bool ruleset_invoke(struct ruleset *restrict r, struct io_stream *code)
 {
 	return ruleset_pcall(r, cfunc_invoke, 1, 0, (void *)code);
 }
@@ -335,7 +335,7 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 
 bool ruleset_rpcall(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	struct stream *code, struct ruleset_callback *callback)
+	struct io_stream *code, struct ruleset_callback *callback)
 {
 	return ruleset_pcall(
 		r, cfunc_rpcall, 3, 1, (void *)state, (void *)code,
@@ -344,7 +344,7 @@ bool ruleset_rpcall(
 
 bool ruleset_update(
 	struct ruleset *restrict r, const char *restrict modname,
-	const char *restrict chunkname, struct stream *code)
+	const char *restrict chunkname, struct io_stream *code)
 {
 	return ruleset_pcall(
 		r, cfunc_update, 3, 0, (void *)modname, (void *)chunkname,
@@ -353,24 +353,24 @@ bool ruleset_update(
 
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 {
-	struct stream *restrict const s = codec_lua_reader(filename);
+	struct io_stream *restrict const s = codec_lua_reader(filename);
 	if (s == NULL) {
 		return false;
 	}
 	const bool ok = ruleset_pcall(r, cfunc_loadfile, 1, 0, (void *)s);
-	stream_close(s);
+	io_stream_close(s);
 	return ok;
 }
 
 bool ruleset_loadconfig(
 	struct ruleset *restrict r, const char *restrict filename)
 {
-	struct stream *restrict const s = codec_lua_reader(filename);
+	struct io_stream *restrict const s = codec_lua_reader(filename);
 	if (s == NULL) {
 		return false;
 	}
 	const bool ok = ruleset_pcall(r, cfunc_loadconfig, 1, 0, (void *)s);
-	stream_close(s);
+	io_stream_close(s);
 	return ok;
 }
 
@@ -429,6 +429,28 @@ bool ruleset_route6(
 {
 	return dispatch_request(
 		r, state, "route6", request, username, password, callback);
+}
+
+bool ruleset_dispatch(
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *restrict request, const int atype,
+	const char *restrict username, const char *restrict password,
+	struct ruleset_callback *callback)
+{
+	switch (atype) {
+	case ATYP_INET:
+		return ruleset_route(
+			r, state, request, username, password, callback);
+	case ATYP_INET6:
+		return ruleset_route6(
+			r, state, request, username, password, callback);
+	case ATYP_DOMAIN:
+		return ruleset_resolve(
+			r, state, request, username, password, callback);
+	default:
+		break;
+	}
+	FAILMSGF("unexpected address type: %d", atype);
 }
 
 void ruleset_vmstats(

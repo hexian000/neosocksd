@@ -17,7 +17,7 @@
 #include <stdint.h>
 
 struct ev_loop;
-struct stream;
+struct io_stream;
 struct ruleset;
 struct config;
 struct dialreq;
@@ -102,7 +102,7 @@ ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len);
  * @param code Stream containing Lua script code
  * @return true on success, false on error
  */
-bool ruleset_invoke(struct ruleset *restrict r, struct stream *code);
+bool ruleset_invoke(struct ruleset *restrict r, struct io_stream *code);
 
 /**
  * @brief Opaque structure representing asynchronous ruleset operation state
@@ -155,7 +155,7 @@ struct ruleset_callback {
  */
 bool ruleset_rpcall(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	struct stream *code, struct ruleset_callback *callback);
+	struct io_stream *code, struct ruleset_callback *callback);
 
 /**
  * @brief Update or load a Lua module without restarting the server.
@@ -167,7 +167,7 @@ bool ruleset_rpcall(
  */
 bool ruleset_update(
 	struct ruleset *restrict r, const char *restrict modname,
-	const char *restrict chunkname, struct stream *code);
+	const char *restrict chunkname, struct io_stream *code);
 
 /**
  * @brief Load and execute Lua code from a file.
@@ -248,6 +248,26 @@ bool ruleset_route(
 bool ruleset_route6(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	const char *restrict request, const char *restrict username,
+	const char *restrict password, struct ruleset_callback *callback);
+
+/**
+ * @brief Route a request to the entry point matching its address type.
+ *
+ * Dispatches to ruleset_route() (ATYP_INET), ruleset_route6() (ATYP_INET6),
+ * or ruleset_resolve() (ATYP_DOMAIN).
+ * @param r Ruleset instance
+ * @param state Output for operation state (for cancellation)
+ * @param request Address and port matching @p atype
+ * @param atype Address type (an enum dialaddr_type value) selecting the
+ *        entry point
+ * @param username SOCKS authentication username (may be NULL)
+ * @param password SOCKS authentication password (may be NULL)
+ * @param callback Callback structure for result notification
+ * @return true if operation started successfully, false on immediate error
+ */
+bool ruleset_dispatch(
+	struct ruleset *restrict r, struct ruleset_state **state,
+	const char *restrict request, int atype, const char *restrict username,
 	const char *restrict password, struct ruleset_callback *callback);
 
 /**

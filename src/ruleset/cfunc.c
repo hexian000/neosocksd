@@ -164,7 +164,7 @@ int cfunc_loadfile(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
-	struct stream *restrict const s = lua_touserdata(L, 1);
+	struct io_stream *restrict const s = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
 	if (aux_load(L, s, "=ruleset")) {
@@ -188,7 +188,7 @@ int cfunc_loadconfig(lua_State *restrict L)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
-	struct stream *restrict const s = lua_touserdata(L, 1);
+	struct io_stream *restrict const s = lua_touserdata(L, 1);
 	lua_settop(L, 0);
 
 	if (aux_load(L, s, "=config")) {
@@ -330,7 +330,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	ASSERT(lua_gettop(L) == 3);
 	struct ruleset_state *restrict *restrict const pstate =
 		(struct ruleset_state *restrict *restrict)lua_touserdata(L, 1);
-	struct stream *const stream = lua_touserdata(L, 2);
+	struct io_stream *const stream = lua_touserdata(L, 2);
 	struct ruleset_callback *restrict const in_cb = lua_touserdata(L, 3);
 	lua_settop(L, 0);
 

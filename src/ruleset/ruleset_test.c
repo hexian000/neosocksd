@@ -51,7 +51,7 @@ struct test_watchdog {
 };
 
 struct string_stream {
-	struct stream stream;
+	struct io_stream stream;
 	const char *text;
 	size_t len;
 	bool consumed;
@@ -133,11 +133,11 @@ static int string_stream_direct_read(void *data, const void **buf, size_t *len)
 	return 0;
 }
 
-static const struct stream_vftable string_stream_vftable = {
+static const struct io_stream_vftable string_stream_vftable = {
 	.direct_read = string_stream_direct_read,
 };
 
-static struct stream *
+static struct io_stream *
 string_stream_open(struct string_stream *restrict s, const char *restrict text)
 {
 	*s = (struct string_stream){
@@ -479,6 +479,67 @@ T_DECLARE_CASE(ruleset_loadfile_dispatches_requests)
 
 	ruleset_setserver(r, (struct server *)0x1);
 	T_EXPECT(r->server == (struct server *)0x1);
+	(void)unlink(path);
+	free_ruleset(loop, r);
+}
+
+T_DECLARE_CASE(ruleset_dispatch_routes_by_address_type)
+{
+	/* Each entry point returns a distinct self-identifying address, so a
+	 * mis-mapped ruleset_dispatch arm yields the wrong parsed type/port. */
+	static const char script[] =
+		"local name = ... "
+		"  local ruleset = {} "
+		"  function ruleset.resolve() return 'resolve.example:1' end "
+		"  function ruleset.route() return '192.0.2.1:2' end "
+		"  function ruleset.route6() return '[2001:db8::1]:3' end "
+		"  return ruleset "
+		"";
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	char path[] = "/tmp/ruleset_test_XXXXXX";
+	struct ruleset_callback cb = { 0 };
+	struct ruleset_state *state = NULL;
+	struct request_result result = {
+		.callback = &cb,
+	};
+
+	T_CHECK(write_tempfile(path, script) == 0);
+	T_EXPECT(ruleset_loadfile(r, path));
+	ev_init(&cb.w_finish, request_finish_cb);
+	cb.w_finish.data = &result;
+
+	T_EXPECT(ruleset_dispatch(
+		r, &state, "example.org:0", ATYP_DOMAIN, NULL, NULL, &cb));
+	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
+	T_CHECK(result.req != NULL);
+	T_EXPECT_EQ(result.req->addr.type, ATYP_DOMAIN);
+	T_EXPECT_EQ(result.req->addr.port, UINT16_C(1));
+	dialreq_free(result.req);
+
+	result = (struct request_result){
+		.callback = &cb,
+	};
+	T_EXPECT(ruleset_dispatch(
+		r, &state, "203.0.113.1:0", ATYP_INET, NULL, NULL, &cb));
+	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
+	T_CHECK(result.req != NULL);
+	T_EXPECT_EQ(result.req->addr.type, ATYP_INET);
+	T_EXPECT_EQ(result.req->addr.port, UINT16_C(2));
+	dialreq_free(result.req);
+
+	result = (struct request_result){
+		.callback = &cb,
+	};
+	T_EXPECT(ruleset_dispatch(
+		r, &state, "[2001:db8::9]:0", ATYP_INET6, NULL, NULL, &cb));
+	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
+	T_CHECK(result.req != NULL);
+	T_EXPECT_EQ(result.req->addr.type, ATYP_INET6);
+	T_EXPECT_EQ(result.req->addr.port, UINT16_C(3));
+	dialreq_free(result.req);
+
 	(void)unlink(path);
 	free_ruleset(loop, r);
 }
@@ -879,6 +940,7 @@ T_DECLARE_CASE(ruleset_load_missing_file_returns_false)
 
 static const struct testing_suite suite[] = {
 	T_CASE(ruleset_loadfile_dispatches_requests),
+	T_CASE(ruleset_dispatch_routes_by_address_type),
 	T_CASE(ruleset_update_invoke_rpcall_stats_and_tick),
 	T_CASE(ruleset_metrics_returns_string_when_defined_and_null_when_absent),
 	T_CASE(ruleset_healthy_reports_unhealthy_string_and_null_when_ok),

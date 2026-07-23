@@ -27,7 +27,7 @@ struct config;
 struct dialreq;
 struct resolver;
 struct server;
-struct stream;
+struct io_stream;
 
 /** @brief Main ruleset structure */
 struct ruleset {
@@ -137,7 +137,7 @@ void aux_setsandboxenv(lua_State *restrict L);
 lua_State *aux_getthread(lua_State *restrict L);
 
 /**
- * @brief lua_load() a chunk from a struct stream.
+ * @brief lua_load() a chunk from a struct io_stream.
  *
  * Wraps lua_load() with a reader that, unlike a bare lua_Reader, propagates a
  * mid-stream read error (which would otherwise look like a clean EOF and
@@ -151,7 +151,7 @@ lua_State *aux_getthread(lua_State *restrict L);
  * stack), or non-zero on a compile or read error (message on the stack).
  */
 int aux_load(
-	lua_State *restrict L, struct stream *restrict stream,
+	lua_State *restrict L, struct io_stream *restrict stream,
 	const char *restrict chunkname);
 
 /**

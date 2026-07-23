@@ -20,7 +20,7 @@
 
 struct stream_context {
 	struct vbuffer *out;
-	struct stream *r, *w;
+	struct io_stream *r, *w;
 	unsigned char buf[IO_BUFSIZE];
 };
 
@@ -28,11 +28,11 @@ static int stream_context_close(lua_State *restrict L)
 {
 	struct stream_context *restrict s = lua_touserdata(L, 1);
 	if (s->r != NULL) {
-		(void)stream_close(s->r);
+		(void)io_stream_close(s->r);
 		s->r = NULL;
 	}
 	if (s->w != NULL) {
-		(void)stream_close(s->w);
+		(void)io_stream_close(s->w);
 		s->w = NULL;
 	}
 	VBUF_FREE(s->out);
@@ -41,13 +41,13 @@ static int stream_context_close(lua_State *restrict L)
 
 static int stream_copyall(struct stream_context *restrict s)
 {
-	int ret = stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
-	int err = stream_close(s->r);
+	int ret = io_stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
+	int err = io_stream_close(s->r);
 	s->r = NULL;
 	if (ret == 0) {
 		ret = err;
 	}
-	err = stream_close(s->w);
+	err = io_stream_close(s->w);
 	s->w = NULL;
 	if (ret == 0) {
 		ret = err;
@@ -60,7 +60,7 @@ static int stream_copyall(struct stream_context *restrict s)
  * it wraps the reader (decompressing). @p what names the operation for errors. */
 static int zlib_transcode(
 	lua_State *restrict L, const bool encode,
-	struct stream *(*const codec)(struct stream *base),
+	struct io_stream *(*const codec)(struct io_stream *base),
 	const char *restrict const what)
 {
 	size_t len;
@@ -73,6 +73,13 @@ static int zlib_transcode(
 	aux_toclose(L, -1, MT_STREAM_CONTEXT, stream_context_close);
 
 	s->out = VBUF_NEW(IO_BUFSIZE);
+	if (s->out == NULL) {
+		/* validate the sink before wrapping it in a codec: a codec built
+		 * over a NULL-backed heapwriter derefs NULL on its
+		 * construction/close-flush write */
+		lua_pushliteral(L, ERR_MEMORY);
+		return lua_error(L);
+	}
 	if (encode) {
 		s->r = io_memreader(src, len);
 		s->w = codec(io_heapwriter(&s->out));
@@ -80,7 +87,7 @@ static int zlib_transcode(
 		s->r = codec(io_memreader(src, len));
 		s->w = io_heapwriter(&s->out);
 	}
-	if (s->out == NULL || s->r == NULL || s->w == NULL) {
+	if (s->r == NULL || s->w == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}

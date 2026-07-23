@@ -187,7 +187,7 @@ lua_State *aux_getthread(lua_State *restrict L)
 }
 
 struct aux_reader_state {
-	struct stream *stream;
+	struct io_stream *stream;
 	int err;
 };
 
@@ -199,7 +199,7 @@ aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 	const void *buf;
 	/* Lua allows arbitrary length. */
 	*sz = SIZE_MAX;
-	const int err = stream_direct_read(rs->stream, &buf, sz);
+	const int err = io_stream_direct_read(rs->stream, &buf, sz);
 	if (err != 0) {
 		LOGE_F("read_stream: error %d", err);
 		/* lua_Reader has no error channel; record it and stop so
@@ -215,7 +215,7 @@ aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 }
 
 int aux_load(
-	lua_State *restrict L, struct stream *restrict stream,
+	lua_State *restrict L, struct io_stream *restrict stream,
 	const char *restrict chunkname)
 {
 	struct aux_reader_state rs = { .stream = stream, .err = 0 };
