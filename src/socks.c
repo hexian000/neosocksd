@@ -36,6 +36,10 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+/* Cap on the distinct target addresses tracked per UDP ASSOCIATE session for
+ * the source filter on the target->client direction (see struct socks_ctx). */
+#define SOCKS_UDP_TARGETS_MAX 32
+
 /* never rollback */
 enum socks_state {
 	STATE_INIT,
@@ -93,6 +97,16 @@ struct socks_ctx {
 			ev_io w_tcp;
 			union sockaddr_max udp_peer;
 			bool udp_peer_known;
+			/* Distinct target addresses the client has sent to, most
+			 * recent first. A target->client datagram is forwarded
+			 * only if its source is one of these, so an off-path host
+			 * cannot inject unsolicited UDP into the client session.
+			 * RFC 1928 leaves this direction unspecified; this is a
+			 * bounded LRU set, so a client fanning out past the cap
+			 * evicts its least-recent target, whose later replies are
+			 * then dropped. */
+			union sockaddr_max udp_targets[SOCKS_UDP_TARGETS_MAX];
+			uint_least8_t udp_ntargets;
 			/* scratch buffer for a single datagram; length is tracked
 			 * per recv, so no BUFFER_HDR is needed */
 			unsigned char ubuf[IO_BUFSIZE];
@@ -763,12 +777,9 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	stats->num_halfopen--;
 	SOCKS_CTX_LOG_F(
 		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	const size_t cur = server_start_session(ctx->s, acc_fd, dial_fd);
+	const size_t cur =
+		server_commit_session(ctx->s, &ctx->gcbase, acc_fd, dial_fd);
 	if (cur == 0) {
-		LOGOOM();
-		socket_close(acc_fd);
-		socket_close(dial_fd);
-		gc_unref(&ctx->gcbase);
 		return;
 	}
 	SOCKS_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
@@ -949,6 +960,44 @@ static bool udp_parse_addr(
 	}
 }
 
+/* Record a target the client sent a datagram to as the most-recently-used entry
+ * of the bounded set, so a later reply from it passes the source filter. When
+ * the set is full the least-recently-used entry is evicted. */
+static void udp_target_remember(
+	struct socks_ctx *restrict ctx, const struct sockaddr *restrict sa)
+{
+	size_t i;
+	for (i = 0; i < ctx->udp_ntargets; i++) {
+		if (sa_equals(&ctx->udp_targets[i].sa, sa)) {
+			break;
+		}
+	}
+	if (i == ctx->udp_ntargets) {
+		/* not present: grow, or reuse the least-recent (last) slot */
+		if (ctx->udp_ntargets < SOCKS_UDP_TARGETS_MAX) {
+			ctx->udp_ntargets++;
+		}
+		i = (size_t)ctx->udp_ntargets - 1;
+	}
+	/* move slot i to the front (index 0 == most recent) */
+	memmove(&ctx->udp_targets[1], &ctx->udp_targets[0],
+		i * sizeof(ctx->udp_targets[0]));
+	sa_copy(&ctx->udp_targets[0].sa, sa);
+}
+
+/* True if a datagram source matches a target the client has sent to. */
+static bool udp_target_known(
+	const struct socks_ctx *restrict ctx,
+	const struct sockaddr *restrict sa)
+{
+	for (size_t i = 0; i < ctx->udp_ntargets; i++) {
+		if (sa_equals(&ctx->udp_targets[i].sa, sa)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void udp_frag_reset(struct socks_ctx *restrict ctx)
 {
 	ctx->frag_next = 0;
@@ -957,6 +1006,8 @@ static void udp_frag_reset(struct socks_ctx *restrict ctx)
 
 static void udp_frag_flush(struct socks_ctx *restrict ctx)
 {
+	/* authorize replies from this target for the source filter */
+	udp_target_remember(ctx, &ctx->frag_target.sa);
 	ssize_t nsend;
 	do {
 		nsend =
@@ -967,8 +1018,11 @@ static void udp_frag_flush(struct socks_ctx *restrict ctx)
 	if (nsend < 0) {
 		const int err = errno;
 		if (err != EAGAIN && err != EWOULDBLOCK && err != ENOBUFS) {
+			/* client-controlled target, so a per-datagram send
+			 * failure is remote-triggerable: log at DEBUG to avoid a
+			 * flood, matching the sibling discard paths */
 			SOCKS_CTX_LOG_F(
-				ERROR, ctx,
+				DEBUG, ctx,
 				"sendto target (reassembled): (%d) %s", err,
 				strerror(err));
 		}
@@ -1147,6 +1201,8 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 				(uint_fast8_t)udph.addrtype, (size_t)nrecv);
 			return;
 		}
+		/* authorize replies from this target for the source filter */
+		udp_target_remember(ctx, &target_sa.sa);
 		ssize_t nsend;
 		do {
 			nsend =
@@ -1159,10 +1215,20 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			if (err != EAGAIN && err != EWOULDBLOCK &&
 			    err != ENOBUFS) {
 				SOCKS_CTX_LOG_F(
-					ERROR, ctx, "sendto target: (%d) %s",
+					DEBUG, ctx, "sendto target: (%d) %s",
 					err, strerror(err));
 			}
 		}
+	} else if (!udp_target_known(ctx, &from_sa.sa)) {
+		/* Source filter: drop a datagram from a host the client has not
+		 * sent to, so an off-path host cannot inject unsolicited UDP
+		 * into the client session. Remote-triggerable, so log at DEBUG. */
+		char src_str[64];
+		sa_format(src_str, sizeof(src_str), &from_sa.sa);
+		SOCKS_CTX_LOG_F(
+			DEBUG, ctx,
+			"UDP: dropping datagram from unsolicited source %s",
+			src_str);
 	} else {
 		/* Target -> client: prepend SOCKS5 UDP header and send */
 		unsigned char hdr_buf[SOCKS5_UDP_HDR_MAXLEN];
@@ -1199,14 +1265,14 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		socks5udphdr_write(hdr_buf, &udph);
-		const struct iovec iov[2] = {
+		struct iovec iov[2] = {
 			{ .iov_base = hdr_buf, .iov_len = hdr_len },
 			{ .iov_base = ctx->ubuf, .iov_len = (size_t)nrecv },
 		};
 		const struct msghdr msg = {
 			.msg_name = &ctx->udp_peer.sa,
 			.msg_namelen = sa_len(&ctx->udp_peer.sa),
-			.msg_iov = (struct iovec *)iov,
+			.msg_iov = iov,
 			.msg_iovlen = 2,
 		};
 		ssize_t nsend;
@@ -1218,7 +1284,7 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			if (err != EAGAIN && err != EWOULDBLOCK &&
 			    err != ENOBUFS) {
 				SOCKS_CTX_LOG_F(
-					ERROR, ctx,
+					DEBUG, ctx,
 					"sendmsg to client: (%d) %s", err,
 					strerror(err));
 			}
@@ -1273,6 +1339,7 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	SOCKS_CTX_LOG(VERBOSE, ctx, "UDP ASSOCIATE: relay ready");
 	struct server_stats *restrict stats = &ctx->s->stats;
 	ctx->udp_peer_known = false;
+	ctx->udp_ntargets = 0;
 	udp_frag_reset(ctx);
 	/* Set state before the halfopen decrement below -- ctx_stop is a
 	 * no-op if gc_unref fires in between, matching socks_start_transfer/
@@ -1439,14 +1506,10 @@ static void dialer_cb(struct ev_loop *restrict loop, void *data, const int fd)
 	if (fd < 0) {
 		const enum dialer_error err = ctx->dialer.err;
 		const int syserr = ctx->dialer.syserr;
-		if (syserr != 0) {
-			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s (%d) %s",
-				dialer_strerror(err), syserr, strerror(syserr));
-		} else {
-			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s", dialer_strerror(err));
-		}
+		char errbuf[128];
+		SOCKS_CTX_LOG_F(
+			ERROR, ctx, "dialer: %s",
+			dialer_errorstr(errbuf, sizeof(errbuf), &ctx->dialer));
 		ctx->s->stats.num_reject_upstream++;
 		socks_senderr(ctx, err, syserr);
 		gc_unref(&ctx->gcbase);
@@ -1502,26 +1565,9 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 	SOCKS_CTX_LOG_F(
 		VERBOSE, ctx, "request: username=%s `%s'",
 		username != NULL ? username : "-", request);
-	bool ok;
-	switch (addr->type) {
-	case ATYP_DOMAIN:
-		ok = ruleset_resolve(
-			ruleset, &ctx->ruleset_state, request, username,
-			password, &ctx->ruleset_callback);
-		break;
-	case ATYP_INET:
-		ok = ruleset_route(
-			ruleset, &ctx->ruleset_state, request, username,
-			password, &ctx->ruleset_callback);
-		break;
-	case ATYP_INET6:
-		ok = ruleset_route6(
-			ruleset, &ctx->ruleset_state, request, username,
-			password, &ctx->ruleset_callback);
-		break;
-	default:
-		FAILMSGF("unexpected address type: %d", ctx->addr.type);
-	}
+	const bool ok = ruleset_dispatch(
+		ruleset, &ctx->ruleset_state, request, addr->type, username,
+		password, &ctx->ruleset_callback);
 	if (!ok) {
 		ctx->s->stats.num_reject_ruleset++;
 		(void)socks_sendrsp(ctx, false);
