@@ -14,7 +14,7 @@
  * @{
  */
 
-struct stream_vftable {
+struct io_stream_vftable {
 	io_direct_reader direct_read;
 	io_reader read;
 	io_writer write;
@@ -22,8 +22,8 @@ struct stream_vftable {
 	io_closer close;
 };
 
-struct stream {
-	const struct stream_vftable *restrict vftable;
+struct io_stream {
+	const struct io_stream_vftable *restrict vftable;
 	void *data;
 };
 
@@ -35,7 +35,7 @@ struct stream {
  * @return Error code, 0 for OK.
  * @details Any output length > 0 should be considered normal.
  */
-int stream_direct_read(struct stream *s, const void **buf, size_t *len);
+int io_stream_direct_read(struct io_stream *s, const void **buf, size_t *len);
 
 /**
  * @brief Read from a stream.
@@ -46,7 +46,7 @@ int stream_direct_read(struct stream *s, const void **buf, size_t *len);
  * @details The buffer should be filled up whenever possible.
  * Caller can assume short read as EOF or error.
  */
-int stream_read(struct stream *s, void *buf, size_t *len);
+int io_stream_read(struct io_stream *s, void *buf, size_t *len);
 
 /**
  * @brief Write to a stream.
@@ -57,7 +57,7 @@ int stream_read(struct stream *s, void *buf, size_t *len);
  * @details All data should be written whenever possible.
  * Caller can assume short write as error.
  */
-int stream_write(struct stream *s, const void *buf, size_t *len);
+int io_stream_write(struct io_stream *s, const void *buf, size_t *len);
 
 /**
  * @brief Flush a stream.
@@ -66,7 +66,7 @@ int stream_write(struct stream *s, const void *buf, size_t *len);
  * @details Base stream is flushed too. If error occurs,
  * stop flushing and return the error.
  */
-int stream_flush(struct stream *s);
+int io_stream_flush(struct io_stream *s);
 
 /**
  * @brief Close a stream.
@@ -75,7 +75,7 @@ int stream_flush(struct stream *s);
  * @details Base stream is closed too. If error occurs,
  * still close all resources and return the first error.
  */
-int stream_close(struct stream *s);
+int io_stream_close(struct io_stream *s);
 
 /**
  * @brief Copy all data from one stream to another.
@@ -85,8 +85,9 @@ int stream_close(struct stream *s);
  * @param[in] bufsize Size of buffer in bytes.
  * @return Error code, 0 for OK.
  */
-int stream_copy(
-	struct stream *dst, struct stream *src, void *buf, size_t bufsize);
+int io_stream_copy(
+	struct io_stream *dst, struct io_stream *src, void *buf,
+	size_t bufsize);
 
 /** @} */
 

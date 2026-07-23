@@ -21,7 +21,7 @@
  * @return If malloc failed or f == NULL, returns NULL.
  * @details The stream is unbuffered.
  */
-struct stream *io_filereader(FILE *f);
+struct io_stream *io_filereader(FILE *f);
 
 /**
  * @brief Create writer from a file object.
@@ -29,7 +29,7 @@ struct stream *io_filereader(FILE *f);
  * @return If malloc failed or f == NULL, returns NULL.
  * @details The stream is unbuffered.
  */
-struct stream *io_filewriter(FILE *f);
+struct io_stream *io_filewriter(FILE *f);
 
 /**
  * @brief Read the entire file into memory.

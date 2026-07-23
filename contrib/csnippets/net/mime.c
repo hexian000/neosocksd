@@ -3,7 +3,7 @@
 
 #include "mime.h"
 
-#include "utils/ascii.h"
+#include "utils/ctype_ascii.h"
 
 #include <string.h>
 

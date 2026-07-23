@@ -12,26 +12,22 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Report a failed stdio transfer: log the real errno (ferror alone is a sticky
- * boolean that discards it) and return it so the caller can tell a transient
- * condition such as EINTR/EAGAIN from a permanent one. errno is zeroed before
- * each transfer below, so a zero here means stdio failed without setting it
- * rather than "Success". Clear the indicator once reported. */
-static int file_error(FILE *restrict f, const char *restrict what)
+/* Collect a failed stdio transfer's errno (ferror alone is a sticky boolean
+ * that discards it) and clear the indicator. errno is zeroed before each
+ * transfer below, so a zero here means stdio failed without setting it,
+ * mapped to -1 rather than "Success". Deliberately quiet: when this stream is
+ * the slog writer sink, write/flush run under slog's output lock and must not
+ * log through slog; the caller may log where that cannot happen. */
+static int file_error(FILE *restrict f)
 {
 	const int err = errno;
-	if (err != 0) {
-		LOGE_F("%s: (%d) %s", what, err, strerror(err));
-	} else {
-		LOGE_F("%s: failed", what);
-	}
 	clearerr(f);
 	return err != 0 ? err : -1;
 }
 
 static int file_read(void *p, void *buf, size_t *restrict len)
 {
-	struct stream *restrict s = p;
+	struct io_stream *restrict s = p;
 	FILE *f = s->data;
 	const size_t want = *len;
 	/* clear any indicator carried in on this stream (e.g. a logged and
@@ -42,14 +38,20 @@ static int file_read(void *p, void *buf, size_t *restrict len)
 	*len = fread(buf, sizeof(unsigned char), want, f);
 	/* a short fread is legitimate EOF; only ferror marks a real failure */
 	if (ferror(f)) {
-		return file_error(f, "fread");
+		const int err = file_error(f);
+		if (err > 0) {
+			LOGE_F("fread: (%d) %s", err, strerror(err));
+		} else {
+			LOGE("fread: failed");
+		}
+		return err;
 	}
 	return 0;
 }
 
 static int file_write(void *p, const void *buf, size_t *restrict len)
 {
-	struct stream *restrict s = p;
+	struct io_stream *restrict s = p;
 	FILE *f = s->data;
 	const size_t want = *len;
 	clearerr(f);
@@ -58,18 +60,18 @@ static int file_write(void *p, const void *buf, size_t *restrict len)
 	/* a short fwrite is unambiguously an error -- decide from the transfer's
 	 * own count rather than the sticky indicator */
 	if (*len < want) {
-		return file_error(f, "fwrite");
+		return file_error(f);
 	}
 	return 0;
 }
 
 static int file_flush(void *p)
 {
-	struct stream *restrict s = p;
+	struct io_stream *restrict s = p;
 	FILE *f = s->data;
 	errno = 0;
 	if (fflush(f) != 0) {
-		return file_error(f, "fflush");
+		return file_error(f);
 	}
 	return 0;
 }
@@ -88,13 +90,13 @@ static int file_fclose(FILE *restrict f)
 
 static int file_close(void *p)
 {
-	struct stream *restrict s = p;
+	struct io_stream *restrict s = p;
 	const int ret = file_fclose(s->data);
 	free(s);
 	return ret;
 }
 
-struct stream *io_filereader(FILE *f)
+struct io_stream *io_filereader(FILE *f)
 {
 	if (f == NULL) {
 		return NULL;
@@ -103,7 +105,7 @@ struct stream *io_filereader(FILE *f)
 		const int err = errno;
 		LOGE_F("setvbuf: (%d) %s", err, strerror(err));
 	}
-	struct stream *restrict s = malloc(sizeof(struct stream));
+	struct io_stream *restrict s = malloc(sizeof(struct io_stream));
 	if (s == NULL) {
 		if (file_fclose(f) != 0) {
 			const int err = errno;
@@ -111,15 +113,15 @@ struct stream *io_filereader(FILE *f)
 		}
 		return NULL;
 	}
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.read = file_read,
 		.close = file_close,
 	};
-	*s = (struct stream){ &vftable, f };
+	*s = (struct io_stream){ &vftable, f };
 	return s;
 }
 
-struct stream *io_filewriter(FILE *f)
+struct io_stream *io_filewriter(FILE *f)
 {
 	if (f == NULL) {
 		return NULL;
@@ -128,7 +130,7 @@ struct stream *io_filewriter(FILE *f)
 		const int err = errno;
 		LOGE_F("setvbuf: (%d) %s", err, strerror(err));
 	}
-	struct stream *restrict s = malloc(sizeof(struct stream));
+	struct io_stream *restrict s = malloc(sizeof(struct io_stream));
 	if (s == NULL) {
 		if (file_fclose(f) != 0) {
 			const int err = errno;
@@ -136,12 +138,12 @@ struct stream *io_filewriter(FILE *f)
 		}
 		return NULL;
 	}
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.write = file_write,
 		.flush = file_flush,
 		.close = file_close,
 	};
-	*s = (struct stream){ &vftable, f };
+	*s = (struct io_stream){ &vftable, f };
 	return s;
 }
 

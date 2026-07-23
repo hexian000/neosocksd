@@ -23,6 +23,7 @@ add_subdirectory(math)
 add_subdirectory(meta)
 add_subdirectory(net)
 add_subdirectory(os)
+add_subdirectory(strings)
 add_subdirectory(utils)
 
 # for wcwidth()

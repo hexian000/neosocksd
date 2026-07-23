@@ -20,7 +20,7 @@
  * @param[in] bufsize Size of buffer in bytes.
  * @return If malloc failed or buf == NULL, returns NULL.
  */
-struct stream *io_memreader(const void *buf, size_t bufsize);
+struct io_stream *io_memreader(const void *buf, size_t bufsize);
 
 /**
  * @brief Fixed-size buffer writer.
@@ -29,7 +29,7 @@ struct stream *io_memreader(const void *buf, size_t bufsize);
  * @param[in] nwritten Counter of bytes written.
  * @return If malloc failed or buf == NULL, returns NULL.
  */
-struct stream *io_memwriter(void *buf, size_t bufsize, size_t *nwritten);
+struct io_stream *io_memwriter(void *buf, size_t bufsize, size_t *nwritten);
 
 struct vbuffer;
 
@@ -38,7 +38,7 @@ struct vbuffer;
  * @param[in] pvbuf Pointer to the heap buffer.
  * @return If malloc failed or pvbuf == NULL, returns NULL.
  */
-struct stream *io_heapwriter(struct vbuffer **pvbuf);
+struct io_stream *io_heapwriter(struct vbuffer **pvbuf);
 
 /**
  * @brief Print to a heapwriter.
@@ -48,7 +48,7 @@ struct stream *io_heapwriter(struct vbuffer **pvbuf);
  * @return Error code, 0 for OK.
  * @details Stream internal buffer have a limited size.
  */
-int io_heapprintf(struct stream *s, const char *format, ...);
+int io_heapprintf(struct io_stream *s, const char *format, ...);
 
 /**
  * @brief Buffered stream reader.
@@ -57,7 +57,7 @@ int io_heapprintf(struct stream *s, const char *format, ...);
  * @details Wraps the base stream to support all read methods.
  * @return If malloc failed or base == NULL, returns NULL.
  */
-struct stream *io_bufreader(struct stream *base, size_t bufsize);
+struct io_stream *io_bufreader(struct io_stream *base, size_t bufsize);
 
 /**
  * @brief Peek at buffered data without consuming it.
@@ -69,7 +69,7 @@ struct stream *io_bufreader(struct stream *base, size_t bufsize);
  * Data is not consumed; the next read or peek returns the same bytes.
  * If the buffer is empty, the underlying stream is read to fill it.
  */
-int io_bufpeek(struct stream *s, const void **buf, size_t *len);
+int io_bufpeek(struct io_stream *s, const void **buf, size_t *len);
 
 /**
  * @brief Buffered stream writer.
@@ -78,7 +78,7 @@ int io_bufpeek(struct stream *s, const void **buf, size_t *len);
  * @details Wraps the base stream to support all write methods.
  * @return If malloc failed or base == NULL, returns NULL.
  */
-struct stream *io_bufwriter(struct stream *base, size_t bufsize);
+struct io_stream *io_bufwriter(struct io_stream *base, size_t bufsize);
 
 /**
  * @brief Print to a bufwriter.
@@ -89,7 +89,7 @@ struct stream *io_bufwriter(struct stream *base, size_t bufsize);
  * @details Any invocation writes all buffered data to the base stream.
  * The printed string is truncated to (bufsize - 1) silently.
  */
-int io_bufprintf(struct stream *s, const char *format, ...);
+int io_bufprintf(struct io_stream *s, const char *format, ...);
 
 /**
  * @brief Metered stream.
@@ -97,7 +97,7 @@ int io_bufprintf(struct stream *s, const char *format, ...);
  * @param[in] meter Pointer to byte counter.
  * @return If malloc failed or base == NULL, returns NULL.
  */
-struct stream *io_metered(struct stream *base, size_t *meter);
+struct io_stream *io_metered(struct io_stream *base, size_t *meter);
 
 /** @} */
 

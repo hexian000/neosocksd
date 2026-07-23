@@ -17,7 +17,7 @@
 #include <string.h>
 
 struct memory_stream {
-	struct stream s;
+	struct io_stream s;
 	/* the reader only ever advances this pointer (mem_direct_read never
 	 * writes through it) while the writer writes through it; the union lets
 	 * the reader keep a const view so io_memreader need not cast away the
@@ -29,7 +29,7 @@ struct memory_stream {
 	size_t bufsize;
 	size_t *nwritten;
 };
-ASSERT_SUPER(struct stream, struct memory_stream, s);
+ASSERT_SUPER(struct io_stream, struct memory_stream, s);
 
 static int
 mem_direct_read(void *p, const void **restrict buf, size_t *restrict len)
@@ -76,7 +76,7 @@ io_memstream(const size_t bufsize, size_t *nwritten)
 	return m;
 }
 
-struct stream *io_memreader(const void *buf, const size_t bufsize)
+struct io_stream *io_memreader(const void *buf, const size_t bufsize)
 {
 	if (buf == NULL) {
 		return NULL;
@@ -86,17 +86,18 @@ struct stream *io_memreader(const void *buf, const size_t bufsize)
 		return NULL;
 	}
 	m->buf.r = buf;
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.direct_read = mem_direct_read,
 	};
-	m->s = (struct stream){
+	m->s = (struct io_stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
 	return &m->s;
 }
 
-struct stream *io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
+struct io_stream *
+io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
 {
 	if (buf == NULL) {
 		return NULL;
@@ -106,10 +107,10 @@ struct stream *io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
 		return NULL;
 	}
 	m->buf.w = buf;
-	static const struct stream_vftable vftable = {
+	static const struct io_stream_vftable vftable = {
 		.write = mem_write,
 	};
-	m->s = (struct stream){
+	m->s = (struct io_stream){
 		.vftable = &vftable,
 		.data = NULL,
 	};
@@ -118,7 +119,7 @@ struct stream *io_memwriter(void *buf, const size_t bufsize, size_t *nwritten)
 
 static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
 {
-	struct stream *restrict s = p;
+	struct io_stream *restrict s = p;
 	struct vbuffer *restrict *restrict pvbuf = (struct vbuffer **)s->data;
 	const size_t n = *len;
 	const size_t before = VBUF_LEN(*pvbuf);
@@ -133,26 +134,26 @@ static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
 	return 0;
 }
 
-static const struct stream_vftable vftable_heapwriter = {
+static const struct io_stream_vftable vftable_heapwriter = {
 	.write = heap_write,
 };
-struct stream *io_heapwriter(struct vbuffer **restrict pvbuf)
+struct io_stream *io_heapwriter(struct vbuffer **restrict pvbuf)
 {
 	if (pvbuf == NULL) {
 		return NULL;
 	}
-	struct stream *s = malloc(sizeof(struct stream));
+	struct io_stream *s = malloc(sizeof(struct io_stream));
 	if (s == NULL) {
 		return NULL;
 	}
-	*s = (struct stream){
+	*s = (struct io_stream){
 		.vftable = &vftable_heapwriter,
 		.data = (void *)pvbuf,
 	};
 	return s;
 }
 
-int io_heapprintf(struct stream *restrict s, const char *restrict format, ...)
+int io_heapprintf(struct io_stream *restrict s, const char *restrict format, ...)
 {
 	assert(s->vftable == &vftable_heapwriter);
 	struct vbuffer *restrict *restrict pvbuf = (struct vbuffer **)s->data;
@@ -173,14 +174,14 @@ int io_heapprintf(struct stream *restrict s, const char *restrict format, ...)
 }
 
 struct buffered_stream {
-	struct stream s;
-	struct stream *base;
+	struct io_stream s;
+	struct io_stream *base;
 	int err;
 	size_t bufsize;
 	size_t pos, len;
 	unsigned char buf[];
 };
-ASSERT_SUPER(struct stream, struct buffered_stream, s);
+ASSERT_SUPER(struct io_stream, struct buffered_stream, s);
 
 static int
 buf_direct_read(void *p, const void **restrict buf, size_t *restrict len)
@@ -195,7 +196,7 @@ buf_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 		}
 		b->pos = b->len = 0;
 		size_t n = b->bufsize;
-		b->err = stream_read(b->base, b->buf, &n);
+		b->err = io_stream_read(b->base, b->buf, &n);
 		b->len = n;
 		if (n == 0) {
 			*len = 0;
@@ -231,7 +232,7 @@ static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 	unsigned char *restrict dst = buf;
 	size_t nread = 0;
 	/* keep refilling until the caller's buffer is full or the base runs
-	 * dry; stream_read's contract lets the caller read a short return as
+	 * dry; io_stream_read's contract lets the caller read a short return as
 	 * EOF, so stopping on a partial buffer would truncate the stream */
 	while (nread < want) {
 		const size_t avail = b->len - b->pos;
@@ -251,7 +252,7 @@ static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 			/* the remainder alone fills the internal buffer; read
 			 * straight into the caller's to skip a copy */
 			size_t n = remain;
-			b->err = stream_read(b->base, dst + nread, &n);
+			b->err = io_stream_read(b->base, dst + nread, &n);
 			nread += n;
 			if (n == 0) {
 				break;
@@ -260,7 +261,7 @@ static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 		}
 		b->pos = b->len = 0;
 		size_t n = b->bufsize;
-		b->err = stream_read(b->base, b->buf, &n);
+		b->err = io_stream_read(b->base, b->buf, &n);
 		b->len = n;
 		if (n == 0) {
 			break;
@@ -301,7 +302,7 @@ static int buf_peek(void *p, const void **restrict buf, size_t *restrict len)
 	b->len = 0;
 	size_t n = b->bufsize;
 	const size_t req = (*len < n) ? *len : n;
-	b->err = stream_read(b->base, b->buf, &n);
+	b->err = io_stream_read(b->base, b->buf, &n);
 	b->len = n;
 	*buf = b->buf;
 	*len = (req < n) ? req : n;
@@ -328,8 +329,8 @@ static int buf_flush_(struct buffered_stream *restrict b)
 	if (len == 0) {
 		return 0;
 	}
-	struct stream *restrict base = b->base;
-	b->err = stream_write(base, b->buf, &len);
+	struct io_stream *restrict base = b->base;
+	b->err = io_stream_write(base, b->buf, &len);
 	if (len < b->len && b->err == 0) {
 		/* short write */
 		b->err = -1;
@@ -355,7 +356,7 @@ static int buf_flush(void *p)
 		b->err = 0;
 		return err;
 	}
-	return stream_flush(b->base);
+	return io_stream_flush(b->base);
 }
 
 static int buf_write(void *p, const void *restrict buf, size_t *restrict len)
@@ -369,8 +370,8 @@ static int buf_write(void *p, const void *restrict buf, size_t *restrict len)
 		size_t n;
 		if (b->len == 0) {
 			n = srclen;
-			struct stream *restrict base = b->base;
-			const int ret = stream_write(base, src, &n);
+			struct io_stream *restrict base = b->base;
+			const int ret = io_stream_write(base, src, &n);
 			if (ret != 0) {
 				/* report bytes consumed so far (prior iterations
 				 * plus whatever the base accepted this call) */
@@ -412,7 +413,8 @@ static int buf_write(void *p, const void *restrict buf, size_t *restrict len)
 static int buf_vprintf(void *p, const char *restrict format, va_list args)
 {
 	struct buffered_stream *restrict b = DOWNCAST(
-		struct stream, struct buffered_stream, s, (struct stream *)p);
+		struct io_stream, struct buffered_stream, s,
+		(struct io_stream *)p);
 	int ret = buf_flush_(b);
 	if (ret != 0) {
 		/* clear after reporting so a subsequent call retries the residual
@@ -438,7 +440,7 @@ static int buf_vprintf(void *p, const char *restrict format, va_list args)
 static int rbuf_close(void *p)
 {
 	struct buffered_stream *restrict b = p;
-	const int err = stream_close(b->base);
+	const int err = io_stream_close(b->base);
 	free(b);
 	return err;
 }
@@ -448,24 +450,24 @@ static int wbuf_close(void *p)
 	struct buffered_stream *restrict b = p;
 	(void)buf_flush_(b);
 	const int err = b->err;
-	const int ret = stream_close(b->base);
+	const int ret = io_stream_close(b->base);
 	free(b);
 	return err != 0 ? err : ret;
 }
 
-static struct stream *io_bufstream(struct stream *base, size_t bufsize)
+static struct io_stream *io_bufstream(struct io_stream *base, size_t bufsize)
 {
 	if (base == NULL) {
 		return NULL;
 	}
 	if (bufsize > SIZE_MAX - sizeof(struct buffered_stream)) {
-		stream_close(base);
+		io_stream_close(base);
 		return NULL;
 	}
 	struct buffered_stream *b =
 		malloc(sizeof(struct buffered_stream) + bufsize);
 	if (b == NULL) {
-		stream_close(base);
+		io_stream_close(base);
 		return NULL;
 	}
 	b->base = base;
@@ -475,22 +477,22 @@ static struct stream *io_bufstream(struct stream *base, size_t bufsize)
 	return &b->s;
 }
 
-static const struct stream_vftable vftable_bufreader = {
+static const struct io_stream_vftable vftable_bufreader = {
 	.direct_read = buf_direct_read,
 	.read = buf_read,
 	.close = rbuf_close,
 };
 
-struct stream *io_bufreader(struct stream *base, size_t bufsize)
+struct io_stream *io_bufreader(struct io_stream *base, size_t bufsize)
 {
 	if (bufsize == 0) {
 		bufsize = IO_BUFSIZE;
 	}
-	struct stream *s = io_bufstream(base, bufsize);
+	struct io_stream *s = io_bufstream(base, bufsize);
 	if (s == NULL) {
 		return NULL;
 	}
-	*s = (struct stream){
+	*s = (struct io_stream){
 		.vftable = &vftable_bufreader,
 		.data = NULL,
 	};
@@ -498,35 +500,35 @@ struct stream *io_bufreader(struct stream *base, size_t bufsize)
 }
 
 int io_bufpeek(
-	struct stream *restrict s, const void **restrict buf,
+	struct io_stream *restrict s, const void **restrict buf,
 	size_t *restrict len)
 {
 	assert(s->vftable == &vftable_bufreader);
 	return buf_peek(s, buf, len);
 }
 
-static const struct stream_vftable vftable_bufwriter = {
+static const struct io_stream_vftable vftable_bufwriter = {
 	.write = buf_write,
 	.flush = buf_flush,
 	.close = wbuf_close,
 };
-struct stream *io_bufwriter(struct stream *base, size_t bufsize)
+struct io_stream *io_bufwriter(struct io_stream *base, size_t bufsize)
 {
 	if (bufsize == 0) {
 		bufsize = IO_BUFSIZE;
 	}
-	struct stream *restrict s = io_bufstream(base, bufsize);
+	struct io_stream *restrict s = io_bufstream(base, bufsize);
 	if (s == NULL) {
 		return NULL;
 	}
-	*s = (struct stream){
+	*s = (struct io_stream){
 		.vftable = &vftable_bufwriter,
 		.data = NULL,
 	};
 	return s;
 }
 
-int io_bufprintf(struct stream *restrict s, const char *restrict format, ...)
+int io_bufprintf(struct io_stream *restrict s, const char *restrict format, ...)
 {
 	assert(s->vftable == &vftable_bufwriter);
 	va_list args;
@@ -537,17 +539,17 @@ int io_bufprintf(struct stream *restrict s, const char *restrict format, ...)
 }
 
 struct metered_stream {
-	struct stream s;
-	struct stream *base;
+	struct io_stream s;
+	struct io_stream *base;
 	size_t *meter;
 };
-ASSERT_SUPER(struct stream, struct metered_stream, s);
+ASSERT_SUPER(struct io_stream, struct metered_stream, s);
 
 static int
 metered_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct metered_stream *restrict m = p;
-	const int ret = stream_direct_read(m->base, buf, len);
+	const int ret = io_stream_direct_read(m->base, buf, len);
 	/* *len is the transferred-byte count per the stream contract (accurate
 	 * even on an error return that also delivered data), so count it
 	 * unconditionally */
@@ -560,7 +562,7 @@ metered_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 static int metered_read(void *p, void *restrict buf, size_t *restrict len)
 {
 	struct metered_stream *restrict m = p;
-	const int ret = stream_read(m->base, buf, len);
+	const int ret = io_stream_read(m->base, buf, len);
 	if (m->meter != NULL) {
 		*m->meter += *len;
 	}
@@ -571,7 +573,7 @@ static int
 metered_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct metered_stream *restrict m = p;
-	const int ret = stream_write(m->base, buf, len);
+	const int ret = io_stream_write(m->base, buf, len);
 	if (m->meter != NULL) {
 		*m->meter += *len;
 	}
@@ -581,44 +583,44 @@ metered_write(void *p, const void *restrict buf, size_t *restrict len)
 static int metered_flush(void *p)
 {
 	struct metered_stream *restrict m = p;
-	return stream_flush(m->base);
+	return io_stream_flush(m->base);
 }
 
 static int metered_close(void *p)
 {
 	struct metered_stream *restrict m = p;
-	const int ret = stream_close(m->base);
+	const int ret = io_stream_close(m->base);
 	free(m);
 	return ret;
 }
 
-struct stream *io_metered(struct stream *base, size_t *meter)
+struct io_stream *io_metered(struct io_stream *base, size_t *meter)
 {
 	if (base == NULL) {
 		return NULL;
 	}
 	struct metered_stream *m = malloc(sizeof(struct metered_stream));
 	if (m == NULL) {
-		stream_close(base);
+		io_stream_close(base);
 		return NULL;
 	}
 	/* only advertise direct_read when the base actually supports it, so a
 	 * metered wrapper over a read-only stream (e.g. io_filereader) does not
 	 * forward direct_read to a NULL base entry */
-	static const struct stream_vftable vftable_direct = {
+	static const struct io_stream_vftable vftable_direct = {
 		.direct_read = metered_direct_read,
 		.read = metered_read,
 		.write = metered_write,
 		.flush = metered_flush,
 		.close = metered_close,
 	};
-	static const struct stream_vftable vftable_indirect = {
+	static const struct io_stream_vftable vftable_indirect = {
 		.read = metered_read,
 		.write = metered_write,
 		.flush = metered_flush,
 		.close = metered_close,
 	};
-	m->s = (struct stream){
+	m->s = (struct io_stream){
 		.vftable = (base->vftable->direct_read != NULL) ?
 				   &vftable_direct :
 				   &vftable_indirect,

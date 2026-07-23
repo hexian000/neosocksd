@@ -133,7 +133,7 @@
  *
  *     --- BENCH bench_add        73400320     13.6ns/op          0/op  0 allocs/op
  *
- *   Times and byte counts are rendered with utils/formats.h (SI-prefixed
+ *   Times and byte counts are rendered with strings/format.h (SI-prefixed
  *   durations like 13.6ns/op, IEC byte counts like 1.50KiB/op), so the runner
  *   pulls in libm.  Memory columns are zero unless the benchmark reports
  *   allocations; a throughput column (e.g. 2.33GB/s) appears only when the

@@ -3,7 +3,7 @@
 
 #include "testing.h"
 
-#include "formats.h"
+#include "strings/format.h"
 #ifdef _WIN32
 #include "wintime.h"
 #else

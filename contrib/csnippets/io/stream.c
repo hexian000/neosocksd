@@ -9,8 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-int stream_direct_read(
-	struct stream *restrict s, const void **restrict buf,
+int io_stream_direct_read(
+	struct io_stream *restrict s, const void **restrict buf,
 	size_t *restrict len)
 {
 	const io_direct_reader direct_read = s->vftable->direct_read;
@@ -23,8 +23,8 @@ int stream_direct_read(
 	return direct_read(s, buf, len);
 }
 
-int stream_read(
-	struct stream *restrict s, void *restrict buf, size_t *restrict len)
+int io_stream_read(
+	struct io_stream *restrict s, void *restrict buf, size_t *restrict len)
 {
 	{
 		const io_reader read = s->vftable->read;
@@ -59,8 +59,8 @@ int stream_read(
 	return err;
 }
 
-int stream_write(
-	struct stream *restrict s, const void *restrict buf,
+int io_stream_write(
+	struct io_stream *restrict s, const void *restrict buf,
 	size_t *restrict len)
 {
 	const io_writer write = s->vftable->write;
@@ -73,7 +73,7 @@ int stream_write(
 	return write(s, buf, len);
 }
 
-int stream_flush(struct stream *restrict s)
+int io_stream_flush(struct io_stream *restrict s)
 {
 	const io_flusher flush = s->vftable->flush;
 	if (flush == NULL) {
@@ -82,7 +82,7 @@ int stream_flush(struct stream *restrict s)
 	return flush(s);
 }
 
-int stream_close(struct stream *restrict s)
+int io_stream_close(struct io_stream *restrict s)
 {
 	const io_closer close = s->vftable->close;
 	if (close == NULL) {
@@ -92,16 +92,16 @@ int stream_close(struct stream *restrict s)
 	return close(s);
 }
 
-int stream_copy(
-	struct stream *restrict dst, struct stream *restrict src,
+int io_stream_copy(
+	struct io_stream *restrict dst, struct io_stream *restrict src,
 	void *restrict buf, const size_t bufsize)
 {
 	size_t nread;
 	do {
 		nread = bufsize;
-		const int srcerr = stream_read(src, buf, &nread);
+		const int srcerr = io_stream_read(src, buf, &nread);
 		size_t nwritten = nread;
-		const int dsterr = stream_write(dst, buf, &nwritten);
+		const int dsterr = io_stream_write(dst, buf, &nwritten);
 		if (srcerr != 0) {
 			return srcerr;
 		}
@@ -109,7 +109,7 @@ int stream_copy(
 			return dsterr;
 		}
 		if (nwritten < nread) {
-			/* short write: per stream_write's contract, the
+			/* short write: per io_stream_write's contract, the
 			 * caller must treat this as an error */
 			return -1;
 		}
