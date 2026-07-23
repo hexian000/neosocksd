@@ -5,6 +5,8 @@
 
 #include "resolver.h"
 
+#include "io/file.h"
+
 #include "math/rand.h"
 #if WITH_CRASH_HANDLER
 #include "os/signal.h"
@@ -42,8 +44,14 @@ void init(int argc, char *const restrict argv[])
 	(void)argc;
 	(void)argv;
 	(void)setlocale(LC_ALL, "");
-	(void)setvbuf(stderr, NULL, _IONBF, 0);
-	slog_setoutput(SLOG_OUTPUT_FILE, stderr);
+	/* io_filewriter() heap-allocates a stream that slog only borrows; keep
+	 * it in a static so it stays reachable (and unbuffered) for the process
+	 * lifetime rather than dangling once the sink is later replaced. */
+	static struct io_stream *log_writer = NULL;
+	if (log_writer == NULL) {
+		log_writer = io_filewriter(stderr);
+	}
+	slog_setoutput(SLOG_OUTPUT_WRITER, log_writer);
 	{
 		static char prefix[] = __FILE__;
 		char *s = strrchr(prefix, PATH_SEPARATOR);
@@ -109,7 +117,7 @@ void modify_io_events(
 	}
 }
 
-void socket_bind_netdev(int fd, const char *restrict netdev)
+void socket_bind_netdev(const int fd, const char *restrict netdev)
 {
 #ifdef SO_BINDTODEVICE
 	char ifname[IFNAMSIZ];
@@ -129,7 +137,7 @@ void socket_bind_netdev(int fd, const char *restrict netdev)
 #endif /* SO_BINDTODEVICE */
 }
 
-void socket_set_transparent(int fd, bool tproxy)
+void socket_set_transparent(const int fd, const bool tproxy)
 {
 #ifdef IP_TRANSPARENT
 	int val = tproxy ? 1 : 0;
