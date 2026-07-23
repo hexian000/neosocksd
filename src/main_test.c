@@ -750,28 +750,16 @@ bool ruleset_resolve(
 	return false;
 }
 
-bool ruleset_route(
+bool ruleset_dispatch(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request, const int atype,
+	const char *restrict username, const char *restrict password,
+	struct ruleset_callback *callback)
 {
 	(void)r;
 	(void)state;
 	(void)request;
-	(void)username;
-	(void)password;
-	(void)callback;
-	return false;
-}
-
-bool ruleset_route6(
-	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
-{
-	(void)r;
-	(void)state;
-	(void)request;
+	(void)atype;
 	(void)username;
 	(void)password;
 	(void)callback;
@@ -2265,13 +2253,13 @@ static void make_socketpair(int sv[2])
 	T_CHECK(ok);
 }
 
-static void drain_stream(struct stream *restrict s)
+static void drain_stream(struct io_stream *restrict s)
 {
 	size_t total = 0;
 	for (;;) {
 		unsigned char out[1024];
 		size_t len = sizeof(out);
-		const int err = stream_read(s, out, &len);
+		const int err = io_stream_read(s, out, &len);
 		if (err != 0 || len == 0) {
 			break;
 		}
@@ -2282,7 +2270,7 @@ static void drain_stream(struct stream *restrict s)
 	}
 }
 
-typedef struct stream *(*codec_reader_fn)(struct stream *base);
+typedef struct io_stream *(*codec_reader_fn)(struct io_stream *base);
 
 static void
 fuzz_codec_reader(struct prng *restrict p, codec_reader_fn new_reader)
@@ -2291,15 +2279,15 @@ fuzz_codec_reader(struct prng *restrict p, codec_reader_fn new_reader)
 	const size_t len = prng_size(p, 0, sizeof(input));
 	prng_fill(p, input, len);
 
-	struct stream *const base = io_memreader(input, len);
+	struct io_stream *const base = io_memreader(input, len);
 	T_CHECK(base != NULL);
-	struct stream *const reader = new_reader(base);
+	struct io_stream *const reader = new_reader(base);
 	if (reader == NULL) {
 		return;
 	}
 	drain_stream(reader);
 	/* Malformed fuzz inputs may be rejected during close-time validation. */
-	(void)stream_close(reader);
+	(void)io_stream_close(reader);
 }
 
 static void
