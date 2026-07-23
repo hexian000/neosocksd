@@ -45,6 +45,18 @@
 		}                                                              \
 	} while (0)
 
+/* Symmetric counterpart to AWAIT_CHECK_YIELDABLE: yield the running coroutine,
+ * resuming into k when the awaited event completes. The two statements after
+ * lua_yieldk are unreachable in a yieldable coroutine (the entry
+ * AWAIT_CHECK_YIELDABLE already rejects the non-yieldable main thread) and
+ * defend against a yield that fails to suspend. */
+#define AWAIT_YIELD(L, k)                                                      \
+	do {                                                                   \
+		lua_yieldk((L), 0, 0, (k));                                    \
+		lua_pushliteral((L), ERR_NOT_ASYNC_ROUTINE);                   \
+		return lua_error((L));                                         \
+	} while (0)
+
 /* [-0, +0, m] */
 static void pin_context(lua_State *restrict L, const void *p)
 {
@@ -66,6 +78,18 @@ static void unpin_context(lua_State *restrict L, const void *p)
 	lua_pushnil(L);
 	lua_rawsetp(L, -2, p);
 	lua_pop(L, 1);
+}
+
+/* Shared idle finish-callback: resume the pinned coroutine with no results.
+ * struct ruleset *ruleset is the first member of every await_*_userdata, so the
+ * concrete userdata type is immaterial and the pointer is passed on opaquely. */
+static void
+await_resume_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	void *restrict ud = watcher->data;
+	ruleset_resume(*(struct ruleset **)ud, ud, 0);
 }
 
 struct await_sleep_userdata {
@@ -90,15 +114,6 @@ static void sleep_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	ev_timer_stop(loop, watcher);
 	struct await_sleep_userdata *restrict ud = watcher->data;
 	ev_idle_start(loop, &ud->w_idle);
-}
-
-static void
-sleep_finish_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_IDLE);
-	ev_idle_stop(loop, watcher);
-	struct await_sleep_userdata *restrict ud = watcher->data;
-	ruleset_resume(ud->ruleset, ud, 0);
 }
 
 static int
@@ -129,7 +144,7 @@ static int await_sleep(lua_State *restrict L)
 	ud->ruleset = r;
 	ev_timer_init(&ud->w_timer, sleep_cb, n, 0.0);
 	ud->w_timer.data = ud;
-	ev_idle_init(&ud->w_idle, sleep_finish_cb);
+	ev_idle_init(&ud->w_idle, await_resume_cb);
 	ud->w_idle.data = ud;
 	aux_toclose(L, -1, MT_AWAIT_SLEEP, await_sleep_close);
 
@@ -142,9 +157,7 @@ static int await_sleep(lua_State *restrict L)
 	pin_context(L, ud);
 	/* lua stack: ud */
 	ASSERT(lua_gettop(L) == 1);
-	lua_yieldk(L, 0, 0, await_sleep_k);
-	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
-	return lua_error(L);
+	AWAIT_YIELD(L, await_sleep_k);
 }
 
 struct await_resolve_userdata {
@@ -235,9 +248,7 @@ static int await_resolve(lua_State *restrict L)
 	pin_context(L, ud);
 	/* lua stack: hostname ud */
 	ASSERT(lua_gettop(L) == 2);
-	lua_yieldk(L, 0, 0, await_resolve_k);
-	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
-	return lua_error(L);
+	AWAIT_YIELD(L, await_resolve_k);
 }
 
 struct await_invoke_userdata {
@@ -259,7 +270,7 @@ static int await_invoke_close(lua_State *restrict L)
 
 static void invoke_cb(
 	struct api_client_ctx *ctx, struct ev_loop *loop, void *data,
-	const char *err, const size_t errlen, struct stream *stream)
+	const char *err, const size_t errlen, struct io_stream *stream)
 {
 	(void)loop;
 	struct await_invoke_userdata *restrict ud = data;
@@ -284,7 +295,7 @@ await_invoke_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	const size_t errlen = ud->errlen;
 	aux_close(L, 2);
 	const char *const errmsg = lua_touserdata(L, 3);
-	struct stream *const stream = lua_touserdata(L, 4);
+	struct io_stream *const stream = lua_touserdata(L, 4);
 	lua_settop(L, 0);
 
 	if (errmsg != NULL) {
@@ -307,7 +318,29 @@ static int await_invoke(lua_State *restrict L)
 	size_t len;
 	const char *restrict const code = luaL_checklstring(L, 1, &len);
 	const int n = lua_gettop(L) - 1;
-	if (n <= 0 || !aux_todialreq(L, n)) {
+	if (n <= 0) {
+		lua_pushliteral(L, ERR_INVALID_ADDR);
+		return lua_error(L);
+	}
+	/* lua stack: code addr proxyN ... proxy1 */
+
+	/* Create the finalizable userdata before aux_todialreq builds req, so
+	 * req is never an unowned C local across a fallible Lua op: slide the ud
+	 * below the n address args (which aux_todialreq consumes off the top),
+	 * then hand req straight to api_client_rpcall with no fallible op in
+	 * between. */
+	struct ruleset *restrict r = aux_getruleset(L);
+	struct await_invoke_userdata *restrict ud =
+		lua_newuserdata(L, sizeof(struct await_invoke_userdata));
+	*ud = (struct await_invoke_userdata){
+		.ruleset = r,
+		.ctx = NULL,
+	};
+	lua_insert(L, -(n + 1));
+	aux_toclose(L, -(n + 1), MT_AWAIT_INVOKE, await_invoke_close);
+	/* lua stack: code ud addr proxyN ... proxy1 */
+
+	if (!aux_todialreq(L, n)) {
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
@@ -316,16 +349,8 @@ static int await_invoke(lua_State *restrict L)
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
 	}
-	lua_settop(L, 1);
-	/* lua stack: code */
-	struct ruleset *restrict r = aux_getruleset(L);
-	struct await_invoke_userdata *restrict ud =
-		lua_newuserdata(L, sizeof(struct await_invoke_userdata));
-	*ud = (struct await_invoke_userdata){
-		.ruleset = r,
-		.ctx = NULL,
-	};
-	aux_toclose(L, -1, MT_AWAIT_INVOKE, await_invoke_close);
+	lua_pop(L, 1);
+	/* lua stack: code ud */
 
 	const struct api_client_cb cb = {
 		.func = invoke_cb,
@@ -342,9 +367,7 @@ static int await_invoke(lua_State *restrict L)
 	pin_context(L, ud);
 	/* lua stack: code ud */
 	ASSERT(lua_gettop(L) == 2);
-	lua_yieldk(L, 0, 0, await_invoke_k);
-	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
-	return lua_error(L);
+	AWAIT_YIELD(L, await_invoke_k);
 }
 
 struct await_forward_userdata {
@@ -472,6 +495,30 @@ static int await_forward(lua_State *restrict L)
 		lua_pushnil(L);
 		return 1;
 	}
+
+	/* Create the finalizable userdata before aux_todialreq builds req, so
+	 * req is never an unowned C local across a fallible Lua op: slide the ud
+	 * below the n address args (which aux_todialreq consumes off the top),
+	 * then store req into ud->req (whose __close frees it) with no fallible
+	 * op in between. */
+	struct ruleset *restrict r = aux_getruleset(L);
+	struct await_forward_userdata *restrict ud =
+		lua_newuserdata(L, sizeof(struct await_forward_userdata));
+	*ud = (struct await_forward_userdata){
+		.ruleset = r,
+		.state = state,
+		.req = NULL,
+		.fd = -1,
+		.dialing = false,
+		.timed_out = false,
+	};
+	ev_timer_init(
+		&ud->w_timeout, forward_timeout_cb, r->conf->timeout, 0.0);
+	ud->w_timeout.data = ud;
+	lua_insert(L, -(n + 1));
+	aux_toclose(L, -(n + 1), MT_AWAIT_FORWARD, await_forward_close);
+	/* lua stack: ud addr proxyN ... proxy1 */
+
 	if (!aux_todialreq(L, n)) {
 		lua_pushliteral(L, ERR_INVALID_ADDR);
 		return lua_error(L);
@@ -483,23 +530,9 @@ static int await_forward(lua_State *restrict L)
 		lua_pushnil(L);
 		return 1;
 	}
-	lua_settop(L, 0);
-
-	struct ruleset *restrict r = aux_getruleset(L);
-	struct await_forward_userdata *restrict ud =
-		lua_newuserdata(L, sizeof(struct await_forward_userdata));
-	*ud = (struct await_forward_userdata){
-		.ruleset = r,
-		.state = state,
-		.req = req,
-		.fd = -1,
-		.dialing = false,
-		.timed_out = false,
-	};
-	ev_timer_init(
-		&ud->w_timeout, forward_timeout_cb, r->conf->timeout, 0.0);
-	ud->w_timeout.data = ud;
-	aux_toclose(L, -1, MT_AWAIT_FORWARD, await_forward_close);
+	ud->req = req;
+	lua_settop(L, 1);
+	/* lua stack: ud */
 
 	struct server *restrict server = r->server;
 	const struct dialer_cb dcb = {
@@ -517,9 +550,7 @@ static int await_forward(lua_State *restrict L)
 	pin_context(L, ud);
 	/* lua stack: ud */
 	ASSERT(lua_gettop(L) == 1);
-	lua_yieldk(L, 0, 0, await_forward_k);
-	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
-	return lua_error(L);
+	AWAIT_YIELD(L, await_forward_k);
 }
 
 struct await_execute_userdata {
@@ -552,15 +583,6 @@ static void child_cb(struct ev_loop *loop, ev_child *watcher, const int revents)
 	watcher->pid = 0;
 	struct await_execute_userdata *restrict ud = watcher->data;
 	ev_idle_start(loop, &ud->w_idle);
-}
-
-static void
-child_finish_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
-{
-	CHECK_REVENTS(revents, EV_IDLE);
-	ev_idle_stop(loop, watcher);
-	struct await_execute_userdata *restrict ud = watcher->data;
-	ruleset_resume(ud->ruleset, ud, 0);
 }
 
 static int
@@ -630,7 +652,7 @@ static int await_execute(lua_State *restrict L)
 	ud->ruleset = r;
 	ev_child_init(&ud->w_child, child_cb, 0, 0);
 	ud->w_child.data = ud;
-	ev_idle_init(&ud->w_idle, child_finish_cb);
+	ev_idle_init(&ud->w_idle, await_resume_cb);
 	ud->w_idle.data = ud;
 	aux_toclose(L, -1, MT_AWAIT_EXECUTE, await_execute_close);
 
@@ -665,9 +687,7 @@ static int await_execute(lua_State *restrict L)
 	pin_context(L, ud);
 	/* lua stack: command ud */
 	ASSERT(lua_gettop(L) == 2);
-	lua_yieldk(L, 0, 0, await_execute_k);
-	lua_pushliteral(L, ERR_NOT_ASYNC_ROUTINE);
-	return lua_error(L);
+	AWAIT_YIELD(L, await_execute_k);
 }
 
 int luaopen_await(lua_State *restrict L)

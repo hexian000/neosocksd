@@ -52,7 +52,7 @@ struct test_watchdog {
 };
 
 struct string_stream {
-	struct stream stream;
+	struct io_stream stream;
 	const char *text;
 	size_t len;
 	bool consumed;
@@ -180,11 +180,11 @@ static int string_stream_direct_read(void *data, const void **buf, size_t *len)
 	return 0;
 }
 
-static const struct stream_vftable string_stream_vftable = {
+static const struct io_stream_vftable string_stream_vftable = {
 	.direct_read = string_stream_direct_read,
 };
 
-static struct stream *
+static struct io_stream *
 string_stream_open(struct string_stream *restrict s, const char *restrict text)
 {
 	*s = (struct string_stream){
@@ -256,6 +256,14 @@ const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_SOCKS5] = "socks5",
 };
 
+/* issue #19 regression: count live dialreqs and inject a one-shot Lua
+ * allocation failure right after aux_todialreq builds one, to prove req is
+ * never leaked when a fallible Lua op raises before ownership transfer. */
+static int g_dialreq_live = 0;
+static bool g_oom_arm_on_dialreq =
+	false; /* next dialreq_new arms the failure */
+static int g_oom_fail_count = 0; /* fail this many upcoming Lua allocations */
+
 struct dialreq *
 dialreq_new(const struct dialreq *restrict base, const size_t num_proxy)
 {
@@ -272,6 +280,13 @@ dialreq_new(const struct dialreq *restrict base, const size_t num_proxy)
 		req->addr = base->addr;
 		memcpy(req->proxy, base->proxy,
 		       base_num_proxy * sizeof(req->proxy[0]));
+	}
+	g_dialreq_live++;
+	if (g_oom_arm_on_dialreq) {
+		/* req is now built but not yet owned: fail the next Lua allocation
+		 * (twice, to defeat Lua's emergency-GC-and-retry) */
+		g_oom_arm_on_dialreq = false;
+		g_oom_fail_count = 2;
 	}
 	return req;
 }
@@ -312,6 +327,9 @@ bool dialreq_addproxy(
 
 void dialreq_free(struct dialreq *req)
 {
+	if (req != NULL) {
+		g_dialreq_live--;
+	}
 	free(req);
 }
 
@@ -443,6 +461,25 @@ void api_client_cancel(
 
 /* ---- Lua helpers ---- */
 
+/* A realloc-based lua_Alloc that fails its next non-free allocation once when
+ * g_oom_armed is set (issue #19 regression). The caller must preserve the
+ * allocator ud as the ruleset pointer so aux_getruleset keeps working. */
+static void *
+test_failing_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
+{
+	(void)ud;
+	(void)osize;
+	if (nsize == 0) {
+		free(ptr);
+		return NULL;
+	}
+	if (g_oom_fail_count > 0) {
+		g_oom_fail_count--;
+		return NULL;
+	}
+	return realloc(ptr, nsize);
+}
+
 static lua_State *new_lua(void)
 {
 	lua_State *restrict L = luaL_newstate();
@@ -520,7 +557,7 @@ static void trigger_resolve_failure(void)
 static void trigger_invoke_success(const char *restrict chunk)
 {
 	struct string_stream stream;
-	struct stream *const s = string_stream_open(&stream, chunk);
+	struct io_stream *const s = string_stream_open(&stream, chunk);
 
 	T_CHECK(STUB.api_ctx != NULL);
 	STUB.api_cb.func(STUB.api_ctx, STUB.loop, STUB.api_cb.data, NULL, 0, s);
@@ -1203,7 +1240,10 @@ T_DECLARE_CASE(await_forward_reports_timeout)
 {
 	struct config conf = {
 		.resolve_pf = PF_UNSPEC,
-		.timeout = 0.001,
+		/* A zero timeout arms the forward deadline to fire on the next
+		 * event-loop iteration (the dial is already issued and pending by
+		 * then), so the "timeout" result is reached without a real wait. */
+		.timeout = 0,
 	};
 	struct ruleset r = { 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
@@ -1281,6 +1321,114 @@ T_DECLARE_CASE(await_execute_reports_signal)
 	lua_pop(L, 1);
 
 	lua_close(L);
+}
+
+/*
+ * Regression (issue #19): a Lua OOM raised in the window between aux_todialreq
+ * building the dialreq and its ownership transfer must not leak the dialreq.
+ * The dialreq_new stub arms an allocator failure right after building req; the
+ * failure lands on the first following Lua allocation -- the await
+ * lua_newuserdata, while req is still an unowned C local, in the buggy code;
+ * pin_context, once req is already owned, in the fixed code. The failure is
+ * armed twice because Lua runs an emergency GC and retries a failed allocation
+ * once before raising LUA_ERRMEM; the GC is stopped so no incidental collection
+ * spends the budget elsewhere. After the routine unwinds and finalizers run, no
+ * dialreq may remain unaccounted for.
+ */
+T_DECLARE_CASE(await_invoke_oom_does_not_leak_dialreq)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	g_dialreq_live = 0;
+	/* keep aux_getruleset working: preserve the ruleset as the allocator ud */
+	lua_setallocf(L, test_failing_alloc, &r);
+	/* stop the GC so the injected failure lands on the target allocation,
+	 * not on an incidental collection */
+	lua_gc(L, LUA_GCSTOP, 0);
+	g_oom_arm_on_dialreq = true;
+
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  await.invoke('return 1', '1.2.3.4:80') "
+		   "end) "
+		   "_G.resume_ok = coroutine.resume(co) "
+		   "co = nil"));
+	g_oom_arm_on_dialreq = false;
+	g_oom_fail_count = 0;
+	lua_gc(L, LUA_GCRESTART, 0);
+
+	/* the injected OOM made await.invoke raise, so the resume reported false */
+	lua_getglobal(L, "resume_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+
+	/* finalize the abandoned coroutine/userdata (the 5.3 __gc path), then
+	 * free any dialreq legitimately owned by the started request */
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	reset_stub_state();
+	T_EXPECT_EQ(g_dialreq_live, 0);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+	reset_stub_state();
+}
+
+T_DECLARE_CASE(await_forward_oom_does_not_leak_dialreq)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct ruleset_callback mock_cb = { 0 };
+	mock_cb.forward = mock_forward_commit;
+	struct ruleset_state mock_state = { .cb = &mock_cb };
+
+	reset_stub_state();
+	g_dialreq_live = 0;
+	g_committed_fd = -1;
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  await.forward('1.2.3.4:80') "
+		   "end)"));
+	lua_getglobal(L, "co");
+	lua_State *const co = lua_tothread(L, -1);
+	lua_pop(L, 1);
+	T_CHECK(co != NULL);
+	aux_setforward(L, co, &mock_state);
+
+	lua_setallocf(L, test_failing_alloc, &r);
+	lua_gc(L, LUA_GCSTOP, 0);
+	g_oom_arm_on_dialreq = true;
+
+	T_EXPECT(run_chunk(
+		L, "_G.resume_ok = coroutine.resume(co) "
+		   "co = nil"));
+	g_oom_arm_on_dialreq = false;
+	g_oom_fail_count = 0;
+	lua_gc(L, LUA_GCRESTART, 0);
+
+	lua_getglobal(L, "resume_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	reset_stub_state();
+	T_EXPECT_EQ(g_dialreq_live, 0);
+	T_EXPECT_EQ(g_committed_fd, -1); /* never committed */
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+	reset_stub_state();
 }
 
 #if HAVE_LUA_TOCLOSE
@@ -1440,6 +1588,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_sleep_rejects_bad_argument),
 	T_CASE(await_resolve_reports_start_failure),
 	T_CASE(await_invoke_reports_start_failure),
+	T_CASE(await_invoke_oom_does_not_leak_dialreq),
+	T_CASE(await_forward_oom_does_not_leak_dialreq),
 #if HAVE_LUA_TOCLOSE
 	T_CASE(await_resolve_abandoned_cancels_query),
 	T_CASE(await_invoke_abandoned_cancels_request),
