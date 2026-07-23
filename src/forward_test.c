@@ -448,8 +448,6 @@ bool transfer_serve(
 	const struct transfer_opts *restrict opts)
 {
 	(void)xfer;
-	(void)acc_fd;
-	(void)dial_fd;
 	if (STUB.xfer_serve_fail) {
 		return false;
 	}
@@ -460,6 +458,10 @@ bool transfer_serve(
 	}
 	xctx->num_sessions = opts->num_sessions;
 	STUB.xfer_ctxs[STUB.xfer_count++] = xctx;
+	/* the real transfer_serve takes ownership of both fds on success and
+	 * closes them in release_ctx; emulate that so they do not leak */
+	(void)close(acc_fd);
+	(void)close(dial_fd);
 	return true;
 }
 
@@ -508,42 +510,29 @@ static bool ruleset_stub_start(
 	return true;
 }
 
-bool ruleset_resolve(
+bool ruleset_dispatch(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request, const int atype,
+	const char *restrict username, const char *restrict password,
+	struct ruleset_callback *callback)
 {
 	(void)r;
 	(void)request;
 	(void)username;
 	(void)password;
-	STUB.ruleset_resolve_calls++;
-	return ruleset_stub_start(state, callback);
-}
-
-bool ruleset_route(
-	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
-{
-	(void)r;
-	(void)request;
-	(void)username;
-	(void)password;
-	STUB.ruleset_route_calls++;
-	return ruleset_stub_start(state, callback);
-}
-
-bool ruleset_route6(
-	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
-{
-	(void)r;
-	(void)request;
-	(void)username;
-	(void)password;
-	STUB.ruleset_route6_calls++;
+	switch (atype) {
+	case ATYP_INET:
+		STUB.ruleset_route_calls++;
+		break;
+	case ATYP_INET6:
+		STUB.ruleset_route6_calls++;
+		break;
+	case ATYP_DOMAIN:
+		STUB.ruleset_resolve_calls++;
+		break;
+	default:
+		return false;
+	}
 	return ruleset_stub_start(state, callback);
 }
 

@@ -167,12 +167,9 @@ static void forward_commit(
 	FW_FD_LOG_F(
 		DEBUG, ctx, acc_fd, "transfer start: [%d<->%d]", acc_fd,
 		dial_fd);
-	const size_t cur = server_start_session(ctx->s, acc_fd, dial_fd);
+	const size_t cur =
+		server_commit_session(ctx->s, &ctx->gcbase, acc_fd, dial_fd);
 	if (cur == 0) {
-		LOGOOM();
-		socket_close(acc_fd);
-		socket_close(dial_fd);
-		gc_unref(&ctx->gcbase);
 		return;
 	}
 	FW_FD_LOG_F(DEBUG, ctx, acc_fd, "ready, %zu active sessions", cur);
@@ -197,16 +194,10 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	struct forward_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
 	if (fd < 0) {
-		const enum dialer_error err = ctx->dialer.err;
-		const int syserr = ctx->dialer.syserr;
-		if (syserr != 0) {
-			FW_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s (%d) %s",
-				dialer_strerror(err), syserr, strerror(syserr));
-		} else {
-			FW_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s", dialer_strerror(err));
-		}
+		char errbuf[128];
+		FW_CTX_LOG_F(
+			ERROR, ctx, "dialer: %s",
+			dialer_errorstr(errbuf, sizeof(errbuf), &ctx->dialer));
 		ctx->s->stats.num_reject_upstream++;
 		gc_unref(&ctx->gcbase);
 		return;
@@ -325,26 +316,9 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	char request[DIALADDR_STRLEN + 1];
 	const int len = dialaddr_format(request, sizeof(request), addr);
 	CHECK(len >= 0 && (size_t)len < sizeof(request));
-	bool ok;
-	switch (addr->type) {
-	case ATYP_INET:
-		ok = ruleset_route(
-			ruleset, &ctx->ruleset_state, request, NULL, NULL,
-			&ctx->ruleset_callback);
-		break;
-	case ATYP_INET6:
-		ok = ruleset_route6(
-			ruleset, &ctx->ruleset_state, request, NULL, NULL,
-			&ctx->ruleset_callback);
-		break;
-	case ATYP_DOMAIN:
-		ok = ruleset_resolve(
-			ruleset, &ctx->ruleset_state, request, NULL, NULL,
-			&ctx->ruleset_callback);
-		break;
-	default:
-		FAILMSGF("unexpected address type: %d", addr->type);
-	}
+	const bool ok = ruleset_dispatch(
+		ruleset, &ctx->ruleset_state, request, addr->type, NULL, NULL,
+		&ctx->ruleset_callback);
 	if (!ok) {
 		ctx->s->stats.num_reject_ruleset++;
 		gc_unref(&ctx->gcbase);
@@ -422,19 +396,15 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 
 	char addr_str[64];
 	sa_format(addr_str, sizeof(addr_str), &dest.sa);
-	bool ok;
+	enum dialaddr_type atype;
 	switch (dest.sa.sa_family) {
 	case AF_INET:
 		CHECK(len >= sizeof(struct sockaddr_in));
-		ok = ruleset_route(
-			ruleset, &ctx->ruleset_state, addr_str, NULL, NULL,
-			&ctx->ruleset_callback);
+		atype = ATYP_INET;
 		break;
 	case AF_INET6:
 		CHECK(len >= sizeof(struct sockaddr_in6));
-		ok = ruleset_route6(
-			ruleset, &ctx->ruleset_state, addr_str, NULL, NULL,
-			&ctx->ruleset_callback);
+		atype = ATYP_INET6;
 		break;
 	default:
 		FW_CTX_LOG_F(
@@ -443,6 +413,9 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		gc_unref(&ctx->gcbase);
 		return;
 	}
+	const bool ok = ruleset_dispatch(
+		ruleset, &ctx->ruleset_state, addr_str, atype, NULL, NULL,
+		&ctx->ruleset_callback);
 	if (!ok) {
 		ctx->s->stats.num_reject_ruleset++;
 		gc_unref(&ctx->gcbase);
