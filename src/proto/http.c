@@ -11,7 +11,7 @@
 #include "net/http.h"
 #include "net/mime.h"
 #include "os/socket.h"
-#include "utils/ascii.h"
+#include "utils/ctype_ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
@@ -983,6 +983,29 @@ bool parsehdr_content_encoding(
 	return false;
 }
 
+enum parsehdr_result parsehdr_representation(
+	struct http_conn *restrict p, const char *restrict key,
+	char *restrict value)
+{
+	if (strcasecmp(key, "Transfer-Encoding") == 0) {
+		return parsehdr_transfer_encoding(p, value) ? PARSEHDR_OK :
+							      PARSEHDR_ERROR;
+	}
+	if (strcasecmp(key, "Content-Length") == 0) {
+		return parsehdr_content_length(p, value) ? PARSEHDR_OK :
+							   PARSEHDR_ERROR;
+	}
+	if (strcasecmp(key, "Content-Type") == 0) {
+		p->hdr.content.type = value;
+		return PARSEHDR_OK;
+	}
+	if (strcasecmp(key, "Content-Encoding") == 0) {
+		return parsehdr_content_encoding(p, value) ? PARSEHDR_OK :
+							     PARSEHDR_ERROR;
+	}
+	return PARSEHDR_UNHANDLED;
+}
+
 bool parsehdr_expect(struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
@@ -1180,11 +1203,11 @@ bool check_rpcall_mime(char *restrict s)
 }
 #endif /* WITH_RULESET */
 
-struct stream *content_reader(
+struct io_stream *content_reader(
 	const void *restrict buf, const size_t len,
 	const enum content_encodings encoding)
 {
-	struct stream *r = NULL;
+	struct io_stream *r = NULL;
 
 	switch (encoding) {
 	case CENCODING_NONE:
@@ -1210,7 +1233,16 @@ struct stream *content_reader(
 	return r;
 }
 
-struct stream *content_writer(
+struct io_stream *content_reader_vbuf(
+	const struct vbuffer *restrict cbuf,
+	const enum content_encodings encoding)
+{
+	return content_reader(
+		cbuf != NULL ? VBUF_DATA(cbuf) : "",
+		cbuf != NULL ? VBUF_LEN(cbuf) : 0, encoding);
+}
+
+struct io_stream *content_writer(
 	struct vbuffer **restrict pvbuf, const size_t bufsize,
 	const enum content_encodings encoding)
 {

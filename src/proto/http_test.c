@@ -228,13 +228,13 @@ static void conn_init_for_test(
 }
 
 static bool stream_read_exact(
-	struct stream *restrict r, unsigned char *restrict buf,
+	struct io_stream *restrict r, unsigned char *restrict buf,
 	const size_t want)
 {
 	size_t got = 0;
 	while (got < want) {
 		size_t n = want - got;
-		if (stream_read(r, buf + got, &n) != 0) {
+		if (io_stream_read(r, buf + got, &n) != 0) {
 			return false;
 		}
 		if (n == 0) {
@@ -246,10 +246,10 @@ static bool stream_read_exact(
 }
 
 static bool stream_write_all(
-	struct stream *restrict w, const void *restrict data, const size_t len)
+	struct io_stream *restrict w, const void *restrict data, const size_t len)
 {
 	size_t n = len;
-	if (stream_write(w, data, &n) != 0) {
+	if (io_stream_write(w, data, &n) != 0) {
 		return false;
 	}
 	return n == len;
@@ -484,12 +484,12 @@ T_DECLARE_CASE(content_reader_none)
 {
 	static const unsigned char input[] = "hello";
 	unsigned char output[sizeof(input)] = { 0 };
-	struct stream *r = content_reader(input, sizeof(input), CENCODING_NONE);
+	struct io_stream *r = content_reader(input, sizeof(input), CENCODING_NONE);
 
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
 	T_EXPECT_MEMEQ(output, input, sizeof(input));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 }
 
 T_DECLARE_CASE(content_reader_gzip)
@@ -501,14 +501,14 @@ T_DECLARE_CASE(content_reader_gzip)
 	};
 	static const unsigned char expected[] = { 'h', 'e', 'l', 'l', 'o' };
 	unsigned char output[sizeof(expected)] = { 0 };
-	struct stream *r =
+	struct io_stream *r =
 		content_reader(gzip_data, sizeof(gzip_data), CENCODING_GZIP);
 	bool ok = false;
 	int rc = -1;
 
 	T_CHECK(r != NULL);
 	ok = stream_read_exact(r, output, sizeof(output));
-	rc = stream_close(r);
+	rc = io_stream_close(r);
 	T_EXPECT(ok);
 	T_EXPECT_MEMEQ(output, expected, sizeof(expected));
 	T_EXPECT_EQ(rc, 0);
@@ -520,19 +520,19 @@ T_DECLARE_CASE(content_writer_roundtrip_none)
 	static const unsigned char input[] = "roundtrip-none";
 	unsigned char output[sizeof(input)] = { 0 };
 
-	struct stream *w = content_writer(&vbuf, 64, CENCODING_NONE);
+	struct io_stream *w = content_writer(&vbuf, 64, CENCODING_NONE);
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, input, sizeof(input)));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	T_CHECK(vbuf != NULL);
 	T_EXPECT(VBUF_LEN(vbuf) >= sizeof(input));
 
-	struct stream *r =
+	struct io_stream *r =
 		content_reader(VBUF_DATA(vbuf), VBUF_LEN(vbuf), CENCODING_NONE);
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
 	T_EXPECT_MEMEQ(output, input, sizeof(input));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 
 	VBUF_FREE(vbuf);
 }
@@ -543,18 +543,18 @@ T_DECLARE_CASE(content_writer_roundtrip_deflate)
 	static const unsigned char input[] = "roundtrip-deflate";
 	unsigned char output[sizeof(input)] = { 0 };
 
-	struct stream *w = content_writer(&vbuf, 64, CENCODING_DEFLATE);
+	struct io_stream *w = content_writer(&vbuf, 64, CENCODING_DEFLATE);
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, input, sizeof(input)));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	T_CHECK(vbuf != NULL);
 
-	struct stream *r = content_reader(
+	struct io_stream *r = content_reader(
 		VBUF_DATA(vbuf), VBUF_LEN(vbuf), CENCODING_DEFLATE);
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
 	T_EXPECT_MEMEQ(output, input, sizeof(input));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 
 	VBUF_FREE(vbuf);
 }
@@ -567,18 +567,18 @@ T_DECLARE_CASE(content_writer_roundtrip_gzip)
 	static const unsigned char input[] = "roundtrip-gzip";
 	unsigned char output[sizeof(input)] = { 0 };
 
-	struct stream *w = content_writer(&vbuf, 64, CENCODING_GZIP);
+	struct io_stream *w = content_writer(&vbuf, 64, CENCODING_GZIP);
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, input, sizeof(input)));
-	T_EXPECT_EQ(stream_close(w), 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
 	T_CHECK(vbuf != NULL);
 
-	struct stream *r =
+	struct io_stream *r =
 		content_reader(VBUF_DATA(vbuf), VBUF_LEN(vbuf), CENCODING_GZIP);
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
 	T_EXPECT_MEMEQ(output, input, sizeof(input));
-	T_EXPECT_EQ(stream_close(r), 0);
+	T_EXPECT_EQ(io_stream_close(r), 0);
 
 	VBUF_FREE(vbuf);
 }

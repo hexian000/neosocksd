@@ -424,6 +424,27 @@ bool parsehdr_content_length(
 bool parsehdr_content_encoding(
 	struct http_conn *restrict p, const char *restrict value);
 
+/** @brief Result of parsehdr_representation(). */
+enum parsehdr_result {
+	PARSEHDR_UNHANDLED, /**< key is not one of these headers */
+	PARSEHDR_OK, /**< key handled successfully */
+	PARSEHDR_ERROR, /**< key handled, but the value was rejected */
+};
+
+/**
+ * @brief Dispatch the message-framing / representation headers shared by both
+ *        HTTP endpoints: Transfer-Encoding, Content-Length, Content-Type and
+ *        Content-Encoding, all recorded on @p p. Factors the framing logic that
+ *        would otherwise be duplicated (and could drift) between the two
+ *        parse_header callbacks.
+ * @return PARSEHDR_UNHANDLED if @p key names none of these (the caller then
+ *         tries its endpoint-specific headers); otherwise PARSEHDR_OK or
+ *         PARSEHDR_ERROR reflecting the underlying parser.
+ */
+enum parsehdr_result parsehdr_representation(
+	struct http_conn *restrict p, const char *restrict key,
+	char *restrict value);
+
 /**
  * @brief Parse Expect header. Only "100-continue" is supported;
  *        sets error status for any other expectation.
@@ -544,9 +565,21 @@ void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code);
  * @param encoding Content encoding type
  * @return Stream for reading decoded content, or NULL on error
  */
-struct stream *content_reader(
+struct io_stream *content_reader(
 	const void *restrict buf, const size_t len,
 	const enum content_encodings encoding);
+
+/**
+ * @brief Create a content_reader() over an optional content vbuffer.
+ *
+ * Content-Length: 0 leaves @p cbuf unallocated; io_memreader() requires a
+ * non-NULL buffer even for a zero-length read, so a NULL @p cbuf reads as "".
+ * @param cbuf Content buffer, or NULL for an empty body
+ * @param encoding Content encoding type
+ * @return Stream for reading decoded content, or NULL on error
+ */
+struct io_stream *content_reader_vbuf(
+	const struct vbuffer *restrict cbuf, enum content_encodings encoding);
 
 /**
  * @brief Create a compressing stream writer into a vbuffer.
@@ -558,7 +591,7 @@ struct stream *content_reader(
  * @param encoding Content encoding type
  * @return Stream for writing encoded content
  */
-struct stream *content_writer(
+struct io_stream *content_writer(
 	struct vbuffer **restrict pvbuf, const size_t bufsize,
 	const enum content_encodings encoding);
 
