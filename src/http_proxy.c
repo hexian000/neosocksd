@@ -16,7 +16,7 @@
 #include "net/http.h"
 #include "net/url.h"
 #include "os/socket.h"
-#include "utils/ascii.h"
+#include "utils/ctype_ascii.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
@@ -139,6 +139,9 @@ struct http_stream {
 	struct http_message rsp_msg;
 	const char *rsp_connection; /* response Connection header value */
 	bool rsp_chunked;
+	/* inner (non-chunked) transfer-codings preceding the final "chunked",
+	 * forwarded to the client verbatim; NULL for a bare "chunked" */
+	const char *rsp_te_prefix;
 	bool rsp_clen_known;
 	size_t rsp_clen;
 	struct http_header_kv rsp_hdr[PROXY_MAX_HEADERS];
@@ -271,12 +274,9 @@ http_ctx_start_transfer(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	ctx->s->stats.num_halfopen--;
 	HTTP_CTX_LOG_F(
 		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
-	const size_t cur = server_start_session(ctx->s, acc_fd, dial_fd);
+	const size_t cur =
+		server_commit_session(ctx->s, &ctx->gcbase, acc_fd, dial_fd);
 	if (cur == 0) {
-		LOGOOM();
-		socket_close(acc_fd);
-		socket_close(dial_fd);
-		gc_unref(&ctx->gcbase);
 		return;
 	}
 	HTTP_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
@@ -371,15 +371,9 @@ static void pump_finished(struct ev_loop *loop, struct http_pump *restrict p)
 {
 	struct http_stream *restrict s = p->owner;
 	ev_io_stop(loop, &p->w);
-	/* Only the response pump half-closes. Without keep-alive the FIN is what
-	 * tells the client its response is complete, so the response direction
-	 * needs it. The request direction does not: a request body is delimited
-	 * by Content-Length or Transfer-Encoding, never by connection close
-	 * (RFC 9112 6.3), so the upstream already knows where the request ends.
-	 * An early FIN there only tells upstreams that watch the request
-	 * connection for client disconnects (Go's net/http) to cancel the
-	 * in-flight request. stream_close() closes the socket once both
-	 * directions finish. */
+	/* Only the response pump half-closes: without keep-alive the FIN signals
+	 * response completion. A request body is self-delimited (RFC 9112 §6.3),
+	 * so an early FIN on the request direction is unnecessary and harmful. */
 	if (p == &s->rsp) {
 		(void)socket_shutdown(p->dst_fd, SHUT_WR);
 	}
@@ -479,6 +473,30 @@ static void pump_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	pump_run(loop, watcher->data);
 }
 
+/* True if any comma-separated transfer-coding in the (non-empty) list is
+ * "chunked", used to reject a response that applies chunked more than once or
+ * not as the final coding (RFC 9112 §6.1). Scans without modifying the string. */
+static bool te_list_has_chunked(const char *restrict list)
+{
+	for (const char *tok = list; tok != NULL;) {
+		const char *const comma = strchr(tok, ',');
+		const char *end = (comma != NULL) ? comma : tok + strlen(tok);
+		while (tok < end && isspace((unsigned char)*tok)) {
+			tok++;
+		}
+		while (end > tok && isspace((unsigned char)end[-1])) {
+			end--;
+		}
+		const size_t len = (size_t)(end - tok);
+		if (len == sizeof("chunked") - 1 &&
+		    strncasecmp(tok, "chunked", len) == 0) {
+			return true;
+		}
+		tok = (comma != NULL) ? comma + 1 : NULL;
+	}
+	return false;
+}
+
 /* Record one response header for forwarding, or capture the framing/hop-by-hop
  * headers we handle specially. Returns false to reject the whole response (bad
  * header characters, a malformed Content-Length, or header-table overflow),
@@ -494,16 +512,45 @@ static bool rsp_record_header(void *ctx, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
-		/* only a bare "chunked" transfer-coding is understood; reject
-		 * any other coding (or a coding list) rather than dropping the
-		 * header and mis-framing the body, mirroring the request side */
-		if (strcasecmp(strtrimspace(value), "chunked") != 0) {
+		/* RFC 9112 §6.1: the response body may carry a stack of transfer
+		 * codings terminated by "chunked" (e.g. "gzip, chunked"). The
+		 * final coding must be chunked -- any other framing cannot be
+		 * delimited, so reject it rather than drop the header and
+		 * mis-frame the body. The inner (non-chunked) codings are opaque:
+		 * the framer dechunks then re-chunks the body below, and they are
+		 * re-emitted verbatim ahead of chunked so the client can decode
+		 * them. */
+		char *const te = strtrimspace(value);
+		char *const last_comma = strrchr(te, ',');
+		const char *const final_coding =
+			(last_comma != NULL) ? strtrimspace(last_comma + 1) :
+					       te;
+		if (strcasecmp(final_coding, "chunked") != 0) {
 			return false;
+		}
+		/* RFC 9112 §6.3: reject TE:chunked conflicting with Content-Length,
+		 * mirroring the request side */
+		if (s->rsp_clen_known) {
+			return false;
+		}
+		if (last_comma != NULL) {
+			*last_comma = '\0';
+			char *const prefix = strtrimspace(te);
+			/* RFC 9112 §6.1: chunked applies at most once and only as
+			 * the final coding; an empty prefix coding is malformed */
+			if (prefix[0] == '\0' || te_list_has_chunked(prefix)) {
+				return false;
+			}
+			s->rsp_te_prefix = prefix;
 		}
 		s->rsp_chunked = true;
 		return true;
 	}
 	if (strcasecmp(key, "Content-Length") == 0) {
+		/* RFC 9112 §6.3: reject duplicate CL or CL+TE:chunked conflict */
+		if (s->rsp_clen_known || s->rsp_chunked) {
+			return false;
+		}
 		if (!http_parse_content_length(value, &s->rsp_clen)) {
 			return false;
 		}
@@ -592,7 +639,11 @@ static bool rsp_build_interim(struct http_stream *restrict s)
 	       fwd_append(conn, "\r\n") &&
 	       http_append_headers(
 		       wbuf, s->rsp_hdr, s->rsp_nhdr, s->rsp_connection) &&
-	       fwd_append(conn, "\r\n");
+	       /* RFC 9110 §7.6.3: add our Via entry to the forwarded interim too
+		* (received-protocol = upstream response version, past "HTTP/") */
+	       fwd_append(conn, "Via: ") &&
+	       fwd_append(conn, s->rsp_msg.rsp.version + 5) &&
+	       fwd_append(conn, " neosocksd\r\n") && fwd_append(conn, "\r\n");
 }
 
 /* Rebuild the final response headers for the client into conn.wbuf and decide
@@ -625,13 +676,29 @@ static bool rsp_build_response(struct http_stream *restrict s)
 	/* end-to-end headers, except those listed in Connection */
 	ok = ok && http_append_headers(
 			   wbuf, s->rsp_hdr, s->rsp_nhdr, s->rsp_connection);
+	/* RFC 9110 §7.6.3: a proxy MUST add a Via entry to every message it
+	 * forwards, both directions; the response side mirrors what
+	 * build_forward_req() does for the request. The received-protocol names
+	 * the upstream response version (validated to start with "HTTP/", so
+	 * skip that 5-char prefix). */
+	ok = ok && fwd_append(conn, "Via: ") &&
+	     fwd_append(conn, s->rsp_msg.rsp.version + 5) &&
+	     fwd_append(conn, " neosocksd\r\n");
 	/* Preserve the declared framing header even for a bodiless response
 	 * (e.g. a HEAD reply keeps its Content-Length); only the body is
 	 * suppressed below. */
 	const bool bodiless = s->head_request || code == 204 || code == 304;
-	ok = ok &&
-	     http_append_framing(
-		     wbuf, s->rsp_chunked, s->rsp_clen_known, s->rsp_clen);
+	if (s->rsp_te_prefix != NULL) {
+		/* re-emit the inner codings ahead of the chunked framing the
+		 * response pump regenerates for the forwarded opaque bytes */
+		ok = ok && fwd_append(conn, "Transfer-Encoding: ") &&
+		     fwd_append(conn, s->rsp_te_prefix) &&
+		     fwd_append(conn, ", chunked\r\n");
+	} else {
+		ok = ok && http_append_framing(
+				   wbuf, s->rsp_chunked, s->rsp_clen_known,
+				   s->rsp_clen);
+	}
 	/* the upstream Connection/Keep-Alive headers were dropped above;
 	 * overwrite the client-facing connection disposition to close (no
 	 * keep-alive) since the connection is torn down after this response */
@@ -663,6 +730,43 @@ static bool rsp_build_response(struct http_stream *restrict s)
 	return true;
 }
 
+/* True when the client request is HTTP/1.0. The request line stays live through
+ * STATE_STREAM (see struct http_ctx.conn) and its version was validated by the
+ * request parser, so a bare strcmp is enough. */
+static bool rsp_client_is_http_1_0(const struct http_stream *restrict s)
+{
+	return strcmp(s->ctx->conn.msg.req.version, "HTTP/1.0") == 0;
+}
+
+/* Discard the just-parsed interim (1xx) header block at the front of
+ * rsp.framer.in and reset every per-response framing/hop-by-hop field, so the
+ * next response parses fresh from the buffer start. Shared by the two interim
+ * paths: after an interim is forwarded to the client, and when one is dropped
+ * unsent because the client is HTTP/1.0 (RFC 9110 §15.2). */
+static void rsp_drop_interim(struct http_stream *restrict s)
+{
+	struct http_pump *restrict rsp = &s->rsp;
+	/* reset every framing/hop-by-hop field rsp_record_header may have set
+	 * from the interim's headers, else e.g. a Transfer-Encoding: chunked on
+	 * a 1xx would make the following final response be dechunked and
+	 * misparsed. */
+	s->rsp_chunked = false;
+	s->rsp_te_prefix = NULL;
+	s->rsp_clen_known = false;
+	s->rsp_clen = 0;
+	s->rsp_connection = NULL;
+	/* drop the interim bytes [0, pos) and keep the trailing bytes, which are
+	 * the start of the next response */
+	const size_t rest = rsp->framer.in_len - s->rsp_reader.pos;
+	memmove(rsp->framer.in, rsp->framer.in + s->rsp_reader.pos, rest);
+	rsp->framer.in_len = rest;
+	rsp->framer.in[rest] = '\0';
+	/* reset the reader (pos=0, line_done=false) to parse the next response
+	 * from the front of the buffer */
+	http_reader_init(&s->rsp_reader);
+	s->rsp_nhdr = 0;
+}
+
 /* Response-direction driver: read + parse upstream headers, forward interim
  * (1xx) responses, then stream the body. The RSP_HDR/RSP_SEND/RSP_BODY phase
  * machine runs as a loop, so a burst of pipelined interim responses iterates
@@ -688,6 +792,14 @@ rsp_run(struct ev_loop *restrict loop, struct http_stream *restrict s)
 					strtoul(s->rsp_msg.rsp.code, NULL, 10);
 				const bool interim =
 					(100 <= code && code < 200);
+				/* RFC 9110 §15.2: a 1xx response MUST NOT be
+				 * sent to an HTTP/1.0 client, which has no 1xx
+				 * concept. Drop the interim header block unsent
+				 * and keep reading for the final response. */
+				if (interim && rsp_client_is_http_1_0(s)) {
+					rsp_drop_interim(s);
+					continue;
+				}
 				const bool ok = interim ? rsp_build_interim(s) :
 							  rsp_build_response(s);
 				if (!ok) {
@@ -753,28 +865,10 @@ rsp_run(struct ev_loop *restrict loop, struct http_stream *restrict s)
 			/* header block fully sent */
 			s->rsp_started = true;
 			if (s->rsp_interim) {
-				/* drop the interim bytes and parse the next
-				 * response; reset every framing/hop-by-hop field
-				 * rsp_record_header may have set from the interim's
-				 * headers, else e.g. a Transfer-Encoding: chunked
-				 * on a 1xx would make the following final response
-				 * be dechunked and misparsed. */
+				/* drop the forwarded interim and parse the next
+				 * response from the front of the buffer */
 				s->rsp_interim = false;
-				s->rsp_chunked = false;
-				s->rsp_clen_known = false;
-				s->rsp_clen = 0;
-				s->rsp_connection = NULL;
-				const size_t rest =
-					rsp->framer.in_len - s->rsp_reader.pos;
-				memmove(rsp->framer.in,
-					rsp->framer.in + s->rsp_reader.pos,
-					rest);
-				rsp->framer.in_len = rest;
-				rsp->framer.in[rest] = '\0';
-				/* reset the reader (pos=0, line_done=false) to parse
-				 * the next response from the front of the buffer */
-				http_reader_init(&s->rsp_reader);
-				s->rsp_nhdr = 0;
+				rsp_drop_interim(s);
 				s->rsp_phase = RSP_HDR;
 				continue;
 			}
@@ -1333,16 +1427,10 @@ static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
 	struct http_ctx *restrict ctx = data;
 	ASSERT(ctx->state == STATE_CONNECT);
 	if (fd < 0) {
-		const enum dialer_error err = ctx->dialer.err;
-		const int syserr = ctx->dialer.syserr;
-		if (syserr != 0) {
-			HTTP_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s (%d) %s",
-				dialer_strerror(err), syserr, strerror(syserr));
-		} else {
-			HTTP_CTX_LOG_F(
-				ERROR, ctx, "dialer: %s", dialer_strerror(err));
-		}
+		char errbuf[128];
+		HTTP_CTX_LOG_F(
+			ERROR, ctx, "dialer: %s",
+			dialer_errorstr(errbuf, sizeof(errbuf), &ctx->dialer));
 		ctx->s->stats.num_reject_upstream++;
 		send_errpage(loop, ctx, HTTP_BAD_GATEWAY);
 		return;

@@ -26,7 +26,7 @@ Status: **Stable**
 
 ## Features
 
-- Protocols: [SOCKS4](https://www.openssh.com/txt/socks4.protocol)/[SOCKS4A](https://www.openssh.com/txt/socks4a.protocol) (Ying-Da Lee / NEC), SOCKS5 ([RFC 1928](https://datatracker.ietf.org/doc/html/rfc1928), with [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929) auth), HTTP CONNECT ([RFC 9110 §9.3.6](https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.6)).
+- Protocols: [SOCKS4](https://www.openssh.com/txt/socks4.protocol)/[SOCKS4A](https://www.openssh.com/txt/socks4a.protocol) (Ying-Da Lee / NEC), SOCKS5 ([RFC 1928](https://datatracker.ietf.org/doc/html/rfc1928), with [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929) auth), HTTP/1.1 proxy — request forwarding ([RFC 9112 §3.2.2](https://datatracker.ietf.org/doc/html/rfc9112#section-3.2.2)), `CONNECT` tunneling ([RFC 9110 §9.3.6](https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.6)), and `Upgrade` (e.g. WebSocket) passthrough.
 - Transparent proxy: Linux [TPROXY](https://docs.kernel.org/networking/tproxy.html).
 - 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024).
 - ~650 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).

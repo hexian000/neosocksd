@@ -937,6 +937,83 @@ T_DECLARE_CASE(proxy_pass_response_bad_status_code_returns_502)
 	ev_loop_destroy(loop);
 }
 
+/* RFC 9112 §6.3: the response framing must be rejected on a duplicate
+ * Content-Length or a Content-Length/Transfer-Encoding conflict, mirroring the
+ * request side; a rejected response header surfaces to the client as 502. */
+T_DECLARE_SUBCASE(
+	expect_response_headers_rejected, struct ev_loop *restrict loop,
+	const char *restrict resp, const size_t resp_len)
+{
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	s.loop = loop;
+	test_server_init(&s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_CHECK(write_all(upstream_fd, resp, resp_len) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(has_http_status(cl, (size_t)cn, "502"));
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+}
+
+T_DECLARE_CASE(proxy_pass_response_duplicate_cl_returns_502)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Content-Length: 5\r\n"
+				   "Content-Length: 5\r\n\r\n";
+	T_CALL_SUBCASE(
+		expect_response_headers_rejected, loop, resp, sizeof(resp) - 1);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(proxy_pass_response_cl_and_te_returns_502)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	/* CL before TE */
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Content-Length: 5\r\n"
+				   "Transfer-Encoding: chunked\r\n\r\n";
+	T_CALL_SUBCASE(
+		expect_response_headers_rejected, loop, resp, sizeof(resp) - 1);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(proxy_pass_response_te_and_cl_returns_502)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	/* TE before CL */
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Transfer-Encoding: chunked\r\n"
+				   "Content-Length: 5\r\n\r\n";
+	T_CALL_SUBCASE(
+		expect_response_headers_rejected, loop, resp, sizeof(resp) - 1);
+	ev_loop_destroy(loop);
+}
+
 /*
  * The reason phrase is re-emitted canonically rather than forwarded, so a
  * broken or hostile upstream cannot inject terminal escapes into the
@@ -1255,6 +1332,98 @@ T_DECLARE_CASE(proxy_pass_unknown_response_transfer_encoding_returns_502)
 
 	static const char resp[] =
 		"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nxxxx";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* RFC 9112 §6.1: an upstream response may stack transfer codings terminated by
+ * "chunked" (e.g. "gzip, chunked"). The outer chunked layer is stripped and
+ * re-generated; the inner codings are forwarded to the client untouched and the
+ * Transfer-Encoding is re-emitted with the prefix preserved. */
+T_DECLARE_CASE(proxy_pass_response_transfer_coding_stack)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* the chunk payload stands in for opaque inner-coding (gzip) bytes */
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Transfer-Encoding: gzip, chunked\r\n"
+				   "\r\n"
+				   "5\r\nHELLO\r\n0\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	/* the inner coding is preserved ahead of the re-generated chunked */
+	T_EXPECT(
+		memmem(cl, (size_t)cn, "Transfer-Encoding: gzip, chunked",
+		       32) != NULL);
+	/* the re-chunked body carries the original opaque bytes, terminated */
+	T_EXPECT(memmem(cl, (size_t)cn, "HELLO", 5) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "0\r\n\r\n", 5) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A response whose transfer-coding list does not end in "chunked" (e.g.
+ * "chunked, gzip") cannot be framed and must be rejected with 502. */
+T_DECLARE_CASE(proxy_pass_response_transfer_coding_not_last_chunked_returns_502)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\n"
+		"Transfer-Encoding: chunked, gzip\r\n\r\nxxxx";
 	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
 	(void)shutdown(upstream_fd, SHUT_WR);
 	drive_loop(loop);
@@ -1753,6 +1922,121 @@ T_DECLARE_CASE(proxy_pass_interim_framing_does_not_leak)
 	T_EXPECT(
 		memmem(cl, (size_t)cn, "Transfer-Encoding: chunked", 26) ==
 		NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* RFC 9110 §7.6.3: a proxy MUST add a Via entry to every message it forwards,
+ * so the client-facing response -- both a forwarded 1xx interim and the final
+ * response -- must carry one. The received-protocol names the version of the
+ * message as received from the upstream. */
+T_DECLARE_CASE(proxy_pass_response_adds_via)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* a 103 Early Hints interim, then the final 200 */
+	static const char hints[] = "HTTP/1.1 103 Early Hints\r\n"
+				    "Link: </style.css>; rel=preload\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, hints, sizeof(hints) - 1) == 0);
+	drive_loop(loop);
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[2048];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the upstream spoke HTTP/1.1, so the Via received-protocol is "1.1";
+	 * both the forwarded interim and the final response carry a Via entry */
+	unsigned char *const via1 =
+		memmem(cl, (size_t)cn, "Via: 1.1 neosocksd", 18);
+	T_CHECK(via1 != NULL);
+	const size_t off1 = (size_t)(via1 + 18 - cl);
+	unsigned char *const via2 =
+		memmem(via1 + 18, (size_t)cn - off1, "Via: 1.1 neosocksd", 18);
+	T_CHECK(via2 != NULL); /* a second Via, one per forwarded message */
+	unsigned char *const p103 = memmem(cl, (size_t)cn, "HTTP/1.1 103", 12);
+	unsigned char *const p200 = memmem(cl, (size_t)cn, "200 OK", 6);
+	T_CHECK(p103 != NULL);
+	T_CHECK(p200 != NULL);
+	T_EXPECT(p103 < via1 && via1 < p200); /* interim's Via */
+	T_EXPECT(p200 < via2); /* final response's Via */
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* RFC 9110 §15.2: a server MUST NOT send a 1xx response to an HTTP/1.0 client.
+ * An upstream 1xx interim must therefore be dropped rather than forwarded when
+ * the client request was HTTP/1.0; the final response still reaches the
+ * client. */
+T_DECLARE_CASE(proxy_pass_interim_dropped_for_http_1_0_client)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.0\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* upstream sends a 103 Early Hints interim, then the final 200 */
+	static const char hints[] = "HTTP/1.1 103 Early Hints\r\n"
+				    "Link: </style.css>; rel=preload\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, hints, sizeof(hints) - 1) == 0);
+	drive_loop(loop);
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[2048];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	/* the interim (and its interim-only Link header) must not reach the
+	 * HTTP/1.0 client */
+	T_EXPECT(memmem(cl, (size_t)cn, "HTTP/1.1 103", 12) == NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "Early Hints", 11) == NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "Link: </style.css>", 18) == NULL);
+	/* the final response and its body still reach the client */
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "ok", 2) != NULL);
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -3500,6 +3784,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(proxy_pass_forwards_content_length),
 	T_CASE(proxy_pass_request_does_not_half_close_upstream),
 	T_CASE(proxy_pass_response_bad_status_code_returns_502),
+	T_CASE(proxy_pass_response_duplicate_cl_returns_502),
+	T_CASE(proxy_pass_response_cl_and_te_returns_502),
+	T_CASE(proxy_pass_response_te_and_cl_returns_502),
 	T_CASE(proxy_pass_response_reason_phrase_is_canonical),
 	T_CASE(proxy_pass_response_reason_phrase_ctl_returns_502),
 	T_CASE(proxy_pass_accepts_te_hint),
@@ -3507,6 +3794,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(proxy_pass_bodyless_pipelined_not_forwarded),
 	T_CASE(proxy_pass_chunked_response),
 	T_CASE(proxy_pass_unknown_response_transfer_encoding_returns_502),
+	T_CASE(proxy_pass_response_transfer_coding_stack),
+	T_CASE(proxy_pass_response_transfer_coding_not_last_chunked_returns_502),
 	T_CASE(proxy_pass_malformed_chunked_request_returns_400),
 	T_CASE(proxy_pass_eof_response),
 	T_CASE(proxy_pass_head_response_bodiless),
@@ -3517,6 +3806,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(proxy_pass_forwards_interim_headers),
 	T_CASE(proxy_pass_multiple_interim_responses),
 	T_CASE(proxy_pass_interim_framing_does_not_leak),
+	T_CASE(proxy_pass_response_adds_via),
+	T_CASE(proxy_pass_interim_dropped_for_http_1_0_client),
 	T_CASE(proxy_pass_negative_content_length_rejected),
 	T_CASE(proxy_pass_response_control_char_header_rejected),
 	T_CASE(proxy_pass_too_many_response_headers_rejected),

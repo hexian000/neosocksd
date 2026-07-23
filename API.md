@@ -147,7 +147,7 @@ end
 **Description**
 
 Handles a hostname request. Specifically:
-- Any HTTP CONNECT request
+- Any HTTP proxy request, whether `CONNECT` or a forwarded request
 - SOCKS5 with a hostname (a.k.a. socks5h)
 - Any SOCKS4A request
 
