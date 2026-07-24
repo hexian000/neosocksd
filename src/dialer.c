@@ -25,6 +25,7 @@
 #include <ev.h>
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -68,12 +69,20 @@ static bool dialaddr_sethostport(
 	return true;
 }
 
-/* Parse a decimal port number in [0, UINT16_MAX]; log and return false on a
+/* Parse a decimal port number in [0, UINT16_MAX]; log and return false on
  * trailing garbage or overflow. An empty port string parses as 0 (endptr stays
  * at the start with no trailing char) — preserved from the original call sites;
  * tightening that rejection now lives here alone. */
 static bool parse_port(const char *restrict port, uint_fast16_t *restrict out)
 {
+	/* strtoumax() skips leading whitespace and accepts a sign, so "+443",
+	 * " 443" and "-0" would otherwise slip through; RFC 3986 defines a port
+	 * as *DIGIT. Require a leading digit, but still allow the empty string
+	 * (parsed as 0 below) that the call sites documented above depend on. */
+	if (port[0] != '\0' && !isdigit((unsigned char)port[0])) {
+		LOGE_F("unable to parse port number: `%s'", port);
+		return false;
+	}
 	char *endptr;
 	const uintmax_t portvalue = strtoumax(port, &endptr, 10);
 	if (*endptr || portvalue > UINT16_MAX) {
@@ -619,8 +628,9 @@ static bool dialer_send(
 }
 
 #define DIALER_HTTP_REQ_MAXLEN                                                 \
-	(CONSTSTRLEN("CONNECT ") + FQDN_MAX_LENGTH +                           \
-	 CONSTSTRLEN(":65535 HTTP/1.1\r\n") +                                  \
+	(CONSTSTRLEN("CONNECT ") + DIALADDR_STRLEN +                           \
+	 CONSTSTRLEN(" HTTP/1.1\r\n") + CONSTSTRLEN("Host: ") +                \
+	 DIALADDR_STRLEN + CONSTSTRLEN("\r\n") +                               \
 	 CONSTSTRLEN("Proxy-Authorization: Basic ") + 685 +                    \
 	 CONSTSTRLEN("\r\n") + CONSTSTRLEN("\r\n"))
 
@@ -632,6 +642,17 @@ static bool send_http_req(
 	const struct dialaddr *restrict addr)
 {
 	char buf[DIALER_HTTP_REQ_MAXLEN];
+	/* the request-target authority; RFC 9112 3.2 requires an HTTP/1.1
+	 * request to carry a Host field identical to it, and strict proxies
+	 * reject a Host-less CONNECT with 400 */
+	char authority[DIALADDR_STRLEN + 1];
+	const int alen = dialaddr_format(authority, sizeof(authority), addr);
+	if (alen < 0 || (size_t)alen >= sizeof(authority)) {
+		DIALER_LOG(DEBUG, d, "failed to format host address");
+		d->err = DIALER_ERR_PROXY_PROTO;
+		d->syserr = 0;
+		return false;
+	}
 #define APPEND(b, s)                                                           \
 	do {                                                                   \
 		if ((b) + CONSTSTRLEN(s) > buf + sizeof(buf)) {                \
@@ -643,17 +664,24 @@ static bool send_http_req(
 		memcpy((b), (s), CONSTSTRLEN(s));                              \
 		(b) += CONSTSTRLEN(s);                                         \
 	} while (0)
+#define APPEND_N(b, s, len)                                                    \
+	do {                                                                   \
+		if ((b) + (len) > buf + sizeof(buf)) {                         \
+			DIALER_LOG(DEBUG, d, "buffer overflow");               \
+			d->err = DIALER_ERR_PROXY_PROTO;                       \
+			d->syserr = 0;                                         \
+			return false;                                          \
+		}                                                              \
+		memcpy((b), (s), (len));                                       \
+		(b) += (len);                                                  \
+	} while (0)
 	char *b = buf;
 	APPEND(b, "CONNECT ");
-	const int n = dialaddr_format(b, sizeof(buf) - (b - buf), addr);
-	if (n < 0 || (size_t)n >= sizeof(buf) - (b - buf)) {
-		DIALER_LOG(DEBUG, d, "failed to format host address");
-		d->err = DIALER_ERR_PROXY_PROTO;
-		d->syserr = 0;
-		return false;
-	}
-	b += n;
+	APPEND_N(b, authority, (size_t)alen);
 	APPEND(b, " HTTP/1.1\r\n");
+	APPEND(b, "Host: ");
+	APPEND_N(b, authority, (size_t)alen);
+	APPEND(b, "\r\n");
 	if (proxy->username != NULL) {
 		APPEND(b, "Proxy-Authorization: Basic ");
 		const size_t ulen = strlen(proxy->username);
@@ -680,6 +708,7 @@ static bool send_http_req(
 	}
 	APPEND(b, "\r\n");
 #undef APPEND
+#undef APPEND_N
 
 	if (!dialer_send(d, (unsigned char *)buf, (size_t)(b - buf))) {
 		return false;
@@ -1445,28 +1474,11 @@ static void socket_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 static bool
 check_outbound_sa(struct dialer *restrict d, const struct sockaddr *restrict sa)
 {
-	/* sa_ipclassify() (vendored, read-only) has no IPv4-mapped awareness,
-	 * so a SOCKS5 ATYP_INET6 request for e.g. ::ffff:127.0.0.1 would
-	 * otherwise be classified IPCLASS_GLOBAL and bypass block_loopback/
-	 * block_local/block_multicast entirely. Classify the embedded IPv4
-	 * address instead; keep the original `sa` for logging so blocked
-	 * messages still show the real (mapped) address. */
-	struct sockaddr_in mapped;
-	const struct sockaddr *classify_sa = sa;
-	if (sa->sa_family == AF_INET6) {
-		const struct sockaddr_in6 *restrict sa6 =
-			(const struct sockaddr_in6 *)sa;
-		if (IN6_IS_ADDR_V4MAPPED(&sa6->sin6_addr)) {
-			mapped = (struct sockaddr_in){
-				.sin_family = AF_INET,
-				.sin_port = sa6->sin6_port,
-			};
-			memcpy(&mapped.sin_addr, &sa6->sin6_addr.s6_addr[12],
-			       sizeof(mapped.sin_addr));
-			classify_sa = (const struct sockaddr *)&mapped;
-		}
-	}
-	switch (sa_ipclassify(classify_sa)) {
+	/* sa_ipclassify() resolves an IPv4-mapped IPv6 address (::ffff:a.b.c.d)
+	 * by its embedded IPv4 address, so a mapped loopback/private target
+	 * reached via a SOCKS5 ATYP_INET6 request (or a dual-stack TPROXY
+	 * listener) is classified -- and blocked -- like its bare IPv4 form. */
+	switch (sa_ipclassify(sa)) {
 	case IPCLASS_LOOPBACK:
 		if (d->conf->block_loopback) {
 			LOG_BLOCKED(DEBUG, "loopback", sa);
@@ -1481,6 +1493,10 @@ check_outbound_sa(struct dialer *restrict d, const struct sockaddr *restrict sa)
 		break;
 	case IPCLASS_LINKLOCAL:
 	case IPCLASS_SITELOCAL:
+	case IPCLASS_SHARED:
+		/* RFC 6598 shared space (100.64.0.0/10, CGNAT) is carrier-internal
+		 * infrastructure, grouped with the private ranges under block_local;
+		 * dialable by default, matching its pre-sync IPCLASS_GLOBAL behavior */
 		if (d->conf->block_local) {
 			LOG_BLOCKED(DEBUG, "local", sa);
 			return false;
@@ -1492,7 +1508,16 @@ check_outbound_sa(struct dialer *restrict d, const struct sockaddr *restrict sa)
 			return false;
 		}
 		break;
+	case IPCLASS_RESERVED:
+		/* RFC 1112 reserved-for-future-use (240.0.0.0/4): non-routable */
+		LOG_BLOCKED(DEBUG, "reserved", sa);
+		return false;
+	case IPCLASS_BROADCAST:
+		/* RFC 919 limited broadcast (255.255.255.255) */
+		LOG_BLOCKED(DEBUG, "broadcast", sa);
+		return false;
 	default:
+		/* IPCLASS_UNSPECIFIED / IPCLASS_UNKNOWN: not a dialable target */
 		LOG_BLOCKED(ERROR, "invalid", sa);
 		return false;
 	}

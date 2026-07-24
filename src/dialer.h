@@ -230,11 +230,23 @@ bool dialreq_replace(
 	struct dialreq **restrict req, const char *restrict addr,
 	const char *restrict csv);
 
-/** @brief Size of dialer receive buffer (large enough for any protocol response) */
-#define DIALER_RBUF_SIZE                                                       \
-	MAX(CONSTSTRLEN("CONNECT ") + FQDN_MAX_LENGTH +                        \
-		    CONSTSTRLEN(":65535 HTTP/1.1\r\n\r\n"),                    \
-	    SOCKS_REQ_MAXLEN)
+/**
+ * @brief Headroom for an upstream proxy's HTTP CONNECT response: the status
+ * line plus every response header must fit here, or recv_http_rsp() fails the
+ * dial as "response too long". A conforming proxy can send well over 1 KiB --
+ * a long Proxy-Authenticate challenge on a 407, Via/X-Cache stacks, portal
+ * Set-Cookie -- so this matches the 8 KiB header block used elsewhere for HTTP
+ * connections (proto/http.h HTTP_MAX_ENTITY) rather than the request maxima.
+ */
+#define DIALER_HTTP_RSP_MAXLEN 8192
+
+/**
+ * @brief Size of the dialer receive buffer: large enough for the largest
+ * upstream proxy handshake response. That is the HTTP CONNECT response header
+ * block (DIALER_HTTP_RSP_MAXLEN); SOCKS4a/5 responses are bounded well below
+ * SOCKS_REQ_MAXLEN, kept here so the buffer never shrinks below either.
+ */
+#define DIALER_RBUF_SIZE MAX(DIALER_HTTP_RSP_MAXLEN, SOCKS_REQ_MAXLEN)
 
 /**
  * @brief Callback function for dialer completion

@@ -672,6 +672,7 @@ T_DECLARE_CASE(http_connect_success_sends_expected_request)
 	T_EXPECT_STREQ(
 		server.request,
 		"CONNECT example.com:443 HTTP/1.1\r\n"
+		"Host: example.com:443\r\n"
 		"Proxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n");
 	T_EXPECT(result.fd >= 0);
 	T_EXPECT_EQ(err, DIALER_OK);

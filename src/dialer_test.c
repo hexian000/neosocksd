@@ -157,9 +157,18 @@ __real_connect(int fd, const struct sockaddr *addr, socklen_t addrlen);
 
 static bool g_force_sync_connect = false;
 static int g_sync_connect_ret = -2; /* sentinel: sync connect not attempted */
+/* When set, fail connect() synchronously with ECONNREFUSED without touching the
+ * network, so a test can observe "passed the egress check and reached connect"
+ * for an address that has no reachable listener (e.g. CGNAT space). */
+static bool g_force_connect_fail = false;
 
 int __wrap_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
 {
+	if (g_force_connect_fail) {
+		(void)fd, (void)addr, (void)addrlen;
+		errno = ECONNREFUSED;
+		return -1;
+	}
 	if (!g_force_sync_connect) {
 		return __real_connect(fd, addr, addrlen);
 	}
@@ -382,6 +391,13 @@ T_DECLARE_CASE(dialaddr_parse_and_format_variants)
 
 	T_EXPECT(!dialaddr_parse(&addr, "missing-port", 12));
 	T_EXPECT(!dialaddr_parse(&addr, "127.0.0.1:70000", 15));
+
+	/* strtoumax() would skip leading whitespace and accept a sign; a port is
+	 * *DIGIT (RFC 3986), so a non-digit-leading port must be rejected even
+	 * though it reaches client-controlled input via the CONNECT authority */
+	T_EXPECT(!dialaddr_parse(&addr, "example.com:+443", 16));
+	T_EXPECT(!dialaddr_parse(&addr, "example.com:-0", 14));
+	T_EXPECT(!dialaddr_parse(&addr, "example.com: 443", 16));
 }
 
 T_DECLARE_CASE(format_max_length_domain_fits_buffers)
@@ -672,11 +688,11 @@ T_DECLARE_CASE(local_address_blocked_by_egress_policy)
 }
 
 /*
- * Regression: sa_ipclassify() (vendored, read-only) has no IPv4-mapped
- * awareness, so an IPv4-mapped IPv6 literal was classified IPCLASS_GLOBAL
- * and sailed straight past block_local/block_loopback/block_multicast --
- * defeating the egress policy for anyone reaching it via a SOCKS5
- * ATYP_INET6 request (or a TPROXY dual-stack listener).
+ * Regression: an IPv4-mapped IPv6 literal (::ffff:a.b.c.d) must be classified
+ * by its embedded IPv4 address so the egress policy catches it, rather than
+ * sailing past block_local/block_loopback/block_multicast as IPCLASS_GLOBAL --
+ * which would defeat the policy for anyone reaching it via a SOCKS5 ATYP_INET6
+ * request (or a TPROXY dual-stack listener).
  */
 T_DECLARE_CASE(v4_mapped_local_address_blocked_by_egress_policy)
 {
@@ -746,6 +762,83 @@ T_DECLARE_CASE(v4_mapped_loopback_address_blocked_by_egress_policy)
 	T_EXPECT_EQ(d.syserr, 0);
 }
 
+/*
+ * Regression: after the csnippets sync added IPCLASS_SHARED, a 100.64.0.0/10
+ * (RFC 6598 CGNAT) target fell through to the "invalid" default and was refused
+ * with DIALER_ERR_BLOCKED regardless of policy. Under the default config it
+ * must instead pass the egress check and be dialed, as it was before the sync
+ * (when it classified IPCLASS_GLOBAL). The connect() interposer forces a
+ * synchronous refusal so the test observes "reached connect (not blocked)"
+ * without any real network traffic.
+ */
+T_DECLARE_CASE(shared_cgnat_address_is_dialable_by_default)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req = dialreq_parse("100.64.0.1:9", NULL);
+
+	T_CHECK(loop != NULL);
+	T_CHECK(req != NULL);
+	g_force_connect_fail = true;
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
+		NULL, NULL);
+	const enum dialer_error err = d.err;
+	g_force_connect_fail = false;
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+
+	T_EXPECT(completed);
+	T_EXPECT_EQ(result.fd, -1);
+	/* not blocked: it passed check_outbound_sa and reached the forced
+	 * connect() failure */
+	T_EXPECT_EQ(err, DIALER_ERR_CONNECT);
+}
+
+/*
+ * The reserved-for-future-use block (240.0.0.0/4, RFC 1112), another class the
+ * csnippets sync introduced, is non-routable and must be refused outright --
+ * with its own case, not the ERROR-level "invalid" default.
+ */
+T_DECLARE_CASE(reserved_address_blocked_by_egress_policy)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req = dialreq_parse("240.0.0.1:9", NULL);
+
+	T_CHECK(loop != NULL);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
+		NULL, NULL);
+	const enum dialer_error err = d.err;
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+
+	T_EXPECT(completed);
+	T_EXPECT_EQ(result.fd, -1);
+	T_EXPECT_EQ(err, DIALER_ERR_BLOCKED);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
 T_DECLARE_CASE(http_connect_success_sends_expected_request)
 {
 	uint_fast16_t port = 0;
@@ -793,6 +886,7 @@ T_DECLARE_CASE(http_connect_success_sends_expected_request)
 	T_EXPECT_STREQ(
 		server.request,
 		"CONNECT example.com:443 HTTP/1.1\r\n"
+		"Host: example.com:443\r\n"
 		"Proxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n");
 	T_EXPECT(result.fd >= 0);
 	T_EXPECT_EQ(err, DIALER_OK);
@@ -858,7 +952,8 @@ T_DECLARE_CASE(sync_connect_success_into_http_handshake)
 	T_EXPECT(server.request_complete);
 	T_EXPECT(server.response_sent);
 	T_EXPECT_STREQ(
-		server.request, "CONNECT example.com:443 HTTP/1.1\r\n\r\n");
+		server.request, "CONNECT example.com:443 HTTP/1.1\r\n"
+				"Host: example.com:443\r\n\r\n");
 	T_EXPECT(result.fd >= 0);
 	T_EXPECT_EQ(err, DIALER_OK);
 	T_EXPECT_EQ(d.syserr, 0);
@@ -867,14 +962,14 @@ T_DECLARE_CASE(sync_connect_success_into_http_handshake)
 /*
  * Regression: a proxy reply delivered one byte at a time (as a slow/adversarial
  * upstream hop might) must still be parsed correctly. dialer_recv() peeks
- * (MSG_PEEK) rather than consumes, and nothing is consumed until the status
- * line is complete; before the fix, re-peeking before any consume happened
- * re-added the same already-seen bytes into rbuf.len on every fragment
- * (triangular growth: len after k one-byte fragments ~= k*(k+1)/2). The
- * status line below is long enough (57 bytes to the first CRLF) that this
- * growth deterministically exceeds DIALER_RBUF_SIZE (1032) well before the
- * ~59 real bytes have arrived, tripping "response too long" (PROXY_PROTO)
- * even though the real response is tiny and entirely ordinary.
+ * (MSG_PEEK) rather than consumes, and re-peeking before the next consume
+ * re-reads bytes already counted in rbuf.len; before the fix each re-peek
+ * accumulated onto the previous length (triangular growth: len after k one-byte
+ * fragments ~= k*(k+1)/2). That inflated length drives the SO_RCVLOWAT wakeup
+ * target past the bytes the reply will ever contain -- so the dialer stalls
+ * waiting for more -- and, once it reaches DIALER_RBUF_SIZE, additionally trips
+ * "response too long" (PROXY_PROTO); either way an ordinary reply fails. This
+ * asserts a byte-at-a-time reply still completes, independent of buffer size.
  */
 T_DECLARE_CASE(http_connect_success_with_byte_at_a_time_response)
 {
@@ -886,6 +981,75 @@ T_DECLARE_CASE(http_connect_success_with_byte_at_a_time_response)
 		.response = "HTTP/1.1 200 Connection Established for "
 			    "upstream target\r\n\r\n",
 		.response_chunk = 1,
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[128];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("example.com:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		proxy_server_pump, &server);
+	int client_fd = result.fd;
+	const enum dialer_error err = d.err;
+	close_if_open(&client_fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT(!server.failed);
+	T_EXPECT(server.response_sent);
+	T_EXPECT(result.fd >= 0);
+	T_EXPECT_EQ(err, DIALER_OK);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
+/*
+ * Regression (#70): the receive buffer was sized from request maxima, capping an
+ * upstream proxy's CONNECT response at ~1 KiB, so a conforming proxy sending a
+ * larger header block (Via/X-Cache stacks, a long auth challenge, portal
+ * Set-Cookie) had its otherwise-successful 200 misreported as "response too
+ * long" (PROXY_PROTO). A valid 200 padded well past the old 1032-byte bound must
+ * now be accepted.
+ */
+T_DECLARE_CASE(http_connect_success_with_large_response_headers)
+{
+	/* one header value long enough to push the whole response past the old
+	 * 1032-byte cap while staying within DIALER_RBUF_SIZE */
+	char filler[1500];
+	memset(filler, 'a', sizeof(filler) - 1);
+	filler[sizeof(filler) - 1] = '\0';
+	char response[2048];
+	const int rn = snprintf(
+		response, sizeof(response),
+		"HTTP/1.1 200 Connection Established\r\n"
+		"X-Padding: %s\r\n\r\n",
+		filler);
+	T_CHECK(rn > 1032 && (size_t)rn < sizeof(response));
+
+	uint_fast16_t port = 0;
+	int listener_fd = make_listener(&port);
+	struct proxy_server server = {
+		.listener_fd = listener_fd,
+		.peer_fd = -1,
+		.response = response,
 	};
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -2210,9 +2374,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(local_address_blocked_by_egress_policy),
 	T_CASE(v4_mapped_local_address_blocked_by_egress_policy),
 	T_CASE(v4_mapped_loopback_address_blocked_by_egress_policy),
+	T_CASE(shared_cgnat_address_is_dialable_by_default),
+	T_CASE(reserved_address_blocked_by_egress_policy),
 	T_CASE(http_connect_success_sends_expected_request),
 	T_CASE(sync_connect_success_into_http_handshake),
 	T_CASE(http_connect_success_with_byte_at_a_time_response),
+	T_CASE(http_connect_success_with_large_response_headers),
 	T_CASE(http_connect_407_maps_to_proxy_auth),
 	T_CASE(http_connect_403_maps_to_proxy_reject),
 	T_CASE(http_connect_502_maps_to_proxy_refused),
