@@ -23,6 +23,11 @@ ROOT = Path.cwd().resolve()
 DEFAULT_BUILD_DIR = ROOT / "build"
 DEFAULT_OUTPUT = DEFAULT_BUILD_DIR / "bench.md"
 BENCH_NETNS_ENV = "BENCH_NETNS"
+# The iperf3 client connects to the proxy on PROXY_PORT; the proxy forwards to
+# the iperf3 server on SERVER_PORT. netem shaping is applied to PROXY_PORT, so
+# every endpoint below must be derived from these constants rather than repeated
+# as a bare literal, or shaping silently applies to the wrong (unshaped) flow.
+SERVER_PORT = 5201
 PROXY_PORT = 5202
 
 
@@ -194,7 +199,7 @@ def build_scenario_commands(
         "-c",
         "127.0.0.1",
         "-p",
-        "5202",
+        str(PROXY_PORT),
         "-t",
         str(duration),
         "--json",
@@ -208,6 +213,19 @@ def build_scenario_commands(
     if scenario.name == "parallel":
         return [base_command + ["--bidir", "-P", str(parallel)]]
     raise SystemExit("unsupported scenario: %s" % scenario.name)
+
+
+def _decode_stream(data: object) -> str:
+    """Decode a captured subprocess stream to text.
+
+    subprocess.TimeoutExpired attaches the partial capture as bytes even when
+    the command ran with text=True, so a plain `data or ""` would hand bytes to
+    Path.write_text() and raise TypeError, losing the very diagnostics the
+    timeout branch exists to preserve.
+    """
+    if isinstance(data, bytes):
+        return data.decode("utf-8", "replace")
+    return data or ""
 
 
 def run_json_command(
@@ -231,8 +249,8 @@ def run_json_command(
         output = proc.stdout or ""
         stderr_output = proc.stderr or ""
     except subprocess.TimeoutExpired as exc:
-        output = exc.stdout or ""
-        stderr_output = exc.stderr or ""
+        output = _decode_stream(exc.stdout)
+        stderr_output = _decode_stream(exc.stderr)
         log_path.write_text(output, encoding="utf-8")
         stderr_path.write_text(stderr_output, encoding="utf-8")
         raise SystemExit(
@@ -391,12 +409,27 @@ def extract_interval_throughputs(report: Dict[str, object]) -> List[float]:
         if not isinstance(interval, dict):
             continue
         total = 0.0
+        have_sum = False
         sum_obj = interval.get("sum")
         if isinstance(sum_obj, dict):
             bps = sum_obj.get("bits_per_second")
             if isinstance(bps, (int, float)):
-                total = float(bps)
-        if total == 0.0:
+                total += float(bps)
+                have_sum = True
+        # In a --bidir run each interval also carries the reverse direction in
+        # a separate sum_bidir_reverse; without it this per-interval series (and
+        # its stddev) reflects only half the traffic that the row's headline
+        # total throughput reports, so add it when present.
+        rev_obj = interval.get("sum_bidir_reverse")
+        if isinstance(rev_obj, dict):
+            bps = rev_obj.get("bits_per_second")
+            if isinstance(bps, (int, float)):
+                total += float(bps)
+        # Only fall back to per-stream summation when no aggregate "sum" was
+        # present: keying the fallback on total == 0.0 would, for an interval
+        # whose forward direction momentarily stalled to 0, silently switch this
+        # entry to a both-direction stream total and corrupt the series.
+        if not have_sum:
             streams = interval.get("streams")
             if isinstance(streams, list):
                 for stream in streams:
@@ -710,9 +743,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         proxy_log = open_log(build_dir / "neosocksd.log")
         iperf_server_log = open_log(build_dir / "iperf3-server.log")
 
-        log("+ %s" % quote_command([iperf3, "-s", "-p", "5201"]))
+        server_command = [iperf3, "-s", "-p", str(SERVER_PORT)]
+        log("+ %s" % quote_command(server_command))
         iperf_server_proc = subprocess.Popen(
-            [iperf3, "-s", "-p", "5201"],
+            server_command,
             cwd=str(build_dir),
             stdout=iperf_server_log,
             stderr=subprocess.STDOUT,
@@ -721,8 +755,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         proxy_command = [
             str(binary_path),
-            "-l", "127.0.0.1:5202",
-            "-f", "127.0.0.1:5201",
+            "-l", "127.0.0.1:%d" % PROXY_PORT,
+            "-f", "127.0.0.1:%d" % SERVER_PORT,
             "--loglevel", "0",
         ]
         if args.pipe:

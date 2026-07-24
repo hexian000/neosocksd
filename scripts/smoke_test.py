@@ -718,12 +718,27 @@ class Daemon:
         try:
             self._wait_ready()
         except Exception:
-            self._terminate()
+            # tear down best-effort; the startup error is what matters
+            self._terminate(check=False)
             raise
         return self
 
-    def _terminate(self) -> None:
-        if self.proc is None or self.proc.poll() is not None:
+    def _terminate(self, check: bool = True) -> None:
+        """Stop the daemon. When check is True (a clean with-block), a shutdown
+        that was not graceful raises RuntimeError so the case fails: the daemon
+        having already exited on its own (a mid-test crash/abort), a nonzero or
+        signal exit after SIGTERM (a broken shutdown path), or a hang that had
+        to be SIGKILLed. When check is False (an error is already propagating,
+        or startup failed) it only tears down, so it never masks that error."""
+        if self.proc is None:
+            return
+        if self.proc.poll() is not None:
+            rc = self.proc.returncode
+            if check:
+                raise RuntimeError(
+                    "%s exited unexpectedly during the test (code %d)\n%s"
+                    % (self.name, rc, self.stderr_text())
+                )
             return
         self.proc.send_signal(signal.SIGTERM)
         try:
@@ -731,10 +746,26 @@ class Daemon:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=SHUTDOWN_TIMEOUT)
+            if check:
+                raise RuntimeError(
+                    "%s did not exit within %.1fs of SIGTERM; had to SIGKILL\n%s"
+                    % (self.name, SHUTDOWN_TIMEOUT, self.stderr_text())
+                )
+            return
+        rc = self.proc.returncode
+        if check and rc != 0:
+            # a graceful SIGTERM handler exits 0; nonzero or a signal kill
+            # (rc < 0) means the shutdown path crashed or aborted
+            raise RuntimeError(
+                "%s exited abnormally after SIGTERM (code %d)\n%s"
+                % (self.name, rc, self.stderr_text())
+            )
 
-    def __exit__(self, *exc) -> None:
-        self._terminate()
-        self._stderr.close()
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        try:
+            self._terminate(check=exc_type is None)
+        finally:
+            self._stderr.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -878,7 +909,9 @@ def t_cli_startup_shutdown(ctx: Context) -> None:
         listen_port=port,
         loglevel=ctx.loglevel,
     ) as d:
-        # graceful SIGTERM is exercised by the harness on exit
+        # the daemon must still be running here; graceful SIGTERM shutdown is
+        # driven and now verified (exit status 0) by Daemon.__exit__ on the way
+        # out of this block.
         assert d.proc.poll() is None, "daemon should still be running"
 
 
@@ -1347,11 +1380,28 @@ def t_api_ruleset_update(ctx: Context) -> None:
         with socks4a_connect(HOST, listen, "hotpath.test", 80) as sock:
             echo_roundtrip(sock)
         # old route is gone -> rejected
+        stale_rejected = False
         try:
             socks4a_connect(HOST, listen, "smoke.test", 80).close()
         except SocksError:
-            return
-        raise AssertionError("stale route survived ruleset hot reload")
+            stale_rejected = True
+        assert stale_rejected, "stale route survived ruleset hot reload"
+
+        # a rejected update (a chunk that fails to compile) must return non-200
+        # AND leave the previously loaded ruleset routing traffic: a bad push
+        # must never take down routing.
+        status, body = api_request(
+            api,
+            "POST",
+            "/ruleset/update?chunkname=%40ruleset.lua",
+            b"return (((  -- deliberately not valid Lua\n",
+        )
+        assert status != 200, (
+            "invalid ruleset update unexpectedly returned 200: %r" % body
+        )
+        # the current route must survive the rejected update
+        with socks4a_connect(HOST, listen, "hotpath.test", 80) as sock:
+            echo_roundtrip(sock)
 
 
 @test("api/gc")
