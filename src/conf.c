@@ -14,7 +14,7 @@
 #endif
 
 #include "io/file.h"
-
+#include "meta/arraysize.h"
 #include "utils/slog.h"
 
 #include <inttypes.h>
@@ -293,6 +293,43 @@ static bool opt_parse_int(const char **restrict s, int *restrict out)
 	return true;
 }
 
+/* Install the logging sink named by a --log argument. Returns false (without
+ * changing the active sink) on an unknown name or on OOM building the stream
+ * writer, so the caller can fail the option instead of installing a NULL
+ * writer that would silently discard every log line. */
+static bool set_log_output(const char *restrict dst)
+{
+	if (strcmp(dst, "syslog") == 0) {
+		slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME, NULL);
+		return true;
+	}
+	if (strcmp(dst, "discard") == 0) {
+		slog_setoutput(SLOG_OUTPUT_DISCARD);
+		return true;
+	}
+	int output;
+	FILE *stream;
+	if (strcmp(dst, "stdout") == 0) {
+		output = SLOG_OUTPUT_STREAM;
+		stream = stdout;
+	} else if (strcmp(dst, "stderr") == 0) {
+		output = SLOG_OUTPUT_STREAM;
+		stream = stderr;
+	} else if (strcmp(dst, "terminal") == 0) {
+		output = SLOG_OUTPUT_TERMINAL;
+		stream = stderr;
+	} else {
+		return false;
+	}
+	/* io_filewriter closes the stream and returns NULL on OOM */
+	struct io_stream *const w = log_filewriter(stream);
+	if (w == NULL) {
+		return false;
+	}
+	slog_setoutput(output, w);
+	return true;
+}
+
 bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 {
 #define OPT_REQUIRE_ARG(argc, argv, i)                                         \
@@ -471,20 +508,7 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 		if (strcmp(argv[i], "--log") == 0) {
 			OPT_REQUIRE_ARG(argc, argv, i);
 			++i;
-			if (strcmp(argv[i], "stdout") == 0) {
-				slog_setoutput(
-					SLOG_OUTPUT_WRITER, log_filewriter(stdout));
-			} else if (strcmp(argv[i], "stderr") == 0) {
-				slog_setoutput(
-					SLOG_OUTPUT_WRITER, log_filewriter(stderr));
-			} else if (strcmp(argv[i], "terminal") == 0) {
-				slog_setoutput(SLOG_OUTPUT_TERMINAL, stderr);
-			} else if (strcmp(argv[i], "syslog") == 0) {
-				slog_setoutput(
-					SLOG_OUTPUT_SYSLOG, PROJECT_NAME, NULL);
-			} else if (strcmp(argv[i], "discard") == 0) {
-				slog_setoutput(SLOG_OUTPUT_DISCARD);
-			} else {
+			if (!set_log_output(argv[i])) {
 				OPT_ARG_ERROR(argv, i);
 			}
 			continue;
@@ -603,7 +627,6 @@ static const struct metaconfig conf_fields[] = {
 	{ "proxy", CONF_STRING, offsetof(struct config, proxy) },
 	{ "restapi", CONF_STRING, offsetof(struct config, restapi) },
 	{ "http_listen", CONF_STRING, offsetof(struct config, http_listen) },
-	{ "user_name", CONF_STRING, offsetof(struct config, user_name) },
 #if WITH_CARES
 	{ "nameserver", CONF_STRING, offsetof(struct config, nameserver) },
 #endif
@@ -640,7 +663,6 @@ static const struct metaconfig conf_fields[] = {
 #endif
 	{ "socks5_bind", CONF_BOOL, offsetof(struct config, socks5_bind) },
 	{ "socks5_udp", CONF_BOOL, offsetof(struct config, socks5_udp) },
-	{ "daemonize", CONF_BOOL, offsetof(struct config, daemonize) },
 	{ "block_loopback", CONF_BOOL,
 	  offsetof(struct config, block_loopback) },
 	{ "block_multicast", CONF_BOOL,
@@ -723,8 +745,116 @@ static bool load_field(
 	return ok;
 }
 
+static const char *boot_errmsg(lua_State *restrict L);
+
+/* Context for conf_fill_fields, passed as a light-userdata upvalue. */
+struct conf_fill {
+	struct config *conf;
+	char *block;
+	size_t total;
+};
+
+/* Apply the non-string fields and copy the string fields into the pre-measured
+ * `block`. conf_loadfromtable runs this under lua_pcall so that a config-table
+ * __index which raises on this second field-access pass is caught -- letting
+ * the caller free `block` instead of leaking it through the longjmp. The
+ * string field pointers are not repointed into `block` until the whole pass has
+ * succeeded, so a mid-pass raise leaves `conf`'s existing pointers intact rather
+ * than dangling into the block the caller then frees. The fill context is the
+ * first argument (a light userdata); the config table is the second (stack
+ * top). */
+static int conf_fill_fields(lua_State *restrict L)
+{
+	const struct conf_fill *restrict const fill = lua_touserdata(L, 1);
+	struct config *restrict const conf = fill->conf;
+
+	/* Every field has now been validated; apply non-string fields. */
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		if (f->type == CONF_STRING) {
+			continue;
+		}
+		(void)load_field(L, f, conf, true);
+	}
+
+	/* Copy string fields into the new block: a Lua-provided string replaces
+	 * the field; a nil value carries the field's current string forward so it
+	 * never dangles into the block freed on a failed load. The resulting
+	 * pointers are staged and only committed to `conf` once the whole pass
+	 * completes without raising. */
+	if (fill->total > 0) {
+		const char *newptr[ARRAY_SIZE(conf_fields)];
+		char *pos = fill->block;
+		char *const blockend = fill->block + fill->total;
+		for (const struct metaconfig *f = conf_fields; f->key != NULL;
+		     f++) {
+			if (f->type != CONF_STRING) {
+				continue;
+			}
+			const char **fptr =
+				(const char **)((char *)conf + f->offset);
+			newptr[f - conf_fields] = *fptr;
+			lua_getfield(L, -1, f->key);
+			const char *s;
+			size_t len = 0;
+			if (lua_type(L, -1) == LUA_TSTRING) {
+				s = lua_tolstring(L, -1, &len);
+			} else {
+				s = *fptr;
+				if (s != NULL) {
+					len = strlen(s);
+				}
+			}
+			if (s != NULL) {
+				/* clamp to the measured block: a stateful __index
+				 * could return a longer string on this second
+				 * lua_getfield, which must not overflow `block` */
+				const size_t avail = (size_t)(blockend - pos);
+				if (avail == 0) {
+					newptr[f - conf_fields] = "";
+				} else {
+					if (len + 1 > avail) {
+						len = avail - 1;
+					}
+					memcpy(pos, s, len);
+					pos[len] = '\0';
+					newptr[f - conf_fields] = pos;
+					pos += len + 1;
+				}
+			}
+			lua_pop(L, 1);
+		}
+		/* the pass raised nowhere above; commit the staged pointers */
+		for (const struct metaconfig *f = conf_fields; f->key != NULL;
+		     f++) {
+			if (f->type != CONF_STRING) {
+				continue;
+			}
+			*(const char **)((char *)conf + f->offset) =
+				newptr[f - conf_fields];
+		}
+	}
+	return 0;
+}
+
 bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 {
+	/* daemonize and user_name are consumed in main() before any boot config
+	 * is loaded -- daemonization must precede thread creation -- so they can
+	 * only take effect from the command line. Reject them rather than accept
+	 * a setting that would silently do nothing (notably user_name, which
+	 * would otherwise leave the process running as root). */
+	static const char *const cli_only[] = { "daemonize", "user_name" };
+	for (size_t i = 0; i < ARRAY_SIZE(cli_only); i++) {
+		lua_getfield(L, -1, cli_only[i]);
+		const bool present = !lua_isnil(L, -1);
+		lua_pop(L, 1);
+		if (present) {
+			LOGE_F("boot: field `%s' can only be set on the command line",
+			       cli_only[i]);
+			return false;
+		}
+	}
+
 	/* Validate every field first (read-only): non-string fields, then
 	 * string fields together with measuring the replacement string
 	 * block below. No field is mutated until all of them check out, so
@@ -775,61 +905,28 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 		return false;
 	}
 
-	/* Every field has now been validated; apply non-string fields. */
-	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
-		if (f->type == CONF_STRING) {
-			continue;
-		}
-		(void)load_field(L, f, conf, true);
-	}
-
-	/* Copy string fields into the new block: a Lua-provided string
-	 * replaces the field; a nil value carries the field's current
-	 * string forward so it never dangles into the block freed below. */
-	if (total > 0) {
-		char *pos = block;
-		char *const blockend = block + total;
-		for (const struct metaconfig *f = conf_fields; f->key != NULL;
-		     f++) {
-			if (f->type != CONF_STRING) {
-				continue;
-			}
-			const char **fptr =
-				(const char **)((char *)conf + f->offset);
-			lua_getfield(L, -1, f->key);
-			const char *s;
-			size_t len = 0;
-			if (lua_type(L, -1) == LUA_TSTRING) {
-				s = lua_tolstring(L, -1, &len);
-			} else {
-				/* nil -- or a stateful __index that no longer
-				 * yields a string on this second lua_getfield --
-				 * carries the current value forward so *fptr never
-				 * dangles into the block freed below */
-				s = *fptr;
-				if (s != NULL) {
-					len = strlen(s);
-				}
-			}
-			if (s != NULL) {
-				/* clamp to the measured block: a stateful __index
-				 * could return a longer string on this second
-				 * lua_getfield, which must not overflow `block` */
-				const size_t avail = (size_t)(blockend - pos);
-				if (avail == 0) {
-					*fptr = "";
-				} else {
-					if (len + 1 > avail) {
-						len = avail - 1;
-					}
-					memcpy(pos, s, len);
-					pos[len] = '\0';
-					*fptr = pos;
-					pos += len + 1;
-				}
-			}
-			lua_pop(L, 1);
-		}
+	/* Apply the non-string fields and fill `block` under a protected call:
+	 * a config-table __index that raises on this second field-access pass
+	 * must fail the load without leaking `block` or dangling a string field
+	 * into it (conf_fill_fields defers the field pointers until it is done).
+	 * The fill context rides in as a light-userdata argument and the body as a
+	 * plain cfunction, so nothing between the malloc above and lua_pcall can
+	 * raise: lua_pushcclosure would allocate its closure and could itself raise
+	 * LUA_ERRMEM, leaking `block` through the caught longjmp, whereas these
+	 * pushes cannot. */
+	struct conf_fill fill = {
+		.conf = conf,
+		.block = block,
+		.total = total,
+	};
+	lua_pushcfunction(L, conf_fill_fields);
+	lua_pushlightuserdata(L, &fill);
+	lua_pushvalue(L, -3); /* the config table, as the second argument */
+	if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+		LOGE_F("boot: %s", boot_errmsg(L));
+		lua_pop(L, 1);
+		free(block);
+		return false;
 	}
 
 	free(conf->strings);
@@ -949,6 +1046,41 @@ boot_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
 	return buf;
 }
 
+/* Format the Lua error object on the stack top for logging. lua_tostring is
+ * only safe on a string; a non-string error object (error({}), error(nil))
+ * yields NULL, and passing NULL to slog's "%s" is undefined behavior. This
+ * state installs no panic handler, so luaL_tolstring's __tostring dispatch
+ * could itself raise and abort() -- mirror ruleset.c's l_panic instead. */
+static const char *boot_errmsg(lua_State *restrict L)
+{
+	if (lua_type(L, -1) == LUA_TSTRING) {
+		return lua_tostring(L, -1);
+	}
+	return "error object is not a string";
+}
+
+/* Protected body of conf_loadboot: guards against a `ruleset` field and applies
+ * the config table. Run under lua_pcall so a raising __index metamethod on the
+ * config table surfaces as a catchable error instead of aborting the process
+ * (this luaL_newstate installs no panic handler). Arguments: the config table
+ * and a light userdata pointing at the struct config to fill. */
+static int conf_apply_boot(lua_State *restrict L)
+{
+	struct config *restrict const conf = lua_touserdata(L, 2);
+	lua_settop(L, 1); /* conf_loadfromtable reads the table at the top */
+	lua_getfield(L, 1, "ruleset");
+	if (!lua_isnil(L, -1)) {
+		return luaL_error(
+			L,
+			"`ruleset' field requires a build with ruleset support");
+	}
+	lua_pop(L, 1);
+	if (!conf_loadfromtable(L, conf)) {
+		return luaL_error(L, "failed to load config fields");
+	}
+	return 0;
+}
+
 bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 {
 	struct io_stream *restrict const s = codec_lua_reader(filename);
@@ -968,7 +1100,7 @@ bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 	 * detecting a truncated stream only as it finishes */
 	const int closeerr = io_stream_close(s);
 	if (status != LUA_OK) {
-		LOGE_F("config: %s", lua_tostring(L, -1));
+		LOGE_F("config: %s", boot_errmsg(L));
 		lua_close(L);
 		return false;
 	}
@@ -985,7 +1117,7 @@ bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 	}
 	lua_pushliteral(L, "config");
 	if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
-		LOGE_F("config: %s", lua_tostring(L, -1));
+		LOGE_F("config: %s", boot_errmsg(L));
 		lua_close(L);
 		return false;
 	}
@@ -994,15 +1126,18 @@ bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 		lua_close(L);
 		return false;
 	}
-	lua_getfield(L, -1, "ruleset");
-	if (!lua_isnil(L, -1)) {
-		LOGE("config: `ruleset' field requires a build with ruleset support");
+	/* Extract the config fields under protection: lua_getfield can invoke an
+	 * __index metamethod that raises, which without a protected frame would
+	 * hit Lua's default panic and abort() the process. */
+	lua_pushcfunction(L, conf_apply_boot);
+	lua_insert(L, -2); /* [conf_apply_boot, config table] */
+	lua_pushlightuserdata(L, conf); /* [conf_apply_boot, table, conf] */
+	if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+		LOGE_F("config: %s", boot_errmsg(L));
 		lua_close(L);
 		return false;
 	}
-	lua_pop(L, 1);
-	const bool ok = conf_loadfromtable(L, conf);
 	lua_close(L);
-	return ok;
+	return true;
 }
 #endif /* WITH_LUA */

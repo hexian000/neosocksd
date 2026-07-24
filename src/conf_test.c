@@ -14,6 +14,7 @@
 
 #include <lauxlib.h>
 #include <lua.h>
+#include <lualib.h>
 #endif /* WITH_LUA */
 
 #include "meta/arraysize.h"
@@ -227,14 +228,14 @@ T_DECLARE_CASE(parseargs_rejects_empty_numeric_args)
 {
 	/* strtoumax/strtod consume no digits on these; the parsers must not
 	 * silently accept them as 0. */
-	static const char *const cases[][3] = {
+	static const char *const cases[][2] = {
 		{ "--loglevel", "" },
 		{ "-m", "" },
 		{ "-t", "" },
 		{ "--max-startups", ":5:10" },
 		{ "--max-startups", "5::10" },
 	};
-	for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+	for (size_t k = 0; k < ARRAY_SIZE(cases); k++) {
 		struct config conf = conf_default();
 		char *argv[] = { "conf_test", (char *)cases[k][0],
 				 (char *)cases[k][1] };
@@ -923,8 +924,8 @@ T_DECLARE_CASE(loadtable_applies_typed_fields)
 	lua_setfield(L, -2, "loglevel");
 	lua_pushnumber(L, 12.5);
 	lua_setfield(L, -2, "timeout");
-	lua_pushboolean(L, 1);
-	lua_setfield(L, -2, "daemonize");
+	lua_pushboolean(L, 0);
+	lua_setfield(L, -2, "tcp_nodelay");
 	lua_pushinteger(L, 4242);
 	lua_setfield(L, -2, "max_sessions");
 
@@ -935,7 +936,7 @@ T_DECLARE_CASE(loadtable_applies_typed_fields)
 		strcmp(conf.listen, "0.0.0.0:1080") == 0);
 	T_EXPECT_EQ(conf.loglevel, 5);
 	T_EXPECT(conf.timeout == 12.5);
-	T_EXPECT(conf.daemonize);
+	T_EXPECT(!conf.tcp_nodelay);
 	T_EXPECT_EQ(conf.max_sessions, 4242);
 
 	free(conf.strings);
@@ -1017,7 +1018,7 @@ T_DECLARE_CASE(loadtable_rejects_wrong_types)
 		lua_State *L = new_conf_table();
 		T_CHECK(L != NULL);
 		lua_pushinteger(L, 1);
-		lua_setfield(L, -2, "daemonize");
+		lua_setfield(L, -2, "tcp_nodelay");
 		struct config conf = conf_default();
 		T_EXPECT(!conf_loadfromtable(L, &conf));
 		free(conf.strings);
@@ -1094,22 +1095,131 @@ T_DECLARE_CASE(loadtable_second_call_does_not_dangle_prior_string)
 	lua_close(L2);
 }
 
-/* conf_loadboot tests */
-
-static int write_tempfile(char *restrict tmpl, const char *restrict content)
+/*
+ * daemonize and user_name are consumed before any boot config loads, so a
+ * config table must not be able to set them: accepting a value that silently
+ * does nothing is the bug (a user_name that never drops privileges leaves the
+ * process running as root). conf_loadfromtable rejects them outright.
+ */
+T_DECLARE_CASE(loadtable_rejects_cli_only_fields)
 {
-	const int fd = mkstemp(tmpl);
-	if (fd < 0) {
-		return -1;
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushboolean(L, 1);
+		lua_setfield(L, -2, "daemonize");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
 	}
-	const size_t len = strlen(content);
-	if ((size_t)write(fd, content, len) != len) {
-		(void)close(fd);
-		(void)unlink(tmpl);
-		return -1;
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushstring(L, "nobody:nogroup");
+		lua_setfield(L, -2, "user_name");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
 	}
-	return close(fd);
 }
+
+/*
+ * conf_loadfromtable measures the string block on one lua_getfield pass and
+ * fills it on a second; a stateful __index metamethod that answers differently
+ * the second time drives the apply pass's defensive clamps, which a plain
+ * table can never reach because measure and apply always agree. Each scenario
+ * below exercises one such branch: a longer-on-apply string that must be
+ * truncated to the measured block (the actual heap-overflow guard), a
+ * string-then-nil field that must carry its current value forward, and a
+ * new-on-apply field that lands in an already-exhausted block.
+ */
+/* Load a config from the metatabled table returned by the Lua expression
+ * `src`, returning conf_loadfromtable's verdict and filling *conf (whose
+ * .strings the caller frees; it stays NULL on failure). */
+static bool
+load_metatable_conf(const char *restrict src, struct config *restrict conf)
+{
+	*conf = conf_default();
+	lua_State *restrict L = luaL_newstate();
+	if (L == NULL) {
+		return false;
+	}
+	luaL_openlibs(L);
+	bool ok = false;
+	if (luaL_dostring(L, src) == LUA_OK && lua_istable(L, -1)) {
+		ok = conf_loadfromtable(L, conf);
+	}
+	lua_close(L);
+	return ok;
+}
+
+T_DECLARE_CASE(loadtable_clamps_stateful_metatable_index)
+{
+	/* (c) truncation: 'listen' measures as "ab" but the apply pass returns a
+	 * longer string, which must be clamped to the 2-byte block, not overrun
+	 * it */
+	{
+		struct config conf;
+		T_EXPECT(load_metatable_conf(
+			"local n = {}\n"
+			"return setmetatable({}, { __index = function(_, k)\n"
+			"  n[k] = (n[k] or 0) + 1\n"
+			"  if k == 'listen' then\n"
+			"    if n[k] == 1 then return 'ab' end\n"
+			"    return 'abcdefghij'\n"
+			"  end\n"
+			"  return nil\n"
+			"end })\n",
+			&conf));
+		T_EXPECT(conf.listen != NULL);
+		T_EXPECT_STREQ(conf.listen, "ab");
+		free(conf.strings);
+	}
+	/* (a) string-then-nil: 'listen' is a string on measure but nil on apply,
+	 * so the current value (NULL here) is carried forward rather than left
+	 * dangling into the freed block */
+	{
+		struct config conf;
+		T_EXPECT(load_metatable_conf(
+			"local n = {}\n"
+			"return setmetatable({}, { __index = function(_, k)\n"
+			"  n[k] = (n[k] or 0) + 1\n"
+			"  if k == 'listen' then\n"
+			"    if n[k] == 1 then return 'hello' end\n"
+			"    return nil\n"
+			"  end\n"
+			"  return nil\n"
+			"end })\n",
+			&conf));
+		T_EXPECT(conf.listen == NULL);
+		free(conf.strings);
+	}
+	/* (b) exhausted block: 'listen' fills the block exactly, then 'forward'
+	 * -- nil on measure, a string on apply -- lands with zero room left and
+	 * must become "" instead of writing past the end */
+	{
+		struct config conf;
+		T_EXPECT(load_metatable_conf(
+			"local n = {}\n"
+			"return setmetatable({}, { __index = function(_, k)\n"
+			"  n[k] = (n[k] or 0) + 1\n"
+			"  if k == 'listen' then return 'ab' end\n"
+			"  if k == 'forward' then\n"
+			"    if n[k] == 1 then return nil end\n"
+			"    return 'zz'\n"
+			"  end\n"
+			"  return nil\n"
+			"end })\n",
+			&conf));
+		T_EXPECT_STREQ(conf.listen, "ab");
+		T_EXPECT(conf.forward != NULL && conf.forward[0] == '\0');
+		free(conf.strings);
+	}
+}
+
+/* conf_loadboot tests */
 
 static int write_tempfile_bin(
 	char *restrict tmpl, const void *restrict data, const size_t len)
@@ -1125,6 +1235,11 @@ static int write_tempfile_bin(
 		return -1;
 	}
 	return close(fd);
+}
+
+static int write_tempfile(char *restrict tmpl, const char *restrict content)
+{
+	return write_tempfile_bin(tmpl, content, strlen(content));
 }
 
 /*
@@ -1261,6 +1376,74 @@ T_DECLARE_CASE(loadboot_rejects_missing_file)
 	T_EXPECT(!conf_loadboot(&conf, "/tmp/conf_test_does_not_exist_XXXXXX"));
 	free(conf.strings);
 }
+
+/*
+ * Regression: field extraction from the returned config table runs on a state
+ * with no panic handler, so a __index metamethod that raises must be caught and
+ * turned into a load failure -- before the fix it hit Lua's default panic and
+ * abort()ed the process.
+ */
+T_DECLARE_CASE(loadboot_rejects_raising_metatable)
+{
+	char path[] = "/tmp/conf_test_XXXXXX";
+	T_CHECK(write_tempfile(
+			path,
+			"return setmetatable({}, { __index = function() error('boom') end })") ==
+		0);
+
+	struct config conf = conf_default();
+	T_EXPECT(!conf_loadboot(&conf, path));
+
+	free(conf.strings);
+	(void)unlink(path);
+}
+
+/*
+ * Regression: a config chunk that raises a non-string error object must fail
+ * cleanly. lua_tostring on a non-string yields NULL, and formatting NULL with
+ * "%s" is undefined behavior -- the load must still just return false.
+ */
+T_DECLARE_CASE(loadboot_rejects_non_string_error)
+{
+	char path[] = "/tmp/conf_test_XXXXXX";
+	T_CHECK(write_tempfile(path, "error(setmetatable({}, {}))") == 0);
+
+	struct config conf = conf_default();
+	T_EXPECT(!conf_loadboot(&conf, path));
+
+	free(conf.strings);
+	(void)unlink(path);
+}
+
+/*
+ * Regression: a stateful __index that yields valid values through validation
+ * and the string-measure pass -- so conf_loadfromtable reaches its malloc of
+ * the string block -- but then raises on the copy pass's second lua_getfield
+ * must fail the load without leaking that block. The raise is caught (the
+ * process would otherwise abort); this covers that the measured block is freed,
+ * verified under ASAN/LSan, rather than abandoned by the longjmp.
+ */
+T_DECLARE_CASE(loadboot_frees_block_when_metatable_raises_after_measure)
+{
+	char path[] = "/tmp/conf_test_XXXXXX";
+	T_CHECK(write_tempfile(
+			path,
+			"local n = {}\n"
+			"return setmetatable({}, { __index = function(_, k)\n"
+			"  if k == 'listen' then\n"
+			"    n[k] = (n[k] or 0) + 1\n"
+			"    if n[k] == 1 then return 'x' end\n"
+			"    error('boom')\n"
+			"  end\n"
+			"  return nil\n"
+			"end })\n") == 0);
+
+	struct config conf = conf_default();
+	T_EXPECT(!conf_loadboot(&conf, path));
+
+	free(conf.strings);
+	(void)unlink(path);
+}
 #endif /* WITH_LUA */
 
 /* -------------------------------------------------------------------------
@@ -1354,12 +1537,17 @@ static const struct testing_suite suite[] = {
 	T_CASE(loadtable_rejects_wrong_types),
 	T_CASE(loadtable_rejects_all_or_nothing_across_field_kinds),
 	T_CASE(loadtable_second_call_does_not_dangle_prior_string),
+	T_CASE(loadtable_rejects_cli_only_fields),
+	T_CASE(loadtable_clamps_stateful_metatable_index),
 	T_CASE(loadboot_applies_config_table),
 	T_CASE(loadboot_rejects_ruleset_field),
 	T_CASE(loadboot_auth_required_requires_ruleset),
 	T_CASE(loadboot_rejects_non_table_return),
 	T_CASE(loadboot_rejects_syntax_error),
 	T_CASE(loadboot_rejects_truncated_stream),
+	T_CASE(loadboot_rejects_raising_metatable),
+	T_CASE(loadboot_rejects_non_string_error),
+	T_CASE(loadboot_frees_block_when_metatable_raises_after_measure),
 	T_CASE(loadboot_rejects_missing_file),
 #endif /* WITH_LUA */
 	T_SUITE_END,

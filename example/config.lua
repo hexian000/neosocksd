@@ -188,9 +188,9 @@ return {
     --   5 Info     6 Debug  7 Verbose  8 VeryVerbose
     loglevel            = 4,
 
-    -- Drop privileges after binding sockets.  Format: "user" or "user:group".
-    -- user_name = "nobody:nogroup",
-
-    -- Detach from the terminal and write logs to syslog.
-    daemonize           = false,
+    -- Note: privilege drop (-u/--user, e.g. "nobody:nogroup") and
+    -- daemonization (-d/--daemonize) are command-line options only.  They must
+    -- take effect before worker threads start, which is earlier than this
+    -- config is loaded, so setting them here is rejected rather than silently
+    -- ignored.
 }
