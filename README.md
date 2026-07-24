@@ -5,7 +5,7 @@
 [![Downloads](https://img.shields.io/github/downloads/hexian000/neosocksd/total.svg)](https://github.com/hexian000/neosocksd/releases)
 [![Release](https://img.shields.io/github/release/hexian000/neosocksd.svg?style=flat)](https://github.com/hexian000/neosocksd/releases)
 
-A fast, lightweight TCP proxy server written in C with a Lua-powered routing engine. Ships with `agent.lua`, an optional module for building an autonomous overlay network across multiple LANs.
+A fast, lightweight proxy server written in C with a Lua-powered routing engine. Ships with `agent.lua`, an optional module for building an autonomous overlay network across multiple LANs.
 
 Status: **Stable**
 
@@ -27,6 +27,7 @@ Status: **Stable**
 ## Features
 
 - Protocols: [SOCKS4](https://www.openssh.com/txt/socks4.protocol)/[SOCKS4A](https://www.openssh.com/txt/socks4a.protocol) (Ying-Da Lee / NEC), SOCKS5 ([RFC 1928](https://datatracker.ietf.org/doc/html/rfc1928), with [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929) auth), HTTP/1.1 proxy — request forwarding ([RFC 9112 §3.2.2](https://datatracker.ietf.org/doc/html/rfc9112#section-3.2.2)), `CONNECT` tunneling ([RFC 9110 §9.3.6](https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.6)), and `Upgrade` (e.g. WebSocket) passthrough.
+- Optional legacy compatibility: The following SOCKS5 commands are off by default and work only in plain proxy mode (not through chains or rulesets): BIND (`--enable-socks5-bind`, relays an inbound connection from the target back to the client); UDP ASSOCIATE (`--enable-socks5-udp`, relays UDP datagrams).
 - Transparent proxy: Linux [TPROXY](https://docs.kernel.org/networking/tproxy.html).
 - 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024).
 - ~650 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
@@ -48,6 +49,7 @@ Status: **Stable**
 ./neosocksd -4 -l 0.0.0.0:1080  # Prefer IPv4 in DNS resolution
 ./neosocksd -4 -l 0.0.0.0:1080 -i eth0  # Bind outbound to eth0
 ./neosocksd -l 0.0.0.0:1080 --http 0.0.0.0:8080  # SOCKS and HTTP server
+./neosocksd -l 0.0.0.0:1080 --enable-socks5-bind --enable-socks5-udp  # Allow SOCKS5 BIND and UDP ASSOCIATE
 
 # Transparent proxy (requires root)
 sudo ./neosocksd --tproxy -l 0.0.0.0:50080 --api 127.0.1.1:9080 -r tproxy.lua \
