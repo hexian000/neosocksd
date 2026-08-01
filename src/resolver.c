@@ -23,7 +23,6 @@
 #include <sys/select.h>
 
 #include <ares.h>
-#include <ares_version.h>
 #endif
 #include <sys/socket.h>
 #if WITH_CARES

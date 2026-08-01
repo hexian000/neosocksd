@@ -162,20 +162,24 @@ T_DECLARE_CASE(resolve_success_ipv4)
 	free_test_resolver(resolver, loop);
 }
 
-T_DECLARE_CASE(resolve_failure_invalid_name)
+T_DECLARE_CASE(resolve_failure_invalid_service)
 {
 	struct ev_loop *loop = NULL;
 	struct resolver *const resolver = new_test_resolver(&loop);
 	struct resolve_result result = { 0 };
 	const struct resolver_stats *stats;
 
+	/* A numeric host needs no DNS and service resolution is always local, so
+	 * an unknown service fails deterministically without a network round-trip
+	 * -- unlike a bad hostname, whose lookup can stall past the watchdog in an
+	 * offline environment. */
 	T_CHECK(resolve_do(
 			resolver,
 			(struct resolve_cb){
 				.func = resolve_capture_cb,
 				.data = &result,
 			},
-			"bad host", "443", AF_UNSPEC) != NULL);
+			"127.0.0.1", "notaservice", AF_UNSPEC) != NULL);
 	T_EXPECT(wait_for_result(loop, &result));
 	T_EXPECT(!result.ok);
 
@@ -561,7 +565,7 @@ T_DECLARE_CASE(resolver_setnameserver_applies_after_new)
 
 static const struct testing_suite suite[] = {
 	T_CASE(resolve_success_ipv4),
-	T_CASE(resolve_failure_invalid_name),
+	T_CASE(resolve_failure_invalid_service),
 	T_CASE(resolve_cancel_suppresses_callback),
 	T_CASE(resolve_success_ipv6),
 	T_CASE(resolve_success_unspec),
