@@ -43,7 +43,8 @@
  * ---------------------------------------------------------------------- */
 
 static bool stream_write_all(
-	struct io_stream *restrict s, const void *restrict data, const size_t len)
+	struct io_stream *restrict s, const void *restrict data,
+	const size_t len)
 {
 	size_t total = 0;
 	const unsigned char *p = data;
@@ -1304,7 +1305,8 @@ T_DECLARE_CASE(codec_gzip_truncated_after_fextra)
 	unsigned char *const buf = malloc(sizeof(trunc));
 	T_CHECK(buf != NULL);
 	memcpy(buf, trunc, sizeof(trunc));
-	struct io_stream *r = codec_gzip_reader(io_memreader(buf, sizeof(trunc)));
+	struct io_stream *r =
+		codec_gzip_reader(io_memreader(buf, sizeof(trunc)));
 	T_CHECK(r != NULL);
 	unsigned char out[16];
 	size_t n = sizeof(out);
@@ -1446,6 +1448,56 @@ T_DECLARE_BENCH(bench_gzip_roundtrip)
 	}
 }
 
+/* A payload that decompresses past CODEC_MAX_INFLATE (overridden to a small
+ * value for this test target) must abort with a decode error rather than
+ * producing it all -- the decompression-bomb guard. A tiny compressed run of
+ * zeros expands past the cap, and the streaming copy must fail before
+ * delivering the whole payload. Exercised for both the inflate and gunzip
+ * streams. */
+T_DECLARE_CASE(codec_reader_aborts_decompression_bomb)
+{
+	struct io_stream *(*const writers[])(struct io_stream *) = {
+		codec_zlib_writer,
+		codec_gzip_writer,
+	};
+	struct io_stream *(*const readers[])(struct io_stream *) = {
+		codec_zlib_reader,
+		codec_gzip_reader,
+	};
+	static const unsigned char zeros[IO_BUFSIZE] = { 0 };
+	const size_t target = (size_t)CODEC_MAX_INFLATE + sizeof(zeros);
+
+	for (size_t v = 0; v < ARRAY_SIZE(writers); ++v) {
+		struct vbuffer *compressed = VBUF_NEW(256);
+		T_CHECK(compressed != NULL);
+		struct io_stream *w = writers[v](io_heapwriter(&compressed));
+		T_CHECK(w != NULL);
+		for (size_t off = 0; off < target; off += sizeof(zeros)) {
+			T_CHECK(stream_write_all(w, zeros, sizeof(zeros)));
+		}
+		T_EXPECT_EQ(io_stream_close(w), 0);
+		/* the bomb is tiny on the wire */
+		T_EXPECT(VBUF_LEN(compressed) < target);
+
+		struct io_stream *r = readers[v](io_memreader(
+			VBUF_DATA(compressed), VBUF_LEN(compressed)));
+		T_CHECK(r != NULL);
+		struct vbuffer *out = VBUF_NEW(IO_BUFSIZE);
+		T_CHECK(out != NULL);
+		struct io_stream *sink = io_heapwriter(&out);
+		T_CHECK(sink != NULL);
+		unsigned char buf[IO_BUFSIZE];
+		/* the reader aborts once its cumulative output crosses the cap,
+		 * so the copy fails and not all of `target` is delivered */
+		T_EXPECT(io_stream_copy(sink, r, buf, sizeof(buf)) != 0);
+		T_EXPECT(VBUF_LEN(out) < target);
+		(void)io_stream_close(sink);
+		(void)io_stream_close(r);
+		VBUF_FREE(out);
+		VBUF_FREE(compressed);
+	}
+}
+
 /* -------------------------------------------------------------------------
  * main - test runner.
  * ---------------------------------------------------------------------- */
@@ -1462,6 +1514,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_lua_reader_shebang_newline_on_chunk_boundary),
 	T_CASE(codec_null_base),
 	T_CASE(codec_zlib_roundtrip),
+	T_CASE(codec_reader_aborts_decompression_bomb),
 	T_CASE(codec_reader_wraps_base_without_direct_read),
 	T_CASE(codec_reader_short_direct_read_is_not_eof),
 	T_CASE(codec_gzip_truncated_header_via_short_reads_fails),

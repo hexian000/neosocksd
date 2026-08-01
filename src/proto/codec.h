@@ -86,4 +86,29 @@ struct io_stream *codec_gzip_reader(struct io_stream *base);
  */
 struct io_stream *codec_lua_reader(const char *path);
 
+#if WITH_LUA
+struct lua_State;
+
+/* State for codec_lua_stream_read: the stream to pull from (borrowed, not
+ * closed by the reader), the read-error log prefix (logged verbatim before the
+ * error code, e.g. "config: read error"), and an out slot for the error code
+ * lua_load() cannot otherwise observe. */
+struct codec_lua_stream {
+	struct io_stream *stream;
+	const char *errlabel;
+	int err;
+};
+
+/**
+ * @brief lua_Reader that streams an io_stream into lua_load().
+ *
+ * Reads the next chunk via io_stream_direct_read(). On a read error it logs
+ * "<errlabel> <n>", records the error in the codec_lua_stream (so the caller
+ * can turn a truncated read into a load failure rather than a clean EOF), and
+ * stops. @p ud must point at a struct codec_lua_stream.
+ */
+const char *codec_lua_stream_read(
+	struct lua_State *restrict L, void *ud, size_t *restrict sz);
+#endif /* WITH_LUA */
+
 #endif /* PROTO_CODEC_H */

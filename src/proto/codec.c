@@ -179,6 +179,17 @@ struct io_stream *codec_deflate_writer(struct io_stream *base)
 	return deflate_writer(base, false);
 }
 
+/* Cap on total decompressed output per stream. Decompression is an unbounded
+ * amplification vector -- a small compressed input can expand to gigabytes --
+ * and the daemon is single-threaded, so an uncapped inflate/gunzip lets one
+ * request stall every session. Once a stream's cumulative output exceeds this
+ * bound it aborts with a decode error rather than exhausting memory/CPU.
+ * Overridable at build time so the unit test can drive the abort at a small
+ * size instead of producing gigabytes. */
+#ifndef CODEC_MAX_INFLATE
+#define CODEC_MAX_INFLATE (2ull << 30) /* 2 GiB */
+#endif
+
 struct inflate_stream {
 	struct io_stream s;
 	struct io_stream *base;
@@ -190,6 +201,7 @@ struct inflate_stream {
 	tinfl_status status;
 	tinfl_decompressor inflator;
 	size_t dstpos, dstlen;
+	size_t outtotal;
 	unsigned char dstbuf[TINFL_LZ_DICT_SIZE];
 };
 ASSERT_SUPER(struct io_stream, struct inflate_stream, s);
@@ -238,6 +250,16 @@ inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 			z->srcbuf += srclen;
 			z->srclen -= srclen;
 			z->dstlen += dstlen;
+			z->outtotal += dstlen;
+			if (z->outtotal > CODEC_MAX_INFLATE) {
+				/* decompression bomb: cumulative output exceeds
+				 * the cap. Remote-triggerable, so log at DEBUG. */
+				LOGD_F("inflate: output exceeds %zu-byte limit, aborting",
+				       (size_t)CODEC_MAX_INFLATE);
+				z->status = TINFL_STATUS_FAILED;
+				*len = 0;
+				return z->status;
+			}
 		}
 
 		if (z->dstpos < z->dstlen) {
@@ -313,6 +335,7 @@ static struct io_stream *inflate_reader(struct io_stream *base, const bool zlib)
 	tinfl_init(&z->inflator);
 
 	z->dstpos = z->dstlen = 0;
+	z->outtotal = 0;
 	return (struct io_stream *)z;
 }
 
@@ -623,6 +646,7 @@ struct gzip_rstream {
 	tinfl_status status;
 	tinfl_decompressor inflator;
 	size_t dstpos, dstlen;
+	size_t outtotal;
 	unsigned char dstbuf[TINFL_LZ_DICT_SIZE];
 	/* gzip state machine */
 	enum gzip_rstate rstate;
@@ -888,6 +912,19 @@ static bool gzip_decompress_body(
 		z->srcbuf += srclen;
 		z->srclen -= srclen;
 		z->dstlen += dstlen;
+		z->outtotal += dstlen;
+		if (z->outtotal > CODEC_MAX_INFLATE) {
+			/* decompression bomb: cumulative output (summed across
+			 * gzip members) exceeds the cap. Remote-triggerable, so
+			 * log at DEBUG. */
+			LOGD_F("gzip: output exceeds %zu-byte limit, aborting",
+			       (size_t)CODEC_MAX_INFLATE);
+			z->status = TINFL_STATUS_FAILED;
+			z->rderr = z->status;
+			*len = 0;
+			*ret = z->status;
+			return true;
+		}
 	}
 
 	if (z->dstpos < z->dstlen) {
@@ -1074,6 +1111,7 @@ struct io_stream *codec_gzip_reader(struct io_stream *base)
 	z->hphase = GZIP_HPHASE_HEADER;
 	z->hdrcrc = (uint_least32_t)MZ_CRC32_INIT;
 	z->dstpos = z->dstlen = 0;
+	z->outtotal = 0;
 	return (struct io_stream *)z;
 }
 
@@ -1108,7 +1146,8 @@ ASSERT_SUPER(struct io_stream, struct lua_rstream, s);
 
 /* Skip UTF-8 BOM if present; transition to LUA_SKIP_SHEBANG. Returns false for non-UTF-8 BOM. */
 static bool lua_skip_bom(
-	struct lua_rstream *z, const unsigned char *p, size_t n, size_t *offset)
+	struct lua_rstream *restrict z, const unsigned char *restrict p,
+	size_t n, size_t *restrict offset)
 {
 	if (n >= 4 && p[0] == 0x00 && p[1] == 0x00 && p[2] == 0xFE &&
 	    p[3] == 0xFF) {
@@ -1147,7 +1186,8 @@ static bool lua_skip_bom(
  * the "#!" prefix is only ever checked once (shebang_confirmed latches
  * it), since a retry's chunk starts mid-line, not at "#!" again. */
 static void lua_skip_shebang(
-	struct lua_rstream *z, const unsigned char *p, size_t n, size_t *offset)
+	struct lua_rstream *restrict z, const unsigned char *restrict p,
+	size_t n, size_t *restrict offset)
 {
 	if (!z->shebang_confirmed) {
 		if (n - *offset < 2 || p[*offset] != '#' ||
@@ -1201,7 +1241,8 @@ lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 		 * prefix whenever the source has that many bytes. */
 		z->peeklen = LUA_PEEK_SIZE;
 		z->peekpos = 0;
-		const int err = io_stream_read(z->inner, z->peekbuf, &z->peeklen);
+		const int err =
+			io_stream_read(z->inner, z->peekbuf, &z->peeklen);
 		if (err != 0) {
 			z->state = LUA_PASSTHROUGH;
 			z->rderr = err;
@@ -1340,6 +1381,31 @@ static struct io_stream *lua_reader_new(struct io_stream *base)
 	return (struct io_stream *)z;
 }
 
+#if WITH_LUA
+const char *codec_lua_stream_read(
+	struct lua_State *restrict L, void *ud, size_t *restrict sz)
+{
+	(void)L;
+	struct codec_lua_stream *restrict rs = ud;
+	const void *buf;
+	/* Lua allows an arbitrary chunk length. */
+	*sz = SIZE_MAX;
+	const int err = io_stream_direct_read(rs->stream, &buf, sz);
+	if (err != 0) {
+		LOGE_F("%s %d", rs->errlabel, err);
+		/* lua_Reader has no error channel; record it and stop so the
+		 * caller can turn it into a load failure instead of letting
+		 * lua_load() treat the truncated input as a clean EOF. */
+		rs->err = err;
+		return NULL;
+	}
+	if (*sz == 0) {
+		return NULL;
+	}
+	return buf;
+}
+#endif /* WITH_LUA */
+
 struct io_stream *codec_lua_reader(const char *path)
 {
 	FILE *f;
@@ -1348,17 +1414,18 @@ struct io_stream *codec_lua_reader(const char *path)
 	} else {
 		f = fopen(path, "rb");
 		if (f == NULL) {
+			const int err = errno;
 			LOGE_F("codec_lua_reader: fopen(\"%s\"): (%d) %s", path,
-			       errno, strerror(errno));
+			       err, strerror(err));
 			return NULL;
 		}
 	}
 	struct io_stream *s = io_filereader(f);
 	if (s == NULL) {
+		/* io_filereader takes ownership of f; given f != NULL here, its
+		 * only NULL return is the internal malloc failure, which already
+		 * fclose()s f. Closing it again here would be a double-close. */
 		LOGOOM();
-		if (f != stdin) {
-			(void)fclose(f);
-		}
 		return NULL;
 	}
 	s = lua_reader_new(s);

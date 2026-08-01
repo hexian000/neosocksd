@@ -315,6 +315,11 @@ add_unit_test(http_test
     SRCS proto/http_test.c proto/http.c proto/codec.c)
 add_unit_test(codec_test
     SRCS proto/codec_test.c proto/codec.c)
+# Drive the decompression-bomb cap at a small size instead of the 2 GiB
+# production default, so the abort is reachable without producing gigabytes.
+# Kept above the largest legitimate round-trip case (100000 bytes) so only the
+# bomb case trips it.
+target_compile_definitions(codec_test PRIVATE CODEC_MAX_INFLATE=1048576)
 # main_test: black-box / integration tests against the real modules, plus the
 # project fuzz suite. This is the only test executable that links several real
 # modules together instead of mocking collaborators.
@@ -349,12 +354,13 @@ if(WITH_LUA)
         SRCS ruleset/time_test.c ruleset/time.c
         NO_LIBEV WITH_LUA)
     add_unit_test(base_test
-        SRCS ruleset/base_test.c ruleset/base.c util.c dialer.c resolver.c
+        SRCS ruleset/base_test.c ruleset/base.c proto/codec.c
+             util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         WITH_LUA WITH_CARES)
     add_unit_test(marshal_test
         SRCS ruleset/marshal_test.c ruleset/marshal.c ruleset/base.c
-             util.c dialer.c resolver.c
+             proto/codec.c util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         WITH_LUA WITH_CARES)
     # marshal_test's OOM cases interpose realloc() to fail the vbuffer's
