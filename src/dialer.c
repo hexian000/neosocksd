@@ -627,11 +627,17 @@ static bool dialer_send(
 	return true;
 }
 
+/* Base64-encoded length of an n-byte input, matching base64_encode()'s
+ * 4 * ((n + 2) / 3) padded output. Defined here because codec/base64.h is
+ * vendored (read-only). */
+#define BASE64_ENCODE_LEN(n) (4 * (((n) + 2) / 3))
+
 #define DIALER_HTTP_REQ_MAXLEN                                                 \
 	(CONSTSTRLEN("CONNECT ") + DIALADDR_STRLEN +                           \
 	 CONSTSTRLEN(" HTTP/1.1\r\n") + CONSTSTRLEN("Host: ") +                \
 	 DIALADDR_STRLEN + CONSTSTRLEN("\r\n") +                               \
-	 CONSTSTRLEN("Proxy-Authorization: Basic ") + 685 +                    \
+	 CONSTSTRLEN("Proxy-Authorization: Basic ") +                          \
+	 BASE64_ENCODE_LEN(sizeof(((struct proxyreq *)0)->credential)) +       \
 	 CONSTSTRLEN("\r\n") + CONSTSTRLEN("\r\n"))
 
 #define HTTP_RSP_MINLEN (CONSTSTRLEN("HTTP/2 200 \r\n\r\n"))
