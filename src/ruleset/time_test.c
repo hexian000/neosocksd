@@ -166,6 +166,26 @@ T_DECLARE_CASE(time_measure_rejects_missing_function)
 	lua_close(L);
 }
 
+T_DECLARE_CASE(time_measure_propagates_error)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* an error raised inside the measured function must surface unchanged,
+	 * not be swallowed into a -1 cost */
+	T_EXPECT(run_chunk(
+		L, "local ok, err = pcall(time.measure, "
+		   "function() error(\"boom\") end) "
+		   "return ok, err"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *const err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "boom") != NULL);
+
+	lua_close(L);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -182,6 +202,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(time_measure_basic),
 	T_CASE(time_measure_passes_results),
 	T_CASE(time_measure_rejects_missing_function),
+	T_CASE(time_measure_propagates_error),
 	T_SUITE_END,
 };
 

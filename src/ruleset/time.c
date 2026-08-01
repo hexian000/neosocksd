@@ -17,7 +17,7 @@ push_clock(lua_State *restrict L, bool (*clock_fn)(struct timespec *restrict))
 {
 	struct timespec t;
 	if (!clock_fn(&t)) {
-		lua_pushinteger(L, -1);
+		lua_pushnumber(L, -1.0);
 		return 1;
 	}
 	lua_pushnumber(L, TIMESPEC_NANO(t) * 1e-9);
