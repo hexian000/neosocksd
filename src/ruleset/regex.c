@@ -137,7 +137,7 @@ static size_t check_matches(lua_State *restrict L, const regex_t *restrict preg)
 static int
 push_matches(lua_State *restrict L, const char *restrict s, size_t nmatch)
 {
-	const regmatch_t *restrict const matches = lua_topointer(L, -1);
+	const regmatch_t *restrict const matches = lua_touserdata(L, -1);
 	for (size_t i = 0; i < nmatch; i++) {
 		/* POSIX: rm_so is -1 when subexpression did not participate */
 		if (matches[i].rm_so < 0) {
