@@ -15,6 +15,7 @@
 
 #include <ev.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -279,6 +280,62 @@ T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
 	T_EXPECT(result.errlen > 0);
 	T_EXPECT_EQ(S.dialer_do_calls, 1);
 
+	ev_loop_destroy(loop);
+}
+
+/*
+ * When the peer accepts but never responds, the request timer
+ * (http_client_timeout_cb) must finish the callback with a "timeout" error.
+ * The timer event is fed directly rather than waited on, per the test
+ * conventions.
+ */
+T_DECLARE_CASE(http_client_timeout_finishes_with_error)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	stub_reset();
+
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	S.dialer_result_fd = sv[0];
+
+	struct http_client_ctx ctx = { 0 };
+	struct cb_result result = { 0 };
+	const struct http_parsehdr_cb no_hdr = { 0 };
+	const struct http_client_cb cb = {
+		.func = capture_cb,
+		.data = &result,
+	};
+
+	http_client_init(
+		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
+		NULL);
+	static const char header[] = "GET /x HTTP/1.1\r\n\r\n";
+	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+
+	struct dialreq *req = calloc(1, sizeof(struct dialreq));
+	T_CHECK(req != NULL);
+	http_client_do(&ctx, loop, req);
+
+	/* the request goes out but the peer never responds: no callback yet */
+	ev_run(loop, EVRUN_NOWAIT);
+	T_EXPECT(!result.called);
+
+	/* fire the request timeout deterministically instead of waiting out
+	 * test_conf.timeout */
+	ev_feed_event(loop, &ctx.w_timeout, EV_TIMER);
+	ev_run(loop, EVRUN_NOWAIT);
+
+	T_EXPECT(result.called);
+	T_CHECK(result.errmsg != NULL);
+	T_EXPECT_EQ(result.errlen, sizeof("timeout") - 1);
+	T_EXPECT_MEMEQ(result.errmsg, "timeout", sizeof("timeout") - 1);
+	/* an error finish delivers no connection */
+	T_EXPECT(!result.has_conn);
+
+	/* the connection fd and dialreq are owned and released by http_client */
+	(void)close(sv[1]);
 	ev_loop_destroy(loop);
 }
 
@@ -659,6 +716,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(http_client_init_state),
 	T_CASE(http_client_cancel_noop),
 	T_CASE(http_client_dialer_fail_calls_cb),
+	T_CASE(http_client_timeout_finishes_with_error),
 	T_CASE(http_client_stale_retry_resends_from_start),
 	T_CASE(http_client_full_request_response),
 	T_CASE(http_client_forwards_response_headers),
