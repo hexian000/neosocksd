@@ -18,6 +18,7 @@
 #include <ev.h>
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #if WITH_THREADS
 #include <stdatomic.h>
