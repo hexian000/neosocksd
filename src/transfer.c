@@ -61,7 +61,8 @@ static const char *const xfer_state_str[] = {
 
 /* ---------------------------------------------------------------- xfer_half */
 
-#define XFER_BUFSIZE 16384
+/* XFER_BUFSIZE (per-half recv buffer size) is defined in transfer.h so the
+ * white-box test shares the single source of truth. */
 
 /* Per-callback byte cap. Once a pump has moved this many bytes in a single
  * wakeup it yields (breaks the loop and re-arms its watcher) rather than
@@ -75,11 +76,7 @@ struct xfer_half {
 	enum xfer_half_state state;
 	int src_fd, dst_fd;
 	ev_io w_socket;
-#if WITH_THREADS
-	atomic_uint_least64_t *byt_transferred;
-#else
-	uint_least64_t *byt_transferred;
-#endif
+	xfer_counter *byt_transferred;
 	bool is_uplink : 1;
 #if WITH_SPLICE
 	bool use_splice : 1;
@@ -355,18 +352,15 @@ static void update_stats(
 	const struct xfer_half *restrict h, const size_t nbsend,
 	const size_t buffered)
 {
-#if WITH_THREADS
-	atomic_uint_least64_t *restrict byt = h->byt_transferred;
+	xfer_counter *restrict byt = h->byt_transferred;
 	if (byt != NULL) {
+#if WITH_THREADS
 		atomic_fetch_add_explicit(
 			byt, (uint_least64_t)nbsend, memory_order_relaxed);
-	}
-#else /* WITH_THREADS */
-	uint_least64_t *restrict byt = h->byt_transferred;
-	if (byt != NULL) {
+#else
 		*byt += (uint_least64_t)nbsend;
+#endif
 	}
-#endif /* WITH_THREADS */
 	if (buffered > 0) {
 		XFER_HALF_LOG_F(
 			VERYVERBOSE, h,
@@ -748,17 +742,8 @@ void transfer_join(struct transfer *restrict xfer)
 static void xfer_half_init(
 	struct xfer_half *restrict h, struct transfer_ctx *restrict owner,
 	const int src_fd, const int dst_fd,
-#if WITH_THREADS
-	atomic_uint_least64_t *restrict byt_transferred,
-#else
-	uint_least64_t *restrict byt_transferred,
-#endif
-	const bool is_uplink
-#if WITH_SPLICE
-	,
-	const bool use_splice
-#endif
-)
+	xfer_counter *restrict byt_transferred, const bool is_uplink,
+	const bool use_splice)
 {
 	h->state = XFER_INIT;
 	h->src_fd = src_fd;
@@ -775,7 +760,9 @@ static void xfer_half_init(
 		.cap = 0,
 		.len = 0,
 	};
-#endif
+#else
+	(void)use_splice;
+#endif /* WITH_SPLICE */
 	h->pos = 0;
 	BUF_INIT(h->buf, 0);
 }
@@ -804,19 +791,11 @@ bool transfer_serve(
 #endif
 
 	xfer_half_init(
-		&t->up, t, acc_fd, dial_fd, opts->byt_up, true
-#if WITH_SPLICE
-		,
-		opts->use_splice
-#endif
-	);
+		&t->up, t, acc_fd, dial_fd, opts->byt_up, true,
+		opts->use_splice);
 	xfer_half_init(
-		&t->down, t, dial_fd, acc_fd, opts->byt_down, false
-#if WITH_SPLICE
-		,
-		opts->use_splice
-#endif
-	);
+		&t->down, t, dial_fd, acc_fd, opts->byt_down, false,
+		opts->use_splice);
 
 #if WITH_THREADS
 	struct xfer_worker *restrict worker = t->worker;

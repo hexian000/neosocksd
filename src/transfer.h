@@ -28,6 +28,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Byte counter shared with the stats readers. It is atomic only where the
+ * transfer runs on a dedicated I/O thread (WITH_THREADS), i.e. a different
+ * thread from the reader; without threads there is no other thread to race
+ * with. Defining it once here keeps every counter field and function signature
+ * config-stable instead of forking their spelling on WITH_THREADS. */
+#if WITH_THREADS
+typedef atomic_uint_least64_t xfer_counter;
+#else
+typedef uint_least64_t xfer_counter;
+#endif
+
+/* Per-half recv buffer size. Exposed as the single source of truth so a
+ * white-box test can size a payload relative to it instead of duplicating the
+ * literal. */
+#define XFER_BUFSIZE 16384
+
 #if WITH_SPLICE
 
 struct splice_pipe {
@@ -74,18 +90,15 @@ void transfer_join(struct transfer *xfer);
 
 /* Options passed to transfer_serve(). */
 struct transfer_opts {
-#if WITH_SPLICE
+	/* Splice hint; ignored unless WITH_SPLICE. */
 	bool use_splice;
-#endif
 #if WITH_THREADS
 	atomic_size_t *num_sessions;
-	atomic_uint_least64_t *byt_up;
-	atomic_uint_least64_t *byt_down;
 #else
 	size_t *num_sessions;
-	uint_least64_t *byt_up;
-	uint_least64_t *byt_down;
 #endif
+	xfer_counter *byt_up;
+	xfer_counter *byt_down;
 };
 
 /**

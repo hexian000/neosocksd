@@ -73,41 +73,25 @@ watchdog_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
-static void poll_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
-{
-	(void)loop;
-	(void)watcher;
-	(void)revents;
-	ev_break(loop, EVBREAK_ONE);
-}
-
-static const ev_tstamp TEST_POLL_INTERVAL_SEC = 0.005;
-
+/* Wait until predicate holds, event-driven. The transfer engine wakes the loop
+ * through its ev_async (w_invoke) whenever the worker thread has progress to
+ * report to the main thread (and without threads the transfer runs inline
+ * during ev_run), so ev_run(EVRUN_ONCE) re-checks the predicate on real
+ * progress rather than a fixed 5ms poll. The watchdog is a hung-test backstop. */
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *data,
 	const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
 	ev_timer w_timeout;
-	ev_timer w_poll;
 
 	ev_timer_init(&w_timeout, watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	ev_timer_init(
-		&w_poll, poll_cb, TEST_POLL_INTERVAL_SEC,
-		TEST_POLL_INTERVAL_SEC);
-	ev_timer_start(loop, &w_poll);
-	while (!watchdog.fired) {
-		if (predicate(data)) {
-			ev_timer_stop(loop, &w_timeout);
-			ev_timer_stop(loop, &w_poll);
-			return true;
-		}
+	while (!watchdog.fired && !predicate(data)) {
 		ev_run(loop, EVRUN_ONCE);
 	}
 	ev_timer_stop(loop, &w_timeout);
-	ev_timer_stop(loop, &w_poll);
 	return predicate(data);
 }
 
@@ -195,7 +179,6 @@ T_DECLARE_CASE(transfer_moves_payload)
 	}
 	T_EXPECT_EQ(got, sizeof(uplink));
 	T_EXPECT_MEMEQ(up_out, uplink, sizeof(uplink));
-	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)sizeof(uplink));
 
 	/* Downlink: dial_peer → dial_fd → acc_fd → acc_peer */
 	got = 0;
@@ -209,9 +192,12 @@ T_DECLARE_CASE(transfer_moves_payload)
 	}
 	T_EXPECT_EQ(got, sizeof(downlink));
 	T_EXPECT_MEMEQ(dn_out, downlink, sizeof(downlink));
-	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
 	transfer_join(xfer);
+	/* byt_up/byt_down are written by the worker with relaxed atomics; only
+	 * transfer_join establishes the happens-before to read them safely */
+	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)sizeof(uplink));
+	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 	socket_close(acc_peer);
 	socket_close(dial_peer);
 	ev_loop_destroy(loop);
@@ -272,7 +258,6 @@ T_DECLARE_CASE(transfer_splice_releases_pipes_on_finish)
 	}
 	T_EXPECT_EQ(got, sizeof(uplink));
 	T_EXPECT_MEMEQ(up_out, uplink, sizeof(uplink));
-	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)sizeof(uplink));
 
 	got = 0;
 	while (got < sizeof(dn_out)) {
@@ -285,9 +270,12 @@ T_DECLARE_CASE(transfer_splice_releases_pipes_on_finish)
 	}
 	T_EXPECT_EQ(got, sizeof(downlink));
 	T_EXPECT_MEMEQ(dn_out, downlink, sizeof(downlink));
-	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 
 	transfer_join(xfer);
+	/* byt_up/byt_down are written by the worker with relaxed atomics; only
+	 * transfer_join establishes the happens-before to read them safely */
+	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)sizeof(uplink));
+	T_EXPECT_EQ((uintmax_t)state.byt_down, (uintmax_t)sizeof(downlink));
 	socket_close(acc_peer);
 	socket_close(dial_peer);
 	ev_loop_destroy(loop);
@@ -454,9 +442,11 @@ T_DECLARE_CASE(transfer_backpressure_completes)
 	char out = 0;
 	T_EXPECT_EQ(recv(dial_peer, &out, 1, MSG_DONTWAIT), (ssize_t)1);
 	T_EXPECT_EQ(out, 'y');
-	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)1);
 
 	transfer_join(xfer);
+	/* byt_up is written by the worker with relaxed atomics; only
+	 * transfer_join establishes the happens-before to read it safely */
+	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)1);
 	socket_close(acc_peer);
 	socket_close(dial_peer);
 	ev_loop_destroy(loop);
@@ -470,7 +460,10 @@ T_DECLARE_CASE(transfer_backpressure_completes)
  */
 T_DECLARE_CASE(transfer_recv_buffer_saturates_completes)
 {
-	enum { PAYLOAD_SZ = 24000 }; /* > XFER_BUFSIZE (16384) */
+	/* a multiple of XFER_BUFSIZE so the payload always overflows one recv
+	 * buffer and drives the xfer_recv cap == 0 early-return, tracking the
+	 * real buffer size instead of a hardcoded copy */
+	enum { PAYLOAD_SZ = 2 * XFER_BUFSIZE };
 	static unsigned char payload[PAYLOAD_SZ];
 	static const char fill[] = "recv-saturate-fill";
 	int acc_peer = -1, acc_fd = -1;
@@ -549,9 +542,11 @@ T_DECLARE_CASE(transfer_recv_buffer_saturates_completes)
 		got += (size_t)n;
 	}
 	T_EXPECT_EQ((uintmax_t)got, (uintmax_t)PAYLOAD_SZ);
-	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)PAYLOAD_SZ);
 
 	transfer_join(xfer);
+	/* byt_up is written by the worker with relaxed atomics; only
+	 * transfer_join establishes the happens-before to read it safely */
+	T_EXPECT_EQ((uintmax_t)state.byt_up, (uintmax_t)PAYLOAD_SZ);
 	socket_close(acc_peer);
 	socket_close(dial_peer);
 	ev_loop_destroy(loop);
@@ -599,8 +594,6 @@ T_DECLARE_CASE(transfer_multi_worker_all_complete)
 	}
 
 	T_EXPECT(test_wait_until(loop, xfer_finished, &state, 2.0));
-	T_EXPECT_EQ(
-		(uintmax_t)state.byt_up, (uintmax_t)(NCONN * sizeof(uplink)));
 
 	for (int i = 0; i < NCONN; i++) {
 		char out[sizeof(uplink)] = { 0 };
@@ -618,6 +611,10 @@ T_DECLARE_CASE(transfer_multi_worker_all_complete)
 	}
 
 	transfer_join(xfer);
+	/* byt_up is written by the workers with relaxed atomics; only
+	 * transfer_join establishes the happens-before to read it safely */
+	T_EXPECT_EQ(
+		(uintmax_t)state.byt_up, (uintmax_t)(NCONN * sizeof(uplink)));
 	for (int i = 0; i < NCONN; i++) {
 		socket_close(acc_peer[i]);
 		socket_close(dial_peer[i]);
