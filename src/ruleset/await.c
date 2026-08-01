@@ -1,12 +1,11 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/await.h"
-
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
+#include "ruleset/await.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
 #include "ruleset/ruleset.h"
@@ -665,9 +664,18 @@ static int await_execute(lua_State *restrict L)
 		return lua_error(L);
 	}
 	if (pid == 0) {
+		/* Between fork() and execv() only async-signal-safe calls are
+		 * permitted: slog_printf takes locks and formats timestamps and
+		 * strerror uses a locale buffer, so under WITH_THREADS a peer
+		 * thread holding the slog or malloc lock at fork() would deadlock
+		 * this child forever, hanging the awaiting coroutine. Emit via
+		 * slog_panicf (single write(2), no lock/alloc) with the raw errno,
+		 * and _exit() rather than abort(). */
 		if (setsid() < 0) {
 			const int err = errno;
-			LOGW_F("setsid: (%d) %s", err, strerror(err));
+			slog_panicf(
+				LOG_LEVEL_WARNING, __FILE__, __LINE__,
+				"setsid: errno=%d", err);
 		}
 		/* restore the default SIGPIPE disposition: util.c ignores it
 		 * process-wide and an ignored disposition survives execv(),
@@ -679,7 +687,10 @@ static int await_execute(lua_State *restrict L)
 		const char *argv[] = { "sh", "-c", command, NULL };
 		execv("/bin/sh", (char *const *)argv);
 		const int err = errno;
-		FAILMSGF("execv: (%d) %s", err, strerror(err));
+		slog_panicf(
+			LOG_LEVEL_ERROR, __FILE__, __LINE__, "execv: errno=%d",
+			err);
+		_exit(127);
 	}
 	ev_child_set(&ud->w_child, pid, 0);
 	ev_child_start(r->loop, &ud->w_child);

@@ -11,12 +11,11 @@
  * by the mocks in the mock section below.
  */
 
-#include "ruleset/await.h"
-
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
+#include "ruleset/await.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
 #include "server.h"
@@ -39,6 +38,60 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+
+/* -------------------------------------------------------------------------
+ * virtual clock - fire await.sleep(delay)'s Lua-owned ev_timer deterministically
+ * with no wall-clock wait. The strong-symbol interposers return a test-advanced
+ * virtual time while enabled and pass through to the real clock (raw syscall)
+ * otherwise, so every other case is unaffected.
+ * ---------------------------------------------------------------------- */
+
+static bool g_vclock_on = false;
+static double g_vclock_sec = 0.0;
+
+int clock_gettime(clockid_t clk, struct timespec *ts)
+{
+	if (g_vclock_on) {
+		ts->tv_sec = (time_t)g_vclock_sec;
+		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
+		return 0;
+	}
+	return (int)syscall(SYS_clock_gettime, clk, ts);
+}
+
+int gettimeofday(struct timeval *tv, void *tz)
+{
+	if (g_vclock_on) {
+		tv->tv_sec = (time_t)g_vclock_sec;
+		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
+		return 0;
+	}
+	return (int)syscall(SYS_gettimeofday, tv, tz);
+}
+
+/* Freeze virtual time at the current real instant so a timer armed in real time
+ * has a consistent virtual deadline the test crosses by advancing. */
+static void vclock_freeze_now(void)
+{
+	struct timespec ts;
+	(void)syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
+	g_vclock_sec = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+	g_vclock_on = true;
+}
+
+static void vclock_advance(const double sec)
+{
+	g_vclock_sec += sec;
+}
+
+static void vclock_stop(void)
+{
+	g_vclock_on = false;
+}
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (dialer, resolver, api_client, server) and
@@ -100,6 +153,9 @@ static struct {
 
 static void reset_stub_state(void)
 {
+	/* clear a virtual clock a prior timeout case may have left enabled on a
+	 * T_EXPECT failure path */
+	vclock_stop();
 	if (STUB.resolve_query != NULL) {
 		free(STUB.resolve_query);
 		STUB.resolve_query = NULL;
@@ -724,6 +780,16 @@ T_DECLARE_CASE(await_sleep_real_paths)
 		L,
 		"co = coroutine.create(function() await.sleep(0.001); _G.sleep_done = 'timer' end) "
 		"return coroutine.resume(co)"));
+	/* the coroutine armed a 1ms Lua-owned ev_timer; cross its deadline on the
+	 * virtual clock and let the next ev_run fire it -- no wall-clock wait */
+	/* the coroutine armed a 1ms Lua-owned ev_timer; cross its deadline on the
+	 * virtual clock and expire it with one non-blocking round, then restore
+	 * real time so wait_until drives the resume idle under a live watchdog --
+	 * no wall-clock sleep */
+	vclock_freeze_now();
+	vclock_advance(1.0);
+	ev_run(loop, EVRUN_NOWAIT);
+	vclock_stop();
 	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, TEST_WAIT_SEC));
 	lua_getglobal(L, "sleep_done");
 	T_EXPECT_STREQ(lua_tostring(L, -1), "timer");
