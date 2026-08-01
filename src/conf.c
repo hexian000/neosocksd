@@ -1018,34 +1018,6 @@ bool conf_print(const struct config *restrict conf)
 	return ok;
 }
 
-struct boot_reader_state {
-	struct io_stream *stream;
-	int err;
-};
-
-/* lua_Reader callback that streams a boot config file into the Lua parser. */
-static const char *
-boot_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
-{
-	(void)L;
-	struct boot_reader_state *restrict rs = ud;
-	const void *buf;
-	*sz = SIZE_MAX;
-	const int err = io_stream_direct_read(rs->stream, &buf, sz);
-	if (err != 0) {
-		LOGE_F("config: read error %d", err);
-		/* lua_Reader has no error channel; record it and stop so
-		 * conf_loadboot() can turn it into a load failure instead of
-		 * letting lua_load() treat the truncated input as a clean EOF. */
-		rs->err = err;
-		return NULL;
-	}
-	if (*sz == 0) {
-		return NULL;
-	}
-	return buf;
-}
-
 /* Format the Lua error object on the stack top for logging. lua_tostring is
  * only safe on a string; a non-string error object (error({}), error(nil))
  * yields NULL, and passing NULL to slog's "%s" is undefined behavior. This
@@ -1094,8 +1066,11 @@ bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 		return false;
 	}
 	luaL_openlibs(L);
-	struct boot_reader_state rs = { .stream = s, .err = 0 };
-	const int status = lua_load(L, boot_reader, &rs, "=config", "t");
+	struct codec_lua_stream rs = { .stream = s,
+				       .errlabel = "config: read error",
+				       .err = 0 };
+	const int status =
+		lua_load(L, codec_lua_stream_read, &rs, "=config", "t");
 	/* the close carries errors the reader cannot see, e.g. a codec
 	 * detecting a truncated stream only as it finishes */
 	const int closeerr = io_stream_close(s);
@@ -1106,9 +1081,9 @@ bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 	}
 	if (rs.err != 0 || closeerr != 0) {
 		/* the chunk lua_load() compiled is truncated by a read error;
-		 * boot_reader already logged rs.err, so re-log only closeerr,
-		 * which the reader never sees (e.g. a codec detecting a
-		 * truncated stream as it finishes) */
+		 * codec_lua_stream_read already logged rs.err, so re-log only
+		 * closeerr, which the reader never sees (e.g. a codec detecting
+		 * a truncated stream as it finishes) */
 		if (rs.err == 0) {
 			LOGE_F("config: read error %d", closeerr);
 		}
