@@ -29,8 +29,73 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+
+/* -------------------------------------------------------------------------
+ * virtual clock - fire the connection idle/connect/process timeouts (ev_timers
+ * inside production ctx structs the test cannot reach) deterministically, with
+ * no wall-clock wait. The strong-symbol interposers return a test-advanced
+ * virtual time while enabled and pass through to the real clock (raw syscall)
+ * otherwise, so non-timeout cases are unaffected.
+ * ---------------------------------------------------------------------- */
+
+static bool g_vclock_on = false;
+static double g_vclock_sec = 0.0;
+
+int clock_gettime(clockid_t clk, struct timespec *ts)
+{
+	if (g_vclock_on) {
+		ts->tv_sec = (time_t)g_vclock_sec;
+		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
+		return 0;
+	}
+	return (int)syscall(SYS_clock_gettime, clk, ts);
+}
+
+int gettimeofday(struct timeval *tv, void *tz)
+{
+	if (g_vclock_on) {
+		tv->tv_sec = (time_t)g_vclock_sec;
+		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
+		return 0;
+	}
+	return (int)syscall(SYS_gettimeofday, tv, tz);
+}
+
+/* Freeze virtual time at the current real instant, so a timer armed in real
+ * time (before this call) has a consistent virtual deadline the test can cross
+ * by advancing. Use when a case must first drive real-time reads. */
+static void vclock_freeze_now(void)
+{
+	struct timespec ts;
+	(void)syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
+	g_vclock_sec = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+	g_vclock_on = true;
+}
+
+static void vclock_advance(const double sec)
+{
+	g_vclock_sec += sec;
+}
+
+static void vclock_stop(void)
+{
+	g_vclock_on = false;
+}
+
+/* Watchers invoked during the current drive_loop() round, via a custom
+ * invoke-pending callback, so a round that invokes none marks quiescence. */
+static unsigned int g_drive_invoked;
+
+static void drive_invoke_pending(struct ev_loop *loop)
+{
+	g_drive_invoked += ev_pending_count(loop);
+	ev_invoke_pending(loop);
+}
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (dialer, transfer, ruleset, server) and shared fixtures.
@@ -75,24 +140,9 @@ static struct config test_conf = {
 	.auth_required = false,
 };
 
-static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.016;
+/* Watchdog bound on the event-driven drive/read helpers: a hung-test backstop,
+ * never a completion signal (completion is loop quiescence or a peer EOF). */
 static const ev_tstamp TEST_WAIT_RECV_SEC = 0.128;
-/* Upper bound on how long ev_run() may sleep while a helper polls a socket
- * that is not registered with the event loop, so fragmented/delayed peer
- * writes (e.g. the MSYS2/Cygwin socket emulation) are observed promptly. */
-static const ev_tstamp TEST_TICK_SEC = 0.002;
-/* Consecutive idle polls (each ~TEST_TICK_SEC apart) with no new bytes that
- * mark the end of a received burst. */
-#define TEST_RECV_QUIET_TICKS 6
-
-static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
-{
-	ev_tstamp wait_sec = timeout_sec * 4.0;
-	if (wait_sec < TEST_WAIT_SHORT_SEC) {
-		wait_sec = TEST_WAIT_SHORT_SEC;
-	}
-	return wait_sec;
-}
 
 const char *const proxy_protocol_str[PROTO_MAX] = {
 	[PROTO_HTTP] = "http",
@@ -188,6 +238,9 @@ static void test_server_init(struct server *restrict s)
 
 static void reset_stub_state(void)
 {
+	/* clear a virtual clock a prior timeout case may have left enabled on a
+	 * T_EXPECT failure path */
+	vclock_stop();
 	S.dialreq_new_ok = false;
 	S.dialaddr_parse_ok = false;
 	S.dialer_invoke_now = true;
@@ -482,41 +535,25 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
-static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
-{
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired) {
-		ev_run(loop, EVRUN_ONCE);
-	}
-	ev_timer_stop(loop, &w_timeout);
-}
-
-static bool
-test_step_timed_out(struct ev_loop *loop, const ev_tstamp timeout_sec)
-{
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	ev_run(loop, EVRUN_ONCE);
-	ev_timer_stop(loop, &w_timeout);
-	return watchdog.fired;
-}
-
+/* Drive the loop until it quiesces: pump non-blocking rounds until a round
+ * invokes no watchers, i.e. all reachable I/O has been processed. No iteration
+ * count and no wall-clock wait; the watchdog only backstops a runaway loop.
+ * Works under the virtual clock too (a frozen clock never advances real time,
+ * so only ready I/O drives progress). */
 static void drive_loop(struct ev_loop *loop)
 {
-	for (int_fast32_t i = 0; i < 16; i++) {
-		if (test_step_timed_out(loop, TEST_WAIT_SHORT_SEC)) {
-			break;
-		}
-	}
+	struct test_watchdog watchdog = { 0 };
+	ev_timer w_timeout;
+	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_RECV_SEC, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	ev_set_invoke_pending_cb(loop, drive_invoke_pending);
+	do {
+		g_drive_invoked = 0;
+		ev_run(loop, EVRUN_NOWAIT);
+	} while (g_drive_invoked > 0 && !watchdog.fired);
+	ev_set_invoke_pending_cb(loop, ev_invoke_pending);
+	ev_timer_stop(loop, &w_timeout);
 }
 
 static bool test_wait_until(
@@ -610,86 +647,46 @@ static void serve_payload(
 	*peer_fd = sv[1];
 }
 
-static void
-test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+/* Drain everything currently readable on fd into buf without blocking. */
+static size_t drain_fd(
+	const int fd, unsigned char *restrict buf, size_t off, const size_t cap)
 {
-	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
-	(void)loop;
-	(void)w;
-	(void)revents;
-}
-
-/* Receive at least min_bytes from fd, up to cap bytes.
- * Returns number of bytes received, or -1 on error.
- * Exits early if at least min_bytes received and no more data available. */
-static ssize_t recv_at_least(
-	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
-	const size_t cap, const size_t min_bytes)
-{
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout, w_tick;
-	size_t off = 0;
-	int_fast32_t idle = 0;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_RECV_SEC, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
-	ev_timer_start(loop, &w_tick);
-	while (!watchdog.fired && off < cap) {
+	while (off < cap) {
 		const ssize_t n = recv(fd, buf + off, cap - off, MSG_DONTWAIT);
-		if (n < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				/* Once the minimum is met, allow a short quiet window
-				 * for trailing fragments (the peer may split a reply
-				 * across writes) before returning. */
-				if (off >= min_bytes &&
-				    ++idle >= TEST_RECV_QUIET_TICKS) {
-					break;
-				}
-				ev_run(loop, EVRUN_ONCE);
-				continue;
-			}
-			ev_timer_stop(loop, &w_tick);
-			ev_timer_stop(loop, &w_timeout);
-			return -1;
-		}
-		if (n == 0) {
-			break;
-		}
-		off += (size_t)n;
-		idle = 0;
-	}
-	ev_timer_stop(loop, &w_tick);
-	ev_timer_stop(loop, &w_timeout);
-	return (ssize_t)off;
-}
-
-/* Drive the loop and read from fd until EOF (or cap/timeout). */
-static size_t recv_all(
-	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
-	const size_t cap)
-{
-	size_t off = 0;
-	for (int i = 0; i < 4096 && off < cap; i++) {
-		const ssize_t n = recv(fd, buf + off, cap - off, 0);
 		if (n > 0) {
 			off += (size_t)n;
 			continue;
 		}
-		if (n == 0) {
-			break; /* EOF */
-		}
-		if (errno == EAGAIN || errno == EWOULDBLOCK) {
-			(void)test_step_timed_out(loop, TEST_WAIT_SHORT_SEC);
+		if (n < 0 && errno == EINTR) {
 			continue;
 		}
-		break;
+		break; /* EOF or EAGAIN: nothing more buffered right now */
 	}
 	return off;
+}
+
+/* Drive the loop to quiescence -- every reachable round of in-loop I/O is
+ * processed, so the server has written its full response into fd's socket
+ * buffer -- then drain fd. Completion tracks the loop reaching a fixed point
+ * (drive_loop's ev_pending_count pump), not a magic quiet-tick count.
+ * min_bytes is the caller's asserted floor; a short read fails the caller. */
+static ssize_t recv_at_least(
+	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
+	const size_t cap, const size_t min_bytes)
+{
+	(void)min_bytes;
+	drive_loop(loop);
+	return (ssize_t)drain_fd(fd, buf, 0, cap);
+}
+
+/* Drive the loop to quiescence, then read from fd until it stops yielding
+ * (the peer's teardown EOF, or all buffered bytes). */
+static size_t recv_all(
+	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
+	const size_t cap)
+{
+	drive_loop(loop);
+	return drain_fd(fd, buf, 0, cap);
 }
 
 static bool has_http_status(
@@ -1009,6 +1006,40 @@ T_DECLARE_CASE(proxy_pass_response_te_and_cl_returns_502)
 	static const char resp[] = "HTTP/1.1 200 OK\r\n"
 				   "Transfer-Encoding: chunked\r\n"
 				   "Content-Length: 5\r\n\r\n";
+	T_CALL_SUBCASE(
+		expect_response_headers_rejected, loop, resp, sizeof(resp) - 1);
+	ev_loop_destroy(loop);
+}
+
+/* RFC 9110 §5.2 / 9112 §6.1: two separate Transfer-Encoding: chunked lines are
+ * a comma-joined "chunked, chunked" -- chunked applied twice -- and must be
+ * rejected exactly like the single-line form, not accepted as singly-chunked. */
+T_DECLARE_CASE(proxy_pass_response_duplicate_te_chunked_returns_502)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Transfer-Encoding: chunked\r\n"
+				   "Transfer-Encoding: chunked\r\n\r\n";
+	T_CALL_SUBCASE(
+		expect_response_headers_rejected, loop, resp, sizeof(resp) - 1);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Regression: a dropped malformed interim (1xx) must not set rsp_started, so a
+ * following malformed final response still fails to a 502 error page rather
+ * than closing bare -- identical to the no-interim case (see
+ * proxy_pass_response_bad_status_code_returns_502). "100X" parses as 1xx
+ * (interim) but is not a valid 3-digit code, so it is dropped unsent.
+ */
+T_DECLARE_CASE(proxy_pass_response_bad_interim_then_bad_final_returns_502)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	static const char resp[] = "HTTP/1.1 100X Continue\r\n\r\n"
+				   "HTTP/1.1 20X OK\r\n"
+				   "Content-Length: 0\r\n\r\n";
 	T_CALL_SUBCASE(
 		expect_response_headers_rejected, loop, resp, sizeof(resp) - 1);
 	ev_loop_destroy(loop);
@@ -2263,8 +2294,11 @@ T_DECLARE_CASE(proxy_pass_idle_stream_times_out)
 	struct server_success_wait_ctx wc = { .s = &s, .expected = 1 };
 	T_EXPECT(test_wait_until(loop, server_success_reached, &wc, 1.0));
 
-	/* the upstream never responds: the idle timeout must close the stream */
-	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
+	/* the upstream never responds: cross the idle deadline on the virtual
+	 * clock; the next drive fires the timeout and closes the stream */
+	vclock_freeze_now();
+	vclock_advance(test_conf.timeout + 1.0);
+	drive_loop(loop);
 
 	unsigned char b[64];
 	const ssize_t n = recv(peer_fd, b, sizeof(b), 0);
@@ -2275,6 +2309,7 @@ T_DECLARE_CASE(proxy_pass_idle_stream_times_out)
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
 	ev_loop_destroy(loop);
+	vclock_stop();
 }
 
 /* Once the response body is streaming, the idle timeout is released: a quiet
@@ -2316,8 +2351,12 @@ T_DECLARE_CASE(proxy_pass_streaming_response_survives_idle)
 	T_EXPECT(cn > 0);
 	T_EXPECT(memmem(cl, (size_t)cn, "text/event-stream", 17) != NULL);
 
-	/* a quiet period longer than the idle timeout must not tear it down */
-	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
+	/* the idle timeout was released on entering RSP_BODY; advancing the
+	 * virtual clock well past it must not fire it */
+	vclock_freeze_now();
+	vclock_advance(test_conf.timeout + 1.0);
+	drive_loop(loop);
+	vclock_stop();
 	T_EXPECT_EQ((uintmax_t)s.stats.num_reject_timeout, (uintmax_t)0);
 
 	/* the stream is still alive: a late event is delivered to the client */
@@ -2782,12 +2821,18 @@ T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
 
-	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
+	/* drive to the process state (ruleset pending, w_timeout armed), then
+	 * cross the deadline on the virtual clock and fire it -- no real wait */
+	drive_loop(loop);
+	vclock_freeze_now();
+	vclock_advance(test_conf.timeout + 1.0);
+	drive_loop(loop);
 
 	T_EXPECT(S.ruleset_cancel_calls > 0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+	vclock_stop();
 }
 
 T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
@@ -2807,12 +2852,18 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
 
-	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
+	/* drive to the connect state (dialer pending, w_timeout armed), then
+	 * cross the deadline on the virtual clock and fire it -- no real wait */
+	drive_loop(loop);
+	vclock_freeze_now();
+	vclock_advance(test_conf.timeout + 1.0);
+	drive_loop(loop);
 
 	T_EXPECT(S.dialer_cancel_calls > 0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+	vclock_stop();
 }
 
 T_DECLARE_CASE(plain_http_absolute_url_no_dialreq_returns_500)
@@ -3787,6 +3838,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(proxy_pass_response_duplicate_cl_returns_502),
 	T_CASE(proxy_pass_response_cl_and_te_returns_502),
 	T_CASE(proxy_pass_response_te_and_cl_returns_502),
+	T_CASE(proxy_pass_response_duplicate_te_chunked_returns_502),
+	T_CASE(proxy_pass_response_bad_interim_then_bad_final_returns_502),
 	T_CASE(proxy_pass_response_reason_phrase_is_canonical),
 	T_CASE(proxy_pass_response_reason_phrase_ctl_returns_502),
 	T_CASE(proxy_pass_accepts_te_hint),

@@ -2310,9 +2310,6 @@ struct header_cb_ctx {
 static bool parse_header_cb(void *ctx, const char *key, char *value)
 {
 	struct header_cb_ctx *const c = ctx;
-	if (strcasecmp(key, "TE") == 0) {
-		return parsehdr_accept_te(c->conn, value);
-	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
 		return parsehdr_transfer_encoding(c->conn, value);
 	}
@@ -2413,7 +2410,6 @@ static void fuzz_http_headers_once(struct prng *restrict p)
 		(void)memcpy(copy, value, len + 1);                            \
 		(void)fn(&conn, copy);                                         \
 	} while (0)
-	CALL_PARSEHDR(parsehdr_accept_te);
 	CALL_PARSEHDR(parsehdr_transfer_encoding);
 	CALL_PARSEHDR(parsehdr_accept_encoding);
 	CALL_PARSEHDR(parsehdr_content_length);

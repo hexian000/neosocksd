@@ -20,9 +20,10 @@
 #include "net/url.h"
 #include "os/clock.h"
 #include "os/socket.h"
+#include "strings/format.h"
+#include "strings/time.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
-#include "strings/format.h"
 #include "utils/gc.h"
 #include "utils/slog.h"
 
@@ -295,7 +296,8 @@ static void append_server_stats(
 	char timestamp[32] = "(unknown)";
 	if (server_time != (time_t)-1) {
 		(void)format_rfc3339(
-			timestamp, sizeof(timestamp), server_time, false);
+			timestamp, sizeof(timestamp), server_time,
+			local_tzoff(server_time));
 	}
 	FORMAT_DURATION(str_uptime, make_duration_nanos(uptime));
 	FORMAT_BYTES(xfer_up, (double)agg.byt_up);
@@ -526,7 +528,8 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		size_t n = len;
 		const int err = io_stream_write(w, s, &n);
 		if (n < len || err != 0) {
-			LOGE_F("io_stream_write: error %d, %zu/%zu", err, n, len);
+			LOGE_F("io_stream_write: error %d, %zu/%zu", err, n,
+			       len);
 			(void)io_stream_close(w);
 			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 			return;
@@ -1034,18 +1037,20 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
 		"%" PRIuLEAST64, "tx", "proxy_client", agg.byt_dial_send);
 #if WITH_RULESET
-	APPEND_METRIC_HDR(
-		"api_client_requests_total", "counter",
-		"API client requests issued by the ruleset.");
-	APPEND_METRIC(
-		"api_client_requests_total", "%" PRIuLEAST64,
-		agg.num_api_client_request);
+	/* keep every protocol_bytes_total sample in one contiguous group (the
+	 * Prometheus text format requires it) before starting another family */
 	APPEND_METRIC_L(
 		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
 		"%" PRIuLEAST64, "rx", "api_client", agg.api_client_byt_recv);
 	APPEND_METRIC_L(
 		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
 		"%" PRIuLEAST64, "tx", "api_client", agg.api_client_byt_send);
+	APPEND_METRIC_HDR(
+		"api_client_requests_total", "counter",
+		"API client requests issued by the ruleset.");
+	APPEND_METRIC(
+		"api_client_requests_total", "%" PRIuLEAST64,
+		agg.num_api_client_request);
 #endif /* WITH_RULESET */
 
 	/* Connect latency summary */
@@ -1278,8 +1283,9 @@ static bool parse_header(void *ctx, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "TE") == 0) {
-		/* RFC 7230: endpoint accepts any TE token */
-		(void)parsehdr_accept_te(p, value);
+		/* RFC 9110 §10.1.4: TE only advertises which transfer-codings the
+		 * client accepts, so any value is accepted and nothing consults it
+		 * (chunked is always acceptable per RFC 9112 §7.4) */
 		return true;
 	}
 

@@ -44,7 +44,6 @@ struct http_headers {
 	/* hop-by-hop headers */
 	char *connection;
 	struct {
-		enum transfer_encodings accept;
 		enum transfer_encodings encoding;
 	} transfer;
 	/* representation headers */
@@ -356,19 +355,6 @@ void http_framer_filled(struct http_framer *restrict f, size_t n);
  *     false if the body was truncated (the caller should fail the exchange).
  */
 bool http_framer_eof(struct http_framer *restrict f);
-
-/**
- * @brief Parse TE header, a list of accepted transfer-codings.
- *
- * Sets the accepted encoding to chunked if the list contains that coding.
- * TE only advertises what the client accepts, so an unsupported coding is
- * not an error.
- *
- * @param p Parser instance
- * @param value Header value
- * @return true for any well-formed value
- */
-bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value);
 
 /**
  * @brief Parse Transfer-Encoding header. Currently detects chunked.

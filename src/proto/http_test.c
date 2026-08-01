@@ -191,9 +191,6 @@ static bool parse_header_cb(void *ctx, const char *key, char *value)
 		return false;
 	}
 
-	if (strcasecmp(key, "TE") == 0) {
-		return parsehdr_accept_te(c->p, value);
-	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
 		return parsehdr_transfer_encoding(c->p, value);
 	}
@@ -246,7 +243,8 @@ static bool stream_read_exact(
 }
 
 static bool stream_write_all(
-	struct io_stream *restrict w, const void *restrict data, const size_t len)
+	struct io_stream *restrict w, const void *restrict data,
+	const size_t len)
 {
 	size_t n = len;
 	if (io_stream_write(w, data, &n) != 0) {
@@ -284,35 +282,6 @@ T_DECLARE_CASE(http_conn_init_response)
 	conn_init_for_test(&p, 8, STATE_PARSE_RESPONSE, &cb);
 	T_EXPECT_EQ(p.state, STATE_PARSE_RESPONSE);
 	T_EXPECT_EQ(p.fd, 8);
-}
-
-T_DECLARE_CASE(parsehdr_accept_te_cases)
-{
-	/* TE only advertises what the client accepts, so every well-formed
-	 * value parses; only a `chunked` token sets the accepted encoding. */
-	static const struct {
-		const char *value;
-		enum transfer_encodings accept;
-	} cases[] = {
-		{ "   ", TENCODING_NONE },
-		{ " chunked ", TENCODING_CHUNKED },
-		{ "Chunked", TENCODING_CHUNKED },
-		/* a coding we do not offer is a hint, not an error */
-		{ "gzip", TENCODING_NONE },
-		/* RFC 9110 §10.1.4: "trailers" is a standard TE keyword */
-		{ "trailers", TENCODING_NONE },
-		{ "trailers, deflate", TENCODING_NONE },
-		{ "trailers, chunked;q=0.5", TENCODING_CHUNKED },
-	};
-	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
-		struct http_conn p = { 0 };
-		char value[64];
-		const size_t len = strlen(cases[i].value);
-		T_CHECK(len < sizeof(value));
-		memcpy(value, cases[i].value, len + 1);
-		T_EXPECT(parsehdr_accept_te(&p, value));
-		T_EXPECT_EQ(p.hdr.transfer.accept, cases[i].accept);
-	}
 }
 
 T_DECLARE_CASE(parsehdr_transfer_encoding_cases)
@@ -372,6 +341,59 @@ T_DECLARE_CASE(parsehdr_accept_encoding_cases)
 	{
 		struct http_conn q = { 0 };
 		char value[] = "gzip,br";
+		T_EXPECT(parsehdr_accept_encoding(&q, value));
+		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_NONE);
+	}
+	{
+		/* RFC 9110 §12.5.3: q=0 means "not acceptable" -- a client that
+		 * explicitly refuses deflate must not be sent it */
+		struct http_conn q = { 0 };
+		char value[] = "deflate;q=0";
+		T_EXPECT(parsehdr_accept_encoding(&q, value));
+		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_NONE);
+	}
+	{
+		/* the same for the wildcard */
+		struct http_conn q = { 0 };
+		char value[] = "*;q=0";
+		T_EXPECT(parsehdr_accept_encoding(&q, value));
+		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_NONE);
+	}
+	{
+		/* "0.000" is also zero */
+		struct http_conn q = { 0 };
+		char value[] = "deflate;q=0.000";
+		T_EXPECT(parsehdr_accept_encoding(&q, value));
+		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_NONE);
+	}
+	{
+		/* a nonzero weight (even tiny) keeps the coding acceptable */
+		struct http_conn q = { 0 };
+		char value[] = "deflate;q=0.001";
+		T_EXPECT(parsehdr_accept_encoding(&q, value));
+		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_DEFLATE);
+	}
+	{
+		/* a q=0 wildcard still lets a later explicit coding match */
+		struct http_conn q = { 0 };
+		char value[] = "*;q=0, deflate";
+		T_EXPECT(parsehdr_accept_encoding(&q, value));
+		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_DEFLATE);
+	}
+	{
+		/* RFC 9110 §12.5.3: `*` matches only codings "not explicitly
+		 * listed", so an explicit deflate;q=0 must not be re-enabled by
+		 * a `*` -- regardless of token order */
+		struct http_conn q = { 0 };
+		char value[] = "deflate;q=0, *";
+		T_EXPECT(parsehdr_accept_encoding(&q, value));
+		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_NONE);
+	}
+	{
+		/* the symmetric order is wrong the same way: the `*` comes first
+		 * but the explicit refusal still wins */
+		struct http_conn q = { 0 };
+		char value[] = "*, deflate;q=0";
 		T_EXPECT(parsehdr_accept_encoding(&q, value));
 		T_EXPECT_EQ(q.hdr.accept_encoding, CENCODING_NONE);
 	}
@@ -484,7 +506,8 @@ T_DECLARE_CASE(content_reader_none)
 {
 	static const unsigned char input[] = "hello";
 	unsigned char output[sizeof(input)] = { 0 };
-	struct io_stream *r = content_reader(input, sizeof(input), CENCODING_NONE);
+	struct io_stream *r =
+		content_reader(input, sizeof(input), CENCODING_NONE);
 
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
@@ -2121,6 +2144,157 @@ T_DECLARE_BENCH(bench_parse_request)
 	T_CHECK(close(sv[1]) == 0);
 }
 
+/*
+ * Drive the shipped representation-header dispatcher directly (api_server.c /
+ * api_client.c use it), rather than a hand-reimplemented copy of the same key
+ * dispatch: a drift/typo in a literal header name or a wrong PARSEHDR_* mapping
+ * must be caught here.
+ */
+T_DECLARE_CASE(parsehdr_representation_dispatches_by_key)
+{
+	/* Content-Type: recorded verbatim -> OK */
+	{
+		struct http_conn p = { 0 };
+		char value[] = "text/plain";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "Content-Type", value),
+			PARSEHDR_OK);
+		T_EXPECT(p.hdr.content.type == value);
+	}
+	/* the key match is case-insensitive */
+	{
+		struct http_conn p = { 0 };
+		char value[] = "text/html";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "content-TYPE", value),
+			PARSEHDR_OK);
+		T_EXPECT(p.hdr.content.type == value);
+	}
+	/* Content-Length: valid -> OK; invalid -> handled but ERROR.
+	 * Response mode skips the request-only CONNECT check that would read the
+	 * (unset) request method. */
+	{
+		struct http_conn p = { 0 };
+		p.mode = STATE_PARSE_RESPONSE;
+		char value[] = "42";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "Content-Length", value),
+			PARSEHDR_OK);
+	}
+	{
+		struct http_conn p = { 0 };
+		p.mode = STATE_PARSE_RESPONSE;
+		char value[] = "not-a-number";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "Content-Length", value),
+			PARSEHDR_ERROR);
+	}
+	/* Transfer-Encoding: chunked -> OK */
+	{
+		struct http_conn p = { 0 };
+		char value[] = "chunked";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "Transfer-Encoding", value),
+			PARSEHDR_OK);
+	}
+	/* Content-Encoding: a known coding -> OK */
+	{
+		struct http_conn p = { 0 };
+		char value[] = "gzip";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "Content-Encoding", value),
+			PARSEHDR_OK);
+	}
+	/* an unhandled key -> UNHANDLED (the caller then tries its own headers) */
+	{
+		struct http_conn p = { 0 };
+		char value[] = "keep-alive";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "Connection", value),
+			PARSEHDR_UNHANDLED);
+	}
+}
+
+/*
+ * http_conn_send() (used by api_server.c, http_proxy.c, http_client.c) drains
+ * wbuf then cbuf to the socket, returns 1 on backpressure/partial send, 0 on
+ * completion, advances wpos/cpos, accumulates *byt_sent, and frees cbuf when
+ * done. Stage a body larger than the socket send buffer to force a real
+ * partial send, then drain and re-send to completion.
+ */
+T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
+{
+	int sv[2] = { -1, -1 };
+	make_socketpair(sv);
+	T_CHECK(fd_set_nonblock(sv[0]));
+
+	struct http_conn p = { 0 };
+	uint_least64_t byt_sent = 0;
+	const struct http_parsehdr_cb no_hdr = { 0 };
+	http_conn_init(
+		&p, sv[0], STATE_PARSE_RESPONSE, no_hdr, NULL, &byt_sent);
+
+	static const char header[] = "HTTP/1.1 200 OK\r\n\r\n";
+	BUF_APPEND(p.wbuf, header, sizeof(header) - 1);
+
+	/* larger than any socket send buffer, so the first send is partial */
+	static unsigned char body[2 * 1024 * 1024];
+	memset(body, 'B', sizeof(body));
+	p.cbuf = VBUF_NEW(sizeof(body));
+	T_CHECK(p.cbuf != NULL);
+	VBUF_APPEND(p.cbuf, body, sizeof(body));
+
+	/* first send: wbuf drains fully, cbuf partially, then backpressure (1) */
+	int err = -1;
+	T_EXPECT_EQ(http_conn_send(&p, sv[0], &err), 1);
+	T_EXPECT_EQ(err, 0);
+	T_EXPECT_EQ(p.wpos, sizeof(header) - 1);
+	T_CHECK(p.cpos > 0 && p.cpos < sizeof(body));
+	T_EXPECT_EQ((uintmax_t)byt_sent, (uintmax_t)(p.wpos + p.cpos));
+
+	/* drain the receiver and re-send until the whole body is out. Each
+	 * drained round frees at least the socket buffer (>= 1 KiB on any real
+	 * system) of room, so the round count is bounded by the body size. */
+	static unsigned char drain[64 * 1024];
+	size_t total_recv = 0;
+	const int max_rounds = (int)(sizeof(body) / 1024) + 16;
+	int rounds = 0;
+	int r = 1;
+	while (r != 0) {
+		T_CHECK(rounds++ < max_rounds);
+		for (;;) {
+			const ssize_t n =
+				recv(sv[1], drain, sizeof(drain), MSG_DONTWAIT);
+			if (n <= 0) {
+				break;
+			}
+			total_recv += (size_t)n;
+		}
+		r = http_conn_send(&p, sv[0], &err);
+		T_EXPECT_EQ(err, 0);
+	}
+	/* drain what the final send left in the socket */
+	for (;;) {
+		const ssize_t n =
+			recv(sv[1], drain, sizeof(drain), MSG_DONTWAIT);
+		if (n <= 0) {
+			break;
+		}
+		total_recv += (size_t)n;
+	}
+
+	T_EXPECT_EQ(p.wpos, sizeof(header) - 1);
+	T_EXPECT_EQ((uintmax_t)p.cpos, (uintmax_t)sizeof(body));
+	T_EXPECT(p.cbuf == NULL); /* cbuf freed on completion */
+	T_EXPECT_EQ(
+		(uintmax_t)byt_sent,
+		(uintmax_t)((sizeof(header) - 1) + sizeof(body)));
+	T_EXPECT_EQ((uintmax_t)total_recv, (uintmax_t)byt_sent);
+
+	T_CHECK(close(sv[0]) == 0);
+	T_CHECK(close(sv[1]) == 0);
+}
+
 /* -------------------------------------------------------------------------
  * main - test runner.
  * ---------------------------------------------------------------------- */
@@ -2128,11 +2302,12 @@ T_DECLARE_BENCH(bench_parse_request)
 static const struct testing_suite suite[] = {
 	T_CASE(http_conn_init_request),
 	T_CASE(http_conn_init_response),
-	T_CASE(parsehdr_accept_te_cases),
 	T_CASE(parsehdr_transfer_encoding_cases),
 	T_CASE(parsehdr_transfer_encoding_rejects_content_length_conflict),
 	T_CASE(parsehdr_accept_encoding_cases),
 	T_CASE(parsehdr_content_length_cases),
+	T_CASE(parsehdr_representation_dispatches_by_key),
+	T_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure),
 	T_CASE(parsehdr_content_length_rejects_duplicate),
 	T_CASE(parsehdr_content_length_rejects_te_chunked_conflict),
 	T_CASE(parsehdr_content_encoding_cases),

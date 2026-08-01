@@ -27,8 +27,62 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+
+/* -------------------------------------------------------------------------
+ * virtual clock - fire the request timeout (an ev_timer inside a production ctx
+ * the test cannot reach) deterministically, with no wall-clock wait. The
+ * strong-symbol interposers return a test-advanced virtual time while enabled
+ * and pass through to the real clock (raw syscall) otherwise, so non-timeout
+ * cases are unaffected.
+ * ---------------------------------------------------------------------- */
+
+static bool g_vclock_on = false;
+static double g_vclock_sec = 0.0;
+
+int clock_gettime(clockid_t clk, struct timespec *ts)
+{
+	if (g_vclock_on) {
+		ts->tv_sec = (time_t)g_vclock_sec;
+		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
+		return 0;
+	}
+	return (int)syscall(SYS_clock_gettime, clk, ts);
+}
+
+int gettimeofday(struct timeval *tv, void *tz)
+{
+	if (g_vclock_on) {
+		tv->tv_sec = (time_t)g_vclock_sec;
+		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
+		return 0;
+	}
+	return (int)syscall(SYS_gettimeofday, tv, tz);
+}
+
+/* Freeze virtual time at the current real instant so a timer armed in real time
+ * has a consistent virtual deadline the test crosses by advancing. */
+static void vclock_freeze_now(void)
+{
+	struct timespec ts;
+	(void)syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
+	g_vclock_sec = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+	g_vclock_on = true;
+}
+
+static void vclock_advance(const double sec)
+{
+	g_vclock_sec += sec;
+}
+
+static void vclock_stop(void)
+{
+	g_vclock_on = false;
+}
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (server, ruleset, resolver) and shared fixtures.
@@ -40,13 +94,6 @@ static struct config test_conf = {
 
 static const ev_tstamp TEST_WAIT_CLOSE_SEC = 0.016;
 static const ev_tstamp TEST_WAIT_RECV_SEC = 0.128;
-/* Upper bound on how long ev_run() may sleep while a helper polls a socket
- * that is not registered with the event loop, so fragmented/delayed peer
- * writes (e.g. the MSYS2/Cygwin socket emulation) are observed promptly. */
-static const ev_tstamp TEST_TICK_SEC = 0.002;
-/* Consecutive idle polls (each ~TEST_TICK_SEC apart) with no new bytes that
- * mark the end of a received burst. */
-#define TEST_RECV_QUIET_TICKS 6
 
 static struct resolver_stats resolver_stub_stats = {
 	.num_query = 7,
@@ -150,6 +197,9 @@ static int ruleset_state_tag = 0;
 
 static void reset_ruleset_stub(void)
 {
+	/* clear a virtual clock a prior timeout case may have left enabled on a
+	 * T_EXPECT failure path */
+	vclock_stop();
 	RS.invoke_ok = true;
 	RS.update_ok = true;
 	RS.gc_ok = true;
@@ -353,29 +403,66 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
-static void
-test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+static bool parse_content_length(
+	const unsigned char *restrict rsp, const size_t n,
+	size_t *restrict out_value)
 {
-	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
-	(void)loop;
-	(void)w;
-	(void)revents;
+	static const char key[] = "Content-Length: ";
+	const size_t keylen = sizeof(key) - 1;
+	for (size_t i = 0; i + keylen <= n; i++) {
+		if (memcmp(rsp + i, key, keylen) != 0) {
+			continue;
+		}
+		size_t pos = i + keylen;
+		size_t value = 0;
+		bool has_digit = false;
+		while (pos < n && '0' <= rsp[pos] && rsp[pos] <= '9') {
+			value = value * 10 + (size_t)(rsp[pos] - '0');
+			has_digit = true;
+			pos++;
+		}
+		if (!has_digit) {
+			return false;
+		}
+		*out_value = value;
+		return true;
+	}
+	return false;
 }
 
+static bool find_body_offset(
+	const unsigned char *restrict rsp, const size_t n,
+	size_t *restrict out_offset)
+{
+	static const char sep[] = "\r\n\r\n";
+	const size_t seplen = sizeof(sep) - 1;
+	for (size_t i = 0; i + seplen <= n; i++) {
+		if (memcmp(rsp + i, sep, seplen) == 0) {
+			*out_offset = i + seplen;
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Receive a complete HTTP response: the header block plus its declared
+ * Content-Length body (api_server always frames responses with Content-Length).
+ * Waiting is event-driven -- ev_run(EVRUN_ONCE) advances the in-loop server and
+ * blocks until more output or the watchdog -- rather than polling a fixed quiet
+ * window, so completion tracks the message structure, not a magic tick count. */
 static ssize_t recv_all_with_timeout(
 	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
 	const size_t cap, const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout, w_tick;
+	struct ev_timer w_timeout;
 	size_t off = 0;
-	int_fast32_t idle_after_data = 0;
+	size_t need = 0; /* total bytes for a complete message, once known */
+	bool need_known = false;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
-	ev_timer_start(loop, &w_tick);
 	while (!watchdog.fired && off < cap) {
 		const ssize_t n = recv(fd, buf + off, cap - off, MSG_DONTWAIT);
 		if (n < 0) {
@@ -383,27 +470,28 @@ static ssize_t recv_all_with_timeout(
 				continue;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				/* After receiving data, allow a short quiet window
-				 * for trailing fragments (the peer may split a reply
-				 * across writes) before returning. */
-				if (off > 0 && ++idle_after_data >=
-						       TEST_RECV_QUIET_TICKS) {
-					break;
-				}
 				ev_run(loop, EVRUN_ONCE);
 				continue;
 			}
-			ev_timer_stop(loop, &w_tick);
 			ev_timer_stop(loop, &w_timeout);
 			return -1;
 		}
 		if (n == 0) {
-			break;
+			break; /* EOF */
 		}
 		off += (size_t)n;
-		idle_after_data = 0;
+		if (!need_known) {
+			size_t body_off, clen;
+			if (find_body_offset(buf, off, &body_off) &&
+			    parse_content_length(buf, body_off, &clen)) {
+				need = body_off + clen;
+				need_known = true;
+			}
+		}
+		if (need_known && off >= need) {
+			break;
+		}
 	}
-	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	return (ssize_t)off;
 }
@@ -548,52 +636,28 @@ static bool find_bytes(
 	return false;
 }
 
+/* Offset of the first occurrence of needle in haystack, or haystack_len when
+ * absent (so a "found before" comparison fails safely). */
+static size_t find_bytes_offset(
+	const unsigned char *restrict haystack, const size_t haystack_len,
+	const char *restrict needle)
+{
+	const size_t needle_len = strlen(needle);
+	if (needle_len == 0 || haystack_len < needle_len) {
+		return haystack_len;
+	}
+	for (size_t i = 0; i + needle_len <= haystack_len; i++) {
+		if (memcmp(haystack + i, needle, needle_len) == 0) {
+			return i;
+		}
+	}
+	return haystack_len;
+}
+
 static bool assert_status(
 	const unsigned char *restrict rsp, const size_t n, const char *code)
 {
 	return find_bytes(rsp, n, code);
-}
-
-static bool parse_content_length(
-	const unsigned char *restrict rsp, const size_t n,
-	size_t *restrict out_value)
-{
-	static const char key[] = "Content-Length: ";
-	const size_t keylen = sizeof(key) - 1;
-	for (size_t i = 0; i + keylen <= n; i++) {
-		if (memcmp(rsp + i, key, keylen) != 0) {
-			continue;
-		}
-		size_t pos = i + keylen;
-		size_t value = 0;
-		bool has_digit = false;
-		while (pos < n && '0' <= rsp[pos] && rsp[pos] <= '9') {
-			value = value * 10 + (size_t)(rsp[pos] - '0');
-			has_digit = true;
-			pos++;
-		}
-		if (!has_digit) {
-			return false;
-		}
-		*out_value = value;
-		return true;
-	}
-	return false;
-}
-
-static bool find_body_offset(
-	const unsigned char *restrict rsp, const size_t n,
-	size_t *restrict out_offset)
-{
-	static const char sep[] = "\r\n\r\n";
-	const size_t seplen = sizeof(sep) - 1;
-	for (size_t i = 0; i + seplen <= n; i++) {
-		if (memcmp(rsp + i, sep, seplen) == 0) {
-			*out_offset = i + seplen;
-			return true;
-		}
-	}
-	return false;
 }
 
 /* -------------------------------------------------------------------------
@@ -758,6 +822,20 @@ T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 			rsp, (size_t)n, "neosocksd_requests_total 13\n"));
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "neosocksd_api_requests_total 2\n"));
+#if WITH_RULESET
+		/* every protocol_bytes_total sample stays in one contiguous
+		 * group: the api_client rows must precede the following
+		 * api_client_requests_total family (Prometheus text-format rule) */
+		const size_t off_api_client_bytes = find_bytes_offset(
+			rsp, (size_t)n,
+			"neosocksd_protocol_bytes_total{direction=\"tx\",module=\"api_client\"}");
+		const size_t off_requests_family = find_bytes_offset(
+			rsp, (size_t)n,
+			"# TYPE neosocksd_api_client_requests_total");
+		T_EXPECT(off_api_client_bytes < (size_t)n);
+		T_EXPECT(off_requests_family < (size_t)n);
+		T_EXPECT(off_api_client_bytes < off_requests_family);
+#endif /* WITH_RULESET */
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -774,6 +852,7 @@ T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
 	T_CHECK(loop != NULL);
 	init_unified_server(&s, loop);
 #if WITH_RULESET
+	reset_ruleset_stub();
 	s.ruleset = (struct ruleset *)&s;
 	RS.metrics_ok = true;
 #endif
@@ -1561,13 +1640,18 @@ T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
 	T_CHECK(test_wait_until(
 		loop, ruleset_rpcall_pending, NULL, TEST_WAIT_RECV_SEC));
 
-	/* Let the request timeout fire while the rpcall is still pending. */
+	/* Cross the request-timeout deadline on the virtual clock while the rpcall
+	 * is still pending; the next ev_run fires the timer and cancels it -- no
+	 * wall-clock wait. */
+	vclock_freeze_now();
+	vclock_advance(test_conf.timeout + 1.0);
 	T_EXPECT(test_wait_until(
 		loop, ruleset_cancelled_once, NULL, TEST_WAIT_RECV_SEC));
 	T_EXPECT_EQ(RS.cancel_count, (size_t)1);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+	vclock_stop();
 	test_conf.timeout = 1.0;
 }
 

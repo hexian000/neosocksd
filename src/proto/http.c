@@ -11,8 +11,8 @@
 #include "net/http.h"
 #include "net/mime.h"
 #include "os/socket.h"
-#include "utils/ctype_ascii.h"
 #include "utils/buffer.h"
+#include "utils/ctype_ascii.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
@@ -828,35 +828,6 @@ bool http_framer_eof(struct http_framer *restrict f)
 	return true;
 }
 
-bool parsehdr_accept_te(struct http_conn *restrict p, char *restrict value)
-{
-	/* comma-split by hand rather than with the non-reentrant strtok(); each
-	 * element is a transfer-coding (or the "trailers" keyword) with an
-	 * optional ";q=..." weight */
-	for (char *token = value; token != NULL;) {
-		char *const comma = strchr(token, ',');
-		if (comma != NULL) {
-			*comma = '\0';
-		}
-		/* drop the quality value if present */
-		char *const semi = strchr(token, ';');
-		if (semi != NULL) {
-			*semi = '\0';
-		}
-		const char *const coding = strtrimspace(token);
-		if (strcasecmp(coding, "chunked") == 0) {
-			p->hdr.transfer.accept = TENCODING_CHUNKED;
-			return true;
-		}
-		token = (comma != NULL) ? comma + 1 : NULL;
-	}
-
-	/* RFC 9110 §10.1.4: TE only advertises what the client is willing to
-	 * accept, so a coding we do not offer (or the "trailers" keyword) must
-	 * never fail the request — leave accept as TENCODING_NONE */
-	return true;
-}
-
 bool parsehdr_transfer_encoding(
 	struct http_conn *restrict p, char *restrict value)
 {
@@ -885,6 +856,17 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 {
 	const char *const deflate =
 		http_content_encoding_str[CENCODING_DEFLATE];
+	/* RFC 9110 §12.5.3: a `*` matches "any available content-coding not
+	 * explicitly listed", so an explicit `deflate;q=0` must suppress
+	 * deflate even when a `*` elsewhere in the list would otherwise select
+	 * it — and this holds whichever token comes first. A single-pass
+	 * "return on the first match" cannot express that, so scan the whole
+	 * list and track two signals: whether deflate was explicitly refused
+	 * (`deflate;q=0`) and whether any acceptable token selects it (`deflate`
+	 * with q>0, or `*` with q>0). Choose deflate only if selected and not
+	 * explicitly refused, independent of token order. */
+	bool deflate_refused = false;
+	bool selected = false;
 	/* comma-split by hand rather than with the non-reentrant strtok(); each
 	 * element is a content-coding with an optional ";q=..." weight */
 	for (char *token = value; token != NULL;) {
@@ -892,24 +874,55 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 		if (comma != NULL) {
 			*comma = '\0';
 		}
-		/* drop the quality value if present */
+		/* split off the optional ";q=..." weight */
 		char *const semi = strchr(token, ';');
+		bool acceptable = true;
 		if (semi != NULL) {
 			*semi = '\0';
+			/* RFC 9110 §12.5.3: a weight of q=0 means the coding is
+			 * NOT acceptable, so honor it rather than dropping the
+			 * whole weight. A qvalue is zero iff every digit is 0
+			 * (0, 0.0, 0.000, ...); scanned digit-wise so it is
+			 * locale-independent (no '.'-vs-',' surprise). */
+			const char *q = strtrimspace(semi + 1);
+			if ((q[0] == 'q' || q[0] == 'Q') && q[1] == '=') {
+				acceptable = false;
+				for (q += 2; *q != '\0'; q++) {
+					if ('1' <= *q && *q <= '9') {
+						acceptable = true;
+						break;
+					}
+					if (*q != '0' && *q != '.') {
+						break; /* end of the qvalue */
+					}
+				}
+			}
 		}
 		const char *const coding = strtrimspace(token);
-		/* RFC 9110 §12.5.3: `*` is a wildcard for any encoding, whether
-		 * it is the whole value or one token among a comma-separated
-		 * list (e.g. "gzip, *") */
-		if (strcmp(coding, "*") == 0 ||
-		    strcasecmp(coding, deflate) == 0) {
-			p->hdr.accept_encoding = CENCODING_DEFLATE;
-			return true;
+		if (strcasecmp(coding, deflate) == 0) {
+			/* an explicit deflate token governs deflate directly: a
+			 * q=0 here refuses it outright and no later `*` can undo
+			 * that */
+			if (acceptable) {
+				selected = true;
+			} else {
+				deflate_refused = true;
+			}
+		} else if (acceptable && strcmp(coding, "*") == 0) {
+			/* the wildcard selects deflate, whether it is the whole
+			 * value or one token among a list (e.g. "gzip, *") --
+			 * but only if deflate was not explicitly refused, which
+			 * the final check enforces */
+			selected = true;
 		}
 		token = (comma != NULL) ? comma + 1 : NULL;
 	}
 
-	/* Valid header, but no supported encoding — leave accept_encoding as CENCODING_NONE */
+	if (selected && !deflate_refused) {
+		p->hdr.accept_encoding = CENCODING_DEFLATE;
+	}
+	/* otherwise leave accept_encoding as CENCODING_NONE: a valid header with
+	 * no acceptable supported coding, or deflate explicitly refused */
 	return true;
 }
 

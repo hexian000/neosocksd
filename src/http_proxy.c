@@ -16,8 +16,8 @@
 #include "net/http.h"
 #include "net/url.h"
 #include "os/socket.h"
-#include "utils/ctype_ascii.h"
 #include "utils/buffer.h"
+#include "utils/ctype_ascii.h"
 #include "utils/debug.h"
 #include "utils/gc.h"
 #include "utils/slog.h"
@@ -512,6 +512,14 @@ static bool rsp_record_header(void *ctx, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
+		/* RFC 9110 §5.2 / 9112 §6.1: repeated field lines are a
+		 * comma-joined value and chunked applies at most once, so a second
+		 * Transfer-Encoding: chunked line is the same violation as
+		 * "chunked, chunked" on one line (rejected below), mirroring the
+		 * Content-Length duplicate guard. */
+		if (s->rsp_chunked) {
+			return false;
+		}
 		/* RFC 9112 §6.1: the response body may carry a stack of transfer
 		 * codings terminated by "chunked" (e.g. "gzip, chunked"). The
 		 * final coding must be chunked -- any other framing cannot be
@@ -862,8 +870,13 @@ rsp_run(struct ev_loop *restrict loop, struct http_stream *restrict s)
 				stream_touch(loop, s);
 				s->whdr_pos += n;
 			}
-			/* header block fully sent */
-			s->rsp_started = true;
+			/* header block fully sent. A dropped malformed interim
+			 * writes nothing (wbuf.len == 0); it must not flip
+			 * rsp_started, which guards whether a later failure can
+			 * still emit a best-effort error page to the client. */
+			if (conn->wbuf.len > 0) {
+				s->rsp_started = true;
+			}
 			if (s->rsp_interim) {
 				/* drop the forwarded interim and parse the next
 				 * response from the front of the buffer */
@@ -952,7 +965,6 @@ http_ctx_start_stream(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	/* conn.rbuf/wbuf are free now: the readahead was copied out and the
 	 * request headers were fully sent. wbuf is reused for the response. */
 	VBUF_FREE(conn->cbuf);
-	conn->cbuf = NULL;
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
 
@@ -1519,7 +1531,10 @@ static bool parse_header(void *data, const char *key, char *value)
 		return true;
 	}
 	if (strcasecmp(key, "TE") == 0) {
-		return parsehdr_accept_te(p, value);
+		/* RFC 9110 §10.1.4: TE only advertises which transfer-codings the
+		 * client accepts, so accept any value and do not vary framing on
+		 * it (chunked is always acceptable per RFC 9112 §7.4) */
+		return true;
 	}
 	if (strcasecmp(key, "Transfer-Encoding") == 0) {
 		if (!parsehdr_transfer_encoding(p, value)) {
