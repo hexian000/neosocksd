@@ -33,7 +33,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 struct api_client_ctx {
 	struct gcbase gcbase;
