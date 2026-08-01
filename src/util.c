@@ -6,7 +6,6 @@
 #include "resolver.h"
 
 #include "io/file.h"
-
 #include "math/rand.h"
 #if WITH_CRASH_HANDLER
 #include "os/signal.h"

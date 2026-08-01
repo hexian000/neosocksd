@@ -1,14 +1,12 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/* Unit tests for util.c; mocked: dialreq_format, resolver; links version.c. */
+/* Unit tests for util.c; mocked: resolver; links version.c. */
 
 #include "util.h"
 
-#include "dialer.h"
 #include "resolver.h"
 
-#include "meta/minmax.h"
 #include "utils/slog.h"
 #include "utils/testing.h"
 
@@ -17,45 +15,14 @@
 #include <signal.h>
 #include <stddef.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
- * mock - stubs for the dialer/resolver symbols referenced by util.c.
+ * mock - stubs for the resolver symbols referenced by util.c.
  * ---------------------------------------------------------------------- */
-
-static struct {
-	int dialreq_format_len_override;
-} STUB = { .dialreq_format_len_override = -1 };
-
-int dialreq_format(
-	char *restrict s, const size_t maxlen, const struct dialreq *restrict r)
-{
-	size_t len;
-
-	if (STUB.dialreq_format_len_override >= 0) {
-		len = (size_t)STUB.dialreq_format_len_override;
-		if (s != NULL && maxlen > 0) {
-			const size_t n = MIN(len, maxlen - 1);
-			memset(s, 'x', n);
-			s[n] = '\0';
-		}
-		return (int)len;
-	}
-	if (r == NULL || r->addr.type != ATYP_DOMAIN) {
-		return -1;
-	}
-	len = r->addr.domain.len;
-	if (s != NULL && maxlen > 0) {
-		const size_t n = MIN(len, maxlen - 1);
-		memcpy(s, r->addr.domain.name, n);
-		s[n] = '\0';
-	}
-	return (int)len;
-}
 
 void resolver_init(void)
 {
