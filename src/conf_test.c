@@ -567,6 +567,10 @@ T_DECLARE_CASE(parseargs_user_daemonize_color)
 	T_EXPECT(conf.daemonize);
 	T_EXPECT(conf.socks5_bind);
 	T_EXPECT(conf.socks5_udp);
+
+	/* --log terminal repointed the slog sink; leave it fd-free so a later
+	 * fd capture is not corrupted (see parseargs_log_outputs) */
+	slog_setoutput(SLOG_OUTPUT_DISCARD);
 }
 
 T_DECLARE_CASE(parseargs_timeout)
@@ -688,6 +692,24 @@ T_DECLARE_CASE(parseargs_max_startups)
 	}
 }
 
+T_DECLARE_CASE(parseargs_rejects_above_int_max_numeric)
+{
+	/* opt_parse_int rejects a syntactically valid decimal exceeding INT_MAX
+	 * (the overflow half of its check, distinct from the missing-digit half);
+	 * exercise it through each of its three consumers */
+	static const char *const cases[][2] = {
+		{ "-m", "9999999999" },
+		{ "--loglevel", "9999999999" },
+		{ "--max-startups", "9999999999:0:0" },
+	};
+	for (size_t k = 0; k < ARRAY_SIZE(cases); k++) {
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+				 (char *)cases[k][0], (char *)cases[k][1] };
+		T_EXPECT(!conf_parseargs(&conf, 5, argv));
+	}
+}
+
 T_DECLARE_CASE(parseargs_double_dash_and_unknown)
 {
 	{
@@ -731,13 +753,11 @@ T_DECLARE_CASE(parseargs_log_outputs)
 				 "nowhere" };
 		T_EXPECT(!conf_parseargs(&conf, 5, argv));
 	}
-	/* restore a sane logging sink for the remainder of the test run */
-	{
-		struct config conf = conf_default();
-		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--log",
-				 "terminal" };
-		T_EXPECT(conf_parseargs(&conf, 5, argv));
-	}
+	/* The cases above repointed the process-global slog sink at stdout/
+	 * stderr; a later test that captures fd 1 or 2 (capture_fd) would then
+	 * catch stray log lines. Leave the sink fd-free so the suite stays
+	 * order-independent. */
+	slog_setoutput(SLOG_OUTPUT_DISCARD);
 }
 
 #if WITH_LUA
@@ -1501,6 +1521,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(parseargs_block_outbound),
 	T_CASE(parseargs_max_sessions),
 	T_CASE(parseargs_max_startups),
+	T_CASE(parseargs_rejects_above_int_max_numeric),
 	T_CASE(parseargs_double_dash_and_unknown),
 #if WITH_CARES
 	T_CASE(parseargs_nameserver),
