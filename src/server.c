@@ -222,7 +222,10 @@ static bool add_listener(
 	ev_timer_init(&l->w_timer, timer_cb, 0.5, 0.0);
 	l->w_timer.data = l;
 
-	ev_io_start(s->loop, &l->w_accept);
+	/* The accept watcher is registered later by server_start(), after the
+	 * privilege drop and I/O thread creation. add_listener() only creates and
+	 * binds the socket, which is the step that needs privilege (a port < 1024
+	 * or IP_TRANSPARENT); accept() afterward needs none. */
 	s->num_listeners++;
 	return true;
 }
@@ -354,17 +357,17 @@ resolve_addr(union sockaddr_max *restrict out, const char *restrict addrstr)
 	return true;
 }
 
-bool server_init(
+bool server_bind(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,
-	struct transfer *xfer, struct dialreq *basereq, struct ruleset *ruleset)
+	struct dialreq *basereq, struct ruleset *ruleset)
 {
 	(void)ruleset;
 	*s = (struct server){
 		.loop = loop,
 		.conf = conf,
 		.resolver = resolver,
-		.xfer = xfer,
+		.xfer = NULL,
 		.basereq = basereq,
 #if WITH_RULESET
 		.ruleset = ruleset,
@@ -427,6 +430,19 @@ bool server_init(
 		}
 	}
 
+	return true;
+}
+
+void server_start(struct server *restrict s, struct transfer *xfer)
+{
+	s->xfer = xfer;
+	struct ev_loop *restrict loop = s->loop;
+	/* register the accept watchers add_listener() deferred; the sockets are
+	 * already bound and listening (from server_bind, while privileged) */
+	for (size_t i = 0; i < s->num_listeners; i++) {
+		ev_io_start(loop, &s->listeners[i].w_accept);
+	}
+
 	const struct {
 		ev_signal *w;
 		int sig;
@@ -441,7 +457,20 @@ bool server_init(
 		ev_set_priority(sigwatchers[i].w, EV_MAXPRI);
 		ev_signal_start(loop, sigwatchers[i].w);
 	}
+}
 
+/* Convenience for callers that do not drop privileges between the two phases
+ * (tests). main() calls server_bind()/server_start() separately across the
+ * privilege drop. */
+bool server_init(
+	struct server *restrict s, struct ev_loop *loop,
+	struct config *restrict conf, struct resolver *resolver,
+	struct transfer *xfer, struct dialreq *basereq, struct ruleset *ruleset)
+{
+	if (!server_bind(s, loop, conf, resolver, basereq, ruleset)) {
+		return false;
+	}
+	server_start(s, xfer);
 	return true;
 }
 
@@ -468,6 +497,15 @@ void server_stop(struct server *restrict s)
 
 	dialreq_free(s->basereq);
 	s->basereq = NULL;
+#if WITH_RULESET
+	/* the server owns the ruleset (installed by server_init, replaced/cleared
+	 * by SIGHUP reload); free it here so ownership stays with the server across
+	 * reloads rather than split with main */
+	if (s->ruleset != NULL) {
+		ruleset_free(s->ruleset);
+		s->ruleset = NULL;
+	}
+#endif /* WITH_RULESET */
 	s->stats.started = -1;
 }
 

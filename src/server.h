@@ -276,6 +276,34 @@ static inline size_t server_commit_session(
 	return cur;
 }
 
+/**
+ * @brief Create and bind all configured listener sockets.
+ *
+ * This is the privileged phase: socket()/bind()/listen() (and, for a
+ * transparent proxy, IP_TRANSPARENT) need the capability to bind a port < 1024
+ * or set transparent mode. The accept watchers are not registered yet, so call
+ * this while still privileged, then drop privileges, then server_start().
+ *
+ * @return true on success; false if any listener fails to bind.
+ */
+bool server_bind(
+	struct server *restrict s, struct ev_loop *loop,
+	struct config *restrict conf, struct resolver *resolver,
+	struct dialreq *basereq, struct ruleset *ruleset);
+
+/**
+ * @brief Register the accept and signal watchers and attach the transfer
+ * engine, after server_bind().
+ *
+ * Runs after the privilege drop and I/O thread creation; accept() needs no
+ * capability. @p xfer must outlive the server.
+ */
+void server_start(struct server *restrict s, struct transfer *xfer);
+
+/**
+ * @brief server_bind() followed by server_start(), for callers that do not
+ * drop privileges between the two phases.
+ */
 bool server_init(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,

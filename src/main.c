@@ -88,47 +88,11 @@ int main(int argc, char *argv[])
 	struct resolver *resolver = resolver_new(loop, conf);
 	CHECKOOM(resolver);
 
-	/* Handle user identity changes and daemonization before spawning any
-	 * threads: fork() only duplicates the calling thread, so all thread
-	 * creation must happen after this point. */
-	{
-		if (conf->daemonize) {
-			daemonize(conf->user_name, true, false);
-			slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME, NULL);
-		} else if (conf->user_name != NULL) {
-			drop_privileges(conf->user_name);
-		}
-	}
-
-	struct transfer *xfer;
-#if WITH_THREADS
-	/* Block all signals before spawning the I/O worker so it inherits the
-	 * mask; server_init will re-enable them in the main thread via
-	 * ev_signal_start. */
-	{
-		sigset_t ss, old_ss;
-		CHECK(sigfillset(&ss) == 0);
-		{
-			const int err =
-				pthread_sigmask(SIG_BLOCK, &ss, &old_ss);
-			CHECKMSGF(
-				err == 0, "pthread_sigmask: (%d) %s", err,
-				strerror(err));
-		}
-		xfer = transfer_create(loop, 1);
-		{
-			const int err =
-				pthread_sigmask(SIG_SETMASK, &old_ss, NULL);
-			CHECKMSGF(
-				err == 0, "pthread_sigmask: (%d) %s", err,
-				strerror(err));
-		}
-	}
-#else /* WITH_THREADS */
-	xfer = transfer_create(loop, 1);
-#endif /* WITH_THREADS */
-	CHECKOOM(xfer);
-
+	/* Load the ruleset/boot config (a boot config may change
+	 * forward/proxy/listen) and bind the listeners while still privileged;
+	 * see server_bind() below. This runs before the privilege drop, so the
+	 * config files are read as the original (root) user, then privileges are
+	 * dropped. */
 #if WITH_RULESET
 	struct ruleset *ruleset = NULL;
 	if (conf->ruleset != NULL || conf->boot != NULL) {
@@ -181,13 +145,9 @@ int main(int argc, char *argv[])
 #endif /* WITH_LUA */
 #endif /* WITH_RULESET */
 
-	/* loglevel and nameserver were latched from CLI values before any boot
-	 * config was loaded (slog in conf_parseargs, the c-ares servers in
-	 * resolver_new, which must precede privilege drop). Re-apply them here only
-	 * when a boot config was loaded, so a value set only there still takes
-	 * effect. Without a boot config both are already applied, so re-applying
-	 * would be redundant — and for an invalid --nameserver would log the c-ares
-	 * failure a second time. */
+	/* loglevel and nameserver are latched from CLI values before any boot
+	 * config loads (slog in conf_parseargs, c-ares in resolver_new); re-apply
+	 * here only for a value a boot config may have changed. */
 #if WITH_LUA
 	if (conf->boot != NULL) {
 		slog_setlevel(conf->loglevel);
@@ -196,10 +156,56 @@ int main(int argc, char *argv[])
 #endif /* WITH_LUA */
 
 	struct server *s = &app.server;
-	if (!server_init(s, loop, conf, resolver, xfer, basereq, ruleset)) {
+	if (!server_bind(s, loop, conf, resolver, basereq, ruleset)) {
 		LOGF("failed to start server");
 		exit(EXIT_FAILURE);
 	}
+
+	/* Drop privileges / daemonize now that the listeners are bound. This must
+	 * precede thread creation: fork() only duplicates the calling thread, so
+	 * all thread creation happens after this point. The bound listener fds are
+	 * inherited across the fork. */
+	{
+		if (conf->daemonize) {
+			daemonize(conf->user_name, true, false);
+			slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME, NULL);
+		} else if (conf->user_name != NULL) {
+			drop_privileges(conf->user_name);
+		}
+	}
+
+	struct transfer *xfer;
+#if WITH_THREADS
+	/* Block all signals before spawning the I/O worker so it inherits the
+	 * mask; server_start will re-enable them in the main thread via
+	 * ev_signal_start. */
+	{
+		sigset_t ss, old_ss;
+		CHECK(sigfillset(&ss) == 0);
+		{
+			const int err =
+				pthread_sigmask(SIG_BLOCK, &ss, &old_ss);
+			CHECKMSGF(
+				err == 0, "pthread_sigmask: (%d) %s", err,
+				strerror(err));
+		}
+		xfer = transfer_create(loop, 1);
+		{
+			const int err =
+				pthread_sigmask(SIG_SETMASK, &old_ss, NULL);
+			CHECKMSGF(
+				err == 0, "pthread_sigmask: (%d) %s", err,
+				strerror(err));
+		}
+	}
+#else /* WITH_THREADS */
+	xfer = transfer_create(loop, 1);
+#endif /* WITH_THREADS */
+	CHECKOOM(xfer);
+
+	/* register the accept/signal watchers now that privileges are dropped and
+	 * the I/O worker exists */
+	server_start(s, xfer);
 #if WITH_RULESET
 	if (ruleset != NULL) {
 		ruleset_setserver(ruleset, s);
@@ -214,12 +220,10 @@ int main(int argc, char *argv[])
 	server_stop(s);
 	LOGN("server shutdown gracefully");
 
-#if WITH_RULESET
-	if (ruleset != NULL) {
-		ruleset_free(ruleset);
-		ruleset = NULL;
-	}
-#endif
+	/* the server owns the ruleset once server_init() stores it: server_stop()
+	 * frees it. main must not free it here -- a SIGHUP reload can replace or
+	 * clear s->ruleset independently of this local, so freeing the local would
+	 * double-free (reload dropped it) or leak (reload installed a new one). */
 	if (resolver != NULL) {
 		resolver_free(resolver);
 		resolver = NULL;

@@ -825,6 +825,32 @@ T_DECLARE_CASE(server_stats_aggregates_listeners)
 	ev_loop_destroy(loop);
 }
 
+/*
+ * server_bind() binds the listener sockets (the privileged phase) but must not
+ * register the accept watcher yet; server_start() registers it afterwards. This
+ * split lets main() bind a privileged port while still privileged, then drop
+ * and spawn the I/O thread, then server_start() after the fork.
+ */
+T_DECLARE_CASE(server_bind_defers_accept_watcher_until_start)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+
+	T_EXPECT(server_bind(&s, loop, &conf, NULL, NULL, NULL));
+	T_EXPECT_EQ(s.num_listeners, (size_t)1);
+	/* bound and listening, but the accept watcher is not registered yet */
+	T_EXPECT(!ev_is_active(&s.listeners[0].w_accept));
+
+	server_start(&s, NULL);
+	T_EXPECT(ev_is_active(&s.listeners[0].w_accept));
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
 #if WITH_RULESET
 /*
  * SIGHUP drives ruleset reload: a failed engine creation leaves the ruleset
@@ -861,6 +887,35 @@ T_DECLARE_CASE(server_signal_reload_ruleset)
 	ev_run(loop, EVRUN_NOWAIT);
 
 	server_stop(&s);
+	/* the server owns the reload-created ruleset: server_stop frees it
+	 * exactly once. It was previously leaked -- main's local stayed NULL
+	 * across the reload, so shutdown never freed s->ruleset. */
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * The server owns the ruleset installed at server_init (main no longer frees
+ * its local copy): server_stop must free it exactly once. A split where main
+ * also freed it double-freed after a reload replaced s->ruleset.
+ */
+T_DECLARE_CASE(server_stop_frees_ruleset_installed_at_init)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+
+	T_EXPECT(server_init(
+		&s, loop, &conf, NULL, NULL, NULL,
+		(struct ruleset *)&ruleset_dummy_tag));
+	T_EXPECT(s.ruleset == (struct ruleset *)&ruleset_dummy_tag);
+
+	server_stop(&s);
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
+	T_EXPECT(s.ruleset == NULL);
+
 	ev_loop_destroy(loop);
 }
 
@@ -955,8 +1010,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(server_init_rejects_bad_addresses),
 	T_CASE(server_init_partial_failure_cleanup),
 	T_CASE(server_stats_aggregates_listeners),
+	T_CASE(server_bind_defers_accept_watcher_until_start),
 #if WITH_RULESET
 	T_CASE(server_signal_reload_ruleset),
+	T_CASE(server_stop_frees_ruleset_installed_at_init),
 	T_CASE(server_signal_reload_boot_basereq),
 	T_CASE(server_signal_reload_boot_basereq_parse_failure),
 #endif
