@@ -97,14 +97,8 @@ struct socks_ctx {
 			ev_io w_tcp;
 			union sockaddr_max udp_peer;
 			bool udp_peer_known;
-			/* Distinct target addresses the client has sent to, most
-			 * recent first. A target->client datagram is forwarded
-			 * only if its source is one of these, so an off-path host
-			 * cannot inject unsolicited UDP into the client session.
-			 * RFC 1928 leaves this direction unspecified; this is a
-			 * bounded LRU set, so a client fanning out past the cap
-			 * evicts its least-recent target, whose later replies are
-			 * then dropped. */
+			/* distinct target addresses the client has sent to:
+			 * bounded LRU set, most-recent first (index 0 == MRU) */
 			union sockaddr_max udp_targets[SOCKS_UDP_TARGETS_MAX];
 			uint_least8_t udp_ntargets;
 			/* scratch buffer for a single datagram; length is tracked
@@ -1054,11 +1048,8 @@ static int udp_hdr_len(const unsigned char *restrict buf, const size_t buflen)
 }
 
 /* Fragment assembly: reassemble into frag_buf, forward on last fragment;
- * discard out-of-order/overflow. Every discard below is driven by remote client
- * input and repeats per datagram, so they log at DEBUG -- like the
- * non-fragmented unsupported-ATYP discard in udp_relay_cb -- rather than
- * WARNING, which a client could stream malformed fragments to grow unbounded (a
- * remote-triggerable log flood, since WARNING <= the default NOTICE loglevel). */
+ * discard out-of-order/overflow. Discards are remote-driven and per-datagram,
+ * so they log at DEBUG. */
 static void udp_frag_client_recv(
 	struct socks_ctx *restrict ctx, const size_t nrecv,
 	const uint_fast8_t frag)
@@ -1150,23 +1141,70 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	ASSERT(ctx->state == STATE_UDP_RELAY);
 
 	union sockaddr_max from_sa;
-	socklen_t from_len = sizeof(from_sa);
-	const ssize_t nrecv = recvfrom(
-		ctx->dialed_fd, ctx->ubuf, IO_BUFSIZE, 0, &from_sa.sa,
-		&from_len);
+	struct iovec riov = {
+		.iov_base = ctx->ubuf,
+		.iov_len = IO_BUFSIZE,
+	};
+	struct msghdr rmsg = {
+		.msg_name = &from_sa,
+		.msg_namelen = sizeof(from_sa),
+		.msg_iov = &riov,
+		.msg_iovlen = 1,
+	};
+	const ssize_t nrecv = recvmsg(ctx->dialed_fd, &rmsg, 0);
 	if (nrecv < 0) {
 		const int err = errno;
 		if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
 			return;
 		}
 		SOCKS_CTX_LOG_F(
-			ERROR, ctx, "recvfrom: (%d) %s", err, strerror(err));
+			ERROR, ctx, "recvmsg: (%d) %s", err, strerror(err));
 		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (rmsg.msg_flags & MSG_TRUNC) {
+		/* A datagram larger than ubuf was truncated by the kernel;
+		 * forwarding the partial payload would silently corrupt it, so
+		 * drop it. Remote-triggerable, so log at DEBUG like the other
+		 * UDP discard paths. */
+		SOCKS_CTX_LOG_F(
+			DEBUG, ctx,
+			"UDP: dropping datagram larger than the %d-byte buffer",
+			(int)IO_BUFSIZE);
 		return;
 	}
 	if (!ctx->udp_peer_known || sa_equals(&from_sa.sa, &ctx->udp_peer.sa)) {
 		/* Client -> target: strip SOCKS5 UDP header and forward */
 		if (!ctx->udp_peer_known) {
+			/* Bind the client identity from the first datagram, but
+			 * require its source host to match the authenticated TCP
+			 * client. The UDP source port legitimately differs from
+			 * the TCP port (a separate socket), so ignore the port
+			 * (match host only); an unspecified client address
+			 * imposes no constraint. This rejects an off-path host
+			 * that reached the ephemeral relay port before the real
+			 * client. Remote-triggerable, so log at DEBUG. */
+			union sockaddr_max client = ctx->accepted_sa;
+			switch (client.sa.sa_family) {
+			case AF_INET:
+				client.in.sin_port = 0;
+				break;
+			case AF_INET6:
+				client.in6.sin6_port = 0;
+				break;
+			default:
+				break;
+			}
+			if (!sa_matches(&client.sa, &from_sa.sa)) {
+				char src_str[64];
+				sa_format(
+					src_str, sizeof(src_str), &from_sa.sa);
+				SOCKS_CTX_LOG_F(
+					DEBUG, ctx,
+					"UDP: dropping first datagram from %s: source does not match the client",
+					src_str);
+				return;
+			}
 			sa_copy(&ctx->udp_peer.sa, &from_sa.sa);
 			ctx->udp_peer_known = true;
 		}

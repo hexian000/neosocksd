@@ -40,7 +40,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -80,15 +83,10 @@ static void test_conf_reset(void)
 }
 
 static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.016;
+/* Watchdog bound on the event-driven read/drive helpers: a hung-test backstop,
+ * never a completion signal (completion is a structurally complete reply or a
+ * driven terminal state). */
 static const ev_tstamp TEST_WAIT_TIMEOUT_SEC = 0.128;
-/* Upper bound on how long ev_run() may sleep while a helper polls a socket
- * that is not registered with the event loop. Keeps the loop re-polling so
- * fragmented/delayed peer writes (e.g. the MSYS2/Cygwin socket emulation) are
- * observed promptly instead of waiting out the watchdog. */
-static const ev_tstamp TEST_TICK_SEC = 0.002;
-/* Consecutive idle polls (each ~TEST_TICK_SEC apart) with no new bytes that
- * mark the end of a received burst once at least some data has arrived. */
-#define TEST_RECV_QUIET_TICKS 6
 
 static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
 {
@@ -97,6 +95,103 @@ static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
 		wait_sec = TEST_WAIT_SHORT_SEC;
 	}
 	return wait_sec;
+}
+
+/* -------------------------------------------------------------------------
+ * virtual clock - deterministic timeout tests without wall-clock waits.
+ *
+ * The timeouts under test are libev ev_timers armed inside production socks_ctx
+ * structs the test never gets a handle to, so firing one in a specific state
+ * requires controlling the clock libev reads. These strong-symbol interposers
+ * shadow clock_gettime/gettimeofday: while enabled they return a virtual time
+ * the test advances, so a deadline is crossed by advancing the clock and
+ * pumping the loop -- no real waiting. Disabled by default (real time via the
+ * raw syscall), so every non-timeout case is unaffected.
+ * ---------------------------------------------------------------------- */
+
+static bool g_vclock_on = false;
+static double g_vclock_sec = 0.0;
+
+int clock_gettime(clockid_t clk, struct timespec *ts)
+{
+	if (g_vclock_on) {
+		ts->tv_sec = (time_t)g_vclock_sec;
+		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
+		return 0;
+	}
+	return (int)syscall(SYS_clock_gettime, clk, ts);
+}
+
+int gettimeofday(struct timeval *tv, void *tz)
+{
+	if (g_vclock_on) {
+		tv->tv_sec = (time_t)g_vclock_sec;
+		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
+		return 0;
+	}
+	return (int)syscall(SYS_gettimeofday, tv, tz);
+}
+
+/* Start virtual time at a fixed base; call before creating the loop so every
+ * timer this case arms has a virtual-time deadline. */
+static void vclock_start(void)
+{
+	g_vclock_sec = 1000.0;
+	g_vclock_on = true;
+}
+
+/* Advance virtual time by @p sec; the caller then pumps the loop so libev fires
+ * any timer whose deadline the advance crossed. */
+static void vclock_advance(const double sec)
+{
+	g_vclock_sec += sec;
+}
+
+static void vclock_stop(void)
+{
+	g_vclock_on = false;
+}
+
+/* Backstop bound on the virtual-clock pump loops below: since the clock is
+ * frozen no watchdog timer can fire, so this caps a hung/never-satisfied test
+ * instead. It is not a completion count -- completion is the awaited flag or a
+ * full/EOF read; a test that relies on the backstop to terminate has failed. */
+enum { VCLOCK_PUMP_MAX = 100000 };
+
+/* Pump the frozen-clock loop until *flag becomes nonzero: the production code
+ * has reached the awaited point (e.g. dialer_do issued -> connect state). */
+static void
+vclock_pump_until(struct ev_loop *loop, const uint_least32_t *restrict flag)
+{
+	for (int i = 0; i < VCLOCK_PUMP_MAX && *flag == 0; i++) {
+		ev_run(loop, EVRUN_NOWAIT);
+	}
+}
+
+/* Pump the frozen-clock loop, reading from @p fd until @p need bytes have
+ * arrived or the peer closes (EOF). Pass need == cap to read a whole reply that
+ * ends in a teardown: a socks_ctx that replies then closes marks completion
+ * with EOF, so no byte length need be hardcoded. Pass a smaller need to stop
+ * after one reply on a connection that stays open (e.g. before advancing the
+ * clock to trigger a later timeout reply). */
+static ssize_t vclock_recv(
+	struct ev_loop *loop, const int fd, void *restrict buf,
+	const size_t cap, const size_t need)
+{
+	const size_t want = need < cap ? need : cap;
+	size_t off = 0;
+	for (int i = 0; i < VCLOCK_PUMP_MAX && off < want; i++) {
+		ev_run(loop, EVRUN_NOWAIT);
+		const ssize_t n =
+			recv(fd, (char *)buf + off, cap - off, MSG_DONTWAIT);
+		if (n > 0) {
+			off += (size_t)n;
+		} else if (n == 0) {
+			break; /* EOF: the reply is complete */
+		}
+		/* n < 0 EAGAIN: nothing more yet, pump again */
+	}
+	return (ssize_t)off;
 }
 
 const char *const proxy_protocol_str[PROTO_MAX] = {
@@ -124,6 +219,7 @@ static struct {
 	int dialer_syserr;
 	int dialer_success_fd;
 	uint_least32_t dialer_cancel_count;
+	uint_least32_t dialer_do_count;
 
 	enum stub_ruleset_mode ruleset_mode;
 	struct ruleset_callback *ruleset_pending_cb;
@@ -147,12 +243,16 @@ static int_least32_t stub_xfer_ctx_count = 0;
 
 static void stub_reset(void)
 {
+	/* clear a virtual clock a prior timeout case may have left enabled on a
+	 * T_EXPECT failure path (its bottom-of-case vclock_stop() was skipped) */
+	vclock_stop();
 	STUB.dialreq_available = false;
 	STUB.dialer_mode = STUB_DIALER_NONE;
 	STUB.dialer_err = DIALER_OK;
 	STUB.dialer_syserr = 0;
 	STUB.dialer_success_fd = -1;
 	STUB.dialer_cancel_count = 0;
+	STUB.dialer_do_count = 0;
 	for (int_fast32_t i = 0; i < stub_xfer_ctx_count; i++) {
 		free(stub_xfer_ctxs[i]);
 		stub_xfer_ctxs[i] = NULL;
@@ -297,6 +397,7 @@ void dialer_do(
 	(void)resolver;
 	(void)server;
 
+	STUB.dialer_do_count++;
 	switch (STUB.dialer_mode) {
 	case STUB_DIALER_NONE:
 		return;
@@ -456,95 +557,98 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
-static void
-test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+struct recv_reply_ctx {
+	int fd;
+	unsigned char *buf;
+	size_t cap;
+	size_t off;
+	bool eof;
+};
+
+static void recv_reply_cb(struct ev_loop *loop, ev_io *w, const int revents)
 {
-	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
 	(void)loop;
-	(void)w;
 	(void)revents;
-}
-
-/* Accumulate from fd until the peer goes quiet (no new bytes for a short
- * window), reaches EOF, or fills the buffer. fd is not registered with the
- * loop, so a tick timer keeps ev_run() from sleeping past TEST_TICK_SEC and
- * lets us collect every fragment of a reply that the peer may split across
- * multiple writes. */
-static ssize_t recv_after_readable(
-	struct ev_loop *loop, const int fd, void *buf, const size_t len,
-	const ev_tstamp timeout_sec)
-{
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout, w_tick;
-	size_t off = 0;
-	int_fast32_t idle = 0;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
-	ev_timer_start(loop, &w_tick);
-	while (!watchdog.fired && off < len) {
-		const ssize_t n = recv_nowait(fd, (char *)buf + off, len - off);
+	struct recv_reply_ctx *restrict c = w->data;
+	while (c->off < c->cap) {
+		const ssize_t n = recv(
+			c->fd, c->buf + c->off, c->cap - c->off, MSG_DONTWAIT);
 		if (n > 0) {
-			off += (size_t)n;
-			idle = 0;
+			c->off += (size_t)n;
 			continue;
 		}
 		if (n == 0) {
-			break; /* EOF */
+			c->eof = true;
+			return; /* peer closed */
 		}
-		if (errno != EAGAIN && errno != EWOULDBLOCK) {
-			if (off == 0) {
-				off = (size_t)-1; /* report the hard error */
-			}
-			break;
+		if (errno == EINTR) {
+			continue;
 		}
-		if (off > 0 && ++idle >= TEST_RECV_QUIET_TICKS) {
-			break;
-		}
-		ev_run(loop, EVRUN_ONCE);
+		return; /* EAGAIN/EWOULDBLOCK: nothing more buffered yet */
 	}
-	ev_timer_stop(loop, &w_tick);
-	ev_timer_stop(loop, &w_timeout);
-	return (ssize_t)off;
 }
 
-static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
+/* Receive a reply of at least @p need bytes -- the length the caller asserts,
+ * i.e. the structurally complete reply -- or until the peer closes (EOF). The
+ * fd is registered with the loop, so the read is event-driven: ev_run() wakes
+ * when the server produces output or closes, with no quiescence tick count. The
+ * watchdog is a hung-test backstop, never the completion signal. */
+static ssize_t recv_reply(
+	struct ev_loop *loop, const int fd, void *restrict buf,
+	const size_t cap, const size_t need)
 {
+	struct recv_reply_ctx c = {
+		.fd = fd, .buf = buf, .cap = cap, .off = 0, .eof = false
+	};
+	const size_t want = need < cap ? need : cap;
 	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
+	ev_io w_io;
+	ev_timer w_timeout;
 
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
+	ev_io_init(&w_io, recv_reply_cb, fd, EV_READ);
+	w_io.data = &c;
+	ev_io_start(loop, &w_io);
+	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_TIMEOUT_SEC, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired) {
+	while (!watchdog.fired && !c.eof && c.off < want) {
 		ev_run(loop, EVRUN_ONCE);
 	}
 	ev_timer_stop(loop, &w_timeout);
+	ev_io_stop(loop, &w_io);
+	return (ssize_t)c.off;
 }
 
-static bool
-test_step_timed_out(struct ev_loop *loop, const ev_tstamp timeout_sec)
+/* Watchers invoked during the current drive_loop() round. A custom
+ * invoke-pending callback accumulates ev_pending_count() so a round that
+ * invokes none can be recognised as quiescence. */
+static unsigned int g_drive_invoked;
+
+static void drive_invoke_pending(struct ev_loop *loop)
 {
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	ev_run(loop, EVRUN_ONCE);
-	ev_timer_stop(loop, &w_timeout);
-	return watchdog.fired;
+	g_drive_invoked += ev_pending_count(loop);
+	ev_invoke_pending(loop);
 }
 
+/* Drive the loop until it quiesces: pump non-blocking rounds until a round
+ * invokes no watchers, i.e. all reachable I/O has been processed. Local
+ * socketpair/loopback writes make the next round's events ready, so this drains
+ * the whole exchange with no magic iteration count and no wall-clock wait. The
+ * watchdog only backstops a runaway loop; it is never the completion signal. */
 static void drive_loop(struct ev_loop *loop)
 {
-	for (int_fast32_t i = 0; i < 16; i++) {
-		if (test_step_timed_out(loop, TEST_WAIT_SHORT_SEC)) {
-			break;
-		}
-	}
+	struct test_watchdog watchdog = { 0 };
+	ev_timer w_timeout;
+	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_TIMEOUT_SEC, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	ev_set_invoke_pending_cb(loop, drive_invoke_pending);
+	do {
+		g_drive_invoked = 0;
+		ev_run(loop, EVRUN_NOWAIT);
+	} while (g_drive_invoked > 0 && !watchdog.fired);
+	ev_set_invoke_pending_cb(loop, ev_invoke_pending);
+	ev_timer_stop(loop, &w_timeout);
 }
 
 static void serve_payload(
@@ -612,8 +716,7 @@ T_DECLARE_SUBCASE(
 	const unsigned char status)
 {
 	unsigned char rsp[64];
-	const ssize_t n = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t n = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 4);
 	T_EXPECT(n >= 4);
 	T_EXPECT_EQ(rsp[0], SOCKS5);
 	T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
@@ -1000,9 +1103,7 @@ T_DECLARE_CASE(fuzz_socks)
  * non-blocking round per queued event; the bound covers the handshake chain. */
 static void drive_nowait(struct ev_loop *restrict loop)
 {
-	for (int_fast32_t i = 0; i < 32; i++) {
-		ev_run(loop, EVRUN_NOWAIT);
-	}
+	drive_loop(loop);
 }
 
 /* The control-path fuzzer above reaches socks_udp_start but never feeds the
@@ -1182,8 +1283,8 @@ T_DECLARE_CASE(socks5_request_version_rejected)
 	{
 		/* the auth-method reply still arrives ... */
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 2);
 		T_EXPECT(n >= 2);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
 		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
@@ -1266,8 +1367,8 @@ T_DECLARE_CASE(socks5_userpass_empty_username_fails)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 4);
 		T_EXPECT(n >= 4);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
 		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_USERPASS);
@@ -1300,8 +1401,8 @@ T_DECLARE_CASE(socks5_no_acceptable_auth_method)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 2);
 		T_EXPECT(n >= 2);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
 		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOACCEPTABLE);
@@ -1365,8 +1466,8 @@ T_DECLARE_CASE(socks5_userpass_domain_request_connect_fail_rsp)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 6);
 		T_EXPECT(n >= 6);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
 		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_USERPASS);
@@ -1435,8 +1536,8 @@ T_DECLARE_CASE(socks4_long_userid_rejected)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_HDR_LEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_HDR_LEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
@@ -1467,8 +1568,8 @@ T_DECLARE_CASE(socks4_valid_connect_rejected_when_dialreq_unavailable)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_HDR_LEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_HDR_LEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
@@ -1505,8 +1606,8 @@ T_DECLARE_CASE(socks4a_domain_connect_dialer_fail_rejected)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_HDR_LEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_HDR_LEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
@@ -1552,7 +1653,6 @@ T_DECLARE_CASE(socks5_split_payload_connect_fail_rsp)
 
 T_DECLARE_CASE(socks5_connect_timeout_rsp_ttl_expired)
 {
-	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
 	int peer_fd = -1;
 	const unsigned char req[] = {
@@ -1563,21 +1663,28 @@ T_DECLARE_CASE(socks5_connect_timeout_rsp_ttl_expired)
 	stub_reset();
 	STUB.dialreq_available = true;
 	STUB.dialer_mode = STUB_DIALER_NONE;
-
-	T_CHECK(loop != NULL);
-	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.timeout = 0.02;
+
+	/* drive the request handshake under a virtual clock so the connect
+	 * timeout fires deterministically without a wall-clock wait */
+	vclock_start();
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	s.loop = loop;
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
-	drive_loop(loop);
-	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
+	/* pump until the dialer is issued: the connection is now in the connect
+	 * state with w_timeout armed */
+	vclock_pump_until(loop, &STUB.dialer_do_count);
+	/* cross the deadline; the next pump fires w_timeout in the connect state */
+	vclock_advance(test_conf.timeout + 1.0);
 
 	{
 		unsigned char rsp[32];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = vclock_recv(
+			loop, peer_fd, rsp, sizeof(rsp), sizeof(rsp));
 		T_EXPECT(n >= 6);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
 		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
@@ -1588,6 +1695,7 @@ T_DECLARE_CASE(socks5_connect_timeout_rsp_ttl_expired)
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+	vclock_stop();
 }
 
 T_DECLARE_CASE(socks5_ruleset_reject_rsp_fail)
@@ -1755,17 +1863,16 @@ T_DECLARE_CASE(socks5_pipelined_bytes_forwarded_to_upstream)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 6);
 		T_EXPECT(n >= 6);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
 		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	}
 	{
 		unsigned char got[sizeof(payload) - 1] = { 0 };
-		const ssize_t n = recv_after_readable(
-			loop, upstream_peer_fd, got, sizeof(got),
-			TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, upstream_peer_fd, got, sizeof(got), sizeof(got));
 		T_EXPECT_EQ(n, (ssize_t)sizeof(got));
 		T_EXPECT(memcmp(got, payload, sizeof(got)) == 0);
 	}
@@ -1865,8 +1972,8 @@ T_DECLARE_CASE(socks5_bind_first_reply_succeeded)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 		/* auth(2) + BIND first reply: hdr(4) + IPv4(4) + port(2) = 12 */
 		T_EXPECT(n >= 12);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
@@ -1905,8 +2012,7 @@ T_DECLARE_CASE(socks5_bind_full_flow)
 
 	/* auth(2) + BIND first reply hdr(4) + IPv4(4) + port(2) = 12 bytes */
 	unsigned char rsp[64];
-	ssize_t n = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	ssize_t n = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(n >= 12);
 	T_EXPECT_EQ(rsp[2], SOCKS5);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
@@ -1932,8 +2038,7 @@ T_DECLARE_CASE(socks5_bind_full_flow)
 
 	/* BIND second reply: hdr(4) + IPv4(4) + port(2) = 10 bytes */
 	unsigned char rsp2[32];
-	const ssize_t n2 = recv_after_readable(
-		loop, peer_fd, rsp2, sizeof(rsp2), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t n2 = recv_reply(loop, peer_fd, rsp2, sizeof(rsp2), 10);
 	T_EXPECT(n2 >= 10);
 	T_EXPECT_EQ(rsp2[0], SOCKS5);
 	T_EXPECT_EQ(rsp2[1], SOCKS5RSP_SUCCEEDED);
@@ -1967,8 +2072,7 @@ T_DECLARE_CASE(socks5_bind_mismatch_allows)
 	drive_loop(loop);
 
 	unsigned char rsp[64];
-	ssize_t n = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	ssize_t n = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(n >= 12);
 	T_EXPECT_EQ(rsp[2], SOCKS5);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
@@ -1992,8 +2096,7 @@ T_DECLARE_CASE(socks5_bind_mismatch_allows)
 	drive_loop(loop);
 
 	unsigned char rsp2[32];
-	const ssize_t n2 = recv_after_readable(
-		loop, peer_fd, rsp2, sizeof(rsp2), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t n2 = recv_reply(loop, peer_fd, rsp2, sizeof(rsp2), 10);
 	T_EXPECT(n2 >= 10);
 	T_EXPECT_EQ(rsp2[0], SOCKS5);
 	T_EXPECT_EQ(rsp2[1], SOCKS5RSP_SUCCEEDED);
@@ -2006,7 +2109,6 @@ T_DECLARE_CASE(socks5_bind_mismatch_allows)
 
 T_DECLARE_CASE(socks5_bind_timeout_ttlexpired)
 {
-	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
 	int peer_fd = -1;
 	const unsigned char req[] = {
@@ -2015,21 +2117,30 @@ T_DECLARE_CASE(socks5_bind_timeout_ttlexpired)
 	};
 
 	stub_reset();
-	T_CHECK(loop != NULL);
-	s.loop = loop;
 	test_conf.auth_required = false;
 	test_conf.socks5_bind = true;
 	test_conf.timeout = 0.02;
+
+	vclock_start();
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	s.loop = loop;
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
-	test_run_for(loop, test_timeout_wait_window(test_conf.timeout));
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
-		T_EXPECT(n >= 14);
+		/* first reply: method-select (2) + BIND SUCCEEDED (10); the
+		 * connection then waits on w_timeout for an inbound peer */
+		size_t off = (size_t)vclock_recv(
+			loop, peer_fd, rsp, sizeof(rsp), 12);
+		/* cross the deadline; the next pump fires w_timeout -> TTL reply */
+		vclock_advance(test_conf.timeout + 1.0);
+		off += (size_t)vclock_recv(
+			loop, peer_fd, rsp + off, sizeof(rsp) - off,
+			sizeof(rsp));
+		T_EXPECT(off >= 14);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
 		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
 		/* First BIND reply: SUCCEEDED */
@@ -2042,6 +2153,7 @@ T_DECLARE_CASE(socks5_bind_timeout_ttlexpired)
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+	vclock_stop();
 }
 
 T_DECLARE_CASE(socks5_udp_first_reply_succeeded)
@@ -2066,8 +2178,8 @@ T_DECLARE_CASE(socks5_udp_first_reply_succeeded)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 		/* auth(2) + UDP reply: hdr(4) + IPv4(4) + port(2) = 12 */
 		T_EXPECT(n >= 12);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
@@ -2107,8 +2219,7 @@ T_DECLARE_CASE(socks5_udp_relay_roundtrip)
 
 	/* Read UDP relay port from the SOCKS5 response */
 	unsigned char rsp[64];
-	const ssize_t nrsp = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(nrsp >= 12);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	in_port_t relay_port;
@@ -2231,8 +2342,7 @@ T_DECLARE_CASE(socks5_udp_relay_filters_unsolicited_source)
 	drive_loop(loop);
 
 	unsigned char rsp[64];
-	const ssize_t nrsp = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(nrsp >= 12);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	in_port_t relay_port;
@@ -2325,6 +2435,358 @@ T_DECLARE_CASE(socks5_udp_relay_filters_unsolicited_source)
 	ev_loop_destroy(loop);
 }
 
+/*
+ * Regression: a datagram larger than the relay's recv buffer (IO_BUFSIZE, 4096)
+ * is truncated by the kernel; forwarding the partial payload would silently
+ * corrupt it, so the relay must drop it and still handle later datagrams.
+ */
+T_DECLARE_CASE(socks5_udp_relay_drops_oversized_datagram)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_udp = true;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	const struct sockaddr_in any = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = 0,
+	};
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	T_CHECK(bind(target_udp, (const struct sockaddr *)&any, sizeof(any)) ==
+		0);
+	T_CHECK(bind(client_udp, (const struct sockaddr *)&any, sizeof(any)) ==
+		0);
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	/* client -> target "hello": learn the client peer, remember the target */
+	unsigned char udp_pkt[10 + 5];
+	udp_pkt[0] = 0;
+	udp_pkt[1] = 0;
+	udp_pkt[2] = 0;
+	udp_pkt[3] = SOCKS5ADDR_IPV4;
+	memcpy(udp_pkt + 4, &target_bound.sin_addr, 4);
+	memcpy(udp_pkt + 8, &target_bound.sin_port, 2);
+	memcpy(udp_pkt + 10, "hello", 5);
+	T_CHECK(sendto(client_udp, udp_pkt, sizeof(udp_pkt), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(udp_pkt));
+	drive_loop(loop);
+	{
+		unsigned char buf[32];
+		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) == 5);
+	}
+
+	/* target -> client oversized (> 4096-byte relay buffer): dropped */
+	static unsigned char big[8192];
+	memset(big, 'A', sizeof(big));
+	T_CHECK(sendto(target_udp, big, sizeof(big), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(big));
+	drive_loop(loop);
+	{
+		unsigned char buf[64];
+		/* the truncated datagram must not reach the client */
+		T_EXPECT(recv(client_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+	}
+
+	/* a normal-size reply still passes after the drop */
+	T_CHECK(sendto(target_udp, "world", 5, 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == 5);
+	drive_loop(loop);
+	{
+		unsigned char buf[64];
+		const ssize_t n =
+			recv(client_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		T_EXPECT(n == 15);
+		T_EXPECT(memcmp(buf + 10, "world", 5) == 0);
+	}
+
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * The UDP source filter is a bounded (SOCKS_UDP_TARGETS_MAX = 32) move-to-front
+ * LRU: sending to more than the cap distinct targets evicts the least-recent.
+ * A reply from an evicted target is dropped while a reply from a recent target
+ * still passes. NTARGET exceeds the cap; if the cap is ever raised past NTARGET
+ * this fails loudly (the eviction assertion) rather than silently losing
+ * coverage.
+ */
+T_DECLARE_CASE(socks5_udp_relay_evicts_oldest_target_at_capacity)
+{
+	enum { NTARGET = 33 }; /* > SOCKS_UDP_TARGETS_MAX (32) */
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp[NTARGET];
+	for (int i = 0; i < NTARGET; i++) {
+		target_udp[i] = -1;
+	}
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_udp = true;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	const struct sockaddr_in any = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = 0,
+	};
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	T_CHECK(bind(client_udp, (const struct sockaddr *)&any, sizeof(any)) ==
+		0);
+
+	struct sockaddr_in target_bound[NTARGET];
+	for (int i = 0; i < NTARGET; i++) {
+		target_udp[i] = socket(AF_INET, SOCK_DGRAM, 0);
+		T_CHECK(target_udp[i] >= 0);
+		T_CHECK(bind(target_udp[i], (const struct sockaddr *)&any,
+			     sizeof(any)) == 0);
+		socklen_t len = sizeof(target_bound[i]);
+		T_CHECK(getsockname(
+				target_udp[i],
+				(struct sockaddr *)&target_bound[i],
+				&len) == 0);
+		/* client -> target[i]: relay remembers target[i] (most recent) */
+		unsigned char udp_pkt[10 + 1];
+		udp_pkt[0] = 0;
+		udp_pkt[1] = 0;
+		udp_pkt[2] = 0;
+		udp_pkt[3] = SOCKS5ADDR_IPV4;
+		memcpy(udp_pkt + 4, &target_bound[i].sin_addr, 4);
+		memcpy(udp_pkt + 8, &target_bound[i].sin_port, 2);
+		udp_pkt[10] = 'x';
+		T_CHECK(sendto(client_udp, udp_pkt, sizeof(udp_pkt), 0,
+			       (const struct sockaddr *)&relay_sa,
+			       sizeof(relay_sa)) == (ssize_t)sizeof(udp_pkt));
+		drive_loop(loop);
+	}
+
+	/* target[0] is the least-recent of NTARGET > cap targets, so it was
+	 * evicted: its reply is dropped by the source filter */
+	T_CHECK(sendto(target_udp[0], "old", 3, 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == 3);
+	drive_loop(loop);
+	{
+		unsigned char buf[64];
+		T_EXPECT(recv(client_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+	}
+
+	/* the most-recent target's reply still passes */
+	T_CHECK(sendto(target_udp[NTARGET - 1], "new", 3, 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == 3);
+	drive_loop(loop);
+	{
+		unsigned char buf[64];
+		const ssize_t n =
+			recv(client_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		T_EXPECT(n == 13); /* 10-byte SOCKS5 UDP header + "new" */
+		T_EXPECT(memcmp(buf + 10, "new", 3) == 0);
+	}
+
+	for (int i = 0; i < NTARGET; i++) {
+		if (target_udp[i] >= 0) {
+			T_CHECK(close(target_udp[i]) == 0);
+		}
+	}
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * The relay binds its client identity to the first datagram, but only from a
+ * source whose IP matches the authenticated TCP client (#91). An off-IP host
+ * that reaches the ephemeral relay port first is rejected; the real client
+ * (matching IP, different UDP source port) is still accepted.
+ */
+T_DECLARE_CASE(socks5_udp_relay_rejects_off_ip_first_datagram)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	int attacker_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_udp = true;
+	test_server_init(&s);
+
+	/* Inline socks_serve with a concrete TCP client IP (127.0.0.1) so the
+	 * source match is active; serve_payload's placeholder 0.0.0.0 would
+	 * impose no constraint. */
+	int sv[2] = { -1, -1 };
+	const struct sockaddr_in tcp_client = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]));
+	socks_serve(&s, loop, sv[0], (const struct sockaddr *)&tcp_client);
+	peer_fd = sv[1];
+	T_CHECK(write_all(peer_fd, req, sizeof(req)) == 0);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	attacker_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(attacker_udp >= 0);
+	{
+		const struct sockaddr_in loop1 = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		};
+		/* a different loopback address (127.0.0.2) for the off-IP host */
+		const struct sockaddr_in loop2 = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK + 1),
+		};
+		T_CHECK(bind(target_udp, (const struct sockaddr *)&loop1,
+			     sizeof(loop1)) == 0);
+		T_CHECK(bind(client_udp, (const struct sockaddr *)&loop1,
+			     sizeof(loop1)) == 0);
+		T_CHECK(bind(attacker_udp, (const struct sockaddr *)&loop2,
+			     sizeof(loop2)) == 0);
+	}
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	/* a client->target datagram addressed to the target */
+	unsigned char udp_pkt[10 + 5];
+	udp_pkt[0] = 0;
+	udp_pkt[1] = 0;
+	udp_pkt[2] = 0;
+	udp_pkt[3] = SOCKS5ADDR_IPV4;
+	memcpy(udp_pkt + 4, &target_bound.sin_addr, 4);
+	memcpy(udp_pkt + 8, &target_bound.sin_port, 2);
+	memcpy(udp_pkt + 10, "hello", 5);
+
+	/* the off-IP host sends first: its source (127.0.0.2) does not match the
+	 * TCP client (127.0.0.1), so the relay drops it and does not adopt it as
+	 * the client -- nothing reaches the target */
+	T_CHECK(sendto(attacker_udp, udp_pkt, sizeof(udp_pkt), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(udp_pkt));
+	drive_loop(loop);
+	{
+		unsigned char buf[32];
+		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+	}
+
+	/* the real client (127.0.0.1, different UDP port) is accepted and its
+	 * datagram is forwarded to the target */
+	T_CHECK(sendto(client_udp, udp_pkt, sizeof(udp_pkt), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(udp_pkt));
+	drive_loop(loop);
+	{
+		unsigned char buf[32];
+		const ssize_t n =
+			recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		T_EXPECT(n == 5);
+		T_EXPECT(memcmp(buf, "hello", 5) == 0);
+	}
+
+	T_CHECK(close(attacker_udp) == 0);
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 /* IPv6 counterpart of socks5_udp_relay_roundtrip. The relay's UDP socket takes
  * the family of the client connection, so the whole chain is IPv6: this
  * exercises udp_parse_addr()'s SOCKS5ADDR_IPV6 branch (client datagram carrying
@@ -2369,8 +2831,7 @@ T_DECLARE_CASE(socks5_udp_relay_roundtrip_ipv6)
 	/* Read the relay port from the IPv6 ASSOCIATE reply. After the 2-byte
 	 * method-select reply: VER REP RSV ATYP BND.ADDR(16) BND.PORT(2). */
 	unsigned char rsp[64];
-	const ssize_t nrsp = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 24);
 	T_EXPECT(nrsp >= 24);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	T_EXPECT_EQ(rsp[5], SOCKS5ADDR_IPV6);
@@ -2484,8 +2945,8 @@ T_DECLARE_CASE(socks5_udp_tcp_close_teardown)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 		T_EXPECT(n >= 12);
 		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	}
@@ -2524,8 +2985,7 @@ T_DECLARE_CASE(socks5_udp_frag_two_parts)
 	drive_loop(loop);
 
 	unsigned char rsp[64];
-	const ssize_t nrsp = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(nrsp >= 12);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	in_port_t relay_port;
@@ -2643,8 +3103,7 @@ T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
 	drive_loop(loop);
 
 	unsigned char rsp[64];
-	const ssize_t nrsp = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(nrsp >= 12);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	in_port_t relay_port;
@@ -2741,8 +3200,7 @@ T_DECLARE_CASE(socks5_udp_frag_restart_recovers)
 	drive_loop(loop);
 
 	unsigned char rsp[64];
-	const ssize_t nrsp = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(nrsp >= 12);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	in_port_t relay_port;
@@ -2886,8 +3344,7 @@ T_DECLARE_CASE(socks5_udp_domain_target_discarded)
 	drive_loop(loop);
 
 	unsigned char rsp[64];
-	const ssize_t nrsp = recv_after_readable(
-		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(nrsp >= 12);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
 	in_port_t relay_port;
@@ -3118,8 +3575,8 @@ T_DECLARE_CASE(socks4_bind_command_rejected)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_RSP_MINLEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
@@ -3157,8 +3614,8 @@ T_DECLARE_CASE(socks4_connect_success_granted)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_RSP_MINLEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
@@ -3194,8 +3651,8 @@ T_DECLARE_CASE(socks4_empty_userid_connect_success_granted)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_RSP_MINLEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
@@ -3240,8 +3697,8 @@ T_DECLARE_CASE(socks4_split_request_connect_success_granted)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_RSP_MINLEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
@@ -3291,8 +3748,8 @@ T_DECLARE_CASE(socks4a_split_after_userid_connect_success_granted)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_RSP_MINLEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
@@ -3332,8 +3789,8 @@ T_DECLARE_CASE(socks4a_domain_connect_success_granted)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n = recv_reply(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_RSP_MINLEN);
 		T_EXPECT(n >= (ssize_t)SOCKS4_RSP_MINLEN);
 		T_EXPECT_EQ(rsp[0], 0x00);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
@@ -3450,8 +3907,8 @@ T_DECLARE_CASE(socks4a_overlong_domain_rejected)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 2);
 		T_EXPECT(n >= 2);
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
 	}
@@ -3477,8 +3934,8 @@ T_DECLARE_CASE(socks5_zero_length_domain_parses_then_fails)
 
 	{
 		unsigned char rsp[64];
-		const ssize_t n = recv_after_readable(
-			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_TIMEOUT_SEC);
+		const ssize_t n =
+			recv_reply(loop, peer_fd, rsp, sizeof(rsp), (2 + 4));
 		/* Must at least reply with auth method selection (2 bytes)
 		 * plus a CONNECT response header (4+ bytes). */
 		T_EXPECT(n >= (ssize_t)(2 + 4));
@@ -3545,6 +4002,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_udp_first_reply_succeeded),
 	T_CASE(socks5_udp_relay_roundtrip),
 	T_CASE(socks5_udp_relay_filters_unsolicited_source),
+	T_CASE(socks5_udp_relay_drops_oversized_datagram),
+	T_CASE(socks5_udp_relay_evicts_oldest_target_at_capacity),
+	T_CASE(socks5_udp_relay_rejects_off_ip_first_datagram),
 	T_CASE(socks5_udp_relay_roundtrip_ipv6),
 	T_CASE(socks5_udp_tcp_close_teardown),
 	T_CASE(socks5_udp_frag_two_parts),

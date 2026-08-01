@@ -7,6 +7,7 @@
 #include "domain.h"
 
 #include "binary/serialize.h"
+#include "meta/minmax.h"
 
 #include <netinet/in.h>
 #include <stdint.h>
