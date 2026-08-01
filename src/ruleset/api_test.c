@@ -11,12 +11,11 @@
  * by the mocks in the mock section below.
  */
 
-#include "ruleset/api.h"
-
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
+#include "ruleset/api.h"
 #include "ruleset/base.h"
 #include "ruleset/ruleset.h"
 #include "server.h"
@@ -657,6 +656,18 @@ T_DECLARE_CASE(api_stats_now_and_setinterval_use_ruleset_state)
 	T_EXPECT(run_chunk(L, "return neosocksd.setinterval(0.25)"));
 	T_EXPECT(ev_is_active(&r.w_ticker));
 	T_EXPECT_EQ(r.w_ticker.repeat, 0.25);
+
+	/* the disable branch (!isnormal: 0/NaN/inf) must stop both watchers and
+	 * start neither -- reached here from an active w_ticker */
+	T_EXPECT(run_chunk(L, "return neosocksd.setinterval(0)"));
+	T_EXPECT(!ev_is_active(&r.w_ticker));
+	T_EXPECT(!ev_is_active(&r.w_idle));
+	/* and from an active w_idle, via a NaN interval */
+	T_EXPECT(run_chunk(L, "return neosocksd.setinterval(-1)"));
+	T_EXPECT(ev_is_active(&r.w_idle));
+	T_EXPECT(run_chunk(L, "return neosocksd.setinterval(0/0)"));
+	T_EXPECT(!ev_is_active(&r.w_ticker));
+	T_EXPECT(!ev_is_active(&r.w_idle));
 
 	lua_close(L);
 	ev_loop_destroy(loop);

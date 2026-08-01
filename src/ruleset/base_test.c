@@ -14,9 +14,8 @@
  * shared Lua test fixtures.
  */
 
-#include "ruleset/base.h"
-
 #include "dialer.h"
+#include "ruleset/base.h"
 
 #include "io/stream.h"
 #include "utils/testing.h"
@@ -330,6 +329,38 @@ T_DECLARE_CASE(base_aux_todialreq_overflow_pops_stack)
 	lua_close(L);
 }
 
+/* Regression: aux_todialreq's string-content rejection branches (over-long
+ * address, unparseable proxy URI, unparseable target) must each pop their n
+ * arguments and return false, honoring the documented [-n, ...] stack effect
+ * like the n > 255 early-out. */
+T_DECLARE_CASE(base_aux_todialreq_rejects_bad_strings_pops_stack)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+	const int base = lua_gettop(L);
+
+	/* an address longer than the 1024-byte cap is rejected before any
+	 * dialreq is built */
+	char big[2000];
+	memset(big, 'a', sizeof(big));
+	lua_pushlstring(L, big, sizeof(big));
+	T_EXPECT(!aux_todialreq(L, 1));
+	T_EXPECT_EQ(lua_gettop(L), base);
+
+	/* a proxy URI the dialer cannot parse (unknown scheme) is rejected */
+	lua_pushstring(L, "example.com:80");
+	lua_pushstring(L, "bogus://127.0.0.1:1080");
+	T_EXPECT(!aux_todialreq(L, 2));
+	T_EXPECT_EQ(lua_gettop(L), base);
+
+	/* a target address the dialer cannot parse (no host:port) is rejected */
+	lua_pushstring(L, "no-colon-no-port");
+	T_EXPECT(!aux_todialreq(L, 1));
+	T_EXPECT_EQ(lua_gettop(L), base);
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 {
 	struct ruleset r = {
@@ -615,6 +646,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(base_aux_todialreq_builds_request),
 	T_CASE(base_aux_todialreq_nil_returns_null),
 	T_CASE(base_aux_todialreq_overflow_pops_stack),
+	T_CASE(base_aux_todialreq_rejects_bad_strings_pops_stack),
 	T_CASE(base_aux_async_reuses_idle_thread),
 	T_CASE(base_aux_async_grows_thread_stack_for_args),
 	T_CASE(base_aux_getregtable_rejects_non_table),

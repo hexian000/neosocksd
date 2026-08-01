@@ -157,7 +157,7 @@ int aux_load(
 /**
  * @brief Format address for display
  *
- * Stack effect: [-1, +1, v]
+ * Stack effect: [-0, +1, v]
  *
  * @param L Lua state
  * @return Number of results (1)

@@ -1,12 +1,11 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+#include "ruleset/base.h"
 #include "ruleset/marshal.h"
 
-#include "ruleset/base.h"
-
-#include "utils/ctype_ascii.h"
 #include "utils/buffer.h"
+#include "utils/ctype_ascii.h"
 #include "utils/debug.h"
 
 #include <lauxlib.h>

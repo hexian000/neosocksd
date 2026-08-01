@@ -22,18 +22,13 @@ target_sources(neosocksd
 )
 
 if(WITH_LUA)
-    add_unit_test(cfunc_test
-        SRCS cfunc_test.c ruleset.c base.c cfunc.c ../conf.c ../proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/../version.c"
-        CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
-        EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
-        WITH_LUA)
     add_unit_test(api_test
-        SRCS api_test.c api.c base.c
+        SRCS api_test.c api.c base.c ../proto/codec.c
         CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
         EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
         WITH_LUA)
     add_unit_test(await_test
-        SRCS await_test.c await.c base.c
+        SRCS await_test.c await.c base.c ../proto/codec.c
         CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
         EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
         WITH_LUA)

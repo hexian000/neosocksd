@@ -1,10 +1,9 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/zlib.h"
-
 #include "proto/codec.h"
 #include "ruleset/base.h"
+#include "ruleset/zlib.h"
 
 #include "io/io.h"
 #include "io/memory.h"

@@ -1,12 +1,11 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/base.h"
-
 #include "dialer.h"
+#include "proto/codec.h"
+#include "ruleset/base.h"
 #include "util.h"
 
-#include "io/stream.h"
 #include "meta/arraysize.h"
 #include "os/clock.h"
 #include "utils/debug.h"
@@ -186,40 +185,15 @@ lua_State *aux_getthread(lua_State *restrict L)
 	return co;
 }
 
-struct aux_reader_state {
-	struct io_stream *stream;
-	int err;
-};
-
-static const char *
-aux_reader(lua_State *restrict L, void *ud, size_t *restrict sz)
-{
-	(void)L;
-	struct aux_reader_state *restrict rs = ud;
-	const void *buf;
-	/* Lua allows arbitrary length. */
-	*sz = SIZE_MAX;
-	const int err = io_stream_direct_read(rs->stream, &buf, sz);
-	if (err != 0) {
-		LOGE_F("read_stream: error %d", err);
-		/* lua_Reader has no error channel; record it and stop so
-		 * aux_load() can turn it into a load failure instead of letting
-		 * lua_load() treat the truncated input as a clean EOF. */
-		rs->err = err;
-		return NULL;
-	}
-	if (*sz == 0) {
-		return NULL;
-	}
-	return buf;
-}
-
 int aux_load(
 	lua_State *restrict L, struct io_stream *restrict stream,
 	const char *restrict chunkname)
 {
-	struct aux_reader_state rs = { .stream = stream, .err = 0 };
-	const int status = lua_load(L, aux_reader, &rs, chunkname, "t");
+	struct codec_lua_stream rs = { .stream = stream,
+				       .errlabel = "read_stream: error",
+				       .err = 0 };
+	const int status =
+		lua_load(L, codec_lua_stream_read, &rs, chunkname, "t");
 	if (status != LUA_OK) {
 		/* compile error: message is already on the stack */
 		return status;
