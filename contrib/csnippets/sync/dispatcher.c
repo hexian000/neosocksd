@@ -4,136 +4,72 @@
 #include "sync/dispatcher.h"
 
 #include "sync/task.h"
+#include "sync/thrd.h"
 
 #include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <threads.h>
 
-#define THRD_ASSERT(expr)                                                      \
-	do {                                                                   \
-		const int status = (expr);                                     \
-		(void)status;                                                  \
-		assert(status == thrd_success);                                \
-	} while (0)
-
-struct task_item {
-	struct task task;
-	struct task_item *next;
-};
-
-/* C11 6.5.8p5: relational comparison between pointers to different
- * array objects is UB (item may come from a separate malloc(), not
- * pool[]). Converting to uintptr_t first compares addresses as
- * integers instead, which isn't subject to that restriction. */
-/* No restrict on either parameter: it would assert to the compiler that
- * `item` and `pool[]` never alias, the negation of the very condition this
- * returns true for. restrict is an access contract, not a bare non-aliasing
- * assertion, so it says nothing here anyway -- neither pointer is ever
- * dereferenced (both convert straight to uintptr_t). */
-static inline bool item_in_pool(
-	const struct task_item *item, const struct task_item *pool,
-	const size_t pool_capacity)
-{
-	const uintptr_t addr = (uintptr_t)item;
-	const uintptr_t start = (uintptr_t)pool;
-	const uintptr_t end = (uintptr_t)(pool + pool_capacity);
-	return addr >= start && addr < end;
-}
-
 struct dispatcher {
 	mtx_t mu;
-	struct {
-		struct task_item *head, *tail;
-	} queue;
-	/* Inline pool for task items; pool_free is the head of the free list */
-	struct task_item *pool_free;
-	size_t pool_capacity;
-	struct task_item pool[];
+	/* Bounded ring buffer: head is the oldest task, count the number held */
+	size_t capacity;
+	size_t head;
+	size_t count;
+	struct task buf[];
 };
 
 static bool dequeue(struct dispatcher *d, struct task *task)
 {
 	THRD_ASSERT(mtx_lock(&d->mu));
-	struct task_item *restrict item = d->queue.head;
-	if (item == NULL) {
+	if (d->count == 0) {
 		THRD_ASSERT(mtx_unlock(&d->mu));
 		return false;
 	}
-	d->queue.head = item->next;
-	if (d->queue.tail == item) {
-		d->queue.tail = NULL;
+	*task = d->buf[d->head];
+	if (++d->head >= d->capacity) {
+		d->head -= d->capacity;
 	}
-	*task = item->task;
-	/* Return pool items to the free list; free heap-allocated items
-	 * after releasing the lock to avoid holding it during free() */
-	struct task_item *to_free;
-	if (item_in_pool(item, d->pool, d->pool_capacity)) {
-		item->next = d->pool_free;
-		d->pool_free = item;
-		to_free = NULL;
-	} else {
-		to_free = item;
-	}
+	d->count--;
 	THRD_ASSERT(mtx_unlock(&d->mu));
-	free(to_free);
 	return true;
 }
 
 static bool enqueue(struct dispatcher *d, const struct task *task)
 {
-	/* Try the inline pool first (under the mutex) */
 	THRD_ASSERT(mtx_lock(&d->mu));
-	struct task_item *new_item;
-	if (d->pool_free != NULL) {
-		new_item = d->pool_free;
-		d->pool_free = new_item->next;
-	} else {
-		/* Pool exhausted: release lock while allocating to avoid
-		 * holding it during a potentially slow heap operation */
+	if (d->count == d->capacity) {
 		THRD_ASSERT(mtx_unlock(&d->mu));
-		new_item = malloc(sizeof(struct task_item));
-		if (new_item == NULL) {
-			return false;
-		}
-		THRD_ASSERT(mtx_lock(&d->mu));
+		return false;
 	}
-	*new_item = (struct task_item){ *task, NULL };
-	struct task_item *restrict tail = d->queue.tail;
-	if (tail != NULL) {
-		tail->next = new_item;
-	} else {
-		d->queue.head = new_item;
+	size_t tail = d->head + d->count;
+	if (tail >= d->capacity) {
+		tail -= d->capacity;
 	}
-	d->queue.tail = new_item;
+	d->buf[tail] = *task;
+	d->count++;
 	THRD_ASSERT(mtx_unlock(&d->mu));
 	return true;
 }
 
 struct dispatcher *dispatcher_create(const size_t capacity)
 {
-	if (capacity >
-	    (SIZE_MAX - sizeof(struct dispatcher)) / sizeof(struct task_item)) {
+	if (capacity == 0) {
 		return NULL;
 	}
-	struct dispatcher *restrict d =
-		malloc(sizeof(struct dispatcher) +
-		       sizeof(struct task_item) * capacity);
+	if (capacity >
+	    (SIZE_MAX - sizeof(struct dispatcher)) / sizeof(struct task)) {
+		return NULL;
+	}
+	struct dispatcher *restrict d = malloc(
+		sizeof(struct dispatcher) + sizeof(struct task) * capacity);
 	if (d == NULL) {
 		return NULL;
 	}
-	d->queue.head = NULL;
-	d->queue.tail = NULL;
-	d->pool_capacity = capacity;
-	for (size_t i = 0; i + 1 < capacity; i++) {
-		d->pool[i].next = &d->pool[i + 1];
-	}
-	if (capacity > 0) {
-		d->pool[capacity - 1].next = NULL;
-		d->pool_free = &d->pool[0];
-	} else {
-		d->pool_free = NULL;
-	}
+	d->capacity = capacity;
+	d->head = 0;
+	d->count = 0;
 	if (mtx_init(&d->mu, mtx_plain) != thrd_success) {
 		free(d);
 		return NULL;
@@ -165,15 +101,7 @@ void dispatcher_join(struct dispatcher *d)
 
 void dispatcher_destroy(struct dispatcher *d)
 {
-	/* Clean up remaining tasks; skip free() for inline pool items */
-	struct task_item *item = d->queue.head;
-	while (item != NULL) {
-		struct task_item *next = item->next;
-		if (!item_in_pool(item, d->pool, d->pool_capacity)) {
-			free(item);
-		}
-		item = next;
-	}
+	/* Pending tasks are plain values; discarding the ring drops them */
 	mtx_destroy(&d->mu);
 	free(d);
 }

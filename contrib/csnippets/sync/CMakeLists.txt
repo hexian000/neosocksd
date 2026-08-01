@@ -4,4 +4,5 @@ target_sources(csnippets
     PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/dispatcher.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/task.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/thrd.h"
 )

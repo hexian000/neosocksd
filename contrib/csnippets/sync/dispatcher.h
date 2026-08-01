@@ -25,20 +25,20 @@
 struct dispatcher;
 
 /**
- * @brief Create a new dispatcher with the given inline pool capacity.
- * 
- * @param capacity Number of task items in the inline pool. 0 disables the
- *                 pool (all tasks are heap-allocated).
- * @return New dispatcher instance, or NULL on failure.
+ * @brief Create a new dispatcher with the given queue capacity.
+ *
+ * @param capacity Maximum number of tasks the bounded queue can hold; must be
+ *                 >= 1.
+ * @return New dispatcher instance, or NULL if capacity is 0 or on failure.
  */
 struct dispatcher *dispatcher_create(size_t capacity);
 
 /**
  * @brief Enqueue a task for asynchronous execution (thread-safe).
- * 
+ *
  * @param d Dispatcher instance.
  * @param task Task to enqueue.
- * @return true on success, false if allocation fails.
+ * @return true on success, false if the queue is full.
  */
 bool dispatcher_invoke(struct dispatcher *d, struct task task);
 
