@@ -11,11 +11,12 @@
  * by the mocks in the mock section below.
  */
 
+#include "ruleset/await.h"
+
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
-#include "ruleset/await.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
 #include "server.h"
@@ -31,6 +32,7 @@
 #include <lualib.h>
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stddef.h>
@@ -38,20 +40,35 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
-#include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * virtual clock - fire await.sleep(delay)'s Lua-owned ev_timer deterministically
  * with no wall-clock wait. The strong-symbol interposers return a test-advanced
- * virtual time while enabled and pass through to the real clock (raw syscall)
- * otherwise, so every other case is unaffected.
+ * virtual time while enabled and pass through to the real clock otherwise, so
+ * every other case is unaffected.
  * ---------------------------------------------------------------------- */
 
 static bool g_vclock_on = false;
 static double g_vclock_sec = 0.0;
+
+/* Read the real clock for the pass-through path. Both clock_gettime() and
+ * gettimeofday() are interposed here, so the underlying clock has to be reached
+ * through a third entry point: ISO C11 timespec_get(), which libc services from
+ * its own internal clock rather than through the shadowed symbols. It is also
+ * the only such entry point that stays declared under the strict
+ * _POSIX_C_SOURCE the FORCE_POSIX build selects. */
+static int real_clock(struct timespec *restrict ts)
+{
+	if (timespec_get(ts, TIME_UTC) != TIME_UTC) {
+		errno = EINVAL;
+		return -1;
+	}
+	return 0;
+}
 
 int clock_gettime(clockid_t clk, struct timespec *ts)
 {
@@ -60,7 +77,8 @@ int clock_gettime(clockid_t clk, struct timespec *ts)
 		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
 		return 0;
 	}
-	return (int)syscall(SYS_clock_gettime, clk, ts);
+	(void)clk;
+	return real_clock(ts);
 }
 
 int gettimeofday(struct timeval *tv, void *tz)
@@ -70,7 +88,14 @@ int gettimeofday(struct timeval *tv, void *tz)
 		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
 		return 0;
 	}
-	return (int)syscall(SYS_gettimeofday, tv, tz);
+	(void)tz;
+	struct timespec ts;
+	if (real_clock(&ts) != 0) {
+		return -1;
+	}
+	tv->tv_sec = ts.tv_sec;
+	tv->tv_usec = (long)(ts.tv_nsec / 1000);
+	return 0;
 }
 
 /* Freeze virtual time at the current real instant so a timer armed in real time
@@ -78,7 +103,7 @@ int gettimeofday(struct timeval *tv, void *tz)
 static void vclock_freeze_now(void)
 {
 	struct timespec ts;
-	(void)syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
+	T_CHECK(real_clock(&ts) == 0);
 	g_vclock_sec = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 	g_vclock_on = true;
 }
@@ -781,8 +806,6 @@ T_DECLARE_CASE(await_sleep_real_paths)
 		"co = coroutine.create(function() await.sleep(0.001); _G.sleep_done = 'timer' end) "
 		"return coroutine.resume(co)"));
 	/* the coroutine armed a 1ms Lua-owned ev_timer; cross its deadline on the
-	 * virtual clock and let the next ev_run fire it -- no wall-clock wait */
-	/* the coroutine armed a 1ms Lua-owned ev_timer; cross its deadline on the
 	 * virtual clock and expire it with one non-blocking round, then restore
 	 * real time so wait_until drives the resume idle under a live watchdog --
 	 * no wall-clock sleep */
@@ -1389,6 +1412,37 @@ T_DECLARE_CASE(await_execute_reports_signal)
 	lua_close(L);
 }
 
+/* An embedded NUL would truncate the command handed to execv, so await.execute
+ * must raise instead of running only the prefix. The check is synchronous
+ * (before fork), so no child runs. */
+T_DECLARE_CASE(await_execute_rejects_embedded_nul)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  _G.x_ok, _G.x_err = pcall(await.execute, 'a\\0; true') "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	lua_getglobal(L, "x_ok");
+	T_EXPECT(lua_toboolean(L, -1) == 0);
+	lua_pop(L, 1);
+	lua_getglobal(L, "x_err");
+	const char *const err = lua_tostring(L, -1);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "NUL") != NULL);
+	lua_pop(L, 1);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
 /*
  * Regression (issue #19): a Lua OOM raised in the window between aux_todialreq
  * building the dialreq and its ownership transfer must not leak the dialreq.
@@ -1588,6 +1642,54 @@ T_DECLARE_CASE(await_forward_abandoned_cancels_dial)
 	ev_loop_destroy(loop);
 }
 
+/* await.sleep arms a Lua-owned ev_timer; closing the suspended coroutine must
+ * run await_sleep_close (ev_timer_stop + ev_idle_stop) so a later timer
+ * expiry cannot fire a callback into the collected userdata. */
+T_DECLARE_CASE(await_sleep_abandoned_stops_timer)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_stub_state();
+	/* a long sleep, so the timer is still pending when the coroutine closes */
+	T_EXPECT(run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  await.sleep(30) "
+		   "end) "
+		   "return coroutine.resume(co)"));
+	T_EXPECT(run_chunk(L, "return coroutine.status(co)"));
+	T_EXPECT_STREQ(lua_tostring(L, -1), "suspended");
+	lua_pop(L, 1);
+
+	/* coroutine.close runs await_sleep_close */
+	T_EXPECT(run_chunk(L, "return coroutine.close(co)"));
+	T_EXPECT(lua_toboolean(L, -1));
+	lua_pop(L, 1);
+	T_EXPECT(run_chunk(L, "return coroutine.status(co)"));
+	T_EXPECT_STREQ(lua_tostring(L, -1), "dead");
+	lua_pop(L, 1);
+
+	/* Drop and collect the coroutine and its sleep userdata; a regression that
+	 * left the timer armed would leave libev holding a freed ev_timer. */
+	T_EXPECT(run_chunk(L, "co = nil"));
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+
+	/* Crossing the (stopped) timer's deadline must stay quiet -- if it were
+	 * still armed, firing it would dereference the collected userdata. */
+	vclock_freeze_now();
+	vclock_advance(60.0);
+	ev_run(loop, EVRUN_NOWAIT);
+	vclock_stop();
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
 /* await.execute forks a real child, so the abandon path (await_execute_close:
  * ev_child_stop + SIGKILL) is exercised only here. Closing the suspended
  * coroutine must run that handler cleanly and leave the coroutine dead.
@@ -1602,6 +1704,10 @@ T_DECLARE_CASE(await_execute_abandoned_stops_child)
 	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
 
 	reset_stub_state();
+	/* drain anything a prior case left unreaped, so the waitpid() below can
+	 * only see the child this case forks */
+	while (waitpid(-1, NULL, WNOHANG) > 0) {
+	}
 	/* a command that would outlive the test unless the child is killed */
 	T_EXPECT(run_chunk(
 		L, "co = coroutine.create(function() "
@@ -1618,6 +1724,24 @@ T_DECLARE_CASE(await_execute_abandoned_stops_child)
 	lua_pop(L, 1);
 	T_EXPECT(run_chunk(L, "return coroutine.status(co)"));
 	T_EXPECT_STREQ(lua_tostring(L, -1), "dead");
+
+	/* A dead coroutine is not enough: the child must actually be gone. The
+	 * close path signals it, so reaping it is bounded by SIGKILL delivery --
+	 * the poll only covers the child not having been scheduled yet, and a
+	 * child that survives (the signal missing it while it is still between
+	 * fork() and setsid()) fails here instead of running to completion. */
+	int wstatus = 0;
+	pid_t child = 0;
+	for (int i = 0; i < 1000 && child == 0; i++) {
+		child = waitpid(-1, &wstatus, WNOHANG);
+		if (child == 0) {
+			const struct timespec delay = { .tv_nsec = 1000000 };
+			(void)nanosleep(&delay, NULL);
+		}
+	}
+	T_EXPECT(child > 0);
+	T_EXPECT(WIFSIGNALED(wstatus));
+	T_EXPECT_EQ(WTERMSIG(wstatus), SIGKILL);
 
 	lua_close(L);
 }
@@ -1645,6 +1769,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_execute_reports_success),
 	T_CASE(await_execute_reports_exit_status),
 	T_CASE(await_execute_reports_signal),
+	T_CASE(await_execute_rejects_embedded_nul),
 	T_CASE(await_forward_commits_on_success),
 	T_CASE(await_forward_reports_dial_failure),
 	T_CASE(await_forward_reports_timeout),
@@ -1657,6 +1782,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_invoke_oom_does_not_leak_dialreq),
 	T_CASE(await_forward_oom_does_not_leak_dialreq),
 #if HAVE_LUA_TOCLOSE
+	T_CASE(await_sleep_abandoned_stops_timer),
 	T_CASE(await_resolve_abandoned_cancels_query),
 	T_CASE(await_invoke_abandoned_cancels_request),
 	T_CASE(await_forward_abandoned_cancels_dial),

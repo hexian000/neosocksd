@@ -1,11 +1,12 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+#include "ruleset/await.h"
+
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
-#include "ruleset/await.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
 #include "ruleset/ruleset.h"
@@ -563,10 +564,26 @@ static int await_execute_close(lua_State *restrict L)
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, 1);
 	const pid_t pid = ud->w_child.pid;
 	struct ev_loop *loop = ud->ruleset->loop;
+	/* If libev has already reaped the child (SIGCHLD handled, child_cb still
+	 * pending), the pid is freed and may be recycled, so only signal while the
+	 * child is still running. */
+	const bool reaped = ev_is_pending(&ud->w_child);
 	ev_child_stop(loop, &ud->w_child);
 	ev_idle_stop(loop, &ud->w_idle);
-	if (pid > 0) {
-		if (kill(pid, SIGKILL) != 0) {
+	if (pid > 0 && !reaped) {
+		/* setsid() in the child makes it a process-group leader (pid ==
+		 * pgid), so signal the whole group to also stop the children a
+		 * compound command (`a | b`, `a; b`, backgrounded work) forked into
+		 * it, not just the shell. That group exists only once the child has
+		 * reached setsid(), which it races us to, so signal the child
+		 * directly as well: that reaches it in the window between fork() and
+		 * setsid(), where it is still in our own group and has not exec'd, so
+		 * it has no children of its own to miss. Either signal finding no
+		 * target (ESRCH) just means the other one covers the child. */
+		if (kill(-pid, SIGKILL) != 0 && errno != ESRCH) {
+			LOG_PERROR("kill");
+		}
+		if (kill(pid, SIGKILL) != 0 && errno != ESRCH) {
 			LOG_PERROR("kill");
 		}
 		ud->w_child.pid = 0;
@@ -643,6 +660,12 @@ static int await_execute(lua_State *restrict L)
 	AWAIT_CHECK_YIELDABLE(L);
 	size_t len;
 	const char *const command = luaL_checklstring(L, 1, &len);
+	/* execv hands the command to sh as a C string, so an embedded NUL would
+	 * silently run only the prefix; reject it rather than a truncated view the
+	 * caller does not know was cut (cf. regex.c). */
+	if (memchr(command, '\0', len) != NULL) {
+		return luaL_error(L, "command contains an embedded NUL byte");
+	}
 	lua_settop(L, 1);
 
 	struct ruleset *restrict r = aux_getruleset(L);
