@@ -39,6 +39,20 @@ typedef atomic_uint_least64_t xfer_counter;
 typedef uint_least64_t xfer_counter;
 #endif
 
+/* Add @p n to a relay byte counter; a NULL counter is ignored. Keeps the
+ * WITH_THREADS spelling of the increment in one place, next to the typedef. */
+static inline void xfer_count(xfer_counter *restrict byt, const size_t n)
+{
+	if (byt == NULL) {
+		return;
+	}
+#if WITH_THREADS
+	atomic_fetch_add_explicit(byt, (uint_least64_t)n, memory_order_relaxed);
+#else
+	*byt += (uint_least64_t)n;
+#endif
+}
+
 /* Per-half recv buffer size. Exposed as the single source of truth so a
  * white-box test can size a payload relative to it instead of duplicating the
  * literal. */
@@ -114,7 +128,9 @@ struct transfer_opts {
  * @param acc_fd Accepted (client-side) file descriptor.
  * @param dial_fd Dialed (upstream-side) file descriptor.
  * @param opts Transfer options (byte counters, splice hint, session counter).
- * @return true on success, false on OOM (fds are NOT closed).
+ * @return true on success; false if the session could not be started -- out
+ *     of memory, or the worker's dispatch queue is momentarily full under a
+ *     burst (transfer_serve() logs which). The fds are NOT closed on failure.
  */
 bool transfer_serve(
 	struct transfer *xfer, int acc_fd, int dial_fd,

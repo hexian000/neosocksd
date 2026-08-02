@@ -19,6 +19,9 @@
 
 #include <ev.h>
 
+#if WITH_SPLICE
+#include <dirent.h>
+#endif
 #include <fcntl.h>
 #include <signal.h>
 #if WITH_THREADS
@@ -27,7 +30,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -73,11 +75,24 @@ watchdog_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
-/* Wait until predicate holds, event-driven. The transfer engine wakes the loop
- * through its ev_async (w_invoke) whenever the worker thread has progress to
- * report to the main thread (and without threads the transfer runs inline
- * during ev_run), so ev_run(EVRUN_ONCE) re-checks the predicate on real
- * progress rather than a fixed 5ms poll. The watchdog is a hung-test backstop. */
+/* Poll interval for test_wait_until: short enough that a completed transfer is
+ * observed promptly, long enough not to spin. */
+#define WAIT_POLL_INTERVAL 0.001 /* 1 ms */
+
+/* Wakes ev_run(EVRUN_ONCE) each tick so test_wait_until re-checks its
+ * predicate; it does no work itself. */
+static void poll_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
+{
+	(void)loop;
+	(void)watcher;
+	(void)revents;
+}
+
+/* Wait until predicate holds. With threads the transfer runs on a worker's
+ * private loop (transfer_create discards the caller's loop) and has no way to
+ * wake this loop, so a short repeating timer polls the predicate; without
+ * threads the transfer runs inline during ev_run and the same poll is a
+ * harmless backstop. The watchdog bounds a hung test. */
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *data,
 	const ev_tstamp timeout_sec)
@@ -88,12 +103,38 @@ static bool test_wait_until(
 	ev_timer_init(&w_timeout, watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
+	ev_timer w_poll;
+	ev_timer_init(&w_poll, poll_cb, WAIT_POLL_INTERVAL, WAIT_POLL_INTERVAL);
+	ev_timer_start(loop, &w_poll);
 	while (!watchdog.fired && !predicate(data)) {
 		ev_run(loop, EVRUN_ONCE);
 	}
+	ev_timer_stop(loop, &w_poll);
 	ev_timer_stop(loop, &w_timeout);
 	return predicate(data);
 }
+
+#if WITH_SPLICE
+/* Count the process's open file descriptors via /proc/self/fd. With the loop,
+ * worker and socketpairs all torn down at both measurement points, a splice
+ * pipe left unreleased shows up as a nonzero delta. The opendir fd is present
+ * in every count, so it cancels out. */
+static int count_open_fds(void)
+{
+	DIR *const dir = opendir("/proc/self/fd");
+	T_CHECK(dir != NULL);
+	int count = 0;
+	for (const struct dirent *ent = readdir(dir); ent != NULL;
+	     ent = readdir(dir)) {
+		if (ent->d_name[0] == '.') {
+			continue;
+		}
+		count++;
+	}
+	T_CHECK(closedir(dir) == 0);
+	return count;
+}
+#endif /* WITH_SPLICE */
 
 static void make_socketpair(int *restrict a, int *restrict b)
 {
@@ -208,6 +249,7 @@ T_DECLARE_CASE(transfer_moves_payload)
  * cancellation path. */
 T_DECLARE_CASE(transfer_splice_releases_pipes_on_finish)
 {
+	const int fds_before = count_open_fds();
 	static const char uplink[] = "splice-uplink";
 	static const char downlink[] = "splice-downlink";
 	int acc_peer = -1, acc_fd = -1;
@@ -279,6 +321,57 @@ T_DECLARE_CASE(transfer_splice_releases_pipes_on_finish)
 	socket_close(acc_peer);
 	socket_close(dial_peer);
 	ev_loop_destroy(loop);
+	/* Every fd opened by this case is closed again: the splice pipes were
+	 * released on the normal-completion path. */
+	T_EXPECT_EQ(count_open_fds(), fds_before);
+}
+
+/*
+ * The splice cancellation path must also release its pipes: drive the
+ * shutdown-cancel teardown (transfer_join with the session still active) with
+ * use_splice, so release_ctx's pipe-closing branch runs, and confirm no fd
+ * leaks.
+ */
+T_DECLARE_CASE(transfer_splice_ctx_cancel_releases_pipes)
+{
+	const int fds_before = count_open_fds();
+	int acc_peer = -1, acc_fd = -1;
+	int dial_fd = -1, dial_peer = -1;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct test_xfer_state state = { 0 };
+
+	make_socketpair(&acc_peer, &acc_fd);
+	make_socketpair(&dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+
+	state.num_sessions = 1;
+	struct transfer *restrict xfer = transfer_create(loop, 1);
+	T_CHECK(xfer != NULL);
+
+	T_CHECK(transfer_serve(
+		xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state.byt_up,
+			.byt_down = &state.byt_down,
+			.use_splice = true,
+			.num_sessions = &state.num_sessions,
+		}));
+	acc_fd = dial_fd = -1;
+
+	/*
+	 * transfer_join runs the worker's queued start task (creating the
+	 * pipes) before cancelling the still-active session, so release_ctx
+	 * closes the pipes on the shutdown path.
+	 */
+	transfer_join(xfer);
+	T_EXPECT_EQ((size_t)state.num_sessions, (size_t)0);
+
+	socket_close(acc_peer);
+	socket_close(dial_peer);
+	ev_loop_destroy(loop);
+	T_EXPECT_EQ(count_open_fds(), fds_before);
 }
 #endif /* WITH_SPLICE */
 
@@ -623,18 +716,23 @@ T_DECLARE_CASE(transfer_multi_worker_all_complete)
 }
 
 /*
- * Rapid serve-and-join cycles must not let num_sessions underflow.
- * This simulates a server under high churn where connections are
- * accepted and immediately closed.
+ * A client that abandons its connection must leave num_sessions at exactly
+ * zero, never underflowed. The decrement runs on two distinct teardown paths
+ * depending on when the client abandons relative to the transfer, so both are
+ * driven explicitly rather than sampled by repeating one cycle and hoping the
+ * scheduler varies the interleaving.
  */
 T_DECLARE_CASE(transfer_serve_join_rapid_cycles)
 {
-	static const int CYCLES = 50;
 	struct ev_loop *loop = ev_loop_new(0);
-
 	T_CHECK(loop != NULL);
 
-	for (int i = 0; i < CYCLES; i++) {
+	/* false: join with the session still active, so transfer_join cancels
+	 *        it (shutdown-cancel decrement).
+	 * true:  close both write ends and let the session finish on its own
+	 *        first, so join finds nothing to cancel (normal-completion
+	 *        decrement, then a no-op join). */
+	for (int finish_first = 0; finish_first <= 1; finish_first++) {
 		int acc_peer = -1, acc_fd = -1;
 		int dial_fd = -1, dial_peer = -1;
 		struct test_xfer_state state = { 0 };
@@ -643,6 +741,11 @@ T_DECLARE_CASE(transfer_serve_join_rapid_cycles)
 		make_socketpair(&dial_fd, &dial_peer);
 		set_nonblock(acc_fd);
 		set_nonblock(dial_fd);
+
+		if (finish_first) {
+			T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+			T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
+		}
 
 		state.num_sessions = 1;
 		struct transfer *restrict xfer = transfer_create(loop, 1);
@@ -657,7 +760,11 @@ T_DECLARE_CASE(transfer_serve_join_rapid_cycles)
 			}));
 		acc_fd = dial_fd = -1;
 
-		/* Join immediately — in-flight transfers are cancelled. */
+		if (finish_first) {
+			T_EXPECT(test_wait_until(
+				loop, xfer_finished, &state, 1.0));
+		}
+
 		transfer_join(xfer);
 
 		/* num_sessions must reach exactly zero, never negative. */
@@ -756,7 +863,7 @@ bench_transfer_impl(struct testing_bench *restrict _b_, const bool use_splice)
 	struct transfer *xfer = transfer_create(loop, 1);
 	T_CHECK(xfer != NULL);
 
-	for (uint_fast64_t i = 0; i < _b_->N; i++) {
+	T_BENCH_LOOP () {
 		int acc_peer, acc_fd, dial_fd, dial_peer;
 		struct test_xfer_state state = { .num_sessions = 1 };
 
@@ -794,6 +901,7 @@ bench_transfer_impl(struct testing_bench *restrict _b_, const bool use_splice)
 			}
 			got += (size_t)n;
 		}
+		T_CHECK(got == (size_t)PAYLOAD_SZ);
 
 		socket_close(acc_peer);
 		socket_close(dial_peer);
@@ -828,6 +936,7 @@ static const struct testing_suite suite[] = {
 #if WITH_SPLICE
 	T_CASE(transfer_pipe_new_close),
 	T_CASE(transfer_splice_releases_pipes_on_finish),
+	T_CASE(transfer_splice_ctx_cancel_releases_pipes),
 #endif
 	T_CASE(transfer_ctx_cancel_no_callback),
 	T_CASE(transfer_dst_error_finishes),

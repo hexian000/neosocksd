@@ -5,7 +5,9 @@
 
 #include "util.h"
 
-#include "io/io.h"
+#if WITH_SPLICE
+#include "io/io.h" /* IO_BUFSIZE, used only by the splice path below */
+#endif
 #include "os/socket.h"
 #if WITH_THREADS
 #include "sync/dispatcher.h"
@@ -70,6 +72,15 @@ static const char *const xfer_state_str[] = {
  * pair cannot keep a worker busy -- for a duration proportional to the kernel
  * buffer/pipe size -- and starve the other sessions sharing that loop. */
 #define XFER_MAXSIZE 16777216
+
+#if WITH_THREADS
+/* Depth of each worker's start-task dispatch queue. A worker can be away from
+ * its dispatcher for a full pump (up to XFER_MAXSIZE per half), so this bounds
+ * how many session starts may queue up in that window before dispatcher_invoke
+ * reports the queue full; sized generously so an ordinary dial-completion burst
+ * is absorbed rather than dropped. */
+#define XFER_DISPATCH_QUEUE_SIZE 256
+#endif
 
 /* Single-direction transfer half; all fields xfer-thread-only after task_xfer_start. */
 struct xfer_half {
@@ -352,15 +363,7 @@ static void update_stats(
 	const struct xfer_half *restrict h, const size_t nbsend,
 	const size_t buffered)
 {
-	xfer_counter *restrict byt = h->byt_transferred;
-	if (byt != NULL) {
-#if WITH_THREADS
-		atomic_fetch_add_explicit(
-			byt, (uint_least64_t)nbsend, memory_order_relaxed);
-#else
-		*byt += (uint_least64_t)nbsend;
-#endif
-	}
+	xfer_count(h->byt_transferred, nbsend);
 	if (buffered > 0) {
 		XFER_HALF_LOG_F(
 			VERYVERBOSE, h,
@@ -655,6 +658,9 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 	}
 
 #if WITH_THREADS
+	/* transfer.h documents nworkers >= 1; a zero would make transfer_serve's
+	 * `... % xfer->nworkers` a division by zero */
+	ASSERT(nworkers >= 1);
 	(void)loop; /* workers run their own loops; the caller's is not used */
 	xfer->nworkers = nworkers;
 	atomic_init(&xfer->next_worker, 0u);
@@ -668,7 +674,7 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 		w->disp = NULL;
 		w->loop = NULL;
 
-		w->disp = dispatcher_create(16);
+		w->disp = dispatcher_create(XFER_DISPATCH_QUEUE_SIZE);
 		if (w->disp == NULL) {
 			transfer_join(xfer);
 			return NULL;
@@ -773,6 +779,7 @@ bool transfer_serve(
 {
 	struct transfer_ctx *restrict t = malloc(sizeof(struct transfer_ctx));
 	if (t == NULL) {
+		LOGOOM();
 		return false;
 	}
 #if !WITH_THREADS
@@ -804,6 +811,10 @@ bool transfer_serve(
 					  .func = task_xfer_start,
 					  .data = t,
 				  })) {
+		/* The worker's dispatch queue is momentarily full (transient
+		 * backpressure under a dial-completion burst), not out of memory
+		 * -- log it as such rather than letting the caller misreport OOM. */
+		LOGW("transfer: worker dispatch queue full, dropping connection");
 		free(t);
 		return false;
 	}
