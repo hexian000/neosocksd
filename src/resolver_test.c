@@ -32,7 +32,15 @@
  * mock - shared test fixtures (resolver.c has no collaborator to mock).
  * ---------------------------------------------------------------------- */
 
-static const ev_tstamp TEST_WAIT_SEC = 0.5;
+/* Failsafe watchdog for the event-driven waits in wait_for_result(): each
+ * resolution breaks the loop the instant its completion event fires, so a
+ * correct build never reaches this deadline -- it exists only to fail a genuine
+ * hang in bounded time instead of blocking CI. It is therefore sized to the
+ * project-standard T_TIMEOUT_SECONDS rather than a tight bound: the c-ares
+ * fake-nameserver cases run inside c-ares' own retry envelope (up to a few
+ * seconds), so a sub-second watchdog supervising them is under-sized and a slow
+ * or heavily loaded CI runner can trip it spuriously. */
+static const ev_tstamp TEST_WAIT_SEC = (ev_tstamp)T_TIMEOUT_SECONDS;
 
 struct resolve_result {
 	bool called;
