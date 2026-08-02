@@ -27,7 +27,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
@@ -37,12 +36,27 @@
  * virtual clock - fire the request timeout (an ev_timer inside a production ctx
  * the test cannot reach) deterministically, with no wall-clock wait. The
  * strong-symbol interposers return a test-advanced virtual time while enabled
- * and pass through to the real clock (raw syscall) otherwise, so non-timeout
- * cases are unaffected.
+ * and pass through to the real clock otherwise, so non-timeout cases are
+ * unaffected.
  * ---------------------------------------------------------------------- */
 
 static bool g_vclock_on = false;
 static double g_vclock_sec = 0.0;
+
+/* Read the real clock for the pass-through path. Both clock_gettime() and
+ * gettimeofday() are interposed here, so the underlying clock has to be reached
+ * through a third entry point: ISO C11 timespec_get(), which libc services from
+ * its own internal clock rather than through the shadowed symbols. It is also
+ * the only such entry point that stays declared under the strict
+ * _POSIX_C_SOURCE the FORCE_POSIX build selects. */
+static int real_clock(struct timespec *restrict ts)
+{
+	if (timespec_get(ts, TIME_UTC) != TIME_UTC) {
+		errno = EINVAL;
+		return -1;
+	}
+	return 0;
+}
 
 int clock_gettime(clockid_t clk, struct timespec *ts)
 {
@@ -51,7 +65,8 @@ int clock_gettime(clockid_t clk, struct timespec *ts)
 		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
 		return 0;
 	}
-	return (int)syscall(SYS_clock_gettime, clk, ts);
+	(void)clk;
+	return real_clock(ts);
 }
 
 int gettimeofday(struct timeval *tv, void *tz)
@@ -61,15 +76,24 @@ int gettimeofday(struct timeval *tv, void *tz)
 		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
 		return 0;
 	}
-	return (int)syscall(SYS_gettimeofday, tv, tz);
+	(void)tz;
+	struct timespec ts;
+	if (real_clock(&ts) != 0) {
+		return -1;
+	}
+	tv->tv_sec = ts.tv_sec;
+	tv->tv_usec = (long)(ts.tv_nsec / 1000);
+	return 0;
 }
 
 /* Freeze virtual time at the current real instant so a timer armed in real time
- * has a consistent virtual deadline the test crosses by advancing. */
+ * has a consistent virtual deadline the test crosses by advancing. The case
+ * must keep that timeout too large for real elapsed setup time to reach, since
+ * the arming happens before the freeze. */
 static void vclock_freeze_now(void)
 {
 	struct timespec ts;
-	(void)syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
+	T_CHECK(real_clock(&ts) == 0);
 	g_vclock_sec = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 	g_vclock_on = true;
 }
@@ -131,6 +155,7 @@ static struct {
 	bool rpcall_ok;
 	bool rpcall_null_result;
 	bool rpcall_auto_finish;
+	bool rpcall_publish_then_fail;
 	bool stats_ok;
 
 	const char *errstr;
@@ -145,6 +170,10 @@ static struct {
 	struct ruleset_vmstats vmstats_after;
 
 	struct ruleset_state *rpcstate;
+	/* the out-pointer ruleset_rpcall wrote *state through (== &ctx->rpcstate);
+	 * production state_complete nulls it when the call completes, so the stub
+	 * retains it to do the same and stay faithful to the teardown paths */
+	struct ruleset_state **rpcstate_out;
 	struct ruleset_callback *pending_rpcall;
 	size_t cancel_count;
 	size_t stats_call_count;
@@ -206,6 +235,7 @@ static void reset_ruleset_stub(void)
 	RS.rpcall_ok = true;
 	RS.rpcall_null_result = false;
 	RS.rpcall_auto_finish = false;
+	RS.rpcall_publish_then_fail = false;
 	RS.stats_ok = true;
 	RS.errstr = "ruleset error";
 	RS.errlen = sizeof("ruleset error") - 1;
@@ -225,6 +255,7 @@ static void reset_ruleset_stub(void)
 		.num_events = 0,
 	};
 	RS.rpcstate = NULL;
+	RS.rpcstate_out = NULL;
 	RS.pending_rpcall = NULL;
 	RS.cancel_count = 0;
 	RS.stats_call_count = 0;
@@ -263,6 +294,12 @@ static void finish_rpcall(struct ev_loop *loop)
 		return;
 	}
 	set_rpcall_result(RS.pending_rpcall);
+	/* production state_complete() nulls *selfptr (== ctx->rpcstate) when the
+	 * call completes, before rpcall_cb is dispatched; mirror it so teardown
+	 * in the completed-but-undispatched window sees rpcstate == NULL */
+	if (RS.rpcstate_out != NULL) {
+		*RS.rpcstate_out = NULL;
+	}
 	ev_feed_event(loop, &RS.pending_rpcall->w_finish, EV_CUSTOM);
 	RS.pending_rpcall = NULL;
 }
@@ -308,14 +345,25 @@ bool ruleset_rpcall(
 	(void)r;
 	(void)code;
 	if (!RS.rpcall_ok) {
+		if (RS.rpcall_publish_then_fail) {
+			/* cfunc_rpcall publishes *pstate before its last fallible
+			 * step, so a failure can leave the state orphaned; emulate
+			 * that so the consumer's cancel-on-failure path is tested */
+			RS.rpcstate =
+				(struct ruleset_state *)&ruleset_state_tag;
+			*state = RS.rpcstate;
+			RS.rpcstate_out = state;
+		}
 		return false;
 	}
 	RS.rpcstate = (struct ruleset_state *)&ruleset_state_tag;
 	*state = RS.rpcstate;
+	RS.rpcstate_out = state;
 	if (RS.rpcall_auto_finish && RS.loop != NULL) {
-		/* completes immediately: set the result before firing w_finish,
-		 * as rpcall_finish() would */
+		/* completes immediately: set the result and null *state before
+		 * firing w_finish, as rpcall_finish()/state_complete() would */
 		set_rpcall_result(callback);
+		*RS.rpcstate_out = NULL;
 		ev_feed_event(RS.loop, &callback->w_finish, EV_CUSTOM);
 		return true;
 	}
@@ -654,6 +702,27 @@ static size_t find_bytes_offset(
 	return haystack_len;
 }
 
+/* Number of non-overlapping occurrences of needle in haystack. */
+static size_t count_bytes(
+	const unsigned char *restrict haystack, const size_t haystack_len,
+	const char *restrict needle)
+{
+	const size_t needle_len = strlen(needle);
+	if (needle_len == 0 || haystack_len < needle_len) {
+		return 0;
+	}
+	size_t count = 0;
+	for (size_t i = 0; i + needle_len <= haystack_len;) {
+		if (memcmp(haystack + i, needle, needle_len) != 0) {
+			i++;
+			continue;
+		}
+		count++;
+		i += needle_len;
+	}
+	return count;
+}
+
 static bool assert_status(
 	const unsigned char *restrict rsp, const size_t n, const char *code)
 {
@@ -696,6 +765,82 @@ T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 		T_EXPECT(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Collect responses until `want` status lines have arrived or the reads stop
+ * producing; returns how many were seen. Bounded by `want` reads, each with its
+ * own timeout, so a missing response fails the assertion instead of hanging. */
+static size_t recv_responses(
+	struct ev_loop *loop, const int peer_fd, unsigned char *restrict buf,
+	const size_t cap, const size_t want)
+{
+	size_t total = 0;
+	for (size_t i = 0; i < want; i++) {
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, buf + total, cap - total,
+			TEST_WAIT_RECV_SEC);
+		if (n <= 0) {
+			break;
+		}
+		total += (size_t)n;
+		if (count_bytes(buf, total, "HTTP/1.1 200") >= want) {
+			break;
+		}
+	}
+	return count_bytes(buf, total, "HTTP/1.1 200");
+}
+
+/*
+ * Regression: two requests delivered in one segment. The keep-alive reset used
+ * to re-init the parser over a zeroed rbuf, discarding the second request --
+ * which the socket had already handed over, so nothing would ever report it
+ * readable again and the connection sat idle until the timeout.
+ */
+T_DECLARE_CASE(pipelined_requests_both_answered)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"
+			 "GET /healthy HTTP/1.1\r\n\r\n"));
+	T_EXPECT_EQ(recv_responses(loop, peer_fd, rsp, sizeof(rsp), 2), 2);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * The same carry-over, but where the first request has a Content-Length body:
+ * the consumed mark must cover the body bytes taken out of rbuf, or the leftover
+ * would start inside the body and parse as garbage.
+ */
+T_DECLARE_CASE(pipelined_after_body_request_both_answered)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /stats?nobanner=1 HTTP/1.1\r\n"
+			 "Content-Length: 4\r\n\r\n"
+			 "body"
+			 "GET /healthy HTTP/1.1\r\n\r\n"));
+	T_EXPECT_EQ(recv_responses(loop, peer_fd, rsp, sizeof(rsp), 2), 2);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -929,6 +1074,8 @@ T_DECLARE_CASE(stats_output_format_has_no_raw_specifiers)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "API Requests        : "));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Name Resolves       : "));
 		T_EXPECT(find_bytes(
+			rsp, (size_t)n, "Upstream Setup      : Rx "));
+		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "Traffic             : Up "));
 		T_EXPECT(!find_bytes(rsp, (size_t)n, "%ju"));
 		T_EXPECT(!find_bytes(rsp, (size_t)n, "%zu"));
@@ -982,6 +1129,84 @@ T_DECLARE_CASE(stats_bad_method_405)
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
 		T_EXPECT(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 405 "));
+		/* RFC 9110 §10.2.1: a 405 must carry Allow */
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Allow: GET, POST\r\n"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* /metrics rejects a non-GET method with 405 + Allow (http_handle_metrics). */
+T_DECLARE_CASE(metrics_bad_method_405)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+
+	T_CHECK(loop != NULL);
+	init_unified_server(&s, loop);
+	start_api(&s, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "PUT /metrics HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 405 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Allow: GET\r\n"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* /healthy is read-only: a non-GET method is 405 + Allow (restapi_check). */
+T_DECLARE_CASE(healthy_bad_method_405)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd,
+		"POST /healthy HTTP/1.1\r\nContent-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 405 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Allow: GET\r\n"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A trailing path segment on a leaf endpoint is 404 (restapi_check). */
+T_DECLARE_CASE(stats_trailing_path_404)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(peer_fd, "GET /stats/extra HTTP/1.1\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 404 "));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1221,7 +1446,7 @@ T_DECLARE_CASE(stats_post_with_ruleset_q)
 	RS.stats_str = "q stats\n";
 	RS.stats_len = sizeof("q stats\n") - 1;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1234,6 +1459,9 @@ T_DECLARE_CASE(stats_post_with_ruleset_q)
 		T_EXPECT(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		T_EXPECT(RS.stats_call_count > 0);
+		/* the ruleset stats output must actually reach the body, not just
+		 * be requested */
+		T_EXPECT(find_bytes(rsp, (size_t)n, "q stats"));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1253,7 +1481,7 @@ T_DECLARE_CASE(healthy_unhealthy_returns_503)
 	RS.healthy_str = "db down";
 	RS.healthy_len = sizeof("db down") - 1;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1314,7 +1542,7 @@ T_DECLARE_CASE(ruleset_unknown_action_404)
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1342,7 +1570,7 @@ T_DECLARE_CASE(ruleset_invoke_ok_200)
 	reset_ruleset_stub();
 	RS.invoke_ok = true;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1373,7 +1601,7 @@ T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
 	reset_ruleset_stub();
 	RS.invoke_ok = true;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1418,7 +1646,7 @@ T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
 	RS.errstr = big_err;
 	RS.errlen = sizeof(big_err);
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1459,7 +1687,7 @@ T_DECLARE_CASE(ruleset_invoke_length_required_411)
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1487,7 +1715,7 @@ T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 	reset_ruleset_stub();
 	RS.update_ok = true;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1520,7 +1748,7 @@ T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
 	reset_ruleset_stub();
 	RS.update_ok = true;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1553,7 +1781,7 @@ T_DECLARE_CASE(ruleset_gc_ok_contains_report)
 	reset_ruleset_stub();
 	RS.gc_ok = true;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1582,7 +1810,7 @@ T_DECLARE_CASE(ruleset_rpcall_bad_mime_400)
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1626,9 +1854,13 @@ T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
 	RS.loop = loop;
 	RS.rpcall_ok = true;
 	RS.rpcall_auto_finish = false;
-	test_conf.timeout = 0.02;
+	/* the rpcall must reach the pending state on real time first, so the
+	 * request deadline is armed before the freeze below: keep it far out of
+	 * real elapsed reach, or slow setup fires the timer on its own and the
+	 * cancel this case asserts is no longer the one the advance caused */
+	test_conf.timeout = 10.0;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1673,7 +1905,7 @@ T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 	RS.rpcall_result = large_result;
 	RS.rpcall_resultlen = sizeof(large_result);
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1715,7 +1947,7 @@ T_DECLARE_CASE(ruleset_rpcall_empty_body_ok)
 	RS.rpcall_ok = true;
 	RS.rpcall_auto_finish = false;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1753,7 +1985,7 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 	RS.errstr = "rpcall failed";
 	RS.errlen = sizeof("rpcall failed") - 1;
 	init_server_pair(&api, &core, loop);
-	api.ruleset = (struct ruleset *)&ruleset_tag;
+	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
@@ -1773,6 +2005,91 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 }
+
+/*
+ * A completed rpcall that returns no result must yield 500 "rpcall did not
+ * return" -- rpcall_cb's result == NULL branch.
+ */
+T_DECLARE_CASE(ruleset_rpcall_null_result_500)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.loop = loop;
+	RS.rpcall_ok = true;
+	RS.rpcall_auto_finish = false;
+	RS.rpcall_null_result = true;
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+			 "Content-Length: 1\r\n"
+			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
+			 "x"));
+	T_CHECK(test_wait_until(
+		loop, ruleset_rpcall_pending, NULL, TEST_WAIT_RECV_SEC));
+	finish_rpcall(loop);
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "rpcall did not return"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * ruleset_rpcall can fail after already publishing *pstate (== ctx->rpcstate),
+ * orphaning a state whose cb still targets this ctx. The failure path must
+ * cancel it so a later Lua GC cannot feed w_finish on the freed/reused ctx.
+ */
+T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.rpcall_ok = false;
+	RS.rpcall_publish_then_fail = true;
+	RS.errstr = "rpcall failed";
+	RS.errlen = sizeof("rpcall failed") - 1;
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+			 "Content-Length: 1\r\n"
+			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
+			 "x"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
+	}
+	/* the orphaned state was cancelled exactly once */
+	T_EXPECT_EQ(RS.cancel_count, (size_t)1);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
 #endif /* WITH_RULESET */
 
 /* -------------------------------------------------------------------------
@@ -1785,6 +2102,8 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 
 static const struct testing_suite suite[] = {
 	T_CASE(healthy_keepalive_reuse_connection),
+	T_CASE(pipelined_requests_both_answered),
+	T_CASE(pipelined_after_body_request_both_answered),
 	T_CASE(healthy_connection_close_header),
 	T_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server),
 	T_CASE(metrics_keep_proxy_and_api_request_totals_separate),
@@ -1794,6 +2113,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(stats_output_format_has_no_raw_specifiers),
 	T_CASE(stats_post_ok_without_nocache),
 	T_CASE(stats_bad_method_405),
+	T_CASE(metrics_bad_method_405),
+	T_CASE(healthy_bad_method_405),
+	T_CASE(stats_trailing_path_404),
 	T_CASE(stats_bad_query_400),
 	T_CASE(chunked_request_rejected_501),
 	T_CASE(stats_key_only_query_options),
@@ -1819,6 +2141,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_rpcall_ok_deflate_response),
 	T_CASE(ruleset_rpcall_empty_body_ok),
 	T_CASE(ruleset_rpcall_sync_fail_500),
+	T_CASE(ruleset_rpcall_null_result_500),
+	T_CASE(ruleset_rpcall_orphaned_state_cancelled),
 #endif /* WITH_RULESET */
 	T_SUITE_END,
 };

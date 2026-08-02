@@ -302,10 +302,12 @@ static void append_server_stats(
 	FORMAT_DURATION(str_uptime, make_duration_nanos(uptime));
 	FORMAT_BYTES(xfer_up, (double)agg.byt_up);
 	FORMAT_BYTES(xfer_down, (double)agg.byt_down);
-	FORMAT_BYTES(hs_crx, (double)agg.byt_client_recv);
-	FORMAT_BYTES(hs_ctx, (double)agg.byt_client_send);
-	FORMAT_BYTES(hs_drx, (double)agg.byt_dial_recv);
-	FORMAT_BYTES(hs_dtx, (double)agg.byt_dial_send);
+	/* the setup counters are split by socket, not by phase: the "hs_"
+	 * (handshake) naming they used to carry no longer describes them */
+	FORMAT_BYTES(client_rx, (double)agg.byt_client_recv);
+	FORMAT_BYTES(client_tx, (double)agg.byt_client_send);
+	FORMAT_BYTES(upstream_rx, (double)agg.byt_dial_recv);
+	FORMAT_BYTES(upstream_tx, (double)agg.byt_dial_send);
 	FORMAT_BYTES(api_recv, (double)apistats->api_byt_recv);
 	FORMAT_BYTES(api_send, (double)apistats->api_byt_send);
 
@@ -322,7 +324,7 @@ static void append_server_stats(
 		"), Rx %s, Tx %s\n"
 		"API Requests        : %" PRIuLEAST64 " (+%" PRIuLEAST64
 		"), Rx %s, Tx %s\n"
-		"Handshake Dial      : Rx %s, Tx %s\n"
+		"Upstream Setup      : Rx %s, Tx %s\n"
 		"Traffic             : Up %s, Down %s\n",
 		/* Server Time, Uptime */
 		timestamp, str_uptime,
@@ -337,14 +339,14 @@ static void append_server_stats(
 		resolv_stats->num_success,
 		resolv_stats->num_query - resolv_stats->num_success,
 		/* Requests */
-		agg.num_success, agg.num_request - agg.num_success, hs_crx,
-		hs_ctx,
+		agg.num_success, agg.num_request - agg.num_success, client_rx,
+		client_tx,
 		/* API Requests */
 		apistats->num_api_success,
 		apistats->num_api_request - apistats->num_api_success, api_recv,
 		api_send,
-		/* Handshake Dial */
-		hs_drx, hs_dtx,
+		/* Upstream Setup */
+		upstream_rx, upstream_tx,
 		/* Traffic */
 		xfer_up, xfer_down);
 
@@ -413,6 +415,25 @@ static void send_errpage(
 	send_response(loop, ctx, false);
 }
 
+/* Send a 405 carrying the Allow header RFC 9110 §10.2.1 mandates. The generic
+ * error page cannot carry it, so build a short plain-text response directly. */
+static void send_method_not_allowed(
+	struct ev_loop *loop, struct api_ctx *restrict ctx,
+	const char *restrict allow)
+{
+	static const char body[] = "405 Method Not Allowed\n";
+	ctx->keepalive = false;
+	VBUF_FREE(ctx->conn.cbuf);
+	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_METHOD_NOT_ALLOWED);
+	resphdr_conn(ctx);
+	BUF_APPENDF(ctx->conn.wbuf, "Allow: %s\r\n", allow);
+	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
+	RESPHDR_CLENGTH(ctx->conn.wbuf, sizeof(body) - 1);
+	RESPHDR_FINISH(ctx->conn.wbuf);
+	BUF_APPEND(ctx->conn.wbuf, body, sizeof(body) - 1);
+	send_response(loop, ctx, false);
+}
+
 /* s is NULL for a key-only query component, which is not an affirmative
  * value. */
 static bool parse_bool(const char *restrict s)
@@ -437,6 +458,18 @@ static enum content_encodings negotiate_encoding(
 	}
 	return CENCODING_DEFLATE;
 }
+
+#if WITH_RULESET
+/* The ruleset is owned by the core proxy server (ctx->s->data), the same
+ * instance server_stats aggregates from, so every endpoint reads it there. The
+ * API server instance's own ruleset field coincides only in the single-server
+ * production layout, not in a split api/core setup. */
+static struct ruleset *ctx_ruleset(const struct api_ctx *restrict ctx)
+{
+	const struct server *restrict core = ctx->s->data;
+	return core->ruleset;
+}
+#endif /* WITH_RULESET */
 
 static void
 http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
@@ -480,7 +513,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	} else if (strcmp(msg->req.method, "POST") == 0) {
 		stateless = false;
 	} else {
-		send_errpage(loop, ctx, HTTP_METHOD_NOT_ALLOWED);
+		send_method_not_allowed(loop, ctx, "GET, POST");
 		return;
 	}
 
@@ -518,7 +551,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 #if WITH_RULESET
-	struct ruleset *ruleset = ctx->s->ruleset;
+	struct ruleset *ruleset = ctx_ruleset(ctx);
 	if (!stateless && ruleset != NULL) {
 		size_t len;
 		const char *s = ruleset_stats(ruleset, dt, query, &len);
@@ -569,7 +602,7 @@ static bool restapi_check(
 	}
 	const struct http_message *restrict msg = &ctx->conn.msg;
 	if (method != NULL && strcmp(msg->req.method, method) != 0) {
-		send_errpage(loop, ctx, HTTP_METHOD_NOT_ALLOWED);
+		send_method_not_allowed(loop, ctx, method);
 		return false;
 	}
 	/* http_conn frames only Content-Length bodies; a chunked request parses
@@ -664,7 +697,19 @@ static void handle_ruleset_rpcall(
 	const bool ok = ruleset_rpcall(
 		ruleset, &ctx->rpcstate, reader, &ctx->rpcreturn);
 	close_stream(reader);
+	/* the body chunk is loaded synchronously; only execution is async, so
+	 * release the request buffer now instead of holding it (up to 4 MiB) for
+	 * the whole async call, as invoke/update already do */
+	VBUF_FREE(ctx->conn.cbuf);
 	if (!ok) {
+		/* ruleset_rpcall may publish *pstate (== ctx->rpcstate) before a
+		 * later fallible step fails, leaving an orphaned state whose cb
+		 * still targets this ctx; cancel it so a later Lua GC cannot feed
+		 * w_finish on this freed/reused ctx. */
+		if (ctx->rpcstate != NULL) {
+			ruleset_cancel(loop, ctx->rpcstate);
+			ctx->rpcstate = NULL;
+		}
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
@@ -807,7 +852,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	ev_idle_stop(loop, watcher);
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
-	struct ruleset *ruleset = ctx->s->ruleset;
+	struct ruleset *ruleset = ctx_ruleset(ctx);
 	ASSERT(ruleset != NULL);
 
 	char *segment;
@@ -864,7 +909,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 static void
 http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	if (ctx->s->ruleset == NULL) {
+	if (ctx_ruleset(ctx) == NULL) {
 		SEND_ERRSTR(loop, ctx, "ruleset is not enabled on the server");
 		return;
 	}
@@ -878,7 +923,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	const struct http_message *restrict msg = &ctx->conn.msg;
 	if (strcmp(msg->req.method, "GET") != 0) {
-		send_errpage(loop, ctx, HTTP_METHOD_NOT_ALLOWED);
+		send_method_not_allowed(loop, ctx, "GET");
 		return;
 	}
 
@@ -1171,7 +1216,7 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			return;
 		}
 #if WITH_RULESET
-		struct ruleset *ruleset = ctx->s->ruleset;
+		struct ruleset *ruleset = ctx_ruleset(ctx);
 		if (ruleset != NULL) {
 			size_t len;
 			const char *unhealthy = ruleset_healthy(ruleset, &len);
@@ -1229,18 +1274,17 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		if (ctx->rpcstate != NULL) {
 			ruleset_cancel(loop, ctx->rpcstate);
 			ctx->rpcstate = NULL;
-			/* rpcall_finish() may have already fired w_finish (and
-			 * allocated a result) before this teardown runs --
-			 * ruleset_cancel() only clears the pending event while
-			 * its own state->cb is still attached, which is already
-			 * NULL once finished. Clear it unconditionally so the
-			 * event loop can never dispatch to this ctx after it's
-			 * freed, and drop any result rpcall_cb() will now never
-			 * get to consume. */
-			ev_clear_pending(loop, &ctx->rpcreturn.w_finish);
-			free((void *)ctx->rpcreturn.rpcall.result);
-			ctx->rpcreturn.rpcall.result = NULL;
 		}
+		/* rpcall_finish() may have already completed the call before this
+		 * teardown runs: state_complete() nulls rpcstate, fires w_finish,
+		 * and allocates a result, all in the completed-but-undispatched
+		 * window where rpcstate is already NULL. Clear the pending event
+		 * and drop the result unconditionally so the event loop can never
+		 * dispatch rpcall_cb() on this ctx after it is freed, and the
+		 * result rpcall_cb() will never consume cannot leak. */
+		ev_clear_pending(loop, &ctx->rpcreturn.w_finish);
+		free((void *)ctx->rpcreturn.rpcall.result);
+		ctx->rpcreturn.rpcall.result = NULL;
 #endif /* WITH_RULESET */
 		break;
 	case STATE_RESPONSE:
@@ -1311,49 +1355,23 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	return true;
 }
 
-/* Reset parser and state machine for reuse on the same TCP connection */
-static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
-{
-	VBUF_FREE(ctx->conn.cbuf);
-	const struct http_parsehdr_cb on_header = {
-		.func = parse_header,
-		.ctx = ctx,
-	};
-	http_conn_init(
-		&ctx->conn, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header,
-		&ctx->s->stats.api_byt_recv, &ctx->s->stats.api_byt_send);
-	ctx->uri = (struct url){ 0 };
-	ctx->keepalive = false;
-	ctx->state = STATE_REQUEST;
-	ev_timer_again(loop, &ctx->w_timeout);
-	ev_io_start(loop, &ctx->w_recv);
-}
-
 static bool api_should_keepalive(const struct api_ctx *restrict ctx)
 {
 	const char *version = ctx->conn.msg.req.version;
 	if (strncmp(version, "HTTP/1.1", 8) != 0) {
 		return false;
 	}
-	const char *conn = ctx->conn.hdr.connection;
-	return conn == NULL || strcasecmp(conn, "close") != 0;
+	/* Connection is a comma-separated token list (RFC 9110 §7.6.1); keep the
+	 * connection alive unless it lists "close" as a token. */
+	return !http_connection_lists(ctx->conn.hdr.connection, "close");
 }
 
-static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+/* Act on a completed parse: account the request and hand it to the endpoint
+ * dispatcher, or answer the parse error. */
+static void api_dispatch(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	CHECK_REVENTS(revents, EV_READ);
-	struct api_ctx *restrict ctx = watcher->data;
-
-	const int want = http_conn_recv(&ctx->conn);
-	if (want < 0) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	if (want > 0) {
-		return;
-	}
 	ctx->state = STATE_PROCESS;
-	ev_io_stop(loop, watcher);
+	ev_io_stop(loop, &ctx->w_recv);
 
 	switch (ctx->conn.state) {
 	case STATE_PARSE_OK: {
@@ -1369,6 +1387,67 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	}
 
 	api_handle(loop, ctx);
+}
+
+static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_READ);
+	struct api_ctx *restrict ctx = watcher->data;
+
+	const int want = http_conn_recv(&ctx->conn);
+	if (want < 0) {
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (want > 0) {
+		return;
+	}
+	api_dispatch(loop, ctx);
+}
+
+/* Reset parser and state machine for reuse on the same TCP connection */
+static void api_ctx_reset(struct ev_loop *loop, struct api_ctx *restrict ctx)
+{
+	struct http_conn *restrict p = &ctx->conn;
+	ASSERT(p->next != NULL);
+	/* Whatever sits past the consumed mark is the next pipelined request:
+	 * the socket already delivered it and will not report it readable
+	 * again, so move it to the front and keep it across the reset. */
+	const size_t pos = (size_t)((unsigned char *)p->next - p->rbuf.data);
+	const size_t rest = p->rbuf.len - pos;
+	memmove(p->rbuf.data, p->rbuf.data + pos, rest);
+
+	VBUF_FREE(p->cbuf);
+	const struct http_parsehdr_cb on_header = {
+		.func = parse_header,
+		.ctx = ctx,
+	};
+	http_conn_init(
+		p, ctx->accepted_fd, STATE_PARSE_REQUEST, on_header,
+		&ctx->s->stats.api_byt_recv, &ctx->s->stats.api_byt_send);
+	p->rbuf.len = rest;
+	p->rbuf.data[rest] = '\0';
+
+	ctx->uri = (struct url){ 0 };
+	ctx->keepalive = false;
+	ctx->state = STATE_REQUEST;
+	ev_timer_again(loop, &ctx->w_timeout);
+	ev_io_start(loop, &ctx->w_recv);
+
+	if (rest == 0) {
+		return;
+	}
+	/* the carried bytes are already here; parse them without waiting for a
+	 * readable event that will never come */
+	const int want = http_conn_parse(p);
+	if (want < 0) {
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	if (want > 0) {
+		return;
+	}
+	api_dispatch(loop, ctx);
 }
 
 static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
