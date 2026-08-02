@@ -271,7 +271,11 @@ inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 			*buf = z->dstbuf + z->dstpos;
 			*len = n;
 			z->dstpos += n;
-			if (z->dstpos == z->dstlen) {
+			/* Defer a base read error until all buffered input has
+			 * been decoded: the base may return data and an error
+			 * together, and srclen>0 still holds decodable bytes.
+			 * Mirrors gzip_decompress_body. */
+			if (z->dstpos == z->dstlen && z->srclen == 0) {
 				return z->srcerr;
 			}
 			return 0;
@@ -279,6 +283,12 @@ inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 	} while (z->status > TINFL_STATUS_DONE && !z->srceof);
 
 	*len = 0;
+	/* Surface the base's error code rather than the inflate status when the
+	 * input ended on a base error (e.g. a first refill that returned an
+	 * error with n == 0), otherwise the original code would be lost. */
+	if (z->srcerr != 0) {
+		return z->srcerr;
+	}
 	if (z->status != TINFL_STATUS_DONE) {
 		return z->status;
 	}
@@ -351,12 +361,23 @@ struct io_stream *codec_inflate_reader(struct io_stream *base)
 
 /* RFC 1952 - gzip format implementation */
 
+/* Resumable phase of a member-finish (TDEFL_FINISH drain, then trailer).
+ * Tracked so a partial write on either sub-step resumes at the right place
+ * rather than re-running the whole finish (which would re-enter tdefl_compress
+ * after DONE -- a BAD_PARAM wedge -- or rewrite the trailer prefix). */
+enum gzip_wphase {
+	GZIP_W_BODY, /* not finishing: normal writes */
+	GZIP_W_FINISH, /* draining the TDEFL_FINISH deflate output */
+	GZIP_W_TRAILER, /* draining the staged 8-byte trailer */
+};
+
 /* same as deflate_stream, extended with running CRC-32 and
  * uncompressed byte count for the gzip trailer */
 struct gzip_wstream {
 	struct io_stream s;
 	struct io_stream *base;
 	bool finished : 1;
+	enum gzip_wphase wphase;
 	tdefl_status status;
 	tdefl_compressor deflator;
 	size_t dstpos, dstlen;
@@ -458,14 +479,20 @@ static int gzip_write(void *p, const void *restrict buf, size_t *restrict len)
 static int gzip_flush_(struct gzip_wstream *restrict z, const tdefl_flush flush)
 {
 	do {
-		unsigned char *buf = z->dstbuf + z->dstlen;
-		size_t n = sizeof(z->dstbuf) - z->dstlen;
-		z->status = tdefl_compress(
-			&z->deflator, NULL, NULL, buf, &n, flush);
-		z->dstlen += n;
+		/* Once the compressor has returned DONE, calling tdefl_compress
+		 * again returns TDEFL_STATUS_BAD_PARAM; on a resumed finish only
+		 * the staged output still needs draining, so skip recompression
+		 * and just drain the remaining dstbuf. */
+		if (z->status != TDEFL_STATUS_DONE) {
+			unsigned char *buf = z->dstbuf + z->dstlen;
+			size_t n = sizeof(z->dstbuf) - z->dstlen;
+			z->status = tdefl_compress(
+				&z->deflator, NULL, NULL, buf, &n, flush);
+			z->dstlen += n;
+		}
 
-		buf = z->dstbuf + z->dstpos;
-		n = z->dstlen - z->dstpos;
+		unsigned char *buf = z->dstbuf + z->dstpos;
+		size_t n = z->dstlen - z->dstpos;
 		const int err = io_stream_write(z->base, buf, &n);
 		z->dstpos += n;
 		if (err != 0) {
@@ -483,18 +510,41 @@ static int gzip_flush_(struct gzip_wstream *restrict z, const tdefl_flush flush)
 	return 0;
 }
 
-/* Write 8-byte gzip trailer (CRC-32 then ISIZE). */
-static int gzip_write_trailer(struct gzip_wstream *restrict z)
+/* Finish the current member resumably: drain the TDEFL_FINISH deflate output,
+ * then the 8-byte trailer (CRC-32 then ISIZE). A partial write on either
+ * sub-step returns nonzero and, on retry, resumes at the phase recorded in
+ * z->wphase rather than re-running the finish. Leaves z->wphase == GZIP_W_BODY
+ * and dstbuf empty on success. */
+static int gzip_finish(struct gzip_wstream *restrict z)
 {
-	unsigned char trailer[8];
-	write_uint32_le(trailer + 0, z->crc);
-	write_uint32_le(trailer + 4, z->isize);
-	size_t n = sizeof(trailer);
-	const int ret = io_stream_write(z->base, trailer, &n);
-	if (ret == 0 && n < sizeof(trailer)) {
+	if (z->wphase == GZIP_W_BODY) {
+		z->wphase = GZIP_W_FINISH;
+	}
+	if (z->wphase == GZIP_W_FINISH) {
+		const int ret = gzip_flush_(z, TDEFL_FINISH);
+		if (ret != 0) {
+			return ret;
+		}
+		/* deflate output fully drained (dstbuf idle); stage the trailer
+		 * and drain it the same resumable way */
+		write_uint32_le(z->dstbuf + 0, z->crc);
+		write_uint32_le(z->dstbuf + 4, z->isize);
+		z->dstpos = 0;
+		z->dstlen = 8;
+		z->wphase = GZIP_W_TRAILER;
+	}
+	size_t n = z->dstlen - z->dstpos;
+	const int err = io_stream_write(z->base, z->dstbuf + z->dstpos, &n);
+	z->dstpos += n;
+	if (err != 0) {
+		return err;
+	}
+	if (z->dstpos < z->dstlen) {
 		return -1;
 	}
-	return ret;
+	z->dstpos = z->dstlen = 0;
+	z->wphase = GZIP_W_BODY;
+	return 0;
 }
 
 /* Flush DEFLATE, write trailer, mark finished; base stream also flushed. Next write starts new member. */
@@ -504,17 +554,17 @@ static int gzip_flush(void *p)
 	if (z->finished) {
 		return io_stream_flush(z->base);
 	}
-	int ret = gzip_flush_(z, TDEFL_FINISH);
-	if (ret == 0) {
-		ret = gzip_write_trailer(z);
+	const int ret = gzip_finish(z);
+	if (ret != 0) {
+		return ret;
 	}
-	if (ret == 0) {
-		z->finished = true;
-		z->crc = MZ_CRC32_INIT;
-		z->isize = 0;
-		ret = io_stream_flush(z->base);
-	}
-	return ret;
+	/* The member (deflate output + trailer) is fully written; mark it
+	 * finished before flushing the base so a base-flush failure retries
+	 * only the flush, not the already-emitted trailer. */
+	z->finished = true;
+	z->crc = MZ_CRC32_INIT;
+	z->isize = 0;
+	return io_stream_flush(z->base);
 }
 
 static int gzip_wclose(void *p)
@@ -522,10 +572,7 @@ static int gzip_wclose(void *p)
 	struct gzip_wstream *restrict z = p;
 	int ret = 0;
 	if (!z->finished) {
-		ret = gzip_flush_(z, TDEFL_FINISH);
-		if (ret == 0) {
-			ret = gzip_write_trailer(z);
-		}
+		ret = gzip_finish(z);
 	}
 	const int err = io_stream_close(z->base);
 	free(z);
@@ -572,6 +619,7 @@ struct io_stream *codec_gzip_writer(struct io_stream *base)
 	};
 	z->base = base;
 	z->finished = false;
+	z->wphase = GZIP_W_BODY;
 	z->status = TDEFL_STATUS_OKAY;
 
 	const tdefl_status status =
@@ -1226,6 +1274,14 @@ lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct lua_rstream *restrict z = p;
 
+	/* A latched read error is sticky, including an unsupported-BOM
+	 * rejection: once set, every subsequent read returns it rather than
+	 * serving the rejected prefix or refilling from mid-file. */
+	if (z->rderr != 0) {
+		*len = 0;
+		return z->rderr;
+	}
+
 	/* Serve any post-prefix bytes still buffered in the peek window. */
 	if (z->peekpos < z->peeklen) {
 		return lua_serve_peek(z, buf, len);
@@ -1256,8 +1312,12 @@ lua_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 		}
 		size_t offset = 0;
 		if (!lua_skip_bom(z, z->peekbuf, z->peeklen, &offset)) {
+			/* discard the rejected prefix so it is never served; the
+			 * error latched in z->rderr makes this terminal (checked
+			 * at the top on any subsequent read) */
+			z->peekpos = z->peeklen;
 			*len = 0;
-			return -1;
+			return z->rderr;
 		}
 		/* Skip the shebang if its start is within the window. If the line
 		 * runs past the window the state stays LUA_SKIP_SHEBANG and the
@@ -1332,12 +1392,14 @@ static struct io_stream *lua_reader_new(struct io_stream *base)
 		return NULL;
 	}
 
-	/* Wrap with bufreader so we can peek for gzip magic */
-	if (base->vftable->direct_read == NULL) {
-		base = io_bufreader(base, IO_BUFSIZE);
-		if (base == NULL) {
-			return NULL;
-		}
+	/* Wrap with bufreader so we can peek for gzip magic. io_bufpeek() below
+	 * requires specifically an io_bufreader (it asserts the vftable and
+	 * reinterprets the object), so wrap unconditionally: a base that already
+	 * has direct_read but is not an io_bufreader would otherwise skip the
+	 * wrap and fail that assert (or type-confuse under NDEBUG). */
+	base = io_bufreader(base, IO_BUFSIZE);
+	if (base == NULL) {
+		return NULL;
 	}
 
 	struct io_stream *inner;

@@ -183,6 +183,102 @@ drip_memreader(const void *data, const size_t len, const size_t chunk)
 	return &m->s;
 }
 
+/* A writer that passes its first `ungated` bytes through in full (so the gzip
+ * constructor's one-shot 10-byte header write succeeds), then accepts at most
+ * `chunk` bytes per call, appending everything to *pvbuf. Exercises the codec
+ * writers' resumable partial-write paths (body/finish/trailer) that
+ * io_heapwriter -- which always accepts the whole buffer -- never triggers. */
+struct choke_memwriter {
+	struct io_stream s;
+	struct vbuffer **pvbuf;
+	size_t ungated;
+	size_t chunk;
+	size_t written;
+};
+
+static int choke_write(void *p, const void *restrict buf, size_t *restrict len)
+{
+	struct choke_memwriter *restrict m = p;
+	size_t n = *len;
+	if (m->written >= m->ungated && n > m->chunk) {
+		n = m->chunk; /* short even when more output is offered */
+	}
+	VBUF_APPEND(*m->pvbuf, buf, n);
+	m->written += n;
+	*len = n;
+	return 0;
+}
+
+static int choke_flush(void *p)
+{
+	(void)p;
+	return 0;
+}
+
+static int choke_close(void *p)
+{
+	free(p);
+	return 0;
+}
+
+static struct io_stream *choke_memwriter(
+	struct vbuffer **restrict pvbuf, const size_t ungated,
+	const size_t chunk)
+{
+	static const struct io_stream_vftable vftable = {
+		.write = choke_write,
+		.flush = choke_flush,
+		.close = choke_close,
+	};
+	struct choke_memwriter *restrict m = malloc(sizeof(*m));
+	if (m == NULL) {
+		return NULL;
+	}
+	m->s = (struct io_stream){ .vftable = &vftable, .data = NULL };
+	m->pvbuf = pvbuf;
+	m->ungated = ungated;
+	m->chunk = chunk;
+	m->written = 0;
+	return &m->s;
+}
+
+/* A reader that always reports an immediate error and no data, to check that a
+ * codec reader surfaces the base's error code rather than its own status. */
+struct err_memstream {
+	struct io_stream s;
+	int err;
+};
+
+static int
+err_direct_read(void *p, const void **restrict buf, size_t *restrict len)
+{
+	struct err_memstream *restrict m = p;
+	(void)buf;
+	*len = 0;
+	return m->err;
+}
+
+static int err_mem_close(void *p)
+{
+	free(p);
+	return 0;
+}
+
+static struct io_stream *err_memreader(const int err)
+{
+	static const struct io_stream_vftable vftable = {
+		.direct_read = err_direct_read,
+		.close = err_mem_close,
+	};
+	struct err_memstream *restrict m = malloc(sizeof(*m));
+	if (m == NULL) {
+		return NULL;
+	}
+	m->s = (struct io_stream){ .vftable = &vftable, .data = NULL };
+	m->err = err;
+	return &m->s;
+}
+
 static int write_tempfile(char *restrict tmpl, const void *content, size_t len)
 {
 	const int fd = mkstemp(tmpl);
@@ -1454,6 +1550,173 @@ T_DECLARE_BENCH(bench_gzip_roundtrip)
  * zeros expands past the cap, and the streaming copy must fail before
  * delivering the whole payload. Exercised for both the inflate and gunzip
  * streams. */
+/* Each of the four unsupported BOMs (UTF-16/32 BE/LE) must be rejected with an
+ * error rather than served as Lua source, and the rejection must be sticky: a
+ * second read may neither hand out the rejected prefix nor refill and re-run
+ * BOM detection from mid-file. */
+T_DECLARE_CASE(codec_lua_reader_rejects_unsupported_boms)
+{
+	static const struct {
+		const char *name;
+		unsigned char bom[4];
+		size_t len;
+	} cases[] = {
+		{ "UTF-32 BE", { 0x00, 0x00, 0xFE, 0xFF }, 4 },
+		{ "UTF-32 LE", { 0xFF, 0xFE, 0x00, 0x00 }, 4 },
+		{ "UTF-16 BE", { 0xFE, 0xFF }, 2 },
+		{ "UTF-16 LE", { 0xFF, 0xFE }, 2 },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		char path[] = "/tmp/codec_test_XXXXXX";
+		unsigned char content[16];
+		memcpy(content, cases[i].bom, cases[i].len);
+		memcpy(content + cases[i].len, "print(1)\n", 9);
+		T_CHECK(write_tempfile(path, content, cases[i].len + 9) == 0);
+
+		struct io_stream *r = codec_lua_reader(path);
+		T_CHECK(r != NULL);
+		unsigned char buf[32];
+		size_t n = sizeof(buf);
+		/* the BOM is rejected with an error, not served */
+		T_EXPECT(io_stream_read(r, buf, &n) != 0);
+		/* the error is sticky on the next read */
+		n = sizeof(buf);
+		T_EXPECT(io_stream_read(r, buf, &n) != 0);
+		(void)io_stream_close(r);
+		(void)unlink(path);
+	}
+}
+
+/* A gzip member carrying optional header fields (FEXTRA/FNAME/FCOMMENT/FHCRC)
+ * must decode when delivered in tiny refills that split those fields across
+ * reads -- exercising header-parse resumption on a successful decode, not only
+ * on the truncation paths. */
+T_DECLARE_CASE(codec_gzip_optional_headers_across_refills)
+{
+	enum { N = 2048 };
+	uint_least8_t src[N], out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 29U + 3U) & 0xffU);
+	}
+	struct vbuffer *g = gzip_with_opt_headers(src, N, false);
+	T_CHECK(g != NULL);
+	struct io_stream *r =
+		codec_gzip_reader(drip_memreader(VBUF_DATA(g), VBUF_LEN(g), 3));
+	T_CHECK(r != NULL);
+	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT_EQ(io_stream_close(r), 0);
+	T_EXPECT_MEMEQ(out, src, N);
+	VBUF_FREE(g);
+}
+
+/* codec_inflate_reader (raw DEFLATE, no header/checksum) must not silently
+ * accept a corrupted or truncated stream. */
+T_DECLARE_CASE(codec_inflate_corrupt_and_truncated_fails)
+{
+	enum { N = 1024 };
+	uint_least8_t src[N], out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 13U + 7U) & 0xffU);
+	}
+
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	struct io_stream *w = codec_deflate_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, src, N));
+	T_EXPECT_EQ(io_stream_close(w), 0);
+	T_CHECK(compressed != NULL && VBUF_LEN(compressed) >= 8);
+
+	/* corrupting a mid-stream byte must not decode back to the original */
+	{
+		unsigned char *d = VBUF_DATA(compressed);
+		const size_t mid = VBUF_LEN(compressed) / 2;
+		const unsigned char saved = d[mid];
+		d[mid] ^= 0xffu;
+		struct io_stream *r = codec_inflate_reader(
+			io_memreader(d, VBUF_LEN(compressed)));
+		T_CHECK(r != NULL);
+		const bool ok = stream_read_exact(r, out, N);
+		(void)io_stream_close(r);
+		T_EXPECT(!ok || memcmp(out, src, N) != 0);
+		d[mid] = saved;
+	}
+	/* a truncated stream must fail rather than yield a short body */
+	{
+		struct io_stream *r = codec_inflate_reader(
+			io_memreader(VBUF_DATA(compressed), 4));
+		T_CHECK(r != NULL);
+		T_EXPECT(!stream_read_exact(r, out, N));
+		(void)io_stream_close(r);
+	}
+	VBUF_FREE(compressed);
+}
+
+/* Regression: the gzip member-finish path must be resumable across a base that
+ * short-writes. Once tdefl returns DONE a retried finish must neither re-enter
+ * tdefl (which then returns TDEFL_STATUS_BAD_PARAM forever) nor rewrite the
+ * trailer prefix; the resumed flush yields one valid member. */
+T_DECLARE_CASE(codec_gzip_finish_resumes_after_short_write)
+{
+	enum { N = 512 };
+	uint_least8_t src[N], out[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 17U + 5U) & 0xffU);
+	}
+
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	/* ungated 10 lets the constructor's header write through; 1 byte per
+	 * call thereafter forces the body/finish/trailer to drain a byte at a
+	 * time so the resumable paths are exercised end to end */
+	struct io_stream *w =
+		codec_gzip_writer(choke_memwriter(&compressed, 10, 1));
+	T_CHECK(w != NULL);
+
+	/* write the source, retrying on the -1 backpressure return */
+	size_t total = 0;
+	int guard = 0;
+	while (total < N && guard++ < 1000000) {
+		size_t n = N - total;
+		const int err = io_stream_write(w, src + total, &n);
+		total += n;
+		T_CHECK(err == 0 || err == -1);
+	}
+	T_EXPECT_EQ(total, (size_t)N);
+
+	/* flush finishes the member; retry until the resumable finish completes */
+	int ret;
+	guard = 0;
+	do {
+		ret = io_stream_flush(w);
+		T_CHECK(ret == 0 || ret == -1);
+	} while (ret == -1 && guard++ < 1000000);
+	T_EXPECT_EQ(ret, 0);
+	T_EXPECT_EQ(io_stream_close(w), 0);
+
+	/* the produced member must decode back to the source */
+	struct io_stream *r = codec_gzip_reader(
+		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
+	T_CHECK(r != NULL);
+	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT_EQ(io_stream_close(r), 0);
+	T_EXPECT_MEMEQ(out, src, N);
+	VBUF_FREE(compressed);
+}
+
+/* An immediate base error (no data) must surface as that error code, not the
+ * inflate reader's own TINFL_STATUS_NEEDS_MORE_INPUT. */
+T_DECLARE_CASE(codec_inflate_surfaces_base_error)
+{
+	enum { SENTINEL = -5 };
+	struct io_stream *r = codec_inflate_reader(err_memreader(SENTINEL));
+	T_CHECK(r != NULL);
+	unsigned char out[16];
+	size_t n = sizeof(out);
+	T_EXPECT_EQ(io_stream_read(r, out, &n), (int)SENTINEL);
+	(void)io_stream_close(r);
+}
+
 T_DECLARE_CASE(codec_reader_aborts_decompression_bomb)
 {
 	struct io_stream *(*const writers[])(struct io_stream *) = {
@@ -1503,6 +1766,11 @@ T_DECLARE_CASE(codec_reader_aborts_decompression_bomb)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(codec_lua_reader_rejects_unsupported_boms),
+	T_CASE(codec_gzip_optional_headers_across_refills),
+	T_CASE(codec_inflate_corrupt_and_truncated_fails),
+	T_CASE(codec_gzip_finish_resumes_after_short_write),
+	T_CASE(codec_inflate_surfaces_base_error),
 	T_CASE(codec_lua_reader_strips_shebang),
 	T_CASE(codec_lua_reader_strips_bom_and_shebang),
 	T_CASE(codec_lua_reader_strips_bom_only),

@@ -17,10 +17,12 @@
 
 struct io_stream;
 
-/* RFC 1950 - zlib format (DEFLATE with adler32 checksum) */
+/* Declarations follow the definition order in codec.c: the compression
+ * writers (zlib/raw DEFLATE) are grouped with their shared writer helper, the
+ * decompression readers with theirs, then gzip and the Lua reader. */
 
 /**
- * @brief Create a zlib compression writer stream
+ * @brief Create a zlib compression writer stream (RFC 1950)
  * @param base The base stream to write compressed data to
  * @return New stream, or NULL on error
  *
@@ -30,16 +32,7 @@ struct io_stream;
 struct io_stream *codec_zlib_writer(struct io_stream *base);
 
 /**
- * @brief Create a zlib decompression reader stream
- * @param base The base stream to read compressed data from
- * @return New stream, or NULL on error; validates zlib header and adler32 checksum
- */
-struct io_stream *codec_zlib_reader(struct io_stream *base);
-
-/* RFC 1951 - raw DEFLATE format */
-
-/**
- * @brief Create a raw DEFLATE compression writer stream
+ * @brief Create a raw DEFLATE compression writer stream (RFC 1951)
  * @param base The base stream to write compressed data to
  * @return New stream, or NULL on error
  *
@@ -50,7 +43,14 @@ struct io_stream *codec_zlib_reader(struct io_stream *base);
 struct io_stream *codec_deflate_writer(struct io_stream *base);
 
 /**
- * @brief Create a raw DEFLATE decompression reader stream
+ * @brief Create a zlib decompression reader stream (RFC 1950)
+ * @param base The base stream to read compressed data from
+ * @return New stream, or NULL on error; validates zlib header and adler32 checksum
+ */
+struct io_stream *codec_zlib_reader(struct io_stream *base);
+
+/**
+ * @brief Create a raw DEFLATE decompression reader stream (RFC 1951)
  * @param base The base stream to read compressed data from
  * @return New stream, or NULL on error; no header or checksum validation
  */
@@ -79,13 +79,6 @@ struct io_stream *codec_gzip_writer(struct io_stream *base);
  */
 struct io_stream *codec_gzip_reader(struct io_stream *base);
 
-/**
- * @brief Create a Lua source reader; auto-detects gzip, strips UTF-8 BOM and shebang
- * @param path File path
- * @return Stream (caller owns; close with io_stream_close()), or NULL on error
- */
-struct io_stream *codec_lua_reader(const char *path);
-
 #if WITH_LUA
 struct lua_State;
 
@@ -110,5 +103,12 @@ struct codec_lua_stream {
 const char *codec_lua_stream_read(
 	struct lua_State *restrict L, void *ud, size_t *restrict sz);
 #endif /* WITH_LUA */
+
+/**
+ * @brief Create a Lua source reader; auto-detects gzip, strips UTF-8 BOM and shebang
+ * @param path File path
+ * @return Stream (caller owns; close with io_stream_close()), or NULL on error
+ */
+struct io_stream *codec_lua_reader(const char *path);
 
 #endif /* PROTO_CODEC_H */
