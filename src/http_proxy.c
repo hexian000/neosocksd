@@ -8,6 +8,7 @@
 #include "proto/http.h"
 #include "ruleset/ruleset.h"
 #include "server.h"
+#include "transfer.h"
 #include "util.h"
 
 #include "codec/base64.h"
@@ -24,9 +25,6 @@
 
 #include <ev.h>
 
-#if WITH_THREADS
-#include <stdatomic.h>
-#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -110,11 +108,7 @@ struct http_pump {
 	struct http_framer framer;
 	/* traffic counter for this direction (byt_up for the request pump,
 	 * byt_down for the response pump); counts framed bytes sent to dst_fd */
-#if WITH_THREADS
-	atomic_uint_least64_t *byt;
-#else
-	uint_least64_t *byt;
-#endif
+	xfer_counter *byt;
 	/* body complete and output flushed; for the response pump the dst write
 	 * side is also shut down (see pump_finished) */
 	bool done;
@@ -198,7 +192,11 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
 		}
-#endif
+		/* a request that completed in this same loop sweep left w_finish
+		 * pending with a delivered dialreq; drop it so it cannot fire into
+		 * this freed ctx and the dialreq is not leaked */
+		ruleset_request_cancel(loop, &ctx->ruleset_callback);
+#endif /* WITH_RULESET */
 		stats->num_halfopen--;
 		return;
 	case STATE_RESPONSE:
@@ -221,12 +219,7 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 			ev_io_stop(loop, &ctx->stream->req.w);
 			ev_io_stop(loop, &ctx->stream->rsp.w);
 		}
-#if WITH_THREADS
-		atomic_fetch_sub_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed);
-#else
-		ctx->s->num_sessions--;
-#endif
+		server_session_decr(ctx->s);
 		return;
 	case STATE_BIDIRECTIONAL:
 		/* transfer_ctx is self-owned; nothing to do */
@@ -291,8 +284,12 @@ static size_t readahead_len(const struct http_conn *restrict p)
 	return p->rbuf.len - (size_t)((unsigned char *)p->next - p->rbuf.data);
 }
 
-/* forward declarations (defined later in this file) */
-static bool fwd_append(struct http_conn *restrict p, const char *restrict s);
+/* Append a string to the connection's write buffer, failing instead of
+ * truncating. */
+static bool fwd_append(struct http_conn *restrict p, const char *restrict s)
+{
+	return http_append((struct buffer *)&p->wbuf, s);
+}
 
 /* -------------------------------------------------------------------------
  * proxy_pass HTTP/1.1 framing forwarder
@@ -304,8 +301,6 @@ static bool fwd_append(struct http_conn *restrict p, const char *restrict s);
  * for Expect: 100-continue and early upstream responses). CONNECT keeps the
  * raw relay. No keep-alive: the connection closes once both directions finish.
  * ---------------------------------------------------------------------- */
-
-static void pump_cb(struct ev_loop *loop, ev_io *watcher, const int revents);
 
 /* Point a pump's single watcher at src(read) or dst(write). */
 static void
@@ -361,6 +356,12 @@ static void stream_fail(
 			}
 			off += n;
 		}
+		/* This page replaces the response headers the pump would have
+		 * sent, on the same socket in the same phase, so it belongs to
+		 * the same counter the pump would have used -- off is exactly
+		 * what reached the wire, since a failed send breaks out without
+		 * advancing it. */
+		xfer_count(&s->ctx->s->byt_down, off);
 	}
 	stream_close(loop, s);
 }
@@ -382,17 +383,6 @@ static void pump_finished(struct ev_loop *loop, struct http_pump *restrict p)
 		HTTP_CTX_LOG(DEBUG, s->ctx, "stream complete");
 		stream_close(loop, s);
 	}
-}
-
-/* Account bytes forwarded to dst_fd for this direction. */
-static void pump_count(struct http_pump *restrict p, const size_t n)
-{
-#if WITH_THREADS
-	atomic_fetch_add_explicit(
-		p->byt, (uint_least64_t)n, memory_order_relaxed);
-#else
-	*p->byt += (uint_least64_t)n;
-#endif
 }
 
 /* Drive one framing pump as far as it can go without blocking. All body framing
@@ -417,7 +407,7 @@ pump_run(struct ev_loop *restrict loop, struct http_pump *restrict p)
 				return;
 			}
 			http_framer_drained(f, n);
-			pump_count(p, n);
+			xfer_count(p->byt, n);
 			stream_touch(loop, p->owner);
 			if (http_framer_pending(f, &buf) > 0) {
 				pump_watch(loop, p, EV_WRITE);
@@ -654,6 +644,14 @@ static bool rsp_build_interim(struct http_stream *restrict s)
 	       fwd_append(conn, " neosocksd\r\n") && fwd_append(conn, "\r\n");
 }
 
+/* True when the client request is HTTP/1.0. The request line stays live through
+ * STATE_STREAM (see struct http_ctx.conn) and its version was validated by the
+ * request parser, so a bare strcmp is enough. */
+static bool rsp_client_is_http_1_0(const struct http_stream *restrict s)
+{
+	return strcmp(s->ctx->conn.msg.req.version, "HTTP/1.0") == 0;
+}
+
 /* Rebuild the final response headers for the client into conn.wbuf and decide
  * the response body framing. */
 static bool rsp_build_response(struct http_stream *restrict s)
@@ -696,7 +694,28 @@ static bool rsp_build_response(struct http_stream *restrict s)
 	 * (e.g. a HEAD reply keeps its Content-Length); only the body is
 	 * suppressed below. */
 	const bool bodiless = s->head_request || code == 204 || code == 304;
-	if (s->rsp_te_prefix != NULL) {
+	/* RFC 9112 §6.1: an HTTP/1.0 client cannot parse chunked framing, so never
+	 * send it Transfer-Encoding; forward a known length, else deliver the body
+	 * EOF-delimited (the Connection: close above bounds it). */
+	const bool client_1_0 = rsp_client_is_http_1_0(s);
+	if (client_1_0 && s->rsp_te_prefix != NULL && !bodiless) {
+		/* The framer only strips the final "chunked": the inner codings
+		 * stay applied to the forwarded octets, and the only way to tell
+		 * the client about them is a Transfer-Encoding header, which the
+		 * branch below must not send to a 1.0 client. Delivering them as
+		 * identity content would hand it undecodable bytes it has no way
+		 * to know are encoded, so refuse the combination the way an
+		 * unsupported final coding already is. (A bodiless response --
+		 * HEAD, 204, 304 -- carries no such octets and falls through.) */
+		HTTP_CTX_LOG(
+			WARNING, s->ctx,
+			"HTTP/1.0 client cannot be told about the response's inner transfer-codings");
+		return false;
+	}
+	if (client_1_0) {
+		ok = ok && http_append_framing(
+				   wbuf, false, s->rsp_clen_known, s->rsp_clen);
+	} else if (s->rsp_te_prefix != NULL) {
 		/* re-emit the inner codings ahead of the chunked framing the
 		 * response pump regenerates for the forwarded opaque bytes */
 		ok = ok && fwd_append(conn, "Transfer-Encoding: ") &&
@@ -733,17 +752,12 @@ static bool rsp_build_response(struct http_stream *restrict s)
 	 * ends at rsp_reader.pos, so seed the filter with [pos, in_len) as the
 	 * start of the body (init resets in_len, so capture it first) */
 	const size_t buffered = rsp->framer.in_len;
-	http_framer_init(&rsp->framer, mode, clen, mode == HTTP_BODY_CHUNKED);
+	/* dechunk the upstream body but do not re-chunk it for a 1.0 client (no TE
+	 * header was emitted); the dechunked bytes go out EOF-delimited */
+	const bool rechunk = (mode == HTTP_BODY_CHUNKED) && !client_1_0;
+	http_framer_init(&rsp->framer, mode, clen, rechunk);
 	http_framer_seed(&rsp->framer, s->rsp_reader.pos, buffered);
 	return true;
-}
-
-/* True when the client request is HTTP/1.0. The request line stays live through
- * STATE_STREAM (see struct http_ctx.conn) and its version was validated by the
- * request parser, so a bare strcmp is enough. */
-static bool rsp_client_is_http_1_0(const struct http_stream *restrict s)
-{
-	return strcmp(s->ctx->conn.msg.req.version, "HTTP/1.0") == 0;
 }
 
 /* Discard the just-parsed interim (1xx) header block at the front of
@@ -866,15 +880,19 @@ rsp_run(struct ev_loop *restrict loop, struct http_stream *restrict s)
 					stream_close(loop, s);
 					return;
 				}
-				pump_count(rsp, n);
+				xfer_count(rsp->byt, n);
 				stream_touch(loop, s);
 				s->whdr_pos += n;
-			}
-			/* header block fully sent. A dropped malformed interim
-			 * writes nothing (wbuf.len == 0); it must not flip
-			 * rsp_started, which guards whether a later failure can
-			 * still emit a best-effort error page to the client. */
-			if (conn->wbuf.len > 0) {
+				/* Once any header byte is on the wire a later
+				 * failure can no longer prepend a clean error
+				 * page, so mark the response started immediately
+				 * -- not only after the whole block flushes, which
+				 * left a mid-block backpressure window where
+				 * stream_fail would append an error page after the
+				 * partial header the client already received. A
+				 * dropped malformed interim writes nothing
+				 * (wbuf.len == 0), never enters this loop, and so
+				 * correctly leaves rsp_started untouched. */
 				s->rsp_started = true;
 			}
 			if (s->rsp_interim) {
@@ -1015,9 +1033,9 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		dialreq_free(ctx->dialreq);
 		ctx->dialreq = NULL;
 		const size_t readahead = readahead_len(&ctx->conn);
-		if (readahead > 0 &&
-		    !forward_readahead(
-			    ctx->dialed_fd, ctx->conn.next, readahead)) {
+		if (readahead > 0 && !forward_readahead(
+					     ctx->dialed_fd, ctx->conn.next,
+					     readahead, &ctx->s->byt_up)) {
 			HTTP_CTX_LOG(
 				WARNING, ctx,
 				"failed to forward pipelined bytes to upstream");
@@ -1042,8 +1060,8 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			const size_t readahead = readahead_len(&ctx->conn);
 			if (readahead > 0 &&
 			    !forward_readahead(
-				    ctx->dialed_fd, ctx->conn.next,
-				    readahead)) {
+				    ctx->dialed_fd, ctx->conn.next, readahead,
+				    &ctx->s->byt_up)) {
 				HTTP_CTX_LOG(
 					WARNING, ctx,
 					"failed to forward pipelined bytes to upstream");
@@ -1074,6 +1092,9 @@ static void
 http_ctx_forward(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	ctx->state = STATE_FORWARD;
+	/* conn now writes the rebuilt request to the upstream rather than to the
+	 * client, so its send accounting moves to the upstream-facing counter */
+	ctx->conn.byt_sent = &ctx->s->stats.byt_dial_send;
 	ev_io_init(&ctx->w_send, send_cb, ctx->dialed_fd, EV_WRITE);
 	ctx->w_send.data = ctx;
 	ev_io_start(loop, &ctx->w_send);
@@ -1118,10 +1139,8 @@ static void send_errpage(
 
 static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
-	if (ctx->dialreq == NULL) {
-		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
+	/* every caller resolves ctx->dialreq (and its error code) first */
+	ASSERT(ctx->dialreq != NULL);
 	HTTP_CTX_LOG(VERBOSE, ctx, "connect");
 	ctx->state = STATE_CONNECT;
 	dialer_do(
@@ -1233,13 +1252,6 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 }
 #endif /* WITH_RULESET */
 
-/* Append a string to the connection's write buffer, failing instead of
- * truncating. */
-static bool fwd_append(struct http_conn *restrict p, const char *restrict s)
-{
-	return http_append((struct buffer *)&p->wbuf, s);
-}
-
 /* Rebuild the client request headers in wbuf for forwarding to the upstream
  * and normalize the dial target into ctx->req_target. The body is left in the
  * read buffer for the framing forwarder. Returns 0 on success or an HTTP
@@ -1273,8 +1285,10 @@ static uint_fast16_t build_forward_req(struct http_ctx *restrict ctx)
 	if (parsed.query != NULL) {
 		ok = ok && fwd_append(p, "?") && fwd_append(p, parsed.query);
 	}
-	ok = ok && fwd_append(p, " ") && fwd_append(p, version) &&
-	     fwd_append(p, "\r\n");
+	/* RFC 9110 §6.2: an intermediary sends its own HTTP version in forwarded
+	 * messages, not the client's; the received protocol still travels in the
+	 * Via entry below. */
+	ok = ok && fwd_append(p, " HTTP/1.1\r\n");
 	/* RFC 9112 §3.2.2: regenerate Host from the request target */
 	ok = ok && fwd_append(p, "Host: ") && fwd_append(p, parsed.host) &&
 	     fwd_append(p, "\r\n");
@@ -1323,19 +1337,24 @@ static uint_fast16_t build_forward_req(struct http_ctx *restrict ctx)
 	return 0;
 }
 
-static struct dialreq *
-make_dialreq(struct http_ctx *restrict ctx, const char *restrict addr_str)
+/* Build the dial request for @p addr_str into *out. Returns 0 on success,
+ * HTTP_BAD_REQUEST for an unparsable client-supplied target, or
+ * HTTP_INTERNAL_SERVER_ERROR on OOM. */
+static uint_fast16_t make_dialreq(
+	struct http_ctx *restrict ctx, const char *restrict addr_str,
+	struct dialreq **restrict out)
 {
 	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
 	if (req == NULL) {
 		LOGOOM();
-		return NULL;
+		return HTTP_INTERNAL_SERVER_ERROR;
 	}
 	if (!dialaddr_parse(&req->addr, addr_str, strlen(addr_str))) {
 		dialreq_free(req);
-		return NULL;
+		return HTTP_BAD_REQUEST;
 	}
-	return req;
+	*out = req;
+	return 0;
 }
 
 static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
@@ -1358,7 +1377,12 @@ static void http_proxy_pass(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		return;
 	}
 #endif
-	ctx->dialreq = make_dialreq(ctx, ctx->req_target);
+	const uint_fast16_t dial_code =
+		make_dialreq(ctx, ctx->req_target, &ctx->dialreq);
+	if (dial_code != 0) {
+		send_errpage(loop, ctx, dial_code);
+		return;
+	}
 	http_connect(loop, ctx);
 }
 
@@ -1381,7 +1405,12 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 #endif
 
-	ctx->dialreq = make_dialreq(ctx, addr_str);
+	const uint_fast16_t dial_code =
+		make_dialreq(ctx, addr_str, &ctx->dialreq);
+	if (dial_code != 0) {
+		send_errpage(loop, ctx, dial_code);
+		return;
+	}
 	http_connect(loop, ctx);
 }
 
@@ -1419,18 +1448,28 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 static void
 timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
-	(void)loop;
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct http_ctx *restrict ctx = watcher->data;
-	if (ctx->state < STATE_STREAM) {
-		/* handshake deadline: the connection never established */
-		ctx->s->stats.num_reject_timeout++;
-	} else {
-		/* idle while establishing the exchange (the request stalled or the
-		 * upstream never responded); the response stream, once flowing, has
-		 * already released this timer */
+	if (ctx->state == STATE_STREAM) {
+		/* the upstream never produced response headers; deliver a 504 if
+		 * nothing has reached the client yet, matching the dialer-failure
+		 * 502, rather than a bare FIN with no status */
 		HTTP_CTX_LOG(DEBUG, ctx, "stream idle timeout");
+		stream_fail(loop, ctx->stream, HTTP_GATEWAY_TIMEOUT);
+		return;
 	}
+	if (ctx->state == STATE_CONNECT) {
+		/* the dial deadline passed: cancel it and answer 504 rather than
+		 * closing the client with no status */
+		HTTP_CTX_LOG(WARNING, ctx, "connect timeout");
+		dialer_cancel(&ctx->dialer, loop);
+		ctx->s->stats.num_reject_timeout++;
+		send_errpage(loop, ctx, HTTP_GATEWAY_TIMEOUT);
+		return;
+	}
+	/* any other pre-stream handshake deadline: the connection never
+	 * established, just close */
+	ctx->s->stats.num_reject_timeout++;
 	gc_unref(&ctx->gcbase);
 }
 

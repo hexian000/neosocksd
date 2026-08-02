@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -29,7 +30,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
@@ -39,12 +39,27 @@
  * virtual clock - fire the connection idle/connect/process timeouts (ev_timers
  * inside production ctx structs the test cannot reach) deterministically, with
  * no wall-clock wait. The strong-symbol interposers return a test-advanced
- * virtual time while enabled and pass through to the real clock (raw syscall)
- * otherwise, so non-timeout cases are unaffected.
+ * virtual time while enabled and pass through to the real clock otherwise, so
+ * non-timeout cases are unaffected.
  * ---------------------------------------------------------------------- */
 
 static bool g_vclock_on = false;
 static double g_vclock_sec = 0.0;
+
+/* Read the real clock for the pass-through path. Both clock_gettime() and
+ * gettimeofday() are interposed here, so the underlying clock has to be reached
+ * through a third entry point: ISO C11 timespec_get(), which libc services from
+ * its own internal clock rather than through the shadowed symbols. It is also
+ * the only such entry point that stays declared under the strict
+ * _POSIX_C_SOURCE the FORCE_POSIX build selects. */
+static int real_clock(struct timespec *restrict ts)
+{
+	if (timespec_get(ts, TIME_UTC) != TIME_UTC) {
+		errno = EINVAL;
+		return -1;
+	}
+	return 0;
+}
 
 int clock_gettime(clockid_t clk, struct timespec *ts)
 {
@@ -53,7 +68,8 @@ int clock_gettime(clockid_t clk, struct timespec *ts)
 		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
 		return 0;
 	}
-	return (int)syscall(SYS_clock_gettime, clk, ts);
+	(void)clk;
+	return real_clock(ts);
 }
 
 int gettimeofday(struct timeval *tv, void *tz)
@@ -63,16 +79,24 @@ int gettimeofday(struct timeval *tv, void *tz)
 		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
 		return 0;
 	}
-	return (int)syscall(SYS_gettimeofday, tv, tz);
+	(void)tz;
+	struct timespec ts;
+	if (real_clock(&ts) != 0) {
+		return -1;
+	}
+	tv->tv_sec = ts.tv_sec;
+	tv->tv_usec = (long)(ts.tv_nsec / 1000);
+	return 0;
 }
 
-/* Freeze virtual time at the current real instant, so a timer armed in real
- * time (before this call) has a consistent virtual deadline the test can cross
- * by advancing. Use when a case must first drive real-time reads. */
+/* Freeze virtual time at the current real instant. Engage it before the case
+ * arms the timer under test, so both the arming and the crossing happen on
+ * virtual time; a case that must first drive real-time reads engages it later
+ * and instead keeps its timeout too large for real elapsed time to reach. */
 static void vclock_freeze_now(void)
 {
 	struct timespec ts;
-	(void)syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
+	T_CHECK(real_clock(&ts) == 0);
 	g_vclock_sec = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 	g_vclock_on = true;
 }
@@ -165,6 +189,10 @@ struct stub_state {
 	bool ruleset_state_nonnull;
 	struct ev_loop *ruleset_loop;
 	struct ruleset_state *ruleset_state_ptr;
+	/* the ctx's callback and the ctx->ruleset_state slot, captured at
+	 * dispatch so a case can emulate the ruleset completing out of band */
+	struct ruleset_callback *ruleset_cb_ptr;
+	struct ruleset_state **ruleset_state_slot;
 	int_least32_t ruleset_cancel_calls;
 	int_least32_t dialer_cancel_calls;
 	int_least32_t dialer_do_calls;
@@ -186,6 +214,8 @@ static struct stub_state S = {
 	.ruleset_state_nonnull = false,
 	.ruleset_loop = NULL,
 	.ruleset_state_ptr = NULL,
+	.ruleset_cb_ptr = NULL,
+	.ruleset_state_slot = NULL,
 	.ruleset_cancel_calls = 0,
 	.dialer_cancel_calls = 0,
 	.dialer_do_calls = 0,
@@ -260,6 +290,8 @@ static void reset_stub_state(void)
 	S.ruleset_state_nonnull = false;
 	S.ruleset_loop = NULL;
 	S.ruleset_state_ptr = NULL;
+	S.ruleset_cb_ptr = NULL;
+	S.ruleset_state_slot = NULL;
 	S.ruleset_cancel_calls = 0;
 	S.dialer_cancel_calls = 0;
 	S.dialer_do_calls = 0;
@@ -459,6 +491,17 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 	S.ruleset_cancel_calls++;
 }
 
+void ruleset_request_cancel(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb)
+{
+	if (!ev_is_pending(&cb->w_finish)) {
+		return;
+	}
+	dialreq_free(cb->request.req);
+	cb->request.req = NULL;
+	ev_clear_pending(loop, &cb->w_finish);
+}
+
 bool ruleset_resolve(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	const char *restrict request, const char *restrict username,
@@ -473,6 +516,8 @@ bool ruleset_resolve(
 	(void)snprintf(
 		S.captured_password, sizeof(S.captured_password), "%s",
 		password != NULL ? password : "");
+	S.ruleset_cb_ptr = callback;
+	S.ruleset_state_slot = state;
 	if (S.ruleset_state_nonnull) {
 		S.ruleset_state_ptr =
 			(struct ruleset_state *)&ruleset_state_token;
@@ -617,6 +662,17 @@ static int write_all(const int fd, const void *buf, size_t len)
 			if (errno == EINTR) {
 				continue;
 			}
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/* transient send-buffer backpressure on the
+				 * nonblocking socketpair: wait for writability
+				 * rather than failing on the first short window */
+				struct pollfd pfd = { .fd = fd,
+						      .events = POLLOUT };
+				if (poll(&pfd, 1, 1000) <= 0) {
+					return -1;
+				}
+				continue;
+			}
 			return -1;
 		}
 		if (n == 0) {
@@ -674,9 +730,18 @@ static ssize_t recv_at_least(
 	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
 	const size_t cap, const size_t min_bytes)
 {
-	(void)min_bytes;
-	drive_loop(loop);
-	return (ssize_t)drain_fd(fd, buf, 0, cap);
+	size_t off = 0;
+	/* Drive the proxy and drain until the caller's floor is met, the buffer
+	 * fills, or a round makes no progress (data source exhausted); each
+	 * round is bounded by drive_loop's watchdog. */
+	for (;;) {
+		drive_loop(loop);
+		const size_t got = drain_fd(fd, buf, off, cap);
+		if (got >= min_bytes || got == off || got >= cap) {
+			return (ssize_t)got;
+		}
+		off = got;
+	}
 }
 
 /* Drive the loop to quiescence, then read from fd until it stops yielding
@@ -750,6 +815,7 @@ T_DECLARE_CASE(plain_http_origin_form_returns_400)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -769,9 +835,6 @@ T_DECLARE_CASE(plain_http_origin_form_returns_400)
 	ev_loop_destroy(loop);
 }
 
-/* Regression: bytes past a Content-Length-bounded body are a pipelined
- * second request; the proxy must reject (400) rather than smuggle them
- * upstream as body content. */
 /* proxy_pass forwards a Content-Length request body to the upstream and the
  * Content-Length response body back to the client through the framing pumps. */
 T_DECLARE_CASE(proxy_pass_forwards_content_length)
@@ -823,6 +886,15 @@ T_DECLARE_CASE(proxy_pass_forwards_content_length)
 	/* traffic is counted per direction */
 	T_EXPECT((uintmax_t)s.byt_up >= 5); /* request body "hello" */
 	T_EXPECT((uintmax_t)s.byt_down >= 3); /* response body "abc" */
+	/* The rebuilt request headers go out on the upstream socket, so they
+	 * belong to the upstream-facing setup counter. Nothing is ever sent to
+	 * the client through the connection itself on this path -- the response
+	 * headers go out through the response pump (byt_down) -- so the
+	 * client-facing send counter stays at zero. */
+	T_EXPECT(
+		(uintmax_t)s.stats.byt_dial_send >=
+		(uintmax_t)CONSTSTRLEN("POST / HTTP/1.1\r\n"));
+	T_EXPECT_EQ((uintmax_t)s.stats.byt_client_send, (uintmax_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -928,6 +1000,10 @@ T_DECLARE_CASE(proxy_pass_response_bad_status_code_returns_502)
 	T_EXPECT(cn > 0);
 	T_EXPECT(has_http_status(cl, (size_t)cn, "502"));
 	T_EXPECT(memmem(cl, (size_t)cn, "20X", 3) == NULL);
+	/* the error page replaces the response headers the pump would have sent
+	 * on this socket, so it lands in the same counter; nothing else reached
+	 * the client on this path, the upstream response having been rejected */
+	T_EXPECT((uintmax_t)s.byt_down >= (uintmax_t)cn);
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -1334,6 +1410,53 @@ T_DECLARE_CASE(proxy_pass_chunked_response)
 	ev_loop_destroy(loop);
 }
 
+/* RFC 9112 §6.1: a chunked upstream response to an HTTP/1.0 client must be
+ * dechunked and delivered EOF-delimited, never with Transfer-Encoding (which a
+ * 1.0 client cannot parse). */
+T_DECLARE_CASE(proxy_pass_chunked_response_to_http_1_0_client_dechunked)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.0\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Transfer-Encoding: chunked\r\n"
+				   "\r\n"
+				   "3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	/* no chunked framing reaches the 1.0 client */
+	T_EXPECT(memmem(cl, (size_t)cn, "Transfer-Encoding", 17) == NULL);
+	/* the dechunked bytes are delivered contiguously, EOF-delimited (no
+	 * chunk-size lines, no terminating 0-chunk) */
+	T_EXPECT(memmem(cl, (size_t)cn, "abcdefg", 7) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "0\r\n\r\n", 5) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 /* Regression: an upstream response with a transfer-coding other than "chunked"
  * (and no Content-Length) cannot be framed, so it must be rejected with 502
  * rather than forwarded with the header dropped and the body mis-framed. */
@@ -1421,6 +1544,95 @@ T_DECLARE_CASE(proxy_pass_response_transfer_coding_stack)
 	/* the re-chunked body carries the original opaque bytes, terminated */
 	T_EXPECT(memmem(cl, (size_t)cn, "HELLO", 5) != NULL);
 	T_EXPECT(memmem(cl, (size_t)cn, "0\r\n\r\n", 5) != NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* The same coding stack cannot be delivered to an HTTP/1.0 client: the framer
+ * strips only the final "chunked", so the inner codings stay applied to the
+ * forwarded octets, and RFC 9112 §6.1 forbids the Transfer-Encoding header that
+ * would describe them. Forwarding them as identity content would be silently
+ * undecodable, so the combination is rejected with 502. */
+T_DECLARE_CASE(proxy_pass_coding_stack_to_1_0_client_returns_502)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.0\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* the chunk payload stands in for opaque inner-coding (gzip) bytes */
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Transfer-Encoding: gzip, chunked\r\n"
+				   "\r\n"
+				   "5\r\nHELLO\r\n0\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) != NULL);
+	/* neither the still-encoded body nor a header describing it escapes */
+	T_EXPECT(memmem(cl, (size_t)cn, "HELLO", 5) == NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "Transfer-Encoding", 17) == NULL);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A bodiless response carries none of those octets, so the same coding stack on
+ * a HEAD reply still reaches the 1.0 client -- as a status line with no body,
+ * the Transfer-Encoding dropped rather than the exchange failed. */
+T_DECLARE_CASE(proxy_pass_head_coding_stack_to_1_0_client_ok)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "HEAD http://example.com/ HTTP/1.0\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	static const char resp[] = "HTTP/1.1 200 OK\r\n"
+				   "Transfer-Encoding: gzip, chunked\r\n"
+				   "\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 1);
+	T_EXPECT(cn > 0);
+	T_EXPECT(memmem(cl, (size_t)cn, "200 OK", 6) != NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "502", 3) == NULL);
+	T_EXPECT(memmem(cl, (size_t)cn, "Transfer-Encoding", 17) == NULL);
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -2279,7 +2491,9 @@ T_DECLARE_CASE(proxy_pass_idle_stream_times_out)
 			   "Host: example.com\r\n\r\n";
 
 	reset_stub_state();
-	test_conf.timeout = 0.05;
+	/* the stream must establish on real time first, so the idle deadline is
+	 * armed before the freeze below: keep it far out of real elapsed reach */
+	test_conf.timeout = 10.0;
 	S.dialreq_new_ok = true;
 	S.dialaddr_parse_ok = true;
 	make_fd_pair(&dialed_fd, &upstream_fd);
@@ -2300,9 +2514,12 @@ T_DECLARE_CASE(proxy_pass_idle_stream_times_out)
 	vclock_advance(test_conf.timeout + 1.0);
 	drive_loop(loop);
 
-	unsigned char b[64];
+	unsigned char b[1024];
 	const ssize_t n = recv(peer_fd, b, sizeof(b), 0);
-	T_EXPECT_EQ(n, (ssize_t)0); /* connection closed by the idle timeout */
+	T_EXPECT(n > 0);
+	/* no response had started, so the idle timeout answers 504 rather than a
+	 * bare FIN with no status */
+	T_EXPECT(has_http_status(b, (size_t)n, "504"));
 	/* an established-then-idle stream is not a rejected connection */
 	T_EXPECT_EQ((uintmax_t)s.stats.num_reject_timeout, (uintmax_t)0);
 
@@ -2323,7 +2540,10 @@ T_DECLARE_CASE(proxy_pass_streaming_response_survives_idle)
 			   "Host: example.com\r\n\r\n";
 
 	reset_stub_state();
-	test_conf.timeout = 0.05;
+	/* the response header must arrive on real time first, so the idle
+	 * deadline is armed before the freeze below: keep it far out of real
+	 * elapsed reach */
+	test_conf.timeout = 10.0;
 	S.dialreq_new_ok = true;
 	S.dialaddr_parse_ok = true;
 	make_fd_pair(&dialed_fd, &upstream_fd);
@@ -2406,6 +2626,7 @@ T_DECLARE_CASE(malformed_proxy_authorization_returns_400)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -2449,7 +2670,9 @@ T_DECLARE_CASE(connect_with_te_hint_is_accepted)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(connect_with_invalid_target_returns_500)
+/* An unparsable client-supplied CONNECT target is a client error (400), not a
+ * server error (500). dialreq_new succeeds; only the address parse fails. */
+T_DECLARE_CASE(connect_with_invalid_target_returns_400)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
@@ -2459,6 +2682,7 @@ T_DECLARE_CASE(connect_with_invalid_target_returns_500)
 			   "\r\n";
 
 	reset_stub_state();
+	S.dialreq_new_ok = true; /* the failure is the target parse, not OOM */
 	init_server(&loop, &s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -2469,7 +2693,7 @@ T_DECLARE_CASE(connect_with_invalid_target_returns_500)
 		const ssize_t n =
 			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
 		T_EXPECT(n >= 17);
-		T_EXPECT(has_http_status(rsp, (size_t)n, "500"));
+		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
 		(void)shutdown(peer_fd, SHUT_WR);
 	}
 
@@ -2801,6 +3025,198 @@ T_DECLARE_CASE(ruleset_finish_with_req_and_dialer_error_returns_502)
 	ev_loop_destroy(loop);
 }
 
+/* proxy_pass with a ruleset: process_cb consumes ctx->req_target (guarded by
+ * ASSERT(req_target[0] != '\0')), dials the ruleset-supplied request, and
+ * forwards the upstream response -- the ruleset path for a non-CONNECT method. */
+T_DECLARE_CASE(proxy_pass_with_ruleset_forwards_response)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.ruleset_resolve_ok = true;
+	S.ruleset_reply_with_req = true;
+	S.ruleset_finish_now = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	/* the request reached the upstream via the ruleset-supplied dialreq */
+	T_EXPECT(memmem(up, (size_t)un, "GET /", 5) != NULL);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	T_EXPECT(assert_response_status(loop, peer_fd, "200"));
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* An upstream response header block larger than the framer buffer
+ * (HTTP_FRAMER_BUFSIZE) cannot be parsed and must be answered 502. */
+T_DECLARE_CASE(proxy_pass_oversized_response_headers_return_502)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* a response whose header block exceeds HTTP_FRAMER_BUFSIZE (16 KiB) */
+	static unsigned char resp[20000];
+	static const char head[] = "HTTP/1.1 200 OK\r\nX-Big: ";
+	size_t off = sizeof(head) - 1;
+	memcpy(resp, head, off);
+	memset(resp + off, 'x', sizeof(resp) - off);
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp)) == 0);
+	drive_loop(loop);
+
+	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A 204 response carries no body; the proxy forwards it and closes without a
+ * body (only HEAD was previously covered). */
+T_DECLARE_CASE(proxy_pass_204_response_has_no_body)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	unsigned char up[1024];
+	(void)recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+
+	/* 204 with a bogus Content-Length must still be treated as bodiless */
+	static const char resp[] = "HTTP/1.1 204 No Content\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+
+	unsigned char cl[1024];
+	const ssize_t cn = recv_at_least(loop, peer_fd, cl, sizeof(cl), 17);
+	T_EXPECT(cn > 0);
+	T_EXPECT(has_http_status(cl, (size_t)cn, "204"));
+	/* nothing follows the header block: the response is bodiless */
+	unsigned char *const sep = memmem(cl, (size_t)cn, "\r\n\r\n", 4);
+	T_CHECK(sep != NULL);
+	T_EXPECT_EQ((size_t)cn, (size_t)(sep - cl) + 4);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Expect: 100-continue with the client withholding the body until the relayed
+ * 100 arrives -- the full-duplex scenario the request/response pumps exist for
+ * (the existing case sends the body up front). */
+T_DECLARE_CASE(proxy_pass_100_continue_client_withholds_body)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1, upstream_fd = -1, dialed_fd = -1;
+	/* headers only: the 5-byte body is withheld */
+	const char req[] = "POST http://example.com/ HTTP/1.1\r\n"
+			   "Host: example.com\r\n"
+			   "Content-Length: 5\r\n"
+			   "Expect: 100-continue\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialaddr_parse_ok = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	/* the request headers reach the upstream even though no body was sent */
+	unsigned char up[1024];
+	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
+	T_EXPECT(un > 0);
+	T_EXPECT(memmem(up, (size_t)un, "Expect: 100-continue", 20) != NULL);
+
+	/* upstream grants 100 Continue; the client sees it and only then sends */
+	static const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
+	T_CHECK(write_all(upstream_fd, cont, sizeof(cont) - 1) == 0);
+	drive_loop(loop);
+	unsigned char c1[1024];
+	const ssize_t c1n = recv_at_least(loop, peer_fd, c1, sizeof(c1), 1);
+	T_EXPECT(c1n > 0);
+	T_EXPECT(memmem(c1, (size_t)c1n, "100 Continue", 12) != NULL);
+
+	/* now the client sends the withheld body; it must reach the upstream */
+	T_CHECK(write_all(peer_fd, "hello", 5) == 0);
+	drive_loop(loop);
+	const ssize_t un2 = recv_at_least(loop, upstream_fd, up, sizeof(up), 5);
+	T_EXPECT(un2 >= 5);
+	T_EXPECT(memmem(up, (size_t)un2, "hello", 5) != NULL);
+
+	static const char resp[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+	T_CHECK(write_all(upstream_fd, resp, sizeof(resp) - 1) == 0);
+	(void)shutdown(upstream_fd, SHUT_WR);
+	drive_loop(loop);
+	T_EXPECT(assert_response_status(loop, peer_fd, "200"));
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 {
 	struct ev_loop *loop = NULL;
@@ -2811,24 +3227,103 @@ T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 			   "\r\n";
 
 	reset_stub_state();
-	test_conf.timeout = 0.01;
+	test_conf.timeout = 10.0;
 	G.ruleset = (struct ruleset *)&ruleset_stub;
 	S.ruleset_resolve_ok = true;
 	S.ruleset_reply_with_req = true;
 	S.ruleset_finish_now = false;
 	S.ruleset_state_nonnull = true;
 
+	/* engage the virtual clock before the loop exists, so w_timeout is armed
+	 * on virtual time and no amount of real setup time can cross it */
+	vclock_freeze_now();
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
 
 	/* drive to the process state (ruleset pending, w_timeout armed), then
 	 * cross the deadline on the virtual clock and fire it -- no real wait */
 	drive_loop(loop);
-	vclock_freeze_now();
 	vclock_advance(test_conf.timeout + 1.0);
 	drive_loop(loop);
 
 	T_EXPECT(S.ruleset_cancel_calls > 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	vclock_stop();
+}
+
+/* Emulate ruleset state_complete() from an ev_check: hand the request over,
+ * detach the caller's ruleset_state, and queue the completion event.
+ *
+ * The timing is the point. libev flushes events fed before ev_run() ahead of
+ * that sweep's timers, so feeding w_finish from the case body would dispatch it
+ * before the deadline expires -- the opposite of the window under test. A check
+ * watcher is queued after the timers are, so running it at EV_MAXPRI (and
+ * w_finish at EV_MINPRI) leaves w_finish pending exactly while the timeout
+ * callback tears the ctx down, which is what a ruleset worker completing a
+ * request just as its deadline expires produces in production. */
+static void
+complete_ruleset_cb(struct ev_loop *loop, ev_check *watcher, const int revents)
+{
+	(void)revents;
+	ev_check_stop(loop, watcher);
+	*S.ruleset_state_slot = NULL;
+	S.ruleset_cb_ptr->request.req = dialreq_new(NULL, 0);
+	T_CHECK(S.ruleset_cb_ptr->request.req != NULL);
+	ev_set_priority(&S.ruleset_cb_ptr->w_finish, EV_MINPRI);
+	ev_feed_event(loop, &S.ruleset_cb_ptr->w_finish, EV_CUSTOM);
+}
+
+/* Regression: ruleset_cancel() reaches an operation only while it is still
+ * pending. Once the request completes, state_complete() has already detached
+ * the caller's ruleset_state and fed w_finish, which stays queued with the
+ * delivered dialreq. If the ctx is torn down in that window, http_ctx_stop must
+ * also ruleset_request_cancel(), or the pending event later fires ruleset_cb()
+ * on the freed ctx and the delivered request leaks. */
+T_DECLARE_CASE(process_teardown_cancels_completed_ruleset_request)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	ev_check w_complete;
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	test_conf.timeout = 10.0;
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.dialreq_new_ok = true;
+	S.ruleset_resolve_ok = true;
+	S.ruleset_reply_with_req = false; /* delivered by complete_ruleset_cb */
+	S.ruleset_finish_now = false;
+	S.ruleset_state_nonnull = true;
+
+	vclock_freeze_now();
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop); /* -> STATE_PROCESS, the request still pending */
+	T_CHECK(S.ruleset_cb_ptr != NULL);
+	T_CHECK(S.ruleset_state_slot != NULL);
+
+	/* complete the request and cross the deadline in the same sweep */
+	ev_check_init(&w_complete, complete_ruleset_cb);
+	ev_set_priority(&w_complete, EV_MAXPRI);
+	ev_check_start(loop, &w_complete);
+	vclock_advance(test_conf.timeout + 1.0);
+	drive_loop(loop);
+
+	/* the state was already detached, so the teardown could not have gone
+	 * through ruleset_cancel... */
+	T_EXPECT_EQ(S.ruleset_cancel_calls, 0);
+	/* ...the completion never dispatched into the torn-down ctx, so no dial
+	 * was ever started from it... */
+	T_EXPECT_EQ(S.dialer_do_calls, 0);
+	/* ...yet the delivered request was released rather than leaked, which
+	 * only ruleset_request_cancel() does */
+	T_EXPECT_EQ(S.dialreq_free_calls, 1);
+	T_EXPECT_EQ(S.dialreq_invalid_free_calls, 0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -2844,26 +3339,39 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 			   "\r\n";
 
 	reset_stub_state();
-	test_conf.timeout = 0.01;
+	test_conf.timeout = 10.0;
 	S.dialreq_new_ok = true;
 	S.dialaddr_parse_ok = true;
 	S.dialer_invoke_now = false;
 
+	/* engage the virtual clock before the loop exists, so w_timeout is armed
+	 * on virtual time and no amount of real setup time can cross it */
+	vclock_freeze_now();
 	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
 
 	/* drive to the connect state (dialer pending, w_timeout armed), then
 	 * cross the deadline on the virtual clock and fire it -- no real wait */
 	drive_loop(loop);
-	vclock_freeze_now();
 	vclock_advance(test_conf.timeout + 1.0);
 	drive_loop(loop);
+	/* the 504 reply is queued on w_send; restore real time so it flushes
+	 * (the frozen vclock trips drive_loop's watchdog before the async send) */
+	vclock_stop();
 
 	T_EXPECT(S.dialer_cancel_calls > 0);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_reject_timeout, (uintmax_t)1);
+	/* the dial deadline answers 504 rather than closing with no status */
+	{
+		unsigned char b[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, b, sizeof(b), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(b, (size_t)n, "504"));
+	}
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
-	vclock_stop();
 }
 
 T_DECLARE_CASE(plain_http_absolute_url_no_dialreq_returns_500)
@@ -3065,7 +3573,9 @@ T_DECLARE_CASE(plain_http_expect_100_continue_with_body_forwarded)
 
 /* Verify that the HTTP version from the client request is preserved in the
  * forwarded request line, not hard-coded to HTTP/1.1. */
-T_DECLARE_CASE(plain_http_version_preserved_in_forwarded_request)
+/* RFC 9110 §6.2: the intermediary forwards its own HTTP/1.1 version, not the
+ * client's HTTP/1.0; the received protocol still travels in the Via entry. */
+T_DECLARE_CASE(plain_http_version_rewritten_in_forwarded_request)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
@@ -3093,7 +3603,7 @@ T_DECLARE_CASE(plain_http_version_preserved_in_forwarded_request)
 			recv_at_least(loop, upstream_fd, buf, sizeof(buf), 25);
 		T_EXPECT(n >= 25);
 		T_EXPECT(
-			memmem(buf, (size_t)n, "GET /page HTTP/1.0", 18) !=
+			memmem(buf, (size_t)n, "GET /page HTTP/1.1", 18) !=
 			NULL);
 		(void)shutdown(upstream_fd, SHUT_WR);
 	}
@@ -3311,6 +3821,9 @@ T_DECLARE_CASE(connect_pipelined_bytes_forwarded_to_upstream)
 		T_EXPECT_EQ(n, (ssize_t)sizeof(got));
 		T_EXPECT(memcmp(got, payload, sizeof(got)) == 0);
 	}
+	/* the replayed bytes bypass the relay, so only the readahead call site
+	 * can count them; uncounted, they would be missing from the uplink */
+	T_EXPECT((uintmax_t)s.byt_up >= (uintmax_t)(sizeof(payload) - 1));
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -3365,6 +3878,7 @@ T_DECLARE_CASE(request_with_cl_and_te_is_rejected)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -3397,6 +3911,7 @@ T_DECLARE_CASE(request_with_te_and_cl_is_rejected)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -3429,6 +3944,7 @@ T_DECLARE_CASE(request_with_duplicate_cl_is_rejected)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -3460,6 +3976,7 @@ T_DECLARE_CASE(request_with_invalid_cl_is_rejected)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -3493,6 +4010,7 @@ T_DECLARE_CASE(request_header_value_with_bare_cr_is_rejected)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -3524,6 +4042,7 @@ T_DECLARE_CASE(request_header_value_with_ctl_is_rejected)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -3554,6 +4073,7 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
+	reset_stub_state();
 	test_server_init(&s);
 
 	serve_payload(loop, &s, req, &peer_fd);
@@ -3575,7 +4095,9 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
 /* RFC 9110 §7.6.3 / RFC 9112 §3.2.2: an HTTP/1.0 absolute-form request is
  * rewritten to origin-form with the version preserved and a Via entry naming
  * the client's "1.0" protocol version. */
-T_DECLARE_CASE(proxy_pass_http_1_0_version_and_via_forwarded)
+/* A 1.0 client's request is forwarded with the proxy's own HTTP/1.1 request
+ * line, while the Via entry records the received 1.0 protocol. */
+T_DECLARE_CASE(proxy_pass_http_1_0_client_rewritten_via_records_1_0)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
@@ -3597,7 +4119,7 @@ T_DECLARE_CASE(proxy_pass_http_1_0_version_and_via_forwarded)
 	unsigned char up[1024];
 	const ssize_t un = recv_at_least(loop, upstream_fd, up, sizeof(up), 1);
 	T_EXPECT(un > 0);
-	T_EXPECT(memmem(up, (size_t)un, "GET /page HTTP/1.0", 18) != NULL);
+	T_EXPECT(memmem(up, (size_t)un, "GET /page HTTP/1.1", 18) != NULL);
 	T_EXPECT(memmem(up, (size_t)un, "Via: 1.0 neosocksd", 18) != NULL);
 	(void)shutdown(upstream_fd, SHUT_WR);
 
@@ -3771,6 +4293,9 @@ T_DECLARE_CASE(proxy_pass_websocket_upgrade_forwards_pipelined_frames)
 	T_EXPECT(un > 0);
 	T_EXPECT(memmem(up, (size_t)un, "GET /chat HTTP/1.1", 18) != NULL);
 	T_EXPECT(memmem(up, (size_t)un, "FRAME-DATA", 10) != NULL);
+	/* the replayed frames bypass the relay, so only the readahead call site
+	 * can count them; uncounted, they would be missing from the uplink */
+	T_EXPECT((uintmax_t)s.byt_up >= (uintmax_t)CONSTSTRLEN("FRAME-DATA"));
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
@@ -3846,8 +4371,11 @@ static const struct testing_suite suite[] = {
 	T_CASE(proxy_pass_chunked_request_discards_surplus),
 	T_CASE(proxy_pass_bodyless_pipelined_not_forwarded),
 	T_CASE(proxy_pass_chunked_response),
+	T_CASE(proxy_pass_chunked_response_to_http_1_0_client_dechunked),
 	T_CASE(proxy_pass_unknown_response_transfer_encoding_returns_502),
 	T_CASE(proxy_pass_response_transfer_coding_stack),
+	T_CASE(proxy_pass_coding_stack_to_1_0_client_returns_502),
+	T_CASE(proxy_pass_head_coding_stack_to_1_0_client_ok),
 	T_CASE(proxy_pass_response_transfer_coding_not_last_chunked_returns_502),
 	T_CASE(proxy_pass_malformed_chunked_request_returns_400),
 	T_CASE(proxy_pass_eof_response),
@@ -3874,14 +4402,14 @@ static const struct testing_suite suite[] = {
 	T_CASE(plain_http_absolute_url_established),
 	T_CASE(plain_http_post_with_body_forwarded),
 	T_CASE(plain_http_expect_100_continue_with_body_forwarded),
-	T_CASE(plain_http_version_preserved_in_forwarded_request),
+	T_CASE(plain_http_version_rewritten_in_forwarded_request),
 	T_CASE(plain_http_te_chunked_forwarded_to_upstream),
 	T_CASE(plain_http_dynamic_hop_by_hop_not_forwarded),
 	T_CASE(plain_http_proxy_authorization_not_forwarded),
 	T_CASE(plain_http_forward_success_counted_once),
 	T_CASE(malformed_proxy_authorization_returns_400),
 	T_CASE(connect_with_te_hint_is_accepted),
-	T_CASE(connect_with_invalid_target_returns_500),
+	T_CASE(connect_with_invalid_target_returns_400),
 	T_CASE(valid_connect_dialer_error_returns_502),
 	T_CASE(valid_connect_established_with_hijack),
 	T_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq),
@@ -3895,7 +4423,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_resolve_failure_returns_500),
 	T_CASE(ruleset_finish_without_req_returns_403),
 	T_CASE(ruleset_finish_with_req_and_dialer_error_returns_502),
+	T_CASE(proxy_pass_with_ruleset_forwards_response),
+	T_CASE(proxy_pass_oversized_response_headers_return_502),
+	T_CASE(proxy_pass_204_response_has_no_body),
+	T_CASE(proxy_pass_100_continue_client_withholds_body),
 	T_CASE(timeout_in_process_state_cancels_ruleset),
+	T_CASE(process_teardown_cancels_completed_ruleset_request),
 	T_CASE(timeout_in_connect_state_cancels_dialer),
 	T_CASE(request_with_cl_and_te_is_rejected),
 	T_CASE(request_with_te_and_cl_is_rejected),
@@ -3904,7 +4437,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(request_header_value_with_bare_cr_is_rejected),
 	T_CASE(request_header_value_with_ctl_is_rejected),
 	T_CASE(request_header_name_with_invalid_token_is_rejected),
-	T_CASE(proxy_pass_http_1_0_version_and_via_forwarded),
+	T_CASE(proxy_pass_http_1_0_client_rewritten_via_records_1_0),
 	T_CASE(proxy_pass_http_1_1_version_and_via_forwarded),
 	T_CASE(request_unsupported_http_version_returns_400),
 	T_CASE(proxy_pass_websocket_upgrade_tunneled),
