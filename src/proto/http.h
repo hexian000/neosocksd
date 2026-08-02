@@ -148,6 +148,9 @@ struct http_body {
 	char line[128];
 	enum http_body_chunk_state chunk_state;
 	bool done : 1;
+	/* within a chunk-size or trailer line, a CR has been seen and the next
+	 * byte must be the LF that completes the CRLF terminator */
+	bool line_cr : 1;
 };
 
 struct http_body_data_cb {
@@ -191,6 +194,20 @@ void http_conn_init(
 	uint_least64_t *const byt_sent);
 
 /**
+ * @brief Drive the parser over the bytes already in `rbuf`, reading nothing.
+ *
+ * For a caller that placed unparsed bytes in `rbuf` itself — carrying a
+ * pipelined message across a keep-alive reset — where waiting for readability
+ * would stall, the socket having already delivered them.
+ *
+ * On return, `rbuf` bytes before `next` are consumed (headers, and any
+ * Content-Length body copied into `cbuf`); what follows is a later message.
+ *
+ * @return 0 on completion, 1 if more data needed, -1 on error
+ */
+int http_conn_parse(struct http_conn *restrict p);
+
+/**
  * @brief Receive and parse HTTP data.
  *
  * Only a Content-Length delimited body is framed, into `cbuf`. A
@@ -227,13 +244,18 @@ void http_body_init(
 /**
  * @brief Feed data to a body parser.
  * @param len Input: bytes available in data. Output: bytes actually
- *     consumed as body content, which may be less than the input value
- *     when the body (e.g. a chunked terminator) ends partway through --
- *     the remaining bytes belong to whatever follows and are left for
- *     the caller to reprocess, not treated as a parse failure.
- * @return false only on a genuine parse error or a nonzero-length call
- *     after the body is already done. A zero-length call (*len == 0) is
- *     always a no-op that returns true, even after the body has finished.
+ *     consumed as body content. In HTTP_BODY_CHUNKED mode this may be less
+ *     than the input value when the body ends partway through (a chunked
+ *     terminator mid-buffer) -- the remaining bytes belong to whatever
+ *     follows and are left for the caller to reprocess, not treated as a
+ *     parse failure. In HTTP_BODY_CONTENT_LENGTH mode the parser does NOT
+ *     clamp: input longer than the bytes still outstanding is a parse error
+ *     (returns false), so a caller with a declared length must feed at most
+ *     the remaining count itself.
+ * @return false only on a genuine parse error (including surplus input past
+ *     a declared Content-Length) or a nonzero-length call after the body is
+ *     already done. A zero-length call (*len == 0) is always a no-op that
+ *     returns true, even after the body has finished.
  */
 bool http_body_consume(
 	struct http_body *restrict d, const unsigned char *restrict data,

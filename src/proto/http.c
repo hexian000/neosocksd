@@ -232,6 +232,9 @@ static int parse_content(struct http_conn *restrict p)
 			len = content_length;
 		}
 		VBUF_APPEND(p->cbuf, p->next, len);
+		/* keep `next` the consumed mark for the whole message, so what
+		 * remains in rbuf past it is a later message's bytes */
+		p->next += len;
 
 		if (p->expect_continue) {
 			if (!reply_short(p, "HTTP/1.1 100 Continue\r\n\r\n")) {
@@ -299,35 +302,8 @@ static int recv_content(const struct http_conn *restrict p)
 	return 1;
 }
 
-int http_conn_recv(struct http_conn *restrict p)
+int http_conn_parse(struct http_conn *restrict p)
 {
-	switch (p->state) {
-	case STATE_PARSE_REQUEST:
-	case STATE_PARSE_RESPONSE:
-	case STATE_PARSE_HEADER: {
-		const int r = recv_request(p);
-		if (r < 0) {
-			return -1;
-		}
-		if (r == 0) {
-			return 1;
-		}
-		break;
-	}
-	case STATE_PARSE_CONTENT: {
-		const int r = recv_content(p);
-		if (r < 0) {
-			return -1;
-		}
-		if (r == 0) {
-			return 1;
-		}
-		break;
-	}
-	default:
-		return -1;
-	}
-
 	for (;;) {
 		int ret;
 		switch (p->state) {
@@ -364,6 +340,38 @@ int http_conn_recv(struct http_conn *restrict p)
 		 * unreachable for the current enum */
 		FAILMSGF("unexpected http parser state: %d", p->state);
 	}
+}
+
+int http_conn_recv(struct http_conn *restrict p)
+{
+	switch (p->state) {
+	case STATE_PARSE_REQUEST:
+	case STATE_PARSE_RESPONSE:
+	case STATE_PARSE_HEADER: {
+		const int r = recv_request(p);
+		if (r < 0) {
+			return -1;
+		}
+		if (r == 0) {
+			return 1;
+		}
+		break;
+	}
+	case STATE_PARSE_CONTENT: {
+		const int r = recv_content(p);
+		if (r < 0) {
+			return -1;
+		}
+		if (r == 0) {
+			return 1;
+		}
+		break;
+	}
+	default:
+		return -1;
+	}
+
+	return http_conn_parse(p);
 }
 
 int http_conn_send(struct http_conn *restrict p, const int fd, int *restrict err)
@@ -577,16 +585,30 @@ bool http_body_consume(
 		switch (d->chunk_state) {
 		case HTTP_BODY_CHUNK_SIZE_LINE:
 		case HTTP_BODY_CHUNK_TRAILER_LINE:
-			if (c == '\r') {
+			if (d->line_cr) {
+				/* RFC 9112 §2.2: within a chunk-size or trailer
+				 * line a CR is valid only as the CR of the
+				 * terminating CRLF. A bare CR (not immediately
+				 * followed by LF) is rejected rather than silently
+				 * deleted -- deleting it would let a smuggled
+				 * interior CR reshape the line (e.g. a chunk size)
+				 * seen only by this parser. */
+				if (c != '\n') {
+					return false;
+				}
+				d->line_cr = false;
+			} else if (c == '\r') {
+				d->line_cr = true;
 				continue;
-			}
-			if (c != '\n') {
+			} else if (c != '\n') {
 				if (d->line_len + 1 >= sizeof(d->line)) {
 					return false;
 				}
 				d->line[d->line_len++] = (char)c;
 				continue;
 			}
+			/* c == '\n': the line terminator (CRLF, or a tolerated
+			 * bare LF) has been reached */
 			d->line[d->line_len] = '\0';
 			if (d->chunk_state == HTTP_BODY_CHUNK_SIZE_LINE) {
 				size_t sz;
@@ -834,7 +856,12 @@ bool parsehdr_transfer_encoding(
 	value = strtrimspace(value);
 
 	if (value[0] == '\0') {
-		p->hdr.transfer.encoding = TENCODING_NONE;
+		/* An empty Transfer-Encoding value carries no transfer-coding, so
+		 * it must not clobber one already recorded from a prior TE line:
+		 * downgrading an established `chunked` framing to NONE here would
+		 * leave the chunked body bytes unframed and attributed to whatever
+		 * follows (request smuggling). Leave the recorded coding as-is (it
+		 * stays TENCODING_NONE when no prior line set one). */
 		return true;
 	}
 
@@ -1082,6 +1109,11 @@ bool http_connection_lists(
 bool http_header_field_valid(
 	const char *restrict key, const char *restrict value)
 {
+	/* RFC 9110 §5.5: field-name = token = 1*tchar, so an empty name is
+	 * invalid; the loop below would otherwise accept it vacuously. */
+	if (key[0] == '\0') {
+		return false;
+	}
 	for (const unsigned char *c = (const unsigned char *)key; *c != '\0';
 	     c++) {
 		if (!isalnum(*c) && strchr("!#$%&'*+-.^_`|~", *c) == NULL) {
@@ -1186,36 +1218,6 @@ void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 	LOG_STACK_F(VERBOSE, 0, "http: response error page %" PRIuFAST16, code);
 }
 
-#if WITH_RULESET
-bool check_rpcall_mime(char *restrict s)
-{
-	if (s == NULL) {
-		return false;
-	}
-	char *type, *subtype;
-	s = mime_parse(s, &type, &subtype);
-	if (s == NULL || strcmp(type, MIME_RPCALL_TYPE) != 0 ||
-	    strcmp(subtype, MIME_RPCALL_SUBTYPE) != 0) {
-		return false;
-	}
-	const char *version = NULL;
-	char *key, *value;
-	for (;;) {
-		s = mime_parseparam(s, &key, &value);
-		if (s == NULL) {
-			return false;
-		}
-		if (key == NULL) {
-			break;
-		}
-		if (strcmp(key, "version") == 0) {
-			version = value;
-		}
-	}
-	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
-}
-#endif /* WITH_RULESET */
-
 struct io_stream *content_reader(
 	const void *restrict buf, const size_t len,
 	const enum content_encodings encoding)
@@ -1277,3 +1279,33 @@ struct io_stream *content_writer(
 	}
 	FAILMSGF("unexpected content encoding: %d", encoding);
 }
+
+#if WITH_RULESET
+bool check_rpcall_mime(char *restrict s)
+{
+	if (s == NULL) {
+		return false;
+	}
+	char *type, *subtype;
+	s = mime_parse(s, &type, &subtype);
+	if (s == NULL || strcmp(type, MIME_RPCALL_TYPE) != 0 ||
+	    strcmp(subtype, MIME_RPCALL_SUBTYPE) != 0) {
+		return false;
+	}
+	const char *version = NULL;
+	char *key, *value;
+	for (;;) {
+		s = mime_parseparam(s, &key, &value);
+		if (s == NULL) {
+			return false;
+		}
+		if (key == NULL) {
+			break;
+		}
+		if (strcmp(key, "version") == 0) {
+			version = value;
+		}
+	}
+	return version != NULL && strcmp(version, MIME_RPCALL_VERSION) == 0;
+}
+#endif /* WITH_RULESET */

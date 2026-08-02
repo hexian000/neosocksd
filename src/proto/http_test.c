@@ -16,7 +16,6 @@
 #include "http.h"
 
 #include "io/stream.h"
-#include "meta/arraysize.h"
 #include "net/http.h"
 #include "utils/buffer.h"
 #include "utils/testing.h"
@@ -309,6 +308,17 @@ T_DECLARE_CASE(parsehdr_transfer_encoding_cases)
 		char value[] = "deflate";
 		T_EXPECT(!parsehdr_transfer_encoding(&p, value));
 	}
+	{
+		/* An empty second Transfer-Encoding line must NOT downgrade an
+		 * already-recorded `chunked` framing to NONE: doing so would
+		 * leave the chunked body bytes unframed and attributed to
+		 * whatever follows (request smuggling). The empty-value branch
+		 * is a no-op that leaves the recorded coding intact. */
+		p.hdr.transfer.encoding = TENCODING_CHUNKED;
+		char value[] = "";
+		T_EXPECT(parsehdr_transfer_encoding(&p, value));
+		T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
+	}
 }
 
 T_DECLARE_CASE(parsehdr_transfer_encoding_rejects_content_length_conflict)
@@ -537,6 +547,35 @@ T_DECLARE_CASE(content_reader_gzip)
 	T_EXPECT_EQ(rc, 0);
 }
 
+T_DECLARE_CASE(content_reader_vbuf_cases)
+{
+	/* NULL cbuf is the documented empty-body case (Content-Length: 0 leaves
+	 * the content vbuffer unallocated): it must read as "" rather than fault
+	 * on the NULL that io_memreader() would otherwise reject. */
+	{
+		struct io_stream *r = content_reader_vbuf(NULL, CENCODING_NONE);
+		T_CHECK(r != NULL);
+		unsigned char buf[8];
+		size_t n = sizeof(buf);
+		T_EXPECT_EQ(io_stream_read(r, buf, &n), 0);
+		T_EXPECT_EQ(n, 0); /* immediate EOF: the stream is empty */
+		T_EXPECT_EQ(io_stream_close(r), 0);
+	}
+	/* a populated cbuf reads back its bytes */
+	{
+		struct vbuffer *cbuf = VBUF_NEW(16);
+		T_CHECK(cbuf != NULL);
+		VBUF_APPENDSTR(cbuf, "hello");
+		struct io_stream *r = content_reader_vbuf(cbuf, CENCODING_NONE);
+		T_CHECK(r != NULL);
+		unsigned char out[5] = { 0 };
+		T_EXPECT(stream_read_exact(r, out, sizeof(out)));
+		T_EXPECT_MEMEQ(out, "hello", sizeof(out));
+		T_EXPECT_EQ(io_stream_close(r), 0);
+		VBUF_FREE(cbuf);
+	}
+}
+
 T_DECLARE_CASE(content_writer_roundtrip_none)
 {
 	struct vbuffer *vbuf = NULL;
@@ -669,7 +708,9 @@ T_DECLARE_CASE(http_conn_recv_request_ok)
  * parses OK but is NOT framed -- cbuf stays NULL and the body is left in rbuf
  * for the caller to dechunk (proxy_pass does, via http_framer). A caller that
  * reads cbuf must reject chunked itself or it silently sees an empty body;
- * api_server answers 411 for the endpoints that need one. Pinned here so the
+ * api_server answers 501 Not Implemented for a chunked request (it reserves
+ * 411 Length Required for a body endpoint that omits Content-Length). Pinned
+ * here so the
  * invariant the other callers depend on is visible rather than incidental.
  */
 T_DECLARE_CASE(http_conn_recv_chunked_body_is_not_framed)
@@ -693,6 +734,40 @@ T_DECLARE_CASE(http_conn_recv_chunked_body_is_not_framed)
 	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
 	T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
 	/* the headers parsed, but the body was not framed */
+	T_EXPECT(p.cbuf == NULL);
+	T_EXPECT(!p.hdr.content.has_length);
+
+	VBUF_FREE(p.cbuf);
+	T_CHECK(close(sv[0]) == 0);
+	T_CHECK(close(sv[1]) == 0);
+}
+
+/* A second, empty Transfer-Encoding line must not downgrade the chunked framing
+ * recorded by the first line -- driven through the real recv path (the parser
+ * http_proxy uses per request). Without the fix the empty value resets the
+ * coding to NONE and the chunked body desyncs into the next message. */
+T_DECLARE_CASE(http_conn_recv_empty_te_does_not_downgrade_chunked)
+{
+	int sv[2] = { -1, -1 };
+	struct http_conn p = { 0 };
+	struct header_cb_ctx cb = { 0 };
+	static const char req[] = "POST /hello HTTP/1.1\r\n"
+				  "Host: test\r\n"
+				  "Transfer-Encoding: chunked\r\n"
+				  "Transfer-Encoding:\r\n"
+				  "\r\n"
+				  "5\r\nhello\r\n0\r\n\r\n";
+
+	make_socketpair(sv);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+
+	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
+	const int ret = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret, 0);
+	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
+	/* the chunked coding survives the empty second line */
+	T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
 	T_EXPECT(p.cbuf == NULL);
 	T_EXPECT(!p.hdr.content.has_length);
 
@@ -999,9 +1074,12 @@ T_DECLARE_CASE(http_conn_recv_content_early_eof)
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 1);
+	/* drain the partial body (parser still needs more) in a
+	 * fragmentation-safe way, then signal EOF and recv to the terminal
+	 * error -- a single recv per phase can race delayed fragments */
+	T_EXPECT_EQ(http_recv_drain(&p), 1);
 	T_CHECK(shutdown(sv[1], SHUT_WR) == 0);
-	T_EXPECT_EQ(http_conn_recv(&p), -1);
+	T_EXPECT_EQ(http_recv_until_done(&p), -1);
 
 	VBUF_FREE(p.cbuf);
 	T_CHECK(close(sv[0]) == 0);
@@ -1023,7 +1101,9 @@ T_DECLARE_CASE(http_conn_recv_header_callback_reject)
 	cb.reject = true;
 
 	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	T_EXPECT_EQ(http_conn_recv(&p), 0);
+	/* recv to the terminal result: a single recv can see only the request
+	 * line before the header callback that rejects has run */
+	T_EXPECT_EQ(http_recv_until_done(&p), 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
 
 	T_CHECK(close(sv[0]) == 0);
@@ -1334,6 +1414,34 @@ T_DECLARE_CASE(http_body_chunked_missing_cr_after_data)
 	T_EXPECT(!http_body_consume(&d, bad, &n, cb));
 }
 
+T_DECLARE_CASE(http_body_chunked_bare_cr_rejected)
+{
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
+
+	/* RFC 9112 §2.2: a bare CR inside a chunk-size line must be rejected,
+	 * not silently deleted -- deleting it would turn "1\r0" into the size
+	 * "10" (16 bytes), a re-framing visible only to this parser. */
+	{
+		struct http_body d;
+		http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+		static const unsigned char bad[] = "1\r0\r\nhello";
+		size_t n = sizeof(bad) - 1;
+		T_EXPECT(!http_body_consume(&d, bad, &n, cb));
+	}
+	/* the same holds inside a trailer line */
+	{
+		struct http_body d;
+		http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+		static const unsigned char bad[] = "0\r\nX\rY\r\n\r\n";
+		size_t n = sizeof(bad) - 1;
+		T_EXPECT(!http_body_consume(&d, bad, &n, cb));
+	}
+}
+
 T_DECLARE_CASE(http_body_chunked_extra_data_after_done)
 {
 	struct http_body d;
@@ -1532,6 +1640,8 @@ T_DECLARE_CASE(http_header_field_valid_cases)
 	T_EXPECT(http_header_field_valid("!#$%&'*+-.^_`|~", "x"));
 	/* HTAB is the one CTL allowed in a field value */
 	T_EXPECT(http_header_field_valid("X", "a\tb"));
+	/* RFC 9110 §5.5: field-name = 1*tchar, so an empty name is invalid */
+	T_EXPECT(!http_header_field_valid("", "x"));
 	/* a space in the field name is not a tchar */
 	T_EXPECT(!http_header_field_valid("Bad Name", "x"));
 	/* a colon in the field name is not a tchar */
@@ -2314,12 +2424,14 @@ static const struct testing_suite suite[] = {
 	T_CASE(parsehdr_expect_cases),
 	T_CASE(content_reader_none),
 	T_CASE(content_reader_gzip),
+	T_CASE(content_reader_vbuf_cases),
 	T_CASE(content_writer_roundtrip_none),
 	T_CASE(content_writer_roundtrip_deflate),
 	T_CASE(content_writer_roundtrip_gzip),
 	T_CASE(http_resp_errpage_normal_and_fallback),
 	T_CASE(http_conn_recv_request_ok),
 	T_CASE(http_conn_recv_chunked_body_is_not_framed),
+	T_CASE(http_conn_recv_empty_te_does_not_downgrade_chunked),
 	T_CASE(http_conn_recv_response_ok),
 	T_CASE(http_conn_recv_response_unsupported_version),
 	T_CASE(http_conn_recv_response_malformed_header),
@@ -2346,6 +2458,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(http_body_chunked_no_hex_digit_fails),
 	T_CASE(http_body_chunked_size_line_too_long),
 	T_CASE(http_body_chunked_missing_cr_after_data),
+	T_CASE(http_body_chunked_bare_cr_rejected),
 	T_CASE(http_body_chunked_extra_data_after_done),
 	T_CASE(http_body_chunked_trailing_data_after_terminator),
 	T_CASE(http_body_chunked_data_cb_reject),
