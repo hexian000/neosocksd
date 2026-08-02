@@ -497,6 +497,130 @@ T_DECLARE_CASE(regex_gmatch_empty_match_terminates)
 	lua_close(L);
 }
 
+/*
+ * Regression: gmatch restarts regexec() on the subject advanced past the last
+ * match, and POSIX calls the first byte handed to regexec() a line start. With
+ * no REG_NOTBOL that made `^` match afresh at every restart, so an anchored
+ * pattern yielded one match per position -- three here instead of one.
+ */
+T_DECLARE_CASE(regex_gmatch_anchor_matches_once)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('^a') "
+		   "local it = regex.gmatch(r, 'aaa') "
+		   "local n = 0 "
+		   "for _ = 1, 10 do "
+		   "  if it() == nil then break end "
+		   "  n = n + 1 "
+		   "end "
+		   "return n"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT_EQ(lua_tointeger(L, 1), 1);
+
+	lua_close(L);
+}
+
+/* Regression: an explicit init is a start offset, not a line start -- `^` must
+ * not match there either. */
+T_DECLARE_CASE(regex_find_init_does_not_reanchor)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('^a') "
+		   "local at_start = regex.find(r, 'aaa') "
+		   "local at_init = regex.find(r, 'aaa', 2) "
+		   "return at_start, at_init == nil"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT_EQ(lua_tointeger(L, 1), 1);
+	T_EXPECT(lua_toboolean(L, 2) != 0);
+
+	lua_close(L);
+}
+
+/*
+ * The REG_NOTBOL above must suppress `^` only at the restart byte itself: under
+ * the default REG_NEWLINE a newline still inside the subject keeps anchoring,
+ * so iterating an anchored pattern over lines still yields every line.
+ */
+T_DECLARE_CASE(regex_gmatch_anchor_still_matches_each_line)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('^[a-z]+') "
+		   "local it = regex.gmatch(r, 'aa\\nbb\\ncc') "
+		   "local out = {} "
+		   "for _ = 1, 10 do "
+		   "  local m = it() "
+		   "  if m == nil then break end "
+		   "  out[#out + 1] = m "
+		   "end "
+		   "return #out, table.concat(out, ',')"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT_EQ(lua_tointeger(L, 1), 3);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "aa,bb,cc");
+
+	lua_close(L);
+}
+
+/*
+ * Regression: a pattern consuming its own line terminator restarts gmatch one
+ * byte past a newline. That is a genuine line start, but the newline anchoring
+ * it now sits outside the subject, so keying REG_NOTBOL on the offset alone
+ * suppressed `^` there and dropped every other line -- "bb" here.
+ */
+T_DECLARE_CASE(regex_gmatch_anchor_matches_consumed_newline_lines)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('^[a-z]+\\n?') "
+		   "local it = regex.gmatch(r, 'aa\\nbb\\ncc') "
+		   "local out = {} "
+		   "for _ = 1, 10 do "
+		   "  local m = it() "
+		   "  if m == nil then break end "
+		   "  out[#out + 1] = m "
+		   "end "
+		   "return #out, table.concat(out, '|')"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT_EQ(lua_tointeger(L, 1), 3);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "aa\n|bb\n|cc");
+
+	lua_close(L);
+}
+
+/*
+ * The line-start exemption above is keyed on regex.NEWLINE: with it, a start
+ * offset right after a newline anchors `^`; without it, `^` binds to the string
+ * start alone, so that offset stays unanchored like any other.
+ */
+T_DECLARE_CASE(regex_find_init_after_newline_anchors)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local nl = regex.compile('^bb') "
+		   "local nonl = regex.compile('^bb', regex.EXTENDED) "
+		   "local s = 'aa\\nbb' "
+		   "local at_nl = regex.find(nl, s, 4) "
+		   "local at_nonl = regex.find(nonl, s, 4) "
+		   "return at_nl, at_nonl == nil"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT_EQ(lua_tointeger(L, 1), 4);
+	T_EXPECT(lua_toboolean(L, 2) != 0);
+
+	lua_close(L);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -528,6 +652,11 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_nosub_is_neutralized),
 	T_CASE(regex_gmatch_iterator),
 	T_CASE(regex_gmatch_empty_match_terminates),
+	T_CASE(regex_gmatch_anchor_matches_once),
+	T_CASE(regex_find_init_does_not_reanchor),
+	T_CASE(regex_gmatch_anchor_still_matches_each_line),
+	T_CASE(regex_gmatch_anchor_matches_consumed_newline_lines),
+	T_CASE(regex_find_init_after_newline_anchors),
 	T_SUITE_END,
 };
 

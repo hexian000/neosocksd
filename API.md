@@ -648,6 +648,8 @@ On a compiled pattern `reg`:
 
 `init` is an optional 1-based start offset (negative counts from the end of `s`); it defaults to the start of `s`. Each method is also callable in function form, e.g. `regex.find(reg, s [, init])`.
 
+Starting past the beginning of `s` does not by itself make that offset a line start, so `^` does not match there; under `regex.NEWLINE` it still matches after any newline, whether that newline lies inside the searched region or immediately before its start. The same applies between `gmatch` iterations, so an anchored pattern yields one match per line rather than one per position — including when the pattern consumes its own line terminator.
+
 
 ### time.\*
 

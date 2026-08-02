@@ -13,6 +13,14 @@
 
 #define MT_REGEX "regex"
 
+/* The compiled pattern behind MT_REGEX. REG_NEWLINE decides what counts as a
+ * line start at match time and POSIX exposes no portable way to read it back
+ * from a regex_t, so the compile flags are kept alongside. */
+struct regex {
+	regex_t preg;
+	int cflags;
+};
+
 static int
 regex_error(lua_State *restrict L, int err, const regex_t *restrict preg)
 {
@@ -56,8 +64,10 @@ static int regex_compile(lua_State *restrict L)
 	 * regexec() leave unset in pmatch; strip it so those offsets are never
 	 * read from an uninitialized regmatch_t */
 	cflags &= ~REG_NOSUB;
-	regex_t *restrict const preg = lua_newuserdata(L, sizeof(regex_t));
-	const int err = regcomp(preg, pattern, cflags);
+	struct regex *restrict const reg =
+		lua_newuserdata(L, sizeof(struct regex));
+	reg->cflags = cflags;
+	const int err = regcomp(&reg->preg, pattern, cflags);
 	if (err != 0) {
 		/* POSIX.1-2008: after a failed regcomp() the content of preg is
 		 * undefined, so it must not be regfree()d (a double-free / stale
@@ -65,7 +75,7 @@ static int regex_compile(lua_State *restrict L)
 		 * regerror() formats the errcode -- the conforming way to report
 		 * the failure -- and preg is abandoned (the __gc finalizer is
 		 * never attached on this path). */
-		return regex_error(L, err, preg);
+		return regex_error(L, err, &reg->preg);
 	}
 	luaL_setmetatable(L, MT_REGEX);
 	return 1;
@@ -100,23 +110,45 @@ static size_t cstrpos(const lua_Integer pos, const size_t len)
 	return (size_t)(pos - 1);
 }
 
+/* Match flags for the subject @p s advanced by @p init bytes. POSIX treats the
+ * first byte handed to regexec() as a line start, so an advanced subject must
+ * say otherwise or `^` re-anchors there. `$` needs no counterpart: the subject
+ * always runs to the end of the string. */
+static int match_eflags(
+	const struct regex *restrict reg, const char *restrict s,
+	const size_t init)
+{
+	if (init == 0) {
+		return 0;
+	}
+	/* Under REG_NEWLINE the byte after a newline is a real line start, and
+	 * that newline now lies outside the subject where it can no longer anchor
+	 * `^` itself, so REG_NOTBOL must not suppress it either. */
+	if ((reg->cflags & REG_NEWLINE) && s[init - 1] == '\n') {
+		return 0;
+	}
+	return REG_NOTBOL;
+}
+
 /* regex.find(reg, s [, init]) */
 static int regex_find(lua_State *restrict L)
 {
-	const regex_t *restrict const preg = luaL_checkudata(L, 1, MT_REGEX);
+	const struct regex *restrict const reg =
+		luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
 	const char *restrict s = luaL_checklstring(L, 2, &len);
 	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
+	const int eflags = match_eflags(reg, s, init);
 	s += init;
 	len -= init;
 	check_no_nul(L, s, len);
 	regmatch_t match;
-	const int err = regexec(preg, s, 1, &match, 0);
+	const int err = regexec(&reg->preg, s, 1, &match, eflags);
 	if (err == REG_NOMATCH) {
 		return 0;
 	}
 	if (err != 0) {
-		return regex_error(L, err, preg);
+		return regex_error(L, err, &reg->preg);
 	}
 	lua_pushinteger(L, (lua_Integer)init + match.rm_so + 1);
 	lua_pushinteger(L, (lua_Integer)init + match.rm_eo);
@@ -155,22 +187,24 @@ push_matches(lua_State *restrict L, const char *restrict s, size_t nmatch)
 /* regex.match(reg, s [, init]) */
 static int regex_match(lua_State *restrict L)
 {
-	const regex_t *restrict const preg = luaL_checkudata(L, 1, MT_REGEX);
+	const struct regex *restrict const reg =
+		luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
 	const char *restrict s = luaL_checklstring(L, 2, &len);
 	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
+	const int eflags = match_eflags(reg, s, init);
 	s += init;
 	len -= init;
 	check_no_nul(L, s, len);
-	const size_t nmatch = check_matches(L, preg);
+	const size_t nmatch = check_matches(L, &reg->preg);
 	regmatch_t *restrict const matches =
 		lua_newuserdata(L, nmatch * sizeof(regmatch_t));
-	const int err = regexec(preg, s, nmatch, matches, 0);
+	const int err = regexec(&reg->preg, s, nmatch, matches, eflags);
 	if (err == REG_NOMATCH) {
 		return 0;
 	}
 	if (err != 0) {
-		return regex_error(L, err, preg);
+		return regex_error(L, err, &reg->preg);
 	}
 	return push_matches(L, s, nmatch);
 }
@@ -188,22 +222,23 @@ static int gmatch_aux(lua_State *restrict L)
 	if (pos == GMATCH_DONE) {
 		return 0;
 	}
-	const regex_t *restrict const preg =
+	const struct regex *restrict const reg =
 		lua_touserdata(L, lua_upvalueindex(1));
 	size_t len;
 	const char *restrict s = lua_tolstring(L, lua_upvalueindex(2), &len);
 	const size_t init = cstrpos(pos, len);
+	const int eflags = match_eflags(reg, s, init);
 	s += init;
 	/* the subject was NUL-checked once in regex_gmatch */
-	const size_t nmatch = check_matches(L, preg);
+	const size_t nmatch = check_matches(L, &reg->preg);
 	regmatch_t *restrict const matches =
 		lua_newuserdata(L, nmatch * sizeof(regmatch_t));
-	const int err = regexec(preg, s, nmatch, matches, 0);
+	const int err = regexec(&reg->preg, s, nmatch, matches, eflags);
 	if (err == REG_NOMATCH) {
 		return 0;
 	}
 	if (err != 0) {
-		return regex_error(L, err, preg);
+		return regex_error(L, err, &reg->preg);
 	}
 	size_t advance = (size_t)matches[0].rm_eo;
 	if (matches[0].rm_so == matches[0].rm_eo) {
@@ -250,8 +285,8 @@ static int regex_gmatch(lua_State *restrict L)
 
 static int regex_gc(lua_State *restrict L)
 {
-	regex_t *restrict const preg = lua_touserdata(L, 1);
-	regfree(preg);
+	struct regex *restrict const reg = lua_touserdata(L, 1);
+	regfree(&reg->preg);
 	return 0;
 }
 
