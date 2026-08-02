@@ -220,6 +220,45 @@ T_DECLARE_CASE(gunzip_invalid)
 	lua_close(L);
 }
 
+/* #191: a valid stream cut off mid-body must be rejected. inflate ends at a
+ * clean EOF in NEEDS_MORE_INPUT rather than a header or checksum error, so this
+ * pins the distinct reader-close "truncated is an error, not short success"
+ * path -- a regression could silently return a partial plaintext. */
+T_DECLARE_CASE(zlib_uncompress_truncated)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local s = ('payload-'):rep(1000) "
+		   "local z = zlib.compress(s) "
+		   "local ok, err = pcall(zlib.uncompress, z:sub(1, #z // 2)) "
+		   "return ok, type(err)"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
+
+	lua_close(L);
+}
+
+/* gunzip counterpart of zlib_uncompress_truncated. */
+T_DECLARE_CASE(gunzip_truncated)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local s = ('payload-'):rep(1000) "
+		   "local z = zlib.gzip(s) "
+		   "local ok, err = pcall(zlib.gunzip, z:sub(1, #z // 2)) "
+		   "return ok, type(err)"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
+
+	lua_close(L);
+}
+
 /* The zlib counterpart of gunzip_crc_mismatch: corrupt only the trailing
  * adler-32 so the stream parses and inflates cleanly and only the checksum,
  * verified at reader close, rejects it. zlib_uncompress_invalid cannot reach
@@ -299,6 +338,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(gzip_roundtrip_large),
 	T_CASE(gzip_empty_string),
 	T_CASE(gunzip_invalid),
+	T_CASE(zlib_uncompress_truncated),
+	T_CASE(gunzip_truncated),
 	T_CASE(zlib_uncompress_adler_mismatch),
 	T_CASE(gunzip_crc_mismatch),
 	T_CASE(zlib_repeated_failure_no_leak),

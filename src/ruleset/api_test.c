@@ -11,15 +11,15 @@
  * by the mocks in the mock section below.
  */
 
+#include "ruleset/api.h"
+
 #include "api_client.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
-#include "ruleset/api.h"
 #include "ruleset/base.h"
 #include "ruleset/ruleset.h"
 #include "server.h"
-#include "util.h"
 
 #include "meta/arraysize.h"
 #include "utils/testing.h"
@@ -735,6 +735,38 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
 	reset_globals();
 }
 
+/* #190: when the async coroutine dies catastrophically (here forced by
+ * corrupting RIDX_IDLE_THREAD so aux_async's re-caching raises), neosocksd.async
+ * returns (nil, err) with err a string, rather than raising. */
+T_DECLARE_CASE(api_async_catastrophic_returns_nil_and_error)
+{
+	struct config conf = { .timeout = 1.0 };
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	/* Expose the idle-thread registry index so the finish callback can
+	 * corrupt it after aux_getthread has already read it but before
+	 * thread_call_k re-caches the thread -- forcing the re-cache to raise,
+	 * which is aux_async's catastrophic status. Corrupting it upfront would
+	 * instead raise inside aux_getthread. */
+	lua_pushinteger(L, RIDX_IDLE_THREAD);
+	lua_setglobal(L, "_IDLE_IDX");
+
+	reset_globals();
+	T_EXPECT(run_chunk(
+		L, "local co, err = neosocksd.async("
+		   "  function() debug.getregistry()[_IDLE_IDX] = false end,"
+		   "  function() return 7 end) "
+		   "return co == nil, type(err)"));
+	T_EXPECT(lua_toboolean(L, 1) != 0); /* co == nil */
+	T_EXPECT_STREQ(lua_tostring(L, 2), "string"); /* err is a string */
+	lua_settop(L, 0);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -759,6 +791,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(api_config_reflects_ruleset_conf),
 	T_CASE(api_stats_now_and_setinterval_use_ruleset_state),
 	T_CASE(api_invoke_and_async_real_paths),
+	T_CASE(api_async_catastrophic_returns_nil_and_error),
 	T_SUITE_END,
 };
 
