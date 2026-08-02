@@ -34,7 +34,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -357,6 +356,26 @@ resolve_addr(union sockaddr_max *restrict out, const char *restrict addrstr)
 	return true;
 }
 
+/* Initialize the SIGHUP/SIGINT/SIGTERM watchers. Done here in server_bind
+ * because init is loop-free and needs no privilege, so server_stop() can stop
+ * them safely even when binding fails before server_start() registers them. */
+static void server_init_signals(struct server *restrict s)
+{
+	const struct {
+		ev_signal *w;
+		int sig;
+	} sigwatchers[] = {
+		{ &s->w_sighup, SIGHUP },
+		{ &s->w_sigint, SIGINT },
+		{ &s->w_sigterm, SIGTERM },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(sigwatchers); i++) {
+		ev_signal_init(sigwatchers[i].w, signal_cb, sigwatchers[i].sig);
+		sigwatchers[i].w->data = s;
+		ev_set_priority(sigwatchers[i].w, EV_MAXPRI);
+	}
+}
+
 bool server_bind(
 	struct server *restrict s, struct ev_loop *loop,
 	struct config *restrict conf, struct resolver *resolver,
@@ -375,6 +394,7 @@ bool server_bind(
 		.stats = { .started = -1 },
 	};
 	s->data = s;
+	server_init_signals(s);
 	/* mark the server started before adding listeners so server_stop()
 	 * always tears down (signal watchers, basereq) even with zero
 	 * listeners, and so uptime spans the whole server lifetime */
@@ -443,20 +463,10 @@ void server_start(struct server *restrict s, struct transfer *xfer)
 		ev_io_start(loop, &s->listeners[i].w_accept);
 	}
 
-	const struct {
-		ev_signal *w;
-		int sig;
-	} sigwatchers[] = {
-		{ &s->w_sighup, SIGHUP },
-		{ &s->w_sigint, SIGINT },
-		{ &s->w_sigterm, SIGTERM },
-	};
-	for (size_t i = 0; i < ARRAY_SIZE(sigwatchers); i++) {
-		ev_signal_init(sigwatchers[i].w, signal_cb, sigwatchers[i].sig);
-		sigwatchers[i].w->data = s;
-		ev_set_priority(sigwatchers[i].w, EV_MAXPRI);
-		ev_signal_start(loop, sigwatchers[i].w);
-	}
+	/* the signal watchers were initialized in server_bind(); register them */
+	ev_signal_start(loop, &s->w_sighup);
+	ev_signal_start(loop, &s->w_sigint);
+	ev_signal_start(loop, &s->w_sigterm);
 }
 
 /* Convenience for callers that do not drop privileges between the two phases

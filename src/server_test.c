@@ -33,7 +33,6 @@
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -792,9 +791,10 @@ T_DECLARE_CASE(server_init_partial_failure_cleanup)
 	T_EXPECT(!server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
 	T_EXPECT_EQ(s.num_listeners, (size_t)1);
 
-	/* server_stop() must release the already-opened listener socket (and
-	 * not touch the signal watchers that were never started) so no fd or
-	 * watcher leaks on the partial-init path */
+	/* server_stop() must release the already-opened listener socket; it also
+	 * stops the signal watchers, which server_bind() initialized but never
+	 * started, so those stops are safe no-ops and nothing leaks on the
+	 * partial-init path */
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
@@ -815,11 +815,20 @@ T_DECLARE_CASE(server_stats_aggregates_listeners)
 	s.listeners[0].stats.num_serve = 2;
 	s.listeners[1].stats.num_accept = 5;
 	s.listeners[1].stats.num_serve = 4;
+	/* the authoritative num_sessions/byt_up/byt_down live in the top-level
+	 * atomic fields; server_stats must copy those into out (the identically
+	 * named s->stats members stay zero) */
+	s.num_sessions = 7;
+	s.byt_up = 1111;
+	s.byt_down = 2222;
 
 	struct server_stats out;
 	server_stats(&s, &out);
 	T_EXPECT_EQ(out.num_accept, (uint_least64_t)8);
 	T_EXPECT_EQ(out.num_serve, (uint_least64_t)6);
+	T_EXPECT_EQ(out.num_sessions, (size_t)7);
+	T_EXPECT_EQ(out.byt_up, (uint_least64_t)1111);
+	T_EXPECT_EQ(out.byt_down, (uint_least64_t)2222);
 
 	server_stop(&s);
 	ev_loop_destroy(loop);

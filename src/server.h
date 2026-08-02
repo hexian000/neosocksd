@@ -9,7 +9,6 @@
 
 #include "os/socket.h"
 #include "utils/gc.h"
-#include "utils/slog.h"
 
 #include <ev.h>
 
@@ -43,9 +42,10 @@ struct server_stats {
 	uint_least64_t num_reject_timeout;
 	/* Connections failed during upstream dial */
 	uint_least64_t num_reject_upstream;
-	/* Bytes uploaded */
+	/* Bytes relayed toward the upstream, including client bytes pipelined
+	 * ahead of the reply and replayed past the relay */
 	uint_least64_t byt_up;
-	/* Bytes downloaded */
+	/* Bytes relayed toward the client */
 	uint_least64_t byt_down;
 	/* Successful connection count (histogram index) */
 	size_t num_connects;
@@ -70,14 +70,18 @@ struct server_stats {
 	/* Bytes received by the API client */
 	uint_least64_t api_client_byt_recv;
 
-	/* Protocol handshake overhead */
-	/* Bytes received from clients during handshake */
+	/* Protocol setup overhead, split by socket rather than by who wrote it:
+	 * everything a context sends or receives itself before handing the
+	 * session to the relay. byt_up/byt_down cover the relay phase, so a
+	 * client byte buffered during setup and later relayed is counted on both
+	 * sides -- one measures the client socket, the other the relay. */
+	/* Bytes received on the client-facing socket */
 	uint_least64_t byt_client_recv;
-	/* Bytes sent to clients during handshake */
+	/* Bytes sent on the client-facing socket */
 	uint_least64_t byt_client_send;
-	/* Bytes sent to upstream proxies in CONNECT handshake */
+	/* Bytes sent on the upstream-facing socket */
 	uint_least64_t byt_dial_send;
-	/* Bytes received from upstream proxies in CONNECT handshake */
+	/* Bytes received on the upstream-facing socket */
 	uint_least64_t byt_dial_recv;
 
 	/* Server start timestamp */
@@ -175,16 +179,26 @@ static inline size_t server_session_incr(struct server *restrict s)
 }
 
 /**
- * @brief Roll back a server_session_incr() when the session failed to start
- * before it was committed to the stats (e.g. a transfer_serve OOM).
+ * @brief Decrement the active-session count. Kept inline here (not open-coded in
+ * the protocol modules) so the drift-prone WITH_THREADS atomic ladder has a
+ * single copy, matching server_session_incr().
  */
-static inline void server_session_rollback(struct server *restrict s)
+static inline void server_session_decr(struct server *restrict s)
 {
 #if WITH_THREADS
 	atomic_fetch_sub_explicit(&s->num_sessions, 1, memory_order_relaxed);
 #else
 	s->num_sessions--;
 #endif
+}
+
+/**
+ * @brief Roll back a server_session_incr() when the session failed to start
+ * before it was committed to the stats (e.g. a transfer_serve OOM).
+ */
+static inline void server_session_rollback(struct server *restrict s)
+{
+	server_session_decr(s);
 }
 
 /**
@@ -253,14 +267,16 @@ static inline size_t server_start_session(
 }
 
 /**
- * @brief Commit a fully-dialed session, folding in the OOM teardown.
+ * @brief Commit a fully-dialed session, folding in the failure teardown.
  *
  * On success returns the new active-session count (nonzero) with ownership of
- * both descriptors transferred to the transfer. On OOM (returns 0) it has
- * already logged, closed both descriptors, and gc_unref'd @p gc; the caller
- * must return immediately without touching either descriptor or @p gc again.
+ * both descriptors transferred to the transfer. On failure (returns 0) it has
+ * closed both descriptors and gc_unref'd @p gc; transfer_serve() has already
+ * logged the specific reason (out of memory, or a momentarily full worker
+ * dispatch queue), so this does not log again. The caller must return
+ * immediately without touching either descriptor or @p gc again.
  *
- * @return New active-session count on success, or 0 after teardown on OOM.
+ * @return New active-session count on success, or 0 after teardown on failure.
  */
 static inline size_t server_commit_session(
 	struct server *restrict s, struct gcbase *restrict gc, const int acc_fd,
@@ -268,7 +284,6 @@ static inline size_t server_commit_session(
 {
 	const size_t cur = server_start_session(s, acc_fd, dial_fd);
 	if (cur == 0) {
-		LOGOOM();
 		socket_close(acc_fd);
 		socket_close(dial_fd);
 		gc_unref(gc);
