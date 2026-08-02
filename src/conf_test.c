@@ -512,6 +512,36 @@ T_DECLARE_CASE(parseargs_http_only)
 	T_EXPECT_STREQ(conf.http_listen, "0.0.0.0:8080");
 }
 
+/* --http immediately followed by another option must not consume it as an
+ * address (the argv[i+1][0] == '-' branch): http_listen falls back to the -l
+ * address and the following option is still parsed. */
+T_DECLARE_CASE(parseargs_http_followed_by_option)
+{
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--http", "-4" };
+
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
+	T_EXPECT(conf.listen == NULL);
+	T_EXPECT_STREQ(conf.http_listen, "127.0.0.1:1080");
+	T_EXPECT_EQ(conf.resolve_pf, PF_INET);
+}
+
+/* --fastopen-connect exists only in a WITH_TCP_FASTOPEN_CONNECT build; there it
+ * sets the flag, and otherwise it is an unknown option that fails the parse. */
+T_DECLARE_CASE(parseargs_fastopen_connect)
+{
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+			 "--fastopen-connect" };
+
+#if WITH_TCP_FASTOPEN_CONNECT
+	T_EXPECT(conf_parseargs(&conf, 4, argv));
+	T_EXPECT(conf.tcp_fastopen_connect);
+#else
+	T_EXPECT(!conf_parseargs(&conf, 4, argv));
+#endif
+}
+
 T_DECLARE_CASE(parseargs_proxy_and_api)
 {
 	struct config conf = conf_default();
@@ -649,6 +679,31 @@ T_DECLARE_CASE(parseargs_block_outbound)
 				 "--block-outbound", long_arg };
 
 		T_EXPECT(!conf_parseargs(&conf, 5, argv));
+	}
+	{
+		/* empty elements -- leading, adjacent and trailing commas --
+		 * are skipped rather than rejected as unknown class names */
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+				 "--block-outbound", ",local,,global," };
+
+		T_EXPECT(conf_parseargs(&conf, 5, argv));
+		T_EXPECT(conf.block_local);
+		T_EXPECT(conf.block_global);
+		T_EXPECT(!conf.block_loopback);
+		T_EXPECT(!conf.block_multicast);
+	}
+	{
+		/* an all-empty list clears every class */
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+				 "--block-outbound", "" };
+
+		T_EXPECT(conf_parseargs(&conf, 5, argv));
+		T_EXPECT(!conf.block_loopback);
+		T_EXPECT(!conf.block_multicast);
+		T_EXPECT(!conf.block_local);
+		T_EXPECT(!conf.block_global);
 	}
 }
 
@@ -1512,6 +1567,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(parseargs_resolve_pf_flags),
 	T_CASE(parseargs_http_with_address),
 	T_CASE(parseargs_http_only),
+	T_CASE(parseargs_http_followed_by_option),
+	T_CASE(parseargs_fastopen_connect),
 	T_CASE(parseargs_proxy_and_api),
 	T_CASE(parseargs_auth_required),
 	T_CASE(parseargs_user_daemonize_color),

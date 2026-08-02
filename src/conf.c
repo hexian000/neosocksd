@@ -44,21 +44,6 @@ struct metaconfig {
 
 #endif /* WITH_LUA */
 
-/* io_filewriter() heap-allocates a stream that slog only borrows for the
- * process lifetime; cache one per standard stream so repeated --log switches
- * neither leak the prior sink nor dangle. */
-static struct io_stream *log_filewriter(FILE *const f)
-{
-	static struct io_stream *stdout_writer = NULL;
-	static struct io_stream *stderr_writer = NULL;
-	struct io_stream **restrict slot =
-		(f == stdout) ? &stdout_writer : &stderr_writer;
-	if (*slot == NULL) {
-		*slot = io_filewriter(f);
-	}
-	return *slot;
-}
-
 struct config conf_default(void)
 {
 	const struct config conf = {
@@ -293,6 +278,21 @@ static bool opt_parse_int(const char **restrict s, int *restrict out)
 	return true;
 }
 
+/* io_filewriter() heap-allocates a stream that slog only borrows for the
+ * process lifetime; cache one per standard stream so repeated --log switches
+ * neither leak the prior sink nor dangle. */
+static struct io_stream *log_filewriter(FILE *const f)
+{
+	static struct io_stream *stdout_writer = NULL;
+	static struct io_stream *stderr_writer = NULL;
+	struct io_stream **restrict slot =
+		(f == stdout) ? &stdout_writer : &stderr_writer;
+	if (*slot == NULL) {
+		*slot = io_filewriter(f);
+	}
+	return *slot;
+}
+
 /* Install the logging sink named by a --log argument. Returns false (without
  * changing the active sink) on an unknown name or on OOM building the stream
  * writer, so the caller can fail the option instead of installing a NULL
@@ -363,8 +363,6 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			conf->boot = argv[++i];
 			continue;
 		}
-#endif /* WITH_LUA */
-#if WITH_LUA
 		if (strcmp(argv[i], "--dump-config") == 0) {
 			conf->dump_config = true;
 			continue;
@@ -540,8 +538,21 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			conf->block_multicast = false;
 			conf->block_local = false;
 			conf->block_global = false;
-			for (char *tok = strtok(list, ","); tok != NULL;
-			     tok = strtok(NULL, ",")) {
+			/* Split on ',' by hand rather than with the non-reentrant
+			 * strtok() the project avoids elsewhere. Empty elements
+			 * (adjacent or trailing commas) are skipped, matching
+			 * strtok's token semantics. */
+			for (char *tok = list; tok != NULL;) {
+				char *const comma = strchr(tok, ',');
+				char *const next =
+					(comma != NULL) ? comma + 1 : NULL;
+				if (comma != NULL) {
+					*comma = '\0';
+				}
+				if (tok[0] == '\0') {
+					tok = next;
+					continue;
+				}
 				if (strcmp(tok, "loopback") == 0) {
 					conf->block_loopback = true;
 				} else if (strcmp(tok, "multicast") == 0) {
@@ -553,6 +564,7 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 				} else {
 					OPT_ARG_ERROR(argv, i);
 				}
+				tok = next;
 			}
 			continue;
 		}
@@ -745,8 +757,6 @@ static bool load_field(
 	return ok;
 }
 
-static const char *boot_errmsg(lua_State *restrict L);
-
 /* Context for conf_fill_fields, passed as a light-userdata upvalue. */
 struct conf_fill {
 	struct config *conf;
@@ -834,6 +844,19 @@ static int conf_fill_fields(lua_State *restrict L)
 		}
 	}
 	return 0;
+}
+
+/* Format the Lua error object on the stack top for logging. lua_tostring is
+ * only safe on a string; a non-string error object (error({}), error(nil))
+ * yields NULL, and passing NULL to slog's "%s" is undefined behavior. This
+ * state installs no panic handler, so luaL_tolstring's __tostring dispatch
+ * could itself raise and abort() -- mirror ruleset.c's l_panic instead. */
+static const char *boot_errmsg(lua_State *restrict L)
+{
+	if (lua_type(L, -1) == LUA_TSTRING) {
+		return lua_tostring(L, -1);
+	}
+	return "error object is not a string";
 }
 
 bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
@@ -1016,19 +1039,6 @@ bool conf_print(const struct config *restrict conf)
 		ok = fputs("}\n", stdout) != EOF;
 	}
 	return ok;
-}
-
-/* Format the Lua error object on the stack top for logging. lua_tostring is
- * only safe on a string; a non-string error object (error({}), error(nil))
- * yields NULL, and passing NULL to slog's "%s" is undefined behavior. This
- * state installs no panic handler, so luaL_tolstring's __tostring dispatch
- * could itself raise and abort() -- mirror ruleset.c's l_panic instead. */
-static const char *boot_errmsg(lua_State *restrict L)
-{
-	if (lua_type(L, -1) == LUA_TSTRING) {
-		return lua_tostring(L, -1);
-	}
-	return "error object is not a string";
 }
 
 /* Protected body of conf_loadboot: guards against a `ruleset` field and applies

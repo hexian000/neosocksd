@@ -85,6 +85,7 @@ bool conf_check(const struct config *restrict conf);
  * On error, logs a message and returns false; the caller should exit. */
 bool conf_parseargs(struct config *restrict conf, int argc, char *argv[]);
 
+#if WITH_LUA
 struct lua_State;
 
 /* Extract config fields from a Lua table at the top of L's stack. Nil fields
@@ -94,7 +95,6 @@ struct lua_State;
 bool conf_loadfromtable(
 	struct lua_State *restrict L, struct config *restrict conf);
 
-#if WITH_LUA
 /* Print the command-line configuration to stdout as a Lua table literal.
  * Returns false on output error. */
 bool conf_print(const struct config *restrict conf);
