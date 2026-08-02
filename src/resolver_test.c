@@ -25,7 +25,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
@@ -501,6 +500,82 @@ T_DECLARE_CASE(resolver_free_does_not_leak_inflight_query)
 }
 
 /*
+ * #177: cancelling a query while its c-ares lookup is still on the wire, then
+ * letting the answer arrive, must suppress the callback (addrinfo_cb ->
+ * finish_defer -> finish_cb sees the cleared done_cb and frees the query). This
+ * is distinct from cancelling a synchronously-completed query and from
+ * destroying the resolver mid-flight.
+ */
+T_DECLARE_CASE(resolve_cancel_inflight_suppresses_callback)
+{
+	struct ev_loop *const loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+
+	const int dns_fd = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(dns_fd >= 0);
+	struct sockaddr_in dns_addr = {
+		.sin_family = AF_INET,
+		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
+		.sin_port = 0,
+	};
+	T_CHECK(bind(dns_fd, (const struct sockaddr *)&dns_addr,
+		     sizeof(dns_addr)) == 0);
+	socklen_t addrlen = sizeof(dns_addr);
+	T_CHECK(getsockname(dns_fd, (struct sockaddr *)&dns_addr, &addrlen) ==
+		0);
+
+	char nameserver[32];
+	(void)snprintf(
+		nameserver, sizeof(nameserver), "127.0.0.1:%u",
+		(unsigned)ntohs(dns_addr.sin_port));
+	struct config conf = { .nameserver = nameserver };
+	struct resolver *const resolver = resolver_new(loop, &conf);
+	T_CHECK(resolver != NULL);
+
+	ev_io w_dns;
+	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
+	ev_io_start(loop, &w_dns);
+
+	struct resolve_result result = { 0 };
+	struct resolve_query *const query = resolve_do(
+		resolver,
+		(struct resolve_cb){
+			.func = resolve_capture_cb,
+			.data = &result,
+		},
+		"test.invalid", "443", AF_INET);
+	T_CHECK(query != NULL);
+
+	/* cancel while the query is still on the wire (unanswered) */
+	resolve_cancel(query);
+
+	/* pump (blocking, watchdog-bounded) until the fake server answers */
+	struct test_watchdog watchdog = { 0 };
+	struct ev_timer w_timeout;
+	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_SEC, 0.0);
+	w_timeout.data = &watchdog;
+	ev_timer_start(loop, &w_timeout);
+	while (!watchdog.fired && ev_is_active(&w_dns)) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	ev_timer_stop(loop, &w_timeout);
+	/* the fake server really answered (the late-completion path ran) */
+	T_CHECK(!ev_is_active(&w_dns));
+	/* the reply is now queued on the c-ares socket (loopback delivery is
+	 * synchronous); process it and the deferred finish without blocking */
+	for (int i = 0; i < 16; i++) {
+		ev_run(loop, EVRUN_NOWAIT);
+	}
+
+	/* the cancelled query's callback must never have fired */
+	T_EXPECT(!result.called);
+
+	(void)close(dns_fd);
+	resolver_free(resolver);
+	ev_loop_destroy(loop);
+}
+
+/*
  * Regression: resolver_new() snapshots conf->nameserver at creation, before a
  * boot config could supply one. resolver_setnameserver() must re-apply a
  * nameserver provided only afterwards. The resolver is created with no
@@ -586,6 +661,7 @@ static const struct testing_suite suite[] = {
 #if WITH_CARES
 	T_CASE(resolve_via_fake_nameserver),
 	T_CASE(resolver_free_does_not_leak_inflight_query),
+	T_CASE(resolve_cancel_inflight_suppresses_callback),
 	T_CASE(resolver_setnameserver_applies_after_new),
 #endif
 	T_SUITE_END,

@@ -122,23 +122,6 @@ finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 
 #if WITH_CARES
 static void
-socket_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
-{
-	(void)loop;
-	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
-	struct resolver *restrict r = watcher->data;
-	const int fd = watcher->fd;
-
-	const ares_socket_t readable =
-		(revents & EV_READ) ? fd : ARES_SOCKET_BAD;
-	const ares_socket_t writable =
-		(revents & EV_WRITE) ? fd : ARES_SOCKET_BAD;
-
-	LOGV_F("io: [fd:%d] revents=0x%x", fd, revents);
-	ares_process_fd(r->channel, readable, writable);
-}
-
-static void
 sched_update(struct ev_loop *restrict loop, ev_timer *restrict watcher)
 {
 	struct resolver *restrict r = watcher->data;
@@ -151,8 +134,32 @@ sched_update(struct ev_loop *restrict loop, ev_timer *restrict watcher)
 
 	const double next = (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
 	LOGV_F("timeout: next check after %.3fs", next);
-	watcher->repeat = next;
+	/* c-ares clamps an already-expired query's remaining time to {0,0}, so
+	 * `next` can be 0.0. ev_timer_again with repeat == 0 stops the timer
+	 * (and no-ops an inactive one), which would leave an already-due timeout
+	 * unprocessed until an unrelated event. Clamp to a small positive delay
+	 * so it fires on the next loop iteration instead. */
+	watcher->repeat = next > 0.0 ? next : 1e-3;
 	ev_timer_again(loop, watcher);
+}
+
+static void
+socket_cb(struct ev_loop *restrict loop, ev_io *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_READ | EV_WRITE);
+	struct resolver *restrict r = watcher->data;
+	const int fd = watcher->fd;
+
+	const ares_socket_t readable =
+		(revents & EV_READ) ? fd : ARES_SOCKET_BAD;
+	const ares_socket_t writable =
+		(revents & EV_WRITE) ? fd : ARES_SOCKET_BAD;
+
+	LOGV_F("io: [fd:%d] revents=0x%x", fd, revents);
+	ares_process_fd(r->channel, readable, writable);
+	/* re-evaluate the timeout after processing: a socket event may have
+	 * advanced or completed queries, changing the next deadline */
+	sched_update(loop, &r->w_timeout);
 }
 
 static size_t purge_watchers(struct resolver *restrict r)
@@ -216,7 +223,11 @@ static void sock_state_cb(
 		if (node == NULL || !ev_is_active(&node->watcher)) {
 			return;
 		}
-		LOGV_F("io: stop [fd:%d] num_socket=%zu", fd, --r->num_socket);
+		/* decrement in its own statement: LOGV_F does not evaluate its
+		 * arguments below VERBOSE level, so a decrement inside the macro
+		 * argument would be skipped and the counter would drift */
+		r->num_socket--;
+		LOGV_F("io: stop [fd:%d] num_socket=%zu", fd, r->num_socket);
 		ev_io_stop(r->loop, &node->watcher);
 		return;
 	}
@@ -424,6 +435,11 @@ void resolver_free(struct resolver *restrict r)
 #if WITH_CARES
 	if (r->async_enabled) {
 		ares_destroy(r->channel);
+		/* the async path arms w_timeout; stop it before the resolver
+		 * storage is freed, or a later ev_run would fire timeout_cb on
+		 * freed memory (ares_destroy stops the I/O watchers via
+		 * sock_state_cb, but nothing stops the timer) */
+		ev_timer_stop(r->loop, &r->w_timeout);
 		(void)purge_watchers(r);
 
 		ASSERT(!ev_is_active(&r->sockets.watcher));
@@ -462,10 +478,11 @@ resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
 			r->channel, q->name, q->service, &hints, addrinfo_cb,
 			q);
 
-		ev_timer *restrict w_timeout = &r->w_timeout;
-		if (!ev_is_active(w_timeout)) {
-			sched_update(r->loop, w_timeout);
-		}
+		/* Re-evaluate the timeout deadline after every ares_getaddrinfo
+		 * (standard c-ares event-loop integration): a newer query may
+		 * have an earlier deadline than the one the timer is armed for,
+		 * so reschedule unconditionally rather than only when inactive. */
+		sched_update(r->loop, &r->w_timeout);
 		return;
 	}
 #endif /* WITH_CARES */
