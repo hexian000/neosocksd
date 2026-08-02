@@ -1,11 +1,11 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+#include "ruleset/cfunc.h"
+
 #include "conf.h"
 #include "ruleset/base.h"
-#include "ruleset/cfunc.h"
 #include "ruleset/ruleset.h"
-#include "util.h"
 
 #include "io/stream.h"
 #include "utils/debug.h"
@@ -81,6 +81,19 @@ static struct ruleset_state *new_ruleset_state(lua_State *restrict L)
 }
 
 /* finish(ok, ...) */
+/* Protected wrapper around aux_todialreq: leaves the built dialreq (or NULL for
+ * a direct/rejected connection) as a lightuserdata on top. Called through a
+ * pcall so a raise while converting args cannot escape and orphan the op. */
+static int protected_todialreq(lua_State *restrict L)
+{
+	const int n = lua_gettop(L);
+	if (aux_todialreq(L, n)) {
+		return 1;
+	}
+	lua_pushlightuserdata(L, NULL);
+	return 1;
+}
+
 static int request_finish(lua_State *restrict L)
 {
 	struct ruleset_state *restrict state =
@@ -93,8 +106,17 @@ static int request_finish(lua_State *restrict L)
 	struct dialreq *req = NULL;
 	if (lua_toboolean(L, 1)) {
 		const int n = lua_gettop(L) - 1;
-		if (n > 0 && aux_todialreq(L, n)) {
-			req = lua_touserdata(L, -1);
+		if (n > 0) {
+			/* aux_todialreq converts args with lua_tolstring, which can
+			 * raise LUA_ERRMEM on a number arg; build under a pcall so
+			 * such a raise cannot precede state_complete below and orphan
+			 * the async op. */
+			lua_pushcfunction(L, protected_todialreq);
+			lua_rotate(L, 2, 1);
+			/* lua stack: ok protected_todialreq arg1 ... argN */
+			if (lua_pcall(L, n, 1, 0) == LUA_OK) {
+				req = lua_touserdata(L, -1);
+			}
 		}
 		if (req == NULL) {
 			/* the routine gave up without forwarding: reject by policy */
@@ -262,6 +284,22 @@ int cfunc_invoke(lua_State *restrict L)
 }
 
 /* finish(ok, ...) */
+/* Protected: build "return " .. marshal(...) as a single Lua string on top,
+ * running every fallible step (lua_pushliteral, lua_getglobal, marshal,
+ * lua_concat) inside one pcall so an OOM/marshal raise is caught by the caller
+ * rather than escaping rpcall_finish and orphaning the async op. */
+static int build_rpcall_result(lua_State *restrict L)
+{
+	const int n = lua_gettop(L);
+	lua_pushliteral(L, "return ");
+	lua_getglobal(L, "marshal");
+	lua_rotate(L, 1, 2);
+	/* lua stack: "return " marshal ... */
+	lua_call(L, n, 1);
+	lua_concat(L, 2);
+	return 1;
+}
+
 static int rpcall_finish(lua_State *restrict L)
 {
 	struct ruleset_state *restrict state =
@@ -282,12 +320,11 @@ static int rpcall_finish(lua_State *restrict L)
 		return 0;
 	}
 	const int n = lua_gettop(L);
-	lua_pushliteral(L, "return ");
-	lua_getglobal(L, "marshal");
-	lua_rotate(L, 1, 2);
-	/* lua stack: "return " marshal ... */
+	lua_pushcfunction(L, build_rpcall_result);
+	lua_insert(L, 1);
+	/* lua stack: build_rpcall_result ok ... */
 	if (lua_pcall(L, n, 1, 0) != LUA_OK) {
-		/* marshal() can raise (e.g. an unmarshalable type); report a failed
+		/* result-building (marshal, concat, OOM) can raise; report a failed
 		 * result rather than letting the error escape and leave the
 		 * caller's callback pending. */
 		state->cb->rpcall.result = NULL;
@@ -295,13 +332,11 @@ static int rpcall_finish(lua_State *restrict L)
 		state_complete(L, state);
 		/* log after completing: luaL_tolstring may invoke a __tostring
 		 * that raises, which must not orphan the async op */
-		LOGE_F("ruleset rpcall: marshal failed: %s",
-		       luaL_tolstring(L, -1, NULL));
+		LOGE_F("ruleset rpcall: %s", luaL_tolstring(L, -1, NULL));
 		return 0;
 	}
-	lua_concat(L, 2);
 	size_t len;
-	const char *s = lua_tolstring(L, 1, &len);
+	const char *s = lua_tolstring(L, -1, &len);
 	/* Copy the marshalled result into a C-owned buffer: `s` borrows Lua
 	 * memory freed once this closure returns, but rpcall_cb() reads it later
 	 * from the deferred event. The consumer takes ownership and frees it. */
@@ -363,8 +398,6 @@ int cfunc_rpcall(lua_State *restrict L)
 	lua_settop(L, 1);
 	return 1;
 }
-
-#define LUA_LOADED_TABLE "_LOADED"
 
 /* m = replace(modname, chunk) */
 static int package_replace(lua_State *restrict L)
