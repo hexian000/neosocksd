@@ -44,6 +44,7 @@ DEFAULT_BUILD_DIR = ROOT / "build"
 DEFAULT_OUTPUT = DEFAULT_BUILD_DIR / "smoke_test.md"
 
 HOST = "127.0.0.1"
+HOST6 = "::1"
 HTTP_BODY = b"neosocksd-smoke-ok\n"
 READY_TIMEOUT = 5.0
 IO_TIMEOUT = 5.0
@@ -103,7 +104,21 @@ def echo_roundtrip(sock: socket.socket, size: int = 4096) -> None:
 
 
 class SocksError(Exception):
-    pass
+    """A SOCKS handshake failure. `stage` names where it failed ("method",
+    "userpass", "connect") and `code` carries the protocol reply byte, so a
+    negative test can assert the specific failure cause rather than accepting
+    any SOCKS failure."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: Optional[str] = None,
+        code: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.code = code
 
 
 # --------------------------------------------------------------------------- #
@@ -141,7 +156,11 @@ def socks5_connect(
         if ver != 0x05:
             raise SocksError("bad SOCKS5 version in method reply: %d" % ver)
         if method == 0xFF:
-            raise SocksError("no acceptable authentication method")
+            raise SocksError(
+                "no acceptable authentication method",
+                stage="method",
+                code=0xFF,
+            )
         if method == 0x02:
             if user is None:
                 raise SocksError("server demanded user/pass but none supplied")
@@ -150,20 +169,29 @@ def socks5_connect(
             sock.sendall(bytes([0x01, len(u)]) + u + bytes([len(p)]) + p)
             _, status = recv_exact(sock, 2)
             if status != 0x00:
-                raise SocksError("username/password auth failed")
+                raise SocksError(
+                    "username/password auth failed",
+                    stage="userpass",
+                    code=status,
+                )
         elif method != 0x00:
             raise SocksError("unexpected auth method selected: %d" % method)
 
         req = bytearray([0x05, 0x01, 0x00])
         try:
-            packed = socket.inet_aton(dst_host)
-            req.append(0x01)
-            req += packed
+            req.append(0x01)  # ATYP IPv4
+            req += socket.inet_pton(socket.AF_INET, dst_host)
         except OSError:
-            host = dst_host.encode()
-            req.append(0x03)
-            req.append(len(host))
-            req += host
+            try:
+                packed6 = socket.inet_pton(socket.AF_INET6, dst_host)
+                req[-1] = 0x04  # ATYP IPv6
+                req += packed6
+            except OSError:
+                del req[-1]
+                host = dst_host.encode()
+                req.append(0x03)  # ATYP domain
+                req.append(len(host))
+                req += host
         req += struct.pack("!H", dst_port)
         sock.sendall(bytes(req))
 
@@ -171,7 +199,11 @@ def socks5_connect(
         if ver != 0x05:
             raise SocksError("bad SOCKS5 version in reply: %d" % ver)
         if rep != 0x00:
-            raise SocksError("SOCKS5 CONNECT failed, reply code %d" % rep)
+            raise SocksError(
+                "SOCKS5 CONNECT failed, reply code %d" % rep,
+                stage="connect",
+                code=rep,
+            )
         if atyp == 0x01:
             recv_exact(sock, 4)
         elif atyp == 0x04:
@@ -213,6 +245,48 @@ def _socks4_request(
     except Exception:
         sock.close()
         raise
+
+
+def _socks5_greet(sock: socket.socket) -> None:
+    """Perform the SOCKS5 no-auth method negotiation on an open socket."""
+    sock.sendall(bytes([0x05, 0x01, 0x00]))
+    ver, method = recv_exact(sock, 2)
+    if ver != 0x05 or method != 0x00:
+        raise SocksError(
+            "SOCKS5 no-auth negotiation failed: ver=%d method=%d"
+            % (ver, method)
+        )
+
+
+def _socks5_addr(host: str, port: int) -> bytes:
+    """Encode a SOCKS5 ATYP+ADDR+PORT tuple for a request or UDP header."""
+    try:
+        body = bytes([0x01]) + socket.inet_pton(socket.AF_INET, host)
+    except OSError:
+        try:
+            body = bytes([0x04]) + socket.inet_pton(socket.AF_INET6, host)
+        except OSError:
+            h = host.encode()
+            body = bytes([0x03, len(h)]) + h
+    return body + struct.pack("!H", port)
+
+
+def _socks5_read_reply(sock: socket.socket) -> Tuple[int, str, int]:
+    """Read a SOCKS5 reply, returning (reply_code, bnd_host, bnd_port)."""
+    ver, rep, _rsv, atyp = recv_exact(sock, 4)
+    if ver != 0x05:
+        raise SocksError("bad SOCKS5 version in reply: %d" % ver)
+    if atyp == 0x01:
+        host = socket.inet_ntop(socket.AF_INET, recv_exact(sock, 4))
+    elif atyp == 0x04:
+        host = socket.inet_ntop(socket.AF_INET6, recv_exact(sock, 16))
+    elif atyp == 0x03:
+        (n,) = struct.unpack("!B", recv_exact(sock, 1))
+        host = recv_exact(sock, n).decode()
+    else:
+        raise SocksError("unexpected ATYP in SOCKS5 reply: %d" % atyp)
+    (port,) = struct.unpack("!H", recv_exact(sock, 2))
+    return rep, host, port
 
 
 def socks4_connect(
@@ -303,7 +377,11 @@ def _parse_http_response(data: bytes, method: str) -> Tuple[int, dict, bytes]:
         key, _, value = line.partition(b":")
         headers[key.strip().lower()] = value.strip()
     if method == "HEAD":
-        body = b""
+        # A HEAD response must be bodiless. Surface any bytes that followed the
+        # header block as the "body" instead of discarding them, so a caller's
+        # `body == b""` check actually detects a leaked body rather than passing
+        # unconditionally.
+        body = rest
     elif b"chunked" in headers.get(b"transfer-encoding", b"").lower():
         body = _decode_chunked(rest)
     elif b"content-length" in headers:
@@ -452,6 +530,45 @@ class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+class _ThreadingTCPServer6(_ThreadingTCPServer):
+    address_family = socket.AF_INET6
+
+
+class _UDPEchoHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        data, sock = self.request
+        sock.sendto(data, self.client_address)
+
+
+class _ThreadingUDPServer(socketserver.ThreadingUDPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def _bind_echo_dual() -> Tuple[_ThreadingTCPServer, _ThreadingTCPServer, int]:
+    """Bind IPv4 and IPv6 echo servers sharing one loopback port.
+
+    A hostname target is resolved by the daemon itself with AF_UNSPEC, so the
+    test cannot know which family the host returns for a name like "localhost".
+    Serving the same port on both loopback addresses makes that choice
+    irrelevant instead of depending on the host's resolver ordering.
+
+    An ephemeral port is picked on ::1 and then claimed on 127.0.0.1; the two
+    addresses are distinct, so only an unrelated listener already holding the
+    IPv4 port can collide, which the retry resolves.
+    """
+    for _ in range(16):
+        srv6 = _ThreadingTCPServer6((HOST6, 0), _EchoHandler)
+        port = srv6.server_address[1]
+        try:
+            srv4 = _ThreadingTCPServer((HOST, port), _EchoHandler)
+        except OSError:
+            srv6.server_close()
+            continue
+        return srv4, srv6, port
+    raise RuntimeError("found no loopback port free on both IPv4 and IPv6")
+
+
 class _HTTPHandler(BaseHTTPRequestHandler):
     """Proxy destination for proxy_pass tests.
 
@@ -596,13 +713,22 @@ class Targets:
         self.echo = _ThreadingTCPServer((HOST, 0), _EchoHandler)
         self.http = _ThreadingTCPServer((HOST, 0), _HTTPHandler)
         self.ws = _ThreadingTCPServer((HOST, 0), _WebSocketHandler)
+        self.echo6 = _ThreadingTCPServer6((HOST6, 0), _EchoHandler)
+        self.udp_echo = _ThreadingUDPServer((HOST, 0), _UDPEchoHandler)
+        self.echo_any, self.echo_any6, self.echo_any_port = _bind_echo_dual()
         self.echo_port = self.echo.server_address[1]
         self.http_port = self.http.server_address[1]
         self.ws_port = self.ws.server_address[1]
+        self.echo6_port = self.echo6.server_address[1]
+        self.udp_echo_port = self.udp_echo.server_address[1]
         self._threads = [
             threading.Thread(target=self.echo.serve_forever, daemon=True),
             threading.Thread(target=self.http.serve_forever, daemon=True),
             threading.Thread(target=self.ws.serve_forever, daemon=True),
+            threading.Thread(target=self.echo6.serve_forever, daemon=True),
+            threading.Thread(target=self.udp_echo.serve_forever, daemon=True),
+            threading.Thread(target=self.echo_any.serve_forever, daemon=True),
+            threading.Thread(target=self.echo_any6.serve_forever, daemon=True),
         ]
 
     def start(self) -> "Targets":
@@ -611,7 +737,15 @@ class Targets:
         return self
 
     def stop(self) -> None:
-        for srv in (self.echo, self.http, self.ws):
+        for srv in (
+            self.echo,
+            self.http,
+            self.ws,
+            self.echo6,
+            self.udp_echo,
+            self.echo_any,
+            self.echo_any6,
+        ):
             try:
                 srv.shutdown()
                 srv.server_close()
@@ -791,20 +925,48 @@ def direct_ruleset() -> str:
 
 
 def redirect_ruleset(fake_host: str, echo_addr: str) -> str:
-    """Redirect a fake hostname to the echo target; reject `reject.test`."""
+    """Redirect a fake hostname to the echo target; reject every other host.
+
+    Unknown hostnames are rejected (return nil) rather than passed through, so a
+    stale route after a hot reload fails hermetically instead of triggering a
+    real resolver lookup (which the suite promises never to do)."""
     return (
         "local ECHO = %r\n"
         "local FAKE = %r\n"
         "local ruleset = {}\n"
         "function ruleset.resolve(addr)\n"
         "    if addr == FAKE then return ECHO end\n"
-        "    if addr == 'reject.test:80' then return nil end\n"
-        "    return addr\n"
+        "    return nil\n"
         "end\n"
         "function ruleset.route(addr) return addr end\n"
         "function ruleset.route6(addr) return addr end\n"
         "return ruleset\n"
     ) % (echo_addr, fake_host)
+
+
+def credential_ruleset(allowed_user: str) -> str:
+    """Route directly only when the SOCKS5 username matches; else reject.
+
+    The ruleset entry points receive the client's credentials as
+    (addr, username, password), so this pins that they actually reach Lua."""
+    return (
+        "local ALLOWED = %r\n"
+        "local ruleset = {}\n"
+        "local function check(addr, username)\n"
+        "    if username == ALLOWED then return addr end\n"
+        "    return nil\n"
+        "end\n"
+        "function ruleset.route(addr, username, password)\n"
+        "    return check(addr, username)\n"
+        "end\n"
+        "function ruleset.route6(addr, username, password)\n"
+        "    return check(addr, username)\n"
+        "end\n"
+        "function ruleset.resolve(addr, username, password)\n"
+        "    return check(addr, username)\n"
+        "end\n"
+        "return ruleset\n"
+    ) % (allowed_user,)
 
 
 # --------------------------------------------------------------------------- #
@@ -830,6 +992,19 @@ class Context:
     @property
     def ws_port(self) -> int:
         return self.targets.ws_port
+
+    @property
+    def echo6_port(self) -> int:
+        return self.targets.echo6_port
+
+    @property
+    def echo_any_port(self) -> int:
+        """Echo port served on both loopback families, for hostname targets."""
+        return self.targets.echo_any_port
+
+    @property
+    def udp_echo_port(self) -> int:
+        return self.targets.udp_echo_port
 
     @property
     def echo_addr(self) -> str:
@@ -943,11 +1118,108 @@ def t_socks5_ipv4(ctx: Context) -> None:
 
 @test("socks5/domain")
 def t_socks5_domain(ctx: Context) -> None:
+    """Dial a hostname target (SOCKS5 ATYP 0x03) via the daemon's resolver.
+
+    The target port is served on both loopback families, so the case does not
+    care which one the host resolves "localhost" to first.
+    """
     d, listen, _ = _socks_daemon(ctx)
     with d:
-        sock = socks5_connect(HOST, listen, "localhost", ctx.echo_port)
+        sock = socks5_connect(HOST, listen, "localhost", ctx.echo_any_port)
         with sock:
             echo_roundtrip(sock)
+
+
+@test("socks5/ipv6")
+def t_socks5_ipv6(ctx: Context) -> None:
+    """Dial an IPv6 literal target (SOCKS5 ATYP 0x04) through ruleset.route6()."""
+    listen = free_port()
+    ruleset = write_ruleset(ctx.tmpdir, "direct.lua", direct_ruleset())
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen), "-r", str(ruleset)],
+        listen_port=listen,
+        loglevel=ctx.loglevel,
+    ):
+        with socks5_connect(HOST, listen, HOST6, ctx.echo6_port) as sock:
+            echo_roundtrip(sock)
+
+
+@test("socks5/udp-associate")
+def t_socks5_udp(ctx: Context) -> None:
+    """SOCKS5 UDP ASSOCIATE relays a datagram to a UDP echo target and back."""
+    listen = free_port()
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen), "--enable-socks5-udp"],
+        listen_port=listen,
+        loglevel=ctx.loglevel,
+    ):
+        ctrl = _connect(HOST, listen)
+        with ctrl:
+            _socks5_greet(ctrl)
+            # UDP ASSOCIATE (CMD 0x03); the client's own addr is unknown yet
+            ctrl.sendall(bytes([0x05, 0x03, 0x00]) + _socks5_addr("0.0.0.0", 0))
+            rep, relay_host, relay_port = _socks5_read_reply(ctrl)
+            if rep != 0x00:
+                raise SocksError(
+                    "UDP ASSOCIATE failed, reply code %d" % rep,
+                    stage="connect", code=rep,
+                )
+            if relay_host in ("0.0.0.0", "::"):
+                relay_host = HOST
+            usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            usock.settimeout(IO_TIMEOUT)
+            with usock:
+                payload = b"udp-relay-smoke"
+                header = bytes([0x00, 0x00, 0x00]) + _socks5_addr(
+                    HOST, ctx.udp_echo_port
+                )
+                usock.sendto(header + payload, (relay_host, relay_port))
+                data, _ = usock.recvfrom(4096)
+            # the reply is SOCKS5-UDP-header-prefixed; the echoed payload trails
+            assert data.endswith(payload), (
+                "UDP relay returned %r, expected trailing %r" % (data, payload)
+            )
+
+
+@test("socks5/bind")
+def t_socks5_bind(ctx: Context) -> None:
+    """SOCKS5 BIND opens a listener, a peer connects, and data relays both ways."""
+    listen = free_port()
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen), "--enable-socks5-bind"],
+        listen_port=listen,
+        loglevel=ctx.loglevel,
+    ):
+        ctrl = _connect(HOST, listen)
+        with ctrl:
+            _socks5_greet(ctrl)
+            # BIND (CMD 0x02); the target address is the advisory expected peer
+            ctrl.sendall(bytes([0x05, 0x02, 0x00]) + _socks5_addr(HOST, 0))
+            rep, bnd_host, bnd_port = _socks5_read_reply(ctrl)
+            if rep != 0x00:
+                raise SocksError(
+                    "BIND first reply failed, code %d" % rep,
+                    stage="connect", code=rep,
+                )
+            if bnd_host in ("0.0.0.0", "::"):
+                bnd_host = HOST
+            # a peer connects to the bound port; the daemon sends its second reply
+            peer = socket.create_connection(
+                (bnd_host, bnd_port), timeout=IO_TIMEOUT
+            )
+            peer.settimeout(IO_TIMEOUT)
+            with peer:
+                rep2, _, _ = _socks5_read_reply(ctrl)
+                assert rep2 == 0x00, "BIND second reply failed, code %d" % rep2
+                # data relays both directions between client and peer
+                msg = b"bind-relay-smoke"
+                ctrl.sendall(msg)
+                assert recv_exact(peer, len(msg)) == msg, "BIND client->peer"
+                peer.sendall(msg[::-1])
+                assert recv_exact(ctrl, len(msg)) == msg[::-1], "BIND peer->client"
 
 
 @test("socks5/refused")
@@ -957,7 +1229,10 @@ def t_socks5_refused(ctx: Context) -> None:
     with d:
         try:
             socks5_connect(HOST, listen, HOST, dead).close()
-        except SocksError:
+        except SocksError as e:
+            assert e.stage == "connect", (
+                "expected a CONNECT-stage failure, got stage=%r" % e.stage
+            )
             return
         raise AssertionError("expected SOCKS5 failure for closed target port")
 
@@ -973,9 +1248,13 @@ def t_socks4_ipv4(ctx: Context) -> None:
 
 @test("socks4a/hostname")
 def t_socks4a_hostname(ctx: Context) -> None:
+    """Dial a hostname target (SOCKS4A) via the daemon's resolver.
+
+    Uses the dual-family echo port for the same reason as socks5/domain.
+    """
     d, listen, _ = _socks_daemon(ctx)
     with d:
-        sock = socks4a_connect(HOST, listen, "localhost", ctx.echo_port)
+        sock = socks4a_connect(HOST, listen, "localhost", ctx.echo_any_port)
         with sock:
             echo_roundtrip(sock)
 
@@ -1000,7 +1279,11 @@ def t_auth_rejects_noauth(ctx: Context) -> None:
             socks5_connect(
                 HOST, listen, HOST, ctx.echo_port, offer_noauth=True
             ).close()
-        except SocksError:
+        except SocksError as e:
+            assert e.stage == "method" and e.code == 0xFF, (
+                "expected a method-selection rejection (0xFF), got "
+                "stage=%r code=%r" % (e.stage, e.code)
+            )
             return
         raise AssertionError("auth-required server accepted a no-auth client")
 
@@ -1027,6 +1310,43 @@ def t_auth_accepts_userpass(ctx: Context) -> None:
         )
         with sock:
             echo_roundtrip(sock)
+
+
+@test("socks5/ruleset-credentials")
+def t_ruleset_credentials(ctx: Context) -> None:
+    """The SOCKS5 username must reach the ruleset: a matching user routes to
+    echo, a wrong user is rejected at the CONNECT stage."""
+    listen = free_port()
+    ruleset = write_ruleset(
+        ctx.tmpdir, "cred.lua", credential_ruleset("smoke")
+    )
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen), "--auth-required",
+         "-r", str(ruleset)],
+        listen_port=listen,
+        loglevel=ctx.loglevel,
+    ):
+        # the allowed username reaches the ruleset, which routes to echo
+        with socks5_connect(
+            HOST, listen, HOST, ctx.echo_port,
+            user="smoke", password="secret", offer_noauth=False,
+        ) as sock:
+            echo_roundtrip(sock)
+        # a different username is rejected by the ruleset (CONNECT stage),
+        # proving the credential was actually inspected
+        try:
+            socks5_connect(
+                HOST, listen, HOST, ctx.echo_port,
+                user="intruder", password="secret", offer_noauth=False,
+            ).close()
+        except SocksError as e:
+            assert e.stage == "connect", (
+                "wrong credentials must be rejected by the ruleset at the "
+                "CONNECT stage, got stage=%r" % e.stage
+            )
+        else:
+            raise AssertionError("ruleset accepted a wrong-username client")
 
 
 # --------------------------------------------------------------------------- #
@@ -1245,6 +1565,91 @@ def t_chain(ctx: Context) -> None:
                 echo_roundtrip(sock)
 
 
+@test("chain/socks5-over-http")
+def t_chain_over_http(ctx: Context) -> None:
+    """Chain a client's SOCKS5 request out through an http:// upstream dialer."""
+    up_socks = free_port()
+    up_http = free_port()
+    front = free_port()
+    up = Daemon(
+        ctx.binary,
+        [
+            "-l", "%s:%d" % (HOST, up_socks),
+            "--http", "%s:%d" % (HOST, up_http),
+        ],
+        listen_port=up_http,
+        loglevel=ctx.loglevel,
+        name="upstream",
+    )
+    with up:
+        fr = Daemon(
+            ctx.binary,
+            [
+                "-l", "%s:%d" % (HOST, front),
+                "-x", "http://%s:%d" % (HOST, up_http),
+            ],
+            listen_port=front,
+            loglevel=ctx.loglevel,
+            name="front",
+        )
+        with fr:
+            sock = socks5_connect(HOST, front, HOST, ctx.echo_port)
+            with sock:
+                echo_roundtrip(sock)
+
+
+@test("chain/socks5-over-socks4a")
+def t_chain_over_socks4a(ctx: Context) -> None:
+    """Chain a client's SOCKS5 request out through a socks4a:// upstream."""
+    upstream = free_port()
+    front = free_port()
+    up = Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, upstream)],
+        listen_port=upstream,
+        loglevel=ctx.loglevel,
+        name="upstream",
+    )
+    with up:
+        fr = Daemon(
+            ctx.binary,
+            [
+                "-l", "%s:%d" % (HOST, front),
+                "-x", "socks4a://%s:%d" % (HOST, upstream),
+            ],
+            listen_port=front,
+            loglevel=ctx.loglevel,
+            name="front",
+        )
+        with fr:
+            sock = socks5_connect(HOST, front, HOST, ctx.echo_port)
+            with sock:
+                echo_roundtrip(sock)
+
+
+@test("forward/pipe")
+def t_pipe(ctx: Context) -> None:
+    """The splice/pipe transfer path (--pipe) must still relay data."""
+    probe = subprocess.run(
+        [str(ctx.binary), "--pipe", "-l", "%s:0" % HOST, "--dump-config"],
+        capture_output=True,
+        timeout=10,
+    )
+    if probe.returncode != 0:
+        raise SkipTest("binary built without --pipe (WITH_SPLICE) support")
+    listen = free_port()
+    d = Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen), "--pipe"],
+        listen_port=listen,
+        loglevel=ctx.loglevel,
+    )
+    with d:
+        sock = socks5_connect(HOST, listen, HOST, ctx.echo_port)
+        with sock:
+            echo_roundtrip(sock)
+
+
 # --------------------------------------------------------------------------- #
 # G. Ruleset routing
 # --------------------------------------------------------------------------- #
@@ -1286,7 +1691,11 @@ def t_ruleset_reject(ctx: Context) -> None:
     ):
         try:
             socks5_connect(HOST, listen, "reject.test", 80).close()
-        except SocksError:
+        except SocksError as e:
+            assert e.stage == "connect", (
+                "a ruleset reject must surface as a CONNECT-stage failure, "
+                "got stage=%r code=%r" % (e.stage, e.code)
+            )
             return
         raise AssertionError("ruleset reject was not honored")
 
@@ -1504,7 +1913,9 @@ def write_report(path: Path, results: List[Result]) -> None:
         )
     lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines))
+    # Failure details can carry U+FFFD from stderr_text(); pin UTF-8 so the
+    # report write does not raise UnicodeEncodeError under a non-UTF-8 locale.
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
