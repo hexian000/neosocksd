@@ -44,7 +44,7 @@ bool dispatcher_invoke(struct dispatcher *d, struct task task);
 
 /**
  * @brief Process all pending tasks without blocking.
- * 
+ *
  * @param d Dispatcher instance.
  * @note Call periodically from main thread.
  */
@@ -63,9 +63,9 @@ void dispatcher_join(struct dispatcher *d);
 
 /**
  * @brief Destroy dispatcher and free all resources.
- * 
+ *
  * Frees remaining tasks without executing them.
- * 
+ *
  * @param d Dispatcher instance.
  * @warning Ensure no other threads are accessing the dispatcher.
  */

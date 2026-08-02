@@ -7,8 +7,9 @@
 
 #include <string.h>
 
-/* RFC 2045 */
-#define istspecial(c) (!!strchr("()<>@,;:\"/[]?=", (c)))
+/* RFC 2045 tspecials, including the backslash that separates the two quoted
+ * specials below ("()<>@,;:\ "/[]?=") */
+#define istspecial(c) (!!strchr("()<>@,;:\\\"/[]?=", (c)))
 #define istoken(c)                                                             \
 	(32u < (unsigned char)(c) && (unsigned char)(c) < 127u &&              \
 	 !istspecial(c))
@@ -127,15 +128,26 @@ static char *parse_value(char *s, char **restrict value)
 			if (*(r + 1)) {
 				r++;
 				ch = (unsigned char)*r;
-				if (ch == '\r' || ch == '\n') {
+				/* a quoted-pair may not smuggle in a control
+				 * byte the unescaped path would reject */
+				if (iscntrl(ch) && ch != '\t') {
 					return NULL;
 				}
 			}
 			break;
-		case '\r':
-		case '\n':
-			return NULL;
 		default:
+			/* Reject every control byte, not just CR and LF.
+			 * RFC 822 qtext tolerates most CTLs, but the tree's
+			 * other parsers (http_parsehdr, url.c's unescape) treat
+			 * a raw control byte in decoded text as an injection
+			 * vector and reject it; a value handed to a direct
+			 * caller of this parser must not be held to a weaker
+			 * rule just because the HTTP pipeline would have
+			 * filtered it first. HT stays allowed, as it does
+			 * there. */
+			if (iscntrl(ch) && ch != '\t') {
+				return NULL;
+			}
 			break;
 		}
 		*w++ = ch;

@@ -258,6 +258,20 @@ int format_duration(char *restrict s, size_t maxlen, const struct duration d)
 		if (tenths >= 600) {
 			tenths -= 600;
 			t.minute++;
+			if (t.minute >= 10) {
+				/* the carry crossed into the whole-second
+				 * display; re-dispatch so 9m59.96s prints
+				 * "10:00" like an exact ten minutes, rather
+				 * than "10:00.0" in a format that range never
+				 * uses -- the same policy the second and
+				 * millisecond branches below follow */
+				return format_duration(
+					s, maxlen,
+					(struct duration){
+						.sign = d.sign,
+						.minute = t.minute,
+					});
+			}
 		}
 		return u8snprintf(
 			s, maxlen, SIGNED_STR(d.sign, "%u:%04.1f"), t.minute,

@@ -10,6 +10,16 @@
 /**
  * @defgroup url
  * @brief RFC 3986: Uniform Resource Identifier (URI)
+ * @details Decoding deviates from the pct-encoded grammar in one deliberate
+ * way: `"%%"` is accepted and decoded to a literal `'%'`. RFC 3986 requires
+ * exactly two HEXDIG after a `'%'`, and every sibling malformation *is*
+ * rejected here -- a trailing `"%"`, a truncated `"%2"`, a non-hex `"%ZZ"`.
+ * A strict peer therefore rejects input these functions accept: `"%%341"`
+ * decodes to `"%341"` here and is an error elsewhere. A caller that must agree
+ * byte-for-byte with a strict decoder should reject a `'%'` followed by `'%'`
+ * before handing the string over. The escaping direction never produces the
+ * form -- it encodes `'%'` as `"%25"` -- so a value that made the round trip
+ * through this module is unaffected.
  * @{
  */
 

@@ -1,12 +1,12 @@
 /* csnippets (c) 2019-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "sync/dispatcher.h"
+#include "dispatcher.h"
 
-#include "sync/task.h"
-#include "sync/thrd.h"
+#include "task.h"
+#include "thrd.h"
 
-#include <assert.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <threads.h>

@@ -69,6 +69,12 @@ void srand64(const uint_fast64_t seed)
 
 uint_fast64_t rand64n(const uint_fast64_t n)
 {
+	/* rand64() yields 64 bits and the mask smear below spans no more, so a
+	 * bound above UINT64_MAX -- reachable only where uint_fast64_t is wider
+	 * -- cannot be sampled uniformly: the rejection loop would accept the
+	 * first draw and quietly return from a truncated range. */
+	assert(n <= UINT64_MAX);
+
 	if ((n & (n + UINT64_C(1))) == UINT64_C(0)) {
 		return rand64() & n;
 	}

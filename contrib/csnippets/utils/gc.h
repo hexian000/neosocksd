@@ -32,6 +32,9 @@ struct gcbase {
 
 /**
  * @brief Registers an object for garbage collection.
+ * @details Registration takes the first reference: the object starts with a
+ * refcount of 1, owned by the registrant, so a single gc_unref() from it
+ * finalizes and frees the object.
  * @param obj The object to register; must point to the start of its own
  * heap allocation, as it is later freed directly via free().
  * @param finalizer The finalizer function, or NULL.

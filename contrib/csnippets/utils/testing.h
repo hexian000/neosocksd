@@ -618,7 +618,7 @@ int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
  *   not include measure.h.
  */
 void testing_bench_run(
-	struct testing_ctx *ctx, const char *name,
+	struct testing_ctx *t, const char *name,
 	void (*bench)(struct testing_bench *));
 
 /*
@@ -659,6 +659,10 @@ void testing_bench_run(
 			abort();                                               \
 		}                                                              \
 	} while (0)
+
+/* T_CHECK that a C11 <threads.h> call returned thrd_success. The using
+ * translation unit must include <threads.h> for thrd_success. */
+#define THRD_CHECK(expr) T_CHECK((expr) == thrd_success)
 
 /* -------------------------------------------------------------------------
  * Deadline helpers for bounded blocking waits (threaded suites).

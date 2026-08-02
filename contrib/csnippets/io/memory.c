@@ -13,7 +13,6 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -122,6 +121,15 @@ static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct io_stream *restrict s = p;
 	struct vbuffer *restrict *restrict pvbuf = (struct vbuffer **)s->data;
+	if (*pvbuf == NULL) {
+		/* NULL is the vbuffer API's OOM state (what VBUF_NEW returns on
+		 * failure, and what VBUF_HAS_OOM reports), so a caller can
+		 * plausibly arrive here holding it. Report the OOM instead of
+		 * dereferencing: VBUF_LEN's sanity assert is gone under NDEBUG
+		 * and vbuf_append would fault. */
+		*len = 0;
+		return -1;
+	}
 	const size_t n = *len;
 	const size_t before = VBUF_LEN(*pvbuf);
 	VBUF_APPEND(*pvbuf, buf, n);
@@ -158,6 +166,10 @@ int io_heapprintf(struct io_stream *restrict s, const char *restrict format, ...
 {
 	assert(s->vftable == &vftable_heapwriter);
 	struct vbuffer *restrict *restrict pvbuf = (struct vbuffer **)s->data;
+	if (*pvbuf == NULL) {
+		/* the OOM state, as in heap_write above */
+		return -1;
+	}
 	va_list args;
 	va_start(args, format);
 	const int ret = VBUF_VAPPENDF(*pvbuf, format, args);
@@ -550,7 +562,7 @@ int io_bufprintf(struct io_stream *restrict s, const char *restrict format, ...)
 struct metered_stream {
 	struct io_stream s;
 	struct io_stream *base;
-	size_t *meter;
+	uint_least64_t *meter;
 };
 ASSERT_SUPER(struct io_stream, struct metered_stream, s);
 
@@ -603,7 +615,7 @@ static int metered_close(void *p)
 	return ret;
 }
 
-struct io_stream *io_metered(struct io_stream *base, size_t *meter)
+struct io_stream *io_metered(struct io_stream *base, uint_least64_t *meter)
 {
 	if (base == NULL) {
 		return NULL;
