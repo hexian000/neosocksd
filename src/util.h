@@ -6,6 +6,8 @@
 #ifndef UTIL_H
 #define UTIL_H
 
+#include "transfer.h"
+
 #include "os/socket.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
@@ -15,11 +17,6 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-struct dialreq;
 
 /* Compile-time length of a string literal excluding the null terminator. */
 #define CONSTSTRLEN(s) (sizeof(s "") - sizeof(""))
@@ -61,14 +58,20 @@ void socket_set_transparent(int fd, bool tproxy);
 /* Best-effort forward of already-buffered client bytes to a freshly dialed
  * upstream connection, whose send buffer should be empty. A short send here
  * (backpressure or error) is treated as failure rather than queued, since
- * silently dropping these bytes would reproduce the bug this exists to fix. */
-static inline bool
-forward_readahead(const int fd, const void *restrict data, size_t len)
+ * silently dropping these bytes would reproduce the bug this exists to fix.
+ * These bytes bypass the relay, so count them into @p byt (the uplink counter)
+ * here: socket_send zeroes the length on failure, so only what reached the
+ * wire is counted, including progress made before a later failure. */
+static inline bool forward_readahead(
+	const int fd, const void *restrict data, size_t len,
+	xfer_counter *restrict byt)
 {
 	const unsigned char *restrict p = data;
 	while (len > 0) {
 		size_t n = len;
-		if (socket_send(fd, p, &n) != 0 || n == 0) {
+		const int err = socket_send(fd, p, &n);
+		xfer_count(byt, n);
+		if (err != 0 || n == 0) {
 			return false;
 		}
 		p += n;

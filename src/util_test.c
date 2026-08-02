@@ -6,17 +6,20 @@
 #include "util.h"
 
 #include "resolver.h"
+#include "transfer.h"
 
 #include "utils/slog.h"
 #include "utils/testing.h"
 
 #include <ev.h>
 
+#include <fcntl.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -207,6 +210,80 @@ T_DECLARE_CASE(util_socket_set_transparent_invalid_fd_aborts)
 	T_EXPECT_EQ(WTERMSIG(status), SIGABRT);
 }
 
+/* forward_readahead delivers a whole buffer over a socketpair, and counts
+ * every delivered byte into the uplink counter -- these bytes bypass the
+ * relay, so this call site is the only place they can be counted. */
+T_DECLARE_CASE(util_forward_readahead_full_delivery)
+{
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+
+	static const char msg[] = "hello upstream";
+	xfer_counter byt = 0;
+	T_EXPECT(forward_readahead(sv[0], msg, sizeof(msg) - 1, &byt));
+	T_EXPECT_EQ((uintmax_t)byt, (uintmax_t)(sizeof(msg) - 1));
+
+	char buf[sizeof(msg)] = { 0 };
+	const ssize_t n = recv(sv[1], buf, sizeof(msg) - 1, 0);
+	T_EXPECT_EQ(n, (ssize_t)(sizeof(msg) - 1));
+	T_EXPECT(memcmp(buf, msg, sizeof(msg) - 1) == 0);
+
+	(void)close(sv[0]);
+	(void)close(sv[1]);
+}
+
+/* A NULL counter is accepted: the caller may not have one to feed. */
+T_DECLARE_CASE(util_forward_readahead_null_counter)
+{
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+
+	static const char msg[] = "no counter";
+	T_EXPECT(forward_readahead(sv[0], msg, sizeof(msg) - 1, NULL));
+
+	(void)close(sv[0]);
+	(void)close(sv[1]);
+}
+
+/* A send error (here EBADF on an invalid fd) makes forward_readahead return
+ * false rather than silently dropping the bytes, and counts nothing: no byte
+ * reached the wire. */
+T_DECLARE_CASE(util_forward_readahead_send_error_fails)
+{
+	static const char msg[] = "x";
+	xfer_counter byt = 0;
+	T_EXPECT(!forward_readahead(-1, msg, sizeof(msg) - 1, &byt));
+	T_EXPECT_EQ((uintmax_t)byt, (uintmax_t)0);
+}
+
+/* A buffer larger than the socket's send capacity, with the peer never
+ * draining, drives the partial-send loop and then fails on backpressure (a
+ * short send is treated as failure, not queued). */
+T_DECLARE_CASE(util_forward_readahead_backpressure_fails)
+{
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	/* shrink both ends and make the sender non-blocking so the send returns
+	 * EAGAIN instead of blocking once the buffers fill */
+	const int lo = 2048;
+	(void)setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &lo, sizeof(lo));
+	(void)setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &lo, sizeof(lo));
+	const int flags = fcntl(sv[0], F_GETFL, 0);
+	T_CHECK(flags >= 0);
+	T_CHECK(fcntl(sv[0], F_SETFL, flags | O_NONBLOCK) == 0);
+
+	static unsigned char big[1u << 20]; /* 1 MiB, far beyond the buffers */
+	xfer_counter byt = 0;
+	T_EXPECT(!forward_readahead(sv[0], big, sizeof(big), &byt));
+	/* the bytes that made it out before the backpressure are counted, so a
+	 * partial delivery is neither dropped from nor rounded up in the total */
+	T_EXPECT((uintmax_t)byt > 0);
+	T_EXPECT((uintmax_t)byt < (uintmax_t)sizeof(big));
+
+	(void)close(sv[0]);
+	(void)close(sv[1]);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -226,6 +303,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(util_socket_bind_netdev_invalid_fd),
 	T_CASE(util_socket_bind_netdev_empty_name),
 	T_CASE(util_socket_set_transparent_invalid_fd_aborts),
+	T_CASE(util_forward_readahead_full_delivery),
+	T_CASE(util_forward_readahead_null_counter),
+	T_CASE(util_forward_readahead_send_error_fails),
+	T_CASE(util_forward_readahead_backpressure_fails),
 	T_SUITE_END,
 };
 

@@ -19,7 +19,6 @@
 #endif
 
 #include <errno.h>
-#include <inttypes.h>
 #include <locale.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -31,6 +30,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 
 #if defined(WIN32)
 #define PATH_SEPARATOR '\\'
@@ -49,6 +49,17 @@ void init(int argc, char *const restrict argv[])
 	static struct io_stream *log_writer = NULL;
 	if (log_writer == NULL) {
 		log_writer = io_filewriter(stderr);
+		if (log_writer == NULL) {
+			/* slog is not usable yet and a NULL sink would run the
+			 * process mute; warn directly on stderr so the failure is
+			 * not silent */
+			static const char msg[] =
+				"init: io_filewriter() failed, logging disabled\n";
+			if (write(STDERR_FILENO, msg, sizeof(msg) - 1) < 0) {
+				/* the warning itself could not be written; there
+				 * is nothing further we can do at process init */
+			}
+		}
 	}
 	slog_setoutput(SLOG_OUTPUT_STREAM, log_writer);
 	{
