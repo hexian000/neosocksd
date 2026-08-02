@@ -18,7 +18,6 @@
 #include "server.h"
 #include "socks.h"
 #include "transfer.h"
-#include "util.h"
 
 #include "io/memory.h"
 #include "io/stream.h"
@@ -737,6 +736,17 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 	(void)state;
 }
 
+void ruleset_request_cancel(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb)
+{
+	if (!ev_is_pending(&cb->w_finish)) {
+		return;
+	}
+	dialreq_free(cb->request.req);
+	cb->request.req = NULL;
+	ev_clear_pending(loop, &cb->w_finish);
+}
+
 bool ruleset_resolve(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	const char *restrict request, const char *restrict username,
@@ -846,8 +856,9 @@ static uint_fast16_t start_proxy_ex(
 	struct sockaddr_in bound_addr = { 0 };
 	socklen_t len = sizeof(bound_addr);
 
-	T_CHECK(server_init(
-		s, loop, conf, resolver, transfer_create(loop, 1), NULL, NULL));
+	struct transfer *restrict xfer = transfer_create(loop, 1);
+	T_CHECK(xfer != NULL);
+	T_CHECK(server_init(s, loop, conf, resolver, xfer, NULL, NULL));
 	T_CHECK(getsockname(
 			s->listeners[0].w_accept.fd,
 			(struct sockaddr *)&bound_addr, &len) == 0);
@@ -915,15 +926,26 @@ static bool drain_sessions(
 	return drained;
 }
 
-/* Bind a listener on an ephemeral loopback port, immediately close it, and
- * return the port so that any connection attempt will be refused. */
-static uint_fast16_t make_closed_port(void)
+/* Reserve an ephemeral loopback port that refuses connections: bind a socket but
+ * never listen() (so connects get RST/ECONNREFUSED) and keep it open (so no
+ * other process, e.g. under `ctest -j`, can grab the port and accept the connect
+ * that the test expects to be refused). No SO_REUSEADDR, to keep the reservation
+ * exclusive. The caller closes the returned fd once the dial has completed. */
+static int make_refused_port(uint_fast16_t *restrict port)
 {
-	uint_fast16_t port = 0;
-	const int fd = make_listener(&port);
+	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in addr = {
+		.sin_family = AF_INET,
+		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
+		.sin_port = 0,
+	};
+	socklen_t len = sizeof(addr);
 
-	T_CHECK(close(fd) == 0);
-	return port;
+	T_CHECK(fd >= 0);
+	T_CHECK(bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0);
+	T_CHECK(getsockname(fd, (struct sockaddr *)&addr, &len) == 0);
+	*port = ntohs(addr.sin_port);
+	return fd;
 }
 
 T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
@@ -989,7 +1011,8 @@ T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
 T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 {
 	uint_fast16_t proxy_port;
-	const uint_fast16_t closed_port = make_closed_port();
+	uint_fast16_t closed_port;
+	const int refused_fd = make_refused_port(&closed_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -1026,6 +1049,7 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
+	(void)close(refused_fd);
 
 	T_EXPECT(drained);
 	T_EXPECT(completed);
@@ -1694,7 +1718,8 @@ T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
 T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 {
 	uint_fast16_t proxy_port;
-	const uint_fast16_t closed_port = make_closed_port();
+	uint_fast16_t closed_port;
+	const int refused_fd = make_refused_port(&closed_port);
 	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
 	struct dialer_result result = { .fd = -1 };
@@ -1731,6 +1756,7 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
+	(void)close(refused_fd);
 
 	T_EXPECT(drained);
 	T_EXPECT(completed);
@@ -1789,14 +1815,40 @@ T_DECLARE_CASE(direct_connect_ipv6_reports_success)
 	T_EXPECT_EQ(d.syserr, 0);
 }
 
-/* Drive the dialer with @p req until completion and assert a successful
- * CONNECT whose final hop is accepted on @p final_fd. The client uses @p conf
- * (with optional @p resolver for domain targets). Both produced fds are
- * closed before returning. */
+/* Outcome of a dial-success attempt, recorded by expect_dial_success and
+ * asserted by the caller after teardown (see below). */
+struct dial_success_result {
+	bool completed;
+	bool has_client_fd;
+	bool has_accepted;
+	enum dialer_error err;
+	int syserr;
+};
+
 T_DECLARE_SUBCASE(
-	expect_dial_success, struct ev_loop *restrict loop,
-	struct dialreq *restrict req, const struct config *restrict conf,
-	struct resolver *restrict resolver, const int final_fd)
+	assert_dial_success, const struct dial_success_result *restrict r)
+{
+	T_EXPECT(r->completed);
+	T_EXPECT(r->has_client_fd);
+	T_EXPECT(r->has_accepted);
+	T_EXPECT_EQ(r->err, DIALER_OK);
+	T_EXPECT_EQ(r->syserr, 0);
+}
+
+/* Drive the dialer with @p req until completion, recording into *out whether a
+ * successful CONNECT whose final hop is accepted on @p final_fd occurred. The
+ * client uses @p conf (with optional @p resolver for domain targets). Both
+ * produced fds are closed before returning.
+ *
+ * Records rather than asserts: the caller must assert (assert_dial_success)
+ * *after* its own teardown, because an inline T_EXPECT here would longjmp out
+ * of the case before drain_sessions/stop_proxy/ev_loop_destroy run -- leaking
+ * the loop and, under WITH_THREADS, leaving worker threads unjoined and still
+ * writing the by-then-dead num_sessions slot. */
+static void expect_dial_success(
+	struct ev_loop *restrict loop, struct dialreq *restrict req,
+	const struct config *restrict conf, struct resolver *restrict resolver,
+	const int final_fd, struct dial_success_result *restrict out)
 {
 	struct dialer_result result = { .fd = -1 };
 	struct dialer d;
@@ -1809,24 +1861,18 @@ T_DECLARE_SUBCASE(
 		},
 		NULL, NULL);
 	dialer_do(&d, loop, req, conf, resolver, NULL);
-	const bool completed = test_wait_until(
+	out->completed = test_wait_until(
 		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
 		NULL, NULL);
 	int client_fd = result.fd;
-	const bool has_client_fd = client_fd >= 0;
-	const enum dialer_error err = d.err;
-	const int syserr = d.syserr;
+	out->has_client_fd = client_fd >= 0;
+	out->err = d.err;
+	out->syserr = d.syserr;
 	int accepted_fd =
 		wait_for_accept(loop, final_fd, TEST_WAIT_RESPONSE_SEC);
-	const bool has_accepted = accepted_fd >= 0;
+	out->has_accepted = accepted_fd >= 0;
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
-
-	T_EXPECT(completed);
-	T_EXPECT(has_client_fd);
-	T_EXPECT(has_accepted);
-	T_EXPECT_EQ(err, DIALER_OK);
-	T_EXPECT_EQ(syserr, 0);
 }
 
 T_DECLARE_CASE(socks5_connect_ipv6_target_via_real_proxy)
@@ -1849,14 +1895,15 @@ T_DECLARE_CASE(socks5_connect_ipv6_target_via_real_proxy)
 			(unsigned)proxy_port) > 0);
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
-	T_CALL_SUBCASE(
-		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
+	struct dial_success_result r;
+	expect_dial_success(loop, req, &test_conf, NULL, final_fd, &r);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 	T_EXPECT(drained);
+	T_CALL_SUBCASE(assert_dial_success, &r);
 }
 
 T_DECLARE_CASE(http_proxy_connect_ipv6_target_via_real_proxy)
@@ -1879,14 +1926,15 @@ T_DECLARE_CASE(http_proxy_connect_ipv6_target_via_real_proxy)
 			(unsigned)proxy_port) > 0);
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
-	T_CALL_SUBCASE(
-		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
+	struct dial_success_result r;
+	expect_dial_success(loop, req, &test_conf, NULL, final_fd, &r);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 	T_EXPECT(drained);
+	T_CALL_SUBCASE(assert_dial_success, &r);
 }
 
 T_DECLARE_CASE(http_proxy_connect_with_credentials_via_real_proxy)
@@ -1912,14 +1960,15 @@ T_DECLARE_CASE(http_proxy_connect_with_credentials_via_real_proxy)
 			(unsigned)proxy_port) > 0);
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
-	T_CALL_SUBCASE(
-		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
+	struct dial_success_result r;
+	expect_dial_success(loop, req, &test_conf, NULL, final_fd, &r);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 	T_EXPECT(drained);
+	T_CALL_SUBCASE(assert_dial_success, &r);
 }
 
 /* Chain two real proxies of the given protocols and assert an end-to-end
@@ -1949,8 +1998,8 @@ T_DECLARE_SUBCASE(
 			second_http ? "http" : "socks5", (unsigned)port2) > 0);
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
-	T_CALL_SUBCASE(
-		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
+	struct dial_success_result r;
+	expect_dial_success(loop, req, &test_conf, NULL, final_fd, &r);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy2, &proxy1);
 	stop_proxy(&proxy2);
@@ -1958,6 +2007,7 @@ T_DECLARE_SUBCASE(
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 	T_EXPECT(drained);
+	T_CALL_SUBCASE(assert_dial_success, &r);
 }
 
 T_DECLARE_CASE(chain_socks5_to_http_connect_success)
@@ -1994,12 +2044,13 @@ T_DECLARE_CASE(direct_connect_domain_resolves_and_succeeds)
 			(unsigned)final_port) > 0);
 	req = dialreq_parse(target_addr, NULL);
 	T_CHECK(req != NULL);
-	T_CALL_SUBCASE(
-		expect_dial_success, loop, req, &conf, resolver, final_fd);
+	struct dial_success_result r;
+	expect_dial_success(loop, req, &conf, resolver, final_fd, &r);
 	dialreq_free(req);
 	resolver_free(resolver);
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
+	T_CALL_SUBCASE(assert_dial_success, &r);
 }
 
 T_DECLARE_CASE(socks5_connect_domain_target_via_real_proxy)
@@ -2027,8 +2078,8 @@ T_DECLARE_CASE(socks5_connect_domain_target_via_real_proxy)
 			(unsigned)proxy_port) > 0);
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
-	T_CALL_SUBCASE(
-		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
+	struct dial_success_result r;
+	expect_dial_success(loop, req, &test_conf, NULL, final_fd, &r);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
@@ -2036,6 +2087,7 @@ T_DECLARE_CASE(socks5_connect_domain_target_via_real_proxy)
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 	T_EXPECT(drained);
+	T_CALL_SUBCASE(assert_dial_success, &r);
 }
 
 /* SOCKS4a has no native IPv6: the client encodes an IPv6 target as a textual
@@ -2065,8 +2117,8 @@ T_DECLARE_CASE(socks4a_connect_ipv6_target_via_real_proxy)
 			(unsigned)proxy_port) > 0);
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
-	T_CALL_SUBCASE(
-		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
+	struct dial_success_result r;
+	expect_dial_success(loop, req, &test_conf, NULL, final_fd, &r);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
@@ -2074,6 +2126,7 @@ T_DECLARE_CASE(socks4a_connect_ipv6_target_via_real_proxy)
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 	T_EXPECT(drained);
+	T_CALL_SUBCASE(assert_dial_success, &r);
 }
 
 T_DECLARE_CASE(socks4a_connect_domain_target_via_real_proxy)
@@ -2101,8 +2154,8 @@ T_DECLARE_CASE(socks4a_connect_domain_target_via_real_proxy)
 			(unsigned)proxy_port) > 0);
 	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
-	T_CALL_SUBCASE(
-		expect_dial_success, loop, req, &test_conf, NULL, final_fd);
+	struct dial_success_result r;
+	expect_dial_success(loop, req, &test_conf, NULL, final_fd, &r);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
@@ -2110,6 +2163,7 @@ T_DECLARE_CASE(socks4a_connect_domain_target_via_real_proxy)
 	ev_loop_destroy(loop);
 	T_CHECK(close(final_fd) == 0);
 	T_EXPECT(drained);
+	T_CALL_SUBCASE(assert_dial_success, &r);
 }
 
 /* -------------------------------------------------------------------------

@@ -169,6 +169,11 @@ int main(int argc, char *argv[])
 		if (conf->daemonize) {
 			daemonize(conf->user_name, true, false);
 			slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME, NULL);
+			/* daemonize() double-forks; libev requires the surviving
+			 * child to notify the already-created default loop before
+			 * running it, or a fork-sensitive backend (e.g. kqueue)
+			 * would resume with a dead backend descriptor. */
+			ev_loop_fork(loop);
 		} else if (conf->user_name != NULL) {
 			drop_privileges(conf->user_name);
 		}
@@ -224,14 +229,20 @@ int main(int argc, char *argv[])
 	 * frees it. main must not free it here -- a SIGHUP reload can replace or
 	 * clear s->ruleset independently of this local, so freeing the local would
 	 * double-free (reload dropped it) or leak (reload installed a new one). */
-	if (resolver != NULL) {
-		resolver_free(resolver);
-		resolver = NULL;
-	}
 
+	/* Finalize live sessions before freeing the resolver: a session still
+	 * mid-resolution cancels its own resolve_query during finalize, and
+	 * resolve_cancel writes into that query. resolver_free() frees every
+	 * outstanding query without invoking its callback, so freeing it first
+	 * would turn that cancel into a use-after-free. transfer_join() stays
+	 * last. */
 	{
 		const size_t num = gc_finalizeall();
 		LOGD_F("%zu objects finalized", num);
+	}
+	if (resolver != NULL) {
+		resolver_free(resolver);
+		resolver = NULL;
 	}
 	if (xfer != NULL) {
 		transfer_join(xfer);
