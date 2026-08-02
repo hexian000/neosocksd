@@ -8,7 +8,6 @@
 #include "conf.h"
 #include "dialer.h"
 #include "proto/http.h"
-#include "util.h"
 
 #include "io/stream.h"
 #include "utils/buffer.h"
@@ -966,6 +965,97 @@ T_DECLARE_CASE(rpcall_structured_error_body_deflate_is_decoded)
 	ev_loop_destroy(loop);
 }
 
+/* Regression: decoding a Content-Encoding'd structured error must report an
+ * error, not crash, when content_decode_vbuf's decode buffer (VBUF_NEW) fails
+ * to allocate. Arms the realloc injector so that allocation returns NULL. */
+T_DECLARE_CASE(rpcall_structured_error_decode_oom_reports_error)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct cb_result out = { 0 };
+	struct api_client_ctx *ctx = NULL;
+	struct dialreq *req = NULL;
+	int sv[2] = { -1, -1 };
+	static const char payload[] = "{}";
+	static const char plain[] = "backend failed: structured error detail";
+	struct vbuffer *cbuf = NULL;
+	const struct api_client_cb cb = {
+		.func = capture_cb,
+		.data = &out,
+	};
+
+	T_CHECK(loop != NULL);
+	reset_stub_state();
+
+	struct io_stream *w =
+		content_writer(&cbuf, sizeof(plain) - 1, CENCODING_DEFLATE);
+	T_CHECK(w != NULL);
+	size_t wn = sizeof(plain) - 1;
+	T_CHECK(io_stream_write(w, plain, &wn) == 0);
+	T_CHECK(wn == sizeof(plain) - 1);
+	T_CHECK(io_stream_close(w) == 0);
+	T_CHECK(cbuf != NULL);
+	T_CHECK(VBUF_LEN(cbuf) > 0);
+
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	T_CHECK(fd_set_nonblock(sv[1]));
+	S.dialer_result_fd = sv[0];
+	req = new_test_dialreq();
+	T_CHECK(req != NULL);
+
+	T_CHECK(api_client_rpcall(
+		loop, &ctx, req, payload, sizeof(payload) - 1, &cb, &test_conf,
+		NULL, NULL));
+
+	/* Build the full response so it can be delivered in two phases. The
+	 * client allocates its content buffer (VBUF_NEW) on the first body byte;
+	 * the inflate reader used later allocates via malloc, which the injector
+	 * does not fail, so the decode buffer's VBUF_NEW is the one realloc that
+	 * must fail to reach the bug. */
+	unsigned char resp[512];
+	const int hn = snprintf(
+		(char *)resp, sizeof(resp),
+		"HTTP/1.1 500 Internal Server Error\r\n"
+		"Content-Type: %s\r\n"
+		"Content-Encoding: deflate\r\n"
+		"Connection: close\r\n"
+		"Content-Length: %zu\r\n\r\n",
+		MIME_RPCALL, VBUF_LEN(cbuf));
+	T_CHECK(hn > 0);
+	const size_t total = (size_t)hn + VBUF_LEN(cbuf);
+	T_CHECK(total <= sizeof(resp) && VBUF_LEN(cbuf) >= 1);
+	memcpy(resp + hn, VBUF_DATA(cbuf), VBUF_LEN(cbuf));
+
+	/* Phase 1: deliver everything but the last body byte and let the client
+	 * parse the headers and allocate its content buffer while allocations
+	 * still succeed. The response stays incomplete, so the callback does not
+	 * fire. */
+	T_CHECK(write_all(sv[1], resp, total - 1));
+	for (int i = 0; i < 32 && !out.called; i++) {
+		ev_run(loop, EVRUN_NOWAIT);
+	}
+	T_CHECK(!out.called);
+
+	/* Phase 2: fail allocations, then deliver the last byte so the response
+	 * completes and content_decode_vbuf's VBUF_NEW returns NULL. */
+	g_realloc_fail = true;
+	T_CHECK(write_all(sv[1], resp + total - 1, 1));
+	const bool waited = test_wait_until(
+		loop, cb_called_predicate, &out, TEST_WAIT_RESPONSE_SEC);
+	g_realloc_fail = false;
+
+	T_CHECK(waited);
+	T_EXPECT(out.called);
+	/* an error is reported (never a NULL/NULL success) and nothing crashed */
+	T_EXPECT(out.errlen > 0);
+	T_EXPECT(!out.has_stream);
+	T_EXPECT(strstr(out.errmsg, "cannot decode error content") != NULL);
+
+	VBUF_FREE(cbuf);
+	T_CHECK(close(sv[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(cancel_during_connect_calls_dialer_cancel)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1222,6 +1312,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(rpcall_oom_building_error_still_reports_error),
 	T_CASE(rpcall_structured_error_body),
 	T_CASE(rpcall_structured_error_body_deflate_is_decoded),
+	T_CASE(rpcall_structured_error_decode_oom_reports_error),
 	T_CASE(cancel_during_connect_calls_dialer_cancel),
 	T_CASE(request_advertises_connection_close),
 	T_CASE(rpcall_write_error_reports_message),

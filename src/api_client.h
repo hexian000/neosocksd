@@ -15,6 +15,12 @@ struct server_stats;
 struct api_client_ctx;
 struct io_stream;
 
+/* The completion callback for api_client_rpcall. The ctx handle passed to
+ * api_client_rpcall's *pctx is valid only until this callback is invoked: the
+ * request is torn down as soon as the callback returns, so the callback must
+ * not retain the handle or call api_client_cancel() on it (cancel is a bare
+ * gc_unref that, combined with the completion teardown, would double-free the
+ * ctx). Cancel only a request whose callback has not yet fired. */
 struct api_client_cb {
 	void (*func)(
 		struct api_client_ctx *ctx, struct ev_loop *loop, void *data,

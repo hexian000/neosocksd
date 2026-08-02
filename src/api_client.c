@@ -19,9 +19,9 @@
 #include "meta/intcast.h"
 #include "meta/minmax.h"
 #include "net/http.h"
+#include "strings/format.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
-#include "strings/format.h"
 #include "utils/gc.h"
 #include "utils/slog.h"
 
@@ -140,6 +140,14 @@ static struct vbuffer *content_decode_vbuf(
 		return NULL;
 	}
 	struct vbuffer *decoded = VBUF_NEW(VBUF_LEN(content));
+	if (decoded == NULL) {
+		/* io_heapwriter validates only &decoded, and the first write
+		 * dereferences *decoded via VBUF_ASSERT_SANITY, so a NULL here
+		 * would crash instead of honoring the "returns NULL on OOM"
+		 * contract */
+		io_stream_close(r);
+		return NULL;
+	}
 	struct io_stream *w = io_heapwriter(&decoded);
 	if (w == NULL) {
 		VBUF_FREE(decoded);
@@ -247,7 +255,9 @@ static void on_http_client_done(
 	}
 
 	if (LOGLEVEL(VERBOSE)) {
-		FORMAT_BYTES(clen, content != NULL ? VBUF_LEN(content) : 0);
+		FORMAT_BYTES(
+			clen,
+			content != NULL ? (double)VBUF_LEN(content) : 0.0);
 		LOGV_F("response: content %s", clen);
 	}
 
@@ -334,6 +344,8 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	ev_idle_stop(loop, watcher);
 	struct api_client_ctx *restrict ctx = watcher->data;
 
+	/* The ctx is torn down below as soon as the callback returns, so the
+	 * callback must not retain the handle or cancel it (see api_client_cb). */
 	if (ctx->cb.func != NULL) {
 		ctx->cb.func(
 			ctx, loop, ctx->cb.data, ctx->result.errmsg,
