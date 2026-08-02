@@ -11,12 +11,13 @@ import os
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, TextIO
+from typing import Dict, List, Optional, Sequence, TextIO, Tuple
 
 
 ROOT = Path.cwd().resolve()
@@ -162,14 +163,59 @@ def compute_process_shutdown_budget(
     )
 
 
+def wait_until_listening(
+        port: int,
+        processes: Sequence[Tuple[subprocess.Popen[str], str]],
+        *,
+        timeout_seconds: float,
+) -> None:
+    """Block until *port* accepts a connection, failing fast if a service died.
+
+    A fixed sleep is not a readiness signal: on a loaded machine the first
+    scenario can start before the services are listening and fail with
+    connection-refused, and a service that exited immediately (a port conflict,
+    say) is otherwise only noticed indirectly, through the client's error.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        for proc, name in processes:
+            if proc.poll() is not None:
+                raise SystemExit(
+                    "%s exited with status %d before the benchmark started"
+                    % (name, proc.returncode)
+                )
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                "nothing is listening on port %d after %.1f s"
+                % (port, timeout_seconds)
+            )
+        time.sleep(0.02)
+
+
 def terminate_process(
         proc: subprocess.Popen[str],
         name: str,
         *,
         shutdown_budget: ProcessShutdownBudget,
-) -> None:
+        expect_clean_exit: bool = False,
+) -> Optional[str]:
+    """Stop *proc*; return a problem description, None if it stopped cleanly.
+
+    Teardown is the last point at which a service that died during the run can
+    still be noticed, since the caller publishes its report immediately after:
+    returning silently here presents a crashed run as a healthy one. The exit
+    status after our own SIGINT is only judged for a service whose clean
+    shutdown this repository owns -- a third-party helper may exit however it
+    likes once signalled.
+    """
     if proc.poll() is not None:
-        return
+        return ("%s exited with status %d during the run"
+                % (name, proc.returncode))
     log("stopping %s [pid:%d]" % (name, proc.pid))
     proc.send_signal(signal.SIGINT)
     try:
@@ -181,6 +227,11 @@ def terminate_process(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=max(2.0, shutdown_budget.terminate_wait_seconds))
+        return "%s ignored SIGINT and had to be killed" % name
+    if expect_clean_exit and proc.returncode != 0:
+        return ("%s exited with status %d on shutdown"
+                % (name, proc.returncode))
+    return None
 
 
 def open_log(path: Path) -> TextIO:
@@ -692,7 +743,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--startup-wait",
         type=float,
         default=1.0,
-        help="seconds to wait after starting services before running iperf3",
+        help="maximum seconds to wait for the services to listen "
+             "before running iperf3 (at least 5)",
     )
     parser.add_argument(
         "--netem-delay",
@@ -738,6 +790,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     iperf_server_proc: Optional[subprocess.Popen[str]] = None
     proxy_log: Optional[TextIO] = None
     iperf_server_log: Optional[TextIO] = None
+    teardown_problems: List[Optional[str]] = []
 
     try:
         proxy_log = open_log(build_dir / "neosocksd.log")
@@ -770,7 +823,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             text=True,
         )
 
-        time.sleep(args.startup_wait)
+        startup_budget = max(args.startup_wait, 5.0)
+        services = [
+            (iperf_server_proc, "iperf3 server"),
+            (proxy_proc, "neosocksd"),
+        ]
+        wait_until_listening(
+            SERVER_PORT, services, timeout_seconds=startup_budget)
+        wait_until_listening(
+            PROXY_PORT, services, timeout_seconds=startup_budget)
 
         for scenario in SCENARIOS:
             commands = build_scenario_commands(
@@ -827,20 +888,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
     finally:
         if proxy_proc is not None:
-            terminate_process(
+            teardown_problems.append(terminate_process(
                 proxy_proc,
                 "neosocksd",
                 shutdown_budget=shutdown_budget,
-            )
+                expect_clean_exit=True,
+            ))
         if iperf_server_proc is not None:
-            terminate_process(
+            teardown_problems.append(terminate_process(
                 iperf_server_proc,
                 "iperf3 server",
                 shutdown_budget=shutdown_budget,
-            )
+            ))
         for handle in (iperf_server_log, proxy_log):
             if handle is not None:
                 handle.close()
+
+    problems = [problem for problem in teardown_problems if problem]
+    if problems:
+        for problem in problems:
+            log("error: %s" % problem)
+        raise SystemExit(
+            "the benchmark services did not run cleanly; refusing to publish "
+            "results that may be meaningless"
+        )
 
     report = render_markdown_report(
         results,
