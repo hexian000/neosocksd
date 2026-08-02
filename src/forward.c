@@ -19,12 +19,8 @@
 
 #include <errno.h>
 #include <netinet/in.h>
-#if WITH_THREADS
-#include <stdatomic.h>
-#endif
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -88,7 +84,11 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
 		}
-#endif
+		/* a request that completed in this same loop sweep left w_finish
+		 * pending with a delivered dialreq; drop it so it cannot fire into
+		 * this freed ctx and the dialreq is not leaked */
+		ruleset_request_cancel(loop, &ctx->ruleset_callback);
+#endif /* WITH_RULESET */
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECT:
@@ -273,6 +273,22 @@ static void forward_ctx_start(
 		ctx->s);
 }
 
+/* Direct dial to the base request. The dialer holds the request for the whole
+ * async handshake, so it must own a copy: a SIGHUP boot-config reload frees
+ * s->basereq immediately, which would dangle every in-flight borrowed dial. */
+static void
+forward_ctx_start_direct(struct ev_loop *loop, struct forward_ctx *restrict ctx)
+{
+	struct dialreq *restrict req = dialreq_new(ctx->s->basereq, 0);
+	if (req == NULL) {
+		LOGOOM();
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	ctx->dialreq = req;
+	forward_ctx_start(loop, ctx, req);
+}
+
 #if WITH_RULESET
 static void
 ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
@@ -307,7 +323,7 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		 * forward_serve check and this callback. Fall back
 		 * to the no-ruleset direct-dial path. */
 		FW_CTX_LOG(VERBOSE, ctx, "ruleset gone, fallback to direct");
-		forward_ctx_start(loop, ctx, ctx->s->basereq);
+		forward_ctx_start_direct(loop, ctx);
 		return;
 	}
 	const struct dialreq *restrict req = ctx->s->basereq;
@@ -346,8 +362,7 @@ void forward_serve(
 		return;
 	}
 #endif
-	const struct dialreq *req = ctx->s->basereq;
-	forward_ctx_start(loop, ctx, req);
+	forward_ctx_start_direct(loop, ctx);
 }
 
 #if WITH_TPROXY

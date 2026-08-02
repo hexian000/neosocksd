@@ -10,7 +10,6 @@
 #include "ruleset/ruleset.h"
 #include "server.h"
 #include "transfer.h"
-#include "util.h"
 
 #include "meta/arraysize.h"
 #include "utils/testing.h"
@@ -90,7 +89,7 @@ static struct {
 	int_least32_t ruleset_cancel_calls;
 #endif
 } STUB = {
-	.dialreq_available = false,
+	.dialreq_available = true,
 	.dialaddr_set_ok = false,
 	.dialaddr_set_calls = 0,
 	.dialreq_free_calls = 0,
@@ -119,7 +118,7 @@ static int stub_ruleset_state_tag = 0;
 
 static void stub_reset(void)
 {
-	STUB.dialreq_available = false;
+	STUB.dialreq_available = true;
 	STUB.dialaddr_set_ok = false;
 	STUB.dialaddr_set_calls = 0;
 	STUB.dialreq_free_calls = 0;
@@ -293,7 +292,13 @@ int dialreq_format(
 
 void dialreq_free(struct dialreq *req)
 {
-	STUB.dialreq_free_calls++;
+	/* Count only the frees that release a request. dialreq_free(NULL) is a
+	 * legal no-op, and counting it would make a context that merely borrowed
+	 * its request (leaving ctx->dialreq NULL) reach the same count as one
+	 * that owns a copy -- exactly the distinction the callers assert on. */
+	if (req != NULL) {
+		STUB.dialreq_free_calls++;
+	}
 	free(req);
 }
 
@@ -488,24 +493,29 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 	STUB.ruleset_cancel_calls++;
 }
 
+void ruleset_request_cancel(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb)
+{
+	if (!ev_is_pending(&cb->w_finish)) {
+		return;
+	}
+	dialreq_free(cb->request.req);
+	cb->request.req = NULL;
+	ev_clear_pending(loop, &cb->w_finish);
+}
+
 static bool ruleset_stub_start(
 	struct ruleset_state **state, struct ruleset_callback *callback)
 {
-	if (STUB.ruleset_mode == STUB_RULESET_ASYNC_REJECT) {
-		/* simulate a ruleset that completes without a dialreq */
-		callback->request.req = NULL;
-		*state = (struct ruleset_state *)&stub_ruleset_state_tag;
-		STUB.ruleset_pending_cb = callback;
-		return true;
-	}
-	if (STUB.ruleset_mode != STUB_RULESET_ASYNC_OK) {
+	if (STUB.ruleset_mode != STUB_RULESET_ASYNC_OK &&
+	    STUB.ruleset_mode != STUB_RULESET_ASYNC_REJECT) {
 		return false;
 	}
-	callback->request.req = dialreq_new(NULL, 0);
-	if (callback->request.req == NULL) {
-		return false;
-	}
-	set_ipv4_addr(&callback->request.req->addr, 443);
+	/* The real ruleset delivers request.req only at completion (in
+	 * request_finish, alongside feeding w_finish); complete_pending_ruleset
+	 * mirrors that. Setting it here would leak the dialreq on a teardown that
+	 * cancels before completion. */
+	(void)callback;
 	*state = (struct ruleset_state *)&stub_ruleset_state_tag;
 	STUB.ruleset_pending_cb = callback;
 	return true;
@@ -540,7 +550,17 @@ bool ruleset_dispatch(
 static void complete_pending_ruleset(struct ev_loop *loop)
 {
 	T_CHECK(STUB.ruleset_pending_cb != NULL);
-	ev_feed_event(loop, &STUB.ruleset_pending_cb->w_finish, EV_CUSTOM);
+	struct ruleset_callback *restrict cb = STUB.ruleset_pending_cb;
+	/* deliver the request (or NULL for a reject) as request_finish would,
+	 * just before feeding the completion event */
+	if (STUB.ruleset_mode == STUB_RULESET_ASYNC_OK) {
+		cb->request.req = dialreq_new(NULL, 0);
+		T_CHECK(cb->request.req != NULL);
+		set_ipv4_addr(&cb->request.req->addr, 443);
+	} else {
+		cb->request.req = NULL;
+	}
+	ev_feed_event(loop, &cb->w_finish, EV_CUSTOM);
 	STUB.ruleset_pending_cb = NULL;
 	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
 }
@@ -586,6 +606,9 @@ T_DECLARE_CASE(forward_dialer_fail_updates_stats)
 	/* the counter this path uniquely updates */
 	T_EXPECT_EQ(s.stats.num_reject_upstream, (uint_least64_t)1);
 	T_EXPECT_EQ(s.num_sessions, 0);
+	/* the direct dial must own a copy of basereq (not borrow it, which a
+	 * SIGHUP reload would free mid-dial): teardown frees exactly that copy */
+	T_EXPECT_EQ(STUB.dialreq_free_calls, 1);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -626,10 +649,13 @@ T_DECLARE_CASE(forward_timeout_cancels_pending_dialer)
 		ev_timer_stop(loop, &w);
 	}
 
+	/* No ruleset: one direct dial attempt, cancelled exactly once by the
+	 * timeout, which also records the timeout rejection. */
 	T_EXPECT_EQ(STUB.dialer_do_calls, 1);
 	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
+	T_EXPECT_EQ(s.stats.num_reject_timeout, (uint_least64_t)1);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
 	T_EXPECT_EQ(s.num_sessions, 0);
 
@@ -970,28 +996,26 @@ T_DECLARE_CASE(forward_ruleset_null_after_sighup)
 /* num_halfopen must not underflow on repeated creation/cancellation. */
 T_DECLARE_CASE(forward_num_halfopen_no_underflow)
 {
-	static const int ITERATIONS = 50;
-	const ev_tstamp max_wait = TEST_WAIT_TIMEOUT_SEC;
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct dialreq base_req = { 0 };
 
-	for (int i = 0; i < ITERATIONS; i++) {
-		struct ev_loop *loop = ev_loop_new(0);
-		struct server s = { 0 };
-		struct sockaddr_in accepted_sa = {
-			.sin_family = AF_INET,
-		};
-		struct dialreq base_req = { 0 };
-		int accepted_fd = -1;
-		int peer_fd = -1;
+	T_CHECK(loop != NULL);
+	stub_reset();
+	test_conf.timeout = TEST_WAIT_SHORT_SEC;
+	STUB.dialer_mode = STUB_DIALER_NONE;
+	set_ipv4_addr(&base_req.addr, 80);
+	s.loop = loop;
+	test_server_init(&s);
+	s.basereq = &base_req;
 
-		stub_reset();
-		test_conf.timeout = TEST_WAIT_SHORT_SEC;
-		STUB.dialer_mode = STUB_DIALER_NONE;
-		set_ipv4_addr(&base_req.addr, 80);
-
-		T_CHECK(loop != NULL);
-		s.loop = loop;
-		test_server_init(&s);
-		s.basereq = &base_req;
+	/* Repeated accept/timeout cycles share one num_halfopen counter, so a
+	 * cross-cycle double-decrement would underflow the unsigned counter to a
+	 * huge value here -- which a fresh-server-per-iteration loop could never
+	 * observe. A few cycles suffice; no magic large repeat count. */
+	for (int cycle = 0; cycle < 3; cycle++) {
+		struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
+		int accepted_fd = -1, peer_fd = -1;
 		make_socketpair(&accepted_fd, &peer_fd);
 
 		forward_serve(
@@ -999,11 +1023,13 @@ T_DECLARE_CASE(forward_num_halfopen_no_underflow)
 			(const struct sockaddr *)&accepted_sa);
 		T_EXPECT_EQ(s.stats.num_halfopen, (size_t)1);
 
-		/* Wait for timeout to clean up — exit when num_halfopen hits zero. */
+		/* wait for the timeout to tear the half-open connection down */
 		{
 			struct test_watchdog watchdog = { 0 };
 			struct ev_timer w;
-			ev_timer_init(&w, test_watchdog_cb, max_wait, 0.0);
+			ev_timer_init(
+				&w, test_watchdog_cb, TEST_WAIT_TIMEOUT_SEC,
+				0.0);
 			w.data = &watchdog;
 			ev_timer_start(loop, &w);
 			while (!watchdog.fired && s.stats.num_halfopen != 0) {
@@ -1016,12 +1042,15 @@ T_DECLARE_CASE(forward_num_halfopen_no_underflow)
 		T_EXPECT_EQ(s.num_sessions, (size_t)0);
 
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
 	}
+
+	ev_loop_destroy(loop);
 }
 
-/* Timeout with dialer pending: dialer_cancel must be called exactly once. */
-T_DECLARE_CASE(forward_timeout_stops_pending_dialer_once)
+#if WITH_RULESET
+/* Tearing a context down while an async ruleset dispatch is still outstanding
+ * must cancel the ruleset state (forward_ctx_stop STATE_PROCESS). */
+T_DECLARE_CASE(forward_ruleset_async_timeout_cancels_ruleset)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
@@ -1033,18 +1062,22 @@ T_DECLARE_CASE(forward_timeout_stops_pending_dialer_once)
 	stub_reset();
 	test_conf.timeout = TEST_WAIT_SHORT_SEC;
 	STUB.dialer_mode = STUB_DIALER_NONE;
+	STUB.ruleset_mode = STUB_RULESET_ASYNC_OK;
 	set_ipv4_addr(&base_req.addr, 80);
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_server_init(&s);
 	s.basereq = &base_req;
+	s.ruleset = (struct ruleset *)&s;
 	make_socketpair(&accepted_fd, &peer_fd);
 
 	forward_serve(
 		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	test_drive_once(loop, TEST_WAIT_SHORT_SEC);
+	T_EXPECT(STUB.ruleset_pending_cb != NULL);
 
-	/* Wait for timeout to clean up — exit when num_halfopen hits zero. */
+	/* let the request timeout fire before the ruleset completes */
 	{
 		struct test_watchdog watchdog = { 0 };
 		struct ev_timer w;
@@ -1057,9 +1090,8 @@ T_DECLARE_CASE(forward_timeout_stops_pending_dialer_once)
 		ev_timer_stop(loop, &w);
 	}
 
-	/* No ruleset: one direct dial attempt, cancelled exactly once by timeout. */
-	T_EXPECT_EQ(STUB.dialer_do_calls, 1);
-	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
+	T_EXPECT_EQ(STUB.ruleset_cancel_calls, 1);
+	T_EXPECT_EQ(STUB.dialer_do_calls, 0);
 	T_EXPECT_EQ(s.stats.num_reject_timeout, (uint_least64_t)1);
 	T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
 	T_EXPECT_EQ(s.num_sessions, (size_t)0);
@@ -1067,6 +1099,7 @@ T_DECLARE_CASE(forward_timeout_stops_pending_dialer_once)
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 }
+#endif /* WITH_RULESET */
 
 #if WITH_TPROXY && WITH_RULESET
 /* tproxy: getsockname() → ruleset_route() for IPv4. */
@@ -1137,6 +1170,66 @@ T_DECLARE_CASE(tproxy_ruleset_null_after_sighup)
 	T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
 	T_EXPECT_EQ(s.num_sessions, (size_t)0);
 
+	ev_loop_destroy(loop);
+}
+
+/* tproxy_process_cb's default: branch: an accepted fd whose getsockname family
+ * is neither AF_INET nor AF_INET6 (here AF_UNIX) is rejected without dialing. */
+T_DECLARE_CASE(tproxy_unsupported_af_rejects)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
+	int accepted_fd = -1;
+	int peer_fd = -1;
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	/* an AF_UNIX socket: getsockname reports AF_UNIX */
+	make_socketpair(&accepted_fd, &peer_fd);
+	s.ruleset = (struct ruleset *)&s;
+
+	tproxy_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	ev_run(loop, EVRUN_NOWAIT);
+
+	T_EXPECT_EQ(STUB.dialer_do_calls, 0);
+	T_EXPECT_EQ(STUB.ruleset_route_calls, 0);
+	T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
+	T_EXPECT_EQ(s.num_sessions, (size_t)0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* tproxy_getdest's failure branch: getsockname fails on a non-socket accepted
+ * fd (a pipe end, ENOTSOCK), so the connection is rejected without dialing. */
+T_DECLARE_CASE(tproxy_getdest_failure_rejects)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
+	int pipefd[2] = { -1, -1 };
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+	T_CHECK(pipe(pipefd) == 0);
+	s.ruleset = (struct ruleset *)&s;
+
+	/* the read end is handed in as the accepted fd; getsockname will fail */
+	tproxy_serve(
+		&s, loop, pipefd[0], (const struct sockaddr *)&accepted_sa);
+	ev_run(loop, EVRUN_NOWAIT);
+
+	T_EXPECT_EQ(STUB.dialer_do_calls, 0);
+	T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
+	T_EXPECT_EQ(s.num_sessions, (size_t)0);
+
+	T_CHECK(close(pipefd[1]) == 0);
 	ev_loop_destroy(loop);
 }
 #endif /* WITH_TPROXY && WITH_RULESET */
@@ -1221,8 +1314,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(forward_bidir_timeout_connected_then_finished),
 	T_CASE(forward_commit_xfer_serve_failure_recovers),
 	T_CASE(forward_num_halfopen_no_underflow),
-	T_CASE(forward_timeout_stops_pending_dialer_once),
 #if WITH_RULESET
+	T_CASE(forward_ruleset_async_timeout_cancels_ruleset),
 	T_CASE(forward_ruleset_async_then_dialer_fail),
 	T_CASE(forward_ruleset_route_ipv4),
 	T_CASE(forward_ruleset_route_ipv6),
@@ -1237,6 +1330,8 @@ static const struct testing_suite suite[] = {
 #if WITH_TPROXY && WITH_RULESET
 	T_CASE(tproxy_ruleset_route_ipv4),
 	T_CASE(tproxy_ruleset_null_after_sighup),
+	T_CASE(tproxy_unsupported_af_rejects),
+	T_CASE(tproxy_getdest_failure_rejects),
 #endif
 	T_SUITE_END,
 };
