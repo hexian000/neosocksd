@@ -33,15 +33,31 @@
  * is linked; the dialer's peers are hand-rolled over socketpairs/listeners).
  * ---------------------------------------------------------------------- */
 
+/* The deadline the dialer itself arms. No case here asserts that it fires --
+ * every one expects its dial to complete -- so it only has to sit far enough
+ * above a healthy dial that a slow or heavily loaded runner cannot reach it,
+ * and below TEST_WAIT_SEC so a genuine stall is reported as DIALER_ERR_TIMEOUT
+ * rather than an opaque watchdog expiry. A direct loopback dial costs
+ * microseconds; the cases that trickle a reply cost more and widen this
+ * further through proxy_server_conf(). */
 static struct config test_conf = {
-	.timeout = 0.2,
+	.timeout = (ev_tstamp)T_TIMEOUT_SECONDS / 2,
 };
 
-static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
-static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 0.256;
+/* Failsafe watchdog for the event-driven waits below: every case breaks its
+ * loop the instant the dialer's callback fires, so a correct build never
+ * reaches this deadline -- it exists only to fail a genuine hang in bounded
+ * time instead of blocking CI. It is therefore sized to the project-standard
+ * T_TIMEOUT_SECONDS rather than a tight bound: a sub-second watchdog is
+ * under-sized here, because scheduling delay alone can stretch a healthy dial
+ * past it on a loaded runner and fail it spuriously. */
+static const ev_tstamp TEST_WAIT_SEC = (ev_tstamp)T_TIMEOUT_SECONDS;
 /* Short tick so ev_run() wakes promptly when mock servers write in fragments
- * (needed for MSYS2/Cygwin socket emulation). */
-static const ev_tstamp TEST_TICK_SEC = 0.002;
+ * (needed for MSYS2/Cygwin socket emulation). It also bounds how long one
+ * test_wait_until() iteration can take, and a mock server delivers at most one
+ * chunk per iteration, so it caps the trickle rate: keep it well below the
+ * per-round budget proxy_server_budget_sec() allows. */
+static const ev_tstamp TEST_TICK_SEC = 0.0002;
 
 struct dialer_result {
 	bool called;
@@ -355,6 +371,49 @@ static bool proxy_server_pump(void *data)
 	return true;
 }
 
+/* Wall-clock budget for trickling this server's response to the dialer.
+ *
+ * proxy_server_pump() writes at most response_chunk bytes per
+ * test_wait_until() iteration, and an iteration costs at least one loopback
+ * wake-up of the dialer, so a small chunk over a long response costs far more
+ * wall clock than the byte count suggests -- tens of milliseconds for a
+ * byte-at-a-time reply, and more on a loaded machine. The deadlines such a case
+ * depends on therefore scale with the trickle instead of racing it: this budget
+ * raises them once a response is chunked finely enough to outlast the flat
+ * test_conf timeout, which already covers every reply the suite sends today.
+ * The per-round allowance is deliberately far above the measured cost:
+ * overshooting only delays a genuinely stuck dial's failure, while
+ * undershooting fails a healthy one. */
+static ev_tstamp proxy_server_budget_sec(const struct proxy_server *server)
+{
+	enum { ROUND_ALLOWANCE_MS = 20 };
+	const size_t total = strlen(server->response);
+	const size_t chunk =
+		server->response_chunk != 0 ? server->response_chunk : total;
+	const size_t rounds = chunk != 0 ? (total + chunk - 1) / chunk : 1;
+	return (ev_tstamp)rounds * ((ev_tstamp)ROUND_ALLOWANCE_MS * 1e-3);
+}
+
+/* The deadline the dialer under test arms, widened to cover the trickle. */
+static struct config proxy_server_conf(const struct proxy_server *server)
+{
+	struct config conf = test_conf;
+	const ev_tstamp budget = proxy_server_budget_sec(server);
+	if (conf.timeout < budget) {
+		conf.timeout = budget;
+	}
+	return conf;
+}
+
+/* The test's own watchdog window: always strictly above the deadline the dialer
+ * arms for the same case, so a handshake that really does stall is reported as
+ * DIALER_ERR_TIMEOUT rather than as an opaque watchdog expiry. Deriving it from
+ * proxy_server_conf() keeps the two from drifting apart. */
+static ev_tstamp proxy_server_wait_sec(const struct proxy_server *server)
+{
+	return proxy_server_conf(server).timeout + TEST_WAIT_SEC;
+}
+
 /* -------------------------------------------------------------------------
  * fuzz - none.
  * ---------------------------------------------------------------------- */
@@ -633,10 +692,9 @@ T_DECLARE_CASE(direct_connect_reports_success)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
-	int accepted_fd =
-		wait_for_accept(loop, listener_fd, TEST_WAIT_SHORT_SEC);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
+	int accepted_fd = wait_for_accept(loop, listener_fd, TEST_WAIT_SEC);
 	int client_fd = result.fd;
 	const bool accepted = accepted_fd >= 0;
 	const bool has_client_fd = client_fd >= 0;
@@ -675,8 +733,8 @@ T_DECLARE_CASE(local_address_blocked_by_egress_policy)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	const enum dialer_error err = d.err;
 	dialreq_free(req);
 	ev_loop_destroy(loop);
@@ -714,8 +772,8 @@ T_DECLARE_CASE(v4_mapped_local_address_blocked_by_egress_policy)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	const enum dialer_error err = d.err;
 	dialreq_free(req);
 	ev_loop_destroy(loop);
@@ -750,8 +808,8 @@ T_DECLARE_CASE(v4_mapped_loopback_address_blocked_by_egress_policy)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	const enum dialer_error err = d.err;
 	dialreq_free(req);
 	ev_loop_destroy(loop);
@@ -790,8 +848,8 @@ T_DECLARE_CASE(shared_cgnat_address_is_dialable_by_default)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	const enum dialer_error err = d.err;
 	g_force_connect_fail = false;
 	dialreq_free(req);
@@ -827,8 +885,8 @@ T_DECLARE_CASE(reserved_address_blocked_by_egress_policy)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	const enum dialer_error err = d.err;
 	dialreq_free(req);
 	ev_loop_destroy(loop);
@@ -867,10 +925,11 @@ T_DECLARE_CASE(http_connect_success_sends_expected_request)
 			.data = &result,
 		},
 		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
@@ -931,12 +990,13 @@ T_DECLARE_CASE(sync_connect_success_into_http_handshake)
 
 	g_sync_connect_ret = -2;
 	g_force_sync_connect = true;
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	g_force_sync_connect = false;
 
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
@@ -1001,10 +1061,11 @@ T_DECLARE_CASE(http_connect_success_with_byte_at_a_time_response)
 			.data = &result,
 		},
 		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
@@ -1070,10 +1131,84 @@ T_DECLARE_CASE(http_connect_success_with_large_response_headers)
 			.data = &result,
 		},
 		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
+	int client_fd = result.fd;
+	const enum dialer_error err = d.err;
+	close_if_open(&client_fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT(!server.failed);
+	T_EXPECT(server.response_sent);
+	T_EXPECT(result.fd >= 0);
+	T_EXPECT_EQ(err, DIALER_OK);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
+/*
+ * Regression (#126): a single header line larger than the peek slack, delivered
+ * fragmented, must still complete. dialer_recv() sized its MSG_PEEK window from
+ * rbuf.len -- which counts the peeked-but-unconsumed fragment -- so once that
+ * fragment exceeded the remaining slack the window could never hold the whole
+ * line, rbuf.len oscillated, and SO_RCVLOWAT re-fired EV_READ into a 100%-CPU
+ * busy loop. A >4 KiB header line that fits DIALER_RBUF_SIZE, delivered in
+ * chunks, must be accepted (the window is now sized from the consumed offset).
+ */
+T_DECLARE_CASE(http_connect_success_with_fragmented_large_header_line)
+{
+	/* a single header line well over 4 KiB but within DIALER_RBUF_SIZE */
+	char filler[5000];
+	memset(filler, 'a', sizeof(filler) - 1);
+	filler[sizeof(filler) - 1] = '\0';
+	char response[6144];
+	const int rn = snprintf(
+		response, sizeof(response),
+		"HTTP/1.1 200 Connection Established\r\n"
+		"X-Long: %s\r\n\r\n",
+		filler);
+	T_CHECK(rn > 4096 && (size_t)rn < sizeof(response));
+
+	uint_fast16_t port = 0;
+	int listener_fd = make_listener(&port);
+	struct proxy_server server = {
+		.listener_fd = listener_fd,
+		.peer_fd = -1,
+		.response = response,
+		/* chunk the reply so the status line is consumed and a large
+		 * partial header line remains peeked -- the livelock trigger */
+		.response_chunk = 4096,
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[128];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("example.com:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
@@ -1119,10 +1254,11 @@ T_DECLARE_CASE(http_connect_407_maps_to_proxy_auth)
 			.data = &result,
 		},
 		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
 	dialreq_free(req);
@@ -1166,10 +1302,11 @@ T_DECLARE_CASE(http_connect_403_maps_to_proxy_reject)
 			.data = &result,
 		},
 		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
 	dialreq_free(req);
@@ -1213,10 +1350,11 @@ T_DECLARE_CASE(http_connect_502_maps_to_proxy_refused)
 			.data = &result,
 		},
 		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
 	dialreq_free(req);
@@ -1260,10 +1398,11 @@ T_DECLARE_CASE(http_connect_non_200_maps_to_proxy_proto)
 			.data = &result,
 		},
 		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
 	dialreq_free(req);
@@ -1274,6 +1413,62 @@ T_DECLARE_CASE(http_connect_non_200_maps_to_proxy_proto)
 	T_EXPECT(!server.failed);
 	T_EXPECT(server.request_complete);
 	T_EXPECT(server.response_sent);
+	T_EXPECT_EQ(result.fd, -1);
+	T_EXPECT_EQ(err, DIALER_ERR_PROXY_PROTO);
+	T_EXPECT_EQ(d.syserr, 0);
+}
+
+/*
+ * Regression (#127): a 200 response followed by a malformed header line (no
+ * colon) must fail the dial with an error. recv_http_hdr()'s http_parsehdr()
+ * failure branch returned -1 without setting d->err, so the dial aborted while
+ * still reporting DIALER_OK -- and socks.c then relayed SOCKS5RSP_SUCCEEDED to
+ * the client for a connection that was already dead.
+ */
+T_DECLARE_CASE(http_connect_malformed_header_maps_to_proxy_proto)
+{
+	uint_fast16_t port = 0;
+	int listener_fd = make_listener(&port);
+	struct proxy_server server = {
+		.listener_fd = listener_fd,
+		.peer_fd = -1,
+		.response = "HTTP/1.1 200 OK\r\nBadHeaderNoColon\r\n\r\n",
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[96];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("example.com:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
+	const enum dialer_error err = d.err;
+	close_if_open(&result.fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT(!server.failed);
+	T_EXPECT(server.response_sent);
+	/* the dial must fail, not report success with a dead connection */
 	T_EXPECT_EQ(result.fd, -1);
 	T_EXPECT_EQ(err, DIALER_ERR_PROXY_PROTO);
 	T_EXPECT_EQ(d.syserr, 0);
@@ -1310,10 +1505,11 @@ T_DECLARE_CASE(http_connect_unsupported_version_maps_to_proxy_proto)
 			.data = &result,
 		},
 		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const struct config conf = proxy_server_conf(&server);
+	dialer_do(&d, loop, req, &conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
+		loop, dialer_called_predicate, &result,
+		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
 	dialreq_free(req);
@@ -1435,7 +1631,7 @@ T_DECLARE_CASE(socks4a_rejected_maps_to_proxy_refused)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks4_raw_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
@@ -1481,7 +1677,7 @@ T_DECLARE_CASE(socks4a_granted_reports_success)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks4_raw_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
@@ -1498,6 +1694,60 @@ T_DECLARE_CASE(socks4a_granted_reports_success)
 	T_EXPECT(result.fd >= 0);
 	T_EXPECT_EQ(err, DIALER_OK);
 	T_EXPECT_EQ(d.syserr, 0);
+}
+
+/* #178: the proxy credential's username is sent as the SOCKS4a userid, between
+ * the 8-byte fixed header and the target hostname. */
+T_DECLARE_CASE(socks4a_sends_userid)
+{
+	uint_fast16_t port = 0;
+	struct socks4_raw_server server = {
+		.listener_fd = make_listener(&port),
+		.peer_fd = -1,
+		.rsp_code = SOCKS4RSP_GRANTED,
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[64];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri),
+			"socks4a://alice@127.0.0.1:%u", (unsigned)port) > 0);
+	req = dialreq_parse("example.com:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
+		socks4_raw_pump, &server);
+	int client_fd = result.fd;
+	const enum dialer_error err = d.err;
+	unsigned char reqbuf[512];
+	const size_t buf_len = server.buf_len < sizeof(reqbuf) ?
+				       server.buf_len :
+				       sizeof(reqbuf);
+	memcpy(reqbuf, server.buf, buf_len);
+	close_if_open(&client_fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&server.listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT(result.fd >= 0);
+	T_EXPECT_EQ(err, DIALER_OK);
+	/* userid "alice\0" follows the 8-byte SOCKS4 header */
+	T_EXPECT(buf_len >= SOCKS4_HDR_LEN + 6);
+	T_EXPECT_MEMEQ(reqbuf + SOCKS4_HDR_LEN, "alice", 6);
 }
 
 /* send_socks4a_req() encodes an IPv6-literal target as a SOCKS4a hostname (the
@@ -1533,7 +1783,7 @@ T_DECLARE_CASE(socks4a_ipv6_target_encodes_hostname)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks4_raw_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
@@ -1581,6 +1831,10 @@ struct socks5_raw_server {
 	/* additional handshakes to service on the same connection after the
 	 * first, for a tunnelled multi-hop proxy chain (default 0) */
 	int extra_hops;
+	/* the CONNECT request (from the ATYP byte through the port) captured for
+	 * the test to assert the encoded request target */
+	unsigned char req_target[260];
+	size_t req_target_len;
 };
 
 static bool socks5_raw_pump(void *data)
@@ -1682,6 +1936,11 @@ static bool socks5_raw_pump(void *data)
 		if (s->buf_len < req_len) {
 			return true;
 		}
+		/* capture the request target (ATYP..port) for assertion */
+		s->req_target_len = addr_len + 1 + sizeof(in_port_t);
+		if (s->req_target_len <= sizeof(s->req_target)) {
+			memcpy(s->req_target, s->buf + 3, s->req_target_len);
+		}
 		/* Respond with rsp_code. Default BND.ADDR is 0.0.0.0:0; the
 		 * bnd_domain variant replies with a domain-form BND.ADDR. */
 		const unsigned char connect_rsp
@@ -1748,7 +2007,7 @@ T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
@@ -1794,7 +2053,7 @@ T_DECLARE_CASE(socks5_connect_success)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
@@ -1810,6 +2069,126 @@ T_DECLARE_CASE(socks5_connect_success)
 	T_EXPECT(result.fd >= 0);
 	T_EXPECT_EQ(err, DIALER_OK);
 	T_EXPECT_EQ(d.syserr, 0);
+}
+
+/* #178: dialing an IPv4 target through a SOCKS5 proxy must encode the request
+ * target as ATYP_IPV4 + the four address bytes + the big-endian port. */
+T_DECLARE_CASE(socks5_connect_ipv4_target_encoding)
+{
+	uint_fast16_t port = 0;
+	struct socks5_raw_server server = {
+		.listener_fd = make_listener(&port),
+		.peer_fd = -1,
+		.phase = SOCKS5_PHASE_AUTH,
+		.rsp_code = SOCKS5RSP_SUCCEEDED,
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[64];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "socks5://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("1.2.3.4:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
+		socks5_raw_pump, &server);
+	int client_fd = result.fd;
+	const enum dialer_error err = d.err;
+	close_if_open(&client_fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&server.listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT_EQ(err, DIALER_OK);
+	static const unsigned char want[] = {
+		SOCKS5ADDR_IPV4, 1, 2, 3, 4, 0x01, 0xBB, /* 443 */
+	};
+	T_EXPECT_EQ(server.req_target_len, sizeof(want));
+	T_EXPECT_MEMEQ(server.req_target, want, sizeof(want));
+}
+
+/* #178: dialing an IPv6 target through a SOCKS5 proxy must encode the request
+ * target as ATYP_IPV6 + the sixteen address bytes + the big-endian port. */
+T_DECLARE_CASE(socks5_connect_ipv6_target_encoding)
+{
+	uint_fast16_t port = 0;
+	struct socks5_raw_server server = {
+		.listener_fd = make_listener(&port),
+		.peer_fd = -1,
+		.phase = SOCKS5_PHASE_AUTH,
+		.rsp_code = SOCKS5RSP_SUCCEEDED,
+	};
+	struct ev_loop *loop = ev_loop_new(0);
+	struct dialer_result result = { .fd = -1 };
+	struct dialer d;
+	struct dialreq *req;
+	char proxy_uri[64];
+
+	T_CHECK(loop != NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "socks5://127.0.0.1:%u",
+			(unsigned)port) > 0);
+	req = dialreq_parse("[::1]:443", proxy_uri);
+	T_CHECK(req != NULL);
+	dialer_init(
+		&d,
+		&(struct dialer_cb){
+			.func = dialer_finish_cb,
+			.data = &result,
+		},
+		NULL, NULL);
+	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
+	const bool completed = test_wait_until(
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
+		socks5_raw_pump, &server);
+	int client_fd = result.fd;
+	const enum dialer_error err = d.err;
+	close_if_open(&client_fd);
+	close_if_open(&server.peer_fd);
+	dialreq_free(req);
+	ev_loop_destroy(loop);
+	close_if_open(&server.listener_fd);
+
+	T_EXPECT(completed);
+	T_EXPECT_EQ(err, DIALER_OK);
+	static const unsigned char want[] = {
+		SOCKS5ADDR_IPV6,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		1, /* ::1 */
+		0x01,
+		0xBB, /* 443 */
+	};
+	T_EXPECT_EQ(server.req_target_len, sizeof(want));
+	T_EXPECT_MEMEQ(server.req_target, want, sizeof(want));
 }
 
 /* Regression: RFC 1928 permits a domain-form BND.ADDR in a SUCCEEDED reply;
@@ -1845,7 +2224,7 @@ T_DECLARE_CASE(socks5_connect_success_domain_bnd_addr)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
@@ -1901,7 +2280,7 @@ T_DECLARE_CASE(socks5_oversized_username_fails)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	(void)test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	const enum dialer_error err = d.err;
 	const bool called = result.called;
@@ -1952,7 +2331,7 @@ T_DECLARE_CASE(socks5_chain_two_hops_success)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
@@ -2005,7 +2384,7 @@ T_DECLARE_CASE(socks5_userpass_auth_success)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	int client_fd = result.fd;
 	const enum dialer_error err = d.err;
@@ -2060,7 +2439,7 @@ T_DECLARE_CASE(socks5_unoffered_userpass_maps_to_proxy_proto)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	(void)test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	const enum dialer_error err = d.err;
 	const bool called = result.called;
@@ -2107,7 +2486,7 @@ T_DECLARE_CASE(socks5_no_acceptable_method_maps_to_proxy_auth)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	(void)test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	const enum dialer_error err = d.err;
 	const bool called = result.called;
@@ -2158,7 +2537,7 @@ T_DECLARE_CASE(socks5_redial_after_success_resets_state)
 	/* first dial */
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed1 = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	int client_fd1 = result.fd;
 	T_EXPECT(completed1);
@@ -2178,7 +2557,7 @@ T_DECLARE_CASE(socks5_redial_after_success_resets_state)
 	result.fd = -1;
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed2 = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	int client_fd2 = result.fd;
 	const enum dialer_error err2 = d.err;
@@ -2262,10 +2641,9 @@ T_DECLARE_CASE(direct_connect_ipv6_reports_success)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
-	int accepted_fd =
-		wait_for_accept(loop, listener_fd, TEST_WAIT_SHORT_SEC);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
+	int accepted_fd = wait_for_accept(loop, listener_fd, TEST_WAIT_SEC);
 	int client_fd = result.fd;
 	const bool accepted = accepted_fd >= 0;
 	const bool has_client_fd = client_fd >= 0;
@@ -2303,14 +2681,13 @@ T_DECLARE_SUBCASE(
 		NULL, NULL);
 	dialer_do(&d, loop, req, conf, resolver, NULL);
 	const bool completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	int client_fd = result.fd;
 	const bool has_client_fd = client_fd >= 0;
 	const enum dialer_error err = d.err;
 	const int syserr = d.syserr;
-	int accepted_fd =
-		wait_for_accept(loop, final_fd, TEST_WAIT_RESPONSE_SEC);
+	int accepted_fd = wait_for_accept(loop, final_fd, TEST_WAIT_SEC);
 	const bool has_accepted = accepted_fd >= 0;
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
@@ -2380,16 +2757,21 @@ static const struct testing_suite suite[] = {
 	T_CASE(sync_connect_success_into_http_handshake),
 	T_CASE(http_connect_success_with_byte_at_a_time_response),
 	T_CASE(http_connect_success_with_large_response_headers),
+	T_CASE(http_connect_success_with_fragmented_large_header_line),
 	T_CASE(http_connect_407_maps_to_proxy_auth),
 	T_CASE(http_connect_403_maps_to_proxy_reject),
 	T_CASE(http_connect_502_maps_to_proxy_refused),
 	T_CASE(http_connect_non_200_maps_to_proxy_proto),
+	T_CASE(http_connect_malformed_header_maps_to_proxy_proto),
 	T_CASE(http_connect_unsupported_version_maps_to_proxy_proto),
 	T_CASE(socks4a_rejected_maps_to_proxy_refused),
 	T_CASE(socks4a_granted_reports_success),
+	T_CASE(socks4a_sends_userid),
 	T_CASE(socks4a_ipv6_target_encodes_hostname),
 	T_CASE(socks5_noallowed_maps_to_proxy_reject),
 	T_CASE(socks5_connect_success),
+	T_CASE(socks5_connect_ipv4_target_encoding),
+	T_CASE(socks5_connect_ipv6_target_encoding),
 	T_CASE(socks5_connect_success_domain_bnd_addr),
 	T_CASE(socks5_oversized_username_fails),
 	T_CASE(socks5_userpass_auth_success),

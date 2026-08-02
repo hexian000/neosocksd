@@ -213,7 +213,11 @@ static const char *const dialer_error_strs[DIALER_ERR_MAX] = {
 
 const char *dialer_strerror(const enum dialer_error err)
 {
-	if (err < DIALER_ERR_MAX && dialer_error_strs[err] != NULL) {
+	/* enum dialer_error has a signed underlying type on common ABIs, so
+	 * cast to bound both ends: a negative (corrupted/foreign) value would
+	 * otherwise index before the array. */
+	if ((unsigned int)err < DIALER_ERR_MAX &&
+	    dialer_error_strs[err] != NULL) {
 		return dialer_error_strs[err];
 	}
 	return "unknown error";
@@ -269,6 +273,15 @@ dialreq_new(const struct dialreq *restrict base, const size_t num_proxy)
 		for (size_t i = 0; i < num_base_proxy; i++) {
 			proxy_copy(&req->proxy[i], &base->proxy[i]);
 		}
+	} else {
+		/* No base to copy the target address from; install an explicit
+		 * INADDR_ANY wildcard rather than leaving req->addr
+		 * indeterminate, matching dialreq_parse's NULL-addr path. */
+		req->addr = (struct dialaddr){
+			.type = ATYP_INET,
+			.port = UINT16_C(0),
+			.in = { INADDR_ANY },
+		};
 	}
 	return req;
 }
@@ -376,24 +389,24 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 			dialreq_free(req);
 			return NULL;
 		}
-		/* up to UINT16_MAX bytes: heap-allocate rather than risk a large
-		 * stack VLA */
-		char *buf = malloc(len + 1);
-		if (buf == NULL) {
-			LOGOOM();
-			dialreq_free(req);
-			return NULL;
-		}
-		(void)memcpy(buf, csv, len + 1);
-		for (const char *tok = strtok(buf, ","); tok != NULL;
-		     tok = strtok(NULL, ",")) {
-			if (!dialreq_addproxy(req, tok, strlen(tok))) {
-				free(buf);
+		/* Split on ',' by hand rather than with the non-reentrant
+		 * strtok() the project avoids elsewhere; csv is not modified, so
+		 * no mutable copy is needed. Empty elements (adjacent or trailing
+		 * commas) are skipped, matching strtok's token semantics. */
+		for (const char *tok = csv;;) {
+			const char *const comma = strchr(tok, ',');
+			const size_t toklen = (comma != NULL) ?
+						      (size_t)(comma - tok) :
+						      strlen(tok);
+			if (toklen > 0 && !dialreq_addproxy(req, tok, toklen)) {
 				dialreq_free(req);
 				return NULL;
 			}
+			if (comma == NULL) {
+				break;
+			}
+			tok = comma + 1;
 		}
-		free(buf);
 	}
 	return req;
 }
@@ -971,6 +984,11 @@ static int recv_http_hdr(struct dialer *restrict d)
 		next = http_parsehdr(last, &key, &value);
 		if (next == NULL) {
 			DIALER_LOG(DEBUG, d, "http_parsehdr: failed");
+			/* a malformed header line is a proxy protocol error;
+			 * without setting d->err the failed dial would report
+			 * DIALER_OK and the client be told the connect succeeded */
+			d->err = DIALER_ERR_PROXY_PROTO;
+			d->syserr = 0;
 			return -1;
 		}
 		if (next == last) {
@@ -1324,7 +1342,14 @@ static int dialer_recv(struct dialer *restrict d)
 {
 	const int fd = d->w_socket.fd;
 	unsigned char *buf = d->next;
-	const size_t n = d->rbuf.cap - d->rbuf.len;
+	/* The peek writes into buf (== d->next) and MSG_PEEK restarts at the
+	 * socket-queue head each call, so the window is the buffer space from
+	 * d->next to the end -- cap minus the consumed offset -- not cap minus
+	 * rbuf.len. rbuf.len also counts the peeked-but-unconsumed fragment, so
+	 * `cap - len` shrinks the window by that fragment; once it exceeds the
+	 * slack a header line that fits the buffer can never be peeked in full
+	 * and the dialer livelocks at 100% CPU. */
+	const size_t n = d->rbuf.cap - (size_t)(d->next - d->rbuf.data);
 	ssize_t nrecv;
 	do {
 		nrecv = recv(fd, buf, n, MSG_PEEK);
@@ -1379,7 +1404,9 @@ static int dialer_recv(struct dialer *restrict d)
 		return 0;
 	}
 	const size_t want = (d->rbuf.data + d->rbuf.len) - d->next + ret;
-	if (want > d->rbuf.cap) {
+	/* want counts from d->next, so bound it by the space from d->next to the
+	 * end of the buffer, matching the peek window above. */
+	if (want > d->rbuf.cap - (size_t)(d->next - d->rbuf.data)) {
 		DIALER_LOG(DEBUG, d, "recv: header too long");
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
