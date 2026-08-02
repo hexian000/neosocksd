@@ -9,6 +9,7 @@
 #include "proto/socks.h"
 #include "ruleset/ruleset.h"
 #include "server.h"
+#include "transfer.h"
 #include "util.h"
 
 #include "binary/serialize.h"
@@ -25,9 +26,6 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <netinet/in.h>
-#if WITH_THREADS
-#include <stdatomic.h>
-#endif
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,6 +37,11 @@
 /* Cap on the distinct target addresses tracked per UDP ASSOCIATE session for
  * the source filter on the target->client direction (see struct socks_ctx). */
 #define SOCKS_UDP_TARGETS_MAX 32
+
+/* RFC 1928 section 7: a reassembly queue SHOULD be timed out; the RFC suggests
+ * a minimum of 5 seconds. A partial fragment sequence that stops making
+ * progress for this long is discarded. */
+#define SOCKS_UDP_FRAG_TIMEOUT 5.0
 
 /* never rollback */
 enum socks_state {
@@ -95,6 +98,9 @@ struct socks_ctx {
 			ev_io w_udp;
 			/* watches accepted_fd for TCP close */
 			ev_io w_tcp;
+			/* per-association reassembly timeout: armed while a
+			 * fragment sequence is pending, discards it on expiry */
+			ev_timer w_frag;
 			union sockaddr_max udp_peer;
 			bool udp_peer_known;
 			/* distinct target addresses the client has sent to:
@@ -201,22 +207,106 @@ socks4_sendrsp(struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 
 static bool socks5_sendrsp_addr(
 	struct socks_ctx *restrict ctx, const uint_fast8_t rsp,
-	const union sockaddr_max *restrict addr);
+	const union sockaddr_max *restrict addr)
+{
+	unsigned char buf[SOCKS5_RSP_MAXLEN];
+	struct socks5_hdr h = {
+		.version = SOCKS5,
+		.command = rsp,
+		.reserved = 0,
+	};
+	size_t len = SOCKS5_HDR_LEN;
+	unsigned char *const restrict addrbuf = buf + len;
+	switch (addr->sa.sa_family) {
+	case AF_INET: {
+		h.addrtype = SOCKS5ADDR_IPV4;
+		memcpy(addrbuf, &addr->in.sin_addr, sizeof(addr->in.sin_addr));
+		len += sizeof(addr->in.sin_addr);
+		memcpy(buf + len, &addr->in.sin_port,
+		       sizeof(addr->in.sin_port));
+		len += sizeof(addr->in.sin_port);
+	} break;
+	case AF_INET6: {
+		h.addrtype = SOCKS5ADDR_IPV6;
+		memcpy(addrbuf, &addr->in6.sin6_addr,
+		       sizeof(addr->in6.sin6_addr));
+		len += sizeof(addr->in6.sin6_addr);
+		memcpy(buf + len, &addr->in6.sin6_port,
+		       sizeof(addr->in6.sin6_port));
+		len += sizeof(addr->in6.sin6_port);
+	} break;
+	default:
+		FAILMSGF("unexpected address family: %d", addr->sa.sa_family);
+	}
+	socks5hdr_write(buf, &h);
+	return send_rsp(ctx, buf, len);
+}
 
+/* Local endpoint of the dialed socket. On failure *out is left as the
+ * unspecified IPv4 address and false is returned. */
+static bool dialed_sockname(
+	const struct socks_ctx *restrict ctx, union sockaddr_max *restrict out)
+{
+	*out = (union sockaddr_max){ 0 };
+	socklen_t len = sizeof(*out);
+	if (getsockname(ctx->dialed_fd, &out->sa, &len) != 0) {
+		const int err = errno;
+		SOCKS_CTX_LOG_F(
+			ERROR, ctx, "getsockname: (%d) %s", err, strerror(err));
+		out->sa.sa_family = AF_INET;
+		return false;
+	}
+	return true;
+}
+
+/* Determine the BND.ADDR to advertise for a wildcard-bound relay/listen socket
+ * (BIND, UDP ASSOCIATE). The socket is bound to INADDR_ANY, so its own
+ * getsockname() host is unspecified and unusable to the client; RFC 1928
+ * requires BND.ADDR to be where the client sends UDP requests (UDP ASSOCIATE)
+ * or what it relays to its peer (BIND). Take the host from the local end of the
+ * TCP control connection — the address the client reached us on — and keep the
+ * ephemeral port from the bound socket. Falls back to the bound socket's own
+ * name if either lookup fails or the two address families disagree. A connected
+ * socket needs none of this and must not come here: its own name is already the
+ * address to report (see socks_sendrsp). */
+static void socks_bound_addr(
+	const struct socks_ctx *restrict ctx, union sockaddr_max *restrict out)
+{
+	union sockaddr_max bound;
+	if (!dialed_sockname(ctx, &bound)) {
+		*out = bound;
+		return;
+	}
+	union sockaddr_max local = { 0 };
+	socklen_t locallen = sizeof(local);
+	if (getsockname(ctx->accepted_fd, &local.sa, &locallen) != 0 ||
+	    local.sa.sa_family != bound.sa.sa_family) {
+		*out = bound;
+		return;
+	}
+	*out = local;
+	switch (out->sa.sa_family) {
+	case AF_INET:
+		out->in.sin_port = bound.in.sin_port;
+		break;
+	case AF_INET6:
+		out->in6.sin6_port = bound.in6.sin6_port;
+		break;
+	default:
+		break;
+	}
+}
+
+/* Every call site reaching here with a live dialed_fd holds a wildcard-bound
+ * BIND/UDP socket; the connected-socket reply is built in socks_sendrsp. */
 static bool
 socks5_sendrsp(struct socks_ctx *restrict ctx, const uint_fast8_t rsp)
 {
 	union sockaddr_max addr = {
 		.sa.sa_family = AF_INET,
 	};
-	socklen_t addrlen = sizeof(addr);
 	if (ctx->dialed_fd != -1) {
-		if (getsockname(ctx->dialed_fd, &addr.sa, &addrlen) != 0) {
-			const int err = errno;
-			SOCKS_CTX_LOG_F(
-				ERROR, ctx, "getsockname: (%d) %s", err,
-				strerror(err));
-		}
+		socks_bound_addr(ctx, &addr);
 	}
 	return socks5_sendrsp_addr(ctx, rsp, &addr);
 }
@@ -229,8 +319,18 @@ static bool socks_sendrsp(struct socks_ctx *restrict ctx, const bool ok)
 		return socks4_sendrsp(
 			ctx, ok ? SOCKS4RSP_GRANTED : SOCKS4RSP_REJECTED);
 	case SOCKS5:
-		return socks5_sendrsp(
-			ctx, ok ? SOCKS5RSP_SUCCEEDED : SOCKS5RSP_FAIL);
+		if (!ok) {
+			return socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
+		}
+		/* RFC 1928 section 6: on CONNECT, BND is the endpoint the server
+		 * connected from, which the outbound socket reports directly. */
+		ASSERT(ctx->dialed_fd != -1);
+		{
+			union sockaddr_max addr;
+			(void)dialed_sockname(ctx, &addr);
+			return socks5_sendrsp_addr(
+				ctx, SOCKS5RSP_SUCCEEDED, &addr);
+		}
 	default:
 		break;
 	}
@@ -649,6 +749,7 @@ static int socks_recv(struct socks_ctx *restrict ctx, const int fd)
 		return -1;
 	}
 	ctx->rbuf.len += (size_t)nrecv;
+	ctx->s->stats.byt_client_recv += (uint_least64_t)nrecv;
 	LOG_BIN_F(
 		VERYVERBOSE, ctx->rbuf.data, ctx->rbuf.len, 0,
 		"[fd:%d] recv: %zu bytes", fd, ctx->rbuf.len);
@@ -679,43 +780,6 @@ static void socks_connect(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	dialer_do(
 		&ctx->dialer, loop, ctx->dialreq, ctx->s->conf,
 		ctx->s->resolver, ctx->s);
-}
-
-static bool socks5_sendrsp_addr(
-	struct socks_ctx *restrict ctx, const uint_fast8_t rsp,
-	const union sockaddr_max *restrict addr)
-{
-	unsigned char buf[SOCKS5_RSP_MAXLEN];
-	struct socks5_hdr h = {
-		.version = SOCKS5,
-		.command = rsp,
-		.reserved = 0,
-	};
-	size_t len = SOCKS5_HDR_LEN;
-	unsigned char *const restrict addrbuf = buf + len;
-	switch (addr->sa.sa_family) {
-	case AF_INET: {
-		h.addrtype = SOCKS5ADDR_IPV4;
-		memcpy(addrbuf, &addr->in.sin_addr, sizeof(addr->in.sin_addr));
-		len += sizeof(addr->in.sin_addr);
-		memcpy(buf + len, &addr->in.sin_port,
-		       sizeof(addr->in.sin_port));
-		len += sizeof(addr->in.sin_port);
-	} break;
-	case AF_INET6: {
-		h.addrtype = SOCKS5ADDR_IPV6;
-		memcpy(addrbuf, &addr->in6.sin6_addr,
-		       sizeof(addr->in6.sin6_addr));
-		len += sizeof(addr->in6.sin6_addr);
-		memcpy(buf + len, &addr->in6.sin6_port,
-		       sizeof(addr->in6.sin6_port));
-		len += sizeof(addr->in6.sin6_port);
-	} break;
-	default:
-		FAILMSGF("unexpected address family: %d", addr->sa.sa_family);
-	}
-	socks5hdr_write(buf, &h);
-	return send_rsp(ctx, buf, len);
 }
 
 static bool bind_peer_matches_request(
@@ -765,7 +829,6 @@ socks_start_transfer(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ctx->accepted_fd = ctx->dialed_fd = -1;
 	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
 	struct server_stats *restrict stats = &ctx->s->stats;
-	stats->byt_client_recv += (uint_least64_t)ctx->rbuf.len;
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	stats->num_halfopen--;
@@ -823,6 +886,19 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	socket_close(ctx->dialed_fd);
 	ctx->dialed_fd = conn_fd;
 	if (!socks5_sendrsp_addr(ctx, SOCKS5RSP_SUCCEEDED, &peer_sa)) {
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	/* Any client bytes pipelined after the BIND request were never
+	 * forwarded to the peer; replay them now, mirroring socks_commit's
+	 * readahead handling on the CONNECT path. */
+	const size_t readahead = ctx->rbuf.len - ctx->reqlen;
+	if (readahead > 0 && !forward_readahead(
+				     conn_fd, ctx->rbuf.data + ctx->reqlen,
+				     readahead, &ctx->s->byt_up)) {
+		SOCKS_CTX_LOG(
+			WARNING, ctx,
+			"failed to forward pipelined bytes to peer");
 		gc_unref(&ctx->gcbase);
 		return;
 	}
@@ -998,6 +1074,34 @@ static void udp_frag_reset(struct socks_ctx *restrict ctx)
 	BUF_INIT(ctx->frag_buf, 0);
 }
 
+/* Keep the reassembly timer armed exactly while a fragment sequence is pending:
+ * each in-order fragment re-arms it (resetting the countdown), and completion
+ * or reset stops it. Called from the relay callback, which owns the loop. */
+static void udp_frag_timer_sync(
+	struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
+{
+	if (ctx->frag_next != 0) {
+		ev_timer_again(loop, &ctx->w_frag);
+	} else {
+		ev_timer_stop(loop, &ctx->w_frag);
+	}
+}
+
+static void udp_frag_timeout_cb(
+	struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
+{
+	CHECK_REVENTS(revents, EV_TIMER);
+	struct socks_ctx *restrict ctx = watcher->data;
+	ASSERT(ctx->state == STATE_UDP_RELAY);
+	/* Remote-triggerable (a client that stalls mid-sequence), so log at
+	 * DEBUG like the sibling UDP discard paths. */
+	SOCKS_CTX_LOG(
+		DEBUG, ctx,
+		"UDP frag: reassembly timed out, discarding partial sequence");
+	udp_frag_reset(ctx);
+	ev_timer_stop(loop, watcher);
+}
+
 static void udp_frag_flush(struct socks_ctx *restrict ctx)
 {
 	/* authorize replies from this target for the source filter */
@@ -1020,6 +1124,8 @@ static void udp_frag_flush(struct socks_ctx *restrict ctx)
 				"sendto target (reassembled): (%d) %s", err,
 				strerror(err));
 		}
+	} else {
+		xfer_count(&ctx->s->byt_up, (size_t)nsend);
 	}
 	udp_frag_reset(ctx);
 }
@@ -1217,8 +1323,22 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		const uint_fast8_t frag = udph.frag;
 		if (frag != 0) {
 			udp_frag_client_recv(ctx, (size_t)nrecv, frag);
+			udp_frag_timer_sync(loop, ctx);
 			return;
 		}
+		/* RFC 1928 section 7 reinitializes the reassembly queue upon a
+		 * datagram whose FRAG is below the highest one seen; FRAG 0 is
+		 * below any in-progress fragment, so a standalone datagram
+		 * interleaved into a partial sequence discards that sequence
+		 * rather than letting a later in-order fragment splice payload
+		 * around it. */
+		if (ctx->frag_next != 0) {
+			SOCKS_CTX_LOG(
+				DEBUG, ctx,
+				"UDP frag: standalone datagram discards in-progress sequence");
+			udp_frag_reset(ctx);
+		}
+		udp_frag_timer_sync(loop, ctx);
 		/* Non-fragmented datagram: parse target and forward payload */
 		union sockaddr_max target_sa;
 		socklen_t target_len;
@@ -1256,6 +1376,8 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 					DEBUG, ctx, "sendto target: (%d) %s",
 					err, strerror(err));
 			}
+		} else {
+			xfer_count(&ctx->s->byt_up, (size_t)nsend);
 		}
 	} else if (!udp_target_known(ctx, &from_sa.sa)) {
 		/* Source filter: drop a datagram from a host the client has not
@@ -1326,6 +1448,8 @@ udp_relay_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 					"sendmsg to client: (%d) %s", err,
 					strerror(err));
 			}
+		} else {
+			xfer_count(&ctx->s->byt_down, (size_t)nsend);
 		}
 	}
 	(void)loop;
@@ -1353,6 +1477,7 @@ tcp_monitor_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			strerror(err));
 	} else if (n > 0) {
 		/* Unexpected data on TCP control connection; ignore */
+		ctx->s->stats.byt_client_recv += (uint_least64_t)n;
 		return;
 	}
 	SOCKS_CTX_LOG(VERBOSE, ctx, "UDP ASSOCIATE: TCP control closed");
@@ -1392,6 +1517,12 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 	ev_io_init(&ctx->w_tcp, tcp_monitor_cb, ctx->accepted_fd, EV_READ);
 	ctx->w_tcp.data = ctx;
 	ev_io_start(loop, &ctx->w_tcp);
+	/* The reassembly timer is armed on demand by udp_frag_timer_sync() while a
+	 * fragment sequence is pending; init with repeat set so ev_timer_again
+	 * arms it to SOCKS_UDP_FRAG_TIMEOUT. */
+	ev_timer_init(
+		&ctx->w_frag, udp_frag_timeout_cb, 0.0, SOCKS_UDP_FRAG_TIMEOUT);
+	ctx->w_frag.data = ctx;
 	SOCKS_CTX_LOG_F(
 		VERBOSE, ctx, "UDP ASSOCIATE: %zu active sessions", cur);
 }
@@ -1435,7 +1566,22 @@ static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 #if WITH_RULESET
 	struct ruleset *restrict ruleset = ctx->s->ruleset;
 	if (ruleset != NULL) {
-		/* With ruleset: all commands route as TCP CONNECT; skip special-case dispatch below. */
+		/* The ruleset path routes only TCP CONNECT; a SOCKS5 BIND/UDP
+		 * ASSOCIATE would otherwise be dialed as a CONNECT to DST.ADDR and
+		 * answered with a CONNECT-style reply. conf.c forbids the flag
+		 * combination for --ruleset, but a --boot script can install rules
+		 * and reach here, so reject those commands explicitly. */
+		if (read_uint8(ctx->rbuf.data) == SOCKS5) {
+			struct socks5_hdr h;
+			socks5hdr_read(&h, ctx->next);
+			if (h.command == SOCKS5CMD_BIND ||
+			    h.command == SOCKS5CMD_UDPASSOCIATE) {
+				socks5_sendrsp(ctx, SOCKS5RSP_CMDNOSUPPORT);
+				gc_unref(&ctx->gcbase);
+				return;
+			}
+		}
+		/* other commands route as TCP CONNECT */
 		ev_idle_start(loop, &ctx->w_process);
 		return;
 	}
@@ -1476,6 +1622,11 @@ timeout_cb(struct ev_loop *restrict loop, ev_timer *watcher, const int revents)
 		const uint_fast8_t version = read_uint8(ctx->rbuf.data);
 		if (version == SOCKS5) {
 			socks5_sendrsp(ctx, SOCKS5RSP_TTLEXPIRED);
+		} else if (version == SOCKS4) {
+			/* SOCKS4 has no TTL-expired code; 91/REJECTED is its
+			 * standard failure reply, sent on every other SOCKS4
+			 * failure path too */
+			socks4_sendrsp(ctx, SOCKS4RSP_REJECTED);
 		}
 	} break;
 	case STATE_BIDIRECTIONAL:
@@ -1504,8 +1655,9 @@ static void socks_commit(
 	/* Any client bytes pipelined after the SOCKS request were never
 	 * forwarded upstream; replay them now while both fds are valid. */
 	const size_t readahead = ctx->rbuf.len - ctx->reqlen;
-	if (readahead > 0 &&
-	    !forward_readahead(fd, ctx->rbuf.data + ctx->reqlen, readahead)) {
+	if (readahead > 0 && !forward_readahead(
+				     fd, ctx->rbuf.data + ctx->reqlen,
+				     readahead, &ctx->s->byt_up)) {
 		SOCKS_CTX_LOG(
 			WARNING, ctx,
 			"failed to forward pipelined bytes to upstream");
@@ -1637,6 +1789,10 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 			ruleset_cancel(loop, ctx->ruleset_state);
 			ctx->ruleset_state = NULL;
 		}
+		/* a request that completed in this same loop sweep left w_finish
+		 * pending with a delivered dialreq; drop it so it cannot fire into
+		 * this freed ctx and the dialreq is not leaked */
+		ruleset_request_cancel(loop, &ctx->ruleset_callback);
 #endif /* WITH_RULESET */
 		stats->num_halfopen--;
 		return;
@@ -1654,12 +1810,8 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 	case STATE_UDP_RELAY:
 		ev_io_stop(loop, &ctx->w_udp);
 		ev_io_stop(loop, &ctx->w_tcp);
-#if WITH_THREADS
-		atomic_fetch_sub_explicit(
-			&ctx->s->num_sessions, 1, memory_order_relaxed);
-#else
-		ctx->s->num_sessions--;
-#endif /* WITH_THREADS */
+		ev_timer_stop(loop, &ctx->w_frag);
+		server_session_decr(ctx->s);
 		return;
 	default:
 		FAILMSGF("unexpected state: %d", ctx->state);

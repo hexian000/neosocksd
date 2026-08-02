@@ -21,7 +21,6 @@
 #include "ruleset/ruleset.h"
 #include "server.h"
 #include "transfer.h"
-#include "util.h"
 
 #include "meta/arraysize.h"
 #include "os/socket.h"
@@ -40,7 +39,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
@@ -105,12 +103,27 @@ static ev_tstamp test_timeout_wait_window(const ev_tstamp timeout_sec)
  * requires controlling the clock libev reads. These strong-symbol interposers
  * shadow clock_gettime/gettimeofday: while enabled they return a virtual time
  * the test advances, so a deadline is crossed by advancing the clock and
- * pumping the loop -- no real waiting. Disabled by default (real time via the
- * raw syscall), so every non-timeout case is unaffected.
+ * pumping the loop -- no real waiting. Disabled by default (real time), so
+ * every non-timeout case is unaffected.
  * ---------------------------------------------------------------------- */
 
 static bool g_vclock_on = false;
 static double g_vclock_sec = 0.0;
+
+/* Read the real clock for the pass-through path. Both clock_gettime() and
+ * gettimeofday() are interposed here, so the underlying clock has to be reached
+ * through a third entry point: ISO C11 timespec_get(), which libc services from
+ * its own internal clock rather than through the shadowed symbols. It is also
+ * the only such entry point that stays declared under the strict
+ * _POSIX_C_SOURCE the FORCE_POSIX build selects. */
+static int real_clock(struct timespec *restrict ts)
+{
+	if (timespec_get(ts, TIME_UTC) != TIME_UTC) {
+		errno = EINVAL;
+		return -1;
+	}
+	return 0;
+}
 
 int clock_gettime(clockid_t clk, struct timespec *ts)
 {
@@ -119,7 +132,8 @@ int clock_gettime(clockid_t clk, struct timespec *ts)
 		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
 		return 0;
 	}
-	return (int)syscall(SYS_clock_gettime, clk, ts);
+	(void)clk;
+	return real_clock(ts);
 }
 
 int gettimeofday(struct timeval *tv, void *tz)
@@ -129,7 +143,14 @@ int gettimeofday(struct timeval *tv, void *tz)
 		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
 		return 0;
 	}
-	return (int)syscall(SYS_gettimeofday, tv, tz);
+	(void)tz;
+	struct timespec ts;
+	if (real_clock(&ts) != 0) {
+		return -1;
+	}
+	tv->tv_sec = ts.tv_sec;
+	tv->tv_usec = (long)(ts.tv_nsec / 1000);
+	return 0;
 }
 
 /* Start virtual time at a fixed base; call before creating the loop so every
@@ -194,12 +215,6 @@ static ssize_t vclock_recv(
 	return (ssize_t)off;
 }
 
-const char *const proxy_protocol_str[PROTO_MAX] = {
-	[PROTO_HTTP] = "http",
-	[PROTO_SOCKS4A] = "socks4a",
-	[PROTO_SOCKS5] = "socks5",
-};
-
 enum stub_dialer_mode {
 	STUB_DIALER_NONE,
 	STUB_DIALER_FAIL,
@@ -224,6 +239,7 @@ static struct {
 	enum stub_ruleset_mode ruleset_mode;
 	struct ruleset_callback *ruleset_pending_cb;
 	uint_least32_t ruleset_cancel_count;
+	uint_least32_t ruleset_dispatch_count;
 } STUB = {
 	.dialreq_available = false,
 	.dialer_mode = STUB_DIALER_NONE,
@@ -261,6 +277,7 @@ static void stub_reset(void)
 	STUB.ruleset_mode = STUB_RULESET_FAIL;
 	STUB.ruleset_pending_cb = NULL;
 	STUB.ruleset_cancel_count = 0;
+	STUB.ruleset_dispatch_count = 0;
 	G.ruleset = NULL;
 	test_conf_reset();
 }
@@ -280,6 +297,11 @@ static void finish_ruleset(struct ev_loop *loop)
 	if (STUB.ruleset_pending_cb == NULL) {
 		return;
 	}
+	/* Production fills request.req only when the async ruleset completes, so
+	 * the stub must too: allocating it eagerly at dispatch would leak it on
+	 * the cancel-before-finish path (ruleset_request_cancel frees the req
+	 * only while w_finish is pending, which a timeout teardown never is). */
+	STUB.ruleset_pending_cb->request.req = dialreq_new(NULL, 0);
 	ev_feed_event(loop, &STUB.ruleset_pending_cb->w_finish, EV_CUSTOM);
 	STUB.ruleset_pending_cb = NULL;
 }
@@ -307,56 +329,9 @@ struct dialreq *dialreq_new(const struct dialreq *base, const size_t num_proxy)
 	return req;
 }
 
-bool dialreq_addproxy(
-	struct dialreq *restrict req, const char *restrict proxy_uri,
-	const size_t urilen)
-{
-	(void)req;
-	(void)proxy_uri;
-	(void)urilen;
-	return false;
-}
-
-struct dialreq *
-dialreq_parse(const char *restrict addr, const char *restrict csv)
-{
-	(void)addr;
-	(void)csv;
-	return NULL;
-}
-
-int dialreq_format(
-	char *restrict s, const size_t maxlen, const struct dialreq *restrict r)
-{
-	(void)s;
-	(void)maxlen;
-	(void)r;
-	return -1;
-}
-
 void dialreq_free(struct dialreq *req)
 {
 	free(req);
-}
-
-bool dialaddr_parse(
-	struct dialaddr *restrict addr, const char *restrict s,
-	const size_t len)
-{
-	(void)addr;
-	(void)s;
-	(void)len;
-	return false;
-}
-
-bool dialaddr_set(
-	struct dialaddr *restrict addr, const struct sockaddr *restrict sa,
-	const socklen_t len)
-{
-	(void)addr;
-	(void)sa;
-	(void)len;
-	return false;
 }
 
 void dialaddr_copy(
@@ -451,11 +426,6 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 	return (struct transfer *)&token;
 }
 
-void transfer_join(struct transfer *restrict xfer)
-{
-	(void)xfer;
-}
-
 bool transfer_serve(
 	struct transfer *restrict xfer, const int acc_fd, const int dial_fd,
 	const struct transfer_opts *restrict opts)
@@ -480,6 +450,17 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 	STUB.ruleset_cancel_count++;
 }
 
+void ruleset_request_cancel(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb)
+{
+	if (!ev_is_pending(&cb->w_finish)) {
+		return;
+	}
+	dialreq_free(cb->request.req);
+	cb->request.req = NULL;
+	ev_clear_pending(loop, &cb->w_finish);
+}
+
 static bool ruleset_stub_resolve(
 	struct ruleset_state **state, struct ruleset_callback *callback)
 {
@@ -490,12 +471,12 @@ static bool ruleset_stub_resolve(
 		return false;
 	}
 
-	callback->request.req = dialreq_new(NULL, 0);
-	if (callback->request.req == NULL) {
-		return false;
-	}
+	/* The dialreq is produced when the async request completes
+	 * (finish_ruleset), not at dispatch — mirroring production. */
+	callback->request.req = NULL;
 	*state = (struct ruleset_state *)&stub_ruleset_state_tag;
 	STUB.ruleset_pending_cb = callback;
+	STUB.ruleset_dispatch_count++;
 	return true;
 }
 
@@ -1097,15 +1078,6 @@ T_DECLARE_CASE(fuzz_socks)
 	}
 }
 
-/* Poll and dispatch all currently-ready events without blocking, so the fuzzer
- * processes handshake/datagram/teardown I/O by message structure rather than by
- * a wall-clock quiescence window (thousands of iterations must stay fast). One
- * non-blocking round per queued event; the bound covers the handshake chain. */
-static void drive_nowait(struct ev_loop *restrict loop)
-{
-	drive_loop(loop);
-}
-
 /* The control-path fuzzer above reaches socks_udp_start but never feeds the
  * relay's own UDP socket, so udp_relay_cb / udp_parse_addr / udp_frag_client_recv
  * (the bounds-arithmetic-heavy fragment reassembly) stay unfuzzed. Establish a
@@ -1136,7 +1108,7 @@ static void fuzz_udp_relay_once(struct prng *restrict p)
 	socks_serve(&s, loop, sv[0], (const struct sockaddr *)&accepted_sa);
 	sv[0] = -1;
 	T_CHECK(write_all(sv[1], req, sizeof(req)) == 0);
-	drive_nowait(loop);
+	drive_loop(loop);
 
 	/* The relay must come up every iteration (valid ASSOCIATE, socks5_udp
 	 * enabled), otherwise the datagram path below is never fuzzed. */
@@ -1176,13 +1148,13 @@ static void fuzz_udp_relay_once(struct prng *restrict p)
 		(void)sendto(
 			client_udp, dg, dglen, 0,
 			(const struct sockaddr *)&relay_sa, sizeof(relay_sa));
-		drive_nowait(loop);
+		drive_loop(loop);
 	}
 
 	/* Close the control connection to tear the (timer-less) relay down; a
 	 * datagram that wedges a watcher open would surface as a leak here. */
 	T_CHECK(shutdown(sv[1], SHUT_WR) == 0);
-	drive_nowait(loop);
+	drive_loop(loop);
 
 	if (client_udp >= 0) {
 		T_CHECK(close(client_udp) == 0);
@@ -1323,6 +1295,12 @@ T_DECLARE_CASE(socks5_unsupported_command_rsp)
 
 	T_CALL_SUBCASE(
 		expect_socks5_reply, loop, peer_fd, SOCKS5RSP_CMDNOSUPPORT);
+
+	/* A rejected handshake still received the request and sent a reply, so
+	 * both client-facing counters must move: accounting the receive side
+	 * only at transfer start left this one at zero next to a nonzero send. */
+	T_EXPECT_EQ((uintmax_t)s.stats.byt_client_recv, sizeof(req));
+	T_EXPECT((uintmax_t)s.stats.byt_client_send > 0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -1563,7 +1541,11 @@ T_DECLARE_CASE(socks4_valid_connect_rejected_when_dialreq_unavailable)
 	};
 
 	T_CHECK(loop != NULL);
-	test_conf_reset();
+	/* stub_reset (not just test_conf_reset): without it this inherits a prior
+	 * case's dialreq_available/dialer_mode, so the REJECTED reply would come
+	 * from the dialer-failure path instead of the dialreq==NULL branch this
+	 * case targets, masking the regression */
+	stub_reset();
 	peer_fd = serve_socks5_noauth(loop, &s, req, sizeof(req));
 
 	{
@@ -1723,6 +1705,77 @@ T_DECLARE_CASE(socks5_ruleset_reject_rsp_fail)
 	G.ruleset = NULL;
 }
 
+/* With a ruleset active the SOCKS path routes only TCP CONNECT; a SOCKS5 BIND
+ * (or UDP ASSOCIATE) must be rejected with CMDNOSUPPORT rather than misrouted as
+ * a CONNECT dial. */
+T_DECLARE_CASE(socks5_bind_rejected_under_ruleset)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_BIND, 0x00, SOCKS5ADDR_IPV4,
+		0x01, 0x02, 0x03, 0x04, 0x00,		0x50,
+	};
+
+	stub_reset();
+	test_conf.socks5_bind = true; /* allowed by config... */
+	G.ruleset =
+		(struct ruleset *)&test_conf; /* ...but a ruleset is active */
+
+	T_CHECK(loop != NULL);
+	peer_fd = serve_socks5_noauth(loop, &s, req, sizeof(req));
+	drive_loop(loop);
+
+	T_CALL_SUBCASE(
+		expect_socks5_reply, loop, peer_fd, SOCKS5RSP_CMDNOSUPPORT);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	G.ruleset = NULL;
+}
+
+/* A SOCKS4 dial that times out gets 91/REJECTED (SOCKS4 has no TTL code),
+ * matching every other SOCKS4 failure path rather than a bare close. */
+T_DECLARE_CASE(socks4_connect_timeout_rejected)
+{
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		SOCKS4, SOCKS4CMD_CONNECT, 0x00, 0x50, 0x01, 0x02, 0x03, 0x04,
+		0x00,
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_NONE;
+	test_conf.timeout = 0.02;
+
+	vclock_start();
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	vclock_pump_until(loop, &STUB.dialer_do_count);
+	vclock_advance(test_conf.timeout + 1.0);
+
+	{
+		unsigned char rsp[32];
+		const ssize_t n = vclock_recv(
+			loop, peer_fd, rsp, sizeof(rsp), SOCKS4_HDR_LEN);
+		T_EXPECT(n >= (ssize_t)SOCKS4_HDR_LEN);
+		T_EXPECT_EQ(rsp[0], 0x00);
+		T_EXPECT_EQ(rsp[1], SOCKS4RSP_REJECTED);
+	}
+	T_EXPECT(STUB.dialer_cancel_count > 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	vclock_stop();
+}
+
 T_DECLARE_CASE(socks5_ruleset_async_then_dialer_fail_noallowed)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1752,6 +1805,58 @@ T_DECLARE_CASE(socks5_ruleset_async_then_dialer_fail_noallowed)
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 	G.ruleset = NULL;
+}
+
+/* A connection torn down while an async ruleset request is still outstanding
+ * must cancel that request (socks_ctx_stop STATE_PROCESS ->
+ * ruleset_cancel(ctx->ruleset_state)). Drive it via the connect timeout: with
+ * the ruleset dispatched but never finished, advancing past the deadline fires
+ * w_timeout in STATE_PROCESS, which replies TTL-expired and gc_unrefs the ctx,
+ * running the cancellation path. */
+T_DECLARE_CASE(socks5_ruleset_async_cancelled_on_timeout)
+{
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x00, 0x50,
+	};
+
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.ruleset_mode = STUB_RULESET_ASYNC_OK;
+	test_conf.timeout = 0.02;
+	G.ruleset = (struct ruleset *)&test_conf;
+
+	vclock_start();
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+
+	peer_fd = serve_socks5_noauth(loop, &s, req, sizeof(req));
+	/* pump until the async ruleset is dispatched: the connection now sits in
+	 * STATE_PROCESS holding a ruleset_state, waiting on a finish that never
+	 * comes */
+	vclock_pump_until(loop, &STUB.ruleset_dispatch_count);
+	T_EXPECT(STUB.ruleset_pending_cb != NULL);
+	/* cross the deadline; the next pump fires w_timeout in STATE_PROCESS */
+	vclock_advance(test_conf.timeout + 1.0);
+
+	{
+		unsigned char rsp[32];
+		const ssize_t n = vclock_recv(
+			loop, peer_fd, rsp, sizeof(rsp), sizeof(rsp));
+		T_EXPECT(n >= 6);
+		T_EXPECT_EQ(rsp[0], SOCKS5);
+		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_NOAUTH);
+		T_EXPECT_EQ(rsp[2], SOCKS5);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_TTLEXPIRED);
+	}
+	T_EXPECT_EQ(STUB.ruleset_cancel_count, 1);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	G.ruleset = NULL;
+	vclock_stop();
 }
 
 T_DECLARE_CASE(socks5_dialer_system_error_netunreach)
@@ -1876,8 +1981,144 @@ T_DECLARE_CASE(socks5_pipelined_bytes_forwarded_to_upstream)
 		T_EXPECT_EQ(n, (ssize_t)sizeof(got));
 		T_EXPECT(memcmp(got, payload, sizeof(got)) == 0);
 	}
+	/* the replayed bytes bypass the relay, so only the readahead call site
+	 * can count them; uncounted, they would be missing from the uplink */
+	T_EXPECT((uintmax_t)s.byt_up >= (uintmax_t)(sizeof(payload) - 1));
 
 	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	T_CHECK(close(upstream_peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* 127.0.0.0/8 is entirely loopback on Linux, but a second address in it needs
+ * an explicit alias elsewhere. Fill *out with 127.0.0.2:0 and report whether it
+ * is bindable here. */
+static bool probe_alt_loopback(struct sockaddr_in *restrict out)
+{
+	*out = (struct sockaddr_in){
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK + 1),
+		.sin_port = 0,
+	};
+	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) {
+		return false;
+	}
+	const bool ok =
+		bind(fd, (const struct sockaddr *)out, sizeof(*out)) == 0;
+	(void)close(fd);
+	return ok;
+}
+
+/*
+ * Regression: RFC 1928 section 6 defines the CONNECT reply's BND as the
+ * endpoint the server connected from, which the outbound socket reports
+ * directly -- not the control-connection host that the wildcard-bound BIND/UDP
+ * sockets have to borrow. The two answers only differ when the control and
+ * outbound sockets sit on different loopback hosts, so put the control
+ * connection on 127.0.0.2 and the upstream on 127.0.0.1.
+ */
+T_DECLARE_CASE(socks5_connect_reply_reports_outbound_sockname)
+{
+	/* probe before allocating: T_SKIPNOW longjmps past any cleanup */
+	struct sockaddr_in ctl_sa;
+	if (!probe_alt_loopback(&ctl_sa)) {
+		T_SKIPNOW();
+	}
+
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int ctl_listen_fd = -1, client_fd = -1, accepted_fd = -1;
+	int up_listen_fd = -1, upstream_fd = -1, upstream_peer_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, /* auth negotiation: NOAUTH */
+		0x05, 0x01, 0x00, 0x01, 0x01,
+		0x02, 0x03, 0x04, 0x00, 0x50, /* connect 1.2.3.4:80 */
+	};
+
+	T_CHECK(loop != NULL);
+	stub_reset();
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_server_init(&s);
+
+	/* control connection: the accepted fd's local host is 127.0.0.2 */
+	ctl_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(ctl_listen_fd >= 0);
+	T_CHECK(bind(ctl_listen_fd, (struct sockaddr *)&ctl_sa,
+		     sizeof(ctl_sa)) == 0);
+	T_CHECK(listen(ctl_listen_fd, 1) == 0);
+	socklen_t ctl_len = sizeof(ctl_sa);
+	T_CHECK(getsockname(
+			ctl_listen_fd, (struct sockaddr *)&ctl_sa, &ctl_len) ==
+		0);
+	client_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(client_fd >= 0);
+	T_CHECK(connect(client_fd, (struct sockaddr *)&ctl_sa,
+			sizeof(ctl_sa)) == 0);
+	struct sockaddr_in peer_sa;
+	socklen_t peer_len = sizeof(peer_sa);
+	accepted_fd =
+		accept(ctl_listen_fd, (struct sockaddr *)&peer_sa, &peer_len);
+	T_CHECK(accepted_fd >= 0);
+	T_CHECK(close(ctl_listen_fd) == 0);
+	T_CHECK(socket_set_nonblock(accepted_fd));
+
+	/* upstream connection: both ends on 127.0.0.1 */
+	struct sockaddr_in up_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+	};
+	up_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(up_listen_fd >= 0);
+	T_CHECK(bind(up_listen_fd, (struct sockaddr *)&up_sa, sizeof(up_sa)) ==
+		0);
+	T_CHECK(listen(up_listen_fd, 1) == 0);
+	socklen_t up_len = sizeof(up_sa);
+	T_CHECK(getsockname(up_listen_fd, (struct sockaddr *)&up_sa, &up_len) ==
+		0);
+	upstream_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(upstream_fd >= 0);
+	T_CHECK(connect(upstream_fd, (struct sockaddr *)&up_sa,
+			sizeof(up_sa)) == 0);
+	upstream_peer_fd = accept(up_listen_fd, NULL, NULL);
+	T_CHECK(upstream_peer_fd >= 0);
+	T_CHECK(close(up_listen_fd) == 0);
+
+	struct sockaddr_in outbound = { 0 };
+	socklen_t outbound_len = sizeof(outbound);
+	T_CHECK(getsockname(
+			upstream_fd, (struct sockaddr *)&outbound,
+			&outbound_len) == 0);
+	/* the premise of the case: the two hosts really do differ */
+	T_CHECK(outbound.sin_addr.s_addr != ctl_sa.sin_addr.s_addr);
+
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_SUCCESS;
+	STUB.dialer_success_fd = upstream_fd;
+
+	socks_serve(&s, loop, accepted_fd, (const struct sockaddr *)&peer_sa);
+	T_CHECK(write_all(client_fd, req, sizeof(req)) == 0);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		/* method-select(2) + reply header(4) + IPv4 BND(4) + port(2) */
+		const ssize_t n =
+			recv_reply(loop, client_fd, rsp, sizeof(rsp), 12);
+		T_EXPECT(n >= 12);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+		T_EXPECT_EQ(rsp[5], SOCKS5ADDR_IPV4);
+		T_EXPECT(
+			memcmp(&rsp[6], &outbound.sin_addr,
+			       sizeof(outbound.sin_addr)) == 0);
+		T_EXPECT(
+			memcmp(&rsp[10], &outbound.sin_port,
+			       sizeof(outbound.sin_port)) == 0);
+	}
+
+	T_CHECK(close(client_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
 	T_CHECK(close(upstream_peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -2049,6 +2290,80 @@ T_DECLARE_CASE(socks5_bind_full_flow)
 	ev_loop_destroy(loop);
 }
 
+/* Client bytes pipelined after the BIND request must be replayed to the peer
+ * once it connects, mirroring the CONNECT path's readahead handling; the BIND
+ * flow used to silently drop them. */
+T_DECLARE_CASE(socks5_bind_pipelined_bytes_forwarded_to_peer)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int connector_fd = -1;
+	static const unsigned char pipelined[] = "peerdata";
+	static const unsigned char bind_req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_BIND, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00, 0x00,		0x00,
+	};
+	/* the BIND request followed by client bytes pipelined in the same recv */
+	unsigned char req[sizeof(bind_req) + sizeof(pipelined) - 1];
+	memcpy(req, bind_req, sizeof(bind_req));
+	memcpy(req + sizeof(bind_req), pipelined, sizeof(pipelined) - 1);
+
+	stub_reset();
+
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_bind = true;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	ssize_t n = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
+	T_EXPECT(n >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t bind_port;
+	memcpy(&bind_port, rsp + 10, sizeof(bind_port));
+
+	connector_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(connector_fd >= 0);
+	{
+		struct sockaddr_in sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = bind_port,
+		};
+		T_CHECK(connect(connector_fd, (const struct sockaddr *)&sa,
+				sizeof(sa)) == 0);
+	}
+
+	drive_loop(loop);
+
+	/* BIND second reply: hdr(4) + IPv4(4) + port(2) = 10 bytes */
+	unsigned char rsp2[32];
+	const ssize_t n2 = recv_reply(loop, peer_fd, rsp2, sizeof(rsp2), 10);
+	T_EXPECT(n2 >= 10);
+	T_EXPECT_EQ(rsp2[1], SOCKS5RSP_SUCCEEDED);
+
+	/* The pipelined client bytes must have been replayed to the peer */
+	{
+		unsigned char got[sizeof(pipelined) - 1] = { 0 };
+		const ssize_t ng = recv_reply(
+			loop, connector_fd, got, sizeof(got), sizeof(got));
+		T_EXPECT_EQ(ng, (ssize_t)sizeof(got));
+		T_EXPECT(memcmp(got, pipelined, sizeof(got)) == 0);
+	}
+	/* the replay to the peer is the BIND path's uplink, counted the same
+	 * way as the CONNECT path's */
+	T_EXPECT((uintmax_t)s.byt_up >= (uintmax_t)(sizeof(pipelined) - 1));
+
+	T_CHECK(close(connector_fd) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(socks5_bind_mismatch_allows)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -2194,6 +2509,84 @@ T_DECLARE_CASE(socks5_udp_first_reply_succeeded)
 	ev_loop_destroy(loop);
 }
 
+/* The UDP ASSOCIATE reply's BND.ADDR must carry the client-facing address (the
+ * local end of the TCP control connection), not the relay socket's INADDR_ANY.
+ * A real loopback control connection is required: an AF_UNIX socketpair has no
+ * meaningful getsockname() host, which is what masked this in the other cases. */
+T_DECLARE_CASE(socks5_udp_associate_advertises_control_addr)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int client_fd = -1;
+	int accepted_fd = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_udp = true;
+	test_server_init(&s);
+
+	/* Establish a real loopback TCP control connection so the served fd has a
+	 * 127.0.0.1 local address to advertise. */
+	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(listen_fd >= 0);
+	struct sockaddr_in lsa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = 0,
+	};
+	T_CHECK(bind(listen_fd, (struct sockaddr *)&lsa, sizeof(lsa)) == 0);
+	T_CHECK(listen(listen_fd, 1) == 0);
+	socklen_t lsa_len = sizeof(lsa);
+	T_CHECK(getsockname(listen_fd, (struct sockaddr *)&lsa, &lsa_len) == 0);
+	client_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(client_fd >= 0);
+	T_CHECK(connect(client_fd, (struct sockaddr *)&lsa, sizeof(lsa)) == 0);
+	struct sockaddr_in peer_sa;
+	socklen_t peer_len = sizeof(peer_sa);
+	accepted_fd = accept(listen_fd, (struct sockaddr *)&peer_sa, &peer_len);
+	T_CHECK(accepted_fd >= 0);
+	T_CHECK(close(listen_fd) == 0);
+	T_CHECK(socket_set_nonblock(accepted_fd));
+
+	socks_serve(&s, loop, accepted_fd, (const struct sockaddr *)&peer_sa);
+	T_CHECK(write_all(client_fd, req, sizeof(req)) == 0);
+	drive_loop(loop);
+
+	{
+		unsigned char rsp[64];
+		const ssize_t n =
+			recv_reply(loop, client_fd, rsp, sizeof(rsp), 12);
+		T_EXPECT(n >= 12);
+		T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+		T_EXPECT_EQ(rsp[5], SOCKS5ADDR_IPV4);
+		/* BND.ADDR (rsp[6..9]) is the control connection's local host */
+		T_EXPECT_EQ(rsp[6], 127);
+		T_EXPECT_EQ(rsp[7], 0);
+		T_EXPECT_EQ(rsp[8], 0);
+		T_EXPECT_EQ(rsp[9], 1);
+	}
+
+	T_CHECK(close(client_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* True when a UDP drop-path recv finds the queue empty (EAGAIN/EWOULDBLOCK)
+ * rather than a genuine socket error, which a bare `< 0` would also accept,
+ * weakening the "datagram was dropped" claim. */
+static bool recv_is_empty(const int fd)
+{
+	unsigned char buf[2048];
+	const ssize_t n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+	return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+}
+
 T_DECLARE_CASE(socks5_udp_relay_roundtrip)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -2222,6 +2615,9 @@ T_DECLARE_CASE(socks5_udp_relay_roundtrip)
 	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
 	T_EXPECT(nrsp >= 12);
 	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	/* the handshake never reaches socks_start_transfer, so it is only
+	 * accounted if socks_recv counts as it reads */
+	T_EXPECT_EQ((uintmax_t)s.stats.byt_client_recv, sizeof(req));
 	in_port_t relay_port;
 	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
 
@@ -2285,6 +2681,8 @@ T_DECLARE_CASE(socks5_udp_relay_roundtrip)
 		T_EXPECT(n == 5);
 		T_EXPECT(memcmp(buf, "hello", 5) == 0);
 	}
+	/* the payload forwarded to the target, header stripped */
+	T_EXPECT_EQ((uintmax_t)s.byt_up, 5);
 
 	/* Target sends reply "world" back to relay */
 	T_CHECK(sendto(target_udp, "world", 5, 0,
@@ -2306,6 +2704,8 @@ T_DECLARE_CASE(socks5_udp_relay_roundtrip)
 		T_EXPECT_EQ(buf[3], SOCKS5ADDR_IPV4);
 		T_EXPECT(memcmp(buf + 10, "world", 5) == 0);
 	}
+	/* what reached the client socket: the rebuilt header plus the payload */
+	T_EXPECT_EQ((uintmax_t)s.byt_down, 15);
 
 	T_CHECK(close(client_udp) == 0);
 	T_CHECK(close(target_udp) == 0);
@@ -2407,12 +2807,7 @@ T_DECLARE_CASE(socks5_udp_relay_filters_unsolicited_source)
 		       (const struct sockaddr *)&relay_sa,
 		       sizeof(relay_sa)) == 4);
 	drive_loop(loop);
-	{
-		unsigned char buf[32];
-		const ssize_t n =
-			recv(client_udp, buf, sizeof(buf), MSG_DONTWAIT);
-		T_EXPECT(n < 0);
-	}
+	T_EXPECT(recv_is_empty(client_udp));
 
 	/* A reply from the real target is still delivered to the client */
 	T_CHECK(sendto(target_udp, "world", 5, 0,
@@ -2520,9 +2915,8 @@ T_DECLARE_CASE(socks5_udp_relay_drops_oversized_datagram)
 		       sizeof(relay_sa)) == (ssize_t)sizeof(big));
 	drive_loop(loop);
 	{
-		unsigned char buf[64];
 		/* the truncated datagram must not reach the client */
-		T_EXPECT(recv(client_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+		T_EXPECT(recv_is_empty(client_udp));
 	}
 
 	/* a normal-size reply still passes after the drop */
@@ -2634,8 +3028,7 @@ T_DECLARE_CASE(socks5_udp_relay_evicts_oldest_target_at_capacity)
 		       sizeof(relay_sa)) == 3);
 	drive_loop(loop);
 	{
-		unsigned char buf[64];
-		T_EXPECT(recv(client_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+		T_EXPECT(recv_is_empty(client_udp));
 	}
 
 	/* the most-recent target's reply still passes */
@@ -2762,8 +3155,7 @@ T_DECLARE_CASE(socks5_udp_relay_rejects_off_ip_first_datagram)
 		       sizeof(relay_sa)) == (ssize_t)sizeof(udp_pkt));
 	drive_loop(loop);
 	{
-		unsigned char buf[32];
-		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+		T_EXPECT(recv_is_empty(target_udp));
 	}
 
 	/* the real client (127.0.0.1, different UDP port) is accepted and its
@@ -3045,8 +3437,7 @@ T_DECLARE_CASE(socks5_udp_frag_two_parts)
 
 	/* Target should have received nothing yet */
 	{
-		unsigned char buf[32];
-		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+		T_EXPECT(recv_is_empty(target_udp));
 	}
 
 	/* Fragment 2 (FRAG=0x82): "World" — last fragment */
@@ -3077,6 +3468,249 @@ T_DECLARE_CASE(socks5_udp_frag_two_parts)
 	T_CHECK(close(target_udp) == 0);
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+}
+
+/* A standalone datagram (FRAG=0) interleaved into a partial reassembly sequence
+ * must reinitialize the reassembly queue (RFC 1928 section 7): the standalone
+ * payload is forwarded, and a later in-order fragment of the abandoned sequence
+ * is then discarded rather than spliced onto the stale prefix. */
+T_DECLARE_CASE(socks5_udp_frag_standalone_resets_sequence)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_conf.auth_required = false;
+	test_conf.socks5_udp = true;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = recv_reply(loop, peer_fd, rsp, sizeof(rsp), 12);
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	{
+		struct sockaddr_in target_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(target_udp, (const struct sockaddr *)&target_sa,
+			     sizeof(target_sa)) == 0);
+	}
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	{
+		struct sockaddr_in cli_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(client_udp, (const struct sockaddr *)&cli_sa,
+			     sizeof(cli_sa)) == 0);
+	}
+
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	/* Fragment 1 (FRAG=0x01): begins a sequence but is never completed */
+	unsigned char frag1[10 + 6];
+	frag1[0] = 0;
+	frag1[1] = 0; /* RSV */
+	frag1[2] = 0x01; /* FRAG: first, more to come */
+	frag1[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag1 + 4, &target_bound.sin_addr, 4);
+	memcpy(frag1 + 8, &target_bound.sin_port, 2);
+	memcpy(frag1 + 10, "Hello ", 6);
+	T_CHECK(sendto(client_udp, frag1, sizeof(frag1), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag1));
+	drive_loop(loop);
+	T_EXPECT(recv_is_empty(target_udp));
+
+	/* Standalone datagram (FRAG=0x00): forwarded immediately and resets the
+	 * pending sequence */
+	unsigned char solo[10 + 4];
+	solo[0] = 0;
+	solo[1] = 0; /* RSV */
+	solo[2] = 0x00; /* FRAG: standalone */
+	solo[3] = SOCKS5ADDR_IPV4;
+	memcpy(solo + 4, &target_bound.sin_addr, 4);
+	memcpy(solo + 8, &target_bound.sin_port, 2);
+	memcpy(solo + 10, "solo", 4);
+	T_CHECK(sendto(client_udp, solo, sizeof(solo), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(solo));
+	drive_loop(loop);
+	{
+		unsigned char buf[32];
+		const ssize_t n =
+			recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT);
+		T_EXPECT(n == 4);
+		T_EXPECT(memcmp(buf, "solo", 4) == 0);
+	}
+
+	/* Fragment 2 (FRAG=0x82, last) of the abandoned sequence: with the queue
+	 * reset it is now out of order and dropped, not spliced onto "Hello " */
+	unsigned char frag2[10 + 5];
+	frag2[0] = 0;
+	frag2[1] = 0; /* RSV */
+	frag2[2] = 0x82; /* FRAG: pos=2, last */
+	frag2[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag2 + 4, &target_bound.sin_addr, 4);
+	memcpy(frag2 + 8, &target_bound.sin_port, 2);
+	memcpy(frag2 + 10, "World", 5);
+	T_CHECK(sendto(client_udp, frag2, sizeof(frag2), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag2));
+	drive_loop(loop);
+	T_EXPECT(recv_is_empty(target_udp));
+
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A fragment sequence that stalls mid-reassembly is discarded when the
+ * per-association reassembly timer fires (RFC 1928 section 7); a later fragment
+ * of the abandoned sequence is then dropped, not spliced onto the stale prefix.
+ * Driven under the virtual clock so the timeout is deterministic. */
+T_DECLARE_CASE(socks5_udp_frag_reassembly_timeout)
+{
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int client_udp = -1;
+	int target_udp = -1;
+	const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, SOCKS5CMD_UDPASSOCIATE,
+		0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00,
+	};
+
+	stub_reset();
+	test_conf.auth_required = false;
+	test_conf.socks5_udp = true;
+
+	vclock_start();
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	s.loop = loop;
+	test_server_init(&s);
+
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	drive_loop(loop);
+
+	unsigned char rsp[64];
+	const ssize_t nrsp = vclock_recv(loop, peer_fd, rsp, sizeof(rsp), 12);
+	T_EXPECT(nrsp >= 12);
+	T_EXPECT_EQ(rsp[3], SOCKS5RSP_SUCCEEDED);
+	in_port_t relay_port;
+	memcpy(&relay_port, rsp + 10, sizeof(relay_port));
+
+	target_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(target_udp >= 0);
+	{
+		struct sockaddr_in target_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(target_udp, (const struct sockaddr *)&target_sa,
+			     sizeof(target_sa)) == 0);
+	}
+	struct sockaddr_in target_bound;
+	socklen_t target_bound_len = sizeof(target_bound);
+	T_CHECK(getsockname(
+			target_udp, (struct sockaddr *)&target_bound,
+			&target_bound_len) == 0);
+
+	client_udp = socket(AF_INET, SOCK_DGRAM, 0);
+	T_CHECK(client_udp >= 0);
+	{
+		struct sockaddr_in cli_sa = {
+			.sin_family = AF_INET,
+			.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			.sin_port = 0,
+		};
+		T_CHECK(bind(client_udp, (const struct sockaddr *)&cli_sa,
+			     sizeof(cli_sa)) == 0);
+	}
+
+	const struct sockaddr_in relay_sa = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+
+	/* Fragment 1 (FRAG=0x01): starts a sequence and arms the timer */
+	unsigned char frag1[10 + 6];
+	frag1[0] = 0;
+	frag1[1] = 0; /* RSV */
+	frag1[2] = 0x01; /* FRAG: first, more to come */
+	frag1[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag1 + 4, &target_bound.sin_addr, 4);
+	memcpy(frag1 + 8, &target_bound.sin_port, 2);
+	memcpy(frag1 + 10, "Hello ", 6);
+	T_CHECK(sendto(client_udp, frag1, sizeof(frag1), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag1));
+	drive_loop(loop);
+	T_EXPECT(recv_is_empty(target_udp));
+
+	/* cross the reassembly deadline; the next pump fires the timer, which
+	 * discards the partial sequence */
+	vclock_advance(10.0);
+	drive_loop(loop);
+
+	/* Fragment 2 (FRAG=0x82, last): the sequence has been timed out, so it
+	 * is out of order and dropped -- the reassembled payload must never
+	 * reach the target */
+	unsigned char frag2[10 + 5];
+	frag2[0] = 0;
+	frag2[1] = 0; /* RSV */
+	frag2[2] = 0x82; /* FRAG: pos=2, last */
+	frag2[3] = SOCKS5ADDR_IPV4;
+	memcpy(frag2 + 4, &target_bound.sin_addr, 4);
+	memcpy(frag2 + 8, &target_bound.sin_port, 2);
+	memcpy(frag2 + 10, "World", 5);
+	T_CHECK(sendto(client_udp, frag2, sizeof(frag2), 0,
+		       (const struct sockaddr *)&relay_sa,
+		       sizeof(relay_sa)) == (ssize_t)sizeof(frag2));
+	drive_loop(loop);
+	T_EXPECT(recv_is_empty(target_udp));
+
+	T_CHECK(close(client_udp) == 0);
+	T_CHECK(close(target_udp) == 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	vclock_stop();
 }
 
 T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
@@ -3161,8 +3795,7 @@ T_DECLARE_CASE(socks5_udp_frag_discard_out_of_order)
 
 	/* Target must receive nothing */
 	{
-		unsigned char buf[32];
-		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+		T_EXPECT(recv_is_empty(target_udp));
 	}
 
 	T_CHECK(close(client_udp) == 0);
@@ -3267,8 +3900,7 @@ T_DECLARE_CASE(socks5_udp_frag_restart_recovers)
 
 	/* Nothing has been forwarded to the target yet. */
 	{
-		unsigned char buf[32];
-		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+		T_EXPECT(recv_is_empty(target_udp));
 	}
 
 	/* A fresh, complete sequence now reassembles and forwards normally. */
@@ -3402,8 +4034,7 @@ T_DECLARE_CASE(socks5_udp_domain_target_discarded)
 
 	/* dropped: the domain target is never resolved or forwarded to */
 	{
-		unsigned char buf[32];
-		T_EXPECT(recv(target_udp, buf, sizeof(buf), MSG_DONTWAIT) < 0);
+		T_EXPECT(recv_is_empty(target_udp));
 	}
 
 	/* the relay survives it: an IPv4 datagram still forwards */
@@ -3975,8 +4606,11 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks4a_domain_connect_dialer_fail_rejected),
 	T_CASE(socks5_split_payload_connect_fail_rsp),
 	T_CASE(socks5_connect_timeout_rsp_ttl_expired),
+	T_CASE(socks5_bind_rejected_under_ruleset),
+	T_CASE(socks4_connect_timeout_rejected),
 	T_CASE(socks5_ruleset_reject_rsp_fail),
 	T_CASE(socks5_ruleset_async_then_dialer_fail_noallowed),
+	T_CASE(socks5_ruleset_async_cancelled_on_timeout),
 	T_CASE(socks5_dialer_system_error_netunreach),
 	T_CASE(socks5_udp_domain_target_discarded),
 	T_CASE(socks5_dialer_err_resolve_hostunreach),
@@ -3992,14 +4626,17 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks4a_split_after_userid_connect_success_granted),
 	T_CASE(socks5_dialer_success_transfer_finished),
 	T_CASE(socks5_pipelined_bytes_forwarded_to_upstream),
+	T_CASE(socks5_connect_reply_reports_outbound_sockname),
 	T_CASE(socks5_dialer_success_connected_transition),
 	T_CASE(socks5_bind_disabled_cmdnosupport),
 	T_CASE(socks5_udp_disabled_cmdnosupport),
 	T_CASE(socks5_bind_first_reply_succeeded),
 	T_CASE(socks5_bind_full_flow),
+	T_CASE(socks5_bind_pipelined_bytes_forwarded_to_peer),
 	T_CASE(socks5_bind_mismatch_allows),
 	T_CASE(socks5_bind_timeout_ttlexpired),
 	T_CASE(socks5_udp_first_reply_succeeded),
+	T_CASE(socks5_udp_associate_advertises_control_addr),
 	T_CASE(socks5_udp_relay_roundtrip),
 	T_CASE(socks5_udp_relay_filters_unsolicited_source),
 	T_CASE(socks5_udp_relay_drops_oversized_datagram),
@@ -4008,6 +4645,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_udp_relay_roundtrip_ipv6),
 	T_CASE(socks5_udp_tcp_close_teardown),
 	T_CASE(socks5_udp_frag_two_parts),
+	T_CASE(socks5_udp_frag_standalone_resets_sequence),
+	T_CASE(socks5_udp_frag_reassembly_timeout),
 	T_CASE(socks5_udp_frag_discard_out_of_order),
 	T_CASE(socks5_udp_frag_restart_recovers),
 	T_CASE(socks5_connect_success_starts_transfer),
