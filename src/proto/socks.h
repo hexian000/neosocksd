@@ -187,8 +187,8 @@ socks4hdr_read(struct socks4_hdr *restrict dst, const void *restrict src)
 	const unsigned char *b = src;
 	dst->version = b[0];
 	dst->command = b[1];
-	dst->port = read_uint16(b + 2);
-	dst->address = read_uint32(b + 4);
+	dst->port = (uint_least16_t)read_uint16(b + 2);
+	dst->address = (uint_least32_t)read_uint32(b + 4);
 }
 
 static inline void
