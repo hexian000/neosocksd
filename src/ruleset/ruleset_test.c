@@ -15,12 +15,13 @@
  * section below.
  */
 
+#include "ruleset/ruleset.h"
+
 #include "conf.h"
 #include "dialer.h"
 #include "proto/codec.h"
 #include "ruleset/base.h"
 #include "ruleset/cfunc.h"
-#include "ruleset/ruleset.h"
 #include "server.h"
 
 #include "io/stream.h"
@@ -621,9 +622,15 @@ T_DECLARE_CASE(ruleset_update_invoke_rpcall_stats_and_tick)
 		&cb));
 	T_EXPECT(wait_until(loop, rpcall_fired, &rpc_result, TEST_WAIT_SEC));
 	T_EXPECT(rpc_result.result != NULL);
-	T_EXPECT(strstr(rpc_result.result, "return ") == rpc_result.result);
-	T_EXPECT(strstr(rpc_result.result, "42") != NULL);
-	T_EXPECT(strstr(rpc_result.result, "done") != NULL);
+	/* the result buffer holds exactly resultlen bytes with no NUL terminator,
+	 * so copy into a terminated local before letting strstr scan it */
+	char rbuf[256];
+	T_CHECK(rpc_result.resultlen < sizeof(rbuf));
+	memcpy(rbuf, rpc_result.result, rpc_result.resultlen);
+	rbuf[rpc_result.resultlen] = '\0';
+	T_EXPECT(strstr(rbuf, "return ") == rbuf);
+	T_EXPECT(strstr(rbuf, "42") != NULL);
+	T_EXPECT(strstr(rbuf, "done") != NULL);
 	free((void *)rpc_result.result);
 
 	s = ruleset_stats(r, 1.5, "alpha", &len);
@@ -948,9 +955,12 @@ T_DECLARE_CASE(ruleset_load_missing_file_returns_false)
 	struct ruleset *const r = new_ruleset(&loop, &conf);
 
 	/* codec_lua_reader() returns NULL for a nonexistent path; both loaders
-	 * must early-return false rather than crash */
+	 * must early-return false rather than crash, and record a "cannot open"
+	 * error so ruleset_geterror does not report "(nil)" */
 	T_EXPECT(!ruleset_loadfile(r, "/nonexistent/ruleset/path.lua"));
+	T_EXPECT(strstr(ruleset_geterror(r, NULL), "cannot open") != NULL);
 	T_EXPECT(!ruleset_loadconfig(r, "/nonexistent/ruleset/config.lua"));
+	T_EXPECT(strstr(ruleset_geterror(r, NULL), "cannot open") != NULL);
 
 	free_ruleset(loop, r);
 }

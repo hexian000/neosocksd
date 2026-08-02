@@ -14,8 +14,9 @@
  * shared Lua test fixtures.
  */
 
-#include "dialer.h"
 #include "ruleset/base.h"
+
+#include "dialer.h"
 
 #include "io/stream.h"
 #include "utils/testing.h"
@@ -93,6 +94,23 @@ resume_finish(lua_State *restrict L, int status, const lua_KContext ctx)
 static int resume_yield(lua_State *restrict L)
 {
 	return lua_yieldk(L, 0, 0, resume_finish);
+}
+
+static int
+resume_error_k(lua_State *restrict L, int status, const lua_KContext ctx)
+{
+	(void)status;
+	(void)ctx;
+	lua_pushliteral(L, "resume boom");
+	return lua_error(L);
+}
+
+/* Yields once, then raises on resume so lua_resume returns an error status --
+ * the catastrophic-resume path (thread dies without passing through
+ * thread_call_k). */
+static int resume_yield_then_error(lua_State *restrict L)
+{
+	return lua_yieldk(L, 0, 0, resume_error_k);
 }
 
 static int getregtable_idle_thunk(lua_State *restrict L)
@@ -625,6 +643,101 @@ T_DECLARE_CASE(base_aux_load_reports_mid_stream_read_error)
 	lua_close(L);
 }
 
+/* ruleset_resume with a corrupted RIDX_AWAIT_CONTEXT (not a table) stores
+ * ERR_BAD_REGISTRY into RIDX_LASTERROR and returns without touching the thread
+ * bookkeeping. */
+T_DECLARE_CASE(base_ruleset_resume_bad_await_context)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+	r.L = L;
+
+	/* corrupt the await-context slot to a non-table */
+	lua_pushboolean(L, 1);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+
+	int ctx_key = 0;
+	r.vmstats.num_thread_active = 3;
+	ruleset_resume(&r, &ctx_key, 0);
+
+	/* the early error path does not decrement the active count */
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)3);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	T_EXPECT(lua_isstring(L, -1));
+	T_EXPECT(strstr(lua_tostring(L, -1), "registry is corrupted") != NULL);
+	lua_pop(L, 1);
+
+	lua_close(L);
+}
+
+/* ruleset_resume for a ctx with no await-context entry (co == NULL) returns
+ * early ("async context lost") without decrementing the active count. */
+T_DECLARE_CASE(base_ruleset_resume_context_lost)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+	r.L = L;
+
+	int ctx_key = 0; /* never registered in the await context */
+	r.vmstats.num_thread_active = 3;
+	ruleset_resume(&r, &ctx_key, 0);
+
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)3);
+	lua_close(L);
+}
+
+/* A coroutine that dies on resume (error status, not OK/YIELD) drives the
+ * catastrophic-resume path: RIDX_LASTERROR is stored, num_thread_active is
+ * decremented exactly once, and both the forward and await context entries for
+ * the abandoned coroutine are cleared. */
+T_DECLARE_CASE(base_ruleset_resume_catastrophic_failure)
+{
+	struct ruleset r = { 0 };
+	lua_State *restrict L = new_ruleset_lua(&r);
+	r.L = L;
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+
+	lua_State *const co = lua_newthread(L);
+	int ctx_key = 0;
+	/* pin co in the await context under ctx_key */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+	lua_pushvalue(L, -2); /* co */
+	lua_rawsetp(L, -2, &ctx_key);
+	lua_pop(L, 1);
+	/* and register a forward-context entry for co */
+	int fwd_state = 0;
+	aux_setforward(L, co, &fwd_state);
+
+	/* start the coroutine so it yields with an error-raising continuation */
+	lua_pushcfunction(co, resume_yield_then_error);
+	T_CHECK(aux_resume(co, L, 0) == LUA_YIELD);
+	lua_pop(L, 1); /* drop co ref (kept alive by the tables) */
+
+	r.vmstats.num_thread_active = 1;
+	ruleset_resume(&r, &ctx_key, 0);
+
+	/* decremented exactly once, not double-counted (SIZE_MAX) */
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+
+	lua_settop(L, 0);
+	/* forward-context entry for co cleared */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+	lua_rawgetp(L, -1, co);
+	T_EXPECT(lua_isnil(L, -1));
+	lua_pop(L, 2);
+	/* await-context entry for ctx cleared */
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+	lua_rawgetp(L, -1, &ctx_key);
+	T_EXPECT(lua_isnil(L, -1));
+	lua_pop(L, 2);
+	/* the error was stored in the coroutine's RIDX_LASTERROR */
+	lua_rawgeti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	T_EXPECT(!lua_isnil(co, -1));
+
+	lua_close(L);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -655,6 +768,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(base_ruleset_resume_wakes_coroutine),
 	T_CASE(base_aux_async_catastrophic_failure_cleanup),
 	T_CASE(base_aux_load_reports_mid_stream_read_error),
+	T_CASE(base_ruleset_resume_bad_await_context),
+	T_CASE(base_ruleset_resume_context_lost),
+	T_CASE(base_ruleset_resume_catastrophic_failure),
 	T_SUITE_END,
 };
 

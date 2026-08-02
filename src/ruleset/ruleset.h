@@ -35,14 +35,10 @@ struct ruleset_vmstats {
 	/* Peak concurrent dispatched Lua coroutines since start */
 	size_t num_thread_peak;
 
-	/* Total time used by ruleset in nanoseconds */
-	uint_least64_t time_total;
 	/* Number of completed events */
 	size_t num_events;
-	/* A circular buffer of recent event timestamps (ns) */
+	/* A circular buffer of recent per-event elapsed times (ns) */
 	int_least64_t event_ns[1024];
-	/* A circular buffer of recent event end timestamps (ns) */
-	int_least64_t event_end[1024];
 };
 
 /**
@@ -113,6 +109,14 @@ struct ruleset_state;
  * @brief Cancel an ongoing asynchronous ruleset operation. Idempotent.
  * @param loop Event loop
  * @param state Operation state to cancel
+ *
+ * @note This reaches the operation only while it is still pending. When it has
+ * already completed, state_complete() has fed the callback's w_finish event and
+ * detached the caller's ruleset_state (setting it to NULL), so this becomes a
+ * no-op and cannot undo the pending event. A consumer that tears down a context
+ * embedding the ruleset_callback must therefore also clear that pending event
+ * and dispose of the delivered payload -- for the request flow use
+ * ruleset_request_cancel().
  */
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state);
 
@@ -144,6 +148,18 @@ struct ruleset_callback {
 	void (*forward)(
 		struct ev_loop *loop, struct ruleset_callback *cb, int fd);
 };
+
+/**
+ * @brief Finalize a request-flow ruleset_callback on consumer teardown.
+ *
+ * Handles the completed-but-undispatched window ruleset_cancel() cannot: if the
+ * request completed and its w_finish event is still pending, drop that event so
+ * it cannot fire into the context being destroyed, and dialreq_free() the
+ * delivered request that the consumer will now never take ownership of. A no-op
+ * while the operation is still pending or already dispatched.
+ */
+void ruleset_request_cancel(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb);
 
 /**
  * @brief Execute remote procedure call asynchronously.

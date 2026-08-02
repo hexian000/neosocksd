@@ -178,7 +178,9 @@ bool aux_todialreq(lua_State *restrict L, int n);
 /**
  * @brief Generate Lua stack traceback
  *
- * Stack effect: [-0, +1, m]
+ * Stack effect: [-0, +(1|2), m]
+ * (the default error-object branch leaves the lua_pushfstring string beneath
+ * the traceback; callers use only the top result)
  *
  * @param L Lua state
  * @return Number of results (1)
@@ -213,7 +215,9 @@ void *aux_getforward(lua_State *restrict L);
 /**
  * @brief Start asynchronous operation
  *
- * Stack effect: [-(narg+1), +(0|1), -]
+ * Stack effect on @p from: [-(narg+1), +0, v]
+ * (a catastrophic resume failure leaves the error object on the coroutine, not
+ * on @p from; the lua_checkstack failure path raises via luaL_error(from, ...))
  *
  * @param L Lua state
  * @param from Calling thread

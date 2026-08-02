@@ -1,10 +1,10 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
+#include "ruleset/base.h"
+
 #include "dialer.h"
 #include "proto/codec.h"
-#include "ruleset/base.h"
-#include "util.h"
 
 #include "meta/arraysize.h"
 #include "os/clock.h"
@@ -405,15 +405,12 @@ int aux_async(
 	return status;
 }
 
-static void record_event_time(
-	struct ruleset *restrict r, const int_fast64_t time_used,
-	const int_fast64_t time_end)
+static void
+record_event_time(struct ruleset *restrict r, const int_fast64_t time_used)
 {
 	const size_t idx =
 		r->vmstats.num_events++ % ARRAY_SIZE(r->vmstats.event_ns);
 	r->vmstats.event_ns[idx] = (int_least64_t)time_used;
-	r->vmstats.event_end[idx] = (int_least64_t)time_end;
-	r->vmstats.time_total += (uint_least64_t)time_used;
 }
 
 static bool ruleset_pcallv(
@@ -448,7 +445,7 @@ bool ruleset_pcall(
 	const bool result = ruleset_pcallv(r, func, nargs, nresults, &args);
 	va_end(args);
 	const int_fast64_t time_end = clock_monotonic_ns();
-	record_event_time(r, time_end - time_begin, time_end);
+	record_event_time(r, time_end - time_begin);
 	return result;
 }
 
@@ -493,5 +490,5 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 		clear_context_entry(L, RIDX_AWAIT_CONTEXT, ctx);
 	}
 	const int_fast64_t time_end = clock_monotonic_ns();
-	record_event_time(r, time_end - time_begin, time_end);
+	record_event_time(r, time_end - time_begin);
 }

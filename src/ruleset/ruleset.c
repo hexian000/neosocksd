@@ -333,6 +333,20 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 	state->cb = NULL;
 }
 
+void ruleset_request_cancel(
+	struct ev_loop *loop, struct ruleset_callback *restrict cb)
+{
+	/* Only the completed-but-undispatched window has a pending w_finish (and
+	 * a request.req already delivered); a still-pending or already-dispatched
+	 * callback leaves it clear, so this stays a no-op there. */
+	if (!ev_is_pending(&cb->w_finish)) {
+		return;
+	}
+	dialreq_free(cb->request.req);
+	cb->request.req = NULL;
+	ev_clear_pending(loop, &cb->w_finish);
+}
+
 bool ruleset_rpcall(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	struct io_stream *code, struct ruleset_callback *callback)
@@ -351,10 +365,21 @@ bool ruleset_update(
 		(void *)code);
 }
 
+/* Record a "cannot open" message in RIDX_LASTERROR so ruleset_geterror honors
+ * its contract when codec_lua_reader fails (it otherwise reported "(nil)"). */
+static void
+ruleset_set_openerror(struct ruleset *restrict r, const char *restrict filename)
+{
+	lua_State *restrict const L = r->L;
+	lua_pushfstring(L, "cannot open file: %s", filename);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+}
+
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 {
 	struct io_stream *restrict const s = codec_lua_reader(filename);
 	if (s == NULL) {
+		ruleset_set_openerror(r, filename);
 		return false;
 	}
 	const bool ok = ruleset_pcall(r, cfunc_loadfile, 1, 0, (void *)s);
@@ -367,6 +392,7 @@ bool ruleset_loadconfig(
 {
 	struct io_stream *restrict const s = codec_lua_reader(filename);
 	if (s == NULL) {
+		ruleset_set_openerror(r, filename);
 		return false;
 	}
 	const bool ok = ruleset_pcall(r, cfunc_loadconfig, 1, 0, (void *)s);
