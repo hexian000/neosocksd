@@ -49,7 +49,14 @@ void http_client_init(
 	uint_least64_t *const byt_sent, uint_least64_t *const dialer_byt_sent,
 	uint_least64_t *const dialer_byt_recv);
 
-/* Takes ownership of req. */
+/* Takes ownership of req.
+ *
+ * A ctx is one-shot: it may not be reused to start a second request, and in
+ * particular http_client_do() must NOT be called again from the completion
+ * callback. The callback runs before the ctx is torn down, so it observes
+ * STATE_CLIENT_INIT, but the pending cleanup would then cancel the fresh dial
+ * and free the newly installed req (use-after-free). Start any follow-up
+ * request from a separate ctx. */
 void http_client_do(
 	struct http_client_ctx *ctx, struct ev_loop *loop,
 	struct dialreq *restrict req);

@@ -8,7 +8,6 @@
 #include "conf.h"
 #include "dialer.h"
 #include "proto/http.h"
-#include "util.h"
 
 #include "utils/buffer.h"
 #include "utils/testing.h"
@@ -44,6 +43,10 @@ static struct {
 	int dialer_result_fd2;
 	enum dialer_error dialer_err;
 	int dialer_syserr;
+	/* when true, dialer_do records the call but does not complete, leaving
+	 * the client in STATE_CLIENT_CONNECT so cancel/timeout-during-connect can
+	 * be observed */
+	bool dialer_pending;
 	int_least32_t dialer_do_calls;
 	int_least32_t dialer_cancel_calls;
 	int_least32_t dialreq_free_calls;
@@ -52,6 +55,7 @@ static struct {
 	.dialer_result_fd2 = -1,
 	.dialer_err = DIALER_ERR_CONNECT,
 	.dialer_syserr = ECONNREFUSED,
+	.dialer_pending = false,
 	.dialer_do_calls = 0,
 	.dialer_cancel_calls = 0,
 	.dialreq_free_calls = 0,
@@ -63,6 +67,7 @@ static void stub_reset(void)
 	S.dialer_result_fd2 = -1;
 	S.dialer_err = DIALER_ERR_CONNECT;
 	S.dialer_syserr = ECONNREFUSED;
+	S.dialer_pending = false;
 	S.dialer_do_calls = 0;
 	S.dialer_cancel_calls = 0;
 	S.dialreq_free_calls = 0;
@@ -97,6 +102,10 @@ void dialer_do(
 	(void)resolver;
 	(void)server;
 	S.dialer_do_calls++;
+	if (S.dialer_pending) {
+		/* stay in-flight: the client remains in STATE_CLIENT_CONNECT */
+		return;
+	}
 	d->err = S.dialer_err;
 	d->syserr = S.dialer_syserr;
 	const int fd = (S.dialer_do_calls == 2 && S.dialer_result_fd2 >= 0) ?
@@ -131,7 +140,11 @@ static bool fd_set_nonblock(const int fd)
 
 struct cb_result {
 	bool called;
-	const char *errmsg;
+	/* copy of the error message: errmsg may point into send_cb's stack VLA,
+	 * whose lifetime ends before the test reads it, so it must be copied here
+	 * (like the body below) rather than stored as a pointer */
+	bool has_errmsg;
+	char errmsg[64];
 	size_t errlen;
 	bool has_conn;
 	char rsp_code[8];
@@ -149,8 +162,13 @@ static void capture_cb(
 	struct cb_result *restrict r = data;
 	(void)loop;
 	r->called = true;
-	r->errmsg = errmsg;
+	r->has_errmsg = (errmsg != NULL);
 	r->errlen = errlen;
+	if (errmsg != NULL) {
+		const size_t n =
+			errlen < sizeof(r->errmsg) ? errlen : sizeof(r->errmsg);
+		memcpy(r->errmsg, errmsg, n);
+	}
 	r->has_conn = (conn != NULL);
 	if (conn != NULL && conn->msg.rsp.code != NULL) {
 		(void)snprintf(
@@ -276,7 +294,7 @@ T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
 	http_client_do(&ctx, loop, req);
 
 	T_EXPECT(result.called);
-	T_EXPECT(result.errmsg != NULL);
+	T_EXPECT(result.has_errmsg);
 	T_EXPECT(result.errlen > 0);
 	T_EXPECT_EQ(S.dialer_do_calls, 1);
 
@@ -328,7 +346,7 @@ T_DECLARE_CASE(http_client_timeout_finishes_with_error)
 	ev_run(loop, EVRUN_NOWAIT);
 
 	T_EXPECT(result.called);
-	T_CHECK(result.errmsg != NULL);
+	T_CHECK(result.has_errmsg);
 	T_EXPECT_EQ(result.errlen, sizeof("timeout") - 1);
 	T_EXPECT_MEMEQ(result.errmsg, "timeout", sizeof("timeout") - 1);
 	/* an error finish delivers no connection */
@@ -390,13 +408,27 @@ T_DECLARE_CASE(http_client_stale_retry_resends_from_start)
 	T_CHECK(req != NULL);
 	http_client_do(&ctx, loop, req);
 
-	/* drive sends until the header is fully out and the body is
-	 * genuinely (not artificially) partial */
+	/* This case exercises the resend, not the request deadline, but
+	 * http_client_do just armed it: were it left running, any stall longer
+	 * than test_conf.timeout -- before or between the drive loops below --
+	 * would finish the request with a "timeout" error and stop every watcher,
+	 * so the loops would spin out their iteration caps having sent nothing.
+	 * Drop it; http_client_timeout_finishes_with_error covers the deadline,
+	 * firing it deterministically instead of waiting for it. Nothing rearms
+	 * it (only http_client_cleanup touches it again), so one stop holds for
+	 * the whole case, and every loop below is bounded by its own iteration
+	 * cap rather than by this timer. */
+	ev_timer_stop(loop, &ctx.w_timeout);
+
+	/* Drive sends until the header is fully out and the body is genuinely
+	 * (not artificially) partial. EVRUN_NOWAIT, never EVRUN_ONCE: with the
+	 * deadline stopped a blocking iteration would have nothing left to wake
+	 * it if the socket were not ready, and the cap is the failing bound. */
 	for (int i = 0;
 	     i < 50 && !(ctx.conn.wpos == sizeof(header) - 1 &&
 			 ctx.conn.cpos > 0 && ctx.conn.cpos < sizeof(body));
 	     i++) {
-		ev_run(loop, EVRUN_ONCE);
+		ev_run(loop, EVRUN_NOWAIT);
 	}
 	T_EXPECT_EQ(ctx.conn.wpos, sizeof(header) - 1);
 	T_CHECK(ctx.conn.cpos > 0);
@@ -407,23 +439,33 @@ T_DECLARE_CASE(http_client_stale_retry_resends_from_start)
 
 	/* the next write hits the dead peer and must retry from scratch */
 	for (int i = 0; i < 20 && S.dialer_do_calls < 2; i++) {
-		ev_run(loop, EVRUN_ONCE);
+		ev_run(loop, EVRUN_NOWAIT);
 	}
 	T_EXPECT_EQ(S.dialer_do_calls, 2);
 	T_EXPECT_EQ(ctx.conn.wpos, 0);
 	T_EXPECT_EQ(ctx.conn.cpos, 0);
 
-	/* let it resend on the fresh connection */
-	for (int i = 0; i < 20; i++) {
-		ev_run(loop, EVRUN_ONCE);
-	}
+	/* Let it resend on the fresh connection, draining sv2 as the bytes arrive
+	 * so the loop advances on real progress (and relieves backpressure)
+	 * instead of blocking on the request timeout. Collect the header plus a
+	 * body prefix -- enough to prove the resend restarted from offset zero --
+	 * with the iteration cap as the failing bound. */
 	unsigned char received[sizeof(header) - 1 + 256];
-	const ssize_t n = read(sv2[1], received, sizeof(received));
-	T_CHECK(n > (ssize_t)(sizeof(header) - 1));
+	size_t got = 0;
+	for (int i = 0; i < 1000 && got < sizeof(received); i++) {
+		ev_run(loop, EVRUN_NOWAIT);
+		const ssize_t n =
+			recv(sv2[1], received + got, sizeof(received) - got,
+			     MSG_DONTWAIT);
+		if (n > 0) {
+			got += (size_t)n;
+		}
+	}
+	T_CHECK(got > sizeof(header) - 1);
 	T_EXPECT_MEMEQ(received, header, sizeof(header) - 1);
 	T_EXPECT_MEMEQ(
 		received + sizeof(header) - 1, body,
-		(size_t)n - (sizeof(header) - 1));
+		got - (sizeof(header) - 1));
 
 	http_client_cancel(&ctx, loop);
 	(void)close(sv2[1]);
@@ -474,7 +516,7 @@ T_DECLARE_CASE(http_client_full_request_response)
 		ev_run(loop, EVRUN_ONCE);
 	}
 	T_EXPECT(result.called);
-	T_EXPECT(result.errmsg == NULL);
+	T_EXPECT(!result.has_errmsg);
 	T_EXPECT(result.has_conn);
 	T_EXPECT_STREQ(result.rsp_code, "200");
 
@@ -591,7 +633,7 @@ T_DECLARE_CASE(http_client_delivers_response_body)
 		ev_run(loop, EVRUN_ONCE);
 	}
 	T_EXPECT(result.called);
-	T_EXPECT(result.errmsg == NULL);
+	T_EXPECT(!result.has_errmsg);
 	T_EXPECT(result.has_conn);
 	T_EXPECT_STREQ(result.rsp_code, "200");
 	T_EXPECT(result.has_body);
@@ -643,7 +685,7 @@ T_DECLARE_CASE(http_client_recv_eof_reports_error)
 		ev_run(loop, EVRUN_ONCE);
 	}
 	T_EXPECT(result.called);
-	T_EXPECT(result.errmsg != NULL);
+	T_EXPECT(result.has_errmsg);
 	T_EXPECT(result.errlen > 0);
 	T_EXPECT(!result.has_conn);
 
@@ -696,11 +738,130 @@ T_DECLARE_CASE(http_client_write_error_reports_strerror)
 		ev_run(loop, EVRUN_ONCE);
 	}
 	T_EXPECT(result.called);
-	T_EXPECT(result.errmsg != NULL);
+	T_EXPECT(result.has_errmsg);
 	T_EXPECT(result.errlen > 0);
 	T_EXPECT(!result.has_conn);
 	T_EXPECT_EQ(S.dialer_do_calls, 2);
 
+	ev_loop_destroy(loop);
+}
+
+/* Cancelling while the dial is still in flight (STATE_CLIENT_CONNECT) must
+ * cancel the dialer and fire no callback -- http_client_stop's dialer_cancel
+ * branch, unreachable with a synchronously-completing dialer stub. */
+T_DECLARE_CASE(http_client_cancel_during_connect_cancels_dialer)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	stub_reset();
+	S.dialer_pending = true;
+
+	struct http_client_ctx ctx = { 0 };
+	struct cb_result result = { 0 };
+	const struct http_parsehdr_cb no_hdr = { 0 };
+	const struct http_client_cb cb = {
+		.func = capture_cb,
+		.data = &result,
+	};
+	http_client_init(
+		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
+		NULL);
+
+	struct dialreq *req = calloc(1, sizeof(struct dialreq));
+	T_CHECK(req != NULL);
+	http_client_do(&ctx, loop, req);
+	/* the dial is in-flight: the client is parked in CONNECT */
+	T_EXPECT_EQ(ctx.state, STATE_CLIENT_CONNECT);
+	T_EXPECT(!result.called);
+
+	http_client_cancel(&ctx, loop);
+	T_EXPECT_EQ(S.dialer_cancel_calls, 1);
+	T_EXPECT(!result.called);
+	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
+
+	ev_loop_destroy(loop);
+}
+
+/* The request timeout firing while the dial is still in flight must cancel the
+ * dialer and finish with a "timeout" error. */
+T_DECLARE_CASE(http_client_timeout_during_connect_cancels_dialer)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	stub_reset();
+	S.dialer_pending = true;
+
+	struct http_client_ctx ctx = { 0 };
+	struct cb_result result = { 0 };
+	const struct http_parsehdr_cb no_hdr = { 0 };
+	const struct http_client_cb cb = {
+		.func = capture_cb,
+		.data = &result,
+	};
+	http_client_init(
+		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
+		NULL);
+
+	struct dialreq *req = calloc(1, sizeof(struct dialreq));
+	T_CHECK(req != NULL);
+	http_client_do(&ctx, loop, req);
+	T_EXPECT_EQ(ctx.state, STATE_CLIENT_CONNECT);
+
+	/* fire the request timeout deterministically */
+	ev_feed_event(loop, &ctx.w_timeout, EV_TIMER);
+	ev_run(loop, EVRUN_NOWAIT);
+
+	T_EXPECT(result.called);
+	T_EXPECT(result.has_errmsg);
+	T_EXPECT_MEMEQ(result.errmsg, "timeout", sizeof("timeout") - 1);
+	T_EXPECT(!result.has_conn);
+	T_EXPECT_EQ(S.dialer_cancel_calls, 1);
+
+	ev_loop_destroy(loop);
+}
+
+/* Cancelling while the request write watcher is active (STATE_CLIENT_REQUEST)
+ * must stop the io watcher, close the fd and fire no callback -- the
+ * STATE_CLIENT_REQUEST/RESPONSE branch of http_client_stop. */
+T_DECLARE_CASE(http_client_cancel_during_request_stops_io)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	stub_reset();
+
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	S.dialer_result_fd = sv[0];
+
+	struct http_client_ctx ctx = { 0 };
+	struct cb_result result = { 0 };
+	const struct http_parsehdr_cb no_hdr = { 0 };
+	const struct http_client_cb cb = {
+		.func = capture_cb,
+		.data = &result,
+	};
+	http_client_init(
+		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
+		NULL);
+
+	static const char header[] = "GET /x HTTP/1.1\r\n\r\n";
+	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+
+	struct dialreq *req = calloc(1, sizeof(struct dialreq));
+	T_CHECK(req != NULL);
+	/* synchronous dial: the client transitions to REQUEST with its write
+	 * watcher active (the send happens on the next loop iteration) */
+	http_client_do(&ctx, loop, req);
+	T_EXPECT_EQ(ctx.state, STATE_CLIENT_REQUEST);
+	T_EXPECT(ev_is_active(&ctx.w_socket));
+
+	http_client_cancel(&ctx, loop);
+	T_EXPECT(!result.called);
+	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
+	T_EXPECT(!ev_is_active(&ctx.w_socket));
+
+	(void)close(sv[1]);
 	ev_loop_destroy(loop);
 }
 
@@ -723,6 +884,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(http_client_delivers_response_body),
 	T_CASE(http_client_recv_eof_reports_error),
 	T_CASE(http_client_write_error_reports_strerror),
+	T_CASE(http_client_cancel_during_connect_cancels_dialer),
+	T_CASE(http_client_timeout_during_connect_cancels_dialer),
+	T_CASE(http_client_cancel_during_request_stops_io),
 	T_SUITE_END,
 };
 

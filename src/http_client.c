@@ -107,9 +107,14 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	int err = 0;
 	const int ret = http_conn_send(&ctx->conn, watcher->fd, &err);
 	if (ret < 0) {
+		/* Retry once on a stale-connection error (the peer closed a
+		 * previously-idle connection). EBADF is excluded: send(2) returns
+		 * it only when our own fd is not open, which means another
+		 * component already closed the dialer-returned fd -- an ownership
+		 * bug to surface, not a peer close to paper over by redialing. */
 		if (ctx->state == STATE_CLIENT_REQUEST && !ctx->cache_retried &&
 		    (err == ECONNRESET || err == EPIPE || err == ECONNABORTED ||
-		     err == ENOTCONN || err == EBADF)) {
+		     err == ENOTCONN)) {
 			ctx->cache_retried = true;
 			ev_io_stop(loop, watcher);
 			const int stale_fd = watcher->fd;
@@ -129,10 +134,15 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			return;
 		}
 		const char *const strerr = strerror(err);
-		const size_t errlen = strlen(strerr);
-		ASSERT(errlen < 256);
-		char errmsg[errlen + 1];
-		memcpy(errmsg, strerr, errlen + 1);
+		/* copy into a fixed buffer with truncation rather than a VLA
+		 * sized by locale-dependent strerror() output */
+		char errmsg[256];
+		size_t errlen = strlen(strerr);
+		if (errlen > sizeof(errmsg) - 1) {
+			errlen = sizeof(errmsg) - 1;
+		}
+		memcpy(errmsg, strerr, errlen);
+		errmsg[errlen] = '\0';
 		finish_error(ctx, errmsg, errlen);
 		return;
 	}
