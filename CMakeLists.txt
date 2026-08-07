@@ -72,8 +72,8 @@ endif()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffile-prefix-map=${PROJECT_SOURCE_DIR}/=")
-    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-    set(CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL} -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -ffunction-sections -fdata-sections")
+    set(CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL} -ffunction-sections -fdata-sections")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -s")
     set(CMAKE_EXE_LINKER_FLAGS_MINSIZEREL "${CMAKE_EXE_LINKER_FLAGS_MINSIZEREL} -Wl,--gc-sections -s")
     if(ENABLE_SANITIZERS)
@@ -101,8 +101,8 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     endif()
 elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffile-prefix-map=${PROJECT_SOURCE_DIR}/=")
-    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
-    set(CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL} -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables")
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -ffunction-sections -fdata-sections")
+    set(CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL} -ffunction-sections -fdata-sections")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -s")
     set(CMAKE_EXE_LINKER_FLAGS_MINSIZEREL "${CMAKE_EXE_LINKER_FLAGS_MINSIZEREL} -Wl,--gc-sections -s")
     if(ENABLE_SANITIZERS)
@@ -136,6 +136,7 @@ include(CTest)
 add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})
 
 include(CheckLibraryExists)
+include(CheckCSourceCompiles)
 
 # find math
 check_library_exists(m floor "" LIBM)
@@ -148,6 +149,42 @@ if(ENABLE_THREADS)
     else()
         message(WARNING "threads not found, thread offloading is unavailable")
     endif()
+endif()
+
+# find libatomic if 64-bit atomics need it
+if(WITH_THREADS)
+    # Some 32-bit targets (e.g. mipsel, armv5, riscv32) have no native 64-bit
+    # atomic instructions.  The <stdatomic.h> operations on 64-bit types -- the
+    # atomic_uint_least64_t byte counters, atomic only WITH_THREADS -- then
+    # lower to __atomic_*_8 calls that live in libatomic, which is not linked by
+    # default: the syntax compiles but the executable link fails.  Probe whether
+    # these ops link (argc keeps the RMW from being folded away) and record the
+    # extra library, if any, in LIBATOMIC.
+    set(_atomic64_probe
+        "#include <stdatomic.h>
+#include <stdint.h>
+atomic_uint_least64_t v;
+int main(int argc, char **argv)
+{
+(void)argv;
+(void)atomic_fetch_add_explicit(&v, (uint_least64_t)argc, memory_order_seq_cst);
+return (int)atomic_load_explicit(&v, memory_order_seq_cst);
+}")
+    set(CMAKE_REQUIRED_QUIET TRUE)
+    check_c_source_compiles("${_atomic64_probe}" HAVE_ATOMIC64_BUILTIN)
+    if(NOT HAVE_ATOMIC64_BUILTIN)
+        set(CMAKE_REQUIRED_LIBRARIES atomic)
+        check_c_source_compiles("${_atomic64_probe}" HAVE_ATOMIC64_LIBATOMIC)
+        unset(CMAKE_REQUIRED_LIBRARIES)
+        if(HAVE_ATOMIC64_LIBATOMIC)
+            set(LIBATOMIC atomic)
+        else()
+            message(WARNING
+                "64-bit atomics link with neither a compiler builtin nor "
+                "libatomic; the executable link is expected to fail")
+        endif()
+    endif()
+    set(CMAKE_REQUIRED_QUIET FALSE)
 endif()
 
 add_subdirectory(contrib)

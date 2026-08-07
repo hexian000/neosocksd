@@ -171,6 +171,10 @@ if(LIBM)
     target_link_libraries(neosocksd PRIVATE m)
 endif()
 
+if(LIBATOMIC)
+    target_link_libraries(neosocksd PRIVATE ${LIBATOMIC})
+endif()
+
 # =============================================================================
 # add_unit_test: register a test executable with standard compile settings.
 #
@@ -224,6 +228,9 @@ function(add_unit_test TEST_NAME)
     endif()
     if(LIBM)
         target_link_libraries(${TEST_NAME} PRIVATE m)
+    endif()
+    if(LIBATOMIC)
+        target_link_libraries(${TEST_NAME} PRIVATE ${LIBATOMIC})
     endif()
     if(FORCE_POSIX)
         target_compile_definitions(${TEST_NAME} PRIVATE _POSIX_C_SOURCE=200809L)
