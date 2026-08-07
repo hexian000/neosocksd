@@ -31,7 +31,10 @@ struct url {
 	char *query; /* escaped */
 	char *fragment;
 	/* RFC 3986 path-rootless: set when the URL has no authority and no
-	 * absolute path, e.g. "mailto:user@example.com" */
+	 * absolute path, e.g. "mailto:user@example.com". Opaque and
+	 * scheme-defined -- url_parse() returns it verbatim and does not decode
+	 * it. It has no generic percent-encoding to speak of, so the escaped /
+	 * decoded distinction its siblings carry does not apply here. */
 	char *defacto;
 };
 

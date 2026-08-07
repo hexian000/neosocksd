@@ -333,16 +333,23 @@ static void slog_print_syslog(
 	}
 
 	MTX_LOCK(&slog_output_mu);
-	if (slog_syslog != NULL) {
-		slog_syslog(
-			slog_syslog_ident, priority, (const char *)buf.data,
-			buf.len);
-	}
+	/* re-check under the lock, as the other printers do -- but on the
+	 * installed printer, not on slog_syslog: a NULL slog_syslog is this
+	 * sink's own sentinel for the libc syslog() fallback, so it cannot also
+	 * mean "the sink was replaced" */
+	if (ATOMIC_LOAD(&slog_printer) == slog_print_syslog) {
+		if (slog_syslog != NULL) {
+			slog_syslog(
+				slog_syslog_ident, priority,
+				(const char *)buf.data, buf.len);
+		}
 #if HAVE_SYSLOG
-	else {
-		syslog(priority, "%.*s", (int)buf.len, (const char *)buf.data);
-	}
+		else {
+			syslog(priority, "%.*s", (int)buf.len,
+			       (const char *)buf.data);
+		}
 #endif
+	}
 	(void)extra;
 	MTX_UNLOCK(&slog_output_mu);
 }
@@ -353,6 +360,25 @@ void slog_setlevel(const int level)
 	ATOMIC_STORE(&slog_level_, level);
 }
 
+/* Drop every sink, so that replacing one sink type with another leaves no
+ * pointer behind for the printers to find. Call under slog_output_mu, before
+ * installing the selected sink: slog.h lets a caller close or free the previous
+ * sink the moment slog_setoutput returns, and a printer that has already loaded
+ * slog_printer but not yet taken the lock re-checks its sink pointer there --
+ * a check only a cleared pointer can fail. */
+static void slog_dropsinks(void)
+{
+	slog_stream = NULL;
+	slog_writer = NULL;
+	slog_writer_ud = NULL;
+	slog_syslog = NULL;
+	slog_syslog_ident = NULL;
+}
+
+/* The printer is published inside the same critical section that installs the
+ * sinks, so a printer holding the lock always sees the two agreeing. Storing it
+ * after the unlock would let one observe the newly dropped sinks against the
+ * still-installed old printer -- the pair slog_print_syslog decides on. */
 void slog_setoutput(const int type, ...)
 {
 	SLOG_INIT();
@@ -360,57 +386,66 @@ void slog_setoutput(const int type, ...)
 	va_start(args, type);
 	switch (type) {
 	case SLOG_OUTPUT_DISCARD: {
+		MTX_LOCK(&slog_output_mu);
+		slog_dropsinks();
 		ATOMIC_STORE(&slog_printer, NULL);
+		MTX_UNLOCK(&slog_output_mu);
 	} break;
 	case SLOG_OUTPUT_TERMINAL: {
 		struct io_stream *stream = va_arg(args, struct io_stream *);
 		MTX_LOCK(&slog_output_mu);
+		slog_dropsinks();
 		slog_stream = stream;
-		MTX_UNLOCK(&slog_output_mu);
 		ATOMIC_STORE(
 			&slog_printer,
 			stream != NULL ? slog_print_terminal : NULL);
+		MTX_UNLOCK(&slog_output_mu);
 	} break;
 	case SLOG_OUTPUT_STREAM: {
 		struct io_stream *stream = va_arg(args, struct io_stream *);
 		MTX_LOCK(&slog_output_mu);
+		slog_dropsinks();
 		slog_stream = stream;
-		MTX_UNLOCK(&slog_output_mu);
 		ATOMIC_STORE(
 			&slog_printer,
 			stream != NULL ? slog_print_stream : NULL);
+		MTX_UNLOCK(&slog_output_mu);
 	} break;
 	case SLOG_OUTPUT_WRITER: {
 		slog_writer_fn fn = va_arg(args, slog_writer_fn);
 		void *ud = va_arg(args, void *);
 		MTX_LOCK(&slog_output_mu);
+		slog_dropsinks();
 		slog_writer = fn;
 		slog_writer_ud = ud;
-		MTX_UNLOCK(&slog_output_mu);
 		ATOMIC_STORE(
 			&slog_printer, fn != NULL ? slog_print_writer : NULL);
+		MTX_UNLOCK(&slog_output_mu);
 	} break;
 	case SLOG_OUTPUT_SYSLOG: {
 		void *ident = va_arg(args, void *);
 		slog_syslog_fn fn = va_arg(args, slog_syslog_fn);
 		if (fn != NULL) {
 			MTX_LOCK(&slog_output_mu);
+			slog_dropsinks();
 			slog_syslog = fn;
 			slog_syslog_ident = ident;
-			MTX_UNLOCK(&slog_output_mu);
 			ATOMIC_STORE(&slog_printer, slog_print_syslog);
+			MTX_UNLOCK(&slog_output_mu);
 			break;
 		}
 #if HAVE_SYSLOG
 		openlog(ident, LOG_PID | LOG_NDELAY, LOG_USER);
 		MTX_LOCK(&slog_output_mu);
-		slog_syslog = NULL;
-		slog_syslog_ident = NULL;
-		MTX_UNLOCK(&slog_output_mu);
+		slog_dropsinks();
 		ATOMIC_STORE(&slog_printer, slog_print_syslog);
+		MTX_UNLOCK(&slog_output_mu);
 #else /* HAVE_SYSLOG */
 		(void)ident;
+		MTX_LOCK(&slog_output_mu);
+		slog_dropsinks();
 		ATOMIC_STORE(&slog_printer, NULL);
+		MTX_UNLOCK(&slog_output_mu);
 #endif /* HAVE_SYSLOG */
 	} break;
 	default:;
