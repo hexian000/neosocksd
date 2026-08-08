@@ -859,23 +859,61 @@ _RAW_LIST_HEADER = """\
 # Committed so a later run can `git diff` it: added lines are newly-introduced
 # findings to triage, removed lines are findings that were resolved.
 #
+# Which findings appear at all depends on the build configuration named below:
+# the path-sensitive analyzer checks explore different paths at different
+# optimization levels, and NDEBUG turns ASSERT() into a no-op, removing
+# constraints they prune with. Diff two lists only if this line matches.
+#
 # Machine-generated — do not hand-edit.
 """
 
 
-def _write_raw_list(path: Path, warnings: list[dict]) -> None:
+def _write_raw_list(path: Path, warnings: list[dict], config: str) -> None:
     """Write `path` with the identities of the current actionable findings,
     sorted for a stable diff."""
     ids = sorted({_finding_id(w) for w in warnings})
     path.parent.mkdir(parents=True, exist_ok=True)
     body = "\n".join(ids)
     path.write_text(
-        _RAW_LIST_HEADER + (body + "\n" if body else ""), encoding="utf-8")
+        _RAW_LIST_HEADER + f"# Build configuration: {config}\n"
+        + (body + "\n" if body else ""), encoding="utf-8")
+
+
+def _build_config(build_dir: Path) -> str:
+    """Describe the configuration in *build_dir*, for the report header.
+
+    The findings depend on it -- the path-sensitive clang-analyzer checks
+    explore different paths at different optimization levels, and NDEBUG turns
+    ASSERT() into a no-op, removing constraints they prune with.  A findings
+    list is therefore only comparable against one taken the same way, so say
+    which way that was rather than leaving it to be guessed.
+    """
+    cache = build_dir / "CMakeCache.txt"
+    wanted = {
+        "CMAKE_BUILD_TYPE": "build",
+        "CMAKE_C_COMPILER": "compiler",
+        "ENABLE_SANITIZERS": "sanitizers",
+    }
+    found: dict[str, str] = {}
+    try:
+        for line in cache.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if not sep:
+                continue
+            name = key.split(":", 1)[0]
+            if name in wanted:
+                found[wanted[name]] = value.strip()
+    except OSError:
+        return "unknown (no CMakeCache.txt)"
+    if "compiler" in found:
+        found["compiler"] = Path(found["compiler"]).name
+    parts = [f"{k}={v}" for k, v in found.items() if v]
+    return ", ".join(parts) if parts else "unknown"
 
 
 def _report(
     warnings: list[dict], suppressed: list[dict], check_filter: str | None,
-    elapsed: float, excluded: list[str],
+    elapsed: float, excluded: list[str], config: str,
 ) -> str:
     title = f"`{check_filter}`" if check_filter else "All Checks"
     total = len(warnings)
@@ -895,6 +933,9 @@ def _report(
         meta,
         "",
         f"> Source filter: excludes {', '.join(excluded)}",
+        "",
+        f"> Build configuration: {config} &mdash; findings are only "
+        "comparable against a list taken under the same one",
         "",
     ]
 
@@ -994,7 +1035,9 @@ def main() -> int:
         metavar="PATH",
         help="also write a raw, line-number-free findings list to PATH (in "
         "addition to the Markdown report); commit it so a later run can `git "
-        "diff` it to see which findings are newly introduced",
+        "diff` it to see which findings are newly introduced.  Record the "
+        "build configuration printed alongside it: a list is only comparable "
+        "against one taken under the same configuration",
     )
     args = ap.parse_args()
 
@@ -1022,25 +1065,30 @@ def main() -> int:
     else:
         kept, suppressed = _denoise(warnings, ROOT)
 
+    config = _build_config(build_dir)
     print(
         f"{len(kept)} warning(s)"
         f"{f', {len(suppressed)} suppressed' if suppressed else ''}"
         f" in {elapsed:.1f} s → {out_path}",
         file=sys.stderr,
     )
+    # the configuration decides which findings appear at all, so name it here
+    # too: a list is only comparable against one taken the same way
+    print(f"  linted {build_dir} [{config}]", file=sys.stderr)
 
     md = _report(
         kept, suppressed, args.check, elapsed,
-        _excluded_labels(args.tests, args.generated),
+        _excluded_labels(args.tests, args.generated), config,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(md, encoding="utf-8")
 
     if args.raw_list:
         raw_path = Path(args.raw_list)
-        _write_raw_list(raw_path, kept)
+        _write_raw_list(raw_path, kept, config)
         print(
-            f"{len({_finding_id(w) for w in kept})} finding(s) → {raw_path}",
+            f"{len({_finding_id(w) for w in kept})} finding(s) → {raw_path}"
+            f" [{config}]",
             file=sys.stderr,
         )
     return 0
