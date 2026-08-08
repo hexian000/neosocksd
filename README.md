@@ -30,7 +30,7 @@ Status: **Stable**
 - Optional legacy compatibility: The following SOCKS5 commands are off by default and work only in plain proxy mode (not through chains or rulesets): BIND (`--enable-socks5-bind`, relays an inbound connection from the target back to the client); UDP ASSOCIATE (`--enable-socks5-udp`, relays UDP datagrams).
 - Transparent proxy: Linux [TPROXY](https://docs.kernel.org/networking/tproxy.html).
 - 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024).
-- ~650 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
+- <800 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
 - Lua scripting on the control plane with extensive RPC support.
 - RESTful API for live monitoring and hot-reloading Lua modules without restarts.
 - Full IPv6 support; horizontal scalability.
