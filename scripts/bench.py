@@ -844,29 +844,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 build_dir / ("iperf3-%s-%02d.stderr" % (scenario.name, index))
                 for index in range(1, len(commands) + 1)
             ]
-            if len(commands) == 1:
-                reports = [
-                    run_json_command(
-                        commands[0],
-                        cwd=ROOT,
-                        log_path=log_paths[0],
-                        stderr_path=stderr_paths[0],
-                        timeout_seconds=command_timeout_seconds,
-                    )
-                ]
-            else:
-                reports = [
-                    run_json_command(
-                        command,
-                        cwd=ROOT,
-                        log_path=log_path,
-                        stderr_path=stderr_path,
-                        timeout_seconds=command_timeout_seconds,
-                    )
-                    for command, log_path, stderr_path in zip(
-                        commands, log_paths, stderr_paths
-                    )
-                ]
+            reports = [
+                run_json_command(
+                    command,
+                    cwd=ROOT,
+                    log_path=log_path,
+                    stderr_path=stderr_path,
+                    timeout_seconds=command_timeout_seconds,
+                )
+                for command, log_path, stderr_path in zip(
+                    commands, log_paths, stderr_paths
+                )
+            ]
             total, sent, received, seconds = combine_throughput(
                 reports, scenario)
             stddev = compute_combined_stddev(reports)
