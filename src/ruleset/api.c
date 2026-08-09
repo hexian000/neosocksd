@@ -65,9 +65,12 @@ static int api_invoke(lua_State *restrict L)
 		return lua_error(L);
 	}
 	const struct ruleset *restrict r = aux_getruleset(L);
-	api_client_invoke(
-		r->loop, req, code, len, r->conf, r->resolver,
-		r->server != NULL ? &r->server->stats : NULL);
+	const struct api_client_opts opts = {
+		.conf = r->conf,
+		.resolver = r->resolver,
+		.stats = r->server != NULL ? &r->server->stats : NULL,
+	};
+	api_client_invoke(r->loop, req, code, len, &opts);
 	return 0;
 }
 

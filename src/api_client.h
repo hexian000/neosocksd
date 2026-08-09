@@ -28,18 +28,25 @@ struct api_client_cb {
 	void *data;
 };
 
+/* Collaborators an API request runs against; they all come from the same
+ * ruleset. A NULL stats leaves the request uncounted. Not retained -- the
+ * request copies what it needs. */
+struct api_client_opts {
+	const struct config *conf;
+	struct resolver *resolver;
+	struct server_stats *stats;
+};
+
 void api_client_invoke(
 	struct ev_loop *restrict loop, struct dialreq *restrict req,
 	const void *restrict payload, size_t len,
-	const struct config *restrict conf, struct resolver *restrict resolver,
-	struct server_stats *restrict stats);
+	const struct api_client_opts *restrict opts);
 
 bool api_client_rpcall(
 	struct ev_loop *restrict loop, struct api_client_ctx **restrict pctx,
 	struct dialreq *restrict req, const void *restrict payload, size_t len,
 	const struct api_client_cb *restrict cb,
-	const struct config *restrict conf, struct resolver *restrict resolver,
-	struct server_stats *restrict stats);
+	const struct api_client_opts *restrict opts);
 
 void api_client_cancel(
 	struct ev_loop *restrict loop, struct api_client_ctx *restrict ctx);

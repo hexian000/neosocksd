@@ -356,9 +356,13 @@ static int await_invoke(lua_State *restrict L)
 		.func = invoke_cb,
 		.data = ud,
 	};
+	const struct api_client_opts opts = {
+		.conf = r->conf,
+		.resolver = r->resolver,
+		.stats = r->server != NULL ? &r->server->stats : NULL,
+	};
 	const bool ok = api_client_rpcall(
-		r->loop, &ud->ctx, req, code, len, &cb, r->conf, r->resolver,
-		r->server != NULL ? &r->server->stats : NULL);
+		r->loop, &ud->ctx, req, code, len, &cb, &opts);
 	if (!ok) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);

@@ -35,6 +35,11 @@ static struct config test_conf = {
 	.timeout = 0.2,
 };
 
+/* the plain client every case builds: no byte counters, no resolver */
+static const struct http_client_opts test_opts = {
+	.conf = &test_conf,
+};
+
 static struct {
 	int dialer_result_fd;
 	/* used on the 2nd dialer_do call instead of dialer_result_fd, when
@@ -233,9 +238,7 @@ T_DECLARE_CASE(http_client_init_state)
 		.data = &result,
 	};
 
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
 	T_EXPECT(ctx.cb.func == capture_cb);
 	T_EXPECT(ctx.cb.data == &result);
@@ -258,9 +261,7 @@ T_DECLARE_CASE(http_client_cancel_noop)
 		.data = &result,
 	};
 
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 	http_client_cancel(&ctx, loop);
 	/* cancel should not invoke the user callback */
 	T_EXPECT(!result.called);
@@ -284,9 +285,7 @@ T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
 		.data = &result,
 	};
 
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
@@ -326,9 +325,7 @@ T_DECLARE_CASE(http_client_timeout_finishes_with_error)
 		.data = &result,
 	};
 
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 	static const char header[] = "GET /x HTTP/1.1\r\n\r\n";
 	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
 
@@ -389,9 +386,7 @@ T_DECLARE_CASE(http_client_stale_retry_resends_from_start)
 		.data = &result,
 	};
 
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
 	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
@@ -493,9 +488,7 @@ T_DECLARE_CASE(http_client_full_request_response)
 		.func = capture_cb,
 		.data = &result,
 	};
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
 	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
@@ -550,9 +543,7 @@ T_DECLARE_CASE(http_client_forwards_response_headers)
 		.func = capture_cb,
 		.data = &result,
 	};
-	http_client_init(
-		&ctx, loop, on_header, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, on_header, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
 	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
@@ -609,9 +600,7 @@ T_DECLARE_CASE(http_client_delivers_response_body)
 		.func = capture_cb,
 		.data = &result,
 	};
-	http_client_init(
-		&ctx, loop, on_header, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, on_header, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
 	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
@@ -664,9 +653,7 @@ T_DECLARE_CASE(http_client_recv_eof_reports_error)
 		.func = capture_cb,
 		.data = &result,
 	};
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
 	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
@@ -723,9 +710,7 @@ T_DECLARE_CASE(http_client_write_error_reports_strerror)
 		.func = capture_cb,
 		.data = &result,
 	};
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
 	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
@@ -763,9 +748,7 @@ T_DECLARE_CASE(http_client_cancel_during_connect_cancels_dialer)
 		.func = capture_cb,
 		.data = &result,
 	};
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
@@ -798,9 +781,7 @@ T_DECLARE_CASE(http_client_timeout_during_connect_cancels_dialer)
 		.func = capture_cb,
 		.data = &result,
 	};
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
@@ -841,9 +822,7 @@ T_DECLARE_CASE(http_client_cancel_during_request_stops_io)
 		.func = capture_cb,
 		.data = &result,
 	};
-	http_client_init(
-		&ctx, loop, no_hdr, &cb, &test_conf, NULL, NULL, NULL, NULL,
-		NULL);
+	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "GET /x HTTP/1.1\r\n\r\n";
 	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);

@@ -501,12 +501,10 @@ void resolve_cancel(struct resolve_query *q)
 bool api_client_rpcall(
 	struct ev_loop *restrict loop, struct api_client_ctx **restrict pctx,
 	struct dialreq *restrict req, const void *restrict payload, size_t len,
-	const struct api_client_cb *restrict cb, const struct config *conf,
-	struct resolver *resolver, struct server_stats *restrict stats)
+	const struct api_client_cb *restrict cb,
+	const struct api_client_opts *restrict opts)
 {
-	(void)conf;
-	(void)resolver;
-	(void)stats;
+	(void)opts;
 	/* mirror api_client_do: req ownership transfers here and it is freed
 	 * on every failure path */
 	if (!STUB.api_start_ok) {

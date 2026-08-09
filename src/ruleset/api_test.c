@@ -245,19 +245,17 @@ void server_stats(
 void api_client_invoke(
 	struct ev_loop *restrict loop, struct dialreq *restrict req,
 	const void *restrict payload, const size_t len,
-	const struct config *restrict conf, struct resolver *restrict resolver,
-	struct server_stats *restrict stats)
+	const struct api_client_opts *restrict opts)
 {
 	(void)loop;
-	(void)stats;
 	G.invoke_called = true;
 	G.req = req;
 	G.payload_len =
 		len < sizeof(G.payload) - 1 ? len : sizeof(G.payload) - 1;
 	memcpy(G.payload, payload, G.payload_len);
 	G.payload[G.payload_len] = '\0';
-	G.conf = conf;
-	G.resolver = resolver;
+	G.conf = opts->conf;
+	G.resolver = opts->resolver;
 }
 
 /* ---- util stub (required by util.c's loadlibs if ever called) ---- */

@@ -17,7 +17,6 @@
 
 #include <errno.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <string.h>
 
 static void
@@ -202,14 +201,13 @@ static bool http_client_on_header(void *data, const char *key, char *value)
 void http_client_init(
 	struct http_client_ctx *restrict ctx, struct ev_loop *loop,
 	const struct http_parsehdr_cb on_header,
-	const struct http_client_cb *restrict cb, const struct config *conf,
-	struct resolver *resolver, uint_least64_t *const byt_recv,
-	uint_least64_t *const byt_sent, uint_least64_t *const dialer_byt_sent,
-	uint_least64_t *const dialer_byt_recv)
+	const struct http_client_cb *restrict cb,
+	const struct http_client_opts *restrict opts)
 {
+	const struct config *restrict conf = opts->conf;
 	ctx->loop = loop;
 	ctx->conf = conf;
-	ctx->resolver = resolver;
+	ctx->resolver = opts->resolver;
 	ctx->dialreq = NULL;
 	ctx->cache_retried = false;
 	ctx->state = STATE_CLIENT_INIT;
@@ -225,15 +223,15 @@ void http_client_init(
 		.data = ctx,
 	};
 	dialer_init(
-		&ctx->dialer, &dialer_cb_conf, dialer_byt_sent,
-		dialer_byt_recv);
+		&ctx->dialer, &dialer_cb_conf, opts->dialer_byt_sent,
+		opts->dialer_byt_recv);
 	const struct http_parsehdr_cb hdr_cb = {
 		.func = http_client_on_header,
 		.ctx = ctx,
 	};
 	http_conn_init(
-		&ctx->conn, -1, STATE_PARSE_RESPONSE, hdr_cb, byt_recv,
-		byt_sent);
+		&ctx->conn, -1, STATE_PARSE_RESPONSE, hdr_cb, opts->byt_recv,
+		opts->byt_sent);
 }
 
 void http_client_do(

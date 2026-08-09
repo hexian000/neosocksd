@@ -11,6 +11,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 enum http_client_state {
 	STATE_CLIENT_INIT,
@@ -41,13 +42,25 @@ struct http_client_ctx {
 	struct http_conn conn;
 };
 
+/* Collaborators and byte counters an http_client_ctx runs against. Each
+ * counter is optional: a NULL one leaves that traffic uncounted. Not
+ * retained -- http_client_init() copies what it needs. */
+struct http_client_opts {
+	const struct config *conf;
+	struct resolver *resolver;
+	/* the HTTP conversation itself */
+	uint_least64_t *byt_recv;
+	uint_least64_t *byt_sent;
+	/* the upstream dial that carries it */
+	uint_least64_t *dialer_byt_recv;
+	uint_least64_t *dialer_byt_sent;
+};
+
 void http_client_init(
 	struct http_client_ctx *restrict ctx, struct ev_loop *loop,
 	const struct http_parsehdr_cb on_header,
-	const struct http_client_cb *restrict cb, const struct config *conf,
-	struct resolver *resolver, uint_least64_t *const byt_recv,
-	uint_least64_t *const byt_sent, uint_least64_t *const dialer_byt_sent,
-	uint_least64_t *const dialer_byt_recv);
+	const struct http_client_cb *restrict cb,
+	const struct http_client_opts *restrict opts);
 
 /* Takes ownership of req.
  *
