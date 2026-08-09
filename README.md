@@ -87,12 +87,13 @@ Binary releases include `neosocksd.noarch.tar.gz` with `libruleset.lua`, `agent.
 
 # Gzip-compressed Lua files
 ./neosocksd -l 0.0.0.0:1080 -r ruleset.lua.gz
-./neosocksd -c config.lua.gz -r ruleset.lua.gz
+./neosocksd -c config.lua.gz
 ```
 
-`-c` and `-r` are unified: a single `-c config.lua` can configure the server
-*and* install the ruleset — the config script just sets `_G.ruleset` (or returns
-a `ruleset` field). `-r` remains as a shorthand for a ruleset-only file.
+`-c config.lua` loads a boot config that configures the server and can also
+install the ruleset — the config script returns a table of server options and
+either sets `_G.ruleset` or provides a `ruleset` field. Use `-r ruleset.lua`
+for a standalone ruleset file. The two options are mutually exclusive.
 
 ```sh
 # One file does both: configure the server and set up the ruleset
