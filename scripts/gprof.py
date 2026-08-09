@@ -23,6 +23,11 @@ ROOT = Path.cwd().resolve()
 DEFAULT_BUILD_DIR = ROOT / "build"
 DEFAULT_PROFILE_BUILD_DIR = DEFAULT_BUILD_DIR / "gprof"
 DEFAULT_MARKDOWN_OUTPUT = DEFAULT_BUILD_DIR / "gprof.md"
+# Every boolean option the root CMakeLists.txt declares, with its declared
+# default, in declaration order -- except ENABLE_SANITIZERS, which
+# build_configure_command() forces OFF for profiling. An option missing here is
+# not carried over, so the profile build would measure a configuration the base
+# build was not built with.
 KNOWN_BOOL_OPTIONS = {
     "BUILD_STATIC": "OFF",
     "BUILD_PIE": "OFF",
@@ -32,6 +37,7 @@ KNOWN_BOOL_OPTIONS = {
     "LINK_STATIC_LIBS": "OFF",
     "ENABLE_SYSTEMD": "OFF",
     "ENABLE_RULESET": "ON",
+    "ENABLE_ALLOC_CACHE": "OFF",
 }
 CACHE_LINE_RE = re.compile(r"^([A-Za-z0-9_]+):[^=]+=(.*)$")
 
