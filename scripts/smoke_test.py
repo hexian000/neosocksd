@@ -24,6 +24,7 @@ import base64
 import hashlib
 import http.client
 import random
+import re
 import signal
 import socket
 import socketserver
@@ -33,6 +34,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -49,6 +51,11 @@ HTTP_BODY = b"neosocksd-smoke-ok\n"
 READY_TIMEOUT = 5.0
 IO_TIMEOUT = 5.0
 SHUTDOWN_TIMEOUT = 5.0
+
+# the /ruleset/rpcall wire contract, mirroring MIME_RPCALL and
+# RPCALL_COMPRESS_THRESHOLD in src/proto/http.h
+RPCALL_MIME = "application/x-neosocksd-rpc; version=1"
+RPCALL_COMPRESS_THRESHOLD = 256
 
 
 def log(message: str) -> None:
@@ -758,16 +765,39 @@ class Targets:
 # --------------------------------------------------------------------------- #
 
 
-def api_request(
-    api_port: int, method: str, path: str, body: Optional[bytes] = None
-) -> Tuple[int, bytes]:
+def api_request_full(
+    api_port: int,
+    method: str,
+    path: str,
+    body: Optional[bytes] = None,
+    headers: Optional[dict] = None,
+) -> Tuple[int, dict, bytes]:
+    """Drive one API request and return (status, headers, body).
+
+    Header names are lowercased so a lookup does not depend on the daemon's
+    spelling. The body is returned exactly as received -- http.client does not
+    decode content, so a deflated response stays compressed and the test can
+    assert on the negotiated encoding.
+    """
     conn = http.client.HTTPConnection(HOST, api_port, timeout=IO_TIMEOUT)
     try:
-        conn.request(method, path, body=body)
+        conn.request(method, path, body=body, headers=headers or {})
         resp = conn.getresponse()
-        return resp.status, resp.read()
+        received = {name.lower(): value for name, value in resp.getheaders()}
+        return resp.status, received, resp.read()
     finally:
         conn.close()
+
+
+def api_request(
+    api_port: int,
+    method: str,
+    path: str,
+    body: Optional[bytes] = None,
+    headers: Optional[dict] = None,
+) -> Tuple[int, bytes]:
+    status, _, data = api_request_full(api_port, method, path, body, headers)
+    return status, data
 
 
 # --------------------------------------------------------------------------- #
@@ -1758,6 +1788,229 @@ def t_api_invoke(ctx: Context) -> None:
             api, "POST", "/ruleset/invoke", b"assert(_G.smoke_ok, 'state lost')"
         )
         assert status == 200, "invoke (read-back) returned %d: %r" % (status, body)
+
+
+def _lua_longstring(data: bytes) -> str:
+    """Quote bytes as a Lua long-bracket string literal.
+
+    The bracket level grows until it cannot terminate early, so any payload
+    embeds verbatim -- no escaping, and no dependence on how the daemon spells
+    the marshalled result.
+    """
+    text = data.decode()
+    level = ""
+    while "]%s]" % level in text:
+        level += "="
+    return "[%s[%s]%s]" % (level, text, level)
+
+
+def _check_rpcall_result(api_port: int, marshalled: bytes, expr: str) -> None:
+    """Load an rpcall response body back on the daemon and assert `expr`.
+
+    The body is a marshalled `return <ok>, <values>` chunk, so loading it is
+    what the caller's `await.invoke` does with it. `expr` sees `ok` (the rpc
+    status flag) plus the first two returned values as `a` and `b`. Checking
+    the chunk by running it pins the contract without pinning marshal's exact
+    spelling.
+    """
+    code = (
+        "local ok, a, b = assert(load(%s))()\n"
+        "assert(%s, 'rpcall result mismatch')\n"
+    ) % (_lua_longstring(marshalled), expr)
+    status, body = api_request(api_port, "POST", "/ruleset/invoke", code.encode())
+    assert status == 200, "rpcall result check returned %d: %r" % (status, body)
+
+
+@test("api/rpcall")
+def t_api_rpcall(ctx: Context) -> None:
+    """/ruleset/rpcall is the only endpoint with a content-type contract on both
+    directions, the only one that negotiates a deflated response, and the only
+    one whose body is a marshalled Lua chunk. Drive all three."""
+    listen = free_port()
+    api = free_port()
+    ruleset = write_ruleset(ctx.tmpdir, "direct.lua", direct_ruleset())
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen), "-r", str(ruleset)],
+        api_port=api,
+        loglevel=ctx.loglevel,
+    ):
+        # a well-formed call answers with the RPC content type and a body that
+        # loads back into the values the chunk returned
+        status, headers, body = api_request_full(
+            api,
+            "POST",
+            "/ruleset/rpcall",
+            b'return 2 + 3, "smoke"',
+            {"Content-Type": RPCALL_MIME},
+        )
+        assert status == 200, "rpcall returned %d: %r" % (status, body)
+        assert headers.get("content-type") == RPCALL_MIME, (
+            "rpcall response content-type is %r" % headers.get("content-type")
+        )
+        assert "content-encoding" not in headers, (
+            "a client that did not accept deflate got %r"
+            % headers.get("content-encoding")
+        )
+        _check_rpcall_result(api, body, 'ok == true and a == 5 and b == "smoke"')
+
+        # the request content type is enforced: no type, the wrong type, and a
+        # future protocol version are all rejected before the chunk runs
+        for ctype in (None, "text/plain", "application/x-neosocksd-rpc; version=99"):
+            sent = {} if ctype is None else {"Content-Type": ctype}
+            status, body = api_request(
+                api, "POST", "/ruleset/rpcall", b"return 1", sent
+            )
+            assert status == 400, (
+                "rpcall with content-type %r returned %d, want 400: %r"
+                % (ctype, status, body)
+            )
+
+        # a chunk that raises is an rpc failure, not a marshalled false result
+        status, body = api_request(
+            api,
+            "POST",
+            "/ruleset/rpcall",
+            b'error("smoke boom")',
+            {"Content-Type": RPCALL_MIME},
+        )
+        assert status == 500, "a raising rpc chunk returned %d: %r" % (status, body)
+
+        # a result at or over the threshold is deflated when the client accepts
+        # it, and still loads back to the same value once inflated
+        status, headers, body = api_request_full(
+            api,
+            "POST",
+            "/ruleset/rpcall",
+            ('return string.rep("x", %d)' % RPCALL_COMPRESS_THRESHOLD).encode(),
+            {"Content-Type": RPCALL_MIME, "Accept-Encoding": "deflate"},
+        )
+        assert status == 200, "deflate rpcall returned %d: %r" % (status, body)
+        assert headers.get("content-encoding") == "deflate", (
+            "a large result was not deflated: %r" % headers.get("content-encoding")
+        )
+        inflated = zlib.decompress(body)
+        assert len(body) < len(inflated), "deflate did not shrink the payload"
+        _check_rpcall_result(
+            api, inflated, 'ok == true and a == string.rep("x", %d)'
+            % RPCALL_COMPRESS_THRESHOLD
+        )
+
+        # ...but a result below the threshold stays plain even so
+        status, headers, body = api_request_full(
+            api,
+            "POST",
+            "/ruleset/rpcall",
+            b'return "tiny"',
+            {"Content-Type": RPCALL_MIME, "Accept-Encoding": "deflate"},
+        )
+        assert status == 200, "small rpcall returned %d: %r" % (status, body)
+        assert "content-encoding" not in headers, (
+            "a result below the %d-byte threshold was deflated"
+            % RPCALL_COMPRESS_THRESHOLD
+        )
+        _check_rpcall_result(api, body, 'ok == true and a == "tiny"')
+
+
+def _rpc_caller_code(remote_api: int) -> bytes:
+    """An invoke chunk that RPC-calls another daemon and records the outcome.
+
+    `neosocksd.async` is the coroutine runner `await.invoke` needs; the shipped
+    `libruleset.lua` wraps it as `_G.async`, but the suite's fixtures are
+    standalone rulesets, so drive the primitive directly. The outcome lands in a
+    global because the invoke request returns before the call completes.
+    """
+    code = (
+        "_G.smoke_rpc = nil\n"
+        "neosocksd.async(function(ok, value)\n"
+        "    if not ok then\n"
+        "        _G.smoke_rpc = 'async error: ' .. tostring(value)\n"
+        "        return\n"
+        "    end\n"
+        "    _G.smoke_rpc = value\n"
+        "end, function()\n"
+        "    local ok, result = await.invoke([[return \"pong\", 42]], %r)\n"
+        "    if not ok then\n"
+        "        return 'invoke failed: ' .. tostring(result)\n"
+        "    end\n"
+        "    local rok, a, b = result()\n"
+        "    if not rok then\n"
+        "        return 'remote error: ' .. tostring(a)\n"
+        "    end\n"
+        "    return tostring(a) .. '/' .. tostring(b)\n"
+        "end)\n"
+    ) % ("%s:%d" % (HOST, remote_api),)
+    return code.encode()
+
+
+@test("api/rpcall-invoke")
+def t_api_rpcall_invoke(ctx: Context) -> None:
+    """await.invoke() runs src/api_client.c against a second daemon's
+    /ruleset/rpcall, so request building, response decode and the result
+    hand-back cross a real socket instead of a mocked collaborator."""
+    ruleset = write_ruleset(ctx.tmpdir, "direct.lua", direct_ruleset())
+    remote_listen = free_port()
+    remote_api = free_port()
+    remote = Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, remote_listen), "-r", str(ruleset)],
+        api_port=remote_api,
+        loglevel=ctx.loglevel,
+        name="rpc-remote",
+    )
+    with remote:
+        listen = free_port()
+        api = free_port()
+        with Daemon(
+            ctx.binary,
+            ["-l", "%s:%d" % (HOST, listen), "-r", str(ruleset)],
+            api_port=api,
+            loglevel=ctx.loglevel,
+            name="rpc-caller",
+        ):
+            status, body = api_request(
+                api, "POST", "/ruleset/invoke", _rpc_caller_code(remote_api)
+            )
+            assert status == 200, "starting the rpc routine returned %d: %r" % (
+                status,
+                body,
+            )
+            # the routine outlives its invoke request: poll until it records an
+            # outcome, then assert on it
+            deadline = time.monotonic() + IO_TIMEOUT
+            while True:
+                status, body = api_request(
+                    api,
+                    "POST",
+                    "/ruleset/invoke",
+                    b"assert(_G.smoke_rpc ~= nil, 'pending')",
+                )
+                if status == 200:
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "await.invoke did not complete within %.1fs: %r"
+                        % (IO_TIMEOUT, body)
+                    )
+                time.sleep(0.05)
+            status, body = api_request(
+                api,
+                "POST",
+                "/ruleset/invoke",
+                b"assert(_G.smoke_rpc == 'pong/42', _G.smoke_rpc)",
+            )
+            assert status == 200, "await.invoke result: %r" % body
+
+            # the call went out through api_client.c, so its counters moved
+            status, stats = api_request(api, "POST", "/stats")
+            assert status == 200, "POST /stats returned %d" % status
+            m = re.search(
+                rb"API Client\s*:\s*(\d+) reqs, Rx (\S+), Tx (\S+)", stats)
+            assert m is not None, "stats has no API Client line: %r" % stats
+            assert int(m.group(1)) >= 1, "api_client request counter did not move"
+            assert m.group(2) != b"0" and m.group(3) != b"0", (
+                "api_client byte counters did not move: %r" % m.group(0)
+            )
 
 
 @test("api/ruleset-update")
