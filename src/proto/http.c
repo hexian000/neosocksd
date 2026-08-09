@@ -600,7 +600,28 @@ bool http_body_consume(
 			} else if (c == '\r') {
 				d->line_cr = true;
 				continue;
+			} else if (c == '\0') {
+				/* NUL is invalid in a chunk-size/trailer
+				 * line; buffered, it would end the C-string
+				 * size parse early and hide the junk after it
+				 * from validation */
+				return false;
 			} else if (c != '\n') {
+				if (d->chunk_state ==
+				    HTTP_BODY_CHUNK_TRAILER_LINE) {
+					/* trailer fields are dropped unparsed;
+					 * only the empty terminator line
+					 * matters, so no length bound applies */
+					d->line_skip = true;
+					continue;
+				}
+				if (c == ';' || d->line_skip) {
+					/* chunk extensions are dropped
+					 * unparsed with no length bound; only
+					 * the size digits are buffered */
+					d->line_skip = true;
+					continue;
+				}
 				if (d->line_len + 1 >= sizeof(d->line)) {
 					return false;
 				}
@@ -617,6 +638,7 @@ bool http_body_consume(
 				}
 				d->chunk_left = sz;
 				d->line_len = 0;
+				d->line_skip = false;
 				if (sz == 0) {
 					d->chunk_state =
 						HTTP_BODY_CHUNK_TRAILER_LINE;
@@ -625,7 +647,7 @@ bool http_body_consume(
 				}
 				continue;
 			}
-			if (d->line_len == 0) {
+			if (!d->line_skip) {
 				d->chunk_state = HTTP_BODY_CHUNK_DONE;
 				d->done = true;
 				/* trailing bytes past the terminator belong to
@@ -636,7 +658,7 @@ bool http_body_consume(
 				*len = i + 1;
 				return true;
 			}
-			d->line_len = 0;
+			d->line_skip = false;
 			continue;
 		case HTTP_BODY_CHUNK_DATA: {
 			const size_t remain = total - i;

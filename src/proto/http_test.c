@@ -1340,6 +1340,67 @@ T_DECLARE_CASE(http_body_chunked_with_extension)
 	T_EXPECT_EQ(sink.len, (size_t)5);
 }
 
+T_DECLARE_CASE(http_body_chunked_long_extension)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* RFC 9112 §7.1.1 puts no bound on chunk-ext length; a size line far
+	 * beyond the digit buffer must still parse:
+	 * "5;name=<v...>\r\nhello\r\n0\r\n\r\n" */
+	unsigned char msg[512];
+	size_t n = 0;
+	memcpy(msg + n, "5;name=", 7);
+	n += 7;
+	memset(msg + n, 'v', 3 * sizeof(d.line));
+	n += 3 * sizeof(d.line);
+	memcpy(msg + n, "\r\nhello\r\n0\r\n\r\n", 14);
+	n += 14;
+	size_t len = n;
+	T_EXPECT(http_body_consume(&d, msg, &len, cb));
+	T_EXPECT_EQ(len, n);
+	T_EXPECT(d.done);
+	T_EXPECT(http_body_finish(&d));
+	T_EXPECT_EQ(sink.len, (size_t)5);
+	T_EXPECT_MEMEQ(sink.buf, "hello", 5);
+}
+
+T_DECLARE_CASE(http_body_chunked_long_extension_split_input)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* the skip state must survive across consume() calls */
+	unsigned char msg[512];
+	size_t n = 0;
+	memcpy(msg + n, "5;name=", 7);
+	n += 7;
+	memset(msg + n, 'v', 3 * sizeof(d.line));
+	n += 3 * sizeof(d.line);
+	memcpy(msg + n, "\r\nhello\r\n0\r\n\r\n", 14);
+	n += 14;
+	for (size_t i = 0; i < n; i++) {
+		size_t len = 1;
+		T_EXPECT(http_body_consume(&d, msg + i, &len, cb));
+	}
+	T_EXPECT(d.done);
+	T_EXPECT(http_body_finish(&d));
+	T_EXPECT_EQ(sink.len, (size_t)5);
+	T_EXPECT_MEMEQ(sink.buf, "hello", 5);
+}
+
 T_DECLARE_CASE(http_body_chunked_trailer)
 {
 	struct http_body d;
@@ -1356,6 +1417,35 @@ T_DECLARE_CASE(http_body_chunked_trailer)
 	size_t n = sizeof(chunk) - 1;
 	T_EXPECT(http_body_consume(&d, chunk, &n, cb));
 	T_EXPECT(d.done);
+	T_EXPECT_EQ(sink.len, (size_t)0);
+}
+
+T_DECLARE_CASE(http_body_chunked_long_trailer)
+{
+	struct http_body d;
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
+
+	http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+
+	/* trailer fields are ordinary field lines with no 127-byte bound;
+	 * a long one must not fail the body: "0\r\nX-Long: <y...>\r\n\r\n" */
+	unsigned char msg[512];
+	size_t n = 0;
+	memcpy(msg + n, "0\r\nX-Long: ", 11);
+	n += 11;
+	memset(msg + n, 'y', 3 * sizeof(d.line));
+	n += 3 * sizeof(d.line);
+	memcpy(msg + n, "\r\n\r\n", 4);
+	n += 4;
+	size_t len = n;
+	T_EXPECT(http_body_consume(&d, msg, &len, cb));
+	T_EXPECT_EQ(len, n);
+	T_EXPECT(d.done);
+	T_EXPECT(http_body_finish(&d));
 	T_EXPECT_EQ(sink.len, (size_t)0);
 }
 
@@ -1437,6 +1527,50 @@ T_DECLARE_CASE(http_body_chunked_bare_cr_rejected)
 		struct http_body d;
 		http_body_init(&d, HTTP_BODY_CHUNKED, 0);
 		static const unsigned char bad[] = "0\r\nX\rY\r\n\r\n";
+		size_t n = sizeof(bad) - 1;
+		T_EXPECT(!http_body_consume(&d, bad, &n, cb));
+	}
+	/* and inside a skipped chunk extension */
+	{
+		struct http_body d;
+		http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+		static const unsigned char bad[] = "5;e\rx\r\nhello";
+		size_t n = sizeof(bad) - 1;
+		T_EXPECT(!http_body_consume(&d, bad, &n, cb));
+	}
+}
+
+T_DECLARE_CASE(http_body_chunked_nul_rejected)
+{
+	struct body_sink sink = { 0 };
+	const struct http_body_data_cb cb = {
+		.func = body_sink_cb,
+		.ctx = &sink,
+	};
+
+	/* an embedded NUL in a chunk-size line must be rejected: buffered, it
+	 * would end the C-string size parse early, accepting "5\0junk" as
+	 * size 5 while "5junk" is rejected */
+	{
+		struct http_body d;
+		http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+		static const unsigned char bad[] = "5\0junk\r\nhello";
+		size_t n = sizeof(bad) - 1;
+		T_EXPECT(!http_body_consume(&d, bad, &n, cb));
+	}
+	/* the same holds inside a trailer line */
+	{
+		struct http_body d;
+		http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+		static const unsigned char bad[] = "0\r\nX\0Y\r\n\r\n";
+		size_t n = sizeof(bad) - 1;
+		T_EXPECT(!http_body_consume(&d, bad, &n, cb));
+	}
+	/* and inside a skipped chunk extension */
+	{
+		struct http_body d;
+		http_body_init(&d, HTTP_BODY_CHUNKED, 0);
+		static const unsigned char bad[] = "5;e\0x\r\nhello";
 		size_t n = sizeof(bad) - 1;
 		T_EXPECT(!http_body_consume(&d, bad, &n, cb));
 	}
@@ -2454,11 +2588,15 @@ static const struct testing_suite suite[] = {
 	T_CASE(http_body_chunked_split_input),
 	T_CASE(http_body_chunked_uppercase_hex),
 	T_CASE(http_body_chunked_with_extension),
+	T_CASE(http_body_chunked_long_extension),
+	T_CASE(http_body_chunked_long_extension_split_input),
 	T_CASE(http_body_chunked_trailer),
+	T_CASE(http_body_chunked_long_trailer),
 	T_CASE(http_body_chunked_no_hex_digit_fails),
 	T_CASE(http_body_chunked_size_line_too_long),
 	T_CASE(http_body_chunked_missing_cr_after_data),
 	T_CASE(http_body_chunked_bare_cr_rejected),
+	T_CASE(http_body_chunked_nul_rejected),
 	T_CASE(http_body_chunked_extra_data_after_done),
 	T_CASE(http_body_chunked_trailing_data_after_terminator),
 	T_CASE(http_body_chunked_data_cb_reject),

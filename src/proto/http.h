@@ -151,6 +151,10 @@ struct http_body {
 	/* within a chunk-size or trailer line, a CR has been seen and the next
 	 * byte must be the LF that completes the CRLF terminator */
 	bool line_cr : 1;
+	/* the rest of the current line is discarded without buffering (chunk
+	 * extension or trailer field content), so its length is unbounded;
+	 * also marks the current trailer line as non-empty */
+	bool line_skip : 1;
 };
 
 struct http_body_data_cb {
