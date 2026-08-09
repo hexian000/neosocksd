@@ -53,7 +53,9 @@ static int time_measure(lua_State *restrict L)
 {
 	luaL_checktype(L, 1, LUA_TFUNCTION);
 	const int nargs = lua_gettop(L) - 1;
-	lua_pushinteger(L, -1);
+	/* the cost slot is a float on every path, including the clock-failure
+	 * one that returns this placeholder unreplaced */
+	lua_pushnumber(L, -1.0);
 	lua_insert(L, 1);
 	bool ok = true;
 	struct timespec ts0, ts1;

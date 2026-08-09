@@ -84,15 +84,15 @@ _G.regex = regex
 
 local time = {}
 
-function time.monotonic() return -1 end
+function time.monotonic() return -1.0 end
 
-function time.process() return -1 end
+function time.process() return -1.0 end
 
-function time.thread() return -1 end
+function time.thread() return -1.0 end
 
-function time.unix() return -1 end
+function time.unix() return -1.0 end
 
-function time.measure(f, ...) return -1, f(...) end
+function time.measure(f, ...) return -1.0, f(...) end
 
 _G.time = time
 

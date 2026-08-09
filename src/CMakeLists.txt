@@ -360,6 +360,8 @@ if(WITH_LUA)
     add_unit_test(time_test
         SRCS ruleset/time_test.c ruleset/time.c
         NO_LIBEV WITH_LUA)
+    # time_test interposes clock_gettime() to force a monotonic-clock failure.
+    target_link_options(time_test PRIVATE "LINKER:--wrap=clock_gettime")
     add_unit_test(base_test
         SRCS ruleset/base_test.c ruleset/base.c proto/codec.c
              util.c dialer.c resolver.c

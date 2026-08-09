@@ -6,8 +6,8 @@
  *
  * Linked translation units (see CMakeLists.txt):
  *   ruleset/time.c   module under test
- * Leaf libraries: Lua. time.c has no stateful collaborator to mock; the mock
- * section only holds shared Lua test fixtures.
+ * Leaf libraries: Lua. time.c's only collaborator is os/clock.h, whose readings
+ * are static inlines over clock_gettime(); the mock section interposes that.
  */
 
 #include "ruleset/time.h"
@@ -18,12 +18,46 @@
 #include <lua.h>
 #include <lualib.h>
 
+#include <errno.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
 
 /* -------------------------------------------------------------------------
- * mock - shared Lua test fixtures (time.c has no collaborator to mock).
+ * mock - shared Lua test fixtures and a clock_gettime() interposer.
  * ---------------------------------------------------------------------- */
+
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+/* clock_gettime() interposer, installed via -Wl,--wrap=clock_gettime (linking
+ * clock_gettime() against libc as __real_clock_gettime). clock_monotonic() is
+ * a static inline over it, so this is the only point a clock failure reaches
+ * time.c. Only CLOCK_MONOTONIC is ever failed, and only while armed, leaving
+ * the time.unix()/process()/thread() cases on the real clock. */
+extern int __real_clock_gettime(clockid_t clk_id, struct timespec *tp);
+
+static unsigned g_monotonic_calls;
+static unsigned g_fail_monotonic_call; /* 0 = disabled */
+
+int __wrap_clock_gettime(clockid_t clk_id, struct timespec *tp)
+{
+	if (clk_id == CLOCK_MONOTONIC) {
+		g_monotonic_calls++;
+		if (g_monotonic_calls == g_fail_monotonic_call) {
+			errno = EINVAL;
+			return -1;
+		}
+	}
+	return __real_clock_gettime(clk_id, tp);
+}
+
+/* Fail the n-th monotonic reading taken from now on, 0 to disarm.
+ * time.measure() takes two, one before the measured call and one after. */
+static void fail_monotonic_at(const unsigned n)
+{
+	g_monotonic_calls = 0;
+	g_fail_monotonic_call = n;
+}
+#endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
 
 static lua_State *new_lua(void)
 {
@@ -186,6 +220,81 @@ T_DECLARE_CASE(time_measure_propagates_error)
 	lua_close(L);
 }
 
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+/*
+ * Either monotonic reading failing makes time.measure() hand back its cost
+ * placeholder unreplaced. That placeholder must carry the same float subtype
+ * the success path returns, which math.type() and marshal() both discriminate.
+ */
+T_DECLARE_CASE(time_measure_start_clock_failure_cost_is_float)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	fail_monotonic_at(1);
+	const bool ok =
+		run_chunk(L, "return time.measure(function() return 42 end)");
+	const unsigned nreadings = g_monotonic_calls;
+	fail_monotonic_at(0);
+	T_EXPECT(ok);
+	T_EXPECT_EQ(nreadings, 2u);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_isnumber(L, 1));
+	T_EXPECT(lua_isinteger(L, 1) == 0);
+	T_EXPECT(lua_tonumber(L, 1) == -1.0);
+	T_EXPECT_EQ(lua_tointeger(L, 2), 42);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(time_measure_end_clock_failure_cost_is_float)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	fail_monotonic_at(2);
+	const bool ok =
+		run_chunk(L, "return time.measure(function() return 42 end)");
+	const unsigned nreadings = g_monotonic_calls;
+	fail_monotonic_at(0);
+	T_EXPECT(ok);
+	T_EXPECT_EQ(nreadings, 2u);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_isnumber(L, 1));
+	T_EXPECT(lua_isinteger(L, 1) == 0);
+	T_EXPECT(lua_tonumber(L, 1) == -1.0);
+	T_EXPECT_EQ(lua_tointeger(L, 2), 42);
+
+	lua_close(L);
+}
+
+/*
+ * push_clock() (behind time.monotonic/process/thread/unix) hands back its
+ * clock-failure placeholder as a float, the same subtype the success path
+ * returns and the subtype math.type()/marshal() discriminate. Only
+ * CLOCK_MONOTONIC can be failed here, so time.monotonic() stands in for the
+ * shared helper.
+ */
+T_DECLARE_CASE(time_monotonic_clock_failure_is_float)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	fail_monotonic_at(1);
+	const bool ok = run_chunk(L, "return time.monotonic()");
+	const unsigned nreadings = g_monotonic_calls;
+	fail_monotonic_at(0);
+	T_EXPECT(ok);
+	T_EXPECT_EQ(nreadings, 1u);
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_isnumber(L, 1));
+	T_EXPECT(lua_isinteger(L, 1) == 0);
+	T_EXPECT(lua_tonumber(L, 1) == -1.0);
+
+	lua_close(L);
+}
+#endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -203,6 +312,11 @@ static const struct testing_suite suite[] = {
 	T_CASE(time_measure_passes_results),
 	T_CASE(time_measure_rejects_missing_function),
 	T_CASE(time_measure_propagates_error),
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+	T_CASE(time_measure_start_clock_failure_cost_is_float),
+	T_CASE(time_measure_end_clock_failure_cost_is_float),
+	T_CASE(time_monotonic_clock_failure_is_float),
+#endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
 	T_SUITE_END,
 };
 
