@@ -15,7 +15,6 @@
 #include <lauxlib.h>
 #include <lua.h>
 
-#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -250,7 +249,7 @@ int cfunc_loadconfig(lua_State *restrict L)
 		/* memlimit is in MiB; keep the arithmetic in lua_Integer and reject
 		 * values that would overflow the KiB field. Non-positive disables. */
 		const lua_Integer mb = luaL_checkinteger(L, -1);
-		if (mb > (INT_MAX >> 10)) {
+		if (mb > (INT_LEAST32_MAX >> 10)) {
 			return luaL_error(L, "config: memlimit too large");
 		}
 		r->config.memlimit_kb =
@@ -498,10 +497,15 @@ int cfunc_update(lua_State *restrict L)
 
 /* Look up the ruleset[name] hook. If it is a function, leave it alone at
  * stack slot 1 (clearing everything else) and return true; otherwise clear
- * the stack and return false. */
+ * the stack and return false. A ruleset global that is not a table has no
+ * hooks rather than being an error: ruleset_isvalid() gates it at load time
+ * only, and ruleset Lua may replace it at any point afterwards. */
 static bool get_ruleset_hook(lua_State *restrict L, const char *name)
 {
-	(void)lua_getglobal(L, "ruleset");
+	if (lua_getglobal(L, "ruleset") != LUA_TTABLE) {
+		lua_settop(L, 0);
+		return false;
+	}
 	(void)lua_getfield(L, -1, name);
 	if (!lua_isfunction(L, -1)) {
 		lua_settop(L, 0);

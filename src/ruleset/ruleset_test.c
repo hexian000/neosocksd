@@ -25,6 +25,7 @@
 #include "server.h"
 
 #include "io/stream.h"
+#include "meta/arraysize.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -783,6 +784,74 @@ T_DECLARE_CASE(ruleset_healthy_reports_unhealthy_string_and_null_when_ok)
 	free_ruleset(loop, r);
 }
 
+/* ruleset_isvalid() gates the ruleset global at load time only, so ruleset Lua
+ * can replace it with anything afterwards. Every hook must then read as absent
+ * rather than raising "attempt to index a nil value": stats reports no ruleset
+ * stats (an empty string, where NULL would mean the lookup failed), healthy
+ * stays healthy (NULL, where a string would mark the service down), and the
+ * ticker keeps running quietly. */
+T_DECLARE_CASE(cfunc_hooks_are_absent_when_ruleset_global_is_not_a_table)
+{
+	static const char update_chunk[] =
+		"local name = ... "
+		"  local ruleset = {} "
+		"  function ruleset.resolve(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.route(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.route6(request, username, password) "
+		"    return request "
+		"  end "
+		"  function ruleset.stats(dt, query) return 'live' end "
+		"  function ruleset.metrics() return 'custom_metric 42\\n' end "
+		"  function ruleset.healthy() return 'down: db' end "
+		"  function ruleset.tick() _G.tick_count = (_G.tick_count or 0) + 1 end "
+		"  return ruleset "
+		"";
+	static const char *const replacements[] = {
+		"_G.ruleset = nil",
+		"_G.ruleset = 42",
+		"_G.ruleset = 'not a table'",
+	};
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct string_stream stream;
+	size_t len = 0;
+	const char *s;
+
+	for (size_t i = 0; i < ARRAY_SIZE(replacements); i++) {
+		T_EXPECT(ruleset_update(
+			r, NULL, NULL,
+			string_stream_open(&stream, update_chunk)));
+		/* the hooks answer while the global is still the loaded table */
+		T_EXPECT(ruleset_isvalid(r));
+		s = ruleset_healthy(r, &len);
+		T_CHECK(s != NULL);
+		T_EXPECT_MEMEQ(s, "down: db", len);
+
+		T_EXPECT(ruleset_invoke(
+			r, string_stream_open(&stream, replacements[i])));
+		T_EXPECT(!ruleset_isvalid(r));
+
+		s = ruleset_stats(r, 1.5, "alpha", &len);
+		T_CHECK(s != NULL);
+		T_EXPECT_EQ(len, (size_t)0);
+		T_EXPECT_EQ(ruleset_metrics(r, &len), NULL);
+		T_EXPECT_EQ(ruleset_healthy(r, &len), NULL);
+		/* the tick fires without raising, and runs no hook */
+		ev_invoke(loop, &r->w_ticker, EV_TIMER);
+		ev_invoke(loop, &r->w_idle, EV_IDLE);
+		T_EXPECT(ruleset_invoke(
+			r, string_stream_open(
+				   &stream, "assert(_G.tick_count == nil)")));
+	}
+
+	free_ruleset(loop, r);
+}
+
 T_DECLARE_CASE(ruleset_cancel_pending_request_clears_callback)
 {
 	static const char update_chunk[] =
@@ -961,6 +1030,21 @@ T_DECLARE_CASE(ruleset_load_missing_file_returns_false)
 	T_EXPECT(strstr(ruleset_geterror(r, NULL), "cannot open") != NULL);
 	T_EXPECT(!ruleset_loadconfig(r, "/nonexistent/ruleset/config.lua"));
 	T_EXPECT(strstr(ruleset_geterror(r, NULL), "cannot open") != NULL);
+
+	free_ruleset(loop, r);
+}
+
+T_DECLARE_CASE(ruleset_new_clamps_oversized_memlimit)
+{
+	struct config conf = make_conf();
+	/* the largest MiB value whose KiB form fits the int_least32_t field */
+	conf.memlimit = (INT_LEAST32_MAX >> 10) + 1;
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+
+	T_EXPECT_EQ(
+		r->config.memlimit_kb,
+		(int_least32_t)((INT_LEAST32_MAX >> 10) << 10));
 
 	free_ruleset(loop, r);
 }
@@ -1482,14 +1566,27 @@ T_DECLARE_CASE(cfunc_loadconfig_rejects_memlimit_overflow)
 	struct ruleset *const r = new_ruleset(&loop, &conf);
 	struct string_stream stream;
 
-	/* memlimit is MiB; a value above INT_MAX>>10 would overflow the KiB
-	 * field and must be rejected */
+	/* memlimit is MiB; a value above INT_LEAST32_MAX>>10 would overflow
+	 * the int_least32_t KiB field and must be rejected */
+	char chunk[64];
+	(void)snprintf(
+		chunk, sizeof(chunk), "return { memlimit = %jd }",
+		(intmax_t)(INT_LEAST32_MAX >> 10) + 1);
 	T_EXPECT(!ruleset_pcall(
-		r, cfunc_loadconfig, 1, 0,
-		string_stream_open(&stream, "return { memlimit = 9999999 }")));
+		r, cfunc_loadconfig, 1, 0, string_stream_open(&stream, chunk)));
 	T_EXPECT(
 		strstr(ruleset_geterror(r, NULL), "memlimit too large") !=
 		NULL);
+
+	/* the boundary value itself is accepted */
+	(void)snprintf(
+		chunk, sizeof(chunk), "return { memlimit = %jd }",
+		(intmax_t)(INT_LEAST32_MAX >> 10));
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_loadconfig, 1, 0, string_stream_open(&stream, chunk)));
+	T_EXPECT_EQ(
+		r->config.memlimit_kb,
+		(int_least32_t)((INT_LEAST32_MAX >> 10) << 10));
 
 	free_ruleset(loop, r);
 	free(conf.strings);
@@ -1582,6 +1679,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_geterror_variants),
 	T_CASE(ruleset_isvalid_tracks_loaded_table),
 	T_CASE(ruleset_load_missing_file_returns_false),
+	T_CASE(ruleset_new_clamps_oversized_memlimit),
 	T_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed),
 	T_CASE(cfunc_metrics_returns_string_when_defined_and_nil_when_absent),
 	T_CASE(cfunc_update_replaces_loaded_module),
@@ -1599,6 +1697,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(cfunc_loadconfig_rejects_wrong_type_ruleset),
 	T_CASE(cfunc_loadconfig_rejects_memlimit_overflow),
 	T_CASE(cfunc_healthy_returns_hook_result_and_nil_when_absent),
+	T_CASE(cfunc_hooks_are_absent_when_ruleset_global_is_not_a_table),
 	T_CASE(cfunc_check_memlimit_collects_when_over_limit),
 	T_SUITE_END,
 };

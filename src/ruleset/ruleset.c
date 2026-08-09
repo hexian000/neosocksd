@@ -32,7 +32,6 @@
 #include <lua.h>
 #include <lualib.h>
 
-#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -205,11 +204,11 @@ struct ruleset *ruleset_new(
 	r->loop = loop;
 	r->vmstats = (struct ruleset_vmstats){ 0 };
 	int memlimit_mb = conf->memlimit;
-	if (memlimit_mb > (INT_MAX >> 10)) {
+	if (memlimit_mb > (INT_LEAST32_MAX >> 10)) {
 		/* clamp to avoid signed overflow in the MiB->KiB shift: conf.c and
 		 * cfunc_loadconfig reject such values, but conf_loadfromtable's
 		 * generic validator does not, so a poisoned conf could reach here */
-		memlimit_mb = INT_MAX >> 10;
+		memlimit_mb = INT_LEAST32_MAX >> 10;
 	}
 	r->config.memlimit_kb =
 		(memlimit_mb > 0) ? (int_least32_t)(memlimit_mb << 10) : 0;
@@ -486,7 +485,7 @@ void ruleset_vmstats(
 }
 
 const char *ruleset_stats(
-	struct ruleset *restrict r, const double dt, const char *restrict query,
+	struct ruleset *restrict r, double dt, const char *restrict query,
 	size_t *len)
 {
 	lua_State *restrict const L = r->L;
