@@ -4,6 +4,7 @@
 #ifndef UTILS_BUFFER_H
 #define UTILS_BUFFER_H
 
+#include "meta/format.h"
 #include "meta/minmax.h"
 
 #include <assert.h>
@@ -93,13 +94,15 @@ buf_append(struct buffer *restrict buf, const void *restrict data, size_t n)
  * (excluding NUL).
  */
 int buf_vappendf(
-	struct buffer *restrict buf, const char *restrict format, va_list args);
+	struct buffer *restrict buf, const char *restrict format, va_list args)
+	FORMAT_PRINTF(2, 0);
 
 /**
  * @internal
  * Convenience wrapper over buf_vappendf with variadic arguments.
  */
-int buf_appendf(struct buffer *restrict buf, const char *restrict format, ...);
+int buf_appendf(struct buffer *restrict buf, const char *restrict format, ...)
+	FORMAT_PRINTF(2, 3);
 
 /* heap allocated buffer */
 /**
@@ -174,13 +177,15 @@ vbuf_append(struct vbuffer *restrict vbuf, const void *restrict data, size_t n);
  * append is skipped.
  */
 int vbuf_vappendf(
-	struct vbuffer **pvbuf, const char *restrict format, va_list args);
+	struct vbuffer **pvbuf, const char *restrict format, va_list args)
+	FORMAT_PRINTF(2, 0);
 
 /**
  * @internal
  * Convenience wrapper over vbuf_vappendf with variadic arguments.
  */
-int vbuf_appendf(struct vbuffer **pvbuf, const char *restrict format, ...);
+int vbuf_appendf(struct vbuffer **pvbuf, const char *restrict format, ...)
+	FORMAT_PRINTF(2, 3);
 
 /**
  * @defgroup BUF

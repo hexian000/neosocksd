@@ -209,7 +209,7 @@ void testing_bench_run(
 				if (active >= time_ns) {
 					break;
 				}
-				if (n > (UINT64_MAX >> 1)) {
+				if (n > (UINT_FAST64_MAX >> 1)) {
 					/* Doubling would overflow before reaching the
 					 * time target.  Completing 2^63 iterations in
 					 * under `time_ns` is physically impossible, so the
@@ -331,10 +331,13 @@ parse_benchtime(const char *s, int_fast64_t *time_ns, uint_fast64_t *fixed_n)
 	}
 	if (strcmp(end, "x") == 0) {
 		/* A fixed count must be a whole number >= 1 and representable;
-		 * reject a fractional (<1) or out-of-range value instead of
-		 * silently truncating it to 0 (which falls back to timed mode).
-		 * The upper bound keeps the cast within uint_fast64_t. */
-		if (!(v >= 1.0 && v < 0x1p64)) {
+		 * reject a fractional or out-of-range value instead of
+		 * silently truncating it.  The upper bound keeps the cast
+		 * within uint_fast64_t; the round-trip compare rejects a
+		 * fractional count, and is exact wherever a fraction can
+		 * exist (any double >= 2^53 is already whole). */
+		if (!(v >= 1.0 && v < 0x1p64) ||
+		    (double)(uint_fast64_t)v != v) {
 			return false;
 		}
 		*fixed_n = (uint_fast64_t)v;

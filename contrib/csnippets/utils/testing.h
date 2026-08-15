@@ -233,11 +233,11 @@ struct testing_bench {
 /*
  * T_DECLARE_CASE(name)
  *   Begins the definition of a static test function named `name`.
- *   Expands to: static void _testcase_name_(struct testing_ctx *_t_)
+ *   Expands to: static void testcase_name_(struct testing_ctx *_t_)
  *   The body follows immediately as a braced block.
  */
 #define T_DECLARE_CASE(name_)                                                  \
-	static void _testcase_##name_##_(struct testing_ctx *_t_)
+	static void testcase_##name_##_(struct testing_ctx *_t_)
 
 /*
  * T_DECLARE_SUBCASE(name, type arg, ...)
@@ -245,11 +245,10 @@ struct testing_bench {
  *   parameter.  Call it with T_CALL_SUBCASE.  All testing macros are usable
  *   inside the body.
  *   Expands to:
- *     static void _testsubcase_name_(struct testing_ctx *_t_, type arg, ...)
+ *     static void testsubcase_name_(struct testing_ctx *_t_, type arg, ...)
  */
 #define T_DECLARE_SUBCASE(name_, ...)                                          \
-	static void _testsubcase_##name_##_(                                   \
-		struct testing_ctx *_t_, __VA_ARGS__)
+	static void testsubcase_##name_##_(struct testing_ctx *_t_, __VA_ARGS__)
 
 /*
  * T_CALL_SUBCASE(name, arg, ...)
@@ -257,7 +256,7 @@ struct testing_bench {
  *   the implicit `_t_` from the enclosing function automatically.
  *   Must be called from a function with `_t_` in scope.
  */
-#define T_CALL_SUBCASE(name_, ...) (_testsubcase_##name_##_(_t_, __VA_ARGS__))
+#define T_CALL_SUBCASE(name_, ...) (testsubcase_##name_##_(_t_, __VA_ARGS__))
 
 /*
  * T_RUN_CASE(ctx, name)
@@ -273,7 +272,7 @@ struct testing_bench {
 		(void)fprintf((ctx_).out, "=== RUN   %s\n", #name_);           \
 		(void)fflush((ctx_).out);                                      \
 		if (setjmp((ctx_).case_jmp) == 0) {                            \
-			_testcase_##name_##_(&(ctx_));                         \
+			testcase_##name_##_(&(ctx_));                          \
 		}                                                              \
 		if ((ctx_).case_failed) {                                      \
 			(ctx_).failed++;                                       \
@@ -303,11 +302,11 @@ struct testing_bench {
 /*
  * T_DECLARE_BENCH(name)
  *   Begins the definition of a static benchmark function named `name`.
- *   Expands to: static void _benchcase_name_(struct testing_bench *_b_)
+ *   Expands to: static void benchcase_name_(struct testing_bench *_b_)
  *   The body must run the benchmarked operation exactly _b_->N times.
  */
 #define T_DECLARE_BENCH(name_)                                                 \
-	static void _benchcase_##name_##_(struct testing_bench *_b_)
+	static void benchcase_##name_##_(struct testing_bench *_b_)
 
 /*
  * T_BENCH_LOOP()
@@ -583,12 +582,12 @@ struct testing_suite {
 #define T_CASE(name_)                                                          \
 	{                                                                      \
 		.name = #name_, .kind = TESTING_CASE,                          \
-		.fn = {.test = _testcase_##name_##_ }                          \
+		.fn = {.test = testcase_##name_##_ }                           \
 	}
 #define T_BENCH(name_)                                                         \
 	{                                                                      \
 		.name = #name_, .kind = TESTING_BENCH,                         \
-		.fn = {.bench = _benchcase_##name_##_ }                        \
+		.fn = {.bench = benchcase_##name_##_ }                         \
 	}
 #define T_SUITE_END { 0 }
 
@@ -627,7 +626,7 @@ void testing_bench_run(
  *   former inline form it does not require measure.h to be included first.
  */
 #define T_RUN_BENCH(ctx_, name_)                                               \
-	(testing_bench_run(&(ctx_), #name_, _benchcase_##name_##_))
+	(testing_bench_run(&(ctx_), #name_, benchcase_##name_##_))
 
 /* -------------------------------------------------------------------------
  * Logging macros - print a message to out with file and line number.

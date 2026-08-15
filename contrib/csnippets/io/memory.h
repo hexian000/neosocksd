@@ -4,6 +4,7 @@
 #ifndef IO_MEMORY_H
 #define IO_MEMORY_H
 
+#include "meta/format.h"
 #include "stream.h"
 
 #include <stddef.h>
@@ -69,7 +70,8 @@ struct io_stream *io_heapwriter(struct vbuffer **pvbuf);
  * is never silently truncated: the only failure is the allocator refusing to
  * grow it (or `*pvbuf` already being NULL), which returns an error.
  */
-int io_heapprintf(struct io_stream *s, const char *format, ...);
+int io_heapprintf(struct io_stream *s, const char *format, ...)
+	FORMAT_PRINTF(2, 3);
 
 /**
  * @brief Buffered stream reader.
@@ -110,7 +112,8 @@ struct io_stream *io_bufwriter(struct io_stream *base, size_t bufsize);
  * @details Any invocation writes all buffered data to the base stream.
  * The printed string is truncated to (bufsize - 1) silently.
  */
-int io_bufprintf(struct io_stream *s, const char *format, ...);
+int io_bufprintf(struct io_stream *s, const char *format, ...)
+	FORMAT_PRINTF(2, 3);
 
 /**
  * @brief Metered stream.

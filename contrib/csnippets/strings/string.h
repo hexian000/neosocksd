@@ -4,6 +4,8 @@
 #ifndef STRINGS_STRING_H
 #define STRINGS_STRING_H
 
+#include "meta/format.h"
+
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -265,14 +267,15 @@ char *u8strsep(char **restrict s, const char *restrict set);
  */
 int u8vsnprintf(
 	char *restrict buf, size_t maxlen, const char *restrict format,
-	va_list args);
+	va_list args) FORMAT_PRINTF(3, 0);
 
 /**
  * @brief Format a string like snprintf(3), independent of libc and locale.
  * @see u8vsnprintf
  */
 int u8snprintf(
-	char *restrict buf, size_t maxlen, const char *restrict format, ...);
+	char *restrict buf, size_t maxlen, const char *restrict format, ...)
+	FORMAT_PRINTF(3, 4);
 
 /**
  * @brief Parse a string like vsscanf(3), independent of libc and locale.

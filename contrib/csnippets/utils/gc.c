@@ -3,7 +3,7 @@
 
 #include "gc.h"
 
-#include "utils/debug.h"
+#include "debug.h"
 
 #include <stdint.h>
 #include <stdlib.h>

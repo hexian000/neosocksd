@@ -4,6 +4,8 @@
 #ifndef UTILS_SLOG_H
 #define UTILS_SLOG_H
 
+#include "meta/format.h"
+
 #include <errno.h>
 #include <stdarg.h>
 #if SLOG_MT_SAFE
@@ -114,11 +116,11 @@ struct slog_extra {
 /** @brief Log a message with a va_list of arguments. extra may be NULL. */
 void slog_vprintf(
 	int level, const char *file, int line, const struct slog_extra *extra,
-	const char *format, va_list args);
+	const char *format, va_list args) FORMAT_PRINTF(5, 0);
 /** @brief Log a message with variadic arguments. extra may be NULL. */
 void slog_printf(
 	int level, const char *file, int line, const struct slog_extra *extra,
-	const char *format, ...);
+	const char *format, ...) FORMAT_PRINTF(5, 6);
 
 /**
  * @brief Async-signal-safe emergency log line, for use from a crash signal
@@ -131,7 +133,8 @@ void slog_printf(
  * emitted. Unlike the LOG* macros it does not test the log level; the caller
  * decides whether to emit.
  */
-void slog_panicf(int level, const char *file, int line, const char *format, ...);
+void slog_panicf(int level, const char *file, int line, const char *format, ...)
+	FORMAT_PRINTF(4, 5);
 
 /* LOG_F: Internal macro to log a message unconditionally. This is not a part of supported API. */
 #define LOG_F(level, format, ...)                                              \

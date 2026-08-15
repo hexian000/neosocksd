@@ -3,11 +3,11 @@
 
 #include "debug.h"
 
+#include "buffer.h"
+#include "ctype_ascii.h"
 #include "io/stream.h"
 #include "strings/string.h"
 #include "strings/utf8.h"
-#include "utils/buffer.h"
-#include "utils/ctype_ascii.h"
 
 #if WITH_LIBBACKTRACE
 #include <backtrace.h>
