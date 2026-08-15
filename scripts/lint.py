@@ -75,27 +75,51 @@ def _make_filter(include_tests: bool, include_generated: bool):
 
 
 # ---------------------------------------------------------------------------
+# Compilation database
+# ---------------------------------------------------------------------------
+
+def _load_db(build_dir: Path) -> list[dict]:
+    """Load compile_commands.json from *build_dir*, exiting when it is
+    missing.  The database drives everything below — the basename map, the
+    accepted-source list and the pruned lint database — so it is loaded once
+    and handed to those consumers."""
+    db_path = build_dir / "compile_commands.json"
+    if not db_path.exists():
+        sys.exit(f"error: {db_path} not found — run cmake first")
+    return json.loads(db_path.read_text(encoding="utf-8"))
+
+
+def _root_relative(fpath: str) -> str | None:
+    """Return *fpath* relative to ROOT after resolving symlinks, or None when
+    it does not lie under ROOT.
+
+    Resolution matters: the database records whatever spelling cmake was
+    configured with, and a checkout reachable through a symlink (two mount
+    aliases of one tree) may be recorded under the other alias.  Comparing
+    lexically would classify every such path as external and silently drop
+    its findings."""
+    try:
+        return str(Path(fpath).resolve().relative_to(ROOT))
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Build a basename → canonical-relative-path lookup from compile_commands.json
 # so that prefix-mapped paths like "dispatch.c" are shown as "src/mux/dispatch.c".
 # ---------------------------------------------------------------------------
 
-def _build_name_map(build_dir: Path, accept) -> dict[str, str]:
-    db_path = build_dir / "compile_commands.json"
-    if not db_path.exists():
-        sys.exit(f"error: {db_path} not found — run cmake first")
-    db: list[dict] = json.loads(db_path.read_text(encoding="utf-8"))
+def _build_name_map(db: list[dict], accept) -> dict[str, str]:
     mapping: dict[str, str] = {}
     ambiguous: set[str] = set()
     for entry in db:
         fpath = entry["file"]
         if not accept(fpath):
             continue
-        pobj = Path(fpath)
-        try:
-            rel = str(pobj.relative_to(ROOT))
-        except ValueError:
-            rel = str(pobj)
-        name = pobj.name
+        rel = _root_relative(fpath)
+        if rel is None:
+            rel = fpath
+        name = Path(fpath).name
         if name in mapping and mapping[name] != rel:
             ambiguous.add(name)
         mapping[name] = rel  # basename → "src/mux/dispatch.c"
@@ -107,14 +131,10 @@ def _build_name_map(build_dir: Path, accept) -> dict[str, str]:
     return mapping
 
 
-def _accepted_sources(build_dir: Path, accept) -> list[str]:
+def _accepted_sources(db: list[dict], accept) -> list[str]:
     """Return the compile_commands.json source files that pass the production
     filter, deduplicated and in database order.  These are passed to
     clang-tidy so only production sources are analyzed."""
-    db_path = build_dir / "compile_commands.json"
-    if not db_path.exists():
-        sys.exit(f"error: {db_path} not found — run cmake first")
-    db: list[dict] = json.loads(db_path.read_text(encoding="utf-8"))
     sources: list[str] = []
     seen: set[str] = set()
     for entry in db:
@@ -139,7 +159,7 @@ def _entry_args(entry: dict) -> list[str]:
     return shlex.split(entry.get("command", ""))
 
 
-def _prune_db(build_dir: Path, sources: list[str]) -> Path:
+def _prune_db(build_dir: Path, db: list[dict], sources: list[str]) -> Path:
     """Write a compilation database holding exactly one command per accepted
     source and return the directory containing it.
 
@@ -152,10 +172,6 @@ def _prune_db(build_dir: Path, sources: list[str]) -> Path:
     configure other modules.  Keeping one command per source cuts the run by
     an order of magnitude and leaves the report unchanged.
     """
-    db_path = build_dir / "compile_commands.json"
-    if not db_path.exists():
-        sys.exit(f"error: {db_path} not found — run cmake first")
-    db: list[dict] = json.loads(db_path.read_text(encoding="utf-8"))
     wanted = set(sources)
     best: dict[str, tuple[int, dict]] = {}
     for entry in db:
@@ -288,10 +304,8 @@ def _parse(raw: str, name_map: dict[str, str], accept) -> list[dict]:
         # Resolve the (possibly prefix-mapped) path to a canonical relative path.
         pobj = Path(fpath)
         if pobj.is_absolute():
-            try:
-                relpath = str(pobj.relative_to(ROOT))
-            except ValueError:
-                relpath = str(pobj)
+            rel = _root_relative(fpath)
+            relpath = rel if rel is not None else fpath
         else:
             # e.g. "dispatch.c" or "mux/dispatch.c" — look up by basename
             relpath = name_map.get(pobj.name, fpath)
@@ -1046,14 +1060,24 @@ def main() -> int:
     check_label = args.check or "all checks"
 
     accept = _make_filter(args.tests, args.generated)
-    name_map = _build_name_map(build_dir, accept)
-    sources = _accepted_sources(build_dir, accept)
+    db = _load_db(build_dir)
+    name_map = _build_name_map(db, accept)
+    sources = _accepted_sources(db, accept)
     if not sources:
         # No accepted sources: passing zero positional paths would make
         # clang-tidy analyze the entire database, so stop here instead.
         sys.exit("error: no sources to lint after applying the source filter")
+    if all(_root_relative(src) is None for src in sources):
+        # The report keeps only findings that resolve under ROOT, so a
+        # database whose sources all lie elsewhere can produce nothing but a
+        # bogus clean report; refuse to write one.
+        sys.exit(
+            f"error: no source in {build_dir / 'compile_commands.json'} "
+            f"resolves under {ROOT} — the database describes a different "
+            "tree; run from the checkout it was configured for, or re-run "
+            "cmake here")
 
-    lint_db = _prune_db(build_dir, sources)
+    lint_db = _prune_db(build_dir, db, sources)
     print(f"Linting [{check_label}] ...", file=sys.stderr, flush=True)
     t0 = time.monotonic()
     raw = _run(lint_db, args.check, args.jobs, sources)
