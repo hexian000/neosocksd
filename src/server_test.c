@@ -66,6 +66,17 @@ void socket_set_transparent(const int fd, const bool tproxy)
 	(void)tproxy;
 }
 
+#if WITH_TCP_KEEPALIVE_PARAMS
+void socket_set_keepalive(
+	const int fd, const int idle, const int intvl, const int cnt)
+{
+	(void)fd;
+	(void)idle;
+	(void)intvl;
+	(void)cnt;
+}
+#endif /* WITH_TCP_KEEPALIVE_PARAMS */
+
 struct dialreq *
 dialreq_parse(const char *restrict addr, const char *restrict csv)
 {

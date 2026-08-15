@@ -126,6 +126,13 @@ static void accept_cb(
 		/* best-effort tuning; failure does not affect correctness */
 		(void)socket_set_tcp(
 			fd, conf->tcp_nodelay, conf->tcp_keepalive);
+#if WITH_TCP_KEEPALIVE_PARAMS
+		if (conf->tcp_keepalive) {
+			socket_set_keepalive(
+				fd, conf->tcp_keepidle, conf->tcp_keepintvl,
+				conf->tcp_keepcnt);
+		}
+#endif
 		(void)socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 
 		l->stats.num_serve++;
@@ -190,6 +197,13 @@ static bool add_listener(
 #endif
 	/* best-effort tuning; failure does not affect correctness */
 	(void)socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
+#if WITH_TCP_KEEPALIVE_PARAMS
+	if (conf->tcp_keepalive) {
+		socket_set_keepalive(
+			fd, conf->tcp_keepidle, conf->tcp_keepintvl,
+			conf->tcp_keepcnt);
+	}
+#endif
 	(void)socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
 
 	if (LOGLEVEL(NOTICE)) {
