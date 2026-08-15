@@ -7,8 +7,10 @@
 #include "utils/debug.h"
 #include "utils/slog.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -18,15 +20,19 @@ struct sigmap_entry {
 	const char *str;
 };
 
-/* read by sighandler_crash() (inside a signal handler) and read/written by
- * crashhandler_install()/crashhandler_uninstall() (ordinary thread context);
- * left unsynchronized by design, see the caller contract in signal.h -- a
- * signal handler cannot safely take a lock, and delivery of a guarded
- * signal races the OS scheduler, not any userspace acquire/release. */
+/* Crash-signal bookkeeping, shared between sighandler_crash() (signal handler
+ * context, possibly on several threads at once) and crashhandler_install()/
+ * crashhandler_uninstall() (ordinary thread context). Per signal.h's caller
+ * contract, install/uninstall never run concurrently with signal delivery, so
+ * oact is written only outside a handler and read-only within one -- concurrent
+ * handlers for one signal thus only read it, never a data race. installed is the
+ * one field a handler writes, and two threads can fault on the same guarded
+ * signal at once (sa_mask blocks only the current thread), so it is atomic; an
+ * always-lock-free atomic keeps that access async-signal-safe. */
 static struct {
 	struct sigaction oact;
 	int signo;
-	bool installed;
+	atomic_bool installed;
 } sighandlers[] = {
 	{ { .sa_handler = SIG_DFL }, SIGQUIT, false },
 	{ { .sa_handler = SIG_DFL }, SIGILL, false },
@@ -38,6 +44,11 @@ static struct {
 	{ { .sa_handler = SIG_DFL }, SIGSYS, false },
 };
 #define NUM_SIGHANDLERS ARRAY_SIZE(sighandlers)
+
+static_assert(
+	ATOMIC_BOOL_LOCK_FREE == 2,
+	"sighandlers[].installed must be always lock-free so the crash "
+	"handler's access to it stays async-signal-safe");
 
 /* AddressSanitizer instrumentation inflates stack frames several-fold, so the
  * crash handlers' alternate stack must be sized larger when built with it, or
@@ -108,6 +119,21 @@ static void crash_altstack_teardown(void)
 	if (crash_altstack == NULL) {
 		return;
 	}
+	/* the allocation is registered as an alternate signal stack on the
+	 * thread that installed it, and sigaltstack is per-thread, so free it
+	 * only once this thread no longer has it registered. If the active
+	 * alternate stack here is not ours -- uninstall ran on a different
+	 * thread than install, or a consumer swapped stacks -- leave the
+	 * allocation in place: freeing memory still registered elsewhere would
+	 * leave a later SA_ONSTACK delivery running on freed memory. */
+	stack_t cur;
+	if (sigaltstack(NULL, &cur) != 0) {
+		LOG_PERROR("sigaltstack");
+		return;
+	}
+	if ((cur.ss_flags & SS_DISABLE) != 0 || cur.ss_sp != crash_altstack) {
+		return;
+	}
 	/* restore whatever alternate stack was effective before install rather
 	 * than forcing SS_DISABLE, so a consumer's own SA_ONSTACK stack is left
 	 * intact. A previously-disabled stack reports an unspecified
@@ -119,7 +145,11 @@ static void crash_altstack_teardown(void)
 				.ss_flags = SS_DISABLE };
 	}
 	if (sigaltstack(&ss, NULL) != 0) {
+		/* POSIX permits EPERM while the stack is active; the allocation
+		 * stays registered, so keep it rather than free memory a later
+		 * delivery would still run on. */
 		LOG_PERROR("sigaltstack");
+		return;
 	}
 	free(crash_altstack);
 	crash_altstack = NULL;
@@ -176,11 +206,14 @@ static void sighandler_crash(const int signo)
 	}
 	if (idx < NUM_SIGHANDLERS) {
 		/* the original disposition is live again; a later
-		 * crashhandler_install() must re-capture and re-arm this
-		 * signal instead of skipping it as still installed. */
-		sighandlers[idx].installed = false;
-		sighandlers[idx].oact =
-			(struct sigaction){ .sa_handler = SIG_DFL };
+		 * crashhandler_install() must re-capture and re-arm this signal
+		 * instead of skipping it as still installed. Only installed is
+		 * touched, atomically, so a concurrent handler for the same
+		 * signal races on nothing: oact is left untouched (install()
+		 * re-captures it whenever installed is false). */
+		atomic_store_explicit(
+			&sighandlers[idx].installed, false,
+			memory_order_relaxed);
 	}
 	errno = saved_errno;
 	if (raise(signo) != 0) {
@@ -212,7 +245,8 @@ void crashhandler_install(void)
 	 * intended backstop. */
 	(void)sigfillset(&act.sa_mask);
 	for (size_t i = 0; i < NUM_SIGHANDLERS; i++) {
-		if (sighandlers[i].installed) {
+		if (atomic_load_explicit(
+			    &sighandlers[i].installed, memory_order_relaxed)) {
 			/* already captured; re-installing would overwrite
 			 * oact with the crash handler itself */
 			continue;
@@ -223,14 +257,16 @@ void crashhandler_install(void)
 			LOG_PERROR("sigaction");
 			continue;
 		}
-		sighandlers[i].installed = true;
+		atomic_store_explicit(
+			&sighandlers[i].installed, true, memory_order_relaxed);
 	}
 }
 
 void crashhandler_uninstall(void)
 {
 	for (size_t i = 0; i < NUM_SIGHANDLERS; i++) {
-		if (!sighandlers[i].installed) {
+		if (!atomic_load_explicit(
+			    &sighandlers[i].installed, memory_order_relaxed)) {
 			/* never captured (install skipped or failed for this
 			 * signal); nothing of ours to restore */
 			continue;
@@ -241,7 +277,8 @@ void crashhandler_uninstall(void)
 			LOG_PERROR("sigaction");
 			continue;
 		}
-		sighandlers[i].installed = false;
+		atomic_store_explicit(
+			&sighandlers[i].installed, false, memory_order_relaxed);
 		sighandlers[i].oact =
 			(struct sigaction){ .sa_handler = SIG_DFL };
 	}

@@ -96,6 +96,13 @@ int io_stream_copy(
 	struct io_stream *restrict dst, struct io_stream *restrict src,
 	void *restrict buf, const size_t bufsize)
 {
+	if (bufsize == 0) {
+		/* Both paths use bufsize as the per-iteration read cap, so a
+		 * zero-length buffer reads nothing yet would report a
+		 * successful copy of an unconsumed source. Reject it. */
+		return -1;
+	}
+
 	if (src->vftable->direct_read != NULL) {
 		/* The source can hand out its own bytes, so write them from
 		 * there. Going through io_stream_read instead would stage them

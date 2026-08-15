@@ -88,7 +88,8 @@ int io_stream_close(struct io_stream *s);
  * @param[in] dst The destination stream.
  * @param[in] src The source stream.
  * @param[in] buf Buffer used for copy.
- * @param[in] bufsize Size of buffer in bytes.
+ * @param[in] bufsize Size of buffer in bytes. Must be nonzero; a zero size
+ * caps every read at zero and is rejected with an error.
  * @return Error code, 0 for OK.
  */
 int io_stream_copy(

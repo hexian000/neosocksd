@@ -62,8 +62,14 @@ void drop_privileges(const char *const identity)
 	const struct passwd *pw = NULL;
 	if (user != NULL) {
 		char *endptr;
+		/* strtoimax saturates an out-of-range value to INTMAX_MAX/MIN and
+		 * sets errno = ERANGE; clear errno first, then reject that
+		 * saturation so an overflowing id cannot pass INTCAST_CHECK on a
+		 * target whose id type is wide enough to hold the saturated value. */
+		errno = 0;
 		const intmax_t uidvalue = strtoimax(user, &endptr, 10);
-		if (endptr == user || *endptr ||
+		const bool range_error = errno == ERANGE;
+		if (endptr == user || *endptr || range_error ||
 		    !INTCAST_CHECK(uid, uidvalue)) {
 			/* Search the user database for the user name. POSIX
 			 * marks a miss with NULL and errno untouched, and a
@@ -95,8 +101,12 @@ void drop_privileges(const char *const identity)
 
 	if (group != NULL) {
 		char *endptr;
+		/* clear errno so an ERANGE overflow can be rejected below, matching
+		 * the user path above */
+		errno = 0;
 		const intmax_t gidvalue = strtoimax(group, &endptr, 10);
-		if (endptr == group || *endptr ||
+		const bool range_error = errno == ERANGE;
+		if (endptr == group || *endptr || range_error ||
 		    !INTCAST_CHECK(gid, gidvalue)) {
 			/* search group database for group name */
 			errno = 0;
@@ -299,6 +309,10 @@ void daemonize(
 			(void)close(fd[0]);
 		}
 	}
+	/* Everything below runs in a fork child and is not async-signal-safe: it
+	 * logs, and may reopen the standard streams or query the account
+	 * database. daemon.h requires a single-threaded caller, which is what
+	 * makes those operations sound here. */
 	/* In the child, call setsid(). */
 	if (setsid() < 0) {
 		const int err = errno;

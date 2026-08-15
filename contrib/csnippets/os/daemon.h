@@ -43,6 +43,12 @@ void drop_privileges(const char *identity);
  * @param identity The user and group to drop privileges to, or NULL.
  * @param nochdir If true, do not change the current directory to /.
  * @param noclose If true, do not redirect stdin, stdout, stderr to /dev/null.
+ * @warning Must be called before the process creates any thread: fork() carries
+ *     only the calling thread into the child, and POSIX confines that child to
+ *     async-signal-safe operations until it execs, which this never does. The
+ *     post-fork path logs, and may reopen the standard streams or query the
+ *     account database, so a lock a vanished thread still owns can hang the
+ *     daemon process instead of starting it.
  * @note Performs the classic double-fork idiom (fork, setsid, fork
  *     again), so the final daemon process is never a session leader and
  *     cannot inadvertently reacquire a controlling terminal.

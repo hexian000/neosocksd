@@ -20,6 +20,10 @@
  * before handing the string over. The escaping direction never produces the
  * form -- it encodes `'%'` as `"%25"` -- so a value that made the round trip
  * through this module is unaffected.
+ *
+ * The serializers return the would-be length excluding the NUL, like snprintf;
+ * a required length that cannot be represented by the `int` return (greater
+ * than `INT_MAX`) yields a negative result.
  * @{
  */
 

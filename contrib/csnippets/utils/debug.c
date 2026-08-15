@@ -30,6 +30,7 @@
 #endif
 
 #include <assert.h>
+#include <limits.h>
 #if DEBUG_FD_RAW_WRITE
 #include <errno.h>
 #endif
@@ -195,14 +196,19 @@ void slog_extra_bin(struct io_stream *restrict s, void *restrict data)
 			buf.len = 0;                                           \
 		}                                                              \
 	} while (0)
-	for (size_t i = 0; i < n; i += binwrap) {
+	for (size_t i = 0; i < n;) {
+		/* i < n, so remaining never underflows; the row spans
+		 * min(binwrap, remaining) real bytes, and every j < rowlen keeps
+		 * i + j within [i, n), so no index can wrap past SIZE_MAX */
+		const size_t remaining = n - i;
+		const size_t rowlen = remaining < binwrap ? remaining : binwrap;
 		/* INDENT + "0x" + up to two hex digits per pointer byte + ": " */
 		BIN_FLUSH_IF(sizeof(INDENT) + 2 + 2 * sizeof(void *) + 2);
 		BUF_APPENDF(buf, INDENT "%p: ", (void *)(b + i));
 		for (size_t j = 0; j < binwrap; j++) {
 			/* "%02hhX " is 3 chars, +1 for buf_appendf's in-place NUL */
 			BIN_FLUSH_IF(4);
-			if ((i + j) < n) {
+			if (j < rowlen) {
 				BUF_APPENDF(buf, "%02hhX ", b[i + j]);
 			} else {
 				BUF_APPENDSTR(buf, "   ");
@@ -212,7 +218,7 @@ void slog_extra_bin(struct io_stream *restrict s, void *restrict data)
 		BUF_APPENDSTR(buf, " ");
 		for (size_t j = 0; j < binwrap; j++) {
 			unsigned char ch = ' ';
-			if ((i + j) < n) {
+			if (j < rowlen) {
 				ch = b[i + j];
 				if (!isascii(ch) || !isprint(ch)) {
 					ch = '.';
@@ -225,6 +231,9 @@ void slog_extra_bin(struct io_stream *restrict s, void *restrict data)
 		BUF_APPENDSTR(buf, "\n");
 		put(s, buf.data, buf.len);
 		buf.len = 0;
+		/* advance by the proven byte count (>= 1), so i rises to exactly n
+		 * and the loop always terminates */
+		i += rowlen;
 	}
 #undef BIN_FLUSH_IF
 }
@@ -251,6 +260,10 @@ struct bt_context {
 	size_t i, n;
 };
 
+#if defined(DEBUG_TEST) && SLOG_MT_SAFE
+static atomic_int g_backtrace_create_state_calls;
+#endif
+
 static int backtrace_cb(void *data, const uintptr_t pc)
 {
 	struct bt_context *restrict ctx = data;
@@ -274,6 +287,10 @@ static struct backtrace_state *bt_state(void)
 	if (cur != NULL) {
 		return cur;
 	}
+#if defined(DEBUG_TEST)
+	(void)atomic_fetch_add_explicit(
+		&g_backtrace_create_state_calls, 1, memory_order_relaxed);
+#endif
 	cur = backtrace_create_state(NULL, 1, NULL, NULL);
 	struct backtrace_state *expected = NULL;
 	if (!atomic_compare_exchange_strong_explicit(
@@ -295,10 +312,25 @@ static struct backtrace_state *bt_state(void)
 }
 #endif /* WITH_LIBBACKTRACE */
 
+#if defined(DEBUG_TEST) && WITH_LIBBACKTRACE && SLOG_MT_SAFE
+int debug_test_backtrace_create_state_calls(void)
+{
+	return atomic_load_explicit(
+		&g_backtrace_create_state_calls, memory_order_relaxed);
+}
+#endif
+
 int debug_backtrace(void **restrict frames, int skip, const int len)
 {
 	assert(frames != NULL && len > 0);
-	skip++;
+	/* skip counts caller frames to drop; clamp a negative request and add
+	 * this function's own frame without signed-overflowing the count */
+	if (skip < 0) {
+		skip = 0;
+	}
+	if (skip < INT_MAX) {
+		skip++;
+	}
 #if WITH_LIBBACKTRACE
 	struct bt_context ctx = {
 		.state = bt_state(),

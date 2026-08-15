@@ -5,24 +5,26 @@
 
 #include "utils/ctype_ascii.h"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 
+/* Copy up to strlen(str) bytes into the unused tail of buf and add the full
+ * length to the running total. The amount copied is derived by subtraction
+ * under the `written < maxlen` guard, so the truncation decision never depends
+ * on a sum of the (saturating) counter that could wrap. */
 #define APPEND_STR(str)                                                        \
 	do {                                                                   \
-		size_t n = strlen(str);                                        \
-		if (buf != NULL) {                                             \
-			size_t copy_n =                                        \
-				(written + n <= maxlen) ?                      \
-					n :                                    \
-					(maxlen > written ? maxlen - written : \
-							    0);                \
+		const size_t n = strlen(str);                                  \
+		if (buf != NULL && written < maxlen) {                         \
+			const size_t avail = maxlen - written;                 \
+			const size_t copy_n = n < avail ? n : avail;           \
 			for (size_t i = 0; i < copy_n; i++) {                  \
 				buf[written + i] = (str)[i];                   \
 			}                                                      \
 		}                                                              \
-		written += n;                                                  \
+		written = add_len(written, n);                                 \
 	} while (0)
 
 #define APPEND_CHAR(ch)                                                        \
@@ -30,7 +32,7 @@
 		if (buf != NULL && written < maxlen) {                         \
 			buf[written] = ch;                                     \
 		}                                                              \
-		written++;                                                     \
+		written = add_len(written, 1);                                 \
 	} while (0)
 
 /* Write the terminating NUL for an escape/build result: at buf[written] when
@@ -42,6 +44,29 @@ static void terminate(char *buf, const size_t maxlen, const size_t written)
 		return;
 	}
 	buf[written < maxlen ? written : maxlen - 1] = '\0';
+}
+
+/* Add `n` to the running output length, saturating just past INT_MAX so the
+ * counter can never wrap. A total beyond INT_MAX is not representable in the
+ * snprintf-style int return; result_len turns that into an error. */
+static size_t add_len(const size_t written, const size_t n)
+{
+	if (written > (size_t)INT_MAX || n > (size_t)INT_MAX - written) {
+		return (size_t)INT_MAX + 1;
+	}
+	return written + n;
+}
+
+/* Finish a serializer: NUL-terminate the (possibly truncated) buffer, then
+ * return the snprintf-style length, or -1 when the required length exceeds the
+ * int return type. */
+static int result_len(char *buf, const size_t maxlen, const size_t written)
+{
+	terminate(buf, maxlen, written);
+	if (written > (size_t)INT_MAX) {
+		return -1;
+	}
+	return (int)written;
 }
 
 /* Point (*p, *avail) at the unused tail of buf past `written` bytes, or at
@@ -75,23 +100,24 @@ escape(char *buf, size_t maxlen, const char *str, const size_t len,
 			APPEND_CHAR('+');
 			continue;
 		}
+		/* percent-escape 'ch' as "%XX"; the two hex bytes are guarded
+		 * independently, via the available tail, so an escape straddling
+		 * the end of buf never overflows. */
 		if (written < maxlen) {
+			const size_t avail = maxlen - written;
+			char hex[2];
+			tohex(hex, ch);
 			buf[written] = '%';
+			if (avail > 1) {
+				buf[written + 1] = hex[0];
+			}
+			if (avail > 2) {
+				buf[written + 2] = hex[1];
+			}
 		}
-		/* tohex() writes two bytes; guard each independently so a
-		 * percent-escape straddling the end of buf never overflows. */
-		char hex[2];
-		tohex(hex, ch);
-		if (written + 1 < maxlen) {
-			buf[written + 1] = hex[0];
-		}
-		if (written + 2 < maxlen) {
-			buf[written + 2] = hex[1];
-		}
-		written += 3;
+		written = add_len(written, 3);
 	}
-	terminate(buf, maxlen, written);
-	return (int)written;
+	return result_len(buf, maxlen, written);
 }
 
 #define S_UNRESERVED "-_.~"
@@ -147,11 +173,13 @@ int url_escape_userinfo(
 	size_t written = 0;
 
 	int n = escape_userinfo(buf, maxlen, username, strlen(username));
-	written += (size_t)n;
+	if (n < 0) {
+		return -1;
+	}
+	written = add_len(written, (size_t)n);
 
 	if (password == NULL) {
-		terminate(buf, maxlen, written);
-		return (int)written;
+		return result_len(buf, maxlen, written);
 	}
 
 	APPEND_CHAR(':');
@@ -160,10 +188,12 @@ int url_escape_userinfo(
 	size_t avail;
 	subbuf(buf, maxlen, written, &p, &avail);
 	n = escape_userinfo(p, avail, password, strlen(password));
-	written += (size_t)n;
+	if (n < 0) {
+		return -1;
+	}
+	written = add_len(written, (size_t)n);
 
-	terminate(buf, maxlen, written);
-	return (int)written;
+	return result_len(buf, maxlen, written);
 }
 
 int url_escape_path(char *restrict buf, size_t maxlen, const char *restrict path)
@@ -193,13 +223,16 @@ int url_escape_query(
 			next = query + strlen(query);
 		}
 		const char *eq = memchr(query, '=', (size_t)(next - query));
+		char *p;
+		size_t avail;
 		int n;
 		if (eq != NULL) {
-			char *p;
-			size_t avail;
 			subbuf(buf, maxlen, written, &p, &avail);
 			n = escape_query(p, avail, query, (size_t)(eq - query));
-			written += (size_t)n;
+			if (n < 0) {
+				return -1;
+			}
+			written = add_len(written, (size_t)n);
 			APPEND_CHAR('=');
 			query = eq + 1;
 			subbuf(buf, maxlen, written, &p, &avail);
@@ -207,21 +240,21 @@ int url_escape_query(
 				p, avail, query, (size_t)(next - query));
 		} else {
 			/* RFC 3986: key without value is a valid query component */
-			char *p;
-			size_t avail;
 			subbuf(buf, maxlen, written, &p, &avail);
 			n = escape_query(
 				p, avail, query, (size_t)(next - query));
 		}
-		written += (size_t)n;
+		if (n < 0) {
+			return -1;
+		}
+		written = add_len(written, (size_t)n);
 		if (*next == '\0') {
 			break;
 		}
 		query = next + 1;
 		APPEND_CHAR('&');
 	}
-	terminate(buf, maxlen, written);
-	return (int)written;
+	return result_len(buf, maxlen, written);
 }
 
 int url_escape_path_segment(
@@ -270,9 +303,12 @@ int url_build(char *restrict buf, size_t maxlen, const struct url *restrict url)
 			char *p;
 			size_t avail;
 			subbuf(buf, maxlen, written, &p, &avail);
-			int n = escape_hostport(
+			const int n = escape_hostport(
 				p, avail, url->host, strlen(url->host));
-			written += (size_t)n;
+			if (n < 0) {
+				return -1;
+			}
+			written = add_len(written, (size_t)n);
 		}
 		if (url->path != NULL) {
 			if (url->path[0] != '/') {
@@ -291,13 +327,15 @@ int url_build(char *restrict buf, size_t maxlen, const struct url *restrict url)
 		char *p;
 		size_t avail;
 		subbuf(buf, maxlen, written, &p, &avail);
-		int n = escape_fragment(
+		const int n = escape_fragment(
 			p, avail, url->fragment, strlen(url->fragment));
-		written += (size_t)n;
+		if (n < 0) {
+			return -1;
+		}
+		written = add_len(written, (size_t)n);
 	}
 
-	terminate(buf, maxlen, written);
-	return (int)written;
+	return result_len(buf, maxlen, written);
 }
 
 /* RFC 3986 admits only these bytes unencoded in a URI: the unreserved set
@@ -442,6 +480,13 @@ bool url_parse(char *raw, struct url *restrict url)
 		char *at = strrchr(raw, '@');
 		if (at != NULL) {
 			*at = '\0';
+			/* RFC 3986 3.2/3.2.1: '@' is the sole authority
+			 * delimiter and a literal '@' in userinfo must be
+			 * pct-encoded, so reject any raw '@' left in the
+			 * selected userinfo (i.e. the input held several). */
+			if (strchr(raw, '@') != NULL) {
+				return false;
+			}
 			url->userinfo = raw;
 			raw = at + 1;
 		}
@@ -525,7 +570,10 @@ bool url_query_component(
 bool url_unescape_userinfo(
 	char *raw, char **restrict username, char **restrict password)
 {
-	const char valid_chars[] = "-._:~!$&'()*+,;=%@";
+	/* RFC 3986 3.2.1: userinfo is unreserved / pct-encoded / sub-delims /
+	 * ':'. A raw '@' is not admitted -- it is the authority delimiter and
+	 * must be pct-encoded (%40) when it is data. */
+	const char valid_chars[] = "-._:~!$&'()*+,;=%";
 	char *colon = NULL;
 	for (char *p = raw; *p != '\0'; ++p) {
 		const unsigned char c = (unsigned char)*p;

@@ -823,12 +823,9 @@ static uintmax_t fetch_unsigned(va_list *restrict ap, const enum length_mod len)
 	if (len == LEN_MAX) {
 		return va_arg(*ap, uintmax_t);
 	}
-	if (len == LEN_SIZE) {
+	if (len == LEN_SIZE || len == LEN_PTRDIFF) {
+		/* z is size_t; t's unsigned counterpart shares its width */
 		return (uintmax_t)va_arg(*ap, size_t);
-	}
-	if (len == LEN_PTRDIFF) {
-		/* the unsigned counterpart of ptrdiff_t shares the width */
-		return (uintmax_t)va_arg(*ap, ptrdiff_t);
 	}
 	return (uintmax_t)va_arg(*ap, unsigned int);
 }
@@ -1476,10 +1473,8 @@ store_signed(va_list *restrict ap, const enum length_mod len, const intmax_t v)
 		*va_arg(*ap, intmax_t *) = v;
 		break;
 	case LEN_SIZE:
-		/* the signed counterpart of size_t shares its width */
-		*va_arg(*ap, size_t *) = (size_t)v;
-		break;
 	case LEN_PTRDIFF:
+		/* z's signed counterpart shares ptrdiff_t's width */
 		*va_arg(*ap, ptrdiff_t *) = (ptrdiff_t)v;
 		break;
 	default:
@@ -1508,11 +1503,9 @@ static void store_unsigned(
 		*va_arg(*ap, uintmax_t *) = v;
 		break;
 	case LEN_SIZE:
-		*va_arg(*ap, size_t *) = (size_t)v;
-		break;
 	case LEN_PTRDIFF:
-		/* the unsigned counterpart of ptrdiff_t shares its width */
-		*va_arg(*ap, ptrdiff_t *) = (ptrdiff_t)v;
+		/* t's unsigned counterpart shares size_t's width */
+		*va_arg(*ap, size_t *) = (size_t)v;
 		break;
 	default:
 		*va_arg(*ap, unsigned int *) = (unsigned int)v;
@@ -1679,9 +1672,10 @@ static enum scan_status read_int(
 		if (conv == 'p') {
 			*va_arg(*ap, void **) = (void *)(uintptr_t)val;
 		} else if (is_signed) {
-			store_signed(
-				ap, sp->length,
-				neg ? -(intmax_t)val : (intmax_t)val);
+			/* form the result in uintmax_t: negating (intmax_t)val
+			 * would overflow at the INTMAX_MIN magnitude */
+			const uintmax_t u = neg ? (uintmax_t)0 - val : val;
+			store_signed(ap, sp->length, (intmax_t)u);
 		} else {
 			store_unsigned(
 				ap, sp->length, neg ? (uintmax_t)0 - val : val);

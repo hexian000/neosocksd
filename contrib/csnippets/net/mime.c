@@ -14,6 +14,47 @@
 	(32u < (unsigned char)(c) && (unsigned char)(c) < 127u &&              \
 	 !istspecial(c))
 
+/* Skip a run of RFC 822 linear white space and return the first byte past it.
+ * Only SP and HT are LWSP-chars; a CRLF is whitespace solely when it folds a
+ * following LWSP-char. Any other byte (a bare CR/LF, VT, FF, DEL, ...) ends the
+ * run and is left in place for the caller's token/separator check to reject. */
+static char *skip_lwsp(char *restrict s)
+{
+	for (;;) {
+		if (isblank((unsigned char)*s)) {
+			s++;
+			continue;
+		}
+		if (s[0] == '\r' && s[1] == '\n' &&
+		    isblank((unsigned char)s[2])) {
+			s += 2;
+			continue;
+		}
+		break;
+	}
+	return s;
+}
+
+/* Trim leading and trailing linear white space in place, returning the first
+ * non-LWSP byte. Trailing whitespace is peeled as whole LWSP runs (folds
+ * included), so a stray control byte at either edge survives to be rejected. */
+static char *trim_lwsp(char *restrict s)
+{
+	s = skip_lwsp(s);
+	char *end = s;
+	for (char *p = s; *p != '\0';) {
+		char *const ws = skip_lwsp(p);
+		if (ws != p) {
+			p = ws;
+			continue;
+		}
+		p++;
+		end = p;
+	}
+	*end = '\0';
+	return s;
+}
+
 char *mime_parse(char *s, char **restrict type, char **restrict subtype)
 {
 	char *next = strchr(s, ';');
@@ -28,8 +69,8 @@ char *mime_parse(char *s, char **restrict type, char **restrict subtype)
 		return NULL;
 	}
 	*slash = '\0';
-	*type = strlower(strtrimspace(s));
-	*subtype = strlower(strtrimspace(slash + 1));
+	*type = strlower(trim_lwsp(s));
+	*subtype = strlower(trim_lwsp(slash + 1));
 	/* RFC 6838: type and subtype must be non-empty token strings */
 	if ((*type)[0] == '\0') {
 		return NULL;
@@ -70,7 +111,7 @@ static char *parse_key(char *s, char **restrict key)
 	/* LWSP may sit between the name and '=' (RFC 822 §3.1.4 free insertion),
 	 * so skip it before deciding, and only then terminate the name -- as in
 	 * end_value, trimming reads the byte the terminator would overwrite */
-	s = strtrimleftspace(end);
+	s = skip_lwsp(end);
 	if (*s != '=') {
 		return NULL;
 	}
@@ -85,7 +126,7 @@ static char *parse_key(char *s, char **restrict key)
  * written; the two are therefore not marked restrict. */
 static char *end_value(char *end, char *rest)
 {
-	rest = strtrimleftspace(rest);
+	rest = skip_lwsp(rest);
 	if (*rest != ';' && *rest != '\0') {
 		return NULL;
 	}
@@ -157,7 +198,7 @@ static char *parse_value(char *s, char **restrict value)
 
 static char *parse_param(char *s, char **restrict key, char **restrict value)
 {
-	char *next = strtrimleftspace(s);
+	char *next = skip_lwsp(s);
 	if (*next == '\0') {
 		*key = *value = NULL;
 		return next;
@@ -168,7 +209,7 @@ static char *parse_param(char *s, char **restrict key, char **restrict value)
 	}
 	*key = strlower(*key);
 
-	next = strtrimleftspace(next);
+	next = skip_lwsp(next);
 	next = parse_value(next, value);
 	if (next == NULL) {
 		return NULL;

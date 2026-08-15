@@ -32,6 +32,9 @@ struct slog_extra_stack {
 };
 void slog_extra_stack(struct io_stream *restrict s, void *restrict data);
 
+#if defined(DEBUG_TEST) && WITH_LIBBACKTRACE && SLOG_MT_SAFE
+int debug_test_backtrace_create_state_calls(void);
+#endif
 int debug_backtrace(void **restrict frames, int skip, int len);
 
 /**

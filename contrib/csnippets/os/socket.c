@@ -418,6 +418,14 @@ static bool sa_matches_inet6(
 		   sizeof(struct in6_addr)) != 0) {
 		return false;
 	}
+	/* RFC 4007 zone index: the same non-global address on different zones is
+	 * a different destination. scope_id 0 is the unspecified/default zone and
+	 * matches any zone (mirroring the wildcard port/address above); a nonzero
+	 * bind zone must equal the destination's */
+	if (bind->sin6_scope_id != 0 &&
+	    bind->sin6_scope_id != dest->sin6_scope_id) {
+		return false;
+	}
 	return true;
 }
 
@@ -495,6 +503,12 @@ static enum ipclass ipclassify_inet4(const uint32_t addr)
 		return IPCLASS_SITELOCAL;
 	default:
 		break;
+	}
+	/* IANA marks 192.0.0.9/32 (PCP anycast, RFC 7723) and 192.0.0.10/32
+	 * (TURN anycast, RFC 8155) globally reachable, so they escape the
+	 * enclosing 192.0.0.0/24 special-purpose block below */
+	if (addr == UINT32_C(0xc0000009) || addr == UINT32_C(0xc000000a)) {
+		return IPCLASS_GLOBAL;
 	}
 	switch (addr & UINT32_C(0xffffff00)) {
 	case 0xc0000000: /* 192.0.0.0/24 */

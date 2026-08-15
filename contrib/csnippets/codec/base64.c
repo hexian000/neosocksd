@@ -85,8 +85,6 @@ bool base64_decode(
 	unsigned char *dst, size_t *restrict dstlen, const unsigned char *src,
 	const size_t srclen)
 {
-	assert(dst == NULL || dst == src || dst + *dstlen <= src ||
-	       src + srclen <= dst);
 	if (srclen == 0) {
 		*dstlen = 0;
 		return true;

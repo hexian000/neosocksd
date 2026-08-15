@@ -147,15 +147,18 @@ int vbuf_vappendf(
 	if (ret <= 0) {
 		return ret;
 	}
-	/* 1 extra byte is reserved for detecting allocation failures */
-	const size_t want = vbuf->len + (size_t)ret + 1;
-	if (want <= vbuf->cap) {
-		/* first try success */
-		vbuf->len += (size_t)ret;
-		return ret;
+	/* 1 extra byte is reserved for detecting allocation failures; guard the
+	 * addition so a len near SIZE_MAX cannot wrap want below cap */
+	if ((size_t)ret < SIZE_MAX - vbuf->len - 1) {
+		const size_t want = vbuf->len + (size_t)ret + 1;
+		if (want <= vbuf->cap) {
+			/* first try success */
+			vbuf->len += (size_t)ret;
+			return ret;
+		}
+		*pvbuf = vbuf_grow(vbuf, want);
+		vbuf = *pvbuf;
 	}
-	*pvbuf = vbuf_grow(vbuf, want);
-	vbuf = *pvbuf;
 	/* when failed, append as much as possible */
 	{
 		char *restrict s = (char *)(vbuf->data + vbuf->len);
