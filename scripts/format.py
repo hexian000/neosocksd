@@ -20,8 +20,12 @@ Include classification is derived, not hardcoded: each #include is resolved
 against the compilation database (compile_commands.json) and bucketed by
 *where the header actually lives* (project tree vs in-tree contrib vs an
 installed/system directory); a built-in table of C-standard/POSIX headers
-separates the standard group from installed third-party libraries.  When the
-database is absent, resolution falls back to structural heuristics.
+separates the standard group from installed third-party libraries.  Telling a
+project header from an in-tree contrib one needs that resolution -- the
+#include spelling alone does not carry it -- so when no compilation database is
+available the include-reordering step is skipped (with a warning, and reported
+by --check) rather than guessing and silently merging the two groups
+tree-wide; clang-format, #endif annotation and Unicode normalization still run.
 
 Include groups (blank-line separated, alphabetically sorted within each):
 
@@ -450,6 +454,14 @@ def classify(target, includer_abs, cfg):
     # includer's own directory.  foo_test.c additionally treats foo.h (its
     # subject under test, with the "_test" suffix stripped) as associated,
     # alongside foo_test.h itself.
+    #
+    # This is decided structurally, from the include's own directory prefix
+    # naming the includer's directory, and needs no compilation database: the
+    # name-based pairing holds regardless of where the header resolves.  The
+    # structural test is therefore authoritative -- a database that resolves the
+    # header under a different-but-equivalent path (e.g. a build tree recorded at
+    # a symlinked mount point, so the resolved string differs from includer_dir)
+    # must not demote the associated header out of group 1.
     if not is_angle and includer_abs.endswith(_C_SOURCE_EXTS):
         stem = os.path.splitext(os.path.basename(includer_abs))[0]
         candidates = [stem]
@@ -458,8 +470,9 @@ def classify(target, includer_abs, cfg):
         inc_dir, base = os.path.split(name)
         includer_dir = os.path.dirname(includer_abs)
         if base in (c + ".h" for c in candidates) and (
-                os.path.dirname(resolved) == includer_dir if resolved is not None
-                else _dir_suffix_matches(includer_dir, inc_dir)):
+                _dir_suffix_matches(includer_dir, inc_dir)
+                or (resolved is not None
+                    and os.path.dirname(resolved) == includer_dir)):
             return GROUP_ASSOCIATED
 
     # 2/3. first-party: resolves somewhere inside the repository
@@ -474,7 +487,9 @@ def classify(target, includer_abs, cfg):
     if is_angle:
         return GROUP_STANDARD if _is_standard(name) else GROUP_PLATFORM
 
-    # quoted but not resolved in-repo (typically: no database) -> heuristics
+    # quoted, database present but this header did not resolve in-repo (e.g. an
+    # -I path the database omits) -> best-effort by spelling.  The no-database
+    # case never reaches here: reordering is skipped entirely without one.
     if any(part in cfg.contrib_dirs for part in name.split("/")[:-1]):
         return GROUP_CONTRIB
     return GROUP_PROJECT
@@ -712,27 +727,44 @@ def _reorder_includes(lines, includer_abs, cfg):
 # ---------------------------------------------------------------------------
 
 def _block_comment_mask(lines):
-    """Mark lines that *begin* inside a ``/* ... */`` block comment."""
+    """Mark lines that *begin* inside a ``/* ... */`` block comment.
+
+    The scan tracks string and character literals so a ``/*`` inside one
+    (e.g. ``"Accept: */*"``) does not open a phantom comment that would mask
+    the following lines from the annotation and include passes.  A literal
+    cannot span lines in C, so its state never carries over."""
     mask = [False] * len(lines)
     in_comment = False
     for i, s in enumerate(lines):
         mask[i] = in_comment
         j = 0
         while j < len(s):
-            if not in_comment:
-                if s.startswith("//", j):
-                    break
-                if s.startswith("/*", j):
-                    in_comment = True
-                    j += 2
-                    continue
-                j += 1
-            else:
+            if in_comment:
                 k = s.find("*/", j)
                 if k == -1:
                     break
                 in_comment = False
                 j = k + 2
+                continue
+            if s.startswith("//", j):
+                break
+            if s.startswith("/*", j):
+                in_comment = True
+                j += 2
+                continue
+            if s[j] in ('"', "'"):
+                quote = s[j]
+                j += 1
+                while j < len(s):
+                    if s[j] == "\\":
+                        j += 2
+                    elif s[j] == quote:
+                        j += 1
+                        break
+                    else:
+                        j += 1
+                continue
+            j += 1
     return mask
 
 
@@ -1002,7 +1034,16 @@ def _cpp_cleanup_text(
     Pure: it neither reads nor writes files.
     """
     lines = text.splitlines(keepends=True)
-    new_lines = _reorder_includes(lines, includer_abs, cfg)
+    if cfg.db is not None:
+        new_lines = _reorder_includes(lines, includer_abs, cfg)
+    else:
+        # Without a compilation database, a project header cannot be told from
+        # an in-tree contrib one -- that distinction is where the header
+        # resolves on disk, not how the #include spells it -- so reordering
+        # would merge groups 2 and 3 into one alphabetical block and rewrite
+        # includes across every file.  Skip it (the caller warns once); the
+        # remaining steps need no database.
+        new_lines = lines
     new_lines = annotate_conditionals(new_lines, _COND_MIN_LINES)
     includes = _collect_includes(lines)
     dep_warnings = check_include_dependencies(includer_abs, includes, cfg)
@@ -1050,7 +1091,14 @@ def main() -> None:
     # run never silently matches nothing.
     cpp_cleanup_cfg = _build_cpp_cleanup_config(root)
     repo_root = cpp_cleanup_cfg.root
+    # A path with no repository above it degrades the root to the argument
+    # itself, and the passes cannot run without one: the text pass lists
+    # files with git, and every reported path is repo-relative.  Say so
+    # instead of crashing on the degraded root further down.
+    if not (repo_root / ".git").exists():
+        sys.exit(f"error: {root} is not inside a git repository")
     scope = None if root == repo_root else root
+    have_db = cpp_cleanup_cfg.db is not None
 
     found_clang = _clang_format_version()
     have_clang = found_clang == args.clang_version
@@ -1076,6 +1124,15 @@ def main() -> None:
     text_total = len(text_by_key)
     if scope is not None and not c_by_key and not text_by_key:
         _warn(f"no files matched {root}")
+    # Include reordering needs a compilation database to classify each header by
+    # where it resolves; without one the step is skipped rather than guessing
+    # (see _cpp_cleanup_text).  Warn once when there are C sources it covers.
+    if not have_db and c_total > 0:
+        _warn("no compilation database found; skipping include reordering for "
+              f"{c_total} C file(s) (project vs. contrib headers cannot be "
+              "classified without it). Generate compile_commands.json with "
+              "cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON and place it at the "
+              "repository root or under build/ (see m.sh).")
 
     clang_changed = clang_lines = 0
     cpp_cleanup_changed = cpp_cleanup_warned = 0
@@ -1143,8 +1200,13 @@ def main() -> None:
               f"{clang_changed}/{c_total} files changed")
     else:
         print(f"clang-format: skipped ({c_total} C file(s) not checked)")
-    print(f"cpp-cleanup: {cpp_cleanup_changed}/{c_total} files changed, "
-          f"{cpp_cleanup_warned} warning(s)")
+    if have_db:
+        print(f"cpp-cleanup: {cpp_cleanup_changed}/{c_total} files changed, "
+              f"{cpp_cleanup_warned} warning(s)")
+    else:
+        print("cpp-cleanup: include reordering skipped (no compilation "
+              f"database); {cpp_cleanup_changed}/{c_total} files changed, "
+              f"{cpp_cleanup_warned} warning(s)")
     print(f"normalize {form}: {norm_lines} lines in "
           f"{norm_changed}/{text_total} files changed")
 
@@ -1161,6 +1223,12 @@ def main() -> None:
         if not have_clang and c_total > 0:
             print("format --check: clang-format did not run, so "
                   f"{c_total} C file(s) are unverified")
+            failed = True
+        # Likewise, without a compilation database include ordering was not
+        # checked -- report it rather than exiting clean.
+        if not have_db and c_total > 0:
+            print("format --check: no compilation database, so include "
+                  f"ordering for {c_total} C file(s) is unverified")
             failed = True
         if failed:
             sys.exit(1)
