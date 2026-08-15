@@ -131,9 +131,11 @@ bool conf_check(const struct config *restrict conf)
 	if (conf->tcp_rcvbuf > 0 && conf->tcp_rcvbuf < 16384) {
 		LOGW("tcp recv buffer may be too small");
 	}
-#if WITH_RULESET
-	if (conf->ruleset != NULL && conf->proxy != NULL) {
-		LOGW("the proxy will be overwritten by ruleset");
+#if WITH_TCP_KEEPALIVE_PARAMS
+	if (!conf->tcp_keepalive &&
+	    (conf->tcp_keepidle > 0 || conf->tcp_keepintvl > 0 ||
+	     conf->tcp_keepcnt > 0)) {
+		LOGW("tcp keepalive timing is set but keepalive is disabled");
 	}
 #endif
 	if (conf->proxy != NULL && conf->socks5_bind) {
@@ -163,6 +165,15 @@ bool conf_check(const struct config *restrict conf)
 	}
 	/* the ruleset requirement is checked in main() after loading */
 
+#if WITH_TCP_KEEPALIVE_PARAMS
+	/* upper bounds are the kernel's MAX_TCP_KEEPIDLE/INTVL/CNT */
+	if (!RANGE_CHECK("tcp_keepidle", conf->tcp_keepidle, 0, 32767) ||
+	    !RANGE_CHECK("tcp_keepintvl", conf->tcp_keepintvl, 0, 32767) ||
+	    !RANGE_CHECK("tcp_keepcnt", conf->tcp_keepcnt, 0, 127)) {
+		return false;
+	}
+#endif
+
 	return RANGE_CHECK(
 		       "loglevel", conf->loglevel, LOG_LEVEL_SILENCE,
 		       LOG_LEVEL_VERYVERBOSE) &&
@@ -181,6 +192,13 @@ bool conf_check(const struct config *restrict conf)
 			"startup_limit_full", conf->startup_limit_full,
 			conf->startup_limit_start,
 			conf->max_sessions > 0 ? conf->max_sessions : INT_MAX));
+}
+
+void conf_advise(const struct config *restrict conf, const bool has_ruleset)
+{
+	if (has_ruleset && conf->proxy != NULL) {
+		LOGN("the ruleset extends the `-x' proxy chain instead of replacing it");
+	}
 }
 
 static void print_usage(const char *restrict argv0)
@@ -683,6 +701,11 @@ static const struct metaconfig conf_fields[] = {
 	{ "block_global", CONF_BOOL, offsetof(struct config, block_global) },
 	{ "tcp_sndbuf", CONF_INT, offsetof(struct config, tcp_sndbuf) },
 	{ "tcp_rcvbuf", CONF_INT, offsetof(struct config, tcp_rcvbuf) },
+#if WITH_TCP_KEEPALIVE_PARAMS
+	{ "tcp_keepidle", CONF_INT, offsetof(struct config, tcp_keepidle) },
+	{ "tcp_keepintvl", CONF_INT, offsetof(struct config, tcp_keepintvl) },
+	{ "tcp_keepcnt", CONF_INT, offsetof(struct config, tcp_keepcnt) },
+#endif
 	{ "max_sessions", CONF_INT, offsetof(struct config, max_sessions) },
 	{ "startup_limit_start", CONF_INT,
 	  offsetof(struct config, startup_limit_start) },
@@ -764,35 +787,47 @@ struct conf_fill {
 	size_t total;
 };
 
-/* Apply the non-string fields and copy the string fields into the pre-measured
- * `block`. conf_loadfromtable runs this under lua_pcall so that a config-table
- * __index which raises on this second field-access pass is caught -- letting
- * the caller free `block` instead of leaking it through the longjmp. The
- * string field pointers are not repointed into `block` until the whole pass has
- * succeeded, so a mid-pass raise leaves `conf`'s existing pointers intact rather
- * than dangling into the block the caller then frees. The fill context is the
- * first argument (a light userdata); the config table is the second (stack
- * top). */
+/* Apply the non-string fields into a staged copy and copy the string fields
+ * into the pre-measured `block`, committing to the live `conf` only once every
+ * field of this second field-access pass has been read. conf_loadfromtable runs
+ * this under lua_pcall so that a config-table __index which raises here is
+ * caught -- letting the caller free `block` instead of leaking it through the
+ * longjmp. Nothing touches `conf` until the final commit, so a mid-pass raise,
+ * or a stateful __index that passed validation but now returns a wrong type,
+ * leaves the live config wholly unchanged rather than partially applied. The
+ * fill context is the first argument (a light userdata); the config table is the
+ * second (stack top). */
 static int conf_fill_fields(lua_State *restrict L)
 {
 	const struct conf_fill *restrict const fill = lua_touserdata(L, 1);
 	struct config *restrict const conf = fill->conf;
 
-	/* Every field has now been validated; apply non-string fields. */
+	/* Stage into a copy: the whole pass below is a read of the config table,
+	 * and only the writes after it (once every read has succeeded) reach the
+	 * live config. */
+	struct config staged = *conf;
+
+	/* Every field validated on the first pass; re-read and apply the
+	 * non-string fields. A stateful __index may still return a wrong type on
+	 * this second read -- that is a failed reload, not a field to skip, so
+	 * raise rather than silently drop it. */
 	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
 		if (f->type == CONF_STRING) {
 			continue;
 		}
-		(void)load_field(L, f, conf, true);
+		if (!load_field(L, f, &staged, true)) {
+			return luaL_error(
+				L, "field `%s' changed type on the apply pass",
+				f->key);
+		}
 	}
 
 	/* Copy string fields into the new block: a Lua-provided string replaces
 	 * the field; a nil value carries the field's current string forward so it
 	 * never dangles into the block freed on a failed load. The resulting
-	 * pointers are staged and only committed to `conf` once the whole pass
-	 * completes without raising. */
+	 * pointers are staged and only committed once the whole pass completes. */
+	const char *newptr[ARRAY_SIZE(conf_fields)];
 	if (fill->total > 0) {
-		const char *newptr[ARRAY_SIZE(conf_fields)];
 		char *pos = fill->block;
 		char *const blockend = fill->block + fill->total;
 		for (const struct metaconfig *f = conf_fields; f->key != NULL;
@@ -833,7 +868,13 @@ static int conf_fill_fields(lua_State *restrict L)
 			}
 			lua_pop(L, 1);
 		}
-		/* the pass raised nowhere above; commit the staged pointers */
+	}
+
+	/* Every protected read succeeded; commit atomically. The non-string
+	 * fields land as one struct copy, then the string pointers are repointed
+	 * into `block`. */
+	*conf = staged;
+	if (fill->total > 0) {
 		for (const struct metaconfig *f = conf_fields; f->key != NULL;
 		     f++) {
 			if (f->type != CONF_STRING) {

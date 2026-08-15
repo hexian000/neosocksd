@@ -70,6 +70,10 @@ struct config {
 #endif
 
 	int tcp_sndbuf, tcp_rcvbuf;
+#if WITH_TCP_KEEPALIVE_PARAMS
+	/* 0 keeps the system default */
+	int tcp_keepidle, tcp_keepintvl, tcp_keepcnt;
+#endif
 
 	int max_sessions;
 	int startup_limit_start;
@@ -80,6 +84,13 @@ struct config {
 struct config conf_default(void);
 
 bool conf_check(const struct config *restrict conf);
+
+/* Report valid settings that interact in a non-obvious way. Separate from
+ * conf_check because the interaction depends on whether a ruleset was actually
+ * installed, which struct config cannot express: it holds only the `-r`
+ * filename, while a `-c` boot config installs a ruleset without setting it.
+ * Call once, after the ruleset is settled. */
+void conf_advise(const struct config *restrict conf, bool has_ruleset);
 
 /* Parse command line arguments into *conf.
  * On error, logs a message and returns false; the caller should exit. */

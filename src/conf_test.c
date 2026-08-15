@@ -330,6 +330,73 @@ T_DECLARE_CASE(conf_print_round_trips_double_precision)
 	lua_close(L);
 }
 #endif /* !LUA_32BITS */
+
+/*
+ * Regression: a config table's stateful __index can pass the read-only
+ * validation pass and then return a wrong type on the apply pass. That is a
+ * failed reload, not a field to silently skip -- conf_loadfromtable must report
+ * failure and leave the live config wholly unchanged, including an earlier
+ * scalar that was read before the offending one.
+ */
+T_DECLARE_CASE(conf_loadfromtable_rejects_second_pass_type_change)
+{
+	struct config conf = make_valid_conf();
+	conf.loglevel = 2;
+	conf.max_sessions = 42;
+
+	lua_State *restrict L = luaL_newstate();
+	T_CHECK(L != NULL);
+	luaL_openlibs(L);
+	/* max_sessions reads as a valid integer on the validation pass, then a
+	 * string on the apply pass; loglevel is a valid scalar read before it */
+	static const char src[] =
+		"local n = 0 "
+		"return setmetatable({ listen = '127.0.0.1:1080', loglevel = 7 }, "
+		"{ __index = function(_, k) if k == 'max_sessions' then "
+		"n = n + 1 if n == 1 then return 100 end return 'not-an-integer' "
+		"end return nil end })";
+	T_CHECK(load_printed_conf(L, src));
+
+	T_EXPECT(!conf_loadfromtable(L, &conf));
+	/* the failed reload left every field intact, not partially applied */
+	T_EXPECT_EQ(conf.loglevel, 2);
+	T_EXPECT_EQ(conf.max_sessions, 42);
+
+	lua_close(L);
+}
+
+/*
+ * Regression: a config table whose __index raises on the apply pass, after an
+ * earlier scalar has already been read, must not leave that earlier field
+ * applied to the live config -- the whole apply pass is staged and committed
+ * only if it completes.
+ */
+T_DECLARE_CASE(conf_loadfromtable_raise_leaves_config_unchanged)
+{
+	struct config conf = make_valid_conf();
+	conf.loglevel = 2;
+	conf.max_sessions = 42;
+
+	lua_State *restrict L = luaL_newstate();
+	T_CHECK(L != NULL);
+	luaL_openlibs(L);
+	/* loglevel (7) is applied first; max_sessions then raises on its second
+	 * read (the apply pass) */
+	static const char src[] =
+		"local n = 0 "
+		"return setmetatable({ listen = '127.0.0.1:1080', loglevel = 7 }, "
+		"{ __index = function(_, k) if k == 'max_sessions' then "
+		"n = n + 1 if n == 1 then return 100 end error('boom') end "
+		"return nil end })";
+	T_CHECK(load_printed_conf(L, src));
+
+	T_EXPECT(!conf_loadfromtable(L, &conf));
+	/* the earlier scalar was staged, not written to the live config */
+	T_EXPECT_EQ(conf.loglevel, 2);
+	T_EXPECT_EQ(conf.max_sessions, 42);
+
+	lua_close(L);
+}
 #endif /* WITH_LUA */
 
 T_DECLARE_CASE(conf_warns_small_tcp_buffers)
@@ -340,6 +407,47 @@ T_DECLARE_CASE(conf_warns_small_tcp_buffers)
 	conf.tcp_rcvbuf = 4096;
 	T_EXPECT(conf_check(&conf)); /* warns but remains valid */
 }
+
+#if WITH_TCP_KEEPALIVE_PARAMS
+T_DECLARE_CASE(conf_default_keeps_system_keepalive_timing)
+{
+	const struct config conf = conf_default();
+
+	T_EXPECT_EQ(conf.tcp_keepidle, 0);
+	T_EXPECT_EQ(conf.tcp_keepintvl, 0);
+	T_EXPECT_EQ(conf.tcp_keepcnt, 0);
+}
+
+T_DECLARE_CASE(conf_rejects_keepalive_timing_out_of_range)
+{
+	struct config conf = make_valid_conf();
+
+	conf.tcp_keepidle = 32768;
+	T_EXPECT(!conf_check(&conf));
+	conf.tcp_keepidle = 32767;
+	T_EXPECT(conf_check(&conf));
+
+	conf.tcp_keepintvl = -1;
+	T_EXPECT(!conf_check(&conf));
+	conf.tcp_keepintvl = 30;
+	T_EXPECT(conf_check(&conf));
+
+	conf.tcp_keepcnt = 128;
+	T_EXPECT(!conf_check(&conf));
+	conf.tcp_keepcnt = 127;
+	T_EXPECT(conf_check(&conf));
+}
+
+/* Timing without keepalive is inert; conf_check warns but stays valid. */
+T_DECLARE_CASE(conf_warns_keepalive_timing_without_keepalive)
+{
+	struct config conf = make_valid_conf();
+
+	conf.tcp_keepalive = false;
+	conf.tcp_keepidle = 600;
+	T_EXPECT(conf_check(&conf));
+}
+#endif /* WITH_TCP_KEEPALIVE_PARAMS */
 
 T_DECLARE_CASE(conf_rejects_block_global_and_local)
 {
@@ -370,16 +478,84 @@ T_DECLARE_CASE(conf_rejects_forward_with_tproxy)
 }
 #endif /* WITH_TPROXY */
 
-#if WITH_RULESET
-T_DECLARE_CASE(conf_warns_ruleset_overrides_proxy)
-{
-	struct config conf = make_valid_conf();
+struct advise_args {
+	const struct config *conf;
+	bool has_ruleset;
+};
 
-	conf.ruleset = "ruleset.lua";
-	conf.proxy = "socks5://127.0.0.1:1080";
-	T_EXPECT(conf_check(&conf)); /* just a warning, still valid */
+static bool run_conf_advise(const void *data)
+{
+	const struct advise_args *restrict args = data;
+	conf_advise(args->conf, args->has_ruleset);
+	return true;
 }
 
+/* Capture what conf_advise() writes to stderr into a heap buffer the caller
+ * must free; returns NULL on failure. slog is pointed at stderr through
+ * conf.c's cached writer, then left fd-free again so a later fd capture is not
+ * corrupted (see parseargs_log_outputs). */
+static char *
+capture_conf_advise(const struct config *restrict conf, const bool has_ruleset)
+{
+	struct config logconf = conf_default();
+	char *logargv[] = { "conf_test", "-l", "127.0.0.1:1080", "--log",
+			    "stderr" };
+	if (!conf_parseargs(&logconf, (int)ARRAY_SIZE(logargv), logargv)) {
+		return NULL;
+	}
+	const struct advise_args args = {
+		.conf = conf,
+		.has_ruleset = has_ruleset,
+	};
+	char *const out = capture_fd(STDERR_FILENO, run_conf_advise, &args);
+	slog_setoutput(SLOG_OUTPUT_DISCARD);
+	return out;
+}
+
+/*
+ * Regression: this notice once lived in conf_check() and claimed the ruleset
+ * would overwrite the proxy chain. aux_todialreq() dials on
+ * dialreq_new(basereq, ...), which copies the -x hops first and appends the
+ * ruleset's proxies, so -x always stays in the path.
+ */
+T_DECLARE_CASE(conf_advise_notes_ruleset_extends_proxy)
+{
+	struct config conf = make_valid_conf();
+	conf.proxy = "socks5://127.0.0.1:1080";
+
+	char *const out = capture_conf_advise(&conf, true);
+	T_CHECK(out != NULL);
+
+	T_EXPECT(strstr(out, "overwritten") == NULL);
+	T_EXPECT(strstr(out, "extends the `-x' proxy chain") != NULL);
+
+	free(out);
+}
+
+/*
+ * Regression: the notice keys on whether a ruleset was installed, not on the
+ * -r filename conf_check() used to test -- a -c boot config installs one while
+ * leaving that field NULL, and an -r file may install none.
+ */
+T_DECLARE_CASE(conf_advise_silent_without_ruleset_or_proxy)
+{
+	struct config conf = make_valid_conf();
+	conf.proxy = "socks5://127.0.0.1:1080";
+
+	char *const noruleset = capture_conf_advise(&conf, false);
+	T_CHECK(noruleset != NULL);
+	T_EXPECT(strstr(noruleset, "proxy chain") == NULL);
+	free(noruleset);
+
+	/* a ruleset with no chain in front of it has nothing to extend */
+	conf.proxy = NULL;
+	char *const noproxy = capture_conf_advise(&conf, true);
+	T_CHECK(noproxy != NULL);
+	T_EXPECT(strstr(noproxy, "proxy chain") == NULL);
+	free(noproxy);
+}
+
+#if WITH_RULESET
 T_DECLARE_CASE(conf_rejects_ruleset_with_socks5_bind)
 {
 	struct config conf = make_valid_conf();
@@ -1546,15 +1722,23 @@ static const struct testing_suite suite[] = {
 #if !LUA_32BITS
 	T_CASE(conf_print_round_trips_double_precision),
 #endif
+	T_CASE(conf_loadfromtable_rejects_second_pass_type_change),
+	T_CASE(conf_loadfromtable_raise_leaves_config_unchanged),
 #endif /* WITH_LUA */
 	T_CASE(conf_warns_small_tcp_buffers),
 	T_CASE(conf_rejects_block_global_and_local),
+#if WITH_TCP_KEEPALIVE_PARAMS
+	T_CASE(conf_default_keeps_system_keepalive_timing),
+	T_CASE(conf_rejects_keepalive_timing_out_of_range),
+	T_CASE(conf_warns_keepalive_timing_without_keepalive),
+#endif
 #if WITH_TPROXY
 	T_CASE(conf_rejects_http_with_tproxy),
 	T_CASE(conf_rejects_forward_with_tproxy),
 #endif
+	T_CASE(conf_advise_notes_ruleset_extends_proxy),
+	T_CASE(conf_advise_silent_without_ruleset_or_proxy),
 #if WITH_RULESET
-	T_CASE(conf_warns_ruleset_overrides_proxy),
 	T_CASE(conf_rejects_ruleset_with_socks5_bind),
 	T_CASE(conf_rejects_ruleset_with_socks5_udp),
 #endif
