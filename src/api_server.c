@@ -740,7 +740,7 @@ static void handle_ruleset_invoke(
 	}
 	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 	resphdr_conn(ctx);
-	RESPHDR_CLENGTH(ctx->conn.wbuf, 0);
+	RESPHDR_CLENGTH(ctx->conn.wbuf, (size_t)0);
 	RESPHDR_FINISH(ctx->conn.wbuf);
 	send_response(loop, ctx, true);
 }
@@ -1230,7 +1230,7 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 #endif /* WITH_RULESET */
 		RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 		resphdr_conn(ctx);
-		RESPHDR_CLENGTH(ctx->conn.wbuf, 0);
+		RESPHDR_CLENGTH(ctx->conn.wbuf, (size_t)0);
 		RESPHDR_FINISH(ctx->conn.wbuf);
 		send_response(loop, ctx, true);
 		return;
