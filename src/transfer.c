@@ -138,6 +138,7 @@ struct xfer_worker {
 	struct ev_loop *loop;
 	/* main -> worker: new task enqueued */
 	ev_async w_invoke;
+	ev_periodic w_timejump;
 	atomic_bool stop;
 	/* worker thread only; no locking needed */
 	struct transfer_ctx *active_list;
@@ -690,6 +691,7 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 		ev_set_priority(&w->w_invoke, EV_MAXPRI);
 		w->w_invoke.data = w;
 		ev_async_start(w->loop, &w->w_invoke);
+		loop_watch_timejump(w->loop, &w->w_timejump);
 
 		if (thrd_create(&w->thread, xfer_thread_func, w) !=
 		    thrd_success) {
