@@ -27,6 +27,7 @@
 static struct {
 	struct config conf;
 	struct server server;
+	ev_periodic w_timejump;
 } app = { 0 };
 
 /* Build *basereq from conf->forward/conf->proxy, replacing any previous
@@ -84,6 +85,7 @@ int main(int argc, char *argv[])
 
 	struct ev_loop *loop = ev_default_loop(0);
 	CHECK(loop != NULL);
+	loop_watch_timejump(loop, &app.w_timejump);
 
 	struct resolver *resolver = resolver_new(loop, conf);
 	CHECKOOM(resolver);
@@ -120,7 +122,9 @@ int main(int argc, char *argv[])
 				exit(EXIT_FAILURE);
 			}
 		}
-		check_config_or_exit(conf, argv[0]);
+		if (defer_check) {
+			check_config_or_exit(conf, argv[0]);
+		}
 		/* drop the engine if no ruleset was installed */
 		if (!ruleset_isvalid(ruleset)) {
 			ruleset_free(ruleset);
@@ -154,6 +158,8 @@ int main(int argc, char *argv[])
 		resolver_setnameserver(resolver, conf);
 	}
 #endif /* WITH_LUA */
+
+	conf_advise(conf, ruleset != NULL);
 
 	struct server *s = &app.server;
 	if (!server_bind(s, loop, conf, resolver, basereq, ruleset)) {
