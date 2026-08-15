@@ -14,6 +14,8 @@
 #include <ev.h>
 
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -210,6 +212,93 @@ T_DECLARE_CASE(util_socket_set_transparent_invalid_fd_aborts)
 	T_EXPECT_EQ(WTERMSIG(status), SIGABRT);
 }
 
+/* The time-jump sentinel must sit far enough in the future that it can never
+ * become pending -- its callback is a hard failure if it ever runs. */
+T_DECLARE_CASE(util_loop_watch_timejump_never_pending)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+
+	ev_periodic w;
+	loop_watch_timejump(loop, &w);
+	T_EXPECT(ev_is_active(&w));
+	T_EXPECT(ev_periodic_at(&w) > (ev_tstamp)TIMEJUMP_SENTINEL_AT / 2.0);
+
+	/* an iteration that would dispatch it aborts in timejump_cb */
+	ev_run(loop, EVRUN_NOWAIT);
+	T_EXPECT(!ev_is_pending(&w));
+
+	/* the sentinel is unref'd, so re-ref before stopping it */
+	ev_ref(loop);
+	ev_periodic_stop(loop, &w);
+	ev_loop_destroy(loop);
+}
+
+/* The sentinel is unref'd, so it must not keep an otherwise-empty loop alive:
+ * ev_run must return rather than block on it. Run in a child under an alarm so
+ * a regression fails the test instead of hanging it. */
+T_DECLARE_CASE(util_loop_watch_timejump_does_not_hold_loop)
+{
+	const pid_t pid = fork();
+	T_CHECK(pid >= 0);
+	if (pid == 0) {
+		struct ev_loop *loop = ev_loop_new(0);
+		if (loop == NULL) {
+			_exit(EXIT_FAILURE);
+		}
+		ev_periodic w;
+		loop_watch_timejump(loop, &w);
+		alarm(5);
+		ev_run(loop, 0);
+		alarm(0);
+		_exit(EXIT_SUCCESS);
+	}
+	int status = 0;
+	T_CHECK(waitpid(pid, &status, 0) == pid);
+	T_EXPECT(WIFEXITED(status));
+	T_EXPECT_EQ(WEXITSTATUS(status), EXIT_SUCCESS);
+}
+
+#if WITH_TCP_KEEPALIVE_PARAMS
+static int getsockopt_int(const int fd, const int optname)
+{
+	int value = -1;
+	socklen_t len = sizeof(value);
+	T_CHECK(getsockopt(fd, IPPROTO_TCP, optname, &value, &len) == 0);
+	return value;
+}
+
+T_DECLARE_CASE(util_socket_set_keepalive_applies_each_param)
+{
+	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(fd >= 0);
+
+	socket_set_keepalive(fd, 300, 30, 5);
+	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPIDLE), 300);
+	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPINTVL), 30);
+	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPCNT), 5);
+
+	(void)close(fd);
+}
+
+/* A non-positive value leaves that parameter at the system default. */
+T_DECLARE_CASE(util_socket_set_keepalive_keeps_defaults)
+{
+	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(fd >= 0);
+
+	const int idle = getsockopt_int(fd, TCP_KEEPIDLE);
+	const int intvl = getsockopt_int(fd, TCP_KEEPINTVL);
+
+	socket_set_keepalive(fd, 0, -1, 7);
+	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPIDLE), idle);
+	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPINTVL), intvl);
+	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPCNT), 7);
+
+	(void)close(fd);
+}
+#endif /* WITH_TCP_KEEPALIVE_PARAMS */
+
 /* forward_readahead delivers a whole buffer over a socketpair, and counts
  * every delivered byte into the uplink counter -- these bytes bypass the
  * relay, so this call site is the only place they can be counted. */
@@ -303,6 +392,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(util_socket_bind_netdev_invalid_fd),
 	T_CASE(util_socket_bind_netdev_empty_name),
 	T_CASE(util_socket_set_transparent_invalid_fd_aborts),
+	T_CASE(util_loop_watch_timejump_never_pending),
+	T_CASE(util_loop_watch_timejump_does_not_hold_loop),
+#if WITH_TCP_KEEPALIVE_PARAMS
+	T_CASE(util_socket_set_keepalive_applies_each_param),
+	T_CASE(util_socket_set_keepalive_keeps_defaults),
+#endif
 	T_CASE(util_forward_readahead_full_delivery),
 	T_CASE(util_forward_readahead_null_counter),
 	T_CASE(util_forward_readahead_send_error_fails),

@@ -22,6 +22,7 @@
 #include <locale.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -165,3 +166,26 @@ void socket_set_transparent(const int fd, const bool tproxy)
 		"not supported in current build");
 #endif /* IP_TRANSPARENT */
 }
+
+#if WITH_TCP_KEEPALIVE_PARAMS
+static void set_keepalive_opt(
+	const int fd, const int optname, const char *restrict name,
+	const int value)
+{
+	if (value <= 0) {
+		return;
+	}
+	if (setsockopt(fd, IPPROTO_TCP, optname, &value, sizeof(value))) {
+		const int err = errno;
+		LOGW_F("[fd:%d] %s: (%d) %s", fd, name, err, strerror(err));
+	}
+}
+
+void socket_set_keepalive(
+	const int fd, const int idle, const int intvl, const int cnt)
+{
+	set_keepalive_opt(fd, TCP_KEEPIDLE, "TCP_KEEPIDLE", idle);
+	set_keepalive_opt(fd, TCP_KEEPINTVL, "TCP_KEEPINTVL", intvl);
+	set_keepalive_opt(fd, TCP_KEEPCNT, "TCP_KEEPCNT", cnt);
+}
+#endif /* WITH_TCP_KEEPALIVE_PARAMS */

@@ -51,9 +51,41 @@ void unloadlibs(void);
 void modify_io_events(
 	struct ev_loop *restrict loop, ev_io *restrict watcher, int events);
 
+/* Absolute time the time-jump sentinel is scheduled at. libev leaves an
+ * ev_periodic with neither an interval nor a reschedule callback at its offset
+ * forever, time jumps included, so this one can never become pending. */
+#define TIMEJUMP_SENTINEL_AT 1e18
+
+static inline void
+timejump_cb(struct ev_loop *loop, ev_periodic *watcher, const int revents)
+{
+	(void)loop;
+	(void)watcher;
+	(void)revents;
+	FAIL();
+}
+
+/* Let libev detect wall-clock jumps by timerfd instead of by waking the loop
+ * once a minute, so an idle loop blocks indefinitely. @p sentinel must outlive
+ * the loop; it never becomes pending and never keeps the loop alive. */
+static inline void loop_watch_timejump(
+	struct ev_loop *restrict loop, ev_periodic *restrict sentinel)
+{
+	/* starting any ev_periodic is what makes libev set up its timerfd */
+	ev_periodic_init(
+		sentinel, timejump_cb, TIMEJUMP_SENTINEL_AT, 0.0, NULL);
+	ev_periodic_start(loop, sentinel);
+	ev_unref(loop);
+}
+
 /* socket utilities */
 void socket_bind_netdev(int fd, const char *restrict netdev);
 void socket_set_transparent(int fd, bool tproxy);
+#if WITH_TCP_KEEPALIVE_PARAMS
+/* Override the kernel's keepalive timing on a keepalive-enabled socket. Each
+ * parameter is left at the system default when it is not positive. */
+void socket_set_keepalive(int fd, int idle, int intvl, int cnt);
+#endif
 
 /* Best-effort forward of already-buffered client bytes to a freshly dialed
  * upstream connection, whose send buffer should be empty. A short send here
