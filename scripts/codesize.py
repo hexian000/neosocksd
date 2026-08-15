@@ -52,6 +52,11 @@ DEFAULT_BUILD_DIR = ROOT / "build"
 DEFAULT_ANALYSIS_BUILD_DIR = DEFAULT_BUILD_DIR / "codesize"
 DEFAULT_OUTPUT = DEFAULT_BUILD_DIR / "codesize.md"
 MAP_NAME = "codesize.map"
+# Every executable links through the same map path (set once via
+# CMAKE_EXE_LINKER_FLAGS), so this stamp beside it records which target the
+# map was last linked for; --no-rebuild refuses to pair it with another
+# target's binary.
+MAP_STAMP_NAME = MAP_NAME + ".target"
 
 CACHE_LINE_RE = re.compile(r"^([A-Za-z0-9_]+):[^=]+=(.*)$")
 
@@ -622,7 +627,7 @@ def build_tables(
 
 
 def _table(
-    title: str, note: str, headers: list[str], aligns: str,
+    title: str, headers: list[str], aligns: str,
     rows: list[tuple], total: int,
 ) -> list[str]:
     """Render one titled Markdown table; the last column is bytes + percent.
@@ -631,8 +636,6 @@ def _table(
     columns, the last is the byte count rendered with a percent-of-*total*.
     """
     lines = [title, ""]
-    if note:
-        lines += [note, ""]
     lines.append("| " + " | ".join(headers) + " |")
     lines.append("|" + aligns + "|")
     for row in rows:
@@ -674,19 +677,19 @@ def render_report(meta: dict[str, str], tables: Tables) -> str:
         "",
     ]
     lines += _table(
-        "## Sections", "",
+        "## Sections",
         ["Section", "Kind", "Bytes", "%"], "---|:-:|---:|---:",
         [(s, k, sz) for s, k, sz in tables.sections], sec_total)
     lines += _table(
-        "## Modules", "",
+        "## Modules",
         ["Module", "Bytes", "%"], "---|---:|---:",
         list(tables.modules), mod_total)
     lines += _table(
-        "## Functions", "",
+        "## Functions",
         ["Function", "Module", "Bytes", "%"], "---|---|---:|---:",
         list(tables.functions), fn_total)
     lines += _table(
-        "## Data", meta.get("data_note", ""),
+        "## Data",
         ["Symbol", "Sec", "Module", "Bytes", "%"], "---|:-:|---|---:|---:",
         list(tables.data), data_total)
     if meta.get("lto_note"):
@@ -758,12 +761,47 @@ def main() -> int:
                  "-- configure first (drop --no-rebuild)")
     target = select_target(targets, cache, args.target)
 
+    map_stamp = build_dir / MAP_STAMP_NAME
     if not args.no_rebuild:
         log(f"Building target {target.name} ...")
         if map_path.exists():
             map_path.unlink()
         _run([cmake, "--build", str(build_dir),
               "--target", target.name, f"-j{os.cpu_count() or 1}"])
+        if map_path.exists():
+            st = map_path.stat()
+            map_stamp.write_text(
+                f"{target.name}\n{st.st_mtime_ns} {st.st_size}\n",
+                encoding="utf-8")
+    elif map_path.exists():
+        # The shared map holds whatever executable linked last -- possibly
+        # not this target: every link overwrites it, including manual builds
+        # in the analysis directory. Pairing this target's binary with
+        # another target's map would silently report the wrong
+        # modules/functions, so refuse unless the stamp written after the
+        # last codesize.py link names this target and the map is untouched
+        # since.
+        try:
+            stamp_lines = map_stamp.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            stamp_lines = []
+        producer = stamp_lines[0] if stamp_lines else ""
+        fingerprint = stamp_lines[1] if len(stamp_lines) > 1 else ""
+        st = map_path.stat()
+        current = f"{st.st_mtime_ns} {st.st_size}"
+        if not producer:
+            why = "has no record of which target linked it"
+        elif fingerprint != current:
+            why = "changed since codesize.py linked it (a later build relinked)"
+        elif producer != target.name:
+            why = f"was last linked for target {producer!r}"
+        else:
+            why = None
+        if why is not None:
+            sys.exit(
+                f"error: {_display_path(map_path)} {why}; analyzing "
+                f"{target.name!r} could pair its binary with another "
+                "target's map -- drop --no-rebuild to relink")
 
     binary = target_binary(target)
     lto = detect_lto(target) or args.lto == "on"
