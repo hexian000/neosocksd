@@ -1323,8 +1323,9 @@ static bool parse_header(void *ctx, const char *key, char *value)
 
 	/* hop-by-hop headers */
 	if (strcasecmp(key, "Connection") == 0) {
-		p->hdr.connection = value;
-		return true;
+		/* RFC 9110 §5.3: combine repeated Connection lines into one
+		 * ordered token list so an earlier `close` is not lost */
+		return parsehdr_connection(p, value);
 	}
 	if (strcasecmp(key, "TE") == 0) {
 		/* RFC 9110 §10.1.4: TE only advertises which transfer-codings the
