@@ -23,6 +23,7 @@
 #include <lualib.h>
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared Lua test fixtures (zlib.c has no collaborator to mock).

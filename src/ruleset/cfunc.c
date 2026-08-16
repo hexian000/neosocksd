@@ -224,45 +224,67 @@ int cfunc_loadconfig(lua_State *restrict L)
 			luaL_typename(L, -1));
 	}
 
-	/* extract `ruleset` table before conf_loadfromtable sees it */
-	lua_getfield(L, -1, "ruleset");
-	if (lua_istable(L, -1)) {
-		lua_setglobal(L, "ruleset");
-		lua_pushnil(L);
-		lua_setfield(L, -2, "ruleset");
-	} else if (!lua_isnil(L, -1)) {
-		return luaL_error(
-			L,
-			"config: `ruleset' must be a table; use `-r' for a standalone ruleset file");
-	} else {
-		lua_pop(L, 1);
-	}
-
+	/* Validate everything and stage the ruleset-local settings before touching
+	 * any live state, so a bad field -- a config-field error from
+	 * conf_loadfromtable, a too-large memlimit, or a non-table ruleset --
+	 * fails the load without having replaced the global ruleset table or the
+	 * config. The commits at the end are pure writes. The config table stays on
+	 * the stack top for conf_loadfromtable, which reads from there. */
 	struct ruleset *restrict r = aux_getruleset(L);
-	if (!conf_loadfromtable(L, r->conf)) {
-		return luaL_error(L, "config: failed to load fields");
-	}
 
-	/* Extract memlimit and traceback into r->config */
-	lua_getfield(L, -1, "memlimit");
+	/* stage memlimit (MiB -> KiB); an absent value keeps the current one */
+	int_least32_t new_memlimit_kb = r->config.memlimit_kb;
+	lua_getfield(L, 1, "memlimit");
 	if (!lua_isnil(L, -1)) {
-		/* memlimit is in MiB; keep the arithmetic in lua_Integer and reject
-		 * values that would overflow the KiB field. Non-positive disables. */
+		/* keep the arithmetic in lua_Integer and reject values that would
+		 * overflow the KiB field. Non-positive disables the limit. */
 		const lua_Integer mb = luaL_checkinteger(L, -1);
 		if (mb > (INT_LEAST32_MAX >> 10)) {
 			return luaL_error(L, "config: memlimit too large");
 		}
-		r->config.memlimit_kb =
-			(mb > 0) ? (int_least32_t)(mb << 10) : 0;
+		new_memlimit_kb = (mb > 0) ? (int_least32_t)(mb << 10) : 0;
 	}
 	lua_pop(L, 1);
 
-	lua_getfield(L, -1, "traceback");
+	/* stage traceback */
+	bool new_traceback = r->config.traceback;
+	lua_getfield(L, 1, "traceback");
 	if (!lua_isnil(L, -1)) {
-		r->config.traceback = lua_toboolean(L, -1) != 0;
+		new_traceback = lua_toboolean(L, -1) != 0;
 	}
 	lua_pop(L, 1);
 
+	/* validate the `ruleset` table and remove it from the config table so
+	 * conf_loadfromtable never sees it; keep its value on the stack to install
+	 * only after the config commit succeeds */
+	lua_getfield(L, 1, "ruleset");
+	const bool has_ruleset = lua_istable(L, -1);
+	if (!has_ruleset && !lua_isnil(L, -1)) {
+		return luaL_error(
+			L,
+			"config: `ruleset' must be a table; use `-r' for a standalone ruleset file");
+	}
+	if (has_ruleset) {
+		lua_pushnil(L);
+		lua_setfield(L, 1, "ruleset");
+	}
+	/* stack: 1=config table, 2=ruleset value; move the ruleset value below so
+	 * the config table is back on top for conf_loadfromtable */
+	lua_insert(L, 1);
+
+	if (!conf_loadfromtable(L, r->conf)) {
+		return luaL_error(L, "config: failed to load fields");
+	}
+	lua_pop(L, 1); /* the config table; the ruleset value is now on top */
+
+	/* every read validated and the config committed; commit the rest */
+	if (has_ruleset) {
+		lua_setglobal(L, "ruleset");
+	} else {
+		lua_pop(L, 1);
+	}
+	r->config.memlimit_kb = new_memlimit_kb;
+	r->config.traceback = new_traceback;
 	return 0;
 }
 

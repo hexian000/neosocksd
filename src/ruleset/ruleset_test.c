@@ -1049,6 +1049,46 @@ T_DECLARE_CASE(ruleset_new_clamps_oversized_memlimit)
 	free_ruleset(loop, r);
 }
 
+/*
+ * Regression: cfunc_loadconfig validates the ruleset-local memlimit only after
+ * it had installed the new ruleset table and committed the config. A too-large
+ * memlimit thus raised while the ruleset and config were already replaced. The
+ * memlimit is now validated before any commit, so a late failure leaves both
+ * the ruleset global and the config untouched.
+ */
+T_DECLARE_CASE(ruleset_loadconfig_late_memlimit_failure_is_atomic)
+{
+	struct config conf = make_conf();
+	conf.max_sessions = 7;
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+
+	/* no ruleset is installed to start with */
+	T_EXPECT(!ruleset_isvalid(r));
+
+	/* a config that would replace both the ruleset table and the config
+	 * fields, but whose memlimit is too large to represent in KiB */
+	char src[256];
+	const long long huge = ((long long)INT_LEAST32_MAX >> 10) + 1;
+	const int n = snprintf(
+		src, sizeof(src),
+		"return { listen = '127.0.0.1:1080', max_sessions = 99, "
+		"ruleset = {}, memlimit = %lld }",
+		huge);
+	T_CHECK(n > 0 && (size_t)n < sizeof(src));
+	char path[] = "/tmp/ruleset_test_cfg_XXXXXX";
+	T_CHECK(write_tempfile(path, src) == 0);
+
+	T_EXPECT(!ruleset_loadconfig(r, path));
+	/* the config fields were not committed before the memlimit failure */
+	T_EXPECT_EQ(conf.max_sessions, 7);
+	/* nor was the new ruleset table installed */
+	T_EXPECT(!ruleset_isvalid(r));
+
+	(void)unlink(path);
+	free_ruleset(loop, r);
+}
+
 T_DECLARE_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed)
 {
 	static const char file_chunk[] =
@@ -1680,6 +1720,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_isvalid_tracks_loaded_table),
 	T_CASE(ruleset_load_missing_file_returns_false),
 	T_CASE(ruleset_new_clamps_oversized_memlimit),
+	T_CASE(ruleset_loadconfig_late_memlimit_failure_is_atomic),
 	T_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed),
 	T_CASE(cfunc_metrics_returns_string_when_defined_and_nil_when_absent),
 	T_CASE(cfunc_update_replaces_loaded_module),

@@ -207,10 +207,11 @@ bool ruleset_loadconfig(
 	struct ruleset *restrict r, const char *restrict filename);
 
 /**
- * @brief Report whether the Lua global `ruleset` is set
+ * @brief Report whether the Lua global `ruleset` is a loaded table
  *
  * @param r Ruleset instance
- * @return true if `_G.ruleset` is non-nil, false otherwise
+ * @return true if `_G.ruleset` is a table, false otherwise (including when it
+ *     is set to a non-nil non-table value)
  */
 bool ruleset_isvalid(struct ruleset *restrict r);
 
