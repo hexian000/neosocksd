@@ -147,7 +147,7 @@ end
 **Description**
 
 Handles a hostname request. Specifically:
-- Any HTTP proxy request, whether `CONNECT` or a forwarded request
+- Any HTTP `CONNECT` proxy request
 - SOCKS5 with a hostname (a.k.a. socks5h)
 - Any SOCKS4A request
 
@@ -172,6 +172,18 @@ Proxy addresses are specified in URI format. Supported schemes:
 - `socks4a://example.org:1080`: SOCKS4A server. The implementation is SOCKS4-compatible when requesting an IPv4 address.
 - `socks5://example.org:1080`: SOCKS5 server.
 - `http://example.org:8080`: HTTP/1.1 CONNECT server.
+
+**Base proxy chain**
+
+A routing decision here does not replace the command-line `-x`/`--proxy` chain —
+it extends it. neosocksd always dials the `-x` chain first, then any proxies
+returned by the ruleset, then the target. So the `-x` hops sit nearest neosocksd
+while the returned `proxy1, ..., proxyN` are appended toward the target (`proxy1`
+is the hop right after the `-x` chain); even a bare `addr` with no proxies still
+routes through the `-x` chain. When `-x` is unset, the returned chain is the whole
+path. The same extension applies to any proxy chain given to
+[neosocksd.invoke](#neosocksdinvoke), [await.forward](#awaitforward), and
+[await.invoke](#awaitinvoke).
 
 **Active forwarding**
 

@@ -110,6 +110,14 @@ return {
     -- Enable SO_KEEPALIVE; helps detect dead peers.
     tcp_keepalive       = true,
 
+    -- Keepalive timing overrides for the above (0 = kernel default, i.e. the
+    -- net.ipv4.tcp_keepalive_* sysctls).  Only meaningful when tcp_keepalive
+    -- is enabled.  On a battery-powered host each probe is a radio wakeup, so
+    -- prefer a long idle time over the shorter ones tuned for fast failover.
+    -- tcp_keepidle = 0,   -- seconds of idle before the first probe [0, 32767]
+    -- tcp_keepintvl = 0,  -- seconds between probes [0, 32767]
+    -- tcp_keepcnt = 0,    -- failed probes before the connection drops [0, 127]
+
     -- Server-side TCP Fast Open (RFC 7413).  Requires Linux 3.7 or later.
     -- tcp_fastopen = true,
 

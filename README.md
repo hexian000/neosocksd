@@ -16,6 +16,7 @@ Status: **Stable**
   - [Lua Ruleset](#lua-ruleset)
   - [Observability](#observability)
 - [Distributed Virtual Network](#distributed-virtual-network)
+- [Battery-Powered Deployment](#battery-powered-deployment)
 - [Installation](#installation)
   - [Runtime Dependencies](#runtime-dependencies)
   - [Building from Source](#building-from-source)
@@ -26,7 +27,7 @@ Status: **Stable**
 
 ## Features
 
-- Protocols: [SOCKS4](https://www.openssh.com/txt/socks4.protocol)/[SOCKS4A](https://www.openssh.com/txt/socks4a.protocol) (Ying-Da Lee / NEC), SOCKS5 ([RFC 1928](https://datatracker.ietf.org/doc/html/rfc1928), with [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929) auth), HTTP/1.1 proxy — request forwarding ([RFC 9112 §3.2.2](https://datatracker.ietf.org/doc/html/rfc9112#section-3.2.2)), `CONNECT` tunneling ([RFC 9110 §9.3.6](https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.6)), and `Upgrade` (e.g. WebSocket) passthrough.
+- Protocols: [SOCKS4](https://www.openssh.com/txt/socks4.protocol)/[SOCKS4A](https://www.openssh.com/txt/socks4a.protocol) (Ying-Da Lee / NEC), SOCKS5 ([RFC 1928](https://datatracker.ietf.org/doc/html/rfc1928), with [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929) auth), HTTP/1.1 proxy — `CONNECT` tunneling ([RFC 9110 §9.3.6](https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.6)).
 - Optional legacy compatibility: The following SOCKS5 commands are off by default and work only in plain proxy mode (not through chains or rulesets): BIND (`--enable-socks5-bind`, relays an inbound connection from the target back to the client); UDP ASSOCIATE (`--enable-socks5-udp`, relays UDP datagrams).
 - Transparent proxy: Linux [TPROXY](https://docs.kernel.org/networking/tproxy.html).
 - 10+ Gbps per x86 core on Linux with `--pipe` (measured in 2024).
@@ -172,6 +173,70 @@ Set up on each node:
 The API must be reachable between nodes for peer discovery to work — see the
 [security note](#lua-ruleset) above. Restrict it to a trusted network (e.g. a
 VPN or private LAN link between nodes), not the public internet.
+
+
+## Battery-Powered Deployment
+
+On a phone or any battery-powered host, the cost of a daemon is dominated by how
+often it wakes the CPU and the radio, not by how much work it does when it runs.
+
+An idle neosocksd performs **no periodic work at all**: an established relay
+carries no timer, and with no ruleset tick armed the event loop blocks
+indefinitely. Everything that still wakes it is something you configure.
+
+### Measuring on the device
+
+Measure before tuning. Start the daemon, leave it idle, and count its wakeups:
+
+```sh
+PID=$(pidof neosocksd)
+grep voluntary_ctxt_switches /proc/$PID/status  # wait a few minutes, compare
+awk '{print $14+$15}' /proc/$PID/stat           # utime+stime, in clock ticks
+```
+
+An idle daemon with no ruleset tick should hold both counters completely still.
+Anything else is traffic or a tick, and the sources below explain which.
+
+```sh
+ss -tio                     # per-connection state, including keepalive timers
+dumpsys batterystats        # Android's own attribution, for the whole picture
+```
+
+### Wakeup sources, in order of impact
+
+- **The ruleset tick.** `neosocksd.setinterval(n)` wakes the loop every `n`
+  seconds forever, whether or not anything is connected. Every shipped example
+  ruleset arms `neosocksd.setinterval(60)`; if your ruleset does not need
+  periodic work, do not arm it at all.
+- **`neosocksd.setinterval(n)` with a negative `n`** runs `ruleset.tick()` on
+  every loop iteration and never blocks — a full core, indefinitely. It exists
+  for latency-critical setups; never use it on battery.
+- **`agent.lua`.** The overlay agent probes every peer over the network on an
+  adaptive interval, and re-enters Lua every `PROBE_INTERVAL_MIN` seconds
+  regardless of how far the interval has backed off. Do not load it unless you
+  are actually running a mesh.
+- **TCP keepalive.** Enabled by default on every accepted and dialed socket.
+  Each probe on an idle connection is a radio wakeup. The kernel defaults are
+  tuned for servers (2 hours idle); `tcp_keepidle`, `tcp_keepintvl` and
+  `tcp_keepcnt` in the boot config let you trade failure-detection speed for
+  quiet, and `tcp_keepalive = false` turns probing off entirely — at the cost of
+  the liveness detection that streaming responses and `CONNECT` tunnels rely on.
+
+### Suggested profile
+
+```sh
+cmake -DCMAKE_BUILD_TYPE="Release" -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+    -DENABLE_THREADS=OFF ..
+```
+
+`ENABLE_THREADS=OFF` keeps everything on one thread and one event loop; the I/O
+offload thread pays off under concurrency a phone will not reach.
+
+At runtime, omit `--api` unless you use it, keep the log quiet (`--loglevel 3`),
+and pass `-4` where IPv6 is not needed — resolving a name without it queries
+both `A` and `AAAA`, doubling the DNS round trips. `--pipe` moves payload with
+`splice(2)` instead of copying it through userspace, at the cost of two extra
+file descriptors per session.
 
 
 ## Installation
