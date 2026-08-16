@@ -196,9 +196,8 @@ static bool reply_short(struct http_conn *restrict p, const char *s)
 static int parse_content(struct http_conn *restrict p)
 {
 	/* Only Content-Length based content is handled here. A chunked body is
-	 * deliberately left in rbuf for the caller to dechunk (proxy_pass does,
-	 * via http_framer); callers that read cbuf must reject chunked
-	 * themselves -- see the http_conn_recv() contract. */
+	 * deliberately left unframed in rbuf; callers that read cbuf must reject
+	 * chunked themselves -- see the http_conn_recv() contract. */
 	if (!p->hdr.content.has_length) {
 		return 0;
 	}
@@ -428,450 +427,6 @@ int http_conn_send(struct http_conn *restrict p, const int fd, int *restrict err
 	return 0;
 }
 
-void http_reader_init(struct http_reader *restrict r)
-{
-	r->pos = 0;
-	r->line_done = false;
-}
-
-enum http_reader_state http_reader_parse(
-	struct http_reader *restrict r, char *restrict base,
-	struct http_message *restrict msg, const bool is_request,
-	const struct http_parsehdr_cb on_header)
-{
-	char *next = base + r->pos;
-	if (!r->line_done) {
-		char *const p = http_parse(next, msg);
-		if (p == NULL) {
-			return HTTP_READER_ERROR;
-		}
-		if (p == next) {
-			return HTTP_READER_MORE;
-		}
-		const char *const version =
-			is_request ? msg->req.version : msg->rsp.version;
-		if (strncmp(version, "HTTP/1.", 7) != 0) {
-			return HTTP_READER_ERROR;
-		}
-		r->line_done = true;
-		r->pos = (size_t)(p - base);
-		next = p;
-	}
-	for (;;) {
-		char *key, *value;
-		char *const p = http_parsehdr(next, &key, &value);
-		if (p == NULL) {
-			return HTTP_READER_ERROR;
-		}
-		if (p == next) {
-			return HTTP_READER_MORE;
-		}
-		r->pos = (size_t)(p - base);
-		next = p;
-		if (key == NULL) {
-			return HTTP_READER_OK; /* end of headers */
-		}
-		if (!on_header.func(on_header.ctx, key, value)) {
-			return HTTP_READER_ERROR;
-		}
-	}
-}
-
-void http_body_init(
-	struct http_body *restrict d, const enum http_body_mode mode,
-	const size_t content_length)
-{
-	*d = (struct http_body){ .mode = mode };
-	switch (mode) {
-	case HTTP_BODY_NONE:
-		d->done = true;
-		return;
-	case HTTP_BODY_CONTENT_LENGTH:
-		d->content_length = content_length;
-		d->done = (content_length == 0);
-		return;
-	case HTTP_BODY_CHUNKED:
-		d->chunk_state = HTTP_BODY_CHUNK_SIZE_LINE;
-		return;
-	case HTTP_BODY_EOF:
-		return;
-	}
-	FAILMSG("unexpected http body mode");
-}
-
-static int hex_digit(const unsigned char c)
-{
-	if ('0' <= c && c <= '9') {
-		return c - '0';
-	}
-	if ('a' <= c && c <= 'f') {
-		return 10 + (c - 'a');
-	}
-	if ('A' <= c && c <= 'F') {
-		return 10 + (c - 'A');
-	}
-	return -1;
-}
-
-static bool
-parse_chunk_size_line(const char *restrict line, size_t *restrict out_size)
-{
-	uintmax_t v = 0;
-	bool has_digit = false;
-	const unsigned char *p = (const unsigned char *)line;
-	for (; *p != '\0'; p++) {
-		const int d = hex_digit(*p);
-		if (d < 0) {
-			break;
-		}
-		has_digit = true;
-		if (v > (uintmax_t)(SIZE_MAX - (uintmax_t)d) / 16u) {
-			return false;
-		}
-		v = v * 16u + (uintmax_t)d;
-	}
-	if (!has_digit) {
-		return false;
-	}
-	for (; *p == ' ' || *p == '\t'; p++) {
-	}
-	if (*p != '\0' && *p != ';') {
-		return false;
-	}
-	*out_size = (size_t)v;
-	return true;
-}
-
-bool http_body_consume(
-	struct http_body *restrict d, const unsigned char *restrict data,
-	size_t *restrict len, const struct http_body_data_cb on_data)
-{
-	const size_t total = *len;
-	if (total == 0) {
-		return true;
-	}
-	switch (d->mode) {
-	case HTTP_BODY_NONE:
-		return false;
-	case HTTP_BODY_CONTENT_LENGTH: {
-		if (d->done) {
-			return false;
-		}
-		const size_t remain = d->content_length - d->consumed;
-		if (total > remain) {
-			return false;
-		}
-		if (!on_data.func(on_data.ctx, data, total)) {
-			return false;
-		}
-		d->consumed += total;
-		if (d->consumed == d->content_length) {
-			d->done = true;
-		}
-		return true;
-	}
-	case HTTP_BODY_EOF:
-		if (!on_data.func(on_data.ctx, data, total)) {
-			return false;
-		}
-		d->consumed += total;
-		return true;
-	case HTTP_BODY_CHUNKED:
-		break;
-	}
-
-	for (size_t i = 0; i < total; i++) {
-		const unsigned char c = data[i];
-		switch (d->chunk_state) {
-		case HTTP_BODY_CHUNK_SIZE_LINE:
-		case HTTP_BODY_CHUNK_TRAILER_LINE:
-			if (d->line_cr) {
-				/* RFC 9112 §2.2: within a chunk-size or trailer
-				 * line a CR is valid only as the CR of the
-				 * terminating CRLF. A bare CR (not immediately
-				 * followed by LF) is rejected rather than silently
-				 * deleted -- deleting it would let a smuggled
-				 * interior CR reshape the line (e.g. a chunk size)
-				 * seen only by this parser. */
-				if (c != '\n') {
-					return false;
-				}
-				d->line_cr = false;
-			} else if (c == '\r') {
-				d->line_cr = true;
-				continue;
-			} else if (c == '\0') {
-				/* NUL is invalid in a chunk-size/trailer
-				 * line; buffered, it would end the C-string
-				 * size parse early and hide the junk after it
-				 * from validation */
-				return false;
-			} else if (c != '\n') {
-				if (d->chunk_state ==
-				    HTTP_BODY_CHUNK_TRAILER_LINE) {
-					/* trailer fields are dropped unparsed;
-					 * only the empty terminator line
-					 * matters, so no length bound applies */
-					d->line_skip = true;
-					continue;
-				}
-				if (c == ';' || d->line_skip) {
-					/* chunk extensions are dropped
-					 * unparsed with no length bound; only
-					 * the size digits are buffered */
-					d->line_skip = true;
-					continue;
-				}
-				if (d->line_len + 1 >= sizeof(d->line)) {
-					return false;
-				}
-				d->line[d->line_len++] = (char)c;
-				continue;
-			}
-			/* c == '\n': the line terminator (CRLF, or a tolerated
-			 * bare LF) has been reached */
-			d->line[d->line_len] = '\0';
-			if (d->chunk_state == HTTP_BODY_CHUNK_SIZE_LINE) {
-				size_t sz;
-				if (!parse_chunk_size_line(d->line, &sz)) {
-					return false;
-				}
-				d->chunk_left = sz;
-				d->line_len = 0;
-				d->line_skip = false;
-				if (sz == 0) {
-					d->chunk_state =
-						HTTP_BODY_CHUNK_TRAILER_LINE;
-				} else {
-					d->chunk_state = HTTP_BODY_CHUNK_DATA;
-				}
-				continue;
-			}
-			if (!d->line_skip) {
-				d->chunk_state = HTTP_BODY_CHUNK_DONE;
-				d->done = true;
-				/* trailing bytes past the terminator belong to
-				 * whatever follows (e.g. a pipelined next
-				 * message), not to this body -- report how
-				 * much was actually consumed instead of
-				 * treating leftovers as a parse failure */
-				*len = i + 1;
-				return true;
-			}
-			d->line_skip = false;
-			continue;
-		case HTTP_BODY_CHUNK_DATA: {
-			const size_t remain = total - i;
-			size_t n = d->chunk_left;
-			if (n > remain) {
-				n = remain;
-			}
-			if (!on_data.func(on_data.ctx, data + i, n)) {
-				return false;
-			}
-			d->consumed += n;
-			d->chunk_left -= n;
-			i += n - 1;
-			if (d->chunk_left == 0) {
-				d->chunk_state = HTTP_BODY_CHUNK_DATA_CR;
-			}
-		}
-			continue;
-		case HTTP_BODY_CHUNK_DATA_CR:
-			if (c != '\r') {
-				return false;
-			}
-			d->chunk_state = HTTP_BODY_CHUNK_DATA_LF;
-			continue;
-		case HTTP_BODY_CHUNK_DATA_LF:
-			if (c != '\n') {
-				return false;
-			}
-			d->chunk_state = HTTP_BODY_CHUNK_SIZE_LINE;
-			continue;
-		case HTTP_BODY_CHUNK_DONE:
-			return false;
-		}
-	}
-	return true;
-}
-
-bool http_body_finish(struct http_body *restrict d)
-{
-	switch (d->mode) {
-	case HTTP_BODY_NONE:
-		return true;
-	case HTTP_BODY_CONTENT_LENGTH:
-	case HTTP_BODY_CHUNKED:
-		return d->done;
-	case HTTP_BODY_EOF:
-		d->done = true;
-		return true;
-	}
-	FAILMSG("unexpected http body mode");
-}
-
-size_t http_chunk_header(char *restrict buf, size_t datalen)
-{
-	static const char xdigits[] = "0123456789abcdef";
-	ASSERT(datalen > 0);
-	/* build the hex digits backwards, then emit big-endian */
-	char hex[16];
-	size_t ndigit = 0;
-	do {
-		hex[ndigit++] = xdigits[datalen & 0xf];
-		datalen >>= 4;
-	} while (datalen != 0);
-	size_t pos = 0;
-	while (ndigit > 0) {
-		buf[pos++] = hex[--ndigit];
-	}
-	buf[pos++] = '\r';
-	buf[pos++] = '\n';
-	return pos;
-}
-
-void http_framer_init(
-	struct http_framer *restrict f, const enum http_body_mode in_mode,
-	const size_t content_length, const bool rechunk)
-{
-	http_body_init(&f->body, in_mode, content_length);
-	f->rechunk = rechunk;
-	f->done = false;
-	f->sending_term = false;
-	f->in_pos = f->in_len = 0;
-	f->out_pos = f->out_end = 0;
-	f->datalen = 0;
-}
-
-void http_framer_seed(
-	struct http_framer *restrict f, const size_t pos, const size_t len)
-{
-	f->in_pos = pos;
-	f->in_len = len;
-}
-
-static bool
-framer_on_data(void *ctx, const unsigned char *restrict data, const size_t len)
-{
-	struct http_framer *restrict f = ctx;
-	/* the input is throttled so the decoded output always fits */
-	memcpy(f->out + HTTP_FRAMER_HDR_ROOM + f->datalen, data, len);
-	f->datalen += len;
-	return true;
-}
-
-enum http_framer_op http_framer_run(struct http_framer *restrict f)
-{
-	const struct http_body_data_cb cb = { .func = framer_on_data,
-					      .ctx = f };
-	for (;;) {
-		if (f->out_pos < f->out_end) {
-			return HTTP_FRAMER_SEND;
-		}
-		if (f->done) {
-			return HTTP_FRAMER_DONE;
-		}
-		if (f->body.done) {
-			if (f->rechunk && !f->sending_term) {
-				memcpy(f->out, HTTP_CHUNK_TERMINATOR,
-				       sizeof(HTTP_CHUNK_TERMINATOR) - 1);
-				f->out_pos = 0;
-				f->out_end = sizeof(HTTP_CHUNK_TERMINATOR) - 1;
-				f->sending_term = true;
-				return HTTP_FRAMER_SEND;
-			}
-			f->done = true;
-			return HTTP_FRAMER_DONE;
-		}
-		if (f->in_pos >= f->in_len) {
-			return HTTP_FRAMER_FILL;
-		}
-		size_t avail = f->in_len - f->in_pos;
-		if (f->body.mode == HTTP_BODY_CONTENT_LENGTH) {
-			const size_t remain =
-				f->body.content_length - f->body.consumed;
-			if (avail > remain) {
-				avail = remain; /* discard surplus past CL */
-			}
-		}
-		f->datalen = 0;
-		size_t consumed = avail;
-		if (!http_body_consume(
-			    &f->body, f->in + f->in_pos, &consumed, cb)) {
-			return HTTP_FRAMER_ERROR;
-		}
-		f->in_pos += consumed;
-		if (f->body.done) {
-			/* surplus past the body (a pipelined next message) is
-			 * left unread and discarded -- no keep-alive here */
-			f->in_pos = f->in_len;
-		}
-		if (f->datalen == 0) {
-			continue; /* framing-only bytes produced no output */
-		}
-		if (f->rechunk) {
-			char hdr[HTTP_CHUNK_HEADER_MAX];
-			const size_t hlen = http_chunk_header(hdr, f->datalen);
-			memcpy(f->out + HTTP_FRAMER_HDR_ROOM - hlen, hdr, hlen);
-			f->out[HTTP_FRAMER_HDR_ROOM + f->datalen] = '\r';
-			f->out[HTTP_FRAMER_HDR_ROOM + f->datalen + 1] = '\n';
-			f->out_pos = HTTP_FRAMER_HDR_ROOM - hlen;
-			f->out_end = HTTP_FRAMER_HDR_ROOM + f->datalen + 2;
-		} else {
-			f->out_pos = HTTP_FRAMER_HDR_ROOM;
-			f->out_end = HTTP_FRAMER_HDR_ROOM + f->datalen;
-		}
-		return HTTP_FRAMER_SEND;
-	}
-}
-
-size_t http_framer_pending(
-	const struct http_framer *restrict f,
-	const unsigned char **restrict buf)
-{
-	*buf = f->out + f->out_pos;
-	return f->out_end - f->out_pos;
-}
-
-void http_framer_drained(struct http_framer *restrict f, const size_t n)
-{
-	f->out_pos += n;
-	if (f->out_pos >= f->out_end) {
-		f->out_pos = f->out_end = 0;
-	}
-}
-
-void http_framer_inbuf(
-	struct http_framer *restrict f, unsigned char **restrict buf,
-	size_t *restrict cap)
-{
-	*buf = f->in;
-	size_t want = sizeof(f->in);
-	if (f->body.mode == HTTP_BODY_CONTENT_LENGTH) {
-		const size_t remain = f->body.content_length - f->body.consumed;
-		if (want > remain) {
-			want = remain;
-		}
-	}
-	*cap = want;
-}
-
-void http_framer_filled(struct http_framer *restrict f, const size_t n)
-{
-	f->in_pos = 0;
-	f->in_len = n;
-}
-
-bool http_framer_eof(struct http_framer *restrict f)
-{
-	if (f->body.mode != HTTP_BODY_EOF) {
-		return false;
-	}
-	(void)http_body_finish(&f->body);
-	return true;
-}
-
 bool parsehdr_transfer_encoding(
 	struct http_conn *restrict p, char *restrict value)
 {
@@ -892,6 +447,13 @@ bool parsehdr_transfer_encoding(
 		/* RFC 9112 §6.3: Content-Length + Transfer-Encoding: chunked
 		 * is an ambiguous framing and must be rejected */
 		if (p->hdr.content.has_length) {
+			return false;
+		}
+		/* RFC 9112 §6.1: chunked applies at most once, so a repeated
+		 * Transfer-Encoding: chunked line -- the split-line form of the
+		 * rejected "chunked, chunked" -- must be rejected too, matching
+		 * the response parser (rsp_record_header). */
+		if (p->hdr.transfer.encoding == TENCODING_CHUNKED) {
 			return false;
 		}
 		p->hdr.transfer.encoding = TENCODING_CHUNKED;
@@ -967,7 +529,15 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 		token = (comma != NULL) ? comma + 1 : NULL;
 	}
 
-	if (selected && !deflate_refused) {
+	/* RFC 9110 §5.3: repeated Accept-Encoding lines are one combined value, so
+	 * a `deflate;q=0` on any line refuses deflate for the whole request -- keep
+	 * the refusal sticky across lines rather than only within this one. */
+	if (deflate_refused) {
+		p->hdr.accept_deflate_refused = true;
+	}
+	if (p->hdr.accept_deflate_refused) {
+		p->hdr.accept_encoding = CENCODING_NONE;
+	} else if (selected) {
 		p->hdr.accept_encoding = CENCODING_DEFLATE;
 	}
 	/* otherwise leave accept_encoding as CENCODING_NONE: a valid header with
@@ -1031,6 +601,14 @@ bool parsehdr_content_length(
 bool parsehdr_content_encoding(
 	struct http_conn *restrict p, const char *restrict value)
 {
+	/* RFC 9110 §5.3: repeated Content-Encoding lines combine into one ordered
+	 * coding list. Only a single supported coding can be decoded, so a second
+	 * coding line is a stack this decoder cannot apply -- reject it, the same
+	 * as the equivalent comma-joined multi-coding on one line. */
+	if (p->hdr.content.encoding != CENCODING_NONE) {
+		p->http_status = HTTP_UNSUPPORTED_MEDIA_TYPE;
+		return false;
+	}
 	for (size_t i = 0; i < CENCODING_MAX; i++) {
 		if (http_content_encoding_str[i] == NULL) {
 			continue;
@@ -1081,10 +659,46 @@ bool parsehdr_expect(struct http_conn *restrict p, char *restrict value)
 	return true;
 }
 
+bool http_connection_join(
+	char *restrict store, const size_t cap, size_t *restrict len,
+	const char *restrict value)
+{
+	const size_t vlen = strlen(value);
+	const size_t sep = (*len > 0) ? 1 : 0;
+	if (*len + sep + vlen + 1 > cap) {
+		return false;
+	}
+	if (sep > 0) {
+		store[(*len)++] = ',';
+	}
+	memcpy(store + *len, value, vlen + 1);
+	*len += vlen;
+	return true;
+}
+
 bool parsehdr_connection(struct http_conn *restrict p, char *restrict value)
 {
-	p->hdr.connection = value;
-	return true;
+	/* The common single-line case is referenced in place, unchanged. A second
+	 * line switches to the combine store: seed it with the first line (still
+	 * referenced by `connection`), then append this and any further lines so
+	 * every consumer sees one ordered token list (RFC 9110 §5.3). */
+	if (p->hdr.connection == NULL) {
+		p->hdr.connection = value;
+		return true;
+	}
+	char *const store = p->hdr.connection_store;
+	if (p->hdr.connection != store) {
+		p->hdr.connection_stored = 0;
+		if (!http_connection_join(
+			    store, sizeof(p->hdr.connection_store),
+			    &p->hdr.connection_stored, p->hdr.connection)) {
+			return false;
+		}
+		p->hdr.connection = store;
+	}
+	return http_connection_join(
+		store, sizeof(p->hdr.connection_store),
+		&p->hdr.connection_stored, value);
 }
 
 const char *parsehdr_connection_token(
@@ -1147,72 +761,6 @@ bool http_header_field_valid(
 		if (iscntrl(*c) && *c != '\t') {
 			return false;
 		}
-	}
-	return true;
-}
-
-bool http_hostport_normalize(
-	char *restrict buf, const size_t cap, const char *restrict host)
-{
-	const size_t hlen = strlen(host);
-	if (hlen >= cap) {
-		return false;
-	}
-	memcpy(buf, host, hlen + 1);
-	const char *const portcheck = (buf[0] == '[') ? strchr(buf, ']') : buf;
-	if (portcheck == NULL) {
-		return false;
-	}
-	if (strchr(portcheck, ':') != NULL) {
-		return true;
-	}
-	if (hlen + 3 >= cap) {
-		return false;
-	}
-	memcpy(buf + hlen, ":80", 4);
-	return true;
-}
-
-bool http_append(struct buffer *restrict buf, const char *restrict s)
-{
-	const size_t n = strlen(s);
-	if (n > buf->cap - buf->len) {
-		return false;
-	}
-	BUF_APPEND(*buf, s, n);
-	return true;
-}
-
-bool http_append_headers(
-	struct buffer *restrict buf, const struct http_header_kv *restrict hdr,
-	const size_t n, const char *restrict connection)
-{
-	for (size_t i = 0; i < n; i++) {
-		if (http_connection_lists(connection, hdr[i].key)) {
-			continue;
-		}
-		if (!http_append(buf, hdr[i].key) || !http_append(buf, ": ") ||
-		    !http_append(buf, hdr[i].value) ||
-		    !http_append(buf, "\r\n")) {
-			return false;
-		}
-	}
-	return true;
-}
-
-bool http_append_framing(
-	struct buffer *restrict buf, const bool chunked, const bool clen_known,
-	const size_t content_length)
-{
-	if (chunked) {
-		return http_append(buf, "Transfer-Encoding: chunked\r\n");
-	}
-	if (clen_known) {
-		char cl[sizeof("Content-Length: \r\n") + 20];
-		(void)snprintf(
-			cl, sizeof(cl), "Content-Length: %zu\r\n",
-			content_length);
-		return http_append(buf, cl);
 	}
 	return true;
 }
