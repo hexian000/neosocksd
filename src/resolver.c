@@ -361,19 +361,35 @@ apply_nameserver(struct resolver *restrict r, const char *restrict nameserver)
 	}
 }
 
+/* Ceiling on the cached lifetime of a reply, matching the c-ares default; a
+ * record's own TTL still applies below it. */
+#define RESOLVER_QCACHE_MAX_TTL 3600
+
 static bool
 async_init(struct resolver *restrict r, const struct config *restrict conf)
 {
 	int ret;
 	struct ares_options options;
+	int optmask = ARES_OPT_SOCK_STATE_CB;
 
 	options.sock_state_cb = sock_state_cb;
 	options.sock_state_cb_data = r;
-	ret = ares_init_options(&r->channel, &options, ARES_OPT_SOCK_STATE_CB);
+#ifdef ARES_OPT_QUERY_CACHE
+	/* every dial to a hostname queries the resolver, so ask for the cache
+	 * rather than inheriting whatever this c-ares defaults to */
+	options.qcache_max_ttl = RESOLVER_QCACHE_MAX_TTL;
+	optmask |= ARES_OPT_QUERY_CACHE;
+#endif
+	ret = ares_init_options(&r->channel, &options, optmask);
 	if (ret != ARES_SUCCESS) {
 		LOGE_F("c-ares: (%d) %s", ret, ares_strerror(ret));
 		return false;
 	}
+#ifdef ARES_OPT_QUERY_CACHE
+	LOGD_F("c-ares: query cache max ttl %d", RESOLVER_QCACHE_MAX_TTL);
+#else
+	LOGW("c-ares: no query cache in this version, every dial re-queries");
+#endif
 
 	ev_timer_init(&r->w_timeout, timeout_cb, 0.0, 0.0);
 	r->w_timeout.data = r;
