@@ -19,6 +19,7 @@
 #include <lualib.h>
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared Lua test fixtures (regex.c has no collaborator to mock).
@@ -621,6 +622,32 @@ T_DECLARE_CASE(regex_find_init_after_newline_anchors)
 	lua_close(L);
 }
 
+/*
+ * Regression: regex_cstrpos() must not narrow the subject length to
+ * lua_Integer. `huge` is the smallest length exceeding LUA_MAXINTEGER -- a
+ * subject that size is reachable under LUA_32BITS on a 64-bit-size_t host, and
+ * the value exceeds LUA_MAXINTEGER at every lua_Integer width, so this pins the
+ * arithmetic portably without allocating the string. Pre-fix, (lua_Integer)len
+ * was implementation-defined here: a positive index clamped to the end instead
+ * of converting, and a negative index overflowed signed arithmetic.
+ */
+T_DECLARE_CASE(regex_cstrpos_does_not_narrow_length)
+{
+	const size_t huge = (size_t)LUA_MAXINTEGER + 1u;
+
+	/* positive 1-based index converts to pos-1, not clamp-to-end */
+	T_EXPECT_EQ(regex_cstrpos(1, huge), (size_t)0);
+	T_EXPECT_EQ(regex_cstrpos(5, huge), (size_t)4);
+	T_EXPECT_EQ(regex_cstrpos(LUA_MAXINTEGER, huge), huge - 2u);
+
+	/* negative index counts back from the end, no signed overflow */
+	T_EXPECT_EQ(regex_cstrpos(-1, huge), huge - 1u);
+	T_EXPECT_EQ(regex_cstrpos(-2, huge), huge - 2u);
+
+	/* the largest-magnitude negative index maps to the string start */
+	T_EXPECT_EQ(regex_cstrpos(LUA_MININTEGER, huge), (size_t)0);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -657,6 +684,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_gmatch_anchor_still_matches_each_line),
 	T_CASE(regex_gmatch_anchor_matches_consumed_newline_lines),
 	T_CASE(regex_find_init_after_newline_anchors),
+	T_CASE(regex_cstrpos_does_not_narrow_length),
 	T_SUITE_END,
 };
 

@@ -83,28 +83,32 @@ static int regex_compile(lua_State *restrict L)
 
 /* Convert Lua string index (1-based, negative for reverse) to C index (0-based).
  * Lua:  1 = first char, -1 = last char, 0 = clamp to start
- * Returns a valid C index in range [0, len]. */
-static size_t cstrpos(const lua_Integer pos, const size_t len)
+ * Returns a valid C index in range [0, len]. `len` is never narrowed to
+ * lua_Integer: under LUA_32BITS a subject can exceed LUA_MAXINTEGER, and that
+ * out-of-range conversion is implementation-defined. */
+size_t regex_cstrpos(const lua_Integer pos, const size_t len)
 {
 	if (len == 0) {
 		return 0;
 	}
 	if (pos < 0) {
-		/* negative index: -1 = last, -2 = second last, etc. */
-		const lua_Integer adjusted = (lua_Integer)len + pos;
-		if (adjusted < 0) {
+		/* Negative index: -1 = last, -2 = second last, etc. Form the
+		 * magnitude |pos| as size_t and compare/subtract at full width.
+		 * -(pos + 1) + 1 avoids the overflow of negating LUA_MININTEGER. */
+		const size_t mag = (size_t)(-(pos + 1)) + 1;
+		if (mag > len) {
 			/* Underflow: clamp to start. */
 			return 0;
 		}
-		return (size_t)adjusted;
+		return len - mag;
 	}
 	if (pos == 0) {
 		/* Zero means the start position. */
 		return 0;
 	}
-	/* pos > 0: positive index (1-based). Compare in lua_Integer so a huge
-	 * pos cannot truncate when narrowed to a (possibly 32-bit) size_t. */
-	if (pos > (lua_Integer)len) {
+	/* pos > 0: positive index (1-based). Widen pos to size_t for the range
+	 * check so len is not narrowed to a (possibly 32-bit) lua_Integer. */
+	if ((size_t)pos > len) {
 		return len;
 	}
 	return (size_t)(pos - 1);
@@ -137,7 +141,7 @@ static int regex_find(lua_State *restrict L)
 		luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
 	const char *restrict s = luaL_checklstring(L, 2, &len);
-	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
+	const size_t init = regex_cstrpos(luaL_optinteger(L, 3, 0), len);
 	const int eflags = match_eflags(reg, s, init);
 	s += init;
 	len -= init;
@@ -191,7 +195,7 @@ static int regex_match(lua_State *restrict L)
 		luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
 	const char *restrict s = luaL_checklstring(L, 2, &len);
-	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
+	const size_t init = regex_cstrpos(luaL_optinteger(L, 3, 0), len);
 	const int eflags = match_eflags(reg, s, init);
 	s += init;
 	len -= init;
@@ -211,9 +215,9 @@ static int regex_match(lua_State *restrict L)
 
 /* Sentinel stored in the "next position" upvalue once the iterator has
  * exhausted the subject string. Both the initial position (normalized in
- * regex_gmatch to cstrpos()+1) and every subsequent one gmatch_aux() stores
- * lie in [1, len+1], so this large-negative value can never collide with a
- * live iteration position. */
+ * regex_gmatch to regex_cstrpos()+1) and every subsequent one gmatch_aux()
+ * stores lie in [1, len+1], so this large-negative value can never collide
+ * with a live iteration position. */
 #define GMATCH_DONE LUA_MININTEGER
 
 static int gmatch_aux(lua_State *restrict L)
@@ -226,7 +230,7 @@ static int gmatch_aux(lua_State *restrict L)
 		lua_touserdata(L, lua_upvalueindex(1));
 	size_t len;
 	const char *restrict s = lua_tolstring(L, lua_upvalueindex(2), &len);
-	const size_t init = cstrpos(pos, len);
+	const size_t init = regex_cstrpos(pos, len);
 	const int eflags = match_eflags(reg, s, init);
 	s += init;
 	/* the subject was NUL-checked once in regex_gmatch */
@@ -250,9 +254,9 @@ static int gmatch_aux(lua_State *restrict L)
 	const size_t next = init + advance;
 	if (next > len) {
 		/* No further positions worth trying; mark the iterator exhausted
-		 * instead of storing a position cstrpos() would silently re-clamp
-		 * to `len` next call, which would repeat this same trailing
-		 * empty match forever. */
+		 * instead of storing a position regex_cstrpos() would silently
+		 * re-clamp to `len` next call, which would repeat this same
+		 * trailing empty match forever. */
 		lua_pushinteger(L, GMATCH_DONE);
 	} else {
 		lua_pushinteger(L, (lua_Integer)next + 1);
@@ -267,15 +271,15 @@ static int regex_gmatch(lua_State *restrict L)
 	(void)luaL_checkudata(L, 1, MT_REGEX);
 	size_t len;
 	const char *restrict const s = luaL_checklstring(L, 2, &len);
-	const size_t init = cstrpos(luaL_optinteger(L, 3, 0), len);
+	const size_t init = regex_cstrpos(luaL_optinteger(L, 3, 0), len);
 	/* Scan for an embedded NUL once here, not on every gmatch_aux()
 	 * iteration (the subject never changes), keeping iteration O(n). Scan
 	 * only the active suffix [init, len) -- exactly what find()/match() do --
 	 * since a NUL before the start offset is never seen by regexec(). */
 	check_no_nul(L, s + init, len - init);
 	lua_settop(L, 2);
-	/* Store a normalized 1-based start position; cstrpos()+1 maps it into
-	 * [1, len+1], which can never be the GMATCH_DONE sentinel, so a
+	/* Store a normalized 1-based start position; regex_cstrpos()+1 maps it
+	 * into [1, len+1], which can never be the GMATCH_DONE sentinel, so a
 	 * huge-negative init (e.g. math.mininteger) clamps to the string start
 	 * instead of colliding with it. */
 	lua_pushinteger(L, (lua_Integer)init + 1);
