@@ -1837,6 +1837,129 @@ return function(T)
         ag.wake = orig_wake
     end)
 
+    -- ------------------------------------------------------------------ --
+    -- 20b. sleep_interval: one timer per interval, cut short on demand
+    -- ------------------------------------------------------------------ --
+
+    -- An earlier test may have left the wakeup flag set (any failed demand or
+    -- applied delta raises it), which would make the next interval skip its
+    -- park. A zero-length interval clears it without sleeping.
+    local function drain_wakeup()
+        ag._sleep_interval(0)
+    end
+
+    -- Drive sleep_interval with a non-yielding await.sleep that advances the
+    -- fake clock, recording what it was asked to wait for. Returns the list of
+    -- requested durations; await.sleep is restored even if the call throws.
+    local function record_sleeps(seconds)
+        drain_wakeup()
+        local sleeps = {}
+        local orig_sleep = await.sleep
+        await.sleep = function(n)
+            t_clock = t_clock + n
+            sleeps[#sleeps + 1] = n
+        end
+        local ok, err = pcall(ag._sleep_interval, seconds)
+        await.sleep = orig_sleep
+        assert(ok, err)
+        return sleeps
+    end
+
+    -- Park a fresh coroutine inside sleep_interval and hand it back suspended.
+    -- async is stubbed out so the interval's own timer never fires, leaving
+    -- whatever the caller does next as the only thing that can resume it.
+    local function park_interval(seconds)
+        drain_wakeup()
+        local orig_sleep, orig_async = await.sleep, _G.async
+        await.sleep = function(n) t_clock = t_clock + n end
+        _G.async = function() return { co = "stub" } end
+        local co = coroutine.create(function() ag._sleep_interval(seconds) end)
+        local ok, err = coroutine.resume(co)
+        _G.async, await.sleep = orig_async, orig_sleep
+        assert(ok, err)
+        return co
+    end
+
+    -- Regression: a backed-off interval was slept in PROBE_INTERVAL_MIN slices
+    -- and the wakeup flag re-read after each one, so a quiescent mesh re-entered
+    -- Lua every 10s forever -- 60 wakeups per PROBE_INTERVAL_MAX round that did
+    -- nothing but read a boolean.
+    T:atest("sleep_interval: a backed-off interval is not polled in slices", function()
+        reset()
+        local sleeps = record_sleeps(ag.PROBE_INTERVAL_MAX)
+        assert(#sleeps == 2, string.format(
+            "a %gs interval must take one floor sleep plus one timer, got %d sleeps",
+            ag.PROBE_INTERVAL_MAX, #sleeps))
+        assert(sleeps[1] == ag.PROBE_INTERVAL_MIN,
+            "the interval must open with an uninterrupted PROBE_INTERVAL_MIN")
+        assert(sleeps[2] == ag.PROBE_INTERVAL_MAX - ag.PROBE_INTERVAL_MIN,
+            "the remainder must be waited out in one go")
+        -- an interval no longer than the floor needs no timer at all
+        sleeps = record_sleeps(ag.PROBE_INTERVAL_MIN)
+        assert(#sleeps == 1 and sleeps[1] == ag.PROBE_INTERVAL_MIN,
+            "a minimum-length interval must be a single sleep")
+    end)
+
+    T:atest("sleep_interval: wake resumes a parked interval at once", function()
+        reset()
+        local co = park_interval(ag.PROBE_INTERVAL_MAX)
+        assert(coroutine.status(co) == "suspended",
+            "the remainder of a long interval must park")
+        ag.wake()
+        assert(coroutine.status(co) == "dead",
+            "wake must resume the parked interval, not wait out its timer")
+    end)
+
+    -- A retired instance keeps its own timer, so clearing the running flag
+    -- alone would still retire it -- but only once that timer expires, up to
+    -- PROBE_INTERVAL_MAX later, with the coroutine and the tables it captured
+    -- held until then. Reloads must not have to wait that out.
+    T:atest("stop: a parked mainloop is retired at once", function()
+        reset()
+        local co = park_interval(ag.PROBE_INTERVAL_MAX)
+        assert(coroutine.status(co) == "suspended",
+            "the remainder of a long interval must park")
+        ag.stop()
+        assert(coroutine.status(co) == "dead",
+            "stop must retire the parked mainloop")
+        assert(ag.running == false, "stop must clear the running flag")
+    end)
+
+    -- A timer left behind by an early wake outlives the interval it belonged
+    -- to; when it finally fires it must not cut the interval in flight short.
+    T:atest("sleep_interval: a timer left by an early wake retires quietly", function()
+        reset()
+        drain_wakeup()
+        local orig_sleep, orig_async = await.sleep, _G.async
+        await.sleep = function(n) t_clock = t_clock + n end
+        local timers = {}
+        _G.async = function(f, ...)
+            timers[#timers + 1] = table.pack(f, ...)
+            return { co = "stub" }
+        end
+        local function park()
+            local co = coroutine.create(
+                function() ag._sleep_interval(ag.PROBE_INTERVAL_MAX) end)
+            local ok, err = coroutine.resume(co)
+            assert(ok, err)
+            return co
+        end
+        local first = park()
+        ag.wake() -- cut it short, stranding the timer recorded above
+        local second = park()
+        _G.async = orig_async
+        -- fire the timer the first interval left behind; await.sleep is still
+        -- mocked, so it returns without waiting out the remainder
+        local stale = timers[1]
+        stale[1](table.unpack(stale, 2, stale.n))
+        await.sleep = orig_sleep
+        assert(coroutine.status(first) == "dead", "wake must resume the first interval")
+        assert(coroutine.status(second) == "suspended",
+            "a stale timer must not cut the interval in flight short")
+        ag.wake()
+        assert(coroutine.status(second) == "dead", "wake must still resume it")
+    end)
+
     T:atest("probe interval: dial failures on an active mesh reset to MIN", function()
         reset()
         ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }

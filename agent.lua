@@ -275,8 +275,36 @@ end
 -- set to interrupt the mainloop sleep so the next round starts promptly
 local wakeup = false
 
+-- the mainloop coroutine while it is parked waiting out a probe interval,
+-- and a generation counter so a timer left behind by an early wake retires
+-- quietly instead of cutting a later interval short
+local sleeping = nil
+local sleep_gen = 0
+
+-- resume the parked mainloop, if any. Nothing else may resume it: the park
+-- is a plain coroutine.yield(), so whoever ends the interval -- its timer,
+-- agent.wake() or agent.stop() -- has to do it here.
+local function resume_sleeping()
+    local co = sleeping
+    if not co then
+        return
+    end
+    sleeping = nil
+    if coroutine.status(co) ~= "suspended" then
+        -- the slot is claimed before the yield, so an interval whose timer
+        -- ended without ever suspending lands here; clearing it is enough,
+        -- sleep_interval then skips the park
+        return
+    end
+    local ok, err = coroutine.resume(co)
+    if not ok then
+        evlogf("agent: mainloop: %s", oneline(err))
+    end
+end
+
 function agent.wake()
     wakeup = true
+    resume_sleeping()
 end
 
 -- set when the data plane uses a mesh route; read-and-cleared each round
@@ -778,20 +806,47 @@ function agent.maintenance()
     end
 end
 
--- sleep in short slices so agent.wake() can cut a backed-off interval short;
--- the first slice is always slept so that wake spam (e.g. sustained failing
--- demand) cannot collapse rounds into a probe storm
+-- ends a parked interval when it expires; a timer left behind by an early
+-- wake sees a newer generation and retires without touching the mainloop
+local function sleep_timer(gen, seconds)
+    await.sleep(seconds)
+    if sleep_gen == gen then
+        resume_sleeping()
+    end
+end
+
+-- wait out one probe interval. The opening PROBE_INTERVAL_MIN is always slept
+-- uninterrupted, so that wake spam (e.g. sustained failing demand) cannot
+-- collapse rounds into a probe storm; the remainder is parked on a single
+-- timer that agent.wake() or agent.stop() can cut short, rather than polled in
+-- slices -- a quiescent mesh would otherwise re-enter Lua every slice forever.
 local function sleep_interval(seconds)
-    local deadline = time.monotonic() + seconds
-    repeat
-        local remain = deadline - time.monotonic()
-        if remain <= 0 or not agent.running then
-            break
+    local floor = seconds < agent.PROBE_INTERVAL_MIN and seconds or
+        agent.PROBE_INTERVAL_MIN
+    if floor > 0 then
+        await.sleep(floor)
+    end
+    local remain = seconds - floor
+    if remain > 0 and agent.running and not wakeup then
+        local co = coroutine.running()
+        sleep_gen = sleep_gen + 1
+        sleeping = co
+        local timer = async(sleep_timer, sleep_gen, remain)
+        if not timer.co then
+            -- the timer could not start; sleep it out rather than park with
+            -- nothing left to resume us
+            sleeping = nil
+            await.sleep(remain)
+        elseif sleeping == co then
+            -- still parked: a resume that arrived while the timer was being
+            -- started has already cleared it
+            coroutine.yield()
         end
-        await.sleep(remain < agent.PROBE_INTERVAL_MIN and remain or agent.PROBE_INTERVAL_MIN)
-    until wakeup
+    end
     wakeup = false
 end
+
+agent._sleep_interval = sleep_interval
 
 local function mainloop()
     await.sleep(agent.BOOTSTRAP_DELAY)
@@ -841,6 +896,11 @@ end
 
 function agent.stop()
     agent.running = false
+    -- a parked mainloop would otherwise idle on until its own timer expires,
+    -- up to PROBE_INTERVAL_MAX later, holding its coroutine and the peerdb and
+    -- route tables it captured; a reload retires it here instead
+    sleep_gen = sleep_gen + 1
+    resume_sleeping()
 end
 
 local function main(...)
