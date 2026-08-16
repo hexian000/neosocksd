@@ -1182,6 +1182,38 @@ T_DECLARE_CASE(codec_gzip_empty_fname_after_fextra)
 	VBUF_FREE(g);
 }
 
+/* Regression: RFC 1952 requires the reserved FLG bits (0xe0) to be zero. A
+ * member with any of bits 5-7 set must be rejected, not decompressed as if the
+ * header were valid. The miniz writer emits FLG=0, so each reserved bit is set
+ * on an otherwise valid member by hand and must drive a read/close error. */
+T_DECLARE_CASE(codec_gzip_rejects_reserved_flag_bits)
+{
+	enum { N = 256 };
+	uint_least8_t src[N];
+	for (size_t i = 0; i < N; ++i) {
+		src[i] = (uint_least8_t)((i * 31U + 3U) & 0xffU);
+	}
+
+	static const unsigned char reserved[] = { 0x20, 0x40, 0x80 };
+	for (size_t k = 0; k < ARRAY_SIZE(reserved); ++k) {
+		struct vbuffer *g = gzip_make_member(src, N);
+		T_CHECK(g != NULL);
+		T_CHECK(VBUF_LEN(g) >= 10);
+		/* set one reserved FLG bit on the otherwise valid member */
+		((unsigned char *)VBUF_DATA(g))[3] |= reserved[k];
+
+		struct io_stream *r = codec_gzip_reader(
+			io_memreader(VBUF_DATA(g), VBUF_LEN(g)));
+		T_CHECK(r != NULL);
+		unsigned char out[N];
+		size_t n = sizeof(out);
+		const int rret = io_stream_read(r, out, &n);
+		const int cret = io_stream_close(r);
+		T_EXPECT(rret != 0 || cret != 0);
+		VBUF_FREE(g);
+	}
+}
+
 /* Regression: a full flush on a zlib/deflate writer must complete instead of
  * looping forever (TDEFL_FULL_FLUSH never reaches TDEFL_STATUS_DONE), and the
  * stream must still decode correctly after the flush and subsequent writes. */
@@ -1801,6 +1833,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_zlib_adler32_mismatch_surfaced_at_close),
 	T_CASE(codec_gzip_hcrc_mismatch),
 	T_CASE(codec_gzip_bad_magic),
+	T_CASE(codec_gzip_rejects_reserved_flag_bits),
 	T_CASE(codec_gzip_truncated_after_fextra),
 	T_CASE(codec_gzip_truncated_body_fails),
 	T_CASE(codec_gzip_short_trailer_fails),

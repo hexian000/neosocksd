@@ -648,6 +648,8 @@ enum gzip_flags {
 	GZIP_FNAME = 1 << 3,
 	/* File comment is present */
 	GZIP_FCOMMENT = 1 << 4,
+	/* Bits 5-7 are reserved and must be zero */
+	GZIP_FRESERVED = 0xe0,
 };
 
 enum gzip_rstate {
@@ -739,6 +741,11 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				return -1;
 			}
 			z->hdrflg = z->hdrbuf[3];
+			if (z->hdrflg & GZIP_FRESERVED) {
+				/* RFC 1952: reserved FLG bits must be zero */
+				LOGD("gzip: reserved header flag bits set");
+				return -1;
+			}
 			/* Advance to first applicable optional-field phase */
 			z->hphase = GZIP_HPHASE_FEXTRA_1;
 			/* fallthrough */
