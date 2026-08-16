@@ -737,8 +737,10 @@ def main() -> int:
     args = ap.parse_args()
 
     ensure_project_root(ROOT)
-    cmake = ensure_tool("cmake")
     size_tool = ensure_tool("size")
+    # cmake only configures and builds the analysis tree; --no-rebuild reuses
+    # existing artifacts and never invokes it, so resolve it only when rebuilding.
+    cmake = ensure_tool("cmake") if not args.no_rebuild else None
 
     build_dir = Path(args.build)
     if not build_dir.is_absolute():

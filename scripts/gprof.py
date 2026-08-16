@@ -686,9 +686,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    cmake = ensure_tool(args.cmake)
+    # gprof always runs (the reuse path still renders the profile); cmake is
+    # only needed to configure or build, and iperf3 only to run the benchmark,
+    # so resolve those two only when their step is not skipped -- otherwise a
+    # reuse-only run needlessly fails on a missing cmake or iperf3.
     gprof = ensure_tool(args.gprof)
-    iperf3 = ensure_tool(args.iperf3)
+    cmake = args.cmake
+    if not args.skip_configure or not args.skip_build:
+        cmake = ensure_tool(args.cmake)
+    iperf3 = args.iperf3
+    if not args.skip_benchmark:
+        iperf3 = ensure_tool(args.iperf3)
     ensure_project_root(ROOT)
 
     base_build_dir = resolve_path(ROOT, args.build_dir)

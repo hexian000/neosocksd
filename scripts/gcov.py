@@ -681,10 +681,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Configure, build, test, collect gcov data, and write the Markdown report."""
     args = parse_args(argv)
-    cmake = ensure_tool(args.cmake)
-    ctest = ensure_tool(args.ctest)
-    gcov = ensure_command(args.gcov)
     ensure_project_root(ROOT)
+    gcov = ensure_command(args.gcov)
+    # cmake configures and builds; ctest runs the suite. Resolve each only when
+    # its stage runs, so a report-only run (--skip-configure --skip-build
+    # --skip-test) works from existing coverage data with gcov alone.
+    cmake = (
+        ensure_tool(args.cmake)
+        if not (args.skip_configure and args.skip_build)
+        else None
+    )
+    ctest = ensure_tool(args.ctest) if not args.skip_test else None
 
     base_build_dir = resolve_path(ROOT, args.build_dir)
     coverage_build_dir = resolve_path(ROOT, args.coverage_build_dir)
