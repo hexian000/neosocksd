@@ -3,7 +3,7 @@
 """End-to-end smoke test for the built neosocksd binary.
 
 Drives the real `neosocksd` executable the way live clients do: speaks
-SOCKS4/4A/5 and HTTP (CONNECT + forward proxy) over real sockets, exercises the
+SOCKS4/4A/5 and HTTP (CONNECT) over real sockets, exercises the
 RESTful API over HTTP, and validates ruleset routing, hot reload, proxy chaining
 and TCP forwarding.
 
@@ -20,8 +20,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
 import http.client
 import random
 import re
@@ -36,7 +34,6 @@ import threading
 import time
 import zlib
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -47,7 +44,6 @@ DEFAULT_OUTPUT = DEFAULT_BUILD_DIR / "smoke_test.md"
 
 HOST = "127.0.0.1"
 HOST6 = "::1"
-HTTP_BODY = b"neosocksd-smoke-ok\n"
 READY_TIMEOUT = 5.0
 IO_TIMEOUT = 5.0
 SHUTDOWN_TIMEOUT = 5.0
@@ -339,181 +335,6 @@ def http_connect(
         raise
 
 
-def _encode_chunked(body: bytes, parts: int = 3) -> bytes:
-    """Frame `body` as HTTP/1.1 chunked transfer coding (at least one chunk)."""
-    if not body:
-        return b"0\r\n\r\n"
-    step = max(1, -(-len(body) // parts))  # ceil division into `parts` chunks
-    out = bytearray()
-    for off in range(0, len(body), step):
-        piece = body[off:off + step]
-        out += b"%X\r\n" % len(piece) + piece + b"\r\n"
-    out += b"0\r\n\r\n"
-    return bytes(out)
-
-
-def _decode_chunked(data: bytes) -> bytes:
-    """Decode a chunked-framed body, ignoring chunk extensions and trailers."""
-    out = bytearray()
-    i = 0
-    while True:
-        eol = data.index(b"\r\n", i)
-        size = int(data[i:eol].split(b";", 1)[0], 16)
-        i = eol + 2
-        if size == 0:
-            break
-        out += data[i:i + size]
-        i += size + 2  # trailing CRLF after the chunk data
-    return bytes(out)
-
-
-def _parse_http_response(data: bytes, method: str) -> Tuple[int, dict, bytes]:
-    """Split a full HTTP/1.1 response into (status, headers, decoded body).
-
-    The body is delimited by Transfer-Encoding: chunked, Content-Length, or EOF,
-    in that order of precedence; a HEAD response is always bodiless.
-    """
-    head, _, rest = data.partition(b"\r\n\r\n")
-    lines = head.split(b"\r\n")
-    parts = lines[0].split(b" ", 2)
-    if len(parts) < 2:
-        raise SocksError("malformed HTTP response: %r" % lines[0])
-    status = int(parts[1])
-    headers: dict = {}
-    for line in lines[1:]:
-        key, _, value = line.partition(b":")
-        headers[key.strip().lower()] = value.strip()
-    if method == "HEAD":
-        # A HEAD response must be bodiless. Surface any bytes that followed the
-        # header block as the "body" instead of discarding them, so a caller's
-        # `body == b""` check actually detects a leaked body rather than passing
-        # unconditionally.
-        body = rest
-    elif b"chunked" in headers.get(b"transfer-encoding", b"").lower():
-        body = _decode_chunked(rest)
-    elif b"content-length" in headers:
-        body = rest[: int(headers[b"content-length"])]
-    else:
-        body = rest  # length delimited by connection close
-    return status, headers, body
-
-
-def http_forward(
-    proxy_host: str,
-    proxy_port: int,
-    dst_host: str,
-    dst_port: int,
-    path: str = "/",
-    *,
-    method: str = "GET",
-    body: Optional[bytes] = None,
-    chunked: bool = False,
-    extra_headers: Optional[List[Tuple[str, str]]] = None,
-    raw_target: Optional[str] = None,
-) -> Tuple[int, dict, bytes]:
-    """Drive one proxy_pass (absolute-URI) exchange through the HTTP proxy.
-
-    Reads the whole response -- the proxy answers with `Connection: close` -- and
-    decodes the body per its framing. `raw_target` overrides the request target
-    verbatim to exercise malformed-request handling.
-    """
-    sock = _connect(proxy_host, proxy_port)
-    try:
-        target = (
-            raw_target
-            if raw_target is not None
-            else "http://%s:%d%s" % (dst_host, dst_port, path)
-        )
-        head = [
-            "%s %s HTTP/1.1" % (method, target),
-            "Host: %s:%d" % (dst_host, dst_port),
-            "Connection: close",
-        ]
-        for key, value in extra_headers or []:
-            head.append("%s: %s" % (key, value))
-        payload = b""
-        if body is not None:
-            if chunked:
-                head.append("Transfer-Encoding: chunked")
-                payload = _encode_chunked(body)
-            else:
-                head.append("Content-Length: %d" % len(body))
-                payload = body
-        request = ("\r\n".join(head) + "\r\n\r\n").encode() + payload
-        sock.sendall(request)
-        data = b""
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-        return _parse_http_response(data, method)
-    finally:
-        sock.close()
-
-
-def http_forward_get(
-    proxy_host: str, proxy_port: int, dst_host: str, dst_port: int, path: str = "/"
-) -> Tuple[int, bytes]:
-    """Perform an absolute-URI GET through an HTTP forward proxy."""
-    status, _headers, body = http_forward(
-        proxy_host, proxy_port, dst_host, dst_port, path
-    )
-    return status, body
-
-
-def http_websocket(
-    proxy_host: str,
-    proxy_port: int,
-    dst_host: str,
-    dst_port: int,
-    payload: bytes,
-) -> Tuple[str, bool, bytes]:
-    """Drive a ws:// (absolute-URI) upgrade through the HTTP forward proxy, then
-    exchange one payload over the resulting raw tunnel.
-
-    Returns (status_line, accept_valid, echoed_payload) where accept_valid is
-    whether the Sec-WebSocket-Accept matched the RFC 6455 key derivation.
-    """
-    key = base64.b64encode(bytes(random.getrandbits(8) for _ in range(16)))
-    expected = base64.b64encode(hashlib.sha1(key + _WS_GUID.encode()).digest())
-    sock = _connect(proxy_host, proxy_port)
-    try:
-        request = (
-            "GET http://%s:%d/chat HTTP/1.1\r\n" % (dst_host, dst_port)
-            + "Host: %s:%d\r\n" % (dst_host, dst_port)
-            + "Upgrade: websocket\r\n"
-            + "Connection: Upgrade\r\n"
-            + "Sec-WebSocket-Key: %s\r\n" % key.decode("ascii")
-            + "Sec-WebSocket-Version: 13\r\n\r\n"
-        ).encode()
-        sock.sendall(request)
-        head = b""
-        while b"\r\n\r\n" not in head:
-            chunk = sock.recv(4096)
-            if not chunk:
-                raise SocksError("connection closed during ws handshake")
-            head += chunk
-        header_block, _, rest = head.partition(b"\r\n\r\n")
-        status_line = header_block.split(b"\r\n", 1)[0].decode("latin-1")
-        accept = b""
-        for line in header_block.split(b"\r\n")[1:]:
-            name, _, value = line.partition(b":")
-            if name.strip().lower() == b"sec-websocket-accept":
-                accept = value.strip()
-        # send a post-upgrade payload; the raw tunnel must echo it back
-        sock.sendall(payload)
-        echoed = rest
-        while len(echoed) < len(payload):
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            echoed += chunk
-        return status_line, accept == expected, echoed
-    finally:
-        sock.close()
-
-
 # --------------------------------------------------------------------------- #
 # Local target servers (proxy destinations)
 # --------------------------------------------------------------------------- #
@@ -576,162 +397,19 @@ def _bind_echo_dual() -> Tuple[_ThreadingTCPServer, _ThreadingTCPServer, int]:
     raise RuntimeError("found no loopback port free on both IPv4 and IPv6")
 
 
-class _HTTPHandler(BaseHTTPRequestHandler):
-    """Proxy destination for proxy_pass tests.
-
-    Routes by path/method so a single instance exercises request-body forwarding
-    (POST echo), response re-framing (chunked), bodiless HEAD responses, and
-    header rewriting (`/echo-headers` reflects what the proxy forwarded).
-    """
-
-    protocol_version = "HTTP/1.1"
-
-    def _read_request_body(self) -> bytes:
-        te = self.headers.get("Transfer-Encoding", "")
-        if "chunked" in te.lower():
-            body = bytearray()
-            while True:
-                size_line = self.rfile.readline()
-                size = int(size_line.split(b";", 1)[0].strip() or b"0", 16)
-                if size == 0:
-                    # consume optional trailers up to the terminating blank line
-                    while self.rfile.readline().strip():
-                        pass
-                    break
-                body += self.rfile.read(size)
-                self.rfile.read(2)  # CRLF following the chunk data
-            return bytes(body)
-        length = self.headers.get("Content-Length")
-        if length is not None:
-            return self.rfile.read(int(length))
-        return b""
-
-    def _respond(self, body: bytes, *, chunked: bool = False) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        if chunked:
-            self.send_header("Transfer-Encoding", "chunked")
-        else:
-            self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        if chunked:
-            step = max(1, -(-len(body) // 3))  # split into ~3 chunks
-            for off in range(0, len(body), step):
-                piece = body[off:off + step]
-                self.wfile.write(b"%X\r\n" % len(piece) + piece + b"\r\n")
-            self.wfile.write(b"0\r\n\r\n")
-        else:
-            self.wfile.write(body)
-        self.close_connection = True
-
-    def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
-        self._read_request_body()  # drain any body to keep framing correct
-        if self.path == "/chunked":
-            self._respond(HTTP_BODY, chunked=True)
-        elif self.path == "/echo-headers":
-            reflected = "".join(
-                "%s: %s\n" % (k, v) for k, v in self.headers.items()
-            ).encode()
-            self._respond(reflected)
-        else:
-            self._respond(HTTP_BODY)
-
-    def do_HEAD(self) -> None:  # noqa: N802
-        # advertise a body via Content-Length but send none, per HTTP semantics
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(HTTP_BODY)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.close_connection = True
-
-    def do_POST(self) -> None:  # noqa: N802
-        self._respond(self._read_request_body())
-
-    def log_message(self, *args) -> None:  # silence
-        pass
-
-
-_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC 6455 §4.2.2
-
-
-class _WebSocketHandler(socketserver.BaseRequestHandler):
-    """Raw ws:// origin: completes the RFC 6455 handshake it receives from the
-    proxy -- proving the proxy forwarded the origin-form request together with
-    the Connection/Upgrade switch-protocol headers -- then echoes the
-    post-upgrade byte stream, proving the connection became a raw tunnel.
-    """
-
-    def handle(self) -> None:
-        self.request.settimeout(IO_TIMEOUT)
-        try:
-            head = b""
-            while b"\r\n\r\n" not in head:
-                chunk = self.request.recv(4096)
-                if not chunk:
-                    return
-                head += chunk
-            header_block, _, rest = head.partition(b"\r\n\r\n")
-            lower = header_block.lower()
-            key = None
-            for line in header_block.split(b"\r\n")[1:]:
-                name, _, value = line.partition(b":")
-                if name.strip().lower() == b"sec-websocket-key":
-                    key = value.strip()
-            # only upgrade when the proxy actually forwarded both switch-protocol
-            # headers; otherwise the tunnel must not be established
-            if (
-                b"upgrade: websocket" not in lower
-                or b"connection: upgrade" not in lower
-                or key is None
-            ):
-                self.request.sendall(
-                    b"HTTP/1.1 426 Upgrade Required\r\n"
-                    b"Connection: close\r\n\r\n"
-                )
-                return
-            accept = base64.b64encode(
-                hashlib.sha1(key + _WS_GUID.encode()).digest()
-            )
-            self.request.sendall(
-                b"HTTP/1.1 101 Switching Protocols\r\n"
-                b"Upgrade: websocket\r\n"
-                b"Connection: Upgrade\r\n"
-                b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
-            )
-            # raw tunnel established: echo everything, including any bytes the
-            # client pipelined right behind the handshake
-            if rest:
-                self.request.sendall(rest)
-            while True:
-                data = self.request.recv(65536)
-                if not data:
-                    break
-                self.request.sendall(data)
-        except OSError:
-            pass
-
-
 class Targets:
-    """Loopback echo + HTTP + WebSocket servers used as proxy destinations."""
+    """Loopback echo servers used as proxy destinations."""
 
     def __init__(self) -> None:
         self.echo = _ThreadingTCPServer((HOST, 0), _EchoHandler)
-        self.http = _ThreadingTCPServer((HOST, 0), _HTTPHandler)
-        self.ws = _ThreadingTCPServer((HOST, 0), _WebSocketHandler)
         self.echo6 = _ThreadingTCPServer6((HOST6, 0), _EchoHandler)
         self.udp_echo = _ThreadingUDPServer((HOST, 0), _UDPEchoHandler)
         self.echo_any, self.echo_any6, self.echo_any_port = _bind_echo_dual()
         self.echo_port = self.echo.server_address[1]
-        self.http_port = self.http.server_address[1]
-        self.ws_port = self.ws.server_address[1]
         self.echo6_port = self.echo6.server_address[1]
         self.udp_echo_port = self.udp_echo.server_address[1]
         self._threads = [
             threading.Thread(target=self.echo.serve_forever, daemon=True),
-            threading.Thread(target=self.http.serve_forever, daemon=True),
-            threading.Thread(target=self.ws.serve_forever, daemon=True),
             threading.Thread(target=self.echo6.serve_forever, daemon=True),
             threading.Thread(target=self.udp_echo.serve_forever, daemon=True),
             threading.Thread(target=self.echo_any.serve_forever, daemon=True),
@@ -746,8 +424,6 @@ class Targets:
     def stop(self) -> None:
         for srv in (
             self.echo,
-            self.http,
-            self.ws,
             self.echo6,
             self.udp_echo,
             self.echo_any,
@@ -865,11 +541,15 @@ class Daemon:
             % (self.name, READY_TIMEOUT, self.stderr_text())
         )
 
-    def stderr_text(self) -> str:
+    def stderr_all(self) -> str:
+        """Everything the daemon has logged so far, untruncated. Assertions on
+        log content need this; stderr_text() below is for failure reports."""
         self._stderr.seek(0)
-        data = self._stderr.read().decode(errors="replace")
+        return self._stderr.read().decode(errors="replace")
+
+    def stderr_text(self) -> str:
         # keep the report compact: only the tail matters for diagnosis
-        lines = data.splitlines()
+        lines = self.stderr_all().splitlines()
         return "\n".join(lines[-25:])
 
     def __enter__(self) -> "Daemon":
@@ -1016,14 +696,6 @@ class Context:
         return self.targets.echo_port
 
     @property
-    def http_port(self) -> int:
-        return self.targets.http_port
-
-    @property
-    def ws_port(self) -> int:
-        return self.targets.ws_port
-
-    @property
     def echo6_port(self) -> int:
         return self.targets.echo6_port
 
@@ -1103,6 +775,60 @@ def t_cli_missing_listen(ctx: Context) -> None:
         [str(ctx.binary), "--loglevel", "0"], capture_output=True, timeout=10
     )
     assert proc.returncode != 0, "expected non-zero exit when no listener given"
+
+
+# The startup notice cases below pin loglevel 4 rather than taking ctx.loglevel:
+# the notice is logged at NOTICE, so a run with --loglevel 3 would silence it and
+# the assertions would pass vacuously.
+PROXY_CHAIN_NOTICE = "extends the `-x' proxy chain"
+
+
+def proxy_chain_notices(log: str) -> List[str]:
+    return [line for line in log.splitlines() if "proxy chain" in line]
+
+
+@test("cli/ruleset-proxy-notice")
+def t_cli_ruleset_proxy_notice(ctx: Context) -> None:
+    """A ruleset extends the -x chain rather than replacing it, and the startup
+    notice must say so exactly once. It once claimed the chain would be
+    "overwritten by ruleset", and main() validated the config twice on the -r
+    path, so it was also logged twice."""
+    listen = free_port()
+    ruleset = write_ruleset(ctx.tmpdir, "direct.lua", direct_ruleset())
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen),
+         "-x", "socks5://%s:%d" % (HOST, free_port()),
+         "-r", str(ruleset)],
+        listen_port=listen,
+        loglevel=4,
+    ) as d:
+        log = d.stderr_all()
+    hits = proxy_chain_notices(log)
+    assert len(hits) == 1, (
+        "expected exactly 1 proxy-chain notice, got %d:\n%s" % (len(hits), log)
+    )
+    assert "overwritten" not in log, (
+        "startup log still claims the proxy is overwritten:\n%s" % log
+    )
+    assert PROXY_CHAIN_NOTICE in hits[0], "unexpected notice text: %s" % hits[0]
+
+
+@test("cli/no-ruleset-no-proxy-notice")
+def t_cli_no_ruleset_no_proxy_notice(ctx: Context) -> None:
+    """-x without a ruleset has nothing to extend it, so nothing is said."""
+    listen = free_port()
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen),
+         "-x", "socks5://%s:%d" % (HOST, free_port())],
+        listen_port=listen,
+        loglevel=4,
+    ) as d:
+        log = d.stderr_all()
+    assert not proxy_chain_notices(log), (
+        "proxy-chain notice logged without a ruleset:\n%s" % log
+    )
 
 
 @test("cli/startup-shutdown")
@@ -1380,7 +1106,7 @@ def t_ruleset_credentials(ctx: Context) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# D. HTTP proxy (CONNECT + proxy_pass)
+# D. HTTP proxy (CONNECT)
 # --------------------------------------------------------------------------- #
 
 
@@ -1406,140 +1132,6 @@ def t_http_connect(ctx: Context) -> None:
         sock = http_connect(HOST, http_port, HOST, ctx.echo_port)
         with sock:
             echo_roundtrip(sock)
-
-
-@test("http/forward")
-def t_http_forward(ctx: Context) -> None:
-    d, http_port = _http_daemon(ctx)
-    with d:
-        status, body = http_forward_get(HOST, http_port, HOST, ctx.http_port)
-        assert status == 200, "forward proxy returned status %d" % status
-        assert HTTP_BODY in body, "forward proxy body mismatch: %r" % body
-
-
-@test("http/proxy-pass-post-echo")
-def t_http_proxy_pass_post(ctx: Context) -> None:
-    """A Content-Length request body is forwarded intact and echoed back."""
-    d, http_port = _http_daemon(ctx)
-    payload = random.randbytes(2048)
-    with d:
-        status, _hdr, body = http_forward(
-            HOST, http_port, HOST, ctx.http_port, "/echo",
-            method="POST", body=payload,
-        )
-        assert status == 200, "POST proxy_pass returned %d" % status
-        assert body == payload, "request body not forwarded verbatim"
-
-
-@test("http/proxy-pass-chunked-request")
-def t_http_proxy_pass_chunked_request(ctx: Context) -> None:
-    """A chunked request body is dechunked/re-framed and forwarded intact."""
-    d, http_port = _http_daemon(ctx)
-    payload = random.randbytes(5000)
-    with d:
-        status, _hdr, body = http_forward(
-            HOST, http_port, HOST, ctx.http_port, "/echo",
-            method="POST", body=payload, chunked=True,
-        )
-        assert status == 200, "chunked POST proxy_pass returned %d" % status
-        assert body == payload, "chunked request body not forwarded verbatim"
-
-
-@test("http/proxy-pass-chunked-response")
-def t_http_proxy_pass_chunked_response(ctx: Context) -> None:
-    """A chunked upstream response is re-framed and reaches the client whole."""
-    d, http_port = _http_daemon(ctx)
-    with d:
-        status, _hdr, body = http_forward(
-            HOST, http_port, HOST, ctx.http_port, "/chunked"
-        )
-        assert status == 200, "chunked-response proxy_pass returned %d" % status
-        assert body == HTTP_BODY, "chunked response body mismatch: %r" % body
-
-
-@test("http/proxy-pass-head")
-def t_http_proxy_pass_head(ctx: Context) -> None:
-    """A HEAD response carries headers but no body across the proxy."""
-    d, http_port = _http_daemon(ctx)
-    with d:
-        status, _hdr, body = http_forward(
-            HOST, http_port, HOST, ctx.http_port, "/", method="HEAD"
-        )
-        assert status == 200, "HEAD proxy_pass returned %d" % status
-        assert body == b"", "HEAD response leaked a body: %r" % body
-
-
-@test("http/proxy-pass-large-body")
-def t_http_proxy_pass_large_body(ctx: Context) -> None:
-    """A megabyte-scale body survives a proxy_pass round trip byte-for-byte."""
-    d, http_port = _http_daemon(ctx)
-    payload = random.randbytes(1 << 20)
-    with d:
-        status, _hdr, body = http_forward(
-            HOST, http_port, HOST, ctx.http_port, "/echo",
-            method="POST", body=payload,
-        )
-        assert status == 200, "large-body proxy_pass returned %d" % status
-        assert body == payload, "large body corrupted (%d bytes)" % len(body)
-
-
-@test("http/proxy-pass-header-rewrite")
-def t_http_proxy_pass_headers(ctx: Context) -> None:
-    """The proxy regenerates Host, appends Via, and forwards custom headers."""
-    d, http_port = _http_daemon(ctx)
-    with d:
-        status, _hdr, body = http_forward(
-            HOST, http_port, HOST, ctx.http_port, "/echo-headers",
-            extra_headers=[("X-Smoke-Test", "hello")],
-        )
-        assert status == 200, "header-rewrite proxy_pass returned %d" % status
-        reflected = body.lower()
-        assert b"via: 1.1 neosocksd" in reflected, "Via header not appended"
-        assert b"x-smoke-test: hello" in reflected, "custom header not forwarded"
-        assert b"host: %s:%d" % (HOST.encode(), ctx.http_port) in reflected, (
-            "Host not regenerated from the request target"
-        )
-
-
-@test("http/proxy-pass-bad-target")
-def t_http_proxy_pass_bad_target(ctx: Context) -> None:
-    """A non-absolute request target is rejected with 400 (proxy needs a URI)."""
-    d, http_port = _http_daemon(ctx)
-    with d:
-        status, _hdr, _body = http_forward(
-            HOST, http_port, HOST, ctx.http_port, raw_target="/relative-path"
-        )
-        assert status == 400, "expected 400 for non-absolute target, got %d" % status
-
-
-@test("http/proxy-pass-ruleset-redirect")
-def t_http_proxy_pass_ruleset(ctx: Context) -> None:
-    """proxy_pass honors a ruleset that redirects the target host."""
-    http_addr = "%s:%d" % (HOST, ctx.http_port)
-    ruleset = write_ruleset(
-        ctx.tmpdir, "http_redirect.lua",
-        redirect_ruleset("smoke.test:80", http_addr),
-    )
-    d, http_port = _http_daemon(ctx, ("-r", str(ruleset)))
-    with d:
-        status, _hdr, body = http_forward(HOST, http_port, "smoke.test", 80)
-        assert status == 200, "ruleset proxy_pass returned %d" % status
-        assert body == HTTP_BODY, "ruleset proxy_pass body mismatch: %r" % body
-
-
-@test("http/websocket-upgrade")
-def t_http_websocket_upgrade(ctx: Context) -> None:
-    """A ws:// upgrade is forwarded with the switch-protocol headers intact and
-    the connection becomes a raw tunnel (101 handshake + echoed frame)."""
-    d, http_port = _http_daemon(ctx)
-    payload = b"\x81\x8bframe-over-the-tunnel"
-    with d:
-        status_line, accept_ok, echoed = http_websocket(
-            HOST, http_port, HOST, ctx.ws_port, payload
-        )
-        assert "101" in status_line, "ws upgrade returned %r" % status_line
-        assert accept_ok, "Sec-WebSocket-Accept mismatch (handshake not relayed)"
-        assert echoed == payload, "tunnel did not echo frame: %r" % echoed
 
 
 # --------------------------------------------------------------------------- #
@@ -2115,6 +1707,59 @@ def t_config_boot(ctx: Context) -> None:
             echo_roundtrip(sock)
 
 
+@test("config/boot-proxy-notice")
+def t_config_boot_proxy_notice(ctx: Context) -> None:
+    """The proxy-chain notice must fire for a ruleset installed from a boot
+    config too. It once tested the -r filename, which a boot config never sets,
+    so this configuration was silently never told."""
+    listen = free_port()
+    config = (
+        "local ruleset = {}\n"
+        "function ruleset.resolve(addr) return addr end\n"
+        "function ruleset.route(addr) return addr end\n"
+        "function ruleset.route6(addr) return addr end\n"
+        "return {\n"
+        "    listen = %r,\n"
+        "    proxy = %r,\n"
+        "    loglevel = 4,\n"
+        "    ruleset = ruleset,\n"
+        "}\n"
+    ) % (
+        "%s:%d" % (HOST, listen),
+        "socks5://%s:%d" % (HOST, free_port()),
+    )
+    cfg = write_ruleset(ctx.tmpdir, "boot_proxy.lua", config)
+    with Daemon(
+        ctx.binary, ["-c", str(cfg)], listen_port=listen, loglevel=4
+    ) as d:
+        log = d.stderr_all()
+    hits = proxy_chain_notices(log)
+    assert len(hits) == 1, (
+        "expected exactly 1 proxy-chain notice, got %d:\n%s" % (len(hits), log)
+    )
+    assert PROXY_CHAIN_NOTICE in hits[0], "unexpected notice text: %s" % hits[0]
+
+
+@test("config/boot-rejects-invalid")
+def t_config_boot_rejects_invalid(ctx: Context) -> None:
+    """The config check is deferred to after the boot config loads, so it is
+    the only one that sees a boot-supplied field. A boot config carrying an
+    out-of-range value must still be rejected."""
+    config = (
+        "return {\n"
+        "    listen = %r,\n"
+        "    timeout = 1.0,\n"
+        "}\n"
+    ) % ("%s:%d" % (HOST, free_port()),)
+    cfg = write_ruleset(ctx.tmpdir, "boot_invalid.lua", config)
+    proc = subprocess.run(
+        [str(ctx.binary), "-c", str(cfg)], capture_output=True, timeout=10
+    )
+    assert proc.returncode != 0, (
+        "expected non-zero exit for an out-of-range boot timeout"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Runner / reporting
 # --------------------------------------------------------------------------- #
@@ -2234,7 +1879,6 @@ def main(argv: List[str]) -> int:
             )
             log("binary : %s" % binary)
             log("echo   : %s:%d" % (HOST, targets.echo_port))
-            log("http   : %s:%d" % (HOST, targets.http_port))
             log("running %d test(s)\n" % len(cases))
             results = run_cases(ctx, cases, args.keep_going)
     finally:
