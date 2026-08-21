@@ -55,8 +55,12 @@ static const struct http_status_info http_resp[] = {
 	  "The amount of data provided in the request exceeds the capacity limit." },
 	{ HTTP_UNSUPPORTED_MEDIA_TYPE, "Unsupported Media Type",
 	  "The server does not support the media type transmitted in the request." },
+	{ HTTP_RANGE_NOT_SATISFIABLE, "Range Not Satisfiable",
+	  "The requested range is not satisfiable for this resource." },
 	{ HTTP_EXPECTATION_FAILED, "Expectation Failed",
 	  "The expectation given in the Expect request-header field could not be met by this server." },
+	{ HTTP_TOO_EARLY, "Too Early",
+	  "The server is unwilling to risk processing a request that might be replayed." },
 	{ HTTP_TOO_MANY_REQUESTS, "Too Many Requests",
 	  "You have sent too many requests in a given amount of time." },
 
