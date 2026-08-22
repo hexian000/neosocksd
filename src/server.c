@@ -119,13 +119,18 @@ static void accept_cb(
 			continue;
 		}
 
-		if (!socket_set_cloexec(fd) || !socket_set_nonblock(fd)) {
+		if (socket_set_cloexec(fd) != 0 ||
+		    socket_set_nonblock(fd) != 0) {
+			const int err = errno;
+			LOGE_F("socket setup: (%d) %s", err, strerror(err));
 			socket_close(fd);
 			continue;
 		}
 		/* best-effort tuning; failure does not affect correctness */
-		(void)socket_set_tcp(
-			fd, conf->tcp_nodelay, conf->tcp_keepalive);
+		LOG_SOCKOPT(
+			"socket_set_tcp",
+			socket_set_tcp(
+				fd, conf->tcp_nodelay, conf->tcp_keepalive));
 #if WITH_TCP_KEEPALIVE_PARAMS
 		if (conf->tcp_keepalive) {
 			socket_set_keepalive(
@@ -133,7 +138,10 @@ static void accept_cb(
 				conf->tcp_keepcnt);
 		}
 #endif
-		(void)socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
+		LOG_SOCKOPT(
+			"socket_set_buffer",
+			socket_set_buffer(
+				fd, conf->tcp_sndbuf, conf->tcp_rcvbuf));
 
 		l->stats.num_serve++;
 		l->serve(s, loop, fd, (const struct sockaddr *)&addr.sa);
@@ -168,7 +176,9 @@ static bool add_listener(
 		return false;
 	}
 
-	if (!socket_set_cloexec(fd) || !socket_set_nonblock(fd)) {
+	if (socket_set_cloexec(fd) != 0 || socket_set_nonblock(fd) != 0) {
+		const int err = errno;
+		LOGE_F("socket setup: (%d) %s", err, strerror(err));
 		socket_close(fd);
 		return false;
 	}
@@ -177,9 +187,11 @@ static bool add_listener(
 
 	/* failure surfaces later via the bind() check below */
 #if WITH_REUSEPORT
-	(void)socket_set_reuseport(fd, conf->reuseport);
+	LOG_SOCKOPT(
+		"socket_set_reuseport",
+		socket_set_reuseport(fd, conf->reuseport));
 #else
-	(void)socket_set_reuseport(fd, false);
+	LOG_SOCKOPT("socket_set_reuseport", socket_set_reuseport(fd, false));
 #endif
 #if WITH_TPROXY
 	/* transparent mode applies only to the primary proxy listener, not to
@@ -192,11 +204,15 @@ static bool add_listener(
 #if WITH_TCP_FASTOPEN
 	if (conf->tcp_fastopen) {
 		/* opportunistic; falls back to a normal handshake on failure */
-		(void)socket_set_fastopen(fd, backlog);
+		LOG_SOCKOPT(
+			"socket_set_fastopen",
+			socket_set_fastopen(fd, backlog));
 	}
 #endif
 	/* best-effort tuning; failure does not affect correctness */
-	(void)socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
+	LOG_SOCKOPT(
+		"socket_set_tcp",
+		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive));
 #if WITH_TCP_KEEPALIVE_PARAMS
 	if (conf->tcp_keepalive) {
 		socket_set_keepalive(
@@ -204,7 +220,9 @@ static bool add_listener(
 			conf->tcp_keepcnt);
 	}
 #endif
-	(void)socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
+	LOG_SOCKOPT(
+		"socket_set_buffer",
+		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf));
 
 	if (LOGLEVEL(NOTICE)) {
 		char addr_str[64];
