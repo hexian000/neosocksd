@@ -733,7 +733,9 @@ static bool send_http_req(
 		return false;
 	}
 	/* SO_RCVLOWAT is a wakeup hint; failure only affects efficiency */
-	(void)socket_rcvlowat(d->w_socket.fd, HTTP_RSP_MINLEN);
+	LOG_SOCKOPT(
+		"socket_rcvlowat",
+		socket_rcvlowat(d->w_socket.fd, HTTP_RSP_MINLEN));
 	return true;
 }
 
@@ -802,7 +804,9 @@ static bool send_socks4a_req(
 	if (!dialer_send(d, buf, len)) {
 		return false;
 	}
-	(void)socket_rcvlowat(d->w_socket.fd, SOCKS4_RSP_MINLEN);
+	LOG_SOCKOPT(
+		"socket_rcvlowat",
+		socket_rcvlowat(d->w_socket.fd, SOCKS4_RSP_MINLEN));
 	return true;
 }
 
@@ -913,7 +917,9 @@ send_socks5_req(struct dialer *restrict d, const struct dialaddr *restrict addr)
 	if (!dialer_send(d, buf, len)) {
 		return false;
 	}
-	(void)socket_rcvlowat(d->w_socket.fd, SOCKS5_RSP_MINLEN);
+	LOG_SOCKOPT(
+		"socket_rcvlowat",
+		socket_rcvlowat(d->w_socket.fd, SOCKS5_RSP_MINLEN));
 	return true;
 }
 
@@ -1400,7 +1406,8 @@ static int dialer_recv(struct dialer *restrict d)
 	}
 	if (ret == 0) {
 		/* restore default */
-		(void)socket_rcvlowat(d->w_socket.fd, 1);
+		LOG_SOCKOPT(
+			"socket_rcvlowat", socket_rcvlowat(d->w_socket.fd, 1));
 		return 0;
 	}
 	const size_t want = (d->rbuf.data + d->rbuf.len) - d->next + ret;
@@ -1412,7 +1419,7 @@ static int dialer_recv(struct dialer *restrict d)
 		d->syserr = 0;
 		return -1;
 	}
-	(void)socket_rcvlowat(fd, (int)want);
+	LOG_SOCKOPT("socket_rcvlowat", socket_rcvlowat(fd, (int)want));
 	return 1;
 }
 
@@ -1576,7 +1583,7 @@ static bool connect_sa(
 		return false;
 	}
 
-	if (!socket_set_cloexec(fd) || !socket_set_nonblock(fd)) {
+	if (socket_set_cloexec(fd) != 0 || socket_set_nonblock(fd) != 0) {
 		const int err = errno;
 		socket_close(fd);
 		d->err = DIALER_ERR_SYSTEM;
@@ -1590,7 +1597,9 @@ static bool connect_sa(
 	}
 #endif
 	/* best-effort tuning; failure does not affect correctness */
-	(void)socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive);
+	LOG_SOCKOPT(
+		"socket_set_tcp",
+		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive));
 #if WITH_TCP_KEEPALIVE_PARAMS
 	if (conf->tcp_keepalive) {
 		socket_set_keepalive(
@@ -1598,11 +1607,15 @@ static bool connect_sa(
 			conf->tcp_keepcnt);
 	}
 #endif
-	(void)socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf);
+	LOG_SOCKOPT(
+		"socket_set_buffer",
+		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf));
 #if WITH_TCP_FASTOPEN_CONNECT
 	if (conf->tcp_fastopen_connect) {
 		/* opportunistic; falls back to a normal handshake on failure */
-		(void)socket_set_fastopen_connect(fd, true);
+		LOG_SOCKOPT(
+			"socket_set_fastopen_connect",
+			socket_set_fastopen_connect(fd, true));
 	}
 #endif
 	if (LOGLEVEL(VERBOSE)) {
