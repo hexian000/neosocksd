@@ -38,6 +38,20 @@
 		}                                                              \
 	} while (0)
 
+/* Report a best-effort socket option failure at the call site. The csnippets
+ * option setters now return 0 or an errno and no longer log themselves (see
+ * contrib/csnippets os/socket), so a caller that discards the result must log
+ * it here. Stay quiet when the option is simply unsupported on this platform
+ * (ENOPROTOOPT), which is expected rather than an error. */
+#define LOG_SOCKOPT(what, expr)                                                \
+	do {                                                                   \
+		const int sockopt_err_ = (expr);                               \
+		if (sockopt_err_ != 0 && sockopt_err_ != ENOPROTOOPT) {        \
+			LOGW_F("%s: (%d) %s", (what), sockopt_err_,            \
+			       strerror(sockopt_err_));                        \
+		}                                                              \
+	} while (0)
+
 /* Process-level initializations. */
 void init(int argc, char *const restrict argv[]);
 
