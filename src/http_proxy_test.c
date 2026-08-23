@@ -643,10 +643,10 @@ static void start_serve(
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]));
-	T_CHECK(socket_set_nonblock(sv[0]));
-	T_CHECK(socket_set_cloexec(sv[1]));
-	T_CHECK(socket_set_nonblock(sv[1]));
+	T_CHECK(socket_set_cloexec(sv[0]) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
+	T_CHECK(socket_set_cloexec(sv[1]) == 0);
+	T_CHECK(socket_set_nonblock(sv[1]) == 0);
 	S.ruleset_loop = loop;
 	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
 	*peer_fd = sv[1];
@@ -691,10 +691,10 @@ static void serve_payload(
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]));
-	T_CHECK(socket_set_nonblock(sv[0]));
-	T_CHECK(socket_set_cloexec(sv[1]));
-	T_CHECK(socket_set_nonblock(sv[1]));
+	T_CHECK(socket_set_cloexec(sv[0]) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
+	T_CHECK(socket_set_cloexec(sv[1]) == 0);
+	T_CHECK(socket_set_nonblock(sv[1]) == 0);
 	S.ruleset_loop = loop;
 	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
 	T_CHECK(write_all(sv[1], req, strlen(req)) == 0);
@@ -778,10 +778,10 @@ static void make_fd_pair(int *restrict a, int *restrict b)
 {
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_cloexec(sv[0]));
-	T_CHECK(socket_set_nonblock(sv[0]));
-	T_CHECK(socket_set_cloexec(sv[1]));
-	T_CHECK(socket_set_nonblock(sv[1]));
+	T_CHECK(socket_set_cloexec(sv[0]) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
+	T_CHECK(socket_set_cloexec(sv[1]) == 0);
+	T_CHECK(socket_set_nonblock(sv[1]) == 0);
 	*a = sv[0];
 	*b = sv[1];
 }

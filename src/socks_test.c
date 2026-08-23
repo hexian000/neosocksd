@@ -643,7 +643,7 @@ static void serve_payload(
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	/* production dispatches accepted fds non-blocking; match it so the
 	 * EAGAIN paths in socks_recv/send_rsp are exercised */
-	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
 	socks_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
 	T_CHECK(write_all(sv[1], payload, payload_len) == 0);
 
@@ -660,7 +660,7 @@ static void serve_payload_split(
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
 	socks_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
 	if (first_len > 0) {
 		T_CHECK(write_all(sv[1], first, first_len) == 0);
@@ -1040,7 +1040,7 @@ static void fuzz_socks_once(struct prng *restrict p)
 	test_server_init(&s);
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
 	socks_serve(&s, loop, sv[0], (const struct sockaddr *)&sa);
 	sv[0] = -1;
 	T_CHECK(write_all(sv[1], input, len) == 0);
@@ -1104,7 +1104,7 @@ static void fuzz_udp_relay_once(struct prng *restrict p)
 	test_server_init(&s);
 
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
 	socks_serve(&s, loop, sv[0], (const struct sockaddr *)&accepted_sa);
 	sv[0] = -1;
 	T_CHECK(write_all(sv[1], req, sizeof(req)) == 0);
@@ -2063,7 +2063,7 @@ T_DECLARE_CASE(socks5_connect_reply_reports_outbound_sockname)
 		accept(ctl_listen_fd, (struct sockaddr *)&peer_sa, &peer_len);
 	T_CHECK(accepted_fd >= 0);
 	T_CHECK(close(ctl_listen_fd) == 0);
-	T_CHECK(socket_set_nonblock(accepted_fd));
+	T_CHECK(socket_set_nonblock(accepted_fd) == 0);
 
 	/* upstream connection: both ends on 127.0.0.1 */
 	struct sockaddr_in up_sa = {
@@ -2553,7 +2553,7 @@ T_DECLARE_CASE(socks5_udp_associate_advertises_control_addr)
 	accepted_fd = accept(listen_fd, (struct sockaddr *)&peer_sa, &peer_len);
 	T_CHECK(accepted_fd >= 0);
 	T_CHECK(close(listen_fd) == 0);
-	T_CHECK(socket_set_nonblock(accepted_fd));
+	T_CHECK(socket_set_nonblock(accepted_fd) == 0);
 
 	socks_serve(&s, loop, accepted_fd, (const struct sockaddr *)&peer_sa);
 	T_CHECK(write_all(client_fd, req, sizeof(req)) == 0);
@@ -3090,7 +3090,7 @@ T_DECLARE_CASE(socks5_udp_relay_rejects_off_ip_first_datagram)
 		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
 	};
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
 	socks_serve(&s, loop, sv[0], (const struct sockaddr *)&tcp_client);
 	peer_fd = sv[1];
 	T_CHECK(write_all(peer_fd, req, sizeof(req)) == 0);
@@ -3207,7 +3207,7 @@ T_DECLARE_CASE(socks5_udp_relay_roundtrip_ipv6)
 	 * AF_INET6 (serve_payload hardcodes an AF_INET peer, so inline it). */
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-	T_CHECK(socket_set_nonblock(sv[0]));
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
 	{
 		const struct sockaddr_in6 client_sa = {
 			.sin6_family = AF_INET6,
