@@ -876,7 +876,10 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			"BIND peer mismatch (expected `%s', got `%s'), allowing",
 			expect_str, peer_str);
 	}
-	if (!socket_set_cloexec(conn_fd) || !socket_set_nonblock(conn_fd)) {
+	if (socket_set_cloexec(conn_fd) != 0 ||
+	    socket_set_nonblock(conn_fd) != 0) {
+		const int err = errno;
+		LOGE_F("socket setup: (%d) %s", err, strerror(err));
 		socket_close(conn_fd);
 		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 		gc_unref(&ctx->gcbase);
@@ -947,7 +950,9 @@ static int socks_open_bound_fd(
 			return -1;
 		}
 	}
-	if (!socket_set_cloexec(fd) || !socket_set_nonblock(fd)) {
+	if (socket_set_cloexec(fd) != 0 || socket_set_nonblock(fd) != 0) {
+		const int err = errno;
+		LOGE_F("socket setup: (%d) %s", err, strerror(err));
 		socket_close(fd);
 		socks5_sendrsp(ctx, SOCKS5RSP_FAIL);
 		gc_unref(&ctx->gcbase);
