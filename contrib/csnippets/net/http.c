@@ -53,6 +53,8 @@ static const struct http_status_info http_resp[] = {
 	  "A request of the requested method requires a valid Content-Length." },
 	{ HTTP_ENTITY_TOO_LARGE, "Content Too Large",
 	  "The amount of data provided in the request exceeds the capacity limit." },
+	{ HTTP_URI_TOO_LONG, "URI Too Long",
+	  "The requested URL's length exceeds the capacity limit for this server." },
 	{ HTTP_UNSUPPORTED_MEDIA_TYPE, "Unsupported Media Type",
 	  "The server does not support the media type transmitted in the request." },
 	{ HTTP_RANGE_NOT_SATISFIABLE, "Range Not Satisfiable",
@@ -63,6 +65,9 @@ static const struct http_status_info http_resp[] = {
 	  "The server is unwilling to risk processing a request that might be replayed." },
 	{ HTTP_TOO_MANY_REQUESTS, "Too Many Requests",
 	  "You have sent too many requests in a given amount of time." },
+	{ HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE,
+	  "Request Header Fields Too Large",
+	  "The server is unwilling to process the request because its header fields are too large." },
 
 	{ HTTP_INTERNAL_SERVER_ERROR, "Internal Server Error",
 	  "The server encountered an internal error." },
