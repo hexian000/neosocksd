@@ -135,6 +135,9 @@ T_DECLARE_CASE(conf_default_has_expected_values)
 	T_EXPECT(conf.tcp_keepalive);
 	T_EXPECT(conf.block_multicast);
 	T_EXPECT_EQ(conf.startup_limit_rate, 30);
+#if WITH_THREADS
+	T_EXPECT_EQ(conf.workers, 1);
+#endif
 }
 
 T_DECLARE_CASE(conf_requires_listen)
@@ -1047,6 +1050,54 @@ T_DECLARE_CASE(parseargs_reuseport)
 }
 #endif /* WITH_REUSEPORT */
 
+/*
+ * Regression for the hardcoded I/O worker count: main() passed a literal 1 to
+ * transfer_create() and nothing could change it, so transfer.c's multi-worker
+ * engine was unreachable in every build. --workers (and the matching `workers`
+ * boot-config key) now set it. The option exists only in a WITH_THREADS build,
+ * where the engine runs worker threads; without threads transfers run on the
+ * main loop, so the count is meaningless and the flag is simply unknown.
+ */
+#if WITH_THREADS
+T_DECLARE_CASE(parseargs_workers)
+{
+	{
+		/* a valid count parses and passes validation */
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+				 "--workers", "4" };
+		T_EXPECT(conf_parseargs(&conf, 5, argv));
+		T_EXPECT_EQ(conf.workers, 4);
+		T_EXPECT(conf_check(&conf));
+	}
+	{
+		/* zero is rejected: transfer_serve() distributes with `% workers` */
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+				 "--workers", "0" };
+		T_EXPECT(conf_parseargs(&conf, 5, argv));
+		T_EXPECT_EQ(conf.workers, 0);
+		T_EXPECT(!conf_check(&conf));
+	}
+	{
+		/* a non-numeric argument fails the parse */
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+				 "--workers", "bad" };
+		T_EXPECT(!conf_parseargs(&conf, 5, argv));
+	}
+}
+#else /* WITH_THREADS */
+T_DECLARE_CASE(parseargs_workers)
+{
+	/* without thread support --workers is an unknown option */
+	struct config conf = conf_default();
+	char *argv[] = { "conf_test", "-l", "127.0.0.1:1080", "--workers",
+			 "4" };
+	T_EXPECT(!conf_parseargs(&conf, 5, argv));
+}
+#endif /* WITH_THREADS */
+
 #if WITH_SPLICE
 T_DECLARE_CASE(parseargs_pipe)
 {
@@ -1776,6 +1827,7 @@ static const struct testing_suite suite[] = {
 #if WITH_REUSEPORT
 	T_CASE(parseargs_reuseport),
 #endif
+	T_CASE(parseargs_workers),
 #if WITH_SPLICE
 	T_CASE(parseargs_pipe),
 #endif

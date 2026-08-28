@@ -67,6 +67,9 @@ struct config conf_default(void)
 		.startup_limit_start = 0,
 		.startup_limit_rate = 30,
 		.startup_limit_full = 0,
+#if WITH_THREADS
+		.workers = 1,
+#endif
 	};
 	return conf;
 }
@@ -173,6 +176,13 @@ bool conf_check(const struct config *restrict conf)
 		return false;
 	}
 #endif
+#if WITH_THREADS
+	/* transfer_create() documents nworkers >= 1, and transfer_serve()
+	 * distributes connections with `... % nworkers`; a zero divides by zero */
+	if (!RANGE_CHECK("workers", conf->workers, 1, INT_MAX)) {
+		return false;
+	}
+#endif
 
 	return RANGE_CHECK(
 		       "loglevel", conf->loglevel, LOG_LEVEL_SILENCE,
@@ -234,6 +244,9 @@ static void print_usage(const char *restrict argv0)
 #endif
 #if WITH_REUSEPORT
 		"  --reuseport                allow multiple instances to listen on the same port\n"
+#endif
+#if WITH_THREADS
+		"  --workers <n>              number of dedicated I/O worker threads (default: 1)\n"
 #endif
 #if WITH_SPLICE
 		"  --pipe                     use pipes to transfer data between connections\n"
@@ -453,6 +466,17 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 			continue;
 		}
 #endif
+#if WITH_THREADS
+		if (strcmp(argv[i], "--workers") == 0) {
+			OPT_REQUIRE_ARG(argc, argv, i);
+			++i;
+			const char *s = argv[i];
+			if (!opt_parse_int(&s, &conf->workers) || *s != '\0') {
+				OPT_ARG_ERROR(argv, i);
+			}
+			continue;
+		}
+#endif /* WITH_THREADS */
 #if WITH_SPLICE
 		if (strcmp(argv[i], "--pipe") == 0) {
 			conf->pipe = true;
@@ -713,6 +737,9 @@ static const struct metaconfig conf_fields[] = {
 	  offsetof(struct config, startup_limit_rate) },
 	{ "startup_limit_full", CONF_INT,
 	  offsetof(struct config, startup_limit_full) },
+#if WITH_THREADS
+	{ "workers", CONF_INT, offsetof(struct config, workers) },
+#endif
 	{ NULL, 0, 0 },
 };
 

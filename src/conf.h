@@ -79,6 +79,11 @@ struct config {
 	int startup_limit_start;
 	int startup_limit_rate;
 	int startup_limit_full;
+#if WITH_THREADS
+	/* number of dedicated I/O worker threads (>= 1); ignored without
+	 * thread support, where transfers run on the main loop */
+	int workers;
+#endif
 };
 
 struct config conf_default(void);
