@@ -200,7 +200,7 @@ int main(int argc, char *argv[])
 				err == 0, "pthread_sigmask: (%d) %s", err,
 				strerror(err));
 		}
-		xfer = transfer_create(loop, 1);
+		xfer = transfer_create(loop, (unsigned int)conf->workers);
 		{
 			const int err =
 				pthread_sigmask(SIG_SETMASK, &old_ss, NULL);
