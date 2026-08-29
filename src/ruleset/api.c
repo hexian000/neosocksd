@@ -280,6 +280,10 @@ static int api_config(lua_State *restrict L)
 	lua_setfield(L, -2, "startup_limit_rate");
 	lua_pushinteger(L, (lua_Integer)conf->startup_limit_full);
 	lua_setfield(L, -2, "startup_limit_full");
+#if WITH_THREADS
+	lua_pushinteger(L, (lua_Integer)conf->workers);
+	lua_setfield(L, -2, "workers");
+#endif
 	return 1;
 }
 

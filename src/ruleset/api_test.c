@@ -580,6 +580,9 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 		.auth_required = true,
 		.tcp_nodelay = true,
 		.tcp_keepalive = true,
+#if WITH_THREADS
+		.workers = 3,
+#endif
 	};
 	struct ruleset r = { 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
@@ -596,6 +599,12 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 	T_EXPECT(lua_toboolean(L, 4) != 0);
 	T_EXPECT_EQ(lua_tointeger(L, 5), 64);
 	T_EXPECT(lua_toboolean(L, 6) != 0);
+
+#if WITH_THREADS
+	/* the worker count is reflected like every other config field */
+	T_EXPECT(run_chunk(L, "return neosocksd.config().workers"));
+	T_EXPECT_EQ(lua_tointeger(L, -1), 3);
+#endif
 
 	lua_close(L);
 	ev_loop_destroy(loop);
