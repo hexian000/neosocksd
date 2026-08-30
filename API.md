@@ -403,6 +403,7 @@ Tuning (integer):
 - `tcp_sndbuf`, `tcp_rcvbuf`: socket buffer sizes in bytes (`0` means system default).
 - `max_sessions`: session count limit (`0` means unlimited).
 - `startup_limit_start`, `startup_limit_rate`, `startup_limit_full`: accept rate-limiting parameters.
+- `workers`†: number of dedicated I/O worker threads (present only in threaded builds).
 
 
 ### neosocksd.resolve
