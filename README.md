@@ -16,6 +16,7 @@ Status: **Stable**
   - [Lua Ruleset](#lua-ruleset)
   - [Observability](#observability)
 - [Distributed Virtual Network](#distributed-virtual-network)
+- [Horizontal Scaling](#horizontal-scaling)
 - [Battery-Powered Deployment](#battery-powered-deployment)
 - [Installation](#installation)
   - [Runtime Dependencies](#runtime-dependencies)
@@ -34,7 +35,7 @@ Status: **Stable**
 - <800 KiB executable on most platforms\*. See [Runtime Dependencies](#runtime-dependencies).
 - Lua scripting on the control plane with extensive RPC support.
 - RESTful API for live monitoring and hot-reloading Lua modules without restarts.
-- Full IPv6 support; horizontal scalability.
+- Full IPv6 support; [horizontal scalability](#horizontal-scaling) via multiple `--reuseport` instances.
 - Standards-compliant: ISO C11 and POSIX.1-2008.
 - No built-in encryption — pair with external tools for transport security. Supports basic authentication (plaintext credentials) only.
 
@@ -173,6 +174,58 @@ Set up on each node:
 The API must be reachable between nodes for peer discovery to work — see the
 [security note](#lua-ruleset) above. Restrict it to a trusted network (e.g. a
 VPN or private LAN link between nodes), not the public internet.
+
+
+## Horizontal Scaling
+
+Within one process, the accept loop, both proxy handshakes, `ruleset.route` and
+outbound dialing all run on a single thread; only relayed payload is offloaded.
+To put the control path on more cores, or to spread load across machines, run
+**several independent instances**. On Linux, `--reuseport` lets them share one
+listening port and the kernel load-balances new connections across them:
+
+```sh
+# Four instances sharing 0.0.0.0:1080, each with its own API address.
+# The kernel spreads incoming connections across them.
+for i in 1 2 3 4; do
+    ./neosocksd --reuseport -l 0.0.0.0:1080 -r ruleset.lua \
+        --api "127.0.0.$i:9080" -d
+done
+```
+
+The same fleet as a systemd template unit, started with
+`systemctl enable --now neosocksd@{1..4}`:
+
+```ini
+# /etc/systemd/system/neosocksd@.service
+[Service]
+# %i is the instance number: each binds a distinct loopback API address.
+ExecStart=/usr/bin/neosocksd --reuseport -l 0.0.0.0:1080 -r /etc/neosocksd/ruleset.lua --api 127.0.0.%i:9080
+DynamicUser=yes
+Restart=on-failure
+```
+
+`--reuseport` requires Linux 3.9 or later (`SO_REUSEPORT`) and is compiled in
+only where the kernel headers provide it.
+
+Every instance is a **separate process** with nothing shared between them, so
+plan for these per-instance consequences:
+
+- **The ruleset is per instance.** Each process runs its own Lua VM with its own
+  state — the `libruleset` biglists, and `agent.lua`'s peer database, connection
+  state, route index and gossip digests. N instances are N independent rulesets;
+  they converge only through whatever your ruleset syncs over RPC.
+- **`--api` reaches one arbitrary instance.** The API is just another listener,
+  so under a shared `--reuseport` port a request lands on whichever instance the
+  kernel picks — `/ruleset/update`, `/ruleset/invoke`, `/ruleset/gc` and
+  `POST /stats` then act on that **one** process, not the fleet. A hot reload
+  does *not* propagate; give each instance its own API address (as above) and
+  drive them individually to update or inspect all of them.
+- **Limits are per process.** `--max-sessions` and `--max-startups` are enforced
+  independently by each instance, so the effective ceiling across N instances is
+  N times the configured value — divide the target accordingly.
+- **Counters are per process.** `/stats` and `/metrics` report the queried
+  instance's own counters, never a fleet total; scrape every instance and sum.
 
 
 ## Battery-Powered Deployment
