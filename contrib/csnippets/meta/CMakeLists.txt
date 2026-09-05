@@ -5,4 +5,5 @@ target_sources(csnippets
     "${CMAKE_CURRENT_SOURCE_DIR}/format.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/intcast.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/minmax.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/strlen.h"
 )

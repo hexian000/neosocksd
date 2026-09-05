@@ -79,9 +79,18 @@ enum {
  *   line is truncated to the internal buffer size. Like the syslog sink, the
  *   writer sink ignores struct slog_extra.
  * - SLOG_OUTPUT_SYSLOG, void *ident, slog_syslog_fn fn: send messages via fn,
- *   or the system syslog() when fn is NULL. ident is the syslog identity and is
- *   passed back to fn as its first argument.
- * @details The previous sink, if any, is replaced.
+ *   or the system syslog() when fn is NULL; a build without syslog support
+ *   discards them instead. ident is the syslog identity and is passed back to
+ *   fn as its first argument. Like the sinks above it is borrowed and must stay
+ *   valid until the sink is replaced: openlog() does not copy it either, so a
+ *   stack buffer is a use-after-scope on every later log line. Replacing the
+ *   sink closes the syslog connection opened for it.
+ * @details The previous sink, if any, is replaced. Each variadic argument is
+ * read back as exactly the type listed above, so pass it as that type: a bare
+ * NULL is a void * (or an int 0), never a function or struct pointer, so cast
+ * it -- (struct io_stream *)NULL, (slog_writer_fn)NULL, (slog_syslog_fn)NULL,
+ * (void *)NULL -- and cast an object pointer given for a void * parameter to
+ * void *; a char * needs no cast there.
  */
 void slog_setoutput(int type, ...);
 

@@ -16,12 +16,20 @@
 /**
  * @brief Encode data with Base64.
  * @param[out] dst Output buffer, or NULL to query required size.
- * @param[inout] dstlen On input: output buffer size.
- *                       On output: encoded data length (always set).
+ * @param[inout] dstlen On input: output buffer size; not read when dst is
+ *                       NULL. On output (always set): the encoded data
+ *                       length, which is also the size a too-small buffer
+ *                       must grow to, or 0 if the length computation
+ *                       overflowed.
  * @param[in] src Raw data buffer.
  * @param srclen Raw data length in bytes.
- * @return true if successfully completed or dst is NULL.
- *         false if buffer too small or integer overflow.
+ * @return true if the data was encoded, or if a size query (dst == NULL)
+ *         computed the required length.
+ *         false if the encoded length overflows size_t, or dst is not NULL
+ *         and the buffer is too small.
+ * @note A size query never fails for lack of buffer space, but it runs the
+ *       same length computation as a real call, so it still returns false on
+ *       overflow.
  * @note Null terminator is not added to output.
  * @note No memory allocations are performed.
  * @warning The buffers must not overlap (in-place encoding is not supported).
@@ -42,15 +50,32 @@ bool base64_encode(
 /**
  * @brief Decode data with Base64.
  * @param[out] dst Output buffer, or NULL to query required size.
- * @param[inout] dstlen On input: output buffer size.
- *                       On output: decoded data length (0 on format error).
+ * @param[inout] dstlen On input: output buffer size; not read when dst is
+ *                       NULL. On output (always set): the decoded data
+ *                       length, which is also the size a too-small buffer
+ *                       must grow to, or 0 if srclen or the encoded data is
+ *                       invalid.
  * @param[in] src Base64 encoded data buffer.
  * @param srclen Encoded data length (must be a multiple of 4).
- * @return true if successfully completed or dst is NULL.
- *         false if invalid input, buffer too small, or srclen not multiple of 4.
+ * @return true if the data was decoded, or if a size query (dst == NULL)
+ *         computed the required length.
+ *         false if srclen is not a multiple of 4, or dst is not NULL and
+ *         either the buffer is too small or the encoded data is invalid.
+ * @note A size query checks srclen but not the encoded data: it returns false
+ *       when srclen is not a multiple of 4, and otherwise returns true with
+ *       the length the input would decode to, including for data that a real
+ *       decode rejects. It reads the trailing padding of src, so its answer
+ *       depends on the input rather than on srclen alone.
  * @note No memory allocations are performed.
  * @note In-place decoding is supported (dst == src), since decoded data
  *       is always smaller than or equal to encoded data.
+ * @note On failure the output buffer holds an unspecified number of decoded
+ *       bytes: every group is written as it is decoded and only the group
+ *       carrying the invalid byte is rejected, so decoding in place destroys
+ *       the leading bytes of the input. A caller that still needs the
+ *       encoded text after a rejection must decode elsewhere or keep a copy.
+ *       Only the checks made before any write — srclen not a multiple of 4,
+ *       and a too-small dst — leave the buffer byte-for-byte intact.
  * @note Decoding is lenient about padding: the bits of a padded group that
  *       belong to the dropped byte(s) are discarded without checking they are
  *       zero, so a non-canonical encoding (e.g. "QR==" as well as "QQ==")

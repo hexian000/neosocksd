@@ -10,7 +10,9 @@
 #include "utils/buffer.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -128,7 +130,7 @@ static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
 		 * dereferencing: VBUF_LEN's sanity assert is gone under NDEBUG
 		 * and vbuf_append would fault. */
 		*len = 0;
-		return -1;
+		return ENOMEM;
 	}
 	const size_t n = *len;
 	const size_t before = VBUF_LEN(*pvbuf);
@@ -138,7 +140,8 @@ static int heap_write(void *p, const void *restrict buf, size_t *restrict len)
 	const size_t appended = VBUF_LEN(*pvbuf) - before;
 	*len = appended;
 	if (appended != n) {
-		return -1;
+		/* the vbuffer could not grow to take the rest */
+		return ENOMEM;
 	}
 	return 0;
 }
@@ -168,20 +171,23 @@ int io_heapprintf(struct io_stream *restrict s, const char *restrict format, ...
 	struct vbuffer *restrict *restrict pvbuf = (struct vbuffer **)s->data;
 	if (*pvbuf == NULL) {
 		/* the OOM state, as in heap_write above */
-		return -1;
+		return ENOMEM;
 	}
 	va_list args;
 	va_start(args, format);
 	const int ret = VBUF_VAPPENDF(*pvbuf, format, args);
 	va_end(args);
-	if (ret < 0) {
-		return ret;
-	}
 	if (VBUF_HAS_OOM(*pvbuf)) {
-		/* growth failed during the call: vappendf still returns the
+		/* growth failed during the call (or before it, in which case
+		 * vappendf returns negative): vappendf still returns the
 		 * would-be count while truncating the stored data and marking
 		 * the vbuffer OOM, so report the truncation as an error */
-		return -1;
+		return ENOMEM;
+	}
+	if (ret < 0) {
+		/* the output length does not fit in an int; nothing was
+		 * appended */
+		return EOVERFLOW;
 	}
 	return 0;
 }
@@ -190,32 +196,55 @@ struct buffered_stream {
 	struct io_stream s;
 	struct io_stream *base;
 	int err;
+	/* the base returned a short count without an error, which a reader
+	 * does only at EOF; it is not read again until that EOF is reported */
+	bool eof;
 	size_t bufsize;
 	size_t pos, len;
 	unsigned char buf[];
 };
 ASSERT_SUPER(struct io_stream, struct buffered_stream, s);
 
+/* Read up to n bytes from the base into dst and return the count. The base's
+ * error is stashed, and a short count with no error is recorded as EOF, since
+ * io_stream_read's contract allows a short count only at EOF or on error.
+ * Reading past it would block a terminal, whose EOF is not sticky, until the
+ * user sent a second one. */
+static size_t
+buf_fill(struct buffered_stream *restrict b, unsigned char *dst, size_t n)
+{
+	const size_t want = n;
+	b->err = io_stream_read(b->base, dst, &n);
+	if (n < want && b->err == 0) {
+		b->eof = true;
+	}
+	return n;
+}
+
+/* The buffer is drained: report the stashed error, or 0 at EOF, and clear both
+ * after reporting so a later call retries the base. */
+static int buf_drained(struct buffered_stream *restrict b)
+{
+	const int err = b->err;
+	b->err = 0;
+	b->eof = false;
+	return err;
+}
+
 static int
 buf_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct buffered_stream *restrict b = p;
 	if (b->pos == b->len) {
-		if (b->err != 0) {
+		if (b->err != 0 || b->eof) {
 			*len = 0;
-			const int err = b->err;
-			b->err = 0;
-			return err;
+			return buf_drained(b);
 		}
-		b->pos = b->len = 0;
-		size_t n = b->bufsize;
-		b->err = io_stream_read(b->base, b->buf, &n);
-		b->len = n;
-		if (n == 0) {
+		b->pos = 0;
+		b->len = buf_fill(b, b->buf, b->bufsize);
+		if (b->len == 0) {
 			*len = 0;
-			const int err = b->err;
-			b->err = 0;
-			return err;
+			return buf_drained(b);
 		}
 	}
 	/* never report more than the caller's requested max, even if more
@@ -235,18 +264,16 @@ static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 	const size_t want = *len;
 	if (want == 0) {
 		if (b->pos < b->len) {
-			*len = 0;
 			return 0;
 		}
-		const int err = b->err;
-		b->err = 0;
-		return err;
+		return buf_drained(b);
 	}
 	unsigned char *restrict dst = buf;
 	size_t nread = 0;
-	/* keep refilling until the caller's buffer is full or the base runs
-	 * dry; io_stream_read's contract lets the caller read a short return as
-	 * EOF, so stopping on a partial buffer would truncate the stream */
+	/* keep refilling until the caller's buffer is full or the base reaches
+	 * EOF or fails; io_stream_read's contract lets the caller read a short
+	 * return as EOF, so stopping on a partial buffer would truncate the
+	 * stream */
 	while (nread < want) {
 		const size_t avail = b->len - b->pos;
 		if (avail > 0) {
@@ -257,79 +284,61 @@ static int buf_read(void *p, void *restrict buf, size_t *restrict len)
 			nread += n;
 			continue;
 		}
-		if (b->err != 0) {
+		if (b->err != 0 || b->eof) {
 			break;
 		}
 		const size_t remain = want - nread;
 		if (remain >= b->bufsize) {
 			/* the remainder alone fills the internal buffer; read
 			 * straight into the caller's to skip a copy */
-			size_t n = remain;
-			b->err = io_stream_read(b->base, dst + nread, &n);
+			const size_t n = buf_fill(b, dst + nread, remain);
 			nread += n;
-			if (n == 0) {
+			if (n < remain) {
 				break;
 			}
 			continue;
 		}
-		b->pos = b->len = 0;
-		size_t n = b->bufsize;
-		b->err = io_stream_read(b->base, b->buf, &n);
-		b->len = n;
-		if (n == 0) {
+		b->pos = 0;
+		b->len = buf_fill(b, b->buf, b->bufsize);
+		if (b->len == 0) {
 			break;
 		}
 	}
 	*len = nread;
-	if (nread == 0) {
-		/* clear after reporting so a later read retries the base,
-		 * mirroring buf_direct_read / buf_peek */
-		const int err = b->err;
-		b->err = 0;
-		return err;
+	if (nread == 0 || (nread < want && b->err != 0)) {
+		/* A short read means EOF or error to the caller, including
+		 * another buffered reader. Report the error with the bytes so
+		 * that wrapping this stream cannot turn a failure into EOF. */
+		return buf_drained(b);
 	}
-	/* hand back the valid bytes now and defer any stashed error until the
-	 * buffer drains, mirroring buf_direct_read / buf_peek */
+	/* A full read can defer the error until the next call. */
 	return 0;
 }
 
 static int buf_peek(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct buffered_stream *restrict b = p;
-	if (b->pos < b->len) {
-		*buf = b->buf + b->pos;
-		if (*len > b->len - b->pos) {
-			*len = b->len - b->pos;
-		}
-		return 0;
+	const size_t want = (*len < b->bufsize) ? *len : b->bufsize;
+	if (b->len - b->pos < want && b->err == 0 && !b->eof) {
+		/* too little is buffered: move the residual to the front and
+		 * fill the rest of the buffer from the base, so a peek of up to
+		 * bufsize bytes is served without consuming anything first */
+		const size_t avail = b->len - b->pos;
+		memmove(b->buf, b->buf + b->pos, avail);
+		b->pos = 0;
+		b->len = avail;
+		b->len += buf_fill(b, b->buf + avail, b->bufsize - avail);
 	}
-	if (b->err != 0) {
-		/* clear after reporting so a later peek retries the base,
-		 * mirroring buf_read / buf_direct_read */
+	const size_t avail = b->len - b->pos;
+	if (avail == 0) {
 		*len = 0;
-		const int err = b->err;
-		b->err = 0;
-		return err;
+		return buf_drained(b);
 	}
-	b->pos = 0;
-	b->len = 0;
-	size_t n = b->bufsize;
-	const size_t req = (*len < n) ? *len : n;
-	b->err = io_stream_read(b->base, b->buf, &n);
-	b->len = n;
-	*buf = b->buf;
-	*len = (req < n) ? req : n;
-	if (n == 0) {
-		/* base returned no data; clear after reporting the error so the
-		 * next peek retries, mirroring buf_read / buf_direct_read */
-		const int err = b->err;
-		b->err = 0;
-		return err;
-	}
-	/* the base returned data together with a possible stashed error: hand
-	 * back the valid peeked bytes now and defer the error (left in b->err)
-	 * until the buffer drains, mirroring buf_read / buf_direct_read rather
-	 * than reporting an error alongside good data */
+	/* a stashed error, or the EOF, stays deferred until the buffer drains,
+	 * mirroring buf_direct_read, rather than being reported
+	 * alongside good data */
+	*buf = b->buf + b->pos;
+	*len = (avail < want) ? avail : want;
 	return 0;
 }
 
@@ -345,8 +354,9 @@ static int buf_flush_(struct buffered_stream *restrict b)
 	struct io_stream *restrict base = b->base;
 	b->err = io_stream_write(base, b->buf, &len);
 	if (len < b->len && b->err == 0) {
-		/* short write */
-		b->err = -1;
+		/* short write: the base ran out of room without naming a
+		 * cause */
+		b->err = ENOSPC;
 	}
 	if (b->err != 0) {
 		if (len > 0 && len < b->len) {
@@ -395,7 +405,7 @@ static int buf_write(void *p, const void *restrict buf, size_t *restrict len)
 				/* base accepted nothing; retrying would
 				 * spin forever, so treat it as a short
 				 * write like buf_flush_ does */
-				b->err = -1;
+				b->err = ENOSPC;
 			}
 		} else {
 			n = navail;
@@ -444,7 +454,8 @@ static int buf_vprintf(void *p, const char *restrict format, va_list args)
 	size_t maxlen = b->bufsize - b->len;
 	ret = u8vsnprintf(s, maxlen, format, args);
 	if (ret < 0) {
-		return ret;
+		/* the output length does not fit in an int */
+		return EOVERFLOW;
 	}
 	if ((size_t)ret < maxlen) {
 		b->len += (size_t)ret;
@@ -482,17 +493,18 @@ static struct io_stream *io_bufstream(struct io_stream *base, size_t bufsize)
 		return NULL;
 	}
 	if (bufsize > SIZE_MAX - sizeof(struct buffered_stream)) {
-		io_stream_close(base);
+		(void)io_stream_close(base);
 		return NULL;
 	}
 	struct buffered_stream *b =
 		malloc(sizeof(struct buffered_stream) + bufsize);
 	if (b == NULL) {
-		io_stream_close(base);
+		(void)io_stream_close(base);
 		return NULL;
 	}
 	b->base = base;
 	b->err = 0;
+	b->eof = false;
 	b->bufsize = bufsize;
 	b->pos = b->len = 0;
 	return &b->s;
@@ -622,7 +634,7 @@ struct io_stream *io_metered(struct io_stream *base, uint_least64_t *meter)
 	}
 	struct metered_stream *m = malloc(sizeof(struct metered_stream));
 	if (m == NULL) {
-		io_stream_close(base);
+		(void)io_stream_close(base);
 		return NULL;
 	}
 	/* only advertise direct_read when the base actually supports it, so a

@@ -67,14 +67,14 @@ int socket_set_buffer(const int fd, const int sndbuf, const int rcvbuf)
 	if (sndbuf > 0) {
 		if (setsockopt(
 			    fd, SOL_SOCKET, SO_SNDBUF, &sndbuf,
-			    sizeof(sndbuf)) != 0) {
+			    (socklen_t)sizeof(sndbuf)) != 0) {
 			err = errno;
 		}
 	}
 	if (rcvbuf > 0) {
 		if (setsockopt(
 			    fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf,
-			    sizeof(rcvbuf)) != 0) {
+			    (socklen_t)sizeof(rcvbuf)) != 0) {
 			/* the first failure is the reported one */
 			if (err == 0) {
 				err = errno;
@@ -88,7 +88,9 @@ int socket_set_reuseport(const int fd, const bool reuseport)
 {
 	int err = 0;
 	const int opt = 1;
-	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
+	if (setsockopt(
+		    fd, SOL_SOCKET, SO_REUSEADDR, &opt,
+		    (socklen_t)sizeof(opt)) != 0) {
 		err = errno;
 	}
 #ifdef SO_REUSEPORT
@@ -96,8 +98,8 @@ int socket_set_reuseport(const int fd, const bool reuseport)
 	 * only SO_REUSEADDR" */
 	if (reuseport) {
 		if (setsockopt(
-			    fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) !=
-		    0) {
+			    fd, SOL_SOCKET, SO_REUSEPORT, &opt,
+			    (socklen_t)sizeof(opt)) != 0) {
 			/* the first failure is the reported one */
 			if (err == 0) {
 				err = errno;
@@ -120,16 +122,16 @@ int socket_set_tcp(const int fd, const bool nodelay, const bool keepalive)
 	{
 		const int opt = nodelay ? 1 : 0;
 		if (setsockopt(
-			    fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt)) !=
-		    0) {
+			    fd, IPPROTO_TCP, TCP_NODELAY, &opt,
+			    (socklen_t)sizeof(opt)) != 0) {
 			err = errno;
 		}
 	}
 	{
 		const int opt = keepalive ? 1 : 0;
 		if (setsockopt(
-			    fd, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof(opt)) !=
-		    0) {
+			    fd, SOL_SOCKET, SO_KEEPALIVE, &opt,
+			    (socklen_t)sizeof(opt)) != 0) {
 			/* the first failure is the reported one */
 			if (err == 0) {
 				err = errno;
@@ -145,7 +147,9 @@ int socket_set_linger(const int fd, const bool enabled, const int seconds)
 		.l_onoff = enabled ? 1 : 0,
 		.l_linger = seconds,
 	};
-	if (setsockopt(fd, SOL_SOCKET, SO_LINGER, &val, sizeof(val)) != 0) {
+	if (setsockopt(
+		    fd, SOL_SOCKET, SO_LINGER, &val, (socklen_t)sizeof(val)) !=
+	    0) {
 		return errno;
 	}
 	return 0;
@@ -155,8 +159,8 @@ int socket_set_fastopen(const int fd, const int backlog)
 {
 #ifdef TCP_FASTOPEN
 	if (setsockopt(
-		    fd, IPPROTO_TCP, TCP_FASTOPEN, &backlog, sizeof(backlog)) !=
-	    0) {
+		    fd, IPPROTO_TCP, TCP_FASTOPEN, &backlog,
+		    (socklen_t)sizeof(backlog)) != 0) {
 		return errno;
 	}
 	return 0;
@@ -172,8 +176,8 @@ int socket_set_fastopen_connect(const int fd, const bool enabled)
 #ifdef TCP_FASTOPEN_CONNECT
 	const int val = enabled ? 1 : 0;
 	if (setsockopt(
-		    fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &val, sizeof(val)) !=
-	    0) {
+		    fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &val,
+		    (socklen_t)sizeof(val)) != 0) {
 		return errno;
 	}
 	return 0;
@@ -189,7 +193,7 @@ int socket_notsent_lowat(const int fd, const int bytes)
 #ifdef TCP_NOTSENT_LOWAT
 	if (setsockopt(
 		    fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &bytes,
-		    sizeof(bytes)) != 0) {
+		    (socklen_t)sizeof(bytes)) != 0) {
 		return errno;
 	}
 	return 0;
@@ -243,9 +247,9 @@ socklen_t sa_len(const struct sockaddr *sa)
 {
 	switch (sa->sa_family) {
 	case AF_INET:
-		return sizeof(struct sockaddr_in);
+		return (socklen_t)sizeof(struct sockaddr_in);
 	case AF_INET6:
-		return sizeof(struct sockaddr_in6);
+		return (socklen_t)sizeof(struct sockaddr_in6);
 	default:
 		break;
 	}

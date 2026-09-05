@@ -43,7 +43,13 @@ struct dispatcher *dispatcher_create(size_t capacity);
 bool dispatcher_invoke(struct dispatcher *d, struct task task);
 
 /**
- * @brief Process all pending tasks without blocking.
+ * @brief Process all pending tasks until the queue is empty.
+ *
+ * Runs tasks until it finds the queue empty, including tasks invoked while it
+ * runs, whether by a running task or by another thread. It does not wait for
+ * tasks to arrive, but it returns only once the queue is empty: a task that
+ * invokes itself again, or producers that invoke tasks at least as fast as
+ * this thread runs them, keep it from returning.
  *
  * @param d Dispatcher instance.
  * @note Call periodically from main thread.
@@ -53,7 +59,8 @@ void dispatcher_tick(struct dispatcher *d);
 /**
  * @brief Shutdown dispatcher, process remaining tasks and cleanup.
  *
- * Processes all pending tasks, then calls dispatcher_destroy().
+ * Processes pending tasks until the queue is empty, including tasks invoked
+ * by the tasks it runs, then calls dispatcher_destroy().
  *
  * @param d Dispatcher instance.
  * @note Call from main thread. Pointer becomes invalid after return.
@@ -62,9 +69,12 @@ void dispatcher_tick(struct dispatcher *d);
 void dispatcher_join(struct dispatcher *d);
 
 /**
- * @brief Destroy dispatcher and free all resources.
+ * @brief Destroy dispatcher and free its resources.
  *
- * Frees remaining tasks without executing them.
+ * Discards any pending tasks without executing them. Pending tasks are plain
+ * values, so their data pointers are not released. In particular, a task
+ * returned by packaged_task_bind() leaks its closure unless the queue is
+ * drained with dispatcher_tick() or dispatcher_join() first.
  *
  * @param d Dispatcher instance.
  * @warning Ensure no other threads are accessing the dispatcher.

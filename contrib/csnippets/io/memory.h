@@ -19,10 +19,12 @@
  *   state, not a failure. It returns 0 with a short `*len`, which per
  *   `io_stream_write`'s contract the caller must still treat as an error.
  * - `io_heapwriter` grows until the allocator refuses, so exhaustion *is* a
- *   failure: it returns -1.
- * The sibling writers elsewhere follow the second shape -- `fd_write` returns
- * the errno and `file_write` returns -1 -- so `io_memwriter` is the one whose
- * short write arrives with a success code.
+ *   failure: it returns `ENOMEM`.
+ * The sibling writers elsewhere follow the second shape -- `fd_write` and
+ * `file_write` return the errno of the failed call -- so `io_memwriter` is the
+ * one whose short write arrives with a success code. A buffered writer turns
+ * such a short write into `ENOSPC`, as `io_stream_copy` does. Every error code
+ * in this module is 0 or a positive `errno` value, as in `stream.h`.
  * @{
  */
 
@@ -55,7 +57,7 @@ struct vbuffer;
  * @return If malloc failed or pvbuf == NULL, returns NULL.
  * @details `*pvbuf` may be NULL -- the state `VBUF_NEW` returns on allocation
  * failure, and the one `VBUF_HAS_OOM` reports as OOM. Writes to a stream in
- * that state fail with -1 rather than dereferencing it, so a caller may carry
+ * that state fail with `ENOMEM` rather than dereferencing it, so a caller may carry
  * a failed `VBUF_NEW` this far and find out at the write.
  */
 struct io_stream *io_heapwriter(struct vbuffer **pvbuf);
@@ -67,8 +69,9 @@ struct io_stream *io_heapwriter(struct vbuffer **pvbuf);
  * @param[in] ... Same as printf.
  * @return Error code, 0 for OK.
  * @details The heap buffer grows to fit, so unlike `io_bufprintf` the output
- * is never silently truncated: the only failure is the allocator refusing to
- * grow it (or `*pvbuf` already being NULL), which returns an error.
+ * is never silently truncated: the allocator refusing to grow it (or `*pvbuf`
+ * already being NULL or out of memory) returns `ENOMEM`, and an output longer
+ * than `INT_MAX` bytes returns `EOVERFLOW` with nothing appended.
  */
 int io_heapprintf(struct io_stream *s, const char *format, ...)
 	FORMAT_PRINTF(2, 3);
@@ -77,7 +80,13 @@ int io_heapprintf(struct io_stream *s, const char *format, ...)
  * @brief Buffered stream reader.
  * @param[in] base Transfer ownership of the base stream.
  * @param[in] bufsize Size of buffer in bytes, 0 for default.
- * @details Wraps the base stream to support all read methods.
+ * @details Wraps the base stream to support all read methods. A short count
+ * from the base with no error is taken as EOF, per `io_stream_read`'s
+ * contract: the base is not read again until the buffered bytes are consumed
+ * and a call has returned no data, after which the next call retries it. A
+ * base error is deferred until the buffered bytes are consumed. An ordinary
+ * read returning fewer bytes than requested reports the error alongside
+ * those bytes, so it cannot be mistaken for clean EOF by another reader.
  * @return If malloc failed or base == NULL, returns NULL.
  */
 struct io_stream *io_bufreader(struct io_stream *base, size_t bufsize);
@@ -90,7 +99,10 @@ struct io_stream *io_bufreader(struct io_stream *base, size_t bufsize);
  * @return Error code, 0 for OK.
  * @details Returns a zero-copy pointer up to bufsize bytes.
  * Data is not consumed; the next read or peek returns the same bytes.
- * If the buffer is empty, the underlying stream is read to fill it.
+ * If fewer bytes are buffered than requested (capped at bufsize), the
+ * buffered ones are moved to the front and the underlying stream is read to
+ * fill the rest of the buffer, so a short peek means the base reached EOF or
+ * failed. Its error is reported once the buffered bytes are consumed.
  */
 int io_bufpeek(struct io_stream *s, const void **buf, size_t *len);
 
@@ -108,9 +120,11 @@ struct io_stream *io_bufwriter(struct io_stream *base, size_t bufsize);
  * @param[in] s If not a valid bufwriter, the behavior is undefined.
  * @param[in] format Same as printf.
  * @param[in] ... Same as printf.
- * @return Error code, 0 for OK.
+ * @return Error code, 0 for OK; `EOVERFLOW`, with nothing buffered, if the
+ * output would be longer than `INT_MAX` bytes.
  * @details Any invocation writes all buffered data to the base stream.
- * The printed string is truncated to (bufsize - 1) silently.
+ * The printed string is silently truncated at a UTF-8 codepoint boundary
+ * to at most (bufsize - 1) bytes.
  */
 int io_bufprintf(struct io_stream *s, const char *format, ...)
 	FORMAT_PRINTF(2, 3);

@@ -3,19 +3,15 @@
 
 #include "testing.h"
 
-#include "strings/format.h"
-#ifdef _WIN32
-#include "wintime.h"
-#else
 #include "os/clock.h"
-#endif
+#include "strings/format.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #if HAVE_REGEX_H
 #include <regex.h>
 #endif
-#include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -87,30 +83,6 @@ static void filter_free(struct filter *f)
 #else
 	(void)f;
 #endif
-}
-
-/* Run a single case, mirroring the T_RUN_CASE macro. */
-static void run_case(struct testing_ctx *t, const struct testing_suite *e)
-{
-	t->current = e->name;
-	t->case_failed = false;
-	t->case_skipped = false;
-	(void)fprintf(t->out, "=== RUN   %s\n", e->name);
-	(void)fflush(t->out);
-	if (setjmp(t->case_jmp) == 0) {
-		e->fn.test(t);
-	}
-	if (t->case_failed) {
-		t->failed++;
-		(void)fprintf(t->out, "--- FAIL  %s\n", e->name);
-	} else if (t->case_skipped) {
-		t->skipped++;
-		(void)fprintf(t->out, "--- SKIP  %s\n", e->name);
-	} else {
-		t->passed++;
-		(void)fprintf(t->out, "--- PASS  %s\n", e->name);
-	}
-	(void)fflush(t->out);
 }
 
 /* -------------------------------------------------------------------------
@@ -280,12 +252,6 @@ void testing_bench_run(
 	t->benched++;
 }
 
-/* Run a benchmark suite entry through testing_bench_run. */
-static void run_bench(struct testing_ctx *t, const struct testing_suite *e)
-{
-	testing_bench_run(t, e->name, e->fn.bench);
-}
-
 /*
  * Match argv[*i] against option `flag`.  Returns 1 and sets *value on a match
  * ("--flag=value" in place, or "--flag value" consuming the next argument), 0
@@ -325,24 +291,28 @@ static bool
 parse_benchtime(const char *s, int_fast64_t *time_ns, uint_fast64_t *fixed_n)
 {
 	char *end;
+	const size_t len = strlen(s);
+	if (len != 0 && s[len - 1] == 'x') {
+		/* Counts are decimal integers.  Parse them without a floating-point
+		 * round trip, which loses precision above 2^53.  strtoumax accepts
+		 * negative values by unsigned negation, so reject that sign first. */
+		const char *start = s + strspn(s, " \t\n\r\f\v");
+		if (*start == '-') {
+			return false;
+		}
+		errno = 0;
+		const uintmax_t n = strtoumax(s, &end, 10);
+		if (end == s || strcmp(end, "x") != 0 || errno != 0 || n == 0 ||
+		    n > UINT_FAST64_MAX) {
+			return false;
+		}
+		*fixed_n = (uint_fast64_t)n;
+		*time_ns = 0;
+		return true;
+	}
 	const double v = strtod(s, &end);
 	if (end == s || !(v > 0.0)) {
 		return false;
-	}
-	if (strcmp(end, "x") == 0) {
-		/* A fixed count must be a whole number >= 1 and representable;
-		 * reject a fractional or out-of-range value instead of
-		 * silently truncating it.  The upper bound keeps the cast
-		 * within uint_fast64_t; the round-trip compare rejects a
-		 * fractional count, and is exact wherever a fraction can
-		 * exist (any double >= 2^53 is already whole). */
-		if (!(v >= 1.0 && v < 0x1p64) ||
-		    (double)(uint_fast64_t)v != v) {
-			return false;
-		}
-		*fixed_n = (uint_fast64_t)v;
-		*time_ns = 0;
-		return true;
 	}
 	double scale; /* to seconds */
 	if (*end == '\0' || strcmp(end, "s") == 0) {
@@ -476,10 +446,15 @@ int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
 	};
 	/* Cases first: with no --run filter every case runs (inactive filter
 	 * matches all); otherwise those whose name matches.  Benchmarks run only
-	 * when --bench is given (bench_f is active only then). */
+	 * when --bench is given (bench_f is active only then).  Count what each
+	 * filter selected rather than reading the outcome counters afterwards:
+	 * the two filters share those counters, and an optimized-away benchmark
+	 * lands in `failed` instead of `benched`. */
+	int cases_selected = 0, benches_selected = 0;
 	for (const struct testing_suite *e = suite; e->name != NULL; e++) {
 		if (e->kind == TESTING_CASE && filter_match(&run_f, e->name)) {
-			run_case(&ctx, e);
+			testing_run_case_(&ctx, e->name, e->fn.test);
+			cases_selected++;
 		}
 	}
 	if (bench_f.active) {
@@ -487,7 +462,8 @@ int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
 		     e++) {
 			if (e->kind == TESTING_BENCH &&
 			    filter_match(&bench_f, e->name)) {
-				run_bench(&ctx, e);
+				testing_bench_run(&ctx, e->name, e->fn.bench);
+				benches_selected++;
 			}
 		}
 	}
@@ -495,9 +471,14 @@ int testing_main(int argc, char *const *argv, const struct testing_suite *suite)
 	filter_free(&run_f);
 	filter_free(&bench_f);
 
-	if ((run != NULL || bench != NULL) &&
-	    ctx.passed + ctx.failed + ctx.skipped + ctx.benched == 0) {
-		(void)fprintf(stderr, "testing: no entries matched\n");
+	if (run != NULL && cases_selected == 0) {
+		(void)fprintf(
+			stderr, "testing: no test case matched \"%s\"\n", run);
+	}
+	if (bench != NULL && benches_selected == 0) {
+		(void)fprintf(
+			stderr, "testing: no benchmark matched \"%s\"\n",
+			bench);
 	}
 	(void)fprintf(
 		ctx.out,

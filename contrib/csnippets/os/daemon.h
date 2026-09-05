@@ -60,10 +60,16 @@ void drop_privileges(const char *identity);
  *     security-relevant: a file the daemon later creates with the customary
  *     0666 lands world-writable, so callers that care must set their own
  *     umask after this returns.
+ * @note Flushes every stdio stream (fflush(NULL)) before the first fork, so
+ *     output the caller buffered beforehand is written once, not once per
+ *     process that inherits the buffer. A failing flush is logged, not fatal.
  * @note Does not return on failure: a failing pipe, fork or freopen, a failing
+ *     fcntl(F_DUPFD) while moving the readiness pipe off fds 0-2, a failing
  *     read of the readiness message, or a daemon process that dies before
  *     confirming startup, aborts the process. If identity is non-NULL,
- *     drop_privileges' own fatal failures apply too.
+ *     drop_privileges' own fatal failures apply too. In the daemon process, a
+ *     readiness write that fails with any error other than EINTR (retried) or
+ *     EPIPE (see below) aborts the daemon.
  * @note Survives losing the original process: if it dies before reading the
  *     readiness message, the already-started daemon logs LOGW and carries on
  *     rather than being killed by SIGPIPE, which is ignored across that write

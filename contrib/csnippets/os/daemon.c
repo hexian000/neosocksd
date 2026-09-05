@@ -246,6 +246,16 @@ static void notify_ready(const int fd)
 void daemonize(
 	const char *const identity, const bool nochdir, const bool noclose)
 {
+	/* Flush every stdio stream before forking. Each fork child inherits a
+	 * copy of whatever output is still buffered, and both the original
+	 * process (its exit()) and the daemon (the freopen below, or its own
+	 * eventual exit()) would flush that copy, writing it twice. A failed
+	 * flush is logged rather than fatal: at worst, the bytes it could not
+	 * write are the ones still duplicated. */
+	if (fflush(NULL) != 0) {
+		const int err = errno;
+		LOGW_F("fflush: (%d) %s", err, strerror(err));
+	}
 	/* Create an anonymous pipe for communicating with daemon process. */
 	int fd[2];
 	if (pipe(fd) == -1) {
@@ -326,10 +336,11 @@ void daemonize(
 			FAILMSGF("fork: (%d) %s", err, strerror(err));
 		} else if (pid > 0) {
 			/* Terminate the intermediate child with _exit(), not
-			 * exit(): it shares (via fork) the original process's stdio
-			 * buffers and atexit registrations, so a full exit() would
-			 * double-flush any buffered output and run those handlers in
-			 * this throwaway process. */
+			 * exit(): it inherits (via fork) the original process's
+			 * atexit registrations and any stdio output buffered since
+			 * the flush above, so a full exit() would run those
+			 * handlers in this throwaway process and write that output
+			 * a second time. */
 			_exit(EXIT_SUCCESS);
 		}
 	}

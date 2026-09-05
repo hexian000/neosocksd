@@ -61,6 +61,13 @@ void gc_unref(struct gcbase *restrict obj);
  * as a refcount-aware "collect what's now unreachable" pass; callers
  * still holding a reference to a finalized object are left with a
  * dangling pointer.
+ *
+ * Teardown is two-phase: every registered object's finalizer runs before
+ * any of them is freed. A finalizer may therefore release the objects it
+ * owns with gc_unref() whatever order they were registered in; gc_ref()
+ * and gc_unref() on an object being torn down are no-ops, and each such
+ * object is finalized exactly once. An object a finalizer registers is
+ * torn down too, before the call returns.
  * @return The number of objects finalized.
  */
 size_t gc_finalizeall(void);

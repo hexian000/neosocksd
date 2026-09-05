@@ -226,9 +226,10 @@ char *mime_parseparam(char *s, char **restrict key, char **restrict value)
 	if (*key == NULL) {
 		return next;
 	}
-	char *star = strchr(*key, '*');
-	if (star != NULL) {
-		/* continuations are not supported */
+	if (strchr(*key, '*') != NULL) {
+		/* RFC 2231 extended values (Section 4) and continuations
+		 * (Section 3) are not supported; both mark the attribute name
+		 * with '*' */
 		return NULL;
 	}
 	return next;

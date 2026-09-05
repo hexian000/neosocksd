@@ -8,8 +8,8 @@
 #include <threads.h>
 
 /* Assert that a C11 threads call returned thrd_success. The (void) cast keeps
- * the temporary live so the argument is still evaluated when assert() compiles
- * out under NDEBUG. */
+ * the temporary live so the argument is still evaluated when assert()
+ * compiles out under NDEBUG. */
 #define THRD_ASSERT(expr)                                                      \
 	do {                                                                   \
 		const int status_ = (expr);                                    \

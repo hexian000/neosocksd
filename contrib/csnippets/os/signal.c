@@ -49,6 +49,12 @@ static_assert(
 	ATOMIC_BOOL_LOCK_FREE == 2,
 	"sighandlers[].installed must be always lock-free so the crash "
 	"handler's access to it stays async-signal-safe");
+#if SLOG_MT_SAFE
+static_assert(
+	ATOMIC_INT_LOCK_FREE == 2,
+	"slog_level_ is read by the crash handler's LOGLEVEL() gate, where "
+	"ISO C11 7.14.1.1p5 admits an atomic access only if it is lock-free");
+#endif
 
 /* AddressSanitizer instrumentation inflates stack frames several-fold, so the
  * crash handlers' alternate stack must be sized larger when built with it, or
@@ -79,9 +85,22 @@ static_assert(
 static void *crash_altstack;
 static stack_t crash_prev_altstack;
 
+/* SIGSTKSZ is the system's budget for a *trivial* handler, but the report
+ * below also runs the unwinder and the symbolizer on this stack, and neither
+ * is trivial: measured high-water marks of debug_backtrace() +
+ * debug_backtrace_fd() on x86-64 are ~5 KiB through glibc execinfo, plus the
+ * ~2.3 KiB pc window debug_backtrace() keeps on that backend, ~8.5 KiB
+ * through libbacktrace and ~11.5 KiB through libunwind (whose unw_cursor_t
+ * alone is ~2 KiB and whose symbol lookup parses ELF with PATH_MAX-sized
+ * buffers) -- already past SIGSTKSZ on its own. Budget that work separately
+ * so the handler does not overflow the very stack it installed to survive a
+ * stack overflow, writing past the allocation and corrupting the heap. */
+#define CRASH_REPORT_STACKSZ 32768
+
 static size_t crash_altstack_size(void)
 {
-	size_t size = (size_t)SIGSTKSZ + DEBUG_STACK_MAXDEPTH * sizeof(void *);
+	size_t size = (size_t)SIGSTKSZ + CRASH_REPORT_STACKSZ +
+		      DEBUG_STACK_MAXDEPTH * sizeof(void *);
 #if CRASH_ALTSTACK_INSTRUMENTED
 	/* the instrumented handler chain needs several times the room */
 	size *= 4;
@@ -237,12 +256,9 @@ void crashhandler_install(void)
 	if (crash_altstack != NULL) {
 		act.sa_flags = SA_ONSTACK;
 	}
-	/* Block everything while the handler runs (the initialization POSIX
-	 * requires anyway): a second guarded signal, e.g. from another crashing
-	 * thread, must not interrupt the report mid-line and interleave its own.
-	 * A synchronous re-fault inside the handler is unblockable regardless
-	 * and takes the process down with the default action, which is the
-	 * intended backstop. */
+	/* Block blockable signals on the handler's thread to prevent nested
+	 * asynchronous delivery from interrupting its report. Other threads can
+	 * run crash handlers concurrently, so their reports may interleave. */
 	(void)sigfillset(&act.sa_mask);
 	for (size_t i = 0; i < NUM_SIGHANDLERS; i++) {
 		if (atomic_load_explicit(

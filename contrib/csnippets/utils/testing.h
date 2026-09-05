@@ -2,12 +2,13 @@
  * This code is licensed under MIT license (see LICENSE for details) */
 
 /*
- * testing.h - lightweight, header-only unit test framework
+ * testing.h - lightweight unit test framework
  *
  * OVERVIEW
- *   All test state is kept in a local `struct testing_ctx` variable declared
- *   inside main().  There are no global variables or external-linkage
- *   symbols.
+ *   Case state is kept in a local `struct testing_ctx` variable declared inside
+ *   main().  The case macros and assertion helpers are header-only.  `T_KEEP`,
+ *   `T_RUN_BENCH`, `testing_main`, and the benchmark timer helpers use external
+ *   definitions in testing.c; link the `testing` library when using them.
  *
  * TEST CASE DEFINITION
  *   Use T_DECLARE_CASE(name) to begin a static test function definition.
@@ -38,35 +39,59 @@
  *         T_CALL_SUBCASE(check_range, 5, 1, 10);
  *     }
  *
+ * PER-CASE CLEANUP
+ *   State a case leaves behind outlives it: every case in a binary runs in one
+ *   process, and T_FAILNOW / T_SKIPNOW abandon the body wherever they are
+ *   called, skipping whatever the body meant to undo at its end.  That is
+ *   harmless for the case's own locals, which the longjmp unwinds past, and not
+ *   harmless for anything file-static a case arms on the code under test - a
+ *   -Wl,--wrap fault injector, a test double told what to answer - which the
+ *   next case would then run against.
+ *
+ *   Register the undo with T_CLEANUP(fn, data) at the point of the setup, and
+ *   the runner calls fn(data) when the case ends however it ends.  Cleanups run
+ *   in reverse order of registration, before the outcome is reported:
+ *
+ *     T_DECLARE_CASE(test_alloc_failure)
+ *     {
+ *         fail_malloc_of = sizeof(struct thing);
+ *         T_CLEANUP(clear_fail_malloc, NULL);
+ *         T_EXPECT_EQ(thing_new(), NULL);   // safe to end the case here
+ *     }
+ *
  * RUNNING TESTS
- *   In main(), declare the context with T_DECLARE_CTX(ctx), run individual
- *   cases with T_RUN_CASE(ctx, name), and return with T_RESULT(ctx):
+ *   In main(), declare the context with T_DECLARE_CTX(ctx) and run individual
+ *   cases with T_RUN_CASE(ctx, name).  T_RESULT(ctx) is a boolean, not an exit
+ *   status, so map it onto EXIT_SUCCESS / EXIT_FAILURE; returning it directly
+ *   would report a passing suite as a failure and a failing one as a success:
  *
  *     int main(void)
  *     {
  *         T_DECLARE_CTX(t);
  *         T_RUN_CASE(t, test_add);
  *         T_RUN_CASE(t, test_range);
- *         return T_RESULT(t);
+ *         return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
  *     }
  *
  *   To batch-run cases with an X-macro list, define the list in the test
- *   file itself and expand it with T_RUN_CASE:
+ *   file itself and expand it with T_RUN_CASE.  The list juxtaposes its
+ *   expansions with nothing in between, so the per-entry macro has to carry
+ *   the statement terminator:
  *
  *     #define ALL_TESTS(X) X(test_add) X(test_range)
  *
  *     int main(void)
  *     {
  *         T_DECLARE_CTX(t);
- * #define RUN(name) T_RUN_CASE(t, name)
+ * #define RUN(name) T_RUN_CASE(t, name);
  *         ALL_TESTS(RUN)
  * #undef RUN
- *         return T_RESULT(t);
+ *         return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
  *     }
  *
  * DEFAULT MAIN (testing_main)
  *   testing_main() (defined in testing.c) is a ready-made entry point.  Pass it
- *   a NUL-terminated array of `struct testing_suite` entries built with T_CASE
+ *   a NULL-terminated array of `struct testing_suite` entries built with T_CASE
  *   and T_BENCH and terminated with T_SUITE_END:
  *
  *     static const struct testing_suite suite[] = {
@@ -94,8 +119,10 @@
  *                     ns/op (min-of-n).
  *   The pattern is a POSIX extended regular expression matched as an unanchored
  *   substring; where POSIX regex is unavailable it degrades to a literal
- *   substring.  Matching cases run first, then matching benches.  Returns
- *   EXIT_SUCCESS when no case failed (and no benchmark was optimized away).
+ *   substring.  Matching cases run first, then matching benches.  Each filter
+ *   that selects nothing is reported separately on stderr, which is a warning,
+ *   not an error.  Returns EXIT_SUCCESS when no case failed (and no benchmark
+ *   was optimized away).
  *
  * CASE OUTCOMES
  *   Each case has one of three outcomes printed by T_RUN_CASE:
@@ -106,7 +133,9 @@
  *
  *   T_FAILNOW and T_SKIPNOW abort the current case body immediately via
  *   longjmp back to T_RUN_CASE.  They must only be called within a test
- *   case body (i.e. under an active T_RUN_CASE).
+ *   case body (i.e. under an active T_RUN_CASE).  The cleanups the case
+ *   registered still run, and still before the outcome is decided, so one that
+ *   calls T_FAIL turns the case it cleaned up after into a failure.
  *
  * BENCH CASE DEFINITION
  *   Use T_DECLARE_BENCH(name) to begin a static benchmark function with a
@@ -147,7 +176,7 @@
  *         T_DECLARE_CTX(t);
  *         T_RUN_CASE(t, test_add);
  *         T_RUN_BENCH(t, bench_add);
- *         return T_RESULT(t);
+ *         return T_RESULT(t) ? EXIT_SUCCESS : EXIT_FAILURE;
  *     }
  *
  *   T_DECLARE_BENCH and T_RUN_BENCH are always available; the monotonic clock
@@ -160,6 +189,9 @@
 #ifndef UTILS_TESTING_H
 #define UTILS_TESTING_H
 
+#include "os/clock.h"
+
+#include <float.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -168,6 +200,22 @@
 #include <string.h>
 #include <time.h>
 
+/*
+ * One undo registered by the running case with T_CLEANUP: `fn` is called with
+ * `data` once the case ends.  See the PER-CASE CLEANUP overview.
+ */
+struct testing_cleanup {
+	void (*fn)(void *data);
+	void *data;
+};
+
+/*
+ * How many cleanups one case may have registered at a time.  Overflowing it is
+ * a runtime check failure rather than a dropped entry: dropping one would leave
+ * behind exactly the state T_CLEANUP exists to restore.
+ */
+enum { T_CLEANUP_MAX = 16 };
+
 /* Test execution context.  Declare one locally in main() with T_DECLARE_CTX. */
 struct testing_ctx {
 	FILE *out;
@@ -175,10 +223,13 @@ struct testing_ctx {
 	int failed;
 	int skipped;
 	int benched;
-	const char *current;
 	volatile bool case_failed : 1;
 	volatile bool case_skipped : 1;
 	jmp_buf case_jmp;
+	/* Cleanups the current case has registered but not yet run; the runner
+	 * empties this between cases, so it never carries state across one. */
+	struct testing_cleanup cleanups[T_CLEANUP_MAX];
+	int cleanup_count;
 	/*
 	 * Benchmark tuning, set by testing_main from CLI flags; zero selects the
 	 * default, so a T_DECLARE_CTX context needs no extra setup.
@@ -198,11 +249,12 @@ struct testing_ctx {
  *
  * `bytes` and `allocs` are running totals reported by the benchmark (see
  * T_BENCH_MALLOC and friends).  `bytes` is the heap memory requested; `allocs`
- * counts allocator calls - malloc/calloc/realloc as well as free, since in C a
- * free is itself a call worth measuring.  The runner divides them by the total
- * iteration count to print `B/op` and `allocs/op`, in the spirit of Go's
- * `-benchmem`.  They accumulate across calibration rounds, exactly like the
- * elapsed time used for the per-op timing, so per-op figures stay correct.
+ * counts successful malloc/calloc/realloc/aligned_alloc calls and every free,
+ * since in C a free is itself a call worth measuring.  The runner divides these
+ * counts by the total iteration count to print `B/op` and `allocs/op`, in the
+ * spirit of Go's `-benchmem`.  They accumulate across calibration rounds,
+ * exactly like the elapsed time used for per-op timing, so the figures stay
+ * correct.
  *
  * `set_bytes` is the number of bytes processed by a single operation, set with
  * T_BENCH_SET_BYTES (like Go's b.SetBytes).  When non-zero the runner adds a
@@ -259,40 +311,95 @@ struct testing_bench {
 #define T_CALL_SUBCASE(name_, ...) (testsubcase_##name_##_(_t_, __VA_ARGS__))
 
 /*
+ * Run what the case registered with T_CLEANUP (see testing_cleanup_push_),
+ * most recent first, and leave the list empty.  Each cleanup gets a setjmp
+ * guard of its own, so one that ends itself with T_FAILNOW or a failing
+ * expectation abandons only itself and the cleanups registered before it still
+ * run; a cleanup that registers another has it run in turn.
+ */
+static inline void testing_run_cleanups_(struct testing_ctx *t)
+{
+	while (t->cleanup_count > 0) {
+		t->cleanup_count--;
+		if (setjmp(t->case_jmp) == 0) {
+			const struct testing_cleanup c =
+				t->cleanups[t->cleanup_count];
+			c.fn(c.data);
+		}
+	}
+}
+
+/*
+ * Announce `name`, run `test` under a setjmp guard so T_FAILNOW / T_SKIPNOW can
+ * abort the body, run the case's cleanups, then report and count the outcome.
+ * Backs both T_RUN_CASE and testing_main's runner, so the two cannot drift
+ * apart; being static inline it keeps the macro path free of any link
+ * dependency.  The cleanups run before the outcome is read, so one of them can
+ * still fail the case, and the case starts with none left over from the last.
+ */
+static inline void testing_run_case_(
+	struct testing_ctx *t, const char *name,
+	void (*test)(struct testing_ctx *))
+{
+	t->case_failed = false;
+	t->case_skipped = false;
+	t->cleanup_count = 0;
+	(void)fprintf(t->out, "=== RUN   %s\n", name);
+	(void)fflush(t->out);
+	if (setjmp(t->case_jmp) == 0) {
+		test(t);
+	}
+	testing_run_cleanups_(t);
+	if (t->case_failed) {
+		t->failed++;
+		(void)fprintf(t->out, "--- FAIL  %s\n", name);
+	} else if (t->case_skipped) {
+		t->skipped++;
+		(void)fprintf(t->out, "--- SKIP  %s\n", name);
+	} else {
+		t->passed++;
+		(void)fprintf(t->out, "--- PASS  %s\n", name);
+	}
+	(void)fflush(t->out);
+}
+
+/*
  * T_RUN_CASE(ctx, name)
  *   Calls test function `name` with &ctx as _t_.
  *   Increments the corresponding counter in ctx.  A failed result takes
  *   priority over a skipped result.
  */
 #define T_RUN_CASE(ctx_, name_)                                                \
-	do {                                                                   \
-		(ctx_).current = #name_;                                       \
-		(ctx_).case_failed = false;                                    \
-		(ctx_).case_skipped = false;                                   \
-		(void)fprintf((ctx_).out, "=== RUN   %s\n", #name_);           \
-		(void)fflush((ctx_).out);                                      \
-		if (setjmp((ctx_).case_jmp) == 0) {                            \
-			testcase_##name_##_(&(ctx_));                          \
-		}                                                              \
-		if ((ctx_).case_failed) {                                      \
-			(ctx_).failed++;                                       \
-			(void)fprintf((ctx_).out, "--- FAIL  %s\n", #name_);   \
-		} else if ((ctx_).case_skipped) {                              \
-			(ctx_).skipped++;                                      \
-			(void)fprintf((ctx_).out, "--- SKIP  %s\n", #name_);   \
-		} else {                                                       \
-			(ctx_).passed++;                                       \
-			(void)fprintf((ctx_).out, "--- PASS  %s\n", #name_);   \
-		}                                                              \
-		(void)fflush((ctx_).out);                                      \
-	} while (0)
+	(testing_run_case_(&(ctx_), #name_, testcase_##name_##_))
 
 /*
  * T_RESULT(ctx)
  *   Evaluates to true when ctx recorded no failures, false otherwise.
- *   Intended for boolean success checks.
+ *   Intended for boolean success checks: it is the inverse of an exit status,
+ *   so main() must return T_RESULT(ctx) ? EXIT_SUCCESS : EXIT_FAILURE and
+ *   never T_RESULT(ctx) itself.
  */
 #define T_RESULT(ctx_) ((ctx_).failed == 0)
+
+/*
+ * TESTING_PROMOTE_(value)
+ *   The dispatch key of a _Generic on `value`, for T_KEEP and T_EXPECT_EQ.
+ *   A generic selection matches the controlling expression's own type and
+ *   promotes nothing (C11 6.5.1.1), while a bit-field has the integer type of
+ *   its width (6.7.2.1p10), which no type name spells: every association misses
+ *   it and the selection takes the default one.  GCC does exactly that, typing
+ *   such an operand `unsigned char:3`; clang matches the declared type instead,
+ *   and neither is wrong.  Pairing the operand with a null pointer constant in
+ *   a conditional operator settles it: an arithmetic operand takes the usual
+ *   arithmetic conversions' type (6.5.15p5, 6.3.1.8) and with it the integer
+ *   promotions (6.3.1.1) - a bit-field arrives as `int`, as does every other
+ *   narrow integer type - while a pointer operand keeps its own (6.5.15p6).  A
+ *   bit-field of an implementation-defined wider type (`unsigned long long
+ *   x : 40`) is outside the promotion rule and still needs a cast.  The
+ *   controlling expression is unevaluated, so `value` is still evaluated once
+ *   only, by the call the selection resolves to.
+ */
+#define TESTING_PROMOTE_(value_) (1 ? (value_) : 0)
 
 /* -------------------------------------------------------------------------
  * Benchmark case definition.  Run a benchmark with T_RUN_BENCH or testing_main;
@@ -323,8 +430,14 @@ struct testing_bench {
  *
  *   Unlike Go's form it cannot keep the operation's result alive by itself
  *   (ISO C11 has no compiler barrier), so wrap the result in T_KEEP (below).
+ *
+ *   The bound is copied into the loop's own object: the runner fixes N before
+ *   the call and no body may change it, but a body that calls an opaque
+ *   function - which a benchmark almost always does - would otherwise reload
+ *   `_b_->N` every round, since that call might write it.
  */
-#define T_BENCH_LOOP() for (uint_fast64_t _i_ = 0; _i_ < (_b_)->N; _i_++)
+#define T_BENCH_LOOP()                                                         \
+	for (uint_fast64_t _i_ = 0, _n_ = (_b_)->N; _i_ < _n_; _i_++)
 
 /* -------------------------------------------------------------------------
  * Defeating dead-code elimination - pure ISO C11.
@@ -347,12 +460,13 @@ struct testing_bench {
  *     }
  *
  * T_KEEP accepts any standard arithmetic type or object-pointer value; its
- * only cost is one forced store.  An enum-typed value has no matching _Generic
- * branch (its type is distinct from its underlying integer type), so cast it to
- * an integer type first.  Calling it once after the loop is enough when results
- * accumulate into a single variable.  To stop the optimizer hoisting a
- * loop-invariant input out of the loop, prefer feeding the loop index or the
- * previous result as input, as above.
+ * only cost is one forced store.  It dispatches on the promoted operand type
+ * (see TESTING_PROMOTE_), so a bit-field or an enum - compatible with whichever
+ * integer type the implementation chose for it (6.7.2.2p4) - needs no cast.
+ * Calling it once after the loop is enough when results accumulate into a
+ * single variable.  To stop the optimizer hoisting a loop-invariant input out
+ * of the loop, prefer feeding the loop index or the previous result as input,
+ * as above.
  * ---------------------------------------------------------------------- */
 
 /* volatile sinks backing T_KEEP; defined once in testing.c. */
@@ -377,22 +491,17 @@ static inline void testing_keep_p_(const volatile void *v)
  * T_KEEP(value)
  *   Force `value` - and the computation that produced it - to be evaluated,
  *   defeating dead-code elimination.  Accepts any standard arithmetic type or
- *   object pointer; cast an enum-typed value to an integer type first.
- *   The _Generic selects a sink function; only the selected branch is applied
- *   to `value`, so the unselected branches need not type-check against it.
+ *   object pointer.  The _Generic selects a sink function from the promoted
+ *   operand type; only the selected branch is applied to `value`, so the
+ *   unselected branches need not type-check against it, and the value reaches
+ *   the sink unpromoted, exactly as written.
  */
 #define T_KEEP(value_)                                                         \
 	(_Generic(                                                             \
-		(value_),                                                      \
+		TESTING_PROMOTE_(value_),                                      \
 		 float: testing_keep_f_,                                       \
 		 double: testing_keep_f_,                                      \
 		 long double: testing_keep_f_,                                 \
-		 _Bool: testing_keep_u_,                                       \
-		 char: testing_keep_u_,                                        \
-		 signed char: testing_keep_u_,                                 \
-		 unsigned char: testing_keep_u_,                               \
-		 short: testing_keep_u_,                                       \
-		 unsigned short: testing_keep_u_,                              \
 		 int: testing_keep_u_,                                         \
 		 unsigned int: testing_keep_u_,                                \
 		 long: testing_keep_u_,                                        \
@@ -406,15 +515,14 @@ static inline void testing_keep_p_(const volatile void *v)
  *
  * C has no runtime that tracks allocations, so a benchmark must report them
  * itself.  The counting wrappers below stand in for the standard allocators
- * (malloc/calloc/realloc/aligned_alloc/free): each records one allocator call
- * into the implicit `_b_` before delegating to the standard function.
- * Allocations also add their requested size to `bytes`; T_BENCH_FREE counts the
- * call but adds no bytes.  Pair every counted allocation with a counted
- * T_BENCH_FREE so frees show up in the allocs column too.
+ * (malloc/calloc/realloc/aligned_alloc/free): allocation wrappers delegate to
+ * the standard function first, then record successful allocations in the
+ * implicit `_b_`.  Allocations add their requested size to `bytes`;
+ * T_BENCH_FREE records every free call but adds no bytes.
  *
  *     T_DECLARE_BENCH(bench_dup)
  *     {
- *         for (uint_fast64_t i = 0; i < _b_->N; i++) {
+ *         T_BENCH_LOOP() {
  *             void *p = T_BENCH_MALLOC(64);
  *             T_BENCH_FREE(p);
  *         }
@@ -547,7 +655,7 @@ void testing_bench_start_timer(struct testing_bench *b);
 #define T_BENCH_LOG(msg_) T_BENCH_LOGF("%s", msg_)
 
 /* -------------------------------------------------------------------------
- * Test suite - a NUL-terminated array of cases and benches consumed by
+ * Test suite - a NULL-terminated array of cases and benches consumed by
  * testing_main().  Build entries with T_CASE / T_BENCH and terminate with
  * T_SUITE_END:
  *
@@ -593,7 +701,7 @@ struct testing_suite {
 
 /*
  * testing_main(argc, argv, suite)
- *   Default test entry point.  Runs the NUL-terminated `suite`: cases selected
+ *   Default test entry point.  Runs the NULL-terminated `suite`: cases selected
  *   by --run (all of them when --run is absent) run first, then benchmarks
  *   selected by --bench (none when --bench is absent) run last.  See the DEFAULT
  *   MAIN overview for the flags (--run, --bench, --benchtime, --count) and the
@@ -664,28 +772,59 @@ void testing_bench_run(
 #define THRD_CHECK(expr) T_CHECK((expr) == thrd_success)
 
 /* -------------------------------------------------------------------------
+ * Per-case cleanup - requires `struct testing_ctx *_t_` in scope.
+ *
+ * T_CLEANUP(fn, data)
+ *   Register `fn(data)` to run when the current case ends, whether it returns
+ *   normally or is abandoned by T_FAILNOW / T_SKIPNOW / a failing expectation.
+ *   Register it right where the state is set up, since a body that undoes it at
+ *   its end undoes nothing when a fatal expectation ends the body first.
+ *   Cleanups run most recent first (testing_run_cleanups_), before the outcome
+ *   is reported, and a case may have at most T_CLEANUP_MAX of them registered.
+ *   Use it for state that outlives the case - file-static fault injectors and
+ *   test doubles, a temporary file, a thread to join - and not for the case's
+ *   own locals, which need no undoing.
+ *
+ *   A cleanup may fail the case (T_FAIL, T_EXPECT and friends need `_t_`, so
+ *   pass the context as `data` to reach them), and T_CLEANUP works the same in
+ *   a T_DECLARE_SUBCASE body.  Benchmarks have no cleanups: T_CHECK is fatal to
+ *   the whole binary, so nothing of a benchmark's survives into the next one.
+ * ---------------------------------------------------------------------- */
+
+static inline void
+testing_cleanup_push_(struct testing_ctx *t, void (*fn)(void *), void *data)
+{
+	T_CHECK(fn != NULL);
+	T_CHECK(t->cleanup_count < T_CLEANUP_MAX);
+	t->cleanups[t->cleanup_count++] =
+		(struct testing_cleanup){ .fn = fn, .data = data };
+}
+
+#define T_CLEANUP(fn_, data_) (testing_cleanup_push_(_t_, (fn_), (data_)))
+
+/* -------------------------------------------------------------------------
  * Deadline helpers for bounded blocking waits (threaded suites).
  *
  * Reaching the deadline is a failure, not a tolerated outcome: the waits are
  * satisfied promptly when the code under test is correct, so a deadline only
  * ever fires on a real defect and keeps a regression from hanging CI instead of
- * reporting. The clock is TIME_UTC (CLOCK_REALTIME) so the result can drive
- * cnd_timedwait directly, which requires its own clock; do not substitute a
- * monotonic clock.
+ * reporting. The clock is the Unix wall clock (clock_unix, i.e. CLOCK_REALTIME
+ * or the ISO C TIME_UTC fallback) so the result can drive cnd_timedwait
+ * directly, which requires its own clock; do not substitute a monotonic clock.
  * ---------------------------------------------------------------------- */
 
 enum { T_TIMEOUT_SECONDS = 10 };
 
 static inline void t_deadline_set(struct timespec *restrict deadline)
 {
-	T_CHECK(timespec_get(deadline, TIME_UTC) == TIME_UTC);
+	T_CHECK(clock_unix(deadline));
 	deadline->tv_sec += T_TIMEOUT_SECONDS;
 }
 
 static inline bool t_deadline_expired(const struct timespec *restrict deadline)
 {
 	struct timespec now;
-	T_CHECK(timespec_get(&now, TIME_UTC) == TIME_UTC);
+	T_CHECK(clock_unix(&now));
 	return now.tv_sec > deadline->tv_sec ||
 	       (now.tv_sec == deadline->tv_sec &&
 		now.tv_nsec >= deadline->tv_nsec);
@@ -749,7 +888,8 @@ static inline bool t_deadline_expired(const struct timespec *restrict deadline)
  * On failure each macro logs a diagnostic then calls T_FAILNOW.
  *
  * T_EXPECT(condition)             fail if condition is false
- * T_EXPECT_EQ(value, expect)      fail if value != expect
+ * T_EXPECT_EQ(value, expect)      fail unless the two hold the same value
+ *                                 (an exact comparison, not C's `==`)
  * T_EXPECT_STREQ(value, expect)   fail if strcmp(value, expect) != 0
  * T_EXPECT_MEMEQ(value, expect, size)  fail if memcmp differs
  * ---------------------------------------------------------------------- */
@@ -763,30 +903,136 @@ static inline bool t_deadline_expired(const struct timespec *restrict deadline)
 
 /*
  * Compare and, on mismatch, report "expect X, got Y" to `out`.  Each variant
- * takes its category's widest natural type (any narrower signed/unsigned/
- * float operand promotes to it losslessly, so equality is preserved exactly)
- * except _p_, which takes `const void *` for pointers: comparing converted
- * pointers is equality-preserving by definition, and every object pointer
- * type converts to it implicitly, unlike the integer types.
+ * takes the widest natural type of the categories it serves -- intmax_t for
+ * signed, uintmax_t for unsigned, long double for floating -- except _p_, which
+ * takes `const void *`: every object pointer converts to it implicitly and that
+ * conversion preserves equality, unlike the integer types.
  *
- * T_EXPECT_EQ below selects one of these through plain, ungenerated _Generic
- * associations -- each association names only the function, never `value_`/
- * `expect_` -- and calls it with the two arguments passed as-is.  A function
- * reference type-checks regardless of which branch _Generic ends up
- * selecting, so, unlike a macro that casts its argument inside every
- * association (rejected: e.g. a pointer cannot cast to long double, which
- * would break the moment any branch mentions a floating-point target), this
- * never requires an operand to satisfy an unrelated branch's type.  The
- * actual argument conversion happens once, in the ordinary function call,
- * to the single selected function's parameter type -- which is exactly why
- * each argument is evaluated exactly once no matter the outcome, fixing a
- * prior double-evaluation of both `value_` and `expect_` in the failure
- * branch (dangerous when either is a side-effecting expression, e.g. a
- * blocking read()).
+ * A signed and an unsigned operand are never folded into one category, because
+ * neither direction is lossless: intmax_t cannot represent an unsigned value
+ * above INTMAX_MAX, and uintmax_t cannot represent a negative one.  Such a pair
+ * goes to _iu_ / _ui_, which keep each operand in its own type, compare the two
+ * values exactly, and print each with its own conversion.
+ *
+ * That is deliberately not what C's `==` says about the same two operands: `==`
+ * applies the usual arithmetic conversions (C11 6.3.1.8), so `u == -1` is true
+ * for `unsigned u = UINT_MAX`, whereas T_EXPECT_EQ(u, -1) fails -- UINT_MAX is
+ * not -1.  An assertion may report a mismatch the language would have converted
+ * away, but it must never accept a value the author did not write.  Where the
+ * converted comparison is the intent, write T_EXPECT(u == -1).
+ *
+ * An integer and a floating operand are not folded into one category either:
+ * `==` would round the integer to the floating type, and converting the other
+ * way would truncate the floating value, so neither direction is exact.  Such a
+ * pair goes to _if_ / _uf_ / _fi_ / _fu_, which hold it equal only when the
+ * floating value is an integer the integer operand's type can hold, and is that
+ * very integer -- T_EXPECT_EQ(n, 2.5) fails for `int n = 2`.
+ *
+ * A floating operand is compared as a value of its own type.  Where
+ * FLT_EVAL_METHOD is 1 or 2, a floating expression -- a constant included -- may
+ * carry more range and precision than its type (C11 5.2.4.2.2p9), and passing
+ * it to a long double parameter keeps that excess: an inexact double constant
+ * such as 1e308 would then keep its exact decimal value, which no stored double
+ * equals.  So each operand travels with its kind (TESTING_EQ_KIND_), and
+ * testing_eq_strip_ casts a floating one back to its own type, which removes
+ * the excess (6.3.1.8p2) exactly as storing it in a variable of that type
+ * would.  Two floating operands of different types then compare in the wider
+ * one, as `==` compares them where FLT_EVAL_METHOD is 0.  A floating value is
+ * reported with the digits its type needs to round-trip (FLT_DECIMAL_DIG and
+ * kin), so a mismatch never prints two equal-looking numbers.
+ *
+ * T_EXPECT_EQ below dispatches on both operands with nested _Generic, keyed on
+ * each operand's promoted type (see TESTING_PROMOTE_) so that a bit-field
+ * operand reaches its own category instead of the pointer default.  Promotion
+ * cannot change a verdict: it leaves every value exactly representable in the
+ * selected variant's parameter type, and it takes the narrow types out of the
+ * dispatch entirely.  The associations name only functions, never a cast of
+ * `value_`/`expect_`.  A function reference type-checks regardless of which
+ * branch _Generic ends up selecting, so, unlike a macro that casts its
+ * argument inside every association (rejected: e.g. a pointer cannot cast to
+ * long double, which would break the moment any branch mentions a
+ * floating-point target), this never requires an operand to satisfy an
+ * unrelated branch's type.  Both operands are converted once, by the ordinary
+ * call to the selected function -- a generic selection leaves its controlling
+ * expression unevaluated (C11 6.5.1.1) -- so each is evaluated exactly once no
+ * matter the outcome, which matters when either is a side-effecting expression
+ * such as a blocking read().
  */
-static inline bool testing_eq_report_i_(
-	FILE *out, const char *file, int line, intmax_t value, intmax_t expect)
+/* The kind of a T_EXPECT_EQ operand, which tells testing_eq_strip_ the type a
+ * floating one had before it was passed as long double. */
+enum {
+	TESTING_KIND_NONE_, /* an integer or a pointer */
+	TESTING_KIND_FLT_,
+	TESTING_KIND_DBL_,
+	TESTING_KIND_LDBL_,
+};
+
+#define TESTING_EQ_KIND_(value_)                                               \
+	_Generic(                                                              \
+		TESTING_PROMOTE_(value_),                                      \
+		float: TESTING_KIND_FLT_,                                      \
+		double: TESTING_KIND_DBL_,                                     \
+		long double: TESTING_KIND_LDBL_,                               \
+		default: TESTING_KIND_NONE_)
+
+/* Round `x` to the type `kind` names, dropping any excess precision. */
+static inline long double testing_eq_strip_(long double x, int kind)
 {
+	switch (kind) {
+	case TESTING_KIND_FLT_:
+		return (float)x;
+	case TESTING_KIND_DBL_:
+		return (double)x;
+	default:
+		return x;
+	}
+}
+
+/* The significant digits that print a value of type `kind` unambiguously. */
+static inline int testing_eq_digits_(int kind)
+{
+	switch (kind) {
+	case TESTING_KIND_FLT_:
+		return FLT_DECIMAL_DIG;
+	case TESTING_KIND_DBL_:
+		return DBL_DECIMAL_DIG;
+	default:
+		return LDBL_DECIMAL_DIG;
+	}
+}
+
+/* Whether the floating value `x` is exactly the integer `i`. */
+static inline bool testing_eq_flt_int_(long double x, intmax_t i)
+{
+	/* 2^(N-1) for an N-bit intmax_t, a power of two every floating type
+	 * holds exactly; [-lim, lim) is where the conversion below is defined. */
+	const long double lim = -(long double)INTMAX_MIN;
+	if (!(x >= -lim && x < lim)) {
+		return false; /* out of range, or NaN */
+	}
+	const intmax_t t = (intmax_t)x;
+	return t == i && (long double)t == x;
+}
+
+/* Whether the floating value `x` is exactly the integer `u`. */
+static inline bool testing_eq_flt_uint_(long double x, uintmax_t u)
+{
+	/* 2^N for an N-bit uintmax_t, built from 2^(N-1) so that no step
+	 * rounds; [0, lim) is where the conversion below is defined. */
+	const long double lim = 2.0L * (long double)(UINTMAX_MAX / 2 + 1);
+	if (!(x >= 0 && x < lim)) {
+		return false; /* out of range, or NaN */
+	}
+	const uintmax_t t = (uintmax_t)x;
+	return t == u && (long double)t == x;
+}
+
+static inline bool testing_eq_report_i_(
+	FILE *out, const char *file, int line, intmax_t value, int vkind,
+	intmax_t expect, int ekind)
+{
+	(void)vkind;
+	(void)ekind;
 	if (value == expect) {
 		return true;
 	}
@@ -798,9 +1044,11 @@ static inline bool testing_eq_report_i_(
 }
 
 static inline bool testing_eq_report_u_(
-	FILE *out, const char *file, int line, uintmax_t value,
-	uintmax_t expect)
+	FILE *out, const char *file, int line, uintmax_t value, int vkind,
+	uintmax_t expect, int ekind)
 {
+	(void)vkind;
+	(void)ekind;
 	if (value == expect) {
 		return true;
 	}
@@ -811,24 +1059,124 @@ static inline bool testing_eq_report_u_(
 	return false;
 }
 
-static inline bool testing_eq_report_f_(
-	FILE *out, const char *file, int line, long double value,
-	long double expect)
+static inline bool testing_eq_report_iu_(
+	FILE *out, const char *file, int line, intmax_t value, int vkind,
+	uintmax_t expect, int ekind)
 {
-	if (value == expect) {
+	(void)vkind;
+	(void)ekind;
+	if (value >= 0 && (uintmax_t)value == expect) {
 		return true;
 	}
 	(void)fprintf(
-		out, "    %s:%d expect %Lg, got %Lg\n", file, line, expect,
+		out, "    %s:%d expect %ju, got %jd\n", file, line, expect,
 		value);
 	(void)fflush(out);
 	return false;
 }
 
-static inline bool testing_eq_report_p_(
-	FILE *out, const char *file, int line, const void *value,
-	const void *expect)
+static inline bool testing_eq_report_ui_(
+	FILE *out, const char *file, int line, uintmax_t value, int vkind,
+	intmax_t expect, int ekind)
 {
+	(void)vkind;
+	(void)ekind;
+	if (expect >= 0 && value == (uintmax_t)expect) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %jd, got %ju\n", file, line, expect,
+		value);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_eq_report_f_(
+	FILE *out, const char *file, int line, long double value, int vkind,
+	long double expect, int ekind)
+{
+	const long double v = testing_eq_strip_(value, vkind);
+	const long double e = testing_eq_strip_(expect, ekind);
+	if (v == e) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %.*Lg, got %.*Lg\n", file, line,
+		testing_eq_digits_(ekind), e, testing_eq_digits_(vkind), v);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_eq_report_if_(
+	FILE *out, const char *file, int line, intmax_t value, int vkind,
+	long double expect, int ekind)
+{
+	(void)vkind;
+	const long double e = testing_eq_strip_(expect, ekind);
+	if (testing_eq_flt_int_(e, value)) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %.*Lg, got %jd\n", file, line,
+		testing_eq_digits_(ekind), e, value);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_eq_report_uf_(
+	FILE *out, const char *file, int line, uintmax_t value, int vkind,
+	long double expect, int ekind)
+{
+	(void)vkind;
+	const long double e = testing_eq_strip_(expect, ekind);
+	if (testing_eq_flt_uint_(e, value)) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %.*Lg, got %ju\n", file, line,
+		testing_eq_digits_(ekind), e, value);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_eq_report_fi_(
+	FILE *out, const char *file, int line, long double value, int vkind,
+	intmax_t expect, int ekind)
+{
+	(void)ekind;
+	const long double v = testing_eq_strip_(value, vkind);
+	if (testing_eq_flt_int_(v, expect)) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %jd, got %.*Lg\n", file, line, expect,
+		testing_eq_digits_(vkind), v);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_eq_report_fu_(
+	FILE *out, const char *file, int line, long double value, int vkind,
+	uintmax_t expect, int ekind)
+{
+	(void)ekind;
+	const long double v = testing_eq_strip_(value, vkind);
+	if (testing_eq_flt_uint_(v, expect)) {
+		return true;
+	}
+	(void)fprintf(
+		out, "    %s:%d expect %ju, got %.*Lg\n", file, line, expect,
+		testing_eq_digits_(vkind), v);
+	(void)fflush(out);
+	return false;
+}
+
+static inline bool testing_eq_report_p_(
+	FILE *out, const char *file, int line, const void *value, int vkind,
+	const void *expect, int ekind)
+{
+	(void)vkind;
+	(void)ekind;
 	if (value == expect) {
 		return true;
 	}
@@ -839,38 +1187,64 @@ static inline bool testing_eq_report_p_(
 	return false;
 }
 
+/*
+ * The second dispatch level: having settled `value_`'s category, pick the
+ * variant matching `expect_`'s.  A pointer `expect_` takes the default, so
+ * pairing it with an arithmetic `value_` fails to compile, as it should.
+ */
+#define TESTING_EQ_FROM_I_(expect_)                                            \
+	_Generic(                                                              \
+		TESTING_PROMOTE_(expect_),                                     \
+		unsigned int: testing_eq_report_iu_,                           \
+		unsigned long: testing_eq_report_iu_,                          \
+		unsigned long long: testing_eq_report_iu_,                     \
+		float: testing_eq_report_if_,                                  \
+		double: testing_eq_report_if_,                                 \
+		long double: testing_eq_report_if_,                            \
+		default: testing_eq_report_i_)
+#define TESTING_EQ_FROM_U_(expect_)                                            \
+	_Generic(                                                              \
+		TESTING_PROMOTE_(expect_),                                     \
+		signed int: testing_eq_report_ui_,                             \
+		signed long: testing_eq_report_ui_,                            \
+		signed long long: testing_eq_report_ui_,                       \
+		float: testing_eq_report_uf_,                                  \
+		double: testing_eq_report_uf_,                                 \
+		long double: testing_eq_report_uf_,                            \
+		default: testing_eq_report_u_)
+#define TESTING_EQ_FROM_F_(expect_)                                            \
+	_Generic(                                                              \
+		TESTING_PROMOTE_(expect_),                                     \
+		signed int: testing_eq_report_fi_,                             \
+		signed long: testing_eq_report_fi_,                            \
+		signed long long: testing_eq_report_fi_,                       \
+		unsigned int: testing_eq_report_fu_,                           \
+		unsigned long: testing_eq_report_fu_,                          \
+		unsigned long long: testing_eq_report_fu_,                     \
+		default: testing_eq_report_f_)
+
 #define T_EXPECT_EQ(value_, expect_)                                           \
 	do {                                                                   \
 		if (!_Generic(                                                 \
-			    (value_),                                          \
-			    _Bool: testing_eq_report_u_,                       \
-			    char: testing_eq_report_i_,                        \
-			    signed char: testing_eq_report_i_,                 \
-			    signed short: testing_eq_report_i_,                \
-			    signed int: testing_eq_report_i_,                  \
-			    signed long: testing_eq_report_i_,                 \
-			    signed long long: testing_eq_report_i_,            \
-			    unsigned char: testing_eq_report_u_,               \
-			    unsigned short: testing_eq_report_u_,              \
-			    unsigned int: testing_eq_report_u_,                \
-			    unsigned long: testing_eq_report_u_,               \
-			    unsigned long long: testing_eq_report_u_,          \
-			    float: testing_eq_report_f_,                       \
-			    double: testing_eq_report_f_,                      \
-			    long double: testing_eq_report_f_,                 \
+			    TESTING_PROMOTE_(value_),                          \
+			    signed int: TESTING_EQ_FROM_I_(expect_),           \
+			    signed long: TESTING_EQ_FROM_I_(expect_),          \
+			    signed long long: TESTING_EQ_FROM_I_(expect_),     \
+			    unsigned int: TESTING_EQ_FROM_U_(expect_),         \
+			    unsigned long: TESTING_EQ_FROM_U_(expect_),        \
+			    unsigned long long: TESTING_EQ_FROM_U_(expect_),   \
+			    float: TESTING_EQ_FROM_F_(expect_),                \
+			    double: TESTING_EQ_FROM_F_(expect_),               \
+			    long double: TESTING_EQ_FROM_F_(expect_),          \
 			    default: testing_eq_report_p_)(                    \
 			    (_t_)->out, __FILE__, __LINE__, (value_),          \
-			    (expect_))) {                                      \
+			    TESTING_EQ_KIND_(value_), (expect_),               \
+			    TESTING_EQ_KIND_(expect_))) {                      \
 			T_FAILNOW();                                           \
 		}                                                              \
 	} while (0)
 
-/*
- * Unlike T_EXPECT_EQ, these two need no _Generic dispatch: their argument
- * types are already fixed (const char * / const void *), so a single
- * ordinary function per macro is enough to compare and conditionally report
- * in one call, fixing the same class of failure-branch double-evaluation.
- */
+/* Compare strings and report a mismatch to `out`; return true on equality. */
 static inline bool testing_streq_report_(
 	FILE *out, const char *file, int line, const char *value,
 	const char *expect)
@@ -889,14 +1263,22 @@ static inline bool testing_memeq_report_(
 	FILE *out, const char *file, int line, const void *value,
 	const void *expect, size_t size)
 {
-	if (memcmp(value, expect, size) == 0) {
-		return true;
+	/* name the first difference: the byte count alone says nothing about
+	 * how much of the buffer is wrong */
+	const unsigned char *const v = value;
+	const unsigned char *const e = expect;
+	for (size_t i = 0; i < size; i++) {
+		if (v[i] == e[i]) {
+			continue;
+		}
+		(void)fprintf(
+			out,
+			"    %s:%d memory mismatch at offset %zu of %zu: expect 0x%02x, got 0x%02x\n",
+			file, line, i, size, (unsigned)e[i], (unsigned)v[i]);
+		(void)fflush(out);
+		return false;
 	}
-	(void)fprintf(
-		out, "    %s:%d memory mismatch: %zu bytes differ\n", file,
-		line, size);
-	(void)fflush(out);
-	return false;
+	return true;
 }
 
 #define T_EXPECT_STREQ(value_, expect_)                                        \

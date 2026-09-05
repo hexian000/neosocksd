@@ -121,13 +121,12 @@ escape(char *buf, size_t maxlen, const char *str, const size_t len,
 }
 
 #define S_UNRESERVED "-_.~"
-#define S_SUB_DELIMS "!$&'()*+,;="
-#define S_PCHAR S_UNRESERVED S_SUB_DELIMS ":@"
-/* Query sub-delimiters minus '+', '&', '=', which carry form-encoding meaning
- * (space<->'+' and the key/value/pair separators). A literal one of these in a
- * query component must be percent-encoded so it is not decoded back as a space
- * or misread as a parameter separator. */
 #define S_QUERY_SUBDELIMS "!$'()*,;"
+#define S_SUB_DELIMS S_QUERY_SUBDELIMS "&+="
+#define S_GEN_DELIMS ":/?#[]@"
+#define S_PCHAR S_UNRESERVED S_SUB_DELIMS ":@"
+#define S_PATH_CHARS "$&+,/:;=@"
+#define S_PATH_SEGMENT_CHARS "$&+:=@"
 
 static int escape_hostport(
 	char *buf, const size_t maxlen, const char *host, const size_t len)
@@ -161,6 +160,20 @@ static int escape_fragment(
 	char *buf, const size_t maxlen, const char *fragment, const size_t len)
 {
 	return escape(buf, maxlen, fragment, len, S_PCHAR "/?", false);
+}
+
+static int
+escape_path(char *buf, const size_t maxlen, const char *path, const size_t len)
+{
+	return escape(buf, maxlen, path, len, S_UNRESERVED S_PATH_CHARS, false);
+}
+
+static int escape_path_segment(
+	char *buf, const size_t maxlen, const char *segment, const size_t len)
+{
+	return escape(
+		buf, maxlen, segment, len, S_UNRESERVED S_PATH_SEGMENT_CHARS,
+		false);
 }
 
 int url_escape_userinfo(
@@ -201,7 +214,7 @@ int url_escape_path(char *restrict buf, size_t maxlen, const char *restrict path
 	if (buf == NULL) {
 		maxlen = 0;
 	}
-	return escape(buf, maxlen, path, strlen(path), "-_.~$&+,/:;=@", false);
+	return escape_path(buf, maxlen, path, strlen(path));
 }
 
 int url_escape_query(
@@ -263,8 +276,7 @@ int url_escape_path_segment(
 	if (buf == NULL) {
 		maxlen = 0;
 	}
-	return escape(
-		buf, maxlen, segment, strlen(segment), "-_.~$&+:=@", false);
+	return escape_path_segment(buf, maxlen, segment, strlen(segment));
 }
 
 int url_escape_query_component(
@@ -311,9 +323,16 @@ int url_build(char *restrict buf, size_t maxlen, const struct url *restrict url)
 			written = add_len(written, (size_t)n);
 		}
 		if (url->path != NULL) {
-			if (url->path[0] != '/') {
+			/* RFC 3986 3.3: with no authority, a path must not
+			 * begin with "//", or it would reparse as one. A path
+			 * whose first segment is empty therefore gets an empty
+			 * authority, which url_parse() reads back as no host. */
+			if (url->host == NULL && url->path[0] == '/') {
+				APPEND_CHAR('/');
 				APPEND_CHAR('/');
 			}
+			/* the separator url_parse() strips from the path */
+			APPEND_CHAR('/');
 			APPEND_STR(url->path);
 		}
 	}
@@ -338,22 +357,54 @@ int url_build(char *restrict buf, size_t maxlen, const struct url *restrict url)
 	return result_len(buf, maxlen, written);
 }
 
-/* RFC 3986 admits only these bytes unencoded in a URI: the unreserved set
- * (ALPHA / DIGIT / "-" / "." / "_" / "~"), the reserved gen-delims and
- * sub-delims, and "%" introducing a percent-encoding. Every other byte -- a
- * raw space, one of <>"{}|\^` and backtick, a control character, or a high
- * byte 0x80-0xFF -- is forbidden and makes the whole input an invalid URI, so
- * the "escaped" contract on the parsed path/host/query holds. Cast through
- * unsigned char so a high byte on a signed-char platform is not misread as an
- * allowed one. */
+/* RFC 3986 admits only these bytes unencoded in a URI: the unreserved set,
+ * reserved gen-delims and sub-delims, and "%" introducing a percent-encoding.
+ * Every other byte is forbidden and makes the whole input an invalid URI. The
+ * parsed path and query retain their escaped form; url_parse() decodes the host
+ * and fragment in place. Cast through unsigned char so a high byte on a
+ * signed-char platform is not misread as an allowed one. */
 static bool has_forbidden(const char *s)
 {
-	static const char allowed[] = "-._~:/?#[]@!$&'()*+,;=%";
+	static const char allowed[] =
+		S_UNRESERVED S_GEN_DELIMS S_SUB_DELIMS "%";
 	for (; *s != '\0'; ++s) {
 		const unsigned char c = (unsigned char)*s;
 		if (!isalnum(c) && strchr(allowed, c) == NULL) {
 			return true;
 		}
+	}
+	return false;
+}
+
+/* An authority carries ':', '[' and ']' as structure -- the port separator and
+ * the IP-literal brackets -- and url_parse() decodes it in place, after which a
+ * pct-encoded delimiter could no longer be told from a structural one. Report
+ * whether any pct-encoded byte in str is an RFC 3986 gen-delim. A malformed
+ * escape is left for unescape() to reject. */
+static bool has_encoded_delim(const char *s)
+{
+	for (; *s != '\0'; ++s) {
+		if (s[0] != '%') {
+			continue;
+		}
+		if (s[1] == '%') {
+			/* "%%" decodes to a literal '%', not a gen-delim */
+			++s;
+			continue;
+		}
+		const int hi = unhex(s[1]);
+		if (hi < 0) {
+			return false;
+		}
+		const int lo = unhex(s[2]);
+		if (lo < 0) {
+			return false;
+		}
+		const unsigned char ch = (unsigned char)((hi << 4u) | lo);
+		if (ch != '\0' && strchr(S_GEN_DELIMS, ch) != NULL) {
+			return true;
+		}
+		s += 2;
 	}
 	return false;
 }
@@ -491,6 +542,9 @@ bool url_parse(char *raw, struct url *restrict url)
 			raw = at + 1;
 		}
 		char *host = raw;
+		if (has_encoded_delim(host)) {
+			return false;
+		}
 		if (!unescape(host, false)) {
 			/* unescape() now also rejects any decoded control char */
 			return false;
@@ -573,7 +627,7 @@ bool url_unescape_userinfo(
 	/* RFC 3986 3.2.1: userinfo is unreserved / pct-encoded / sub-delims /
 	 * ':'. A raw '@' is not admitted -- it is the authority delimiter and
 	 * must be pct-encoded (%40) when it is data. */
-	const char valid_chars[] = "-._:~!$&'()*+,;=%";
+	const char valid_chars[] = S_UNRESERVED ":" S_SUB_DELIMS "%";
 	char *colon = NULL;
 	for (char *p = raw; *p != '\0'; ++p) {
 		const unsigned char c = (unsigned char)*p;

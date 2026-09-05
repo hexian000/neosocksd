@@ -3,6 +3,7 @@
 
 #include "time.h"
 
+#include "meta/strlen.h"
 #include "utils/ctype_ascii.h"
 
 #include <assert.h>
@@ -24,8 +25,6 @@
 #else
 #define LOCALTIME(timer) localtime((timer))
 #endif /* HAVE_LOCALTIME_R */
-
-#define STRLEN(s) (sizeof(s "") - sizeof(""))
 
 #define LAYOUT_RFC3339 "2006-01-02T15:04:05-07:00"
 #define LAYOUT_RFC3339_UTC "2006-01-02T15:04:05Z"
