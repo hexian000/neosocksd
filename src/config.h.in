@@ -18,12 +18,12 @@ const char *neosocksd_version(void);
 #cmakedefine01 WITH_TCP_FASTOPEN_CONNECT
 #cmakedefine01 WITH_TCP_KEEPALIVE_PARAMS
 #cmakedefine01 WITH_CLOSE_RANGE
+#cmakedefine01 WITH_PATHS_H
 #cmakedefine01 WITH_CARES
 #cmakedefine01 WITH_LUA
 #cmakedefine01 WITH_RULESET
 #cmakedefine01 WITH_ALLOC_CACHE
 #cmakedefine01 WITH_THREADS
-#cmakedefine01 WITH_SYSTEMD
 #cmakedefine01 WITH_CRASH_HANDLER
 
 #endif /* CONFIG_H */

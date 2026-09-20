@@ -35,6 +35,7 @@ check_symbol_exists(TCP_KEEPIDLE "netinet/tcp.h" HAVE_TCP_KEEPIDLE)
 check_symbol_exists(TCP_KEEPINTVL "netinet/tcp.h" HAVE_TCP_KEEPINTVL)
 check_symbol_exists(TCP_KEEPCNT "netinet/tcp.h" HAVE_TCP_KEEPCNT)
 check_symbol_exists(close_range "unistd.h" HAVE_CLOSE_RANGE)
+check_symbol_exists(_PATH_BSHELL "paths.h" HAVE_PATH_BSHELL)
 
 if(NOT FORCE_POSIX)
     if(HAVE_PIPE2 AND HAVE_SPLICE)
@@ -61,6 +62,13 @@ if(NOT FORCE_POSIX)
     if(HAVE_CLOSE_RANGE)
         set(WITH_CLOSE_RANGE TRUE)
     endif()
+endif()
+
+# <paths.h> is neither ISO C nor POSIX.1, so this one is not gated on
+# FORCE_POSIX: where the header exists it names the system shell, and where it
+# does not the code falls back to "/bin/sh".
+if(HAVE_PATH_BSHELL)
+    set(WITH_PATHS_H TRUE)
 endif()
 
 target_compile_options(neosocksd PRIVATE "-include${CMAKE_CURRENT_BINARY_DIR}/config.h")
@@ -128,6 +136,13 @@ find_library(LUA_LIBRARY
     liblua54.a liblua5.4.a liblua-5.4.a
     liblua53.a liblua5.3.a liblua-5.3.a
     liblua.a
+    # Search each directory for every name before moving to the next, so the
+    # prefix order decides which installation is used, as it does for the
+    # header above. The default is name-major -- every directory is searched
+    # for liblua5.4.a before liblua.a is tried anywhere -- which pairs a
+    # distribution's archive with a /usr/local header wherever both are
+    # installed.
+    NAMES_PER_DIR
     PATH_SUFFIXES
     lua55 lua5.5 lua-5.5
     lua54 lua5.4 lua-5.4
@@ -141,6 +156,8 @@ if((NOT EXISTS ${LUA_LIBRARY}) AND (NOT BUILD_STATIC))
         lua54 lua5.4 lua-5.4
         lua53 lua5.3 lua-5.3
         lua
+        # as above: prefix order, not name order, chooses the installation
+        NAMES_PER_DIR
         PATH_SUFFIXES
         lua55 lua5.5 lua-5.5
         lua54 lua5.4 lua-5.4
@@ -186,6 +203,8 @@ endif()
 #
 # Arguments:
 #   SRCS            source file list
+#   MOCK_SRCS       modules compiled with test-only mock substitutions
+#   MOCK_DEFINITIONS preprocessor substitutions for MOCK_SRCS
 #   CONFIG_H        path to generated config.h
 #                   (default: ${CMAKE_CURRENT_BINARY_DIR}/config.h)
 #   NO_LIBEV        flag: do not link libev
@@ -193,75 +212,70 @@ endif()
 #   WITH_RULESET    flag: link Lua when WITH_RULESET is set
 #   WITH_THREADS    flag: link Threads::Threads when WITH_THREADS is set
 #   WITH_CARES      flag: link c-ares when WITH_CARES is set
-#   EXTRA_INCLUDES  list of additional private include directories
 # =============================================================================
 function(add_unit_test TEST_NAME)
     cmake_parse_arguments(
         UT
         "NO_LIBEV;WITH_LUA;WITH_RULESET;WITH_THREADS;WITH_CARES"
         "CONFIG_H"
-        "SRCS;EXTRA_INCLUDES"
+        "SRCS;MOCK_SRCS;MOCK_DEFINITIONS"
         ${ARGN}
     )
     if(NOT UT_CONFIG_H)
         set(UT_CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/config.h")
     endif()
     add_executable(${TEST_NAME} ${UT_SRCS})
-    target_include_directories(${TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/src)
-    if(UT_EXTRA_INCLUDES)
-        target_include_directories(${TEST_NAME} PRIVATE ${UT_EXTRA_INCLUDES})
+    set(UT_TARGETS ${TEST_NAME})
+    if(UT_MOCK_SRCS)
+        # Compile the module under test separately so its ordinary calls can
+        # be redirected to test functions without linker interposition. This
+        # keeps the seam visible to the compiler and valid under LTO.
+        add_library(${TEST_NAME}_mock_impl OBJECT ${UT_MOCK_SRCS})
+        target_compile_definitions(${TEST_NAME}_mock_impl PRIVATE
+            ${UT_MOCK_DEFINITIONS})
+        target_sources(${TEST_NAME} PRIVATE $<TARGET_OBJECTS:${TEST_NAME}_mock_impl>)
+        list(APPEND UT_TARGETS ${TEST_NAME}_mock_impl)
     endif()
-    target_compile_options(${TEST_NAME} PRIVATE "-include${UT_CONFIG_H}")
-    target_compile_options(${TEST_NAME} PRIVATE -pedantic -Wall -Wextra -Werror)
-    target_link_libraries(${TEST_NAME} PRIVATE csnippets miniz)
-    if(NOT UT_NO_LIBEV)
-        target_link_libraries(${TEST_NAME} PRIVATE ${LIBEV_LIBRARY})
-    endif()
-    if(UT_WITH_LUA AND WITH_LUA)
-        target_include_directories(${TEST_NAME} SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
-        target_link_libraries(${TEST_NAME} PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
-    endif()
-    if(UT_WITH_RULESET AND WITH_RULESET)
-        target_include_directories(${TEST_NAME} SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
-        target_link_libraries(${TEST_NAME} PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
-    endif()
-    if(UT_WITH_THREADS AND WITH_THREADS)
-        target_link_libraries(${TEST_NAME} PRIVATE Threads::Threads)
-    endif()
-    if(UT_WITH_CARES AND WITH_CARES)
-        target_include_directories(${TEST_NAME} SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
-        target_link_libraries(${TEST_NAME} PRIVATE ${LIBCARES_LIBRARY})
-    endif()
-    if(LIBM)
-        target_link_libraries(${TEST_NAME} PRIVATE m)
-    endif()
-    if(LIBATOMIC)
-        target_link_libraries(${TEST_NAME} PRIVATE ${LIBATOMIC})
-    endif()
-    if(FORCE_POSIX)
-        target_compile_definitions(${TEST_NAME} PRIVATE _POSIX_C_SOURCE=200809L)
-    else()
-        target_compile_definitions(${TEST_NAME} PRIVATE _GNU_SOURCE)
-    endif()
+    foreach(UT_TARGET IN LISTS UT_TARGETS)
+        target_include_directories(${UT_TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/src)
+        target_compile_options(${UT_TARGET} PRIVATE "-include${UT_CONFIG_H}")
+        target_compile_options(${UT_TARGET} PRIVATE -pedantic -Wall -Wextra -Werror)
+        target_link_libraries(${UT_TARGET} PRIVATE csnippets miniz)
+        if(NOT UT_NO_LIBEV)
+            target_link_libraries(${UT_TARGET} PRIVATE ${LIBEV_LIBRARY})
+        endif()
+        if(UT_WITH_LUA AND WITH_LUA)
+            target_include_directories(${UT_TARGET} SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
+            target_link_libraries(${UT_TARGET} PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
+        endif()
+        if(UT_WITH_RULESET AND WITH_RULESET)
+            target_include_directories(${UT_TARGET} SYSTEM PRIVATE ${LUA_INCLUDE_DIR})
+            target_link_libraries(${UT_TARGET} PRIVATE ${LUA_LIBRARY} ${CMAKE_DL_LIBS})
+        endif()
+        if(UT_WITH_THREADS AND WITH_THREADS)
+            target_link_libraries(${UT_TARGET} PRIVATE Threads::Threads)
+        endif()
+        if(UT_WITH_CARES AND WITH_CARES)
+            target_include_directories(${UT_TARGET} SYSTEM PRIVATE ${LIBCARES_INCLUDE_DIR})
+            target_link_libraries(${UT_TARGET} PRIVATE ${LIBCARES_LIBRARY})
+        endif()
+        if(LIBM)
+            target_link_libraries(${UT_TARGET} PRIVATE m)
+        endif()
+        if(LIBATOMIC)
+            target_link_libraries(${UT_TARGET} PRIVATE ${LIBATOMIC})
+        endif()
+        if(FORCE_POSIX)
+            target_compile_definitions(${UT_TARGET} PRIVATE _POSIX_C_SOURCE=200809L)
+        else()
+            target_compile_definitions(${UT_TARGET} PRIVATE _GNU_SOURCE)
+        endif()
+    endforeach()
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endfunction()
 
 if(ENABLE_RULESET)
     add_subdirectory(ruleset)
-endif()
-
-# find systemd
-if(ENABLE_SYSTEMD)
-    find_path(SYSTEMD_INCLUDE_DIR NAMES systemd/sd-daemon.h)
-    find_library(SYSTEMD_LIBRARY NAMES systemd)
-    if((EXISTS ${SYSTEMD_INCLUDE_DIR}) AND (EXISTS ${SYSTEMD_LIBRARY}))
-        message(STATUS "systemd: ${SYSTEMD_LIBRARY}")
-        set(WITH_SYSTEMD TRUE)
-        target_include_directories(neosocksd SYSTEM PRIVATE ${SYSTEMD_INCLUDE_DIR})
-        target_link_libraries(neosocksd PRIVATE ${SYSTEMD_LIBRARY})
-    else()
-        message(WARNING "systemd not found")
-    endif()
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")

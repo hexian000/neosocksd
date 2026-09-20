@@ -77,7 +77,9 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -s")
     set(CMAKE_EXE_LINKER_FLAGS_MINSIZEREL "${CMAKE_EXE_LINKER_FLAGS_MINSIZEREL} -Wl,--gc-sections -s")
     if(ENABLE_SANITIZERS)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer -fsanitize=address,leak,undefined -fstack-protector-all")
+        # UBSan checks recover by default: a hit is only printed and the exit
+        # status is left alone, so no test run would fail on it.
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer -fsanitize=address,leak,undefined -fno-sanitize-recover=undefined -fstack-protector-all")
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fno-omit-frame-pointer -fsanitize=address,leak,undefined -static-libasan -static-liblsan -static-libubsan")
     endif()
     if(CMAKE_INTERPROCEDURAL_OPTIMIZATION)
@@ -106,7 +108,9 @@ elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -s")
     set(CMAKE_EXE_LINKER_FLAGS_MINSIZEREL "${CMAKE_EXE_LINKER_FLAGS_MINSIZEREL} -Wl,--gc-sections -s")
     if(ENABLE_SANITIZERS)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer -fsanitize=address,leak,undefined -fstack-protector-all")
+        # UBSan checks recover by default: a hit is only printed and the exit
+        # status is left alone, so no test run would fail on it.
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-omit-frame-pointer -fsanitize=address,leak,undefined -fno-sanitize-recover=undefined -fstack-protector-all")
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fno-omit-frame-pointer -fsanitize=address,leak,undefined -static-libsan")
     endif()
     if(CMAKE_INTERPROCEDURAL_OPTIMIZATION)
