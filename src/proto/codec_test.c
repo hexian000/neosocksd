@@ -81,6 +81,28 @@ static bool stream_read_exact(
 	return true;
 }
 
+/* One more read after the payload must be a clean EOF, returning 0 with
+ * n == 0: a reader that fails at EOF, or a stream missing its final block,
+ * can still deliver every payload byte first. */
+static bool stream_at_eof(struct io_stream *restrict s)
+{
+	unsigned char b;
+	size_t n = sizeof(b);
+	return io_stream_read(s, &b, &n) == 0 && n == 0;
+}
+
+/* Fill a buffer with xorshift32 output, which deflate cannot compress. */
+static void fill_random(uint_least8_t *restrict buf, const size_t len)
+{
+	uint_least32_t x = UINT32_C(2463534242);
+	for (size_t i = 0; i < len; ++i) {
+		x ^= (x << 13) & UINT32_C(0xffffffff);
+		x ^= x >> 17;
+		x ^= (x << 5) & UINT32_C(0xffffffff);
+		buf[i] = (uint_least8_t)(x & 0xffU);
+	}
+}
+
 /* A read-only stream over a fixed memory buffer that exposes only .read (no
  * direct_read). Feeding it to codec_zlib_reader/codec_gzip_reader forces their
  * io_bufreader-wrap fallback for a base stream lacking direct_read — the path
@@ -187,19 +209,26 @@ drip_memreader(const void *data, const size_t len, const size_t chunk)
  * constructor's one-shot 10-byte header write succeeds), then accepts at most
  * `chunk` bytes per call, appending everything to *pvbuf. Exercises the codec
  * writers' resumable partial-write paths (body/finish/trailer) that
- * io_heapwriter -- which always accepts the whole buffer -- never triggers. */
+ * io_heapwriter -- which always accepts the whole buffer -- never triggers.
+ * A nonzero `err` instead fails every nonempty write past the ungated prefix
+ * with that code. Tests may retune chunk/err through the returned stream. */
 struct choke_memwriter {
 	struct io_stream s;
 	struct vbuffer **pvbuf;
 	size_t ungated;
 	size_t chunk;
 	size_t written;
+	int err;
 };
 
 static int choke_write(void *p, const void *restrict buf, size_t *restrict len)
 {
 	struct choke_memwriter *restrict m = p;
 	size_t n = *len;
+	if (m->written >= m->ungated && m->err != 0 && n > 0) {
+		*len = 0;
+		return m->err;
+	}
 	if (m->written >= m->ungated && n > m->chunk) {
 		n = m->chunk; /* short even when more output is offered */
 	}
@@ -239,6 +268,7 @@ static struct io_stream *choke_memwriter(
 	m->ungated = ungated;
 	m->chunk = chunk;
 	m->written = 0;
+	m->err = 0;
 	return &m->s;
 }
 
@@ -577,6 +607,7 @@ T_DECLARE_CASE(codec_zlib_roundtrip)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
@@ -620,6 +651,7 @@ T_DECLARE_CASE(codec_reader_wraps_base_without_direct_read)
 		struct io_stream *r = readers[v](base);
 		T_CHECK(r != NULL);
 		T_EXPECT(stream_read_exact(r, out, N));
+		T_EXPECT(stream_at_eof(r));
 		T_EXPECT_EQ(io_stream_close(r), 0);
 		T_EXPECT_MEMEQ(out, src, N);
 		VBUF_FREE(compressed);
@@ -666,6 +698,7 @@ T_DECLARE_CASE(codec_reader_short_direct_read_is_not_eof)
 		struct io_stream *r = readers[v](base);
 		T_CHECK(r != NULL);
 		T_EXPECT(stream_read_exact(r, out, N));
+		T_EXPECT(stream_at_eof(r));
 		T_EXPECT_EQ(io_stream_close(r), 0);
 		T_EXPECT_MEMEQ(out, src, N);
 		VBUF_FREE(compressed);
@@ -723,6 +756,7 @@ T_DECLARE_CASE(codec_deflate_roundtrip)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
@@ -760,6 +794,7 @@ T_DECLARE_CASE(codec_gzip_roundtrip)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
@@ -824,6 +859,7 @@ T_DECLARE_CASE(codec_decompress_ring_wraparound)
 			T_EXPECT(stream_read_exact(r, out + off, n));
 			off += n;
 		}
+		T_EXPECT(stream_at_eof(r));
 		T_EXPECT_EQ(io_stream_close(r), 0);
 		T_EXPECT_MEMEQ(out, src, N);
 		VBUF_FREE(compressed);
@@ -877,6 +913,7 @@ T_DECLARE_CASE(codec_gzip_multiframe)
 		io_memreader(VBUF_DATA(combined), VBUF_LEN(combined)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, (size_t)N * 2));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
@@ -981,6 +1018,7 @@ T_DECLARE_CASE(codec_gzip_flush_multiframe)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N1 + N2));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
@@ -1020,6 +1058,7 @@ T_DECLARE_CASE(codec_gzip_flush_empty)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	r = NULL;
 
@@ -1052,6 +1091,46 @@ static struct vbuffer *gzip_make_member(const void *src, const size_t srclen)
 		return NULL;
 	}
 	return compressed;
+}
+
+/* The CRC is independent of ISIZE: changing only the final four trailer
+ * bytes must be rejected after the unchanged body has been delivered. */
+T_DECLARE_CASE(codec_gzip_isize_error)
+{
+	enum { N = 200 };
+	unsigned char src[N];
+	for (size_t i = 0; i < (size_t)N; i++) {
+		src[i] = (unsigned char)((i * 7U + 3U) & 0xffU);
+	}
+	/* Exercise every ISIZE byte, then the unchanged member as a control. */
+	for (size_t byte = 0; byte <= 4; byte++) {
+		struct vbuffer *member = gzip_make_member(src, N);
+		T_CHECK(member != NULL && VBUF_LEN(member) > 8);
+		const bool corrupt = byte < 4;
+		if (corrupt) {
+			((unsigned char *)VBUF_DATA(
+				member))[VBUF_LEN(member) - 4 + byte] ^= 0x01;
+		}
+		struct io_stream *r = codec_gzip_reader(
+			io_memreader(VBUF_DATA(member), VBUF_LEN(member)));
+		T_CHECK(r != NULL);
+		unsigned char out[N];
+		T_EXPECT(stream_read_exact(r, out, sizeof(out)));
+		T_EXPECT_MEMEQ(out, src, sizeof(src));
+		unsigned char probe;
+		size_t n = sizeof(probe);
+		const int rret = io_stream_read(r, &probe, &n);
+		const int cret = io_stream_close(r);
+		VBUF_FREE(member);
+		T_EXPECT_EQ(n, 0);
+		if (corrupt) {
+			T_EXPECT(rret != 0);
+			T_EXPECT(cret != 0);
+		} else {
+			T_EXPECT_EQ(rret, 0);
+			T_EXPECT_EQ(cret, 0);
+		}
+	}
 }
 
 /*
@@ -1133,6 +1212,7 @@ T_DECLARE_CASE(codec_gzip_optional_headers)
 		codec_gzip_reader(io_memreader(VBUF_DATA(g), VBUF_LEN(g)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(g);
@@ -1177,6 +1257,7 @@ T_DECLARE_CASE(codec_gzip_empty_fname_after_fextra)
 		codec_gzip_reader(io_memreader(VBUF_DATA(g), VBUF_LEN(g)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(g);
@@ -1232,6 +1313,16 @@ T_DECLARE_CASE(codec_zlib_flush_then_continue)
 	T_CHECK(w != NULL);
 	T_EXPECT(stream_write_all(w, src, N / 2));
 	T_EXPECT_EQ(io_stream_flush(w), 0);
+	T_CHECK(compressed != NULL);
+	/* the sync point makes everything written so far decodable */
+	{
+		struct io_stream *r = codec_zlib_reader(io_memreader(
+			VBUF_DATA(compressed), VBUF_LEN(compressed)));
+		T_CHECK(r != NULL);
+		T_EXPECT(stream_read_exact(r, out, N / 2));
+		T_EXPECT_MEMEQ(out, src, N / 2);
+		(void)io_stream_close(r);
+	}
 	T_EXPECT(stream_write_all(w, src + (N / 2), N - (N / 2)));
 	T_EXPECT_EQ(io_stream_close(w), 0);
 
@@ -1239,6 +1330,7 @@ T_DECLARE_CASE(codec_zlib_flush_then_continue)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(compressed);
@@ -1576,12 +1668,6 @@ T_DECLARE_BENCH(bench_gzip_roundtrip)
 	}
 }
 
-/* A payload that decompresses past CODEC_MAX_INFLATE (overridden to a small
- * value for this test target) must abort with a decode error rather than
- * producing it all -- the decompression-bomb guard. A tiny compressed run of
- * zeros expands past the cap, and the streaming copy must fail before
- * delivering the whole payload. Exercised for both the inflate and gunzip
- * streams. */
 /* Each of the four unsupported BOMs (UTF-16/32 BE/LE) must be rejected with an
  * error rather than served as Lua source, and the rejection must be sticky: a
  * second read may neither hand out the rejected prefix nor refill and re-run
@@ -1636,6 +1722,7 @@ T_DECLARE_CASE(codec_gzip_optional_headers_across_refills)
 		codec_gzip_reader(drip_memreader(VBUF_DATA(g), VBUF_LEN(g), 3));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(g);
@@ -1731,6 +1818,7 @@ T_DECLARE_CASE(codec_gzip_finish_resumes_after_short_write)
 		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
 	T_CHECK(r != NULL);
 	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
 	T_EXPECT_EQ(io_stream_close(r), 0);
 	T_EXPECT_MEMEQ(out, src, N);
 	VBUF_FREE(compressed);
@@ -1749,6 +1837,12 @@ T_DECLARE_CASE(codec_inflate_surfaces_base_error)
 	(void)io_stream_close(r);
 }
 
+/* A payload that decompresses past CODEC_MAX_INFLATE (overridden to a small
+ * value for this test target) must abort with a decode error rather than
+ * producing it all -- the decompression-bomb guard. A tiny compressed run of
+ * zeros expands past the cap, and the streaming copy must fail before
+ * delivering the whole payload. Exercised for both the zlib and gzip
+ * streams. */
 T_DECLARE_CASE(codec_reader_aborts_decompression_bomb)
 {
 	struct io_stream *(*const writers[])(struct io_stream *) = {
@@ -1793,6 +1887,287 @@ T_DECLARE_CASE(codec_reader_aborts_decompression_bomb)
 	}
 }
 
+static const struct {
+	const char *name;
+	struct io_stream *(*writer)(struct io_stream *);
+	struct io_stream *(*reader)(struct io_stream *);
+} deflate_variants[] = {
+	{ "zlib", codec_zlib_writer, codec_zlib_reader },
+	{ "deflate", codec_deflate_writer, codec_inflate_reader },
+};
+
+/* Regression: incompressible input of ~31 KiB crosses miniz's block threshold
+ * while the finish processes the last lookahead, and the resulting block is
+ * larger than the writer's output buffer. The calls that drain it return
+ * short without having emitted the final block, so the finish (and a full
+ * flush) must not stop on a short return that followed a full one. */
+T_DECLARE_CASE(codec_deflate_writer_emits_final_block)
+{
+	enum { N = 31799, CHUNK = 4096 };
+	static const size_t sizes[] = { 31745, 31760, 31799 };
+	uint_least8_t *const src = malloc(N);
+	uint_least8_t *const out = malloc(N);
+	T_CHECK(src != NULL);
+	T_CHECK(out != NULL);
+	fill_random(src, N);
+
+	for (size_t v = 0; v < ARRAY_SIZE(deflate_variants); ++v) {
+		for (size_t k = 0; k < ARRAY_SIZE(sizes); ++k) {
+			const size_t len = sizes[k];
+			struct vbuffer *compressed = VBUF_NEW(64);
+			T_CHECK(compressed != NULL);
+			struct io_stream *w = deflate_variants[v].writer(
+				io_heapwriter(&compressed));
+			T_CHECK(w != NULL);
+			for (size_t off = 0; off < len; off += CHUNK) {
+				const size_t n =
+					len - off < CHUNK ? len - off : CHUNK;
+				T_EXPECT(stream_write_all(w, src + off, n));
+			}
+			T_EXPECT_EQ(io_stream_flush(w), 0);
+			T_CHECK(compressed != NULL);
+			/* the flushed prefix alone decodes to all input */
+			{
+				struct io_stream *r =
+					deflate_variants[v].reader(io_memreader(
+						VBUF_DATA(compressed),
+						VBUF_LEN(compressed)));
+				T_CHECK(r != NULL);
+				memset(out, 0, len);
+				T_EXPECT(stream_read_exact(r, out, len));
+				T_EXPECT_MEMEQ(out, src, len);
+				(void)io_stream_close(r);
+			}
+			T_EXPECT_EQ(io_stream_close(w), 0);
+
+			struct io_stream *r =
+				deflate_variants[v].reader(io_memreader(
+					VBUF_DATA(compressed),
+					VBUF_LEN(compressed)));
+			T_CHECK(r != NULL);
+			memset(out, 0, len);
+			T_EXPECT(stream_read_exact(r, out, len));
+			T_EXPECT(stream_at_eof(r));
+			T_EXPECT_EQ(io_stream_close(r), 0);
+			T_EXPECT_MEMEQ(out, src, len);
+			VBUF_FREE(compressed);
+		}
+	}
+	free(src);
+	free(out);
+}
+
+/* The same finish without a preceding flush: the whole stream must end in a
+ * final block, not stop inside the last drained block. */
+T_DECLARE_CASE(codec_deflate_writer_close_emits_final_block)
+{
+	enum { N = 31760 };
+	uint_least8_t *const src = malloc(N);
+	uint_least8_t *const out = malloc(N);
+	T_CHECK(src != NULL);
+	T_CHECK(out != NULL);
+	fill_random(src, N);
+
+	for (size_t v = 0; v < ARRAY_SIZE(deflate_variants); ++v) {
+		struct vbuffer *compressed = VBUF_NEW(64);
+		T_CHECK(compressed != NULL);
+		struct io_stream *w =
+			deflate_variants[v].writer(io_heapwriter(&compressed));
+		T_CHECK(w != NULL);
+		T_EXPECT(stream_write_all(w, src, N));
+		T_EXPECT_EQ(io_stream_close(w), 0);
+		T_CHECK(compressed != NULL);
+
+		struct io_stream *r = deflate_variants[v].reader(io_memreader(
+			VBUF_DATA(compressed), VBUF_LEN(compressed)));
+		T_CHECK(r != NULL);
+		T_EXPECT(stream_read_exact(r, out, N));
+		T_EXPECT(stream_at_eof(r));
+		T_EXPECT_EQ(io_stream_close(r), 0);
+		T_EXPECT_MEMEQ(out, src, N);
+		VBUF_FREE(compressed);
+	}
+	free(src);
+	free(out);
+}
+
+/* Regression: the inflater may report more pending output after the last
+ * input byte was consumed (a match running past the end of the 32 KiB ring).
+ * A raw DEFLATE stream has no trailer after it, so the reader must keep
+ * draining the decompressor at EOF instead of failing at the ring boundary. */
+T_DECLARE_CASE(codec_inflate_drains_output_after_input_ends)
+{
+	enum { N = 32785 };
+	static const uint_least8_t zeros[N] = { 0 };
+	uint_least8_t *const out = malloc(N);
+	T_CHECK(out != NULL);
+
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	struct io_stream *w = codec_deflate_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, zeros, N));
+	T_EXPECT_EQ(io_stream_close(w), 0);
+	T_CHECK(compressed != NULL);
+
+	struct io_stream *r = codec_inflate_reader(
+		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed)));
+	T_CHECK(r != NULL);
+	memset(out, 0xff, N);
+	T_EXPECT(stream_read_exact(r, out, N));
+	T_EXPECT(stream_at_eof(r));
+	T_EXPECT_EQ(io_stream_close(r), 0);
+	T_EXPECT_MEMEQ(out, zeros, N);
+	VBUF_FREE(compressed);
+	free(out);
+}
+
+/* The gzip body decoder drains pending output the same way: with the trailer
+ * cut off, every body byte is delivered before the short trailer fails. */
+T_DECLARE_CASE(codec_gzip_drains_output_before_short_trailer)
+{
+	enum { N = 32785 };
+	static const uint_least8_t zeros[N] = { 0 };
+	/* one spare byte so a read of everything also hits the error */
+	uint_least8_t *const out = malloc(N + 1);
+	T_CHECK(out != NULL);
+
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	struct io_stream *w = codec_gzip_writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_EXPECT(stream_write_all(w, zeros, N));
+	T_EXPECT_EQ(io_stream_close(w), 0);
+	T_CHECK(compressed != NULL && VBUF_LEN(compressed) > 8);
+
+	/* drop the 8-byte CRC-32/ISIZE trailer */
+	struct io_stream *r = codec_gzip_reader(
+		io_memreader(VBUF_DATA(compressed), VBUF_LEN(compressed) - 8));
+	T_CHECK(r != NULL);
+	memset(out, 0xff, N + 1);
+	size_t n = N + 1;
+	T_EXPECT(io_stream_read(r, out, &n) != 0);
+	T_EXPECT_EQ(n, (size_t)N);
+	T_EXPECT_MEMEQ(out, zeros, N);
+	(void)io_stream_close(r);
+	VBUF_FREE(compressed);
+	free(out);
+}
+
+/* The zlib/raw-deflate writers must resume after a base short-write: write,
+ * full flush and finish each return -1 while output is staged, and the retried
+ * call carries on from where the base stopped, so the stream still decodes
+ * whole. Input large enough to cross a block boundary exercises the drain of a
+ * block held inside the compressor across the -1 returns as well. */
+T_DECLARE_CASE(codec_deflate_writer_resumes_after_short_write)
+{
+	enum { N = 40000, CHUNK = 97 };
+	uint_least8_t *const src = malloc(N);
+	uint_least8_t *const out = malloc(N);
+	T_CHECK(src != NULL);
+	T_CHECK(out != NULL);
+	fill_random(src, N);
+
+	for (size_t v = 0; v < ARRAY_SIZE(deflate_variants); ++v) {
+		struct vbuffer *compressed = VBUF_NEW(64);
+		T_CHECK(compressed != NULL);
+		struct io_stream *base = choke_memwriter(&compressed, 0, CHUNK);
+		T_CHECK(base != NULL);
+		struct io_stream *w = deflate_variants[v].writer(base);
+		T_CHECK(w != NULL);
+
+		size_t total = 0;
+		size_t shorts = 0;
+		int guard = 0;
+		while (total < N && guard++ < 1000000) {
+			size_t n = N - total;
+			const int err = io_stream_write(w, src + total, &n);
+			total += n;
+			T_CHECK(err == 0 || err == -1);
+			shorts += (err == -1);
+		}
+		T_EXPECT_EQ(total, (size_t)N);
+		T_EXPECT(shorts > 0);
+
+		int ret;
+		shorts = 0;
+		guard = 0;
+		do {
+			ret = io_stream_flush(w);
+			T_CHECK(ret == 0 || ret == -1);
+			shorts += (ret == -1);
+		} while (ret == -1 && guard++ < 1000000);
+		T_EXPECT_EQ(ret, 0);
+		T_EXPECT(shorts > 0);
+		T_CHECK(compressed != NULL);
+		{
+			struct io_stream *r =
+				deflate_variants[v].reader(io_memreader(
+					VBUF_DATA(compressed),
+					VBUF_LEN(compressed)));
+			T_CHECK(r != NULL);
+			memset(out, 0, N);
+			T_EXPECT(stream_read_exact(r, out, N));
+			T_EXPECT_MEMEQ(out, src, N);
+			(void)io_stream_close(r);
+		}
+
+		/* close cannot be retried: let the finish through whole */
+		((struct choke_memwriter *)base)->chunk = SIZE_MAX;
+		T_EXPECT_EQ(io_stream_close(w), 0);
+
+		struct io_stream *r = deflate_variants[v].reader(io_memreader(
+			VBUF_DATA(compressed), VBUF_LEN(compressed)));
+		T_CHECK(r != NULL);
+		memset(out, 0, N);
+		T_EXPECT(stream_read_exact(r, out, N));
+		T_EXPECT(stream_at_eof(r));
+		T_EXPECT_EQ(io_stream_close(r), 0);
+		T_EXPECT_MEMEQ(out, src, N);
+		VBUF_FREE(compressed);
+	}
+	free(src);
+	free(out);
+}
+
+/* A base write error surfaces unchanged from the zlib/raw-deflate writers'
+ * write, flush and close. */
+T_DECLARE_CASE(codec_deflate_writer_surfaces_base_error)
+{
+	enum { N = 40000, SENTINEL = -7 };
+	uint_least8_t *const src = malloc(N);
+	T_CHECK(src != NULL);
+	fill_random(src, N);
+
+	for (size_t v = 0; v < ARRAY_SIZE(deflate_variants); ++v) {
+		struct vbuffer *compressed = VBUF_NEW(64);
+		T_CHECK(compressed != NULL);
+		struct io_stream *base = choke_memwriter(&compressed, 0, 0);
+		T_CHECK(base != NULL);
+		((struct choke_memwriter *)base)->err = SENTINEL;
+
+		/* write: a full block is emitted mid-write */
+		struct io_stream *w = deflate_variants[v].writer(base);
+		T_CHECK(w != NULL);
+		size_t n = N;
+		T_EXPECT_EQ(io_stream_write(w, src, &n), (int)SENTINEL);
+		T_EXPECT(n < (size_t)N);
+		T_EXPECT_EQ(io_stream_close(w), (int)SENTINEL);
+
+		/* flush, then close, of a small buffered payload */
+		base = choke_memwriter(&compressed, 0, 0);
+		T_CHECK(base != NULL);
+		((struct choke_memwriter *)base)->err = SENTINEL;
+		w = deflate_variants[v].writer(base);
+		T_CHECK(w != NULL);
+		T_EXPECT(stream_write_all(w, src, 100));
+		T_EXPECT_EQ(io_stream_flush(w), (int)SENTINEL);
+		T_EXPECT_EQ(io_stream_close(w), (int)SENTINEL);
+		VBUF_FREE(compressed);
+	}
+	free(src);
+}
+
 /* -------------------------------------------------------------------------
  * main - test runner.
  * ---------------------------------------------------------------------- */
@@ -1803,6 +2178,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_inflate_corrupt_and_truncated_fails),
 	T_CASE(codec_gzip_finish_resumes_after_short_write),
 	T_CASE(codec_inflate_surfaces_base_error),
+	T_CASE(codec_deflate_writer_emits_final_block),
+	T_CASE(codec_deflate_writer_close_emits_final_block),
+	T_CASE(codec_inflate_drains_output_after_input_ends),
+	T_CASE(codec_gzip_drains_output_before_short_trailer),
+	T_CASE(codec_deflate_writer_resumes_after_short_write),
+	T_CASE(codec_deflate_writer_surfaces_base_error),
 	T_CASE(codec_lua_reader_strips_shebang),
 	T_CASE(codec_lua_reader_strips_bom_and_shebang),
 	T_CASE(codec_lua_reader_strips_bom_only),
@@ -1823,6 +2204,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_decompress_ring_wraparound),
 	T_CASE(codec_gzip_multiframe),
 	T_CASE(codec_gzip_crc_error),
+	T_CASE(codec_gzip_isize_error),
 	T_CASE(codec_gzip_flush_multiframe),
 	T_CASE(codec_gzip_flush_empty),
 	T_CASE(codec_gzip_optional_headers),

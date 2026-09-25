@@ -23,12 +23,33 @@
 struct deflate_stream {
 	struct io_stream s;
 	struct io_stream *base;
+	/* The last tdefl_compress() call filled the output buffer, so the
+	 * compressor may still hold output and the next call may only drain it
+	 * without compressing or flushing anything. */
+	bool pending : 1;
 	tdefl_status status;
 	tdefl_compressor deflator;
 	size_t dstpos, dstlen;
 	unsigned char dstbuf[IO_BUFSIZE];
 };
 ASSERT_SUPER(struct io_stream, struct deflate_stream, s);
+
+/* Write out dstbuf[dstpos, dstlen); returns -1 on a partial write so the
+ * caller retries from dstpos. */
+static int deflate_drain(struct deflate_stream *restrict z)
+{
+	size_t n = z->dstlen - z->dstpos;
+	const int err = io_stream_write(z->base, z->dstbuf + z->dstpos, &n);
+	z->dstpos += n;
+	if (err != 0) {
+		return err;
+	}
+	if (z->dstpos < z->dstlen) {
+		return -1;
+	}
+	z->dstpos = z->dstlen = 0;
+	return 0;
+}
 
 static int
 deflate_write(void *p, const void *restrict buf, size_t *restrict len)
@@ -42,29 +63,23 @@ deflate_write(void *p, const void *restrict buf, size_t *restrict len)
 		if (z->dstlen < sizeof(z->dstbuf)) {
 			size_t srclen = remain;
 			unsigned char *dst = z->dstbuf + z->dstlen;
-			size_t dstlen = sizeof(z->dstbuf) - z->dstlen;
+			const size_t avail = sizeof(z->dstbuf) - z->dstlen;
+			size_t dstlen = avail;
 
 			z->status = tdefl_compress(
 				&z->deflator, src, &srclen, dst, &dstlen,
 				TDEFL_NO_FLUSH);
+			z->pending = (dstlen == avail);
 			src += srclen, remain -= srclen;
 			z->dstlen += dstlen;
 			nwritten += srclen;
 		}
 
-		unsigned char *avail = z->dstbuf + z->dstpos;
-		size_t n = z->dstlen - z->dstpos;
-		const int err = io_stream_write(z->base, avail, &n);
-		z->dstpos += n;
+		const int err = deflate_drain(z);
 		if (err != 0) {
 			*len = nwritten;
 			return err;
 		}
-		if (z->dstpos < z->dstlen) {
-			*len = nwritten;
-			return -1;
-		}
-		z->dstpos = z->dstlen = 0;
 	}
 
 	*len = nwritten;
@@ -77,38 +92,34 @@ deflate_write(void *p, const void *restrict buf, size_t *restrict len)
 static int
 deflate_flush_(struct deflate_stream *restrict z, const tdefl_flush flush)
 {
+	bool done = false;
 	for (;;) {
-		unsigned char *buf = z->dstbuf + z->dstlen;
-		const size_t avail = sizeof(z->dstbuf) - z->dstlen;
-		size_t n = avail;
-		z->status = tdefl_compress(
-			&z->deflator, NULL, NULL, buf, &n, flush);
-		z->dstlen += n;
-
-		buf = z->dstbuf + z->dstpos;
-		size_t w = z->dstlen - z->dstpos;
-		const int err = io_stream_write(z->base, buf, &w);
-		z->dstpos += w;
+		const int err = deflate_drain(z);
 		if (err != 0) {
 			return err;
 		}
-		if (z->dstpos < z->dstlen) {
-			return -1;
-		}
-		z->dstpos = z->dstlen = 0;
-
 		if (z->status < TDEFL_STATUS_OKAY) {
 			return z->status;
 		}
-		/* TDEFL_FINISH reaches DONE; TDEFL_FULL_FLUSH never does (it
-		 * re-emits an empty sync marker each call), so also stop once a
-		 * call no longer fills the output buffer -- i.e. all pending
-		 * output plus the flush marker has been emitted. */
-		if (z->status == TDEFL_STATUS_DONE || n < avail) {
-			break;
+		/* calling tdefl_compress again after DONE is a BAD_PARAM */
+		if (done || z->status == TDEFL_STATUS_DONE) {
+			return 0;
 		}
+		/* A call made while the compressor still holds output only
+		 * drains it: it neither consumes the remaining lookahead nor
+		 * emits the flush block, so its short return proves nothing. */
+		const bool drain_only = z->pending;
+		size_t n = sizeof(z->dstbuf);
+		z->status = tdefl_compress(
+			&z->deflator, NULL, NULL, z->dstbuf, &n, flush);
+		z->dstlen = n;
+		z->pending = (n == sizeof(z->dstbuf));
+		/* TDEFL_FINISH ends at DONE. TDEFL_FULL_FLUSH never does (each
+		 * call re-emits an empty sync block); it is complete once a
+		 * compressing call leaves room in the buffer, as that call
+		 * consumed all lookahead and emitted the whole sync block. */
+		done = (flush != TDEFL_FINISH && !drain_only && !z->pending);
 	}
-	return 0;
 }
 
 /* full flush: emit a sync point so the decompressor can restart here */
@@ -154,6 +165,7 @@ static struct io_stream *deflate_writer(struct io_stream *base, const bool zlib)
 		.data = NULL,
 	};
 	z->base = base;
+	z->pending = false;
 	z->status = TDEFL_STATUS_OKAY;
 
 	const int flags =
@@ -232,7 +244,12 @@ inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 			z->dstpos = z->dstlen = 0;
 		}
 
-		if (z->srclen > 0 && z->dstlen < sizeof(z->dstbuf) &&
+		/* HAS_MORE_OUTPUT may be reported after the last input byte was
+		 * consumed (e.g. a match running past the end of the ring), so
+		 * keep calling the decompressor to drain it even without input */
+		if ((z->srclen > 0 ||
+		     z->status == TINFL_STATUS_HAS_MORE_OUTPUT) &&
+		    z->dstlen < sizeof(z->dstbuf) &&
 		    z->status > TINFL_STATUS_DONE) {
 			const unsigned char *src = z->srcbuf;
 			size_t srclen = z->srclen;
@@ -280,7 +297,8 @@ inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 			}
 			return 0;
 		}
-	} while (z->status > TINFL_STATUS_DONE && !z->srceof);
+	} while (z->status == TINFL_STATUS_HAS_MORE_OUTPUT ||
+		 (z->status > TINFL_STATUS_DONE && !z->srceof));
 
 	*len = 0;
 	/* Surface the base's error code rather than the inflate status when the
@@ -950,8 +968,9 @@ static bool gzip_decompress_body(
 		z->dstpos = z->dstlen = 0;
 	}
 
-	if (z->srclen > 0 && z->dstlen < sizeof(z->dstbuf) &&
-	    z->status > TINFL_STATUS_DONE) {
+	/* drain HAS_MORE_OUTPUT even without input (see inflate_direct_read) */
+	if ((z->srclen > 0 || z->status == TINFL_STATUS_HAS_MORE_OUTPUT) &&
+	    z->dstlen < sizeof(z->dstbuf) && z->status > TINFL_STATUS_DONE) {
 		const unsigned char *src = z->srcbuf;
 		size_t srclen = z->srclen;
 		unsigned char *dst = z->dstbuf + z->dstlen;
