@@ -6,6 +6,7 @@
 #ifndef UTIL_H
 #define UTIL_H
 
+#include "conf.h"
 #include "transfer.h"
 
 #include "os/socket.h"
@@ -38,11 +39,8 @@
 		}                                                              \
 	} while (0)
 
-/* Report a best-effort socket option failure at the call site. The csnippets
- * option setters now return 0 or an errno and no longer log themselves (see
- * contrib/csnippets os/socket), so a caller that discards the result must log
- * it here. Stay quiet when the option is simply unsupported on this platform
- * (ENOPROTOOPT), which is expected rather than an error. */
+/* Log a best-effort socket option failure at the call site. @p expr yields 0
+ * or an errno; ENOPROTOOPT means unsupported here, not an error. */
 #define LOG_SOCKOPT(what, expr)                                                \
 	do {                                                                   \
 		const int sockopt_err_ = (expr);                               \
@@ -51,6 +49,83 @@
 			       strerror(sockopt_err_));                        \
 		}                                                              \
 	} while (0)
+
+/**
+ * @brief Upper bound, excluding the null terminator, on @p n bytes rendered by
+ * log_escape(): the widest escape is four characters.
+ */
+#define LOG_ESCAPE_STRLEN(n) (4 * (n))
+
+/**
+ * @brief Render peer-chosen bytes as printable ASCII for a log line.
+ * @details A log line ends at the first newline in every sink, so a byte the
+ * peer chose that reaches one verbatim lets that peer end the entry there and
+ * write entries of its own (CWE-117). Escapes every byte outside printable
+ * ASCII -- `\n`, `\r` and `\t` in their short forms, anything else as `\xHH` --
+ * plus the backslash that introduces an escape and the quote that would close
+ * the value early. The mapping is injective, so the bytes read back
+ * unambiguously, and an ordinary host name or user name passes through
+ * unchanged. Unlike LOG_TXT_F()'s text extra, the result is part of the line
+ * itself, so it survives the sinks that render no struct slog_extra -- as a
+ * per-request context prefix must.
+ * @param[out] buf Out buffer, always null-terminated.
+ * @param maxlen Buffer size in bytes, at least 1.
+ * @param[in] s Input bytes, not null-terminated.
+ * @param len Number of input bytes.
+ * @return Number of characters written, excluding the null terminator. Output
+ * stops on a whole escape rather than splitting one, so a buffer of
+ * LOG_ESCAPE_STRLEN(len) + 1 bytes never truncates.
+ */
+static inline size_t log_escape(
+	char *restrict buf, const size_t maxlen, const char *restrict s,
+	const size_t len)
+{
+	static const char hexdigit[] = "0123456789abcdef";
+	ASSERT(maxlen > 0);
+	size_t n = 0;
+	for (size_t i = 0; i < len; i++) {
+		const unsigned char c = (unsigned char)s[i];
+		char esc[4] = { '\\', '\0', '\0', '\0' };
+		size_t esclen = 2;
+		switch (c) {
+		case '\n':
+			esc[1] = 'n';
+			break;
+		case '\r':
+			esc[1] = 'r';
+			break;
+		case '\t':
+			esc[1] = 't';
+			break;
+		case '\\':
+			esc[1] = '\\';
+			break;
+		case '\'':
+			esc[1] = '\'';
+			break;
+		default:
+			if ('\x20' <= c && c <= '\x7e') {
+				esc[0] = (char)c;
+				esclen = 1;
+				break;
+			}
+			esc[1] = 'x';
+			esc[2] = hexdigit[c >> 4];
+			esc[3] = hexdigit[c & 0x0f];
+			esclen = 4;
+			break;
+		}
+		if (n + esclen + 1 > maxlen) {
+			break;
+		}
+		for (size_t k = 0; k < esclen; k++) {
+			buf[n + k] = esc[k];
+		}
+		n += esclen;
+	}
+	buf[n] = '\0';
+	return n;
+}
 
 /* Process-level initializations. */
 void init(int argc, char *const restrict argv[]);
@@ -101,13 +176,10 @@ void socket_set_transparent(int fd, bool tproxy);
 void socket_set_keepalive(int fd, int idle, int intvl, int cnt);
 #endif
 
-/* Best-effort forward of already-buffered client bytes to a freshly dialed
- * upstream connection, whose send buffer should be empty. A short send here
- * (backpressure or error) is treated as failure rather than queued, since
- * silently dropping these bytes would reproduce the bug this exists to fix.
- * These bytes bypass the relay, so count them into @p byt (the uplink counter)
- * here: socket_send zeroes the length on failure, so only what reached the
- * wire is counted, including progress made before a later failure. */
+/* Forward already-buffered client bytes to a freshly dialed upstream, whose
+ * send buffer should be empty. Retry successful partial sends; fail on an
+ * error or zero progress rather than queueing the remainder. Count sent bytes
+ * into @p byt; these bytes bypass the relay. */
 static inline bool forward_readahead(
 	const int fd, const void *restrict data, size_t len,
 	xfer_counter *restrict byt)

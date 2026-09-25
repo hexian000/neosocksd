@@ -44,6 +44,10 @@ void init(int argc, char *const restrict argv[])
 	(void)argc;
 	(void)argv;
 	(void)setlocale(LC_ALL, "");
+	/* the numeric conventions belong to the protocols this daemon speaks --
+	 * Prometheus samples, the configuration dump, the numeric options -- so
+	 * LC_NUMERIC stays in the C locale whatever the environment asks for */
+	(void)setlocale(LC_NUMERIC, "C");
 	/* io_filewriter() heap-allocates a stream that slog only borrows; keep
 	 * it in a static so it stays reachable (and unbuffered) for the process
 	 * lifetime rather than dangling once the sink is later replaced. */
