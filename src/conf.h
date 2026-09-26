@@ -6,6 +6,10 @@
 
 #include <stdbool.h>
 
+/* The `-f' address that names no destination: forward mode with the ruleset
+ * choosing each connection's target. Only a configured address spells it. */
+#define CONF_FORWARD_ANY ":"
+
 struct config {
 	/* Heap block owning a subset of the string data referenced by const
 	 * char * fields below. Other fields may point into argv[] or literals.
@@ -13,6 +17,7 @@ struct config {
 	char *strings;
 
 	const char *listen;
+	/* forward-mode destination, or CONF_FORWARD_ANY */
 	const char *forward;
 	const char *proxy;
 	const char *restapi;
@@ -104,12 +109,24 @@ bool conf_parseargs(struct config *restrict conf, int argc, char *argv[]);
 #if WITH_LUA
 struct lua_State;
 
-/* Extract config fields from a Lua table at the top of L's stack. Nil fields
- * keep their current value. Returns false on type error. L may be the ruleset
- * VM (cfunc_loadconfig) or a standalone state used for a boot config
+/* Extract config fields from a Lua table at the top of L's stack, checking
+ * their domains; nil fields keep their current value. Returns false on a bad
+ * field, but may also raise, so call it from a protected frame. L may be the
+ * ruleset VM (cfunc_loadconfig) or a standalone state used for a boot config
  * (conf_loadboot); this function assumes nothing about which. */
 bool conf_loadfromtable(
 	struct lua_State *restrict L, struct config *restrict conf);
+
+/* conf_loadfromtable for a reload into the config the running server was
+ * started with. The staged config must also pass conf_check, leave unchanged
+ * every field the server applies only at startup (the listener addresses,
+ * `transparent', `reuseport', `tcp_fastopen', `workers', and whether `forward'
+ * is set), and not require authentication unless has_ruleset, which tells
+ * whether a ruleset is installed once the load commits. A table that fails
+ * any of these leaves conf unchanged. */
+bool conf_reloadfromtable(
+	struct lua_State *restrict L, struct config *restrict conf,
+	bool has_ruleset);
 
 /* Print the command-line configuration to stdout as a Lua table literal.
  * Returns false on output error. */

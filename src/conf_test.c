@@ -214,6 +214,29 @@ T_DECLARE_CASE(conf_accepts_unlimited_startup_full)
 	T_EXPECT(conf_check(&conf));
 }
 
+#if WITH_THREADS
+/*
+ * Regression: workers was bounded only by INT_MAX, which is meaningless for a
+ * thread count and lets `nworkers * sizeof(struct xfer_worker)' wrap a 32-bit
+ * size_t in transfer_create().
+ */
+T_DECLARE_CASE(conf_rejects_workers_out_of_range)
+{
+	struct config conf = make_valid_conf();
+
+	conf.workers = 0;
+	T_EXPECT(!conf_check(&conf));
+	conf.workers = 1;
+	T_EXPECT(conf_check(&conf));
+	conf.workers = 1024;
+	T_EXPECT(conf_check(&conf));
+	conf.workers = 1025;
+	T_EXPECT(!conf_check(&conf));
+	conf.workers = INT_MAX;
+	T_EXPECT(!conf_check(&conf));
+}
+#endif /* WITH_THREADS */
+
 T_DECLARE_CASE(parseargs_accepts_unlimited_max_startups)
 {
 	struct config conf = conf_default();
@@ -270,6 +293,31 @@ T_DECLARE_CASE(conf_accepts_valid_configuration)
 	conf.startup_limit_full = 128;
 	conf.tcp_sndbuf = 32768;
 	conf.tcp_rcvbuf = 32768;
+	T_EXPECT(conf_check(&conf));
+}
+
+T_DECLARE_CASE(conf_rejects_invalid_resolve_pf)
+{
+	struct config conf = make_valid_conf();
+
+	conf.resolve_pf = -1;
+	T_EXPECT(!conf_check(&conf));
+
+	conf.resolve_pf = PF_UNSPEC;
+	T_EXPECT(conf_check(&conf));
+	conf.resolve_pf = PF_INET;
+	T_EXPECT(conf_check(&conf));
+	conf.resolve_pf = PF_INET6;
+	T_EXPECT(conf_check(&conf));
+}
+
+T_DECLARE_CASE(conf_rejects_negative_max_sessions)
+{
+	struct config conf = make_valid_conf();
+
+	conf.max_sessions = -1;
+	T_EXPECT(!conf_check(&conf));
+	conf.max_sessions = 0;
 	T_EXPECT(conf_check(&conf));
 }
 
@@ -333,6 +381,201 @@ T_DECLARE_CASE(conf_print_round_trips_double_precision)
 	lua_close(L);
 }
 #endif /* !LUA_32BITS */
+
+/* Read `path` whole into `buf` as a NUL-terminated string. Returns false on an
+ * I/O error or when the file does not fit. */
+static bool read_wholefile(
+	char *restrict buf, const size_t bufsize, const char *restrict path)
+{
+	FILE *const f = fopen(path, "rb");
+	if (f == NULL) {
+		return false;
+	}
+	const size_t n = fread(buf, 1, bufsize - 1, f);
+	const bool ok = (ferror(f) == 0 && feof(f) != 0);
+	(void)fclose(f);
+	buf[n] = '\0';
+	return ok;
+}
+
+/*
+ * Regression: conf_print checked every write but never the final flush. A
+ * redirected `--dump-config' is fully buffered and the whole dump fits in one
+ * stdio buffer, so nothing had reached the file when conf_print reported
+ * success -- and every write error surfaced at the unchecked flush instead.
+ */
+T_DECLARE_CASE(conf_print_flushes_the_dump)
+{
+	char path[] = "/tmp/conf_test_XXXXXX";
+	const int fd = mkstemp(path);
+	T_CHECK(fd >= 0);
+	T_CHECK(close(fd) == 0);
+	const int saved = dup(STDOUT_FILENO);
+	T_CHECK(saved >= 0);
+
+	const struct config conf = make_valid_conf();
+	/* freopen re-associates stdout with a regular file, which POSIX makes
+	 * fully buffered; no testing macro may run before stdout is restored */
+	char dumped[4096] = "";
+	bool ok = false, samefd = false, read_ok = false;
+	if (freopen(path, "w", stdout) != NULL) {
+		samefd = (fileno(stdout) == STDOUT_FILENO);
+		ok = conf_print(&conf);
+		read_ok = read_wholefile(dumped, sizeof(dumped), path);
+		(void)fflush(stdout);
+	}
+	(void)dup2(saved, STDOUT_FILENO);
+	(void)close(saved);
+	(void)unlink(path);
+
+	T_CHECK(samefd);
+	T_CHECK(read_ok);
+	T_EXPECT(ok);
+	/* the whole dump is on the file, not still in the stdio buffer */
+	T_EXPECT(strncmp(dumped, "return {\n", 9) == 0);
+	T_EXPECT(strstr(dumped, "\n}\n") != NULL);
+}
+
+/*
+ * conf_fields[] is the single source of truth shared by conf_print and
+ * conf_loadfromtable, and a dump is meant to load back through `-c'. A wrong
+ * offsetof or conf_type in an entry passes every other case in this file, so
+ * round trip every field at once with a distinct value each.
+ */
+T_DECLARE_CASE(conf_print_round_trips_every_field)
+{
+	struct config conf = conf_default();
+	conf.listen = "0.0.0.0:1080";
+	conf.forward = "127.0.0.1:8080";
+	conf.proxy = "socks5://127.0.0.2:1081";
+	conf.restapi = "127.0.0.3:9080";
+	conf.http_listen = "127.0.0.4:8081";
+#if WITH_CARES
+	conf.nameserver = "127.0.0.53:53";
+#endif
+#if WITH_NETDEVICE
+	conf.netdev = "eth0";
+#endif
+	conf.loglevel = LOG_LEVEL_DEBUG;
+	conf.resolve_pf = PF_INET6;
+	conf.timeout = 123.5;
+#if WITH_RULESET
+	conf.memlimit = 64;
+	conf.auth_required = true;
+#endif
+#if WITH_SPLICE
+	conf.pipe = true;
+#endif
+#if WITH_REUSEPORT
+	conf.reuseport = true;
+#endif
+#if WITH_TCP_FASTOPEN
+	conf.tcp_fastopen = false;
+#endif
+#if WITH_TCP_FASTOPEN_CONNECT
+	conf.tcp_fastopen_connect = true;
+#endif
+	conf.tcp_nodelay = false;
+	conf.tcp_keepalive = false;
+#if WITH_TPROXY
+	conf.transparent = true;
+#endif
+#if WITH_RULESET
+	conf.traceback = true;
+#endif
+	conf.socks5_bind = true;
+	conf.socks5_udp = true;
+	conf.block_loopback = true;
+	conf.block_multicast = false;
+	conf.block_local = true;
+	conf.block_global = true;
+	conf.tcp_sndbuf = 32768;
+	conf.tcp_rcvbuf = 65536;
+#if WITH_TCP_KEEPALIVE_PARAMS
+	conf.tcp_keepidle = 111;
+	conf.tcp_keepintvl = 22;
+	conf.tcp_keepcnt = 33;
+#endif
+	conf.max_sessions = 4096;
+	conf.startup_limit_start = 12;
+	conf.startup_limit_rate = 34;
+	conf.startup_limit_full = 56;
+#if WITH_THREADS
+	conf.workers = 7;
+#endif
+
+	char *const out = capture_conf_print(&conf);
+	T_CHECK(out != NULL);
+	lua_State *restrict L = luaL_newstate();
+	T_CHECK(L != NULL);
+	T_CHECK(load_printed_conf(L, out));
+	free(out);
+
+	struct config loaded = conf_default();
+	T_EXPECT(conf_loadfromtable(L, &loaded));
+	lua_close(L);
+
+	T_EXPECT_STREQ(loaded.listen, conf.listen);
+	T_EXPECT_STREQ(loaded.forward, conf.forward);
+	T_EXPECT_STREQ(loaded.proxy, conf.proxy);
+	T_EXPECT_STREQ(loaded.restapi, conf.restapi);
+	T_EXPECT_STREQ(loaded.http_listen, conf.http_listen);
+#if WITH_CARES
+	T_EXPECT_STREQ(loaded.nameserver, conf.nameserver);
+#endif
+#if WITH_NETDEVICE
+	T_EXPECT_STREQ(loaded.netdev, conf.netdev);
+#endif
+	T_EXPECT_EQ(loaded.loglevel, conf.loglevel);
+	T_EXPECT_EQ(loaded.resolve_pf, conf.resolve_pf);
+	T_EXPECT(loaded.timeout == conf.timeout);
+#if WITH_RULESET
+	T_EXPECT_EQ(loaded.memlimit, conf.memlimit);
+	T_EXPECT_EQ(loaded.auth_required, conf.auth_required);
+#endif
+#if WITH_SPLICE
+	T_EXPECT_EQ(loaded.pipe, conf.pipe);
+#endif
+#if WITH_REUSEPORT
+	T_EXPECT_EQ(loaded.reuseport, conf.reuseport);
+#endif
+#if WITH_TCP_FASTOPEN
+	T_EXPECT_EQ(loaded.tcp_fastopen, conf.tcp_fastopen);
+#endif
+#if WITH_TCP_FASTOPEN_CONNECT
+	T_EXPECT_EQ(loaded.tcp_fastopen_connect, conf.tcp_fastopen_connect);
+#endif
+	T_EXPECT_EQ(loaded.tcp_nodelay, conf.tcp_nodelay);
+	T_EXPECT_EQ(loaded.tcp_keepalive, conf.tcp_keepalive);
+#if WITH_TPROXY
+	T_EXPECT_EQ(loaded.transparent, conf.transparent);
+#endif
+#if WITH_RULESET
+	T_EXPECT_EQ(loaded.traceback, conf.traceback);
+#endif
+	T_EXPECT_EQ(loaded.socks5_bind, conf.socks5_bind);
+	T_EXPECT_EQ(loaded.socks5_udp, conf.socks5_udp);
+	T_EXPECT_EQ(loaded.block_loopback, conf.block_loopback);
+	T_EXPECT_EQ(loaded.block_multicast, conf.block_multicast);
+	T_EXPECT_EQ(loaded.block_local, conf.block_local);
+	T_EXPECT_EQ(loaded.block_global, conf.block_global);
+	T_EXPECT_EQ(loaded.tcp_sndbuf, conf.tcp_sndbuf);
+	T_EXPECT_EQ(loaded.tcp_rcvbuf, conf.tcp_rcvbuf);
+#if WITH_TCP_KEEPALIVE_PARAMS
+	T_EXPECT_EQ(loaded.tcp_keepidle, conf.tcp_keepidle);
+	T_EXPECT_EQ(loaded.tcp_keepintvl, conf.tcp_keepintvl);
+	T_EXPECT_EQ(loaded.tcp_keepcnt, conf.tcp_keepcnt);
+#endif
+	T_EXPECT_EQ(loaded.max_sessions, conf.max_sessions);
+	T_EXPECT_EQ(loaded.startup_limit_start, conf.startup_limit_start);
+	T_EXPECT_EQ(loaded.startup_limit_rate, conf.startup_limit_rate);
+	T_EXPECT_EQ(loaded.startup_limit_full, conf.startup_limit_full);
+#if WITH_THREADS
+	T_EXPECT_EQ(loaded.workers, conf.workers);
+#endif
+
+	free(loaded.strings);
+}
 
 /*
  * Regression: a config table's stateful __index can pass the read-only
@@ -558,6 +801,35 @@ T_DECLARE_CASE(conf_advise_silent_without_ruleset_or_proxy)
 	free(noproxy);
 }
 
+/*
+ * CONF_FORWARD_ANY names no destination, so a ruleset has to choose one per
+ * connection; on its own it dials the wildcard and every forwarded connection
+ * fails. That is a valid-but-useless combination conf_check() cannot see, since
+ * a `-c' boot config installs a ruleset without setting the `-r' field.
+ */
+T_DECLARE_CASE(conf_advise_notes_forward_placeholder_without_ruleset)
+{
+	struct config conf = make_valid_conf();
+	conf.forward = CONF_FORWARD_ANY;
+
+	char *const noruleset = capture_conf_advise(&conf, false);
+	T_CHECK(noruleset != NULL);
+	T_EXPECT(strstr(noruleset, "names no destination") != NULL);
+	free(noruleset);
+
+	char *const withruleset = capture_conf_advise(&conf, true);
+	T_CHECK(withruleset != NULL);
+	T_EXPECT(strstr(withruleset, "names no destination") == NULL);
+	free(withruleset);
+
+	/* a named destination needs no ruleset to reach */
+	conf.forward = "127.0.0.1:8080";
+	char *const fixed = capture_conf_advise(&conf, false);
+	T_CHECK(fixed != NULL);
+	T_EXPECT(strstr(fixed, "names no destination") == NULL);
+	free(fixed);
+}
+
 #if WITH_RULESET
 T_DECLARE_CASE(conf_rejects_ruleset_with_socks5_bind)
 {
@@ -703,6 +975,30 @@ T_DECLARE_CASE(parseargs_http_followed_by_option)
 	T_EXPECT(conf.listen == NULL);
 	T_EXPECT_STREQ(conf.http_listen, "127.0.0.1:1080");
 	T_EXPECT_EQ(conf.resolve_pf, PF_INET);
+}
+
+/* A bare --http takes over the -l address; with no -l it must fail the parse
+ * rather than be dropped, or a boot config's `listen' later satisfies
+ * conf_check() and the daemon serves SOCKS where HTTP was asked for. */
+T_DECLARE_CASE(parseargs_http_only_requires_listen)
+{
+	{
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "--http" };
+		T_EXPECT(!conf_parseargs(&conf, 2, argv));
+	}
+#if WITH_LUA
+	{
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-c", "boot.lua", "--http" };
+		T_EXPECT(!conf_parseargs(&conf, 4, argv));
+	}
+	{
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "--http", "-c", "boot.lua" };
+		T_EXPECT(!conf_parseargs(&conf, 4, argv));
+	}
+#endif /* WITH_LUA */
 }
 
 /* --fastopen-connect exists only in a WITH_TCP_FASTOPEN_CONNECT build; there it
@@ -935,6 +1231,32 @@ T_DECLARE_CASE(parseargs_rejects_above_int_max_numeric)
 		{ "-m", "9999999999" },
 		{ "--loglevel", "9999999999" },
 		{ "--max-startups", "9999999999:0:0" },
+	};
+	for (size_t k = 0; k < ARRAY_SIZE(cases); k++) {
+		struct config conf = conf_default();
+		char *argv[] = { "conf_test", "-l", "127.0.0.1:1080",
+				 (char *)cases[k][0], (char *)cases[k][1] };
+		T_EXPECT(!conf_parseargs(&conf, 5, argv));
+	}
+}
+
+/* opt_parse_int() and strtoimax() leave the terminator to the caller, so each
+ * consumer's own check is what rejects the rest of the argument instead of
+ * accepting a truncated number (`-m 5x' as 5) */
+T_DECLARE_CASE(parseargs_rejects_numeric_trailing_junk)
+{
+	static const char *const cases[][2] = {
+		{ "-m", "5x" },
+		{ "--loglevel", "3x" },
+		{ "--max-startups", "10;50:100" },
+		{ "--max-startups", "10:50" },
+		{ "--max-startups", "10:50:100x" },
+#if WITH_THREADS
+		{ "--workers", "4x" },
+#endif /* WITH_THREADS */
+#if WITH_RULESET
+		{ "--memlimit", "12x" },
+#endif /* WITH_RULESET */
 	};
 	for (size_t k = 0; k < ARRAY_SIZE(cases); k++) {
 		struct config conf = conf_default();
@@ -1339,6 +1661,41 @@ T_DECLARE_CASE(loadtable_rejects_wrong_types)
 	}
 }
 
+T_DECLARE_CASE(loadtable_rejects_invalid_config_values)
+{
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushinteger(L, -1);
+		lua_setfield(L, -2, "resolve_pf");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
+	}
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushinteger(L, -1);
+		lua_setfield(L, -2, "max_sessions");
+		struct config conf = conf_default();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
+	}
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushinteger(L, 0);
+		lua_setfield(L, -2, "max_sessions");
+		struct config conf = conf_default();
+		T_EXPECT(conf_loadfromtable(L, &conf));
+		T_EXPECT_EQ(conf.max_sessions, 0);
+		free(conf.strings);
+		lua_close(L);
+	}
+}
+
 /*
  * Regression: a bad string field must not leave an already-applied
  * non-string field behind. All fields are now validated before any of
@@ -1425,6 +1782,105 @@ T_DECLARE_CASE(loadtable_rejects_cli_only_fields)
 		free(conf.strings);
 		lua_close(L);
 	}
+}
+
+/*
+ * Regression: conf_check enforces the domain of every numeric field, but it
+ * ran only on the command line. A boot config applied at runtime -- the
+ * SIGHUP reload path -- committed straight into the live config, so a table
+ * could install values the daemon would have refused to start with: timeout
+ * = 0 makes every connection timer fire on the next loop iteration.
+ */
+T_DECLARE_CASE(loadtable_rejects_out_of_range_fields)
+{
+	static const struct {
+		const char *key;
+		lua_Integer value;
+	} badints[] = {
+		{ "loglevel", LOG_LEVEL_VERYVERBOSE + 1 },
+		{ "startup_limit_rate", 1000 },
+#if WITH_TCP_KEEPALIVE_PARAMS
+		{ "tcp_keepcnt", 128 },
+#endif
+#if WITH_THREADS
+		{ "workers", 4096 },
+#endif
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(badints); i++) {
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushinteger(L, badints[i].value);
+		lua_setfield(L, -2, badints[i].key);
+		struct config conf = make_valid_conf();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		free(conf.strings);
+		lua_close(L);
+	}
+	/* the rejected table leaves every field of the live config alone */
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushnumber(L, 0.0);
+		lua_setfield(L, -2, "timeout");
+		lua_pushinteger(L, LOG_LEVEL_VERBOSE);
+		lua_setfield(L, -2, "loglevel");
+		const struct config def = conf_default();
+		struct config conf = make_valid_conf();
+		T_EXPECT(!conf_loadfromtable(L, &conf));
+		T_EXPECT(conf.timeout == def.timeout);
+		T_EXPECT_EQ(conf.loglevel, def.loglevel);
+		free(conf.strings);
+		lua_close(L);
+	}
+	/* the boundary value itself still loads */
+	{
+		lua_State *L = new_conf_table();
+		T_CHECK(L != NULL);
+		lua_pushnumber(L, 5.0);
+		lua_setfield(L, -2, "timeout");
+		struct config conf = make_valid_conf();
+		T_EXPECT(conf_loadfromtable(L, &conf));
+		T_EXPECT(conf.timeout == 5.0);
+		free(conf.strings);
+		lua_close(L);
+	}
+}
+
+/* conf_loadfromtable on the table at index 1, filling the config at index 2. */
+static int loadfromtable_body(lua_State *restrict L)
+{
+	struct config *restrict const conf = lua_touserdata(L, 2);
+	lua_settop(L, 1);
+	lua_pushboolean(L, conf_loadfromtable(L, conf));
+	return 1;
+}
+
+/*
+ * conf_loadfromtable reports a bad field by return value, but it reads the
+ * config table with unprotected lua_getfield calls: a raising __index leaves
+ * through a Lua error instead. Every caller must therefore supply a protected
+ * frame, which is what conf.h documents.
+ */
+T_DECLARE_CASE(loadtable_raises_instead_of_returning_false)
+{
+	lua_State *restrict L = luaL_newstate();
+	T_CHECK(L != NULL);
+	luaL_openlibs(L);
+	/* raises on the very first read, the unprotected cli_only scan */
+	static const char src[] = "return setmetatable({}, "
+				  "{ __index = function() error('boom') end })";
+	T_CHECK(load_printed_conf(L, src));
+
+	struct config conf = make_valid_conf();
+	lua_pushcfunction(L, loadfromtable_body);
+	lua_insert(L, -2);
+	lua_pushlightuserdata(L, &conf);
+	/* not LUA_OK: the error escaped conf_loadfromtable rather than being
+	 * turned into a false return */
+	T_EXPECT(lua_pcall(L, 2, 1, 0) != LUA_OK);
+	T_EXPECT(conf.strings == NULL);
+
+	lua_close(L);
 }
 
 /*
@@ -1519,6 +1975,141 @@ T_DECLARE_CASE(loadtable_clamps_stateful_metatable_index)
 		T_EXPECT(conf.forward != NULL && conf.forward[0] == '\0');
 		free(conf.strings);
 	}
+}
+
+/* conf_reloadfromtable tests */
+
+/* Reload the table returned by the Lua chunk `src` into *conf, the config the
+ * running server was started with, returning conf_reloadfromtable's verdict.
+ * A committed load leaves conf->strings for the caller to free. */
+static bool reload_conf(
+	const char *restrict src, struct config *restrict conf,
+	const bool has_ruleset)
+{
+	lua_State *restrict L = luaL_newstate();
+	if (L == NULL) {
+		return false;
+	}
+	bool ok = false;
+	if (luaL_dostring(L, src) == LUA_OK && lua_istable(L, -1)) {
+		ok = conf_reloadfromtable(L, conf, has_ruleset);
+	}
+	lua_close(L);
+	return ok;
+}
+
+#if WITH_RULESET
+/*
+ * main() refuses to start with auth_required and no ruleset installed, since
+ * nothing would check the credentials. A reload must refuse the same config
+ * rather than commit it into the running server, while the initial load still
+ * defers the check to main(), which knows the ruleset only after `-r' loads.
+ */
+T_DECLARE_CASE(reloadtable_auth_required_requires_ruleset)
+{
+	struct config conf = make_valid_conf();
+	T_EXPECT(!reload_conf("return { auth_required = true }", &conf, false));
+	T_EXPECT(!conf.auth_required);
+	T_EXPECT(conf.strings == NULL);
+
+	T_EXPECT(reload_conf("return { auth_required = true }", &conf, true));
+	T_EXPECT(conf.auth_required);
+	free(conf.strings);
+
+	conf = make_valid_conf();
+	lua_State *L = new_conf_table();
+	T_CHECK(L != NULL);
+	lua_pushboolean(L, 1);
+	lua_setfield(L, -2, "auth_required");
+	T_EXPECT(conf_loadfromtable(L, &conf));
+	T_EXPECT(conf.auth_required);
+	free(conf.strings);
+	lua_close(L);
+}
+#endif /* WITH_RULESET */
+
+/*
+ * A reload must pass the rules conf_check enforces at startup: each of these
+ * configs is refused on the command line, and must not become live through a
+ * SIGHUP either. The config is left untouched, not partially committed.
+ */
+T_DECLARE_CASE(reloadtable_applies_startup_checks)
+{
+	static const char *const refused[] = {
+		"return { proxy = 'socks5://127.0.0.1:1', socks5_udp = true }",
+		"return { proxy = 'socks5://127.0.0.1:1', socks5_bind = true }",
+		"return { block_global = true, block_local = true }",
+		"return { timeout = 1.0 }",
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(refused); i++) {
+		struct config conf = make_valid_conf();
+		T_EXPECT(!reload_conf(refused[i], &conf, true));
+		T_EXPECT(conf.proxy == NULL);
+		T_EXPECT(!conf.block_global);
+		T_EXPECT(conf.strings == NULL);
+	}
+
+#if WITH_RULESET
+	/* authentication is unsupported in forward mode, ruleset or not */
+	struct config conf = make_valid_conf();
+	conf.forward = "127.0.0.1:80";
+	T_EXPECT(!reload_conf("return { auth_required = true }", &conf, true));
+	T_EXPECT(!conf.auth_required);
+	T_EXPECT(conf.strings == NULL);
+#endif /* WITH_RULESET */
+}
+
+/*
+ * The listeners, their socket options, the serve mode chosen by whether
+ * `forward' is set, and the worker threads are set up once at startup; a
+ * reload that changes one of them could not take effect, and committing it
+ * would make neosocksd.config() report a configuration nothing runs. Restating
+ * the running value, or changing the forward destination itself, is allowed.
+ */
+T_DECLARE_CASE(reloadtable_refuses_startup_only_fields)
+{
+	static const char *const refused[] = {
+		"return { listen = '127.0.0.1:1081' }",
+		"return { http_listen = '127.0.0.1:8080' }",
+		"return { restapi = '127.0.0.1:9080' }",
+		"return { forward = '127.0.0.1:80' }",
+#if WITH_TPROXY
+		"return { transparent = true }",
+#endif
+#if WITH_REUSEPORT
+		"return { reuseport = true }",
+#endif
+#if WITH_TCP_FASTOPEN
+		"return { tcp_fastopen = false }",
+#endif
+#if WITH_THREADS
+		"return { workers = 3 }",
+#endif
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(refused); i++) {
+		struct config conf = make_valid_conf();
+		conf.max_sessions = 7;
+		char src[128];
+		const int n = snprintf(
+			src, sizeof(src),
+			"local t = %s t.max_sessions = 9 return t",
+			refused[i] + strlen("return "));
+		T_CHECK(n > 0 && (size_t)n < sizeof(src));
+		T_EXPECT(!reload_conf(src, &conf, true));
+		T_EXPECT_EQ(conf.max_sessions, 7);
+		T_EXPECT_STREQ(conf.listen, "127.0.0.1:1080");
+		T_EXPECT(conf.forward == NULL);
+		T_EXPECT(conf.strings == NULL);
+	}
+
+	struct config conf = make_valid_conf();
+	conf.forward = "127.0.0.1:80";
+	T_EXPECT(reload_conf(
+		"return { listen = '127.0.0.1:1080', forward = '127.0.0.1:81' }",
+		&conf, true));
+	T_EXPECT_STREQ(conf.listen, "127.0.0.1:1080");
+	T_EXPECT_STREQ(conf.forward, "127.0.0.1:81");
+	free(conf.strings);
 }
 
 /* conf_loadboot tests */
@@ -1764,15 +2355,22 @@ static const struct testing_suite suite[] = {
 	T_CASE(conf_rejects_loglevel_out_of_range),
 	T_CASE(conf_rejects_startup_limits_out_of_range),
 	T_CASE(conf_accepts_unlimited_startup_full),
+#if WITH_THREADS
+	T_CASE(conf_rejects_workers_out_of_range),
+#endif
 	T_CASE(parseargs_accepts_unlimited_max_startups),
 	T_CASE(parseargs_rejects_empty_numeric_args),
 	T_CASE(conf_rejects_proxy_with_socks5_extensions),
 	T_CASE(conf_accepts_valid_configuration),
+	T_CASE(conf_rejects_invalid_resolve_pf),
+	T_CASE(conf_rejects_negative_max_sessions),
 #if WITH_LUA
 	T_CASE(conf_print_round_trips_control_char_before_digit),
 #if !LUA_32BITS
 	T_CASE(conf_print_round_trips_double_precision),
 #endif
+	T_CASE(conf_print_flushes_the_dump),
+	T_CASE(conf_print_round_trips_every_field),
 	T_CASE(conf_loadfromtable_rejects_second_pass_type_change),
 	T_CASE(conf_loadfromtable_raise_leaves_config_unchanged),
 #endif /* WITH_LUA */
@@ -1789,6 +2387,7 @@ static const struct testing_suite suite[] = {
 #endif
 	T_CASE(conf_advise_notes_ruleset_extends_proxy),
 	T_CASE(conf_advise_silent_without_ruleset_or_proxy),
+	T_CASE(conf_advise_notes_forward_placeholder_without_ruleset),
 #if WITH_RULESET
 	T_CASE(conf_rejects_ruleset_with_socks5_bind),
 	T_CASE(conf_rejects_ruleset_with_socks5_udp),
@@ -1803,6 +2402,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(parseargs_http_with_address),
 	T_CASE(parseargs_http_only),
 	T_CASE(parseargs_http_followed_by_option),
+	T_CASE(parseargs_http_only_requires_listen),
 	T_CASE(parseargs_fastopen_connect),
 	T_CASE(parseargs_proxy_and_api),
 	T_CASE(parseargs_auth_required),
@@ -1814,6 +2414,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(parseargs_max_sessions),
 	T_CASE(parseargs_max_startups),
 	T_CASE(parseargs_rejects_above_int_max_numeric),
+	T_CASE(parseargs_rejects_numeric_trailing_junk),
 	T_CASE(parseargs_double_dash_and_unknown),
 #if WITH_CARES
 	T_CASE(parseargs_nameserver),
@@ -1849,10 +2450,18 @@ static const struct testing_suite suite[] = {
 	T_CASE(loadtable_applies_typed_fields),
 	T_CASE(loadtable_empty_preserves_defaults),
 	T_CASE(loadtable_rejects_wrong_types),
+	T_CASE(loadtable_rejects_invalid_config_values),
 	T_CASE(loadtable_rejects_all_or_nothing_across_field_kinds),
 	T_CASE(loadtable_second_call_does_not_dangle_prior_string),
 	T_CASE(loadtable_rejects_cli_only_fields),
 	T_CASE(loadtable_clamps_stateful_metatable_index),
+	T_CASE(loadtable_rejects_out_of_range_fields),
+	T_CASE(loadtable_raises_instead_of_returning_false),
+#if WITH_RULESET
+	T_CASE(reloadtable_auth_required_requires_ruleset),
+#endif
+	T_CASE(reloadtable_applies_startup_checks),
+	T_CASE(reloadtable_refuses_startup_only_fields),
 	T_CASE(loadboot_applies_config_table),
 	T_CASE(loadboot_rejects_ruleset_field),
 	T_CASE(loadboot_auth_required_requires_ruleset),

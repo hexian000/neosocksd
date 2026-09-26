@@ -100,7 +100,60 @@ static bool range_check_double(
 	_Generic(value, int: range_check_int, double: range_check_double)(     \
 		key, value, lbound, ubound)
 
-bool conf_check(const struct config *restrict conf)
+static bool is_valid_resolve_pf(const int resolve_pf)
+{
+	return resolve_pf == PF_UNSPEC || resolve_pf == PF_INET ||
+	       resolve_pf == PF_INET6;
+}
+
+/* Field domains: bounds that depend only on the config's own fields. */
+static bool check_ranges(const struct config *restrict conf)
+{
+#if WITH_TCP_KEEPALIVE_PARAMS
+	/* upper bounds are the kernel's MAX_TCP_KEEPIDLE/INTVL/CNT */
+	if (!RANGE_CHECK("tcp_keepidle", conf->tcp_keepidle, 0, 32767) ||
+	    !RANGE_CHECK("tcp_keepintvl", conf->tcp_keepintvl, 0, 32767) ||
+	    !RANGE_CHECK("tcp_keepcnt", conf->tcp_keepcnt, 0, 127)) {
+		return false;
+	}
+#endif
+#if WITH_THREADS
+	/* the lower bound keeps transfer_serve's `... % nworkers' from dividing
+	 * by zero; the upper one keeps the worker array clear of SIZE_MAX */
+	if (!RANGE_CHECK("workers", conf->workers, 1, 1024)) {
+		return false;
+	}
+#endif
+	if (!is_valid_resolve_pf(conf->resolve_pf)) {
+		LOGE_F("resolve_pf is invalid: %d", conf->resolve_pf);
+		return false;
+	}
+	if (!RANGE_CHECK("max_sessions", conf->max_sessions, 0, INT_MAX)) {
+		return false;
+	}
+	return RANGE_CHECK(
+		       "loglevel", conf->loglevel, LOG_LEVEL_SILENCE,
+		       LOG_LEVEL_VERYVERBOSE) &&
+	       RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
+	       RANGE_CHECK(
+		       "startup_limit_start", conf->startup_limit_start, 0,
+		       conf->startup_limit_full > 0 ? conf->startup_limit_full :
+						      INT_MAX) &&
+	       RANGE_CHECK(
+		       "startup_limit_rate", conf->startup_limit_rate, 0,
+		       100) &&
+	       /* startup_limit_full == 0 means "unlimited"; the start bound
+		* above already enforces start <= full when full > 0 */
+	       (conf->startup_limit_full == 0 ||
+		RANGE_CHECK(
+			"startup_limit_full", conf->startup_limit_full,
+			conf->startup_limit_start,
+			conf->max_sessions > 0 ? conf->max_sessions : INT_MAX));
+}
+
+/* Cross-field rules and field domains: everything conf_check refuses. Logs the
+ * first violation found and emits no advisory warning. */
+static bool check_rules(const struct config *restrict conf)
 {
 	if (conf->listen == NULL && conf->http_listen == NULL) {
 		LOGE("listen address is not specified");
@@ -128,19 +181,6 @@ bool conf_check(const struct config *restrict conf)
 		LOGE("incompatible outbound policies are specified");
 		return false;
 	}
-	if (conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 16384) {
-		LOGW("tcp send buffer may be too small");
-	}
-	if (conf->tcp_rcvbuf > 0 && conf->tcp_rcvbuf < 16384) {
-		LOGW("tcp recv buffer may be too small");
-	}
-#if WITH_TCP_KEEPALIVE_PARAMS
-	if (!conf->tcp_keepalive &&
-	    (conf->tcp_keepidle > 0 || conf->tcp_keepintvl > 0 ||
-	     conf->tcp_keepcnt > 0)) {
-		LOGW("tcp keepalive timing is set but keepalive is disabled");
-	}
-#endif
 	if (conf->proxy != NULL && conf->socks5_bind) {
 		LOGE_F("%s is incompatible with forwarding proxy",
 		       "SOCKS5 BIND");
@@ -166,48 +206,42 @@ bool conf_check(const struct config *restrict conf)
 		LOGE("authentication is not supported in current mode");
 		return false;
 	}
-	/* the ruleset requirement is checked in main() after loading */
+	/* the ruleset requirement depends on what the load installs: main()
+	 * checks it after its load, check_reload() on a reload */
 
+	return check_ranges(conf);
+}
+
+bool conf_check(const struct config *restrict conf)
+{
+	if (!check_rules(conf)) {
+		return false;
+	}
+	if (conf->tcp_sndbuf > 0 && conf->tcp_sndbuf < 16384) {
+		LOGW("tcp send buffer may be too small");
+	}
+	if (conf->tcp_rcvbuf > 0 && conf->tcp_rcvbuf < 16384) {
+		LOGW("tcp recv buffer may be too small");
+	}
 #if WITH_TCP_KEEPALIVE_PARAMS
-	/* upper bounds are the kernel's MAX_TCP_KEEPIDLE/INTVL/CNT */
-	if (!RANGE_CHECK("tcp_keepidle", conf->tcp_keepidle, 0, 32767) ||
-	    !RANGE_CHECK("tcp_keepintvl", conf->tcp_keepintvl, 0, 32767) ||
-	    !RANGE_CHECK("tcp_keepcnt", conf->tcp_keepcnt, 0, 127)) {
-		return false;
+	if (!conf->tcp_keepalive &&
+	    (conf->tcp_keepidle > 0 || conf->tcp_keepintvl > 0 ||
+	     conf->tcp_keepcnt > 0)) {
+		LOGW("tcp keepalive timing is set but keepalive is disabled");
 	}
 #endif
-#if WITH_THREADS
-	/* transfer_create() documents nworkers >= 1, and transfer_serve()
-	 * distributes connections with `... % nworkers`; a zero divides by zero */
-	if (!RANGE_CHECK("workers", conf->workers, 1, INT_MAX)) {
-		return false;
-	}
-#endif
-
-	return RANGE_CHECK(
-		       "loglevel", conf->loglevel, LOG_LEVEL_SILENCE,
-		       LOG_LEVEL_VERYVERBOSE) &&
-	       RANGE_CHECK("timeout", conf->timeout, 5.0, 86400.0) &&
-	       RANGE_CHECK(
-		       "startup_limit_start", conf->startup_limit_start, 0,
-		       conf->startup_limit_full > 0 ? conf->startup_limit_full :
-						      INT_MAX) &&
-	       RANGE_CHECK(
-		       "startup_limit_rate", conf->startup_limit_rate, 0,
-		       100) &&
-	       /* startup_limit_full == 0 means "unlimited"; the start bound
-		* above already enforces start <= full when full > 0 */
-	       (conf->startup_limit_full == 0 ||
-		RANGE_CHECK(
-			"startup_limit_full", conf->startup_limit_full,
-			conf->startup_limit_start,
-			conf->max_sessions > 0 ? conf->max_sessions : INT_MAX));
+	return true;
 }
 
 void conf_advise(const struct config *restrict conf, const bool has_ruleset)
 {
 	if (has_ruleset && conf->proxy != NULL) {
 		LOGN("the ruleset extends the `-x' proxy chain instead of replacing it");
+	}
+	if (!has_ruleset && conf->forward != NULL &&
+	    strcmp(conf->forward, CONF_FORWARD_ANY) == 0) {
+		LOGW("`-f " CONF_FORWARD_ANY
+		     "' names no destination, but no ruleset is loaded to choose one");
 	}
 }
 
@@ -234,6 +268,7 @@ static void print_usage(const char *restrict argv0)
 		"  --auth-required            require basic authentication\n"
 #endif
 		"  -f, --forward <address>    run TCP port forwarding instead of SOCKS\n"
+		"                             `:' names no destination, leaving it to the ruleset\n"
 		"  -x, --proxy proxy1[,...[,proxyN]]\n"
 		"                             forward outbound connection over proxy chain\n"
 #if WITH_CARES
@@ -666,6 +701,13 @@ bool conf_parseargs(struct config *restrict conf, const int argc, char *argv[])
 	}
 #endif
 	if (http_only) {
+		/* A boot config's `listen' is applied after this point and
+		 * would silently serve SOCKS instead; it can say
+		 * `http_listen' directly. */
+		if (conf->listen == NULL) {
+			LOGF("`--http' without an address requires `-l'");
+			return false;
+		}
 		conf->http_listen = conf->listen;
 		conf->listen = NULL;
 	}
@@ -812,18 +854,82 @@ struct conf_fill {
 	struct config *conf;
 	char *block;
 	size_t total;
+	/* the config is already live: see conf_reloadfromtable */
+	bool reload;
+	bool has_ruleset;
 };
 
+static bool str_equal(const char *restrict a, const char *restrict b)
+{
+	if (a == NULL || b == NULL) {
+		return a == b;
+	}
+	return strcmp(a, b) == 0;
+}
+
+/* Log a field the running server applied once at startup when a reload would
+ * change it. Returns whether the field is unchanged. */
+static bool keep_fixed(const char *restrict key, const bool changed)
+{
+	if (changed) {
+		LOGE_F("reload: field `%s' only takes effect on restart", key);
+	}
+	return !changed;
+}
+
+/* The checks a reload runs on the staged config before it becomes live: the
+ * same rules main() applies at startup, and no change to what the running
+ * server applied only once -- the listener addresses and socket options that
+ * server_bind() set, the serve mode it chose by whether `forward' is set, and
+ * the worker threads main() started. */
+static bool check_reload(
+	const struct config *restrict running,
+	const struct config *restrict staged, const bool has_ruleset)
+{
+	if (!check_rules(staged)) {
+		return false;
+	}
+	if (staged->auth_required && !has_ruleset) {
+		LOGE("authentication requires a ruleset");
+		return false;
+	}
+	bool ok = keep_fixed(
+			  "listen",
+			  !str_equal(running->listen, staged->listen)) &&
+		  keep_fixed(
+			  "http_listen",
+			  !str_equal(
+				  running->http_listen, staged->http_listen)) &&
+		  keep_fixed(
+			  "restapi",
+			  !str_equal(running->restapi, staged->restapi)) &&
+		  keep_fixed(
+			  "forward", (running->forward == NULL) !=
+					     (staged->forward == NULL));
+#if WITH_TPROXY
+	ok = ok && keep_fixed(
+			   "transparent",
+			   running->transparent != staged->transparent);
+#endif
+#if WITH_REUSEPORT
+	ok = ok &&
+	     keep_fixed("reuseport", running->reuseport != staged->reuseport);
+#endif
+#if WITH_TCP_FASTOPEN
+	ok = ok && keep_fixed(
+			   "tcp_fastopen",
+			   running->tcp_fastopen != staged->tcp_fastopen);
+#endif
+#if WITH_THREADS
+	ok = ok && keep_fixed("workers", running->workers != staged->workers);
+#endif
+	return ok;
+}
+
 /* Apply the non-string fields into a staged copy and copy the string fields
- * into the pre-measured `block`, committing to the live `conf` only once every
- * field of this second field-access pass has been read. conf_loadfromtable runs
- * this under lua_pcall so that a config-table __index which raises here is
- * caught -- letting the caller free `block` instead of leaking it through the
- * longjmp. Nothing touches `conf` until the final commit, so a mid-pass raise,
- * or a stateful __index that passed validation but now returns a wrong type,
- * leaves the live config wholly unchanged rather than partially applied. The
- * fill context is the first argument (a light userdata); the config table is the
- * second (stack top). */
+ * into the pre-measured `block`, committing to the live `conf` only once the
+ * whole pass reads clean. Arguments: the fill context (a light userdata), then
+ * the config table. */
 static int conf_fill_fields(lua_State *restrict L)
 {
 	const struct conf_fill *restrict const fill = lua_touserdata(L, 1);
@@ -847,6 +953,11 @@ static int conf_fill_fields(lua_State *restrict L)
 				L, "field `%s' changed type on the apply pass",
 				f->key);
 		}
+	}
+
+	/* the staged values must be in range before any of them becomes live */
+	if (!check_ranges(&staged)) {
+		return luaL_error(L, "field out of range");
 	}
 
 	/* Copy string fields into the new block: a Lua-provided string replaces
@@ -897,20 +1008,24 @@ static int conf_fill_fields(lua_State *restrict L)
 		}
 	}
 
-	/* Every protected read succeeded; commit atomically. The non-string
-	 * fields land as one struct copy, then the string pointers are repointed
-	 * into `block`. */
-	*conf = staged;
+	/* Every protected read succeeded; repoint the staged string fields into
+	 * `block`, so the staged copy is the whole config to be committed. */
 	if (fill->total > 0) {
 		for (const struct metaconfig *f = conf_fields; f->key != NULL;
 		     f++) {
 			if (f->type != CONF_STRING) {
 				continue;
 			}
-			*(const char **)((char *)conf + f->offset) =
+			*(const char **)((char *)&staged + f->offset) =
 				newptr[f - conf_fields];
 		}
 	}
+	/* a reload must also leave a config the running server can apply */
+	if (fill->reload && !check_reload(conf, &staged, fill->has_ruleset)) {
+		return luaL_error(L, "config not applicable on reload");
+	}
+	/* commit atomically */
+	*conf = staged;
 	return 0;
 }
 
@@ -927,7 +1042,9 @@ static const char *boot_errmsg(lua_State *restrict L)
 	return "error object is not a string";
 }
 
-bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
+static bool load_table(
+	lua_State *restrict L, struct config *restrict conf, const bool reload,
+	const bool has_ruleset)
 {
 	/* daemonize and user_name are consumed in main() before any boot config
 	 * is loaded -- daemonization must precede thread creation -- so they can
@@ -996,19 +1113,16 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 		return false;
 	}
 
-	/* Apply the non-string fields and fill `block` under a protected call:
-	 * a config-table __index that raises on this second field-access pass
-	 * must fail the load without leaking `block` or dangling a string field
-	 * into it (conf_fill_fields defers the field pointers until it is done).
-	 * The fill context rides in as a light-userdata argument and the body as a
-	 * plain cfunction, so nothing between the malloc above and lua_pcall can
-	 * raise: lua_pushcclosure would allocate its closure and could itself raise
-	 * LUA_ERRMEM, leaking `block` through the caught longjmp, whereas these
-	 * pushes cannot. */
+	/* Apply the non-string fields and fill `block` under a protected call, so
+	 * a raising config-table __index fails the load instead of leaking
+	 * `block`. Nothing between the malloc above and lua_pcall may allocate:
+	 * the context rides in as a light userdata, not as a closure upvalue. */
 	struct conf_fill fill = {
 		.conf = conf,
 		.block = block,
 		.total = total,
+		.reload = reload,
+		.has_ruleset = has_ruleset,
 	};
 	lua_pushcfunction(L, conf_fill_fields);
 	lua_pushlightuserdata(L, &fill);
@@ -1023,6 +1137,18 @@ bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
 	free(conf->strings);
 	conf->strings = block;
 	return true;
+}
+
+bool conf_loadfromtable(lua_State *restrict L, struct config *restrict conf)
+{
+	return load_table(L, conf, false, false);
+}
+
+bool conf_reloadfromtable(
+	lua_State *restrict L, struct config *restrict conf,
+	const bool has_ruleset)
+{
+	return load_table(L, conf, true, has_ruleset);
 }
 
 /* Write a Lua double-quoted string literal for s. */
@@ -1106,7 +1232,9 @@ bool conf_print(const struct config *restrict conf)
 	if (ok) {
 		ok = fputs("}\n", stdout) != EOF;
 	}
-	return ok;
+	/* a redirected stdout is fully buffered and the whole dump fits in it, so
+	 * the write errors that matter surface only here */
+	return ok && fflush(stdout) == 0 && ferror(stdout) == 0;
 }
 
 /* Protected body of conf_loadboot: guards against a `ruleset` field and applies
