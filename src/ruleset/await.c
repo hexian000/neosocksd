@@ -1,15 +1,15 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/await.h"
+#include "await.h"
 
 #include "api_client.h"
+#include "base.h"
+#include "cfunc.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
-#include "ruleset/base.h"
-#include "ruleset/cfunc.h"
-#include "ruleset/ruleset.h"
+#include "ruleset.h"
 #include "server.h"
 #include "util.h"
 
@@ -20,6 +20,9 @@
 #include <ev.h>
 #include <lauxlib.h>
 #include <lua.h>
+#if WITH_PATHS_H
+#include <paths.h>
+#endif
 
 #include <errno.h>
 #include <math.h>
@@ -27,9 +30,15 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+/* _PATH_BSHELL is neither ISO C nor POSIX.1: where <paths.h> provides it, it
+ * names the system shell, which is "/system/bin/sh" on Android -- a system
+ * with no "/bin/sh" at all. */
+#ifndef _PATH_BSHELL
+#define _PATH_BSHELL "/bin/sh"
+#endif
 
 #define MT_AWAIT_SLEEP "await.sleep"
 #define MT_AWAIT_RESOLVE "await.resolve"
@@ -182,16 +191,19 @@ static int await_resolve_close(lua_State *restrict L)
 
 static void resolve_cb(
 	struct resolve_query *q, struct ev_loop *loop, void *data,
-	const struct sockaddr *restrict sa)
+	const union sockaddr_max *restrict addr, const size_t num_addr)
 {
 	struct await_resolve_userdata *restrict ud = data;
 	ASSERT(ud->query == q);
 	(void)q;
 	ud->query = NULL;
-	/* sa is NULL when name resolution fails */
-	ud->ok = (sa != NULL);
+	/* num_addr is 0 when name resolution fails; a name answering with
+	 * several addresses still yields one here -- await.resolve() answers
+	 * with an address, and the rest of the list exists for the dialer to
+	 * fall back through */
+	ud->ok = (num_addr > 0);
 	if (ud->ok) {
-		sa_copy(&ud->sa.sa, sa);
+		ud->sa = addr[0];
 	}
 	ev_idle_start(loop, &ud->w_idle);
 }
@@ -222,7 +234,11 @@ await_resolve_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 static int await_resolve(lua_State *restrict L)
 {
 	AWAIT_CHECK_YIELDABLE(L);
-	const char *restrict name = luaL_checkstring(L, 1);
+	size_t len;
+	const char *restrict name = luaL_checklstring(L, 1, &len);
+	if (memchr(name, '\0', len) != NULL) {
+		return luaL_error(L, "string contains an embedded NUL byte");
+	}
 	lua_settop(L, 1);
 	struct await_resolve_userdata *restrict ud =
 		lua_newuserdata(L, sizeof(struct await_resolve_userdata));
@@ -563,6 +579,20 @@ struct await_execute_userdata {
 	ev_idle w_idle;
 };
 
+/* Signal target, which is either a pid or the negation of a process-group id.
+ * A target that is already gone (ESRCH) is the expected outcome, not an error. */
+static void send_sigkill(const pid_t target)
+{
+	if (kill(target, SIGKILL) == 0) {
+		return;
+	}
+	const int err = errno;
+	if (err == ESRCH) {
+		return;
+	}
+	LOGE_F("kill: (%d) %s", err, strerror(err));
+}
+
 static int await_execute_close(lua_State *restrict L)
 {
 	struct await_execute_userdata *restrict ud = lua_touserdata(L, 1);
@@ -574,6 +604,9 @@ static int await_execute_close(lua_State *restrict L)
 	const bool reaped = ev_is_pending(&ud->w_child);
 	ev_child_stop(loop, &ud->w_child);
 	ev_idle_stop(loop, &ud->w_idle);
+	/* drop the pid unconditionally: this handler is installed as both
+	 * __close and __gc, so a later pass must find nothing left to signal */
+	ud->w_child.pid = 0;
 	if (pid > 0 && !reaped) {
 		/* setsid() in the child makes it a process-group leader (pid ==
 		 * pgid), so signal the whole group to also stop the children a
@@ -584,13 +617,8 @@ static int await_execute_close(lua_State *restrict L)
 		 * setsid(), where it is still in our own group and has not exec'd, so
 		 * it has no children of its own to miss. Either signal finding no
 		 * target (ESRCH) just means the other one covers the child. */
-		if (kill(-pid, SIGKILL) != 0 && errno != ESRCH) {
-			LOG_PERROR("kill");
-		}
-		if (kill(pid, SIGKILL) != 0 && errno != ESRCH) {
-			LOG_PERROR("kill");
-		}
-		ud->w_child.pid = 0;
+		send_sigkill(-pid);
+		send_sigkill(pid);
 	}
 	unpin_context(L, ud);
 	return 0;
@@ -712,7 +740,7 @@ static int await_execute(lua_State *restrict L)
 		(void)sigaction(SIGPIPE, &dfl, NULL);
 		close_inherited_fds();
 		const char *argv[] = { "sh", "-c", command, NULL };
-		execv("/bin/sh", (char *const *)argv);
+		execv(_PATH_BSHELL, (char *const *)argv);
 		const int err = errno;
 		slog_panicf(
 			LOG_LEVEL_ERROR, __FILE__, __LINE__, "execv: errno=%d",

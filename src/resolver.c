@@ -12,6 +12,9 @@
 
 #include <ev.h>
 
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -55,20 +58,25 @@ struct resolve_query {
 	struct resolve_query *next;
 	struct resolve_cb done_cb;
 	ev_watcher w_finish;
-	bool ok : 1;
-	union sockaddr_max addr;
+	size_t num_addr;
+	union sockaddr_max addr[RESOLVE_MAX_ADDR];
 	const char *name, *service;
 	int family;
 	char buf[];
 };
 
-/* Track a completed query on the resolver's pending list and schedule its
- * deferred completion callback. It stays on the list until finish_cb
- * dispatches it, letting resolver_free() reclaim any still-undispatched query
- * at teardown. */
+/* Count a completed query's outcome, track it on the resolver's pending list
+ * and schedule its deferred completion callback. It stays on the list until
+ * finish_cb dispatches it, letting resolver_free() reclaim any
+ * still-undispatched query at teardown. */
 static void finish_defer(struct resolve_query *restrict q)
 {
 	struct resolver *restrict r = q->resolver;
+	/* the counters describe lookups, not callback deliveries: a lookup that
+	 * succeeded counts even if its caller has cancelled it since */
+	if (q->num_addr > 0) {
+		r->stats.num_success++;
+	}
 	q->next = r->pending;
 	r->pending = q;
 	ev_feed_event(r->loop, &q->w_finish, EV_CUSTOM);
@@ -87,20 +95,39 @@ static void finish_unlink(struct resolve_query *restrict q)
 	}
 }
 
+#define RESOLVE_NAME(q) ((q)->name != NULL ? (q)->name : "")
+#define RESOLVE_SERVICE(q) ((q)->service != NULL ? (q)->service : "")
+
+/* Log about a query, with its name in the log's text extra rather than in the
+ * line itself: the dialer resolves the name its peer wrote, and a SOCKS5
+ * DOMAINNAME is an arbitrary byte string (RFC 1928, 5), so a newline in it
+ * would end the line there and let the peer write whatever follows. The
+ * service is the caller's own service name or port string and stays in the
+ * line. */
+#define RESOLVE_LOG_F(level, q, format, ...)                                   \
+	LOG_TXT_F(                                                             \
+		level, RESOLVE_NAME(q), strlen(RESOLVE_NAME(q)), 0,            \
+		"resolve `:%s': " format, RESOLVE_SERVICE(q), __VA_ARGS__)
+#define RESOLVE_LOG(level, q, message) RESOLVE_LOG_F(level, q, "%s", message)
+
 static void
 finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_CUSTOM);
 	struct resolve_query *restrict q = watcher->data;
 	finish_unlink(q);
-	const char *const name = q->name != NULL ? q->name : "";
-	const char *const service = q->service != NULL ? q->service : "";
-	if (q->ok) {
-		char addr[64];
-		sa_format(addr, sizeof(addr), &q->addr.sa);
-		LOGD_F("resolve `%s:%s': %s", name, service, addr);
+	if (q->num_addr == 0) {
+		RESOLVE_LOG(DEBUG, q, "failed");
 	} else {
-		LOGD_F("resolve `%s:%s': failed", name, service);
+		char addr[64];
+		sa_format(addr, sizeof(addr), &q->addr[0].sa);
+		if (q->num_addr > 1) {
+			RESOLVE_LOG_F(
+				DEBUG, q, "%s and %zu more", addr,
+				q->num_addr - 1);
+		} else {
+			RESOLVE_LOG_F(DEBUG, q, "%s", addr);
+		}
 	}
 
 	/* Check if query was cancelled */
@@ -109,15 +136,138 @@ finish_cb(struct ev_loop *restrict loop, ev_watcher *watcher, const int revents)
 		return;
 	}
 
-	if (!q->ok) {
-		q->done_cb.func(q, loop, q->done_cb.data, NULL);
+	if (q->num_addr == 0) {
+		q->done_cb.func(q, loop, q->done_cb.data, NULL, 0);
 		free(q);
 		return;
 	}
 
-	q->resolver->stats.num_success++;
-	q->done_cb.func(q, loop, q->done_cb.data, &q->addr.sa);
+	q->done_cb.func(q, loop, q->done_cb.data, q->addr, q->num_addr);
 	free(q);
+}
+
+/* Working room for one answer before it is cut down to what the query carries:
+ * up to RESOLVE_MAX_ADDR addresses of each family, the most either one can
+ * contribute to the final list once the two are interleaved. */
+#define RESOLVE_WORK_ADDR ((size_t)RESOLVE_MAX_ADDR * 2)
+
+/* One answer being collected. The resolver's own ordering (RFC 6724) groups the
+ * families, so the answer is walked until both are full rather than cut at a
+ * total: a name with many records of the leading family must still contribute
+ * the other family's to the list interleave_family() alternates. */
+struct addr_work {
+	union sockaddr_max addr[RESOLVE_WORK_ADDR];
+	size_t num;
+	size_t num_inet, num_inet6;
+};
+
+static bool addr_work_full(const struct addr_work *restrict w)
+{
+	return w->num_inet >= RESOLVE_MAX_ADDR &&
+	       w->num_inet6 >= RESOLVE_MAX_ADDR;
+}
+
+/* How many addresses a query answers with. A pinned family answers with one,
+ * exactly as it did before there was any fallback to a second address: `-4' /
+ * `-6' is the operator saying which family to use, not which to start with.
+ * Only an unpinned query carries the whole list. */
+static size_t query_maxaddr(const struct resolve_query *restrict q)
+{
+	return q->family == AF_UNSPEC ? RESOLVE_MAX_ADDR : 1;
+}
+
+/* Append one address of an answer, dropping a family that cannot be dialed, a
+ * node whose length does not match the family it claims, and an address of a
+ * family that already has all the room it can use. */
+static void addr_append(
+	struct addr_work *restrict w, const int family,
+	const struct sockaddr *restrict sa, const size_t salen)
+{
+	switch (family) {
+	case AF_INET:
+		if (salen != sizeof(struct sockaddr_in)) {
+			LOGE_F("resolve: invalid addrlen %zu (af=%d)", salen,
+			       family);
+			return;
+		}
+		if (w->num_inet >= RESOLVE_MAX_ADDR) {
+			return;
+		}
+		w->addr[w->num].in = *(const struct sockaddr_in *)sa;
+		w->num_inet++;
+		break;
+	case AF_INET6:
+		if (salen != sizeof(struct sockaddr_in6)) {
+			LOGE_F("resolve: invalid addrlen %zu (af=%d)", salen,
+			       family);
+			return;
+		}
+		if (w->num_inet6 >= RESOLVE_MAX_ADDR) {
+			return;
+		}
+		w->addr[w->num].in6 = *(const struct sockaddr_in6 *)sa;
+		w->num_inet6++;
+		break;
+	default:
+		return;
+	}
+	w->num++;
+}
+
+/* Reorder one answer as RFC 8305 4 prescribes: each family keeps its own
+ * order, but the two alternate, so a caller walking the list never spends two
+ * hops in a row on a family this host may have no working route for. The
+ * family that led the answer still leads the list -- that is where the
+ * resolver's own ordering has already put the address most likely to work. */
+static void
+interleave_family(union sockaddr_max *restrict addr, const size_t num)
+{
+	ASSERT(num <= RESOLVE_WORK_ADDR);
+	if (num < 3) {
+		/* fewer than three addresses already alternate */
+		return;
+	}
+	const int preferred = addr[0].sa.sa_family;
+	union sockaddr_max out[RESOLVE_WORK_ADDR];
+	/* where each family's unconsumed addresses start */
+	size_t next[2] = { 0, 0 };
+	bool want_preferred = true;
+	size_t n = 0;
+	while (n < num) {
+		const size_t which = want_preferred ? 0 : 1;
+		size_t i = next[which];
+		while (i < num) {
+			const bool is_preferred =
+				(addr[i].sa.sa_family == preferred);
+			if (is_preferred == want_preferred) {
+				break;
+			}
+			i++;
+		}
+		next[which] = i;
+		if (i < num) {
+			out[n++] = addr[i];
+			next[which] = i + 1;
+		}
+		/* an exhausted family leaves its turn to the other, which then
+		 * supplies every remaining address */
+		want_preferred = !want_preferred;
+	}
+	memcpy(addr, out, num * sizeof(*addr));
+}
+
+/* Interleave the families of a collected answer, then keep as many of the
+ * addresses as the query carries. */
+static size_t addr_finish(
+	union sockaddr_max *restrict addr, const size_t maxlen,
+	struct addr_work *restrict w)
+{
+	interleave_family(w->addr, w->num);
+	const size_t n = w->num < maxlen ? w->num : maxlen;
+	if (n > 0) {
+		memcpy(addr, w->addr, n * sizeof(*addr));
+	}
+	return n;
 }
 
 #if WITH_CARES
@@ -260,35 +410,18 @@ static void sock_state_cb(
 	ev_io_start(r->loop, &node->watcher);
 }
 
-static bool find_addrinfo(
-	union sockaddr_max *restrict addr,
+static size_t collect_addrinfo(
+	union sockaddr_max *restrict addr, const size_t maxlen,
 	const struct ares_addrinfo_node *restrict node)
 {
-	for (const struct ares_addrinfo_node *restrict it = node; it != NULL;
-	     it = it->ai_next) {
-		switch (it->ai_family) {
-		case AF_INET:
-			if (it->ai_addrlen != sizeof(struct sockaddr_in)) {
-				LOGE_F("resolve: invalid ai_addrlen %zu (af=%d)",
-				       (size_t)it->ai_addrlen, it->ai_family);
-				continue;
-			}
-			addr->in = *(struct sockaddr_in *)it->ai_addr;
-			break;
-		case AF_INET6:
-			if (it->ai_addrlen != sizeof(struct sockaddr_in6)) {
-				LOGE_F("resolve: invalid ai_addrlen %zu (af=%d)",
-				       (size_t)it->ai_addrlen, it->ai_family);
-				continue;
-			}
-			addr->in6 = *(struct sockaddr_in6 *)it->ai_addr;
-			break;
-		default:
-			continue;
-		}
-		return true;
+	struct addr_work work = { .num = 0 };
+	for (const struct ares_addrinfo_node *restrict it = node;
+	     it != NULL && !addr_work_full(&work); it = it->ai_next) {
+		addr_append(
+			&work, it->ai_family, it->ai_addr,
+			(size_t)it->ai_addrlen);
 	}
-	return false;
+	return addr_finish(addr, maxlen, &work);
 }
 
 static void addrinfo_cb(
@@ -301,7 +434,8 @@ static void addrinfo_cb(
 	switch (status) {
 	case ARES_SUCCESS:
 		if (info != NULL) {
-			q->ok = find_addrinfo(&q->addr, info->nodes);
+			q->num_addr = collect_addrinfo(
+				q->addr, query_maxaddr(q), info->nodes);
 			ares_freeaddrinfo(info);
 		}
 		break;
@@ -475,11 +609,68 @@ void resolver_free(struct resolver *restrict r)
 	free(r);
 }
 
+/* getaddrinfo() consults the resolver only for a real host name: a numeric
+ * address is parsed locally. AI_ADDRCONFIG guards against a lookup answering
+ * with a family this host has no address for, which is all it is good for --
+ * anywhere else it only does harm, glibc not counting a loopback address as
+ * configured, so a host with only `lo' up would reject 127.0.0.1 and ::1 too. */
+static bool needs_resolver(const char *restrict name)
+{
+	if (name == NULL) {
+		return false;
+	}
+	struct in_addr in;
+	struct in6_addr in6;
+	return inet_pton(AF_INET, name, &in) != 1 &&
+	       inet_pton(AF_INET6, name, &in6) != 1;
+}
+
+/* Resolve synchronously, blocking the event loop: the fallback for a build
+ * without c-ares. sa_resolve() answers with a single address, which is what a
+ * caller needs the whole list to avoid, so getaddrinfo() is driven here
+ * directly. The name is peer-supplied, so it stays out of the log lines the
+ * same way RESOLVE_LOG_F keeps it out of the others. */
+static size_t resolve_sync(
+	union sockaddr_max *restrict addr, const size_t maxlen,
+	const char *restrict name, const char *restrict service,
+	const int family)
+{
+	const struct addrinfo hints = {
+		.ai_family = family,
+		.ai_socktype = SOCK_STREAM,
+		.ai_protocol = IPPROTO_TCP,
+		.ai_flags = needs_resolver(name) ? AI_ADDRCONFIG : 0,
+	};
+	struct addrinfo *result = NULL;
+	const int err = getaddrinfo(name, service, &hints, &result);
+	if (err != 0) {
+		if (err == EAI_SYSTEM) {
+			/* EAI_SYSTEM defers to errno; gai_strerror would only
+			 * yield a generic "System error", so report the real OS
+			 * error, captured before any call can clobber errno */
+			const int syserr = errno;
+			LOGE_F("getaddrinfo: (%d) %s", syserr,
+			       strerror(syserr));
+		} else {
+			LOGE_F("getaddrinfo: (%d) %s", err, gai_strerror(err));
+		}
+		return 0;
+	}
+	struct addr_work work = { .num = 0 };
+	for (const struct addrinfo *restrict it = result;
+	     it != NULL && !addr_work_full(&work); it = it->ai_next) {
+		addr_append(
+			&work, it->ai_family, it->ai_addr,
+			(size_t)it->ai_addrlen);
+	}
+	freeaddrinfo(result);
+	return addr_finish(addr, maxlen, &work);
+}
+
 static void
 resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
 {
-	LOGD_F("resolve `%s:%s': start pf=%d", q->name != NULL ? q->name : "",
-	       q->service != NULL ? q->service : "", q->family);
+	RESOLVE_LOG_F(DEBUG, q, "start pf=%d", q->family);
 	r->stats.num_query++;
 
 #if WITH_CARES
@@ -504,8 +695,8 @@ resolve_start(struct resolver *restrict r, struct resolve_query *restrict q)
 #endif /* WITH_CARES */
 
 	/* Fall back to synchronous resolution */
-	q->ok = sa_resolve(
-		&q->addr, q->name, q->service, SA_RESOLVE_TCP, q->family);
+	q->num_addr = resolve_sync(
+		q->addr, query_maxaddr(q), q->name, q->service, q->family);
 	finish_defer(q);
 }
 
@@ -528,7 +719,7 @@ struct resolve_query *resolve_do(
 	q->done_cb = cb;
 	ev_init(&q->w_finish, finish_cb);
 	q->w_finish.data = q;
-	q->ok = false;
+	q->num_addr = 0;
 
 	if (name != NULL) {
 		q->name = memcpy(q->buf, name, namelen);
@@ -551,8 +742,7 @@ void resolve_cancel(struct resolve_query *restrict q)
 	if (q == NULL) {
 		return;
 	}
-	LOGD_F("resolve `%s:%s': cancel", q->name != NULL ? q->name : "",
-	       q->service != NULL ? q->service : "");
+	RESOLVE_LOG(DEBUG, q, "cancel");
 
 	/* Clear the callback to indicate cancellation */
 	q->done_cb = (struct resolve_cb){

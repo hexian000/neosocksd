@@ -16,6 +16,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+static inline bool http_version_is_1x(const char *restrict version)
+{
+	return strncmp(version, "HTTP/1.", 7) == 0 && '0' <= version[7] &&
+	       version[7] <= '9' && version[8] == '\0';
+}
 
 /** Maximum size for HTTP entity headers */
 #define HTTP_MAX_ENTITY 8192

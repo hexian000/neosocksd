@@ -12,7 +12,7 @@
  * resolution depending on build configuration.
  */
 
-#include "util.h"
+#include "os/socket.h"
 
 #include <stdint.h>
 
@@ -41,7 +41,7 @@ void resolver_cleanup(void);
 /**
  * @brief Create a new resolver instance
  * @param loop Event loop to integrate with (not owned; must remain valid)
- * @param conf Configuration containing nameserver settings (may be NULL)
+ * @param conf Configuration containing nameserver settings (must not be NULL)
  * @return New resolver instance or NULL on allocation failure; free with resolver_free()
  */
 struct resolver *
@@ -57,6 +57,7 @@ resolver_new(struct ev_loop *restrict loop, const struct config *restrict conf);
  *
  * @param r Resolver instance
  * @param conf Configuration carrying the (possibly boot-updated) nameserver
+ *             (must not be NULL)
  */
 void resolver_setnameserver(
 	struct resolver *restrict r, const struct config *restrict conf);
@@ -74,7 +75,15 @@ const struct resolver_stats *resolver_stats(const struct resolver *restrict r);
  */
 void resolver_free(struct resolver *restrict r);
 
-struct sockaddr;
+/**
+ * @brief Upper bound on the addresses one query answers with.
+ *
+ * A name commonly resolves to more than one address, and a caller that dials
+ * only the first fails outright whenever that one is unreachable -- so the
+ * whole answer is carried, capped here. The cap bounds the query's own storage
+ * and, through it, how far a caller may fan out over one name.
+ */
+#define RESOLVE_MAX_ADDR 4
 
 /** @brief Callback structure for DNS resolution completion (always from event loop context) */
 struct resolve_cb {
@@ -83,11 +92,15 @@ struct resolve_cb {
 	 * @param q The completed query (freed automatically after return)
 	 * @param loop Event loop where the query was processed
 	 * @param data User data passed during query initiation
-	 * @param sa Resolved socket address, or NULL on failure (DNS error, no address, or OOM)
+	 * @param addr Resolved socket addresses, in the order they are meant to
+	 *             be tried; valid until the callback returns, NULL on
+	 *             failure
+	 * @param num_addr Number of addresses in @p addr; 0 on failure (DNS
+	 *                 error, no address, or OOM)
 	 */
 	void (*func)(
 		struct resolve_query *q, struct ev_loop *loop, void *data,
-		const struct sockaddr *sa);
+		const union sockaddr_max *addr, size_t num_addr);
 	/** User data passed to callback (not freed by resolver). */
 	void *data;
 };
@@ -98,7 +111,11 @@ struct resolve_cb {
  * @param cb Callback invoked on completion (cb.func may be NULL to ignore)
  * @param name Hostname to resolve (may be NULL for localhost)
  * @param service Service name or port string (e.g. "80"); may be NULL
- * @param family AF_INET, AF_INET6, or AF_UNSPEC
+ * @param family AF_INET, AF_INET6, or AF_UNSPEC. A pinned family answers with
+ *               at most one address; AF_UNSPEC answers with up to
+ *               RESOLVE_MAX_ADDR of them, the families interleaved as RFC 8305
+ *               4 prescribes so a caller walking the list alternates between
+ *               them.
  * @return Query handle (freed automatically after callback); NULL on OOM
  */
 struct resolve_query *resolve_do(
@@ -112,12 +129,16 @@ struct resolve_query *resolve_do(
  * in the background (for c-ares) but the result is discarded. The query
  * memory is freed when resolution completes internally.
  *
- * Safe to call multiple times on the same query. Safe to call after
- * the query has already completed (no-op).
+ * The handle lives from resolve_do() until the callback is invoked or
+ * resolver_free() runs; both free the query. Cancelling suppresses the
+ * callback, so no observable event marks the handle's death afterwards --
+ * drop it at the cancel. Repeated cancels while the handle is live are a
+ * no-op.
  *
  * @param q Query to cancel (safe to pass NULL)
  *
- * @warning Do not call from within the query's own callback.
+ * @warning Do not call from within the query's own callback, nor on a query
+ * whose callback has already returned.
  */
 void resolve_cancel(struct resolve_query *restrict q);
 

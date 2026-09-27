@@ -47,6 +47,10 @@ enum socks4_response {
 	SOCKS4RSP_GRANTED = 90, /* 0x5A */
 	/* request rejected or failed */
 	SOCKS4RSP_REJECTED = 91, /* 0x5B */
+	/* rejected: server cannot connect to identd on the client */
+	SOCKS4RSP_NOIDENTD = 92, /* 0x5C */
+	/* rejected: client and identd report different user-ids */
+	SOCKS4RSP_IDENTMISMATCH = 93, /* 0x5D */
 };
 
 enum socks5_address_type {

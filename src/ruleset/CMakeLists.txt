@@ -27,11 +27,12 @@ if(WITH_LUA)
         CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
         EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
         WITH_LUA)
-    add_unit_test(await_test
-        SRCS await_test.c await.c base.c ../proto/codec.c
-        CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
-        EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
-        WITH_LUA)
+add_unit_test(await_test
+    SRCS await_test.c base.c ../proto/codec.c
+    MOCK_SRCS await.c
+    MOCK_DEFINITIONS fork=test_await_fork
+    CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
+    WITH_LUA)
     add_unit_test(ruleset_test
         SRCS ruleset_test.c ruleset.c base.c cfunc.c ../conf.c ../proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/../version.c"
         CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"

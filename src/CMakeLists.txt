@@ -359,11 +359,17 @@ add_unit_test(main_test
 # dialer_test: isolated white-box tests for dialer.c; collaborators are mocked
 # or driven through raw loopback peers, so only leaf modules are linked.
 add_unit_test(dialer_test
-    SRCS dialer_test.c dialer.c util.c resolver.c
+    SRCS dialer_test.c util.c
          "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    MOCK_SRCS dialer.c resolver.c
+    MOCK_DEFINITIONS
+        connect=test_connect
+        malloc=test_malloc
+        socket_set_cloexec=test_socket_set_cloexec
+        socket_set_nonblock=test_socket_set_nonblock
     WITH_RULESET WITH_THREADS WITH_CARES)
+target_compile_options(dialer_test_mock_impl PRIVATE -U_GNU_SOURCE)
 # dialer_test interposes connect() to force a synchronous-success handshake.
-target_link_options(dialer_test PRIVATE "LINKER:--wrap=connect")
 add_unit_test(resolver_test
     SRCS resolver_test.c resolver.c
     WITH_CARES)

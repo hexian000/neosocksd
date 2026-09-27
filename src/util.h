@@ -127,6 +127,72 @@ static inline size_t log_escape(
 	return n;
 }
 
+/* Log a blocked-address message; the caller returns false regardless of the
+ * runtime log level (this macro must not carry the control flow itself). */
+#define LOG_BLOCKED(level, what, sa)                                           \
+	do {                                                                   \
+		if (LOGLEVEL(level)) {                                         \
+			char addr_str[64];                                     \
+			sa_format(addr_str, sizeof(addr_str), sa);             \
+			LOG_F(level, "blocked %s address: %s", what,           \
+			      addr_str);                                       \
+		}                                                              \
+	} while (0)
+
+/* Apply the outbound policy to TCP and UDP targets alike. */
+static inline bool check_outbound_sa(
+	const struct config *restrict conf, const struct sockaddr *restrict sa)
+{
+	/* sa_ipclassify() resolves an IPv4-mapped IPv6 address (::ffff:a.b.c.d)
+	 * by its embedded IPv4 address */
+	switch (sa_ipclassify(sa)) {
+	case IPCLASS_LOOPBACK:
+		if (conf->block_loopback) {
+			LOG_BLOCKED(DEBUG, "loopback", sa);
+			return false;
+		}
+		break;
+	case IPCLASS_MULTICAST:
+		if (conf->block_multicast) {
+			LOG_BLOCKED(DEBUG, "multicast", sa);
+			return false;
+		}
+		break;
+	case IPCLASS_LINKLOCAL:
+	case IPCLASS_SITELOCAL:
+	case IPCLASS_SHARED:
+		/* RFC 6598 shared space (100.64.0.0/10, CGNAT) is
+		 * carrier-internal infrastructure, grouped with the private
+		 * ranges under block_local */
+		if (conf->block_local) {
+			LOG_BLOCKED(DEBUG, "local", sa);
+			return false;
+		}
+		break;
+	case IPCLASS_GLOBAL:
+		if (conf->block_global) {
+			LOG_BLOCKED(DEBUG, "non-local", sa);
+			return false;
+		}
+		break;
+	case IPCLASS_RESERVED:
+		/* RFC 1112 reserved-for-future-use (240.0.0.0/4): non-routable */
+		LOG_BLOCKED(DEBUG, "reserved", sa);
+		return false;
+	case IPCLASS_BROADCAST:
+		/* RFC 919 limited broadcast (255.255.255.255) */
+		LOG_BLOCKED(DEBUG, "broadcast", sa);
+		return false;
+	default:
+		/* IPCLASS_UNSPECIFIED / IPCLASS_UNKNOWN: not a dialable target */
+		LOG_BLOCKED(DEBUG, "invalid", sa);
+		return false;
+	}
+	return true;
+}
+
+#undef LOG_BLOCKED
+
 /* Process-level initializations. */
 void init(int argc, char *const restrict argv[]);
 

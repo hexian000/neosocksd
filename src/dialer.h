@@ -11,6 +11,7 @@
 
 #include "proto/domain.h"
 #include "proto/socks.h"
+#include "resolver.h"
 #include "util.h"
 
 #include "meta/minmax.h"
@@ -26,7 +27,6 @@
 #include <string.h>
 
 struct config;
-struct resolver;
 struct server;
 
 /**
@@ -40,6 +40,14 @@ enum dialaddr_type {
 
 /**
  * @brief Network address structure supporting IPv4, IPv6, and domain names
+ * @details A domain name is `domain.len` bytes and carries no null byte: the
+ * resolver and the ruleset binding both take it as a C string, so a name
+ * holding one has to be refused where it enters rather than truncated here.
+ * Nor any other byte outside printable ASCII: an HTTP hop writes the name into
+ * the CONNECT request-line and the Host field, which frame on the space and
+ * the CRLF, so a name that cannot be written there fails the dial instead. And
+ * `domain.len` is at least 1: the empty string is no host name, and writing it
+ * there would leave the request-target without a host at all.
  */
 struct dialaddr {
 	enum dialaddr_type type;
@@ -53,6 +61,9 @@ struct dialaddr {
 
 /**
  * @brief Parse a string address into a dialaddr structure
+ * @details The address names a destination to dial, and carries no scheme to
+ * take a default port from, so the port is explicit and non-zero: RFC 6335 6
+ * reserves port 0 and no connection reaches it.
  * @param addr Output dialaddr structure
  * @param s Input string in "host:port" format
  * @param len Length of input string
@@ -141,6 +152,9 @@ enum dialer_error {
 	DIALER_ERR_EOF,
 	/** Connection blocked by local policy. */
 	DIALER_ERR_BLOCKED,
+	/** The request names an address no protocol message can carry, or a
+	 * port no connection reaches. */
+	DIALER_ERR_BADADDR,
 
 	DIALER_ERR_MAX,
 };
@@ -172,6 +186,8 @@ struct proxyreq {
 struct dialreq {
 	struct dialaddr addr;
 	size_t num_proxy;
+	/* Allocated proxy[] slots; dialreq_addproxy() appends up to this many */
+	size_t num_proxy_max;
 	struct proxyreq proxy[];
 };
 
@@ -185,10 +201,12 @@ struct dialreq *dialreq_new(const struct dialreq *base, size_t num_proxy);
 
 /**
  * @brief Add a proxy to a dial request
+ * @details The URI's port is optional: an absent or empty port subcomponent
+ * takes the scheme's default (RFC 3986 3.2.3, RFC 9110 4.2.1).
  * @param req Dial request to modify
  * @param proxy_uri Proxy URI string (e.g., "http://proxy:8080")
  * @param urilen Length of proxy URI string
- * @return true on success, false on parse error
+ * @return true on success, false on parse error or when proxy[] is full
  */
 bool dialreq_addproxy(
 	struct dialreq *restrict req, const char *restrict proxy_uri,
@@ -196,7 +214,7 @@ bool dialreq_addproxy(
 
 /**
  * @brief Parse address and proxy chain from strings
- * @param addr Target address string (may be NULL for wildcard)
+ * @param addr Target address string; NULL or CONF_FORWARD_ANY for wildcard
  * @param csv Comma-separated list of proxy URIs (may be NULL for direct connection)
  * @return Allocated dialreq structure, or NULL on error
  */
@@ -222,7 +240,7 @@ void dialreq_free(struct dialreq *req);
 /**
  * @brief Replace *req with a freshly parsed dial request, freeing the old one
  * @param req Pointer to the dial request to replace; left unchanged on failure
- * @param addr Target address string (may be NULL for wildcard)
+ * @param addr Target address string; NULL or CONF_FORWARD_ANY for wildcard
  * @param csv Comma-separated list of proxy URIs (may be NULL for direct connection)
  * @return true on success, false if the new dial request could not be parsed
  */
@@ -232,8 +250,10 @@ bool dialreq_replace(
 
 /**
  * @brief Headroom for an upstream proxy's HTTP CONNECT response: the status
- * line plus every response header must fit here, or recv_http_rsp() fails the
- * dial as "response too long". A conforming proxy can send well over 1 KiB --
+ * line plus every response header, with one byte left over for the terminator
+ * the parser writes after them, must fit here, or the dial fails as "header too
+ * long". Tunnel bytes queued behind a complete header block do not count
+ * against it. A conforming proxy can send well over 1 KiB --
  * a long Proxy-Authenticate challenge on a 407, Via/X-Cache stacks, portal
  * Set-Cookie -- so this matches the 8 KiB header block used elsewhere for HTTP
  * connections (proto/http.h HTTP_MAX_ENTITY) rather than the request maxima.
@@ -256,6 +276,24 @@ struct dialer_cb {
 	void *data;
 };
 
+/** @brief Progress of a dial through the dialer state machine */
+enum dialer_state {
+	/** Initial state, not yet started. */
+	DIALER_STATE_INIT,
+	/** Resolving the domain name to an IP address. */
+	DIALER_STATE_RESOLVE,
+	/** Establishing the TCP connection. */
+	DIALER_STATE_CONNECT,
+	/** First phase of the proxy handshake. */
+	DIALER_STATE_HANDSHAKE1,
+	/** Second phase of the proxy handshake. */
+	DIALER_STATE_HANDSHAKE2,
+	/** Third phase of the proxy handshake. */
+	DIALER_STATE_HANDSHAKE3,
+	/** Connection established or failed. */
+	DIALER_STATE_DONE,
+};
+
 /** @brief Dialer state machine */
 struct dialer {
 	const struct dialreq *req;
@@ -263,13 +301,22 @@ struct dialer {
 	struct resolver *resolver;
 	struct resolve_query *resolve_query;
 	size_t jump;
-	int state;
+	enum dialer_state state;
 	/* High-level error code */
 	enum dialer_error err;
-	/* System errno (valid when err == DIALER_ERR_SYSTEM) */
+	/* System errno; set for DIALER_ERR_SYSTEM and DIALER_ERR_CONNECT, 0
+	 * otherwise */
 	int syserr;
 	ev_io w_socket;
 	int dialed_fd;
+	/* Addresses to try in resolver order and their connect sockets,
+	 * staggered per RFC 8305; live only in DIALER_STATE_CONNECT. The winner
+	 * becomes dialed_fd (direct) or moves to w_socket (proxied handshake);
+	 * the losers are closed. */
+	union sockaddr_max addr[RESOLVE_MAX_ADDR];
+	size_t num_addr, next_addr, num_inflight;
+	ev_io w_attempt[RESOLVE_MAX_ADDR];
+	ev_timer w_delay;
 	ev_watcher w_finish;
 	struct dialer_cb finish_cb;
 	uint_least64_t *byt_sent, *byt_recv;
