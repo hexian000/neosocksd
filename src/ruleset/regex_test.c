@@ -10,7 +10,7 @@
  * section only holds shared Lua test fixtures.
  */
 
-#include "ruleset/regex.h"
+#include "regex.h"
 
 #include "utils/testing.h"
 
@@ -20,6 +20,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* -------------------------------------------------------------------------
  * mock - shared Lua test fixtures (regex.c has no collaborator to mock).
@@ -468,6 +469,28 @@ T_DECLARE_CASE(regex_gmatch_iterator)
 	lua_close(L);
 }
 
+/* Regression: once gmatch reaches the end, repeated probes must not keep
+ * allocating match storage while rescanning the same suffix. */
+T_DECLARE_CASE(regex_gmatch_exhaustion_is_stable)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local r = regex.compile('z') "
+		   "local it = regex.gmatch(r, 'abc') "
+		   "it() "
+		   "collectgarbage('stop') "
+		   "local before = collectgarbage('count') "
+		   "for _ = 1, 1000 do it() end "
+		   "local after = collectgarbage('count') "
+		   "return before, after"));
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_tonumber(L, 2) <= lua_tonumber(L, 1));
+
+	lua_close(L);
+}
+
 /*
  * Regression: a pattern that can match empty (here, always-empty) must not
  * loop forever -- Lua's own string.gmatch advances by at least one byte
@@ -624,15 +647,19 @@ T_DECLARE_CASE(regex_find_init_after_newline_anchors)
 
 /*
  * Regression: regex_cstrpos() must not narrow the subject length to
- * lua_Integer. `huge` is the smallest length exceeding LUA_MAXINTEGER -- a
- * subject that size is reachable under LUA_32BITS on a 64-bit-size_t host, and
- * the value exceeds LUA_MAXINTEGER at every lua_Integer width, so this pins the
- * arithmetic portably without allocating the string. Pre-fix, (lua_Integer)len
- * was implementation-defined here: a positive index clamped to the end instead
- * of converting, and a negative index overflowed signed arithmetic.
+ * lua_Integer. `huge` is the smallest length exceeding LUA_MAXINTEGER, the
+ * only width where that conversion breaks, and is synthetic -- Lua's MAX_SIZE
+ * caps a string at a size both size_t and lua_Integer hold -- so no string is
+ * allocated. Pre-fix, (lua_Integer)len was implementation-defined there: a
+ * positive index clamped to the end instead of converting, and a negative
+ * index overflowed signed arithmetic. A size_t that cannot reach past
+ * LUA_MAXINTEGER has no such length to pin.
  */
 T_DECLARE_CASE(regex_cstrpos_does_not_narrow_length)
 {
+	if (SIZE_MAX <= (lua_Unsigned)LUA_MAXINTEGER) {
+		T_SKIPNOW();
+	}
 	const size_t huge = (size_t)LUA_MAXINTEGER + 1u;
 
 	/* positive 1-based index converts to pos-1, not clamp-to-end */
@@ -646,6 +673,36 @@ T_DECLARE_CASE(regex_cstrpos_does_not_narrow_length)
 
 	/* the largest-magnitude negative index maps to the string start */
 	T_EXPECT_EQ(regex_cstrpos(LUA_MININTEGER, huge), (size_t)0);
+}
+
+/*
+ * Regression: the mirror image -- regex_cstrpos() must not narrow the Lua
+ * index to size_t either. lua_Integer is 64-bit by default at every target
+ * width, so on a 32-bit-size_t host an index past SIZE_MAX truncated:
+ * regex_cstrpos(2^32, 10) returned 4294967295, an offset past len that
+ * find/match/gmatch add to the subject pointer while underflowing the
+ * remaining length.
+ */
+T_DECLARE_CASE(regex_cstrpos_does_not_narrow_position)
+{
+	const size_t len = 10;
+
+	/* the extremes of lua_Integer clamp to the two ends, at any width */
+	T_EXPECT_EQ(regex_cstrpos(LUA_MAXINTEGER, len), len);
+	T_EXPECT_EQ(regex_cstrpos(LUA_MININTEGER, len), (size_t)0);
+
+	/*
+	 * Indices a narrowing cast folds back into range: SIZE_MAX + 1 + k
+	 * truncates to k. Only a size_t narrower than lua_Integer has any.
+	 */
+	if (SIZE_MAX >= (lua_Unsigned)LUA_MAXINTEGER) {
+		return;
+	}
+	const lua_Integer wrap = (lua_Integer)SIZE_MAX + 1;
+	T_EXPECT_EQ(regex_cstrpos(wrap, len), len);
+	T_EXPECT_EQ(regex_cstrpos(wrap + 3, len), len);
+	T_EXPECT_EQ(regex_cstrpos(-wrap, len), (size_t)0);
+	T_EXPECT_EQ(regex_cstrpos(-(wrap + 5), len), (size_t)0);
 }
 
 /* -------------------------------------------------------------------------
@@ -678,6 +735,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_icase_matches_mixed_case),
 	T_CASE(regex_nosub_is_neutralized),
 	T_CASE(regex_gmatch_iterator),
+	T_CASE(regex_gmatch_exhaustion_is_stable),
 	T_CASE(regex_gmatch_empty_match_terminates),
 	T_CASE(regex_gmatch_anchor_matches_once),
 	T_CASE(regex_find_init_does_not_reanchor),
@@ -685,6 +743,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_gmatch_anchor_matches_consumed_newline_lines),
 	T_CASE(regex_find_init_after_newline_anchors),
 	T_CASE(regex_cstrpos_does_not_narrow_length),
+	T_CASE(regex_cstrpos_does_not_narrow_position),
 	T_SUITE_END,
 };
 

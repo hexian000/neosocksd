@@ -6,6 +6,7 @@
  *
  * Linked translation units (see CMakeLists.txt):
  *   ruleset/base.c   module under test
+ *   proto/codec.c    leaf
  *   util.c           leaf
  *   dialer.c         linked for the symbols bound by the Lua base library
  *   resolver.c       linked for the symbols bound by the Lua base library
@@ -14,7 +15,7 @@
  * shared Lua test fixtures.
  */
 
-#include "ruleset/base.h"
+#include "base.h"
 
 #include "dialer.h"
 
@@ -29,6 +30,7 @@
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
@@ -272,17 +274,242 @@ T_DECLARE_CASE(base_aux_format_addr_unknown_family)
 	lua_close(L);
 }
 
-T_DECLARE_CASE(base_aux_traceback_string)
+/* Evaluate @p expr for one error object, hand the result to aux_traceback and
+ * check the traceback it heads with. The documented stack effect is
+ * [-0, +(1|2)]: a rendering that had to be built stays beneath the traceback. */
+T_DECLARE_SUBCASE(
+	check_traceback, lua_State *restrict L, const char *restrict expr,
+	const char *restrict prefix)
+{
+	lua_settop(L, 0);
+	T_CHECK(luaL_loadstring(L, expr) == LUA_OK);
+	T_CHECK(lua_pcall(L, 0, 1, 0) == LUA_OK);
+
+	T_EXPECT_EQ(aux_traceback(L), 1);
+	const int pushed = lua_gettop(L) - 1;
+	T_EXPECT(pushed == 1 || pushed == 2);
+	const char *restrict const s = lua_tostring(L, -1);
+	T_CHECK(s != NULL);
+	T_EXPECT(strncmp(s, prefix, strlen(prefix)) == 0);
+	T_EXPECT(strstr(s, "stack traceback:") != NULL);
+
+	lua_settop(L, 0);
+}
+
+/*
+ * The traceback header was formatted from the type name and address for every
+ * non-string error object, so the `traceback' configuration replaced a
+ * ruleset's own message with "(table: 0x...)" -- less than the same error
+ * reports with the configuration off. aux_errmsg renders it now, so every shape
+ * heads the traceback with the message it logs either way.
+ */
+T_DECLARE_CASE(base_aux_traceback_renders_error_object)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
 
-	lua_pushliteral(L, "boom");
-	T_EXPECT_EQ(aux_traceback(L), 1);
-	const char *restrict s = lua_tostring(L, -1);
-	T_CHECK(s != NULL);
-	T_EXPECT(strstr(s, "boom") != NULL);
+	T_CALL_SUBCASE(
+		check_traceback, L, "return 'ruleset:1: boom'",
+		"ruleset:1: boom");
+	T_CALL_SUBCASE(check_traceback, L, "return 42", "42");
+	T_CALL_SUBCASE(check_traceback, L, "return nil", "nil");
+	/* an object without __tostring: type and address */
+	T_CALL_SUBCASE(check_traceback, L, "return {}", "table: ");
+	/* a working __tostring is the message the operator asked for */
+	T_CALL_SUBCASE(
+		check_traceback, L,
+		"return setmetatable({ code = 42 }, { __tostring = "
+		"function(self) return 'denied code=' .. self.code end })",
+		"denied code=42");
+	/* a __tostring that raises, and one that returns a non-string */
+	T_CALL_SUBCASE(
+		check_traceback, L,
+		"return setmetatable({}, { __tostring = function() error('tostring boom') end })",
+		"(unprintable table: ");
+	T_CALL_SUBCASE(
+		check_traceback, L,
+		"return setmetatable({}, { __tostring = function() return {} end })",
+		"(unprintable table: ");
 
+	/* neosocksd.traceback() is reachable without an error object, where
+	 * reading the stack top would reach below the frame */
+	lua_settop(L, 0);
+	T_EXPECT_EQ(aux_traceback(L), 1);
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	const char *restrict const s = lua_tostring(L, -1);
+	T_CHECK(s != NULL);
+	T_EXPECT(strstr(s, "(no error object)") == s);
+	T_EXPECT(strstr(s, "stack traceback:") != NULL);
+
+	lua_close(L);
+}
+
+/*
+ * The constraint the rendering has to respect: luaG_errormsg calls the message
+ * handler unprotected, so a raise there re-enters the handler until Lua gives
+ * up with LUA_ERRERR and replaces the error with "error in error handling".
+ * Drive aux_traceback as a real lua_pcall errfunc over an error object whose
+ * __tostring raises: the call still reports LUA_ERRRUN and carries both the
+ * fallback message and the traceback.
+ */
+T_DECLARE_CASE(base_aux_traceback_survives_raising_tostring)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	lua_pushcfunction(L, aux_traceback);
+	T_CHECK(luaL_loadstring(
+			L,
+			"error(setmetatable({}, { __tostring = function() error('tostring boom') end }))") ==
+		LUA_OK);
+	T_EXPECT_EQ(lua_pcall(L, 0, 0, 1), LUA_ERRRUN);
+	const char *restrict const s = lua_tostring(L, -1);
+	T_CHECK(s != NULL);
+	static const char want[] = "(unprintable table: ";
+	T_EXPECT(strncmp(s, want, sizeof(want) - 1) == 0);
+	T_EXPECT(strstr(s, "stack traceback:") != NULL);
+	T_EXPECT(strstr(s, "error in error handling") == NULL);
+
+	lua_close(L);
+}
+
+/* Evaluate @p expr for one error object and check how aux_errmsg renders it.
+ * The rendering is the sole diagnostic on the ruleset error paths, so every
+ * shape ruleset Lua can raise -- including the ones whose __tostring itself
+ * fails -- must come back as a usable message and leave the stack no deeper
+ * than the one pushed result. */
+T_DECLARE_SUBCASE(
+	check_errmsg, lua_State *restrict L, const char *restrict expr,
+	const char *restrict prefix)
+{
+	const int base = lua_gettop(L);
+
+	T_CHECK(luaL_loadstring(L, expr) == LUA_OK);
+	T_CHECK(lua_pcall(L, 0, 1, 0) == LUA_OK);
+	const char *restrict s = aux_errmsg(L, -1);
+	T_CHECK(s != NULL);
+	T_EXPECT(strncmp(s, prefix, strlen(prefix)) == 0);
+	T_EXPECT(lua_gettop(L) <= base + 2);
+	lua_settop(L, base);
+}
+
+T_DECLARE_CASE(base_aux_errmsg_renders_every_error_object)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* a string message passes through untouched */
+	T_CALL_SUBCASE(
+		check_errmsg, L, "return 'ruleset:1: boom'", "ruleset:1: boom");
+	/* other primitives render as tostring() would */
+	T_CALL_SUBCASE(check_errmsg, L, "return 42", "42");
+	T_CALL_SUBCASE(check_errmsg, L, "return nil", "nil");
+	/* an object without __tostring: type and address */
+	T_CALL_SUBCASE(check_errmsg, L, "return {}", "table: ");
+	/* a working __tostring is honored */
+	T_CALL_SUBCASE(
+		check_errmsg, L,
+		"return setmetatable({}, { __tostring = function() return 'denied' end })",
+		"denied");
+	/* a __tostring that raises must not take the message down with it */
+	T_CALL_SUBCASE(
+		check_errmsg, L,
+		"return setmetatable({}, { __tostring = function() error('nested') end })",
+		"(unprintable table: ");
+	/* nor one that returns a non-string, which luaL_tolstring rejects */
+	T_CALL_SUBCASE(
+		check_errmsg, L,
+		"return setmetatable({}, { __tostring = function() return {} end })",
+		"(unprintable table: ");
+	/* the same holds for a non-table carrier */
+	T_CALL_SUBCASE(
+		check_errmsg, L,
+		"local co = coroutine.create(function() end) "
+		"debug.setmetatable(co, { __tostring = function() error('nested') end }) "
+		"return co",
+		"(unprintable thread: ");
+
+	lua_close(L);
+}
+
+/* aux_errmsg's last resort: with the stack full it cannot even set up the
+ * protected call that renders the object. */
+T_DECLARE_CASE(base_aux_errmsg_stack_exhausted)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_CHECK(luaL_loadstring(
+			L,
+			"return setmetatable({}, { __tostring = function() error('nested') end })") ==
+		LUA_OK);
+	T_CHECK(lua_pcall(L, 0, 1, 0) == LUA_OK);
+	/* Fill the stack until it cannot take another slot. Lua answers its
+	 * first refusal by opening the reserve it keeps for error handling, so
+	 * keep filling until a refusal repeats. */
+	int refusals = 0;
+	while (refusals < 2) {
+		if (lua_checkstack(L, 1)) {
+			lua_pushnil(L);
+			refusals = 0;
+			continue;
+		}
+		refusals++;
+	}
+	T_CHECK(!lua_checkstack(L, 1));
+
+	T_EXPECT_STREQ(aux_errmsg(L, 1), "(unprintable error object)");
+
+	lua_settop(L, 0);
+	lua_close(L);
+}
+
+/* Fail every allocation, including the emergency-GC retry that follows the
+ * first failure. */
+static void *
+failing_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
+{
+	const bool *restrict const failing = ud;
+
+	(void)osize;
+	if (nsize == 0) {
+		free(ptr);
+		return NULL;
+	}
+	if (*failing) {
+		return NULL;
+	}
+	return realloc(ptr, nsize);
+}
+
+/* Out of memory is the one failure that defeats both renderings: luaL_tolstring
+ * cannot build its result and neither can the type/address fallback. */
+T_DECLARE_CASE(base_aux_errmsg_out_of_memory)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+	bool failing = false;
+	lua_setallocf(L, failing_alloc, &failing);
+
+	T_CHECK(luaL_loadstring(
+			L,
+			"return setmetatable({}, { __tostring = function() error('nested') end })") ==
+		LUA_OK);
+	T_CHECK(lua_pcall(L, 0, 1, 0) == LUA_OK);
+	/* the same object renders through the fallback while memory is
+	 * available, so the literal below is the shortage talking */
+	static const char want[] = "(unprintable table: ";
+	T_EXPECT(strncmp(aux_errmsg(L, 1), want, sizeof(want) - 1) == 0);
+	lua_settop(L, 1);
+	/* reserve the stack in advance, so the rendering itself is what fails */
+	T_CHECK(lua_checkstack(L, 8));
+
+	failing = true;
+	const char *restrict s = aux_errmsg(L, 1);
+	failing = false;
+	T_EXPECT_STREQ(s, "(unprintable error object)");
+
+	lua_settop(L, 0);
 	lua_close(L);
 }
 
@@ -377,6 +604,51 @@ T_DECLARE_CASE(base_aux_todialreq_rejects_bad_strings_pops_stack)
 	T_EXPECT_EQ(lua_gettop(L), base);
 
 	lua_close(L);
+}
+
+T_DECLARE_SUBCASE(
+	expect_nul_dialreq_rejected, const char *restrict target,
+	const size_t target_len, const char *restrict proxy,
+	const size_t proxy_len)
+{
+	struct ruleset r = { 0 };
+	r.basereq =
+		dialreq_parse("base.example:443", "socks5://127.0.0.1:1080");
+	T_CHECK(r.basereq != NULL);
+	lua_State *restrict L = new_ruleset_lua(&r);
+	lua_pushstring(L, "sentinel");
+	lua_pushlstring(L, target, target_len);
+	lua_pushlstring(L, proxy, proxy_len);
+	const bool accepted = aux_todialreq(L, 2);
+	const int top = lua_gettop(L);
+	const bool preserved = strcmp(lua_tostring(L, 1), "sentinel") == 0;
+	if (accepted) {
+		dialreq_free(lua_touserdata(L, -1));
+	}
+	lua_close(L);
+	dialreq_free(r.basereq);
+
+	T_EXPECT(!accepted);
+	T_EXPECT_EQ(top, 1);
+	T_EXPECT(preserved);
+}
+
+T_DECLARE_CASE(base_aux_todialreq_rejects_nul_target)
+{
+	static const char target[] = "example.com:443\0.attacker";
+	static const char proxy[] = "http://127.0.0.1:8080";
+	T_CALL_SUBCASE(
+		expect_nul_dialreq_rejected, target, sizeof(target) - 1, proxy,
+		sizeof(proxy) - 1);
+}
+
+T_DECLARE_CASE(base_aux_todialreq_rejects_nul_proxy)
+{
+	static const char target[] = "example.com:443";
+	static const char proxy[] = "http://127.0.0.1:8080\0.attacker";
+	T_CALL_SUBCASE(
+		expect_nul_dialreq_rejected, target, sizeof(target) - 1, proxy,
+		sizeof(proxy) - 1);
 }
 
 T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
@@ -755,11 +1027,17 @@ static const struct testing_suite suite[] = {
 	T_CASE(base_aux_format_addr_ipv6),
 	T_CASE(base_aux_format_addr_null),
 	T_CASE(base_aux_format_addr_unknown_family),
-	T_CASE(base_aux_traceback_string),
+	T_CASE(base_aux_traceback_renders_error_object),
+	T_CASE(base_aux_traceback_survives_raising_tostring),
+	T_CASE(base_aux_errmsg_renders_every_error_object),
+	T_CASE(base_aux_errmsg_stack_exhausted),
+	T_CASE(base_aux_errmsg_out_of_memory),
 	T_CASE(base_aux_todialreq_builds_request),
 	T_CASE(base_aux_todialreq_nil_returns_null),
 	T_CASE(base_aux_todialreq_overflow_pops_stack),
 	T_CASE(base_aux_todialreq_rejects_bad_strings_pops_stack),
+	T_CASE(base_aux_todialreq_rejects_nul_target),
+	T_CASE(base_aux_todialreq_rejects_nul_proxy),
 	T_CASE(base_aux_async_reuses_idle_thread),
 	T_CASE(base_aux_async_grows_thread_stack_for_args),
 	T_CASE(base_aux_getregtable_rejects_non_table),

@@ -1,14 +1,16 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/regex.h"
+#include "regex.h"
 
 #include <lauxlib.h>
 #include <lua.h>
 
+#include <assert.h>
 #include <limits.h>
 #include <regex.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 #define MT_REGEX "regex"
@@ -81,11 +83,17 @@ static int regex_compile(lua_State *restrict L)
 	return 1;
 }
 
+static_assert(
+	SIZE_MAX <= UINT_FAST64_MAX &&
+		(lua_Unsigned)LUA_MAXINTEGER < UINT_FAST64_MAX,
+	"regex_cstrpos needs uint_fast64_t to cover size_t and lua_Integer");
+
 /* Convert Lua string index (1-based, negative for reverse) to C index (0-based).
  * Lua:  1 = first char, -1 = last char, 0 = clamp to start
- * Returns a valid C index in range [0, len]. `len` is never narrowed to
- * lua_Integer: under LUA_32BITS a subject can exceed LUA_MAXINTEGER, and that
- * out-of-range conversion is implementation-defined. */
+ * Returns a valid C index in range [0, len]. Either of size_t and lua_Integer
+ * can be the wider type -- lua_Integer on a 32-bit target, size_t under
+ * LUA_32BITS -- so index and length meet at uint_fast64_t and the result
+ * narrows to size_t only once clamped into range. */
 size_t regex_cstrpos(const lua_Integer pos, const size_t len)
 {
 	if (len == 0) {
@@ -93,22 +101,21 @@ size_t regex_cstrpos(const lua_Integer pos, const size_t len)
 	}
 	if (pos < 0) {
 		/* Negative index: -1 = last, -2 = second last, etc. Form the
-		 * magnitude |pos| as size_t and compare/subtract at full width.
-		 * -(pos + 1) + 1 avoids the overflow of negating LUA_MININTEGER. */
-		const size_t mag = (size_t)(-(pos + 1)) + 1;
-		if (mag > len) {
+		 * magnitude |pos|; -(pos + 1) + 1 avoids the overflow of
+		 * negating LUA_MININTEGER. */
+		const uint_fast64_t mag = (uint_fast64_t)(-(pos + 1)) + 1u;
+		if (mag > (uint_fast64_t)len) {
 			/* Underflow: clamp to start. */
 			return 0;
 		}
-		return len - mag;
+		return len - (size_t)mag;
 	}
 	if (pos == 0) {
 		/* Zero means the start position. */
 		return 0;
 	}
-	/* pos > 0: positive index (1-based). Widen pos to size_t for the range
-	 * check so len is not narrowed to a (possibly 32-bit) lua_Integer. */
-	if ((size_t)pos > len) {
+	/* pos > 0: positive index (1-based). */
+	if ((uint_fast64_t)pos > (uint_fast64_t)len) {
 		return len;
 	}
 	return (size_t)(pos - 1);
@@ -239,6 +246,8 @@ static int gmatch_aux(lua_State *restrict L)
 		lua_newuserdata(L, nmatch * sizeof(regmatch_t));
 	const int err = regexec(&reg->preg, s, nmatch, matches, eflags);
 	if (err == REG_NOMATCH) {
+		lua_pushinteger(L, GMATCH_DONE);
+		lua_replace(L, lua_upvalueindex(3));
 		return 0;
 	}
 	if (err != 0) {

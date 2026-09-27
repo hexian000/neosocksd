@@ -4,7 +4,7 @@
 #ifndef RULESET_BASE_H
 #define RULESET_BASE_H
 
-#include "ruleset/ruleset.h"
+#include "ruleset.h"
 
 #include <ev.h>
 #include <lauxlib.h>
@@ -157,21 +157,33 @@ int aux_load(
 /**
  * @brief Format address for display
  *
- * Stack effect: [-0, +1, v]
+ * Stack effect: [-0, +(0|1), v]. Reads the sockaddr pointer on top without
+ * removing it; a NULL pointer pushes nothing. An unsupported address family
+ * or formatting failure raises a Lua error.
  *
  * @param L Lua state
- * @return Number of results (1)
+ * @return 1 after pushing an address string, or 0 for a NULL sockaddr
  */
 int aux_format_addr(lua_State *restrict L);
 
 /**
  * @brief Convert Lua values to dial request
  *
- * Stack effect: [-n, +(0|1), -]
+ * Stack effect: [-n, +(0|1), m]
+ *
+ * @details Consumes the n values on the stack top: the address followed by
+ * proxyN ... proxy1. On success pushes the built dialreq as a lightuserdata;
+ * a nil address pushes a NULL one, which never means a direct connection:
+ * callers reject the request (or raise an invalid-address error) on it. A
+ * direct connection is an address with no proxies, which still yields a
+ * non-NULL dialreq. On failure pushes nothing. Raises only on a memory error
+ * while converting a number argument with lua_tolstring, so a caller that must
+ * not unwind calls it under a pcall.
  *
  * @param L Lua state
  * @param n Number of arguments to convert
- * @return true on success, false on error
+ * @return true on success; false on an invalid address or proxy, more than
+ * 255 values, or failure to allocate the dialreq
  */
 bool aux_todialreq(lua_State *restrict L, int n);
 
@@ -179,8 +191,10 @@ bool aux_todialreq(lua_State *restrict L, int n);
  * @brief Generate Lua stack traceback
  *
  * Stack effect: [-0, +(1|2), m]
- * (the default error-object branch leaves the lua_pushfstring string beneath
- * the traceback; callers use only the top result)
+ *
+ * @details Heads the traceback with aux_errmsg's rendering of the error object
+ * at the stack top, which for a non-string object stays beneath the traceback;
+ * callers use only the top result.
  *
  * @param L Lua state
  * @return Number of results (1)
@@ -188,9 +202,30 @@ bool aux_todialreq(lua_State *restrict L, int n);
 int aux_traceback(lua_State *restrict L);
 
 /**
+ * @brief Render the error object at @p idx as a log message.
+ *
+ * Stack effect: [-0, +(0|1), -]
+ *
+ * @details luaL_tolstring dispatches __tostring, which ruleset Lua owns and may
+ * raise from, return a non-string from, or exhaust memory in. Rendering an
+ * error object on an unprotected error path would then lose the log line
+ * entirely, so run the dispatch protected and fall back to a metamethod-free
+ * description of the object.
+ *
+ * @param L Lua state
+ * @param idx Stack index of the error object
+ * @return The message, never NULL, valid until the pushed result is popped
+ */
+const char *aux_errmsg(lua_State *restrict L, int idx);
+
+/**
  * @brief Resume Lua coroutine
  *
- * Stack effect: [-narg, +0, -]
+ * Stack effect: [-?, +?, -], as for lua_resume(). Starting consumes the body
+ * function and its arguments; resuming a yielded coroutine consumes its
+ * resume arguments. On yield or success the coroutine stack exposes the
+ * yielded or returned values; on error an error object is left on top.
+ * This wrapper returns only the status, not the number of results.
  *
  * @param L Thread to resume
  * @param from Calling thread

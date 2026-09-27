@@ -7,18 +7,19 @@
  * Linked translation units (see CMakeLists.txt):
  *   ruleset/api.c    module under test
  *   ruleset/base.c   ruleset Lua substrate
+ *   proto/codec.c    leaf
  * The dialer/resolver/api_client/server symbols bound by api.c are replaced
  * by the mocks in the mock section below.
  */
 
-#include "ruleset/api.h"
+#include "api.h"
 
 #include "api_client.h"
+#include "base.h"
 #include "conf.h"
 #include "dialer.h"
 #include "resolver.h"
-#include "ruleset/base.h"
-#include "ruleset/ruleset.h"
+#include "ruleset.h"
 #include "server.h"
 
 #include "meta/arraysize.h"
@@ -144,9 +145,12 @@ static bool parse_hostport(
 
 /*
  * api.c and base.c are included as sources.  The stubs below satisfy their
- * external dependencies that are outside the scope of these tests.  The
- * tested functions (parse_ipv4, parse_ipv6, splithostport, traceback) do
- * not access a live ruleset, so aux_getruleset returning NULL is fine.
+ * external dependencies that are outside the scope of these tests.  Cases
+ * built on new_lua() (module open, parse_ipv4, parse_ipv6, splithostport,
+ * traceback) run with no ruleset, so aux_getruleset returns NULL there; the
+ * rest (config, stats, setinterval, invoke, async, resolve, now) go through
+ * new_ruleset_lua(), which installs a real struct ruleset as the Lua
+ * allocator userdata.
  */
 
 /* ---- dialer stubs (required by base.c's aux_todialreq) ---- */
@@ -256,29 +260,6 @@ void api_client_invoke(
 	G.payload[G.payload_len] = '\0';
 	G.conf = opts->conf;
 	G.resolver = opts->resolver;
-}
-
-/* ---- util stub (required by util.c's loadlibs if ever called) ---- */
-
-const char *neosocksd_version(void)
-{
-	return "test";
-}
-
-int dialreq_format(
-	char *restrict s, const size_t maxlen, const struct dialreq *restrict r)
-{
-	(void)s;
-	(void)maxlen;
-	(void)r;
-	return -1;
-}
-
-void resolver_init(void)
-{
-}
-void resolver_cleanup(void)
-{
 }
 
 /* ---- Lua helpers ---- */
@@ -414,6 +395,33 @@ T_DECLARE_CASE(api_resolve_invalid)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(api_resolve_rejects_embedded_nul)
+{
+	struct config conf = {
+		.resolve_pf = PF_UNSPEC,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	T_CHECK(L != NULL);
+
+	const int rc_load = luaL_loadstring(
+		L, "local ok, err = pcall(neosocksd.resolve, "
+		   "'127.0.0.1'..string.char(0)..'.attacker') "
+		   "return ok, err");
+	T_EXPECT_EQ(rc_load, LUA_OK);
+	const int rc_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(rc_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *const err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "NUL") != NULL);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(api_parse_ipv4_valid)
 {
 	lua_State *restrict L = new_lua();
@@ -441,6 +449,27 @@ T_DECLARE_CASE(api_parse_ipv4_invalid)
 	T_EXPECT(lua_isnil(L, 1));
 	T_EXPECT(lua_isnil(L, 2));
 	T_EXPECT(lua_isnil(L, 3));
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(api_parse_ipv4_rejects_embedded_nul)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	const int rc_load = luaL_loadstring(
+		L, "local ok, err = pcall(neosocksd.parse_ipv4, "
+		   "'127.0.0.1'..string.char(0)..'.attacker') "
+		   "return ok, err");
+	T_EXPECT_EQ(rc_load, LUA_OK);
+	const int rc_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(rc_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *const err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "NUL") != NULL);
 
 	lua_close(L);
 }
@@ -479,6 +508,27 @@ T_DECLARE_CASE(api_parse_ipv6_invalid)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_isnil(L, 1));
 	T_EXPECT(lua_isnil(L, 2));
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(api_parse_ipv6_rejects_embedded_nul)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	const int rc_load = luaL_loadstring(
+		L, "local ok, err = pcall(neosocksd.parse_ipv6, "
+		   "'::1'..string.char(0)..'.attacker') "
+		   "return ok, err");
+	T_EXPECT_EQ(rc_load, LUA_OK);
+	const int rc_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(rc_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *const err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "NUL") != NULL);
 
 	lua_close(L);
 }
@@ -525,6 +575,58 @@ T_DECLARE_CASE(api_splithostport_invalid)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT(lua_type(L, 2) == LUA_TSTRING);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(api_splithostport_rejects_embedded_nul)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	const int rc_load = luaL_loadstring(
+		L, "local ok, err = pcall(neosocksd.splithostport, "
+		   "'example.com:80'..string.char(0)..'junk') "
+		   "return ok, err");
+	T_EXPECT_EQ(rc_load, LUA_OK);
+	const int rc_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(rc_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *const err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "NUL") != NULL);
+
+	lua_close(L);
+}
+
+/*
+ * On the request path the address handed to neosocksd.splithostport() is the
+ * one the peer wrote -- a SOCKS5 DOMAINNAME is an arbitrary byte string (RFC
+ * 1928, 5) with the port appended. The daemon renders an uncaught ruleset error
+ * into one log line, so splicing that address into the raised message let a
+ * newline in it end the line and leave the rest to the peer (CWE-117).
+ */
+T_DECLARE_CASE(api_splithostport_invalid_message_omits_the_address)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	const int rc_load = luaL_loadstring(
+		L, "local ok, err = pcall(neosocksd.splithostport, "
+		   "'a:b\\nE forged\\r\\1:80') "
+		   "return ok, err");
+	T_EXPECT_EQ(rc_load, LUA_OK);
+	const int rc_call = lua_pcall(L, 0, LUA_MULTRET, 0);
+	T_EXPECT_EQ(rc_call, LUA_OK);
+	T_EXPECT_EQ(lua_gettop(L), 2);
+	T_EXPECT(lua_toboolean(L, 1) == 0);
+	const char *restrict err = lua_tostring(L, 2);
+	T_CHECK(err != NULL);
+	T_EXPECT(strstr(err, "invalid address") != NULL);
+	T_EXPECT(strstr(err, "forged") == NULL);
+	T_EXPECT(strchr(err, '\n') == NULL);
+	T_EXPECT(strchr(err, '\r') == NULL);
 
 	lua_close(L);
 }
@@ -605,6 +707,84 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 	T_EXPECT(run_chunk(L, "return neosocksd.config().workers"));
 	T_EXPECT_EQ(lua_tointeger(L, -1), 3);
 #endif
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
+#if WITH_TCP_KEEPALIVE_PARAMS
+/*
+ * The keepalive timing is settable from a Lua config, so the ruleset must be
+ * able to read it back like every other tunable.
+ */
+T_DECLARE_CASE(api_config_exports_tcp_keepalive_params)
+{
+	struct config conf = {
+		.listen = "127.0.0.1:1080",
+		.timeout = 1.0,
+		.tcp_nodelay = true,
+		.tcp_keepalive = true,
+		.tcp_keepidle = 300,
+		.tcp_keepintvl = 15,
+		.tcp_keepcnt = 5,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_globals();
+	T_EXPECT(run_chunk(
+		L, "local c = neosocksd.config() "
+		   "return c.tcp_keepidle, c.tcp_keepintvl, c.tcp_keepcnt"));
+	T_EXPECT_EQ(lua_tointeger(L, 1), 300);
+	T_EXPECT_EQ(lua_tointeger(L, 2), 15);
+	T_EXPECT_EQ(lua_tointeger(L, 3), 5);
+	lua_settop(L, 0);
+
+	/* the system default reads back as 0, not as an absent field */
+	conf.tcp_keepidle = 0;
+	conf.tcp_keepintvl = 0;
+	conf.tcp_keepcnt = 0;
+	T_EXPECT(run_chunk(
+		L,
+		"local c = neosocksd.config() "
+		"return c.tcp_keepidle == 0, c.tcp_keepintvl == 0, c.tcp_keepcnt == 0"));
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+	T_EXPECT(lua_toboolean(L, 2) != 0);
+	T_EXPECT(lua_toboolean(L, 3) != 0);
+
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+#endif /* WITH_TCP_KEEPALIVE_PARAMS */
+
+/*
+ * neosocksd.now() hands back the event loop timestamp as a float. The subtype
+ * is observable in Lua 5.3+ (math.type, integer division, "%d" formatting), so
+ * the linter stub in neosocksd.lua must declare a float too.
+ */
+T_DECLARE_CASE(api_now_is_float)
+{
+	struct config conf = {
+		.listen = "127.0.0.1:1080",
+		.timeout = 1.0,
+	};
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+
+	reset_globals();
+	ev_now_update(loop);
+
+	T_EXPECT(run_chunk(L, "return neosocksd.now()"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_type(L, 1) == LUA_TNUMBER);
+	T_EXPECT(!lua_isinteger(L, 1));
+	T_EXPECT(lua_tonumber(L, 1) > 0.0);
+	lua_settop(L, 0);
+
+	T_EXPECT(run_chunk(L, "return math.type(neosocksd.now())"));
+	T_EXPECT_STREQ(lua_tostring(L, 1), "float");
 
 	lua_close(L);
 	ev_loop_destroy(loop);
@@ -786,16 +966,25 @@ static const struct testing_suite suite[] = {
 	T_CASE(api_module_opens),
 	T_CASE(api_resolve_valid),
 	T_CASE(api_resolve_invalid),
+	T_CASE(api_resolve_rejects_embedded_nul),
 	T_CASE(api_parse_ipv4_valid),
 	T_CASE(api_parse_ipv4_invalid),
+	T_CASE(api_parse_ipv4_rejects_embedded_nul),
 	T_CASE(api_parse_ipv6_valid),
 	T_CASE(api_parse_ipv6_invalid),
+	T_CASE(api_parse_ipv6_rejects_embedded_nul),
 	T_CASE(api_splithostport_simple),
 	T_CASE(api_splithostport_ipv6),
 	T_CASE(api_splithostport_invalid),
+	T_CASE(api_splithostport_rejects_embedded_nul),
+	T_CASE(api_splithostport_invalid_message_omits_the_address),
 	T_CASE(api_splithostport_too_long),
 	T_CASE(api_traceback_string),
 	T_CASE(api_config_reflects_ruleset_conf),
+#if WITH_TCP_KEEPALIVE_PARAMS
+	T_CASE(api_config_exports_tcp_keepalive_params),
+#endif
+	T_CASE(api_now_is_float),
 	T_CASE(api_stats_now_and_setinterval_use_ruleset_state),
 	T_CASE(api_invoke_and_async_real_paths),
 	T_CASE(api_async_catastrophic_returns_nil_and_error),

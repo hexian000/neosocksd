@@ -7,13 +7,14 @@
  * Linked translation units (see CMakeLists.txt):
  *   ruleset/marshal.c  module under test
  *   ruleset/base.c     ruleset Lua substrate
+ *   proto/codec.c      leaf
  *   util.c             leaf
  *   dialer.c, resolver.c  linked for symbols bound by the Lua base library
  *   version.c          leaf
  * No stateful collaborator to mock; the mock section holds Lua fixtures.
  */
 
-#include "ruleset/marshal.h"
+#include "marshal.h"
 
 #include "utils/testing.h"
 
@@ -301,6 +302,70 @@ T_DECLARE_CASE(marshal_float_zero)
 	lua_close(L);
 }
 
+/* marshal_number()'s hex-float tail is reached by every non-zero finite float:
+ * fpclassify() returns zero, NaN and infinity earlier, so frexp() always yields
+ * a non-zero [0.5, 1) fraction there and the [1, 2) exponent adjustment is
+ * unconditional. Pin the whole float domain against a regression in that tail:
+ * signed zeros, subnormals, the normal extremes, integral floats,
+ * 17-significant-digit values and the non-finite forms. Values are compared,
+ * not spelled, so a narrower lua_Number (which folds the extremes to zero or
+ * infinity) still holds. */
+T_DECLARE_CASE(marshal_float_domain_roundtrip)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L, "local huge = math.huge "
+		   "local vals = { "
+		   "  0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, 4.0, 1.5, -2.25, "
+		   "  0.1, 0.2, 0.1 + 0.2, 1 / 3, math.pi, 1.2345678901234567, "
+		   "  2 ^ -1022, 2 ^ -1023, 2 ^ -1074, "
+		   "  2.2250738585072014e-308, 1.7976931348623157e308, "
+		   "  1e-300, 1e300, 2 ^ 53, -(2 ^ 53), 1e15, 1e16, "
+		   "  huge, -huge, 0 / 0, "
+		   "} "
+		   "for i = 1, #vals do "
+		   "  local v = vals[i] "
+		   "  local m = marshal(v) "
+		   "  local f = load('return ' .. m) "
+		   "  if not f then return false, i, m end "
+		   "  local r = f() "
+		   "  if v ~= v then "
+		   "    if r == r then return false, i, m end "
+		   "  elseif v == 0 then "
+		   "    if r ~= 0 or (1 / v < 0) ~= (1 / r < 0) then "
+		   "      return false, i, m "
+		   "    end "
+		   "  elseif r ~= v or math.type(r) ~= 'float' then "
+		   "    return false, i, m "
+		   "  end "
+		   "end "
+		   "return true"));
+	T_EXPECT(lua_gettop(L) >= 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+	lua_settop(L, 0);
+
+	/* The emitted binary exponent is one less than frexp()'s, for the
+	 * [1, 2) mantissa. Spell out a few exact forms so a regression that
+	 * skipped the adjustment -- which the round-trip above catches only as a
+	 * value mismatch -- is pinned at the byte level. These values are exact
+	 * at every lua_Number width. */
+	T_EXPECT(run_chunk(
+		L, "local vals = {1.0, 0.5, 4.0, 2.0, -2.25} "
+		   "local want = {'0x1p+0', '0x1p-1', '0x1p+2', '0x1p+1', "
+		   "  '-0x1.2p+1'} "
+		   "for i = 1, #vals do "
+		   "  local m = marshal(vals[i]) "
+		   "  if m ~= want[i] then return false, i, m end "
+		   "end "
+		   "return true"));
+	T_EXPECT(lua_gettop(L) >= 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+
+	lua_close(L);
+}
+
 T_DECLARE_CASE(marshal_string_roundtrip)
 {
 	lua_State *restrict L = new_lua();
@@ -323,6 +388,32 @@ T_DECLARE_CASE(marshal_string_roundtrip)
 		   "return f() == s, marshal('plain text')"));
 	T_EXPECT(lua_toboolean(L, 1) != 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "\"plain text\"");
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(marshal_string_escape_before_digit)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	/* Lua reads up to three decimal digits after a backslash, so a byte
+	 * escaped right before a literal digit must use all three */
+	T_EXPECT(run_chunk(L, "return marshal('\\1' .. '2')"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT_STREQ(lua_tostring(L, 1), "\"\\0012\"");
+	lua_settop(L, 0);
+
+	/* every byte value, each followed by a digit, covers the escape width
+	 * for all escaped classes and the pass-through of the rest */
+	T_EXPECT(run_chunk(
+		L, "local t = {} "
+		   "for i = 0, 255 do t[#t + 1] = string.char(i) .. '7' end "
+		   "local s = table.concat(t) "
+		   "local f = assert(load('return ' .. marshal(s))) "
+		   "return f() == s"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
 
 	lua_close(L);
 }
@@ -517,7 +608,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(marshal_large_integer_hex),
 	T_CASE(marshal_mininteger_uses_hex),
 	T_CASE(marshal_float_zero),
+	T_CASE(marshal_float_domain_roundtrip),
 	T_CASE(marshal_string_roundtrip),
+	T_CASE(marshal_string_escape_before_digit),
 	T_CASE(marshal_table_roundtrip),
 	T_CASE(marshal_unsupported_type),
 	T_CASE(marshal_circular_table_rejected),

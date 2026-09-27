@@ -12,10 +12,11 @@
  * @brief Convert a Lua string index to a 0-based C offset clamped to [0, len].
  *
  * Lua indices are 1-based, with negatives counting from the end (-1 = last
- * char) and 0 clamping to the start. @p len is a byte count and is never
- * narrowed to lua_Integer, so the conversion stays correct when a subject is
- * longer than LUA_MAXINTEGER (reachable under LUA_32BITS). Declared here so the
- * width-portable arithmetic can be unit-tested with a synthetic length.
+ * char) and 0 clamping to the start. size_t and lua_Integer have no fixed
+ * width relation -- either can be the wider one -- and neither operand is
+ * narrowed to the other, so the result is in [0, len] at every target width.
+ * Declared here so the width-portable arithmetic can be unit-tested with a
+ * synthetic length.
  */
 size_t regex_cstrpos(lua_Integer pos, size_t len);
 

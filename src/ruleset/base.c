@@ -1,7 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/base.h"
+#include "base.h"
 
 #include "dialer.h"
 #include "proto/codec.h"
@@ -252,7 +252,7 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 	ASSERT(n > 0);
 	/* lua stack: ... addr proxyN ... proxy1 */
 	if (lua_isnil(L, -n)) {
-		/* a nil address means a direct connection (NULL dialreq) */
+		/* a nil address rejects the request (NULL dialreq) */
 		lua_pop(L, n);
 		lua_pushlightuserdata(L, NULL);
 		return true;
@@ -300,27 +300,60 @@ bool aux_todialreq(lua_State *restrict L, const int n)
 
 int aux_traceback(lua_State *restrict L)
 {
-	const int type = lua_type(L, -1);
-	const char *err;
-	switch (type) {
-	case LUA_TNIL:
-		err = "(nil)";
-		break;
-	case LUA_TNUMBER:
-	case LUA_TSTRING:
-		err = lua_tostring(L, -1);
-		break;
-	default:
-		err = lua_pushfstring(
-			L, "(%s: %p)", lua_typename(L, type),
-			lua_topointer(L, -1));
-	}
+	/* unlike a message handler, neosocksd.traceback() may be called
+	 * without an error object */
+	const char *restrict const err =
+		(lua_gettop(L) < 1) ? "(no error object)" : aux_errmsg(L, -1);
 	LOG_STACK_F(VERBOSE, 0, "traceback: %s", err);
 	luaL_traceback(L, L, err, 1);
 	size_t len;
 	const char *s = lua_tolstring(L, -1, &len);
 	LOG_TXT_F(VERBOSE, s, len, 0, "traceback: %s", err);
 	return 1;
+}
+
+/* Protected: replace the error object at index 1 with luaL_tolstring's
+ * rendering of it, which dispatches __tostring. */
+static int protected_tolstring(lua_State *restrict L)
+{
+	luaL_tolstring(L, 1, NULL);
+	return 1;
+}
+
+/* Protected: describe the error object at index 1 by type and address, without
+ * consulting any metamethod. lua_pushfstring allocates, so this too can only
+ * run under a pcall. */
+static int protected_describe(lua_State *restrict L)
+{
+	lua_pushfstring(
+		L, "(unprintable %s: %p)", luaL_typename(L, 1),
+		lua_topointer(L, 1));
+	return 1;
+}
+
+const char *aux_errmsg(lua_State *restrict L, const int idx)
+{
+	const int arg = lua_absindex(L, idx);
+	/* the common case, and the only one that needs no allocation */
+	if (lua_type(L, arg) == LUA_TSTRING) {
+		return lua_tostring(L, arg);
+	}
+	static const lua_CFunction render[] = { protected_tolstring,
+						protected_describe };
+	if (lua_checkstack(L, 3)) {
+		for (size_t i = 0; i < ARRAY_SIZE(render); i++) {
+			lua_pushcfunction(L, render[i]);
+			lua_pushvalue(L, arg);
+			if (lua_pcall(L, 1, 1, 0) == LUA_OK &&
+			    lua_type(L, -1) == LUA_TSTRING) {
+				return lua_tostring(L, -1);
+			}
+			/* the failed call's error object, or a __tostring
+			 * result that is not a string */
+			lua_pop(L, 1);
+		}
+	}
+	return "(unprintable error object)";
 }
 
 int aux_resume(lua_State *restrict L, lua_State *restrict from, const int narg)

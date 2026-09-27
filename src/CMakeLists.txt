@@ -378,11 +378,12 @@ if(WITH_LUA)
         SRCS ruleset/regex_test.c ruleset/regex.c
         NO_LIBEV WITH_LUA)
     add_unit_test(time_test
-        SRCS ruleset/time_test.c ruleset/time.c
+        SRCS ruleset/time_test.c
+        MOCK_SRCS ruleset/time.c
+        MOCK_DEFINITIONS clock_gettime=test_clock_gettime
         NO_LIBEV WITH_LUA)
     # time_test interposes clock_gettime() to force a monotonic-clock failure.
-    target_link_options(time_test PRIVATE "LINKER:--wrap=clock_gettime")
-    add_unit_test(base_test
+        add_unit_test(base_test
         SRCS ruleset/base_test.c ruleset/base.c proto/codec.c
              util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
@@ -403,6 +404,8 @@ if(WITH_LUA)
              proto/codec.c util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         WITH_LUA WITH_CARES)
+target_compile_options(zlib_test PRIVATE
+    -fno-builtin-malloc -fno-builtin-realloc)
 endif()
 
 # neosocksd binary early-exit integration tests.

@@ -1,13 +1,13 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/api.h"
+#include "api.h"
 
 #include "api_client.h"
+#include "base.h"
 #include "conf.h"
 #include "proto/domain.h"
 #include "resolver.h"
-#include "ruleset/base.h"
 #include "server.h"
 #include "util.h"
 
@@ -77,7 +77,11 @@ static int api_invoke(lua_State *restrict L)
 /* neosocksd.resolve(host) */
 static int api_resolve(lua_State *restrict L)
 {
-	const char *restrict const name = luaL_checkstring(L, 1);
+	size_t len;
+	const char *restrict const name = luaL_checklstring(L, 1, &len);
+	if (memchr(name, '\0', len) != NULL) {
+		return luaL_error(L, "string contains an embedded NUL byte");
+	}
 	const struct ruleset *restrict r = aux_getruleset(L);
 	union sockaddr_max addr;
 	if (!sa_resolve(
@@ -91,9 +95,13 @@ static int api_resolve(lua_State *restrict L)
 /* neosocksd.parse_ipv4(ipv4) */
 static int api_parse_ipv4(lua_State *restrict L)
 {
-	const char *restrict const s = lua_tostring(L, 1);
+	size_t len;
+	const char *restrict const s = lua_tolstring(L, 1, &len);
 	if (s == NULL) {
 		return 0;
+	}
+	if (memchr(s, '\0', len) != NULL) {
+		return luaL_error(L, "string contains an embedded NUL byte");
 	}
 	struct in_addr in;
 	if (inet_pton(AF_INET, s, &in) != 1) {
@@ -106,9 +114,13 @@ static int api_parse_ipv4(lua_State *restrict L)
 /* neosocksd.parse_ipv6(ipv6) */
 static int api_parse_ipv6(lua_State *restrict L)
 {
-	const char *restrict const s = lua_tostring(L, 1);
+	size_t len;
+	const char *restrict const s = lua_tolstring(L, 1, &len);
 	if (s == NULL) {
 		return 0;
+	}
+	if (memchr(s, '\0', len) != NULL) {
+		return luaL_error(L, "string contains an embedded NUL byte");
 	}
 	struct in6_addr in6;
 	if (inet_pton(AF_INET6, s, &in6) != 1) {
@@ -156,6 +168,9 @@ static int api_splithostport(lua_State *restrict L)
 {
 	size_t len;
 	const char *restrict const s = luaL_checklstring(L, 1, &len);
+	if (memchr(s, '\0', len) != NULL) {
+		return luaL_error(L, "string contains an embedded NUL byte");
+	}
 	/* FQDN + ':' + port */
 	if (len > FQDN_MAX_LENGTH + CONSTSTRLEN(":65535")) {
 		/* Format len with the standard %zu into a buffer, then pass it as
@@ -173,7 +188,12 @@ static int api_splithostport(lua_State *restrict L)
 	buf[len] = '\0';
 	char *host, *port;
 	if (!splithostport(buf, &host, &port)) {
-		return luaL_error(L, "invalid address: `%s'", s);
+		/* On the request path the address is the name the peer wrote,
+		 * and the daemon renders an uncaught ruleset error into one log
+		 * line, so a newline in it would end that line and let the peer
+		 * write the rest. Report the failure without the bytes; the
+		 * caller has the address it passed. */
+		return luaL_error(L, "invalid address");
 	}
 	lua_pushstring(L, host);
 	lua_pushstring(L, port);
@@ -197,10 +217,8 @@ static int api_config(lua_State *restrict L)
 	lua_setfield(L, -2, "restapi");
 	lua_pushstring(L, conf->http_listen);
 	lua_setfield(L, -2, "http_listen");
-#if WITH_RULESET
 	lua_pushstring(L, conf->ruleset);
 	lua_setfield(L, -2, "ruleset");
-#endif
 	lua_pushstring(L, conf->user_name);
 	lua_setfield(L, -2, "user_name");
 #if WITH_CARES
@@ -218,10 +236,8 @@ static int api_config(lua_State *restrict L)
 	lua_setfield(L, -2, "resolve_pf");
 	lua_pushnumber(L, (lua_Number)conf->timeout);
 	lua_setfield(L, -2, "timeout");
-#if WITH_RULESET
 	lua_pushinteger(L, (lua_Integer)conf->memlimit);
 	lua_setfield(L, -2, "memlimit");
-#endif
 
 	lua_pushboolean(L, conf->auth_required);
 	lua_setfield(L, -2, "auth_required");
@@ -249,10 +265,8 @@ static int api_config(lua_State *restrict L)
 	lua_pushboolean(L, conf->transparent);
 	lua_setfield(L, -2, "transparent");
 #endif
-#if WITH_RULESET
 	lua_pushboolean(L, conf->traceback);
 	lua_setfield(L, -2, "traceback");
-#endif
 	lua_pushboolean(L, conf->socks5_bind);
 	lua_setfield(L, -2, "socks5_bind");
 	lua_pushboolean(L, conf->socks5_udp);
@@ -272,6 +286,14 @@ static int api_config(lua_State *restrict L)
 	lua_setfield(L, -2, "tcp_sndbuf");
 	lua_pushinteger(L, (lua_Integer)conf->tcp_rcvbuf);
 	lua_setfield(L, -2, "tcp_rcvbuf");
+#if WITH_TCP_KEEPALIVE_PARAMS
+	lua_pushinteger(L, (lua_Integer)conf->tcp_keepidle);
+	lua_setfield(L, -2, "tcp_keepidle");
+	lua_pushinteger(L, (lua_Integer)conf->tcp_keepintvl);
+	lua_setfield(L, -2, "tcp_keepintvl");
+	lua_pushinteger(L, (lua_Integer)conf->tcp_keepcnt);
+	lua_setfield(L, -2, "tcp_keepcnt");
+#endif
 	lua_pushinteger(L, (lua_Integer)conf->max_sessions);
 	lua_setfield(L, -2, "max_sessions");
 	lua_pushinteger(L, (lua_Integer)conf->startup_limit_start);

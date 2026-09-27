@@ -7,10 +7,10 @@
  * Linked translation units (see CMakeLists.txt):
  *   ruleset/time.c   module under test
  * Leaf libraries: Lua. time.c's only collaborator is os/clock.h, whose readings
- * are static inlines over clock_gettime(); the mock section interposes that.
+ * are static inlines over clock_gettime(); the mock section replaces that call.
  */
 
-#include "ruleset/time.h"
+#include "time.h"
 
 #include "utils/testing.h"
 
@@ -24,21 +24,18 @@
 #include <time.h>
 
 /* -------------------------------------------------------------------------
- * mock - shared Lua test fixtures and a clock_gettime() interposer.
+ * mock - shared Lua test fixtures and a clock_gettime() test stub.
  * ---------------------------------------------------------------------- */
 
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
-/* clock_gettime() interposer, installed via -Wl,--wrap=clock_gettime (linking
- * clock_gettime() against libc as __real_clock_gettime). clock_monotonic() is
+/* clock_gettime() test stub. clock_monotonic() is
  * a static inline over it, so this is the only point a clock failure reaches
  * time.c. Only CLOCK_MONOTONIC is ever failed, and only while armed, leaving
  * the time.unix()/process()/thread() cases on the real clock. */
-extern int __real_clock_gettime(clockid_t clk_id, struct timespec *tp);
-
 static unsigned g_monotonic_calls;
 static unsigned g_fail_monotonic_call; /* 0 = disabled */
 
-int __wrap_clock_gettime(clockid_t clk_id, struct timespec *tp)
+int test_clock_gettime(clockid_t clk_id, struct timespec *tp)
 {
 	if (clk_id == CLOCK_MONOTONIC) {
 		g_monotonic_calls++;
@@ -47,7 +44,7 @@ int __wrap_clock_gettime(clockid_t clk_id, struct timespec *tp)
 			return -1;
 		}
 	}
-	return __real_clock_gettime(clk_id, tp);
+	return clock_gettime(clk_id, tp);
 }
 
 /* Fail the n-th monotonic reading taken from now on, 0 to disarm.

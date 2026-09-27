@@ -1,9 +1,9 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/marshal.h"
+#include "marshal.h"
 
-#include "ruleset/base.h"
+#include "base.h"
 
 #include "utils/buffer.h"
 #include "utils/ctype_ascii.h"
@@ -175,12 +175,10 @@ marshal_number(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 	}
 
 	int e2 = 0;
-	/* frexp() gives [0.5, 1); convert it to [1, 2). */
+	/* zero, NaN and infinity returned above, so frexp() gives a non-zero
+	 * [0.5, 1) fraction here; shift it to [1, 2) and match the exponent. */
 	x = frexp(x, &e2) * 2;
-	if (x) {
-		/* Adjust the exponent for the [1, 2) range. */
-		e2--;
-	}
+	e2--;
 
 	unsigned char *const bufend = &buf[sizeof(buf)];
 	unsigned char *estr = bufend;
