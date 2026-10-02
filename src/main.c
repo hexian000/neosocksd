@@ -16,10 +16,6 @@
 
 #include <ev.h>
 
-#if WITH_THREADS
-#include <signal.h>
-#include <string.h>
-#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -91,10 +87,8 @@ int main(int argc, char *argv[])
 	CHECKOOM(resolver);
 
 	/* Load the ruleset/boot config (a boot config may change
-	 * forward/proxy/listen) and bind the listeners while still privileged;
-	 * see server_bind() below. This runs before the privilege drop, so the
-	 * config files are read as the original (root) user, then privileges are
-	 * dropped. */
+	 * forward/proxy/listen) and bind the listeners (server_bind() below)
+	 * before the privilege drop, so both run as the original user. */
 #if WITH_RULESET
 	struct ruleset *ruleset = NULL;
 	if (conf->ruleset != NULL || conf->boot != NULL) {
@@ -167,51 +161,27 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	/* Drop privileges / daemonize now that the listeners are bound. This must
-	 * precede thread creation: fork() only duplicates the calling thread, so
-	 * all thread creation happens after this point. The bound listener fds are
-	 * inherited across the fork. */
+	/* Drop privileges / daemonize now that the listeners are bound. Must
+	 * precede thread creation: fork() keeps only the calling thread. */
 	{
 		if (conf->daemonize) {
 			daemonize(conf->user_name, true, false);
 			slog_setoutput(SLOG_OUTPUT_SYSLOG, PROJECT_NAME, NULL);
-			/* daemonize() double-forks; libev requires the surviving
-			 * child to notify the already-created default loop before
-			 * running it, or a fork-sensitive backend (e.g. kqueue)
-			 * would resume with a dead backend descriptor. */
+			/* daemonize() double-forks; the already-created
+			 * default loop must be notified in the surviving
+			 * child before it runs */
 			ev_loop_fork(loop);
 		} else if (conf->user_name != NULL) {
 			drop_privileges(conf->user_name);
 		}
 	}
 
-	struct transfer *xfer;
 #if WITH_THREADS
-	/* Block all signals before spawning the I/O worker so it inherits the
-	 * mask; server_start will re-enable them in the main thread via
-	 * ev_signal_start. */
-	{
-		sigset_t ss, old_ss;
-		CHECK(sigfillset(&ss) == 0);
-		{
-			const int err =
-				pthread_sigmask(SIG_BLOCK, &ss, &old_ss);
-			CHECKMSGF(
-				err == 0, "pthread_sigmask: (%d) %s", err,
-				strerror(err));
-		}
-		xfer = transfer_create(loop, (unsigned int)conf->workers);
-		{
-			const int err =
-				pthread_sigmask(SIG_SETMASK, &old_ss, NULL);
-			CHECKMSGF(
-				err == 0, "pthread_sigmask: (%d) %s", err,
-				strerror(err));
-		}
-	}
-#else /* WITH_THREADS */
-	xfer = transfer_create(loop, 1);
-#endif /* WITH_THREADS */
+	struct transfer *xfer =
+		transfer_create(loop, (unsigned int)conf->workers);
+#else
+	struct transfer *xfer = transfer_create(loop, 1);
+#endif
 	CHECKOOM(xfer);
 
 	/* register the accept/signal watchers now that privileges are dropped and
@@ -225,23 +195,23 @@ int main(int argc, char *argv[])
 
 	(void)systemd_notify(DAEMON_SYSTEMD_STATE_READY);
 
+	/* The startup is complete here: server_start() has registered the
+	 * signal watchers, so SIGTERM now reaches the loop instead of
+	 * terminating the process by its default disposition. The bootstrap
+	 * test waits for this line before it signals. */
 	LOGD("starting the main event loop");
 	ev_run(loop, 0);
 
 	server_stop(s);
 	LOGN("server shutdown gracefully");
 
-	/* the server owns the ruleset once server_init() stores it: server_stop()
-	 * frees it. main must not free it here -- a SIGHUP reload can replace or
-	 * clear s->ruleset independently of this local, so freeing the local would
-	 * double-free (reload dropped it) or leak (reload installed a new one). */
+	/* the server owns the ruleset once server_init() stores it:
+	 * server_stop() frees it, and a SIGHUP reload may have replaced or
+	 * cleared it, so this local must not be freed here */
 
 	/* Finalize live sessions before freeing the resolver: a session still
-	 * mid-resolution cancels its own resolve_query during finalize, and
-	 * resolve_cancel writes into that query. resolver_free() frees every
-	 * outstanding query without invoking its callback, so freeing it first
-	 * would turn that cancel into a use-after-free. transfer_join() stays
-	 * last. */
+	 * mid-resolution cancels its own query during finalize, and
+	 * resolve_cancel writes into that query. transfer_join() stays last. */
 	{
 		const size_t num = gc_finalizeall();
 		LOGD_F("%zu objects finalized", num);

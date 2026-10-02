@@ -28,15 +28,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Byte counter shared with the stats readers. It is atomic only where the
+/* Counters shared with the stats readers: xfer_counter counts relayed bytes,
+ * xfer_session_counter counts active sessions. They are atomic only where the
  * transfer runs on a dedicated I/O thread (WITH_THREADS), i.e. a different
  * thread from the reader; without threads there is no other thread to race
- * with. Defining it once here keeps every counter field and function signature
- * config-stable instead of forking their spelling on WITH_THREADS. */
+ * with. Defining them once here keeps every counter field and function
+ * signature config-stable instead of forking their spelling on WITH_THREADS. */
 #if WITH_THREADS
 typedef atomic_uint_least64_t xfer_counter;
+typedef atomic_size_t xfer_session_counter;
 #else
 typedef uint_least64_t xfer_counter;
+typedef size_t xfer_session_counter;
 #endif
 
 /* Add @p n to a relay byte counter; a NULL counter is ignored. Keeps the
@@ -86,7 +89,11 @@ struct transfer;
  *                 own loop).
  * @param nworkers Number of I/O worker threads to spawn (ignored when
  *                 WITH_THREADS is disabled; must be >= 1).
- * @return Heap-allocated engine, or NULL on allocation / thread failure.
+ * @return Heap-allocated engine, or NULL when @p nworkers is too large to
+ *         size the worker array, or on allocation / thread failure.
+ * @note The worker threads run with every asynchronous signal blocked and the
+ *       synchronously generated ones deliverable, whatever the caller was
+ *       masking; the caller's own mask is restored before returning.
  */
 struct transfer *transfer_create(struct ev_loop *loop, unsigned int nworkers);
 
@@ -106,11 +113,7 @@ void transfer_join(struct transfer *xfer);
 struct transfer_opts {
 	/* Splice hint; ignored unless WITH_SPLICE. */
 	bool use_splice;
-#if WITH_THREADS
-	atomic_size_t *num_sessions;
-#else
-	size_t *num_sessions;
-#endif
+	xfer_session_counter *num_sessions;
 	xfer_counter *byt_up;
 	xfer_counter *byt_down;
 };

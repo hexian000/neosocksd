@@ -8,42 +8,34 @@
 #if WITH_SPLICE
 #include "io/io.h" /* IO_BUFSIZE, used only by the splice path below */
 #endif
-#include "os/socket.h"
 #if WITH_THREADS
+#include "meta/arraysize.h"
 #include "sync/dispatcher.h"
 #include "sync/task.h"
 #endif
+#include "os/socket.h"
 #include "utils/buffer.h"
 #include "utils/debug.h"
 #include "utils/slog.h"
 
 #include <ev.h>
 
-#include <assert.h>
 #include <errno.h>
 #if WITH_SPLICE
 #include <fcntl.h>
 #include <unistd.h>
 #endif
 #if WITH_THREADS
+#include <signal.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <threads.h>
 #endif
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-
-#if WITH_THREADS
-#define THRD_ASSERT(expr)                                                      \
-	do {                                                                   \
-		const int status = (expr);                                     \
-		(void)status;                                                  \
-		assert(status == thrd_success);                                \
-	} while (0)
-#endif /* WITH_THREADS */
 
 /* ------------------------------------------------------------------ states */
 
@@ -120,11 +112,7 @@ struct transfer_ctx {
 	struct xfer_half up, down;
 	unsigned n_finished;
 	/* session counter to decrement when both halves finish */
-#if WITH_THREADS
-	atomic_size_t *num_sessions;
-#else
-	size_t *num_sessions;
-#endif
+	xfer_session_counter *num_sessions;
 };
 
 /* ---------------------------------------------------------------- xfer_worker (WITH_THREADS only) */
@@ -630,6 +618,10 @@ static int xfer_thread_func(void *arg)
 	struct xfer_worker *restrict worker = arg;
 	struct ev_loop *restrict loop = worker->loop;
 	ev_run(loop, 0);
+	/* A start task enqueued after this loop's last dispatcher_tick is still
+	 * in the ring: run it here, on the still-valid worker loop, so the sweep
+	 * below cancels it instead of dispatcher_destroy discarding it. */
+	dispatcher_tick(worker->disp);
 	/* Cancel any transfers that are still in flight at shutdown. */
 	for (struct transfer_ctx *t = worker->active_list; t != NULL;) {
 		struct transfer_ctx *next = t->next;
@@ -640,6 +632,77 @@ static int xfer_thread_func(void *arg)
 	return 0;
 }
 
+/* The synchronously generated signals. POSIX leaves SIGFPE/SIGILL/SIGSEGV/
+ * SIGBUS undefined when one is generated while blocked, and Linux resolves that
+ * by force-unblocking the signal and resetting its disposition to SIG_DFL,
+ * which would silently defeat any installed crash handler. */
+static const int fault_signals[] = { SIGILL, SIGTRAP, SIGABRT, SIGBUS,
+				     SIGFPE, SIGSEGV, SIGSYS };
+
+/* Put the calling thread on the mask a worker must run with -- every
+ * asynchronous signal blocked, the fault signals deliverable -- and hand the
+ * previous one back for restore_sigmask(). A worker inherits the creating
+ * thread's mask, so applying it around thrd_create both leaves no window in
+ * which a worker could run a signal handler and keeps the worker's mask
+ * independent of whatever the caller was masking. */
+static void set_worker_sigmask(sigset_t *restrict oldset)
+{
+	sigset_t set;
+	CHECK(sigfillset(&set) == 0);
+	for (size_t i = 0; i < ARRAY_SIZE(fault_signals); i++) {
+		CHECK(sigdelset(&set, fault_signals[i]) == 0);
+	}
+	const int err = pthread_sigmask(SIG_SETMASK, &set, oldset);
+	CHECKMSGF(err == 0, "pthread_sigmask: (%d) %s", err, strerror(err));
+}
+
+static void restore_sigmask(const sigset_t *restrict oldset)
+{
+	const int err = pthread_sigmask(SIG_SETMASK, oldset, NULL);
+	CHECKMSGF(err == 0, "pthread_sigmask: (%d) %s", err, strerror(err));
+}
+
+/* Build and start the worker threads over a zero-initialized workers[]. On
+ * failure the partially built workers are left for transfer_join() to release. */
+static bool
+start_workers(struct transfer *restrict xfer, const unsigned int nworkers)
+{
+	for (unsigned int i = 0; i < nworkers; i++) {
+		struct xfer_worker *restrict w = &xfer->workers[i];
+		w->thread_started = false;
+		atomic_init(&w->stop, false);
+		w->active_list = NULL;
+		w->disp = NULL;
+		w->loop = NULL;
+
+		w->disp = dispatcher_create(XFER_DISPATCH_QUEUE_SIZE);
+		if (w->disp == NULL) {
+			return false;
+		}
+
+		w->loop = ev_loop_new(0);
+		if (w->loop == NULL) {
+			return false;
+		}
+
+		ev_async_init(&w->w_invoke, w_invoke_cb);
+		ev_set_priority(&w->w_invoke, EV_MAXPRI);
+		w->w_invoke.data = w;
+		ev_async_start(w->loop, &w->w_invoke);
+		loop_watch_timejump(w->loop, &w->w_timejump);
+
+		if (thrd_create(&w->thread, xfer_thread_func, w) !=
+		    thrd_success) {
+			ev_async_stop(w->loop, &w->w_invoke);
+			ev_loop_destroy(w->loop);
+			w->loop = NULL;
+			return false;
+		}
+		w->thread_started = true;
+	}
+	return true;
+}
+
 #endif /* WITH_THREADS */
 
 /* ---------------------------------------------------------------- public API */
@@ -647,10 +710,17 @@ static int xfer_thread_func(void *arg)
 struct transfer *
 transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 {
+#if WITH_THREADS
+	/* the worker array must not wrap a 32-bit size_t */
+	const size_t worksize = (size_t)nworkers * sizeof(struct xfer_worker);
+	if (worksize / sizeof(struct xfer_worker) != (size_t)nworkers ||
+	    worksize > SIZE_MAX - sizeof(struct transfer)) {
+		return NULL;
+	}
+#endif
 	struct transfer *restrict xfer =
 #if WITH_THREADS
-		malloc(sizeof(struct transfer) +
-		       nworkers * sizeof(struct xfer_worker));
+		malloc(sizeof(struct transfer) + worksize);
 #else
 		malloc(sizeof(struct transfer));
 #endif
@@ -665,43 +735,15 @@ transfer_create(struct ev_loop *restrict loop, const unsigned int nworkers)
 	(void)loop; /* workers run their own loops; the caller's is not used */
 	xfer->nworkers = nworkers;
 	atomic_init(&xfer->next_worker, 0u);
-	memset(xfer->workers, 0, nworkers * sizeof(struct xfer_worker));
+	memset(xfer->workers, 0, worksize);
 
-	for (unsigned int i = 0; i < nworkers; i++) {
-		struct xfer_worker *restrict w = &xfer->workers[i];
-		w->thread_started = false;
-		atomic_init(&w->stop, false);
-		w->active_list = NULL;
-		w->disp = NULL;
-		w->loop = NULL;
-
-		w->disp = dispatcher_create(XFER_DISPATCH_QUEUE_SIZE);
-		if (w->disp == NULL) {
-			transfer_join(xfer);
-			return NULL;
-		}
-
-		w->loop = ev_loop_new(0);
-		if (w->loop == NULL) {
-			transfer_join(xfer);
-			return NULL;
-		}
-
-		ev_async_init(&w->w_invoke, w_invoke_cb);
-		ev_set_priority(&w->w_invoke, EV_MAXPRI);
-		w->w_invoke.data = w;
-		ev_async_start(w->loop, &w->w_invoke);
-		loop_watch_timejump(w->loop, &w->w_timejump);
-
-		if (thrd_create(&w->thread, xfer_thread_func, w) !=
-		    thrd_success) {
-			ev_async_stop(w->loop, &w->w_invoke);
-			ev_loop_destroy(w->loop);
-			w->loop = NULL;
-			transfer_join(xfer);
-			return NULL;
-		}
-		w->thread_started = true;
+	sigset_t oldset;
+	set_worker_sigmask(&oldset);
+	const bool started = start_workers(xfer, nworkers);
+	restore_sigmask(&oldset);
+	if (!started) {
+		transfer_join(xfer);
+		return NULL;
 	}
 #else /* WITH_THREADS */
 	(void)nworkers;
@@ -724,7 +766,9 @@ void transfer_join(struct transfer *restrict xfer)
 				atomic_store_explicit(
 					&w->stop, true, memory_order_release);
 				ev_async_send(w->loop, &w->w_invoke);
-				THRD_ASSERT(thrd_join(w->thread, NULL));
+				const int err = thrd_join(w->thread, NULL);
+				ASSERT(err == thrd_success);
+				(void)err;
 				/* xfer_thread_func cancelled all in-flight
 				 * transfers for this worker. */
 			}

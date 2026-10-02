@@ -333,8 +333,18 @@ add_unit_test(conf_test
     SRCS conf_test.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_LUA)
 add_unit_test(transfer_test
-    SRCS transfer_test.c transfer.c
+    SRCS transfer_test.c
+    MOCK_SRCS transfer.c
+    MOCK_DEFINITIONS
+        dispatcher_invoke=test_dispatcher_invoke
+        dispatcher_tick=test_dispatcher_tick
+        ev_break=test_ev_break
+        pipe2=test_pipe2
+        recv=test_recv
+        send=test_send
+        ev_io_start=test_ev_io_start
     WITH_THREADS)
+target_compile_options(transfer_test_mock_impl PRIVATE -U_FORTIFY_SOURCE)
 add_unit_test(server_test
     SRCS server_test.c server.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_LUA)

@@ -132,13 +132,8 @@ struct server {
 	void *data;
 
 	/* Transfer-thread counters; atomic in multi-threaded builds. */
-#if WITH_THREADS
-	atomic_size_t num_sessions;
-	atomic_uint_least64_t byt_up, byt_down;
-#else
-	size_t num_sessions;
-	uint_least64_t byt_up, byt_down;
-#endif
+	xfer_session_counter num_sessions;
+	xfer_counter byt_up, byt_down;
 
 	/* Signal watchers */
 	ev_signal w_sighup;
