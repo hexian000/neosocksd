@@ -37,6 +37,10 @@
 #include <string.h>
 #include <sys/socket.h>
 
+/* How long a listener sleeps after an accept() failure that belongs to the
+ * listener itself rather than to one incoming connection. */
+#define LISTENER_BACKOFF 0.5
+
 static bool is_startup_limited(const struct server *restrict s)
 {
 	const struct config *restrict conf = s->conf;
@@ -76,6 +80,30 @@ static bool is_startup_limited(const struct server *restrict s)
 	return false;
 }
 
+/* accept() failures that must not stop the listener: EINTR interrupted the
+ * call, the rest belong to the connection the failed call already dropped.
+ * accept(2) requires retrying the protocol's network errors like EAGAIN, as
+ * Linux reports an error already pending on the new socket through accept(). */
+static bool is_transient_accept_error(const int err)
+{
+	static const int transient[] = {
+		EINTR,	      ECONNABORTED, ENETDOWN,	ENETUNREACH,
+		EHOSTUNREACH, ENOPROTOOPT,  EOPNOTSUPP, EPROTO,
+#ifdef EHOSTDOWN
+		EHOSTDOWN,
+#endif
+#ifdef ENONET
+		ENONET,
+#endif
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(transient); i++) {
+		if (err == transient[i]) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void accept_cb(
 	struct ev_loop *restrict loop, ev_io *restrict watcher,
 	const int revents)
@@ -95,13 +123,13 @@ static void accept_cb(
 			if (err == EAGAIN || err == EWOULDBLOCK) {
 				break;
 			}
-			if (err == EINTR || err == ECONNABORTED) {
+			if (is_transient_accept_error(err)) {
 				continue;
 			}
 			LOGE_F("accept: (%d) %s", err, strerror(err));
 			/* Sleep until next timer, see timer_cb */
 			ev_io_stop(loop, watcher);
-			ev_timer_start(loop, &l->w_timer);
+			ev_timer_again(loop, &l->w_timer);
 			return;
 		}
 
@@ -119,10 +147,15 @@ static void accept_cb(
 			continue;
 		}
 
-		if (socket_set_cloexec(fd) != 0 ||
-		    socket_set_nonblock(fd) != 0) {
-			const int err = errno;
-			LOGE_F("socket setup: (%d) %s", err, strerror(err));
+		/* both setters return the errno; they never set the global
+		 * one */
+		int setup_err = socket_set_cloexec(fd);
+		if (setup_err == 0) {
+			setup_err = socket_set_nonblock(fd);
+		}
+		if (setup_err != 0) {
+			LOGE_F("socket setup: (%d) %s", setup_err,
+			       strerror(setup_err));
 			socket_close(fd);
 			continue;
 		}
@@ -154,6 +187,7 @@ static void timer_cb(
 	const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
+	/* one arming per failure: repeat only carries the interval */
 	ev_timer_stop(loop, watcher);
 	struct listener *restrict l = watcher->data;
 	ev_io_start(loop, &l->w_accept);
@@ -176,9 +210,13 @@ static bool add_listener(
 		return false;
 	}
 
-	if (socket_set_cloexec(fd) != 0 || socket_set_nonblock(fd) != 0) {
-		const int err = errno;
-		LOGE_F("socket setup: (%d) %s", err, strerror(err));
+	/* both setters return the errno; they never set the global one */
+	int setup_err = socket_set_cloexec(fd);
+	if (setup_err == 0) {
+		setup_err = socket_set_nonblock(fd);
+	}
+	if (setup_err != 0) {
+		LOGE_F("socket setup: (%d) %s", setup_err, strerror(setup_err));
 		socket_close(fd);
 		return false;
 	}
@@ -250,7 +288,12 @@ static bool add_listener(
 
 	ev_io_init(&l->w_accept, accept_cb, fd, EV_READ);
 	l->w_accept.data = l;
-	ev_timer_init(&l->w_timer, timer_cb, 0.5, 0.0);
+	/* The backoff is armed on demand by accept_cb() and disarmed by
+	 * timer_cb(), so it must re-arm to the full interval every time. libev
+	 * normalises a timer's deadline against the current time when it stops
+	 * it, leaving a fired one-shot timer with nothing left to wait: init
+	 * with repeat set so ev_timer_again() arms it to LISTENER_BACKOFF. */
+	ev_timer_init(&l->w_timer, timer_cb, 0.0, LISTENER_BACKOFF);
 	l->w_timer.data = l;
 
 	/* The accept watcher is registered later by server_start(), after the

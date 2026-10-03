@@ -10,8 +10,10 @@
  *   proto/codec.c    leaf
  *   version.c        leaf
  * All stateful collaborators of server.c (socks, http_proxy, forward,
- * api_server, ruleset, dialer, transfer) are replaced by the mocks in the
- * mock section below.
+ * api_server, ruleset, dialer) are replaced by the mocks in the mock section
+ * below. The transfer engine gets no stub: server.c has no call site for it,
+ * the only one being a static inline in server.h that this unit never
+ * instantiates.
  */
 
 #include "server.h"
@@ -25,40 +27,256 @@
 #endif
 #include "socks.h"
 
+#include "meta/arraysize.h"
 #include "os/socket.h"
+#include "utils/slog.h"
 #include "utils/testing.h"
 
 #include <ev.h>
 
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
  * mock - collaborator stubs (socks, http_proxy, forward, api_server,
- * ruleset, dialer, transfer) and shared fixtures.
+ * ruleset, dialer), the accept() test stub and shared fixtures.
  *
- * Knobs to steer the stubbed dependencies for the reload tests. Defaults
- * (all zero/false) preserve the original behaviour used by the other cases.
+ * Knobs to steer the stubbed dependencies for the reload and accept-error
+ * cases. Defaults (all zero/false) preserve the original behaviour used by
+ * the other cases.
  * ---------------------------------------------------------------------- */
 
 static struct {
+	/* one-shot accept() failure; 0 lets the call through */
+	int accept_fail_errno;
+	/* keep accept_fail_errno armed instead of consuming it */
+	bool accept_fail_sticky;
+	/* accept() calls the interposer saw */
+	uint_least32_t accept_calls;
+	/* one-shot socket-setter failures; 0 lets the call through */
+	int cloexec_fail_errno;
+	int nonblock_fail_errno;
 	bool dialreq_parse_ok;
+	int dialreq_replace_calls;
 #if WITH_RULESET
 	bool ruleset_new_ok;
 	bool ruleset_load_ok;
+	int ruleset_new_calls;
 	bool ruleset_valid;
 	int ruleset_setserver_calls;
 	int ruleset_setbasereq_calls;
 	int ruleset_free_calls;
 	int resolver_setnameserver_calls;
-#endif
+#endif /* WITH_RULESET */
 } CONTROL;
 
+/* Restore every knob to its default, so a case starts from the behaviour
+ * the untouched mocks provide. */
+static void control_reset(void)
+{
+	memset(&CONTROL, 0, sizeof(CONTROL));
+}
+
 static int dialreq_dummy_tag;
+
+/* accept() test stub. Fails the next call -- or, while sticky,
+ * every call -- with the armed errno so the accept loop's error classification
+ * and its backoff can be driven without a real network failure; unarmed calls
+ * pass through unchanged. */
+int test_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+	CONTROL.accept_calls++;
+	const int err = CONTROL.accept_fail_errno;
+	if (err == 0) {
+		return accept(fd, addr, addrlen);
+	}
+	if (!CONTROL.accept_fail_sticky) {
+		CONTROL.accept_fail_errno = 0;
+	}
+	errno = err;
+	return -1;
+}
+
+/* The test build redirects server.c's socket setters to these stubs.
+ * Fixture and pass-through calls still use the real csnippets functions. They
+ * return 0 or an errno and promise nothing about the global errno, so an armed
+ * failure returns its own errno and leaves STALE_ERRNO in the global one.
+ * Unarmed calls pass through unchanged. */
+int test_socket_set_cloexec(int fd);
+int test_socket_set_nonblock(int fd);
+
+/* no socket setup can fail this way, so a report of it can only have come from
+ * the global errno */
+enum { STALE_ERRNO = EDOM };
+
+int test_socket_set_cloexec(const int fd)
+{
+	const int err = CONTROL.cloexec_fail_errno;
+	if (err == 0) {
+		return socket_set_cloexec(fd);
+	}
+	CONTROL.cloexec_fail_errno = 0;
+	errno = STALE_ERRNO;
+	return err;
+}
+
+int test_socket_set_nonblock(const int fd)
+{
+	const int err = CONTROL.nonblock_fail_errno;
+	if (err == 0) {
+		return socket_set_nonblock(fd);
+	}
+	CONTROL.nonblock_fail_errno = 0;
+	errno = STALE_ERRNO;
+	return err;
+}
+
+/* Log capture: the errno a failed socket setup reports reaches no other
+ * output, so a writer sink collects the formatted lines for the case to
+ * search. */
+static struct {
+	char buf[4096];
+	size_t len;
+} g_logcap;
+
+static void logcap_write(void *ud, const unsigned char *buf, size_t len)
+{
+	(void)ud;
+	const size_t space = sizeof(g_logcap.buf) - 1 - g_logcap.len;
+	if (len > space) {
+		len = space;
+	}
+	memcpy(g_logcap.buf + g_logcap.len, buf, len);
+	g_logcap.len += len;
+	g_logcap.buf[g_logcap.len] = '\0';
+}
+
+static void logcap_start(const int level)
+{
+	g_logcap.len = 0;
+	g_logcap.buf[0] = '\0';
+	slog_setoutput(SLOG_OUTPUT_WRITER, logcap_write, NULL);
+	slog_setlevel(level);
+}
+
+/* Restore the default silence, so a case that longjmps out of an assertion
+ * cannot leave the writer sink installed for the next one. */
+static void logcap_stop(void)
+{
+	slog_setlevel(LOG_LEVEL_SILENCE);
+	slog_setoutput(SLOG_OUTPUT_DISCARD);
+}
+
+/* Match a captured line's "<what>: (<err>) " prefix, so the assertion turns on
+ * the reported number rather than a locale-dependent strerror text. */
+static bool logcap_has_errno(const char *restrict what, const int err)
+{
+	char needle[64];
+	(void)snprintf(needle, sizeof(needle), "%s: (%d) ", what, err);
+	return strstr(g_logcap.buf, needle) != NULL;
+}
+
+/* -------------------------------------------------------------------------
+ * virtual clock - deterministic backoff tests without wall-clock waits.
+ *
+ * The accept backoff is a libev ev_timer inside the listener, so observing how
+ * long it actually delays a retry means controlling the clock libev reads.
+ * These strong-symbol interposers shadow clock_gettime/gettimeofday: while
+ * enabled they return a virtual time the test advances, so a deadline is
+ * crossed by advancing the clock and pumping the loop -- no real waiting.
+ * Disabled by default (real time), so every other case is unaffected.
+ * ---------------------------------------------------------------------- */
+
+static bool g_vclock_on;
+static double g_vclock_sec;
+
+/* Read the real clock for the pass-through path. Both clock_gettime() and
+ * gettimeofday() are interposed here, so the underlying clock has to be reached
+ * through a third entry point: ISO C11 timespec_get(), which libc services from
+ * its own internal clock rather than through the shadowed symbols. It is also
+ * the only such entry point that stays declared under the strict
+ * _POSIX_C_SOURCE the FORCE_POSIX build selects. */
+static int real_clock(struct timespec *restrict ts)
+{
+	if (timespec_get(ts, TIME_UTC) != TIME_UTC) {
+		errno = EINVAL;
+		return -1;
+	}
+	return 0;
+}
+
+int clock_gettime(clockid_t clk, struct timespec *ts)
+{
+	if (g_vclock_on) {
+		ts->tv_sec = (time_t)g_vclock_sec;
+		ts->tv_nsec = (long)((g_vclock_sec - (double)ts->tv_sec) * 1e9);
+		return 0;
+	}
+	(void)clk;
+	return real_clock(ts);
+}
+
+int gettimeofday(struct timeval *tv, void *tz)
+{
+	if (g_vclock_on) {
+		tv->tv_sec = (time_t)g_vclock_sec;
+		tv->tv_usec = (long)((g_vclock_sec - (double)tv->tv_sec) * 1e6);
+		return 0;
+	}
+	(void)tz;
+	struct timespec ts;
+	if (real_clock(&ts) != 0) {
+		return -1;
+	}
+	tv->tv_sec = ts.tv_sec;
+	tv->tv_usec = (long)(ts.tv_nsec / 1000);
+	return 0;
+}
+
+/* Start virtual time at a fixed base; call before creating the loop so every
+ * timer the case arms has a virtual-time deadline. */
+static void vclock_start(void)
+{
+	g_vclock_sec = 1000.0;
+	g_vclock_on = true;
+}
+
+static void vclock_stop(void)
+{
+	g_vclock_on = false;
+}
+
+/* Advance virtual time by @p step and pump the loop once, so libev fires any
+ * deadline the advance crossed. A step of 0 observes what the loop does with
+ * no time passing at all. */
+static void vclock_step(struct ev_loop *loop, const double step)
+{
+	g_vclock_sec += step;
+	ev_run(loop, EVRUN_NOWAIT);
+}
+
+/* Step the frozen-clock loop until @p predicate holds, at most @p steps times
+ * so a never-satisfied predicate returns false instead of hanging. */
+static bool vclock_step_until(
+	struct ev_loop *loop, bool (*predicate)(void *), void *data,
+	const double step, const int steps)
+{
+	for (int i = 0; i < steps; i++) {
+		if (predicate(data)) {
+			return true;
+		}
+		vclock_step(loop, step);
+	}
+	return predicate(data);
+}
 
 void socket_set_transparent(const int fd, const bool tproxy)
 {
@@ -97,6 +315,7 @@ bool dialreq_replace(
 	struct dialreq **restrict req, const char *restrict addr,
 	const char *restrict csv)
 {
+	CONTROL.dialreq_replace_calls++;
 	struct dialreq *restrict newreq = dialreq_parse(addr, csv);
 	if (newreq == NULL) {
 		return false;
@@ -169,6 +388,7 @@ struct ruleset *ruleset_new(
 	(void)conf;
 	(void)resolver;
 	(void)basereq;
+	CONTROL.ruleset_new_calls++;
 	if (!CONTROL.ruleset_new_ok) {
 		return NULL;
 	}
@@ -506,6 +726,160 @@ T_DECLARE_CASE(server_accept_error_restarts_listener)
 }
 
 /*
+ * accept() reports an error already pending on the incoming connection as its
+ * own error code, and accept(2) requires the application to retry those like
+ * EAGAIN. Taking one for a listener failure would stop the accept watcher and
+ * block every other connection until the backoff timer expires. The client is
+ * queued before the loop runs, so the single accept_cb invocation must see the
+ * armed failure, retry, and still serve it.
+ */
+T_DECLARE_SUBCASE(server_accept_pending_error_case, const int err)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint_fast16_t port;
+	int client_fd = -1;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+	CONTROL.accept_fail_errno = err;
+
+	ev_run(loop, EVRUN_ONCE);
+
+	/* the armed failure was consumed, so the retry is what served */
+	T_EXPECT_EQ(CONTROL.accept_fail_errno, 0);
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
+	T_EXPECT(ev_is_active(&s.listeners[0].w_accept));
+	T_EXPECT(!ev_is_active(&s.listeners[0].w_timer));
+
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(server_accept_retries_pending_network_errors)
+{
+	static const int pending[] = {
+		ENETDOWN,    ENETUNREACH, EHOSTUNREACH,
+		ENOPROTOOPT, EOPNOTSUPP,  EPROTO,
+#ifdef EHOSTDOWN
+		EHOSTDOWN,
+#endif
+#ifdef ENONET
+		ENONET,
+#endif
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(pending); i++) {
+		T_CALL_SUBCASE(server_accept_pending_error_case, pending[i]);
+	}
+}
+
+/*
+ * The backoff still belongs to the listener's own failures: a descriptor
+ * shortage is not a per-connection error, so the watcher stops and waits for
+ * the timer instead of spinning on it.
+ */
+T_DECLARE_CASE(server_accept_listener_error_backs_off)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint_fast16_t port;
+	int client_fd = -1;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+	CONTROL.accept_fail_errno = EMFILE;
+
+	ev_run(loop, EVRUN_ONCE);
+
+	T_EXPECT_EQ(CONTROL.accept_fail_errno, 0);
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 0);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(!ev_is_active(&s.listeners[0].w_accept));
+	T_EXPECT(ev_is_active(&s.listeners[0].w_timer));
+
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Every retry has to be delayed, not only the first. libev normalises a
+ * timer's deadline against the current time when it stops it, so a fired
+ * one-shot timer has nothing left to wait and re-arming it with a bare
+ * ev_timer_start() schedules it for now: a persistent accept() failure would
+ * then spin the listener at full CPU, flooding the log at ERROR level exactly
+ * when the daemon can least afford it.
+ *
+ * The observations are taken before the assertions so a failing one cannot
+ * leave the virtual clock installed for the next case.
+ */
+T_DECLARE_CASE(server_accept_error_backoff_delays_every_retry)
+{
+	/* the measured window spans BACKOFF_ROUNDS backoff periods, sampled
+	 * BACKOFF_STEPS times each: both scale the listener's own interval, so
+	 * no count here is a wall-clock guess */
+	enum { BACKOFF_ROUNDS = 4, BACKOFF_STEPS = 16 };
+
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+
+	vclock_start();
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	T_CHECK(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	struct listener *const l = &s.listeners[0];
+	const int client_fd = connect_loopback(bound_port(l->w_accept.fd));
+
+	/* the interposed accept() never consumes the pending connection, so the
+	 * listener stays readable for as long as the failure is armed */
+	CONTROL.accept_fail_errno = EMFILE;
+	CONTROL.accept_fail_sticky = true;
+	const bool armed = vclock_step_until(
+		loop, listener_backing_off, l, 0.0, BACKOFF_STEPS);
+	/* the delay the listener promises on its first failure: every later
+	 * retry has to honour the same one, so the measured window and its
+	 * sampling resolution are both derived from it */
+	const ev_tstamp backoff = ev_timer_remaining(loop, &l->w_timer);
+	const double step = backoff / BACKOFF_STEPS;
+
+	const uint_least32_t before = CONTROL.accept_calls;
+	for (int i = 0; i < BACKOFF_ROUNDS * BACKOFF_STEPS; i++) {
+		vclock_step(loop, step);
+	}
+	const uint_least32_t retries = CONTROL.accept_calls - before;
+	const ev_tstamp last_delay = ev_timer_remaining(loop, &l->w_timer);
+
+	/* the shortage clears: the listener must come back on its own */
+	CONTROL.accept_fail_sticky = false;
+	CONTROL.accept_fail_errno = 0;
+	const bool recovered = vclock_step_until(
+		loop, served_once, &s, step, 2 * BACKOFF_STEPS);
+
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+	vclock_stop();
+
+	T_EXPECT(armed);
+	T_EXPECT(backoff > 0.0);
+	/* one retry per backoff period, plus at most one on a period boundary */
+	T_EXPECT(retries >= 1);
+	T_EXPECT(retries <= (uint_least32_t)BACKOFF_ROUNDS + 1);
+	/* the latest failure is scheduled ahead, not for the current instant */
+	T_EXPECT(last_delay >= 0.0);
+	T_EXPECT(recovered);
+}
+
+/*
  * max_sessions is a hard cap: at exactly max_sessions concurrent sessions,
  * the next connection must be rejected (n >= max_sessions, not n >).
  */
@@ -729,11 +1103,6 @@ T_DECLARE_CASE(server_dual_listener_independent_accepts)
 	ev_loop_destroy(loop);
 }
 
-static void control_reset(void)
-{
-	memset(&CONTROL, 0, sizeof(CONTROL));
-}
-
 /*
  * Exercise the listener-setup branches of server_init() for the forward,
  * HTTP and REST API modes.
@@ -810,6 +1179,69 @@ T_DECLARE_CASE(server_init_partial_failure_cleanup)
 	ev_loop_destroy(loop);
 }
 
+/*
+ * socket_set_cloexec() and socket_set_nonblock() return the errno; the global
+ * one is not theirs. A listener whose socket setup fails must report the
+ * returned value -- reading the global errno recovers a plausible one only
+ * while the setters are implemented over fcntl(), and would otherwise blame an
+ * unrelated error for a bind that never happened.
+ */
+T_DECLARE_CASE(server_listener_setup_failure_reports_setter_errno)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+
+	logcap_start(LOG_LEVEL_ERROR);
+	CONTROL.cloexec_fail_errno = EMFILE;
+	const bool ok = server_init(&s, loop, &conf, NULL, NULL, NULL, NULL);
+	logcap_stop();
+
+	T_EXPECT(!ok);
+	/* the armed failure was consumed, so the listener is what tripped it */
+	T_EXPECT_EQ(CONTROL.cloexec_fail_errno, 0);
+	T_EXPECT_EQ(s.num_listeners, (size_t)0);
+	T_EXPECT(logcap_has_errno("socket setup", EMFILE));
+	T_EXPECT(!logcap_has_errno("socket setup", STALE_ERRNO));
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/* The same for an accepted connection, whose setup runs the second setter:
+ * the connection is dropped and the returned errno reported. */
+T_DECLARE_CASE(server_accepted_setup_failure_reports_setter_errno)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+	uint_fast16_t port;
+	int client_fd = -1;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	port = bound_port(s.listeners[0].w_accept.fd);
+	client_fd = connect_loopback(port);
+	logcap_start(LOG_LEVEL_ERROR);
+	CONTROL.nonblock_fail_errno = ENFILE;
+
+	ev_run(loop, EVRUN_ONCE);
+	logcap_stop();
+
+	T_EXPECT_EQ(CONTROL.nonblock_fail_errno, 0);
+	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(logcap_has_errno("socket setup", ENFILE));
+	T_EXPECT(!logcap_has_errno("socket setup", STALE_ERRNO));
+
+	socket_close(client_fd);
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
 /* server_stats() aggregates per-listener accept/serve counters. */
 T_DECLARE_CASE(server_stats_aggregates_listeners)
 {
@@ -874,7 +1306,7 @@ T_DECLARE_CASE(server_bind_defers_accept_watcher_until_start)
 #if WITH_RULESET
 /*
  * SIGHUP drives ruleset reload: a failed engine creation leaves the ruleset
- * unset; a successful reload installs it. SIGINT then breaks the loop.
+ * unset; a successful reload installs it.
  */
 T_DECLARE_CASE(server_signal_reload_ruleset)
 {
@@ -901,10 +1333,6 @@ T_DECLARE_CASE(server_signal_reload_ruleset)
 	ev_run(loop, EVRUN_NOWAIT);
 	T_EXPECT(s.ruleset != NULL);
 	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 1);
-
-	/* SIGINT breaks the event loop */
-	ev_feed_event(loop, &s.w_sigint, EV_SIGNAL);
-	ev_run(loop, EVRUN_NOWAIT);
 
 	server_stop(&s);
 	/* the server owns the reload-created ruleset: server_stop frees it
@@ -1002,7 +1430,213 @@ T_DECLARE_CASE(server_signal_reload_boot_basereq_parse_failure)
 	server_stop(&s);
 	ev_loop_destroy(loop);
 }
+
+/* Deliver `w`'s signal to the server and run the handler. */
+static void feed_signal(struct ev_loop *loop, ev_signal *w)
+{
+	ev_feed_event(loop, w, EV_SIGNAL);
+	ev_run(loop, EVRUN_NOWAIT);
+}
+
+/*
+ * A reload whose load fails keeps the previous state: an engine created for
+ * it is freed rather than leaked or installed, and an installed ruleset is
+ * neither freed, replaced nor attached to the server again.
+ */
+T_DECLARE_CASE(server_signal_reload_load_failure_keeps_previous)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	conf.ruleset = "ruleset.lua";
+	struct server s;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = false;
+	CONTROL.ruleset_valid = true;
+	feed_signal(loop, &s.w_sighup);
+	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 1);
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
+	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 0);
+	T_EXPECT(s.ruleset == NULL);
+	server_stop(&s);
+
+	control_reset();
+	struct ruleset *const installed = (struct ruleset *)&ruleset_dummy_tag;
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, installed));
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = false;
+	CONTROL.ruleset_valid = true;
+	feed_signal(loop, &s.w_sighup);
+	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 0);
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 0);
+	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 0);
+	T_EXPECT(s.ruleset == installed);
+	server_stop(&s);
+
+	ev_loop_destroy(loop);
+}
+
+/*
+ * A load that succeeds but leaves no ruleset installed drops the engine,
+ * whether the reload created it or it was already installed.
+ */
+T_DECLARE_CASE(server_signal_reload_without_ruleset_drops_engine)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	conf.ruleset = "ruleset.lua";
+	struct server s;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = true;
+	CONTROL.ruleset_valid = false;
+	feed_signal(loop, &s.w_sighup);
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
+	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 0);
+	T_EXPECT(s.ruleset == NULL);
+	server_stop(&s);
+
+	control_reset();
+	T_EXPECT(server_init(
+		&s, loop, &conf, NULL, NULL, NULL,
+		(struct ruleset *)&ruleset_dummy_tag));
+	CONTROL.ruleset_load_ok = true;
+	CONTROL.ruleset_valid = false;
+	feed_signal(loop, &s.w_sighup);
+	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 0);
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
+	T_EXPECT(s.ruleset == NULL);
+	server_stop(&s);
+	/* server_stop does not free the dropped engine a second time */
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
+
+	ev_loop_destroy(loop);
+}
+
+/*
+ * A successful reload of an installed ruleset updates it in place: no new
+ * engine is created, and the one attached to the server is not attached
+ * again.
+ */
+T_DECLARE_CASE(server_signal_reload_in_place)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	conf.ruleset = "ruleset.lua";
+	struct server s;
+	struct ruleset *const installed = (struct ruleset *)&ruleset_dummy_tag;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, installed));
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = true;
+	CONTROL.ruleset_valid = true;
+	feed_signal(loop, &s.w_sighup);
+	feed_signal(loop, &s.w_sighup);
+	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 0);
+	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 0);
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 0);
+	T_EXPECT(s.ruleset == installed);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * A boot config that fails to reload is not applied at all: the base request,
+ * the log level and the nameserver keep what the previous config set.
+ */
+T_DECLARE_CASE(server_signal_reload_boot_failure_skips_reapply)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	conf.boot = "boot.lua";
+	conf.loglevel = LOG_LEVEL_VERBOSE;
+	struct server s;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = false;
+	CONTROL.ruleset_valid = true;
+	CONTROL.dialreq_parse_ok = true;
+	slog_setlevel(LOG_LEVEL_SILENCE);
+	feed_signal(loop, &s.w_sighup);
+	const bool level_applied = LOGLEVEL(FATAL);
+	slog_setlevel(LOG_LEVEL_SILENCE);
+	T_EXPECT(!level_applied);
+	T_EXPECT_EQ(CONTROL.dialreq_replace_calls, 0);
+	T_EXPECT_EQ(CONTROL.ruleset_setbasereq_calls, 0);
+	T_EXPECT_EQ(CONTROL.resolver_setnameserver_calls, 0);
+	T_EXPECT(s.ruleset == NULL);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
+
+/* SIGHUP with neither a boot config nor a ruleset file reloads nothing. */
+T_DECLARE_CASE(server_signal_reload_nothing_reloadable)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	control_reset();
+	struct config conf = make_conf("127.0.0.1:0");
+	struct server s;
+
+	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	CONTROL.ruleset_new_ok = true;
+	CONTROL.ruleset_load_ok = true;
+	CONTROL.ruleset_valid = true;
+	CONTROL.dialreq_parse_ok = true;
+	feed_signal(loop, &s.w_sighup);
+	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 0);
+	T_EXPECT_EQ(CONTROL.dialreq_replace_calls, 0);
+	T_EXPECT_EQ(CONTROL.resolver_setnameserver_calls, 0);
+	T_EXPECT(s.ruleset == NULL);
+
+	server_stop(&s);
+	ev_loop_destroy(loop);
+}
 #endif /* WITH_RULESET */
+
+/*
+ * SIGINT and SIGTERM stop the event loop: with a listener still active the
+ * loop would otherwise run on until the watchdog fires.
+ */
+T_DECLARE_CASE(server_signal_int_term_break_loop)
+{
+	for (int i = 0; i < 2; i++) {
+		struct ev_loop *loop = ev_loop_new(0);
+		T_CHECK(loop != NULL);
+		control_reset();
+		struct config conf = make_conf("127.0.0.1:0");
+		struct server s;
+
+		T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+		struct test_watchdog watchdog = { 0 };
+		ev_timer w_timeout;
+		ev_timer_init(&w_timeout, watchdog_cb, 5.0, 0.0);
+		w_timeout.data = &watchdog;
+		ev_timer_start(loop, &w_timeout);
+
+		ev_feed_event(
+			loop, (i == 0) ? &s.w_sigint : &s.w_sigterm, EV_SIGNAL);
+		ev_run(loop, 0);
+		T_EXPECT(!watchdog.fired);
+
+		ev_timer_stop(loop, &w_timeout);
+		server_stop(&s);
+		ev_loop_destroy(loop);
+	}
+}
 
 /* -------------------------------------------------------------------------
  * bench - none.
@@ -1025,10 +1659,15 @@ static const struct testing_suite suite[] = {
 	T_CASE(server_rejects_when_probabilistic_startup_limit_hits),
 	T_CASE(server_rejects_when_at_probabilistic_startup_limit),
 	T_CASE(server_accept_error_restarts_listener),
+	T_CASE(server_accept_retries_pending_network_errors),
+	T_CASE(server_accept_listener_error_backs_off),
+	T_CASE(server_accept_error_backoff_delays_every_retry),
 	T_CASE(server_dual_listener_independent_accepts),
 	T_CASE(server_init_multi_mode_listeners),
 	T_CASE(server_init_rejects_bad_addresses),
 	T_CASE(server_init_partial_failure_cleanup),
+	T_CASE(server_listener_setup_failure_reports_setter_errno),
+	T_CASE(server_accepted_setup_failure_reports_setter_errno),
 	T_CASE(server_stats_aggregates_listeners),
 	T_CASE(server_bind_defers_accept_watcher_until_start),
 #if WITH_RULESET
@@ -1036,7 +1675,13 @@ static const struct testing_suite suite[] = {
 	T_CASE(server_stop_frees_ruleset_installed_at_init),
 	T_CASE(server_signal_reload_boot_basereq),
 	T_CASE(server_signal_reload_boot_basereq_parse_failure),
-#endif
+	T_CASE(server_signal_reload_load_failure_keeps_previous),
+	T_CASE(server_signal_reload_without_ruleset_drops_engine),
+	T_CASE(server_signal_reload_in_place),
+	T_CASE(server_signal_reload_boot_failure_skips_reapply),
+	T_CASE(server_signal_reload_nothing_reloadable),
+#endif /* WITH_RULESET */
+	T_CASE(server_signal_int_term_break_loop),
 	T_SUITE_END,
 };
 

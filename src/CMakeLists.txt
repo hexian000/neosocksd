@@ -353,8 +353,14 @@ add_unit_test(transfer_test
     WITH_THREADS)
 target_compile_options(transfer_test_mock_impl PRIVATE -U_FORTIFY_SOURCE)
 add_unit_test(server_test
-    SRCS server_test.c server.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    SRCS server_test.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    MOCK_SRCS server.c
+    MOCK_DEFINITIONS
+        accept=test_accept
+        socket_set_cloexec=test_socket_set_cloexec
+        socket_set_nonblock=test_socket_set_nonblock
     WITH_LUA)
+target_compile_options(server_test_mock_impl PRIVATE -U_GNU_SOURCE)
 add_unit_test(http_test
     SRCS proto/http_test.c proto/codec.c
     MOCK_SRCS proto/http.c
