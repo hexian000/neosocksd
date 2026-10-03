@@ -27,7 +27,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 /* never rollback */
 enum http_state {
@@ -47,6 +46,7 @@ struct http_ctx {
 	enum http_state state;
 	int accepted_fd, dialed_fd;
 	union sockaddr_max accepted_sa;
+	struct dialaddr addr;
 	ev_timer w_timeout;
 	ev_io w_recv, w_send;
 #if WITH_RULESET
@@ -60,39 +60,82 @@ struct http_ctx {
 };
 ASSERT_SUPER(struct gcbase, struct http_ctx, gcbase);
 
+/* Upper bound (excluding NUL) on the prefix format_fd() builds. */
+#define FD_PREFIX_STRLEN                                                       \
+	(CONSTSTRLEN("[fd:] ") + CONSTSTRLEN("-2147483648") /* max int fd */)
+
+/* The fd-correlation prefix, empty when there is no descriptor left to name:
+ * the transfer hand-off moves the accepted fd out of the context, and the
+ * number it held may since have been reused by another connection. */
+static const char *
+format_fd(char *restrict buf, const size_t maxlen, const int fd)
+{
+	if (fd < 0) {
+		return "";
+	}
+	const int n = snprintf(buf, maxlen, "[fd:%d] ", fd);
+	ASSERT(n > 0 && (size_t)n < maxlen);
+	(void)n;
+	return buf;
+}
+
 static int format_status(
 	char *restrict s, const size_t maxlen,
-	const struct http_ctx *restrict ctx)
+	const struct http_ctx *restrict ctx, const int fd)
 {
+	char fdstr[FD_PREFIX_STRLEN + 1];
+	const char *const prefix = format_fd(fdstr, sizeof(fdstr), fd);
 	char caddr[64];
 	sa_format(caddr, sizeof(caddr), &ctx->accepted_sa.sa);
 	if (ctx->state < STATE_CONNECT || STATE_ESTABLISHED < ctx->state) {
-		return snprintf(
-			s, maxlen, "[fd:%d] %s", ctx->accepted_fd, caddr);
+		return snprintf(s, maxlen, "%s%s", prefix, caddr);
 	}
 	return snprintf(
-		s, maxlen, "[fd:%d] %s -> `%s'", ctx->accepted_fd, caddr,
+		s, maxlen, "%s%s -> `%s'", prefix, caddr,
 		ctx->conn.msg.req.url);
 }
 
-#define HTTP_CTX_LOG_F(level, ctx, format, ...)                                \
+/* Log with an explicit fd for the correlation prefix, for the hand-off path
+ * that has already moved the accepted fd out of the context. */
+#define HTTP_FD_LOG_F(level, ctx, fd, format, ...)                             \
 	do {                                                                   \
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
 		char status_str[256];                                          \
-		const int nstatus =                                            \
-			format_status(status_str, sizeof(status_str), (ctx));  \
+		const int nstatus = format_status(                             \
+			status_str, sizeof(status_str), (ctx), (fd));          \
 		ASSERT(nstatus > 0);                                           \
 		LOG_F(level, "%.*s: " format, nstatus, status_str,             \
 		      __VA_ARGS__);                                            \
 	} while (0)
+#define HTTP_CTX_LOG_F(level, ctx, format, ...)                                \
+	HTTP_FD_LOG_F(level, ctx, (ctx)->accepted_fd, format, __VA_ARGS__)
 #define HTTP_CTX_LOG(level, ctx, message)                                      \
 	HTTP_CTX_LOG_F(level, ctx, "%s", message)
+
+#if WITH_RULESET
+/* Release the ruleset work the context still owes. A start that failed may
+ * have published its state anyway, and a request that completed in this same
+ * loop sweep leaves w_finish pending with a delivered dialreq; neither is tied
+ * to a context state, so every path that stops expecting the callback releases
+ * both. */
+static void cancel_ruleset(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	if (ctx->ruleset_state != NULL) {
+		ruleset_cancel(loop, ctx->ruleset_state);
+		ctx->ruleset_state = NULL;
+	}
+	ruleset_request_cancel(loop, &ctx->ruleset_callback);
+}
+#endif /* WITH_RULESET */
 
 static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
+#if WITH_RULESET
+	cancel_ruleset(loop, ctx);
+#endif
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
@@ -105,14 +148,6 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	case STATE_PROCESS:
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_process);
-		if (ctx->ruleset_state != NULL) {
-			ruleset_cancel(loop, ctx->ruleset_state);
-			ctx->ruleset_state = NULL;
-		}
-		/* a request that completed in this same loop sweep left w_finish
-		 * pending with a delivered dialreq; drop it so it cannot fire into
-		 * this freed ctx and the dialreq is not leaked */
-		ruleset_request_cancel(loop, &ctx->ruleset_callback);
 #endif /* WITH_RULESET */
 		stats->num_halfopen--;
 		return;
@@ -121,8 +156,6 @@ static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		stats->num_halfopen--;
 		return;
 	case STATE_CONNECT:
-		ev_io_stop(loop, &ctx->w_recv);
-		ev_io_stop(loop, &ctx->w_send);
 		dialer_cancel(&ctx->dialer, loop);
 		stats->num_halfopen--;
 		return;
@@ -168,18 +201,22 @@ http_ctx_start_transfer(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
 	ctx->accepted_fd = ctx->dialed_fd = -1;
-	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
+	/* Enter STATE_BIDIRECTIONAL before server_commit_session(): on failure
+	 * it gc_unref()s the context, and the finalizer must then treat it as
+	 * handed off rather than decrement num_halfopen a second time or free
+	 * the released dialreq again. */
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	ctx->s->stats.num_halfopen--;
-	HTTP_CTX_LOG_F(
-		DEBUG, ctx, "transfer start: [%d<->%d]", acc_fd, dial_fd);
+	HTTP_FD_LOG_F(
+		DEBUG, ctx, acc_fd, "transfer start: [%d<->%d]", acc_fd,
+		dial_fd);
 	const size_t cur =
 		server_commit_session(ctx->s, &ctx->gcbase, acc_fd, dial_fd);
 	if (cur == 0) {
 		return;
 	}
-	HTTP_CTX_LOG_F(DEBUG, ctx, "ready, %zu active sessions", cur);
+	HTTP_FD_LOG_F(DEBUG, ctx, acc_fd, "ready, %zu active sessions", cur);
 	gc_unref(&ctx->gcbase);
 }
 
@@ -280,6 +317,20 @@ static void http_connect(struct ev_loop *loop, struct http_ctx *restrict ctx)
 		ctx->s->resolver, ctx->s);
 }
 
+static void
+http_connect_direct(struct ev_loop *loop, struct http_ctx *restrict ctx)
+{
+	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
+	if (req == NULL) {
+		LOGOOM();
+		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+		return;
+	}
+	dialaddr_copy(&req->addr, &ctx->addr);
+	ctx->dialreq = req;
+	http_connect(loop, ctx);
+}
+
 #if WITH_RULESET
 static void
 ruleset_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
@@ -310,14 +361,15 @@ static void http_forward_commit(
 }
 
 static void parse_proxy_auth(
-	unsigned char *buf, const size_t bufsize, const char **username,
-	const char **password, const char *authtype, const char *credentials)
+	unsigned char *buf, const size_t bufsize,
+	struct ruleset_credentials *restrict creds, const char *authtype,
+	const char *credentials)
 {
 	if (authtype == NULL || credentials == NULL) {
 		return;
 	}
 	/* RFC 9110 §11.1: the authentication scheme token is case-insensitive */
-	if (strcasecmp(authtype, "Basic") != 0) {
+	if (!http_token_equal(authtype, "Basic")) {
 		return;
 	}
 	size_t dstlen = bufsize - 1;
@@ -326,15 +378,24 @@ static void parse_proxy_auth(
 		    strlen(credentials))) {
 		return;
 	}
+	/* RFC 7617 §2 forbids control characters in the user-id and the
+	 * password, so a null byte makes the credentials malformed */
+	if (memchr(buf, '\0', dstlen) != NULL) {
+		return;
+	}
 	char *const s = (char *)buf;
 	s[dstlen] = '\0';
 	char *const sep = strchr(s, ':');
 	if (sep == NULL) {
 		return;
 	}
-	*sep = '\0';
-	*username = s;
-	*password = sep + 1;
+	const size_t userlen = (size_t)(sep - s);
+	*creds = (struct ruleset_credentials){
+		.username = s,
+		.username_len = userlen,
+		.password = sep + 1,
+		.password_len = dstlen - userlen - 1,
+	};
 }
 
 static void
@@ -344,18 +405,16 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	ev_idle_stop(loop, watcher);
 	struct http_ctx *restrict ctx = watcher->data;
 	struct ruleset *restrict ruleset = ctx->s->ruleset;
-	ASSERT(ruleset != NULL);
 	ASSERT(ctx->state == STATE_PROCESS);
 
 	unsigned char buf[512];
-	const char *username = NULL;
-	const char *password = NULL;
+	struct ruleset_credentials creds = { 0 };
 	parse_proxy_auth(
-		buf, sizeof(buf), &username, &password,
+		buf, sizeof(buf), &creds,
 		ctx->conn.hdr.proxy_authorization.type,
 		ctx->conn.hdr.proxy_authorization.credentials);
 	if (ctx->s->conf->auth_required &&
-	    (username == NULL || password == NULL)) {
+	    (ruleset == NULL || creds.username == NULL)) {
 		RESPHDR_BEGIN(
 			ctx->conn.wbuf, HTTP_PROXY_AUTHENTICATION_REQUIRED);
 		RESPHDR_CONN_CLOSE(ctx->conn.wbuf);
@@ -367,36 +426,27 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		return;
 	}
 
-	const char *const addr_str = ctx->conn.msg.req.url;
+	if (ruleset == NULL) {
+		http_connect_direct(loop, ctx);
+		return;
+	}
+
+	char request[DIALADDR_STRLEN + 1];
+	const int n = dialaddr_format(request, sizeof(request), &ctx->addr);
+	ASSERT(n >= 0 && (size_t)n < sizeof(request));
+	(void)n;
 	const bool ok = ruleset_resolve(
-		ruleset, &ctx->ruleset_state, addr_str, username, password,
+		ruleset, &ctx->ruleset_state, request, &creds,
 		&ctx->ruleset_callback);
 	if (!ok) {
+		/* the context stays alive to flush the error page, but leaves
+		 * STATE_PROCESS and no longer expects the callback */
+		cancel_ruleset(loop, ctx);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
 }
 #endif /* WITH_RULESET */
-
-/* Build the dial request for @p addr_str into *out. Returns 0 on success,
- * HTTP_BAD_REQUEST for an unparsable client-supplied target, or
- * HTTP_INTERNAL_SERVER_ERROR on OOM. */
-static uint_fast16_t make_dialreq(
-	struct http_ctx *restrict ctx, const char *restrict addr_str,
-	struct dialreq **restrict out)
-{
-	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
-	if (req == NULL) {
-		LOGOOM();
-		return HTTP_INTERNAL_SERVER_ERROR;
-	}
-	if (!dialaddr_parse(&req->addr, addr_str, strlen(addr_str))) {
-		dialreq_free(req);
-		return HTTP_BAD_REQUEST;
-	}
-	*out = req;
-	return 0;
-}
 
 static void
 http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
@@ -414,6 +464,13 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 
 	const char *const addr_str = ctx->conn.msg.req.url;
 	HTTP_CTX_LOG_F(VERBOSE, ctx, "http: CONNECT `%s'", addr_str);
+	/* RFC 9110 §9.3.6: the CONNECT request-target is authority-form only,
+	 * so one that is not a dialable "host:port" is a malformed request
+	 * whichever path routes it */
+	if (!dialaddr_parse(&ctx->addr, addr_str, strlen(addr_str))) {
+		send_errpage(loop, ctx, HTTP_BAD_REQUEST);
+		return;
+	}
 #if WITH_RULESET
 	const struct ruleset *restrict ruleset = ctx->s->ruleset;
 	if (ruleset != NULL) {
@@ -422,13 +479,7 @@ http_proxy_handle(struct ev_loop *loop, struct http_ctx *restrict ctx)
 	}
 #endif
 
-	const uint_fast16_t dial_code =
-		make_dialreq(ctx, addr_str, &ctx->dialreq);
-	if (dial_code != 0) {
-		send_errpage(loop, ctx, dial_code);
-		return;
-	}
-	http_connect(loop, ctx);
+	http_connect_direct(loop, ctx);
 }
 
 static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
@@ -467,19 +518,34 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_TIMER);
 	struct http_ctx *restrict ctx = watcher->data;
-	if (ctx->state == STATE_CONNECT) {
-		/* the dial deadline passed: cancel it and answer 504 rather than
-		 * closing the client with no status */
+	ctx->s->stats.num_reject_timeout++;
+	switch (ctx->state) {
+	case STATE_PROCESS:
+		/* the request parsed but routing it outlived the deadline: the
+		 * context stops expecting the ruleset callback */
+		HTTP_CTX_LOG(WARNING, ctx, "process timeout");
+#if WITH_RULESET
+		ev_idle_stop(loop, &ctx->w_process);
+		cancel_ruleset(loop, ctx);
+#endif /* WITH_RULESET */
+		break;
+	case STATE_CONNECT:
 		HTTP_CTX_LOG(WARNING, ctx, "connect timeout");
 		dialer_cancel(&ctx->dialer, loop);
-		ctx->s->stats.num_reject_timeout++;
-		send_errpage(loop, ctx, HTTP_GATEWAY_TIMEOUT);
+		break;
+	default:
+		/* the client never finished its request, or never drained the
+		 * response: there is no one to answer, just close */
+		gc_unref(&ctx->gcbase);
 		return;
 	}
-	/* any other pre-stream handshake deadline: the connection never
-	 * established, just close */
-	ctx->s->stats.num_reject_timeout++;
-	gc_unref(&ctx->gcbase);
+	/* answer 504 rather than closing the client with no status */
+	send_errpage(loop, ctx, HTTP_GATEWAY_TIMEOUT);
+	/* the one-shot deadline stopped itself before this callback, so re-arm
+	 * it: a client that never reads the queued error page would otherwise
+	 * pin the context with no deadline left */
+	ev_timer_set(&ctx->w_timeout, ctx->s->conf->timeout, 0.0);
+	ev_timer_start(loop, &ctx->w_timeout);
 }
 
 static void dialer_cb(struct ev_loop *loop, void *data, const int fd)
@@ -503,22 +569,25 @@ static bool parse_header(void *data, const char *key, char *value)
 	struct http_ctx *restrict ctx = (struct http_ctx *)data;
 	struct http_conn *restrict p = &ctx->conn;
 
-	/* RFC 7230 §3.2.6 / RFC 9112 §2.2: validate field name (tchar only)
-	 * and field value (no CTL except HTAB, no DEL). */
-	if (!http_header_field_valid(key, value)) {
-		return false;
-	}
+	/* http_parsehdr() has already rejected a field name that is not a
+	 * token and a value carrying any CTL but HTAB (RFC 9110 §5.5), so
+	 * key and value arrive well-formed. */
 
-	/* CONNECT only sets up a tunnel; the sole request header acted on is
-	 * Proxy-Authorization (proxy auth), and all others are ignored. */
-	if (strcasecmp(key, "Proxy-Authorization") == 0) {
+	/* The shared parser validates Host before this callback. CONNECT only
+	 * acts on Proxy-Authorization here; other fields are ignored. */
+	if (http_token_equal(key, "Proxy-Authorization")) {
+		/* RFC 9110 §11.4: credentials = auth-scheme [ 1*SP ( token68 /
+		 * #auth-param ) ] — the credentials part is optional and any
+		 * number of SP may separate it from the scheme */
+		p->hdr.proxy_authorization.type = value;
+		p->hdr.proxy_authorization.credentials = NULL;
 		char *const sep = strchr(value, ' ');
 		if (sep == NULL) {
-			return false;
+			return true;
 		}
 		*sep = '\0';
-		p->hdr.proxy_authorization.type = value;
-		p->hdr.proxy_authorization.credentials = sep + 1;
+		p->hdr.proxy_authorization.credentials =
+			sep + 1 + strspn(sep + 1, " ");
 		return true;
 	}
 	return true;

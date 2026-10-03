@@ -8,6 +8,7 @@
 #include "conf.h"
 #include "dialer.h"
 #include "proto/http.h"
+#include "resolver.h"
 
 #include "utils/buffer.h"
 #include "utils/testing.h"
@@ -42,10 +43,6 @@ static const struct http_client_opts test_opts = {
 
 static struct {
 	int dialer_result_fd;
-	/* used on the 2nd dialer_do call instead of dialer_result_fd, when
-	 * >= 0 -- lets a test simulate a stale-connection retry redialing
-	 * to a second, distinct fd */
-	int dialer_result_fd2;
 	enum dialer_error dialer_err;
 	int dialer_syserr;
 	/* when true, dialer_do records the call but does not complete, leaving
@@ -57,7 +54,6 @@ static struct {
 	int_least32_t dialreq_free_calls;
 } S = {
 	.dialer_result_fd = -1,
-	.dialer_result_fd2 = -1,
 	.dialer_err = DIALER_ERR_CONNECT,
 	.dialer_syserr = ECONNREFUSED,
 	.dialer_pending = false,
@@ -69,7 +65,6 @@ static struct {
 static void stub_reset(void)
 {
 	S.dialer_result_fd = -1;
-	S.dialer_result_fd2 = -1;
 	S.dialer_err = DIALER_ERR_CONNECT;
 	S.dialer_syserr = ECONNREFUSED;
 	S.dialer_pending = false;
@@ -113,9 +108,10 @@ void dialer_do(
 	}
 	d->err = S.dialer_err;
 	d->syserr = S.dialer_syserr;
-	const int fd = (S.dialer_do_calls == 2 && S.dialer_result_fd2 >= 0) ?
-			       S.dialer_result_fd2 :
-			       S.dialer_result_fd;
+	/* a request dials once: fail any further dial rather than hand back
+	 * an fd the client has already closed, so a stray redial surfaces as
+	 * a "connection failed" result */
+	const int fd = (S.dialer_do_calls == 1) ? S.dialer_result_fd : -1;
 	d->finish_cb.func(loop, d->finish_cb.data, fd);
 }
 
@@ -145,9 +141,9 @@ static bool fd_set_nonblock(const int fd)
 
 struct cb_result {
 	bool called;
-	/* copy of the error message: errmsg may point into send_cb's stack VLA,
-	 * whose lifetime ends before the test reads it, so it must be copied here
-	 * (like the body below) rather than stored as a pointer */
+	/* copy of the error message: errmsg may point into send_cb's stack
+	 * buffer, whose lifetime ends before the test reads it, so it must be
+	 * copied here (like the body below) rather than stored as a pointer */
 	bool has_errmsg;
 	char errmsg[64];
 	size_t errlen;
@@ -188,6 +184,15 @@ static void capture_cb(
 			memcpy(r->body, VBUF_DATA(conn->cbuf), n);
 		}
 	}
+}
+
+/* whether the callback reported exactly the error message msg */
+static bool
+result_errmsg_is(const struct cb_result *restrict r, const char *msg)
+{
+	const size_t n = strlen(msg);
+	return r->has_errmsg && r->errlen == n &&
+	       memcmp(r->errmsg, msg, n) == 0;
 }
 
 /* A user on_header callback: records that headers reach the user, and
@@ -355,28 +360,24 @@ T_DECLARE_CASE(http_client_timeout_finishes_with_error)
 }
 
 /*
- * Regression: a stale-connection retry (after a successful partial write
- * followed by a hard write error) must resend the whole request on the
- * fresh connection, not resume from the dead connection's offset. The
+ * Regression: a peer that resets the connection mid-request (after a partial
+ * write, as a server does when it answers early and closes with the body
+ * unread) must finish the request with the write error, on the one connection
+ * it was dialed -- not redial and re-upload the request from the start. The
  * body is large enough that no realistic socket buffer accepts it in one
- * send(), guaranteeing a genuine partial write before sv1's peer is
- * closed out from under it.
+ * send(), guaranteeing a genuine partial write before the peer is closed out
+ * from under it.
  */
-T_DECLARE_CASE(http_client_stale_retry_resends_from_start)
+T_DECLARE_CASE(http_client_reset_mid_request_reports_error)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
 	stub_reset();
 
-	int sv1[2] = { -1, -1 };
-	int sv2[2] = { -1, -1 };
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv1) == 0);
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv2) == 0);
-	T_CHECK(fd_set_nonblock(sv1[0]));
-	T_CHECK(fd_set_nonblock(sv2[0]));
-
-	S.dialer_result_fd = sv1[0];
-	S.dialer_result_fd2 = sv2[0];
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	S.dialer_result_fd = sv[0];
 
 	struct http_client_ctx ctx = { 0 };
 	struct cb_result result = { 0 };
@@ -403,16 +404,12 @@ T_DECLARE_CASE(http_client_stale_retry_resends_from_start)
 	T_CHECK(req != NULL);
 	http_client_do(&ctx, loop, req);
 
-	/* This case exercises the resend, not the request deadline, but
-	 * http_client_do just armed it: were it left running, any stall longer
-	 * than test_conf.timeout -- before or between the drive loops below --
-	 * would finish the request with a "timeout" error and stop every watcher,
-	 * so the loops would spin out their iteration caps having sent nothing.
-	 * Drop it; http_client_timeout_finishes_with_error covers the deadline,
-	 * firing it deterministically instead of waiting for it. Nothing rearms
-	 * it (only http_client_cleanup touches it again), so one stop holds for
-	 * the whole case, and every loop below is bounded by its own iteration
-	 * cap rather than by this timer. */
+	/* This case exercises the write error, not the request deadline, but
+	 * http_client_do just armed it: were it left running, a stall longer
+	 * than test_conf.timeout would finish the request with a "timeout" error
+	 * that the assertions below must not mistake for the write error. Drop
+	 * it; http_client_timeout_finishes_with_error covers the deadline. Every
+	 * loop below is bounded by its own iteration cap instead. */
 	ev_timer_stop(loop, &ctx.w_timeout);
 
 	/* Drive sends until the header is fully out and the body is genuinely
@@ -430,40 +427,18 @@ T_DECLARE_CASE(http_client_stale_retry_resends_from_start)
 	T_CHECK(ctx.conn.cpos < sizeof(body));
 
 	/* the peer disappears mid-transfer */
-	T_CHECK(close(sv1[1]) == 0);
+	T_CHECK(close(sv[1]) == 0);
 
-	/* the next write hits the dead peer and must retry from scratch */
-	for (int i = 0; i < 20 && S.dialer_do_calls < 2; i++) {
+	/* the next write hits the dead peer and finishes the request */
+	for (int i = 0; i < 20 && !result.called; i++) {
 		ev_run(loop, EVRUN_NOWAIT);
 	}
-	T_EXPECT_EQ(S.dialer_do_calls, 2);
-	T_EXPECT_EQ(ctx.conn.wpos, 0);
-	T_EXPECT_EQ(ctx.conn.cpos, 0);
+	T_EXPECT(result.called);
+	T_EXPECT(result_errmsg_is(&result, strerror(EPIPE)));
+	T_EXPECT(!result.has_conn);
+	T_EXPECT_EQ(S.dialer_do_calls, 1);
+	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
 
-	/* Let it resend on the fresh connection, draining sv2 as the bytes arrive
-	 * so the loop advances on real progress (and relieves backpressure)
-	 * instead of blocking on the request timeout. Collect the header plus a
-	 * body prefix -- enough to prove the resend restarted from offset zero --
-	 * with the iteration cap as the failing bound. */
-	unsigned char received[sizeof(header) - 1 + 256];
-	size_t got = 0;
-	for (int i = 0; i < 1000 && got < sizeof(received); i++) {
-		ev_run(loop, EVRUN_NOWAIT);
-		const ssize_t n =
-			recv(sv2[1], received + got, sizeof(received) - got,
-			     MSG_DONTWAIT);
-		if (n > 0) {
-			got += (size_t)n;
-		}
-	}
-	T_CHECK(got > sizeof(header) - 1);
-	T_EXPECT_MEMEQ(received, header, sizeof(header) - 1);
-	T_EXPECT_MEMEQ(
-		received + sizeof(header) - 1, body,
-		got - (sizeof(header) - 1));
-
-	http_client_cancel(&ctx, loop);
-	(void)close(sv2[1]);
 	ev_loop_destroy(loop);
 }
 
@@ -517,9 +492,104 @@ T_DECLARE_CASE(http_client_full_request_response)
 	ev_loop_destroy(loop);
 }
 
-/* A user on_header callback must receive each response header
- * (http_client_on_header forwards to it); previously every case passed an
- * empty header callback so this forwarding was unverified. */
+T_DECLARE_SUBCASE(interim_responses, const bool split)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	stub_reset();
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	S.dialer_result_fd = sv[0];
+	struct http_client_ctx ctx = { 0 };
+	struct cb_result result = { 0 };
+	struct hdr_capture hdrs = { .client = &ctx };
+	const struct http_parsehdr_cb on_header = {
+		.func = record_header_cb,
+		.ctx = &hdrs,
+	};
+	const struct http_client_cb cb = {
+		.func = capture_cb,
+		.data = &result,
+	};
+	uint_least64_t received = 0, sent = 0;
+	const struct http_client_opts opts = {
+		.conf = &test_conf,
+		.byt_recv = &received,
+		.byt_sent = &sent,
+	};
+	http_client_init(&ctx, loop, on_header, &cb, &opts);
+	static const char request[] = "GET /x HTTP/1.1\r\n\r\n";
+	BUF_APPEND(ctx.conn.wbuf, request, sizeof(request) - 1);
+	struct dialreq *req = calloc(1, sizeof(struct dialreq));
+	T_CHECK(req != NULL);
+	http_client_do(&ctx, loop, req);
+	for (int i = 0; i < 20 && ctx.state == STATE_CLIENT_REQUEST; i++) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	T_CHECK(ctx.state == STATE_CLIENT_RESPONSE);
+	static const char interim[] =
+		"HTTP/1.1 100 Continue\r\n\r\n"
+		"HTTP/1.1 103 Early Hints\r\n"
+		"Server: interim\r\nContent-Length: 999\r\n\r\n";
+	static const char final[] = "HTTP/1.1 200 OK\r\nServer: test-server\r\n"
+				    "Content-Length: 5\r\n\r\nhello";
+	char response[sizeof(interim) + sizeof(final)];
+	memcpy(response, interim, sizeof(interim) - 1);
+	memcpy(response + sizeof(interim) - 1, final, sizeof(final) - 1);
+	if (split) {
+		T_CHECK(write(sv[1], interim, sizeof(interim) - 1) ==
+			(ssize_t)(sizeof(interim) - 1));
+		for (int i = 0;
+		     i < 20 && received < sizeof(interim) - 1 && !result.called;
+		     i++) {
+			ev_run(loop, EVRUN_ONCE);
+		}
+		T_CHECK(received == sizeof(interim) - 1);
+		T_CHECK(!result.called);
+		T_EXPECT_EQ(hdrs.count, 0);
+		/* Split the final status line too: compaction must preserve
+		 * a partial next message as well as a complete one. */
+		T_CHECK(write(sv[1], final, 8) == 8);
+		for (int i = 0; i < 20 && received < sizeof(interim) - 1 + 8 &&
+				!result.called;
+		     i++) {
+			ev_run(loop, EVRUN_ONCE);
+		}
+		T_CHECK(!result.called);
+		T_CHECK(write(sv[1], final + 8, sizeof(final) - 1 - 8) ==
+			(ssize_t)(sizeof(final) - 1 - 8));
+	} else {
+		const size_t total = sizeof(interim) + sizeof(final) - 2;
+		T_CHECK(write(sv[1], response, total) == (ssize_t)total);
+	}
+	for (int i = 0; i < 20 && !result.called; i++) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	T_CHECK(result.called);
+	T_EXPECT(!result.has_errmsg);
+	T_EXPECT_STREQ(result.rsp_code, "200");
+	T_EXPECT_EQ(result.body_len, 5);
+	T_EXPECT_MEMEQ(result.body, "hello", 5);
+	T_EXPECT_EQ(hdrs.count, 2);
+	T_EXPECT(hdrs.saw_server);
+	T_EXPECT_EQ(received, sizeof(interim) + sizeof(final) - 2);
+	T_EXPECT_EQ(sent, sizeof(request) - 1);
+	T_CHECK(close(sv[1]) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(http_client_coalesced_interim_responses)
+{
+	T_CALL_SUBCASE(interim_responses, false);
+}
+
+T_DECLARE_CASE(http_client_split_interim_responses)
+{
+	T_CALL_SUBCASE(interim_responses, true);
+}
+
+/* A user on_header callback must receive each final response header. */
 T_DECLARE_CASE(http_client_forwards_response_headers)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -672,19 +742,19 @@ T_DECLARE_CASE(http_client_recv_eof_reports_error)
 		ev_run(loop, EVRUN_ONCE);
 	}
 	T_EXPECT(result.called);
-	T_EXPECT(result.has_errmsg);
-	T_EXPECT(result.errlen > 0);
+	/* the exact message tells the EOF path from the request deadline, which
+	 * would also finish a stalled request with an error */
+	T_EXPECT(result_errmsg_is(&result, "error receiving response"));
 	T_EXPECT(!result.has_conn);
 
 	ev_loop_destroy(loop);
 }
 
 /*
- * send_cb's generic write-error path builds the error message from strerror()
- * in a stack buffer. Force it by dialing to two sockets whose peers are both
- * closed: the first write fails with EPIPE and retries, the retry redials to a
- * second (still valid but dead-peer) fd and fails again with the retry flag
- * set, so the generic path runs and must deliver a non-empty message.
+ * send_cb's write-error path builds the error message from strerror() in a
+ * stack buffer. Dial to a socket whose peer is already closed: the first write
+ * fails with EPIPE and must finish the request with that message, without a
+ * second dial.
  */
 T_DECLARE_CASE(http_client_write_error_reports_strerror)
 {
@@ -692,16 +762,11 @@ T_DECLARE_CASE(http_client_write_error_reports_strerror)
 	T_CHECK(loop != NULL);
 	stub_reset();
 
-	int sv1[2] = { -1, -1 };
-	int sv2[2] = { -1, -1 };
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv1) == 0);
-	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv2) == 0);
-	T_CHECK(fd_set_nonblock(sv1[0]));
-	T_CHECK(fd_set_nonblock(sv2[0]));
-	T_CHECK(close(sv1[1]) == 0);
-	T_CHECK(close(sv2[1]) == 0);
-	S.dialer_result_fd = sv1[0];
-	S.dialer_result_fd2 = sv2[0];
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	T_CHECK(close(sv[1]) == 0);
+	S.dialer_result_fd = sv[0];
 
 	struct http_client_ctx ctx = { 0 };
 	struct cb_result result = { 0 };
@@ -723,10 +788,127 @@ T_DECLARE_CASE(http_client_write_error_reports_strerror)
 		ev_run(loop, EVRUN_ONCE);
 	}
 	T_EXPECT(result.called);
-	T_EXPECT(result.has_errmsg);
-	T_EXPECT(result.errlen > 0);
+	/* the exact message tells the write error from the request deadline */
+	T_EXPECT(result_errmsg_is(&result, strerror(EPIPE)));
 	T_EXPECT(!result.has_conn);
-	T_EXPECT_EQ(S.dialer_do_calls, 2);
+	T_EXPECT_EQ(S.dialer_do_calls, 1);
+
+	ev_loop_destroy(loop);
+}
+
+/* Drive one request to a peer that answers with resp, then run the loop until
+ * the completion callback fires; the request deadline stays armed as the
+ * failsafe, and the caller pins the message to tell a result from it. */
+static void run_request_with_response(
+	struct ev_loop *loop, const struct http_parsehdr_cb on_header,
+	struct http_client_ctx *restrict ctx, struct cb_result *restrict result,
+	const char *resp)
+{
+	int sv[2] = { -1, -1 };
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	T_CHECK(fd_set_nonblock(sv[1]));
+	S.dialer_result_fd = sv[0];
+
+	const struct http_client_cb cb = {
+		.func = capture_cb,
+		.data = result,
+	};
+	http_client_init(ctx, loop, on_header, &cb, &test_opts);
+
+	static const char header[] = "GET /x HTTP/1.1\r\n\r\n";
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
+
+	struct dialreq *req = calloc(1, sizeof(struct dialreq));
+	T_CHECK(req != NULL);
+	http_client_do(ctx, loop, req);
+
+	for (int i = 0; i < 20 && ctx->state == STATE_CLIENT_REQUEST; i++) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	const size_t n = strlen(resp);
+	T_CHECK(write(sv[1], resp, n) == (ssize_t)n);
+
+	for (int i = 0; i < 50 && !result->called; i++) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	(void)close(sv[1]);
+}
+
+/* recv_cb's parse-error branch: a response header the parser rejects -- here
+ * a Content-Length over HTTP_MAX_CONTENT -- must finish with a parse error and
+ * no connection. */
+T_DECLARE_CASE(http_client_oversized_content_reports_parse_error)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	stub_reset();
+
+	struct http_client_ctx ctx = { 0 };
+	struct cb_result result = { 0 };
+	struct hdr_capture hdrs = { .client = &ctx };
+	const struct http_parsehdr_cb on_header = {
+		.func = record_header_cb,
+		.ctx = &hdrs,
+	};
+	char resp[128];
+	T_CHECK(snprintf(
+			resp, sizeof(resp),
+			"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n",
+			HTTP_MAX_CONTENT + 1) > 0);
+	run_request_with_response(loop, on_header, &ctx, &result, resp);
+
+	T_EXPECT(result.called);
+	T_EXPECT(result_errmsg_is(&result, "error parsing response"));
+	T_EXPECT(!result.has_conn);
+
+	ev_loop_destroy(loop);
+}
+
+/* recv_cb's parse-error branch reached through the user header callback: a
+ * header it rejects must finish with a parse error and no connection. */
+T_DECLARE_CASE(http_client_rejected_header_reports_parse_error)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	stub_reset();
+
+	struct http_client_ctx ctx = { 0 };
+	struct cb_result result = { 0 };
+	struct hdr_capture hdrs = { .client = &ctx };
+	const struct http_parsehdr_cb on_header = {
+		.func = record_header_cb,
+		.ctx = &hdrs,
+	};
+	/* parsehdr_content_length rejects a non-numeric length */
+	run_request_with_response(
+		loop, on_header, &ctx, &result,
+		"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n");
+
+	T_EXPECT(result.called);
+	T_EXPECT(result_errmsg_is(&result, "error parsing response"));
+	T_EXPECT(!result.has_conn);
+
+	ev_loop_destroy(loop);
+}
+
+/* A status line that is not HTTP/1.x is a receive error (http_conn_recv < 0),
+ * not a parse error: the response parser gives up on the message outright. */
+T_DECLARE_CASE(http_client_non_http1_status_reports_error)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	stub_reset();
+
+	struct http_client_ctx ctx = { 0 };
+	struct cb_result result = { 0 };
+	const struct http_parsehdr_cb no_hdr = { 0 };
+	run_request_with_response(
+		loop, no_hdr, &ctx, &result, "SPDY/3 200 OK\r\n\r\n");
+
+	T_EXPECT(result.called);
+	T_EXPECT(result_errmsg_is(&result, "error receiving response"));
+	T_EXPECT(!result.has_conn);
 
 	ev_loop_destroy(loop);
 }
@@ -857,12 +1039,17 @@ static const struct testing_suite suite[] = {
 	T_CASE(http_client_cancel_noop),
 	T_CASE(http_client_dialer_fail_calls_cb),
 	T_CASE(http_client_timeout_finishes_with_error),
-	T_CASE(http_client_stale_retry_resends_from_start),
+	T_CASE(http_client_reset_mid_request_reports_error),
 	T_CASE(http_client_full_request_response),
+	T_CASE(http_client_coalesced_interim_responses),
+	T_CASE(http_client_split_interim_responses),
 	T_CASE(http_client_forwards_response_headers),
 	T_CASE(http_client_delivers_response_body),
 	T_CASE(http_client_recv_eof_reports_error),
 	T_CASE(http_client_write_error_reports_strerror),
+	T_CASE(http_client_oversized_content_reports_parse_error),
+	T_CASE(http_client_rejected_header_reports_parse_error),
+	T_CASE(http_client_non_http1_status_reports_error),
 	T_CASE(http_client_cancel_during_connect_cancels_dialer),
 	T_CASE(http_client_timeout_during_connect_cancels_dialer),
 	T_CASE(http_client_cancel_during_request_stops_io),
@@ -871,7 +1058,7 @@ static const struct testing_suite suite[] = {
 
 int main(int argc, char **argv)
 {
-	/* Ignore SIGPIPE: writing to the closed peer during the retry test
+	/* Ignore SIGPIPE: writing to a closed peer in the write-error cases
 	 * returns EPIPE instead of killing the process. */
 	const struct sigaction ignore = { .sa_handler = SIG_IGN };
 	(void)sigaction(SIGPIPE, &ignore, NULL);

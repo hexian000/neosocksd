@@ -13,6 +13,7 @@
 
 #include "meta/arraysize.h"
 #include "os/socket.h"
+#include "utils/slog.h"
 #include "utils/testing.h"
 
 #include <ev.h>
@@ -21,7 +22,7 @@
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <stdatomic.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -182,6 +183,7 @@ struct stub_state {
 	int dialer_syserr;
 	int_least32_t dialreq_free_calls;
 	int_least32_t dialreq_invalid_free_calls;
+	bool xfer_serve_fail;
 	bool ruleset_resolve_ok;
 	bool ruleset_reply_with_req;
 	bool ruleset_finish_now;
@@ -192,21 +194,33 @@ struct stub_state {
 	 * dispatch so a case can emulate the ruleset completing out of band */
 	struct ruleset_callback *ruleset_cb_ptr;
 	struct ruleset_state **ruleset_state_slot;
+	/* the published state is still attached to its callback, i.e. a Lua
+	 * collection of it would still complete it (ruleset_state_gc) */
+	bool ruleset_state_live;
 	int_least32_t ruleset_cancel_calls;
 	int_least32_t dialer_cancel_calls;
 	int_least32_t dialer_do_calls;
+	/* the last request-target handed to dialaddr_parse(), and the address
+	 * string the ruleset entry point was called with */
+	int_least32_t dialaddr_parse_calls;
+	char parsed_target[512];
+	int_least32_t ruleset_resolve_calls;
+	char captured_request[DIALADDR_STRLEN + 1];
 	bool captured_creds;
 	char captured_username[64];
+	size_t captured_username_len;
 	char captured_password[64];
+	size_t captured_password_len;
 };
 
 static struct stub_state S = {
 	.dialreq_new_ok = false,
-	.dialaddr_parse_ok = false,
+	.dialaddr_parse_ok = true,
 	.dialer_invoke_now = true,
 	.dialer_result_fd = -1,
 	.dialer_err = DIALER_ERR_CONNECT,
 	.dialer_syserr = ECONNREFUSED,
+	.xfer_serve_fail = false,
 	.ruleset_resolve_ok = false,
 	.ruleset_reply_with_req = false,
 	.ruleset_finish_now = false,
@@ -215,6 +229,7 @@ static struct stub_state S = {
 	.ruleset_state_ptr = NULL,
 	.ruleset_cb_ptr = NULL,
 	.ruleset_state_slot = NULL,
+	.ruleset_state_live = false,
 	.ruleset_cancel_calls = 0,
 	.dialer_cancel_calls = 0,
 	.dialer_do_calls = 0,
@@ -271,13 +286,14 @@ static void reset_stub_state(void)
 	 * T_EXPECT failure path */
 	vclock_stop();
 	S.dialreq_new_ok = false;
-	S.dialaddr_parse_ok = false;
+	S.dialaddr_parse_ok = true;
 	S.dialer_invoke_now = true;
 	S.dialer_result_fd = -1;
 	S.dialer_err = DIALER_ERR_CONNECT;
 	S.dialer_syserr = ECONNREFUSED;
 	S.dialreq_free_calls = 0;
 	S.dialreq_invalid_free_calls = 0;
+	S.xfer_serve_fail = false;
 	for (int i = 0; i < stub_xfer_ctx_count; i++) {
 		free(stub_xfer_ctxs[i]);
 		stub_xfer_ctxs[i] = NULL;
@@ -291,12 +307,19 @@ static void reset_stub_state(void)
 	S.ruleset_state_ptr = NULL;
 	S.ruleset_cb_ptr = NULL;
 	S.ruleset_state_slot = NULL;
+	S.ruleset_state_live = false;
 	S.ruleset_cancel_calls = 0;
 	S.dialer_cancel_calls = 0;
 	S.dialer_do_calls = 0;
+	S.dialaddr_parse_calls = 0;
+	S.parsed_target[0] = '\0';
+	S.ruleset_resolve_calls = 0;
+	S.captured_request[0] = '\0';
 	S.captured_creds = false;
 	S.captured_username[0] = '\0';
+	S.captured_username_len = 0;
 	S.captured_password[0] = '\0';
+	S.captured_password_len = 0;
 	reset_dialreq_allocations();
 	test_conf.timeout = 1.0;
 	test_conf.auth_required = false;
@@ -367,11 +390,15 @@ bool dialaddr_parse(
 	struct dialaddr *restrict addr, const char *restrict s,
 	const size_t len)
 {
-	(void)s;
-	(void)len;
+	S.dialaddr_parse_calls++;
+	T_CHECK(len < sizeof(S.parsed_target));
+	memcpy(S.parsed_target, s, len);
+	S.parsed_target[len] = '\0';
 	if (!S.dialaddr_parse_ok) {
 		return false;
 	}
+	/* a fixed address unrelated to the target, so a caller that forwards
+	 * the parsed address is distinguishable from one forwarding the bytes */
 	addr->type = ATYP_DOMAIN;
 	addr->port = 80;
 	addr->domain.len = 7;
@@ -392,19 +419,17 @@ bool dialaddr_set(
 void dialaddr_copy(
 	struct dialaddr *restrict dst, const struct dialaddr *restrict src)
 {
-	(void)dst;
-	(void)src;
+	*dst = *src;
 }
 
 int dialaddr_format(
 	char *restrict s, const size_t maxlen,
 	const struct dialaddr *restrict addr)
 {
-	(void)addr;
-	if (s != NULL && maxlen > 0) {
-		(void)snprintf(s, maxlen, "(stub)");
-	}
-	return 6;
+	T_CHECK(addr->type == ATYP_DOMAIN);
+	return snprintf(
+		s, maxlen, "%.*s:%" PRIuLEAST16, (int)addr->domain.len,
+		addr->domain.name, addr->port);
 }
 
 void dialer_init(
@@ -445,11 +470,7 @@ void dialer_cancel(struct dialer *restrict d, struct ev_loop *restrict loop)
 }
 
 struct stub_xfer_ctx {
-#if WITH_THREADS
-	atomic_size_t *num_sessions;
-#else
-	size_t *num_sessions;
-#endif
+	xfer_session_counter *num_sessions;
 };
 
 struct transfer *
@@ -471,8 +492,9 @@ bool transfer_serve(
 	const struct transfer_opts *restrict opts)
 {
 	(void)xfer;
-	(void)acc_fd;
-	(void)dial_fd;
+	if (S.xfer_serve_fail) {
+		return false;
+	}
 	T_CHECK(stub_xfer_ctx_count < (int)ARRAY_SIZE(stub_xfer_ctxs));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
@@ -480,14 +502,22 @@ bool transfer_serve(
 	}
 	xctx->num_sessions = opts->num_sessions;
 	stub_xfer_ctxs[stub_xfer_ctx_count++] = xctx;
+	/* the real transfer_serve takes ownership of both fds on success and
+	 * closes them in release_ctx; emulate that so they do not leak */
+	(void)close(acc_fd);
+	(void)close(dial_fd);
 	return true;
 }
 
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 {
 	(void)loop;
-	(void)state;
 	S.ruleset_cancel_calls++;
+	if (state == S.ruleset_state_ptr) {
+		/* production detaches the state from its callback here, which
+		 * is what makes a later ruleset_state_gc() a no-op */
+		S.ruleset_state_live = false;
+	}
 }
 
 void ruleset_request_cancel(
@@ -501,26 +531,47 @@ void ruleset_request_cancel(
 	ev_clear_pending(loop, &cb->w_finish);
 }
 
+/* Copy a credential field http_proxy.c handed on, so the assertion outlives
+ * the decode buffer it points into. */
+static size_t capture_credential(
+	char *restrict dst, const size_t bufsize, const char *restrict s,
+	const size_t len)
+{
+	if (s == NULL) {
+		dst[0] = '\0';
+		return 0;
+	}
+	T_CHECK(len < bufsize);
+	memcpy(dst, s, len);
+	dst[len] = '\0';
+	return len;
+}
+
 bool ruleset_resolve(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request,
+	const struct ruleset_credentials *restrict creds,
+	struct ruleset_callback *callback)
 {
 	(void)r;
-	(void)request;
+	S.ruleset_resolve_calls++;
+	T_CHECK(strlen(request) < sizeof(S.captured_request));
+	(void)snprintf(
+		S.captured_request, sizeof(S.captured_request), "%s", request);
 	S.captured_creds = true;
-	(void)snprintf(
-		S.captured_username, sizeof(S.captured_username), "%s",
-		username != NULL ? username : "");
-	(void)snprintf(
-		S.captured_password, sizeof(S.captured_password), "%s",
-		password != NULL ? password : "");
+	S.captured_username_len = capture_credential(
+		S.captured_username, sizeof(S.captured_username),
+		creds->username, creds->username_len);
+	S.captured_password_len = capture_credential(
+		S.captured_password, sizeof(S.captured_password),
+		creds->password, creds->password_len);
 	S.ruleset_cb_ptr = callback;
 	S.ruleset_state_slot = state;
 	if (S.ruleset_state_nonnull) {
 		S.ruleset_state_ptr =
 			(struct ruleset_state *)&ruleset_state_token;
 		*state = S.ruleset_state_ptr;
+		S.ruleset_state_live = true;
 	} else {
 		*state = NULL;
 	}
@@ -532,6 +583,9 @@ bool ruleset_resolve(
 		callback->request.req = dialreq_new(NULL, 0);
 	}
 	if (S.ruleset_finish_now && S.ruleset_loop != NULL) {
+		/* production's state_complete() detaches the state before the
+		 * consumer's callback runs */
+		S.ruleset_state_live = false;
 		callback->w_finish.cb(
 			S.ruleset_loop, &callback->w_finish, EV_CUSTOM);
 	}
@@ -540,28 +594,28 @@ bool ruleset_resolve(
 
 bool ruleset_route(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request,
+	const struct ruleset_credentials *restrict creds,
+	struct ruleset_callback *callback)
 {
 	(void)r;
 	(void)state;
 	(void)request;
-	(void)username;
-	(void)password;
+	(void)creds;
 	(void)callback;
 	return false;
 }
 
 bool ruleset_route6(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request,
+	const struct ruleset_credentials *restrict creds,
+	struct ruleset_callback *callback)
 {
 	(void)r;
 	(void)state;
 	(void)request;
-	(void)username;
-	(void)password;
+	(void)creds;
 	(void)callback;
 	return false;
 }
@@ -702,6 +756,52 @@ static void serve_payload(
 	*peer_fd = sv[1];
 }
 
+/* serve_payload() with the proxy-side descriptor handed back and its send
+ * buffer shrunk to the kernel minimum, so a case can wedge the response write.
+ * The context owns that descriptor and closes it; the case must not. */
+static void serve_payload_wedged(
+	struct ev_loop *loop, struct server *restrict s,
+	const char *restrict req, int *restrict peer_fd, int *restrict srv_fd)
+{
+	int sv[2] = { -1, -1 };
+	struct sockaddr_in sa = { .sin_family = AF_INET };
+	const int sndbuf = 1;
+
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(socket_set_cloexec(sv[0]) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
+	T_CHECK(socket_set_cloexec(sv[1]) == 0);
+	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	T_CHECK(setsockopt(
+			sv[0], SOL_SOCKET, SO_SNDBUF, &sndbuf,
+			sizeof(sndbuf)) == 0);
+	S.ruleset_loop = loop;
+	http_proxy_serve(s, loop, sv[0], (const struct sockaddr *)&sa);
+	T_CHECK(write_all(sv[1], req, strlen(req)) == 0);
+
+	*peer_fd = sv[1];
+	*srv_fd = sv[0];
+}
+
+/* Fill fd's send buffer so nothing the proxy queues afterwards can leave. The
+ * descriptor is nonblocking and its buffer is bounded, so this terminates. */
+static size_t wedge_send_buffer(const int fd)
+{
+	static const unsigned char pad[4096] = { 0 };
+	size_t total = 0;
+	for (;;) {
+		const ssize_t n = send(fd, pad, sizeof(pad), MSG_DONTWAIT);
+		if (n > 0) {
+			total += (size_t)n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR) {
+			continue;
+		}
+		return total;
+	}
+}
+
 /* Drain everything currently readable on fd into buf without blocking. */
 static size_t drain_fd(
 	const int fd, unsigned char *restrict buf, size_t off, const size_t cap)
@@ -794,6 +894,51 @@ static void make_fd_pair(int *restrict a, int *restrict b)
  * regression - request-form handling, CONNECT tunneling and proxy behavior.
  * ---------------------------------------------------------------------- */
 
+T_DECLARE_CASE(host_validation_before_connect_dispatch)
+{
+	static const struct {
+		const char *headers;
+		const char *version;
+		const char *status;
+	} cases[] = {
+		{ "", "HTTP/1.1", "400" },
+		{ "Host: test\r\nhOsT: test\r\n", "HTTP/1.1", "400" },
+		{ "Host: user@test\r\n", "HTTP/1.1", "400" },
+		{ "Host: bad host\r\n", "HTTP/1.1", "400" },
+		{ "Host: [broken]\r\n", "HTTP/1.1", "400" },
+		{ "Host: test:abc\r\n", "HTTP/1.1", "400" },
+		{ "", "HTTP/1.0", "502" },
+		{ "Host: test\r\nHost: other\r\n", "HTTP/1.0", "400" },
+		{ "Host: test/path\r\n", "HTTP/1.0", "400" },
+		{ "Host: [::1]:80\r\n", "HTTP/1.1", "502" },
+		{ "Host:\r\n", "HTTP/1.1", "502" },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct ev_loop *loop = NULL;
+		struct server s = { 0 };
+		int peer_fd = -1;
+		char req[256];
+		reset_stub_state();
+		S.dialreq_new_ok = true;
+		S.dialer_result_fd = -1;
+		init_server(&loop, &s);
+		const int n = snprintf(
+			req, sizeof(req), "CONNECT example.com:80 %s\r\n%s\r\n",
+			cases[i].version, cases[i].headers);
+		T_CHECK(n > 0 && (size_t)n < sizeof(req));
+		serve_payload(loop, &s, req, &peer_fd);
+		const bool ok =
+			assert_response_status(loop, peer_fd, cases[i].status);
+		const uintmax_t dispatched = s.stats.num_request;
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+		T_EXPECT(ok);
+		T_EXPECT_EQ(
+			dispatched,
+			strcmp(cases[i].status, "502") == 0 ? 1 : 0);
+	}
+}
+
 T_DECLARE_CASE(split_request_is_parsed_incrementally)
 {
 	struct ev_loop *loop = NULL;
@@ -816,31 +961,27 @@ T_DECLARE_CASE(split_request_is_parsed_incrementally)
 	ev_loop_destroy(loop);
 }
 
-T_DECLARE_CASE(malformed_proxy_authorization_returns_400)
+/* RFC 9110 §11.4 makes the credentials part optional, so a scheme-only
+ * Proxy-Authorization is a conforming value. The proxy has nothing to decode
+ * from it, but the request must proceed -- reaching the dialer (502 here) --
+ * rather than being failed with a 400. */
+T_DECLARE_CASE(scheme_only_proxy_authorization_is_ignored)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "Proxy-Authorization: BasicOnly\r\n"
 			   "\r\n";
 
-	T_CHECK(loop != NULL);
-	s.loop = loop;
 	reset_stub_state();
-	test_server_init(&s);
+	S.dialreq_new_ok = true;
+	S.dialer_result_fd = -1;
 
+	init_server(&loop, &s);
 	serve_payload(loop, &s, req, &peer_fd);
-	drive_loop(loop);
 
-	{
-		unsigned char rsp[1024];
-		const ssize_t n =
-			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
-		T_EXPECT(n >= 17);
-		T_EXPECT(has_http_status(rsp, (size_t)n, "400"));
-		(void)shutdown(peer_fd, SHUT_WR);
-	}
+	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -853,13 +994,12 @@ T_DECLARE_CASE(connect_with_te_hint_is_accepted)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "TE: gzip\r\n"
 			   "\r\n";
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	S.dialer_result_fd = -1;
 
 	init_server(&loop, &s);
@@ -883,6 +1023,7 @@ T_DECLARE_CASE(connect_with_invalid_target_returns_400)
 			   "\r\n";
 
 	reset_stub_state();
+	S.dialaddr_parse_ok = false;
 	S.dialreq_new_ok = true; /* the failure is the target parse, not OOM */
 	init_server(&loop, &s);
 
@@ -902,6 +1043,127 @@ T_DECLARE_CASE(connect_with_invalid_target_returns_400)
 	ev_loop_destroy(loop);
 }
 
+/* Drive one CONNECT whose request-target the address parser refuses, with a
+ * ruleset configured, and require the front end to answer the client itself. */
+T_DECLARE_SUBCASE(
+	expect_target_refused_before_ruleset, const char *restrict target)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	char req[512];
+	T_CHECK(snprintf(
+			req, sizeof(req),
+			"CONNECT %s HTTP/1.1\r\nHost: test\r\n\r\n",
+			target) > 0);
+
+	reset_stub_state();
+	S.dialaddr_parse_ok = false;
+	S.dialreq_new_ok = true;
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.ruleset_resolve_ok = true;
+	S.ruleset_state_nonnull = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	T_EXPECT(assert_response_status(loop, peer_fd, "400"));
+	/* the raw request-target is what the address parser judged */
+	T_EXPECT_EQ(S.dialaddr_parse_calls, 1);
+	T_EXPECT_STREQ(S.parsed_target, target);
+	/* and the ruleset was never handed it */
+	T_EXPECT_EQ(S.ruleset_resolve_calls, 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Regression: RFC 9110 §9.3.6 admits only the authority-form request-target for
+ * CONNECT, and the no-ruleset path has always answered 400 for anything else.
+ * The ruleset path instead handed ctx->conn.msg.req.url straight to
+ * ruleset_resolve(), so configuring a ruleset silently weakened the front end's
+ * input validation: a portless, origin-form, absolute-form, empty-host or
+ * over-long target reached the ruleset as policy input in a shape the API says
+ * cannot occur. Every such target must now be refused before the ruleset runs,
+ * with the same 400 the no-ruleset path gives. */
+T_DECLARE_CASE(ruleset_malformed_connect_target_returns_400)
+{
+	/* past DIALADDR_STRLEN, which the address parser bounds */
+	char overlong[300 + sizeof(":80")];
+	memset(overlong, 'x', 300);
+	(void)memcpy(overlong + 300, ":80", sizeof(":80"));
+
+	static const char *const bad[] = {
+		"example.com", /* no port */
+		"/path", /* origin-form */
+		"http://example.com/", /* absolute-form */
+		"*", /* asterisk-form */
+		"a:b:c", /* unbracketed multi-colon */
+		"[foo]:80", /* bracketed non-literal */
+		":80", /* empty host */
+		"example.com:99999", /* port out of range */
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+		T_CALL_SUBCASE(expect_target_refused_before_ruleset, bad[i]);
+	}
+	T_CALL_SUBCASE(expect_target_refused_before_ruleset, overlong);
+}
+
+/* Regression: the ruleset must see the parsed address rendered by
+ * dialaddr_format() -- the canonical "host:port" src/socks.c hands over -- not
+ * the client's raw request-target bytes. The parse stub maps every target onto
+ * one fixed address, so the rendering is what tells the two apart. */
+T_DECLARE_CASE(ruleset_receives_the_parsed_authority)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	const char req[] =
+		"CONNECT www.example.org:8443 HTTP/1.1\r\nHost: test\r\n"
+		"\r\n";
+
+	reset_stub_state();
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.ruleset_resolve_ok = true;
+	S.ruleset_state_nonnull = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT_EQ(S.dialaddr_parse_calls, 1);
+	T_EXPECT_STREQ(S.parsed_target, "www.example.org:8443");
+	T_EXPECT_EQ(S.ruleset_resolve_calls, 1);
+	T_EXPECT_STREQ(S.captured_request, "example:80");
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* The no-ruleset path's OOM arm: dialreq_new() failing is a server error
+ * (500), distinct from the unparsable-target 400 above. */
+T_DECLARE_CASE(connect_dialreq_oom_returns_500)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = false; /* the allocation, not the target, fails */
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(valid_connect_dialer_error_returns_502)
 {
 	struct ev_loop *loop = NULL;
@@ -913,7 +1175,6 @@ T_DECLARE_CASE(valid_connect_dialer_error_returns_502)
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	S.dialer_result_fd = -1;
 	S.dialer_err = DIALER_ERR_CONNECT;
 	S.dialer_syserr = ECONNREFUSED;
@@ -941,7 +1202,6 @@ T_DECLARE_CASE(valid_connect_established_with_hijack)
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	make_fd_pair(&dialed_fd, &upstream_fd);
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
@@ -980,7 +1240,6 @@ T_DECLARE_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq)
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	make_fd_pair(&dialed_fd, &upstream_fd);
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
@@ -1012,7 +1271,7 @@ T_DECLARE_CASE(connect_with_transfer_encoding_chunked_is_accepted)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "Connection: close\r\n"
 			   "Keep-Alive: timeout=1\r\n"
 			   "Transfer-Encoding: chunked\r\n"
@@ -1021,7 +1280,6 @@ T_DECLARE_CASE(connect_with_transfer_encoding_chunked_is_accepted)
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	S.dialer_result_fd = -1;
 
 	init_server(&loop, &s);
@@ -1043,13 +1301,12 @@ T_DECLARE_CASE(connect_ignores_malformed_authorization)
 	int upstream_fd = -1;
 	int dialed_fd = -1;
 	unsigned char rsp[1024];
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "Authorization: BasicOnly\r\n"
 			   "\r\n";
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	make_fd_pair(&dialed_fd, &upstream_fd);
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
@@ -1080,7 +1337,7 @@ T_DECLARE_CASE(ruleset_auth_required_without_basic_credentials_returns_407)
 	struct server s = { 0 };
 	int peer_fd = -1;
 	int_fast32_t ruleset_stub = 0;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "Proxy-Authorization: Bearer token\r\n"
 			   "\r\n";
 
@@ -1103,7 +1360,7 @@ T_DECLARE_CASE(ruleset_auth_required_with_invalid_basic_returns_407)
 	struct server s = { 0 };
 	int peer_fd = -1;
 	int_fast32_t ruleset_stub = 0;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "Proxy-Authorization: Basic dXNlcm9ubHk=\r\n"
 			   "\r\n";
 
@@ -1129,7 +1386,7 @@ T_DECLARE_CASE(ruleset_auth_required_valid_basic_decodes_credentials)
 	int peer_fd = -1;
 	int_fast32_t ruleset_stub = 0;
 	/* "user:pass" base64-encoded */
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"
 			   "\r\n";
 
@@ -1144,11 +1401,61 @@ T_DECLARE_CASE(ruleset_auth_required_valid_basic_decodes_credentials)
 	drive_loop(loop);
 
 	T_EXPECT(S.captured_creds);
+	T_EXPECT_EQ(S.captured_username_len, sizeof("user") - 1);
 	T_EXPECT_STREQ(S.captured_username, "user");
+	T_EXPECT_EQ(S.captured_password_len, sizeof("pass") - 1);
 	T_EXPECT_STREQ(S.captured_password, "pass");
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+}
+
+/* The credentials are split at the first colon and measured from the decoded
+ * length, so a colon inside the password and an empty password both reach the
+ * ruleset with the right byte counts. */
+T_DECLARE_CASE(ruleset_auth_basic_credential_lengths_reach_ruleset)
+{
+	static const struct {
+		const char *credentials;
+		const char *username;
+		const char *password;
+	} cases[] = {
+		/* base64 of "user:pa:ss" and "user:" */
+		{ "dXNlcjpwYTpzcw==", "user", "pa:ss" },
+		{ "dXNlcjo=", "user", "" },
+	};
+	for (size_t k = 0; k < ARRAY_SIZE(cases); ++k) {
+		struct ev_loop *loop = NULL;
+		struct server s = { 0 };
+		int peer_fd = -1;
+		int_fast32_t ruleset_stub = 0;
+		char req[128];
+		(void)snprintf(
+			req, sizeof(req),
+			"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			"Proxy-Authorization: Basic %s\r\n"
+			"\r\n",
+			cases[k].credentials);
+
+		reset_stub_state();
+		test_conf.auth_required = true;
+		G.ruleset = (struct ruleset *)&ruleset_stub;
+		S.ruleset_resolve_ok = true;
+		S.ruleset_state_nonnull = true;
+
+		init_server(&loop, &s);
+		serve_payload(loop, &s, req, &peer_fd);
+		drive_loop(loop);
+
+		T_EXPECT(S.captured_creds);
+		T_EXPECT_EQ(S.captured_username_len, strlen(cases[k].username));
+		T_EXPECT_STREQ(S.captured_username, cases[k].username);
+		T_EXPECT_EQ(S.captured_password_len, strlen(cases[k].password));
+		T_EXPECT_STREQ(S.captured_password, cases[k].password);
+
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+	}
 }
 
 /* Regression: RFC 9110 §11.1 makes the authentication scheme token
@@ -1168,7 +1475,7 @@ T_DECLARE_CASE(ruleset_auth_scheme_is_case_insensitive)
 		char req[128];
 		(void)snprintf(
 			req, sizeof(req),
-			"CONNECT example.com:80 HTTP/1.1\r\n"
+			"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			"Proxy-Authorization: %s dXNlcjpwYXNz\r\n"
 			"\r\n",
 			schemes[k]);
@@ -1192,13 +1499,133 @@ T_DECLARE_CASE(ruleset_auth_scheme_is_case_insensitive)
 	}
 }
 
+/* Regression: RFC 9110 §11.4 spells credentials as
+ * `auth-scheme [ 1*SP ( token68 / #auth-param ) ]`, so a run of SP between the
+ * scheme and the credentials is conforming. Pre-fix only the first SP was
+ * consumed, the rest stayed in the base64 input, the decode failed, and with
+ * auth_required the conforming client was answered 407. */
+T_DECLARE_CASE(ruleset_auth_accepts_extra_space_before_credentials)
+{
+	/* "user:pass" base64-encoded, varying only the scheme separator */
+	static const char *const seps[] = { " ", "  ", "     " };
+	for (size_t k = 0; k < ARRAY_SIZE(seps); ++k) {
+		struct ev_loop *loop = NULL;
+		struct server s = { 0 };
+		int peer_fd = -1;
+		int_fast32_t ruleset_stub = 0;
+		char req[128];
+		(void)snprintf(
+			req, sizeof(req),
+			"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			"Proxy-Authorization: Basic%sdXNlcjpwYXNz\r\n"
+			"\r\n",
+			seps[k]);
+
+		reset_stub_state();
+		test_conf.auth_required = true;
+		G.ruleset = (struct ruleset *)&ruleset_stub;
+		S.ruleset_resolve_ok = true;
+		S.ruleset_state_nonnull = true;
+
+		init_server(&loop, &s);
+		serve_payload(loop, &s, req, &peer_fd);
+		drive_loop(loop);
+
+		T_EXPECT(S.captured_creds);
+		T_EXPECT_STREQ(S.captured_username, "user");
+		T_EXPECT_STREQ(S.captured_password, "pass");
+
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+	}
+}
+
+/* Regression: RFC 7617 §2 forbids control characters in the user-id and the
+ * password, so credentials carrying a null byte are malformed. Pre-fix
+ * "us:pass\0y" reached the ruleset as ("us", "pass"), aliasing onto the shorter
+ * identity; a null byte anywhere in the decoded credentials must leave them
+ * unset instead, i.e. 407 under auth_required. */
+T_DECLARE_CASE(ruleset_auth_rejects_basic_credentials_with_nul)
+{
+	/* base64 of "us\0er:pass", "us:pass\0y", "us\0er:pass\0y", "us\0:pass\0" */
+	static const char *const credentials[] = {
+		"dXMAZXI6cGFzcw==",
+		"dXM6cGFzcwB5",
+		"dXMAZXI6cGFzcwB5",
+		"dXMAOnBhc3MA",
+	};
+	for (size_t k = 0; k < ARRAY_SIZE(credentials); ++k) {
+		struct ev_loop *loop = NULL;
+		struct server s = { 0 };
+		int peer_fd = -1;
+		int_fast32_t ruleset_stub = 0;
+		char req[128];
+		(void)snprintf(
+			req, sizeof(req),
+			"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			"Proxy-Authorization: Basic %s\r\n"
+			"\r\n",
+			credentials[k]);
+
+		reset_stub_state();
+		test_conf.auth_required = true;
+		G.ruleset = (struct ruleset *)&ruleset_stub;
+		S.ruleset_resolve_ok = true;
+		S.ruleset_state_nonnull = true;
+
+		init_server(&loop, &s);
+		serve_payload(loop, &s, req, &peer_fd);
+		drive_loop(loop);
+
+		/* the truncated prefix never reached the ruleset */
+		T_EXPECT(!S.captured_creds);
+		T_EXPECT(assert_response_status(loop, peer_fd, "407"));
+
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+	}
+}
+
+/* Only the null byte is unrepresentable: the decoded credentials otherwise
+ * reach the ruleset verbatim, bytes outside ASCII included. */
+T_DECLARE_CASE(ruleset_auth_basic_high_byte_credentials_reach_ruleset)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	/* "hi\xff:pw\xfe" base64-encoded */
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			   "Proxy-Authorization: Basic aGn/OnB3/g==\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	test_conf.auth_required = true;
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.ruleset_resolve_ok = true;
+	S.ruleset_state_nonnull = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT(S.captured_creds);
+	T_EXPECT_EQ(S.captured_username_len, sizeof("hi\xff") - 1);
+	T_EXPECT_STREQ(S.captured_username, "hi\xff");
+	T_EXPECT_EQ(S.captured_password_len, sizeof("pw\xfe") - 1);
+	T_EXPECT_STREQ(S.captured_password, "pw\xfe");
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(ruleset_resolve_failure_returns_500)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
 	int_fast32_t ruleset_stub = 0;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"
 			   "\r\n";
 
@@ -1216,13 +1643,66 @@ T_DECLARE_CASE(ruleset_resolve_failure_returns_500)
 	ev_loop_destroy(loop);
 }
 
+/* Emulate ruleset_state_gc(): a published state the consumer never cancelled
+ * stays reachable only from the Lua heap, and the next collection completes it
+ * through the callback -- which is the consumer's context, freed or not. */
+static void emulate_ruleset_state_gc(struct ev_loop *loop)
+{
+	if (!S.ruleset_state_live) {
+		return;
+	}
+	S.ruleset_state_live = false;
+	struct ruleset_callback *restrict cb = S.ruleset_cb_ptr;
+	cb->request.req = NULL;
+	if (S.ruleset_state_slot != NULL) {
+		*S.ruleset_state_slot = NULL;
+	}
+	ev_feed_event(loop, &cb->w_finish, EV_CUSTOM);
+}
+
+/* Regression: ruleset_resolve() publishes its state before its last fallible
+ * startup steps, so a false return can still leave a live state whose callback
+ * targets this ctx. Answering 500 moves the ctx to STATE_RESPONSE, where a
+ * teardown keyed on the STATE_PROCESS arm never cancels it, and the next Lua
+ * collection completes the orphan into the freed ctx. */
+T_DECLARE_CASE(ruleset_resolve_failure_cancels_published_state)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.ruleset_resolve_ok = false;
+	/* the failed start published its state anyway */
+	S.ruleset_state_nonnull = true;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
+	/* the ctx is gone with the response, so collecting the state now must
+	 * be a no-op rather than a write through the callback into freed
+	 * memory -- which a sanitizer build reports here */
+	emulate_ruleset_state_gc(loop);
+	drive_loop(loop);
+	/* only a cancel before the ctx was released can have made it one */
+	T_EXPECT_EQ(S.ruleset_cancel_calls, 1);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(ruleset_finish_without_req_returns_403)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
 	int_fast32_t ruleset_stub = 0;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "\r\n";
 
 	reset_stub_state();
@@ -1246,7 +1726,7 @@ T_DECLARE_CASE(ruleset_finish_with_req_and_dialer_error_returns_502)
 	struct server s = { 0 };
 	int peer_fd = -1;
 	int_fast32_t ruleset_stub = 0;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "\r\n";
 
 	reset_stub_state();
@@ -1267,13 +1747,68 @@ T_DECLARE_CASE(ruleset_finish_with_req_and_dialer_error_returns_502)
 	ev_loop_destroy(loop);
 }
 
+/* await.forward()'s commit hook: instead of resolving a dial request, the
+ * ruleset hands back an already-connected descriptor, and the tunnel opens
+ * straight from STATE_PROCESS -- a state no other path commits from. */
+T_DECLARE_CASE(ruleset_forward_commit_establishes_tunnel)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	unsigned char rsp[1024];
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.ruleset_resolve_ok = true;
+	S.ruleset_finish_now = false;
+	S.ruleset_state_nonnull = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop); /* -> STATE_PROCESS, the request still pending */
+	T_CHECK(S.ruleset_cb_ptr != NULL);
+	T_CHECK(S.ruleset_cb_ptr->forward != NULL);
+
+	/* emulate await.forward() committing a connected upstream */
+	S.ruleset_cb_ptr->forward(loop, S.ruleset_cb_ptr, dialed_fd);
+
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	T_EXPECT(test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC));
+
+	{
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 30);
+		T_EXPECT(n >= 30);
+		T_EXPECT(
+			memmem(rsp, (size_t)n, "200 Connection established",
+			       26) != NULL);
+		(void)shutdown(peer_fd, SHUT_WR);
+	}
+	T_EXPECT_EQ((uintmax_t)s.stats.num_success, (uintmax_t)1);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
+	T_EXPECT_EQ(S.ruleset_cancel_calls, 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 {
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
 	int_fast32_t ruleset_stub = 0;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "\r\n";
 
 	reset_stub_state();
@@ -1295,12 +1830,107 @@ T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 	drive_loop(loop);
 	vclock_advance(test_conf.timeout + 1.0);
 	drive_loop(loop);
+	/* the 504 reply is queued on w_send; restore real time so it flushes */
+	vclock_stop();
 
 	T_EXPECT(S.ruleset_cancel_calls > 0);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_reject_timeout, (uintmax_t)1);
+	/* the request parsed, so a stalled route answers 504 like a stalled
+	 * dial rather than closing with no status */
+	{
+		unsigned char b[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, b, sizeof(b), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(b, (size_t)n, "504"));
+	}
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
+}
+T_DECLARE_CASE(ruleset_removed_before_processing)
+{
+	for (int auth = 0; auth < 2; auth++) {
+		reset_stub_state();
+		S.dialreq_new_ok = true;
+		G.ruleset = (struct ruleset *)&test_conf;
+		struct ev_loop *loop = NULL;
+		struct server s = { 0 };
+		int peer_fd = -1;
+		init_server(&loop, &s);
+		serve_payload(
+			loop, &s,
+			"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			"Proxy-Authorization: Basic dTpw\r\n\r\n",
+			&peer_fd);
+		ev_run(loop, EVRUN_NOWAIT);
+		T_CHECK(s.stats.num_request == 1);
+		T_CHECK(S.ruleset_resolve_calls == 0);
+		s.ruleset = NULL;
+		test_conf.auth_required = auth != 0;
+		unsigned char rsp[2048];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(rsp, (size_t)n, auth ? "407" : "502"));
+		T_EXPECT_EQ(S.ruleset_resolve_calls, 0);
+		T_EXPECT_EQ(S.dialer_do_calls, auth ? 0 : 1);
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+	}
+	G.ruleset = NULL;
+}
+
+/* The deadline can also cross before the idle watcher that starts the ruleset
+ * has run (idle watchers starve while other events are pending). The 504 moves
+ * the context out of STATE_PROCESS, so the pending start must be withdrawn too,
+ * or it later routes a request the client was already answered for. */
+T_DECLARE_CASE(timeout_before_ruleset_start_answers_504)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int_fast32_t ruleset_stub = 0;
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	test_conf.timeout = 10.0;
+	G.ruleset = (struct ruleset *)&ruleset_stub;
+	S.ruleset_resolve_ok = true;
+	S.ruleset_finish_now = false;
+
+	vclock_freeze_now();
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+
+	/* single iterations: the one that parses the request starts the idle
+	 * watcher, which libev queues no earlier than the next iteration */
+	while (s.stats.num_request == 0) {
+		ev_run(loop, EVRUN_ONCE);
+	}
+	T_CHECK(S.ruleset_resolve_calls == 0);
+	/* the expired timer is pending in this iteration, so the idle watcher
+	 * is not queued alongside it */
+	vclock_advance(test_conf.timeout + 1.0);
+	ev_run(loop, EVRUN_NOWAIT);
 	vclock_stop();
+
+	{
+		unsigned char b[1024];
+		const ssize_t n =
+			recv_at_least(loop, peer_fd, b, sizeof(b), 17);
+		T_EXPECT(n >= 17);
+		T_EXPECT(has_http_status(b, (size_t)n, "504"));
+	}
+	/* the ruleset was never started for the answered request */
+	T_EXPECT_EQ(S.ruleset_resolve_calls, 0);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_reject_timeout, (uintmax_t)1);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
 }
 
 /* Emulate ruleset state_complete() from an ev_check: hand the request over,
@@ -1338,7 +1968,7 @@ T_DECLARE_CASE(process_teardown_cancels_completed_ruleset_request)
 	int peer_fd = -1;
 	int_fast32_t ruleset_stub = 0;
 	ev_check w_complete;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "\r\n";
 
 	reset_stub_state();
@@ -1385,13 +2015,12 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 	struct ev_loop *loop = NULL;
 	struct server s = { 0 };
 	int peer_fd = -1;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "\r\n";
 
 	reset_stub_state();
 	test_conf.timeout = 10.0;
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	S.dialer_invoke_now = false;
 
 	/* engage the virtual clock before the loop exists, so w_timeout is armed
@@ -1424,6 +2053,52 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 	ev_loop_destroy(loop);
 }
 
+/* Regression: the connect deadline is a one-shot timer, so libev has already
+ * stopped it when timeout_cb() queues the 504. That response is written
+ * asynchronously, so unless the deadline is re-armed the context is left with
+ * none: a client that never reads holds the accepted descriptor and its
+ * num_halfopen slot forever, and num_halfopen gates every new accept. */
+T_DECLARE_CASE(connect_timeout_response_is_deadline_bounded)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int srv_fd = -1;
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+	test_conf.timeout = 10.0;
+	S.dialreq_new_ok = true;
+	S.dialer_invoke_now = false; /* the dial never completes */
+
+	/* engage the virtual clock before the loop exists, so w_timeout is armed
+	 * on virtual time and no amount of real setup time can cross it */
+	vclock_freeze_now();
+	init_server(&loop, &s);
+	serve_payload_wedged(loop, &s, req, &peer_fd, &srv_fd);
+	/* the proxy can queue the error page but never drain it */
+	T_CHECK(wedge_send_buffer(srv_fd) > 0);
+
+	drive_loop(loop); /* -> STATE_CONNECT, w_timeout armed */
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)1);
+
+	vclock_advance(test_conf.timeout + 1.0);
+	drive_loop(loop); /* the dial deadline: 504 queued, unsendable */
+	T_EXPECT(S.dialer_cancel_calls > 0);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)1);
+
+	/* the response phase must carry a deadline of its own; crossing it
+	 * releases the context instead of pinning the descriptor and the slot */
+	vclock_advance(test_conf.timeout + 1.0);
+	drive_loop(loop);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	vclock_stop();
+}
+
 /*
  * Regression: a client that doesn't wait for the "200 Connection
  * established" reply before sending payload (e.g. TCP fast open) has its
@@ -1440,12 +2115,12 @@ T_DECLARE_CASE(connect_pipelined_bytes_forwarded_to_upstream)
 	int upstream_fd = -1;
 	int dialed_fd = -1;
 	static const char payload[] = "hello upstream";
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n\r\n"
-			   "hello upstream";
+	const char req[] =
+		"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n\r\n"
+		"hello upstream";
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	make_fd_pair(&dialed_fd, &upstream_fd);
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
@@ -1485,11 +2160,11 @@ T_DECLARE_CASE(connect_success_counted_once)
 	int peer_fd = -1;
 	int upstream_fd = -1;
 	int dialed_fd = -1;
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n\r\n";
+	const char req[] =
+		"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n\r\n";
 
 	reset_stub_state();
 	S.dialreq_new_ok = true;
-	S.dialaddr_parse_ok = true;
 	make_fd_pair(&dialed_fd, &upstream_fd);
 	S.dialer_result_fd = dialed_fd;
 	S.dialer_err = DIALER_OK;
@@ -1509,6 +2184,47 @@ T_DECLARE_CASE(connect_success_counted_once)
 	ev_loop_destroy(loop);
 }
 
+/* http_ctx_start_transfer()'s failure arm: server_commit_session() has already
+ * closed both descriptors and dropped the context, and num_halfopen was
+ * decremented before the call, so every counter must land back at zero rather
+ * than underflow. */
+T_DECLARE_CASE(connect_commit_xfer_serve_failure_recovers)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] =
+		"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.xfer_serve_fail = true;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	serve_payload(loop, &s, req, &peer_fd);
+	drive_loop(loop);
+
+	T_EXPECT_EQ(stub_xfer_ctx_count, 0);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_request, (uintmax_t)1);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_success, (uintmax_t)0);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
+	T_EXPECT_EQ((uintmax_t)s.num_sessions, (uintmax_t)0);
+	/* the dialreq was released exactly once, by the ordinary teardown */
+	T_EXPECT_EQ(S.dialreq_free_calls, 1);
+	T_EXPECT_EQ(S.dialreq_invalid_free_calls, 0);
+
+	/* both descriptors were closed by the recovery path */
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
 T_DECLARE_CASE(request_header_value_with_bare_cr_is_rejected)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1517,7 +2233,7 @@ T_DECLARE_CASE(request_header_value_with_bare_cr_is_rejected)
 	/* Bare CR in a field value is a CTL; RFC 9112 §2.2 SHOULD reject.
 	 * The \r before "Injected" is not followed by \n so strstr("\r\n")
 	 * finds the real CRLF later; value = "foo\rInjected: bar". */
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "X-Custom: foo\r"
 			   "Injected: bar\r\n"
 			   "\r\n";
@@ -1549,7 +2265,7 @@ T_DECLARE_CASE(request_header_value_with_ctl_is_rejected)
 	struct server s = { 0 };
 	int peer_fd = -1;
 	/* SOH (0x01) in value is a CTL; must be rejected */
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "X-Custom: foo\x01"
 			   "bar\r\n"
 			   "\r\n";
@@ -1581,7 +2297,7 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
 	struct server s = { 0 };
 	int peer_fd = -1;
 	/* Space in field name is not a tchar; RFC 7230 §3.2.6 requires rejection */
-	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\n"
+	const char req[] = "CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n"
 			   "X Invalid: foo\r\n"
 			   "\r\n";
 
@@ -1643,6 +2359,321 @@ T_DECLARE_CASE(request_unsupported_http_version_returns_400)
 	}
 }
 
+/* transfer_serve() takes ownership of both descriptors and closes them; the
+ * lowest free descriptor must therefore be back where it started once the case
+ * has closed its own ends. */
+static int probe_lowest_fd(void)
+{
+	const int fd = dup(STDIN_FILENO);
+	if (fd >= 0) {
+		(void)close(fd);
+	}
+	return fd;
+}
+
+T_DECLARE_CASE(connect_success_releases_descriptors)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] =
+		"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n\r\n";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	const int before = probe_lowest_fd();
+	T_CHECK(before >= 0);
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	serve_payload(loop, &s, req, &peer_fd);
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	T_EXPECT(test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC));
+
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	/* the accepted end and the dialed socket belong to the transfer now */
+	T_EXPECT_EQ(probe_lowest_fd(), before);
+
+	ev_loop_destroy(loop);
+}
+
+/* log capture - the fd-correlation prefix has no output other than the log, so
+ * the case reads back the lines production emitted. */
+static struct {
+	char buf[8192];
+	size_t len;
+} g_logcap;
+
+static void logcap_write(void *ud, const unsigned char *buf, size_t len)
+{
+	(void)ud;
+	const size_t space = sizeof(g_logcap.buf) - 1 - g_logcap.len;
+	if (len > space) {
+		len = space;
+	}
+	memcpy(g_logcap.buf + g_logcap.len, buf, len);
+	g_logcap.len += len;
+	g_logcap.buf[g_logcap.len] = '\0';
+}
+
+static void logcap_start(const int level)
+{
+	g_logcap.len = 0;
+	g_logcap.buf[0] = '\0';
+	slog_setoutput(SLOG_OUTPUT_WRITER, logcap_write, NULL);
+	slog_setlevel(level);
+}
+
+/* Restore the default silence, so a case that longjmps out of an assertion
+ * cannot leave the writer sink installed for the next one. */
+static void logcap_stop(void)
+{
+	slog_setlevel(LOG_LEVEL_SILENCE);
+	slog_setoutput(SLOG_OUTPUT_DISCARD);
+}
+
+/* Copy the whole captured line containing @p needle into @p out. A substring
+ * search cannot tell "[fd:9] addr: closing" from "addr: closing"; the line
+ * boundaries can. */
+static bool logcap_line(
+	const char *restrict needle, char *restrict out, const size_t maxlen)
+{
+	const char *const hit = strstr(g_logcap.buf, needle);
+	if (hit == NULL) {
+		return false;
+	}
+	const char *begin = hit;
+	while (begin > g_logcap.buf && begin[-1] != '\n') {
+		begin--;
+	}
+	const char *end = strchr(hit, '\n');
+	if (end == NULL) {
+		end = g_logcap.buf + g_logcap.len;
+	}
+	const size_t len = (size_t)(end - begin);
+	if (len >= maxlen) {
+		return false;
+	}
+	(void)memcpy(out, begin, len);
+	out[len] = '\0';
+	return true;
+}
+
+/* The hand-off clears ctx->accepted_fd before logging, so the fd-correlation
+ * prefix has to carry the descriptor explicitly rather than read it back. */
+T_DECLARE_CASE(connect_transfer_start_log_reports_accepted_fd)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
+	int sv[2] = { -1, -1 };
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	const char req[] =
+		"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n\r\n";
+	const struct sockaddr_in client_sa = { .sin_family = AF_INET };
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+
+	init_server(&loop, &s);
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	T_CHECK(socket_set_cloexec(sv[0]) == 0);
+	T_CHECK(socket_set_nonblock(sv[0]) == 0);
+	T_CHECK(socket_set_cloexec(sv[1]) == 0);
+	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	const int accepted_fd = sv[0];
+	S.ruleset_loop = loop;
+
+	logcap_start(LOG_LEVEL_DEBUG);
+	http_proxy_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&client_sa);
+	T_CHECK(write_all(sv[1], req, strlen(req)) == 0);
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	const bool committed = test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC);
+	logcap_stop();
+	T_EXPECT(committed);
+
+	/* the stub client formats as 0.0.0.0:0, so the prefix is deterministic */
+	char want[128];
+	(void)snprintf(
+		want, sizeof(want), "[fd:%d] 0.0.0.0:0: transfer start: [%d<->",
+		accepted_fd, accepted_fd);
+	T_EXPECT(strstr(g_logcap.buf, want) != NULL);
+	(void)snprintf(
+		want, sizeof(want), "[fd:%d] 0.0.0.0:0: ready, ", accepted_fd);
+	T_EXPECT(strstr(g_logcap.buf, want) != NULL);
+	T_EXPECT(strstr(g_logcap.buf, "[fd:-1]") == NULL);
+
+	T_CHECK(close(sv[1]) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* The context finalizes after the hand-off moved its descriptor out, so the
+ * closing line has none to name. It must print no fd field at all: [fd:-1]
+ * names nothing, and the remembered number may already belong to another
+ * connection. Lines emitted while the context still owns the descriptor keep
+ * naming it. */
+T_DECLARE_CASE(connect_close_log_omits_handed_off_fd)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	struct server_success_wait_ctx wait_ctx = { 0 };
+	int sv[2] = { -1, -1 };
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	char line[256];
+	char want[128];
+	const char req[] =
+		"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n\r\n";
+	const struct sockaddr_in client_sa = { .sin_family = AF_INET };
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+
+	init_server(&loop, &s);
+	make_fd_pair(&sv[0], &sv[1]);
+	const int accepted_fd = sv[0];
+	S.ruleset_loop = loop;
+
+	logcap_start(LOG_LEVEL_VERBOSE);
+	http_proxy_serve(
+		&s, loop, accepted_fd, (const struct sockaddr *)&client_sa);
+	T_CHECK(write_all(sv[1], req, strlen(req)) == 0);
+	wait_ctx.s = &s;
+	wait_ctx.expected = 1;
+	const bool committed = test_wait_until(
+		loop, server_success_reached, &wait_ctx, TEST_WAIT_RECV_SEC);
+	logcap_stop();
+	T_EXPECT(committed);
+
+	T_EXPECT(logcap_line("closing state=", line, sizeof(line)));
+	T_EXPECT(strstr(line, "[fd:") == NULL);
+	/* the same session named its descriptor while it still owned one */
+	(void)snprintf(want, sizeof(want), "[fd:%d] ", accepted_fd);
+	T_EXPECT(logcap_line("http: CONNECT", line, sizeof(line)));
+	T_EXPECT(strstr(line, want) != NULL);
+
+	T_CHECK(close(sv[1]) == 0);
+	T_CHECK(close(upstream_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* The client resets before the queued response can be written: the send fails
+ * and the context must be torn down from STATE_RESPONSE, releasing its
+ * half-open slot and the accepted descriptor. */
+T_DECLARE_CASE(response_send_failure_releases_context)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	const char req[] = "GET http://example.com/ HTTP/1.1\r\nHost: test\r\n"
+			   "\r\n";
+
+	reset_stub_state();
+
+	init_server(&loop, &s);
+	const int before = probe_lowest_fd();
+	T_CHECK(before >= 0);
+	serve_payload(loop, &s, req, &peer_fd);
+	/* the request stays readable after the peer is gone, so the proxy parses
+	 * it and queues a 501 that can no longer be delivered */
+	T_CHECK(close(peer_fd) == 0);
+	logcap_start(LOG_LEVEL_WARNING);
+	drive_loop(loop);
+	logcap_stop();
+
+	{
+		char line[256];
+		T_EXPECT(logcap_line("socket_send:", line, sizeof(line)));
+	}
+	T_EXPECT_EQ((uintmax_t)s.stats.num_request, (uintmax_t)1);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
+	/* the accepted end was closed with the context */
+	T_EXPECT_EQ(probe_lowest_fd(), before);
+
+	ev_loop_destroy(loop);
+}
+
+/* The upstream is gone before the pipelined client bytes can be replayed to it:
+ * the replay fails after the CONNECT 200 went out and the dialreq was released,
+ * but before the transfer starts, so the teardown runs from STATE_ESTABLISHED
+ * and must release the half-open slot and both descriptors without freeing the
+ * dialreq a second time. */
+T_DECLARE_CASE(connect_pipelined_forward_failure_releases_context)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	int upstream_fd = -1;
+	int dialed_fd = -1;
+	unsigned char rsp[1024];
+	const char req[] =
+		"CONNECT example.com:80 HTTP/1.1\r\nHost: test\r\n\r\n"
+		"hello upstream";
+
+	reset_stub_state();
+	S.dialreq_new_ok = true;
+	S.dialer_err = DIALER_OK;
+	S.dialer_syserr = 0;
+
+	init_server(&loop, &s);
+	const int before = probe_lowest_fd();
+	T_CHECK(before >= 0);
+	make_fd_pair(&dialed_fd, &upstream_fd);
+	S.dialer_result_fd = dialed_fd;
+	/* the replay to the dialed socket fails with EPIPE */
+	T_CHECK(close(upstream_fd) == 0);
+	serve_payload(loop, &s, req, &peer_fd);
+	logcap_start(LOG_LEVEL_WARNING);
+	const ssize_t n = recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 30);
+	logcap_stop();
+
+	T_EXPECT(n >= 30);
+	T_EXPECT(
+		memmem(rsp, (size_t)n, "200 Connection established", 26) !=
+		NULL);
+	{
+		char line[256];
+		T_EXPECT(logcap_line(
+			"failed to forward pipelined bytes", line,
+			sizeof(line)));
+	}
+	/* no transfer was started from the failed replay */
+	T_EXPECT_EQ(stub_xfer_ctx_count, 0);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_success, (uintmax_t)0);
+	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
+	/* released once, before the replay; the teardown did not free it again */
+	T_EXPECT_EQ(S.dialreq_free_calls, 1);
+	T_EXPECT_EQ(S.dialreq_invalid_free_calls, 0);
+	/* the accepted end reads EOF, and both proxy-side descriptors are gone */
+	T_EXPECT_EQ(recv(peer_fd, rsp, sizeof(rsp), MSG_DONTWAIT), (ssize_t)0);
+	T_CHECK(close(peer_fd) == 0);
+	T_EXPECT_EQ(probe_lowest_fd(), before);
+
+	ev_loop_destroy(loop);
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -1652,27 +2683,46 @@ T_DECLARE_CASE(request_unsupported_http_version_returns_400)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(host_validation_before_connect_dispatch),
 	T_CASE(split_request_is_parsed_incrementally),
-	T_CASE(malformed_proxy_authorization_returns_400),
+	T_CASE(scheme_only_proxy_authorization_is_ignored),
 	T_CASE(connect_with_te_hint_is_accepted),
 	T_CASE(connect_with_invalid_target_returns_400),
+	T_CASE(ruleset_malformed_connect_target_returns_400),
+	T_CASE(ruleset_receives_the_parsed_authority),
+	T_CASE(connect_dialreq_oom_returns_500),
 	T_CASE(valid_connect_dialer_error_returns_502),
 	T_CASE(valid_connect_established_with_hijack),
 	T_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq),
 	T_CASE(connect_with_transfer_encoding_chunked_is_accepted),
 	T_CASE(connect_success_counted_once),
+	T_CASE(connect_success_releases_descriptors),
+	T_CASE(connect_transfer_start_log_reports_accepted_fd),
+	T_CASE(connect_close_log_omits_handed_off_fd),
+	T_CASE(connect_commit_xfer_serve_failure_recovers),
 	T_CASE(connect_pipelined_bytes_forwarded_to_upstream),
+	T_CASE(connect_pipelined_forward_failure_releases_context),
+	T_CASE(response_send_failure_releases_context),
 	T_CASE(connect_ignores_malformed_authorization),
 	T_CASE(ruleset_auth_required_without_basic_credentials_returns_407),
 	T_CASE(ruleset_auth_required_with_invalid_basic_returns_407),
 	T_CASE(ruleset_auth_required_valid_basic_decodes_credentials),
+	T_CASE(ruleset_auth_basic_credential_lengths_reach_ruleset),
 	T_CASE(ruleset_auth_scheme_is_case_insensitive),
+	T_CASE(ruleset_auth_accepts_extra_space_before_credentials),
+	T_CASE(ruleset_auth_rejects_basic_credentials_with_nul),
+	T_CASE(ruleset_auth_basic_high_byte_credentials_reach_ruleset),
 	T_CASE(ruleset_resolve_failure_returns_500),
+	T_CASE(ruleset_resolve_failure_cancels_published_state),
 	T_CASE(ruleset_finish_without_req_returns_403),
 	T_CASE(ruleset_finish_with_req_and_dialer_error_returns_502),
+	T_CASE(ruleset_forward_commit_establishes_tunnel),
 	T_CASE(timeout_in_process_state_cancels_ruleset),
+	T_CASE(timeout_before_ruleset_start_answers_504),
+	T_CASE(ruleset_removed_before_processing),
 	T_CASE(process_teardown_cancels_completed_ruleset_request),
 	T_CASE(timeout_in_connect_state_cancels_dialer),
+	T_CASE(connect_timeout_response_is_deadline_bounded),
 	T_CASE(request_header_value_with_bare_cr_is_rejected),
 	T_CASE(request_header_value_with_ctl_is_rejected),
 	T_CASE(request_header_name_with_invalid_token_is_rejected),
@@ -1682,6 +2732,11 @@ static const struct testing_suite suite[] = {
 
 int main(int argc, char **argv)
 {
+	/* socket_send() passes no MSG_NOSIGNAL, so a send to a closed peer must
+	 * fail with EPIPE rather than kill the process, as in the daemon */
+	const struct sigaction ignore = { .sa_handler = SIG_IGN };
+	(void)sigaction(SIGPIPE, &ignore, NULL);
+
 	reset_stub_state();
 	const int ret = testing_main(argc, argv, suite);
 	reset_stub_state();

@@ -23,6 +23,8 @@ int cfunc_loadfile(lua_State *restrict L);
 
 int cfunc_loadconfig(lua_State *restrict L);
 
+int cfunc_reloadconfig(lua_State *restrict L);
+
 int cfunc_invoke(lua_State *restrict L);
 
 int cfunc_rpcall(lua_State *restrict L);
@@ -36,6 +38,8 @@ int cfunc_metrics(lua_State *restrict L);
 int cfunc_tick(lua_State *restrict L);
 
 int cfunc_healthy(lua_State *restrict L);
+
+int cfunc_isvalid(lua_State *restrict L);
 
 int cfunc_gc(lua_State *restrict L);
 

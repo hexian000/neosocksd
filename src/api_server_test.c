@@ -14,11 +14,14 @@
 #include "meta/arraysize.h"
 #include "os/clock.h"
 #include "os/socket.h"
+#include "utils/slog.h"
 #include "utils/testing.h"
 
 #include <ev.h>
 
 #include <errno.h>
+#include <locale.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -116,8 +119,15 @@ static struct config test_conf = {
 	.timeout = 1.0,
 };
 
-static const ev_tstamp TEST_WAIT_CLOSE_SEC = 0.016;
+/* Upper bounds on a wait; reaching one is a failure. Both stay below
+ * test_conf.timeout so a satisfied wait means the response path acted, not that
+ * the request timeout expired. */
+static const ev_tstamp TEST_WAIT_CLOSE_SEC = 0.128;
 static const ev_tstamp TEST_WAIT_RECV_SEC = 0.128;
+
+/* Bounds an ev_run(EVRUN_ONCE) sleep so a predicate over an fd the loop does
+ * not watch is re-checked promptly. */
+static const ev_tstamp TEST_TICK_SEC = 0.002;
 
 static struct resolver_stats resolver_stub_stats = {
 	.num_query = 7,
@@ -148,6 +158,22 @@ void server_stats(
 }
 
 #if WITH_RULESET
+/* A string argument a ruleset stub received, copied out of the caller's
+ * request buffers, which do not outlive the call. */
+struct stub_arg {
+	bool present;
+	char str[64];
+};
+
+static void stub_arg_record(struct stub_arg *restrict a, const char *s)
+{
+	a->present = (s != NULL);
+	a->str[0] = '\0';
+	if (s != NULL) {
+		(void)snprintf(a->str, sizeof(a->str), "%s", s);
+	}
+}
+
 static struct {
 	bool invoke_ok;
 	bool update_ok;
@@ -156,6 +182,7 @@ static struct {
 	bool rpcall_null_result;
 	bool rpcall_auto_finish;
 	bool rpcall_publish_then_fail;
+	bool rpcall_finish_then_fail;
 	bool stats_ok;
 
 	const char *errstr;
@@ -176,7 +203,12 @@ static struct {
 	struct ruleset_state **rpcstate_out;
 	struct ruleset_callback *pending_rpcall;
 	size_t cancel_count;
+	size_t update_call_count;
+	struct stub_arg update_modname;
+	struct stub_arg update_chunkname;
 	size_t stats_call_count;
+	double stats_dt;
+	struct stub_arg stats_query;
 	bool metrics_ok;
 	const char *metrics_str;
 	size_t metrics_len;
@@ -192,6 +224,8 @@ static struct {
 	.rpcall_ok = true,
 	.rpcall_null_result = false,
 	.rpcall_auto_finish = false,
+	.rpcall_publish_then_fail = false,
+	.rpcall_finish_then_fail = false,
 	.stats_ok = true,
 	.errstr = "ruleset error",
 	.errlen = sizeof("ruleset error") - 1,
@@ -236,6 +270,7 @@ static void reset_ruleset_stub(void)
 	RS.rpcall_null_result = false;
 	RS.rpcall_auto_finish = false;
 	RS.rpcall_publish_then_fail = false;
+	RS.rpcall_finish_then_fail = false;
 	RS.stats_ok = true;
 	RS.errstr = "ruleset error";
 	RS.errlen = sizeof("ruleset error") - 1;
@@ -258,7 +293,12 @@ static void reset_ruleset_stub(void)
 	RS.rpcstate_out = NULL;
 	RS.pending_rpcall = NULL;
 	RS.cancel_count = 0;
+	RS.update_call_count = 0;
+	RS.update_modname = (struct stub_arg){ .present = false };
+	RS.update_chunkname = (struct stub_arg){ .present = false };
 	RS.stats_call_count = 0;
+	RS.stats_dt = 0.0;
+	RS.stats_query = (struct stub_arg){ .present = false };
 	RS.metrics_ok = false;
 	RS.metrics_str = "custom_metric 1\n";
 	RS.metrics_len = sizeof("custom_metric 1\n") - 1;
@@ -326,9 +366,10 @@ bool ruleset_update(
 	const char *restrict chunkname, struct io_stream *code)
 {
 	(void)r;
-	(void)modname;
-	(void)chunkname;
 	(void)code;
+	RS.update_call_count++;
+	stub_arg_record(&RS.update_modname, modname);
+	stub_arg_record(&RS.update_chunkname, chunkname);
 	return RS.update_ok;
 }
 
@@ -345,6 +386,20 @@ bool ruleset_rpcall(
 	(void)r;
 	(void)code;
 	if (!RS.rpcall_ok) {
+		if (RS.rpcall_finish_then_fail) {
+			/* rpcall_finish() completes the call -- result delivered,
+			 * *state nulled and w_finish fed -- and only a later step
+			 * raises, so the failure is reported over a call that has
+			 * already run */
+			RS.rpcstate =
+				(struct ruleset_state *)&ruleset_state_tag;
+			*state = RS.rpcstate;
+			RS.rpcstate_out = state;
+			set_rpcall_result(callback);
+			*RS.rpcstate_out = NULL;
+			ev_feed_event(RS.loop, &callback->w_finish, EV_CUSTOM);
+			return false;
+		}
 		if (RS.rpcall_publish_then_fail) {
 			/* cfunc_rpcall publishes *pstate before its last fallible
 			 * step, so a failure can leave the state orphaned; emulate
@@ -396,13 +451,12 @@ const char *ruleset_stats(
 	size_t *len)
 {
 	(void)r;
-	(void)dt;
-	(void)query;
 	RS.stats_call_count++;
+	RS.stats_dt = dt;
+	stub_arg_record(&RS.stats_query, query);
 	if (!RS.stats_ok) {
-		if (len != NULL) {
-			*len = RS.errlen;
-		}
+		/* like the real one, a failure leaves *len unset: the error text
+		 * and its length come from ruleset_geterror() */
 		return NULL;
 	}
 	if (len != NULL) {
@@ -544,18 +598,13 @@ static ssize_t recv_all_with_timeout(
 	return (ssize_t)off;
 }
 
-static void test_run_for(struct ev_loop *loop, const ev_tstamp timeout_sec)
+static void
+test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 {
-	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
-
-	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired) {
-		ev_run(loop, EVRUN_ONCE);
-	}
-	ev_timer_stop(loop, &w_timeout);
+	/* No-op: this timer exists only to bound ev_run(EVRUN_ONCE) sleeps. */
+	(void)loop;
+	(void)w;
+	(void)revents;
 }
 
 static bool test_wait_until(
@@ -563,14 +612,17 @@ static bool test_wait_until(
 	const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
-	struct ev_timer w_timeout;
+	struct ev_timer w_timeout, w_tick;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
+	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
+	ev_timer_start(loop, &w_tick);
 	while (!watchdog.fired && !predicate(data)) {
 		ev_run(loop, EVRUN_ONCE);
 	}
+	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	return predicate(data);
 }
@@ -723,6 +775,41 @@ static size_t count_bytes(
 	return count;
 }
 
+/* Copy the value text of one Prometheus sample. `name` carries the leading
+ * newline so it matches the sample line, not the HELP/TYPE lines above it. */
+static bool read_metric_text(
+	const unsigned char *restrict rsp, const size_t n,
+	const char *restrict name, char *restrict buf, const size_t bufsize)
+{
+	const size_t off = find_bytes_offset(rsp, n, name);
+	if (off >= n) {
+		return false;
+	}
+	size_t len = 0;
+	for (size_t i = off + strlen(name); i < n && rsp[i] != '\n'; i++) {
+		if (len + 1 >= bufsize) {
+			return false;
+		}
+		buf[len++] = (char)rsp[i];
+	}
+	buf[len] = '\0';
+	return true;
+}
+
+/* Read back the value of one Prometheus sample. */
+static bool parse_metric_value(
+	const unsigned char *restrict rsp, const size_t n,
+	const char *restrict name, double *restrict out)
+{
+	char buf[64];
+	if (!read_metric_text(rsp, n, name, buf, sizeof(buf))) {
+		return false;
+	}
+	char *end = NULL;
+	*out = strtod(buf, &end);
+	return end != buf;
+}
+
 static bool assert_status(
 	const unsigned char *restrict rsp, const size_t n, const char *code)
 {
@@ -737,6 +824,56 @@ static bool assert_status(
  * regression - REST/RPC endpoints, keepalive and error responses.
  * ---------------------------------------------------------------------- */
 
+/* Host validation must finish before endpoint dispatch or body handling. */
+T_DECLARE_CASE(host_validation_before_api_dispatch)
+{
+	static const struct {
+		const char *headers;
+		const char *version;
+		const char *status;
+	} cases[] = {
+		{ "", "HTTP/1.1", " 400 " },
+		{ "Host: test\r\nhOsT: test\r\n", "HTTP/1.1", " 400 " },
+		{ "Host: user@test\r\n", "HTTP/1.1", " 400 " },
+		{ "Host: bad host\r\n", "HTTP/1.1", " 400 " },
+		{ "Host: [broken]\r\n", "HTTP/1.1", " 400 " },
+		{ "Host: test:abc\r\n", "HTTP/1.1", " 400 " },
+		{ "", "HTTP/1.0", " 200 " },
+		{ "Host: test\r\nHost: other\r\n", "HTTP/1.0", " 400 " },
+		{ "Host: test/path\r\n", "HTTP/1.0", " 400 " },
+		{ "Host: [::1]:80\r\n", "HTTP/1.1", " 200 " },
+		{ "Host:\r\n", "HTTP/1.1", " 200 " },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct ev_loop *loop = ev_loop_new(0);
+		struct server api, core;
+		int peer_fd = -1;
+		char req[256];
+		unsigned char rsp[4096];
+		T_CHECK(loop != NULL);
+		init_server_pair(&api, &core, loop);
+		start_api(&api, loop, &peer_fd);
+		const int n = snprintf(
+			req, sizeof(req),
+			"GET /healthy %s\r\n%sConnection: close\r\n\r\n",
+			cases[i].version, cases[i].headers);
+		T_CHECK(n > 0 && (size_t)n < sizeof(req));
+		T_CHECK(send_request(peer_fd, req));
+		const ssize_t received = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		const bool ok =
+			received > 0 &&
+			assert_status(rsp, (size_t)received, cases[i].status);
+		const uintmax_t dispatched = api.stats.num_api_request;
+		T_CHECK(close(peer_fd) == 0);
+		ev_loop_destroy(loop);
+		T_EXPECT(ok);
+		T_EXPECT_EQ(
+			dispatched,
+			strcmp(cases[i].status, " 200 ") == 0 ? 1 : 0);
+	}
+}
+
 T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -748,7 +885,8 @@ T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -758,7 +896,8 @@ T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 			rsp, (size_t)n, "Connection: keep-alive\r\n"));
 	}
 
-	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -811,8 +950,8 @@ T_DECLARE_CASE(pipelined_requests_both_answered)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"
-			 "GET /healthy HTTP/1.1\r\n\r\n"));
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"
+			 "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	T_EXPECT_EQ(recv_responses(loop, peer_fd, rsp, sizeof(rsp), 2), 2);
 
 	T_CHECK(close(peer_fd) == 0);
@@ -836,16 +975,91 @@ T_DECLARE_CASE(pipelined_after_body_request_both_answered)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /stats?nobanner=1 HTTP/1.1\r\n"
+		peer_fd, "POST /stats?nobanner=1 HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 4\r\n\r\n"
 			 "body"
-			 "GET /healthy HTTP/1.1\r\n\r\n"));
+			 "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	T_EXPECT_EQ(recv_responses(loop, peer_fd, rsp, sizeof(rsp), 2), 2);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 }
 
+/*
+ * Regression: an endpoint that reads no request body must drop it, or
+ * http_conn_send writes those bytes out behind the response header. /healthy
+ * answers Content-Length: 0, so a trailing byte is read by the client as the
+ * start of the next response and desyncs the keep-alive stream.
+ */
+T_DECLARE_CASE(healthy_request_body_is_not_echoed)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n"
+			 "Content-Length: 19\r\n\r\n"
+			 "HTTP/1.1 500 PWNED\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		size_t body_off = 0;
+		T_CHECK(find_body_offset(rsp, (size_t)n, &body_off));
+		/* Content-Length: 0 makes the header block the whole response */
+		T_EXPECT_EQ((size_t)n, body_off);
+	}
+
+	/* the stream is still in sync: the next read starts at a status line */
+	T_CHECK(send_request(
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT_EQ(
+			find_bytes_offset(rsp, (size_t)n, "HTTP/1.1 200"),
+			(size_t)0);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+struct fd_closed_ctx {
+	int fd;
+};
+
+/* True once the peer end reports EOF, i.e. the server closed its side. A byte
+ * still queued reads as "not closed yet" and is consumed. */
+static bool fd_closed_predicate(void *data)
+{
+	struct fd_closed_ctx *const ctx = data;
+	for (;;) {
+		unsigned char ch;
+		const ssize_t n = recv(ctx->fd, &ch, sizeof(ch), MSG_DONTWAIT);
+		if (n >= 0) {
+			return n == 0;
+		}
+		const int err = errno;
+		if (err != EINTR) {
+			return false;
+		}
+	}
+}
+
+/*
+ * Regression: a `Connection: close` request must actually tear the connection
+ * down. Waiting for the peer's EOF terminates on that event and fails on the
+ * timeout, where accepting "closed or nothing to read" passed either way.
+ */
 T_DECLARE_CASE(healthy_connection_close_header)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -858,7 +1072,7 @@ T_DECLARE_CASE(healthy_connection_close_header)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "GET /healthy HTTP/1.1\r\n"
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n"
 			 "Connection: close\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
@@ -868,12 +1082,11 @@ T_DECLARE_CASE(healthy_connection_close_header)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Connection: close\r\n"));
 	}
 
-	test_run_for(loop, TEST_WAIT_CLOSE_SEC);
 	{
-		const ssize_t n = recv(peer_fd, rsp, sizeof(rsp), MSG_DONTWAIT);
-		T_EXPECT(
-			n == 0 ||
-			(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)));
+		struct fd_closed_ctx closed = { .fd = peer_fd };
+		T_EXPECT(test_wait_until(
+			loop, fd_closed_predicate, &closed,
+			TEST_WAIT_CLOSE_SEC));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -891,7 +1104,8 @@ T_DECLARE_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server)
 	init_unified_server(&s, loop);
 	start_api(&s, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -923,7 +1137,7 @@ T_DECLARE_CASE(metrics_unsupported_accept_encoding_and_te_returns_200)
 	 * are valid headers whose values the server simply does not support.
 	 * The API endpoint must respond 200, not 400. */
 	T_CHECK(send_request(
-		peer_fd, "GET /metrics HTTP/1.1\r\n"
+		peer_fd, "GET /metrics HTTP/1.1\r\nHost: test\r\n"
 			 "Accept-Encoding: gzip\r\n"
 			 "TE: trailers\r\n"
 			 "\r\n"));
@@ -949,7 +1163,8 @@ T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 	init_unified_server(&s, loop);
 	start_api(&s, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -957,7 +1172,8 @@ T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
-	T_CHECK(send_request(peer_fd, "GET /metrics HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1003,7 +1219,8 @@ T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
 #endif
 	start_api(&s, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /metrics HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1014,6 +1231,122 @@ T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
 		T_EXPECT_EQ(RS.metrics_call_count, (size_t)1);
 #endif
 	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Regression: a Prometheus float sample must carry the whole value. "%g" prints
+ * 6 significant digits, which cannot resolve a second of a long uptime, so a
+ * counter consumed by rate() sat still between scrapes and then jumped.
+ */
+T_DECLARE_CASE(metrics_float_sample_keeps_full_precision)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+	/* about 39 years, far enough out that 6 significant digits quantize it
+	 * to a multiple of 10 ks */
+	static const int_least64_t uptime_ns = 1234567890123456789;
+
+	T_CHECK(loop != NULL);
+	init_unified_server(&s, loop);
+	s.stats.started = (int_least64_t)clock_monotonic_ns() - uptime_ns;
+	start_api(&s, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		const double expect =
+			(double)((int_least64_t)clock_monotonic_ns() -
+				 s.stats.started) *
+			1e-9;
+		double uptime = 0.0;
+		T_CHECK(parse_metric_value(
+			rsp, (size_t)n, "\nneosocksd_uptime_seconds ",
+			&uptime));
+		T_EXPECT(fabs(uptime - expect) < 1.0);
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Switch LC_NUMERIC to the first installed locale that spells the decimal point
+ * with something other than '.'; NULL when the host has none, LC_NUMERIC then
+ * left in the C locale. */
+static const char *set_comma_locale(void)
+{
+	static const char *const names[] = {
+		"de_DE.UTF-8", "de_DE.utf8",  "de_DE",	     "de_DE@euro",
+		"fr_FR.UTF-8", "fr_FR.utf8",  "fr_FR",	     "es_ES.UTF-8",
+		"it_IT.UTF-8", "nl_NL.UTF-8", "pt_BR.UTF-8", "ru_RU.UTF-8",
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+		if (setlocale(LC_NUMERIC, names[i]) == NULL) {
+			continue;
+		}
+		if (localeconv()->decimal_point[0] != '.') {
+			return names[i];
+		}
+	}
+	(void)setlocale(LC_NUMERIC, "C");
+	return NULL;
+}
+
+/*
+ * Regression: the exposition format wants a '.' decimal separator, but printf
+ * writes the one LC_NUMERIC names, so a host running with a comma locale served
+ * "neosocksd_uptime_seconds 3,01134" and failed the whole scrape.
+ */
+T_DECLARE_CASE(metrics_float_sample_ignores_lc_numeric)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+	char value[64];
+	/* far enough out that the shortest round-trip form carries fractional
+	 * digits, so the sample really contains a decimal separator */
+	static const int_least64_t uptime_ns = 1234567890123456789;
+
+	T_CHECK(loop != NULL);
+	const char *const numeric = set_comma_locale();
+	if (numeric == NULL) {
+		ev_loop_destroy(loop);
+		T_LOG("no installed locale uses a non-'.' decimal point");
+		T_SKIPNOW();
+	}
+	T_LOGF("LC_NUMERIC=%s decimal_point=\"%s\"", numeric,
+	       localeconv()->decimal_point);
+
+	init_unified_server(&s, loop);
+	s.stats.started = (int_least64_t)clock_monotonic_ns() - uptime_ns;
+	start_api(&s, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
+	const ssize_t n = recv_all_with_timeout(
+		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+	const bool ok =
+		n > 0 && read_metric_text(
+				 rsp, (size_t)n, "\nneosocksd_uptime_seconds ",
+				 value, sizeof(value));
+	/* restore before the first assertion: a failing one aborts the case */
+	(void)setlocale(LC_NUMERIC, "C");
+
+	T_EXPECT(ok);
+	T_LOGF("uptime sample: \"%s\"", value);
+	T_EXPECT(strchr(value, '.') != NULL);
+	/* Go ParseFloat accepts nothing outside this set */
+	T_EXPECT(value[strspn(value, "0123456789.eE+-")] == '\0');
+	T_EXPECT(strtod(value, NULL) > 1.0e9);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -1030,7 +1363,8 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /stats HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1059,7 +1393,8 @@ T_DECLARE_CASE(stats_output_format_has_no_raw_specifiers)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /stats HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1098,7 +1433,8 @@ T_DECLARE_CASE(stats_post_ok_without_nocache)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /stats HTTP/1.1\r\nContent-Length: 0\r\n\r\n"));
+		peer_fd,
+		"POST /stats HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1106,6 +1442,71 @@ T_DECLARE_CASE(stats_post_ok_without_nocache)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		T_EXPECT(!find_bytes(
 			rsp, (size_t)n, "Cache-Control: no-store\r\n"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/*
+ * Regression: the rate window is a single window. A POST that omits the server
+ * statistics still closes it, so the counter baselines have to move with the
+ * timestamp; leaving them behind divided the whole backlog by the next
+ * request's short dt and reported a burst that never happened.
+ */
+T_DECLARE_CASE(stats_post_without_server_advances_rate_baselines)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+
+	T_CHECK(loop != NULL);
+	init_server_pair(&api, &core, loop);
+	start_api(&api, loop, &peer_fd);
+
+	/* the window statics outlive each case, so this request only takes this
+	 * case's own baselines */
+	T_CHECK(send_request(
+		peer_fd, "POST /stats?nobanner=1 HTTP/1.1\r\nHost: test\r\n"
+			 "Content-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+	}
+
+	/* traffic that belongs to the window the next request closes */
+	core.listeners[0].stats.num_accept += 100;
+	core.listeners[0].stats.num_serve += 100;
+	T_CHECK(send_request(
+		peer_fd,
+		"POST /stats?nobanner=1&server=0 HTTP/1.1\r\nHost: test\r\n"
+		"Content-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "Accept Rate"));
+	}
+
+	/* no counter moved since, so every rate over this window is zero */
+	T_CHECK(send_request(
+		peer_fd, "POST /stats?nobanner=1 HTTP/1.1\r\nHost: test\r\n"
+			 "Content-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n,
+			"Accept Rate         : 0.0/s (+0.0/s)\n"));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n,
+			"Reject Rate         : ruleset=0.0/s, timeout=0.0/s, upstream=0.0/s\n"));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1123,7 +1524,8 @@ T_DECLARE_CASE(stats_bad_method_405)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "PUT /stats HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "PUT /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1149,7 +1551,8 @@ T_DECLARE_CASE(metrics_bad_method_405)
 	init_unified_server(&s, loop);
 	start_api(&s, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "PUT /metrics HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "PUT /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1176,7 +1579,7 @@ T_DECLARE_CASE(healthy_bad_method_405)
 
 	T_CHECK(send_request(
 		peer_fd,
-		"POST /healthy HTTP/1.1\r\nContent-Length: 0\r\n\r\n"));
+		"POST /healthy HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1201,7 +1604,8 @@ T_DECLARE_CASE(stats_trailing_path_404)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /stats/extra HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /stats/extra HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1230,7 +1634,7 @@ T_DECLARE_CASE(chunked_request_rejected_501)
 	 * close the connection rather than dispatch a no-body endpoint over it.
 	 * /stats is a require_content=false endpoint, the path the bug affected. */
 	T_CHECK(send_request(
-		peer_fd, "GET /stats HTTP/1.1\r\n"
+		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n"
 			 "Transfer-Encoding: chunked\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
@@ -1255,7 +1659,8 @@ T_DECLARE_CASE(stats_bad_query_400)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /stats?% HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /stats?% HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1270,10 +1675,10 @@ T_DECLARE_CASE(stats_bad_query_400)
 T_DECLARE_CASE(stats_key_only_query_options)
 {
 	static const char *const requests[] = {
-		"GET /stats?nobanner HTTP/1.1\r\n\r\n",
-		"GET /stats?server HTTP/1.1\r\n\r\n",
-		"GET /stats?runtime HTTP/1.1\r\n\r\n",
-		"GET /stats?nobanner&server&runtime HTTP/1.1\r\n\r\n",
+		"GET /stats?nobanner HTTP/1.1\r\nHost: test\r\n\r\n",
+		"GET /stats?server HTTP/1.1\r\nHost: test\r\n\r\n",
+		"GET /stats?runtime HTTP/1.1\r\nHost: test\r\n\r\n",
+		"GET /stats?nobanner&server&runtime HTTP/1.1\r\nHost: test\r\n\r\n",
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(requests); i++) {
 		struct ev_loop *loop = ev_loop_new(0);
@@ -1315,7 +1720,7 @@ T_DECLARE_CASE(stats_deflate_response_header)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "GET /stats HTTP/1.1\r\n"
+		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n"
 			 "Accept-Encoding: deflate\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
@@ -1341,7 +1746,8 @@ T_DECLARE_CASE(not_found_404)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /notfound HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /notfound HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1366,7 +1772,8 @@ T_DECLARE_CASE(malformed_url_400)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET http://%zz/ HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET http://%zz/ HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1393,7 +1800,8 @@ T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
 	core.stats.connect_ns[2] = 300000000; /* 300 ms */
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /stats HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1418,7 +1826,9 @@ T_DECLARE_CASE(stats_nobanner_option_suppresses_banner)
 	init_server_pair(&api, &core, loop);
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /stats?nobanner=1 HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd,
+		"GET /stats?nobanner=1 HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1452,16 +1862,115 @@ T_DECLARE_CASE(stats_post_with_ruleset_q)
 
 	T_CHECK(send_request(
 		peer_fd,
-		"POST /stats?q=abc HTTP/1.1\r\nContent-Length: 0\r\n\r\n"));
+		"POST /stats?q=a%20b HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
 		T_EXPECT(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
-		T_EXPECT(RS.stats_call_count > 0);
+		T_EXPECT_EQ(RS.stats_call_count, (size_t)1);
 		/* the ruleset stats output must actually reach the body, not just
 		 * be requested */
 		T_EXPECT(find_bytes(rsp, (size_t)n, "q stats"));
+	}
+	/* the filter reaches ruleset.stats percent-decoded */
+	T_EXPECT(RS.stats_query.present);
+	T_EXPECT_STREQ(RS.stats_query.str, "a b");
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* ruleset.stats gets the same window the server rates are taken over: the time
+ * since the previous stateful request, in seconds; with no q it gets no filter. */
+T_DECLARE_CASE(stats_post_ruleset_dt_is_rate_window)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	/* the window is measured on the virtual clock from here on; the advance
+	 * below stays short of test_conf.timeout, armed on real time before the
+	 * freeze, so the connection outlives it. The window statics outlive each
+	 * case, so the first request only opens this case's window. */
+	vclock_freeze_now();
+	T_CHECK(send_request(
+		peer_fd,
+		"POST /stats HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT_EQ(RS.stats_call_count, (size_t)1);
+	}
+
+	vclock_advance(0.5);
+	/* re-read the clock, or the next wait's watchdog is armed against the
+	 * loop's cached pre-advance time and expires on its first run */
+	ev_now_update(loop);
+	T_CHECK(send_request(
+		peer_fd,
+		"POST /stats HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT_EQ(RS.stats_call_count, (size_t)2);
+	}
+	T_EXPECT(fabs(RS.stats_dt - 0.5) < 1e-3);
+	T_EXPECT(!RS.stats_query.present);
+	vclock_stop();
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A failing ruleset.stats does not fail the request: its error text takes the
+ * place of the ruleset section in the 200 body. */
+T_DECLARE_CASE(stats_post_ruleset_error_in_body)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.stats_ok = false;
+	RS.errstr = "stats failed";
+	RS.errlen = sizeof("stats failed") - 1;
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd,
+		"POST /stats?nobanner=1&server=0 HTTP/1.1\r\nHost: test\r\n"
+		"Content-Length: 0\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT_EQ(RS.stats_call_count, (size_t)1);
+
+		size_t body_off = 0;
+		T_CHECK(find_body_offset(rsp, (size_t)n, &body_off));
+		T_EXPECT_EQ((size_t)n - body_off, RS.errlen);
+		T_EXPECT(find_bytes(rsp, (size_t)n, "stats failed"));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1485,7 +1994,8 @@ T_DECLARE_CASE(healthy_unhealthy_returns_503)
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "GET /healthy HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1513,7 +2023,7 @@ T_DECLARE_CASE(ruleset_disabled_returns_500)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 1\r\n\r\n"
 			 "x"));
 	{
@@ -1546,7 +2056,8 @@ T_DECLARE_CASE(ruleset_unknown_action_404)
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "POST /ruleset/bogus HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/bogus HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1575,7 +2086,7 @@ T_DECLARE_CASE(ruleset_invoke_ok_200)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 1\r\n\r\n"
 			 "x"));
 	{
@@ -1608,7 +2119,7 @@ T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
 	/* Regression: Content-Length: 0 leaves conn.cbuf unallocated (NULL);
 	 * this must not crash the server. */
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 0\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
@@ -1628,6 +2139,20 @@ T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
  * ~8KB). A keep-alive-tolerant client relying on Content-Length (rather
  * than EOF) to know when the response ends would read a truncated body.
  */
+static void reset_warning_log(void *data)
+{
+	(void)data;
+	slog_setlevel(LOG_LEVEL_SILENCE);
+	slog_setoutput(SLOG_OUTPUT_DISCARD);
+}
+
+static void count_warning(void *data, const unsigned char *buf, size_t len)
+{
+	(void)buf;
+	(void)len;
+	(*(size_t *)data)++;
+}
+
 T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1635,23 +2160,29 @@ T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
 	int peer_fd = -1;
 	int ruleset_tag = 0;
 	static unsigned char rsp[16384];
-	static char big_err[10000];
+	/* ruleset_geterror() returns a NUL-terminated Lua string. */
+	static char big_err[10001];
 
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	for (size_t i = 0; i < sizeof(big_err); i++) {
+	for (size_t i = 0; i < sizeof(big_err) - 1; i++) {
 		big_err[i] = (char)('a' + (i % 26));
 	}
+	big_err[sizeof(big_err) - 1] = '\0';
+	size_t warnings = 0;
+	T_CLEANUP(reset_warning_log, NULL);
+	slog_setoutput(SLOG_OUTPUT_WRITER, count_warning, &warnings);
+	slog_setlevel(LOG_LEVEL_WARNING);
 	RS.invoke_ok = false;
 	RS.errstr = big_err;
-	RS.errlen = sizeof(big_err);
+	RS.errlen = sizeof(big_err) - 1;
 	init_server_pair(&api, &core, loop);
 	/* the ruleset lives on the core server; api_server reads it there */
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 1\r\n\r\n"
 			 "x"));
 	{
@@ -1668,10 +2199,12 @@ T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
 
 		/* confirm the message was actually too large to fit whole,
 		 * and that Content-Length always matches what was sent */
-		T_EXPECT(declared_len < sizeof(big_err));
+		T_EXPECT(declared_len < sizeof(big_err) - 1);
 		T_EXPECT_EQ(actual_body_len, declared_len);
 	}
 
+	reset_warning_log(NULL);
+	T_EXPECT_EQ(warnings, 1);
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 }
@@ -1691,7 +2224,9 @@ T_DECLARE_CASE(ruleset_invoke_length_required_411)
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "POST /ruleset/invoke HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd,
+		"POST /ruleset/invoke HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1721,7 +2256,7 @@ T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 
 	T_CHECK(send_request(
 		peer_fd,
-		"POST /ruleset/update?module=libruleset&chunkname=%40x.lua HTTP/1.1\r\n"
+		"POST /ruleset/update?module=libruleset&chunkname=%40x.lua HTTP/1.1\r\nHost: test\r\n"
 		"Content-Length: 1\r\n\r\n"
 		"x"));
 	{
@@ -1731,6 +2266,85 @@ T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Time Cost"));
 	}
+	/* each query value reaches its own parameter, percent-decoded */
+	T_EXPECT_EQ(RS.update_call_count, (size_t)1);
+	T_EXPECT(RS.update_modname.present);
+	T_EXPECT_STREQ(RS.update_modname.str, "libruleset");
+	T_EXPECT(RS.update_chunkname.present);
+	T_EXPECT_STREQ(RS.update_chunkname.str, "@x.lua");
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A failed update answers 500 with the ruleset's error text; with no query the
+ * ruleset is asked to update the main ruleset with no chunk name (both NULL). */
+T_DECLARE_CASE(ruleset_update_fail_500)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.update_ok = false;
+	RS.errstr = "update failed";
+	RS.errlen = sizeof("update failed") - 1;
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/update HTTP/1.1\r\nHost: test\r\n"
+			 "Content-Length: 1\r\n\r\n"
+			 "x"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "update failed"));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "Time Cost"));
+	}
+	T_EXPECT_EQ(RS.update_call_count, (size_t)1);
+	T_EXPECT(!RS.update_modname.present);
+	T_EXPECT(!RS.update_chunkname.present);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A malformed /ruleset/update query is refused before the ruleset runs. */
+T_DECLARE_CASE(ruleset_update_bad_query_400)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd,
+		"POST /ruleset/update?module=m&% HTTP/1.1\r\nHost: test\r\n"
+		"Content-Length: 1\r\n\r\n"
+		"x"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 400 "));
+	}
+	T_EXPECT_EQ(RS.update_call_count, (size_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -1756,7 +2370,7 @@ T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
 	 * this must not crash the server. */
 	T_CHECK(send_request(
 		peer_fd,
-		"POST /ruleset/update?module=libruleset&chunkname=%40x.lua HTTP/1.1\r\n"
+		"POST /ruleset/update?module=libruleset&chunkname=%40x.lua HTTP/1.1\r\nHost: test\r\n"
 		"Content-Length: 0\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
@@ -1765,6 +2379,33 @@ T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+T_DECLARE_CASE(ruleset_removed_before_processing)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	init_server_pair(&api, &core, loop);
+	core.ruleset = (struct ruleset *)&test_conf;
+	start_api(&api, loop, &peer_fd);
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/gc HTTP/1.1\r\nHost: test\r\n"
+			 "Connection: close\r\n\r\n"));
+	ev_run(loop, EVRUN_NOWAIT);
+	T_CHECK(api.stats.num_api_request == 1);
+	core.ruleset = NULL;
+	const ssize_t n = recv_all_with_timeout(
+		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+	T_EXPECT(n > 0);
+	T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
+	T_EXPECT(find_bytes(
+		rsp, (size_t)n, "ruleset is not enabled on the server"));
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 }
@@ -1785,7 +2426,8 @@ T_DECLARE_CASE(ruleset_gc_ok_contains_report)
 	core.ruleset = (struct ruleset *)&ruleset_tag;
 	start_api(&api, loop, &peer_fd);
 
-	T_CHECK(send_request(peer_fd, "POST /ruleset/gc HTTP/1.1\r\n\r\n"));
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/gc HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -1793,6 +2435,41 @@ T_DECLARE_CASE(ruleset_gc_ok_contains_report)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Difference"));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Time Cost"));
+	}
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* A failed collection answers 500 with the ruleset's error text instead of the
+ * report. */
+T_DECLARE_CASE(ruleset_gc_fail_500)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.gc_ok = false;
+	RS.errstr = "gc failed";
+	RS.errlen = sizeof("gc failed") - 1;
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/gc HTTP/1.1\r\nHost: test\r\n\r\n"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "gc failed"));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "Difference"));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
@@ -1815,7 +2492,7 @@ T_DECLARE_CASE(ruleset_rpcall_bad_mime_400)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 1\r\n"
 			 "Content-Type: text/plain\r\n\r\n"
 			 "x"));
@@ -1865,7 +2542,7 @@ T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 1\r\n"
 			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
 			 "x"));
@@ -1880,6 +2557,123 @@ T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
 	T_EXPECT(test_wait_until(
 		loop, ruleset_cancelled_once, NULL, TEST_WAIT_RECV_SEC));
 	T_EXPECT_EQ(RS.cancel_count, (size_t)1);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	vclock_stop();
+	test_conf.timeout = 1.0;
+}
+
+/*
+ * A ruleset rpcall that completes before ruleset_rpcall() returns -- result set
+ * and *state nulled inside the call, w_finish already fed -- must answer
+ * normally, with rpcall_cb dispatched on a ctx whose rpcstate is already NULL.
+ */
+T_DECLARE_CASE(ruleset_rpcall_sync_finish_ok_200)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.loop = loop;
+	RS.rpcall_ok = true;
+	RS.rpcall_auto_finish = true;
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
+			 "Content-Length: 1\r\n"
+			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
+			 "x"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n, "Content-Type: " MIME_RPCALL "\r\n"));
+	}
+	/* it finished inside the call: nothing was left pending or cancelled */
+	T_EXPECT(RS.pending_rpcall == NULL);
+	T_EXPECT_EQ(RS.cancel_count, (size_t)0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
+
+/* Complete the pending rpcall from inside the loop's dispatch, so the finish
+ * event is queued while the request timeout is already pending. */
+static void
+finish_rpcall_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
+{
+	(void)w;
+	(void)revents;
+	finish_rpcall(loop);
+}
+
+/*
+ * Regression: teardown in the completed-but-undispatched window -- the result
+ * delivered, ctx->rpcstate already NULL and w_finish still pending.
+ * api_ctx_stop() has to clear the pending event and free the result there too;
+ * skipping it leaves a queued event on the freed ctx (dispatched onto freed
+ * memory) and leaks the result rpcall_cb() will never consume.
+ */
+T_DECLARE_CASE(ruleset_rpcall_finished_torn_down_before_dispatch)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	int ruleset_tag = 0;
+	struct ev_timer w_finish_race;
+	struct fd_closed_ctx closed_ctx = { 0 };
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.loop = loop;
+	RS.rpcall_ok = true;
+	RS.rpcall_auto_finish = false;
+	/* both deadlines below must stay out of real elapsed reach until the
+	 * advance crosses them, or slow setup fires one on its own */
+	test_conf.timeout = 10.0;
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
+			 "Content-Length: 1\r\n"
+			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
+			 "x"));
+	T_CHECK(test_wait_until(
+		loop, ruleset_rpcall_pending, NULL, TEST_WAIT_RECV_SEC));
+
+	/* Open the window inside one dispatch batch: the earlier deadline runs
+	 * first, so the call completes before the request timeout tears the ctx
+	 * down, and w_finish is demoted to the lowest priority so the event it
+	 * feeds cannot overtake the timeout already queued at the default one. */
+	ev_set_priority(&RS.pending_rpcall->w_finish, EV_MINPRI);
+	ev_timer_init(
+		&w_finish_race, finish_rpcall_cb, test_conf.timeout * 0.5, 0.0);
+	ev_timer_start(loop, &w_finish_race);
+	vclock_freeze_now();
+	vclock_advance(test_conf.timeout + 1.0);
+	ev_run(loop, EVRUN_ONCE);
+	ev_timer_stop(loop, &w_finish_race);
+
+	/* the teardown saw a completed call: no cancel, and no response -- the
+	 * ctx was destroyed before rpcall_cb could run */
+	T_EXPECT(RS.pending_rpcall == NULL);
+	T_EXPECT_EQ(RS.cancel_count, (size_t)0);
+	closed_ctx.fd = peer_fd;
+	T_EXPECT(fd_closed_predicate(&closed_ctx));
 
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
@@ -1910,7 +2704,7 @@ T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
 			 "Accept-Encoding: deflate\r\n"
 			 "Content-Length: 1\r\n"
 			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
@@ -1954,7 +2748,7 @@ T_DECLARE_CASE(ruleset_rpcall_empty_body_ok)
 	/* Regression: Content-Length: 0 leaves conn.cbuf unallocated (NULL);
 	 * this must not crash the server. */
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 0\r\n"
 			 "Content-Type: " MIME_RPCALL "\r\n\r\n"));
 	T_CHECK(test_wait_until(
@@ -1990,7 +2784,7 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 1\r\n"
 			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
 			 "x"));
@@ -2030,7 +2824,7 @@ T_DECLARE_CASE(ruleset_rpcall_null_result_500)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 1\r\n"
 			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
 			 "x"));
@@ -2074,7 +2868,7 @@ T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
 	start_api(&api, loop, &peer_fd);
 
 	T_CHECK(send_request(
-		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\n"
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
 			 "Content-Length: 1\r\n"
 			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
 			 "x"));
@@ -2090,6 +2884,60 @@ T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
 	T_CHECK(close(peer_fd) == 0);
 	ev_loop_destroy(loop);
 }
+
+/*
+ * ruleset_rpcall can also fail after rpcall_finish() already completed the
+ * call: the state is detached (ctx->rpcstate NULL, so ruleset_cancel reaches
+ * nothing) while w_finish is fed and the result delivered. The failure path
+ * answers 500 and leaves STATE_PROCESS, so it must drop that pending event and
+ * its result too -- otherwise rpcall_cb runs on a ctx in STATE_RESPONSE, where
+ * it aborts on its state assertion and, without one, replaces the error
+ * response already composed in wbuf with the rpcall result.
+ */
+T_DECLARE_CASE(ruleset_rpcall_completed_then_failed_drops_finish)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[4096];
+	int ruleset_tag = 0;
+
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	RS.loop = loop;
+	RS.rpcall_ok = false;
+	RS.rpcall_finish_then_fail = true;
+	RS.errstr = "rpcall failed";
+	RS.errlen = sizeof("rpcall failed") - 1;
+	RS.rpcall_result = "rpcall-result-marker";
+	RS.rpcall_resultlen = sizeof("rpcall-result-marker") - 1;
+	init_server_pair(&api, &core, loop);
+	/* the ruleset lives on the core server; api_server reads it there */
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(&api, loop, &peer_fd);
+
+	T_CHECK(send_request(
+		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
+			 "Content-Length: 1\r\n"
+			 "Content-Type: " MIME_RPCALL "\r\n\r\n"
+			 "x"));
+	{
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "rpcall failed"));
+		/* the client is answered once, with the failure */
+		T_EXPECT(!find_bytes(rsp, (size_t)n, RS.rpcall_result));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "rpcall did not return"));
+	}
+	/* the completed call detached its own state; nothing was left to cancel */
+	T_EXPECT_EQ(RS.cancel_count, (size_t)0);
+	T_EXPECT_EQ(api.stats.num_api_success, (uint_least64_t)0);
+
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+}
 #endif /* WITH_RULESET */
 
 /* -------------------------------------------------------------------------
@@ -2101,17 +2949,22 @@ T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(host_validation_before_api_dispatch),
 	T_CASE(healthy_keepalive_reuse_connection),
 	T_CASE(pipelined_requests_both_answered),
 	T_CASE(pipelined_after_body_request_both_answered),
+	T_CASE(healthy_request_body_is_not_echoed),
 	T_CASE(healthy_connection_close_header),
 	T_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server),
 	T_CASE(metrics_keep_proxy_and_api_request_totals_separate),
 	T_CASE(metrics_unsupported_accept_encoding_and_te_returns_200),
 	T_CASE(metrics_appends_ruleset_metrics_when_defined),
+	T_CASE(metrics_float_sample_keeps_full_precision),
+	T_CASE(metrics_float_sample_ignores_lc_numeric),
 	T_CASE(stats_get_ok_with_nocache),
 	T_CASE(stats_output_format_has_no_raw_specifiers),
 	T_CASE(stats_post_ok_without_nocache),
+	T_CASE(stats_post_without_server_advances_rate_baselines),
 	T_CASE(stats_bad_method_405),
 	T_CASE(metrics_bad_method_405),
 	T_CASE(healthy_bad_method_405),
@@ -2126,6 +2979,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(stats_nobanner_option_suppresses_banner),
 #if WITH_RULESET
 	T_CASE(stats_post_with_ruleset_q),
+	T_CASE(stats_post_ruleset_dt_is_rate_window),
+	T_CASE(stats_post_ruleset_error_in_body),
 	T_CASE(healthy_unhealthy_returns_503),
 	T_CASE(ruleset_disabled_returns_500),
 	T_CASE(ruleset_unknown_action_404),
@@ -2135,14 +2990,21 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_invoke_length_required_411),
 	T_CASE(ruleset_update_ok_contains_time_cost),
 	T_CASE(ruleset_update_empty_body_ok_200),
+	T_CASE(ruleset_update_fail_500),
+	T_CASE(ruleset_update_bad_query_400),
 	T_CASE(ruleset_gc_ok_contains_report),
+	T_CASE(ruleset_removed_before_processing),
+	T_CASE(ruleset_gc_fail_500),
 	T_CASE(ruleset_rpcall_bad_mime_400),
 	T_CASE(ruleset_rpcall_pending_torn_down_by_timeout),
+	T_CASE(ruleset_rpcall_sync_finish_ok_200),
+	T_CASE(ruleset_rpcall_finished_torn_down_before_dispatch),
 	T_CASE(ruleset_rpcall_ok_deflate_response),
 	T_CASE(ruleset_rpcall_empty_body_ok),
 	T_CASE(ruleset_rpcall_sync_fail_500),
 	T_CASE(ruleset_rpcall_null_result_500),
 	T_CASE(ruleset_rpcall_orphaned_state_cancelled),
+	T_CASE(ruleset_rpcall_completed_then_failed_drops_finish),
 #endif /* WITH_RULESET */
 	T_SUITE_END,
 };

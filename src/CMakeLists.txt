@@ -309,7 +309,11 @@ target_sources(neosocksd
 
 if(WITH_RULESET)
     add_unit_test(socks_test
-        SRCS socks_test.c socks.c)
+        SRCS socks_test.c
+        MOCK_SRCS socks.c
+        MOCK_DEFINITIONS
+            socket_set_cloexec=test_socket_set_cloexec
+            socket_set_nonblock=test_socket_set_nonblock)
     add_unit_test(http_proxy_test
         SRCS http_proxy_test.c http_proxy.c proto/http.c proto/codec.c)
     add_unit_test(api_server_test
@@ -328,7 +332,10 @@ if(WITH_RULESET)
 endif()
 
 add_unit_test(forward_test
-    SRCS forward_test.c forward.c)
+    SRCS forward_test.c
+    MOCK_SRCS forward.c
+    MOCK_DEFINITIONS ev_timer_start=test_ev_timer_start)
+set_tests_properties(forward_test PROPERTIES TIMEOUT 10)
 add_unit_test(conf_test
     SRCS conf_test.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_LUA)
@@ -349,7 +356,9 @@ add_unit_test(server_test
     SRCS server_test.c server.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_LUA)
 add_unit_test(http_test
-    SRCS proto/http_test.c proto/http.c proto/codec.c)
+    SRCS proto/http_test.c proto/codec.c
+    MOCK_SRCS proto/http.c
+    MOCK_DEFINITIONS http_date=test_http_date)
 add_unit_test(codec_test
     SRCS proto/codec_test.c proto/codec.c)
 # Drive the decompression-bomb cap at a small size instead of the 2 GiB

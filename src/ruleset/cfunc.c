@@ -1,11 +1,11 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/cfunc.h"
+#include "cfunc.h"
 
+#include "base.h"
 #include "conf.h"
-#include "ruleset/base.h"
-#include "ruleset/ruleset.h"
+#include "ruleset.h"
 
 #include "io/stream.h"
 #include "utils/debug.h"
@@ -53,6 +53,10 @@ static int ruleset_state_gc(lua_State *restrict L)
 	return 0;
 }
 
+/* Force a full collection once the VM is at its memory limit. The limit is
+ * judged against the allocator's total rather than LUA_GCCOUNT: lauxlib's
+ * string buffers allocate through the allocator without entering Lua's own
+ * count, and on Lua 5.5 the strings built from them stay outside it. */
 static void check_memlimit(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
@@ -60,7 +64,7 @@ static void check_memlimit(lua_State *restrict L)
 	if (memlimit_kb <= 0) {
 		return;
 	}
-	if (lua_gc(L, LUA_GCCOUNT, 0) < memlimit_kb) {
+	if ((r->vmstats.byt_allocated >> 10) < (size_t)memlimit_kb) {
 		return;
 	}
 	(void)lua_gc(L, LUA_GCCOLLECT, 0);
@@ -79,10 +83,10 @@ static struct ruleset_state *new_ruleset_state(lua_State *restrict L)
 	return state;
 }
 
-/* finish(ok, ...) */
-/* Protected wrapper around aux_todialreq: leaves the built dialreq (or NULL for
- * a direct/rejected connection) as a lightuserdata on top. Called through a
- * pcall so a raise while converting args cannot escape and orphan the op. */
+/* Protected wrapper around aux_todialreq: leaves the built dialreq as a
+ * lightuserdata on top, NULL for a nil or invalid address (both reject the
+ * request). Called through a pcall so a raise while converting args cannot
+ * escape and orphan the op. */
 static int protected_todialreq(lua_State *restrict L)
 {
 	const int n = lua_gettop(L);
@@ -93,57 +97,85 @@ static int protected_todialreq(lua_State *restrict L)
 	return 1;
 }
 
+/* Build the dialreq a successful routine returned, from the results above
+ * finish's leading `ok`; NULL rejects the request. */
+static struct dialreq *request_todialreq(lua_State *restrict L)
+{
+	const int n = lua_gettop(L) - 1;
+	struct dialreq *req = NULL;
+	if (n > 0) {
+		/* aux_todialreq converts args with lua_tolstring, which can
+		 * raise LUA_ERRMEM on a number arg; build under a pcall so such
+		 * a raise cannot precede state_complete and orphan the async
+		 * op. */
+		lua_pushcfunction(L, protected_todialreq);
+		lua_rotate(L, 2, 1);
+		/* lua stack: ok protected_todialreq arg1 ... argN */
+		if (lua_pcall(L, n, 1, 0) == LUA_OK) {
+			req = lua_touserdata(L, -1);
+		}
+	}
+	if (req == NULL) {
+		/* the routine gave up without forwarding: reject by policy */
+		LOGD("ruleset: request rejected");
+	}
+	return req;
+}
+
+/* finish(ok, ...) */
 static int request_finish(lua_State *restrict L)
 {
 	struct ruleset_state *restrict state =
 		lua_touserdata(L, lua_upvalueindex(1));
 	/* clear the forward context as the routine finishes */
 	aux_setforward(L, L, NULL);
-	if (state->cb == NULL) {
-		return 0;
-	}
-	struct dialreq *req = NULL;
-	if (lua_toboolean(L, 1)) {
-		const int n = lua_gettop(L) - 1;
-		if (n > 0) {
-			/* aux_todialreq converts args with lua_tolstring, which can
-			 * raise LUA_ERRMEM on a number arg; build under a pcall so
-			 * such a raise cannot precede state_complete below and orphan
-			 * the async op. */
-			lua_pushcfunction(L, protected_todialreq);
-			lua_rotate(L, 2, 1);
-			/* lua stack: ok protected_todialreq arg1 ... argN */
-			if (lua_pcall(L, n, 1, 0) == LUA_OK) {
-				req = lua_touserdata(L, -1);
-			}
+	const bool ok = lua_toboolean(L, 1);
+	/* A NULL callback means the consumer is gone -- the client cancelled, or
+	 * await.forward() already committed the request -- so there is nothing
+	 * to deliver, but an error the routine raised is still reported below. */
+	if (state->cb != NULL) {
+		struct dialreq *req = NULL;
+		if (ok) {
+			req = request_todialreq(L);
 		}
-		if (req == NULL) {
-			/* the routine gave up without forwarding: reject by policy */
-			LOGD("ruleset: request rejected");
-		}
+		state->cb->request.req = req;
+		state_complete(L, state);
 	}
-	state->cb->request.req = req;
-	state_complete(L, state);
-	if (!lua_toboolean(L, 1)) {
-		/* log the error only after completing: luaL_tolstring may invoke
-		 * a __tostring that raises, which must not orphan the async op */
-		LOGE_F("ruleset error: %s", luaL_tolstring(L, 2, NULL));
+	if (!ok) {
+		/* log the error only after completing: rendering the error
+		 * object runs its __tostring, which must not observe a
+		 * half-finished op */
+		LOGE_F("ruleset error: %s", aux_errmsg(L, 2));
 	}
 	return 0;
 }
 
-/* request(state, func, request, username, password, callback) */
+/* Push a credential field as the exact bytes received, or nil if unsupplied. */
+static void
+push_credential(lua_State *restrict L, const char *s, const size_t len)
+{
+	if (s == NULL) {
+		lua_pushnil(L);
+		return;
+	}
+	(void)lua_pushlstring(L, s, len);
+}
+
+/* request(state, func, request, credentials, callback) */
 int cfunc_request(lua_State *restrict L)
 {
 	check_memlimit(L);
-	ASSERT(lua_gettop(L) == 6);
+	ASSERT(lua_gettop(L) == 5);
 	struct ruleset_state *restrict *restrict const pstate =
 		(struct ruleset_state *restrict *restrict)lua_touserdata(L, 1);
 	const char *const func = lua_touserdata(L, 2);
 	const char *const request = lua_touserdata(L, 3);
-	const char *const username = lua_touserdata(L, 4);
-	const char *const password = lua_touserdata(L, 5);
-	struct ruleset_callback *restrict const in_cb = lua_touserdata(L, 6);
+	const struct ruleset_credentials nocreds = { 0 };
+	const struct ruleset_credentials *creds = lua_touserdata(L, 4);
+	if (creds == NULL) {
+		creds = &nocreds;
+	}
+	struct ruleset_callback *restrict const in_cb = lua_touserdata(L, 5);
 	lua_settop(L, 0);
 
 	struct ruleset_state *restrict state = new_ruleset_state(L);
@@ -153,14 +185,14 @@ int cfunc_request(lua_State *restrict L)
 	(void)lua_getglobal(L, "ruleset");
 	(void)lua_getfield(L, -1, func);
 	lua_pushstring(L, request);
-	lua_pushstring(L, username);
-	lua_pushstring(L, password);
+	push_credential(L, creds->username, creds->username_len);
+	push_credential(L, creds->password, creds->password_len);
 	/* lua stack: state finish ruleset func request username password */
 
 	/* Check out the coroutine only after the fallible stack setup above:
 	 * aux_getthread() increments num_thread_active and pulls a thread from
 	 * the idle pool, and nothing before aux_async() would return it if an
-	 * earlier step raised (e.g. LUA_ERRMEM from lua_pushstring). */
+	 * earlier step raised (e.g. LUA_ERRMEM while pushing a string). */
 	lua_State *restrict co = aux_getthread(L);
 	lua_insert(L, 2);
 	/* lua stack: state co finish ruleset func request username password */
@@ -203,8 +235,16 @@ int cfunc_loadfile(lua_State *restrict L)
 	return 0;
 }
 
-/* loadconfig() */
-int cfunc_loadconfig(lua_State *restrict L)
+/* Protected separately so a global-table __newindex or allocation failure
+ * can discard the staged C config before the error is propagated. */
+static int install_ruleset(lua_State *restrict L)
+{
+	lua_setglobal(L, "ruleset");
+	return 0;
+}
+
+/* Shared body of loadconfig() and reloadconfig(). */
+static int loadconfig(lua_State *restrict L, const bool reload)
 {
 	check_memlimit(L);
 	ASSERT(lua_gettop(L) == 1);
@@ -215,9 +255,7 @@ int cfunc_loadconfig(lua_State *restrict L)
 		return lua_error(L);
 	}
 	lua_pushliteral(L, "config");
-	if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
-		return lua_error(L);
-	}
+	lua_call(L, 1, 1);
 	if (!lua_istable(L, -1)) {
 		return luaL_error(
 			L, "config: expected table, got %s",
@@ -228,8 +266,8 @@ int cfunc_loadconfig(lua_State *restrict L)
 	 * any live state, so a bad field -- a config-field error from
 	 * conf_loadfromtable, a too-large memlimit, or a non-table ruleset --
 	 * fails the load without having replaced the global ruleset table or the
-	 * config. The commits at the end are pure writes. The config table stays on
-	 * the stack top for conf_loadfromtable, which reads from there. */
+	 * config. The final config commit follows the fallible global installation.
+	 * The config table stays on top for conf_loadfromtable. */
 	struct ruleset *restrict r = aux_getruleset(L);
 
 	/* stage memlimit (MiB -> KiB); an absent value keeps the current one */
@@ -238,7 +276,12 @@ int cfunc_loadconfig(lua_State *restrict L)
 	if (!lua_isnil(L, -1)) {
 		/* keep the arithmetic in lua_Integer and reject values that would
 		 * overflow the KiB field. Non-positive disables the limit. */
-		const lua_Integer mb = luaL_checkinteger(L, -1);
+		if (!lua_isinteger(L, -1)) {
+			return luaL_error(
+				L,
+				"config: field `memlimit' must be an integer");
+		}
+		const lua_Integer mb = lua_tointeger(L, -1);
 		if (mb > (INT_LEAST32_MAX >> 10)) {
 			return luaL_error(L, "config: memlimit too large");
 		}
@@ -256,7 +299,7 @@ int cfunc_loadconfig(lua_State *restrict L)
 
 	/* validate the `ruleset` table and remove it from the config table so
 	 * conf_loadfromtable never sees it; keep its value on the stack to install
-	 * only after the config commit succeeds */
+	 * after the staged config validates */
 	lua_getfield(L, 1, "ruleset");
 	const bool has_ruleset = lua_istable(L, -1);
 	if (!has_ruleset && !lua_isnil(L, -1)) {
@@ -268,24 +311,75 @@ int cfunc_loadconfig(lua_State *restrict L)
 		lua_pushnil(L);
 		lua_setfield(L, 1, "ruleset");
 	}
+	/* a reload installs no ruleset of its own when the table carries none,
+	 * but keeps the one in place */
+	bool will_have_ruleset = has_ruleset;
+	if (reload && !has_ruleset) {
+		will_have_ruleset = (lua_getglobal(L, "ruleset") == LUA_TTABLE);
+		lua_pop(L, 1);
+	}
 	/* stack: 1=config table, 2=ruleset value; move the ruleset value below so
 	 * the config table is back on top for conf_loadfromtable */
 	lua_insert(L, 1);
 
-	if (!conf_loadfromtable(L, r->conf)) {
+	/* Preserve the old string block while the loader copies its referenced
+	 * fields into a replacement owned by the staged config. Reserve the
+	 * installation call's stack before that C allocation exists. */
+	luaL_checkstack(L, 5, "config installation");
+	/* Anchor the global key before allocating the staged string block. */
+	lua_pushliteral(L, "ruleset");
+	lua_insert(L, 1);
+	/* stack: key, ruleset value, config table */
+	struct config staged = *r->conf;
+	staged.strings = NULL;
+	const bool ok =
+		reload ? conf_reloadfromtable(L, &staged, will_have_ruleset) :
+			 conf_loadfromtable(L, &staged);
+	if (!ok) {
 		return luaL_error(L, "config: failed to load fields");
 	}
-	lua_pop(L, 1); /* the config table; the ruleset value is now on top */
+	lua_pop(L, 1); /* config table: key and ruleset value remain */
 
-	/* every read validated and the config committed; commit the rest */
+	/* Install the global before changing live C state; lua_setglobal may
+	 * invoke __newindex or allocate even though every field was validated. */
 	if (has_ruleset) {
-		lua_setglobal(L, "ruleset");
+		lua_pushglobaltable(L);
+		lua_pushvalue(L, 1);
+		lua_rawget(L, 3);
+		lua_rotate(L, 1, 2);
+		/* stack: globals, old value, key, proposed ruleset */
+		lua_pushcfunction(L, install_ruleset);
+		lua_insert(L, 4);
+		if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+			/* A raising __newindex may already have stored the new
+			 * field. Restore its prior raw value without invoking it
+			 * again; removing that new field does not allocate. */
+			lua_pushvalue(L, 3);
+			lua_pushvalue(L, 2);
+			lua_rawset(L, 1);
+			free(staged.strings);
+			return lua_error(L);
+		}
 	} else {
 		lua_pop(L, 1);
 	}
+	free(r->conf->strings);
+	*r->conf = staged;
 	r->config.memlimit_kb = new_memlimit_kb;
 	r->config.traceback = new_traceback;
 	return 0;
+}
+
+/* loadconfig() */
+int cfunc_loadconfig(lua_State *restrict L)
+{
+	return loadconfig(L, false);
+}
+
+/* reloadconfig() */
+int cfunc_reloadconfig(lua_State *restrict L)
+{
+	return loadconfig(L, true);
 }
 
 /* invoke(codestream) */
@@ -304,7 +398,6 @@ int cfunc_invoke(lua_State *restrict L)
 	return 0;
 }
 
-/* finish(ok, ...) */
 /* Protected: build "return " .. marshal(...) as a single Lua string on top,
  * running every fallible step (lua_pushliteral, lua_getglobal, marshal,
  * lua_concat) inside one pcall so an OOM/marshal raise is caught by the caller
@@ -321,23 +414,29 @@ static int build_rpcall_result(lua_State *restrict L)
 	return 1;
 }
 
+/* finish(ok, ...) */
 static int rpcall_finish(lua_State *restrict L)
 {
 	struct ruleset_state *restrict state =
 		lua_touserdata(L, lua_upvalueindex(1));
-	if (state->cb == NULL) {
-		return 0;
-	}
 	/* finish(ok, ...): a false ok means the rpc chunk raised, leaving
 	 * (false, errmsg) on the stack. Surface that as an rpcall failure
 	 * instead of marshalling it as a successful (false, "...") result. */
 	if (!lua_toboolean(L, 1)) {
-		state->cb->rpcall.result = NULL;
-		state->cb->rpcall.resultlen = 0;
-		state_complete(L, state);
-		/* log after completing: luaL_tolstring may invoke a __tostring
-		 * that raises, which must not orphan the async op */
-		LOGE_F("ruleset rpcall: %s", luaL_tolstring(L, 2, NULL));
+		/* a NULL callback means the client is gone: there is no failure
+		 * to deliver, but the error is still reported */
+		if (state->cb != NULL) {
+			state->cb->rpcall.result = NULL;
+			state->cb->rpcall.resultlen = 0;
+			state_complete(L, state);
+		}
+		/* log after completing: rendering the error object runs its
+		 * __tostring, which must not observe a half-finished op */
+		LOGE_F("ruleset rpcall: %s", aux_errmsg(L, 2));
+		return 0;
+	}
+	if (state->cb == NULL) {
+		/* the client is gone: nobody reads the result */
 		return 0;
 	}
 	const int n = lua_gettop(L);
@@ -351,9 +450,9 @@ static int rpcall_finish(lua_State *restrict L)
 		state->cb->rpcall.result = NULL;
 		state->cb->rpcall.resultlen = 0;
 		state_complete(L, state);
-		/* log after completing: luaL_tolstring may invoke a __tostring
-		 * that raises, which must not orphan the async op */
-		LOGE_F("ruleset rpcall: %s", luaL_tolstring(L, -1, NULL));
+		/* log after completing: rendering the error object runs its
+		 * __tostring, which must not observe a half-finished op */
+		LOGE_F("ruleset rpcall: %s", aux_errmsg(L, -1));
 		return 0;
 	}
 	size_t len;
@@ -451,15 +550,16 @@ static int package_replace(lua_State *restrict L)
 	lua_pushvalue(L, idx_modname);
 	/* call open function */
 	lua_call(L, 1, 1);
-	/* modname */
-	lua_pushvalue(L, idx_modname);
-	if (!lua_isnil(L, -2)) {
-		/* Make a copy of the module returned by the open function. */
-		lua_pushvalue(L, -2);
-	} else {
-		/* No value returned, use true as the result. */
+	if (lua_isnil(L, -1)) {
+		/* No value returned: use true as the module, so that LOADED, _G
+		 * and the result all agree. */
+		lua_pop(L, 1);
 		lua_pushboolean(L, 1);
 	}
+	/* modname */
+	lua_pushvalue(L, idx_modname);
+	/* copy of module */
+	lua_pushvalue(L, -2);
 	/* LOADED[modname] = module */
 	lua_settable(L, idx_loaded);
 	if (glb) {
@@ -538,6 +638,17 @@ static bool get_ruleset_hook(lua_State *restrict L, const char *name)
 	return true;
 }
 
+/* Call the hook on slot 1 with the @p nargs arguments above it and leave its
+ * result on top. A number result is converted to its string form here, while
+ * still protected: the conversion allocates, and the C caller reads the result
+ * with lua_tolstring() after the protected call has returned. */
+static int call_hook_tostring(lua_State *restrict L, const int nargs)
+{
+	lua_call(L, nargs, 1);
+	(void)lua_tolstring(L, -1, NULL);
+	return 1;
+}
+
 /* stats(dt, query) */
 int cfunc_stats(lua_State *restrict L)
 {
@@ -552,8 +663,7 @@ int cfunc_stats(lua_State *restrict L)
 	}
 	lua_pushnumber(L, dt);
 	lua_pushstring(L, query);
-	lua_call(L, 2, 1);
-	return 1;
+	return call_hook_tostring(L, 2);
 }
 
 /* metrics() */
@@ -564,8 +674,7 @@ int cfunc_metrics(lua_State *restrict L)
 	if (!get_ruleset_hook(L, "metrics")) {
 		return 0;
 	}
-	lua_call(L, 0, 1);
-	return 1;
+	return call_hook_tostring(L, 0);
 }
 
 /* tick() */
@@ -588,7 +697,15 @@ int cfunc_healthy(lua_State *restrict L)
 	if (!get_ruleset_hook(L, "healthy")) {
 		return 0; /* absent: healthy */
 	}
-	lua_call(L, 0, 1);
+	return call_hook_tostring(L, 0);
+}
+
+/* isvalid() */
+int cfunc_isvalid(lua_State *restrict L)
+{
+	ASSERT(lua_gettop(L) == 0);
+	/* honours _G's metatable, whose __index may raise */
+	lua_pushboolean(L, lua_getglobal(L, "ruleset") == LUA_TTABLE);
 	return 1;
 }
 

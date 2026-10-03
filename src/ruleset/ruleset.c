@@ -1,23 +1,21 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-#include "ruleset/ruleset.h"
+#include "ruleset.h"
 
-#if WITH_RULESET
-
+#include "api.h"
+#include "await.h"
+#include "base.h"
+#include "cfunc.h"
 #include "conf.h"
 #include "dialer.h"
+#include "marshal.h"
 #include "proto/codec.h"
+#include "regex.h"
 #include "resolver.h"
-#include "ruleset/api.h"
-#include "ruleset/await.h"
-#include "ruleset/base.h"
-#include "ruleset/cfunc.h"
-#include "ruleset/marshal.h"
-#include "ruleset/regex.h"
-#include "ruleset/time.h"
-#include "ruleset/zlib.h"
+#include "time.h"
 #include "util.h"
+#include "zlib.h"
 
 #include "io/stream.h"
 #include "utils/debug.h"
@@ -27,7 +25,6 @@
 #include "utils/slog.h"
 
 #include <ev.h>
-
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
@@ -258,7 +255,7 @@ struct ruleset *ruleset_new(
 		ruleset_free(r);
 		return NULL;
 	default:
-		FAILMSGF("ruleset init: %s", lua_tostring(L, -1));
+		FAILMSGF("ruleset init: %s", aux_errmsg(L, -1));
 	}
 	lua_gc(L, LUA_GCRESTART, 0);
 #if LUA_VERSION_NUM >= 504
@@ -296,22 +293,42 @@ void ruleset_free(struct ruleset *restrict r)
 #define CONST_LSTRING(s, len)                                                  \
 	((len) != NULL ? (*(len) = sizeof(s) - 1, "" s) : ("" s))
 
+/* Protected: replace the stored error object with aux_errmsg()'s rendering of
+ * it. Both the rendering and the registry store allocate, so neither may run
+ * unprotected on an error path. */
+static int render_lasterror(lua_State *restrict L)
+{
+	(void)lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	lua_pushstring(L, aux_errmsg(L, -1));
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	return 0;
+}
+
 const char *
 ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 {
 	lua_State *restrict const L = r->L;
-	const char *s = NULL;
-	switch (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR)) {
-	case LUA_TNIL:
-		s = CONST_LSTRING("(nil)", len);
-		break;
-	case LUA_TSTRING:
-		s = lua_tolstring(L, -1, len);
-		break;
-	default:
-		s = CONST_LSTRING("(error object is not a string)", len);
-		break;
+	/* every arm below pushes, and this runs on error paths where growing
+	 * the stack is exactly what may be unavailable */
+	if (!lua_checkstack(L, 2)) {
+		return CONST_LSTRING("(unprintable error object)", len);
 	}
+	const int type = lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	lua_pop(L, 1);
+	if (type == LUA_TNIL) {
+		return CONST_LSTRING("(nil)", len);
+	}
+	if (type != LUA_TSTRING) {
+		/* Normalize the object into its rendering: the registry slot is
+		 * then the anchor that keeps the returned pointer alive. */
+		lua_pushcfunction(L, render_lasterror);
+		if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+			lua_pop(L, 1);
+			return CONST_LSTRING("(unprintable error object)", len);
+		}
+	}
+	(void)lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	const char *const s = lua_tolstring(L, -1, len);
 	lua_pop(L, 1);
 	return s;
 }
@@ -364,14 +381,23 @@ bool ruleset_update(
 		(void *)code);
 }
 
+/* Protected: store the "cannot open" message. Formatting it allocates, and
+ * this runs when codec_lua_reader has failed, possibly for want of memory. */
+static int record_openerror(lua_State *restrict L)
+{
+	const char *const filename = lua_touserdata(L, 1);
+	lua_pushfstring(L, "cannot open file: %s", filename);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	return 0;
+}
+
 /* Record a "cannot open" message in RIDX_LASTERROR so ruleset_geterror honors
- * its contract when codec_lua_reader fails (it otherwise reported "(nil)"). */
+ * its contract when codec_lua_reader fails (it otherwise reported "(nil)").
+ * If recording fails, the error that defeated it is what gets recorded. */
 static void
 ruleset_set_openerror(struct ruleset *restrict r, const char *restrict filename)
 {
-	lua_State *restrict const L = r->L;
-	lua_pushfstring(L, "cannot open file: %s", filename);
-	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	(void)ruleset_pcall(r, record_openerror, 1, 0, (void *)filename);
 }
 
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
@@ -386,23 +412,40 @@ bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 	return ok;
 }
 
-bool ruleset_loadconfig(
-	struct ruleset *restrict r, const char *restrict filename)
+static bool loadconfig(
+	struct ruleset *restrict r, const char *restrict filename,
+	const lua_CFunction func)
 {
 	struct io_stream *restrict const s = codec_lua_reader(filename);
 	if (s == NULL) {
 		ruleset_set_openerror(r, filename);
 		return false;
 	}
-	const bool ok = ruleset_pcall(r, cfunc_loadconfig, 1, 0, (void *)s);
+	const bool ok = ruleset_pcall(r, func, 1, 0, (void *)s);
 	io_stream_close(s);
 	return ok;
+}
+
+bool ruleset_loadconfig(
+	struct ruleset *restrict r, const char *restrict filename)
+{
+	return loadconfig(r, filename, cfunc_loadconfig);
+}
+
+bool ruleset_reloadconfig(
+	struct ruleset *restrict r, const char *restrict filename)
+{
+	return loadconfig(r, filename, cfunc_reloadconfig);
 }
 
 bool ruleset_isvalid(struct ruleset *restrict r)
 {
 	lua_State *restrict const L = r->L;
-	const bool valid = (lua_getglobal(L, "ruleset") == LUA_TTABLE);
+	if (!ruleset_pcall(r, cfunc_isvalid, 0, 1)) {
+		LOGD_F("ruleset.isvalid: %s", ruleset_geterror(r, NULL));
+		return false;
+	}
+	const bool valid = lua_toboolean(L, -1);
 	lua_pop(L, 1);
 	return valid;
 }
@@ -415,13 +458,12 @@ bool ruleset_gc(struct ruleset *restrict r)
 static bool dispatch_request(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	const char *restrict func, const char *restrict request,
-	const char *restrict username, const char *restrict password,
+	const struct ruleset_credentials *restrict creds,
 	struct ruleset_callback *callback)
 {
 	const bool ok = ruleset_pcall(
-		r, cfunc_request, 6, 1, (void *)state, (void *)func,
-		(void *)request, (void *)username, (void *)password,
-		(void *)callback);
+		r, cfunc_request, 5, 1, (void *)state, (void *)func,
+		(void *)request, (void *)creds, (void *)callback);
 	if (!ok) {
 		LOGW_F("ruleset.%s: %s", func, ruleset_geterror(r, NULL));
 		return false;
@@ -431,47 +473,44 @@ static bool dispatch_request(
 
 bool ruleset_resolve(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request,
+	const struct ruleset_credentials *restrict creds,
+	struct ruleset_callback *callback)
 {
-	return dispatch_request(
-		r, state, "resolve", request, username, password, callback);
+	return dispatch_request(r, state, "resolve", request, creds, callback);
 }
 
 bool ruleset_route(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request,
+	const struct ruleset_credentials *restrict creds,
+	struct ruleset_callback *callback)
 {
-	return dispatch_request(
-		r, state, "route", request, username, password, callback);
+	return dispatch_request(r, state, "route", request, creds, callback);
 }
 
 bool ruleset_route6(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request,
+	const struct ruleset_credentials *restrict creds,
+	struct ruleset_callback *callback)
 {
-	return dispatch_request(
-		r, state, "route6", request, username, password, callback);
+	return dispatch_request(r, state, "route6", request, creds, callback);
 }
 
 bool ruleset_dispatch(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	const char *restrict request, const int atype,
-	const char *restrict username, const char *restrict password,
+	const struct ruleset_credentials *restrict creds,
 	struct ruleset_callback *callback)
 {
 	switch (atype) {
 	case ATYP_INET:
-		return ruleset_route(
-			r, state, request, username, password, callback);
+		return ruleset_route(r, state, request, creds, callback);
 	case ATYP_INET6:
-		return ruleset_route6(
-			r, state, request, username, password, callback);
+		return ruleset_route6(r, state, request, creds, callback);
 	case ATYP_DOMAIN:
-		return ruleset_resolve(
-			r, state, request, username, password, callback);
+		return ruleset_resolve(r, state, request, creds, callback);
 	default:
 		break;
 	}
@@ -532,5 +571,3 @@ const char *ruleset_healthy(struct ruleset *restrict r, size_t *len)
 	}
 	return s; /* unhealthy: error message */
 }
-
-#endif /* WITH_RULESET */

@@ -15,7 +15,6 @@
 
 #include <ev.h>
 
-#include <errno.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -64,11 +63,35 @@ static void finish_error(
 	}
 }
 
+static bool response_is_interim(const struct http_conn *restrict conn)
+{
+	const char *const code = conn->msg.rsp.code;
+	return code != NULL && strlen(code) == 3 && code[0] == '1' &&
+	       '0' <= code[1] && code[1] <= '9' && '0' <= code[2] &&
+	       code[2] <= '9';
+}
+
 static void recv_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 {
 	CHECK_REVENTS(revents, EV_READ);
 	struct http_client_ctx *restrict ctx = watcher->data;
-	const int ret = http_conn_recv(&ctx->conn);
+	int ret = http_conn_recv(&ctx->conn);
+	while (ret == 0 && ctx->conn.state == STATE_PARSE_OK &&
+	       response_is_interim(&ctx->conn)) {
+		/* RFC 9110 15.2: discard each interim header block and keep
+		 * waiting for the final response, including bytes already read. */
+		struct http_conn *restrict conn = &ctx->conn;
+		const size_t consumed =
+			(size_t)((unsigned char *)conn->next - conn->rbuf.data);
+		const size_t remaining = conn->rbuf.len - consumed;
+		memmove(conn->rbuf.data, conn->next, remaining);
+		http_conn_init(
+			conn, watcher->fd, STATE_PARSE_RESPONSE,
+			conn->on_header, conn->byt_recv, conn->byt_sent);
+		conn->rbuf.len = remaining;
+		conn->rbuf.data[remaining] = '\0';
+		ret = http_conn_parse(conn);
+	}
 	if (ret < 0) {
 		finish_error(
 			ctx, "error receiving response",
@@ -106,32 +129,9 @@ static void send_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 	int err = 0;
 	const int ret = http_conn_send(&ctx->conn, watcher->fd, &err);
 	if (ret < 0) {
-		/* Retry once on a stale-connection error (the peer closed a
-		 * previously-idle connection). EBADF is excluded: send(2) returns
-		 * it only when our own fd is not open, which means another
-		 * component already closed the dialer-returned fd -- an ownership
-		 * bug to surface, not a peer close to paper over by redialing. */
-		if (ctx->state == STATE_CLIENT_REQUEST && !ctx->cache_retried &&
-		    (err == ECONNRESET || err == EPIPE || err == ECONNABORTED ||
-		     err == ENOTCONN)) {
-			ctx->cache_retried = true;
-			ev_io_stop(loop, watcher);
-			const int stale_fd = watcher->fd;
-			ev_io_set(watcher, -1, EV_NONE);
-			if (stale_fd != -1) {
-				socket_close(stale_fd);
-			}
-			/* the fresh connection is a new peer with no bytes
-			 * of its own yet; resend the whole request instead
-			 * of resuming from the stale connection's offset */
-			ctx->conn.wpos = 0;
-			ctx->conn.cpos = 0;
-			ctx->state = STATE_CLIENT_CONNECT;
-			dialer_do(
-				&ctx->dialer, loop, ctx->dialreq, ctx->conf,
-				ctx->resolver, NULL);
-			return;
-		}
+		/* Every request runs on its own freshly dialed connection, so
+		 * a write error is no idle connection gone stale: report it
+		 * rather than redial and resend. */
 		const char *const strerr = strerror(err);
 		/* copy into a fixed buffer with truncation rather than a VLA
 		 * sized by locale-dependent strerror() output */
@@ -191,6 +191,12 @@ static void http_client_timeout_cb(
 static bool http_client_on_header(void *data, const char *key, char *value)
 {
 	struct http_client_ctx *restrict ctx = data;
+	/* Informational responses have no body regardless of framing fields
+	 * (RFC 9112 6.3). Ignore their headers so they cannot frame a body or
+	 * change the final response's representation metadata. */
+	if (response_is_interim(&ctx->conn)) {
+		return true;
+	}
 	if (ctx->user_on_header.func != NULL) {
 		return ctx->user_on_header.func(
 			ctx->user_on_header.ctx, key, value);
@@ -209,7 +215,6 @@ void http_client_init(
 	ctx->conf = conf;
 	ctx->resolver = opts->resolver;
 	ctx->dialreq = NULL;
-	ctx->cache_retried = false;
 	ctx->state = STATE_CLIENT_INIT;
 	ctx->cb = *cb;
 	ctx->user_on_header = on_header;
@@ -240,7 +245,6 @@ void http_client_do(
 {
 	ASSERT(ctx->state == STATE_CLIENT_INIT);
 	ctx->dialreq = req;
-	ctx->cache_retried = false;
 	ctx->state = STATE_CLIENT_CONNECT;
 	ev_timer_start(loop, &ctx->w_timeout);
 	dialer_do(&ctx->dialer, loop, req, ctx->conf, ctx->resolver, NULL);

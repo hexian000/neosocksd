@@ -293,7 +293,7 @@ static bool server_reload_ruleset(struct server *restrict s)
 	}
 	bool ok;
 	if (s->conf->boot != NULL) {
-		ok = ruleset_loadconfig(ruleset, s->conf->boot);
+		ok = ruleset_reloadconfig(ruleset, s->conf->boot);
 		if (!ok) {
 			LOGW_F("reload: config error: %s",
 			       ruleset_geterror(ruleset, NULL));

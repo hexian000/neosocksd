@@ -5,23 +5,27 @@
  * http_test - white-box unit tests for proto/http.c.
  *
  * Linked translation units (see CMakeLists.txt):
- *   proto/http.c     module under test
+ *   proto/http.c     module under test, compiled with http_date redirected
+ *                    to test_http_date so a case can fail the clock
  *   proto/codec.c    leaf (transfer codecs)
  * Leaf libraries: csnippets (io/stream).
- * http.c has no stateful collaborator module to mock; the mock section only
- * holds a portability shim. Randomized HTTP parsing is fuzzed by main_test
- * (fuzz_http_req, fuzz_http_resp, fuzz_parsehdr).
+ * http.c has no stateful collaborator module to mock; the mock section holds
+ * that clock seam and a portability shim. Randomized HTTP parsing is fuzzed by
+ * main_test (fuzz_http_req, fuzz_http_resp, fuzz_parsehdr).
  */
 
 #include "http.h"
 
 #include "io/stream.h"
+#include "meta/arraysize.h"
 #include "net/http.h"
+#include "os/clock.h"
 #include "utils/buffer.h"
 #include "utils/testing.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <locale.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -35,8 +39,21 @@
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
- * mock - portability shim only (http.c has no collaborator to mock).
+ * mock - the http_date() clock seam and a portability shim.
  * ---------------------------------------------------------------------- */
+
+size_t test_http_date(char *restrict buf, size_t buf_size);
+
+/* when set, the clock has no IMF-fixdate rendering */
+static bool g_http_date_fail;
+
+size_t test_http_date(char *restrict buf, const size_t buf_size)
+{
+	if (g_http_date_fail) {
+		return 0;
+	}
+	return http_date(buf, buf_size);
+}
 
 #if !defined(_GNU_SOURCE)
 static void *test_memmem(
@@ -61,9 +78,13 @@ static void *test_memmem(
 #define memmem test_memmem
 #endif /* !defined(_GNU_SOURCE) */
 
-struct header_cb_ctx {
+/* Per-connection test fixture: the header callback's context plus the byte
+ * counters http_conn_init() maintains, so a case can assert on them and the
+ * recv helpers can decide completion from the bytes actually delivered. */
+struct conn_test_ctx {
 	struct http_conn *p;
 	bool reject;
+	uint_least64_t byt_recv, byt_sent;
 };
 
 static bool write_all(const int fd, const void *buf, size_t len)
@@ -100,49 +121,76 @@ static ssize_t recv_nowait(const int fd, void *buf, const size_t len)
 /*
  * Cygwin/MSYS socketpairs deliver one write as several delayed fragments, so a
  * single http_conn_recv() may report "need more" (1) before the whole message
- * has arrived. These helpers poll the connection fd so the tests never depend
- * on a write being delivered atomically; they also evaluate http_conn_recv()
- * exactly once, since it has side effects.
+ * has arrived. These helpers wait on the connection fd so the tests never
+ * depend on a write being delivered atomically; they also evaluate
+ * http_conn_recv() exactly once, since it has side effects.
+ *
+ * What ends a wait is always the message itself -- the parser reaching a
+ * terminal state, or every byte the peer wrote having been taken in -- never a
+ * quiet period. The budget below is a watchdog: reaching it means the expected
+ * bytes never arrived, and the helper then returns a value no case accepts.
  */
-#define TEST_RECV_BUDGET_MS 4000
-#define TEST_RECV_QUIET_MS 200
+#define TEST_RECV_BUDGET_NS INT64_C(4000000000)
+#define TEST_RECV_TIMEDOUT (-2)
+
+/* Wait for `fd` to become readable, bounded by the watchdog `deadline`
+ * (monotonic ns). Returns false once the deadline has passed, or when the
+ * monotonic clock is unavailable and the wait cannot be bounded. */
+static bool wait_readable(const int fd, const int_fast64_t deadline)
+{
+	for (;;) {
+		const int_fast64_t now = clock_monotonic_ns();
+		if (now < 0 || now >= deadline) {
+			return false;
+		}
+		struct pollfd pfd = {
+			.fd = fd,
+			.events = POLLIN,
+		};
+		const int ret =
+			poll(&pfd, 1, (int)((deadline - now) / 1000000) + 1);
+		if (ret > 0) {
+			return true;
+		}
+		if (ret < 0 && errno != EINTR) {
+			return false;
+		}
+	}
+}
 
 /* Receive until the parser reaches a terminal state (0 = done, -1 = error).
  * Use when the complete message or EOF has been written and must arrive. */
 static int http_recv_until_done(struct http_conn *restrict p)
 {
-	for (int waited = 0; waited < TEST_RECV_BUDGET_MS;) {
-		const int ret = http_conn_recv(p);
-		if (ret <= 0) {
-			return ret;
-		}
-		struct pollfd pfd = {
-			.fd = p->fd,
-			.events = POLLIN,
-		};
-		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
-			waited += TEST_RECV_QUIET_MS;
-		}
-	}
-	return 1;
-}
-
-/* Receive every fragment currently available, then return the parser result
- * once the connection goes quiet. Use when only a partial message has been
- * written and the parser is expected to still need more input. */
-static int http_recv_drain(struct http_conn *restrict p)
-{
+	const int_fast64_t deadline =
+		clock_monotonic_ns() + TEST_RECV_BUDGET_NS;
 	for (;;) {
 		const int ret = http_conn_recv(p);
 		if (ret <= 0) {
 			return ret;
 		}
-		struct pollfd pfd = {
-			.fd = p->fd,
-			.events = POLLIN,
-		};
-		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
+		if (!wait_readable(p->fd, deadline)) {
+			return TEST_RECV_TIMEDOUT;
+		}
+	}
+}
+
+/* Receive until `want` bytes -- exactly what the peer has written so far --
+ * have been taken in, then return the parser's last result. Use when only a
+ * fragment of a message has been written and the parser is expected to still
+ * need more input. Requires a connection set up by conn_init_for_test(), whose
+ * byt_recv counter measures the arrival. */
+static int http_recv_nbytes(struct http_conn *restrict p, const size_t want)
+{
+	const int_fast64_t deadline =
+		clock_monotonic_ns() + TEST_RECV_BUDGET_NS;
+	for (;;) {
+		const int ret = http_conn_recv(p);
+		if (ret <= 0 || *p->byt_recv >= (uint_least64_t)want) {
 			return ret;
+		}
+		if (!wait_readable(p->fd, deadline)) {
+			return TEST_RECV_TIMEDOUT;
 		}
 	}
 }
@@ -185,7 +233,7 @@ static bool fd_set_nonblock(const int fd)
 
 static bool parse_header_cb(void *ctx, const char *key, char *value)
 {
-	struct header_cb_ctx *const c = ctx;
+	struct conn_test_ctx *const c = ctx;
 	if (c->reject) {
 		return false;
 	}
@@ -210,9 +258,9 @@ static bool parse_header_cb(void *ctx, const char *key, char *value)
 
 static void conn_init_for_test(
 	struct http_conn *restrict p, const int fd,
-	const enum http_conn_state mode, struct header_cb_ctx *restrict cb)
+	const enum http_conn_state mode, struct conn_test_ctx *restrict cb)
 {
-	*cb = (struct header_cb_ctx){
+	*cb = (struct conn_test_ctx){
 		.p = p,
 		.reject = false,
 	};
@@ -220,7 +268,7 @@ static void conn_init_for_test(
 		.func = parse_header_cb,
 		.ctx = cb,
 	};
-	http_conn_init(p, fd, mode, on_header, NULL, NULL);
+	http_conn_init(p, fd, mode, on_header, &cb->byt_recv, &cb->byt_sent);
 }
 
 static bool stream_read_exact(
@@ -263,7 +311,7 @@ static bool stream_write_all(
 T_DECLARE_CASE(http_conn_init_request)
 {
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 
 	conn_init_for_test(&p, 7, STATE_PARSE_REQUEST, &cb);
 	T_EXPECT_EQ(p.state, STATE_PARSE_REQUEST);
@@ -276,7 +324,7 @@ T_DECLARE_CASE(http_conn_init_request)
 T_DECLARE_CASE(http_conn_init_response)
 {
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 
 	conn_init_for_test(&p, 8, STATE_PARSE_RESPONSE, &cb);
 	T_EXPECT_EQ(p.state, STATE_PARSE_RESPONSE);
@@ -520,6 +568,79 @@ T_DECLARE_CASE(parsehdr_content_encoding_rejects_stacked)
 	T_EXPECT_EQ(p.hdr.content.encoding, CENCODING_GZIP);
 }
 
+/* Parse one Transfer-Encoding value on a fresh request-mode connection and
+ * check both the verdict and the status left for the error page. */
+T_DECLARE_SUBCASE(
+	expect_transfer_encoding, const char *restrict value, const bool ok,
+	const int status)
+{
+	struct http_conn p = { 0 };
+	p.http_status = HTTP_BAD_REQUEST;
+	char buf[64];
+	const size_t len = strlen(value);
+	T_CHECK(len < sizeof(buf));
+	(void)memcpy(buf, value, len + 1);
+
+	T_EXPECT_EQ(parsehdr_transfer_encoding(&p, buf), ok);
+	T_EXPECT_EQ(p.http_status, status);
+	if (!ok) {
+		/* a rejected value records no framing */
+		T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_NONE);
+	}
+}
+
+/*
+ * Regression: RFC 9112 §6.1 -- a well-framed request (chunked is the final
+ * coding) naming a transfer-coding the server does not implement is answered
+ * 501, not the parser's default 400. A list whose final coding is not chunked
+ * cannot be framed at all (RFC 9112 §6.3) and stays 400, as does chunked
+ * applied twice.
+ */
+T_DECLARE_CASE(parsehdr_transfer_encoding_unimplemented_coding)
+{
+	T_CALL_SUBCASE(
+		expect_transfer_encoding, "gzip, chunked", false,
+		HTTP_NOT_IMPLEMENTED);
+	T_CALL_SUBCASE(
+		expect_transfer_encoding, "x-custom ,Chunked", false,
+		HTTP_NOT_IMPLEMENTED);
+	T_CALL_SUBCASE(
+		expect_transfer_encoding, "gzip", false, HTTP_BAD_REQUEST);
+	T_CALL_SUBCASE(
+		expect_transfer_encoding, "chunked, gzip", false,
+		HTTP_BAD_REQUEST);
+	T_CALL_SUBCASE(
+		expect_transfer_encoding, "chunked, chunked", false,
+		HTTP_BAD_REQUEST);
+	T_CALL_SUBCASE(
+		expect_transfer_encoding, "gzip, chunked, chunked", false,
+		HTTP_BAD_REQUEST);
+	/* RFC 9110 §5.6.1: empty list elements are ignored */
+	{
+		struct http_conn p = { 0 };
+		char value[] = " , chunked ,";
+		T_EXPECT(parsehdr_transfer_encoding(&p, value));
+		T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
+	}
+	{
+		struct http_conn p = { 0 };
+		char value[] = " , ";
+		T_EXPECT(parsehdr_transfer_encoding(&p, value));
+		T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_NONE);
+	}
+
+	{
+		/* an ambiguous Content-Length framing is a 400 before the
+		 * coding is judged */
+		struct http_conn p = { 0 };
+		p.http_status = HTTP_BAD_REQUEST;
+		p.hdr.content.has_length = true;
+		char value[] = "gzip, chunked";
+		T_EXPECT(!parsehdr_transfer_encoding(&p, value));
+		T_EXPECT_EQ(p.http_status, HTTP_BAD_REQUEST);
+	}
+}
+
 /* Regression: RFC 9112 §6.1 forbids applying chunked more than once, so a
  * repeated Transfer-Encoding: chunked line -- the split-line form of the
  * already-rejected "chunked, chunked" -- must be rejected on the request side
@@ -610,6 +731,7 @@ T_DECLARE_CASE(parsehdr_connection_rejects_overflow)
 T_DECLARE_CASE(parsehdr_expect_cases)
 {
 	struct http_conn p = { 0 };
+	p.msg.req.version = "HTTP/1.1";
 
 	{
 		char value[] = " 100-Continue ";
@@ -622,6 +744,15 @@ T_DECLARE_CASE(parsehdr_expect_cases)
 		T_EXPECT(!parsehdr_expect(&p, value));
 		T_EXPECT(!p.expect_continue);
 		T_EXPECT_EQ(p.http_status, HTTP_EXPECTATION_FAILED);
+	}
+	{
+		/* RFC 9110 §10.1.1: an HTTP/1.0 request's 100-continue is
+		 * accepted but ignored, so no interim response is armed */
+		char value[] = "100-continue";
+		p.msg.req.version = "HTTP/1.0";
+		p.expect_continue = false;
+		T_EXPECT(parsehdr_expect(&p, value));
+		T_EXPECT(!p.expect_continue);
 	}
 }
 
@@ -658,6 +789,29 @@ T_DECLARE_CASE(content_reader_gzip)
 	T_EXPECT(ok);
 	T_EXPECT_MEMEQ(output, expected, sizeof(expected));
 	T_EXPECT_EQ(rc, 0);
+}
+
+/*
+ * Every stream content_reader() can hand back must implement direct_read: the
+ * ruleset Lua loader pulls the body through io_stream_direct_read(), which
+ * fails outright on a stream without the slot. Pins the invariant the reader
+ * asserts, for each encoding it constructs.
+ */
+T_DECLARE_CASE(content_reader_supports_direct_read)
+{
+	static const enum content_encodings encodings[] = {
+		CENCODING_NONE,
+		CENCODING_DEFLATE,
+		CENCODING_GZIP,
+	};
+	static const unsigned char input[] = "hello";
+	for (size_t i = 0; i < ARRAY_SIZE(encodings); i++) {
+		struct io_stream *r =
+			content_reader(input, sizeof(input), encodings[i]);
+		T_CHECK(r != NULL);
+		T_EXPECT(r->vftable->direct_read != NULL);
+		(void)io_stream_close(r);
+	}
 }
 
 T_DECLARE_CASE(content_reader_vbuf_cases)
@@ -761,7 +915,7 @@ T_DECLARE_CASE(content_writer_roundtrip_gzip)
 T_DECLARE_CASE(http_resp_errpage_normal_and_fallback)
 {
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 
 	conn_init_for_test(&p, -1, STATE_PARSE_REQUEST, &cb);
 	p.cbuf = VBUF_NEW(16);
@@ -792,11 +946,92 @@ T_DECLARE_CASE(http_resp_errpage_normal_and_fallback)
 		NULL);
 }
 
+T_DECLARE_CASE(http_resp_errpage_fallback_omits_date_without_clock)
+{
+	struct http_conn p = { 0 };
+	struct conn_test_ctx cb = { 0 };
+
+	conn_init_for_test(&p, -1, STATE_PARSE_REQUEST, &cb);
+
+	/* an unknown status code takes the RESPHDR_BEGIN fallback, which
+	 * carries a Date line while the clock renders */
+	http_resp_errpage(&p, 599);
+	T_EXPECT(memmem(p.wbuf.data, p.wbuf.len, "\r\nDate: ", 8) != NULL);
+	T_EXPECT(memmem(p.wbuf.data, p.wbuf.len, "Date: \r\n", 8) == NULL);
+
+	/* RFC 9110 §6.6.1: with no usable clock the Date field is omitted
+	 * whole, never sent with an empty value */
+	g_http_date_fail = true;
+	http_resp_errpage(&p, 599);
+	g_http_date_fail = false;
+	T_EXPECT(memmem(p.wbuf.data, p.wbuf.len, "Date:", 5) == NULL);
+	static const char want[] = "HTTP/1.1 599 \r\n"
+				   "Connection: close\r\n"
+				   "\r\n";
+	T_EXPECT_EQ(p.wbuf.len, sizeof(want) - 1);
+	T_EXPECT_MEMEQ(p.wbuf.data, want, sizeof(want) - 1);
+}
+
+T_DECLARE_CASE(http_conn_host_syntax)
+{
+	static const struct {
+		const char *host;
+		bool valid;
+	} cases[] = {
+		{ "", true },
+		{ "example.com", true },
+		{ "127.0.0.1:8080", true },
+		{ "example.com:", true },
+		{ "example.com:999999999999", true },
+		{ "ex%61mple.com", true },
+		{ "-._~!$&'()*+,;=", true },
+		{ "[::1]", true },
+		{ "[::ffff:192.0.2.1]:80", true },
+		{ "[v1.a:b]:", true },
+		{ "[VF.a-._~!$&'()*+,;=]", true },
+		{ "user@example.com", false },
+		{ "example.com/path", false },
+		{ "example.com?query", false },
+		{ "example.com#fragment", false },
+		{ "bad host", false },
+		{ "bad\thost", false },
+		{ "bad\x80host", false },
+		{ "%", false },
+		{ "%1", false },
+		{ "%gg", false },
+		{ "host:-1", false },
+		{ "host:1x", false },
+		{ "::1", false },
+		{ "[::1", false },
+		{ "[]", false },
+		{ "[broken]", false },
+		{ "[1:2:3:4:5:6:7:8:9:0:1:2:3:4:5:6:7:8:9:0:1:2]", false },
+		{ "[::1]suffix", false },
+		{ "[v.a]", false },
+		{ "[v1]", false },
+		{ "[v1.]", false },
+		{ "[v1.a%20]", false },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct http_conn p = { 0 };
+		struct conn_test_ctx cb = { 0 };
+		conn_init_for_test(&p, -1, STATE_PARSE_REQUEST, &cb);
+		BUF_APPENDF(
+			p.rbuf, "GET / HTTP/1.1\r\nHost: %s\r\n\r\n",
+			cases[i].host);
+		T_EXPECT_EQ(http_conn_parse(&p), 0);
+		T_EXPECT_EQ(
+			p.state,
+			cases[i].valid ? STATE_PARSE_OK : STATE_PARSE_ERROR);
+		T_EXPECT_EQ(p.http_status, HTTP_BAD_REQUEST);
+	}
+}
+
 T_DECLARE_CASE(http_conn_recv_request_ok)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	static const char req[] = "GET /hello HTTP/1.1\r\n"
 				  "Host: test\r\n"
 				  "\r\n";
@@ -829,7 +1064,7 @@ T_DECLARE_CASE(http_conn_recv_chunked_body_is_not_framed)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	static const char req[] = "POST /hello HTTP/1.1\r\n"
 				  "Host: test\r\n"
 				  "Transfer-Encoding: chunked\r\n"
@@ -862,7 +1097,7 @@ T_DECLARE_CASE(http_conn_recv_empty_te_does_not_downgrade_chunked)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	static const char req[] = "POST /hello HTTP/1.1\r\n"
 				  "Host: test\r\n"
 				  "Transfer-Encoding: chunked\r\n"
@@ -892,7 +1127,7 @@ T_DECLARE_CASE(http_conn_recv_response_ok)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	static const char rsp[] = "HTTP/1.1 204 No Content\r\n"
 				  "Date: Wed, 01 Jan 2025 00:00:00 GMT\r\n"
 				  "\r\n";
@@ -919,7 +1154,7 @@ T_DECLARE_CASE(http_conn_recv_response_unsupported_version)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	static const char rsp[] = "HTTP/2 200 OK\r\n\r\n";
 
 	make_socketpair(sv);
@@ -938,7 +1173,7 @@ T_DECLARE_CASE(http_conn_recv_response_malformed_header)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	static const char rsp[] = "HTTP/1.1 200 OK\r\n"
 				  "no-colon-here\r\n"
 				  "\r\n";
@@ -960,9 +1195,9 @@ T_DECLARE_CASE(http_conn_recv_content_length_too_large)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	/* HTTP_MAX_CONTENT is 4194304 */
-	static const char req[] = "POST / HTTP/1.1\r\n"
+	static const char req[] = "POST / HTTP/1.1\r\nHost: test\r\n"
 				  "Content-Length: 4194305\r\n"
 				  "\r\n";
 
@@ -979,40 +1214,74 @@ T_DECLARE_CASE(http_conn_recv_content_length_too_large)
 	T_CHECK(close(sv[1]) == 0);
 }
 
-T_DECLARE_CASE(http_conn_recv_bad_version)
+/* Feed `msg` to a fresh connection in `mode` and check its HTTP-version is
+ * rejected: a request fails with STATE_PARSE_ERROR (400 page, return 0), a
+ * response with -1. */
+T_DECLARE_SUBCASE(
+	expect_bad_version, const enum http_conn_state mode,
+	const char *restrict msg)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
-	static const char req[] = "GET / HTTP/2.0\r\n\r\n";
+	struct conn_test_ctx cb = { 0 };
 
 	make_socketpair(sv);
 	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	conn_init_for_test(&p, sv[0], mode, &cb);
 
-	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	/* request-mode: bad version → STATE_PARSE_ERROR + 0 (not -1) */
+	T_CHECK(write_all(sv[1], msg, strlen(msg)));
 	const int ret = http_recv_until_done(&p);
-	T_EXPECT_EQ(ret, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
+	if (mode == STATE_PARSE_REQUEST) {
+		T_EXPECT_EQ(ret, 0);
+		T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
+		T_EXPECT_EQ(p.http_status, HTTP_BAD_REQUEST);
+	} else {
+		T_EXPECT_EQ(ret, -1);
+	}
 
 	T_CHECK(close(sv[0]) == 0);
 	T_CHECK(close(sv[1]) == 0);
 }
 
 /*
- * Regression: a header value that never contains \r\n must fail cleanly
- * (413), matching parse_message()'s existing guard for an unterminated
- * request line. Pre-fix, parse_header() had no such guard: rbuf fills
- * up, the next recv_request() computes a zero-length read, and that gets
- * misread as early EOF -- tearing down the connection with no response.
+ * RFC 9112 §2.3: HTTP-version = HTTP-name "/" DIGIT "." DIGIT, exactly. A
+ * version merely starting with "HTTP/1." -- no minor digit, trailing bytes, or
+ * a third field swallowing the rest of the request-line -- is not HTTP/1.x.
  */
-T_DECLARE_CASE(http_conn_recv_header_line_too_long)
+T_DECLARE_CASE(http_conn_recv_bad_version)
+{
+	static const char *const bad_req[] = {
+		"GET / HTTP/2.0\r\n\r\n",
+		"CONNECT example.com:443 HTTP/1.\r\n\r\n",
+		"CONNECT example.com:443 HTTP/1.1x\r\n\r\n",
+		"CONNECT example.com:443 HTTP/1.10\r\n\r\n",
+		"CONNECT example.com:443 HTTP/1.1 trailing junk\r\n\r\n",
+		"GET / HTTP/1.a\r\n\r\n",
+		"GET / http/1.1\r\n\r\n",
+		"GET / \r\n\r\n",
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(bad_req); i++) {
+		T_CALL_SUBCASE(
+			expect_bad_version, STATE_PARSE_REQUEST, bad_req[i]);
+	}
+	static const char *const bad_rsp[] = {
+		"HTTP/1. 200 OK\r\n\r\n",
+		"HTTP/1.1x 200 OK\r\n\r\n",
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(bad_rsp); i++) {
+		T_CALL_SUBCASE(
+			expect_bad_version, STATE_PARSE_RESPONSE, bad_rsp[i]);
+	}
+}
+
+/* An over-long request-line is an over-long request-target: RFC 9112 §3
+ * requires 414, not the 413 reserved for request content. */
+T_DECLARE_CASE(http_conn_recv_request_line_too_long)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
-	static const char reqline[] = "GET / HTTP/1.1\r\nX-Long: ";
+	struct conn_test_ctx cb = { 0 };
+	static const char reqline[] = "GET /";
 	unsigned char filler[HTTP_MAX_ENTITY];
 	memset(filler, 'a', sizeof(filler));
 
@@ -1026,7 +1295,40 @@ T_DECLARE_CASE(http_conn_recv_header_line_too_long)
 	const int ret = http_recv_until_done(&p);
 	T_EXPECT_EQ(ret, 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
-	T_EXPECT_EQ(p.http_status, HTTP_ENTITY_TOO_LARGE);
+	T_EXPECT_EQ(p.http_status, HTTP_URI_TOO_LONG);
+
+	T_CHECK(close(sv[0]) == 0);
+	T_CHECK(close(sv[1]) == 0);
+}
+
+/*
+ * Regression: a header value that never contains \r\n must fail cleanly
+ * with 431 Request Header Fields Too Large (RFC 6585 §5), matching
+ * parse_message()'s existing guard for an unterminated request line. Pre-fix, parse_header() had no such guard: rbuf fills
+ * up, the next recv_request() computes a zero-length read, and that gets
+ * misread as early EOF -- tearing down the connection with no response.
+ */
+T_DECLARE_CASE(http_conn_recv_header_line_too_long)
+{
+	int sv[2] = { -1, -1 };
+	struct http_conn p = { 0 };
+	struct conn_test_ctx cb = { 0 };
+	static const char reqline[] =
+		"GET / HTTP/1.1\r\nHost: test\r\nX-Long: ";
+	unsigned char filler[HTTP_MAX_ENTITY];
+	memset(filler, 'a', sizeof(filler));
+
+	make_socketpair(sv);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+
+	T_CHECK(write_all(sv[1], reqline, sizeof(reqline) - 1));
+	T_CHECK(write_all(sv[1], filler, sizeof(filler)));
+
+	const int ret = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret, 0);
+	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
+	T_EXPECT_EQ(p.http_status, HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE);
 
 	T_CHECK(close(sv[0]) == 0);
 	T_CHECK(close(sv[1]) == 0);
@@ -1036,7 +1338,7 @@ T_DECLARE_CASE(http_conn_recv_incremental)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	static const char req1[] = "GET / HTTP/1.1\r\n"
 				   "Host: a\r\n";
 	static const char req2[] = "\r\n";
@@ -1046,8 +1348,9 @@ T_DECLARE_CASE(http_conn_recv_incremental)
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	const int ret1 = http_recv_drain(&p);
+	const int ret1 = http_recv_nbytes(&p, sizeof(req1) - 1);
 	T_EXPECT_EQ(ret1, 1);
+	T_EXPECT_EQ(p.state, STATE_PARSE_HEADER);
 	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
 	const int ret2 = http_recv_until_done(&p);
 	T_EXPECT_EQ(ret2, 0);
@@ -1061,8 +1364,8 @@ T_DECLARE_CASE(http_conn_recv_content_incomplete_then_complete)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
-	static const char req1[] = "POST /x HTTP/1.1\r\n"
+	struct conn_test_ctx cb = { 0 };
+	static const char req1[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
 				   "Content-Length: 5\r\n"
 				   "\r\n"
 				   "he";
@@ -1073,7 +1376,7 @@ T_DECLARE_CASE(http_conn_recv_content_incomplete_then_complete)
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	const int ret1 = http_recv_drain(&p);
+	const int ret1 = http_recv_nbytes(&p, sizeof(req1) - 1);
 	T_EXPECT_EQ(ret1, 1);
 	T_CHECK(p.cbuf != NULL);
 	T_EXPECT_EQ(VBUF_LEN(p.cbuf), 2);
@@ -1090,15 +1393,50 @@ T_DECLARE_CASE(http_conn_recv_content_incomplete_then_complete)
 	T_CHECK(close(sv[1]) == 0);
 }
 
+T_DECLARE_CASE(http_conn_recv_content_later_read_keeps_nul_terminator)
+{
+	int sv[2] = { -1, -1 };
+	struct http_conn p = { 0 };
+	struct conn_test_ctx cb = { 0 };
+	static const char req1[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
+				   "Content-Length: 5\r\n"
+				   "\r\n"
+				   "he";
+	static const char req2[] = "llo";
+
+	make_socketpair(sv);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+
+	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
+	T_EXPECT_EQ(http_recv_nbytes(&p, sizeof(req1) - 1), 1);
+	T_CHECK(p.cbuf != NULL);
+	T_CHECK(VBUF_LEN(p.cbuf) == 2);
+	/* poison the spare room, so a terminator can only come from the
+	 * bytes read directly into it */
+	memset(p.cbuf->data + p.cbuf->len, 'X', p.cbuf->cap + 1 - p.cbuf->len);
+
+	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
+	T_EXPECT_EQ(http_recv_until_done(&p), 0);
+	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(VBUF_LEN(p.cbuf), 5);
+	T_EXPECT_EQ(p.cbuf->data[p.cbuf->len], '\0');
+	T_EXPECT_STREQ((const char *)VBUF_DATA(p.cbuf), "hello");
+
+	VBUF_FREE(p.cbuf);
+	T_CHECK(close(sv[0]) == 0);
+	T_CHECK(close(sv[1]) == 0);
+}
+
 T_DECLARE_CASE(http_conn_recv_content_clamped_to_content_length)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	/* Content-Length: 5 declared, but 8 body bytes arrive in the same
 	 * write as the headers; the extra 3 bytes must not be copied into
 	 * the content buffer (they belong to a later message, if anything). */
-	static const char req[] = "POST /x HTTP/1.1\r\n"
+	static const char req[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
 				  "Content-Length: 5\r\n"
 				  "\r\n"
 				  "hello!!!";
@@ -1125,8 +1463,69 @@ T_DECLARE_CASE(http_conn_recv_expect_continue)
 	int sv[2] = { -1, -1 };
 	unsigned char rsp[128] = { 0 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
-	static const char req1[] = "POST /x HTTP/1.1\r\n"
+	struct conn_test_ctx cb = { 0 };
+	static const char req1[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
+				   "Expect: 100-continue\r\n"
+				   "Content-Length: 5\r\n"
+				   "\r\n";
+	static const char req2[] = "hello";
+	/* the interim response reply_short() writes straight to the socket */
+	static const char rsp_expect[] = "HTTP/1.1 100 Continue\r\n\r\n";
+	const size_t rsp_want = sizeof(rsp_expect) - 1;
+
+	make_socketpair(sv);
+	T_CHECK(fd_set_nonblock(sv[0]));
+	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+
+	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
+	const int ret1 = http_recv_nbytes(&p, sizeof(req1) - 1);
+	T_EXPECT_EQ(ret1, 1);
+	T_EXPECT(p.expect_continue);
+
+	/* read the interim response, tolerating fragmented delivery */
+	size_t rsplen = 0;
+	const int_fast64_t deadline =
+		clock_monotonic_ns() + TEST_RECV_BUDGET_NS;
+	while (rsplen < rsp_want && wait_readable(sv[1], deadline)) {
+		const ssize_t n =
+			recv_nowait(sv[1], rsp + rsplen, sizeof(rsp) - rsplen);
+		if (n < 0) {
+			const int err = errno;
+			T_CHECK(err == EAGAIN || err == EWOULDBLOCK);
+			continue;
+		}
+		if (n == 0) {
+			break;
+		}
+		rsplen += (size_t)n;
+	}
+	T_EXPECT_EQ(rsplen, rsp_want);
+	T_EXPECT_MEMEQ(rsp, rsp_expect, rsp_want);
+	/* the interim response is accounted like every other write */
+	T_EXPECT_EQ((uintmax_t)cb.byt_sent, (uintmax_t)rsp_want);
+
+	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
+	const int ret2 = http_recv_until_done(&p);
+	T_EXPECT_EQ(ret2, 0);
+	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(
+		(uintmax_t)cb.byt_recv,
+		(uintmax_t)((sizeof(req1) - 1) + (sizeof(req2) - 1)));
+
+	VBUF_FREE(p.cbuf);
+	T_CHECK(close(sv[0]) == 0);
+	T_CHECK(close(sv[1]) == 0);
+}
+
+/* Regression: RFC 9110 §10.1.1 and §15.2 -- an HTTP/1.0 request's
+ * 100-continue is ignored, so no interim response reaches the peer. */
+T_DECLARE_CASE(http_conn_recv_expect_continue_http10)
+{
+	int sv[2] = { -1, -1 };
+	unsigned char rsp[128];
+	struct http_conn p = { 0 };
+	struct conn_test_ctx cb = { 0 };
+	static const char req1[] = "POST /x HTTP/1.0\r\n"
 				   "Expect: 100-continue\r\n"
 				   "Content-Length: 5\r\n"
 				   "\r\n";
@@ -1137,34 +1536,24 @@ T_DECLARE_CASE(http_conn_recv_expect_continue)
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	const int ret1 = http_recv_drain(&p);
+	const int ret1 = http_recv_nbytes(&p, sizeof(req1) - 1);
 	T_EXPECT_EQ(ret1, 1);
-	T_EXPECT(p.expect_continue);
-
-	/* read the 100-continue reply, tolerating fragmented delivery */
-	size_t rsplen = 0;
-	for (int waited = 0; waited < TEST_RECV_BUDGET_MS &&
-			     memmem(rsp, rsplen, "100 Continue", 12) == NULL;) {
-		struct pollfd pfd = {
-			.fd = sv[1],
-			.events = POLLIN,
-		};
-		if (poll(&pfd, 1, TEST_RECV_QUIET_MS) <= 0) {
-			waited += TEST_RECV_QUIET_MS;
-			continue;
-		}
-		const ssize_t n =
-			recv_nowait(sv[1], rsp + rsplen, sizeof(rsp) - rsplen);
-		if (n > 0) {
-			rsplen += (size_t)n;
-		}
-	}
-	T_EXPECT(memmem(rsp, rsplen, "100 Continue", 12) != NULL);
+	T_EXPECT_EQ(p.state, STATE_PARSE_CONTENT);
+	T_EXPECT(!p.expect_continue);
+	/* the interim reply is written synchronously when the body starts, so
+	 * nothing pending now means nothing was sent */
+	T_EXPECT_EQ((uintmax_t)cb.byt_sent, 0);
+	const ssize_t n = recv_nowait(sv[1], rsp, sizeof(rsp));
+	const int err = errno;
+	T_EXPECT_EQ(n, -1);
+	T_EXPECT(err == EAGAIN || err == EWOULDBLOCK);
 
 	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
 	const int ret2 = http_recv_until_done(&p);
 	T_EXPECT_EQ(ret2, 0);
 	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
+	T_CHECK(p.cbuf != NULL);
+	T_EXPECT_MEMEQ(VBUF_DATA(p.cbuf), "hello", 5);
 
 	VBUF_FREE(p.cbuf);
 	T_CHECK(close(sv[0]) == 0);
@@ -1175,8 +1564,8 @@ T_DECLARE_CASE(http_conn_recv_content_early_eof)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
-	static const char req[] = "POST /x HTTP/1.1\r\n"
+	struct conn_test_ctx cb = { 0 };
+	static const char req[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
 				  "Content-Length: 5\r\n"
 				  "\r\n"
 				  "he";
@@ -1186,10 +1575,10 @@ T_DECLARE_CASE(http_conn_recv_content_early_eof)
 	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
 
 	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	/* drain the partial body (parser still needs more) in a
+	/* take in the partial body (parser still needs more) in a
 	 * fragmentation-safe way, then signal EOF and recv to the terminal
 	 * error -- a single recv per phase can race delayed fragments */
-	T_EXPECT_EQ(http_recv_drain(&p), 1);
+	T_EXPECT_EQ(http_recv_nbytes(&p, sizeof(req) - 1), 1);
 	T_CHECK(shutdown(sv[1], SHUT_WR) == 0);
 	T_EXPECT_EQ(http_recv_until_done(&p), -1);
 
@@ -1202,7 +1591,7 @@ T_DECLARE_CASE(http_conn_recv_header_callback_reject)
 {
 	int sv[2] = { -1, -1 };
 	struct http_conn p = { 0 };
-	struct header_cb_ctx cb = { 0 };
+	struct conn_test_ctx cb = { 0 };
 	static const char req[] = "GET /x HTTP/1.1\r\n"
 				  "Host: reject\r\n"
 				  "\r\n";
@@ -1222,28 +1611,6 @@ T_DECLARE_CASE(http_conn_recv_header_callback_reject)
 	T_CHECK(close(sv[1]) == 0);
 }
 
-T_DECLARE_CASE(http_header_field_valid_cases)
-{
-	/* tchar-only field name, no CTL-except-HTAB field value */
-	T_EXPECT(http_header_field_valid("Content-Type", "text/plain"));
-	/* every RFC 7230 tchar special is a legal field-name character */
-	T_EXPECT(http_header_field_valid("!#$%&'*+-.^_`|~", "x"));
-	/* HTAB is the one CTL allowed in a field value */
-	T_EXPECT(http_header_field_valid("X", "a\tb"));
-	/* RFC 9110 §5.5: field-name = 1*tchar, so an empty name is invalid */
-	T_EXPECT(!http_header_field_valid("", "x"));
-	/* a space in the field name is not a tchar */
-	T_EXPECT(!http_header_field_valid("Bad Name", "x"));
-	/* a colon in the field name is not a tchar */
-	T_EXPECT(!http_header_field_valid("Bad:Name", "x"));
-	/* CR/LF (and any other CTL) in the value is rejected */
-	T_EXPECT(!http_header_field_valid("X", "a\rb"));
-	T_EXPECT(!http_header_field_valid("X", "a\nb"));
-	T_EXPECT(!http_header_field_valid(
-		"X", "a\x01"
-		     "b"));
-}
-
 T_DECLARE_CASE(http_connection_lists_cases)
 {
 	/* NULL value lists nothing */
@@ -1259,6 +1626,80 @@ T_DECLARE_CASE(http_connection_lists_cases)
 	/* a prefix must not match a longer token */
 	T_EXPECT(!http_connection_lists("keep-alive", "keep"));
 	T_EXPECT(!http_connection_lists("close", "clos"));
+}
+
+static void restore_c_ctype(void *data)
+{
+	(void)data;
+	(void)setlocale(LC_CTYPE, "C");
+}
+
+/* Selects a Turkish LC_CTYPE when one is installed: its tolower() maps 'I'
+ * to a dotless i, so a locale-aware case fold stops pairing 'I' with 'i'.
+ * Without one, the environment's LC_CTYPE is used, as init() would. */
+static void use_turkish_ctype(struct testing_ctx *_t_)
+{
+	static const char *const names[] = {
+		"tr_TR.ISO-8859-9", "tr_TR.UTF-8", "tr_TR.utf8", "tr_TR", "",
+	};
+	T_CLEANUP(restore_c_ctype, NULL);
+	for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+		const char *const loc = setlocale(LC_CTYPE, names[i]);
+		if (loc != NULL) {
+			T_LOGF("LC_CTYPE=%s", loc);
+			return;
+		}
+	}
+}
+
+T_DECLARE_CASE(http_tokens_match_case_insensitively_under_any_locale)
+{
+	use_turkish_ctype(_t_);
+
+	/* a field name spelled with an upper-case I still dispatches */
+	{
+		struct http_conn p = { 0 };
+		char value[] = "chunked";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "TRANSFER-ENCODING", value),
+			PARSEHDR_OK);
+		T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
+	}
+	{
+		struct http_conn p = { 0 };
+		char value[] = "GZIP";
+		T_EXPECT_EQ(
+			parsehdr_representation(&p, "CONTENT-ENCODING", value),
+			PARSEHDR_OK);
+		T_EXPECT_EQ(p.hdr.content.encoding, CENCODING_GZIP);
+	}
+	{
+		struct http_conn p = { 0 };
+		p.msg.req.version = "HTTP/1.1";
+		char value[] = "100-CONTINUE";
+		T_EXPECT(parsehdr_expect(&p, value));
+		T_EXPECT(p.expect_continue);
+	}
+	T_EXPECT(http_connection_lists("close, KEEP-ALIVE", "keep-alive"));
+	T_EXPECT(http_connection_lists("Keep-Alive", "KEEP-ALIVE"));
+}
+
+T_DECLARE_CASE(http_token_equal_folds_ascii_only)
+{
+	use_turkish_ctype(_t_);
+
+	T_EXPECT(
+		http_token_equal("Proxy-Authorization", "PROXY-AUTHORIZATION"));
+	T_EXPECT(http_token_equal("BASIC", "Basic"));
+	T_EXPECT(http_token_equal("", ""));
+	T_EXPECT(!http_token_equal("Basic", "Basi"));
+	T_EXPECT(!http_token_equal("Basi", "Basic"));
+	T_EXPECT(!http_token_equal("TE", "TF"));
+	/* bytes outside ASCII fold to nothing, whatever the locale pairs */
+	T_EXPECT(!http_token_equal("\xc9", "\xe9"));
+	T_EXPECT(!http_token_equal("\xfd", "I"));
+	T_EXPECT(!http_token_equal("\xdd", "i"));
+	T_EXPECT(http_token_equal("\xc9", "\xc9"));
 }
 
 T_DECLARE_CASE(http_parse_content_length_accepts)
@@ -1296,6 +1737,95 @@ T_DECLARE_CASE(http_parse_content_length_rejects)
 	T_EXPECT_EQ(out, (size_t)777);
 }
 
+#if WITH_RULESET
+/*
+ * check_rpcall_mime() is the content-type admission gate for POST
+ * /ruleset/rpcall (api_server) and for the rpcall response (api_client): the
+ * media type must be the RPC type and carry the supported version parameter.
+ * It parses in place, so every input here is a writable array.
+ */
+T_DECLARE_CASE(check_rpcall_mime_cases)
+{
+	/* what the client actually sends */
+	{
+		char s[] = MIME_RPCALL;
+		T_EXPECT(check_rpcall_mime(s));
+	}
+	/* RFC 9110 §8.3.1: type and subtype are case-insensitive, and §5.6.6:
+	 * so are parameter names */
+	{
+		char s[] = "Application/X-NeoSocksd-RPC; Version=1";
+		T_EXPECT(check_rpcall_mime(s));
+	}
+	/* RFC 9110 §5.6.6: a token value may equally be sent quoted */
+	{
+		char s[] = "application/x-neosocksd-rpc; version=\"1\"";
+		T_EXPECT(check_rpcall_mime(s));
+	}
+	/* an unrelated parameter on either side does not hide the version */
+	{
+		char s[] = "application/x-neosocksd-rpc; charset=utf-8;"
+			   " version=1";
+		T_EXPECT(check_rpcall_mime(s));
+	}
+	{
+		char s[] = "application/x-neosocksd-rpc; version=1;"
+			   " charset=utf-8";
+		T_EXPECT(check_rpcall_mime(s));
+	}
+	/* RFC 9110 §5.6.6: the parameter list may end on a bare ';' */
+	{
+		char s[] = "application/x-neosocksd-rpc; version=1;";
+		T_EXPECT(check_rpcall_mime(s));
+	}
+	/* a request without Content-Type reaches the gate as NULL */
+	T_EXPECT(!check_rpcall_mime(NULL));
+	/* type mismatch */
+	{
+		char s[] = "text/plain";
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+	/* subtype mismatch under the right type */
+	{
+		char s[] = "application/json";
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+	/* not a media type at all */
+	{
+		char s[] = "application";
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+	/* the version parameter is mandatory... */
+	{
+		char s[] = MIME_RPCALL_TYPE "/" MIME_RPCALL_SUBTYPE;
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+	/* ...and only the supported version is accepted */
+	{
+		char s[] = "application/x-neosocksd-rpc; version=2";
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+	{
+		char s[] = "application/x-neosocksd-rpc; version=";
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+	/* a malformed parameter list is rejected, not scanned past */
+	{
+		char s[] = "application/x-neosocksd-rpc; version";
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+	{
+		char s[] = "application/x-neosocksd-rpc; =1";
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+	/* RFC 2231 parameter continuations are not supported */
+	{
+		char s[] = "application/x-neosocksd-rpc; version*=utf-8''1";
+		T_EXPECT(!check_rpcall_mime(s));
+	}
+}
+#endif /* WITH_RULESET */
+
 /* -------------------------------------------------------------------------
  * bench - end-to-end recv + parse of a representative keep-alive request.
  * Runs only when a name filter selects it (e.g. --run bench); a plain ctest
@@ -1328,10 +1858,10 @@ T_DECLARE_BENCH(bench_parse_request)
 		}
 
 		struct http_conn conn = { 0 };
-		struct header_cb_ctx cb = { 0 };
+		struct conn_test_ctx cb = { 0 };
 		conn_init_for_test(&conn, sv[0], STATE_PARSE_REQUEST, &cb);
-		for (int k = 0; k < 16 && http_conn_recv(&conn) == 1; ++k) {
-		}
+		T_CHECK(http_recv_until_done(&conn) == 0);
+		T_CHECK(conn.state == STATE_PARSE_OK);
 		VBUF_FREE(conn.cbuf);
 	}
 
@@ -1433,18 +1963,23 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 	BUF_APPEND(p.wbuf, header, sizeof(header) - 1);
 
 	/* larger than any socket send buffer, so the first send is partial */
-	static unsigned char body[2 * 1024 * 1024];
-	memset(body, 'B', sizeof(body));
-	p.cbuf = VBUF_NEW(sizeof(body));
+	const size_t body_len = (size_t)2 * 1024 * 1024;
+	static unsigned char wire[sizeof(header) - 1 + (size_t)2 * 1024 * 1024];
+	memcpy(wire, header, sizeof(header) - 1);
+	unsigned char *const body = wire + sizeof(header) - 1;
+	for (size_t i = 0; i < body_len; i++) {
+		body[i] = (unsigned char)(i ^ (i >> 8) ^ (i >> 16));
+	}
+	p.cbuf = VBUF_NEW(body_len);
 	T_CHECK(p.cbuf != NULL);
-	VBUF_APPEND(p.cbuf, body, sizeof(body));
+	VBUF_APPEND(p.cbuf, body, body_len);
 
 	/* first send: wbuf drains fully, cbuf partially, then backpressure (1) */
 	int err = -1;
 	T_EXPECT_EQ(http_conn_send(&p, sv[0], &err), 1);
 	T_EXPECT_EQ(err, 0);
 	T_EXPECT_EQ(p.wpos, sizeof(header) - 1);
-	T_CHECK(p.cpos > 0 && p.cpos < sizeof(body));
+	T_CHECK(p.cpos > 0 && p.cpos < body_len);
 	T_EXPECT_EQ((uintmax_t)byt_sent, (uintmax_t)(p.wpos + p.cpos));
 
 	/* drain the receiver and re-send until the whole body is out. Each
@@ -1452,7 +1987,7 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 	 * system) of room, so the round count is bounded by the body size. */
 	static unsigned char drain[64 * 1024];
 	size_t total_recv = 0;
-	const int max_rounds = (int)(sizeof(body) / 1024) + 16;
+	const int max_rounds = (int)(body_len / 1024) + 16;
 	int rounds = 0;
 	int r = 1;
 	while (r != 0) {
@@ -1463,6 +1998,8 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 			if (n <= 0) {
 				break;
 			}
+			T_CHECK((size_t)n <= sizeof(wire) - total_recv);
+			T_EXPECT_MEMEQ(drain, wire + total_recv, (size_t)n);
 			total_recv += (size_t)n;
 		}
 		r = http_conn_send(&p, sv[0], &err);
@@ -1475,15 +2012,17 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 		if (n <= 0) {
 			break;
 		}
+		T_CHECK((size_t)n <= sizeof(wire) - total_recv);
+		T_EXPECT_MEMEQ(drain, wire + total_recv, (size_t)n);
 		total_recv += (size_t)n;
 	}
 
 	T_EXPECT_EQ(p.wpos, sizeof(header) - 1);
-	T_EXPECT_EQ((uintmax_t)p.cpos, (uintmax_t)sizeof(body));
+	T_EXPECT_EQ((uintmax_t)p.cpos, (uintmax_t)body_len);
 	T_EXPECT(p.cbuf == NULL); /* cbuf freed on completion */
 	T_EXPECT_EQ(
 		(uintmax_t)byt_sent,
-		(uintmax_t)((sizeof(header) - 1) + sizeof(body)));
+		(uintmax_t)((sizeof(header) - 1) + body_len));
 	T_EXPECT_EQ((uintmax_t)total_recv, (uintmax_t)byt_sent);
 
 	T_CHECK(close(sv[0]) == 0);
@@ -1500,6 +2039,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(parsehdr_transfer_encoding_cases),
 	T_CASE(parsehdr_transfer_encoding_rejects_content_length_conflict),
 	T_CASE(parsehdr_transfer_encoding_rejects_double_chunked),
+	T_CASE(parsehdr_transfer_encoding_unimplemented_coding),
 	T_CASE(parsehdr_accept_encoding_cases),
 	T_CASE(parsehdr_accept_encoding_refusal_sticks_across_lines),
 	T_CASE(parsehdr_content_length_cases),
@@ -1514,11 +2054,14 @@ static const struct testing_suite suite[] = {
 	T_CASE(parsehdr_expect_cases),
 	T_CASE(content_reader_none),
 	T_CASE(content_reader_gzip),
+	T_CASE(content_reader_supports_direct_read),
 	T_CASE(content_reader_vbuf_cases),
 	T_CASE(content_writer_roundtrip_none),
 	T_CASE(content_writer_roundtrip_deflate),
 	T_CASE(content_writer_roundtrip_gzip),
 	T_CASE(http_resp_errpage_normal_and_fallback),
+	T_CASE(http_resp_errpage_fallback_omits_date_without_clock),
+	T_CASE(http_conn_host_syntax),
 	T_CASE(http_conn_recv_request_ok),
 	T_CASE(http_conn_recv_chunked_body_is_not_framed),
 	T_CASE(http_conn_recv_empty_te_does_not_downgrade_chunked),
@@ -1527,17 +2070,24 @@ static const struct testing_suite suite[] = {
 	T_CASE(http_conn_recv_response_malformed_header),
 	T_CASE(http_conn_recv_content_length_too_large),
 	T_CASE(http_conn_recv_bad_version),
+	T_CASE(http_conn_recv_request_line_too_long),
 	T_CASE(http_conn_recv_header_line_too_long),
 	T_CASE(http_conn_recv_incremental),
 	T_CASE(http_conn_recv_content_incomplete_then_complete),
+	T_CASE(http_conn_recv_content_later_read_keeps_nul_terminator),
 	T_CASE(http_conn_recv_content_clamped_to_content_length),
 	T_CASE(http_conn_recv_expect_continue),
+	T_CASE(http_conn_recv_expect_continue_http10),
 	T_CASE(http_conn_recv_content_early_eof),
 	T_CASE(http_conn_recv_header_callback_reject),
-	T_CASE(http_header_field_valid_cases),
 	T_CASE(http_connection_lists_cases),
+	T_CASE(http_tokens_match_case_insensitively_under_any_locale),
+	T_CASE(http_token_equal_folds_ascii_only),
 	T_CASE(http_parse_content_length_accepts),
 	T_CASE(http_parse_content_length_rejects),
+#if WITH_RULESET
+	T_CASE(check_rpcall_mime_cases),
+#endif
 	T_BENCH(bench_parse_request),
 	T_SUITE_END,
 };

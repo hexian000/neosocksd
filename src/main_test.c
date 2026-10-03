@@ -10,7 +10,6 @@
 #include "forward.h"
 #include "proto/codec.h"
 #include "proto/http.h"
-#include "proto/socks.h"
 #include "resolver.h"
 #if WITH_RULESET
 #include "ruleset/ruleset.h"
@@ -49,16 +48,23 @@
  * stubbed; everything else is the real module. Shared fixtures live here too.
  * ---------------------------------------------------------------------- */
 
-static const struct config test_conf = { .timeout = 0.2 };
+/* The client dialer's configuration. The dialer arms no deadline of its own,
+ * so conf.timeout is not read from here; each case's own wait is bounded by
+ * TEST_WAIT_SEC instead. */
+static const struct config test_conf = { 0 };
 
-/* Read-only fixture templates: start_proxy mutates the config it is given
- * (its .listen/.http_listen), so callers copy these into a local first --
- * const here makes that copy-before-use compiler-enforced. */
-static const struct config proxy_conf = { .timeout = 0.5 };
-
-/* proxy.timeout must outlive the refused connect so the proxy returns a SOCKS/
- * HTTP error; loopback ECONNREFUSED takes ~2s on MSYS2/Cygwin emulation. */
-static const struct config connrefused_proxy_conf = { .timeout = 5.0 };
+/* Read-only fixture template: start_proxy mutates the config it is given (its
+ * .listen/.http_listen), so callers copy this into a local first -- const here
+ * makes that copy-before-use compiler-enforced.
+ *
+ * .timeout is the proxy's own handshake-and-connect deadline. No case expects
+ * it to expire -- a healthy session stops it once relaying starts -- so it too
+ * is sized as a failsafe rather than a tight bound: it must outlive a refused
+ * connect, so the connrefused cases get the proxy's error reply (loopback
+ * ECONNREFUSED takes ~2s on MSYS2/Cygwin emulation), and a healthy dial under
+ * load; and it must stay below TEST_WAIT_SEC, so a proxy-side stall surfaces as
+ * the proxy's error rather than as the case's own watchdog expiring. */
+static const struct config proxy_conf = { .timeout = 5.0 };
 
 void api_serve(
 	struct server *s, struct ev_loop *loop, int accepted_fd,
@@ -92,18 +98,16 @@ void tproxy_serve(
 }
 #endif /* WITH_TPROXY */
 
-static const ev_tstamp TEST_WAIT_SHORT_SEC = 0.064;
-static const ev_tstamp TEST_WAIT_RESPONSE_SEC = 0.256;
-/* Upper bound for the connrefused tests; only a ceiling, so the test returns
- * as soon as the dialer completes. Must exceed connrefused_proxy_conf.timeout
- * so a refused reply (not a proxy-side timeout) is what completes the dial. */
-static const ev_tstamp TEST_WAIT_CONNREFUSED_SEC = 6.0;
-/* Ceiling for draining sessions after a case completes. Only a ceiling: the
- * poll timer below makes drain_sessions() return as soon as the sessions clear,
- * so this budget is paid only when a session genuinely fails to tear down. It
- * is generous because a worker thread's teardown can run long under a sanitizer
- * build (WITH_THREADS). */
-static const ev_tstamp TEST_WAIT_DRAIN_SEC = 1.0;
+/* Failsafe watchdog for every wait below -- a dial completing, an accept, the
+ * multi-session relay, the sessions draining. Each wait returns the instant its
+ * predicate holds, so a correct build never reaches this deadline; it exists
+ * only to fail a genuine hang in bounded time instead of blocking CI. It is
+ * therefore sized to the project-standard T_TIMEOUT_SECONDS rather than a tight
+ * bound: a real-proxy case runs a loopback connect, the SOCKS/HTTP handshake,
+ * the proxy's own dial and the reply, possibly on a worker thread, and
+ * scheduling delay alone can stretch that past a sub-second watchdog on a
+ * loaded runner (ctest -j, a sanitizer build) and fail a healthy case. */
+static const ev_tstamp TEST_WAIT_SEC = (ev_tstamp)T_TIMEOUT_SECONDS;
 /* Re-check period while draining. Under WITH_THREADS a worker clears the session
  * counter on its own thread without waking the main loop, so a plain
  * ev_run(EVRUN_ONCE) would block on the watchdog instead of observing the drop;
@@ -117,17 +121,6 @@ struct dialer_result {
 
 struct test_watchdog {
 	bool fired;
-};
-
-struct proxy_server {
-	int listener_fd;
-	int peer_fd;
-	char request[1024];
-	size_t request_len;
-	const char *response;
-	bool request_complete;
-	bool response_sent;
-	bool failed;
 };
 
 static void close_if_open(int *restrict fd)
@@ -247,6 +240,10 @@ static int accept_nowait(const int listener_fd)
 	}
 }
 
+/* Accept-queue depth for the loopback listeners: deep enough for every dial of
+ * the multi-session case to be queued at once. */
+#define TEST_LISTEN_BACKLOG 16
+
 static int make_listener(uint_fast16_t *restrict port)
 {
 	const int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -264,7 +261,7 @@ static int make_listener(uint_fast16_t *restrict port)
 			fd, SOL_SOCKET, SO_REUSEADDR, &enable,
 			sizeof(enable)) == 0);
 	T_CHECK(bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0);
-	T_CHECK(listen(fd, 1) == 0);
+	T_CHECK(listen(fd, TEST_LISTEN_BACKLOG) == 0);
 	T_CHECK(fd_set_nonblock(fd));
 	T_CHECK(getsockname(fd, (struct sockaddr *)&bound_addr, &len) == 0);
 	*port = ntohs(bound_addr.sin_port);
@@ -288,7 +285,7 @@ static int make_listener6(uint_fast16_t *restrict port)
 			fd, SOL_SOCKET, SO_REUSEADDR, &enable,
 			sizeof(enable)) == 0);
 	T_CHECK(bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0);
-	T_CHECK(listen(fd, 1) == 0);
+	T_CHECK(listen(fd, TEST_LISTEN_BACKLOG) == 0);
 	T_CHECK(fd_set_nonblock(fd));
 	T_CHECK(getsockname(fd, (struct sockaddr *)&bound_addr, &len) == 0);
 	*port = ntohs(bound_addr.sin6_port);
@@ -315,418 +312,11 @@ static int wait_for_accept(
 	}
 }
 
-static bool proxy_server_pump(void *data)
-{
-	struct proxy_server *const server = data;
-
-	if (server->peer_fd < 0) {
-		server->peer_fd = accept_nowait(server->listener_fd);
-		if (server->peer_fd < 0) {
-			return true;
-		}
-	}
-	if (!server->request_complete) {
-		const size_t avail =
-			sizeof(server->request) - server->request_len - 1;
-		const ssize_t n = recv_nowait(
-			server->peer_fd, server->request + server->request_len,
-			avail);
-		if (n < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				return true;
-			}
-			server->failed = true;
-			return false;
-		}
-		if (n == 0) {
-			server->failed = true;
-			return false;
-		}
-		server->request_len += (size_t)n;
-		server->request[server->request_len] = '\0';
-		if (server->request_len + 1 >= sizeof(server->request)) {
-			server->failed = true;
-			return false;
-		}
-		if (strstr(server->request, "\r\n\r\n") != NULL) {
-			server->request_complete = true;
-		}
-	}
-	if (server->request_complete && !server->response_sent) {
-		if (!write_all(
-			    server->peer_fd, server->response,
-			    strlen(server->response))) {
-			server->failed = true;
-			return false;
-		}
-		server->response_sent = true;
-	}
-	return true;
-}
-
 /* -------------------------------------------------------------------------
- * regression - dialer unit checks and end-to-end CONNECT through the real
- * socks/http proxy handlers (direct, single-hop and chained).
+ * regression - end-to-end CONNECT through the real socks/http proxy handlers
+ * (single-hop and chained). The dialer's own unit and raw-peer cases live in
+ * dialer_test.c.
  * ---------------------------------------------------------------------- */
-
-T_DECLARE_CASE(dialaddr_parse_and_format_variants)
-{
-	struct dialaddr addr = { 0 };
-	char buf[128];
-
-	T_EXPECT(dialaddr_parse(&addr, "127.0.0.1:1080", 14));
-	T_EXPECT_EQ(addr.type, ATYP_INET);
-	T_EXPECT_EQ(addr.port, UINT16_C(1080));
-	T_EXPECT_EQ(dialaddr_format(buf, sizeof(buf), &addr), 14);
-	T_EXPECT_STREQ(buf, "127.0.0.1:1080");
-
-	T_EXPECT(dialaddr_parse(&addr, "[::1]:5353", 10));
-	T_EXPECT_EQ(addr.type, ATYP_INET6);
-	T_EXPECT_EQ(addr.port, UINT16_C(5353));
-	T_EXPECT_EQ(dialaddr_format(buf, sizeof(buf), &addr), 10);
-	T_EXPECT_STREQ(buf, "[::1]:5353");
-
-	T_EXPECT(dialaddr_parse(&addr, "example.com:443", 15));
-	T_EXPECT_EQ(addr.type, ATYP_DOMAIN);
-	T_EXPECT_EQ(addr.port, UINT16_C(443));
-	T_EXPECT_EQ(addr.domain.len, strlen("example.com"));
-	T_EXPECT_MEMEQ(addr.domain.name, "example.com", addr.domain.len);
-	T_EXPECT_EQ(dialaddr_format(buf, sizeof(buf), &addr), 15);
-	T_EXPECT_STREQ(buf, "example.com:443");
-
-	T_EXPECT(!dialaddr_parse(&addr, "missing-port", 12));
-	T_EXPECT(!dialaddr_parse(&addr, "127.0.0.1:70000", 15));
-}
-
-T_DECLARE_CASE(dialaddr_set_and_copy)
-{
-	struct sockaddr_in in = {
-		.sin_family = AF_INET,
-		.sin_port = htons(UINT16_C(8080)),
-		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
-	};
-	struct sockaddr_in6 in6 = {
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(UINT16_C(8443)),
-		.sin6_addr = in6addr_loopback,
-	};
-	struct dialaddr addr = { 0 };
-	struct dialaddr copied = { 0 };
-	char buf[128];
-
-	T_EXPECT(dialaddr_set(&addr, (const struct sockaddr *)&in, sizeof(in)));
-	T_EXPECT_EQ(addr.type, ATYP_INET);
-	T_EXPECT_EQ(addr.port, UINT16_C(8080));
-	T_EXPECT(dialaddr_set(
-		&copied, (const struct sockaddr *)&in6, sizeof(in6)));
-	T_EXPECT_EQ(copied.type, ATYP_INET6);
-	T_EXPECT_EQ(copied.port, UINT16_C(8443));
-	T_EXPECT(!dialaddr_set(
-		&copied, (const struct sockaddr *)&in6, sizeof(in6) - 1));
-
-	addr = (struct dialaddr){ 0 };
-	addr.type = ATYP_DOMAIN;
-	addr.port = UINT16_C(53);
-	addr.domain.len = (uint_least8_t)strlen("resolver.local");
-	(void)memcpy(addr.domain.name, "resolver.local", addr.domain.len);
-	dialaddr_copy(&copied, &addr);
-	T_EXPECT_EQ(copied.type, ATYP_DOMAIN);
-	T_EXPECT_EQ(copied.port, UINT16_C(53));
-	T_EXPECT_EQ(dialaddr_format(buf, sizeof(buf), &copied), 17);
-	T_EXPECT_STREQ(buf, "resolver.local:53");
-}
-
-T_DECLARE_CASE(dialreq_parse_and_format_proxy_chain)
-{
-	struct dialreq *req = dialreq_parse(
-		"example.com:443",
-		"http://user:pass@127.0.0.1:8080,socks5://127.0.0.2");
-	char buf[256];
-
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, 2);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_HTTP);
-	T_EXPECT_EQ(req->proxy[0].addr.type, ATYP_INET);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(8080));
-	T_EXPECT_STREQ(req->proxy[0].username, "user");
-	T_EXPECT_STREQ(req->proxy[0].password, "pass");
-	T_EXPECT_EQ(req->proxy[1].proto, PROTO_SOCKS5);
-	T_EXPECT_EQ(req->proxy[1].addr.port, UINT16_C(1080));
-	T_EXPECT_EQ(req->proxy[1].username, NULL);
-	T_EXPECT_EQ(dialreq_format(buf, sizeof(buf), req), 63);
-	T_EXPECT_STREQ(
-		buf,
-		"http://127.0.0.1:8080->socks5://127.0.0.2:1080->example.com:443");
-	dialreq_free(req);
-}
-
-T_DECLARE_CASE(dialreq_parse_scheme_default_ports)
-{
-	/* http defaults to port 80, socks4a/socks5 to 1080 when omitted. */
-	struct dialreq *req =
-		dialreq_parse("example.com:443", "http://127.0.0.1");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, 1);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_HTTP);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(80));
-	dialreq_free(req);
-
-	req = dialreq_parse("example.com:443", "socks4a://127.0.0.1");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_SOCKS4A);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(1080));
-	dialreq_free(req);
-}
-
-T_DECLARE_CASE(dialreq_parse_rejects_bad_proxy_uris)
-{
-	/* unknown scheme */
-	T_EXPECT_EQ(
-		dialreq_parse("example.com:443", "ftp://127.0.0.1:21"), NULL);
-	/* missing scheme / unparseable */
-	T_EXPECT_EQ(dialreq_parse("example.com:443", "127.0.0.1:1080"), NULL);
-	/* port out of range */
-	T_EXPECT_EQ(
-		dialreq_parse("example.com:443", "http://127.0.0.1:99999"),
-		NULL);
-	/* non-numeric port */
-	T_EXPECT_EQ(
-		dialreq_parse("example.com:443", "http://127.0.0.1:abc"), NULL);
-}
-
-T_DECLARE_CASE(dialreq_parse_rejects_overlong_proxy_uri)
-{
-	char uri[1100];
-	const int n = snprintf(uri, sizeof(uri), "socks5://");
-	T_CHECK(n > 0 && (size_t)n < sizeof(uri));
-	memset(uri + n, 'a', sizeof(uri) - 1 - (size_t)n);
-	uri[sizeof(uri) - 1] = '\0';
-	T_EXPECT_EQ(dialreq_parse("example.com:443", uri), NULL);
-}
-
-T_DECLARE_CASE(dialreq_new_copies_base_request)
-{
-	struct dialreq *base = dialreq_parse(
-		"example.com:443", "socks5://alice:secret@127.0.0.1");
-	struct dialreq *copy;
-	char buf[256];
-
-	T_CHECK(base != NULL);
-	copy = dialreq_new(base, 1);
-	T_CHECK(copy != NULL);
-	T_EXPECT_EQ(copy->num_proxy, 1);
-	T_EXPECT_EQ(copy->proxy[0].proto, PROTO_SOCKS5);
-	T_EXPECT_STREQ(copy->proxy[0].username, "alice");
-	T_EXPECT_STREQ(copy->proxy[0].password, "secret");
-	T_EXPECT_EQ(copy->proxy[0].addr.port, UINT16_C(1080));
-	T_EXPECT_EQ(dialreq_format(buf, sizeof(buf), copy), 40);
-	T_EXPECT_STREQ(buf, "socks5://127.0.0.1:1080->example.com:443");
-	dialreq_free(copy);
-	dialreq_free(base);
-}
-
-T_DECLARE_CASE(dialer_strerror_known_and_unknown)
-{
-	T_EXPECT_STREQ(dialer_strerror(DIALER_OK), "success");
-	T_EXPECT_STREQ(
-		dialer_strerror(DIALER_ERR_PROXY_AUTH),
-		"proxy authentication failed");
-	T_EXPECT_STREQ(
-		dialer_strerror((enum dialer_error)DIALER_ERR_MAX),
-		"unknown error");
-}
-
-T_DECLARE_CASE(direct_connect_reports_success)
-{
-	uint_fast16_t port = 0;
-	const int listener_fd = make_listener(&port);
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char addr[32];
-	bool completed;
-	int accepted_fd;
-	int client_fd;
-	bool accepted;
-	bool has_client_fd;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(addr, sizeof(addr), "127.0.0.1:%u", (unsigned)port) >
-		0);
-	req = dialreq_parse(addr, NULL);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
-	accepted_fd = wait_for_accept(loop, listener_fd, TEST_WAIT_SHORT_SEC);
-	client_fd = result.fd;
-	accepted = accepted_fd >= 0;
-	has_client_fd = client_fd >= 0;
-	err = d.err;
-	close_if_open(&accepted_fd);
-	close_if_open(&client_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	T_CHECK(close(listener_fd) == 0);
-
-	T_EXPECT(completed);
-	T_EXPECT(result.called);
-	T_EXPECT(has_client_fd);
-	T_EXPECT(accepted);
-	T_EXPECT_EQ(err, DIALER_OK);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
-T_DECLARE_CASE(local_address_blocked_by_egress_policy)
-{
-	struct config conf = test_conf;
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req = dialreq_parse("10.0.0.1:9", NULL);
-	bool completed;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(req != NULL);
-	conf.block_local = true;
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
-	err = d.err;
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-
-	T_EXPECT(completed);
-	T_EXPECT_EQ(result.fd, -1);
-	T_EXPECT_EQ(err, DIALER_ERR_BLOCKED);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
-T_DECLARE_CASE(http_connect_success_sends_expected_request)
-{
-	uint_fast16_t port = 0;
-	int listener_fd = make_listener(&port);
-	struct proxy_server server = {
-		.listener_fd = listener_fd,
-		.peer_fd = -1,
-		.response = "HTTP/1.1 200 Connection Established\r\n\r\n",
-	};
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char proxy_uri[128];
-	bool completed;
-	int client_fd;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(
-			proxy_uri, sizeof(proxy_uri),
-			"http://user:pass@127.0.0.1:%u", (unsigned)port) > 0);
-	req = dialreq_parse("example.com:443", proxy_uri);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
-	client_fd = result.fd;
-	err = d.err;
-	close_if_open(&client_fd);
-	close_if_open(&server.peer_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	close_if_open(&listener_fd);
-
-	T_EXPECT(completed);
-	T_EXPECT(!server.failed);
-	T_EXPECT(server.request_complete);
-	T_EXPECT(server.response_sent);
-	T_EXPECT_STREQ(
-		server.request,
-		"CONNECT example.com:443 HTTP/1.1\r\n"
-		"Host: example.com:443\r\n"
-		"Proxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n");
-	T_EXPECT(result.fd >= 0);
-	T_EXPECT_EQ(err, DIALER_OK);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
-T_DECLARE_CASE(http_connect_407_maps_to_proxy_auth)
-{
-	uint_fast16_t port = 0;
-	int listener_fd = make_listener(&port);
-	struct proxy_server server = {
-		.listener_fd = listener_fd,
-		.peer_fd = -1,
-		.response =
-			"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
-	};
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char proxy_uri[96];
-	bool completed;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(
-			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
-			(unsigned)port) > 0);
-	req = dialreq_parse("example.com:443", proxy_uri);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
-	err = d.err;
-	close_if_open(&server.peer_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	close_if_open(&listener_fd);
-
-	T_EXPECT(completed);
-	T_EXPECT(!server.failed);
-	T_EXPECT(server.request_complete);
-	T_EXPECT(server.response_sent);
-	T_EXPECT_EQ(result.fd, -1);
-	T_EXPECT_EQ(err, DIALER_ERR_PROXY_AUTH);
-	T_EXPECT_EQ(d.syserr, 0);
-}
 
 /* mock (cont.) - ruleset host stubs and the real-proxy fixtures below. */
 #if WITH_RULESET
@@ -736,27 +326,27 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 	(void)state;
 }
 
+/* ruleset_new() returns NULL here, so no request ever completes and w_finish
+ * never goes pending: the window this handles cannot arise. Assert that premise
+ * rather than keep a second copy of the production body, which ruleset_test
+ * covers directly. */
 void ruleset_request_cancel(
 	struct ev_loop *loop, struct ruleset_callback *restrict cb)
 {
-	if (!ev_is_pending(&cb->w_finish)) {
-		return;
-	}
-	dialreq_free(cb->request.req);
-	cb->request.req = NULL;
-	ev_clear_pending(loop, &cb->w_finish);
+	(void)loop;
+	T_CHECK(!ev_is_pending(&cb->w_finish));
 }
 
 bool ruleset_resolve(
 	struct ruleset *restrict r, struct ruleset_state **state,
-	const char *restrict request, const char *restrict username,
-	const char *restrict password, struct ruleset_callback *callback)
+	const char *restrict request,
+	const struct ruleset_credentials *restrict creds,
+	struct ruleset_callback *callback)
 {
 	(void)r;
 	(void)state;
 	(void)request;
-	(void)username;
-	(void)password;
+	(void)creds;
 	(void)callback;
 	return false;
 }
@@ -764,15 +354,14 @@ bool ruleset_resolve(
 bool ruleset_dispatch(
 	struct ruleset *restrict r, struct ruleset_state **state,
 	const char *restrict request, const int atype,
-	const char *restrict username, const char *restrict password,
+	const struct ruleset_credentials *restrict creds,
 	struct ruleset_callback *callback)
 {
 	(void)r;
 	(void)state;
 	(void)request;
 	(void)atype;
-	(void)username;
-	(void)password;
+	(void)creds;
 	(void)callback;
 	return false;
 }
@@ -813,7 +402,7 @@ bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 	return false;
 }
 
-bool ruleset_loadconfig(
+bool ruleset_reloadconfig(
 	struct ruleset *restrict r, const char *restrict filename)
 {
 	(void)r;
@@ -840,11 +429,12 @@ ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 
 /* Start a proxy server on an ephemeral loopback port and return that port.
  * Sets conf->listen or conf->http_listen to "127.0.0.1:0" depending on
- * use_http; conf must outlive the server. */
+ * use_http; conf must outlive the server. Relayed payload is spread over
+ * @p nworkers I/O worker threads, as --workers does in main(). */
 static uint_fast16_t start_proxy_ex(
 	struct server *restrict s, struct ev_loop *restrict loop,
 	const bool use_http, struct config *restrict conf,
-	struct resolver *restrict resolver)
+	struct resolver *restrict resolver, const unsigned int nworkers)
 {
 	if (use_http) {
 		conf->listen = NULL;
@@ -856,7 +446,7 @@ static uint_fast16_t start_proxy_ex(
 	struct sockaddr_in bound_addr = { 0 };
 	socklen_t len = sizeof(bound_addr);
 
-	struct transfer *restrict xfer = transfer_create(loop, 1);
+	struct transfer *restrict xfer = transfer_create(loop, nworkers);
 	T_CHECK(xfer != NULL);
 	T_CHECK(server_init(s, loop, conf, resolver, xfer, NULL, NULL));
 	T_CHECK(getsockname(
@@ -869,7 +459,7 @@ static uint_fast16_t start_proxy(
 	struct server *restrict s, struct ev_loop *restrict loop,
 	const bool use_http, struct config *restrict conf)
 {
-	return start_proxy_ex(s, loop, use_http, conf, NULL);
+	return start_proxy_ex(s, loop, use_http, conf, NULL, 1);
 }
 
 static void stop_proxy(struct server *restrict s)
@@ -920,8 +510,8 @@ static bool drain_sessions(
 		TEST_POLL_INTERVAL_SEC);
 	ev_timer_start(loop, &w_poll);
 	const bool drained = test_wait_until(
-		loop, sessions_drained_predicate, &ctx, TEST_WAIT_DRAIN_SEC,
-		NULL, NULL);
+		loop, sessions_drained_predicate, &ctx, TEST_WAIT_SEC, NULL,
+		NULL);
 	ev_timer_stop(loop, &w_poll);
 	return drained;
 }
@@ -985,11 +575,12 @@ T_DECLARE_CASE(socks5_connect_success_via_real_proxy)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	client_fd = result.fd;
 	has_client_fd = client_fd >= 0;
 	err = d.err;
+	dialer_cancel(&d, loop);
 	accepted_fd = accept_nowait(final_fd);
 	has_accepted = accepted_fd >= 0;
 	close_if_open(&accepted_fd);
@@ -1023,7 +614,7 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	struct config pconf = connrefused_proxy_conf;
+	struct config pconf = proxy_conf;
 	proxy_port = start_proxy(&proxy_s, loop, false, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
@@ -1042,9 +633,10 @@ T_DECLARE_CASE(socks5_connrefused_proxied_correctly)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result,
-		TEST_WAIT_CONNREFUSED_SEC, NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	err = d.err;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
@@ -1089,9 +681,10 @@ T_DECLARE_CASE(socks5_noauth_rejected_when_auth_required)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	err = d.err;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
@@ -1143,11 +736,12 @@ T_DECLARE_CASE(socks5_credentials_accepted_when_auth_required)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	client_fd = result.fd;
 	has_client_fd = client_fd >= 0;
 	err = d.err;
+	dialer_cancel(&d, loop);
 	accepted_fd = accept_nowait(final_fd);
 	has_accepted = accepted_fd >= 0;
 	close_if_open(&accepted_fd);
@@ -1203,11 +797,12 @@ T_DECLARE_CASE(socks4a_connect_success_via_real_proxy)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	client_fd = result.fd;
 	has_client_fd = client_fd >= 0;
 	err = d.err;
+	dialer_cancel(&d, loop);
 	accepted_fd = accept_nowait(final_fd);
 	has_accepted = accepted_fd >= 0;
 	close_if_open(&accepted_fd);
@@ -1263,11 +858,12 @@ T_DECLARE_CASE(http_proxy_connect_success_via_real_proxy)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	client_fd = result.fd;
 	has_client_fd = client_fd >= 0;
 	err = d.err;
+	dialer_cancel(&d, loop);
 	accepted_fd = accept_nowait(final_fd);
 	has_accepted = accepted_fd >= 0;
 	close_if_open(&accepted_fd);
@@ -1286,435 +882,6 @@ T_DECLARE_CASE(http_proxy_connect_success_via_real_proxy)
 	T_EXPECT_EQ(d.syserr, 0);
 }
 
-T_DECLARE_CASE(http_connect_403_maps_to_proxy_reject)
-{
-	uint_fast16_t port = 0;
-	int listener_fd = make_listener(&port);
-	struct proxy_server server = {
-		.listener_fd = listener_fd,
-		.peer_fd = -1,
-		.response = "HTTP/1.1 403 Forbidden\r\n\r\n",
-	};
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char proxy_uri[96];
-	bool completed;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(
-			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
-			(unsigned)port) > 0);
-	req = dialreq_parse("example.com:443", proxy_uri);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
-	err = d.err;
-	close_if_open(&server.peer_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	close_if_open(&listener_fd);
-
-	T_EXPECT(completed);
-	T_EXPECT(!server.failed);
-	T_EXPECT(server.request_complete);
-	T_EXPECT(server.response_sent);
-	T_EXPECT_EQ(result.fd, -1);
-	T_EXPECT_EQ(err, DIALER_ERR_PROXY_REJECT);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
-T_DECLARE_CASE(http_connect_502_maps_to_proxy_refused)
-{
-	uint_fast16_t port = 0;
-	int listener_fd = make_listener(&port);
-	struct proxy_server server = {
-		.listener_fd = listener_fd,
-		.peer_fd = -1,
-		.response = "HTTP/1.1 502 Bad Gateway\r\n\r\n",
-	};
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char proxy_uri[96];
-	bool completed;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(
-			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
-			(unsigned)port) > 0);
-	req = dialreq_parse("example.com:443", proxy_uri);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
-	err = d.err;
-	close_if_open(&server.peer_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	close_if_open(&listener_fd);
-
-	T_EXPECT(completed);
-	T_EXPECT(!server.failed);
-	T_EXPECT(server.request_complete);
-	T_EXPECT(server.response_sent);
-	T_EXPECT_EQ(result.fd, -1);
-	T_EXPECT_EQ(err, DIALER_ERR_PROXY_REFUSED);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
-T_DECLARE_CASE(http_connect_non_200_maps_to_proxy_proto)
-{
-	uint_fast16_t port = 0;
-	int listener_fd = make_listener(&port);
-	struct proxy_server server = {
-		.listener_fd = listener_fd,
-		.peer_fd = -1,
-		.response = "HTTP/1.1 500 Internal Server Error\r\n\r\n",
-	};
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char proxy_uri[96];
-	bool completed;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(
-			proxy_uri, sizeof(proxy_uri), "http://127.0.0.1:%u",
-			(unsigned)port) > 0);
-	req = dialreq_parse("example.com:443", proxy_uri);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		proxy_server_pump, &server);
-	err = d.err;
-	close_if_open(&server.peer_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	close_if_open(&listener_fd);
-
-	T_EXPECT(completed);
-	T_EXPECT(!server.failed);
-	T_EXPECT(server.request_complete);
-	T_EXPECT(server.response_sent);
-	T_EXPECT_EQ(result.fd, -1);
-	T_EXPECT_EQ(err, DIALER_ERR_PROXY_PROTO);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
-struct socks4_raw_server {
-	int listener_fd;
-	int peer_fd;
-	unsigned char buf[512];
-	size_t buf_len;
-	bool request_complete;
-	bool response_sent;
-	bool failed;
-	uint_least8_t rsp_code;
-};
-
-/* Returns true when a complete SOCKS4/4a request has been accumulated. */
-static bool
-socks4_request_complete(const unsigned char *restrict buf, const size_t len)
-{
-	const unsigned char *userid_end;
-
-	if (len <= SOCKS4_HDR_LEN) {
-		return false;
-	}
-	userid_end = memchr(buf + SOCKS4_HDR_LEN, '\0', len - SOCKS4_HDR_LEN);
-	if (userid_end == NULL) {
-		return false;
-	}
-	/* SOCKS4a: header IP 0.0.0.x (x != 0) means a domain name follows. */
-	if (buf[4] == 0 && buf[5] == 0 && buf[6] == 0 && buf[7] != 0) {
-		const unsigned char *const host_start = userid_end + 1;
-		const size_t host_space =
-			len - SOCKS4_HDR_LEN -
-			(size_t)(host_start - (buf + SOCKS4_HDR_LEN));
-		return memchr(host_start, '\0', host_space) != NULL;
-	}
-	return true;
-}
-
-static bool socks4_raw_pump(void *data)
-{
-	struct socks4_raw_server *const s = data;
-	ssize_t n;
-
-	if (s->peer_fd < 0) {
-		s->peer_fd = accept_nowait(s->listener_fd);
-		if (s->peer_fd < 0) {
-			return true;
-		}
-	}
-	if (!s->request_complete) {
-		n = recv_nowait(
-			s->peer_fd, s->buf + s->buf_len,
-			sizeof(s->buf) - s->buf_len);
-		if (n < 0) {
-			if (errno != EAGAIN && errno != EWOULDBLOCK) {
-				s->failed = true;
-				return false;
-			}
-		} else if (n == 0) {
-			s->failed = true;
-			return false;
-		} else {
-			s->buf_len += (size_t)n;
-		}
-		if (socks4_request_complete(s->buf, s->buf_len)) {
-			s->request_complete = true;
-		}
-	}
-	if (s->request_complete && !s->response_sent) {
-		const unsigned char rsp[SOCKS4_HDR_LEN] = {
-			0, s->rsp_code, 0, 0, 0, 0, 0, 0,
-		};
-		if (!write_all(s->peer_fd, rsp, sizeof(rsp))) {
-			s->failed = true;
-			return false;
-		}
-		s->response_sent = true;
-	}
-	return true;
-}
-
-T_DECLARE_CASE(socks4a_rejected_maps_to_proxy_refused)
-{
-	uint_fast16_t port = 0;
-	struct socks4_raw_server server = {
-		.listener_fd = make_listener(&port),
-		.peer_fd = -1,
-		.rsp_code = SOCKS4RSP_REJECTED,
-	};
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char proxy_uri[64];
-	bool completed;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(
-			proxy_uri, sizeof(proxy_uri), "socks4a://127.0.0.1:%u",
-			(unsigned)port) > 0);
-	req = dialreq_parse("example.com:443", proxy_uri);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		socks4_raw_pump, &server);
-	err = d.err;
-	close_if_open(&server.peer_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	close_if_open(&server.listener_fd);
-
-	T_EXPECT(completed);
-	T_EXPECT(!server.failed);
-	T_EXPECT(server.request_complete);
-	T_EXPECT(server.response_sent);
-	T_EXPECT_EQ(result.fd, -1);
-	T_EXPECT_EQ(err, DIALER_ERR_PROXY_REFUSED);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
-enum socks5_pump_phase {
-	SOCKS5_PHASE_AUTH,
-	SOCKS5_PHASE_CONNECT,
-	SOCKS5_PHASE_DONE,
-};
-
-struct socks5_raw_server {
-	int listener_fd;
-	int peer_fd;
-	unsigned char buf[512];
-	size_t buf_len;
-	enum socks5_pump_phase phase;
-	bool response_sent;
-	bool failed;
-	uint_least8_t rsp_code;
-};
-
-static bool socks5_raw_pump(void *data)
-{
-	struct socks5_raw_server *const s = data;
-	ssize_t n;
-	size_t addr_len;
-	size_t req_len;
-
-	if (s->peer_fd < 0) {
-		s->peer_fd = accept_nowait(s->listener_fd);
-		if (s->peer_fd < 0) {
-			return true;
-		}
-	}
-	/* Once the CONNECT response has been sent, the handshake is complete. */
-	if (s->phase == SOCKS5_PHASE_DONE) {
-		return true;
-	}
-	n = recv_nowait(
-		s->peer_fd, s->buf + s->buf_len, sizeof(s->buf) - s->buf_len);
-	if (n < 0) {
-		if (errno != EAGAIN && errno != EWOULDBLOCK) {
-			s->failed = true;
-			return false;
-		}
-	} else if (n == 0) {
-		if (s->phase != SOCKS5_PHASE_DONE) {
-			s->failed = true;
-			return false;
-		}
-	} else {
-		s->buf_len += (size_t)n;
-	}
-	if (s->phase == SOCKS5_PHASE_AUTH) {
-		/* Need: version(1) + nmethods(1) + methods(nmethods) */
-		if (s->buf_len < 2) {
-			return true;
-		}
-		const size_t auth_len = (size_t)2 + s->buf[1];
-		if (s->buf_len < auth_len) {
-			return true;
-		}
-		const unsigned char auth_rsp[2] = { SOCKS5, SOCKS5AUTH_NOAUTH };
-		if (!write_all(s->peer_fd, auth_rsp, sizeof(auth_rsp))) {
-			s->failed = true;
-			return false;
-		}
-		s->buf_len -= auth_len;
-		memmove(s->buf, s->buf + auth_len, s->buf_len);
-		s->phase = SOCKS5_PHASE_CONNECT;
-	}
-	if (s->phase == SOCKS5_PHASE_CONNECT) {
-		/* SOCKS5 request: hdr(4) + addr_data + port(2) */
-		if (s->buf_len < SOCKS5_HDR_LEN + 1) {
-			return true;
-		}
-		switch (s->buf[3]) {
-		case SOCKS5ADDR_IPV4:
-			addr_len = sizeof(struct in_addr);
-			break;
-		case SOCKS5ADDR_IPV6:
-			addr_len = sizeof(struct in6_addr);
-			break;
-		case SOCKS5ADDR_DOMAIN:
-			addr_len = (size_t)1 + s->buf[SOCKS5_HDR_LEN];
-			break;
-		default:
-			s->failed = true;
-			return false;
-		}
-		req_len = SOCKS5_HDR_LEN + addr_len + sizeof(in_port_t);
-		if (s->buf_len < req_len) {
-			return true;
-		}
-		/* Respond with rsp_code; bind address 0.0.0.0:0 */
-		const unsigned char connect_rsp
-			[SOCKS5_HDR_LEN + sizeof(struct in_addr) +
-			 sizeof(in_port_t)] = {
-				SOCKS5, s->rsp_code, 0, SOCKS5ADDR_IPV4,
-				0,	0,	     0, 0,
-				0,	0,
-			};
-		if (!write_all(s->peer_fd, connect_rsp, sizeof(connect_rsp))) {
-			s->failed = true;
-			return false;
-		}
-		s->phase = SOCKS5_PHASE_DONE;
-		s->response_sent = true;
-	}
-	return true;
-}
-
-T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
-{
-	uint_fast16_t port = 0;
-	struct socks5_raw_server server = {
-		.listener_fd = make_listener(&port),
-		.peer_fd = -1,
-		.phase = SOCKS5_PHASE_AUTH,
-		.rsp_code = SOCKS5RSP_NOALLOWED,
-	};
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char proxy_uri[64];
-	bool completed;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(
-			proxy_uri, sizeof(proxy_uri), "socks5://127.0.0.1:%u",
-			(unsigned)port) > 0);
-	req = dialreq_parse("example.com:443", proxy_uri);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		socks5_raw_pump, &server);
-	err = d.err;
-	close_if_open(&server.peer_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	close_if_open(&server.listener_fd);
-
-	T_EXPECT(completed);
-	T_EXPECT(!server.failed);
-	T_EXPECT(server.response_sent);
-	T_EXPECT_EQ(result.fd, -1);
-	T_EXPECT_EQ(err, DIALER_ERR_PROXY_REJECT);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
 T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 {
 	uint_fast16_t proxy_port;
@@ -1730,7 +897,7 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 	enum dialer_error err;
 
 	T_CHECK(loop != NULL);
-	struct config pconf = connrefused_proxy_conf;
+	struct config pconf = proxy_conf;
 	proxy_port = start_proxy(&proxy_s, loop, true, &pconf);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "127.0.0.1:%u",
@@ -1749,9 +916,10 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 		NULL, NULL);
 	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
 	completed = test_wait_until(
-		loop, dialer_called_predicate, &result,
-		TEST_WAIT_CONNREFUSED_SEC, NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	err = d.err;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	const bool drained = drain_sessions(loop, &proxy_s, NULL);
 	stop_proxy(&proxy_s);
@@ -1762,56 +930,6 @@ T_DECLARE_CASE(http_proxy_connrefused_proxied_correctly)
 	T_EXPECT(completed);
 	T_EXPECT_EQ(result.fd, -1);
 	T_EXPECT_EQ(err, DIALER_ERR_PROXY_REFUSED);
-	T_EXPECT_EQ(d.syserr, 0);
-}
-
-T_DECLARE_CASE(direct_connect_ipv6_reports_success)
-{
-	uint_fast16_t port = 0;
-	const int listener_fd = make_listener6(&port);
-	struct ev_loop *loop = ev_loop_new(0);
-	struct dialer_result result = { .fd = -1 };
-	struct dialer d;
-	struct dialreq *req;
-	char addr[32];
-	bool completed;
-	int accepted_fd;
-	int client_fd;
-	bool accepted;
-	bool has_client_fd;
-	enum dialer_error err;
-
-	T_CHECK(loop != NULL);
-	T_CHECK(snprintf(addr, sizeof(addr), "[::1]:%u", (unsigned)port) > 0);
-	req = dialreq_parse(addr, NULL);
-	T_CHECK(req != NULL);
-	dialer_init(
-		&d,
-		&(struct dialer_cb){
-			.func = dialer_finish_cb,
-			.data = &result,
-		},
-		NULL, NULL);
-	dialer_do(&d, loop, req, &test_conf, NULL, NULL);
-	completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_SHORT_SEC,
-		NULL, NULL);
-	accepted_fd = wait_for_accept(loop, listener_fd, TEST_WAIT_SHORT_SEC);
-	client_fd = result.fd;
-	accepted = accepted_fd >= 0;
-	has_client_fd = client_fd >= 0;
-	err = d.err;
-	close_if_open(&accepted_fd);
-	close_if_open(&client_fd);
-	dialreq_free(req);
-	ev_loop_destroy(loop);
-	T_CHECK(close(listener_fd) == 0);
-
-	T_EXPECT(completed);
-	T_EXPECT(result.called);
-	T_EXPECT(has_client_fd);
-	T_EXPECT(accepted);
-	T_EXPECT_EQ(err, DIALER_OK);
 	T_EXPECT_EQ(d.syserr, 0);
 }
 
@@ -1862,14 +980,17 @@ static void expect_dial_success(
 		NULL, NULL);
 	dialer_do(&d, loop, req, conf, resolver, NULL);
 	out->completed = test_wait_until(
-		loop, dialer_called_predicate, &result, TEST_WAIT_RESPONSE_SEC,
-		NULL, NULL);
+		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
+		NULL);
 	int client_fd = result.fd;
 	out->has_client_fd = client_fd >= 0;
 	out->err = d.err;
 	out->syserr = d.syserr;
-	int accepted_fd =
-		wait_for_accept(loop, final_fd, TEST_WAIT_RESPONSE_SEC);
+	/* A dial still in flight when the watchdog expired must not outlive d:
+	 * the caller runs the loop again (drain_sessions), which would fire its
+	 * watchers into this dead frame. A no-op once the dial has completed. */
+	dialer_cancel(&d, loop);
+	int accepted_fd = wait_for_accept(loop, final_fd, TEST_WAIT_SEC);
 	out->has_accepted = accepted_fd >= 0;
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
@@ -2025,32 +1146,219 @@ T_DECLARE_CASE(chain_socks5_to_socks5_connect_success)
 	T_CALL_SUBCASE(run_chain_success, false, false);
 }
 
-T_DECLARE_CASE(direct_connect_domain_resolves_and_succeeds)
+/* Concurrent sessions relayed through one multi-worker proxy. Sized so
+ * transfer_serve's round-robin lands at least one session on every worker. */
+enum { MULTI_WORKERS = 4, MULTI_SESSIONS = 8 };
+
+/* One proxied client: the dial that produced it, the tag byte it sent and the
+ * byte the far end echoed back through the relay. */
+struct multi_client {
+	struct dialer d;
+	struct dialer_result result;
+	int fd;
+	unsigned char echo;
+	bool got_echo;
+};
+
+/* The far end of one session, accepted on the final listener. Which client it
+ * belongs to is unknown here; the tag byte carries that. */
+struct multi_relay {
+	int fd;
+	bool echoed;
+};
+
+struct multi_ctx {
+	struct multi_client clients[MULTI_SESSIONS];
+	struct multi_relay relays[MULTI_SESSIONS];
+	size_t nrelays;
+	int listener_fd;
+};
+
+/* Accept whatever the final listener has queued, so a proxy dial never waits on
+ * a full accept queue. */
+static bool multi_accept_step(void *data)
 {
-	struct config conf = test_conf;
-	uint_fast16_t final_port;
-	int final_fd = make_listener(&final_port);
+	struct multi_ctx *const ctx = data;
+
+	while (ctx->nrelays < MULTI_SESSIONS) {
+		const int fd = accept_nowait(ctx->listener_fd);
+		if (fd < 0) {
+			break;
+		}
+		if (!fd_set_nonblock(fd)) {
+			return false;
+		}
+		ctx->relays[ctx->nrelays++] = (struct multi_relay){
+			.fd = fd,
+			.echoed = false,
+		};
+	}
+	return true;
+}
+
+static bool multi_dialed_predicate(void *data)
+{
+	const struct multi_ctx *const ctx = data;
+
+	if (ctx->nrelays < MULTI_SESSIONS) {
+		return false;
+	}
+	for (size_t i = 0; i < MULTI_SESSIONS; i++) {
+		if (!ctx->clients[i].result.called) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Bounce each tag byte back at the far end, then collect the bounce at the
+ * client end; both directions cross the relay. */
+static bool multi_relay_step(void *data)
+{
+	struct multi_ctx *const ctx = data;
+
+	for (size_t i = 0; i < ctx->nrelays; i++) {
+		struct multi_relay *const relay = &ctx->relays[i];
+		if (relay->echoed) {
+			continue;
+		}
+		unsigned char tag;
+		if (recv_nowait(relay->fd, &tag, sizeof(tag)) !=
+		    (ssize_t)sizeof(tag)) {
+			continue;
+		}
+		if (!write_all(relay->fd, &tag, sizeof(tag))) {
+			return false;
+		}
+		relay->echoed = true;
+	}
+	for (size_t i = 0; i < MULTI_SESSIONS; i++) {
+		struct multi_client *const client = &ctx->clients[i];
+		if (client->got_echo || client->fd < 0) {
+			continue;
+		}
+		if (recv_nowait(
+			    client->fd, &client->echo, sizeof(client->echo)) !=
+		    (ssize_t)sizeof(client->echo)) {
+			continue;
+		}
+		client->got_echo = true;
+	}
+	return true;
+}
+
+static bool multi_echoed_predicate(void *data)
+{
+	const struct multi_ctx *const ctx = data;
+
+	for (size_t i = 0; i < MULTI_SESSIONS; i++) {
+		if (!ctx->clients[i].got_echo) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/*
+ * Several real SOCKS5 sessions relayed at once by a proxy whose transfer engine
+ * runs MULTI_WORKERS I/O threads -- the configuration --workers creates, which
+ * no other case builds: handshakes accepted on the main loop, payload pumped on
+ * the worker loops, num_sessions accounted across threads and torn down through
+ * server_stop -> gc_finalizeall -> transfer_join. Each client sends its own tag
+ * byte and must read that same byte back, so a session crossed both relay
+ * directions and stayed paired with its own far end. Without WITH_THREADS the
+ * engine ignores the worker count and the case still covers the concurrent
+ * sessions.
+ */
+T_DECLARE_CASE(multi_worker_relays_concurrent_sessions)
+{
+	uint_fast16_t proxy_port, final_port;
+	struct server proxy_s;
 	struct ev_loop *loop = ev_loop_new(0);
-	struct resolver *resolver;
 	struct dialreq *req;
-	char target_addr[32];
+	char proxy_uri[64], target_addr[32];
+	/* static: a dialer carries an 8 KiB read buffer, MULTI_SESSIONS of
+	 * them do not belong on the case's stack */
+	static struct multi_ctx ctx;
 
 	T_CHECK(loop != NULL);
-	conf.resolve_pf = PF_INET;
-	resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
+	/* The client and far-end sockets are not watched by this loop -- under
+	 * WITH_THREADS the relay runs on a worker thread that never wakes it --
+	 * so a short repeating timer drives the step callbacks below. */
+	struct ev_timer w_poll;
+	ev_timer_init(
+		&w_poll, test_poll_cb, TEST_POLL_INTERVAL_SEC,
+		TEST_POLL_INTERVAL_SEC);
+	ev_timer_start(loop, &w_poll);
+	ctx = (struct multi_ctx){ .listener_fd = make_listener(&final_port) };
+	struct config pconf = proxy_conf;
+	proxy_port = start_proxy_ex(
+		&proxy_s, loop, false, &pconf, NULL, MULTI_WORKERS);
 	T_CHECK(snprintf(
-			target_addr, sizeof(target_addr), "localhost:%u",
+			target_addr, sizeof(target_addr), "127.0.0.1:%u",
 			(unsigned)final_port) > 0);
-	req = dialreq_parse(target_addr, NULL);
+	T_CHECK(snprintf(
+			proxy_uri, sizeof(proxy_uri), "socks5://127.0.0.1:%u",
+			(unsigned)proxy_port) > 0);
+	req = dialreq_parse(target_addr, proxy_uri);
 	T_CHECK(req != NULL);
-	struct dial_success_result r;
-	expect_dial_success(loop, req, &conf, resolver, final_fd, &r);
+
+	for (size_t i = 0; i < MULTI_SESSIONS; i++) {
+		struct multi_client *const client = &ctx.clients[i];
+		client->fd = -1;
+		client->result.fd = -1;
+		dialer_init(
+			&client->d,
+			&(struct dialer_cb){
+				.func = dialer_finish_cb,
+				.data = &client->result,
+			},
+			NULL, NULL);
+		dialer_do(&client->d, loop, req, &test_conf, NULL, NULL);
+	}
+	const bool dialed = test_wait_until(
+		loop, multi_dialed_predicate, &ctx, TEST_WAIT_SEC,
+		multi_accept_step, &ctx);
+
+	bool wrote = true;
+	for (size_t i = 0; i < MULTI_SESSIONS; i++) {
+		struct multi_client *const client = &ctx.clients[i];
+		dialer_cancel(&client->d, loop);
+		const unsigned char tag = (unsigned char)i;
+		client->fd = client->result.fd;
+		if (client->fd < 0) {
+			wrote = false;
+			continue;
+		}
+		wrote = write_all(client->fd, &tag, sizeof(tag)) && wrote;
+	}
+	const bool echoed = test_wait_until(
+		loop, multi_echoed_predicate, &ctx, TEST_WAIT_SEC,
+		multi_relay_step, &ctx);
+
+	bool paired = true;
+	for (size_t i = 0; i < MULTI_SESSIONS; i++) {
+		paired = paired && ctx.clients[i].got_echo &&
+			 ctx.clients[i].echo == (unsigned char)i;
+		close_if_open(&ctx.clients[i].fd);
+	}
+	for (size_t i = 0; i < ctx.nrelays; i++) {
+		close_if_open(&ctx.relays[i].fd);
+	}
+	const size_t nrelays = ctx.nrelays;
 	dialreq_free(req);
-	resolver_free(resolver);
+	ev_timer_stop(loop, &w_poll);
+	const bool drained = drain_sessions(loop, &proxy_s, NULL);
+	stop_proxy(&proxy_s);
 	ev_loop_destroy(loop);
-	T_CHECK(close(final_fd) == 0);
-	T_CALL_SUBCASE(assert_dial_success, &r);
+	T_CHECK(close(ctx.listener_fd) == 0);
+
+	T_EXPECT(dialed);
+	T_EXPECT_EQ(nrelays, (size_t)MULTI_SESSIONS);
+	T_EXPECT(wrote);
+	T_EXPECT(echoed);
+	T_EXPECT(paired);
+	T_EXPECT(drained);
 }
 
 T_DECLARE_CASE(socks5_connect_domain_target_via_real_proxy)
@@ -2068,8 +1376,8 @@ T_DECLARE_CASE(socks5_connect_domain_target_via_real_proxy)
 	server_conf.resolve_pf = PF_INET;
 	resolver = resolver_new(loop, &server_conf);
 	T_CHECK(resolver != NULL);
-	proxy_port =
-		start_proxy_ex(&proxy_s, loop, false, &server_conf, resolver);
+	proxy_port = start_proxy_ex(
+		&proxy_s, loop, false, &server_conf, resolver, 1);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "localhost:%u",
 			(unsigned)final_port) > 0);
@@ -2107,8 +1415,8 @@ T_DECLARE_CASE(socks4a_connect_ipv6_target_via_real_proxy)
 	server_conf.resolve_pf = PF_INET6;
 	resolver = resolver_new(loop, &server_conf);
 	T_CHECK(resolver != NULL);
-	proxy_port =
-		start_proxy_ex(&proxy_s, loop, false, &server_conf, resolver);
+	proxy_port = start_proxy_ex(
+		&proxy_s, loop, false, &server_conf, resolver, 1);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "[::1]:%u",
 			(unsigned)final_port) > 0);
@@ -2144,8 +1452,8 @@ T_DECLARE_CASE(socks4a_connect_domain_target_via_real_proxy)
 	server_conf.resolve_pf = PF_INET;
 	resolver = resolver_new(loop, &server_conf);
 	T_CHECK(resolver != NULL);
-	proxy_port =
-		start_proxy_ex(&proxy_s, loop, false, &server_conf, resolver);
+	proxy_port = start_proxy_ex(
+		&proxy_s, loop, false, &server_conf, resolver, 1);
 	T_CHECK(snprintf(
 			target_addr, sizeof(target_addr), "localhost:%u",
 			(unsigned)final_port) > 0);
@@ -2458,6 +1766,7 @@ static void fuzz_http_headers_once(struct prng *restrict p)
 		&conn, -1, STATE_PARSE_REQUEST, (struct http_parsehdr_cb){ 0 },
 		NULL, NULL);
 	conn.msg.req.method = "";
+	conn.msg.req.version = "HTTP/1.1";
 
 #define CALL_PARSEHDR(fn)                                                      \
 	do {                                                                   \
@@ -2547,19 +1856,6 @@ T_DECLARE_CASE(fuzz_parsehdr)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
-	T_CASE(dialaddr_parse_and_format_variants),
-	T_CASE(dialaddr_set_and_copy),
-	T_CASE(dialreq_parse_and_format_proxy_chain),
-	T_CASE(dialreq_parse_scheme_default_ports),
-	T_CASE(dialreq_parse_rejects_bad_proxy_uris),
-	T_CASE(dialreq_parse_rejects_overlong_proxy_uri),
-	T_CASE(dialreq_new_copies_base_request),
-	T_CASE(dialer_strerror_known_and_unknown),
-	T_CASE(direct_connect_reports_success),
-	T_CASE(direct_connect_ipv6_reports_success),
-	T_CASE(local_address_blocked_by_egress_policy),
-	T_CASE(http_connect_success_sends_expected_request),
-	T_CASE(http_connect_407_maps_to_proxy_auth),
 	T_CASE(socks5_connect_success_via_real_proxy),
 	T_CASE(socks5_connrefused_proxied_correctly),
 	T_CASE(socks5_noauth_rejected_when_auth_required),
@@ -2567,18 +1863,13 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks4a_connect_success_via_real_proxy),
 	T_CASE(http_proxy_connect_success_via_real_proxy),
 	T_CASE(http_proxy_connrefused_proxied_correctly),
-	T_CASE(http_connect_403_maps_to_proxy_reject),
-	T_CASE(http_connect_502_maps_to_proxy_refused),
-	T_CASE(http_connect_non_200_maps_to_proxy_proto),
-	T_CASE(socks4a_rejected_maps_to_proxy_refused),
-	T_CASE(socks5_noallowed_maps_to_proxy_reject),
 	T_CASE(socks5_connect_ipv6_target_via_real_proxy),
 	T_CASE(http_proxy_connect_ipv6_target_via_real_proxy),
 	T_CASE(http_proxy_connect_with_credentials_via_real_proxy),
 	T_CASE(chain_socks5_to_http_connect_success),
 	T_CASE(chain_http_to_socks5_connect_success),
 	T_CASE(chain_socks5_to_socks5_connect_success),
-	T_CASE(direct_connect_domain_resolves_and_succeeds),
+	T_CASE(multi_worker_relays_concurrent_sessions),
 	T_CASE(socks5_connect_domain_target_via_real_proxy),
 	T_CASE(socks4a_connect_ipv6_target_via_real_proxy),
 	T_CASE(socks4a_connect_domain_target_via_real_proxy),

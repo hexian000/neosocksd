@@ -164,6 +164,24 @@ static struct vbuffer *content_decode_vbuf(
 	return decoded;
 }
 
+/* Why a 2xx rpcall response cannot be delivered as the call's result, or NULL
+ * when it can. */
+static const char *rpcall_response_error(
+	const struct http_conn *restrict conn, const uint_fast16_t code)
+{
+	/* With neither Content-Length nor chunked, the body runs to the
+	 * connection close (RFC 9112 6.3). http_conn frames only Content-Length,
+	 * so that body was never read and cbuf would pass for an empty result.
+	 * A 204 carries no body by definition, so it is not one. */
+	if (!conn->hdr.content.has_length && code != 204) {
+		return "close-delimited response not supported";
+	}
+	if (!check_rpcall_mime(conn->hdr.content.type)) {
+		return "unsupported content-type";
+	}
+	return NULL;
+}
+
 static void on_http_client_done(
 	struct ev_loop *loop, void *data, const char *errmsg,
 	const size_t errlen, struct http_conn *conn)
@@ -202,10 +220,12 @@ static void on_http_client_done(
 			api_client_finish(loop, ctx, NULL, 0, NULL);
 			return;
 		}
-		/* rpcall: validate content type */
-		if (!check_rpcall_mime(conn->hdr.content.type)) {
+		/* rpcall: the body must be one this client read and can load */
+		const char *err = rpcall_response_error(conn, code);
+		if (err != NULL) {
 			VBUF_FREE(content);
-			API_RETURN_ERROR(loop, ctx, "unsupported content-type");
+			api_client_finish(loop, ctx, err, strlen(err), NULL);
+			return;
 		}
 	} else {
 		if (content != NULL && VBUF_LEN(content) > 0 &&
@@ -273,9 +293,19 @@ static void on_http_client_done(
 }
 
 static bool make_request(
-	struct http_conn *restrict p, const char *restrict uri,
-	const void *restrict content, const size_t len)
+	struct http_conn *restrict p, const struct dialaddr *restrict addr,
+	const char *restrict uri, const void *restrict content,
+	const size_t len)
 {
+	/* RFC 9112 3.2: every HTTP/1.1 request carries a Host field, and a
+	 * conforming server or reverse proxy answers a Host-less one with 400.
+	 * The request is sent to addr, so its authority names the server. */
+	char authority[DIALADDR_STRLEN + 1];
+	const int alen = dialaddr_format(authority, sizeof(authority), addr);
+	if (alen < 0 || (size_t)alen >= sizeof(authority)) {
+		LOGE("api request: cannot format the server address");
+		return false;
+	}
 	/* Compress large payloads to reduce traffic */
 	enum content_encodings encoding = CENCODING_NONE;
 	if (len >= RPCALL_COMPRESS_THRESHOLD) {
@@ -307,11 +337,12 @@ static bool make_request(
 	BUF_APPENDF(
 		p->wbuf,
 		"POST %s HTTP/1.1\r\n"
+		"Host: %s\r\n"
 		"Accept-Encoding: deflate\r\n"
 		"Connection: close\r\n"
 		"Content-Length: %zu\r\n"
 		"Content-Type: %s\r\n",
-		uri, VBUF_LEN(p->cbuf), MIME_RPCALL);
+		uri, authority, VBUF_LEN(p->cbuf), MIME_RPCALL);
 	const char *encoding_str = http_content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		BUF_APPENDF(p->wbuf, "Content-Encoding: %s\r\n", encoding_str);
@@ -414,7 +445,7 @@ static bool api_client_do(
 		hopts.dialer_byt_sent = &stats->byt_dial_send;
 	}
 	http_client_init(&ctx->hctx, loop, on_header, &hcb, &hopts);
-	if (!make_request(&ctx->hctx.conn, uri, payload, len)) {
+	if (!make_request(&ctx->hctx.conn, &req->addr, uri, payload, len)) {
 		/* make_request logs its own specific cause */
 		dialreq_free(req);
 		free(ctx);

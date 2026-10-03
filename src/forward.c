@@ -18,9 +18,12 @@
 #include <ev.h>
 
 #include <errno.h>
+#if WITH_TPROXY && WITH_RULESET
 #include <netinet/in.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -37,7 +40,7 @@ struct forward_ctx {
 	struct gcbase gcbase;
 	struct server *s;
 	enum forward_state state;
-	int accepted_fd, dialed_fd;
+	int accepted_fd;
 	union sockaddr_max accepted_sa;
 	ev_timer w_timeout;
 	/* state < STATE_BIDIRECTIONAL */
@@ -53,6 +56,25 @@ struct forward_ctx {
 };
 ASSERT_SUPER(struct gcbase, struct forward_ctx, gcbase);
 
+/* Upper bound (excluding NUL) on the prefix format_fd() builds. */
+#define FD_PREFIX_STRLEN                                                       \
+	(CONSTSTRLEN("[fd:] ") + CONSTSTRLEN("-2147483648") /* max int fd */)
+
+/* The fd-correlation prefix, empty when there is no descriptor left to name:
+ * the transfer hand-off moves the accepted fd out of the context, and the
+ * number it held may since have been reused by another connection. */
+static const char *
+format_fd(char *restrict buf, const size_t maxlen, const int fd)
+{
+	if (fd < 0) {
+		return "";
+	}
+	const int n = snprintf(buf, maxlen, "[fd:%d] ", fd);
+	ASSERT(n > 0 && (size_t)n < maxlen);
+	(void)n;
+	return buf;
+}
+
 /* Log with an explicit fd for the correlation prefix, for the hand-off path
  * that has already moved the accepted fd out of the context. */
 #define FW_FD_LOG_F(level, ctx, fd, format, ...)                               \
@@ -60,18 +82,41 @@ ASSERT_SUPER(struct gcbase, struct forward_ctx, gcbase);
 		if (!LOGLEVEL(level)) {                                        \
 			break;                                                 \
 		}                                                              \
+		char fdstr[FD_PREFIX_STRLEN + 1];                              \
 		char caddr[64];                                                \
 		sa_format(caddr, sizeof(caddr), &(ctx)->accepted_sa.sa);       \
-		LOG_F(level, "[fd:%d] %s: " format, (fd), caddr, __VA_ARGS__); \
+		LOG_F(level, "%s%s: " format,                                  \
+		      format_fd(fdstr, sizeof(fdstr), (fd)), caddr,            \
+		      __VA_ARGS__);                                            \
 	} while (0)
 #define FW_CTX_LOG_F(level, ctx, format, ...)                                  \
 	FW_FD_LOG_F(level, ctx, (ctx)->accepted_fd, format, __VA_ARGS__)
 #define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
 
+#if WITH_RULESET
+/* Release the ruleset work the context still owes. A start that failed may
+ * have published its state anyway, and a request that completed in this same
+ * loop sweep leaves w_finish pending with a delivered dialreq; neither is tied
+ * to a context state, so every path that stops expecting the callback releases
+ * both. */
+static void
+cancel_ruleset(struct ev_loop *loop, struct forward_ctx *restrict ctx)
+{
+	if (ctx->ruleset_state != NULL) {
+		ruleset_cancel(loop, ctx->ruleset_state);
+		ctx->ruleset_state = NULL;
+	}
+	ruleset_request_cancel(loop, &ctx->ruleset_callback);
+}
+#endif /* WITH_RULESET */
+
 static void
 forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
+#if WITH_RULESET
+	cancel_ruleset(loop, ctx);
+#endif
 
 	struct server_stats *restrict stats = &ctx->s->stats;
 	switch (ctx->state) {
@@ -80,14 +125,6 @@ forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 	case STATE_PROCESS:
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_process);
-		if (ctx->ruleset_state != NULL) {
-			ruleset_cancel(loop, ctx->ruleset_state);
-			ctx->ruleset_state = NULL;
-		}
-		/* a request that completed in this same loop sweep left w_finish
-		 * pending with a delivered dialreq; drop it so it cannot fire into
-		 * this freed ctx and the dialreq is not leaked */
-		ruleset_request_cancel(loop, &ctx->ruleset_callback);
 #endif /* WITH_RULESET */
 		stats->num_halfopen--;
 		return;
@@ -113,10 +150,6 @@ static void forward_ctx_finalize(struct gcbase *restrict obj)
 	if (ctx->accepted_fd != -1) {
 		socket_close(ctx->accepted_fd);
 		ctx->accepted_fd = -1;
-	}
-	if (ctx->dialed_fd != -1) {
-		socket_close(ctx->dialed_fd);
-		ctx->dialed_fd = -1;
 	}
 
 	if (ctx->state < STATE_BIDIRECTIONAL) {
@@ -150,25 +183,24 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 static void forward_commit(
 	struct ev_loop *loop, struct forward_ctx *restrict ctx, const int fd)
 {
-	ctx->dialed_fd = fd;
-
 	FW_CTX_LOG_F(VERBOSE, ctx, "connected, [fd:%d]", fd);
 	/* cleanup before state change */
 	dialreq_free(ctx->dialreq);
 	ctx->dialreq = NULL;
 
-	const int acc_fd = ctx->accepted_fd, dial_fd = ctx->dialed_fd;
-	ctx->accepted_fd = ctx->dialed_fd = -1;
-	/* Set state before transfer_start — ctx_stop is a no-op if gc_unref fires below. */
+	const int acc_fd = ctx->accepted_fd;
+	ctx->accepted_fd = -1;
+	/* Enter STATE_BIDIRECTIONAL before server_commit_session(): on failure
+	 * it gc_unref()s the context, and the finalizer must then treat it as
+	 * handed off rather than decrement num_halfopen a second time. */
 	ctx->state = STATE_BIDIRECTIONAL;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	ctx->s->stats.num_halfopen--;
 
 	FW_FD_LOG_F(
-		DEBUG, ctx, acc_fd, "transfer start: [%d<->%d]", acc_fd,
-		dial_fd);
+		DEBUG, ctx, acc_fd, "transfer start: [%d<->%d]", acc_fd, fd);
 	const size_t cur =
-		server_commit_session(ctx->s, &ctx->gcbase, acc_fd, dial_fd);
+		server_commit_session(ctx->s, &ctx->gcbase, acc_fd, fd);
 	if (cur == 0) {
 		return;
 	}
@@ -215,7 +247,6 @@ forward_ctx_new(struct server *restrict s, const int accepted_fd)
 	ctx->s = s;
 	ctx->state = STATE_INIT;
 	ctx->accepted_fd = accepted_fd;
-	ctx->dialed_fd = -1;
 
 	ev_timer_init(&ctx->w_timeout, timeout_cb, s->conf->timeout, 0.0);
 	ctx->w_timeout.data = ctx;
@@ -333,7 +364,7 @@ forward_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	const int len = dialaddr_format(request, sizeof(request), addr);
 	CHECK(len >= 0 && (size_t)len < sizeof(request));
 	const bool ok = ruleset_dispatch(
-		ruleset, &ctx->ruleset_state, request, addr->type, NULL, NULL,
+		ruleset, &ctx->ruleset_state, request, addr->type, NULL,
 		&ctx->ruleset_callback);
 	if (!ok) {
 		ctx->s->stats.num_reject_ruleset++;
@@ -373,6 +404,8 @@ static bool tproxy_getdest(
 	const struct forward_ctx *restrict ctx,
 	union sockaddr_max *restrict dest, socklen_t *restrict len)
 {
+	/* only called before the hand-off moves the accepted fd out */
+	ASSERT(ctx->accepted_fd >= 0);
 	*dest = (union sockaddr_max){ 0 };
 	*len = sizeof(*dest);
 	if (getsockname(ctx->accepted_fd, &dest->sa, len) != 0) {
@@ -382,6 +415,42 @@ static bool tproxy_getdest(
 		return false;
 	}
 	return true;
+}
+
+static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
+{
+	union sockaddr_max dest;
+	socklen_t len;
+	if (!tproxy_getdest(ctx, &dest, &len)) {
+		return NULL;
+	}
+	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
+	if (req == NULL) {
+		LOGOOM();
+		return NULL;
+	}
+	if (!dialaddr_set(&req->addr, &dest.sa, len)) {
+		FW_CTX_LOG_F(
+			ERROR, ctx, "tproxy: unsupported af:%u",
+			(unsigned int)dest.sa.sa_family);
+		dialreq_free(req);
+		return NULL;
+	}
+	return req;
+}
+
+/* Dial the intercepted connection's original destination directly, as the
+ * no-ruleset configuration serves it. */
+static void
+tproxy_start_direct(struct ev_loop *loop, struct forward_ctx *restrict ctx)
+{
+	struct dialreq *req = tproxy_makereq(ctx);
+	if (req == NULL) {
+		gc_unref(&ctx->gcbase);
+		return;
+	}
+	ctx->dialreq = req;
+	forward_ctx_start(loop, ctx, req);
 }
 
 #if WITH_RULESET
@@ -394,11 +463,10 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	struct ruleset *restrict ruleset = ctx->s->ruleset;
 	if (ruleset == NULL) {
 		/* SIGHUP may have cleared s->ruleset between the
-		 * forward_serve check and this callback. TPROXY mode
-		 * cannot proceed without a ruleset. */
-		FW_CTX_LOG(ERROR, ctx, "ruleset gone, cannot route tproxy");
-		ctx->s->stats.num_reject_ruleset++;
-		gc_unref(&ctx->gcbase);
+		 * tproxy_serve check and this callback. Fall back
+		 * to the no-ruleset direct-dial path. */
+		FW_CTX_LOG(VERBOSE, ctx, "ruleset gone, fallback to direct");
+		tproxy_start_direct(loop, ctx);
 		return;
 	}
 
@@ -429,7 +497,7 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 		return;
 	}
 	const bool ok = ruleset_dispatch(
-		ruleset, &ctx->ruleset_state, addr_str, atype, NULL, NULL,
+		ruleset, &ctx->ruleset_state, addr_str, atype, NULL,
 		&ctx->ruleset_callback);
 	if (!ok) {
 		ctx->s->stats.num_reject_ruleset++;
@@ -438,28 +506,6 @@ tproxy_process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	}
 }
 #endif /* WITH_RULESET */
-
-static struct dialreq *tproxy_makereq(const struct forward_ctx *restrict ctx)
-{
-	union sockaddr_max dest;
-	socklen_t len;
-	if (!tproxy_getdest(ctx, &dest, &len)) {
-		return NULL;
-	}
-	struct dialreq *req = dialreq_new(ctx->s->basereq, 0);
-	if (req == NULL) {
-		LOGOOM();
-		return NULL;
-	}
-	if (!dialaddr_set(&req->addr, &dest.sa, len)) {
-		FW_CTX_LOG_F(
-			ERROR, ctx, "tproxy: unsupported af:%u",
-			(unsigned int)dest.sa.sa_family);
-		dialreq_free(req);
-		return NULL;
-	}
-	return req;
-}
 
 void tproxy_serve(
 	struct server *restrict s, struct ev_loop *loop, const int accepted_fd,
@@ -480,13 +526,6 @@ void tproxy_serve(
 		return;
 	}
 #endif
-
-	struct dialreq *req = tproxy_makereq(ctx);
-	if (req == NULL) {
-		gc_unref(&ctx->gcbase);
-		return;
-	}
-	ctx->dialreq = req;
-	forward_ctx_start(loop, ctx, req);
+	tproxy_start_direct(loop, ctx);
 }
 #endif /* WITH_TPROXY */

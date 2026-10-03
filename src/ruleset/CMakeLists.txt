@@ -33,9 +33,17 @@ add_unit_test(await_test
     MOCK_DEFINITIONS fork=test_await_fork
     CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
     WITH_LUA)
-    add_unit_test(ruleset_test
-        SRCS ruleset_test.c ruleset.c base.c cfunc.c ../conf.c ../proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/../version.c"
-        CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
-        EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
-        WITH_LUA)
+add_unit_test(ruleset_test
+    SRCS ruleset_test.c base.c cfunc.c ../conf.c ../proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/../version.c"
+    MOCK_SRCS ruleset.c
+    MOCK_DEFINITIONS
+        malloc=test_ruleset_malloc
+        realloc=test_ruleset_realloc
+        free=test_ruleset_free
+        lua_newstate=test_ruleset_newstate
+    CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
+    WITH_LUA)
 endif()
+file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/tmp")
+target_compile_definitions(ruleset_test PRIVATE
+    TEST_TMPDIR="${PROJECT_BINARY_DIR}/tmp")

@@ -5,7 +5,6 @@
 
 #include "codec.h"
 
-#include "io/io.h"
 #include "io/memory.h"
 #include "io/stream.h"
 #include "net/http.h"
@@ -16,20 +15,46 @@
 #include "utils/debug.h"
 #include "utils/slog.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
+#include <sys/socket.h>
 
 const char *const http_content_encoding_str[] = {
 	[CENCODING_NONE] = NULL,
 	[CENCODING_DEFLATE] = "deflate",
 	[CENCODING_GZIP] = "gzip",
 };
+
+/* Compares at most n bytes, folding only A-Z: libc strncasecmp() folds
+ * through the LC_CTYPE locale, which a Turkish one makes map 'I' away from
+ * 'i', while HTTP tokens are case-insensitive in ASCII alone. */
+static bool
+token_equal_n(const char *restrict a, const char *restrict b, const size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		const unsigned char ca = (unsigned char)a[i];
+		const unsigned char cb = (unsigned char)b[i];
+		if (tolower(ca) != tolower(cb)) {
+			return false;
+		}
+		if (ca == '\0') {
+			break;
+		}
+	}
+	return true;
+}
+
+bool http_token_equal(const char *restrict a, const char *restrict b)
+{
+	return token_equal_n(a, b, SIZE_MAX);
+}
 
 void http_conn_init(
 	struct http_conn *restrict p, const int fd,
@@ -80,7 +105,9 @@ static int parse_message(struct http_conn *restrict p)
 
 	if (next == p->next) {
 		if (p->rbuf.len + 1 >= p->rbuf.cap) {
-			p->http_status = HTTP_ENTITY_TOO_LARGE;
+			/* RFC 9112 §3: a request-line that does not fit is an
+			 * over-long request-target, answered 414 */
+			p->http_status = HTTP_URI_TOO_LONG;
 			p->state = STATE_PARSE_ERROR;
 			return 0;
 		}
@@ -101,7 +128,7 @@ static int parse_message(struct http_conn *restrict p)
 	default:
 		FAILMSGF("unexpected http parser state: %d", p->state);
 	}
-	if (strncmp(version, "HTTP/1.", 7) != 0) {
+	if (!http_version_is_1x(version)) {
 		LOGD_F("http: unsupported protocol `%s'", version);
 		if (p->state == STATE_PARSE_REQUEST) {
 			p->state = STATE_PARSE_ERROR;
@@ -115,11 +142,83 @@ static int parse_message(struct http_conn *restrict p)
 	return 0;
 }
 
+/* RFC 9110 §7.2 / RFC 3986 §3.2: Host is uri-host [ ":" port ],
+ * with no userinfo. Validate syntax only; it need not name a dialable peer. */
+static bool host_valid(const char *value)
+{
+	if (*value == '[') {
+		const char *end = strchr(++value, ']');
+		if (end == NULL) {
+			return false;
+		}
+		if (*value == 'v' || *value == 'V') {
+			value++;
+			const char *version = value;
+			while (value < end && isxdigit((unsigned char)*value)) {
+				value++;
+			}
+			if (value == version || value == end || *value != '.') {
+				return false;
+			}
+			value++;
+			if (value == end) {
+				return false;
+			}
+			for (; value < end; value++) {
+				if (!isalnum((unsigned char)*value) &&
+				    strchr("-._~!$&'()*+,;=:", *value) ==
+					    NULL) {
+					return false;
+				}
+			}
+		} else {
+			char literal[INET6_ADDRSTRLEN];
+			const size_t len = (size_t)(end - value);
+			if (len >= sizeof(literal)) {
+				return false;
+			}
+			memcpy(literal, value, len);
+			literal[len] = '\0';
+			struct in6_addr addr;
+			if (inet_pton(AF_INET6, literal, &addr) != 1) {
+				return false;
+			}
+		}
+		value = end + 1;
+	} else {
+		for (; *value != '\0' && *value != ':'; value++) {
+			if (*value == '%') {
+				if (!isxdigit((unsigned char)value[1]) ||
+				    !isxdigit((unsigned char)value[2])) {
+					return false;
+				}
+				value += 2;
+			} else if (
+				!isalnum((unsigned char)*value) &&
+				strchr("-._~!$&'()*+,;=", *value) == NULL) {
+				return false;
+			}
+		}
+	}
+	if (*value == ':') {
+		value++;
+		for (; isdigit((unsigned char)*value); value++) {
+		}
+	}
+	return *value == '\0';
+}
+
 static bool parse_header_kv(
-	const struct http_conn *restrict p, const char *restrict key,
+	struct http_conn *restrict p, const char *restrict key,
 	char *restrict value)
 {
 	LOGVV_F("http_header: \"%s: %s\"", key, value);
+	if (p->mode == STATE_PARSE_REQUEST && http_token_equal(key, "Host")) {
+		if (p->hdr.has_host || !host_valid(value)) {
+			return false;
+		}
+		p->hdr.has_host = true;
+	}
 	return p->on_header.func(p->on_header.ctx, key, value);
 }
 
@@ -140,7 +239,8 @@ static int parse_header(struct http_conn *restrict p)
 
 	if (next == p->next) {
 		if (p->rbuf.len + 1 >= p->rbuf.cap) {
-			p->http_status = HTTP_ENTITY_TOO_LARGE;
+			/* RFC 6585 §5: the header section does not fit */
+			p->http_status = HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE;
 			p->state = STATE_PARSE_ERROR;
 			return 0;
 		}
@@ -151,6 +251,12 @@ static int parse_header(struct http_conn *restrict p)
 
 	/* NULL key indicates end of headers */
 	if (key == NULL) {
+		/* HTTP/1.0 can omit Host; later HTTP/1.x versions must send it. */
+		if (p->mode == STATE_PARSE_REQUEST &&
+		    p->msg.req.version[7] != '0' && !p->hdr.has_host) {
+			p->state = STATE_PARSE_ERROR;
+			return 0;
+		}
 		p->cbuf = NULL;
 		p->state = STATE_PARSE_CONTENT;
 		return 0;
@@ -189,15 +295,19 @@ static bool reply_short(struct http_conn *restrict p, const char *s)
 			return false;
 		}
 		pos += len;
+		if (p->byt_sent != NULL) {
+			*p->byt_sent += (uint_least64_t)len;
+		}
 	}
 	return true;
 }
 
 static int parse_content(struct http_conn *restrict p)
 {
-	/* Only Content-Length based content is handled here. A chunked body is
-	 * deliberately left unframed in rbuf; callers that read cbuf must reject
-	 * chunked themselves -- see the http_conn_recv() contract. */
+	/* Only Content-Length based content is handled here. A chunked or a
+	 * close-delimited response body is deliberately left unframed in rbuf;
+	 * callers that read cbuf must reject those themselves -- see the
+	 * http_conn_recv() contract. */
 	if (!p->hdr.content.has_length) {
 		return 0;
 	}
@@ -295,6 +405,7 @@ static int recv_content(const struct http_conn *restrict p)
 	}
 
 	p->cbuf->len += n;
+	p->cbuf->data[p->cbuf->len] = '\0';
 	if (p->byt_recv != NULL) {
 		*p->byt_recv += (uint_least64_t)n;
 	}
@@ -430,9 +541,32 @@ int http_conn_send(struct http_conn *restrict p, const int fd, int *restrict err
 bool parsehdr_transfer_encoding(
 	struct http_conn *restrict p, char *restrict value)
 {
-	value = strtrimspace(value);
+	/* RFC 9112 §6.1: the value lists the transfer-codings in the order they
+	 * were applied; RFC 9110 §5.6.1: empty list elements are ignored.
+	 * comma-split by hand rather than with the non-reentrant strtok() */
+	size_t num_chunked = 0;
+	bool has_unknown = false;
+	bool final_chunked = false;
+	for (char *token = value; token != NULL;) {
+		char *const comma = strchr(token, ',');
+		if (comma != NULL) {
+			*comma = '\0';
+		}
+		const char *const coding = strtrimspace(token);
+		if (coding[0] != '\0') {
+			/* RFC 9112 §7: transfer-coding names are
+			 * case-insensitive tokens */
+			final_chunked = http_token_equal(coding, "chunked");
+			if (final_chunked) {
+				num_chunked++;
+			} else {
+				has_unknown = true;
+			}
+		}
+		token = (comma != NULL) ? comma + 1 : NULL;
+	}
 
-	if (value[0] == '\0') {
+	if (num_chunked == 0 && !has_unknown) {
 		/* An empty Transfer-Encoding value carries no transfer-coding, so
 		 * it must not clobber one already recorded from a prior TE line:
 		 * downgrading an established `chunked` framing to NONE here would
@@ -442,25 +576,31 @@ bool parsehdr_transfer_encoding(
 		return true;
 	}
 
-	/* RFC 9112 §7: transfer-coding names are case-insensitive tokens */
-	if (strcasecmp(value, "chunked") == 0) {
-		/* RFC 9112 §6.3: Content-Length + Transfer-Encoding: chunked
-		 * is an ambiguous framing and must be rejected */
-		if (p->hdr.content.has_length) {
-			return false;
-		}
-		/* RFC 9112 §6.1: chunked applies at most once, so a repeated
-		 * Transfer-Encoding: chunked line -- the split-line form of the
-		 * rejected "chunked, chunked" -- must be rejected too, matching
-		 * the response parser (rsp_record_header). */
-		if (p->hdr.transfer.encoding == TENCODING_CHUNKED) {
-			return false;
-		}
-		p->hdr.transfer.encoding = TENCODING_CHUNKED;
-		return true;
+	/* RFC 9112 §6.3: a request whose final transfer-coding is not chunked
+	 * cannot be framed, which is a 400 whatever the codings are. Only the
+	 * field lines seen so far are judged, so a split "gzip" then "chunked"
+	 * is rejected at its first line. */
+	if (!final_chunked) {
+		return false;
 	}
-
-	return false;
+	/* RFC 9112 §6.1: chunked applies at most once, whether it is repeated
+	 * within this list or already recorded from a prior field line */
+	if (num_chunked > 1 || p->hdr.transfer.encoding == TENCODING_CHUNKED) {
+		return false;
+	}
+	/* RFC 9112 §6.3: Content-Length + Transfer-Encoding: chunked
+	 * is an ambiguous framing and must be rejected */
+	if (p->hdr.content.has_length) {
+		return false;
+	}
+	/* RFC 9112 §6.1: the framing is sound but a coding applied before
+	 * chunked is one this parser cannot decode */
+	if (has_unknown) {
+		p->http_status = HTTP_NOT_IMPLEMENTED;
+		return false;
+	}
+	p->hdr.transfer.encoding = TENCODING_CHUNKED;
+	return true;
 }
 
 bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value)
@@ -510,7 +650,7 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 			}
 		}
 		const char *const coding = strtrimspace(token);
-		if (strcasecmp(coding, deflate) == 0) {
+		if (http_token_equal(coding, deflate)) {
 			/* an explicit deflate token governs deflate directly: a
 			 * q=0 here refuses it outright and no later `*` can undo
 			 * that */
@@ -613,7 +753,7 @@ bool parsehdr_content_encoding(
 		if (http_content_encoding_str[i] == NULL) {
 			continue;
 		}
-		if (strcasecmp(value, http_content_encoding_str[i]) == 0) {
+		if (http_token_equal(value, http_content_encoding_str[i])) {
 			p->hdr.content.encoding = (enum content_encodings)i;
 			return true;
 		}
@@ -627,19 +767,19 @@ enum parsehdr_result parsehdr_representation(
 	struct http_conn *restrict p, const char *restrict key,
 	char *restrict value)
 {
-	if (strcasecmp(key, "Transfer-Encoding") == 0) {
+	if (http_token_equal(key, "Transfer-Encoding")) {
 		return parsehdr_transfer_encoding(p, value) ? PARSEHDR_OK :
 							      PARSEHDR_ERROR;
 	}
-	if (strcasecmp(key, "Content-Length") == 0) {
+	if (http_token_equal(key, "Content-Length")) {
 		return parsehdr_content_length(p, value) ? PARSEHDR_OK :
 							   PARSEHDR_ERROR;
 	}
-	if (strcasecmp(key, "Content-Type") == 0) {
+	if (http_token_equal(key, "Content-Type")) {
 		p->hdr.content.type = value;
 		return PARSEHDR_OK;
 	}
-	if (strcasecmp(key, "Content-Encoding") == 0) {
+	if (http_token_equal(key, "Content-Encoding")) {
 		return parsehdr_content_encoding(p, value) ? PARSEHDR_OK :
 							     PARSEHDR_ERROR;
 	}
@@ -650,11 +790,16 @@ bool parsehdr_expect(struct http_conn *restrict p, char *restrict value)
 {
 	value = strtrimspace(value);
 
-	if (strcasecmp(value, "100-continue") != 0) {
+	if (!http_token_equal(value, "100-continue")) {
 		p->http_status = HTTP_EXPECTATION_FAILED;
 		return false;
 	}
 
+	/* RFC 9110 §10.1.1 and §15.2: an HTTP/1.0 request's 100-continue is
+	 * ignored, since an HTTP/1.0 client cannot take a 1xx response */
+	if (strcmp(p->msg.req.version, "HTTP/1.0") == 0) {
+		return true;
+	}
 	p->expect_continue = true;
 	return true;
 }
@@ -735,34 +880,11 @@ bool http_connection_lists(
 		     parsehdr_connection_token(connection, &tok, &toklen);
 	     tok != NULL;
 	     next = parsehdr_connection_token(next, &tok, &toklen)) {
-		if (toklen == keylen && strncasecmp(tok, key, keylen) == 0) {
+		if (toklen == keylen && token_equal_n(tok, key, keylen)) {
 			return true;
 		}
 	}
 	return false;
-}
-
-bool http_header_field_valid(
-	const char *restrict key, const char *restrict value)
-{
-	/* RFC 9110 §5.5: field-name = token = 1*tchar, so an empty name is
-	 * invalid; the loop below would otherwise accept it vacuously. */
-	if (key[0] == '\0') {
-		return false;
-	}
-	for (const unsigned char *c = (const unsigned char *)key; *c != '\0';
-	     c++) {
-		if (!isalnum(*c) && strchr("!#$%&'*+-.^_`|~", *c) == NULL) {
-			return false;
-		}
-	}
-	for (const unsigned char *c = (const unsigned char *)value; *c != '\0';
-	     c++) {
-		if (iscntrl(*c) && *c != '\t') {
-			return false;
-		}
-	}
-	return true;
 }
 
 void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
@@ -811,10 +933,10 @@ struct io_stream *content_reader(
 		return NULL;
 	}
 
-	/* Ensure direct_read capability for Lua compatibility */
-	if (r->vftable->direct_read == NULL) {
-		r = io_bufreader(r, IO_BUFSIZE);
-	}
+	/* the ruleset Lua loader pulls the body through io_stream_direct_read,
+	 * which has no fallback for a stream lacking the slot; every reader
+	 * constructed above provides one */
+	ASSERT(r->vftable->direct_read != NULL);
 	return r;
 }
 

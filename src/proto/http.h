@@ -18,18 +18,25 @@
 #include <stdint.h>
 #include <string.h>
 
-static inline bool http_version_is_1x(const char *restrict version)
-{
-	return strncmp(version, "HTTP/1.", 7) == 0 && '0' <= version[7] &&
-	       version[7] <= '9' && version[8] == '\0';
-}
-
 /** Maximum size for HTTP entity headers */
 #define HTTP_MAX_ENTITY 8192
 /** Maximum combined length of repeated Connection field lines */
 #define HTTP_MAX_CONNECTION 512
 /** Maximum size for HTTP content body */
 #define HTTP_MAX_CONTENT 4194304
+
+/**
+ * @brief Check that a start-line's HTTP-version names HTTP/1.x.
+ * @details RFC 9112 §2.3: HTTP-version = HTTP-name "/" DIGIT "." DIGIT, so the
+ *     field is exactly "HTTP/1." and one minor-version digit, nothing more.
+ * @param version The HTTP-version field of a request-line or status-line
+ * @return true if @p version is "HTTP/1." followed by a single DIGIT
+ */
+static inline bool http_version_is_1x(const char *restrict version)
+{
+	return strncmp(version, "HTTP/1.", 7) == 0 && '0' <= version[7] &&
+	       version[7] <= '9' && version[8] == '\0';
+}
 
 /** Transfer encoding types supported by the HTTP parser */
 enum transfer_encodings {
@@ -69,11 +76,11 @@ struct http_headers {
 	} content;
 	/* request headers */
 	struct {
+		bool has_host : 1;
 		enum content_encodings accept_encoding;
 		/* sticky `deflate;q=0` refusal, so a later Accept-Encoding line's
 		 * `*` cannot re-select deflate across combined field lines */
 		bool accept_deflate_refused : 1;
-		char *host;
 		struct {
 			char *type;
 			char *credentials;
@@ -152,13 +159,18 @@ int http_conn_parse(struct http_conn *restrict p);
  * Only a Content-Length delimited body is framed, into `cbuf`. A
  * `Transfer-Encoding: chunked` message parses to STATE_PARSE_OK with
  * `cbuf == NULL` and its body left unconsumed in `rbuf`; no caller accepts a
- * chunked body, so framing it here would be wasted work.
+ * chunked body, so framing it here would be wasted work. Likewise a response
+ * with neither Content-Length nor chunked, whose body runs to the connection
+ * close (RFC 9112 6.3), parses to STATE_PARSE_OK as soon as its header block
+ * ends, with `cbuf == NULL` and the body unread. (A request with neither has
+ * no body, RFC 9112 6.3, so `cbuf == NULL` is its true, empty body.)
  *
- * A caller that consumes `cbuf` must therefore reject chunked itself, or it
- * will silently see an empty body. Both do: api_server's `restapi_check`
- * answers 501 for every REST endpoint, and api_client's `on_http_client_done`
- * reports an error for a chunked rpcall/invoke response. Check
- * `hdr.transfer.encoding` before relying on `cbuf`.
+ * A caller that consumes `cbuf` must therefore reject both itself, or it will
+ * silently see an empty body. Both do: api_server's `restapi_check` answers
+ * 501 for every chunked REST request, and api_client's `on_http_client_done`
+ * reports an error for a chunked rpcall/invoke response and for a
+ * close-delimited 2xx rpcall response. Check `hdr.transfer.encoding` and
+ * `hdr.content.has_length` before relying on `cbuf`.
  *
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
@@ -177,22 +189,33 @@ int http_conn_send(
 
 /**
  * @brief Parse Transfer-Encoding header. Currently detects chunked.
+ *
+ * The value is a comma-separated transfer-coding list; empty list elements are
+ * ignored. A list ending in chunked that also names a coding this parser does
+ * not implement sets @c http_status to 501 Not Implemented (RFC 9112 §6.1);
+ * every other rejection is a framing error and keeps the default 400.
+ *
  * @param p Parser instance
- * @param value Header value
- * @return true on success; false for a coding that cannot be framed, or for
- *     an ambiguous Content-Length + chunked framing
+ * @param value Header value, split in place
+ * @return true on success; false for a list whose final coding is not chunked,
+ *     for chunked applied more than once (within the list or across field
+ *     lines), for an ambiguous Content-Length + chunked framing, or for an
+ *     unimplemented coding before chunked
  */
 bool parsehdr_transfer_encoding(
 	struct http_conn *restrict p, char *restrict value);
 
 /**
- * @brief Parse Accept-Encoding header; ignores quality values.
+ * @brief Parse Accept-Encoding header; honors quality values.
  *
- * Currently supports deflate.
+ * Currently supports deflate. RFC 9110 §12.5.3: a weight of q=0 refuses the
+ * coding, and a refused deflate stays refused across the combined field value.
  *
  * @param p Parser instance
  * @param value Header value
- * @return true if at least one supported encoding found
+ * @return always true; a value with no acceptable supported coding leaves
+ *     @c accept_encoding at @c CENCODING_NONE, which the RFC's identity
+ *     fallback makes a valid outcome rather than a rejected header
  */
 bool parsehdr_accept_encoding(
 	struct http_conn *restrict p, char *restrict value);
@@ -253,7 +276,11 @@ enum parsehdr_result parsehdr_representation(
 /**
  * @brief Parse Expect header. Only "100-continue" is supported;
  *        sets error status for any other expectation.
- * @param p Parser instance
+ *
+ * RFC 9110 §10.1.1: a 100-continue expectation in an HTTP/1.0 request is
+ * ignored, so no interim response is ever sent to an HTTP/1.0 client.
+ *
+ * @param p Parser instance, in request mode
  * @param value Header value
  * @return true if expectation is supported
  */
@@ -287,6 +314,17 @@ bool http_connection_join(
 bool parsehdr_connection(struct http_conn *restrict p, char *restrict value);
 
 /**
+ * @brief Compare two HTTP tokens case-insensitively.
+ *
+ * Field names, coding names, auth-schemes and the other tokens RFC 9110 §5.1
+ * makes case-insensitive fold in ASCII only, whatever LC_CTYPE says; use this
+ * rather than the locale-dependent strcasecmp().
+ *
+ * @return true if @p a and @p b are equal ignoring ASCII case.
+ */
+bool http_token_equal(const char *restrict a, const char *restrict b);
+
+/**
  * @brief Iterate over comma-separated tokens in a Connection header value.
  *
  * Models the same iterator pattern as http_parsehdr(): the caller passes
@@ -313,17 +351,6 @@ const char *parsehdr_connection_token(
  */
 bool http_connection_lists(
 	const char *restrict connection, const char *restrict key);
-
-/**
- * @brief Validate an HTTP header field for forwarding.
- *
- * RFC 7230 §3.2.6 / RFC 9110 §5.5: a field name must be tchar-only and a field
- * value must contain no CTL other than HTAB.
- *
- * @return true if both @p key and @p value are well-formed.
- */
-bool http_header_field_valid(
-	const char *restrict key, const char *restrict value);
 
 /** @brief Write an HTTP error response page into @p p's write buffer. */
 void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code);
@@ -367,6 +394,11 @@ struct io_stream *content_writer(
 
 /**
  * @brief Begin HTTP response header (status line + Date header).
+ *
+ * RFC 9110 §6.6.1: Date is omitted when http_date() finds no IMF-fixdate
+ * rendering of the current time, as http_error() does, since an empty
+ * field value is not a valid HTTP-date.
+ *
  * @param buf Buffer to write response headers
  * @param code HTTP status code
  */
@@ -377,11 +409,13 @@ struct io_stream *content_writer(
 		const char *status = http_status((code));                      \
 		(buf).len = 0;                                                 \
 		BUF_APPENDF(                                                   \
-			(buf),                                                 \
-			"HTTP/1.1 %" PRIuFAST16 " %s\r\n"                      \
-			"Date: %.*s\r\n",                                      \
-			(uint_fast16_t)(code), status ? status : "",           \
-			(int)date_len, date_str);                              \
+			(buf), "HTTP/1.1 %" PRIuFAST16 " %s\r\n",              \
+			(uint_fast16_t)(code), status ? status : "");          \
+		if (date_len > 0) {                                            \
+			BUF_APPENDF(                                           \
+				(buf), "Date: %.*s\r\n", (int)date_len,        \
+				date_str);                                     \
+		}                                                              \
 	} while (0)
 
 /** @brief Add plain text content type headers */

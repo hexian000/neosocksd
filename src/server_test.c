@@ -211,7 +211,7 @@ bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
 	return CONTROL.ruleset_load_ok;
 }
 
-bool ruleset_loadconfig(
+bool ruleset_reloadconfig(
 	struct ruleset *restrict r, const char *restrict filename)
 {
 	(void)r;

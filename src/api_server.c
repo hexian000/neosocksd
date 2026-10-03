@@ -29,7 +29,9 @@
 
 #include <ev.h>
 
+#include <float.h>
 #include <inttypes.h>
+#include <locale.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -37,7 +39,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <time.h>
 
 enum api_state {
@@ -169,6 +170,9 @@ static double process_load(void)
 	return load;
 }
 
+/* Report the rates over the window that just ended, then re-sample it. A NULL w
+ * re-samples without reporting: every stateful request consumes the window, so
+ * one that skips the report must still advance the baselines with it. */
 static void server_stats_stateful(
 	struct io_stream *restrict w, const struct server *restrict api,
 	const double dt)
@@ -218,16 +222,19 @@ static void server_stats_stateful(
 	}
 	FORMAT_DURATION(dt_str, make_duration(dt));
 
-	(void)io_bufprintf(
-		w,
-		"Accept Rate         : %.1f/s (%+.1f/s)\n"
-		"Request Rate        : %.1f/s (API%+.1f/s)\n"
-		"Reject Rate         : ruleset=%.1f/s, timeout=%.1f/s, upstream=%.1f/s\n"
-		"Throughput          : Up %s/s, Down %s/s\n"
-		"Server Load         : %s (last %s)\n",
-		accept_rate, reject_rate, request_rate, api_request_rate,
-		reject_ruleset_rate, reject_timeout_rate, reject_upstream_rate,
-		xfer_rate_up, xfer_rate_down, load_str, dt_str);
+	if (w != NULL) {
+		(void)io_bufprintf(
+			w,
+			"Accept Rate         : %.1f/s (%+.1f/s)\n"
+			"Request Rate        : %.1f/s (API%+.1f/s)\n"
+			"Reject Rate         : ruleset=%.1f/s, timeout=%.1f/s, upstream=%.1f/s\n"
+			"Throughput          : Up %s/s, Down %s/s\n"
+			"Server Load         : %s (last %s)\n",
+			accept_rate, reject_rate, request_rate,
+			api_request_rate, reject_ruleset_rate,
+			reject_timeout_rate, reject_upstream_rate, xfer_rate_up,
+			xfer_rate_down, load_str, dt_str);
+	}
 
 	last.xfer_up = agg.byt_up;
 	last.xfer_down = agg.byt_down;
@@ -283,7 +290,7 @@ static void append_vmstats(
 
 static void append_server_stats(
 	struct io_stream *restrict w, const struct server *restrict api,
-	const int_fast64_t uptime, const double dt, const bool runtime)
+	const int_fast64_t uptime, const bool runtime)
 {
 	const struct server_stats *restrict apistats = &api->stats;
 	const struct server *restrict s = api->data;
@@ -387,10 +394,6 @@ static void append_server_stats(
 	} else {
 		(void)io_bufprintf(
 			w, "%-20s: %s\n", "Connect Latency", "(never)");
-	}
-
-	if (dt > 0) {
-		server_stats_stateful(w, api, dt);
 	}
 }
 
@@ -547,7 +550,13 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		last.tstamp = now;
 	}
 	if (opt.server) {
-		append_server_stats(w, ctx->s, uptime, dt, opt.runtime);
+		append_server_stats(w, ctx->s, uptime, opt.runtime);
+	}
+	/* the window is shared with ruleset.stats' dt below and every stateful
+	 * request consumes it, so re-sample the baselines even for a request
+	 * that reports no rates */
+	if (dt > 0) {
+		server_stats_stateful(opt.server ? w : NULL, ctx->s, dt);
 	}
 
 #if WITH_RULESET
@@ -618,6 +627,12 @@ static bool restapi_check(
 		send_errpage(loop, ctx, HTTP_LENGTH_REQUIRED);
 		return false;
 	}
+	/* cbuf carries the parsed request body in and the response body out, and
+	 * http_conn_send writes it after the response header: an endpoint that
+	 * reads no body must drop it, or those bytes leak onto the wire. */
+	if (!require_content) {
+		VBUF_FREE(ctx->conn.cbuf);
+	}
 	return true;
 }
 
@@ -677,6 +692,24 @@ static struct io_stream *ctx_content_reader(struct api_ctx *restrict ctx)
 		ctx->conn.cbuf, ctx->conn.hdr.content.encoding);
 }
 
+/* Release the ruleset work the context still owes. A start that failed may have
+ * published its state anyway, and a call that completed in this same loop sweep
+ * leaves w_finish pending with a delivered result; neither is tied to a context
+ * state, so every path that stops expecting the callback releases both. */
+static void cancel_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
+{
+	if (ctx->rpcstate != NULL) {
+		ruleset_cancel(loop, ctx->rpcstate);
+		ctx->rpcstate = NULL;
+	}
+	/* ruleset_cancel() cannot reach a completed call: state_complete() has
+	 * already fed w_finish and handed the result over. */
+	ev_clear_pending(loop, &ctx->rpcreturn.w_finish);
+	free((void *)ctx->rpcreturn.rpcall.result);
+	ctx->rpcreturn.rpcall.result = NULL;
+	ctx->rpcreturn.rpcall.resultlen = 0;
+}
+
 static void handle_ruleset_rpcall(
 	struct ev_loop *loop, struct api_ctx *restrict ctx,
 	struct ruleset *restrict ruleset)
@@ -702,14 +735,9 @@ static void handle_ruleset_rpcall(
 	 * the whole async call, as invoke/update already do */
 	VBUF_FREE(ctx->conn.cbuf);
 	if (!ok) {
-		/* ruleset_rpcall may publish *pstate (== ctx->rpcstate) before a
-		 * later fallible step fails, leaving an orphaned state whose cb
-		 * still targets this ctx; cancel it so a later Lua GC cannot feed
-		 * w_finish on this freed/reused ctx. */
-		if (ctx->rpcstate != NULL) {
-			ruleset_cancel(loop, ctx->rpcstate);
-			ctx->rpcstate = NULL;
-		}
+		/* the context stays alive to flush the error message, but leaves
+		 * STATE_PROCESS and no longer expects the callback */
+		cancel_ruleset(loop, ctx);
 		size_t len;
 		const char *err = ruleset_geterror(ruleset, &len);
 		LOGW_F("ruleset rpcall: %s", err);
@@ -853,7 +881,10 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
 	struct ruleset *ruleset = ctx_ruleset(ctx);
-	ASSERT(ruleset != NULL);
+	if (ruleset == NULL) {
+		SEND_ERRSTR(loop, ctx, "ruleset is not enabled on the server");
+		return;
+	}
 
 	char *segment;
 	if (!url_path_segment(&ctx->uri.path, &segment)) {
@@ -918,6 +949,48 @@ http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 }
 #endif /* WITH_RULESET */
 
+/* Rewrite the separator printf just wrote to '.', the only one the exposition
+ * format accepts. LC_NUMERIC is process-global and a ruleset moves it through
+ * os.setlocale; "%g" applies no grouping, so this is its only variant byte. */
+static char *normalize_decimal_point(char *restrict buf)
+{
+	const char *restrict point = localeconv()->decimal_point;
+	const size_t len = strlen(point);
+	if (len == 0 || (len == 1 && point[0] == '.')) {
+		return buf;
+	}
+	char *const s = strstr(buf, point);
+	if (s == NULL) {
+		return buf;
+	}
+	s[0] = '.';
+	memmove(&s[1], &s[len], strlen(&s[len]) + 1);
+	return buf;
+}
+
+/* Render a sample value for the Prometheus text exposition format, which spells
+ * the non-finite values NaN/+Inf/-Inf and parses the rest as Go ParseFloat.
+ * Emits the shortest form that reads back as the same double, so a counter is
+ * never quantized the way the 6 significant digits of "%g" quantize it. */
+static const char *
+format_sample(char *restrict buf, const size_t bufsize, const double value)
+{
+	if (isnan(value)) {
+		return "NaN";
+	}
+	if (isinf(value)) {
+		return value > 0 ? "+Inf" : "-Inf";
+	}
+	for (int prec = DBL_DIG; prec < DBL_DECIMAL_DIG; prec++) {
+		(void)snprintf(buf, bufsize, "%.*g", prec, value);
+		if (strtod(buf, NULL) == value) {
+			return normalize_decimal_point(buf);
+		}
+	}
+	(void)snprintf(buf, bufsize, "%.*g", DBL_DECIMAL_DIG, value);
+	return normalize_decimal_point(buf);
+}
+
 static void
 http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
@@ -969,6 +1042,9 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	(void)io_bufprintf(                                                    \
 		w, "neosocksd_%s{" labels "} " fmt "\n", name, __VA_ARGS__)
 
+	/* rendering buffer for the floating-point samples below */
+	char sample[32];
+
 	/* Gauges */
 	APPEND_METRIC_HDR(
 		"sessions_active", "gauge", "Number of active proxy sessions.");
@@ -983,7 +1059,9 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	APPEND_METRIC("halfopen_connections", "%zu", agg.num_halfopen);
 	APPEND_METRIC_HDR(
 		"uptime_seconds", "gauge", "Seconds since server start.");
-	APPEND_METRIC("uptime_seconds", "%g", uptime);
+	APPEND_METRIC(
+		"uptime_seconds", "%s",
+		format_sample(sample, sizeof(sample), uptime));
 
 	/* Counters */
 	if (have_cpu) {
@@ -991,8 +1069,10 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			"process_cpu_seconds_total", "counter",
 			"Total CPU time consumed by the process.");
 		APPEND_METRIC(
-			"process_cpu_seconds_total", "%g",
-			(double)TIMESPEC_NANO(cpu_ts) * 1e-9);
+			"process_cpu_seconds_total", "%s",
+			format_sample(
+				sample, sizeof(sample),
+				(double)TIMESPEC_NANO(cpu_ts) * 1e-9));
 	}
 	APPEND_METRIC_HDR(
 		"connections_accepted_total", "counter",
@@ -1107,14 +1187,20 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			"connect_latency_seconds", "summary",
 			"Connection establishment latency.");
 		APPEND_METRIC_L(
-			"connect_latency_seconds", "quantile=\"%s\"", "%g",
-			"0.5", (double)p.p50 * 1e-9);
+			"connect_latency_seconds", "quantile=\"%s\"", "%s",
+			"0.5",
+			format_sample(
+				sample, sizeof(sample), (double)p.p50 * 1e-9));
 		APPEND_METRIC_L(
-			"connect_latency_seconds", "quantile=\"%s\"", "%g",
-			"0.9", (double)p.p90 * 1e-9);
+			"connect_latency_seconds", "quantile=\"%s\"", "%s",
+			"0.9",
+			format_sample(
+				sample, sizeof(sample), (double)p.p90 * 1e-9));
 		APPEND_METRIC_L(
-			"connect_latency_seconds", "quantile=\"%s\"", "%g",
-			"0.99", (double)p.p99 * 1e-9);
+			"connect_latency_seconds", "quantile=\"%s\"", "%s",
+			"0.99",
+			format_sample(
+				sample, sizeof(sample), (double)p.p99 * 1e-9));
 		APPEND_METRIC(
 			"connect_latency_seconds_count", "%zu",
 			agg.num_connects);
@@ -1261,6 +1347,9 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
+#if WITH_RULESET
+	cancel_ruleset(loop, ctx);
+#endif
 
 	switch (ctx->state) {
 	case STATE_INIT:
@@ -1271,20 +1360,6 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	case STATE_PROCESS:
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_process);
-		if (ctx->rpcstate != NULL) {
-			ruleset_cancel(loop, ctx->rpcstate);
-			ctx->rpcstate = NULL;
-		}
-		/* rpcall_finish() may have already completed the call before this
-		 * teardown runs: state_complete() nulls rpcstate, fires w_finish,
-		 * and allocates a result, all in the completed-but-undispatched
-		 * window where rpcstate is already NULL. Clear the pending event
-		 * and drop the result unconditionally so the event loop can never
-		 * dispatch rpcall_cb() on this ctx after it is freed, and the
-		 * result rpcall_cb() will never consume cannot leak. */
-		ev_clear_pending(loop, &ctx->rpcreturn.w_finish);
-		free((void *)ctx->rpcreturn.rpcall.result);
-		ctx->rpcreturn.rpcall.result = NULL;
 #endif /* WITH_RULESET */
 		break;
 	case STATE_RESPONSE:
@@ -1322,12 +1397,12 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	struct http_conn *restrict p = &((struct api_ctx *)ctx)->conn;
 
 	/* hop-by-hop headers */
-	if (strcasecmp(key, "Connection") == 0) {
+	if (http_token_equal(key, "Connection")) {
 		/* RFC 9110 §5.3: combine repeated Connection lines into one
 		 * ordered token list so an earlier `close` is not lost */
 		return parsehdr_connection(p, value);
 	}
-	if (strcasecmp(key, "TE") == 0) {
+	if (http_token_equal(key, "TE")) {
 		/* RFC 9110 §10.1.4: TE only advertises which transfer-codings the
 		 * client accepts, so any value is accepted and nothing consults it
 		 * (chunked is always acceptable per RFC 9112 §7.4) */
@@ -1345,10 +1420,10 @@ static bool parse_header(void *ctx, const char *key, char *value)
 	}
 
 	/* request headers */
-	if (strcasecmp(key, "Accept-Encoding") == 0) {
+	if (http_token_equal(key, "Accept-Encoding")) {
 		return parsehdr_accept_encoding(p, value);
 	}
-	if (strcasecmp(key, "Expect") == 0) {
+	if (http_token_equal(key, "Expect")) {
 		return parsehdr_expect(p, value);
 	}
 
@@ -1584,6 +1659,8 @@ static struct api_ctx *api_ctx_new(struct server *restrict s, const int fd)
 	http_conn_init(
 		&ctx->conn, fd, STATE_PARSE_REQUEST, on_header,
 		&s->stats.api_byt_recv, &s->stats.api_byt_send);
+	ctx->uri = (struct url){ 0 };
+	ctx->keepalive = false;
 	gc_register(&ctx->gcbase, api_ctx_finalize);
 	return ctx;
 }

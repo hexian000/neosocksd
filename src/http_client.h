@@ -32,7 +32,6 @@ struct http_client_ctx {
 	const struct config *conf;
 	struct resolver *resolver;
 	struct dialreq *dialreq;
-	bool cache_retried;
 	enum http_client_state state;
 	struct http_client_cb cb;
 	struct http_parsehdr_cb user_on_header;
