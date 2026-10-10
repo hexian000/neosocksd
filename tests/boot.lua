@@ -9,6 +9,9 @@
 -- Loaded in "config" mode: it returns the configuration table and installs the
 -- test ruleset inline via the `ruleset` field. package.path is "?.lua" relative
 -- to the working directory (project root).
+--
+-- NEOSOCKSD_TEST_ID (from the environment) selects the loopback address the
+-- run owns; see test_host() below.
 
 local mode = ...
 assert(mode == "config")
@@ -19,11 +22,40 @@ local testlib = require("tests.testlib")
 
 pcall(collectgarbage, "generational")
 
--- Listener addresses; reused by both the config table and the ruleset below.
--- The config has not been applied yet while this chunk runs, so the ruleset
--- refers to these locals instead of neosocksd.config().
-local LISTEN       = "127.0.1.1:31080"
-local RESTAPI      = "127.0.1.1:39080"
+-- test_host returns the loopback address this run of the suite owns.
+--
+-- Both listeners must be bound before the suite starts, and the tests dial
+-- them back by address (neosocksd.config().listen / .restapi), so the kernel
+-- cannot be left to choose the ports. A fixed address instead makes a second
+-- concurrent run of the suite -- several worktrees of this repository testing
+-- at the same time -- fail outright: the bind reports EADDRINUSE and starting
+-- the server is fatal. So the whole suite moves onto an address of its own.
+--
+-- The test runner passes NEOSOCKSD_TEST_ID, a number no other live process
+-- shares (the run's own PID), and it selects one address out of 127.0.0.0/8;
+-- the mapping is injective over the platform's PID range, so two runs alive
+-- at the same time never pick the same address.
+local function test_host()
+    local id = tonumber(os.getenv("NEOSOCKSD_TEST_ID") or "")
+    id = id and math.tointeger(id)
+    if not id then
+        -- run by hand without the variable: the historical fixed address,
+        -- which the mapping below never yields
+        return "127.0.1.1"
+    end
+    -- 127.0.1.2 - 127.255.255.254, skipping 127.0.0.0, 127.0.0.1, the address
+    -- above, and the 127.255.255.255 broadcast address
+    local n = 258 + id % 16776957
+    return string.format(
+        "127.%d.%d.%d", n // 65536 % 256, n // 256 % 256, n % 256)
+end
+
+-- Addresses used by the suite; reused by both the config table and the ruleset
+-- below. The config has not been applied yet while this chunk runs, so the
+-- ruleset refers to these locals instead of neosocksd.config().
+local HOST         = test_host()
+local LISTEN       = HOST .. ":31080"
+local RESTAPI      = HOST .. ":39080"
 
 local ruleset      = {}
 local API_ENDPOINT = "api.neosocksd.internal:80"
@@ -45,9 +77,15 @@ local function run_all(T)
 end
 
 async(function()
-    -- Allow the event loop to start and the API listener to bind before
-    -- issuing any RPC calls.
-    await.sleep(0.1)
+    -- Park until the event loop runs. neosocksd.async() resumes the new
+    -- coroutine at once, so without a yield the suite would run inside this
+    -- config chunk: before the ruleset tables below are installed (a case
+    -- that saves and restores them would then restore nil), and before
+    -- main() applies the returned config and binds the listeners the tests
+    -- dial back. A zero-length sleep arms an idle watcher rather than a
+    -- timer, so it resumes on the loop's first iteration -- after
+    -- server_bind() and server_start() -- with no wall-clock delay.
+    await.sleep(0)
 
     local T = testlib.new("neosocksd")
     -- Run the suite as a child task and observe its future. An uncaught
@@ -72,10 +110,16 @@ end)
 _G.redirect_name = {
     { match.exact(API_ENDPOINT), rule.redirect(RESTAPI) },
 }
+-- Backends nothing listens on: tests/test_forward.lua relies on the default
+-- route failing. HOST is this run's own address, so no unrelated service can
+-- be listening there and turn the expected failure into a success.
 _G.route_default = { lb.roundrobin({
-    rule.redirect("127.0.0.1:30001"),
-    rule.redirect("127.0.0.1:30002"),
+    rule.redirect(HOST .. ":30001"),
+    rule.redirect(HOST .. ":30002"),
 }) }
+
+-- an address on this run's own host that nothing binds: connecting is refused
+local REFUSED = HOST .. ":1"
 
 -- failover demo for tests/test_forward.lua: try an unreachable proxy, then
 -- fall back to a direct connection to the API endpoint
@@ -86,18 +130,18 @@ local POLICYREJECT_NAME = "policyreject.test:80"
 function ruleset.resolve(addr, username, password)
     if addr == FAILOVER_NAME then
         return libruleset.failover(RESTAPI, {
-            { "socks5://127.0.0.1:1" }, -- connection refused: this fails
+            { "socks5://" .. REFUSED }, -- connection refused: this fails
             {},                         -- direct to the API: this succeeds
         })
     end
     if addr == POLICYREJECT_NAME then
-        await.forward("127.0.0.1:1") -- refused; the error is reported only here
-        return nil                   -- give up: rejected by policy
+        await.forward(REFUSED) -- refused; the error is reported only here
+        return nil             -- give up: rejected by policy
     end
     return libruleset.resolve(addr, username, password)
 end
 
-neosocksd.setinterval(0.0)
+neosocksd.setinterval(testlib.tick_interval)
 setmetatable(ruleset, {
     __index = function(_, k)
         return _G.libruleset[k]

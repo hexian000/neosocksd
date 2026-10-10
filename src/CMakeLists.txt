@@ -351,6 +351,8 @@ add_unit_test(transfer_test
         send=test_send
         ev_io_start=test_ev_io_start
     WITH_THREADS)
+# glibc's fortified recv redirects to the literal recv symbol, bypassing the
+# test_recv substitution. Keep every receive visible to this test's probe.
 target_compile_options(transfer_test_mock_impl PRIVATE -U_FORTIFY_SOURCE)
 add_unit_test(server_test
     SRCS server_test.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
@@ -360,6 +362,8 @@ add_unit_test(server_test
         socket_set_cloexec=test_socket_set_cloexec
         socket_set_nonblock=test_socket_set_nonblock
     WITH_LUA)
+# glibc exposes accept() with a transparent-union argument under _GNU_SOURCE.
+# Keep the declaration in its portable struct-pointer form for this alias.
 target_compile_options(server_test_mock_impl PRIVATE -U_GNU_SOURCE)
 add_unit_test(http_test
     SRCS proto/http_test.c proto/codec.c
@@ -393,8 +397,9 @@ add_unit_test(dialer_test
         socket_set_cloexec=test_socket_set_cloexec
         socket_set_nonblock=test_socket_set_nonblock
     WITH_RULESET WITH_THREADS WITH_CARES)
+# glibc exposes connect() with a transparent-union argument under _GNU_SOURCE.
+# Keep the declaration in its portable struct-pointer form for this alias.
 target_compile_options(dialer_test_mock_impl PRIVATE -U_GNU_SOURCE)
-# dialer_test interposes connect() to force a synchronous-success handshake.
 add_unit_test(resolver_test
     SRCS resolver_test.c resolver.c
     WITH_CARES)
@@ -413,8 +418,7 @@ if(WITH_LUA)
         MOCK_SRCS ruleset/time.c
         MOCK_DEFINITIONS clock_gettime=test_clock_gettime
         NO_LIBEV WITH_LUA)
-    # time_test interposes clock_gettime() to force a monotonic-clock failure.
-        add_unit_test(base_test
+    add_unit_test(base_test
         SRCS ruleset/base_test.c ruleset/base.c proto/codec.c
              util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
@@ -435,25 +439,55 @@ if(WITH_LUA)
              proto/codec.c util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         WITH_LUA WITH_CARES)
-target_compile_options(zlib_test PRIVATE
-    -fno-builtin-malloc -fno-builtin-realloc)
+    # zlib_test's OOM cases interpose realloc() the same way; keep the
+    # vbuffer's initial realloc(NULL, size) a real call, as in marshal_test.
+    target_compile_options(zlib_test PRIVATE
+        -fno-builtin-malloc -fno-builtin-realloc)
 endif()
 
 # neosocksd binary early-exit integration tests.
 # These cover main.c code paths that cannot be reached from unit tests.
 # Each scenario exits before the event loop, so the tests complete quickly.
+#
+# Each one requires the exact EXIT_FAILURE status and the diagnostic of the
+# path it covers, so a daemon that fails earlier or for another reason does
+# not pass. A sanitizer report also ends in exit status 1, so any report on
+# the output fails the test as well.
+function(add_early_exit_test name expect)
+    add_test(NAME ${name} COMMAND sh -c [==[
+expect=$1
+shift
+out=$("$@" 2>&1)
+status=$?
+printf '%s\n' "$out"
+[ "$status" = 1 ] || { echo "expected exit status 1, got $status"; exit 1; }
+case $out in
+*"$expect"*) ;;
+*) echo "missing the expected diagnostic: $expect"; exit 1 ;;
+esac
+]==] ${name} "${expect}" "$<TARGET_FILE:neosocksd>" ${ARGN})
+    set_tests_properties(${name} PROPERTIES
+        FAIL_REGULAR_EXPRESSION "Sanitizer|runtime error" TIMEOUT 5)
+endfunction()
 
 # --help: covers print_usage() in conf.c and the early-exit path in main().
-add_test(NAME neosocksd_help COMMAND neosocksd --help)
-set_tests_properties(neosocksd_help PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
+add_early_exit_test(neosocksd_help "usage: " --help)
 
 # No listen address: conf_parseargs succeeds but conf_check fails.
-add_test(NAME neosocksd_no_listen COMMAND neosocksd)
-set_tests_properties(neosocksd_no_listen PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
+add_early_exit_test(neosocksd_no_listen "configuration check failed")
 
 # Unknown argument: conf_parseargs returns false immediately.
-add_test(NAME neosocksd_bad_arg COMMAND neosocksd --zz-invalid-arg)
-set_tests_properties(neosocksd_bad_arg PROPERTIES WILL_FAIL TRUE TIMEOUT 5)
+add_early_exit_test(neosocksd_bad_arg "unknown argument: `--zz-invalid-arg'"
+    --zz-invalid-arg)
+
+# --auth-required with no ruleset: nothing would check the credentials, so
+# main() must refuse to start rather than run an open proxy.
+if(WITH_RULESET)
+    add_test(NAME neosocksd_auth_without_ruleset
+        COMMAND neosocksd -l 127.0.0.1:0 --auth-required)
+    set_tests_properties(neosocksd_auth_without_ruleset PROPERTIES
+        PASS_REGULAR_EXPRESSION "authentication requires a ruleset" TIMEOUT 5)
+endif()
 
 # --dump-config: a successful dump must exit 0, not break scripted use
 # (e.g. `neosocksd --dump-config > out.lua && ...`).
@@ -466,14 +500,67 @@ endif()
 # Full bootstrap: start a server on ephemeral ports, let the event loop run,
 # then SIGTERM it. Covers app_run() setup, the main event loop, the SIGTERM
 # handler and the graceful shutdown / cleanup path in main.c.
-add_test(NAME neosocksd_run_and_terminate
-    COMMAND sh -c "'$<TARGET_FILE:neosocksd>' -l 127.0.0.1:0 --http 127.0.0.1:0 --api 127.0.0.1:0 & pid=$!; sleep 1; kill -TERM $pid; wait $pid")
+#
+# The signal is only safe once main() has reached server_start(): until the
+# SIGTERM watcher is registered the signal keeps its default disposition and
+# kills the daemon, which then exits 143 and fails the test. Waiting a fixed
+# duration for that both delays every run and breaks on a machine loaded
+# enough to miss the deadline, so this waits for the event instead. The daemon
+# runs at --loglevel 6 with its output on a pipe, and the reader blocks until
+# the line main() logs right after server_start() returns, signals on it, then
+# requires a clean exit. Reading the daemon's own output also ends the wait
+# when it dies during startup -- the pipe carries its exit status and then
+# reaches EOF -- so a daemon that never starts fails the test rather than
+# hanging it; one that starts but never becomes ready is bounded by the
+# TIMEOUT property below. The inner shell prints the pid it is about to
+# become, so the reader has it before any daemon output can arrive.
+add_test(NAME neosocksd_run_and_terminate COMMAND sh -c [==[
+{
+    sh -c 'echo "@pid $$"; exec "$@"' neosocksd_run_and_terminate \
+        '$<TARGET_FILE:neosocksd>' -l 127.0.0.1:0 --http 127.0.0.1:0 \
+        --api 127.0.0.1:0 --loglevel 6 2>&1 &
+    wait $!
+    echo "@status $?"
+} | {
+    IFS= read -r line || { echo "the daemon produced no output"; exit 1; }
+    case $line in
+    "@pid "*) pid=${line#@pid } ;;
+    *) echo "unexpected first line: $line"; exit 1 ;;
+    esac
+    ready=0
+    status=
+    while IFS= read -r line; do
+        case $line in
+        "@status "*)
+            status=${line#@status }
+            continue
+            ;;
+        esac
+        printf '%s\n' "$line"
+        case $line in
+        *"starting the main event loop"*)
+            ready=1
+            kill -TERM "$pid"
+            ;;
+        esac
+    done
+    [ "$ready" = 1 ] || { echo "the daemon exited before it was ready"; exit 1; }
+    [ "$status" = 0 ] || { echo "the daemon exited with status ${status:-unknown}"; exit 1; }
+}
+]==])
 set_tests_properties(neosocksd_run_and_terminate PROPERTIES TIMEOUT 20)
 
 if(WITH_RULESET)
     # Boot config: covers the ruleset/boot bootstrap path in main.c and runs
     # the in-tree Lua integration suite, which self-terminates via os.exit(0).
-    add_test(NAME neosocksd_boot_config COMMAND neosocksd -c tests/boot.lua)
+    # The suite binds listeners it later dials back by address, so it cannot
+    # let the kernel pick their ports. NEOSOCKSD_TEST_ID hands it a number no
+    # other live process shares -- the shell's PID, which exec makes the
+    # daemon's -- and it derives a loopback address of its own from that, so
+    # a concurrent run of the same suite from another build tree does not
+    # collide with this one.
+    add_test(NAME neosocksd_boot_config
+        COMMAND sh -c "export NEOSOCKSD_TEST_ID=$$; exec '$<TARGET_FILE:neosocksd>' -c tests/boot.lua")
     set_tests_properties(neosocksd_boot_config PROPERTIES
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" TIMEOUT 60)
 endif()

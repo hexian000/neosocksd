@@ -19,6 +19,12 @@
 local M = {}
 local M_mt = { __index = M }
 
+-- tick_interval is the ruleset tick interval tests/boot.lua arms the suite
+-- with. The suite runs with the ticker stopped, so no ruleset.tick() fires
+-- behind a case's back and pushes into the shared _G.stat_requests ring. A
+-- case that changes the timer must restore this value, not one of its own.
+M.tick_interval = 0.0
+
 -- filter: compiled TESTING_FILTER (selects cases), or nil when absent.
 -- benchfilter: compiled TESTING_BENCH (selects benches), or nil when absent.
 local filter, benchfilter

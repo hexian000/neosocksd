@@ -21,12 +21,10 @@ target_sources(neosocksd
     "${CMAKE_CURRENT_SOURCE_DIR}/zlib.c"
 )
 
-if(WITH_LUA)
-    add_unit_test(api_test
-        SRCS api_test.c api.c base.c ../proto/codec.c
-        CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
-        EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/.."
-        WITH_LUA)
+add_unit_test(api_test
+    SRCS api_test.c api.c base.c ../proto/codec.c
+    CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
+    WITH_LUA)
 add_unit_test(await_test
     SRCS await_test.c base.c ../proto/codec.c
     MOCK_SRCS await.c
@@ -43,7 +41,7 @@ add_unit_test(ruleset_test
         lua_newstate=test_ruleset_newstate
     CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
     WITH_LUA)
-endif()
+
 file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/tmp")
 target_compile_definitions(ruleset_test PRIVATE
     TEST_TMPDIR="${PROJECT_BINARY_DIR}/tmp")

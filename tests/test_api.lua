@@ -3,6 +3,23 @@
 
 -- [[ test_api.lua: tests for the built-in neosocksd Lua API ]] --
 
+local testlib = require("tests.testlib")
+
+-- waitfor polls `f` until it returns true or `timeout` seconds elapse, and
+-- reports whether it became true. Polling keeps a successful case as short as
+-- the event it waits for, unlike a fixed sleep. Must be called from within an
+-- async context.
+local function waitfor(f, timeout)
+    local deadline = neosocksd.now() + timeout
+    while not f() do
+        if neosocksd.now() >= deadline then
+            return false
+        end
+        await.sleep(1e-3)
+    end
+    return true
+end
+
 return function(T)
     -- neosocksd.config --
 
@@ -175,10 +192,32 @@ return function(T)
     -- neosocksd.setinterval --
 
     T:test("neosocksd.setinterval accepts the valid range", function()
-        neosocksd.setinterval(1e-3)  -- minimum
-        neosocksd.setinterval(1e+9)  -- maximum
-        neosocksd.setinterval(0)     -- stop timer
-        neosocksd.setinterval(60.0)  -- restore to test default
+        neosocksd.setinterval(1e-3) -- minimum
+        neosocksd.setinterval(1e+9) -- maximum
+        neosocksd.setinterval(-1)   -- every loop iteration
+        neosocksd.setinterval(0)    -- stop timer
+        -- Restore what tests/boot.lua armed. Anything else would leave a live
+        -- ticker calling ruleset.tick() behind the back of every case that
+        -- runs after this one.
+        neosocksd.setinterval(testlib.tick_interval)
+    end)
+
+    T:atest("neosocksd.setinterval starts and stops the ruleset ticker", function()
+        -- the daemon looks the hook up as _G.ruleset.tick on every tick, so
+        -- counting ticks only takes a raw field on the installed ruleset
+        local ticks = 0
+        local saved_tick = rawget(_G.ruleset, "tick")
+        rawset(_G.ruleset, "tick", function() ticks = ticks + 1 end)
+        neosocksd.setinterval(1e-3)
+        local started = waitfor(function() return ticks > 0 end, 1.0)
+        neosocksd.setinterval(0)
+        ticks = 0
+        local ticked_while_stopped = waitfor(function() return ticks > 0 end, 0.05)
+        neosocksd.setinterval(testlib.tick_interval)
+        rawset(_G.ruleset, "tick", saved_tick)
+        assert(started, "the 1ms ticker never called ruleset.tick")
+        assert(not ticked_while_stopped,
+            string.format("setinterval(0) left the ticker running (%d ticks)", ticks))
     end)
 
     -- time.* --
