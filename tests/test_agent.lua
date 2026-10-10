@@ -709,6 +709,61 @@ return function(T)
             "multi-label fqdn must extract correctly")
     end)
 
+    T:test("subdomain: the domain suffix matches case-insensitively", function()
+        local domain = ag.INTERNAL_DOMAIN
+        -- host names are case-insensitive and a trailing dot only spells out
+        -- the implicit root label
+        assert(ag._subdomain("host.INTERNAL", domain) == "host",
+            "an upper-case suffix must still be recognized")
+        assert(ag._subdomain("host.internal.", domain) == "host",
+            "a trailing root dot is not part of the name")
+        assert(ag._subdomain("host.INTERNAL.", domain) == "host",
+            "case and root dot must be tolerated together")
+        assert(ag._subdomain("host" .. string.upper(domain), domain) == "host",
+            "the whole suffix must fold, not just its first label")
+        -- the extracted prefix keeps its case: on the relay path it carries
+        -- peer names, which key the peerdb verbatim
+        assert(ag._subdomain("Host.Internal", domain) == "Host",
+            "the extracted prefix must keep its original case")
+        -- neighbours that must NOT be taken for a subdomain
+        assert(ag._subdomain(string.upper(domain), domain) == nil,
+            "an upper-case fqdn equal to the domain has an empty prefix")
+        assert(ag._subdomain(domain .. ".", domain) == nil,
+            "a rooted fqdn equal to the domain has an empty prefix")
+        assert(ag._subdomain("hostinternal", domain) == nil,
+            "a name merely ending in the domain letters is not a subdomain")
+        assert(ag._subdomain("", domain) == nil,
+            "an empty fqdn is not a subdomain")
+        assert(ag._subdomain(".", domain) == nil,
+            "a bare root label is not a subdomain")
+    end)
+
+    T:test("parallel_for: a task error is reported, not re-raised", function()
+        reset()
+        -- The suite runs with `traceback` enabled, which stringifies a task
+        -- error before it ever reaches the future; with the shipped default
+        -- the raw error value is delivered instead. Model that delivery so
+        -- the reporting path sees what it sees in production.
+        local orig_async = _G.async
+        _G.async = function(f, ...)
+            local ok, err = pcall(f, ...)
+            return { get = function() return ok, err end }
+        end
+        local ran = {}
+        local ok, err = pcall(ag._parallel_for, "probe",
+            { a = true, b = true, c = true }, function(k)
+                ran[k] = true
+                if k == "a" then
+                    error() -- no message: the error value is nil
+                elseif k == "b" then
+                    error({ code = "boom" }) -- an error object is not a string
+                end
+            end)
+        _G.async = orig_async
+        assert(ok, "reporting a failed task must not fail: " .. tostring(err))
+        assert(ran.a and ran.b and ran.c, "every task must have run")
+    end)
+
     T:atest("resolve_internal: returns nil for self-hosted host (relay final-hop bug)", function()
         reset()
         -- maintenance with no conns publishes self entry and calls build_index,
@@ -1443,6 +1498,216 @@ return function(T)
         assert(result_addr == "peer3-host.relay.neosocksd.internal:80",
             "multi-label relay must strip one layer, got " .. tostring(result_addr))
         assert(proxy ~= nil, "must forward through proxy")
+    end)
+
+    -- ------------------------------------------------------------------ --
+    -- 16b. Case-insensitive name matching (RFC 4343)
+    -- ------------------------------------------------------------------ --
+
+    -- one direct conn to peer2, which advertises `hosts`
+    local function mesh_with(hosts)
+        reset()
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        t_clock = 1000
+        with_rpcall({
+            probe = function()
+                t_clock = t_clock + 0.002
+                return true, "peer2", D { peer2 = 1 }
+            end,
+            sync = function()
+                return true, "peer2", { peer2 = mkpeer(1, hosts, {}) }
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+    end
+
+    T:atest("matcher: an internal name matches whatever its case", function()
+        mesh_with({ "peer2-host" })
+        -- every spelling of the same name must stay inside the mesh, or an
+        -- internal-only host leaks to the default upstream
+        for _, addr in ipairs({
+            "peer2-host.internal:80",
+            "PEER2-HOST.INTERNAL:80",
+            "Peer2-Host.Internal:80",
+            "peer2-host.internal.:80",
+            "PEER2-HOST.INTERNAL.:80",
+        }) do
+            local handler = ag.matcher(addr)
+            assert(type(handler) == "function",
+                addr .. " must be handled by the mesh, got " .. tostring(handler))
+            local result_addr, proxy = handler()
+            assert(result_addr == "peer2-host.internal:80",
+                addr .. " must resolve to the folded name, got " ..
+                tostring(result_addr))
+            assert(proxy ~= nil, addr .. " must be dialed over a mesh conn")
+        end
+    end)
+
+    T:atest("matcher: a name outside the mesh is still unhandled", function()
+        mesh_with({ "peer2-host" })
+        -- folding must not widen the match: anything not under the internal
+        -- domain still falls through to the next handler
+        for _, addr in ipairs({
+            "example.com:80",
+            "EXAMPLE.COM:80",
+            "example.com.:80",
+            "peer2-hostinternal:80",
+            "192.0.2.1:80",
+        }) do
+            assert(ag.matcher(addr) == nil,
+                addr .. " must be left to the next handler")
+        end
+        -- a name that merely extends an internal one is not that host: the
+        -- mesh owns the domain, so it rejects instead of falling through
+        local ok, err = pcall(ag.matcher, "xpeer2-host.internal:80")
+        assert(not ok, "an unknown host under the internal domain must reject")
+        assert(tostring(err):find("unknown host"),
+            "error must mention 'unknown host', got: " .. tostring(err))
+    end)
+
+    T:atest("build_index: advertised host names are folded when indexed", function()
+        reset()
+        ag.hosts = { "Self-Host" }
+        ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
+        t_clock = 1000
+        with_rpcall({
+            probe = function()
+                t_clock = t_clock + 0.002
+                return true, "peer2", D { peer2 = 1 }
+            end,
+            sync = function()
+                return true, "peer2", { peer2 = mkpeer(1, { "Peer2-Host" }, {}) }
+            end,
+        }, function()
+            ag.maintenance()
+        end)
+        -- the index is keyed by the folded name, so a peer's mixed-case
+        -- advertisement is reachable by the name a client would send
+        local result, conn = ag._resolve_internal("peer2-host", "80")
+        assert(conn ~= nil,
+            "a mixed-case advertised host must route, got: " .. tostring(result))
+        assert(result == "peer2-host.internal:80",
+            "must dial the folded name, got " .. tostring(result))
+        -- and this node's own mixed-case host is still recognized as local
+        assert(ag.matcher("self-host.internal:80") == nil,
+            "a local host must be passed to the next handler")
+        assert(ag.matcher("SELF-HOST.INTERNAL:80") == nil,
+            "case must not turn a local host into a mesh route")
+    end)
+
+    T:atest("matcher: API_ENDPOINT matches whatever its case", function()
+        reset()
+        local host, port = neosocksd.splithostport(ag.API_ENDPOINT)
+        for _, addr in ipairs({
+            ag.API_ENDPOINT,
+            string.format("%s:%s", string.upper(host), port),
+            string.format("%s.:%s", host, port),
+        }) do
+            local handler = ag.matcher(addr)
+            assert(type(handler) == "function",
+                addr .. " must resolve to the API endpoint, got " ..
+                tostring(handler))
+            assert(handler() == ag.api_endpoint,
+                addr .. " must resolve to api_endpoint")
+        end
+    end)
+
+    T:atest("matcher: relay folds the domain suffix and the final host label", function()
+        mesh_with({ "peer2-host" })
+        ag.relay_cost = 0 -- opt in to relaying
+        for _, addr in ipairs({
+            "peer2-host.relay.neosocksd.internal:80",
+            "PEER2-HOST.RELAY.NEOSOCKSD.INTERNAL:80",
+            "Peer2-Host.Relay.Neosocksd.Internal.:80",
+        }) do
+            local handler = ag.matcher(addr)
+            assert(type(handler) == "function",
+                addr .. " must be relayed, got " .. tostring(handler))
+            local result_addr, proxy = handler()
+            assert(result_addr == "peer2-host.internal:80",
+                addr .. " must be rewritten to the folded internal name, got " ..
+                tostring(result_addr))
+            assert(proxy ~= nil, addr .. " must be forwarded over a conn")
+        end
+    end)
+
+    -- fold_of returns the spelling an advertised host name is indexed under,
+    -- i.e. the folded form of `host`.
+    local function fold_of(host)
+        local index = ag._build_index({ peerX = { hosts = { host } } })
+        return (next(index))
+    end
+
+    -- assert_ascii_fold pins the fold RFC 4343 s3 defines, octet by octet:
+    -- 0x41-0x5A folds onto 0x61-0x7A and every other octet stands for itself.
+    local function assert_ascii_fold()
+        for b = 0, 255 do
+            local expect = b
+            if b >= 0x41 and b <= 0x5A then
+                expect = b + 0x20
+            end
+            local got = fold_of("x" .. string.char(b) .. "y")
+            assert(got == "x" .. string.char(expect) .. "y", string.format(
+                "octet 0x%02x must fold to 0x%02x, got %q",
+                b, expect, tostring(got)))
+        end
+    end
+
+    -- a tolower(3) whose case table is not ASCII-invariant: Turkish/Azeri
+    -- maps "I" (0x49) to the dotless "\xb1" rather than "i", and ISO-8859-1
+    -- folds 0xdd onto 0xfd -- the very pair RFC 4343 names as one that must
+    -- not match. Lua truncates tolower's result to a char, so such a mapping
+    -- does not merely fail to fold, it substitutes another octet.
+    local SIM_TOLOWER = {}
+    for b = 0x41, 0x5A do
+        SIM_TOLOWER[string.char(b)] = string.char(b + 0x20)
+    end
+    for b = 0xC0, 0xDE do
+        if b ~= 0xD7 then -- the multiplication sign is not a letter
+            SIM_TOLOWER[string.char(b)] = string.char(b + 0x20)
+        end
+    end
+    SIM_TOLOWER["I"] = "\xb1"
+
+    T:atest("matcher: the fold is ASCII-only, never the locale's (RFC 4343)", function()
+        mesh_with({ "peer2-host" })
+        -- every ASCII name folds the same way before and after the locale
+        -- changes: only the octets >= 0x80 are at stake
+        assert_ascii_fold()
+        -- string.lower folds each byte through tolower(3), which follows
+        -- LC_CTYPE, so a name folded through it is spelled differently under
+        -- a locale whose case table is not ASCII-invariant. Stand in for one
+        -- and require every name to fold exactly as it does under C.
+        local orig_lower = string.lower
+        string.lower = function(s)
+            return (s:gsub(".", SIM_TOLOWER))
+        end
+        local ok, err = pcall(function()
+            assert_ascii_fold()
+            assert(ag._subdomain("HOST.INTERNAL", ag.INTERNAL_DOMAIN) == "HOST",
+                "an upper-case suffix must still fold onto the domain")
+            local handler = ag.matcher("PEER2-HOST.INTERNAL:80")
+            assert(type(handler) == "function",
+                "an upper-case internal name must stay inside the mesh, got " ..
+                tostring(handler))
+            local result_addr, proxy = handler()
+            assert(result_addr == "peer2-host.internal:80",
+                "must resolve to the folded name, got " .. tostring(result_addr))
+            assert(proxy ~= nil, "must be dialed over a mesh conn")
+            -- 0xdd and 0xfd are two names, not one name in two cases
+            local index = ag._build_index({
+                peerA = { hosts = { "h\xddst" } },
+                peerB = { hosts = { "h\xfdst" } },
+            })
+            assert(index["h\xddst"] == "peerA" and index["h\xfdst"] == "peerB",
+                "names differing above 0x7f must not collide in the index")
+            -- folding must still not widen the match
+            assert(ag.matcher("example.com:80") == nil,
+                "a name outside the mesh must be left to the next handler")
+        end)
+        string.lower = orig_lower
+        assert(ok, tostring(err))
     end)
 
     -- ------------------------------------------------------------------ --
@@ -2341,7 +2606,344 @@ return function(T)
     end)
 
     -- ------------------------------------------------------------------ --
-    -- 22. Cleanup
+    -- 22. agent.proxy(): the URI scheme set (RFC 3986 s3.1)
+    -- ------------------------------------------------------------------ --
+
+    -- the mesh_with() fixture reaches "peer2-host" over one conn, and that
+    -- host's internal name resolves to itself, so a chain built on MESH_ADDR
+    -- has exactly two hops: the URI under test as written, then the conn that
+    -- carries it (outermost last).
+    local MESH_ADDR = "peer2-host.internal:1080"
+    local MESH_HOP = "socks4a://peer2.internal:1080"
+
+    -- proxy_hops builds the chain agent.proxy(...) makes for one request and
+    -- returns it as a list, ordered as await.rpcall() takes it: the outermost
+    -- proxy last. Returns nil and the error message when a URI is rejected.
+    local function proxy_hops(...)
+        local build = ag.proxy(...)
+        local r = table.pack(pcall(build, "example.com:80"))
+        if not r[1] then
+            return nil, tostring(r[2])
+        end
+        assert(r[2] == "example.com:80",
+            "the request address must be passed through unchanged, got " ..
+            tostring(r[2]))
+        return table.move(r, 3, r.n, 1, {})
+    end
+
+    -- assert_scheme_set pins one octet position of the scheme production in
+    -- RFC 3986 s3.1 -- scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) --
+    -- byte by byte: mkuri(c) places the octet, legal(b) says whether the RFC
+    -- allows it there. ALPHA and DIGIT are the ASCII letters and digits, so
+    -- the answer must not depend on what LC_CTYPE calls a letter.
+    local function assert_scheme_set(where, mkuri, legal)
+        for b = 0, 255 do
+            local uri = mkuri(string.char(b))
+            local hops, err = proxy_hops(uri)
+            if legal(b) then
+                assert(hops ~= nil, string.format(
+                    "%s octet 0x%02x is in the scheme set and must be " ..
+                    "accepted, rejected with: %s", where, b, tostring(err)))
+                assert(#hops == 2 and hops[1] == uri and hops[2] == MESH_HOP,
+                    string.format(
+                        "%s octet 0x%02x must dial %q over the mesh conn, " ..
+                        "got %q", where, b, uri, table.concat(hops, ", ")))
+            else
+                assert(hops == nil, string.format(
+                    "%s octet 0x%02x is outside the scheme set and must be " ..
+                    "rejected, built %q", where, b, tostring(hops and hops[1])))
+            end
+        end
+    end
+
+    T:atest("proxy: the scheme set is exactly RFC 3986's, octet by octet", function()
+        mesh_with({ "peer2-host" })
+        -- a scheme leads with ALPHA
+        assert_scheme_set("first", function(c)
+            return c .. "x://" .. MESH_ADDR
+        end, function(b)
+            return (b >= 0x41 and b <= 0x5A) or (b >= 0x61 and b <= 0x7A)
+        end)
+        -- and continues with ALPHA / DIGIT / "+" / "-" / "." -- 0x2b, 0x2d
+        -- and 0x2e, but never the 0x2c that lies between them
+        assert_scheme_set("continuation", function(c)
+            return "s" .. c .. "://" .. MESH_ADDR
+        end, function(b)
+            local c = string.char(b)
+            return (b >= 0x30 and b <= 0x39) or (b >= 0x41 and b <= 0x5A) or
+                (b >= 0x61 and b <= 0x7A) or
+                c == "+" or c == "-" or c == "."
+        end)
+    end)
+
+    T:atest("proxy: a legal scheme builds the chain, an illegal one is named", function()
+        mesh_with({ "peer2-host" })
+        -- the schemes this project dials, an upper-case and a mixed-case
+        -- spelling (RFC 3986 s3.1 makes the scheme case-insensitive), the
+        -- shortest legal scheme, and one carrying every allowed punctuation
+        for _, scheme in ipairs({
+            "socks5", "socks4a", "http", "HTTP", "Socks5", "a", "a+b-c.d",
+        }) do
+            local uri = scheme .. "://" .. MESH_ADDR
+            local hops, err = proxy_hops(uri)
+            assert(hops ~= nil,
+                uri .. " must build a chain, rejected with: " .. tostring(err))
+            assert(#hops == 2 and hops[1] == uri and hops[2] == MESH_HOP,
+                uri .. " must be dialed over the mesh conn, got " ..
+                table.concat(hops, ", "))
+        end
+        -- only the first hop is resolved through the mesh; the outer ones are
+        -- dialed by the peer that receives them and are passed through as
+        -- written, so narrowing the scheme set must not reject them
+        local carried, err = proxy_hops("socks5://" .. MESH_ADDR,
+            "so,cks5://198.51.100.1:1080")
+        assert(carried ~= nil and #carried == 3,
+            "an outer hop must be carried, got: " .. tostring(err))
+        assert(carried[1] == "so,cks5://198.51.100.1:1080",
+            "an outer hop must be passed through as written, got " ..
+            carried[1])
+        -- every rejected URI names itself, because the chain is built once
+        -- while a dialer failure is reported per request
+        for _, uri in ipairs({
+            "so,cks5://" .. MESH_ADDR, -- 0x2c is not "+", "-" or "."
+            "1socks://" .. MESH_ADDR,  -- a scheme leads with ALPHA, not DIGIT
+            "socks 5://" .. MESH_ADDR, -- nor is a space in the set
+            "://" .. MESH_ADDR,        -- the scheme is not optional
+            MESH_ADDR,                 -- nor is the delimiter
+            "socks5:/" .. MESH_ADDR,
+            "socks5://", -- and the address is not optional either
+            "",          -- nor is anything at all a proxy URI
+        }) do
+            local hops, err = proxy_hops(uri)
+            assert(hops == nil, string.format("%q must be rejected, built %q",
+                uri, tostring(hops and hops[1])))
+            assert(err:find(uri, 1, true),
+                string.format("the error must name %q, got: %s", uri, err))
+        end
+    end)
+
+    T:atest("proxy: a hop that is not a URI is refused, not dropped", function()
+        mesh_with({ "peer2-host" })
+        -- refuse(where, ...) asserts that agent.proxy(...) raises where it is
+        -- called, naming the hop it cannot use, instead of returning an action
+        -- built from whatever was left
+        local function refuse(where, ...)
+            local ok, err = pcall(ag.proxy, ...)
+            assert(not ok, string.format(
+                "%s must be refused, agent.proxy built an action", where))
+            err = tostring(err)
+            assert(err:find(where, 1, true), string.format(
+                "the error must name %s, got: %s", where, err))
+        end
+        -- the first hop is the one the mesh resolves and the reason the
+        -- function exists: without it the chain is empty and the action
+        -- returns the address unchanged, which is rule.direct()
+        refuse("proxy #1")                                    -- no argument at all
+        refuse("proxy #1", nil)                               -- a field that was never set
+        refuse("proxy #1", nil, "socks5://198.51.100.1:1080") -- ... behind a valid outer hop
+        refuse("proxy #1", 42)                                -- a hop that is not a URI
+        -- an outer hop is carried rather than resolved, but a hole among the
+        -- outer hops would drop every hop behind it just as quietly
+        refuse("proxy #2", "socks5://" .. MESH_ADDR, nil)
+        refuse("proxy #3", "socks5://" .. MESH_ADDR,
+            "socks5://198.51.100.1:1080", {})
+        -- a chain of real URIs is built exactly as before
+        local hops, err = proxy_hops("socks5://" .. MESH_ADDR)
+        assert(hops ~= nil and #hops == 2 and
+            hops[1] == "socks5://" .. MESH_ADDR and hops[2] == MESH_HOP,
+            string.format("one hop must dial %q over the mesh conn, got: %s",
+                MESH_ADDR, hops and table.concat(hops, ", ") or tostring(err)))
+        hops, err = proxy_hops("socks5://" .. MESH_ADDR,
+            "socks5://198.51.100.1:1080")
+        assert(hops ~= nil and #hops == 3 and
+            hops[1] == "socks5://198.51.100.1:1080" and hops[3] == MESH_HOP,
+            string.format("an outer hop must still be carried, got: %s",
+                hops and table.concat(hops, ", ") or tostring(err)))
+    end)
+
+    -- ------------------------------------------------------------------ --
+    -- 23. agent.proxy(): the first hop is the one the mesh resolves
+    -- ------------------------------------------------------------------ --
+
+    T:atest("proxy: a first hop outside the internal domain names itself", function()
+        mesh_with({ "peer2-host" })
+        -- every other proxy string in a ruleset is an outside address, so
+        -- writing one here is an ordinary mistake; the rejection has to say
+        -- which URI it was and the domain it had to be under, or the author
+        -- is left with nothing but the position of the check
+        local domain = string.format("%q", ag.INTERNAL_DOMAIN)
+        for _, uri in ipairs({
+            "socks5://example.com:1080",                 -- an outside name
+            "socks5://198.51.100.1:1080",                -- an IPv4 literal
+            "socks5://[2001:db8::1]:1080",               -- an IPv6 literal
+            "socks5://peer2-host:1080",                  -- no domain at all
+            "socks5://peer2-hostinternal:1080",          -- no label separator
+            "socks5://peer2-host.internal.example:1080", -- another domain
+            "socks5://internal:1080",                    -- the bare label
+            "socks5://.internal:1080",                   -- the domain, no host
+        }) do
+            local hops, err = proxy_hops(uri)
+            assert(hops == nil, string.format("%q must be rejected, built %q",
+                uri, tostring(hops and hops[1])))
+            assert(err:find(uri, 1, true),
+                string.format("the error must name %q, got: %s", uri, err))
+            assert(err:find(domain, 1, true), string.format(
+                "the error must name %s, got: %s", domain, err))
+        end
+    end)
+
+    T:atest("proxy: the local host is not a peer, and says so", function()
+        mesh_with({ "peer2-host" })
+        -- resolve_internal() reports nothing at all -- not even an error
+        -- string -- for a host this node advertises itself, so the shared
+        -- report below it formatted that nil as the whole explanation
+        local hops, err = proxy_hops("socks5://self-host.internal:1080")
+        assert(hops == nil, "the local host must not build a chain, got " ..
+            tostring(hops and hops[1]))
+        assert(err:find("self-host.internal", 1, true),
+            "the rejection must name the host, got: " .. err)
+        assert(not err:endswith(": nil"),
+            "the rejection must say what is wrong, got: " .. err)
+    end)
+
+    T:atest("proxy: naming the rejection does not move the boundary", function()
+        mesh_with({ "peer2-host" })
+        -- the accepted set is unchanged: an internal name in any spelling
+        -- RFC 4343 makes equal still resolves through the mesh
+        for _, uri in ipairs({
+            "socks5://" .. MESH_ADDR,
+            "socks5://peer2-host.internal.:1080",
+            "socks5://PEER2-HOST.INTERNAL:1080",
+        }) do
+            local hops, err = proxy_hops(uri)
+            assert(hops ~= nil,
+                uri .. " must build a chain, rejected with: " .. tostring(err))
+            assert(#hops == 2 and hops[1] == "socks5://" .. MESH_ADDR and
+                hops[2] == MESH_HOP, uri ..
+                " must be resolved to the folded internal name and dialed " ..
+                "over the mesh conn, got " .. table.concat(hops, ", "))
+        end
+        -- and only the first hop is resolved here, so the outer ones are
+        -- still carried to the peer as written, internal domain or not
+        local hops, err = proxy_hops("socks5://" .. MESH_ADDR,
+            "socks5://198.51.100.1:1080", "http://example.com:8080")
+        assert(hops ~= nil and #hops == 4,
+            "the outer hops must be carried, got: " .. tostring(err))
+        assert(hops[1] == "http://example.com:8080" and
+            hops[2] == "socks5://198.51.100.1:1080",
+            "an outer hop must be passed through as written, got " ..
+            table.concat(hops, ", "))
+        -- an internal name the mesh cannot reach is still the neighbouring
+        -- report, not this one: the first-hop check only spells the domain
+        local unknown, uerr = proxy_hops("socks5://nosuchhost.internal:1080")
+        assert(unknown == nil, "an unknown internal host must be rejected")
+        assert(uerr:find("unknown host", 1, true),
+            "an unknown internal host must be reported as such, got: " .. uerr)
+    end)
+
+    -- ------------------------------------------------------------------ --
+    -- 24. Client-supplied names in messages
+    -- ------------------------------------------------------------------ --
+
+    -- Every byte agent.matcher() reads is the client's: a SOCKS5 DOMAINNAME is
+    -- a length-prefixed byte string (RFC 1928, 5) and an HTTP CONNECT
+    -- request-target reaches the ruleset as written, port and all. A newline
+    -- among them is the one byte string.format("%q") does not escape -- it
+    -- writes a backslash and a real newline -- so the client could end the log
+    -- line there and append lines of its own.
+    local FORGED = "\nE 1970-01-01T00-00-00+0000 forged-c-1 forged line"
+
+    -- lastmsg returns the message the most recent evlogf() call recorded
+    local function lastmsg()
+        local entry = _G.recent_events:get(1)
+        return entry and entry.msg or ""
+    end
+
+    T:atest("matcher: a client-supplied name cannot end the line", function()
+        mesh_with({ "peer2-host" })
+        ag.relay_cost = 0 -- opt in to relaying, so the relay branch is reached
+        -- every rejection that names something the client wrote
+        for _, case in ipairs({
+            -- a name under the internal domain that no peer advertises
+            { "evil" .. FORGED .. ".internal:80",                        "unknown host" },
+            -- a relay to a peer name the client made up
+            { "x.peer9" .. FORGED .. ".relay.neosocksd.internal:80",     "peer not reachable" },
+            -- a relay whose last label names no host, so it resolves to no
+            -- peer name at all
+            { "evil" .. FORGED .. ".relay.neosocksd.internal:80",        "peer not reachable" },
+        }) do
+            local addr, want = case[1], case[2]
+            local ok, err = pcall(ag.matcher, addr)
+            assert(not ok, "a name the mesh cannot resolve must be rejected")
+            err = tostring(err)
+            assert(err:find(want, 1, true), string.format(
+                "the rejection must say %q, got: %s", want, err))
+            assert(not err:find("\n", 1, true), string.format(
+                "the client must not be able to end the line, got: %s", err))
+            assert(err:find("\\n", 1, true), string.format(
+                "the newline must be escaped, not dropped, got: %s", err))
+        end
+        -- ... including the one that refuses to relay at all
+        ag.relay_cost = nil
+        local ok, err = pcall(ag.matcher,
+            "evil" .. FORGED .. ".peer2.relay.neosocksd.internal:80")
+        err = tostring(err)
+        assert(not ok and err:find("relay disabled", 1, true),
+            "relaying must be refused, got: " .. err)
+        assert(not err:find("\n", 1, true) and err:find("\\n", 1, true),
+            "the refusal must stay on one line, got: " .. err)
+        -- and every line the mesh logs about a request it accepts
+        ag.relay_cost = 0
+        ag.verbose = true
+        local accepted = {
+            -- a relay carries the name the client wrote to the next hop
+            "evil" .. FORGED .. ".peer2.relay.neosocksd.internal:80",
+            -- a CONNECT request-target puts the client's bytes in the port,
+            -- which the mesh resolves as a passthrough
+            "peer2-host.internal:80" .. FORGED,
+            -- ... and logs with the rewritten address beside it
+            "PEER2-HOST.INTERNAL:80" .. FORGED,
+        }
+        local logged = {}
+        for i, addr in ipairs(accepted) do
+            local handler = ag.matcher(addr)
+            logged[i] = lastmsg()
+            assert(type(handler) == "function",
+                "the request must still be handled by the mesh")
+        end
+        ag.verbose = false
+        for i, msg in ipairs(logged) do
+            assert(not msg:find("\n", 1, true), string.format(
+                "log line %d must not be split by the client, got: %s", i, msg))
+            assert(msg:find("\\n", 1, true), string.format(
+                "log line %d must escape the newline, got: %s", i, msg))
+        end
+    end)
+
+    T:atest("matcher: a legitimate name reads exactly as it is", function()
+        mesh_with({ "peer2-host" })
+        ag.relay_cost = 0
+        ag.verbose = true
+        local handler = ag.matcher("peer2-host.internal:80")
+        local msg = lastmsg()
+        local relay = ag.matcher("peer2-host.relay.neosocksd.internal:80")
+        local relaymsg = lastmsg()
+        ag.verbose = false
+        assert(type(handler) == "function", "a mesh host must still be handled")
+        assert(msg == 'agent [1]: "peer2-host.internal:80" (passthrough)',
+            "an accepted request must name the address in full, got: " .. msg)
+        assert(type(relay) == "function", "a relay must still be handled")
+        assert(relaymsg == 'relay [1] "peer2": "peer2-host.internal:80"',
+            "a relay must name the peer and the address, got: " .. relaymsg)
+        local ok, err = pcall(ag.matcher, "no-such-peer.internal:80")
+        err = tostring(err)
+        assert(not ok, "an unknown host must still be rejected")
+        assert(err:find('"no-such-peer.internal": unknown host', 1, true),
+            "the rejection must name the host, got: " .. err)
+    end)
+
+    -- ------------------------------------------------------------------ --
+    -- 25. Cleanup
     -- ------------------------------------------------------------------ --
 
     ag.stop() -- signal the sleeping mainloop to exit on wake

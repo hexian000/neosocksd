@@ -69,10 +69,51 @@ agent.relay_cost              = table.get(_G.agent, "relay_cost")
 -- optional callback invoked after every maintenance round
 agent.on_updated              = table.get(_G.agent, "on_updated")
 
+-- Renders a value as a quoted literal for a message. string.format's "%q"
+-- escapes every byte that would otherwise break the line except the newline,
+-- which it writes as a backslash followed by a real newline: one such byte in
+-- a name the client wrote would end the line there and let the client append
+-- lines of its own.
+local function quoted(s)
+    return (string.format("%q", s):gsub("\\\n", "\\n"))
+end
+
 local function oneline(err)
     if not err then return "unknown" end
     err = tostring(err)
     return err:match("^(.-)\n") or err
+end
+
+-- The fold covers the ASCII letters and nothing else: an octet in 0x41-0x5A
+-- matches its counterpart in 0x61-0x7A, while every other octet -- 0xdd and
+-- 0xfd among them -- matches only itself (RFC 4343). string.lower maps each
+-- byte through tolower(3), which follows LC_CTYPE and is therefore a different
+-- mapping under any locale whose case table is not ASCII-invariant, so the
+-- range is spelled out here instead.
+local ASCII_LOWER = {}
+for b = string.byte("A"), string.byte("Z") do
+    ASCII_LOWER[string.char(b)] = string.char(b + 0x20)
+end
+
+local function asciilower(s)
+    return (s:gsub("[A-Z]", ASCII_LOWER))
+end
+
+-- Host names are case-insensitive and a trailing dot only spells out the
+-- implicit root label (RFC 4343, RFC 1034), so every name is folded before it
+-- is compared or used as an index -- the advertised host list as well as the
+-- incoming request, since normalizing one side alone still misses. Otherwise
+-- "peer1.INTERNAL" or "peer1.internal." would leave agent.matcher unhandled
+-- and leak an internal-only name to the default upstream, while a host
+-- advertised as "MyHost" would never be found at all.
+-- Peer names are mesh identifiers rather than host labels: they key the
+-- peerdb verbatim, so a relay chain keeps the case its owner published.
+local function foldname(name)
+    name = asciilower(name)
+    if name:endswith(".") then
+        return name:sub(1, -2)
+    end
+    return name
 end
 
 -- windowed minimum filter (Kathleen Nichols, 2012)
@@ -191,7 +232,7 @@ local function build_index(peerdb, prev)
     local hosts = {}
     for peername, data in pairs(peerdb) do
         for _, host in pairs(data.hosts or {}) do
-            hosts[host] = peername
+            hosts[foldname(host)] = peername
         end
     end
     -- group direct conns by neighbor peername
@@ -261,8 +302,12 @@ local hosts, routes = build_index(_G.peerdb)
 
 -- extracts subdomain from FQDN
 local function subdomain(fqdn, domain)
+    domain = foldname(domain)
+    if fqdn:endswith(".") then
+        fqdn = fqdn:sub(1, -2)
+    end
     local n = domain:len()
-    if fqdn:sub(-n) ~= domain then
+    if asciilower(fqdn:sub(-n)) ~= domain then
         return nil
     end
     local pre = fqdn:sub(1, -n - 1)
@@ -314,6 +359,7 @@ local ERR_UNKNOWN_HOST = "unknown host"
 local ERR_NOT_REACHABLE = "peer not reachable"
 
 local function resolve_internal(host, port)
+    host = foldname(host)
     local peername = hosts[host]
     if not peername then
         -- failed demand is evidence that the peerdb may be stale (e.g. the
@@ -349,20 +395,54 @@ agent._resolve_internal = resolve_internal
 agent._build_index = build_index
 
 local splithostport = neosocksd.splithostport
+
+-- RFC 3986 s3.1 defines the scheme as ALPHA *( ALPHA / DIGIT / "+" / "-" /
+-- "." ) over ASCII alone, so the set is spelled out here: %a is isalpha(3)
+-- and follows LC_CTYPE like every Lua class, and "+-." written inside a set
+-- is the range 0x2b-0x2e, which also admits the comma.
+local PROXY_URI = "^([A-Za-z][0-9A-Za-z%+%-.]*://)(.+)$"
+
 function agent.proxy(...)
-    local t = { ... }
+    local t = table.pack(...)
+    -- Every hop is a proxy URI, and the first one is the hop the mesh
+    -- resolves -- the reason this function exists. A nil among them would be
+    -- collected as a hole for ipairs to stop at, silently shortening the
+    -- chain; with no first hop the chain is empty and the action returns the
+    -- address unchanged, which is rule.direct(): a rule written to leave
+    -- through a peer would leave through this node instead, unlogged.
+    for i = 1, math.max(t.n, 1) do
+        if type(t[i]) ~= "string" then
+            error(string.format("agent.proxy: proxy #%d must be a URI, got %s",
+                i, type(t[i])), 2)
+        end
+    end
     return function(addr)
         local chain = list:new()
         for i, proxy in ipairs(t) do
             if i == 1 then
-                local proxyscheme, proxyaddr = proxy:match("^(%a[0-9A-Za-z+-.]*://)(.+)$")
-                assert(proxyscheme and proxyaddr)
+                local proxyscheme, proxyaddr = proxy:match(PROXY_URI)
+                if not proxyscheme then
+                    -- the chain is built once, so name the offending URI
+                    -- here instead of failing per request in the dialer
+                    error(string.format("%q: invalid proxy URI", proxy))
+                end
                 local fqdn, port = splithostport(proxyaddr)
                 local sub = subdomain(fqdn, agent.INTERNAL_DOMAIN)
-                assert(sub)
+                if not sub then
+                    -- only this hop is resolved by the mesh, so it has to
+                    -- name an internal host; the outer ones are dialed by
+                    -- the peer and may be any address at all
+                    error(string.format(
+                        "%q: the first proxy must be a host under %q",
+                        proxy, agent.INTERNAL_DOMAIN))
+                end
                 local result, conn = resolve_internal(sub, port)
                 if not conn then
-                    error(string.format("%s: %s", fqdn, result))
+                    -- a host this node advertises itself is resolved to
+                    -- nothing at all, there being no conn to reach it over;
+                    -- say so instead of formatting that nil
+                    error(string.format("%s: %s", fqdn,
+                        result or "this node itself, not a peer"))
                 end
                 chain:append(conn)
                 chain:insert(proxyscheme .. result)
@@ -378,13 +458,19 @@ function agent.rpcall(addr, func, ...)
     return await.rpcall({ agent.proxy(addr)(agent.API_ENDPOINT) }, func, ...)
 end
 
+-- Every byte of addr is the client's to choose: a SOCKS5 DOMAINNAME is a
+-- length-prefixed byte string (RFC 1928, 5) and an HTTP CONNECT
+-- request-target reaches the ruleset as written, so every name this function
+-- renders into a message -- the request address, the host and peer names read
+-- out of it, and the address rewritten from them -- is quoted first.
 function agent.matcher(addr)
-    if addr == agent.API_ENDPOINT then
+    local fqdn, port = splithostport(addr)
+    if string.format("%s:%s", foldname(fqdn), port) ==
+        foldname(agent.API_ENDPOINT) then
         return function()
             return agent.api_endpoint
         end
     end
-    local fqdn, port = splithostport(addr)
     local sub = subdomain(fqdn, agent.RELAY_DOMAIN)
     if not sub then
         sub = subdomain(fqdn, agent.INTERNAL_DOMAIN)
@@ -396,13 +482,15 @@ function agent.matcher(addr)
             return nil -- local host, pass to next handler
         end
         if not conn then
-            error(string.format("%s: %s", fqdn, result))
+            error(string.format("%s: %s", quoted(fqdn), result))
         end
         if agent.verbose then
             if addr == result then
-                evlogf("agent [%s]: %s (passthrough)", connid_of(conn), addr)
+                evlogf("agent [%s]: %s (passthrough)",
+                    connid_of(conn), quoted(addr))
             else
-                evlogf("agent [%s]: %s -> %s", connid_of(conn), addr, result)
+                evlogf("agent [%s]: %s -> %s", connid_of(conn),
+                    quoted(addr), quoted(result))
             end
         end
         local proxies = list:new():append(conn):reverse()
@@ -412,7 +500,7 @@ function agent.matcher(addr)
     end
     -- resolve relay
     if not (type(agent.relay_cost) == "number" and agent.relay_cost >= 0) then
-        error(string.format("%q: relay disabled", fqdn)) -- break matching
+        error(string.format("%s: relay disabled", quoted(fqdn))) -- break matching
     end
     local remain, peername = sub:match("^(.+)%.([^.]+)$")
     local domain
@@ -420,19 +508,25 @@ function agent.matcher(addr)
         sub = remain
         domain = agent.RELAY_DOMAIN
     else
+        -- the last label is a host name, not a peer name
+        sub = foldname(sub)
         peername = hosts[sub]
         domain = agent.INTERNAL_DOMAIN
     end
     local route = routes[peername]
     if not route or #route.path ~= 1 then
         agent.wake()
-        error(string.format("%q: %s", peername, ERR_NOT_REACHABLE)) -- break matching
+        -- a last label naming a host this mesh does not know resolves to no
+        -- peer name at all; name the label instead of formatting that nil
+        error(string.format("%s: %s", quoted(peername or sub),
+            ERR_NOT_REACHABLE)) -- break matching
     end
     addr = string.format("%s%s:%s", sub, domain, port)
     active = true
     local conn = route.conn
     if agent.verbose then
-        evlogf("relay [%s] %q: %s", connid_of(conn), peername, addr)
+        evlogf("relay [%s] %s: %s", connid_of(conn),
+            quoted(peername), quoted(addr))
     end
     local proxies = list:new():append(conn):reverse()
     return function()
@@ -674,10 +768,12 @@ local function parallel_for(tag, t, func)
     for k, future in pairs(tasks) do
         local ok, result = future:get()
         if not ok then
-            evlogf("%s error: [%s] %s", tag, tostring(k), result:match("^(.-)\n") or result)
+            evlogf("%s error: [%s] %s", tag, tostring(k), oneline(result))
         end
     end
 end
+
+agent._parallel_for = parallel_for
 
 -- upstream dial-failure count sampled at the previous round; a rising
 -- count while mesh routes are in use means a route may be broken even
