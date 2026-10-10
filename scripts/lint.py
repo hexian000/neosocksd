@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # csnippets (c) 2019-2026 He Xian <hexian000@outlook.com>
 # This code is licensed under MIT license (see LICENSE for details)
-
 """Run clang-tidy on production sources and write build/lint.md.
 
 Usage:
@@ -17,6 +16,9 @@ Usage:
   scripts/lint.py --path src/net             # analyze only these files
   scripts/lint.py --path 'src/net/*.c' --path src/os/socket.c
 
+Path globs use slash-aware shell semantics: '*', '?' and '[...]' match within
+one directory; '**' matches zero or more directories.
+
 The CHECK argument is forwarded verbatim as the glob in -checks='-*,CHECK'.
 Use a trailing '*' for prefix matching, e.g. "readability-*".
 
@@ -28,12 +30,14 @@ is not comparable against a full sweep's. The scope is recorded in the "Build
 configuration" line of both the report and the raw list so the two cannot be
 mistaken for each other.
 
-Production code is defined as all C sources under src/ that are not test
-files (*_test.c) and not generated files (*.gen.[ch]). Generated headers count
-too: clang-tidy attributes diagnostics from a header to that header, so a
-warning in a *.gen.h pulled in by an accepted translation unit must be dropped
-just like its *.gen.c sibling. The third-party tree (contrib/) is always
-excluded; --tests and --generated opt the respective file groups back in.
+Production code is defined as all non-test, non-generated C sources listed in
+the compilation database. In this project that covers the build-included
+src/, examples/, and tools/ trees. The compilation database is authoritative
+for which sources are build-included. Generated headers count too: clang-tidy
+attributes diagnostics from a header to that header, so a warning in a *.gen.h
+pulled in by an accepted translation unit must be dropped just like its
+*.gen.c sibling. The third-party tree (contrib/) is always excluded; --tests
+and --generated opt the respective file groups back in.
 
 Denoising: some valuable checks fire false positives on this project's own
 facilities (the archetype is misc-include-cleaner on utils/ctype_ascii.h, an
@@ -166,22 +170,55 @@ def _norm_pattern(pattern: str) -> str:
     path = Path(pattern)
     if path.is_absolute():
         try:
-            return str(path.resolve().relative_to(ROOT))
+            pattern = str(path.resolve().relative_to(ROOT))
         except ValueError:
             return pattern
-    return os.path.normpath(pattern)
+    else:
+        pattern = os.path.normpath(pattern)
+    return pattern.replace(os.sep, "/")
+
+
+def _glob_match(path: str, pattern: str) -> bool:
+    """Match a repository path against a slash-aware shell-style glob.
+
+    ``fnmatch`` treats ``*`` as matching every character, including ``/``.
+    Split both paths into components so ordinary wildcards stay within one
+    directory; ``**`` is the explicit recursive wildcard.
+    """
+    path_parts = tuple(path.split("/"))
+    pattern_parts = tuple(pattern.split("/"))
+
+    def match(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        component = pattern_parts[pattern_index]
+        if component == "**":
+            if match(path_index, pattern_index + 1):
+                return True
+            return path_index < len(path_parts) and match(
+                path_index + 1, pattern_index)
+        return (
+            path_index < len(path_parts)
+            and fnmatch.fnmatchcase(path_parts[path_index], component)
+            and match(path_index + 1, pattern_index + 1)
+        )
+
+    return match(0, 0)
 
 
 def _select_sources(sources: list[str], patterns: list[str]) -> list[str]:
     """Keep the sources selected by any --path pattern: an exact
-    repository-relative path, a directory holding it, or a glob matching it."""
+    repository-relative path, a directory holding it, or a slash-aware glob
+    matching it.  Ordinary wildcards stay within one directory; ``**`` is
+    recursive."""
     wanted = [_norm_pattern(p) for p in patterns]
     kept: list[str] = []
     for fpath in sources:
         rel = _root_relative(fpath)
         if rel is None:
             continue
-        if any(rel == p or rel.startswith(p + "/") or fnmatch.fnmatch(rel, p)
+        rel = rel.replace(os.sep, "/")
+        if any(rel == p or rel.startswith(p + "/") or _glob_match(rel, p)
                for p in wanted):
             kept.append(fpath)
     return kept
@@ -1108,7 +1145,8 @@ def main() -> int:
         metavar="PATTERN",
         help="analyze only the sources PATTERN selects -- a repository-"
         "relative file (src/os/socket.c), a directory holding them (src/net), "
-        "or a glob (src/net/*.c).  Repeatable.  Filters and denoising are "
+        "or a slash-aware glob (src/net/*.c; use ** for recursive matches).  "
+        "Repeatable.  Filters and denoising are "
         "unchanged and every finding in the covered files is reported, but "
         "the run says nothing about the rest of the tree, so the scope is "
         "recorded in the report and the raw list",
