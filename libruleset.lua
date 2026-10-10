@@ -2,7 +2,29 @@
 -- This code is licensed under MIT license (see LICENSE for details)
 
 -- [[ libruleset.lua: ruleset and RPC facilities ]] --
-_G.config = neosocksd.config()
+-- A live view over neosocksd.config(), never a snapshot: a "config" chunk (-c)
+-- requires this module while the table it returns has not been applied yet, and
+-- a reload replaces the configuration again later, so a table captured here
+-- would answer with the pre-config values for the life of the process. Every
+-- read reaches the configuration that is in effect right now.
+--
+-- The view is kept in an upvalue as well as published as _G.config: a ruleset
+-- that assigns its own snapshot to the global must not silently turn the reads
+-- below -- the credential policy among them -- back into stale ones.
+local getconfig = neosocksd.config
+local config = setmetatable({}, {
+    __name = "config",
+    __index = function(_, key)
+        return getconfig()[key]
+    end,
+    __newindex = function()
+        error("config is a read-only view of neosocksd.config()", 2)
+    end,
+    __pairs = function()
+        return next, getconfig(), nil
+    end,
+})
+_G.config = config
 
 -- [[ useful library routines ]] --
 local print = _G.print
@@ -113,6 +135,15 @@ local rlist_mt = { __name = "rlist", __index = rlist }
 function rlist:new(cap, t)
     t = t or {}
     local n = #t
+    if n > cap then
+        -- seeding is equivalent to pushing each element in order, so an
+        -- over-long seed keeps the newest cap elements and drops the rest
+        table.move(t, n - cap + 1, n, 1)
+        for i = cap + 1, n do
+            t[i] = nil
+        end
+        n = cap
+    end
     t.pos = n % cap + 1
     t.len = n
     t.cap = cap
@@ -177,6 +208,16 @@ end
 _G.rlist = rlist
 
 -- [[ logging utilities ]] --
+
+-- Renders a string as a quoted literal for a log line. string.format's "%q"
+-- escapes every byte that would otherwise break the line except the newline,
+-- which it writes as a backslash followed by a real newline: one such byte in
+-- a client-supplied name or user name would end the log line there and let the
+-- peer append lines of its own.
+local function quoted(s)
+    return (strformat("%q", s):gsub("\\\n", "\\n"))
+end
+
 _G.recent_events = rlist:check(_G.recent_events) or rlist:new(100)
 local function evlog_(now, msg)
     local entry = recent_events:get(1)
@@ -285,15 +326,17 @@ local future = {}
 local future_mt = { __name = "future", __index = future }
 
 function future:get()
+    -- unpack by the recorded count, not by #: a routine returning trailing
+    -- nils packs a table with holes, whose length is undefined
     if self.result then
-        return table.unpack(self.result)
+        return table.unpack(self.result, 1, self.result.n)
     end
     local co = coroutine.running()
     assert(coroutine.isyieldable(co))
     assert(self.co ~= co)
     self.wakeup[co] = true
     coroutine.yield()
-    return table.unpack(self.result)
+    return table.unpack(self.result, 1, self.result.n)
 end
 
 function _G.async(f, ...)
@@ -309,7 +352,7 @@ function _G.async(f, ...)
     if co then
         t.co = co
     else
-        t.result = { false, err }
+        t.result = table.pack(false, err)
     end
     return t
 end
@@ -320,7 +363,7 @@ function await.callback(f, ...)
     local result
     local callback = function(...)
         if co == coroutine.running() then
-            result = { ... }
+            result = table.pack(...)
             return
         end
         local ok, err = coroutine.resume(co, ...)
@@ -328,7 +371,7 @@ function await.callback(f, ...)
     end
     f(callback, ...)
     if result then
-        return table.unpack(result)
+        return table.unpack(result, 1, result.n)
     end
     return coroutine.yield()
 end
@@ -478,46 +521,78 @@ function match.any(...)
     end
 end
 
--- Hostnames are case-insensitive (RFC 4343); match.exact/host/domain/
--- domaintree all normalize to lowercase, both when compiling the match
--- table/tree and when reading the incoming address, so a request can't
--- dodge a reject/redirect rule by varying case (e.g. "foo.INTERNAL" vs
--- "foo.internal"). Ports and IP-literal digits/separators are unaffected
--- by string.lower, so this is safe even when match.exact is used with an
--- "ip:port" literal instead of a hostname.
+-- A host name is case-insensitive and a trailing dot only spells out the
+-- implicit root label (RFC 1034, RFC 4343), so "foo.INTERNAL", "foo.internal."
+-- and "foo.internal" all name the same host. match.exact/host/domain/
+-- domaintree and the _G.hosts lookup in resolve_() therefore fold every name
+-- to one spelling before comparing or indexing it -- the compiled match
+-- table/tree as well as the incoming address, since normalizing one side alone
+-- still misses -- so that a request can't dodge a reject/redirect rule by
+-- spelling its target differently.
+-- The case fold is ASCII-only, the way RFC 4343 defines name comparison.
+-- string.lower() would fold through tolower(3), which follows the process
+-- locale (the daemon calls setlocale(LC_ALL, "")): in a locale where "I" does
+-- not fold to "i" (Turkish) it stops folding exactly the spellings these
+-- matchers exist to catch, and a mapping outside 0-255 substitutes a different
+-- byte instead. This is the call the C side already makes with
+-- utils/ctype_ascii.h.
+local lower_replacement = {}
+for b = string.byte("A"), string.byte("Z") do
+    lower_replacement[string.char(b)] = string.char(b + 0x20)
+end
+
+-- folds a bare host name
+local function foldname(name)
+    name = name:gsub("[A-Z]", lower_replacement)
+    if name:endswith(".") then
+        return name:sub(1, -2)
+    end
+    return name
+end
+
+-- Folds the host part of a "host:port" address in place: the root dot can
+-- only be the last byte of a host name, so it stands directly before the port
+-- separator. Rewriting in place keeps an IPv6 literal's brackets, which
+-- splitting and rejoining would drop. Ports and IP-literal digits/separators
+-- are unaffected, so this is safe for an "ip:port" literal as well.
+local function foldaddr(addr)
+    addr = addr:gsub("[A-Z]", lower_replacement)
+    return (addr:gsub("%.:([^:]*)$", ":%1"))
+end
+
 function match.exact(s)
     if type(s) ~= "table" then
         local _, _ = splithostport(s)
-        s = string.lower(s)
+        s = foldaddr(s)
         return function(addr)
-            return string.lower(addr) == s
+            return foldaddr(addr) == s
         end
     end
     local t = {}
     for _, v in pairs(s) do
         local _, _ = splithostport(v)
-        t[string.lower(v)] = true
+        t[foldaddr(v)] = true
     end
     return function(addr)
-        return not not t[string.lower(addr)]
+        return not not t[foldaddr(addr)]
     end
 end
 
 function match.host(s)
     if type(s) ~= "table" then
-        s = string.lower(s)
+        s = foldname(s)
         return function(addr)
             local host, _ = splithostport(addr)
-            return string.lower(host) == s
+            return foldname(host) == s
         end
     end
     local t = {}
     for _, v in pairs(s) do
-        t[string.lower(v)] = true
+        t[foldname(v)] = true
     end
     return function(addr)
         local host, _ = splithostport(addr)
-        return t[string.lower(host)] ~= nil
+        return t[foldname(host)] ~= nil
     end
 end
 
@@ -547,23 +622,22 @@ end
 
 function match.domain(s)
     if type(s) ~= "table" then
+        s = foldname(s)
         local suffix = s
         if s:startswith(".") then
             s = s:sub(2)
         else
             suffix = "." .. s
         end
-        s = string.lower(s)
-        suffix = string.lower(suffix)
         return function(addr)
             local host, _ = splithostport(addr)
-            host = string.lower(host)
+            host = foldname(host)
             return host == s or host:endswith(suffix)
         end
     end
     local tree = {}
     for _, v in pairs(s) do
-        v = string.lower(v)
+        v = foldname(v)
         local path, n = {}, 0
         for seg in v:gmatch("[^.]+") do
             n = n + 1
@@ -572,25 +646,39 @@ function match.domain(s)
         local t = tree
         for i = n, 2, -1 do
             local seg = path[i]
-            t[seg] = t[seg] or {}
-            t = t[seg]
+            local sub = t[seg]
+            if sub == true then
+                -- a shorter suffix already in the tree subsumes this entry
+                t = nil
+                break
+            end
+            if not sub then
+                sub = {}
+                t[seg] = sub
+            end
+            t = sub
         end
-        t[path[1]] = true
+        -- in the reverse order an existing subtree is simply replaced by the
+        -- terminal true, which subsumes every entry that was under it
+        if t then
+            t[path[1]] = true
+        end
     end
     return match.domaintree(tree)
 end
 
--- Note: match.domaintree() lowercases only the queried address, not `tree`
--- itself -- a manually-constructed tree (as opposed to one built by
--- match.domain() above, which already normalizes) should use lowercase
--- keys to match case-insensitively.
+-- Note: match.domaintree() folds only the queried address, not `tree` itself
+-- -- a manually-constructed tree (as opposed to one built by match.domain()
+-- above, which already folds) should use lowercase keys to match
+-- case-insensitively. A trailing dot needs no such care: splitting a name
+-- into labels drops the empty root label, so no tree entry can spell it out.
 function match.domaintree(tree)
     if type(tree) ~= "table" then
         error("domain tree should be a table", 2)
     end
     return function(addr)
         local host, _ = splithostport(addr)
-        host = string.lower(host)
+        host = foldname(host)
         local path, n = {}, 0
         for seg in host:gmatch("[^.]+") do
             n = n + 1
@@ -654,7 +742,7 @@ function match.regex(s)
         if ok then
             table.insert(regs, ret)
         else
-            logf("%s: %q", ret, pat)
+            evlogf("%s: %s", ret, quoted(pat))
         end
     end
     return function(addr)
@@ -744,18 +832,21 @@ end
 
 function rule.resolve()
     return function(addr)
-        addr = await.resolve(addr)
-        if not addr then
+        -- await.resolve takes a bare hostname and returns a bare IP literal,
+        -- so the port has to be split off first and joined back afterwards
+        local host, port = splithostport(addr)
+        local ip = await.resolve(host)
+        if not ip then
             return nil
         end
-        local host, _ = splithostport(addr)
-        if parse_ipv4(host) then
-            return route_(addr)
+        if parse_ipv4(ip) then
+            return route_(strformat("%s:%s", ip, port))
         end
-        if parse_ipv6(host) then
-            return route6_(addr)
+        if parse_ipv6(ip) then
+            -- route6_ splits the address again, so bracket the literal
+            return route6_(strformat("[%s]:%s", ip, port))
         end
-        return resolve_(addr)
+        return resolve_(strformat("%s:%s", ip, port))
     end
 end
 
@@ -764,13 +855,13 @@ function rule.redirect(dst, ...)
     local host, port, _ = splithostport(dst)
     if host == "" then
         return function(addr)
-            host, _ = splithostport(addr)
+            local host, _ = splithostport(addr)
             return strformat("%s:%s", host, port), chain:unpack()
         end
     end
     if port == "" then
         return function(addr)
-            _, port = splithostport(addr)
+            local _, port = splithostport(addr)
             return strformat("%s:%s", host, port), chain:unpack()
         end
     end
@@ -836,18 +927,22 @@ end
 -- max would otherwise divide every weight into NaN, which never satisfies
 -- the dispatcher's comparison and spins forever.
 function lb.iwrr(t, cyclesize)
-    local active, max = {}, 0
+    local max = 0
     for _, v in ipairs(t) do
         if v[1] > 0 then
             max = math.max(max, v[1])
-            table.insert(active, v)
         end
     end
-    if #active == 0 then
+    if max == 0 then
         return function(...) end
     end
-    for _, v in ipairs(active) do
-        v[1] = v[1] / max
+    -- normalize into copies: the caller keeps its declared weights, which a
+    -- second lb.iwrr over the same entries, or a renderer, still reads back
+    local active = {}
+    for _, v in ipairs(t) do
+        if v[1] > 0 then
+            table.insert(active, { v[1] / max, v[2] })
+        end
     end
     local step = 0.01
     if cyclesize then step = 1 / cyclesize end
@@ -875,7 +970,7 @@ function default_(addr)
         local action, tag = table.unpack(route)
         if action then
             if tag then
-                evlogf("[%s] %q", tag, addr)
+                evlogf("[%s] %s", tag, quoted(addr))
             end
             return action(addr)
         end
@@ -889,7 +984,7 @@ function route_(addr)
         local action, tag = runchain_(redirtab, addr)
         if action then
             if tag then
-                evlogf("[%s] %q", tag, addr)
+                evlogf("[%s] %s", tag, quoted(addr))
             end
             return action(addr)
         end
@@ -901,7 +996,7 @@ function route_(addr)
         local action, tag = runchain_(routetab, ip)
         if action then
             if tag then
-                evlogf("[%s] %q", tag, addr)
+                evlogf("[%s] %s", tag, quoted(addr))
             end
             return action(addr)
         end
@@ -915,7 +1010,7 @@ function route6_(addr)
         local action, tag = runchain_(redirtab, addr)
         if action then
             if tag then
-                evlogf("[%s] %q", tag, addr)
+                evlogf("[%s] %s", tag, quoted(addr))
             end
             return action(addr)
         end
@@ -927,7 +1022,7 @@ function route6_(addr)
         local action, tag = runchain_(routetab, ip1, ip2)
         if action then
             if tag then
-                evlogf("[%s] %q", tag, addr)
+                evlogf("[%s] %s", tag, quoted(addr))
             end
             return action(addr)
         end
@@ -935,32 +1030,74 @@ function route6_(addr)
     return default_(addr)
 end
 
+-- resolve_() is reached with a name the client chose: a SOCKS5 DOMAINNAME is a
+-- length-prefixed byte string (RFC 1928, 5) and an HTTP CONNECT request-target
+-- is not validated before the ruleset sees it either, so the address is that
+-- byte string with the port appended. A host name is letters, digits, hyphens
+-- and dots (RFC 1035, 2.3.1; RFC 1123, 2.1), so it never holds a colon, and an
+-- IPv6 literal is only unambiguous in brackets (RFC 3986, 3.2.2). A name
+-- breaking either rule forms no "host:port" authority, and splithostport()
+-- raises on it -- in the first rule of _G.redirect_name that reads the address,
+-- if not in resolve_ itself. The daemon reports that as a ruleset error: one
+-- error line per request carrying bytes the peer chose, plus a traceback under
+-- --traceback.
+-- Such a request is rejected rather than routed. The dialer parses an authority
+-- the same way, so a name refused here could not have been dialed either, and
+-- letting it through would only hand the default route an address that no rule
+-- was able to match.
+local function checkaddr(addr)
+    local ok, host = pcall(splithostport, addr)
+    if not ok or host == "" then
+        return nil
+    end
+    -- splithostport() strips the brackets, so only the address itself still
+    -- says whether the client wrote them
+    if addr:startswith("[") and not parse_ipv6(host) then
+        return nil
+    end
+    return addr
+end
+
 function resolve_(addr)
+    if not checkaddr(addr) then
+        evlogf("invalid address: %s", quoted(addr))
+        return nil
+    end
     local redirtab = _G.redirect_name
     if redirtab then
         local action, tag = runchain_(redirtab, addr)
         if action then
             if tag then
-                evlogf("[%s] %q", tag, addr)
+                evlogf("[%s] %s", tag, quoted(addr))
             end
             return action(addr)
         end
     end
+    -- checkaddr() above already parsed this address, so the split cannot raise
     local host, port = splithostport(addr)
-    host = string.lower(host)
+    -- _G.hosts is expected to be keyed by folded names, and an IP literal
+    -- spelled with the root dot ("127.0.0.1.") still names that address, so
+    -- the folded name is what decides the route as well
+    local name = foldname(host)
     local hosts = _G.hosts
     if hosts then
-        local entry = hosts[host]
+        local entry = hosts[name]
         if entry then
-            host = entry
-            addr = strformat("%s:%s", host, port)
+            name = entry
+            addr = strformat("%s:%s", name, port)
         end
     end
-    if parse_ipv4(host) then
-        return route_(addr)
+    -- route_/route6_ split the address again, so hand them one rebuilt from
+    -- the literal they parse (an IPv6 literal bracketed, as splithostport
+    -- requires); passing the unfolded spelling on would leave them with an
+    -- unparsable address. A name that stays a name is passed on as the client
+    -- spelled it, since the root dot also tells a resolver not to apply its
+    -- search list.
+    if parse_ipv4(name) then
+        return route_(strformat("%s:%s", name, port))
     end
-    if parse_ipv6(host) then
-        return route6_(addr)
+    if parse_ipv6(name) then
+        return route6_(strformat("[%s]:%s", name, port))
     end
     return default_(addr)
 end
@@ -1015,21 +1152,19 @@ local function authenticate(addr, username, password)
     if s and (s == true or s == password) then
         return true
     end
-    evlogf("authenticate failed: %q", username)
+    evlogf("authenticate failed: %s", quoted(username))
     return false
 end
 
+-- The credential policy is selected per request, not once while this module
+-- loads: the configuration that decides it is only applied after a "config"
+-- chunk (-c) returns, and a reload may change it again. The C side reads the
+-- same setting per request, so the two can never disagree.
 local function with_authenticate(f)
-    if not config.auth_required then
-        return function(addr, username, password)
-            _G.num_requests = _G.num_requests + 1
-            _G.num_authorized = _G.num_authorized + 1
-            return f(addr)
-        end
-    end
     return function(addr, username, password)
         _G.num_requests = _G.num_requests + 1
-        if not authenticate(addr, username, password) then
+        if config.auth_required and
+            not authenticate(addr, username, password) then
             return nil
         end
         _G.num_authorized = _G.num_authorized + 1

@@ -48,6 +48,49 @@ return function(T)
             "expected %q, got %q", "DEFERRED", tostring(result)))
     end)
 
+    T:atest("await.callback preserves trailing nils", function()
+        -- Regression: the synchronous fast path stored the callback's
+        -- arguments in a plain table and unpacked it with #, so trailing nils
+        -- were lost -- cb(nil) even returned no value at all.
+        local n = select('#', await.callback(function(cb)
+            cb(nil)
+        end))
+        assert(n == 1, string.format("expected 1 value, got %d", n))
+        local a, b, c = await.callback(function(cb)
+            cb("HELLO", nil, nil)
+        end)
+        assert(a == "HELLO" and b == nil and c == nil)
+        n = select('#', await.callback(function(cb)
+            cb("HELLO", nil, nil)
+        end))
+        assert(n == 3, string.format("expected 3 values, got %d", n))
+        -- the deferred path resumes the coroutine directly and already kept
+        -- the count; pin it so the two paths cannot drift apart
+        n = select('#', await.callback(function(cb)
+            async(function()
+                await.sleep(0)
+                cb("HELLO", nil, nil)
+            end)
+        end))
+        assert(n == 3, string.format("expected 3 deferred values, got %d", n))
+    end)
+
+    T:atest("future:get preserves trailing nils", function()
+        -- Regression: the result is table.pack'ed with its true count in .n,
+        -- but was unpacked with #, which is undefined for a table with holes
+        -- and demonstrably short when the last packed value is nil.
+        local t = async(function()
+            await.sleep(0)
+            return nil, nil
+        end)
+        local r = table.pack(t:get())
+        assert(r.n == 3, string.format("expected ok plus 2 values, got %d", r.n))
+        assert(r[1] == true and r[2] == nil and r[3] == nil)
+        -- an already-finished future takes the fast path in get()
+        local n = select('#', t:get())
+        assert(n == 3, string.format("expected 3 values on re-get, got %d", n))
+    end)
+
     T:atest("async captures error in future", function()
         local t = async(function()
             await.sleep(0)
