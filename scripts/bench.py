@@ -30,6 +30,12 @@ BENCH_NETNS_ENV = "BENCH_NETNS"
 # as a bare literal, or shaping silently applies to the wrong (unshaped) flow.
 SERVER_PORT = 5201
 PROXY_PORT = 5202
+# Floor for --startup-wait. The readiness probe returns as soon as both
+# services listen, so a larger budget costs nothing on a fast machine while
+# keeping a loaded one from failing spuriously. It is applied once, before the
+# argument reaches any consumer, so the timeout and shutdown budgets are
+# derived from the same value the wait actually uses.
+MIN_STARTUP_WAIT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -443,11 +449,12 @@ def format_bits_per_second(bits_per_second: float) -> str:
             ("Mbit/s", 1_000_000.0),
             ("Gbit/s", 1_000_000_000.0),
     )
-    for index in range(len(units) - 1, -1, -1):
-        unit, scale = units[index]
-        if bits_per_second >= scale or scale == 1.0:
+    for unit, scale in reversed(units):
+        if bits_per_second >= scale:
             return "%.2f %s" % (bits_per_second / scale, unit)
-    return "0.00 bit/s"
+    # Reached by everything below one bit/s -- zero, negatives and NaN, none of
+    # which compare greater than any scale.
+    return "%.2f bit/s" % bits_per_second
 
 
 def extract_interval_throughputs(report: Dict[str, object]) -> List[float]:
@@ -744,7 +751,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=float,
         default=1.0,
         help="maximum seconds to wait for the services to listen "
-             "before running iperf3 (at least 5)",
+             "before running iperf3 (at least %g)" % MIN_STARTUP_WAIT_SECONDS,
     )
     parser.add_argument(
         "--netem-delay",
@@ -772,13 +779,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not binary_path.exists():
         raise SystemExit("expected binary not found: %s" % binary_path)
     configure_netem(args.netem_delay)
+    startup_wait = max(args.startup_wait, MIN_STARTUP_WAIT_SECONDS)
     command_timeout_seconds = compute_command_timeout_seconds(
         args.duration,
-        args.startup_wait,
+        startup_wait,
     )
     shutdown_budget = compute_process_shutdown_budget(
         args.duration,
-        args.startup_wait,
+        startup_wait,
         scenario_count=len(SCENARIOS),
     )
 
@@ -823,15 +831,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             text=True,
         )
 
-        startup_budget = max(args.startup_wait, 5.0)
         services = [
             (iperf_server_proc, "iperf3 server"),
             (proxy_proc, "neosocksd"),
         ]
         wait_until_listening(
-            SERVER_PORT, services, timeout_seconds=startup_budget)
+            SERVER_PORT, services, timeout_seconds=startup_wait)
         wait_until_listening(
-            PROXY_PORT, services, timeout_seconds=startup_budget)
+            PROXY_PORT, services, timeout_seconds=startup_wait)
 
         for scenario in SCENARIOS:
             commands = build_scenario_commands(
