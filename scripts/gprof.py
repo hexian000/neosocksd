@@ -23,14 +23,29 @@ ROOT = Path.cwd().resolve()
 DEFAULT_BUILD_DIR = ROOT / "build"
 DEFAULT_PROFILE_BUILD_DIR = DEFAULT_BUILD_DIR / "gprof"
 DEFAULT_MARKDOWN_OUTPUT = DEFAULT_BUILD_DIR / "gprof.md"
+# The iperf3 client connects to the proxy on PROXY_PORT; the proxy forwards to
+# the iperf3 server on SERVER_PORT. Every endpoint below must be derived from
+# these constants rather than repeated as a bare literal: a client port that no
+# longer matches the proxy's listener sends the traffic straight to the iperf3
+# server, so the profiled binary does no work and the resulting flat profile is
+# silently meaningless.
+SERVER_PORT = 5201
+PROXY_PORT = 5202
+# Floor for --startup-wait. The readiness probe returns as soon as both
+# services listen, so a larger budget costs nothing on a fast machine while
+# keeping a loaded one from failing spuriously. It is applied once, before the
+# argument reaches any consumer, so the timeout and shutdown budgets are
+# derived from the same value the wait actually uses.
+MIN_STARTUP_WAIT_SECONDS = 5.0
 # Every boolean option the root CMakeLists.txt declares, with its declared
-# default, in declaration order -- except ENABLE_SANITIZERS, which
-# build_configure_command() forces OFF for profiling. An option missing here is
-# not carried over, so the profile build would measure a configuration the base
-# build was not built with.
+# default, in declaration order -- except ENABLE_SANITIZERS and BUILD_PIE,
+# which build_configure_command() forces OFF for profiling: a carried-over
+# BUILD_PIE=ON would append -pie (or -static-pie) and the target-level -fPIE
+# after the forced -no-pie/-fno-pie, turning the instrumented binary back into
+# a PIE. An option missing here is not carried over, so the profile build would
+# measure a configuration the base build was not built with.
 KNOWN_BOOL_OPTIONS = {
     "BUILD_STATIC": "OFF",
-    "BUILD_PIE": "OFF",
     "ENABLE_MIMALLOC": "OFF",
     "FORCE_POSIX": "OFF",
     "ENABLE_THREADS": "OFF",
@@ -194,6 +209,7 @@ def build_configure_command(
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         "-DBUILD_TESTING=OFF",
         "-DENABLE_SANITIZERS=OFF",
+        "-DBUILD_PIE=OFF",
         "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
         "-DCMAKE_C_FLAGS=-pg -fno-pie",
         "-DCMAKE_EXE_LINKER_FLAGS=-pg -no-pie",
@@ -406,6 +422,9 @@ def run_benchmark(
 def parse_flat_profile(gprof_output: str) -> List[FlatProfileRow]:
     rows: List[FlatProfileRow] = []
     in_table = False
+    unit_scales = {"s": 1e6, "ms": 1e3, "us": 1.0, "ns": 1e-3}
+    self_scale: Optional[float] = None
+    total_scale: Optional[float] = None
     for raw_line in gprof_output.splitlines():
         line = raw_line.rstrip()
         if line.startswith("  %   cumulative"):
@@ -416,6 +435,12 @@ def parse_flat_profile(gprof_output: str) -> List[FlatProfileRow]:
         if not line.strip():
             if rows:
                 break
+            continue
+        units = re.search(
+            r"\bcalls\s+(\S+)/call\s+(\S+)/call\s+name\b", line)
+        if units is not None:
+            self_scale = unit_scales.get(units.group(1))
+            total_scale = unit_scales.get(units.group(2))
             continue
         parts = line.split()
         if len(parts) < 4:
@@ -433,8 +458,10 @@ def parse_flat_profile(gprof_output: str) -> List[FlatProfileRow]:
         if len(parts) >= 7:
             try:
                 calls = int(parts[3])
-                self_us_per_call = float(parts[4])
-                total_us_per_call = float(parts[5])
+                if self_scale is not None:
+                    self_us_per_call = float(parts[4]) * self_scale
+                if total_scale is not None:
+                    total_us_per_call = float(parts[5]) * total_scale
                 name = parts[6]
             except ValueError:
                 name = parts[3]
@@ -493,6 +520,7 @@ def render_markdown_report(
         gprof_output: str,
         command_timeout_seconds: float,
         shutdown_budget: ProcessShutdownBudget,
+        benchmark_ran: bool,
 ) -> str:
     output_dir = output_path.parent
     rows = parse_flat_profile(gprof_output)
@@ -518,6 +546,17 @@ def render_markdown_report(
     benchmark_stderr_link = relative_markdown_path(
         output_dir, benchmark_stderr_path)
     benchmark_output_text = sanitize_report_text(benchmark_output).rstrip()
+    # Both budgets govern the benchmark subprocess and the teardown that
+    # follows it; neither applied to a run that started nothing.
+    if benchmark_ran:
+        benchmark_timeout_text = "%.1f s" % command_timeout_seconds
+        shutdown_grace_text = "SIGINT %.1f s, terminate %.1f s" % (
+            shutdown_budget.sigint_wait_seconds,
+            shutdown_budget.terminate_wait_seconds,
+        )
+    else:
+        benchmark_timeout_text = "not applicable (--skip-benchmark)"
+        shutdown_grace_text = "not applicable (--skip-benchmark)"
     gprof_output_text = sanitize_report_text(gprof_output).rstrip()
     lines = [
         "# gprof Profile",
@@ -528,13 +567,9 @@ def render_markdown_report(
         "| --- | --- |",
         "| Profile build dir | %s |" % profile_build_dir_text,
         "| Binary | %s |" % binary_path_text,
-        "| Benchmark timeout | %.1f s |" % command_timeout_seconds,
-        "| Shutdown grace | SIGINT %.1f s, terminate %.1f s |"
-        % (
-            shutdown_budget.sigint_wait_seconds,
-            shutdown_budget.terminate_wait_seconds,
-        ),
-        "| Benchmark command | `%s` |" % benchmark_command_text,
+        "| Benchmark timeout | %s |" % benchmark_timeout_text,
+        "| Shutdown grace | %s |" % shutdown_grace_text,
+        "| Benchmark command | %s |" % benchmark_command_text,
         "| Raw gprof output | [%s](%s) |" % (
             raw_gprof_text, raw_gprof_link),
         "| Benchmark stdout | [%s](%s) |" % (
@@ -649,7 +684,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=float,
         default=1.0,
         help="maximum seconds to wait for the services to listen "
-             "before running iperf3 (at least 5)",
+             "before running iperf3 (at least %g)" % MIN_STARTUP_WAIT_SECONDS,
     )
     parser.add_argument(
         "--output",
@@ -730,13 +765,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not binary_path.exists():
         raise SystemExit("expected binary not found: %s" % binary_path)
 
+    startup_wait = max(args.startup_wait, MIN_STARTUP_WAIT_SECONDS)
     command_timeout_seconds = compute_command_timeout_seconds(
         args.duration,
-        args.startup_wait,
+        startup_wait,
     )
     shutdown_budget = compute_process_shutdown_budget(
         args.duration,
-        args.startup_wait,
+        startup_wait,
         scenario_count=1,
     )
     profile_build_dir.mkdir(parents=True, exist_ok=True)
@@ -746,7 +782,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "-c",
             "127.0.0.1",
             "-p",
-            "5202",
+            str(PROXY_PORT),
             "--bidir",
             "-P",
             str(args.parallel),
@@ -773,9 +809,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             benchmark_stdout_path = profile_build_dir / "iperf3-parallel.stdout"
             benchmark_stderr_path = profile_build_dir / "iperf3-parallel.stderr"
 
-            log("+ %s" % quote_command([iperf3, "-s", "-p", "5201"]))
+            server_command = [iperf3, "-s", "-p", str(SERVER_PORT)]
+            log("+ %s" % quote_command(server_command))
             iperf_server_proc = subprocess.Popen(
-                [iperf3, "-s", "-p", "5201"],
+                server_command,
                 cwd=str(profile_build_dir),
                 stdout=iperf_server_log,
                 stderr=subprocess.STDOUT,
@@ -784,8 +821,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             proxy_command = [
                 str(binary_path),
-                "-l", "127.0.0.1:5202",
-                "-f", "127.0.0.1:5201",
+                "-l", "127.0.0.1:%d" % PROXY_PORT,
+                "-f", "127.0.0.1:%d" % SERVER_PORT,
                 "--loglevel", "0",
             ]
             proxy_env = os.environ.copy()
@@ -801,15 +838,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 text=True,
             )
 
-            startup_budget = max(args.startup_wait, 5.0)
             services = [
                 (iperf_server_proc, "iperf3 server"),
                 (proxy_proc, "neosocksd"),
             ]
             wait_until_listening(
-                5201, services, timeout_seconds=startup_budget)
+                SERVER_PORT, services, timeout_seconds=startup_wait)
             wait_until_listening(
-                5202, services, timeout_seconds=startup_budget)
+                PROXY_PORT, services, timeout_seconds=startup_wait)
             benchmark_output = run_benchmark(
                 benchmark_commands,
                 cwd=profile_build_dir,
@@ -851,16 +887,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "no gprof data files found; expected gmon.out or GMON_OUT_PREFIX outputs")
     log("found %d gprof data files" % len(profile_files))
     benchmark_stdout_path = profile_build_dir / "iperf3-parallel.stdout"
-    benchmark_command_text = " ; ".join(
-        format_command_for_report(command) for command in benchmark_commands
-    )
     if not benchmark_output and benchmark_stdout_path.exists():
         benchmark_output = benchmark_stdout_path.read_text(
             encoding="utf-8", errors="replace")
-        if args.skip_benchmark:
-            benchmark_command_text = "reused existing benchmark log from %s" % workspace_relative_path(
-                benchmark_stdout_path
-            )
+    # The cell is markdown, not a command: only an actually executed command is
+    # quoted as code. Reusing a log, or finding none at all, must not present
+    # the command line this invocation never ran.
+    if not args.skip_benchmark:
+        benchmark_command_text = "`%s`" % " ; ".join(
+            format_command_for_report(command) for command in benchmark_commands
+        )
+    elif benchmark_output:
+        benchmark_command_text = "reused existing benchmark log from %s" % (
+            workspace_relative_path(benchmark_stdout_path)
+        )
+    else:
+        benchmark_command_text = "not run (--skip-benchmark)"
     gprof_proc = run_command(
         [gprof, str(binary_path), *[str(path) for path in profile_files]],
         cwd=ROOT,
@@ -881,6 +923,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         gprof_output=gprof_output,
         command_timeout_seconds=command_timeout_seconds,
         shutdown_budget=shutdown_budget,
+        benchmark_ran=not args.skip_benchmark,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report, encoding="utf-8")
