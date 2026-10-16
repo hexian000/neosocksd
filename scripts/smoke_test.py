@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import os
 import random
 import re
 import signal
@@ -32,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,10 +109,10 @@ def echo_roundtrip(sock: socket.socket, size: int = 4096) -> None:
 
 
 class SocksError(Exception):
-    """A SOCKS handshake failure. `stage` names where it failed ("method",
-    "userpass", "connect") and `code` carries the protocol reply byte, so a
-    negative test can assert the specific failure cause rather than accepting
-    any SOCKS failure."""
+    """A SOCKS handshake failure. `stage` names where it failed ("version",
+    "method", "userpass", "connect") and `code` carries the protocol reply
+    byte, so a negative test can assert the specific failure cause rather than
+    accepting any SOCKS failure."""
 
     def __init__(
         self,
@@ -239,11 +241,20 @@ def _socks4_request(
         if hostname is not None:
             req += hostname + b"\x00"
         sock.sendall(bytes(req))
+        # SOCKS4 reply: VN(1)=0, CD(1), DSTPORT(2), DSTIP(4)
         reply = recv_exact(sock, 8)
         if reply[0] != 0x00:
-            raise SocksError("bad SOCKS4 reply version: %d" % reply[0])
+            raise SocksError(
+                "bad SOCKS4 reply version: %d" % reply[0],
+                stage="version",
+                code=reply[0],
+            )
         if reply[1] != 0x5A:
-            raise SocksError("SOCKS4 request rejected, code 0x%02X" % reply[1])
+            raise SocksError(
+                "SOCKS4 request rejected, code 0x%02X" % reply[1],
+                stage="connect",
+                code=reply[1],
+            )
         return sock
     except Exception:
         sock.close()
@@ -397,38 +408,95 @@ def _bind_echo_dual() -> Tuple[_ThreadingTCPServer, _ThreadingTCPServer, int]:
     raise RuntimeError("found no loopback port free on both IPv4 and IPv6")
 
 
+def _ipv6_loopback_error() -> Optional[str]:
+    """Return why the IPv6 loopback is unusable here, or None if it works.
+
+    Where IPv6 is disabled -- no `::1`, `ipv6.disable=1`, a v4-only container
+    -- binding it fails with EAFNOSUPPORT/EADDRNOTAVAIL. Probing once lets the
+    v6 targets be left unbound and their cases report SKIP, instead of the
+    whole run aborting before a single case starts.
+    """
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+            sock.bind((HOST6, 0))
+    except OSError as exc:
+        return "IPv6 loopback unusable: %s" % exc
+    return None
+
+
+def _resolves_ipv6(name: str) -> bool:
+    """Whether resolving `name` can yield an IPv6 address on this host."""
+    try:
+        infos = socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    return any(info[0] == socket.AF_INET6 for info in infos)
+
+
 class Targets:
-    """Loopback echo servers used as proxy destinations."""
+    """Loopback echo servers used as proxy destinations.
+
+    The IPv6 targets are optional: where the IPv6 loopback cannot be bound
+    they are left unbound and `ipv6_error`/`echo_any_error` carry the reason,
+    so the cases that need them report SKIP while the rest still run.
+    """
 
     def __init__(self) -> None:
-        self.echo = _ThreadingTCPServer((HOST, 0), _EchoHandler)
-        self.echo6 = _ThreadingTCPServer6((HOST6, 0), _EchoHandler)
-        self.udp_echo = _ThreadingUDPServer((HOST, 0), _UDPEchoHandler)
-        self.echo_any, self.echo_any6, self.echo_any_port = _bind_echo_dual()
-        self.echo_port = self.echo.server_address[1]
-        self.echo6_port = self.echo6.server_address[1]
-        self.udp_echo_port = self.udp_echo.server_address[1]
-        self._threads = [
-            threading.Thread(target=self.echo.serve_forever, daemon=True),
-            threading.Thread(target=self.echo6.serve_forever, daemon=True),
-            threading.Thread(target=self.udp_echo.serve_forever, daemon=True),
-            threading.Thread(target=self.echo_any.serve_forever, daemon=True),
-            threading.Thread(target=self.echo_any6.serve_forever, daemon=True),
-        ]
+        self._servers: List[socketserver.BaseServer] = []
+        self.ipv6_error = _ipv6_loopback_error()
+        self.echo_any_error: Optional[str] = self.ipv6_error
+        self.echo6_port: Optional[int] = None
+        self.echo_any_port: Optional[int] = None
+        try:
+            self.echo_port = self._add(
+                _ThreadingTCPServer((HOST, 0), _EchoHandler)
+            )
+            self.udp_echo_port = self._add(
+                _ThreadingUDPServer((HOST, 0), _UDPEchoHandler)
+            )
+            if self.ipv6_error is None:
+                self.echo6_port = self._add(
+                    _ThreadingTCPServer6((HOST6, 0), _EchoHandler)
+                )
+                srv4, srv6, port = _bind_echo_dual()
+                self._add(srv4)
+                self._add(srv6)
+                self.echo_any_port = port
+                self.echo_any_error = None
+            elif _resolves_ipv6("localhost"):
+                # the daemon resolves the hostname target itself and dials
+                # whatever family comes first, so a v4-only echo server here
+                # would be a coin flip rather than a test
+                self.echo_any_error = (
+                    '%s, and "localhost" still resolves to an IPv6 address'
+                    % self.ipv6_error
+                )
+            else:
+                # no loopback name can resolve to IPv6, so one family is
+                # already every family a hostname target can reach
+                self.echo_any_port = self._add(
+                    _ThreadingTCPServer((HOST, 0), _EchoHandler)
+                )
+                self.echo_any_error = None
+        except BaseException:
+            # a bind that fails midway must not leak the sockets already
+            # bound; these servers are not serving yet, so only close them
+            for srv in self._servers:
+                srv.server_close()
+            raise
+
+    def _add(self, server: socketserver.BaseServer) -> int:
+        """Take ownership of a bound server, returning its listening port."""
+        self._servers.append(server)
+        return server.server_address[1]
 
     def start(self) -> "Targets":
-        for t in self._threads:
-            t.start()
+        for srv in self._servers:
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
         return self
 
     def stop(self) -> None:
-        for srv in (
-            self.echo,
-            self.echo6,
-            self.udp_echo,
-            self.echo_any,
-            self.echo_any6,
-        ):
+        for srv in self._servers:
             try:
                 srv.shutdown()
                 srv.server_close()
@@ -503,7 +571,18 @@ class Daemon:
         self.timeout = timeout
         self.name = name
         self.proc: Optional[subprocess.Popen] = None
-        self._stderr = tempfile.TemporaryFile(mode="w+b")
+        self._stderr = tempfile.NamedTemporaryFile(mode="w+b", delete=False)
+        # Keep automatic cleanup when startup fails or the context is never
+        # entered, as well as explicit cleanup at the end of a with-block.
+        self._stderr_cleanup = weakref.finalize(
+            self, self._close_stderr, self._stderr)
+
+    @staticmethod
+    def _close_stderr(file) -> None:
+        try:
+            file.close()
+        finally:
+            Path(file.name).unlink()
 
     def _argv(self) -> List[str]:
         argv = [str(self.binary)]
@@ -544,8 +623,12 @@ class Daemon:
     def stderr_all(self) -> str:
         """Everything the daemon has logged so far, untruncated. Assertions on
         log content need this; stderr_text() below is for failure reports."""
-        self._stderr.seek(0)
-        return self._stderr.read().decode(errors="replace")
+        # Reopen by name for an independent reader offset; the inherited
+        # writer descriptor must stay at the end. Bound the snapshot size so
+        # an actively logging daemon cannot keep extending the read forever.
+        with Path(self._stderr.name).open("rb") as reader:
+            return reader.read(os.fstat(reader.fileno()).st_size).decode(
+                errors="replace")
 
     def stderr_text(self) -> str:
         # keep the report compact: only the tail matters for diagnosis
@@ -553,17 +636,20 @@ class Daemon:
         return "\n".join(lines[-25:])
 
     def __enter__(self) -> "Daemon":
-        self.proc = subprocess.Popen(
-            self._argv(),
-            cwd=str(ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=self._stderr,
-        )
         try:
+            self.proc = subprocess.Popen(
+                self._argv(),
+                cwd=str(ROOT),
+                stdout=subprocess.DEVNULL,
+                stderr=self._stderr,
+            )
             self._wait_ready()
         except Exception:
             # tear down best-effort; the startup error is what matters
-            self._terminate(check=False)
+            try:
+                self._terminate(check=False)
+            finally:
+                self._stderr_cleanup()
             raise
         return self
 
@@ -609,7 +695,7 @@ class Daemon:
         try:
             self._terminate(check=exc_type is None)
         finally:
-            self._stderr.close()
+            self._stderr_cleanup()
 
 
 # --------------------------------------------------------------------------- #
@@ -697,12 +783,18 @@ class Context:
 
     @property
     def echo6_port(self) -> int:
-        return self.targets.echo6_port
+        port = self.targets.echo6_port
+        if port is None:
+            raise SkipTest(self.targets.ipv6_error)
+        return port
 
     @property
     def echo_any_port(self) -> int:
         """Echo port served on both loopback families, for hostname targets."""
-        return self.targets.echo_any_port
+        port = self.targets.echo_any_port
+        if port is None:
+            raise SkipTest(self.targets.echo_any_error)
+        return port
 
     @property
     def udp_echo_port(self) -> int:
@@ -747,16 +839,35 @@ def test(name: str) -> Callable[[Callable[[Context], None]], Callable]:
 # --------------------------------------------------------------------------- #
 
 
+# A sanitizer report ends the process with status 1 as well, so a rejection is
+# only the expected one when no report was printed on the way out.
+SANITIZER_REPORT = re.compile(r"Sanitizer|runtime error")
+
+
+def assert_rejected(proc: subprocess.CompletedProcess, expect: str) -> None:
+    """Require the EXIT_FAILURE rejection a main() path takes, carrying that
+    path's own diagnostic: a signal death (negative code), a sanitizer report,
+    or a failure for another reason does not count."""
+    text = (proc.stdout + proc.stderr).decode(errors="replace")
+    assert proc.returncode == 1, "expected exit status 1, got %d\n%s" % (
+        proc.returncode,
+        text,
+    )
+    assert not SANITIZER_REPORT.search(text), "sanitizer report:\n%s" % text
+    assert expect in text, "missing the expected diagnostic %r:\n%s" % (
+        expect,
+        text,
+    )
+
+
 @test("cli/help")
 def t_cli_help(ctx: Context) -> None:
     proc = subprocess.run(
         [str(ctx.binary), "--help"], capture_output=True, timeout=10
     )
-    # `--help` prints usage to stderr and exits non-zero by design
-    # (mirrors the CMake `neosocksd_help` test marked WILL_FAIL).
-    assert proc.returncode != 0, "expected non-zero exit, got 0"
-    text = (proc.stdout + proc.stderr).decode(errors="replace").lower()
-    assert "usage" in text, "help output missing 'usage'"
+    # `--help` prints usage to stderr and exits with EXIT_FAILURE by design
+    # (mirrors the CMake `neosocksd_help` test).
+    assert_rejected(proc, "usage: ")
 
 
 @test("cli/unknown-flag")
@@ -766,15 +877,13 @@ def t_cli_unknown_flag(ctx: Context) -> None:
         capture_output=True,
         timeout=10,
     )
-    assert proc.returncode != 0, "expected non-zero exit for unknown flag"
+    assert_rejected(proc, "unknown argument: `--definitely-not-a-flag'")
 
 
 @test("cli/missing-listen")
 def t_cli_missing_listen(ctx: Context) -> None:
-    proc = subprocess.run(
-        [str(ctx.binary), "--loglevel", "0"], capture_output=True, timeout=10
-    )
-    assert proc.returncode != 0, "expected non-zero exit when no listener given"
+    proc = subprocess.run([str(ctx.binary)], capture_output=True, timeout=10)
+    assert_rejected(proc, "configuration check failed")
 
 
 # The startup notice cases below pin loglevel 4 rather than taking ctx.loglevel:
@@ -1258,7 +1367,10 @@ def t_pipe(ctx: Context) -> None:
         timeout=10,
     )
     if probe.returncode != 0:
+        assert_rejected(probe, "unknown argument: `--pipe'")
         raise SkipTest("binary built without --pipe (WITH_SPLICE) support")
+    text = (probe.stdout + probe.stderr).decode(errors="replace")
+    assert not SANITIZER_REPORT.search(text), "sanitizer report:\n%s" % text
     listen = free_port()
     d = Daemon(
         ctx.binary,
@@ -1633,13 +1745,17 @@ def t_api_ruleset_update(ctx: Context) -> None:
         # new routing takes effect
         with socks4a_connect(HOST, listen, "hotpath.test", 80) as sock:
             echo_roundtrip(sock)
-        # old route is gone -> rejected
-        stale_rejected = False
+        # old route is gone -> rejected with CD=0x5B (request rejected or
+        # failed); any other failure means the reply itself is broken
         try:
             socks4a_connect(HOST, listen, "smoke.test", 80).close()
-        except SocksError:
-            stale_rejected = True
-        assert stale_rejected, "stale route survived ruleset hot reload"
+        except SocksError as e:
+            assert e.stage == "connect" and e.code == 0x5B, (
+                "the stale route must be rejected with SOCKS4 CD=0x5B, got "
+                "stage=%r code=%r" % (e.stage, e.code)
+            )
+        else:
+            raise AssertionError("stale route survived ruleset hot reload")
 
         # a rejected update (a chunk that fails to compile) must return non-200
         # AND leave the previously loaded ruleset routing traffic: a bad push
@@ -1742,9 +1858,9 @@ def t_config_boot_proxy_notice(ctx: Context) -> None:
 
 @test("config/boot-rejects-invalid")
 def t_config_boot_rejects_invalid(ctx: Context) -> None:
-    """The config check is deferred to after the boot config loads, so it is
-    the only one that sees a boot-supplied field. A boot config carrying an
-    out-of-range value must still be rejected."""
+    """A boot config carrying an out-of-range value must be rejected. The boot
+    loader range-checks each field as it reads it, so the load itself fails
+    before main() reaches the deferred config check."""
     config = (
         "return {\n"
         "    listen = %r,\n"
@@ -1755,8 +1871,28 @@ def t_config_boot_rejects_invalid(ctx: Context) -> None:
     proc = subprocess.run(
         [str(ctx.binary), "-c", str(cfg)], capture_output=True, timeout=10
     )
-    assert proc.returncode != 0, (
-        "expected non-zero exit for an out-of-range boot timeout"
+    assert_rejected(proc, "timeout is out of range")
+
+
+@test("config/boot-deferred-check")
+def t_config_boot_deferred_check(ctx: Context) -> None:
+    """With -c, main() defers the config check until the boot config loads, so
+    a boot config that loads cleanly but leaves a required field unset must
+    be rejected by that deferred check rather than start the daemon."""
+    config = "return {\n    forward = %r,\n}\n" % (
+        "%s:%d" % (HOST, free_port()),
+    )
+    cfg = write_ruleset(ctx.tmpdir, "boot_no_listen.lua", config)
+    proc = subprocess.run(
+        [str(ctx.binary), "-c", str(cfg)], capture_output=True, timeout=10
+    )
+    assert_rejected(proc, "configuration check failed")
+    text = (proc.stdout + proc.stderr).decode(errors="replace")
+    assert "listen address is not specified" in text, (
+        "rejected for another reason:\n%s" % text
+    )
+    assert "unable to load config" not in text, (
+        "rejected by the boot loader, not the config check:\n%s" % text
     )
 
 
@@ -1868,7 +2004,11 @@ def main(argv: List[str]) -> int:
 
     output = Path(args.output) if args.output else build_dir / "smoke_test.md"
 
-    targets = Targets().start()
+    try:
+        targets = Targets().start()
+    except (OSError, RuntimeError) as exc:
+        log("failed to bind the loopback echo targets: %s" % exc)
+        return 2
     try:
         with tempfile.TemporaryDirectory(prefix="neosocksd-smoke-") as td:
             ctx = Context(
@@ -1879,6 +2019,8 @@ def main(argv: List[str]) -> int:
             )
             log("binary : %s" % binary)
             log("echo   : %s:%d" % (HOST, targets.echo_port))
+            if targets.ipv6_error is not None:
+                log("ipv6   : %s" % targets.ipv6_error)
             log("running %d test(s)\n" % len(cases))
             results = run_cases(ctx, cases, args.keep_going)
     finally:
