@@ -349,6 +349,81 @@ T_DECLARE_CASE(util_modify_io_events_same_events_noop)
 	(void)close(sv[1]);
 }
 
+/* Calibrate the kernel's rounding/clamping for the requested size, then leave
+ * a different baseline so an omitted buffer setter cannot pass the test. */
+static int prepare_socket_buffer(const int fd, const int opt, const int size)
+{
+	T_CHECK(setsockopt(fd, SOL_SOCKET, opt, &size, sizeof(size)) == 0);
+	int expected = 0;
+	socklen_t len = sizeof(expected);
+	T_CHECK(getsockopt(fd, SOL_SOCKET, opt, &expected, &len) == 0);
+	const int baseline = 1;
+	T_CHECK(setsockopt(fd, SOL_SOCKET, opt, &baseline, sizeof(baseline)) ==
+		0);
+	int actual = 0;
+	T_CHECK(getsockopt(fd, SOL_SOCKET, opt, &actual, &len) == 0);
+	T_CHECK(actual != expected);
+	return expected;
+}
+
+T_DECLARE_CASE(util_socket_tune_tcp_applies_config)
+{
+	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(fd >= 0);
+	struct config conf = {
+		.tcp_nodelay = true,
+		.tcp_keepalive = true,
+		.tcp_sndbuf = 16384,
+		.tcp_rcvbuf = 32768,
+#if WITH_TCP_KEEPALIVE_PARAMS
+		.tcp_keepidle = 7,
+		.tcp_keepintvl = 3,
+		.tcp_keepcnt = 2,
+#endif
+	};
+	const int expected_sndbuf =
+		prepare_socket_buffer(fd, SO_SNDBUF, conf.tcp_sndbuf);
+	const int expected_rcvbuf =
+		prepare_socket_buffer(fd, SO_RCVBUF, conf.tcp_rcvbuf);
+	socket_tune_tcp(fd, &conf);
+	int nodelay = 0, keepalive = 0, sndbuf = 0, rcvbuf = 0;
+	socklen_t len = sizeof(int);
+	T_CHECK(getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, &len) == 0);
+	T_CHECK(getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, &len) ==
+		0);
+	T_CHECK(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &len) == 0);
+	T_CHECK(getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &len) == 0);
+#if WITH_TCP_KEEPALIVE_PARAMS
+	int idle = 0, intvl = 0, cnt = 0;
+	T_CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, &len) == 0);
+	T_CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, &len) == 0);
+	T_CHECK(getsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, &len) == 0);
+#endif
+	conf.tcp_nodelay = false;
+	conf.tcp_keepalive = false;
+	socket_tune_tcp(fd, &conf);
+	int disabled_nodelay = 1, disabled_keepalive = 1;
+	T_CHECK(getsockopt(
+			fd, IPPROTO_TCP, TCP_NODELAY, &disabled_nodelay,
+			&len) == 0);
+	T_CHECK(getsockopt(
+			fd, SOL_SOCKET, SO_KEEPALIVE, &disabled_keepalive,
+			&len) == 0);
+	T_CHECK(close(fd) == 0);
+
+	T_EXPECT_EQ(nodelay, 1);
+	T_EXPECT_EQ(keepalive, 1);
+	T_EXPECT_EQ(sndbuf, expected_sndbuf);
+	T_EXPECT_EQ(rcvbuf, expected_rcvbuf);
+#if WITH_TCP_KEEPALIVE_PARAMS
+	T_EXPECT_EQ(idle, conf.tcp_keepidle);
+	T_EXPECT_EQ(intvl, conf.tcp_keepintvl);
+	T_EXPECT_EQ(cnt, conf.tcp_keepcnt);
+#endif
+	T_EXPECT_EQ(disabled_nodelay, 0);
+	T_EXPECT_EQ(disabled_keepalive, 0);
+}
+
 T_DECLARE_CASE(util_socket_bind_netdev_invalid_fd)
 {
 	/* An invalid fd causes setsockopt to fail; socket_bind_netdev
@@ -563,6 +638,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(util_log_escape_table),
 	T_CASE(util_log_escape_strlen_bound),
 	T_CASE(util_loadlibs_unloadlibs),
+	T_CASE(util_socket_tune_tcp_applies_config),
 	T_CASE(util_socket_bind_netdev_invalid_fd),
 	T_CASE(util_socket_bind_netdev_empty_name),
 	T_CASE(util_socket_set_transparent_invalid_fd_aborts),

@@ -18,9 +18,29 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /* Compile-time length of a string literal excluding the null terminator. */
 #define CONSTSTRLEN(s) (sizeof(s "") - sizeof(""))
+
+/* Upper bound (excluding NUL) on the prefix format_fd() builds. */
+#define FD_PREFIX_STRLEN                                                       \
+	(CONSTSTRLEN("[fd:] ") + CONSTSTRLEN("-2147483648") /* max int fd */)
+
+/* The fd-correlation prefix, empty when there is no descriptor left to name:
+ * the transfer hand-off moves the accepted fd out of the context, and the
+ * number it held may since have been reused by another connection. */
+static inline const char *
+format_fd(char *restrict buf, const size_t maxlen, const int fd)
+{
+	if (fd < 0) {
+		return "";
+	}
+	const int n = snprintf(buf, maxlen, "[fd:%d] ", fd);
+	ASSERT(n > 0 && (size_t)n < maxlen);
+	(void)n;
+	return buf;
+}
 
 /* Sentinel value representing an invalid or unavailable timestamp. */
 #define TSTAMP_NIL (-1.0)
@@ -241,6 +261,26 @@ void socket_set_transparent(int fd, bool tproxy);
  * parameter is left at the system default when it is not positive. */
 void socket_set_keepalive(int fd, int idle, int intvl, int cnt);
 #endif
+
+/* Apply the configured best-effort TCP and buffer tuning. Mandatory descriptor
+ * setup and endpoint-specific options remain the caller's responsibility. */
+static inline void
+socket_tune_tcp(const int fd, const struct config *restrict conf)
+{
+	LOG_SOCKOPT(
+		"socket_set_tcp",
+		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive));
+#if WITH_TCP_KEEPALIVE_PARAMS
+	if (conf->tcp_keepalive) {
+		socket_set_keepalive(
+			fd, conf->tcp_keepidle, conf->tcp_keepintvl,
+			conf->tcp_keepcnt);
+	}
+#endif
+	LOG_SOCKOPT(
+		"socket_set_buffer",
+		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf));
+}
 
 /* Forward already-buffered client bytes to a freshly dialed upstream, whose
  * send buffer should be empty. Retry successful partial sends; fail on an

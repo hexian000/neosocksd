@@ -138,25 +138,6 @@ struct socks_ctx {
 };
 ASSERT_SUPER(struct gcbase, struct socks_ctx, gcbase);
 
-/* Upper bound (excluding NUL) on the prefix format_fd() builds. */
-#define FD_PREFIX_STRLEN                                                       \
-	(CONSTSTRLEN("[fd:] ") + CONSTSTRLEN("-2147483648") /* max int fd */)
-
-/* The fd-correlation prefix, empty when there is no descriptor left to name:
- * the transfer hand-off moves the accepted fd out of the context, and the
- * number it held may since have been reused by another connection. */
-static const char *
-format_fd(char *restrict buf, const size_t maxlen, const int fd)
-{
-	if (fd < 0) {
-		return "";
-	}
-	const int n = snprintf(buf, maxlen, "[fd:%d] ", fd);
-	ASSERT(n > 0 && (size_t)n < maxlen);
-	(void)n;
-	return buf;
-}
-
 /* Upper bound (excluding NUL) on a dialaddr rendered by format_addr(). */
 #define DIALADDR_LOG_STRLEN LOG_ESCAPE_STRLEN(DIALADDR_STRLEN)
 
@@ -998,7 +979,7 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 			"BIND peer mismatch (expected `%s', got `%s'), allowing",
 			expect_str, peer_str);
 	}
-	/* both setters return the errno; they never set the global one */
+	/* use the error code returned by the setters, not errno */
 	int setup_err = socket_set_cloexec(conn_fd);
 	if (setup_err == 0) {
 		setup_err = socket_set_nonblock(conn_fd);
@@ -1012,21 +993,7 @@ bind_accept_cb(struct ev_loop *loop, ev_io *watcher, const int revents)
 		gc_unref(&ctx->gcbase);
 		return;
 	}
-	/* best-effort tuning; failure does not affect correctness */
-	const struct config *restrict conf = ctx->s->conf;
-	LOG_SOCKOPT(
-		"socket_set_tcp",
-		socket_set_tcp(conn_fd, conf->tcp_nodelay, conf->tcp_keepalive));
-#if WITH_TCP_KEEPALIVE_PARAMS
-	if (conf->tcp_keepalive) {
-		socket_set_keepalive(
-			conn_fd, conf->tcp_keepidle, conf->tcp_keepintvl,
-			conf->tcp_keepcnt);
-	}
-#endif
-	LOG_SOCKOPT(
-		"socket_set_buffer",
-		socket_set_buffer(conn_fd, conf->tcp_sndbuf, conf->tcp_rcvbuf));
+	socket_tune_tcp(conn_fd, ctx->s->conf);
 	ev_io_stop(loop, &ctx->w_socket);
 	socket_close(ctx->dialed_fd);
 	ctx->dialed_fd = conn_fd;
@@ -1092,7 +1059,7 @@ static int socks_open_bound_fd(
 			return -1;
 		}
 	}
-	/* both setters return the errno; they never set the global one */
+	/* use the error code returned by the setters, not errno */
 	int setup_err = socket_set_cloexec(fd);
 	if (setup_err == 0) {
 		setup_err = socket_set_nonblock(fd);
@@ -1383,8 +1350,7 @@ static int udp_out_fd(
 	if (fd < 0) {
 		err = errno;
 	} else {
-		/* both setters return the errno; they never set the global
-		 * one */
+		/* use the error code returned by the setters, not errno */
 		err = socket_set_cloexec(fd);
 		if (err == 0) {
 			err = socket_set_nonblock(fd);
@@ -1764,9 +1730,9 @@ socks_udp_start(struct ev_loop *loop, struct socks_ctx *restrict ctx)
 		ctx->udp_out[i].failed = false;
 	}
 	udp_frag_reset(ctx);
-	/* Set state before the halfopen decrement below -- ctx_stop is a
-	 * no-op if gc_unref fires in between, matching socks_start_transfer/
-	 * forward_commit/http_ctx_start_transfer. */
+	/* Switch from halfopen bookkeeping to active-session cleanup. The
+	 * context retains ownership of the UDP relay sockets and watchers;
+	 * socks_ctx_stop() tears them down and decrements the session count. */
 	ctx->state = STATE_UDP_RELAY;
 	ev_timer_stop(loop, &ctx->w_timeout);
 	stats->num_halfopen--;

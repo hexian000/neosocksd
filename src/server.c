@@ -147,8 +147,7 @@ static void accept_cb(
 			continue;
 		}
 
-		/* both setters return the errno; they never set the global
-		 * one */
+		/* use the error code returned by the setters, not errno */
 		int setup_err = socket_set_cloexec(fd);
 		if (setup_err == 0) {
 			setup_err = socket_set_nonblock(fd);
@@ -159,22 +158,7 @@ static void accept_cb(
 			socket_close(fd);
 			continue;
 		}
-		/* best-effort tuning; failure does not affect correctness */
-		LOG_SOCKOPT(
-			"socket_set_tcp",
-			socket_set_tcp(
-				fd, conf->tcp_nodelay, conf->tcp_keepalive));
-#if WITH_TCP_KEEPALIVE_PARAMS
-		if (conf->tcp_keepalive) {
-			socket_set_keepalive(
-				fd, conf->tcp_keepidle, conf->tcp_keepintvl,
-				conf->tcp_keepcnt);
-		}
-#endif
-		LOG_SOCKOPT(
-			"socket_set_buffer",
-			socket_set_buffer(
-				fd, conf->tcp_sndbuf, conf->tcp_rcvbuf));
+		socket_tune_tcp(fd, conf);
 
 		l->stats.num_serve++;
 		l->serve(s, loop, fd, (const struct sockaddr *)&addr.sa);
@@ -210,7 +194,7 @@ static bool add_listener(
 		return false;
 	}
 
-	/* both setters return the errno; they never set the global one */
+	/* use the error code returned by the setters, not errno */
 	int setup_err = socket_set_cloexec(fd);
 	if (setup_err == 0) {
 		setup_err = socket_set_nonblock(fd);
@@ -247,20 +231,7 @@ static bool add_listener(
 			socket_set_fastopen(fd, backlog));
 	}
 #endif
-	/* best-effort tuning; failure does not affect correctness */
-	LOG_SOCKOPT(
-		"socket_set_tcp",
-		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive));
-#if WITH_TCP_KEEPALIVE_PARAMS
-	if (conf->tcp_keepalive) {
-		socket_set_keepalive(
-			fd, conf->tcp_keepidle, conf->tcp_keepintvl,
-			conf->tcp_keepcnt);
-	}
-#endif
-	LOG_SOCKOPT(
-		"socket_set_buffer",
-		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf));
+	socket_tune_tcp(fd, conf);
 
 	if (LOGLEVEL(NOTICE)) {
 		char addr_str[64];

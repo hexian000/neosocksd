@@ -1709,7 +1709,7 @@ attempt_open(struct dialer *restrict d, const struct sockaddr *restrict sa)
 		return -1;
 	}
 
-	/* both setters return the errno; they never set the global one */
+	/* use the error code returned by the setters, not errno */
 	int setup_err = socket_set_cloexec(fd);
 	if (setup_err == 0) {
 		setup_err = socket_set_nonblock(fd);
@@ -1726,20 +1726,7 @@ attempt_open(struct dialer *restrict d, const struct sockaddr *restrict sa)
 		socket_bind_netdev(fd, conf->netdev);
 	}
 #endif
-	/* best-effort tuning; failure does not affect correctness */
-	LOG_SOCKOPT(
-		"socket_set_tcp",
-		socket_set_tcp(fd, conf->tcp_nodelay, conf->tcp_keepalive));
-#if WITH_TCP_KEEPALIVE_PARAMS
-	if (conf->tcp_keepalive) {
-		socket_set_keepalive(
-			fd, conf->tcp_keepidle, conf->tcp_keepintvl,
-			conf->tcp_keepcnt);
-	}
-#endif
-	LOG_SOCKOPT(
-		"socket_set_buffer",
-		socket_set_buffer(fd, conf->tcp_sndbuf, conf->tcp_rcvbuf));
+	socket_tune_tcp(fd, conf);
 #if WITH_TCP_FASTOPEN_CONNECT
 	if (conf->tcp_fastopen_connect) {
 		/* opportunistic; falls back to a normal handshake on failure */

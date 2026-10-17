@@ -28,7 +28,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* never rollback */
 enum http_state {
 	STATE_INIT,
 	STATE_REQUEST,
@@ -59,25 +58,6 @@ struct http_ctx {
 	struct http_conn conn;
 };
 ASSERT_SUPER(struct gcbase, struct http_ctx, gcbase);
-
-/* Upper bound (excluding NUL) on the prefix format_fd() builds. */
-#define FD_PREFIX_STRLEN                                                       \
-	(CONSTSTRLEN("[fd:] ") + CONSTSTRLEN("-2147483648") /* max int fd */)
-
-/* The fd-correlation prefix, empty when there is no descriptor left to name:
- * the transfer hand-off moves the accepted fd out of the context, and the
- * number it held may since have been reused by another connection. */
-static const char *
-format_fd(char *restrict buf, const size_t maxlen, const int fd)
-{
-	if (fd < 0) {
-		return "";
-	}
-	const int n = snprintf(buf, maxlen, "[fd:%d] ", fd);
-	ASSERT(n > 0 && (size_t)n < maxlen);
-	(void)n;
-	return buf;
-}
 
 static int format_status(
 	char *restrict s, const size_t maxlen,
