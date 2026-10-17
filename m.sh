@@ -3,6 +3,13 @@
 cd "$(dirname "$0")"
 set -ex
 
+# empty the build directory, preserving build/tmp (the scratch area that
+# AGENTS.md documents as surviving clean rebuilds)
+clean_build() {
+    mkdir -p build
+    find build -mindepth 1 -maxdepth 1 ! -name tmp -exec rm -rf {} +
+}
+
 case "$1" in
 "fmt")
     # format code
@@ -10,7 +17,8 @@ case "$1" in
     ;;
 "c")
     # clean artifacts
-    rm -rf build compile_commands.json
+    clean_build
+    rm -f compile_commands.json
     ;;
 "doc")
     VERSION="dev"
@@ -28,12 +36,13 @@ case "$1" in
     fi
     mkdir -p build/doc
     cp -r neosocksd.lua libruleset.lua agent.lua example build/doc/
-    sed "s/^Version: dev$/Version: ${VERSION}/g" API.md >build/doc/API.md
+    VERSION_REPLACEMENT="$(printf '%s' "${VERSION}" | sed 's/[\\&/]/\\&/g')"
+    sed "s/^Version: dev$/Version: ${VERSION_REPLACEMENT}/g" API.md >build/doc/API.md
     ;;
 "x")
     # cross compiling, environment vars need to be set
     : "${SYSROOT:?SYSROOT must be set}"
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_SYSROOT="${SYSROOT}" \
@@ -45,7 +54,7 @@ case "$1" in
     ;;
 "vanilla")
     # rebuild without ruleset
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Release" \
@@ -58,7 +67,7 @@ case "$1" in
     ;;
 "posix")
     # rebuild for strict POSIX compliance
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Release" \
@@ -71,7 +80,7 @@ case "$1" in
     ;;
 "clang")
     # rebuild with Linux clang/lld
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_C_COMPILER="clang" \
@@ -84,7 +93,7 @@ case "$1" in
     ;;
 "msys2")
     # rebuild with MSYS 2
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc" \
@@ -102,7 +111,7 @@ case "$1" in
     : "${ANDROID_API_LEVEL:?ANDROID_API_LEVEL must be set}"
     : "${ANDROID_NDK_ROOT:?ANDROID_NDK_ROOT must be set}"
     : "${ABI_NAME:?ABI_NAME must be set}"
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_BUILD_TYPE="Release" \
         -DCMAKE_SYSTEM_NAME="Android" \
@@ -118,12 +127,13 @@ case "$1" in
     ;;
 "san")
     # rebuild with clang & sanitizers
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Debug" \
         -DCMAKE_C_COMPILER="clang" \
         -DENABLE_SANITIZERS=ON \
+        -DENABLE_THREADS=ON \
         ..
     cp compile_commands.json ../
     cmake --build . -j"$(nproc)"
@@ -132,7 +142,7 @@ case "$1" in
     ;;
 "min")
     # rebuild for minimized size
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_BUILD_TYPE="MinSizeRel" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
@@ -142,7 +152,7 @@ case "$1" in
     ;;
 "p")
     # rebuild for profiling
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_BUILD_TYPE="RelWithDebInfo" \
         -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
@@ -155,7 +165,7 @@ case "$1" in
     ;;
 "r")
     # rebuild for release
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Release" \
@@ -168,7 +178,7 @@ case "$1" in
     ;;
 "d")
     # rebuild for debug
-    rm -rf build && mkdir -p build && cd build
+    clean_build && cd build
     cmake \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         -DCMAKE_BUILD_TYPE="Debug" \
@@ -187,6 +197,7 @@ case "$1" in
     ls -lh bin/neosocksd
     ;;
 *)
-    echo "Unknown option: $1"
+    echo "Unknown option: $1" >&2
+    exit 1
     ;;
 esac
