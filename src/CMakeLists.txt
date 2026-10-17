@@ -373,12 +373,15 @@ add_unit_test(http_test
     MOCK_SRCS proto/http.c
     MOCK_DEFINITIONS http_date=test_http_date)
 add_unit_test(codec_test
-    SRCS proto/codec_test.c proto/codec.c)
+    SRCS proto/codec_test.c
+    MOCK_SRCS proto/codec.c
+    MOCK_DEFINITIONS mz_crc32=test_mz_crc32)
 # Drive the decompression-bomb cap at a small size instead of the 2 GiB
 # production default, so the abort is reachable without producing gigabytes.
 # Kept above the largest legitimate round-trip case (100000 bytes) so only the
 # bomb case trips it.
 target_compile_definitions(codec_test PRIVATE CODEC_MAX_INFLATE=1048576)
+target_compile_definitions(codec_test_mock_impl PRIVATE CODEC_MAX_INFLATE=1048576)
 # main_test: black-box / integration tests against the real modules, plus the
 # project fuzz suite. This is the only test executable that links several real
 # modules together instead of mocking collaborators.

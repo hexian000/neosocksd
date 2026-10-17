@@ -288,11 +288,11 @@ inflate_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 			*buf = z->dstbuf + z->dstpos;
 			*len = n;
 			z->dstpos += n;
-			/* Defer a base read error until all buffered input has
-			 * been decoded: the base may return data and an error
-			 * together, and srclen>0 still holds decodable bytes.
-			 * Mirrors gzip_decompress_body. */
-			if (z->dstpos == z->dstlen && z->srclen == 0) {
+			/* Defer a base read error until buffered input and pending
+			 * output have both drained. A match can extend past the
+			 * ring even after its last compressed byte was consumed. */
+			if (z->dstpos == z->dstlen && z->srclen == 0 &&
+			    z->status != TINFL_STATUS_HAS_MORE_OUTPUT) {
 				return z->srcerr;
 			}
 			return 0;
@@ -737,6 +737,22 @@ struct gzip_rstream {
 };
 ASSERT_SUPER(struct io_stream, struct gzip_rstream, s);
 
+/* Consume a buffered filename/comment span, including its NUL terminator. */
+static bool gzip_skip_text(struct gzip_rstream *restrict z)
+{
+	if (z->srclen == 0) {
+		return false;
+	}
+	const unsigned char *end = memchr(z->srcbuf, 0, z->srclen);
+	const size_t n =
+		end != NULL ? (size_t)(end - z->srcbuf) + 1 : z->srclen;
+	if (z->hdrflg & GZIP_FHCRC) {
+		z->hdrcrc = (uint_least32_t)mz_crc32(z->hdrcrc, z->srcbuf, n);
+	}
+	z->srcbuf += n, z->srclen -= n;
+	return end != NULL;
+}
+
 /* Parse gzip member header from z->srcbuf. Returns 1=done, 0=needs-more-input, -1=format-error. */
 static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 {
@@ -815,24 +831,8 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				z->hphase = GZIP_HPHASE_FCOMMENT;
 				break;
 			}
-			if (z->srclen == 0) {
-				/* FEXTRA_2 falls through here without re-checking the
-				 * loop guard; the buffer may be exhausted exactly at
-				 * the FEXTRA boundary, so wait for more input before
-				 * reading the name byte */
+			if (!gzip_skip_text(z)) {
 				return 0;
-			}
-			{
-				/* read the terminator byte from srcbuf directly:
-				 * b is stale when FEXTRA_2 fell through here */
-				const unsigned char c = *z->srcbuf;
-				z->hdrcrc = (uint_least32_t)mz_crc32(
-					z->hdrcrc, z->srcbuf, 1);
-				z->srcbuf++, z->srclen--;
-				if (c != 0x00) {
-					/* still inside filename */
-					return 0;
-				}
 			}
 			z->hphase = GZIP_HPHASE_FCOMMENT;
 			break;
@@ -841,14 +841,8 @@ static int gzip_rstream_parse_hdr(struct gzip_rstream *restrict z)
 				z->hphase = GZIP_HPHASE_FHCRC_1;
 				break;
 			}
-			{
-				const unsigned char c = *z->srcbuf;
-				z->hdrcrc = (uint_least32_t)mz_crc32(
-					z->hdrcrc, z->srcbuf, 1);
-				z->srcbuf++, z->srclen--;
-				if (c != 0x00) {
-					return 0;
-				}
+			if (!gzip_skip_text(z)) {
+				return 0;
 			}
 			z->hphase = GZIP_HPHASE_FHCRC_1;
 			break;

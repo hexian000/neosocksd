@@ -8,8 +8,7 @@
  *   proto/codec.c    module under test
  * Leaf libraries: csnippets (io/stream, utils/buffer), miniz.
  *
- * codec.c has no stateful collaborators, so this test links no other module
- * sources and the mock section below is empty.
+ * CRC calls in codec.c are observed through a test-only compiler alias.
  */
 
 #include "codec.h"
@@ -22,6 +21,7 @@
 #include "utils/buffer.h"
 #include "utils/testing.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -30,8 +30,18 @@
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
- * mock - codec.c has no stateful collaborators; nothing to mock.
+ * mock - count CRC calls while delegating to the real implementation.
  * ---------------------------------------------------------------------- */
+
+static size_t crc_calls;
+
+mz_ulong test_mz_crc32(mz_ulong crc, const unsigned char *ptr, size_t len);
+
+mz_ulong test_mz_crc32(mz_ulong crc, const unsigned char *ptr, size_t len)
+{
+	++crc_calls;
+	return mz_crc32(crc, ptr, len);
+}
 
 /* -------------------------------------------------------------------------
  * fuzz - randomized codec inputs are exercised by main_test (fuzz_inflate,
@@ -272,10 +282,12 @@ static struct io_stream *choke_memwriter(
 	return &m->s;
 }
 
-/* A reader that always reports an immediate error and no data, to check that a
- * codec reader surfaces the base's error code rather than its own status. */
+/* A reader that reports an error alongside its last bytes, or immediately
+ * when initialized without data. */
 struct err_memstream {
 	struct io_stream s;
+	const unsigned char *data;
+	size_t len, pos;
 	int err;
 };
 
@@ -283,9 +295,14 @@ static int
 err_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct err_memstream *restrict m = p;
-	(void)buf;
-	*len = 0;
-	return m->err;
+	size_t n = m->len - m->pos;
+	if (n > *len) {
+		n = *len;
+	}
+	*buf = n > 0 ? m->data + m->pos : NULL;
+	m->pos += n;
+	*len = n;
+	return m->pos == m->len ? m->err : 0;
 }
 
 static int err_mem_close(void *p)
@@ -294,7 +311,8 @@ static int err_mem_close(void *p)
 	return 0;
 }
 
-static struct io_stream *err_memreader(const int err)
+static struct io_stream *
+err_memreader(const int err, const void *data, const size_t len)
 {
 	static const struct io_stream_vftable vftable = {
 		.direct_read = err_direct_read,
@@ -305,6 +323,9 @@ static struct io_stream *err_memreader(const int err)
 		return NULL;
 	}
 	m->s = (struct io_stream){ .vftable = &vftable, .data = NULL };
+	m->data = data;
+	m->len = len;
+	m->pos = 0;
 	m->err = err;
 	return &m->s;
 }
@@ -1196,6 +1217,125 @@ gzip_with_opt_headers(const void *src, const size_t srclen, bool corrupt_hcrc)
 	return out;
 }
 
+static struct vbuffer *gzip_with_text_headers(
+	const struct vbuffer *plain, const unsigned char flags,
+	const size_t length)
+{
+	struct vbuffer *g = VBUF_NEW(VBUF_LEN(plain) + 2 * (length + 1) + 2);
+	if (g == NULL) {
+		return NULL;
+	}
+	unsigned char hdr[10];
+	memcpy(hdr, VBUF_DATA(plain), sizeof(hdr));
+	hdr[3] = flags;
+	VBUF_APPEND(g, hdr, sizeof(hdr));
+	for (int flag = GZIP_FNAME; flag <= GZIP_FCOMMENT; flag <<= 1) {
+		if (flags & flag) {
+			for (size_t i = 0; i < length; ++i) {
+				VBUF_APPEND(g, "x", 1);
+			}
+			VBUF_APPEND(g, "", 1);
+		}
+	}
+	if (flags & GZIP_FHCRC) {
+		const mz_ulong crc =
+			mz_crc32(MZ_CRC32_INIT, VBUF_DATA(g), VBUF_LEN(g));
+		const unsigned char bytes[] = { (unsigned char)crc,
+						(unsigned char)(crc >> 8) };
+		VBUF_APPEND(g, bytes, sizeof(bytes));
+	}
+	VBUF_APPEND(
+		g, (const unsigned char *)VBUF_DATA(plain) + 10,
+		VBUF_LEN(plain) - 10);
+	if (VBUF_HAS_OOM(g)) {
+		VBUF_FREE(g);
+		return NULL;
+	}
+	return g;
+}
+
+T_DECLARE_SUBCASE(
+	gzip_check_text_headers, const struct vbuffer *g, const bool hcrc)
+{
+	static const unsigned char payload[] = "text metadata payload";
+	static const size_t chunks[] = { 1, 17, IO_BUFSIZE };
+	for (size_t i = 0; i < ARRAY_SIZE(chunks); ++i) {
+		struct io_stream *r = codec_gzip_reader(
+			drip_memreader(VBUF_DATA(g), VBUF_LEN(g), chunks[i]));
+		T_CHECK(r != NULL);
+		unsigned char out[sizeof(payload)];
+		crc_calls = 0;
+		T_EXPECT(stream_read_exact(r, out, sizeof(out)));
+		T_EXPECT(stream_at_eof(r));
+		T_EXPECT_MEMEQ(out, payload, sizeof(out));
+		/* Ten fixed-header CRCs, at most two text fields per buffer,
+		 * and one payload CRC per buffer. */
+		const size_t buffers =
+			(VBUF_LEN(g) + chunks[i] - 1) / chunks[i];
+		T_EXPECT(crc_calls <= 12 + (hcrc ? 2 * buffers : buffers));
+		T_EXPECT_EQ(io_stream_close(r), 0);
+	}
+}
+
+/* Long text fields must be consumed per buffered span, not CRC'd byte by
+ * byte. Verify the work bound alongside payload/EOF and FHCRC validation. */
+T_DECLARE_CASE(codec_gzip_text_headers_use_buffered_spans)
+{
+	static const unsigned char payload[] = "text metadata payload";
+	static const unsigned char flags[] = {
+		GZIP_FNAME,
+		GZIP_FCOMMENT,
+		GZIP_FNAME | GZIP_FCOMMENT,
+		GZIP_FNAME | GZIP_FHCRC,
+		GZIP_FCOMMENT | GZIP_FHCRC,
+		GZIP_FNAME | GZIP_FCOMMENT | GZIP_FHCRC,
+	};
+	static const size_t lengths[] = { 0, IO_BUFSIZE * 2 + 1 };
+	struct vbuffer *plain = gzip_make_member(payload, sizeof(payload));
+	T_CHECK(plain != NULL);
+	for (size_t i = 0; i < ARRAY_SIZE(flags); ++i) {
+		for (size_t j = 0; j < ARRAY_SIZE(lengths); ++j) {
+			struct vbuffer *g = gzip_with_text_headers(
+				plain, flags[i], lengths[j]);
+			T_CHECK(g != NULL);
+			const bool hcrc = (flags[i] & GZIP_FHCRC) != 0;
+			T_CALL_SUBCASE(gzip_check_text_headers, g, hcrc);
+			if (lengths[j] != 0) {
+				/* EOF before the first text terminator must remain a
+				 * truncated-header error after spanning several buffers. */
+				struct io_stream *r =
+					codec_gzip_reader(drip_memreader(
+						VBUF_DATA(g), 10 + lengths[j],
+						17));
+				T_CHECK(r != NULL);
+				unsigned char out;
+				size_t n = 1;
+				T_EXPECT(io_stream_read(r, &out, &n) != 0);
+				T_EXPECT_EQ(n, 0U);
+				T_EXPECT(io_stream_close(r) != 0);
+			}
+			if (hcrc) {
+				const size_t header_len =
+					VBUF_LEN(g) - (VBUF_LEN(plain) - 10) -
+					2;
+				((unsigned char *)VBUF_DATA(g))[header_len] ^=
+					1;
+				struct io_stream *r =
+					codec_gzip_reader(drip_memreader(
+						VBUF_DATA(g), VBUF_LEN(g), 17));
+				T_CHECK(r != NULL);
+				unsigned char out;
+				size_t n = 1;
+				T_EXPECT(io_stream_read(r, &out, &n) != 0);
+				T_EXPECT_EQ(n, 0U);
+				T_EXPECT(io_stream_close(r) != 0);
+			}
+			VBUF_FREE(g);
+		}
+	}
+	VBUF_FREE(plain);
+}
+
 T_DECLARE_CASE(codec_gzip_optional_headers)
 {
 	enum { N = 2048 };
@@ -1829,7 +1969,8 @@ T_DECLARE_CASE(codec_gzip_finish_resumes_after_short_write)
 T_DECLARE_CASE(codec_inflate_surfaces_base_error)
 {
 	enum { SENTINEL = -5 };
-	struct io_stream *r = codec_inflate_reader(err_memreader(SENTINEL));
+	struct io_stream *r =
+		codec_inflate_reader(err_memreader(SENTINEL, NULL, 0));
 	T_CHECK(r != NULL);
 	unsigned char out[16];
 	size_t n = sizeof(out);
@@ -2022,6 +2163,71 @@ T_DECLARE_CASE(codec_inflate_drains_output_after_input_ends)
 	free(out);
 }
 
+/* A base can return the last compressed bytes together with an error. The
+ * caller stops on that error, so it must follow every pending output byte,
+ * including a match that continues after the decompressor wraps its ring. */
+T_DECLARE_SUBCASE(
+	expect_inflate_drains_before_base_error, const size_t variant,
+	const size_t chunk)
+{
+	enum { N = 32785 };
+	static const unsigned char zeros[N] = { 0 };
+	unsigned char *const out = malloc(N);
+	T_CHECK(out != NULL);
+	memset(out, 0xff, N);
+	struct vbuffer *compressed = VBUF_NEW(64);
+	T_CHECK(compressed != NULL);
+	struct io_stream *w =
+		deflate_variants[variant].writer(io_heapwriter(&compressed));
+	T_CHECK(w != NULL);
+	T_CHECK(stream_write_all(w, zeros, N));
+	T_CHECK(io_stream_close(w) == 0);
+	T_CHECK(compressed != NULL && VBUF_LEN(compressed) < IO_BUFSIZE);
+	struct io_stream *r = deflate_variants[variant].reader(err_memreader(
+		EIO, VBUF_DATA(compressed), VBUF_LEN(compressed)));
+	T_CHECK(r != NULL);
+
+	size_t total = 0;
+	int err = 0;
+	while (total < N && err == 0) {
+		const void *buf = NULL;
+		size_t n = chunk;
+		err = io_stream_direct_read(r, &buf, &n);
+		if (n == 0 || n > N - total) {
+			break;
+		}
+		memcpy(out + total, buf, n);
+		total += n;
+	}
+	const bool matched = memcmp(out, zeros, N) == 0;
+	const void *buf = NULL;
+	size_t n = chunk;
+	const int next_err = io_stream_direct_read(r, &buf, &n);
+	const int close_err = io_stream_close(r);
+	VBUF_FREE(compressed);
+	free(out);
+
+	T_EXPECT_EQ(total, (size_t)N);
+	T_EXPECT(matched);
+	T_EXPECT_EQ(err, EIO);
+	T_EXPECT_EQ(next_err, EIO);
+	T_EXPECT_EQ(n, (size_t)0);
+	T_EXPECT_EQ(close_err, 0);
+}
+
+T_DECLARE_CASE(codec_inflate_drains_output_before_base_error)
+{
+	const size_t chunks[] = { 32785, 1000 };
+	for (size_t variant = 0; variant < ARRAY_SIZE(deflate_variants);
+	     variant++) {
+		for (size_t k = 0; k < ARRAY_SIZE(chunks); k++) {
+			T_CALL_SUBCASE(
+				expect_inflate_drains_before_base_error,
+				variant, chunks[k]);
+		}
+	}
+}
+
 /* The gzip body decoder drains pending output the same way: with the trailer
  * cut off, every body byte is delivered before the short trailer fails. */
 T_DECLARE_CASE(codec_gzip_drains_output_before_short_trailer)
@@ -2181,6 +2387,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_deflate_writer_emits_final_block),
 	T_CASE(codec_deflate_writer_close_emits_final_block),
 	T_CASE(codec_inflate_drains_output_after_input_ends),
+	T_CASE(codec_inflate_drains_output_before_base_error),
 	T_CASE(codec_gzip_drains_output_before_short_trailer),
 	T_CASE(codec_deflate_writer_resumes_after_short_write),
 	T_CASE(codec_deflate_writer_surfaces_base_error),
@@ -2208,6 +2415,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(codec_gzip_flush_multiframe),
 	T_CASE(codec_gzip_flush_empty),
 	T_CASE(codec_gzip_optional_headers),
+	T_CASE(codec_gzip_text_headers_use_buffered_spans),
 	T_CASE(codec_gzip_empty_fname_after_fextra),
 	T_CASE(codec_zlib_flush_then_continue),
 	T_CASE(codec_zlib_corrupt_input_fails),
