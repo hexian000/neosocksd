@@ -6,7 +6,7 @@
 #include "io.h"
 #include "meta/class.h"
 #include "stream.h"
-#include "strings/string.h"
+#include "strings/internal.h"
 #include "utils/buffer.h"
 
 #include <assert.h>
@@ -446,26 +446,17 @@ static int buf_vprintf(void *p, const char *restrict format, va_list args)
 		b->err = 0;
 		return ret;
 	}
-	/* Format through u8vsnprintf, not the C library vsnprintf, so this
-	 * shares the locale-independent, UTF-8-safe engine io_heapprintf uses
-	 * (via VBUF_VAPPENDF). buf_flush_ above succeeded, so b->len == 0 and
-	 * maxlen == b->bufsize > 0. */
-	char *s = (char *)b->buf + b->len;
-	size_t maxlen = b->bufsize - b->len;
-	ret = u8vsnprintf(s, maxlen, format, args);
+	/* The formatter reports the stored prefix separately from the needed
+	 * length: it ends at a whole UTF-8 unit and may contain embedded NULs.
+	 * buf_flush_ succeeded, so b->len == 0 and b->bufsize > 0. */
+	size_t written;
+	ret = u8vsnprintf_stored(
+		(char *)b->buf, b->bufsize, format, args, &written);
 	if (ret < 0) {
 		/* the output length does not fit in an int */
 		return EOVERFLOW;
 	}
-	if ((size_t)ret < maxlen) {
-		b->len += (size_t)ret;
-		return 0;
-	}
-	/* Truncated: u8vsnprintf stops on a whole-codepoint boundary at or
-	 * before maxlen-1, so advance by the bytes it actually wrote (it
-	 * NUL-terminates there) rather than assuming the buffer filled to
-	 * bufsize-1, which could split a UTF-8 sequence. */
-	b->len += strlen(s);
+	b->len = written;
 	return 0;
 }
 
