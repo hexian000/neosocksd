@@ -17,6 +17,7 @@
 #include "meta/arraysize.h"
 #include "utils/slog.h"
 
+#include <ctype.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -334,6 +335,13 @@ static void print_usage(const char *restrict argv0)
  * for the caller to check; return false on a missing digit or on overflow. */
 static bool opt_parse_int(const char **restrict s, int *restrict out)
 {
+	const char *digits = *s;
+	while (isspace((unsigned char)*digits)) {
+		digits++;
+	}
+	if (*digits == '-') {
+		return false;
+	}
 	char *endptr;
 	const uintmax_t value = strtoumax(*s, &endptr, 10);
 	if (endptr == *s || value > INT_MAX) {
@@ -785,6 +793,29 @@ static const struct metaconfig conf_fields[] = {
 	{ NULL, 0, 0 },
 };
 
+void conf_pushtable(lua_State *restrict L, const struct config *restrict conf)
+{
+	lua_createtable(L, 0, (int)ARRAY_SIZE(conf_fields) - 1);
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		const void *value = (const char *)conf + f->offset;
+		switch (f->type) {
+		case CONF_STRING:
+			lua_pushstring(L, *(const char *const *)value);
+			break;
+		case CONF_INT:
+			lua_pushinteger(L, *(const int *)value);
+			break;
+		case CONF_DOUBLE:
+			lua_pushnumber(L, *(const double *)value);
+			break;
+		case CONF_BOOL:
+			lua_pushboolean(L, *(const bool *)value);
+			break;
+		}
+		lua_setfield(L, -2, f->key);
+	}
+}
+
 /* Validate or apply one non-string config field from Lua stack top; not for CONF_STRING. */
 static bool load_field(
 	lua_State *restrict L, const struct metaconfig *restrict f,
@@ -965,47 +996,48 @@ static int conf_fill_fields(lua_State *restrict L)
 	 * never dangles into the block freed on a failed load. The resulting
 	 * pointers are staged and only committed once the whole pass completes. */
 	const char *newptr[ARRAY_SIZE(conf_fields)];
-	if (fill->total > 0) {
-		char *pos = fill->block;
-		char *const blockend = fill->block + fill->total;
-		for (const struct metaconfig *f = conf_fields; f->key != NULL;
-		     f++) {
-			if (f->type != CONF_STRING) {
-				continue;
-			}
-			const char **fptr =
-				(const char **)((char *)conf + f->offset);
-			newptr[f - conf_fields] = *fptr;
-			lua_getfield(L, -1, f->key);
-			const char *s;
-			size_t len = 0;
-			if (lua_type(L, -1) == LUA_TSTRING) {
-				s = lua_tolstring(L, -1, &len);
-			} else {
-				s = *fptr;
-				if (s != NULL) {
-					len = strlen(s);
-				}
-			}
-			if (s != NULL) {
-				/* clamp to the measured block: a stateful __index
-				 * could return a longer string on this second
-				 * lua_getfield, which must not overflow `block` */
-				const size_t avail = (size_t)(blockend - pos);
-				if (avail == 0) {
-					newptr[f - conf_fields] = "";
-				} else {
-					if (len + 1 > avail) {
-						len = avail - 1;
-					}
-					memcpy(pos, s, len);
-					pos[len] = '\0';
-					newptr[f - conf_fields] = pos;
-					pos += len + 1;
-				}
-			}
-			lua_pop(L, 1);
+	char *pos = fill->block;
+	size_t avail = fill->total;
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		if (f->type != CONF_STRING) {
+			continue;
 		}
+		const char **fptr = (const char **)((char *)conf + f->offset);
+		newptr[f - conf_fields] = *fptr;
+		lua_getfield(L, -1, f->key);
+		const char *s;
+		size_t len = 0;
+		if (lua_type(L, -1) == LUA_TSTRING) {
+			s = lua_tolstring(L, -1, &len);
+			if (memchr(s, '\0', len) != NULL) {
+				return luaL_error(
+					L, "field `%s' contains a NUL byte",
+					f->key);
+			}
+		} else {
+			s = *fptr;
+			if (s != NULL) {
+				len = strlen(s);
+			}
+		}
+		if (s != NULL) {
+			/* clamp to the measured block: a stateful __index
+			 * could return a longer string on this second
+			 * lua_getfield, which must not overflow `block` */
+			if (avail == 0) {
+				newptr[f - conf_fields] = "";
+			} else {
+				if (len + 1 > avail) {
+					len = avail - 1;
+				}
+				memcpy(pos, s, len);
+				pos[len] = '\0';
+				newptr[f - conf_fields] = pos;
+				pos += len + 1;
+				avail -= len + 1;
+			}
+		}
+		lua_pop(L, 1);
 	}
 
 	/* Every protected read succeeded; repoint the staged string fields into
@@ -1046,11 +1078,9 @@ static bool load_table(
 	lua_State *restrict L, struct config *restrict conf, const bool reload,
 	const bool has_ruleset)
 {
-	/* daemonize and user_name are consumed in main() before any boot config
-	 * is loaded -- daemonization must precede thread creation -- so they can
-	 * only take effect from the command line. Reject them rather than accept
-	 * a setting that would silently do nothing (notably user_name, which
-	 * would otherwise leave the process running as root). */
+	/* Daemonization and the target user are command-line-only settings.
+	 * Reject them in configuration tables to keep process identity and
+	 * daemon mode under command-line control. */
 	static const char *const cli_only[] = { "daemonize", "user_name" };
 	for (size_t i = 0; i < ARRAY_SIZE(cli_only); i++) {
 		lua_getfield(L, -1, cli_only[i]);
@@ -1096,7 +1126,13 @@ static bool load_table(
 			}
 		} else if (lua_type(L, -1) == LUA_TSTRING) {
 			size_t len;
-			lua_tolstring(L, -1, &len);
+			const char *s = lua_tolstring(L, -1, &len);
+			if (memchr(s, '\0', len) != NULL) {
+				LOGE_F("boot: field `%s' contains a NUL byte",
+				       f->key);
+				lua_pop(L, 1);
+				return false;
+			}
 			total += len + 1;
 		} else {
 			LOGE_F("boot: field `%s' must be a string", f->key);

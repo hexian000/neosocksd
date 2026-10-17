@@ -109,8 +109,13 @@ bool conf_parseargs(struct config *restrict conf, int argc, char *argv[]);
 #if WITH_LUA
 struct lua_State;
 
+/* Push a new Lua table containing the configurable fields and their values. */
+void conf_pushtable(
+	struct lua_State *restrict L, const struct config *restrict conf);
+
 /* Extract config fields from a Lua table at the top of L's stack, checking
- * their domains; nil fields keep their current value. Returns false on a bad
+ * their domains (strings must contain no embedded NUL); nil fields keep their
+ * current value. Returns false on a bad
  * field, but may also raise, so call it from a protected frame. L may be the
  * ruleset VM (cfunc_loadconfig) or a standalone state used for a boot config
  * (conf_loadboot); this function assumes nothing about which. */

@@ -21,7 +21,9 @@
 #include "utils/slog.h"
 #include "utils/testing.h"
 
+#include <inttypes.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -269,6 +271,43 @@ T_DECLARE_CASE(parseargs_rejects_empty_numeric_args)
 	}
 }
 
+T_DECLARE_CASE(parseargs_rejects_wrapped_negative_integers)
+{
+	char negative[64];
+	(void)snprintf(negative, sizeof(negative), "-%" PRIuMAX, UINTMAX_MAX);
+	char spaced[80];
+	(void)snprintf(spaced, sizeof(spaced), " \t%s", negative);
+	char startup[96];
+	(void)snprintf(startup, sizeof(startup), "1:%s:10", negative);
+	char startup_full[96];
+	(void)snprintf(startup_full, sizeof(startup_full), "1:30:%s", negative);
+	const char *const cases[][2] = {
+		{ "-m", negative },
+		{ "-m", spaced },
+		{ "--loglevel", negative },
+		{ "--max-startups", negative },
+		{ "--max-startups", startup },
+		{ "--max-startups", startup_full },
+#if WITH_THREADS
+		{ "--workers", spaced },
+#endif
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct config conf;
+		char *argv[] = { "conf_test", (char *)cases[i][0],
+				 (char *)cases[i][1] };
+		T_EXPECT(!conf_parseargs(&conf, 3, argv));
+	}
+	struct config conf;
+	char *argv[] = { "conf_test", "-m", " \t+123", "--max-startups",
+			 " +1: +30: +100" };
+	T_EXPECT(conf_parseargs(&conf, 5, argv));
+	T_EXPECT_EQ(conf.max_sessions, 123);
+	T_EXPECT_EQ(conf.startup_limit_start, 1);
+	T_EXPECT_EQ(conf.startup_limit_rate, 30);
+	T_EXPECT_EQ(conf.startup_limit_full, 100);
+}
+
 T_DECLARE_CASE(conf_rejects_proxy_with_socks5_extensions)
 {
 	struct config conf = make_valid_conf();
@@ -513,7 +552,17 @@ T_DECLARE_CASE(conf_print_round_trips_every_field)
 
 	struct config loaded = conf_default();
 	T_EXPECT(conf_loadfromtable(L, &loaded));
+	conf_pushtable(L, &conf);
+	bool matches = true;
+	lua_pushnil(L);
+	while (lua_next(L, 1) != 0) {
+		lua_pushvalue(L, -2);
+		lua_gettable(L, 2);
+		matches = matches && lua_rawequal(L, -1, -2);
+		lua_pop(L, 2);
+	}
 	lua_close(L);
+	T_EXPECT(matches);
 
 	T_EXPECT_STREQ(loaded.listen, conf.listen);
 	T_EXPECT_STREQ(loaded.forward, conf.forward);
@@ -1755,10 +1804,8 @@ T_DECLARE_CASE(loadtable_second_call_does_not_dangle_prior_string)
 }
 
 /*
- * daemonize and user_name are consumed before any boot config loads, so a
- * config table must not be able to set them: accepting a value that silently
- * does nothing is the bug (a user_name that never drops privileges leaves the
- * process running as root). conf_loadfromtable rejects them outright.
+ * daemonize and user_name are command-line-only settings.
+ * conf_loadfromtable rejects either field in a configuration table.
  */
 T_DECLARE_CASE(loadtable_rejects_cli_only_fields)
 {
@@ -1913,6 +1960,63 @@ load_metatable_conf(const char *restrict src, struct config *restrict conf)
 	return ok;
 }
 
+T_DECLARE_CASE(loadtable_rejects_embedded_nul_strings)
+{
+	static const char *const fields[] = {
+		"listen",     "forward", "proxy", "restapi", "http_listen",
+#if WITH_CARES
+		"nameserver",
+#endif
+#if WITH_NETDEVICE
+		"netdev",
+#endif
+	};
+	lua_State *L = luaL_newstate();
+	T_CHECK(L != NULL);
+	bool rejected = true;
+	bool unchanged = true;
+	for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
+		struct config conf = make_valid_conf();
+		lua_newtable(L);
+		static const char value[] = "prefix\0suffix";
+		lua_pushlstring(L, value, sizeof(value) - 1);
+		lua_setfield(L, -2, fields[i]);
+		lua_pushinteger(L, 7);
+		lua_setfield(L, -2, "loglevel");
+		const bool ok = conf_loadfromtable(L, &conf);
+		const bool intact = conf.loglevel == LOG_LEVEL_NOTICE &&
+				    strcmp(conf.listen, "127.0.0.1:1080") == 0;
+		free(conf.strings);
+		lua_pop(L, 1);
+		rejected = rejected && !ok;
+		unchanged = unchanged && intact;
+	}
+	lua_close(L);
+	T_EXPECT(rejected);
+	T_EXPECT(unchanged);
+}
+
+T_DECLARE_CASE(loadtable_rejects_embedded_nul_on_apply)
+{
+	static const char *const measured[] = { "nil", "'good'" };
+	for (size_t i = 0; i < ARRAY_SIZE(measured); i++) {
+		char src[512];
+		(void)snprintf(
+			src, sizeof(src),
+			"local n=0 return setmetatable({loglevel=7}, {__index=function(_,k) "
+			"if k=='listen' then n=n+1 if n==1 then return %s end "
+			"return 'bad'..string.char(0)..'suffix' end end})",
+			measured[i]);
+		struct config conf;
+		const bool ok = load_metatable_conf(src, &conf);
+		const bool intact = conf.loglevel == LOG_LEVEL_NOTICE &&
+				    conf.listen == NULL;
+		free(conf.strings);
+		T_EXPECT(!ok);
+		T_EXPECT(intact);
+	}
+}
+
 T_DECLARE_CASE(loadtable_clamps_stateful_metatable_index)
 {
 	/* (c) truncation: 'listen' measures as "ab" but the apply pass returns a
@@ -1996,6 +2100,24 @@ static bool reload_conf(
 	}
 	lua_close(L);
 	return ok;
+}
+
+T_DECLARE_CASE(reloadtable_rejects_embedded_nul_atomically)
+{
+	struct config conf = make_valid_conf();
+	T_EXPECT(reload_conf(
+		"return { proxy = 'socks5://127.0.0.1:1081' }", &conf, true));
+	char *const strings = conf.strings;
+	const bool ok = reload_conf(
+		"return { proxy = 'socks5://127.0.0.1:1082\\0ignored', loglevel = 7 }",
+		&conf, true);
+	const bool intact =
+		conf.strings == strings &&
+		strcmp(conf.proxy, "socks5://127.0.0.1:1081") == 0 &&
+		conf.loglevel == LOG_LEVEL_NOTICE;
+	free(conf.strings);
+	T_EXPECT(!ok);
+	T_EXPECT(intact);
 }
 
 #if WITH_RULESET
@@ -2174,6 +2296,23 @@ T_DECLARE_CASE(loadboot_rejects_truncated_stream)
 
 	free(conf.strings);
 	(void)unlink(path);
+}
+
+T_DECLARE_CASE(loadboot_rejects_embedded_nul)
+{
+	char path[] = TEST_TMPDIR "/conf_nul_XXXXXX";
+	T_CHECK(write_tempfile(
+			path,
+			"return {listen='127.0.0.1:1080\\0ignored',loglevel=7}") ==
+		0);
+	struct config conf = conf_default();
+	const bool ok = conf_loadboot(&conf, path);
+	(void)unlink(path);
+	const bool intact =
+		conf.listen == NULL && conf.loglevel == LOG_LEVEL_NOTICE;
+	free(conf.strings);
+	T_EXPECT(!ok);
+	T_EXPECT(intact);
 }
 
 T_DECLARE_CASE(loadboot_applies_config_table)
@@ -2360,6 +2499,7 @@ static const struct testing_suite suite[] = {
 #endif
 	T_CASE(parseargs_accepts_unlimited_max_startups),
 	T_CASE(parseargs_rejects_empty_numeric_args),
+	T_CASE(parseargs_rejects_wrapped_negative_integers),
 	T_CASE(conf_rejects_proxy_with_socks5_extensions),
 	T_CASE(conf_accepts_valid_configuration),
 	T_CASE(conf_rejects_invalid_resolve_pf),
@@ -2455,6 +2595,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(loadtable_second_call_does_not_dangle_prior_string),
 	T_CASE(loadtable_rejects_cli_only_fields),
 	T_CASE(loadtable_clamps_stateful_metatable_index),
+	T_CASE(loadtable_rejects_embedded_nul_strings),
+	T_CASE(loadtable_rejects_embedded_nul_on_apply),
+	T_CASE(reloadtable_rejects_embedded_nul_atomically),
+	T_CASE(loadboot_rejects_embedded_nul),
 	T_CASE(loadtable_rejects_out_of_range_fields),
 	T_CASE(loadtable_raises_instead_of_returning_false),
 #if WITH_RULESET

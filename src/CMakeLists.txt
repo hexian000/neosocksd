@@ -339,6 +339,9 @@ set_tests_properties(forward_test PROPERTIES TIMEOUT 10)
 add_unit_test(conf_test
     SRCS conf_test.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
     WITH_LUA)
+file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/tmp")
+target_compile_definitions(conf_test PRIVATE
+    TEST_TMPDIR="${PROJECT_BINARY_DIR}/tmp")
 add_unit_test(transfer_test
     SRCS transfer_test.c
     MOCK_SRCS transfer.c

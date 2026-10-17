@@ -7,6 +7,7 @@
  * Linked translation units (see CMakeLists.txt):
  *   ruleset/api.c    module under test
  *   ruleset/base.c   ruleset Lua substrate
+ *   conf.c           configuration field metadata and export
  *   proto/codec.c    leaf
  * The dialer/resolver/api_client/server symbols bound by api.c are replaced
  * by the mocks in the mock section below.
@@ -676,6 +677,9 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 	struct config conf = {
 		.listen = "127.0.0.1:1080",
 		.forward = "127.0.0.1:8080",
+		.ruleset = "rules.lua",
+		.user_name = "proxy-user",
+		.daemonize = true,
 		.timeout = 12.5,
 		.traceback = true,
 		.memlimit = 64,
@@ -701,6 +705,14 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 	T_EXPECT(lua_toboolean(L, 4) != 0);
 	T_EXPECT_EQ(lua_tointeger(L, 5), 64);
 	T_EXPECT(lua_toboolean(L, 6) != 0);
+
+	lua_settop(L, 0);
+	T_EXPECT(run_chunk(
+		L,
+		"local c=neosocksd.config() return c.ruleset, c.user_name, c.daemonize"));
+	T_EXPECT_STREQ(lua_tostring(L, 1), "rules.lua");
+	T_EXPECT_STREQ(lua_tostring(L, 2), "proxy-user");
+	T_EXPECT(lua_toboolean(L, 3) != 0);
 
 #if WITH_THREADS
 	/* the worker count is reflected like every other config field */

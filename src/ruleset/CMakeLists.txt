@@ -22,7 +22,7 @@ target_sources(neosocksd
 )
 
 add_unit_test(api_test
-    SRCS api_test.c api.c base.c ../proto/codec.c
+    SRCS api_test.c api.c base.c ../conf.c ../proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/../version.c"
     CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
     WITH_LUA)
 add_unit_test(await_test
