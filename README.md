@@ -33,7 +33,7 @@ Status: **Stable**
 - **Lua ruleset**: resolve, route, authenticate and load-balance every connection in Lua, with built-in async I/O and RPC helpers.
 - **RESTful API**: live stats, Prometheus metrics, and hot-reloading of the ruleset and Lua modules without a restart.
 - **Proxy chains**: forward outbound connections through a chain of SOCKS4A/SOCKS5/HTTP upstreams.
-- **IPv6**: a name resolving to several addresses is dialed as [RFC 8305](https://datatracker.ietf.org/doc/html/rfc8305) prescribes — families interleaved, attempts staggered — so a destination stays reachable when one of its addresses is not.
+- **IPv6**: supported in both forwarding and resolving; a name resolving to IPv4 and IPv6 addresses is dialed with Happy Eyeballs ([RFC 8305](https://datatracker.ietf.org/doc/html/rfc8305)).
 - **Portable**: ISO C11 and POSIX.1-2008; cross-compiles for Android (NDK) and Windows (MSYS2), see [m.sh](m.sh).
 - **Legacy SOCKS5 commands**, off by default and available in plain proxy mode only (not with `-r`/`-x`): BIND (`--enable-socks5-bind`) and UDP ASSOCIATE (`--enable-socks5-udp`).
 - **No built-in encryption** — pair with external tools for transport security. Authentication is basic (plaintext credentials) only.
@@ -205,7 +205,7 @@ private LAN link between the nodes (see the [security note](#restful-api)).
 
 ### Runtime Dependencies
 
-**Statically linked setup**: Download a `-static` build from the [Releases](https://github.com/hexian000/neosocksd/releases) section — no additional runtime dependencies are needed.
+**Statically linked setup**: Download a `-static` build from the [Releases](https://github.com/hexian000/neosocksd/releases) section — no additional runtime dependencies are needed. Such a build cannot be relied on to `require` a binary Lua module (a C `?.so` on `package.cpath`): on musl the static libc's `dlopen` is a stub that always fails, and on glibc it succeeds only by mapping the dynamic loader and a second `libc.so.6` into the process — restoring the very dependency a static build exists to avoid. Pure Lua modules, the ruleset and everything it hot-reloads included, are unaffected.
 
 **Dynamically linked setup**: Install the following runtime dependencies.
 
@@ -258,7 +258,7 @@ cross-compiling.
 | -------------------- | ------- | ---------------------------------------------------- |
 | `ENABLE_RULESET`     | ON      | Lua ruleset scripting (requires Lua)                 |
 | `ENABLE_THREADS`     | OFF     | I/O worker threads, enables `--workers`              |
-| `BUILD_STATIC`       | OFF     | Build a fully static executable                      |
+| `BUILD_STATIC`       | OFF     | Build a fully static executable, no Lua C modules    |
 | `LINK_STATIC_LIBS`   | OFF     | Link dependencies statically, libc dynamically       |
 | `BUILD_PIE`          | OFF     | Build a position-independent executable              |
 | `ENABLE_MIMALLOC`    | OFF     | Use mimalloc as the allocator                        |

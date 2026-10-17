@@ -130,14 +130,30 @@ _G.route6 = {
 _G.route_default = { rule.proxy("socks5://user:pass@gateway.lan:1080"), "wan" }
 
 -- [[ optional: failover with await.forward ]] --
--- Uncomment to try the gateway, then a backup proxy, then direct, resolving
--- the address with libruleset.decide.route:
+-- Uncomment to try the routing decision the tables above make, then a
+-- backup proxy, then a direct connection.
 --
--- function ruleset.route(addr)
+-- Security: libruleset installs ruleset.route as its credential check wrapped
+-- around the routing decision, and a field defined here shadows what
+-- libruleset defines. An override that decides on its own -- through
+-- libruleset.decide.route, say -- therefore takes that check out of the
+-- request path: under `--auth-required' the server keeps demanding
+-- credentials from every client, but nothing verifies them any more, so every
+-- user name and password is accepted and _G.num_requests/_G.num_authorized
+-- stop advancing. Calling libruleset.route keeps the check where it is. See
+-- API.md, "Ruleset Callbacks".
+--
+-- function ruleset.route(addr, username, password)
+--     -- true: the session is relaying; nil: rejected, by policy or because
+--     -- the credentials did not check out
+--     local ok = libruleset.route(addr, username, password)
+--     if ok ~= false then
+--         return ok
+--     end
+--     -- false: the dial failed and the request is still forwardable, so
+--     -- take the same decision again for the address to retry
 --     local resolved = libruleset.decide.route(addr)
---     if not resolved then return nil end
 --     return ruleset.failover(resolved, {
---         { "socks5://user:pass@gateway.lan:1080" },
 --         { "socks5://backup.lan:1080" },
 --         {},
 --     })

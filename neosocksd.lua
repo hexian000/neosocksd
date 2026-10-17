@@ -16,7 +16,7 @@ function await.execute(command) return true, "exit", 0 end
 
 function await.forward(addr, ...) return false, "" end
 
-function await.invoke(code, addr, ...) return false, ... end
+function await.invoke(code, addr, ...) return false, "" end
 
 function await.resolve(s) return "" end
 
@@ -33,7 +33,7 @@ function neosocksd.config() return {} end
 
 function neosocksd.invoke(code, addr, ...) end
 
-function neosocksd.now() return 0 end
+function neosocksd.now() return 0.0 end
 
 function neosocksd.parse_ipv4(s) return 0 end
 

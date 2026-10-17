@@ -73,11 +73,15 @@ return {
     -- memlimit = 64,
 
     -- ------------------------------------------------------------------ --
-    -- Authentication (requires a build with Lua scripting support; pass  --
-    -- --auth-required to enforce; credentials are validated inside the   --
-    -- ruleset)                                                           --
+    -- Authentication (requires a build with Lua scripting support)       --
     -- ------------------------------------------------------------------ --
 
+    -- Demand credentials from the client -- SOCKS5 username/password
+    -- (RFC 1929) or HTTP Basic proxy authorization -- and let the ruleset
+    -- accept or reject them; equivalent to `--auth-required' on the command
+    -- line.  A ruleset is required.  libruleset checks the credentials
+    -- against _G.secrets, or against ruleset.authenticate() when that is
+    -- defined; see example/ruleset.lua.
     -- auth_required = false,
 
     -- ------------------------------------------------------------------ --
