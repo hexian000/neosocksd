@@ -214,6 +214,9 @@ struct io_probe_state {
 	struct ev_loop *loop;
 	ev_io *watcher;
 	atomic_bool blocked, write_watcher, full_buffer;
+#if WITH_SPLICE
+	atomic_size_t splice_pending;
+#endif
 };
 
 static struct io_probe_state io_probe = { .src_fd = -1, .dst_fd = -1 };
@@ -261,6 +264,24 @@ test_send(const int fd, const void *buf, const size_t len, const int flags)
 	errno = err;
 	return n;
 }
+
+#if WITH_SPLICE
+ssize_t test_splice(
+	const int fd_in, off_t *off_in, const int fd_out, off_t *off_out,
+	const size_t len, const unsigned int flags)
+{
+	const ssize_t n = splice(fd_in, off_in, fd_out, off_out, len, flags);
+	const int err = errno;
+	if (fd_out == io_probe.dst_fd && n < 0 &&
+	    (err == EAGAIN || err == EWOULDBLOCK)) {
+		/* splice_pump passes its retained pipe length to the syscall. */
+		atomic_store(&io_probe.splice_pending, len);
+		atomic_store(&io_probe.blocked, true);
+	}
+	errno = err;
+	return n;
+}
+#endif /* WITH_SPLICE */
 
 void test_ev_io_start(struct ev_loop *loop, ev_io *watcher)
 {
@@ -1203,6 +1224,116 @@ T_DECLARE_CASE(transfer_backpressure_completes)
 	fixture_finish(fixture);
 }
 
+#if WITH_SPLICE
+/* A socket that rejects send can still accept splice data. Fill through
+ * splice itself so the next pipe-to-socket attempt must encounter EAGAIN. */
+static size_t fill_splice_socket(struct splice_pipe *pipe, const int fd)
+{
+	unsigned char fill[IO_BUFSIZE] = { 0 };
+	size_t total = 0;
+	for (;;) {
+		const ssize_t nwritten = write(pipe->fd[1], fill, sizeof(fill));
+		T_CHECK(nwritten > 0);
+		size_t remaining = (size_t)nwritten;
+		while (remaining > 0) {
+			const ssize_t n =
+				splice(pipe->fd[0], NULL, fd, NULL, remaining,
+				       SPLICE_F_NONBLOCK);
+			if (n < 0) {
+				T_CHECK(errno == EAGAIN ||
+					errno == EWOULDBLOCK);
+				return total;
+			}
+			T_CHECK(n > 0);
+			total += (size_t)n;
+			remaining -= (size_t)n;
+		}
+	}
+}
+
+/* Keep real pipe bytes pending behind a full destination, then let the
+ * writable watcher resume the pump and propagate EOF after the payload. */
+T_DECLARE_CASE(transfer_splice_backpressure_completes)
+{
+	const int fds_before = count_open_fds();
+	enum { PAYLOAD_SZ = 2 * IO_BUFSIZE };
+	unsigned char payload[PAYLOAD_SZ];
+	unsigned char received[PAYLOAD_SZ + 1];
+	unsigned char drain[4096];
+	int acc_peer, acc_fd, dial_fd, dial_peer;
+	struct test_fixture *fixture = NULL;
+	T_CALL_SUBCASE(fixture_setup, &fixture);
+	struct test_xfer_state *state = &fixture->state;
+	for (size_t i = 0; i < sizeof(payload); i++) {
+		payload[i] = (unsigned char)i;
+	}
+
+	fixture_socketpair(fixture, &acc_peer, &acc_fd);
+	fixture_socketpair(fixture, &dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+	set_nonblock(dial_peer);
+	io_probe.src_fd = acc_fd;
+	io_probe.dst_fd = dial_fd;
+
+	/* Saturate the real socket before the worker can pump into it. */
+	T_EXPECT(pipe_new(&fixture->pipe));
+	size_t fill_bytes = fill_splice_socket(&fixture->pipe, dial_fd);
+	pipe_close(&fixture->pipe);
+	T_EXPECT(fill_bytes > 0);
+	T_EXPECT_EQ(
+		send(acc_peer, payload, sizeof(payload), 0),
+		(ssize_t)sizeof(payload));
+	T_EXPECT(shutdown(acc_peer, SHUT_WR) == 0);
+	T_EXPECT(shutdown(dial_peer, SHUT_WR) == 0);
+
+	state->num_sessions = 1;
+	fixture->xfer = transfer_create(fixture->loop, 1);
+	T_EXPECT(fixture->xfer != NULL);
+	T_EXPECT(fixture_serve(
+		fixture, fixture->xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state->byt_up,
+			.byt_down = &state->byt_down,
+			.use_splice = true,
+			.num_sessions = &state->num_sessions,
+		}));
+
+	T_EXPECT(test_wait_until(fixture->loop, send_blocked, NULL, 1.0));
+	T_EXPECT(atomic_load(&io_probe.splice_pending) > 0);
+	T_EXPECT(!xfer_finished(state));
+	T_EXPECT_EQ((uintmax_t)state->byt_up, (uintmax_t)0);
+
+	/* Consume only the prefill; transferred bytes follow it in order. */
+	while (fill_bytes > 0) {
+		const size_t ask =
+			fill_bytes < sizeof(drain) ? fill_bytes : sizeof(drain);
+		const ssize_t n = recv(dial_peer, drain, ask, 0);
+		T_EXPECT(n > 0);
+		fill_bytes -= (size_t)n;
+	}
+	struct test_relay_sink sink = {
+		.fd = dial_peer,
+		.data = received,
+		.cap = sizeof(received),
+	};
+	T_EXPECT(test_wait_until(fixture->loop, sink_reached_eof, &sink, 1.0));
+	T_EXPECT_EQ(sink.len, sizeof(payload));
+	T_EXPECT_MEMEQ(received, payload, sizeof(payload));
+	T_EXPECT(test_wait_until(fixture->loop, xfer_finished, state, 1.0));
+	unsigned char byte;
+	T_EXPECT_EQ(recv(acc_peer, &byte, 1, MSG_DONTWAIT), (ssize_t)0);
+
+	fixture_join(fixture);
+	T_EXPECT_EQ((uintmax_t)state->byt_up, (uintmax_t)sizeof(payload));
+	T_EXPECT_EQ((uintmax_t)state->byt_down, (uintmax_t)0);
+	/* A recv/send fallback cannot satisfy the splice-pending assertion. */
+	T_EXPECT_EQ(io_probe.recv_calls, (size_t)0);
+	fixture_finish(fixture);
+	T_EXPECT_EQ(count_open_fds(), fds_before);
+}
+#endif /* WITH_SPLICE */
+
 /*
  * A payload larger than XFER_BUFSIZE while the destination is blocked drives
  * xfer_recv()'s receive buffer to saturation, exercising its `cap == 0`
@@ -1831,6 +1962,9 @@ static const struct testing_suite suite[] = {
 #endif
 	T_CASE(transfer_dst_error_finishes),
 	T_CASE(transfer_backpressure_completes),
+#if WITH_SPLICE
+	T_CASE(transfer_splice_backpressure_completes),
+#endif
 	T_CASE(transfer_recv_buffer_saturates_completes),
 	T_CASE(transfer_multi_worker_all_complete),
 #if WITH_THREADS

@@ -34,7 +34,9 @@
 
 #include <ev.h>
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -203,9 +205,16 @@ enum { STALE_ERRNO = EDOM };
 /* one-shot failures; 0 lets the call through */
 static int g_cloexec_fail_errno;
 static int g_nonblock_fail_errno;
+static struct {
+	uint_least32_t cloexec_calls;
+	uint_least32_t nonblock_calls;
+	int fd;
+} g_socket_setup;
 
 int test_socket_set_cloexec(const int fd)
 {
+	g_socket_setup.cloexec_calls++;
+	g_socket_setup.fd = fd;
 	const int err = g_cloexec_fail_errno;
 	if (err == 0) {
 		return socket_set_cloexec(fd);
@@ -217,6 +226,7 @@ int test_socket_set_cloexec(const int fd)
 
 int test_socket_set_nonblock(const int fd)
 {
+	g_socket_setup.nonblock_calls++;
 	const int err = g_nonblock_fail_errno;
 	if (err == 0) {
 		return socket_set_nonblock(fd);
@@ -225,6 +235,45 @@ int test_socket_set_nonblock(const int fd)
 	errno = STALE_ERRNO;
 	return err;
 }
+
+/* Only socks.c's sends pass through this boundary. Fuzz fixtures drop them
+ * after parsing/reassembly; ordinary relay fixtures and client injections use
+ * real sockets. */
+ssize_t test_sendto(
+	int fd, const void *buf, size_t len, int flags,
+	const struct sockaddr *dest,
+	socklen_t destlen) __asm__("__wrap_sendto");
+ssize_t real_sendto(
+	int fd, const void *buf, size_t len, int flags,
+	const struct sockaddr *dest,
+	socklen_t destlen) __asm__("__real_sendto");
+
+static struct {
+	bool drop;
+	uint_least32_t calls;
+	union sockaddr_max dest;
+	socklen_t destlen;
+	size_t len;
+} g_udp_send;
+
+ssize_t test_sendto(
+	const int fd, const void *buf, const size_t len, const int flags,
+	const struct sockaddr *dest, const socklen_t destlen)
+{
+	if (!g_udp_send.drop) {
+		return real_sendto(fd, buf, len, flags, dest, destlen);
+	}
+	T_CHECK(destlen <= sizeof(g_udp_send.dest));
+	g_udp_send.calls++;
+	memcpy(&g_udp_send.dest, dest, destlen);
+	g_udp_send.destlen = destlen;
+	g_udp_send.len = len;
+	return (ssize_t)len;
+}
+
+/* Client and target fixtures inject real datagrams even while relay output is
+ * dropped; only calls from the separately compiled socks.c are wrapped. */
+#define sendto real_sendto
 
 /* -------------------------------------------------------------------------
  * util.c stubs - util.c is not linked, so the socket helpers socks.c takes
@@ -443,6 +492,11 @@ enum stub_ruleset_mode {
 };
 
 static struct {
+	bool transfer_fail;
+	uint_least32_t transfer_calls;
+	int transfer_acc_fd, transfer_dial_fd;
+	size_t transfer_num_sessions;
+	uint_least32_t dialreq_free_count;
 	bool dialreq_available;
 
 	enum stub_dialer_mode dialer_mode;
@@ -451,6 +505,7 @@ static struct {
 	int dialer_success_fd;
 	uint_least32_t dialer_cancel_count;
 	uint_least32_t dialer_do_count;
+	struct dialreq *dialer_request;
 
 	enum stub_ruleset_mode ruleset_mode;
 	struct ruleset_callback *ruleset_pending_cb;
@@ -494,6 +549,10 @@ static void stub_reset(void)
 	/* clear an arm a prior case may have left unconsumed on a failure path */
 	g_cloexec_fail_errno = 0;
 	g_nonblock_fail_errno = 0;
+	memset(&g_udp_send, 0, sizeof(g_udp_send));
+	g_socket_setup.cloexec_calls = 0;
+	g_socket_setup.nonblock_calls = 0;
+	g_socket_setup.fd = -1;
 	g_bind_netdev.calls = 0;
 	g_bind_netdev.fd = -1;
 	g_bind_netdev.netdev = NULL;
@@ -502,6 +561,11 @@ static void stub_reset(void)
 #endif
 	STUB.xfer_dial_nodelay = -1;
 	STUB.xfer_dial_keepalive = -1;
+	STUB.transfer_fail = false;
+	STUB.transfer_calls = 0;
+	STUB.transfer_acc_fd = STUB.transfer_dial_fd = -1;
+	STUB.transfer_num_sessions = 0;
+	STUB.dialreq_free_count = 0;
 	STUB.dialreq_available = false;
 	STUB.dialer_mode = STUB_DIALER_NONE;
 	STUB.dialer_err = DIALER_OK;
@@ -509,6 +573,8 @@ static void stub_reset(void)
 	STUB.dialer_success_fd = -1;
 	STUB.dialer_cancel_count = 0;
 	STUB.dialer_do_count = 0;
+	free(STUB.dialer_request);
+	STUB.dialer_request = NULL;
 	for (int_fast32_t i = 0; i < stub_xfer_ctx_count; i++) {
 		free(stub_xfer_ctxs[i]);
 		stub_xfer_ctxs[i] = NULL;
@@ -576,25 +642,52 @@ const char *dialer_strerror(const enum dialer_error err)
 	return "stub";
 }
 
-struct dialreq *dialreq_new(const struct dialreq *base, const size_t num_proxy)
+/* Copy the request as the real allocator does, including independent proxy
+ * credential storage. Also used to retain the handoff after socks.c frees it. */
+static struct dialreq *
+stub_dialreq_copy(const struct dialreq *base, const size_t num_proxy)
 {
-	(void)base;
-	if (!STUB.dialreq_available) {
-		return NULL;
-	}
-	if (num_proxy != 0) {
-		return NULL;
-	}
-	struct dialreq *req = malloc(sizeof(*req));
+	const size_t inherited = base != NULL ? base->num_proxy : 0;
+	struct dialreq *req =
+		calloc(1, sizeof(*req) + (inherited + num_proxy) *
+						 sizeof(req->proxy[0]));
 	if (req == NULL) {
 		return NULL;
 	}
-	memset(req, 0, sizeof(*req));
+	req->num_proxy = inherited;
+	req->num_proxy_max = inherited + num_proxy;
+	if (base != NULL) {
+		req->addr = base->addr;
+		for (size_t i = 0; i < inherited; i++) {
+			req->proxy[i] = base->proxy[i];
+			if (base->proxy[i].username != NULL) {
+				req->proxy[i].username =
+					req->proxy[i].credential +
+					(base->proxy[i].username -
+					 base->proxy[i].credential);
+			}
+			if (base->proxy[i].password != NULL) {
+				req->proxy[i].password =
+					req->proxy[i].credential +
+					(base->proxy[i].password -
+					 base->proxy[i].credential);
+			}
+		}
+	}
 	return req;
+}
+
+struct dialreq *dialreq_new(const struct dialreq *base, const size_t num_proxy)
+{
+	return STUB.dialreq_available ? stub_dialreq_copy(base, num_proxy) :
+					NULL;
 }
 
 void dialreq_free(struct dialreq *req)
 {
+	if (req != NULL) {
+		STUB.dialreq_free_count++;
+	}
 	free(req);
 }
 
@@ -604,9 +697,8 @@ void dialaddr_copy(
 	*dst = *src;
 }
 
-/* The domain form renders faithfully: it is the byte string the client sent,
- * and the cases below turn on what socks.c does with it. The literal forms keep
- * a fixed rendering, which the other cases match on. */
+/* Render every destination faithfully so log assertions see the same address
+ * that the dialer receives. */
 int dialaddr_format(
 	char *restrict s, const size_t maxlen,
 	const struct dialaddr *restrict addr)
@@ -616,10 +708,17 @@ int dialaddr_format(
 			s, maxlen, "%.*s:%" PRIuLEAST16, (int)addr->domain.len,
 			addr->domain.name, addr->port);
 	}
-	if (s != NULL && maxlen > 0) {
-		(void)snprintf(s, maxlen, "(stub)");
+	char host[INET6_ADDRSTRLEN];
+	const bool ipv6 = addr->type == ATYP_INET6;
+	if (inet_ntop(
+		    ipv6 ? AF_INET6 : AF_INET,
+		    ipv6 ? (const void *)&addr->in6 : (const void *)&addr->in,
+		    host, sizeof(host)) == NULL) {
+		return -1;
 	}
-	return 6;
+	return snprintf(
+		s, maxlen, ipv6 ? "[%s]:%" PRIuLEAST16 : "%s:%" PRIuLEAST16,
+		host, addr->port);
 }
 
 void dialer_init(
@@ -638,7 +737,10 @@ void dialer_do(
 	const struct config *conf, struct resolver *resolver,
 	struct server *server)
 {
-	(void)req;
+	T_CHECK(req != NULL);
+	free(STUB.dialer_request);
+	STUB.dialer_request = stub_dialreq_copy(req, 0);
+	T_CHECK(STUB.dialer_request != NULL);
 	(void)conf;
 	(void)resolver;
 	(void)server;
@@ -698,6 +800,13 @@ bool transfer_serve(
 	const struct transfer_opts *restrict opts)
 {
 	(void)xfer;
+	STUB.transfer_calls++;
+	STUB.transfer_acc_fd = acc_fd;
+	STUB.transfer_dial_fd = dial_fd;
+	STUB.transfer_num_sessions = (size_t)*opts->num_sessions;
+	if (STUB.transfer_fail) {
+		return false;
+	}
 	T_CHECK(stub_xfer_ctx_count < (int_fast32_t)ARRAY_SIZE(stub_xfer_ctxs));
 	struct stub_xfer_ctx *restrict xctx = malloc(sizeof(*xctx));
 	if (xctx == NULL) {
@@ -1457,6 +1566,7 @@ static void fuzz_udp_relay_once(struct prng *restrict p)
 	};
 
 	stub_reset();
+	g_udp_send.drop = true;
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_conf.auth_required = false;
@@ -1511,8 +1621,8 @@ static void fuzz_udp_relay_once(struct prng *restrict p)
 		drive_loop(loop);
 	}
 
-	/* Close the control connection to tear the (timer-less) relay down; a
-	 * datagram that wedges a watcher open would surface as a leak here. */
+	/* Closing the control connection tears down the relay, including any
+	 * pending fragment timer; a stuck watcher would surface as a leak. */
 	T_CHECK(shutdown(sv[1], SHUT_WR) == 0);
 	drive_loop(loop);
 
@@ -1686,36 +1796,52 @@ T_DECLARE_CASE(socks5_unsupported_atyp_rsp)
 	fixture_destroy(loop, &s);
 }
 
-T_DECLARE_CASE(socks5_userpass_empty_username_fails)
+T_DECLARE_CASE(socks5_userpass_empty_credentials_fail)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server s = { 0 };
-	int peer_fd = -1;
-	const unsigned char req[] = {
-		0x05, 0x01, 0x02, 0x01, 0x00, 0x00,
+	static const unsigned char auth[][7] = {
+		{ 0x05, 0x01, 0x02, 0x01, 0x00, 0x01, 'p' },
+		{ 0x05, 0x01, 0x02, 0x01, 0x01, 'u', 0x00 },
 	};
+	for (size_t i = 0; i < ARRAY_SIZE(auth); i++) {
+		struct ev_loop *loop = ev_loop_new(0);
+		struct server s = { 0 };
+		int peer_fd = -1;
+		unsigned char req[17];
+		memcpy(req, auth[i], sizeof(auth[i]));
+		/* A complete CONNECT makes accidental authentication acceptance
+		 * observable as a ruleset or dialer dispatch. */
+		const unsigned char connect_req[] = {
+			0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0, 80,
+		};
+		memcpy(req + sizeof(auth[i]), connect_req, sizeof(connect_req));
 
-	T_CHECK(loop != NULL);
-	test_conf_reset();
-	s.loop = loop;
-	test_conf.auth_required = true;
-	test_server_init(&s);
-
-	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
-
-	{
+		stub_reset();
+		T_CHECK(loop != NULL);
+		s.loop = loop;
+		test_conf.auth_required = true;
+		G.ruleset = (struct ruleset *)&test_conf;
+		STUB.ruleset_mode = STUB_RULESET_ASYNC_OK;
+		STUB.dialreq_available = true;
+		test_server_init(&s);
+		serve_payload(loop, &s, req, sizeof(req), &peer_fd);
 		unsigned char rsp[64];
 		const ssize_t n =
 			recv_reply(loop, peer_fd, rsp, sizeof(rsp), 4);
-		T_EXPECT(n >= 4);
+		drive_loop(loop);
+		const uint_least32_t dispatches = STUB.ruleset_dispatch_count;
+		const uint_least32_t dials = STUB.dialer_do_count;
+		T_CHECK(close(peer_fd) == 0);
+		fixture_destroy(loop, &s);
+		G.ruleset = NULL;
+
+		T_EXPECT_EQ(n, (ssize_t)4);
 		T_EXPECT_EQ(rsp[0], SOCKS5);
 		T_EXPECT_EQ(rsp[1], SOCKS5AUTH_USERPASS);
 		T_EXPECT_EQ(rsp[2], 0x01);
 		T_EXPECT_EQ(rsp[3], 0x01);
+		T_EXPECT_EQ(dispatches, 0);
+		T_EXPECT_EQ(dials, 0);
 	}
-
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(socks5_no_acceptable_auth_method)
@@ -1776,6 +1902,15 @@ T_DECLARE_CASE(socks5_valid_ipv4_request_connect_fail_rsp)
 
 	T_CALL_SUBCASE(expect_socks5_reply, loop, peer_fd, SOCKS5RSP_FAIL);
 
+	T_EXPECT_EQ(STUB.dialer_do_count, 1);
+	T_CHECK(STUB.dialer_request != NULL);
+	T_EXPECT_EQ(STUB.dialer_request->addr.type, ATYP_INET);
+	T_EXPECT_EQ(STUB.dialer_request->addr.port, 80);
+	T_EXPECT_EQ(
+		STUB.dialer_request->addr.in.s_addr,
+		htonl(UINT32_C(0x01020304)));
+	T_EXPECT_EQ(STUB.dialer_request->num_proxy, 0);
+
 	T_CHECK(close(peer_fd) == 0);
 	fixture_destroy(loop, &s);
 }
@@ -1815,6 +1950,15 @@ T_DECLARE_CASE(socks5_userpass_domain_request_connect_fail_rsp)
 		T_EXPECT_EQ(rsp[5], SOCKS5RSP_FAIL);
 	}
 
+	T_EXPECT_EQ(STUB.dialer_do_count, 1);
+	T_CHECK(STUB.dialer_request != NULL);
+	T_EXPECT_EQ(STUB.dialer_request->addr.type, ATYP_DOMAIN);
+	T_EXPECT_EQ(STUB.dialer_request->addr.port, 443);
+	T_EXPECT_EQ(STUB.dialer_request->addr.domain.len, 11);
+	T_EXPECT(
+		memcmp(STUB.dialer_request->addr.domain.name, "example.com",
+		       11) == 0);
+
 	T_CHECK(close(peer_fd) == 0);
 	fixture_destroy(loop, &s);
 }
@@ -1843,6 +1987,68 @@ T_DECLARE_CASE(socks5_valid_ipv6_request_connect_fail_rsp)
 
 	T_CALL_SUBCASE(expect_socks5_reply, loop, peer_fd, SOCKS5RSP_FAIL);
 
+	T_EXPECT_EQ(STUB.dialer_do_count, 1);
+	T_CHECK(STUB.dialer_request != NULL);
+	T_EXPECT_EQ(STUB.dialer_request->addr.type, ATYP_INET6);
+	T_EXPECT_EQ(STUB.dialer_request->addr.port, 53);
+	T_EXPECT(memcmp(&STUB.dialer_request->addr.in6, req + 7, 16) == 0);
+
+	T_CHECK(close(peer_fd) == 0);
+	fixture_destroy(loop, &s);
+}
+
+T_DECLARE_CASE(socks5_connect_inherits_base_proxy_chain)
+{
+	static const unsigned char req[] = {
+		0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01,
+		0x01, 0x02, 0x03, 0x04, 0x01, 0xbb,
+	};
+	stub_reset();
+	STUB.dialreq_available = true;
+	STUB.dialer_mode = STUB_DIALER_FAIL;
+	STUB.dialer_err = DIALER_ERR_PROXY_PROTO;
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	struct server s = { .loop = loop };
+	test_server_init(&s);
+	struct dialreq *base =
+		calloc(1, sizeof(*base) + 2 * sizeof(base->proxy[0]));
+	T_CHECK(base != NULL);
+	base->num_proxy = base->num_proxy_max = 2;
+	for (size_t i = 0; i < 2; i++) {
+		base->proxy[i].proto = i == 0 ? PROTO_HTTP : PROTO_SOCKS5;
+		base->proxy[i].addr.type = ATYP_INET;
+		base->proxy[i].addr.in.s_addr = htonl(INADDR_LOOPBACK);
+		base->proxy[i].addr.port = (uint_least16_t)(8080 + i);
+		memcpy(base->proxy[i].credential, "user\0pass",
+		       sizeof("user\0pass"));
+		base->proxy[i].username = base->proxy[i].credential;
+		base->proxy[i].password = base->proxy[i].credential + 5;
+	}
+	s.basereq = base;
+	int peer_fd = -1;
+	serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+	T_CALL_SUBCASE(expect_socks5_reply, loop, peer_fd, SOCKS5RSP_FAIL);
+	free(base);
+	s.basereq = NULL;
+
+	T_EXPECT_EQ(STUB.dialer_do_count, 1);
+	T_CHECK(STUB.dialer_request != NULL);
+	T_EXPECT_EQ(STUB.dialer_request->addr.type, ATYP_INET);
+	T_EXPECT_EQ(
+		STUB.dialer_request->addr.in.s_addr,
+		htonl(UINT32_C(0x01020304)));
+	T_EXPECT_EQ(STUB.dialer_request->addr.port, 443);
+	T_EXPECT_EQ(STUB.dialer_request->num_proxy, 2);
+	for (size_t i = 0; i < STUB.dialer_request->num_proxy; i++) {
+		const struct proxyreq *proxy = &STUB.dialer_request->proxy[i];
+		T_EXPECT_EQ(proxy->proto, i == 0 ? PROTO_HTTP : PROTO_SOCKS5);
+		T_EXPECT_EQ(proxy->addr.type, ATYP_INET);
+		T_EXPECT_EQ(proxy->addr.in.s_addr, htonl(INADDR_LOOPBACK));
+		T_EXPECT_EQ(proxy->addr.port, 8080 + i);
+		T_EXPECT(strcmp(proxy->username, "user") == 0);
+		T_EXPECT(strcmp(proxy->password, "pass") == 0);
+	}
 	T_CHECK(close(peer_fd) == 0);
 	fixture_destroy(loop, &s);
 }
@@ -4278,6 +4484,151 @@ static int udp_loopback_socket(const int family)
 	return fd;
 }
 
+/* Send one standalone datagram to a bound loopback target through an IPv4
+ * client leg. Building the wire address from the socket keeps both families on
+ * the same real UDP relay path. */
+static void udp_send_to_target(
+	struct ev_loop *loop, const int client_fd, const in_port_t relay_port,
+	const int target_fd)
+{
+	union sockaddr_max target = { 0 };
+	socklen_t target_len = sizeof(target);
+	T_CHECK(getsockname(target_fd, &target.sa, &target_len) == 0);
+	unsigned char pkt[SOCKS5_UDP_HDR_IPV6LEN + 1] = { 0 };
+	size_t hdrlen;
+	if (target.sa.sa_family == AF_INET6) {
+		pkt[3] = SOCKS5ADDR_IPV6;
+		memcpy(pkt + 4, &target.in6.sin6_addr, 16);
+		memcpy(pkt + 20, &target.in6.sin6_port, 2);
+		hdrlen = SOCKS5_UDP_HDR_IPV6LEN;
+	} else {
+		pkt[3] = SOCKS5ADDR_IPV4;
+		memcpy(pkt + 4, &target.in.sin_addr, 4);
+		memcpy(pkt + 8, &target.in.sin_port, 2);
+		hdrlen = SOCKS5_UDP_HDR_IPV4LEN;
+	}
+	pkt[hdrlen] = 'x';
+	const struct sockaddr_in relay = {
+		.sin_family = AF_INET,
+		.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+		.sin_port = relay_port,
+	};
+	T_CHECK(sendto(client_fd, pkt, hdrlen + 1, 0,
+		       (const struct sockaddr *)&relay,
+		       sizeof(relay)) == (ssize_t)(hdrlen + 1));
+	drive_loop(loop);
+}
+
+/* Each setter can fail either family independently. The failed descriptor
+ * must close immediately, and that slot must stay failed for this association
+ * without preventing the other family from serving requests and replies. */
+T_DECLARE_SUBCASE(
+	expect_udp_target_setup_failure, const int failed_family,
+	const bool fail_nonblock)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	int peer_fd = -1;
+	stub_reset();
+	T_CHECK(loop != NULL);
+	const in_port_t relay_port = udp_associate_v4(loop, &s, &peer_fd);
+	const int relay_fd = g_socket_setup.fd;
+	const int bad_target = udp_loopback_socket(failed_family);
+	const int good_family = failed_family == AF_INET ? AF_INET6 : AF_INET;
+	const int good_target = udp_loopback_socket(good_family);
+	const int client_fd = udp_loopback_socket(AF_INET);
+	const uint_least32_t cloexec_calls = g_socket_setup.cloexec_calls;
+	const uint_least32_t nonblock_calls = g_socket_setup.nonblock_calls;
+	int *const fault =
+		fail_nonblock ? &g_nonblock_fail_errno : &g_cloexec_fail_errno;
+	*fault = EMFILE;
+	logcap_start(LOG_LEVEL_WARNING);
+	udp_send_to_target(loop, client_fd, relay_port, bad_target);
+	const int failed_fd = g_socket_setup.fd;
+	T_EXPECT_EQ(*fault, 0);
+	T_EXPECT_EQ(g_socket_setup.cloexec_calls, cloexec_calls + 1);
+	T_EXPECT_EQ(
+		g_socket_setup.nonblock_calls,
+		nonblock_calls + (fail_nonblock ? 1 : 0));
+	T_EXPECT(fcntl(failed_fd, F_GETFD) == -1 && errno == EBADF);
+	T_EXPECT(recv_is_empty(bad_target));
+	T_EXPECT(logcap_has_errno("no socket", EMFILE));
+	T_EXPECT(!logcap_has_errno("no socket", STALE_ERRNO));
+	T_EXPECT(
+		strstr(g_logcap.buf, failed_family == AF_INET ?
+					     "IPv4 targets" :
+					     "IPv6 targets") != NULL);
+	const size_t warning_len = g_logcap.len;
+	for (int i = 0; i < 2; i++) {
+		udp_send_to_target(loop, client_fd, relay_port, bad_target);
+		T_EXPECT(recv_is_empty(bad_target));
+	}
+	T_EXPECT_EQ(g_socket_setup.cloexec_calls, cloexec_calls + 1);
+	T_EXPECT_EQ(
+		g_socket_setup.nonblock_calls,
+		nonblock_calls + (fail_nonblock ? 1 : 0));
+	T_EXPECT_EQ(g_logcap.len, warning_len);
+	T_EXPECT_EQ(s.num_sessions, 1);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT(recv_is_empty(peer_fd));
+
+	udp_send_to_target(loop, client_fd, relay_port, good_target);
+	const int good_fd = g_socket_setup.fd;
+	T_EXPECT_EQ(g_socket_setup.cloexec_calls, cloexec_calls + 2);
+	T_EXPECT_EQ(
+		g_socket_setup.nonblock_calls,
+		nonblock_calls + (fail_nonblock ? 1 : 0) + 1);
+	struct relay_out from;
+	unsigned char buf[SOCKS5_UDP_HDR_IPV6LEN + 1];
+	T_EXPECT_EQ(recv_from_relay(good_target, buf, sizeof(buf), &from), 1);
+	T_EXPECT_EQ(buf[0], 'x');
+	T_CHECK(sendto(good_target, "y", 1, 0, &from.sa.sa, from.len) == 1);
+	drive_loop(loop);
+	const size_t hdrlen = good_family == AF_INET ? SOCKS5_UDP_HDR_IPV4LEN :
+						       SOCKS5_UDP_HDR_IPV6LEN;
+	T_EXPECT_EQ(
+		recv(client_fd, buf, sizeof(buf), MSG_DONTWAIT),
+		(ssize_t)(hdrlen + 1));
+	T_EXPECT_EQ(
+		buf[3],
+		good_family == AF_INET ? SOCKS5ADDR_IPV4 : SOCKS5ADDR_IPV6);
+	T_EXPECT_EQ(buf[hdrlen], 'y');
+	/* Success in the other slot cannot reset the failed slot. */
+	udp_send_to_target(loop, client_fd, relay_port, bad_target);
+	T_EXPECT(recv_is_empty(bad_target));
+	T_EXPECT_EQ(g_socket_setup.cloexec_calls, cloexec_calls + 2);
+	T_EXPECT_EQ(g_logcap.len, warning_len);
+	logcap_stop();
+
+	/* Keep our read half open to observe closure of the accepted TCP fd. */
+	T_CHECK(shutdown(peer_fd, SHUT_WR) == 0);
+	drive_loop(loop);
+	T_EXPECT_EQ(recv(peer_fd, buf, sizeof(buf), MSG_DONTWAIT), 0);
+	T_EXPECT_EQ(s.num_sessions, 0);
+	T_EXPECT_EQ(s.stats.num_halfopen, 0);
+	T_EXPECT(fcntl(relay_fd, F_GETFD) == -1 && errno == EBADF);
+	T_EXPECT(fcntl(good_fd, F_GETFD) == -1 && errno == EBADF);
+	T_EXPECT_EQ(gc_finalizeall(), 0);
+	T_EXPECT(!ev_run(loop, EVRUN_NOWAIT));
+	T_CHECK(close(peer_fd) == 0);
+	T_CHECK(close(client_fd) == 0);
+	T_CHECK(close(bad_target) == 0);
+	T_CHECK(close(good_target) == 0);
+	fixture_destroy(loop, &s);
+}
+
+T_DECLARE_CASE(socks5_udp_target_cloexec_failure)
+{
+	T_CALL_SUBCASE(expect_udp_target_setup_failure, AF_INET, false);
+	T_CALL_SUBCASE(expect_udp_target_setup_failure, AF_INET6, false);
+}
+
+T_DECLARE_CASE(socks5_udp_target_nonblock_failure)
+{
+	T_CALL_SUBCASE(expect_udp_target_setup_failure, AF_INET, true);
+	T_CALL_SUBCASE(expect_udp_target_setup_failure, AF_INET6, true);
+}
+
 /* The relay reaches a target of either family whatever the client's: an IPv4
  * client's datagram to an IPv6 target is delivered, and the reply comes back
  * wrapped as ATYP=IPv6. */
@@ -5188,6 +5539,54 @@ T_DECLARE_SUBCASE(
 	T_EXPECT(udp_target_recv_runs(rig->target_udp, fills, lens, 2));
 }
 
+T_DECLARE_CASE(socks5_udp_fuzz_send_boundary)
+{
+	struct udp_frag_rig rig = { 0 };
+	T_CALL_SUBCASE(udp_frag_rig_open, &rig);
+	g_udp_send.drop = true;
+	udp_frag_send(&rig, 0, 'a', 3);
+	T_EXPECT_EQ(g_udp_send.calls, 1);
+	T_EXPECT_EQ(g_udp_send.len, 3);
+	T_EXPECT_EQ(g_udp_send.destlen, sizeof(struct sockaddr_in));
+	T_EXPECT_EQ(g_udp_send.dest.in.sin_family, AF_INET);
+	T_EXPECT_EQ(
+		g_udp_send.dest.in.sin_addr.s_addr,
+		rig.target_sa.sin_addr.s_addr);
+	T_EXPECT_EQ(g_udp_send.dest.in.sin_port, rig.target_sa.sin_port);
+	T_EXPECT(recv_is_empty(rig.target_udp));
+
+	udp_frag_send(&rig, 0x01, 'b', 2);
+	T_EXPECT_EQ(g_udp_send.calls, 1);
+	udp_frag_send(&rig, 0x82, 'c', 3);
+	T_EXPECT_EQ(g_udp_send.calls, 2);
+	T_EXPECT_EQ(g_udp_send.len, 5);
+	T_EXPECT(recv_is_empty(rig.target_udp));
+
+	const unsigned char v6[] = {
+		0,    0,    0,	  SOCKS5ADDR_IPV6,
+		0x20, 0x01, 0x0d, 0xb8,
+		0,    0,    0,	  0,
+		0,    0,    0,	  0,
+		0,    0,    0,	  1,
+		0x01, 0xbb, 'v',  '6',
+	};
+	udp_frag_send_raw(&rig, v6, sizeof(v6));
+	T_EXPECT_EQ(g_udp_send.calls, 3);
+	T_EXPECT_EQ(g_udp_send.destlen, sizeof(struct sockaddr_in6));
+	T_EXPECT_EQ(g_udp_send.dest.in6.sin6_family, AF_INET6);
+	T_EXPECT_EQ(g_udp_send.dest.in6.sin6_port, htons(443));
+	T_EXPECT(memcmp(&g_udp_send.dest.in6.sin6_addr, v6 + 4, 16) == 0);
+	T_EXPECT_EQ(g_udp_send.len, 2);
+
+	/* Disarming the boundary restores real delivery for ordinary fixtures. */
+	g_udp_send.drop = false;
+	udp_frag_send(&rig, 0, 'd', 3);
+	static const unsigned char fills[] = { 'd' };
+	static const size_t lens[] = { 3 };
+	T_EXPECT(udp_target_recv_runs(rig.target_udp, fills, lens, 1));
+	udp_frag_rig_close(&rig);
+}
+
 /* A sequence of more than two fragments reassembles in order, up to a payload
  * that fills the reassembly buffer exactly: the overflow guard admits a total
  * of IO_BUFSIZE bytes. */
@@ -5825,14 +6224,18 @@ T_DECLARE_CASE(socks4a_domain_connect_success_granted)
 		T_EXPECT_EQ(rsp[1], SOCKS4RSP_GRANTED);
 	}
 
+	T_EXPECT_EQ(STUB.dialer_do_count, 1);
+	T_CHECK(STUB.dialer_request != NULL);
+	T_EXPECT_EQ(STUB.dialer_request->addr.type, ATYP_DOMAIN);
+	T_EXPECT_EQ(STUB.dialer_request->addr.port, 443);
+	T_EXPECT_EQ(STUB.dialer_request->addr.domain.len, 5);
+	T_EXPECT(
+		memcmp(STUB.dialer_request->addr.domain.name, "a.com", 5) == 0);
+
 	T_CHECK(close(peer_fd) == 0);
 	fixture_destroy(loop, &s);
 }
 
-/*
- * SOCKS5 CONNECT with ATYP=DOMAIN and a zero-length domain name must be
- * rejected gracefully rather than crashing.
- */
 /* A successful CONNECT must send SOCKS5RSP_SUCCEEDED and start exactly one
  * transfer (exercises the previously-dead stub_xfer capture). */
 T_DECLARE_CASE(socks5_connect_success_starts_transfer)
@@ -5993,6 +6396,97 @@ static int probe_lowest_fd(void)
 	return fd;
 }
 
+/* Each hand-off must release its context even when the transfer refuses both
+ * descriptors. No GC sweep is allowed to hide a context left behind. */
+T_DECLARE_CASE(socks5_transfer_start_failure_cleans_up)
+{
+	enum { CONNECT, BIND, FORWARD };
+	for (int mode = CONNECT; mode <= FORWARD; mode++) {
+		struct ev_loop *loop = ev_loop_new(0);
+		struct server s = { 0 };
+		int peer_fd = -1;
+		int connector_fd = -1;
+		unsigned char req[] = {
+			0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x01,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		};
+
+		stub_reset();
+		T_CHECK(loop != NULL);
+		s.loop = loop;
+		STUB.transfer_fail = true;
+		STUB.dialreq_available = true;
+		STUB.dialer_mode = STUB_DIALER_SUCCESS;
+		if (mode == BIND) {
+			test_conf.socks5_bind = true;
+			req[4] = SOCKS5CMD_BIND;
+		} else if (mode == FORWARD) {
+			G.ruleset = (struct ruleset *)&test_conf;
+			STUB.ruleset_mode = STUB_RULESET_ASYNC_OK;
+		}
+		test_server_init(&s);
+		serve_payload(loop, &s, req, sizeof(req), &peer_fd);
+		drive_loop(loop);
+
+		if (mode == BIND) {
+			unsigned char rsp[12];
+			T_CHECK(recv_reply(
+					loop, peer_fd, rsp, sizeof(rsp),
+					sizeof(rsp)) == 12);
+			T_CHECK(rsp[3] == SOCKS5RSP_SUCCEEDED);
+			struct sockaddr_in sa = {
+				.sin_family = AF_INET,
+				.sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+			};
+			memcpy(&sa.sin_port, rsp + 10, sizeof(sa.sin_port));
+			connector_fd = socket(AF_INET, SOCK_STREAM, 0);
+			T_CHECK(connector_fd >= 0);
+			T_CHECK(connect(connector_fd,
+					(const struct sockaddr *)&sa,
+					sizeof(sa)) == 0);
+			drive_loop(loop);
+		} else if (mode == FORWARD) {
+			T_CHECK(STUB.ruleset_pending_cb != NULL);
+			struct ruleset_callback *const cb =
+				STUB.ruleset_pending_cb;
+			STUB.ruleset_pending_cb = NULL;
+			const int fd = socket(AF_INET, SOCK_STREAM, 0);
+			T_CHECK(fd >= 0);
+			cb->forward(loop, cb, fd);
+			drive_loop(loop);
+		}
+
+		const int acc_result = fcntl(STUB.transfer_acc_fd, F_GETFD);
+		const int acc_errno = errno;
+		const int dial_result = fcntl(STUB.transfer_dial_fd, F_GETFD);
+		const int dial_errno = errno;
+		const int active = ev_run(loop, EVRUN_NOWAIT);
+		const size_t leaked = gc_finalizeall();
+		if (connector_fd >= 0) {
+			T_CHECK(close(connector_fd) == 0);
+		}
+		T_CHECK(close(peer_fd) == 0);
+		fixture_destroy(loop, &s);
+		G.ruleset = NULL;
+
+		T_EXPECT_EQ(STUB.transfer_calls, 1);
+		T_EXPECT_EQ(STUB.transfer_num_sessions, (size_t)1);
+		T_EXPECT_EQ(stub_xfer_ctx_count, 0);
+		T_EXPECT_EQ((size_t)s.num_sessions, (size_t)0);
+		T_EXPECT_EQ(s.stats.num_halfopen, (size_t)0);
+		T_EXPECT_EQ(s.stats.num_success, (size_t)0);
+		T_EXPECT_EQ(s.stats.num_sessions_peak, (size_t)0);
+		T_EXPECT_EQ(STUB.dialreq_free_count, mode == CONNECT ? 1 : 0);
+		T_EXPECT_EQ(STUB.ruleset_cancel_count, 0);
+		T_EXPECT_EQ(acc_result, -1);
+		T_EXPECT_EQ(acc_errno, EBADF);
+		T_EXPECT_EQ(dial_result, -1);
+		T_EXPECT_EQ(dial_errno, EBADF);
+		T_EXPECT_EQ(active, 0);
+		T_EXPECT_EQ(leaked, (size_t)0);
+	}
+}
+
 T_DECLARE_CASE(socks5_transfer_start_releases_descriptors)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -6056,17 +6550,17 @@ T_DECLARE_CASE(socks5_transfer_start_log_reports_accepted_fd)
 	logcap_stop();
 
 	T_EXPECT_EQ(stub_xfer_ctx_count, 1);
-	/* the stub peer formats as 0.0.0.0:0 and the stub dialaddr as `(stub)',
+	/* The stub peer formats as 0.0.0.0:0 and the request as `1.2.3.4:80',
 	 * so the whole correlation prefix is deterministic */
 	char want[128];
 	(void)snprintf(
 		want, sizeof(want),
-		"[fd:%d] 0.0.0.0:0 -> `(stub)': transfer start: [%d<->",
+		"[fd:%d] 0.0.0.0:0 -> `1.2.3.4:80': transfer start: [%d<->",
 		accepted_fd, accepted_fd);
 	T_EXPECT(strstr(g_logcap.buf, want) != NULL);
 	(void)snprintf(
-		want, sizeof(want), "[fd:%d] 0.0.0.0:0 -> `(stub)': ready, ",
-		accepted_fd);
+		want, sizeof(want),
+		"[fd:%d] 0.0.0.0:0 -> `1.2.3.4:80': ready, ", accepted_fd);
 	T_EXPECT(strstr(g_logcap.buf, want) != NULL);
 	T_EXPECT(strstr(g_logcap.buf, "[fd:-1]") == NULL);
 
@@ -7000,11 +7494,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_request_version_rejected),
 	T_CASE(socks5_unsupported_command_rsp),
 	T_CASE(socks5_unsupported_atyp_rsp),
-	T_CASE(socks5_userpass_empty_username_fails),
+	T_CASE(socks5_userpass_empty_credentials_fail),
 	T_CASE(socks5_no_acceptable_auth_method),
 	T_CASE(socks5_valid_ipv4_request_connect_fail_rsp),
 	T_CASE(socks5_userpass_domain_request_connect_fail_rsp),
 	T_CASE(socks5_valid_ipv6_request_connect_fail_rsp),
+	T_CASE(socks5_connect_inherits_base_proxy_chain),
 	T_CASE(socks4_long_userid_rejected),
 	T_CASE(socks4_valid_connect_rejected_when_dialreq_unavailable),
 	T_CASE(socks4a_domain_connect_dialer_fail_rejected),
@@ -7058,6 +7553,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_udp_relay_rejects_off_ip_first_datagram),
 	T_CASE(socks5_udp_relay_roundtrip_ipv6),
 	T_CASE(socks5_udp_relay_ipv4_client_reaches_ipv6_target),
+	T_CASE(socks5_udp_target_cloexec_failure),
+	T_CASE(socks5_udp_target_nonblock_failure),
 #if WITH_NETDEVICE
 	T_CASE(socks5_udp_relay_target_socket_bound_to_netdev),
 #endif
@@ -7068,6 +7565,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_udp_frag_discard_out_of_order),
 	T_CASE(socks5_udp_frag_restart_recovers),
 	T_CASE(socks5_udp_frag_three_parts_fill_buffer),
+	T_CASE(socks5_udp_fuzz_send_boundary),
 	T_CASE(socks5_udp_frag_overflow_discards_sequence),
 	T_CASE(socks5_udp_outbound_policy),
 	T_CASE(socks5_udp_frag_out_of_order_mid_sequence),
@@ -7076,6 +7574,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(socks5_domain_max_length_parses),
 	T_CASE(socks4a_overlong_domain_rejected),
 	T_CASE(socks5_zero_length_domain_parses_then_fails),
+	T_CASE(socks5_transfer_start_failure_cleans_up),
 	T_CASE(socks5_transfer_start_releases_descriptors),
 	T_CASE(socks5_transfer_start_log_reports_accepted_fd),
 	T_CASE(socks5_ruleset_forward_commit_starts_transfer),

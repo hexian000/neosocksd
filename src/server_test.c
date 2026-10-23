@@ -254,6 +254,19 @@ static void vclock_stop(void)
 	g_vclock_on = false;
 }
 
+/* The framework also runs this after a failing expectation skips the normal
+ * teardown at the end of a virtual-clock case. */
+static void vclock_cleanup(void *data)
+{
+	(void)data;
+	vclock_stop();
+}
+
+static void loop_cleanup(void *data)
+{
+	ev_loop_destroy(data);
+}
+
 /* Advance virtual time by @p step and pump the loop once, so libev fires any
  * deadline the advance crossed. A step of 0 observes what the loop does with
  * no time passing at all. */
@@ -605,7 +618,7 @@ T_DECLARE_CASE(server_rejects_when_session_limit_exceeded)
  * leave the rest queued for another event-loop tick each, one connection
  * at a time, during exactly the overload condition the limiter exists to
  * mitigate. All three connections are queued in the kernel accept
- * backlog before the loop ever runs, so a single ev_run(EVRUN_ONCE) call
+ * backlog before the loop ever runs, so a single ev_run(EVRUN_NOWAIT) call
  * -- one accept_cb invocation -- must drain and reject all three.
  */
 T_DECLARE_CASE(server_accept_cb_drains_backlog_in_one_invocation)
@@ -625,7 +638,7 @@ T_DECLARE_CASE(server_accept_cb_drains_backlog_in_one_invocation)
 		client_fd[i] = connect_loopback(port);
 	}
 
-	ev_run(loop, EVRUN_ONCE);
+	ev_run(loop, EVRUN_NOWAIT);
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 3);
 	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
 
@@ -687,8 +700,12 @@ T_DECLARE_CASE(server_rejects_when_probabilistic_startup_limit_hits)
 
 T_DECLARE_CASE(server_accept_error_restarts_listener)
 {
+	enum { BACKOFF_STEPS = 16 };
+	vclock_start();
+	T_CLEANUP(vclock_cleanup, NULL);
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
+	T_CLEANUP(loop_cleanup, loop);
 	struct config conf = make_conf("127.0.0.1:0");
 	struct server s;
 	struct listener *l;
@@ -708,21 +725,54 @@ T_DECLARE_CASE(server_accept_error_restarts_listener)
 	ev_io_start(loop, &l->w_accept);
 	T_CHECK(write(pipefd[1], "x", 1) == 1);
 
-	T_EXPECT(test_wait_until(loop, listener_backing_off, l, 0.5));
-	T_EXPECT(!ev_is_active(&l->w_accept));
-	T_EXPECT(ev_is_active(&l->w_timer));
+	const bool armed = vclock_step_until(
+		loop, listener_backing_off, l, 0.0, BACKOFF_STEPS);
+	const ev_tstamp backoff = ev_timer_remaining(loop, &l->w_timer);
 
 	ev_io_set(&l->w_accept, listener_fd, EV_READ);
 	socket_close(pipefd[0]);
 	socket_close(pipefd[1]);
 	client_fd = connect_loopback(port);
-	T_EXPECT(test_wait_until(loop, served_once, &s, 1.0));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
+	/* A queued connection cannot restart the listener before its timer. */
+	const bool served_early =
+		vclock_step_until(loop, served_once, &s, 0.0, BACKOFF_STEPS);
+	const bool still_backing_off = listener_backing_off(l);
+	const bool recovered = vclock_step_until(
+		loop, served_once, &s, backoff / BACKOFF_STEPS,
+		2 * BACKOFF_STEPS);
+	const struct listener_stats stats = l->stats;
+	const bool accepting = ev_is_active(&l->w_accept);
+	const bool timer_active = ev_is_active(&l->w_timer);
 
 	socket_close(client_fd);
 	server_stop(&s);
-	ev_loop_destroy(loop);
+	vclock_stop();
+
+	T_EXPECT(armed);
+	T_EXPECT(backoff > 0.0);
+	T_EXPECT(!served_early);
+	T_EXPECT(still_backing_off);
+	T_EXPECT(recovered);
+	T_EXPECT_EQ(stats.num_accept, 1);
+	T_EXPECT_EQ(stats.num_serve, 1);
+	T_EXPECT(accepting);
+	T_EXPECT(!timer_active);
+}
+
+/* Drive the fixture's actual early expectation failure through the framework,
+ * then observe its cleanup before another case can enter an event-loop wait. */
+T_DECLARE_CASE(server_failed_setup_restores_virtual_clock)
+{
+	control_reset();
+	CONTROL.cloexec_fail_errno = EMFILE;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, server_accept_error_restarts_listener);
+	const bool restored = !g_vclock_on;
+	/* Keep the failure of this regression from poisoning later cases. */
+	vclock_stop();
+	control_reset();
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT(restored);
 }
 
 /*
@@ -747,7 +797,7 @@ T_DECLARE_SUBCASE(server_accept_pending_error_case, const int err)
 	client_fd = connect_loopback(port);
 	CONTROL.accept_fail_errno = err;
 
-	ev_run(loop, EVRUN_ONCE);
+	ev_run(loop, EVRUN_NOWAIT);
 
 	/* the armed failure was consumed, so the retry is what served */
 	T_EXPECT_EQ(CONTROL.accept_fail_errno, 0);
@@ -797,7 +847,7 @@ T_DECLARE_CASE(server_accept_listener_error_backs_off)
 	client_fd = connect_loopback(port);
 	CONTROL.accept_fail_errno = EMFILE;
 
-	ev_run(loop, EVRUN_ONCE);
+	ev_run(loop, EVRUN_NOWAIT);
 
 	T_EXPECT_EQ(CONTROL.accept_fail_errno, 0);
 	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 0);
@@ -833,8 +883,10 @@ T_DECLARE_CASE(server_accept_error_backoff_delays_every_retry)
 	struct server s;
 
 	vclock_start();
+	T_CLEANUP(vclock_cleanup, NULL);
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
+	T_CLEANUP(loop_cleanup, loop);
 	T_CHECK(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
 	struct listener *const l = &s.listeners[0];
 	const int client_fd = connect_loopback(bound_port(l->w_accept.fd));
@@ -866,7 +918,6 @@ T_DECLARE_CASE(server_accept_error_backoff_delays_every_retry)
 
 	socket_close(client_fd);
 	server_stop(&s);
-	ev_loop_destroy(loop);
 	vclock_stop();
 
 	T_EXPECT(armed);
@@ -1228,7 +1279,7 @@ T_DECLARE_CASE(server_accepted_setup_failure_reports_setter_errno)
 	logcap_start(LOG_LEVEL_ERROR);
 	CONTROL.nonblock_fail_errno = ENFILE;
 
-	ev_run(loop, EVRUN_ONCE);
+	ev_run(loop, EVRUN_NOWAIT);
 	logcap_stop();
 
 	T_EXPECT_EQ(CONTROL.nonblock_fail_errno, 0);
@@ -1659,6 +1710,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(server_rejects_when_probabilistic_startup_limit_hits),
 	T_CASE(server_rejects_when_at_probabilistic_startup_limit),
 	T_CASE(server_accept_error_restarts_listener),
+	T_CASE(server_failed_setup_restores_virtual_clock),
 	T_CASE(server_accept_retries_pending_network_errors),
 	T_CASE(server_accept_listener_error_backs_off),
 	T_CASE(server_accept_error_backoff_delays_every_retry),

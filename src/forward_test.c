@@ -12,6 +12,7 @@
 #include "transfer.h"
 
 #include "meta/arraysize.h"
+#include "os/socket.h"
 #if WITH_RULESET
 #include "utils/gc.h"
 #endif
@@ -73,7 +74,10 @@ static struct {
 	bool dialreq_available;
 	bool dialaddr_set_ok;
 	int_least32_t dialaddr_set_calls;
+	socklen_t dialaddr_set_len;
 	int_least32_t dialreq_free_calls;
+	const struct dialreq *dialreq_base;
+	const struct dialreq *dialreq_created;
 
 	enum stub_dialer_mode dialer_mode;
 	enum dialer_error dialer_err;
@@ -81,6 +85,10 @@ static struct {
 	int dialer_result_fd;
 	int_least32_t dialer_do_calls;
 	int_least32_t dialer_cancel_calls;
+	bool dialer_used_created_request;
+	struct dialaddr dialer_target;
+	size_t dialer_num_proxy;
+	struct proxyreq dialer_proxy[2];
 
 	struct stub_xfer_ctx *xfer_ctxs[2];
 	int_least32_t xfer_count;
@@ -96,6 +104,7 @@ static struct {
 	int_least32_t ruleset_route_calls;
 	int_least32_t ruleset_route6_calls;
 	int_least32_t ruleset_cancel_calls;
+	char ruleset_request[DIALADDR_STRLEN + 1];
 #endif /* WITH_RULESET */
 } STUB = {
 	.dialreq_available = true,
@@ -196,13 +205,20 @@ static void stub_reset(void)
 	STUB.dialreq_available = true;
 	STUB.dialaddr_set_ok = false;
 	STUB.dialaddr_set_calls = 0;
+	STUB.dialaddr_set_len = 0;
 	STUB.dialreq_free_calls = 0;
+	STUB.dialreq_base = NULL;
+	STUB.dialreq_created = NULL;
 	STUB.dialer_mode = STUB_DIALER_NONE;
 	STUB.dialer_err = DIALER_ERR_CONNECT;
 	STUB.dialer_syserr = ECONNREFUSED;
 	STUB.dialer_result_fd = -1;
 	STUB.dialer_do_calls = 0;
 	STUB.dialer_cancel_calls = 0;
+	STUB.dialer_used_created_request = false;
+	STUB.dialer_target = (struct dialaddr){ 0 };
+	STUB.dialer_num_proxy = 0;
+	memset(STUB.dialer_proxy, 0, sizeof(STUB.dialer_proxy));
 	for (int_fast32_t i = 0; i < STUB.xfer_count; i++) {
 		free(STUB.xfer_ctxs[i]);
 		STUB.xfer_ctxs[i] = NULL;
@@ -217,7 +233,8 @@ static void stub_reset(void)
 	STUB.ruleset_route_calls = 0;
 	STUB.ruleset_route6_calls = 0;
 	STUB.ruleset_cancel_calls = 0;
-#endif
+	STUB.ruleset_request[0] = '\0';
+#endif /* WITH_RULESET */
 	test_conf.timeout = 1.0;
 }
 
@@ -289,6 +306,20 @@ static int make_bound_ipv4_socket(void)
 	T_CHECK(bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0);
 	return fd;
 }
+
+static int make_bound_ipv6_socket(void)
+{
+	const int fd = socket(AF_INET6, SOCK_STREAM, 0);
+	const struct sockaddr_in6 addr = {
+		.sin6_family = AF_INET6,
+		.sin6_addr = IN6ADDR_LOOPBACK_INIT,
+		.sin6_port = 0,
+	};
+
+	T_CHECK(fd >= 0);
+	T_CHECK(bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0);
+	return fd;
+}
 #endif /* WITH_TPROXY */
 
 static void
@@ -332,9 +363,11 @@ const char *dialer_strerror(const enum dialer_error err)
 struct dialreq *dialreq_new(const struct dialreq *base, const size_t num_proxy)
 {
 	struct dialreq *req;
-	const size_t size = sizeof(*req) + num_proxy * sizeof(req->proxy[0]);
+	const size_t num_base = base != NULL ? base->num_proxy : 0;
+	const size_t size =
+		sizeof(*req) + (num_base + num_proxy) * sizeof(req->proxy[0]);
 
-	(void)base;
+	STUB.dialreq_base = base;
 	if (!STUB.dialreq_available) {
 		return NULL;
 	}
@@ -342,7 +375,17 @@ struct dialreq *dialreq_new(const struct dialreq *base, const size_t num_proxy)
 	if (req == NULL) {
 		return NULL;
 	}
-	req->num_proxy = num_proxy;
+	req->num_proxy = num_base;
+	req->num_proxy_max = num_base + num_proxy;
+	if (base != NULL) {
+		req->addr = base->addr;
+		/* The fixture uses credential-free proxies; copying their
+		 * address and protocol preserves the base chain. */
+		for (size_t i = 0; i < num_base; i++) {
+			req->proxy[i] = base->proxy[i];
+		}
+	}
+	STUB.dialreq_created = req;
 	return req;
 }
 
@@ -399,7 +442,7 @@ bool dialaddr_set(
 	struct dialaddr *restrict addr, const struct sockaddr *restrict sa,
 	const socklen_t len)
 {
-	(void)len;
+	STUB.dialaddr_set_len = len;
 	STUB.dialaddr_set_calls++;
 	if (!STUB.dialaddr_set_ok) {
 		return false;
@@ -478,11 +521,18 @@ void dialer_do(
 	const struct config *conf, struct resolver *resolver,
 	struct server *server)
 {
-	(void)req;
 	(void)conf;
 	(void)resolver;
 	(void)server;
 	STUB.dialer_do_calls++;
+	T_CHECK(req != NULL);
+	STUB.dialer_used_created_request = req == STUB.dialreq_created;
+	STUB.dialer_target = req->addr;
+	STUB.dialer_num_proxy = req->num_proxy;
+	T_CHECK(req->num_proxy <= ARRAY_SIZE(STUB.dialer_proxy));
+	for (size_t i = 0; i < req->num_proxy; i++) {
+		STUB.dialer_proxy[i] = req->proxy[i];
+	}
 
 	switch (STUB.dialer_mode) {
 	case STUB_DIALER_NONE:
@@ -608,8 +658,10 @@ bool ruleset_dispatch(
 	struct ruleset_callback *callback)
 {
 	(void)r;
-	(void)request;
 	(void)creds;
+	const size_t len = strlen(request);
+	T_CHECK(len < sizeof(STUB.ruleset_request));
+	memcpy(STUB.ruleset_request, request, len + 1);
 	switch (atype) {
 	case ATYP_INET:
 		STUB.ruleset_route_calls++;
@@ -670,7 +722,6 @@ T_DECLARE_CASE(forward_dialer_fail_updates_stats)
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
 	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
-	struct dialreq base_req = { 0 };
 	int accepted_fd = -1;
 	int peer_fd = -1;
 
@@ -678,18 +729,45 @@ T_DECLARE_CASE(forward_dialer_fail_updates_stats)
 	STUB.dialer_mode = STUB_DIALER_FAIL;
 	STUB.dialer_err = DIALER_ERR_CONNECT;
 	STUB.dialer_syserr = ENETUNREACH;
-	set_ipv4_addr(&base_req.addr, 80);
+	struct dialreq *const base_req = dialreq_new(NULL, 2);
+	T_CHECK(base_req != NULL);
+	T_CLEANUP(free, base_req);
+	set_ipv4_addr(&base_req->addr, 80);
+	base_req->num_proxy = 2;
+	base_req->proxy[0].proto = PROTO_HTTP;
+	set_ipv4_addr(&base_req->proxy[0].addr, 8080);
+	base_req->proxy[1].proto = PROTO_SOCKS5;
+	set_ipv4_addr(&base_req->proxy[1].addr, 1080);
 
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_server_init(&s);
-	s.basereq = &base_req;
+	s.basereq = base_req;
 	make_socketpair(&accepted_fd, &peer_fd);
 
 	forward_serve(
 		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
 
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+
 	T_EXPECT_EQ(STUB.dialer_do_calls, 1);
+	T_EXPECT(STUB.dialreq_base == base_req);
+	T_EXPECT(STUB.dialer_used_created_request);
+	T_EXPECT_EQ(STUB.dialer_target.type, ATYP_INET);
+	T_EXPECT_EQ(STUB.dialer_target.in.s_addr, htonl(INADDR_LOOPBACK));
+	T_EXPECT_EQ(STUB.dialer_target.port, 80);
+	T_EXPECT_EQ(STUB.dialer_num_proxy, (size_t)2);
+	T_EXPECT_EQ(STUB.dialer_proxy[0].proto, PROTO_HTTP);
+	T_EXPECT_EQ(STUB.dialer_proxy[0].addr.type, ATYP_INET);
+	T_EXPECT_EQ(
+		STUB.dialer_proxy[0].addr.in.s_addr, htonl(INADDR_LOOPBACK));
+	T_EXPECT_EQ(STUB.dialer_proxy[0].addr.port, 8080);
+	T_EXPECT_EQ(STUB.dialer_proxy[1].proto, PROTO_SOCKS5);
+	T_EXPECT_EQ(STUB.dialer_proxy[1].addr.type, ATYP_INET);
+	T_EXPECT_EQ(
+		STUB.dialer_proxy[1].addr.in.s_addr, htonl(INADDR_LOOPBACK));
+	T_EXPECT_EQ(STUB.dialer_proxy[1].addr.port, 1080);
 	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
@@ -700,9 +778,6 @@ T_DECLARE_CASE(forward_dialer_fail_updates_stats)
 	/* the direct dial must own a copy of basereq (not borrow it, which a
 	 * SIGHUP reload would free mid-dial): teardown frees exactly that copy */
 	T_EXPECT_EQ(STUB.dialreq_free_calls, 1);
-
-	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(forward_timeout_cancels_pending_dialer)
@@ -1002,14 +1077,17 @@ T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
 	test_drive_once(loop);
 
-	T_EXPECT_EQ(STUB.ruleset_resolve_calls, 1);
-	T_EXPECT(STUB.ruleset_pending_cb != NULL);
-	/* num_request is counted at request receipt (in forward_serve) */
-	T_EXPECT_EQ(s.stats.num_request, 1);
-
 	complete_pending_ruleset(loop);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+
+	T_EXPECT_STREQ(STUB.ruleset_request, "example.org:443");
 
 	T_EXPECT_EQ(STUB.ruleset_resolve_calls, 1);
+	T_EXPECT(STUB.dialer_used_created_request);
+	T_EXPECT_EQ(STUB.dialer_target.type, ATYP_INET);
+	T_EXPECT_EQ(STUB.dialer_target.in.s_addr, htonl(INADDR_LOOPBACK));
+	T_EXPECT_EQ(STUB.dialer_target.port, 443);
 	T_EXPECT_EQ(STUB.ruleset_cancel_calls, 0);
 	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
 	T_EXPECT_EQ(STUB.dialreq_free_calls, 1);
@@ -1017,9 +1095,6 @@ T_DECLARE_CASE(forward_ruleset_async_then_dialer_fail)
 	T_EXPECT_EQ(s.stats.num_success, 0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
 	T_EXPECT_EQ(s.num_sessions, 0);
-
-	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
 }
 
 /* IPv4 base → ruleset_route(); IPv6 base → ruleset_route6(). */
@@ -1053,26 +1128,31 @@ T_DECLARE_SUBCASE(forward_ruleset_route_case, const bool ipv6)
 		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
 	test_drive_once(loop);
 
+	complete_pending_ruleset(loop);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+
 	T_EXPECT_EQ(STUB.ruleset_resolve_calls, 0);
 	if (ipv6) {
 		T_EXPECT_EQ(STUB.ruleset_route_calls, 0);
 		T_EXPECT_EQ(STUB.ruleset_route6_calls, 1);
+		T_EXPECT_STREQ(STUB.ruleset_request, "[::1]:443");
 	} else {
 		T_EXPECT_EQ(STUB.ruleset_route_calls, 1);
 		T_EXPECT_EQ(STUB.ruleset_route6_calls, 0);
+		T_EXPECT_STREQ(STUB.ruleset_request, "127.0.0.1:443");
 	}
 
-	complete_pending_ruleset(loop);
-
 	/* the ruleset-supplied request is dialed; the dialer then fails */
+	T_EXPECT(STUB.dialer_used_created_request);
+	T_EXPECT_EQ(STUB.dialer_target.type, ATYP_INET);
+	T_EXPECT_EQ(STUB.dialer_target.in.s_addr, htonl(INADDR_LOOPBACK));
+	T_EXPECT_EQ(STUB.dialer_target.port, 443);
 	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
 	T_EXPECT_EQ(s.stats.num_request, 1);
 	T_EXPECT_EQ(s.stats.num_success, 0);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
 	T_EXPECT_EQ(s.num_sessions, 0);
-
-	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(forward_ruleset_route_ipv4)
@@ -1349,13 +1429,16 @@ T_DECLARE_CASE(forward_ruleset_completed_teardown_cancels_request)
 #endif /* WITH_RULESET */
 
 #if WITH_TPROXY && WITH_RULESET
-/* tproxy: getsockname() → ruleset_route() for IPv4. */
-T_DECLARE_CASE(tproxy_ruleset_route_ipv4)
+/* Route the socket destination through the matching address-family entry. */
+T_DECLARE_SUBCASE(tproxy_ruleset_route_case, const bool ipv6)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
+	union sockaddr_max accepted_sa = { 0 };
 	int accepted_fd = -1;
+	union sockaddr_max dest = { 0 };
+	socklen_t destlen = sizeof(dest);
+	char request[64];
 
 	stub_reset();
 	STUB.dialreq_available = true;
@@ -1365,26 +1448,52 @@ T_DECLARE_CASE(tproxy_ruleset_route_ipv4)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_server_init(&s);
-	accepted_fd = make_bound_ipv4_socket();
+	accepted_sa.sa.sa_family = ipv6 ? AF_INET6 : AF_INET;
+	accepted_fd =
+		ipv6 ? make_bound_ipv6_socket() : make_bound_ipv4_socket();
+	T_CHECK(getsockname(accepted_fd, &dest.sa, &destlen) == 0);
+	T_CHECK(dest.sa.sa_family == accepted_sa.sa.sa_family);
+	T_CHECK(destlen == (ipv6 ? sizeof(struct sockaddr_in6) :
+				   sizeof(struct sockaddr_in)));
+	const unsigned port =
+		ntohs(ipv6 ? dest.in6.sin6_port : dest.in.sin_port);
+	T_CHECK(port != 0);
+	(void)snprintf(
+		request, sizeof(request), ipv6 ? "[::1]:%u" : "127.0.0.1:%u",
+		port);
 	s.ruleset = (struct ruleset *)&s;
 
-	tproxy_serve(
-		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	tproxy_serve(&s, loop, accepted_fd, &accepted_sa.sa);
 	test_drive_once(loop);
 
-	/* the bound IPv4 destination is routed via ruleset_route() */
-	T_EXPECT_EQ(STUB.ruleset_route_calls, 1);
-	T_EXPECT_EQ(STUB.ruleset_route6_calls, 0);
-	T_EXPECT(STUB.ruleset_pending_cb != NULL);
-
 	complete_pending_ruleset(loop);
+	ev_loop_destroy(loop);
 
+	T_EXPECT_EQ(STUB.ruleset_resolve_calls, 0);
+	T_EXPECT_EQ(STUB.ruleset_route_calls, ipv6 ? 0 : 1);
+	T_EXPECT_EQ(STUB.ruleset_route6_calls, ipv6 ? 1 : 0);
+	T_EXPECT_STREQ(STUB.ruleset_request, request);
+	T_EXPECT_EQ(STUB.dialer_do_calls, 1);
+	T_EXPECT_EQ(STUB.dialreq_free_calls, 1);
 	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
 	T_EXPECT_EQ(s.stats.num_request, 1);
+	T_EXPECT_EQ(s.stats.num_success, 0);
+	T_EXPECT_EQ(s.stats.num_reject_upstream, (uint_least64_t)1);
 	T_EXPECT_EQ(s.stats.num_halfopen, 0);
 	T_EXPECT_EQ(s.num_sessions, 0);
+	errno = 0;
+	T_EXPECT_EQ(fcntl(accepted_fd, F_GETFD), -1);
+	T_EXPECT_EQ(errno, EBADF);
+}
 
-	ev_loop_destroy(loop);
+T_DECLARE_CASE(tproxy_ruleset_route_ipv4)
+{
+	T_CALL_SUBCASE(tproxy_ruleset_route_case, false);
+}
+
+T_DECLARE_CASE(tproxy_ruleset_route_ipv6)
+{
+	T_CALL_SUBCASE(tproxy_ruleset_route_case, true);
 }
 
 /* SIGHUP may clear s->ruleset between tproxy_serve and tproxy_process_cb. The
@@ -1489,12 +1598,14 @@ T_DECLARE_CASE(tproxy_getdest_failure_rejects)
 #endif /* WITH_TPROXY && WITH_RULESET */
 
 #if WITH_TPROXY
-T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
+T_DECLARE_SUBCASE(tproxy_dialer_fail_case, const bool ipv6)
 {
 	struct ev_loop *loop = ev_loop_new(0);
 	struct server s = { 0 };
-	struct sockaddr_in accepted_sa = { .sin_family = AF_INET };
+	union sockaddr_max accepted_sa = { 0 };
 	int accepted_fd = -1;
+	union sockaddr_max dest = { 0 };
+	socklen_t destlen = sizeof(dest);
 
 	stub_reset();
 	STUB.dialreq_available = true;
@@ -1504,12 +1615,36 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 	T_CHECK(loop != NULL);
 	s.loop = loop;
 	test_server_init(&s);
-	accepted_fd = make_bound_ipv4_socket();
+	accepted_sa.sa.sa_family = ipv6 ? AF_INET6 : AF_INET;
+	accepted_fd =
+		ipv6 ? make_bound_ipv6_socket() : make_bound_ipv4_socket();
+	T_CHECK(getsockname(accepted_fd, &dest.sa, &destlen) == 0);
+	T_CHECK(dest.sa.sa_family == accepted_sa.sa.sa_family);
+	T_CHECK(destlen == (ipv6 ? sizeof(struct sockaddr_in6) :
+				   sizeof(struct sockaddr_in)));
+	const unsigned port =
+		ntohs(ipv6 ? dest.in6.sin6_port : dest.in.sin_port);
+	T_CHECK(port != 0);
 
-	tproxy_serve(
-		&s, loop, accepted_fd, (const struct sockaddr *)&accepted_sa);
+	tproxy_serve(&s, loop, accepted_fd, &accepted_sa.sa);
+
+	ev_loop_destroy(loop);
 
 	T_EXPECT_EQ(STUB.dialaddr_set_calls, 1);
+	T_EXPECT(STUB.dialer_used_created_request);
+	T_EXPECT_EQ(STUB.dialaddr_set_len, destlen);
+	T_EXPECT_EQ(STUB.dialer_do_calls, 1);
+	if (ipv6) {
+		T_EXPECT_EQ(STUB.dialer_target.type, ATYP_INET6);
+		T_EXPECT_MEMEQ(
+			&STUB.dialer_target.in6, &in6addr_loopback,
+			sizeof(in6addr_loopback));
+	} else {
+		T_EXPECT_EQ(STUB.dialer_target.type, ATYP_INET);
+		T_EXPECT_EQ(
+			STUB.dialer_target.in.s_addr, dest.in.sin_addr.s_addr);
+	}
+	T_EXPECT_EQ(STUB.dialer_target.port, port);
 	T_EXPECT_EQ(STUB.dialreq_free_calls, 1);
 	T_EXPECT_EQ(STUB.dialer_cancel_calls, 1);
 	T_EXPECT_EQ(s.stats.num_request, 1);
@@ -1518,8 +1653,19 @@ T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
 	/* the counter this path uniquely updates */
 	T_EXPECT_EQ(s.stats.num_reject_upstream, (uint_least64_t)1);
 	T_EXPECT_EQ(s.num_sessions, 0);
+	errno = 0;
+	T_EXPECT_EQ(fcntl(accepted_fd, F_GETFD), -1);
+	T_EXPECT_EQ(errno, EBADF);
+}
 
-	ev_loop_destroy(loop);
+T_DECLARE_CASE(tproxy_dialer_fail_uses_socket_destination)
+{
+	T_CALL_SUBCASE(tproxy_dialer_fail_case, false);
+}
+
+T_DECLARE_CASE(tproxy_dialer_fail_uses_ipv6_socket_destination)
+{
+	T_CALL_SUBCASE(tproxy_dialer_fail_case, true);
 }
 
 /* No-ruleset tproxy path where tproxy_makereq() fails (dialaddr_set rejects
@@ -1620,11 +1766,13 @@ static const struct testing_suite suite[] = {
 #endif /* WITH_RULESET */
 #if WITH_TPROXY
 	T_CASE(tproxy_dialer_fail_uses_socket_destination),
+	T_CASE(tproxy_dialer_fail_uses_ipv6_socket_destination),
 	T_CASE(tproxy_makereq_failure_cleans_up),
 	T_CASE(tproxy_makereq_oom_closes_accepted),
 #endif
 #if WITH_TPROXY && WITH_RULESET
 	T_CASE(tproxy_ruleset_route_ipv4),
+	T_CASE(tproxy_ruleset_route_ipv6),
 	T_CASE(tproxy_ruleset_null_after_sighup),
 	T_CASE(tproxy_unsupported_af_rejects),
 	T_CASE(tproxy_getdest_failure_rejects),

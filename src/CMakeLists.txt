@@ -314,6 +314,10 @@ if(WITH_RULESET)
         MOCK_DEFINITIONS
             socket_set_cloexec=test_socket_set_cloexec
             socket_set_nonblock=test_socket_set_nonblock)
+    # A compiler alias renames glibc's GNU transparent-union declaration,
+    # which GCC rejects at call sites under -pedantic. Wrap only this test
+    # executable; its fixture injections call __real_sendto directly.
+    target_link_options(socks_test PRIVATE "-Wl,--wrap=sendto")
     add_unit_test(http_proxy_test
         SRCS http_proxy_test.c http_proxy.c proto/http.c proto/codec.c)
     add_unit_test(api_server_test
@@ -350,6 +354,7 @@ add_unit_test(transfer_test
         dispatcher_tick=test_dispatcher_tick
         ev_break=test_ev_break
         pipe2=test_pipe2
+        splice=test_splice
         recv=test_recv
         send=test_send
         ev_io_start=test_ev_io_start
@@ -365,6 +370,7 @@ add_unit_test(server_test
         socket_set_cloexec=test_socket_set_cloexec
         socket_set_nonblock=test_socket_set_nonblock
     WITH_LUA)
+set_tests_properties(server_test PROPERTIES TIMEOUT 10)
 # glibc exposes accept() with a transparent-union argument under _GNU_SOURCE.
 # Keep the declaration in its portable struct-pointer form for this alias.
 target_compile_options(server_test_mock_impl PRIVATE -U_GNU_SOURCE)
@@ -407,7 +413,11 @@ add_unit_test(dialer_test
 # Keep the declaration in its portable struct-pointer form for this alias.
 target_compile_options(dialer_test_mock_impl PRIVATE -U_GNU_SOURCE)
 add_unit_test(resolver_test
-    SRCS resolver_test.c resolver.c
+    SRCS resolver_test.c
+    MOCK_SRCS resolver.c
+    MOCK_DEFINITIONS
+        ares_timeout=test_ares_timeout
+        ev_timer_again=test_ev_timer_again
     WITH_CARES)
 add_unit_test(util_test
     SRCS util_test.c util.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"

@@ -7,8 +7,8 @@
  * Linked translation units (see CMakeLists.txt):
  *   resolver.c       module under test
  * Leaf libraries: c-ares.
- * resolver.c has no stateful collaborator module to mock; the mock section
- * only holds shared test fixtures.
+ * Test-only aliases control c-ares deadlines and observe timer rearming;
+ * socket processing and libev timer operations still use the real libraries.
  */
 
 #include "resolver.h"
@@ -24,15 +24,24 @@
 #include <ev.h>
 
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#if WITH_CARES
+/* ares.h needs fd_set under strict POSIX feature macros. */
+#include <sys/select.h>
+
+#include <ares.h>
+#include <ares_version.h>
+#endif
+#include <sys/time.h>
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
- * mock - shared test fixtures (resolver.c has no collaborator to mock).
+ * mock - deadline control and shared test fixtures.
  * ---------------------------------------------------------------------- */
 
 /* Failsafe watchdog for the event-driven waits in wait_for_result(): each
@@ -148,6 +157,42 @@ static void free_test_resolver(struct resolver *resolver, struct ev_loop *loop)
 }
 
 #if WITH_CARES
+static struct {
+	bool enabled;
+	struct timeval next;
+	ev_timer *watcher;
+} g_timeout;
+
+/* c-ares made the channel parameter const in 1.29. */
+struct timeval *test_ares_timeout(
+#if ARES_VERSION >= 0x011d00
+	const ares_channel_t *channel,
+#else
+	ares_channel channel,
+#endif
+	struct timeval *maxtv, struct timeval *tv)
+{
+	if (!g_timeout.enabled) {
+		return ares_timeout(channel, maxtv, tv);
+	}
+	*tv = g_timeout.next;
+	return tv;
+}
+
+void test_ev_timer_again(struct ev_loop *loop, ev_timer *watcher)
+{
+	if (g_timeout.enabled) {
+		g_timeout.watcher = watcher;
+	}
+	ev_timer_again(loop, watcher);
+}
+
+static void reset_timeout(void *data)
+{
+	(void)data;
+	memset(&g_timeout, 0, sizeof(g_timeout));
+}
+
 /* Log capture, for the cases that point the resolver at a fake nameserver so
  * the host name they log needs no real lookup. A stream sink, not the writer
  * sink the other suites install: only the terminal and stream sinks render a
@@ -554,6 +599,116 @@ new_unanswered_resolver(struct ev_loop **loop_out, int *dns_fd_out)
 	*loop_out = loop;
 	*dns_fd_out = dns_fd;
 	return resolver;
+}
+
+static struct resolve_query *start_unanswered_query(
+	struct resolver *resolver, struct resolve_result *result,
+	const char *name)
+{
+	return resolve_do(
+		resolver,
+		(struct resolve_cb){ .func = resolve_capture_cb,
+				     .data = result },
+		name, "443", AF_INET);
+}
+
+/* Inspect deadlines against libev's cached loop time without running the loop
+ * or waiting for c-ares' real retry interval. */
+T_DECLARE_CASE(resolve_zero_timeout_keeps_timer_active)
+{
+	struct ev_loop *loop = NULL;
+	int dns_fd = -1;
+	struct resolver *const resolver =
+		new_unanswered_resolver(&loop, &dns_fd);
+	g_timeout.enabled = true;
+	T_CLEANUP(reset_timeout, NULL);
+	struct resolve_result result[3] = { 0 };
+
+	T_CHECK(start_unanswered_query(resolver, &result[0], "due.invalid") !=
+		NULL);
+	T_CHECK(g_timeout.watcher != NULL);
+	T_EXPECT(ev_is_active(g_timeout.watcher));
+	T_EXPECT(g_timeout.watcher->repeat > 0.0);
+	T_EXPECT(ev_timer_remaining(loop, g_timeout.watcher) <= 0.001001);
+
+	g_timeout.next.tv_sec = 60;
+	T_CHECK(start_unanswered_query(resolver, &result[1], "later.invalid") !=
+		NULL);
+	T_EXPECT(ev_timer_remaining(loop, g_timeout.watcher) > 59.0);
+	g_timeout.next.tv_sec = 0;
+	T_CHECK(start_unanswered_query(
+			resolver, &result[2], "due-again.invalid") != NULL);
+	T_EXPECT(ev_is_active(g_timeout.watcher));
+	T_EXPECT(ev_timer_remaining(loop, g_timeout.watcher) > 0.0);
+	T_EXPECT(ev_timer_remaining(loop, g_timeout.watcher) <= 0.001001);
+
+	free_test_resolver(resolver, loop);
+	(void)close(dns_fd);
+}
+
+T_DECLARE_CASE(resolve_new_query_advances_active_deadline)
+{
+	struct ev_loop *loop = NULL;
+	int dns_fd = -1;
+	struct resolver *const resolver =
+		new_unanswered_resolver(&loop, &dns_fd);
+	g_timeout.enabled = true;
+	g_timeout.next.tv_sec = 60;
+	T_CLEANUP(reset_timeout, NULL);
+	struct resolve_result result[2] = { 0 };
+
+	T_CHECK(start_unanswered_query(resolver, &result[0], "later.invalid") !=
+		NULL);
+	T_CHECK(g_timeout.watcher != NULL);
+	T_EXPECT(ev_is_active(g_timeout.watcher));
+	T_EXPECT(ev_timer_remaining(loop, g_timeout.watcher) > 59.0);
+	g_timeout.next = (struct timeval){ .tv_sec = 2, .tv_usec = 500000 };
+	T_CHECK(start_unanswered_query(
+			resolver, &result[1], "earlier.invalid") != NULL);
+	T_EXPECT(ev_is_active(g_timeout.watcher));
+	const ev_tstamp remaining = ev_timer_remaining(loop, g_timeout.watcher);
+	T_EXPECT(remaining > 2.499 && remaining < 2.501);
+	T_EXPECT(!result[0].called && !result[1].called);
+
+	free_test_resolver(resolver, loop);
+	(void)close(dns_fd);
+}
+
+T_DECLARE_CASE(resolve_socket_event_advances_active_deadline)
+{
+	struct ev_loop *loop = NULL;
+	int dns_fd = -1;
+	struct resolver *const resolver =
+		new_unanswered_resolver(&loop, &dns_fd);
+	g_timeout.enabled = true;
+	g_timeout.next.tv_sec = 60;
+	T_CLEANUP(reset_timeout, NULL);
+	struct resolve_result result[2] = { 0 };
+	T_CHECK(start_unanswered_query(resolver, &result[0], "first.invalid") !=
+		NULL);
+	T_CHECK(start_unanswered_query(
+			resolver, &result[1], "second.invalid") != NULL);
+	T_CHECK(g_timeout.watcher != NULL);
+	T_EXPECT(ev_timer_remaining(loop, g_timeout.watcher) > 59.0);
+
+	/* Reply to only one query. The other remains in flight when socket_cb
+	 * must replace the active timer's later deadline. */
+	struct fake_dns dns = make_fake_dns();
+	ev_io w_dns;
+	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
+	w_dns.data = &dns;
+	struct pollfd pending = { .fd = dns_fd, .events = POLLIN };
+	T_CHECK(poll(&pending, 1, 0) == 1);
+	ev_invoke(loop, &w_dns, EV_READ);
+	g_timeout.next.tv_sec = 5;
+	ev_run(loop, EVRUN_NOWAIT);
+	T_EXPECT_EQ(resolver_stats(resolver)->num_success, 1);
+	T_EXPECT(ev_is_active(g_timeout.watcher));
+	const ev_tstamp remaining = ev_timer_remaining(loop, g_timeout.watcher);
+	T_EXPECT(remaining > 4.999 && remaining < 5.001);
+
+	free_test_resolver(resolver, loop);
+	(void)close(dns_fd);
 }
 
 /*
@@ -1096,6 +1251,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(resolve_success_null_service),
 	T_CASE(resolver_free_reclaims_completed_query),
 #if WITH_CARES
+	T_CASE(resolve_zero_timeout_keeps_timer_active),
+	T_CASE(resolve_new_query_advances_active_deadline),
+	T_CASE(resolve_socket_event_advances_active_deadline),
 	T_CASE(resolve_log_keeps_client_name_off_the_line),
 	T_CASE(resolve_log_keeps_an_ordinary_name_legible),
 	T_CASE(resolve_via_fake_nameserver),
