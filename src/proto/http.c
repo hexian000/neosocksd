@@ -122,9 +122,18 @@ static int parse_message(struct http_conn *restrict p)
 	case STATE_PARSE_REQUEST:
 		version = msg->req.version;
 		break;
-	case STATE_PARSE_RESPONSE:
+	case STATE_PARSE_RESPONSE: {
+		/* RFC 9112 §4: the complete status field is exactly 3DIGIT. */
+		const char *code = msg->rsp.code;
+		if (strlen(code) != 3 || !isdigit((unsigned char)code[0]) ||
+		    !isdigit((unsigned char)code[1]) ||
+		    !isdigit((unsigned char)code[2])) {
+			LOGD_F("http: invalid status code `%s'", code);
+			return -1;
+		}
 		version = msg->rsp.version;
 		break;
+	}
 	default:
 		FAILMSGF("unexpected http parser state: %d", p->state);
 	}
@@ -680,8 +689,8 @@ bool parsehdr_accept_encoding(struct http_conn *restrict p, char *restrict value
 	} else if (selected) {
 		p->hdr.accept_encoding = CENCODING_DEFLATE;
 	}
-	/* otherwise leave accept_encoding as CENCODING_NONE: a valid header with
-	 * no acceptable supported coding, or deflate explicitly refused */
+	/* Otherwise retain the previous selection: this field adds no acceptable
+	 * supported coding, and no field has explicitly refused deflate. */
 	return true;
 }
 
@@ -906,6 +915,16 @@ void http_resp_errpage(struct http_conn *restrict p, const uint_fast16_t code)
 	 * truncation, so add only the bytes actually written */
 	if (cap > 0) {
 		p->wbuf.len += ((size_t)len < cap) ? (size_t)len : cap - 1;
+	}
+	if (cap > 0 && p->mode == STATE_PARSE_REQUEST &&
+	    p->msg.req.method != NULL &&
+	    strcmp(p->msg.req.method, "HEAD") == 0) {
+		/* Preserve the generated headers, but HEAD responses never
+		 * carry the error page itself. */
+		const char *end = strstr(buf, "\r\n\r\n");
+		if (end != NULL) {
+			p->wbuf.len = (size_t)(end - buf) + 4;
+		}
 	}
 	LOG_STACK_F(VERBOSE, 0, "http: response error page %" PRIuFAST16, code);
 }

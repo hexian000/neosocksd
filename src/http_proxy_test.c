@@ -13,6 +13,7 @@
 
 #include "meta/arraysize.h"
 #include "os/socket.h"
+#include "utils/gc.h"
 #include "utils/slog.h"
 #include "utils/testing.h"
 
@@ -45,6 +46,8 @@
 
 static bool g_vclock_on = false;
 static double g_vclock_sec = 0.0;
+
+enum { TEST_MAX_STEPS = 1024 };
 
 /* Read the real clock for the pass-through path. Both clock_gettime() and
  * gettimeofday() are interposed here, so the underlying clock has to be reached
@@ -164,8 +167,8 @@ static struct config test_conf = {
 	.auth_required = false,
 };
 
-/* Watchdog bound on the event-driven drive/read helpers: a hung-test backstop,
- * never a completion signal (completion is loop quiescence or a peer EOF). */
+/* Watchdog bound on real-time predicate waits. Frozen-clock waits and loop
+ * quiescence use TEST_MAX_STEPS independently of time. */
 static const ev_tstamp TEST_WAIT_RECV_SEC = 0.128;
 
 const char *const proxy_protocol_str[PROTO_MAX] = {
@@ -633,25 +636,39 @@ test_watchdog_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
-/* Drive the loop until it quiesces: pump non-blocking rounds until a round
- * invokes no watchers, i.e. all reachable I/O has been processed. No iteration
- * count and no wall-clock wait; the watchdog only backstops a runaway loop.
- * Works under the virtual clock too (a frozen clock never advances real time,
- * so only ready I/O drives progress). */
-static void drive_loop(struct ev_loop *loop)
+/* Quiescence is a round with no callbacks. Bound the number of nonblocking
+ * rounds independently of time so a frozen clock cannot hide runaway work. */
+static bool drive_loop_until_quiet(struct ev_loop *loop)
 {
-	struct test_watchdog watchdog = { 0 };
-	ev_timer w_timeout;
-	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_RECV_SEC, 0.0);
-	w_timeout.data = &watchdog;
-	ev_timer_start(loop, &w_timeout);
+	bool quiet = false;
 	ev_set_invoke_pending_cb(loop, drive_invoke_pending);
-	do {
+	for (unsigned int step = 0; step < TEST_MAX_STEPS; step++) {
 		g_drive_invoked = 0;
 		ev_run(loop, EVRUN_NOWAIT);
-	} while (g_drive_invoked > 0 && !watchdog.fired);
+		if (g_drive_invoked == 0) {
+			quiet = true;
+			break;
+		}
+	}
 	ev_set_invoke_pending_cb(loop, ev_invoke_pending);
-	ev_timer_stop(loop, &w_timeout);
+	return quiet;
+}
+
+static void drive_loop(struct ev_loop *loop)
+{
+	T_CHECK(drive_loop_until_quiet(loop));
+}
+
+/* Drain peer EOF and finalize unfinished requests while their server and loop
+ * still exist. Observation-only ruleset cases deliberately leave work pending. */
+static void fixture_destroy(struct ev_loop *loop, struct server *restrict s)
+{
+	drive_loop(loop);
+	(void)gc_finalizeall();
+	T_CHECK(s->stats.num_halfopen == 0);
+	T_CHECK(gc_finalizeall() == 0);
+	T_CHECK(!ev_run(loop, EVRUN_NOWAIT));
+	ev_loop_destroy(loop);
 }
 
 static bool test_wait_until(
@@ -660,12 +677,14 @@ static bool test_wait_until(
 {
 	struct test_watchdog watchdog = { 0 };
 	struct ev_timer w_timeout;
+	unsigned int steps = 0;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired && !predicate(data)) {
-		ev_run(loop, EVRUN_ONCE);
+	while (!watchdog.fired && !predicate(data) &&
+	       (!g_vclock_on || steps++ < TEST_MAX_STEPS)) {
+		ev_run(loop, g_vclock_on ? EVRUN_NOWAIT : EVRUN_ONCE);
 	}
 	ev_timer_stop(loop, &w_timeout);
 	return predicate(data);
@@ -832,7 +851,7 @@ static ssize_t recv_at_least(
 	size_t off = 0;
 	/* Drive the proxy and drain until the caller's floor is met, the buffer
 	 * fills, or a round makes no progress (data source exhausted); each
-	 * round is bounded by drive_loop's watchdog. */
+	 * round has drive_loop's independent progress bound. */
 	for (;;) {
 		drive_loop(loop);
 		const size_t got = drain_fd(fd, buf, off, cap);
@@ -931,12 +950,37 @@ T_DECLARE_CASE(host_validation_before_connect_dispatch)
 			assert_response_status(loop, peer_fd, cases[i].status);
 		const uintmax_t dispatched = s.stats.num_request;
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop, &s);
 		T_EXPECT(ok);
 		T_EXPECT_EQ(
 			dispatched,
 			strcmp(cases[i].status, "502") == 0 ? 1 : 0);
 	}
+}
+
+T_DECLARE_CASE(head_error_has_no_wire_payload)
+{
+	struct ev_loop *loop = NULL;
+	struct server s = { 0 };
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+	const char req[] = "HEAD / HTTP/1.1\r\nHost: test\r\n\r\n";
+	reset_stub_state();
+	init_server(&loop, &s);
+	start_serve(loop, &s, &peer_fd);
+	T_CHECK(write_all(peer_fd, req, sizeof(req) - 1) == 0);
+	const ssize_t n = recv_at_least(loop, peer_fd, rsp, sizeof(rsp), 17);
+	T_CHECK(n > 0);
+	T_EXPECT(has_http_status(rsp, (size_t)n, "501"));
+	const unsigned char *end = memmem(rsp, (size_t)n, "\r\n\r\n", 4);
+	T_CHECK(end != NULL);
+	const bool no_payload = (size_t)n == (size_t)(end - rsp) + 4;
+	T_EXPECT(memmem(rsp, (size_t)n, "Connection: close\r\n", 19) != NULL);
+	unsigned char byte;
+	T_EXPECT_EQ(recv(peer_fd, &byte, 1, MSG_DONTWAIT), 0);
+	T_CHECK(close(peer_fd) == 0);
+	ev_loop_destroy(loop);
+	T_EXPECT(no_payload);
 }
 
 T_DECLARE_CASE(split_request_is_parsed_incrementally)
@@ -958,7 +1002,7 @@ T_DECLARE_CASE(split_request_is_parsed_incrementally)
 	T_EXPECT(assert_response_status(loop, peer_fd, "501"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* RFC 9110 §11.4 makes the credentials part optional, so a scheme-only
@@ -984,7 +1028,7 @@ T_DECLARE_CASE(scheme_only_proxy_authorization_is_ignored)
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* A CONNECT carrying a TE the proxy does not offer must not fail the request:
@@ -1008,7 +1052,7 @@ T_DECLARE_CASE(connect_with_te_hint_is_accepted)
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* An unparsable client-supplied CONNECT target is a client error (400), not a
@@ -1040,7 +1084,7 @@ T_DECLARE_CASE(connect_with_invalid_target_returns_400)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* Drive one CONNECT whose request-target the address parser refuses, with a
@@ -1076,7 +1120,7 @@ T_DECLARE_SUBCASE(
 	T_EXPECT_EQ(S.ruleset_resolve_calls, 0);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* Regression: RFC 9110 §9.3.6 admits only the authority-form request-target for
@@ -1139,7 +1183,7 @@ T_DECLARE_CASE(ruleset_receives_the_parsed_authority)
 	T_EXPECT_STREQ(S.captured_request, "example:80");
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* The no-ruleset path's OOM arm: dialreq_new() failing is a server error
@@ -1161,7 +1205,7 @@ T_DECLARE_CASE(connect_dialreq_oom_returns_500)
 	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(valid_connect_dialer_error_returns_502)
@@ -1185,7 +1229,7 @@ T_DECLARE_CASE(valid_connect_dialer_error_returns_502)
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(valid_connect_established_with_hijack)
@@ -1223,7 +1267,7 @@ T_DECLARE_CASE(valid_connect_established_with_hijack)
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq)
@@ -1263,7 +1307,7 @@ T_DECLARE_CASE(connect_hijack_finalize_does_not_touch_overwritten_dialreq)
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(connect_with_transfer_encoding_chunked_is_accepted)
@@ -1288,7 +1332,7 @@ T_DECLARE_CASE(connect_with_transfer_encoding_chunked_is_accepted)
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* A CONNECT tunnel ignores request headers the proxy does not consume; an
@@ -1328,7 +1372,7 @@ T_DECLARE_CASE(connect_ignores_malformed_authorization)
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(ruleset_auth_required_without_basic_credentials_returns_407)
@@ -1351,7 +1395,7 @@ T_DECLARE_CASE(ruleset_auth_required_without_basic_credentials_returns_407)
 	T_EXPECT(assert_response_status(loop, peer_fd, "407"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(ruleset_auth_required_with_invalid_basic_returns_407)
@@ -1374,7 +1418,7 @@ T_DECLARE_CASE(ruleset_auth_required_with_invalid_basic_returns_407)
 	T_EXPECT(assert_response_status(loop, peer_fd, "407"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* auth_required with valid Basic credentials: the decoded username/password
@@ -1407,7 +1451,7 @@ T_DECLARE_CASE(ruleset_auth_required_valid_basic_decodes_credentials)
 	T_EXPECT_STREQ(S.captured_password, "pass");
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* The credentials are split at the first colon and measured from the decoded
@@ -1454,7 +1498,7 @@ T_DECLARE_CASE(ruleset_auth_basic_credential_lengths_reach_ruleset)
 		T_EXPECT_STREQ(S.captured_password, cases[k].password);
 
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop, &s);
 	}
 }
 
@@ -1495,7 +1539,7 @@ T_DECLARE_CASE(ruleset_auth_scheme_is_case_insensitive)
 		T_EXPECT_STREQ(S.captured_password, "pass");
 
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop, &s);
 	}
 }
 
@@ -1536,7 +1580,7 @@ T_DECLARE_CASE(ruleset_auth_accepts_extra_space_before_credentials)
 		T_EXPECT_STREQ(S.captured_password, "pass");
 
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop, &s);
 	}
 }
 
@@ -1582,7 +1626,7 @@ T_DECLARE_CASE(ruleset_auth_rejects_basic_credentials_with_nul)
 		T_EXPECT(assert_response_status(loop, peer_fd, "407"));
 
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop, &s);
 	}
 }
 
@@ -1616,7 +1660,7 @@ T_DECLARE_CASE(ruleset_auth_basic_high_byte_credentials_reach_ruleset)
 	T_EXPECT_STREQ(S.captured_password, "pw\xfe");
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(ruleset_resolve_failure_returns_500)
@@ -1640,7 +1684,7 @@ T_DECLARE_CASE(ruleset_resolve_failure_returns_500)
 	T_EXPECT(assert_response_status(loop, peer_fd, "500"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* Emulate ruleset_state_gc(): a published state the consumer never cancelled
@@ -1693,7 +1737,7 @@ T_DECLARE_CASE(ruleset_resolve_failure_cancels_published_state)
 	T_EXPECT_EQ(S.ruleset_cancel_calls, 1);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(ruleset_finish_without_req_returns_403)
@@ -1717,7 +1761,7 @@ T_DECLARE_CASE(ruleset_finish_without_req_returns_403)
 	T_EXPECT(assert_response_status(loop, peer_fd, "403"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(ruleset_finish_with_req_and_dialer_error_returns_502)
@@ -1744,7 +1788,7 @@ T_DECLARE_CASE(ruleset_finish_with_req_and_dialer_error_returns_502)
 	T_EXPECT(assert_response_status(loop, peer_fd, "502"));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* await.forward()'s commit hook: instead of resolving a dial request, the
@@ -1799,7 +1843,7 @@ T_DECLARE_CASE(ruleset_forward_commit_establishes_tunnel)
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
@@ -1847,7 +1891,7 @@ T_DECLARE_CASE(timeout_in_process_state_cancels_ruleset)
 	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 T_DECLARE_CASE(ruleset_removed_before_processing)
 {
@@ -1877,7 +1921,7 @@ T_DECLARE_CASE(ruleset_removed_before_processing)
 		T_EXPECT_EQ(S.ruleset_resolve_calls, 0);
 		T_EXPECT_EQ(S.dialer_do_calls, auth ? 0 : 1);
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop, &s);
 	}
 	G.ruleset = NULL;
 }
@@ -1907,9 +1951,11 @@ T_DECLARE_CASE(timeout_before_ruleset_start_answers_504)
 
 	/* single iterations: the one that parses the request starts the idle
 	 * watcher, which libev queues no earlier than the next iteration */
-	while (s.stats.num_request == 0) {
-		ev_run(loop, EVRUN_ONCE);
+	for (unsigned int step = 0;
+	     s.stats.num_request == 0 && step < TEST_MAX_STEPS; step++) {
+		ev_run(loop, EVRUN_NOWAIT);
 	}
+	T_CHECK(s.stats.num_request != 0);
 	T_CHECK(S.ruleset_resolve_calls == 0);
 	/* the expired timer is pending in this iteration, so the idle watcher
 	 * is not queued alongside it */
@@ -1930,7 +1976,7 @@ T_DECLARE_CASE(timeout_before_ruleset_start_answers_504)
 	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* Emulate ruleset state_complete() from an ev_check: hand the request over,
@@ -2006,7 +2052,7 @@ T_DECLARE_CASE(process_teardown_cancels_completed_ruleset_request)
 	T_EXPECT_EQ(S.dialreq_invalid_free_calls, 0);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 	vclock_stop();
 }
 
@@ -2034,8 +2080,7 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 	drive_loop(loop);
 	vclock_advance(test_conf.timeout + 1.0);
 	drive_loop(loop);
-	/* the 504 reply is queued on w_send; restore real time so it flushes
-	 * (the frozen vclock trips drive_loop's watchdog before the async send) */
+	/* Restore the real clock after driving the deadline and its response. */
 	vclock_stop();
 
 	T_EXPECT(S.dialer_cancel_calls > 0);
@@ -2050,7 +2095,7 @@ T_DECLARE_CASE(timeout_in_connect_state_cancels_dialer)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* Regression: the connect deadline is a one-shot timer, so libev has already
@@ -2095,7 +2140,7 @@ T_DECLARE_CASE(connect_timeout_response_is_deadline_bounded)
 	T_EXPECT_EQ((uintmax_t)s.stats.num_halfopen, (uintmax_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 	vclock_stop();
 }
 
@@ -2147,7 +2192,7 @@ T_DECLARE_CASE(connect_pipelined_bytes_forwarded_to_upstream)
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* A successful CONNECT tunnel must count exactly one success (dialer_cb must
@@ -2181,7 +2226,7 @@ T_DECLARE_CASE(connect_success_counted_once)
 
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* http_ctx_start_transfer()'s failure arm: server_commit_session() has already
@@ -2222,7 +2267,7 @@ T_DECLARE_CASE(connect_commit_xfer_serve_failure_recovers)
 	/* both descriptors were closed by the recovery path */
 	T_CHECK(close(peer_fd) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(request_header_value_with_bare_cr_is_rejected)
@@ -2256,7 +2301,7 @@ T_DECLARE_CASE(request_header_value_with_bare_cr_is_rejected)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(request_header_value_with_ctl_is_rejected)
@@ -2288,7 +2333,7 @@ T_DECLARE_CASE(request_header_value_with_ctl_is_rejected)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
@@ -2319,7 +2364,7 @@ T_DECLARE_CASE(request_header_name_with_invalid_token_is_rejected)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* RFC 9112 §2.3: the proxy speaks HTTP/1.x only. A request whose version is not
@@ -2355,7 +2400,7 @@ T_DECLARE_CASE(request_unsupported_http_version_returns_400)
 		(void)shutdown(peer_fd, SHUT_WR);
 
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop, &s);
 	}
 }
 
@@ -2403,7 +2448,7 @@ T_DECLARE_CASE(connect_success_releases_descriptors)
 	/* the accepted end and the dialed socket belong to the transfer now */
 	T_EXPECT_EQ(probe_lowest_fd(), before);
 
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* log capture - the fd-correlation prefix has no output other than the log, so
@@ -2522,7 +2567,7 @@ T_DECLARE_CASE(connect_transfer_start_log_reports_accepted_fd)
 
 	T_CHECK(close(sv[1]) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* The context finalizes after the hand-off moved its descriptor out, so the
@@ -2576,7 +2621,7 @@ T_DECLARE_CASE(connect_close_log_omits_handed_off_fd)
 
 	T_CHECK(close(sv[1]) == 0);
 	T_CHECK(close(upstream_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* The client resets before the queued response can be written: the send fails
@@ -2612,7 +2657,7 @@ T_DECLARE_CASE(response_send_failure_releases_context)
 	/* the accepted end was closed with the context */
 	T_EXPECT_EQ(probe_lowest_fd(), before);
 
-	ev_loop_destroy(loop);
+	fixture_destroy(loop, &s);
 }
 
 /* The upstream is gone before the pipelined client bytes can be replayed to it:
@@ -2671,7 +2716,39 @@ T_DECLARE_CASE(connect_pipelined_forward_failure_releases_context)
 	T_CHECK(close(peer_fd) == 0);
 	T_EXPECT_EQ(probe_lowest_fd(), before);
 
+	fixture_destroy(loop, &s);
+}
+
+static void
+runaway_idle_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
+{
+	(void)loop;
+	(void)watcher;
+	(void)revents;
+}
+
+/* Neither an unmet predicate nor a perpetually ready callback may rely on
+ * virtual time advancing to terminate a helper's wait. */
+T_DECLARE_CASE(frozen_clock_progress_is_bounded)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server s = { 0 };
+	struct server_success_wait_ctx wait = { .s = &s, .expected = 1 };
+	ev_idle w_idle;
+	T_CHECK(loop != NULL);
+	vclock_freeze_now();
+	const bool ready = test_wait_until(
+		loop, server_success_reached, &wait, TEST_WAIT_RECV_SEC);
+	ev_idle_init(&w_idle, runaway_idle_cb);
+	ev_idle_start(loop, &w_idle);
+	const bool quiet = drive_loop_until_quiet(loop);
+	ev_idle_stop(loop, &w_idle);
+	const bool stopped = drive_loop_until_quiet(loop);
+	vclock_stop();
 	ev_loop_destroy(loop);
+	T_EXPECT(!ready);
+	T_EXPECT(!quiet);
+	T_EXPECT(stopped);
 }
 
 /* -------------------------------------------------------------------------
@@ -2683,7 +2760,9 @@ T_DECLARE_CASE(connect_pipelined_forward_failure_releases_context)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(frozen_clock_progress_is_bounded),
 	T_CASE(host_validation_before_connect_dispatch),
+	T_CASE(head_error_has_no_wire_payload),
 	T_CASE(split_request_is_parsed_incrementally),
 	T_CASE(scheme_only_proxy_authorization_is_ignored),
 	T_CASE(connect_with_te_hint_is_accepted),
@@ -2739,6 +2818,7 @@ int main(int argc, char **argv)
 
 	reset_stub_state();
 	const int ret = testing_main(argc, argv, suite);
+	T_CHECK(gc_finalizeall() == 0);
 	reset_stub_state();
 	return ret;
 }

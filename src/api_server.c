@@ -401,6 +401,19 @@ static void
 send_response(struct ev_loop *loop, struct api_ctx *restrict ctx, const bool ok)
 {
 	ASSERT(ctx->conn.wbuf.len > 0);
+	const char *method = ctx->conn.msg.req.method;
+	if (method != NULL && strcmp(method, "HEAD") == 0) {
+		/* HEAD ends at the header section, including error responses
+		 * with an inline body or an unconsumed request in cbuf. */
+		for (size_t i = 0; i + 4 <= ctx->conn.wbuf.len; i++) {
+			if (memcmp(ctx->conn.wbuf.data + i, "\r\n\r\n", 4) ==
+			    0) {
+				ctx->conn.wbuf.len = i + 4;
+				break;
+			}
+		}
+		VBUF_FREE(ctx->conn.cbuf);
+	}
 	if (ok) {
 		ctx->s->stats.num_api_success++;
 	}
@@ -431,7 +444,11 @@ static void send_method_not_allowed(
 	resphdr_conn(ctx);
 	BUF_APPENDF(ctx->conn.wbuf, "Allow: %s\r\n", allow);
 	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
-	RESPHDR_CLENGTH(ctx->conn.wbuf, sizeof(body) - 1);
+	/* A rejected HEAD does not describe the successful GET representation,
+	 * so its error body's length cannot be sent as HEAD metadata. */
+	if (strcmp(ctx->conn.msg.req.method, "HEAD") != 0) {
+		RESPHDR_CLENGTH(ctx->conn.wbuf, sizeof(body) - 1);
+	}
 	RESPHDR_FINISH(ctx->conn.wbuf);
 	BUF_APPEND(ctx->conn.wbuf, body, sizeof(body) - 1);
 	send_response(loop, ctx, false);
@@ -615,10 +632,10 @@ static bool restapi_check(
 		return false;
 	}
 	/* http_conn frames only Content-Length bodies; a chunked request parses
-	 * OK with its body left unconsumed in rbuf (see http_conn_recv), which the
-	 * keep-alive reset in api_ctx_reset would then discard, desyncing the
-	 * stream. The REST API decodes no request body of its own, so reject
-	 * chunked outright (send_errpage also closes the connection). */
+	 * OK with its body left unconsumed in rbuf (see http_conn_recv). The
+	 * keep-alive reset in api_ctx_reset would preserve those bytes and parse
+	 * them as another request. The REST API decodes no chunked request body,
+	 * so reject it outright (send_errpage also closes the connection). */
 	if (ctx->conn.hdr.transfer.encoding == TENCODING_CHUNKED) {
 		send_errpage(loop, ctx, HTTP_NOT_IMPLEMENTED);
 		return false;
@@ -1081,7 +1098,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		"connections_accepted_total", "%" PRIuLEAST64, agg.num_accept);
 	APPEND_METRIC_HDR(
 		"connections_served_total", "counter",
-		"Connections upgraded to proxy sessions.");
+		"Connections handed to listener handlers, including API connections and failed handshakes.");
 	APPEND_METRIC(
 		"connections_served_total", "%" PRIuLEAST64, agg.num_serve);
 	APPEND_METRIC_HDR(
@@ -1137,12 +1154,12 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	APPEND_METRIC("uplink_bytes_total", "%" PRIuLEAST64, agg.byt_up);
 	APPEND_METRIC_HDR(
 		"downlink_bytes_total", "counter",
-		"Total bytes of proxied payload received from upstream.");
+		"Total bytes relayed to clients, including SOCKS5 UDP reply headers.");
 	APPEND_METRIC("downlink_bytes_total", "%" PRIuLEAST64, agg.byt_down);
-	/* neosocksd_protocol_bytes_total: per-module protocol overhead */
+	/* neosocksd_protocol_bytes_total: per-module setup and API traffic */
 	APPEND_METRIC_HDR(
 		"protocol_bytes_total", "counter",
-		"Total bytes of protocol overhead, by direction and module.");
+		"Bytes exchanged during proxy setup and API HTTP messages, by direction and module; may include relayed payload.");
 	APPEND_METRIC_L(
 		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
 		"%" PRIuLEAST64, "rx", "api_server", apistats->api_byt_recv);

@@ -146,8 +146,12 @@ void http_conn_init(
  * pipelined message across a keep-alive reset — where waiting for readability
  * would stall, the socket having already delivered them.
  *
- * On return, `rbuf` bytes before `next` are consumed (headers, and any
- * Content-Length body copied into `cbuf`); what follows is a later message.
+ * Bytes in `rbuf` before `next` are consumed (headers, and any Content-Length
+ * body copied into `cbuf`). While a start-line or header is incomplete, bytes
+ * after `next` still belong to the current message. Only after STATE_PARSE_OK
+ * with the current message fully framed can remaining bytes be treated as
+ * later-message data. Chunked bodies and close-delimited response bodies remain
+ * unconsumed, as described for http_conn_recv().
  *
  * @return 0 on completion, 1 if more data needed, -1 on error
  */
@@ -213,9 +217,10 @@ bool parsehdr_transfer_encoding(
  *
  * @param p Parser instance
  * @param value Header value
- * @return always true; a value with no acceptable supported coding leaves
- *     @c accept_encoding at @c CENCODING_NONE, which the RFC's identity
- *     fallback makes a valid outcome rather than a rejected header
+ * @return always true; a value with no acceptable supported coding preserves
+ *     the previous @c accept_encoding selection (initially @c CENCODING_NONE),
+ *     unless deflate was explicitly refused on this or an earlier field line,
+ *     which sets @c accept_encoding to @c CENCODING_NONE
  */
 bool parsehdr_accept_encoding(
 	struct http_conn *restrict p, char *restrict value);

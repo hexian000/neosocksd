@@ -1148,6 +1148,47 @@ T_DECLARE_CASE(http_conn_recv_response_ok)
 	T_CHECK(close(sv[1]) == 0);
 }
 
+/* Reject the entire malformed field before headers or content are consumed.
+ * An unrecognized three-digit code and an empty reason phrase remain valid. */
+T_DECLARE_CASE(http_conn_recv_response_status_code_syntax)
+{
+	static const struct {
+		const char *code;
+		bool valid;
+	} cases[] = {
+		{ "200junk", false }, { "+200", false }, { "-200", false },
+		{ "0200", false },    { "2000", false }, { "20", false },
+		{ "2", false },	      { "a00", false },	 { "2a0", false },
+		{ "20a", false },     { "0xC8", false }, { "200", true },
+		{ "299", true },      { "599", true },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		int sv[2] = { -1, -1 };
+		struct http_conn p = { 0 };
+		struct conn_test_ctx cb = { 0 };
+		char response[256];
+		const int n = snprintf(
+			response, sizeof(response),
+			"HTTP/1.1 %s \r\nContent-Length: 2\r\n\r\nok",
+			cases[i].code);
+		T_CHECK(n > 0 && (size_t)n < sizeof(response));
+		make_socketpair(sv);
+		T_CHECK(fd_set_nonblock(sv[0]));
+		conn_init_for_test(&p, sv[0], STATE_PARSE_RESPONSE, &cb);
+		T_CHECK(write_all(sv[1], response, (size_t)n));
+		const int result = http_recv_until_done(&p);
+		const bool headers_parsed = p.hdr.content.has_length;
+		const bool content_read =
+			p.cbuf != NULL && VBUF_LEN(p.cbuf) == 2;
+		VBUF_FREE(p.cbuf);
+		T_CHECK(close(sv[0]) == 0);
+		T_CHECK(close(sv[1]) == 0);
+		T_EXPECT_EQ(result, cases[i].valid ? 0 : -1);
+		T_EXPECT_EQ(headers_parsed, cases[i].valid);
+		T_EXPECT_EQ(content_read, cases[i].valid);
+	}
+}
+
 /* Response mode reports a hard -1 (immediate teardown) rather than the
  * request mode's graceful STATE_PARSE_ERROR: unsupported response version. */
 T_DECLARE_CASE(http_conn_recv_response_unsupported_version)
@@ -2066,6 +2107,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(http_conn_recv_chunked_body_is_not_framed),
 	T_CASE(http_conn_recv_empty_te_does_not_downgrade_chunked),
 	T_CASE(http_conn_recv_response_ok),
+	T_CASE(http_conn_recv_response_status_code_syntax),
 	T_CASE(http_conn_recv_response_unsupported_version),
 	T_CASE(http_conn_recv_response_malformed_header),
 	T_CASE(http_conn_recv_content_length_too_large),

@@ -45,7 +45,7 @@ struct server_stats {
 	/* Bytes relayed toward the upstream, including client bytes pipelined
 	 * ahead of the reply and replayed past the relay */
 	uint_least64_t byt_up;
-	/* Bytes relayed toward the client */
+	/* Bytes relayed toward the client, including SOCKS5 UDP reply headers */
 	uint_least64_t byt_down;
 	/* Successful connection count (histogram index) */
 	size_t num_connects;
@@ -70,7 +70,7 @@ struct server_stats {
 	/* Bytes received by the API client */
 	uint_least64_t api_client_byt_recv;
 
-	/* Protocol setup overhead, split by socket rather than by who wrote it:
+	/* Proxy setup traffic, split by socket rather than by who wrote it:
 	 * everything a context sends or receives itself before handing the
 	 * session to the relay. byt_up/byt_down cover the relay phase, so a
 	 * client byte buffered during setup and later relayed is counted on both
@@ -211,8 +211,8 @@ server_session_commit(struct server *restrict s, const size_t cur)
 
 /**
  * @brief Account a session that starts without the transfer engine — the UDP
- * ASSOCIATE relay and the HTTP proxy stream forward drive their own watchers
- * rather than handing a fd pair to transfer_serve.
+ * ASSOCIATE relay drives its own watchers and owns its cleanup rather than
+ * handing a fd pair to transfer_serve.
  * @return New active-session count (>= 1).
  */
 static inline size_t server_account_session(struct server *restrict s)

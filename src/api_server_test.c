@@ -11,15 +11,18 @@
 #include "ruleset/ruleset.h"
 #include "server.h"
 
+#include "io/stream.h"
 #include "meta/arraysize.h"
 #include "os/clock.h"
 #include "os/socket.h"
+#include "utils/gc.h"
 #include "utils/slog.h"
 #include "utils/testing.h"
 
 #include <ev.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <locale.h>
 #include <math.h>
 #include <netinet/in.h>
@@ -45,6 +48,10 @@
 
 static bool g_vclock_on = false;
 static double g_vclock_sec = 0.0;
+
+enum { TEST_MAX_STEPS = 1024 };
+
+static int g_accepted_fd = -1;
 
 /* Read the real clock for the pass-through path. Both clock_gettime() and
  * gettimeofday() are interposed here, so the underlying clock has to be reached
@@ -203,6 +210,10 @@ static struct {
 	struct ruleset_state **rpcstate_out;
 	struct ruleset_callback *pending_rpcall;
 	size_t cancel_count;
+	unsigned char body[4096];
+	size_t body_len;
+	size_t body_call_count;
+	int body_error;
 	size_t update_call_count;
 	struct stub_arg update_modname;
 	struct stub_arg update_chunkname;
@@ -293,6 +304,9 @@ static void reset_ruleset_stub(void)
 	RS.rpcstate_out = NULL;
 	RS.pending_rpcall = NULL;
 	RS.cancel_count = 0;
+	RS.body_len = 0;
+	RS.body_call_count = 0;
+	RS.body_error = 0;
 	RS.update_call_count = 0;
 	RS.update_modname = (struct stub_arg){ .present = false };
 	RS.update_chunkname = (struct stub_arg){ .present = false };
@@ -354,11 +368,31 @@ ruleset_geterror(const struct ruleset *restrict r, size_t *restrict len)
 	return RS.errstr;
 }
 
+/* Load synchronously through the same direct-read boundary as the Lua loader.
+ * The API retains ownership and closes the stream after the stub returns. */
+static bool record_request_body(struct io_stream *code)
+{
+	RS.body_call_count++;
+	RS.body_len = 0;
+	for (;;) {
+		const void *buf = NULL;
+		size_t n = 7;
+		RS.body_error = io_stream_direct_read(code, &buf, &n);
+		T_CHECK(n <= sizeof(RS.body) - RS.body_len);
+		if (n != 0) {
+			memcpy(RS.body + RS.body_len, buf, n);
+			RS.body_len += n;
+		}
+		if (RS.body_error != 0 || n == 0) {
+			return RS.body_error == 0;
+		}
+	}
+}
+
 bool ruleset_invoke(struct ruleset *restrict r, struct io_stream *code)
 {
 	(void)r;
-	(void)code;
-	return RS.invoke_ok;
+	return record_request_body(code) && RS.invoke_ok;
 }
 
 bool ruleset_update(
@@ -366,11 +400,11 @@ bool ruleset_update(
 	const char *restrict chunkname, struct io_stream *code)
 {
 	(void)r;
-	(void)code;
+	const bool body_ok = record_request_body(code);
 	RS.update_call_count++;
 	stub_arg_record(&RS.update_modname, modname);
 	stub_arg_record(&RS.update_chunkname, chunkname);
-	return RS.update_ok;
+	return body_ok && RS.update_ok;
 }
 
 bool ruleset_gc(struct ruleset *restrict r)
@@ -384,7 +418,9 @@ bool ruleset_rpcall(
 	struct io_stream *code, struct ruleset_callback *callback)
 {
 	(void)r;
-	(void)code;
+	if (!record_request_body(code)) {
+		return false;
+	}
 	if (!RS.rpcall_ok) {
 		if (RS.rpcall_finish_then_fail) {
 			/* rpcall_finish() completes the call -- result delivered,
@@ -547,11 +583,36 @@ static bool find_body_offset(
 	return false;
 }
 
+/* Require exact HTTP framing and a clean decoder EOF, including the trailer. */
+static size_t decode_response_body(
+	const unsigned char *rsp, const size_t len, unsigned char *body,
+	const size_t cap)
+{
+	size_t offset = 0, clen = 0;
+	T_CHECK(find_body_offset(rsp, len, &offset));
+	T_CHECK(parse_content_length(rsp, offset, &clen));
+	T_CHECK(clen == len - offset);
+	struct io_stream *reader =
+		content_reader(rsp + offset, clen, CENCODING_DEFLATE);
+	T_CHECK(reader != NULL);
+	size_t n = cap;
+	const int err = io_stream_read(reader, body, &n);
+	unsigned char extra;
+	size_t tail = 1;
+	const int eof_err = io_stream_read(reader, &extra, &tail);
+	const int close_err = io_stream_close(reader);
+	T_CHECK(err == 0);
+	T_CHECK(eof_err == 0);
+	T_CHECK(tail == 0);
+	T_CHECK(close_err == 0);
+	return n;
+}
+
 /* Receive a complete HTTP response: the header block plus its declared
  * Content-Length body (api_server always frames responses with Content-Length).
- * Waiting is event-driven -- ev_run(EVRUN_ONCE) advances the in-loop server and
- * blocks until more output or the watchdog -- rather than polling a fixed quiet
- * window, so completion tracks the message structure, not a magic tick count. */
+ * Real-time waits block on events and the watchdog. Under a frozen clock,
+ * nonblocking rounds have an independent progress bound; completion still
+ * follows the message framing rather than a quiet interval. */
 static ssize_t recv_all_with_timeout(
 	struct ev_loop *loop, const int fd, unsigned char *restrict buf,
 	const size_t cap, const ev_tstamp timeout_sec)
@@ -561,18 +622,21 @@ static ssize_t recv_all_with_timeout(
 	size_t off = 0;
 	size_t need = 0; /* total bytes for a complete message, once known */
 	bool need_known = false;
+	unsigned int steps = 0;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired && off < cap) {
+	while (!watchdog.fired && off < cap &&
+	       (!g_vclock_on || steps++ < TEST_MAX_STEPS)) {
 		const ssize_t n = recv(fd, buf + off, cap - off, MSG_DONTWAIT);
 		if (n < 0) {
 			if (errno == EINTR) {
 				continue;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				ev_run(loop, EVRUN_ONCE);
+				ev_run(loop,
+				       g_vclock_on ? EVRUN_NOWAIT : EVRUN_ONCE);
 				continue;
 			}
 			ev_timer_stop(loop, &w_timeout);
@@ -607,24 +671,104 @@ test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	(void)revents;
 }
 
+/* A polling wakeup must not suppress default-priority idle completion. */
+static void test_tick_start(struct ev_loop *loop, ev_timer *w)
+{
+	ev_timer_init(w, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
+	ev_set_priority(w, EV_MINPRI);
+	ev_timer_start(loop, w);
+}
+
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *data,
 	const ev_tstamp timeout_sec)
 {
 	struct test_watchdog watchdog = { 0 };
 	struct ev_timer w_timeout, w_tick;
+	unsigned int steps = 0;
 
 	ev_timer_init(&w_timeout, test_watchdog_cb, timeout_sec, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
-	ev_timer_start(loop, &w_tick);
-	while (!watchdog.fired && !predicate(data)) {
-		ev_run(loop, EVRUN_ONCE);
+	test_tick_start(loop, &w_tick);
+	while (!watchdog.fired && !predicate(data) &&
+	       (!g_vclock_on || steps++ < TEST_MAX_STEPS)) {
+		ev_run(loop, g_vclock_on ? EVRUN_NOWAIT : EVRUN_ONCE);
 	}
 	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	return predicate(data);
+}
+
+struct idle_progress {
+	ev_timer tick;
+	bool called;
+};
+
+static void
+idle_progress_prepare(struct ev_loop *loop, ev_prepare *w, const int revents)
+{
+	(void)revents;
+	struct idle_progress *const progress = w->data;
+	/* Keep the polling tick overdue on every iteration, without waiting. */
+	ev_timer_stop(loop, &progress->tick);
+	ev_timer_set(&progress->tick, -1.0, TEST_TICK_SEC);
+	ev_timer_start(loop, &progress->tick);
+}
+
+static void
+idle_progress_cb(struct ev_loop *loop, ev_idle *w, const int revents)
+{
+	(void)revents;
+	struct idle_progress *const progress = w->data;
+	progress->called = true;
+	ev_idle_stop(loop, w);
+}
+
+static bool idle_progress_done(void *data)
+{
+	const struct idle_progress *const progress = data;
+	return progress->called;
+}
+
+T_DECLARE_CASE(wait_tick_allows_idle_progress)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct idle_progress progress = { 0 };
+	ev_prepare prepare;
+	ev_idle idle;
+	T_CHECK(loop != NULL);
+	ev_prepare_init(&prepare, idle_progress_prepare);
+	prepare.data = &progress;
+	ev_idle_init(&idle, idle_progress_cb);
+	idle.data = &progress;
+	test_tick_start(loop, &progress.tick);
+	ev_prepare_start(loop, &prepare);
+	ev_idle_start(loop, &idle);
+	const bool observed =
+		test_wait_until(loop, idle_progress_done, &progress, 1.0);
+	ev_idle_stop(loop, &idle);
+	ev_prepare_stop(loop, &prepare);
+	ev_timer_stop(loop, &progress.tick);
+	ev_loop_destroy(loop);
+	T_EXPECT(observed);
+}
+
+/* Run peer EOF and all deferred completion work before the fixture's server
+ * leaves scope. Successful teardown must need no forced GC finalization. */
+static void fixture_destroy(struct ev_loop *loop)
+{
+	unsigned int steps = 0;
+	while (ev_run(loop, EVRUN_NOWAIT) && steps++ < TEST_MAX_STEPS) {
+	}
+	T_CHECK(gc_finalizeall() == 0);
+	T_CHECK(!ev_run(loop, EVRUN_NOWAIT));
+	if (g_accepted_fd != -1) {
+		errno = 0;
+		T_CHECK(fcntl(g_accepted_fd, F_GETFD) == -1 && errno == EBADF);
+		g_accepted_fd = -1;
+	}
+	ev_loop_destroy(loop);
 }
 
 static bool ruleset_rpcall_pending(void *data)
@@ -691,6 +835,8 @@ static void start_api(
 	T_CHECK(socket_set_nonblock(sv[0]) == 0);
 	T_CHECK(socket_set_cloexec(sv[1]) == 0);
 	T_CHECK(socket_set_nonblock(sv[1]) == 0);
+	T_CHECK(g_accepted_fd == -1);
+	g_accepted_fd = sv[0];
 	api_serve(api, loop, sv[0], (const struct sockaddr *)&sa);
 	*peer_fd = sv[1];
 }
@@ -866,7 +1012,7 @@ T_DECLARE_CASE(host_validation_before_api_dispatch)
 			assert_status(rsp, (size_t)received, cases[i].status);
 		const uintmax_t dispatched = api.stats.num_api_request;
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop);
 		T_EXPECT(ok);
 		T_EXPECT_EQ(
 			dispatched,
@@ -906,7 +1052,7 @@ T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* Collect responses until `want` status lines have arrived or the reads stop
@@ -955,7 +1101,7 @@ T_DECLARE_CASE(pipelined_requests_both_answered)
 	T_EXPECT_EQ(recv_responses(loop, peer_fd, rsp, sizeof(rsp), 2), 2);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -982,7 +1128,7 @@ T_DECLARE_CASE(pipelined_after_body_request_both_answered)
 	T_EXPECT_EQ(recv_responses(loop, peer_fd, rsp, sizeof(rsp), 2), 2);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -1030,7 +1176,7 @@ T_DECLARE_CASE(healthy_request_body_is_not_echoed)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 struct fd_closed_ctx {
@@ -1090,7 +1236,7 @@ T_DECLARE_CASE(healthy_connection_close_header)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server)
@@ -1119,7 +1265,7 @@ T_DECLARE_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server)
 	T_EXPECT_EQ(s.stats.num_api_success, 1);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(metrics_unsupported_accept_encoding_and_te_returns_200)
@@ -1149,7 +1295,7 @@ T_DECLARE_CASE(metrics_unsupported_accept_encoding_and_te_returns_200)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
@@ -1183,6 +1329,15 @@ T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 			rsp, (size_t)n, "neosocksd_requests_total 13\n"));
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "neosocksd_api_requests_total 2\n"));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n,
+			"# HELP neosocksd_connections_served_total Connections handed to listener handlers, including API connections and failed handshakes.\n"));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n,
+			"# HELP neosocksd_downlink_bytes_total Total bytes relayed to clients, including SOCKS5 UDP reply headers.\n"));
+		T_EXPECT(find_bytes(
+			rsp, (size_t)n,
+			"# HELP neosocksd_protocol_bytes_total Bytes exchanged during proxy setup and API HTTP messages, by direction and module; may include relayed payload.\n"));
 #if WITH_RULESET
 		/* every protocol_bytes_total sample stays in one contiguous
 		 * group: the api_client rows must precede the following
@@ -1200,7 +1355,7 @@ T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
@@ -1233,7 +1388,7 @@ T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -1275,7 +1430,7 @@ T_DECLARE_CASE(metrics_float_sample_keeps_full_precision)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* Switch LC_NUMERIC to the first installed locale that spells the decimal point
@@ -1319,7 +1474,7 @@ T_DECLARE_CASE(metrics_float_sample_ignores_lc_numeric)
 	T_CHECK(loop != NULL);
 	const char *const numeric = set_comma_locale();
 	if (numeric == NULL) {
-		ev_loop_destroy(loop);
+		fixture_destroy(loop);
 		T_LOG("no installed locale uses a non-'.' decimal point");
 		T_SKIPNOW();
 	}
@@ -1349,7 +1504,7 @@ T_DECLARE_CASE(metrics_float_sample_ignores_lc_numeric)
 	T_EXPECT(strtod(value, NULL) > 1.0e9);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(stats_get_ok_with_nocache)
@@ -1379,7 +1534,7 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(stats_output_format_has_no_raw_specifiers)
@@ -1418,7 +1573,7 @@ T_DECLARE_CASE(stats_output_format_has_no_raw_specifiers)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(stats_post_ok_without_nocache)
@@ -1445,7 +1600,7 @@ T_DECLARE_CASE(stats_post_ok_without_nocache)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -1510,7 +1665,7 @@ T_DECLARE_CASE(stats_post_without_server_advances_rate_baselines)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(stats_bad_method_405)
@@ -1536,7 +1691,7 @@ T_DECLARE_CASE(stats_bad_method_405)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* /metrics rejects a non-GET method with 405 + Allow (http_handle_metrics). */
@@ -1562,7 +1717,7 @@ T_DECLARE_CASE(metrics_bad_method_405)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* /healthy is read-only: a non-GET method is 405 + Allow (restapi_check). */
@@ -1589,7 +1744,7 @@ T_DECLARE_CASE(healthy_bad_method_405)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* A trailing path segment on a leaf endpoint is 404 (restapi_check). */
@@ -1614,7 +1769,7 @@ T_DECLARE_CASE(stats_trailing_path_404)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(chunked_request_rejected_501)
@@ -1629,10 +1784,10 @@ T_DECLARE_CASE(chunked_request_rejected_501)
 	start_api(&api, loop, &peer_fd);
 
 	/* http_conn frames only Content-Length bodies, so a chunked request body
-	 * is left unconsumed in rbuf and discarded on the keep-alive reset,
-	 * desyncing the stream. restapi_check must reject chunked with 501 and
-	 * close the connection rather than dispatch a no-body endpoint over it.
-	 * /stats is a require_content=false endpoint, the path the bug affected. */
+	 * is left unconsumed in rbuf. A keep-alive reset would preserve it and
+	 * parse it as another request. restapi_check must reject chunked with 501
+	 * and close the connection rather than dispatch a no-body endpoint over
+	 * it. /stats is a require_content=false endpoint. */
 	T_CHECK(send_request(
 		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n"
 			 "Transfer-Encoding: chunked\r\n\r\n"));
@@ -1645,7 +1800,7 @@ T_DECLARE_CASE(chunked_request_rejected_501)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(stats_bad_query_400)
@@ -1669,7 +1824,7 @@ T_DECLARE_CASE(stats_bad_query_400)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(stats_key_only_query_options)
@@ -1704,7 +1859,7 @@ T_DECLARE_CASE(stats_key_only_query_options)
 		}
 
 		T_CHECK(close(peer_fd) == 0);
-		ev_loop_destroy(loop);
+		fixture_destroy(loop);
 	}
 }
 
@@ -1725,14 +1880,20 @@ T_DECLARE_CASE(stats_deflate_response_header)
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
-		T_EXPECT(n > 0);
+		T_CHECK(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "Content-Encoding: deflate\r\n"));
+		unsigned char body[8192];
+		const size_t len = decode_response_body(
+			rsp, (size_t)n, body, sizeof(body));
+		T_EXPECT(find_bytes(body, len, "neosocksd "));
+		T_EXPECT(find_bytes(body, len, "Uptime              : "));
+		T_EXPECT(find_bytes(body, len, "Accept"));
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(not_found_404)
@@ -1756,7 +1917,7 @@ T_DECLARE_CASE(not_found_404)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* api_handle()'s url_parse() failure path: invalid percent-encoding in the
@@ -1782,37 +1943,135 @@ T_DECLARE_CASE(malformed_url_400)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
+/* Exercise the endpoint consumers, with unused ring slots poisoned and then a
+ * full ring whose initial large samples have been overwritten. */
 T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
-	int peer_fd = -1;
-	unsigned char rsp[8192];
+	static const struct {
+		bool wrapped;
+		const char *percentiles;
+		double p50, p90, p99;
+	} cases[] = {
+		{ false, "P50=11.00ms P90=19.00ms P99=20.00ms MAX=20.00ms",
+		  0.011, 0.019, 0.020 },
+		{ true, "P50=129.0ms P90=231.0ms P99=254.0ms MAX=256.0ms",
+		  0.129, 0.231, 0.254 },
+	};
+	for (size_t c = 0; c < ARRAY_SIZE(cases); c++) {
+		struct ev_loop *loop = ev_loop_new(0);
+		struct server api, core;
+		int peer_fd = -1;
+		unsigned char rsp[16384];
+		T_CHECK(loop != NULL);
+		init_server_pair(&api, &core, loop);
+		const size_t cap = ARRAY_SIZE(core.stats.connect_ns);
+		for (size_t i = 0; i < cap; i++) {
+			core.stats.connect_ns[i] = 9000000000;
+		}
+		const size_t n = cases[c].wrapped ? cap : 20;
+		const size_t count = cases[c].wrapped ? cap + 17 : n;
+		/* Reproduce ring writes: only the last capacity samples survive.
+		 * Multiplication by an odd number permutes a power-of-two ring. */
+		for (size_t i = 0; i < n; i++) {
+			const size_t value = cases[c].wrapped ?
+						     (i * 73) % cap + 1 :
+						     (i * 7) % n + 1;
+			core.stats.connect_ns[(count - n + i) % cap] =
+				(int_least64_t)value * 1000000;
+		}
+		core.stats.num_connects = count;
+		start_api(&api, loop, &peer_fd);
+		T_CHECK(send_request(
+			peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
+		ssize_t received = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_CHECK(received > 0);
+		T_EXPECT(assert_status(rsp, (size_t)received, " 200 "));
+		const bool stats_match =
+			find_bytes(rsp, (size_t)received, cases[c].percentiles);
+		T_CHECK(send_request(
+			peer_fd,
+			"GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
+		received = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_CHECK(received > 0);
+		T_EXPECT(assert_status(rsp, (size_t)received, " 200 "));
+		static const char *const names[] = {
+			"\nneosocksd_connect_latency_seconds{quantile=\"0.5\"} ",
+			"\nneosocksd_connect_latency_seconds{quantile=\"0.9\"} ",
+			"\nneosocksd_connect_latency_seconds{quantile=\"0.99\"} ",
+			"\nneosocksd_connect_latency_seconds_count ",
+		};
+		const double expected[] = {
+			cases[c].p50,
+			cases[c].p90,
+			cases[c].p99,
+			(double)count,
+		};
+		bool metrics_match = true;
+		for (size_t i = 0; i < ARRAY_SIZE(names); i++) {
+			double value = -1;
+			T_CHECK(parse_metric_value(
+				rsp, (size_t)received, names[i], &value));
+			metrics_match = metrics_match &&
+					fabs(value - expected[i]) < 1e-12;
+		}
+		T_CHECK(close(peer_fd) == 0);
+		fixture_destroy(loop);
+		T_EXPECT(stats_match);
+		T_EXPECT(metrics_match);
+	}
+}
 
-	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	core.stats.num_connects = 3;
-	core.stats.connect_ns[0] = 100000000; /* 100 ms */
-	core.stats.connect_ns[1] = 200000000; /* 200 ms */
-	core.stats.connect_ns[2] = 300000000; /* 300 ms */
-	start_api(&api, loop, &peer_fd);
-
-	T_CHECK(send_request(
-		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
-	{
+T_DECLARE_CASE(head_errors_have_no_wire_payload)
+{
+	static const struct {
+		const char *request;
+		const char *status;
+		const char *allow;
+	} cases[] = {
+		{ "HEAD /healthy HTTP/1.1\r\nHost: test\r\n\r\n", " 405 ",
+		  "Allow: GET\r\n" },
+		{ "HEAD /missing HTTP/1.1\r\nHost: test\r\n\r\n", " 404 ",
+		  NULL },
+		{ "HEAD /healthy HTTP/1.1\r\n\r\n", " 400 ", NULL },
+		{ "HEAD /stats?bad=%zz HTTP/1.1\r\nHost: test\r\n\r\n", " 400 ",
+		  NULL },
+		{ "HEAD /healthy HTTP/1.1\r\nHost: test\r\nContent-Length: 4\r\n\r\nbody",
+		  " 405 ", "Allow: GET\r\n" },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct ev_loop *loop = ev_loop_new(0);
+		struct server api, core;
+		int peer_fd = -1;
+		unsigned char rsp[2048];
+		T_CHECK(loop != NULL);
+		init_server_pair(&api, &core, loop);
+		start_api(&api, loop, &peer_fd);
+		T_CHECK(send_request(peer_fd, cases[i].request));
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
-		T_EXPECT(n > 0);
-		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
-		T_EXPECT(find_bytes(rsp, (size_t)n, "Connect Latency"));
-		T_EXPECT(find_bytes(rsp, (size_t)n, "P50="));
+		T_CHECK(n > 0);
+		size_t body_offset = 0, content_length = 0;
+		T_EXPECT(assert_status(rsp, (size_t)n, cases[i].status));
+		T_CHECK(find_body_offset(rsp, (size_t)n, &body_offset));
+		const bool no_payload = (size_t)n == body_offset;
+		if (cases[i].allow != NULL) {
+			T_EXPECT(find_bytes(rsp, body_offset, cases[i].allow));
+		}
+		const bool no_content_length = !parse_content_length(
+			rsp, body_offset, &content_length);
+		T_EXPECT(find_bytes(rsp, body_offset, "Connection: close\r\n"));
+		unsigned char byte;
+		T_EXPECT_EQ(recv(peer_fd, &byte, 1, MSG_DONTWAIT), 0);
+		T_CHECK(close(peer_fd) == 0);
+		fixture_destroy(loop);
+		T_EXPECT(no_payload);
+		T_EXPECT(no_content_length);
 	}
-
-	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(stats_nobanner_option_suppresses_banner)
@@ -1839,10 +2098,45 @@ T_DECLARE_CASE(stats_nobanner_option_suppresses_banner)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 #if WITH_RULESET
+T_DECLARE_CASE(stats_ruleset_event_percentile_values)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct server api, core;
+	int peer_fd = -1;
+	unsigned char rsp[8192];
+	int ruleset_tag = 0;
+	T_CHECK(loop != NULL);
+	reset_ruleset_stub();
+	init_server_pair(&api, &core, loop);
+	core.ruleset = (struct ruleset *)&ruleset_tag;
+	RS.vmstats_before.num_events = 20;
+	for (size_t i = 0; i < ARRAY_SIZE(RS.vmstats_before.event_ns); i++) {
+		RS.vmstats_before.event_ns[i] = 9000000000;
+	}
+	for (size_t i = 0; i < 20; i++) {
+		RS.vmstats_before.event_ns[i] =
+			(int_least64_t)((i * 7) % 20 + 1) * 1000000;
+	}
+	start_api(&api, loop, &peer_fd);
+	T_CHECK(send_request(
+		peer_fd,
+		"GET /stats?runtime=1 HTTP/1.1\r\nHost: test\r\n\r\n"));
+	const ssize_t n = recv_all_with_timeout(
+		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+	T_CHECK(n > 0);
+	T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+	T_CHECK(close(peer_fd) == 0);
+	fixture_destroy(loop);
+	T_EXPECT(find_bytes(
+		rsp, (size_t)n,
+		"Ruleset Events      : P50=11.00ms P90=19.00ms P99=20.00ms MAX=20.00ms"));
+	T_EXPECT_EQ(RS.vmstats_count, (size_t)1);
+}
+
 T_DECLARE_CASE(stats_post_with_ruleset_q)
 {
 	struct ev_loop *loop = ev_loop_new(0);
@@ -1878,7 +2172,7 @@ T_DECLARE_CASE(stats_post_with_ruleset_q)
 	T_EXPECT_STREQ(RS.stats_query.str, "a b");
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* ruleset.stats gets the same window the server rates are taken over: the time
@@ -1933,7 +2227,7 @@ T_DECLARE_CASE(stats_post_ruleset_dt_is_rate_window)
 	vclock_stop();
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* A failing ruleset.stats does not fail the request: its error text takes the
@@ -1974,7 +2268,7 @@ T_DECLARE_CASE(stats_post_ruleset_error_in_body)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(healthy_unhealthy_returns_503)
@@ -2006,7 +2300,7 @@ T_DECLARE_CASE(healthy_unhealthy_returns_503)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_disabled_returns_500)
@@ -2037,7 +2331,7 @@ T_DECLARE_CASE(ruleset_disabled_returns_500)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* process_cb()'s fallback 404 for an unrecognized /ruleset/<action>. */
@@ -2066,7 +2360,91 @@ T_DECLARE_CASE(ruleset_unknown_action_404)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
+}
+
+/* Each endpoint receives the decoded bytes before the API closes its reader. */
+T_DECLARE_CASE(ruleset_request_body_integrity)
+{
+	static const unsigned char identity[] = "return 'request body'\n";
+	static const unsigned char deflate[] = {
+		0x78, 0x9c, 0x2b, 0x4a, 0x2d, 0x29, 0x2d, 0xca, 0x53, 0x50,
+		0x2f, 0x4a, 0x2d, 0x2c, 0x4d, 0x2d, 0x2e, 0x51, 0x48, 0xca,
+		0x4f, 0xa9, 0x54, 0xe7, 0x02, 0x00, 0x61, 0x7c, 0x07, 0xf0
+	};
+	static const unsigned char gzip[] = {
+		0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+		0x03, 0x2b, 0x4a, 0x2d, 0x29, 0x2d, 0xca, 0x53, 0x50,
+		0x2f, 0x4a, 0x2d, 0x2c, 0x4d, 0x2d, 0x2e, 0x51, 0x48,
+		0xca, 0x4f, 0xa9, 0x54, 0xe7, 0x02, 0x00, 0x0e, 0x77,
+		0x92, 0x04, 0x16, 0x00, 0x00, 0x00
+	};
+	static const unsigned char empty_deflate[] = { 0x78, 0x9c, 0x03, 0x00,
+						       0x00, 0x00, 0x00, 0x01 };
+	static const unsigned char empty_gzip[] = {
+		0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03,
+		0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+	};
+	static const char *const actions[] = { "invoke", "update", "rpcall" };
+	static const struct {
+		const char *encoding;
+		const unsigned char *wire;
+		size_t wire_len;
+		size_t decoded_len;
+	} cases[] = {
+		{ "", identity, sizeof(identity) - 1, sizeof(identity) - 1 },
+		{ "deflate", deflate, sizeof(deflate), sizeof(identity) - 1 },
+		{ "gzip", gzip, sizeof(gzip), sizeof(identity) - 1 },
+		{ "", identity, 0, 0 },
+		{ "deflate", empty_deflate, sizeof(empty_deflate), 0 },
+		{ "gzip", empty_gzip, sizeof(empty_gzip), 0 },
+	};
+	for (size_t a = 0; a < ARRAY_SIZE(actions); a++) {
+		for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+			struct ev_loop *loop = ev_loop_new(0);
+			struct server api, core;
+			int peer_fd = -1;
+			int ruleset_tag = 0;
+			unsigned char rsp[4096];
+			T_CHECK(loop != NULL);
+			reset_ruleset_stub();
+			RS.loop = loop;
+			RS.rpcall_auto_finish = true;
+			init_server_pair(&api, &core, loop);
+			core.ruleset = (struct ruleset *)&ruleset_tag;
+			start_api(&api, loop, &peer_fd);
+			char header[512];
+			const int hn = snprintf(
+				header, sizeof(header),
+				"POST /ruleset/%s HTTP/1.1\r\nHost: test\r\n"
+				"Content-Type: " MIME_RPCALL "\r\n"
+				"Content-Length: %zu\r\n%s%s%s\r\n",
+				actions[a], cases[i].wire_len,
+				cases[i].encoding[0] != '\0' ?
+					"Content-Encoding: " :
+					"",
+				cases[i].encoding,
+				cases[i].encoding[0] != '\0' ? "\r\n" : "");
+			T_CHECK(hn > 0 && (size_t)hn < sizeof(header));
+			T_CHECK(write_all(peer_fd, header, (size_t)hn) == 0);
+			T_CHECK(write_all(
+					peer_fd, cases[i].wire,
+					cases[i].wire_len) == 0);
+			const ssize_t n = recv_all_with_timeout(
+				loop, peer_fd, rsp, sizeof(rsp),
+				TEST_WAIT_RECV_SEC);
+			T_CHECK(n > 0);
+			T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+			T_EXPECT_EQ(RS.body_call_count, (size_t)1);
+			T_EXPECT_EQ(RS.body_error, 0);
+			T_EXPECT_EQ(RS.body_len, cases[i].decoded_len);
+			T_EXPECT(
+				memcmp(RS.body, identity,
+				       cases[i].decoded_len) == 0);
+			T_CHECK(close(peer_fd) == 0);
+			fixture_destroy(loop);
+		}
+	}
 }
 
 T_DECLARE_CASE(ruleset_invoke_ok_200)
@@ -2097,7 +2475,7 @@ T_DECLARE_CASE(ruleset_invoke_ok_200)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
@@ -2129,7 +2507,7 @@ T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -2206,7 +2584,7 @@ T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
 	reset_warning_log(NULL);
 	T_EXPECT_EQ(warnings, 1);
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_invoke_length_required_411)
@@ -2235,7 +2613,7 @@ T_DECLARE_CASE(ruleset_invoke_length_required_411)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
@@ -2274,7 +2652,7 @@ T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 	T_EXPECT_STREQ(RS.update_chunkname.str, "@x.lua");
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* A failed update answers 500 with the ruleset's error text; with no query the
@@ -2314,7 +2692,7 @@ T_DECLARE_CASE(ruleset_update_fail_500)
 	T_EXPECT(!RS.update_chunkname.present);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* A malformed /ruleset/update query is refused before the ruleset runs. */
@@ -2347,7 +2725,7 @@ T_DECLARE_CASE(ruleset_update_bad_query_400)
 	T_EXPECT_EQ(RS.update_call_count, (size_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
@@ -2380,7 +2758,7 @@ T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_removed_before_processing)
@@ -2407,7 +2785,7 @@ T_DECLARE_CASE(ruleset_removed_before_processing)
 	T_EXPECT(find_bytes(
 		rsp, (size_t)n, "ruleset is not enabled on the server"));
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_gc_ok_contains_report)
@@ -2438,7 +2816,7 @@ T_DECLARE_CASE(ruleset_gc_ok_contains_report)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* A failed collection answers 500 with the ruleset's error text instead of the
@@ -2473,7 +2851,7 @@ T_DECLARE_CASE(ruleset_gc_fail_500)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_rpcall_bad_mime_400)
@@ -2504,7 +2882,7 @@ T_DECLARE_CASE(ruleset_rpcall_bad_mime_400)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -2559,7 +2937,7 @@ T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
 	T_EXPECT_EQ(RS.cancel_count, (size_t)1);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 	vclock_stop();
 	test_conf.timeout = 1.0;
 }
@@ -2605,7 +2983,7 @@ T_DECLARE_CASE(ruleset_rpcall_sync_finish_ok_200)
 	T_EXPECT_EQ(RS.cancel_count, (size_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /* Complete the pending rpcall from inside the loop's dispatch, so the finish
@@ -2665,7 +3043,7 @@ T_DECLARE_CASE(ruleset_rpcall_finished_torn_down_before_dispatch)
 	ev_timer_start(loop, &w_finish_race);
 	vclock_freeze_now();
 	vclock_advance(test_conf.timeout + 1.0);
-	ev_run(loop, EVRUN_ONCE);
+	ev_run(loop, g_vclock_on ? EVRUN_NOWAIT : EVRUN_ONCE);
 	ev_timer_stop(loop, &w_finish_race);
 
 	/* the teardown saw a completed call: no cancel, and no response -- the
@@ -2676,7 +3054,7 @@ T_DECLARE_CASE(ruleset_rpcall_finished_torn_down_before_dispatch)
 	T_EXPECT(fd_closed_predicate(&closed_ctx));
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 	vclock_stop();
 	test_conf.timeout = 1.0;
 }
@@ -2715,16 +3093,21 @@ T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 	{
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
-		T_EXPECT(n > 0);
+		T_CHECK(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "Content-Type: " MIME_RPCALL "\r\n"));
 		T_EXPECT(find_bytes(
 			rsp, (size_t)n, "Content-Encoding: deflate\r\n"));
+		unsigned char body[sizeof(large_result) + 1];
+		const size_t len = decode_response_body(
+			rsp, (size_t)n, body, sizeof(body));
+		T_EXPECT_EQ(len, sizeof(large_result));
+		T_EXPECT(memcmp(body, large_result, sizeof(large_result)) == 0);
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_rpcall_empty_body_ok)
@@ -2762,7 +3145,7 @@ T_DECLARE_CASE(ruleset_rpcall_empty_body_ok)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
@@ -2797,7 +3180,7 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -2840,7 +3223,7 @@ T_DECLARE_CASE(ruleset_rpcall_null_result_500)
 	}
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -2882,7 +3265,7 @@ T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
 	T_EXPECT_EQ(RS.cancel_count, (size_t)1);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 
 /*
@@ -2936,9 +3319,32 @@ T_DECLARE_CASE(ruleset_rpcall_completed_then_failed_drops_finish)
 	T_EXPECT_EQ(api.stats.num_api_success, (uint_least64_t)0);
 
 	T_CHECK(close(peer_fd) == 0);
-	ev_loop_destroy(loop);
+	fixture_destroy(loop);
 }
 #endif /* WITH_RULESET */
+
+/* A live peer with no producer must return an incomplete read and an unmet
+ * predicate even while both clocks used by libev are frozen. */
+T_DECLARE_CASE(frozen_clock_waits_are_bounded)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	int sv[2];
+	unsigned char rsp[64];
+	T_CHECK(loop != NULL);
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	struct fd_closed_ctx closed = { .fd = sv[0] };
+	vclock_freeze_now();
+	const ssize_t n = recv_all_with_timeout(
+		loop, sv[0], rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+	const bool ready = test_wait_until(
+		loop, fd_closed_predicate, &closed, TEST_WAIT_CLOSE_SEC);
+	vclock_stop();
+	T_CHECK(close(sv[0]) == 0);
+	T_CHECK(close(sv[1]) == 0);
+	fixture_destroy(loop);
+	T_EXPECT_EQ(n, (ssize_t)0);
+	T_EXPECT(!ready);
+}
 
 /* -------------------------------------------------------------------------
  * bench - none.
@@ -2949,6 +3355,8 @@ T_DECLARE_CASE(ruleset_rpcall_completed_then_failed_drops_finish)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(wait_tick_allows_idle_progress),
+	T_CASE(frozen_clock_waits_are_bounded),
 	T_CASE(host_validation_before_api_dispatch),
 	T_CASE(healthy_keepalive_reuse_connection),
 	T_CASE(pipelined_requests_both_answered),
@@ -2976,14 +3384,17 @@ static const struct testing_suite suite[] = {
 	T_CASE(not_found_404),
 	T_CASE(malformed_url_400),
 	T_CASE(stats_connect_latency_shows_percentiles),
+	T_CASE(head_errors_have_no_wire_payload),
 	T_CASE(stats_nobanner_option_suppresses_banner),
 #if WITH_RULESET
+	T_CASE(stats_ruleset_event_percentile_values),
 	T_CASE(stats_post_with_ruleset_q),
 	T_CASE(stats_post_ruleset_dt_is_rate_window),
 	T_CASE(stats_post_ruleset_error_in_body),
 	T_CASE(healthy_unhealthy_returns_503),
 	T_CASE(ruleset_disabled_returns_500),
 	T_CASE(ruleset_unknown_action_404),
+	T_CASE(ruleset_request_body_integrity),
 	T_CASE(ruleset_invoke_ok_200),
 	T_CASE(ruleset_invoke_empty_body_ok_200),
 	T_CASE(errmsg_content_length_matches_truncated_body),

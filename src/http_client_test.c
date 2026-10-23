@@ -33,7 +33,9 @@
  * ---------------------------------------------------------------------- */
 
 static struct config test_conf = {
-	.timeout = 0.2,
+	/* Healthy socket exchanges must tolerate scheduler stalls. Timeout
+	 * cases feed the timer directly; this deadline is only a failsafe. */
+	.timeout = T_TIMEOUT_SECONDS,
 };
 
 /* the plain client every case builds: no byte counters, no resolver */

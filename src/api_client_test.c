@@ -12,6 +12,7 @@
 
 #include "io/stream.h"
 #include "utils/buffer.h"
+#include "utils/gc.h"
 #include "utils/slog.h"
 #include "utils/testing.h"
 
@@ -220,6 +221,14 @@ test_tick_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
 	(void)revents;
 }
 
+/* A polling wakeup must not suppress default-priority idle completion. */
+static void test_tick_start(struct ev_loop *loop, ev_timer *w)
+{
+	ev_timer_init(w, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
+	ev_set_priority(w, EV_MINPRI);
+	ev_timer_start(loop, w);
+}
+
 static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *data,
 	const ev_tstamp timeout_sec)
@@ -233,14 +242,67 @@ static bool test_wait_until(
 	/* The predicate may poll a socket that is not registered with the loop
 	 * (e.g. fd_closed_predicate); bound ev_run() so it is re-checked
 	 * promptly instead of sleeping until the watchdog. */
-	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
-	ev_timer_start(loop, &w_tick);
+	test_tick_start(loop, &w_tick);
 	while (!watchdog.fired && !predicate(data)) {
 		ev_run(loop, EVRUN_ONCE);
 	}
 	ev_timer_stop(loop, &w_tick);
 	ev_timer_stop(loop, &w_timeout);
 	return predicate(data);
+}
+
+struct idle_progress {
+	ev_timer tick;
+	bool called;
+};
+
+static void
+idle_progress_prepare(struct ev_loop *loop, ev_prepare *w, const int revents)
+{
+	(void)revents;
+	struct idle_progress *const progress = w->data;
+	/* Keep the polling tick overdue on every iteration, without waiting. */
+	ev_timer_stop(loop, &progress->tick);
+	ev_timer_set(&progress->tick, -1.0, TEST_TICK_SEC);
+	ev_timer_start(loop, &progress->tick);
+}
+
+static void
+idle_progress_cb(struct ev_loop *loop, ev_idle *w, const int revents)
+{
+	(void)revents;
+	struct idle_progress *const progress = w->data;
+	progress->called = true;
+	ev_idle_stop(loop, w);
+}
+
+static bool idle_progress_done(void *data)
+{
+	const struct idle_progress *const progress = data;
+	return progress->called;
+}
+
+T_DECLARE_CASE(wait_tick_allows_idle_progress)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	struct idle_progress progress = { 0 };
+	ev_prepare prepare;
+	ev_idle idle;
+	T_CHECK(loop != NULL);
+	ev_prepare_init(&prepare, idle_progress_prepare);
+	prepare.data = &progress;
+	ev_idle_init(&idle, idle_progress_cb);
+	idle.data = &progress;
+	test_tick_start(loop, &progress.tick);
+	ev_prepare_start(loop, &prepare);
+	ev_idle_start(loop, &idle);
+	const bool observed =
+		test_wait_until(loop, idle_progress_done, &progress, 1.0);
+	ev_idle_stop(loop, &idle);
+	ev_prepare_stop(loop, &prepare);
+	ev_timer_stop(loop, &progress.tick);
+	ev_loop_destroy(loop);
+	T_EXPECT(observed);
 }
 
 static bool cb_called_predicate(void *data)
@@ -288,8 +350,7 @@ static bool read_request_headers_with_size(
 	/* fd is not registered with the loop; bound ev_run() so we keep
 	 * re-polling and pick up the request even when the peer's write lands
 	 * a little later (as it does under the MSYS2/Cygwin socket emulation). */
-	ev_timer_init(&w_tick, test_tick_cb, TEST_TICK_SEC, TEST_TICK_SEC);
-	ev_timer_start(loop, &w_tick);
+	test_tick_start(loop, &w_tick);
 	while (!watchdog.fired && off + 1 < cap) {
 		const ssize_t n = recv_nowait(fd, buf + off, cap - off - 1);
 		if (n > 0) {
@@ -812,6 +873,44 @@ T_DECLARE_SUBCASE(
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(rpcall_malformed_status_reports_protocol_error)
+{
+	static const char *const codes[] = {
+		"200junk", "+200", "-200", "0200",
+		"2000",	   "20",   "2",	   "a00",
+		"2a0",	   "20a",  "0xC8", "200000000000000000000000",
+	};
+	for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
+		struct cb_result out = { 0 };
+		char response[256];
+		const int n = snprintf(
+			response, sizeof(response),
+			"HTTP/1.1 %s OK\r\nContent-Type: " MIME_RPCALL "\r\n"
+			"Content-Length: 2\r\nConnection: close\r\n\r\nok",
+			codes[i]);
+		T_CHECK(n > 0 && (size_t)n < sizeof(response));
+		T_CALL_SUBCASE(rpcall_raw_response, response, (size_t)n, &out);
+		T_EXPECT(out.called);
+		T_EXPECT(!out.has_stream);
+		T_EXPECT(out.errlen > 0);
+		T_EXPECT_STREQ(out.errmsg, "error receiving response");
+	}
+}
+
+T_DECLARE_CASE(rpcall_malformed_interim_status_reports_protocol_error)
+{
+	struct cb_result out = { 0 };
+	static const char response[] =
+		"HTTP/1.1 103junk Early Hints\r\n\r\n"
+		"HTTP/1.1 200 OK\r\nContent-Type: " MIME_RPCALL "\r\n"
+		"Content-Length: 2\r\n\r\nok";
+	T_CALL_SUBCASE(
+		rpcall_raw_response, response, sizeof(response) - 1, &out);
+	T_EXPECT(out.called);
+	T_EXPECT(!out.has_stream);
+	T_EXPECT_STREQ(out.errmsg, "error receiving response");
+}
+
 T_DECLARE_CASE(rpcall_interim_responses_deliver_final_result)
 {
 	struct cb_result out = { 0 };
@@ -957,8 +1056,19 @@ T_DECLARE_CASE(invoke_uses_invoke_path)
 		loop, fd_closed_predicate, &closed_ctx,
 		TEST_WAIT_RESPONSE_SEC));
 
-	T_CHECK(close(sv[1]) == 0);
+	/* Peer EOF can precede the deferred process callback. Run that callback
+	 * before destroying the loop. Count and release any abandoned context
+	 * while its loop still exists, so a failed check also cleans up safely. */
+	const int active = ev_run(loop, EVRUN_NOWAIT);
+	const unsigned int pending = ev_pending_count(loop);
+	const size_t abandoned = gc_finalizeall();
+	const int close_result = close(sv[1]);
 	ev_loop_destroy(loop);
+
+	T_EXPECT_EQ(active, 0);
+	T_EXPECT_EQ(pending, 0u);
+	T_EXPECT_EQ(abandoned, (size_t)0);
+	T_EXPECT_EQ(close_result, 0);
 }
 
 static bool logcap_has_invoke_error(void *data)
@@ -1853,6 +1963,7 @@ T_DECLARE_CASE(rpcall_deflate_response_is_decoded)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(wait_tick_allows_idle_progress),
 	T_CASE(rpcall_success_returns_stream),
 	T_CASE(rpcall_threads_stats_counters),
 	T_CASE(rpcall_chunked_response_reports_error),
@@ -1877,6 +1988,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(request_advertises_connection_close),
 	T_CASE(rpcall_write_error_reports_message),
 	T_CASE(rpcall_large_payload_is_deflate_compressed),
+	T_CASE(rpcall_malformed_status_reports_protocol_error),
+	T_CASE(rpcall_malformed_interim_status_reports_protocol_error),
 	T_CASE(rpcall_interim_responses_deliver_final_result),
 	T_CASE(rpcall_interim_response_requires_valid_final_response),
 	T_CASE(rpcall_deflate_response_is_decoded),
