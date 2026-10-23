@@ -460,6 +460,17 @@ bool dialreq_addproxy(
 				"invalid proxy userinfo:");
 			return false;
 		}
+		if (protocol == PROTO_SOCKS5) {
+			const size_t ulen = strlen(username);
+			const size_t plen =
+				(password != NULL) ? strlen(password) : 0;
+			/* RFC 1929 2 requires both fields to have 1-255 octets. */
+			if (ulen == 0 || ulen > UCHAR_MAX || plen == 0 ||
+			    plen > UCHAR_MAX) {
+				LOGE("invalid socks5 credential lengths");
+				return false;
+			}
+		}
 	}
 	req->num_proxy++;
 	return true;
@@ -964,10 +975,10 @@ static bool send_socks5_auth(
 	const size_t ulen = strlen(proxy->username);
 	const size_t plen =
 		(proxy->password != NULL) ? strlen(proxy->password) : 0;
-	if (ulen > UCHAR_MAX || plen > UCHAR_MAX) {
+	if (ulen == 0 || ulen > UCHAR_MAX || plen == 0 || plen > UCHAR_MAX) {
 		DIALER_LOG_F(
-			ERROR, d, "socks5 credentials too long: %zu, %zu", ulen,
-			plen);
+			ERROR, d, "invalid socks5 credential lengths: %zu, %zu",
+			ulen, plen);
 		d->err = DIALER_ERR_PROXY_PROTO;
 		d->syserr = 0;
 		return false;
@@ -978,14 +989,10 @@ static bool send_socks5_auth(
 	/* version */
 	*p++ = 0x01;
 	*p++ = (unsigned char)ulen;
-	if (ulen > 0) {
-		(void)memcpy(p, proxy->username, ulen);
-	}
+	(void)memcpy(p, proxy->username, ulen);
 	p += ulen;
 	*p++ = (unsigned char)plen;
-	if (plen > 0) {
-		(void)memcpy(p, proxy->password, plen);
-	}
+	(void)memcpy(p, proxy->password, plen);
 	return dialer_send(d, buf, len);
 }
 
