@@ -647,6 +647,8 @@ static lua_State *new_ruleset_lua(
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
 	aux_newweaktable(L, "k");
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+	aux_newweaktable(L, "v");
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_THREAD_CONTEXT);
 	lua_newtable(L);
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
 	r->loop = loop;

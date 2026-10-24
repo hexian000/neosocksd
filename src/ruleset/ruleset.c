@@ -164,6 +164,9 @@ static int ruleset_luainit(lua_State *restrict L)
 	/* forward context: thread pointer -> request state lightuserdata */
 	lua_newtable(L);
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+	/* Coroutine lifecycle guards are owned by their thread closures. */
+	aux_newweaktable(L, "v");
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_THREAD_CONTEXT);
 	/* load Lua libraries */
 	luaL_openlibs(L);
 	/* restrict package searcher */

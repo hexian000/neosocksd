@@ -292,6 +292,8 @@ static lua_State *new_ruleset_lua(
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
 	aux_newweaktable(L, "k");
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+	aux_newweaktable(L, "v");
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_THREAD_CONTEXT);
 	r->loop = loop;
 	r->conf = conf;
 	r->resolver = (struct resolver *)0x1234;
@@ -934,6 +936,89 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
 	reset_globals();
 }
 
+#if LUA_VERSION_NUM >= 504
+T_DECLARE_CASE(api_async_replaces_caller_closed_idle_threads)
+{
+	struct ruleset r = { 0 };
+	struct config conf = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	const bool ok = run_chunk(
+		L,
+		"local held, called, finished = {}, 0, 0 "
+		"for i = 1, 3 do "
+		"  local old = neosocksd.async(function() end, function() end) "
+		"  assert(type(old) == 'thread') "
+		"  assert(coroutine.close(old)) "
+		"  held[i] = old "
+		"  local co, err = neosocksd.async("
+		"    function(ok, value) assert(ok and value == i); finished = finished + 1 end,"
+		"    function() called = called + 1; return i end) "
+		"  assert(type(co) == 'thread' and co ~= old and err == nil) "
+		"  assert(coroutine.status(co) == 'suspended') "
+		"end "
+		"return called == 3 and finished == 3");
+	const bool completed = ok && lua_toboolean(L, 1);
+	if (!ok) {
+		T_LOGF("async: %s", lua_tostring(L, -1));
+	}
+	const size_t active = r.vmstats.num_thread_active;
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	const size_t collected_active = r.vmstats.num_thread_active;
+	const size_t peak = r.vmstats.num_thread_peak;
+	lua_close(L);
+	ev_loop_destroy(loop);
+
+	T_EXPECT(completed);
+	T_EXPECT_EQ(active, (size_t)0);
+	T_EXPECT_EQ(collected_active, (size_t)0);
+	T_EXPECT_EQ(peak, (size_t)1);
+}
+#endif /* LUA_VERSION_NUM >= 504 */
+
+/* Plain yield has no await context to own the coroutine. Its guard must
+ * balance orphan collection while retaining genuinely reachable routines. */
+T_DECLARE_CASE(api_async_orphan_collection_balances_thread_count)
+{
+	struct ruleset r = { 0 };
+	struct config conf = { 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	for (int i = 0; i < 3; i++) {
+		/* Collect an idle thread first: the finalizable guard can
+		 * transiently resurrect it after its weak lookup was cleared. */
+		T_CHECK(run_chunk(
+			L, "neosocksd.async(function() end, function() end)"));
+		lua_settop(L, 0);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+		T_CHECK(run_chunk(
+			L,
+			"neosocksd.async(function() end, function() coroutine.yield() end)"));
+		T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
+		lua_settop(L, 0);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+		T_EXPECT_EQ(r.vmstats.num_thread_peak, (size_t)1);
+	}
+	T_CHECK(run_chunk(
+		L,
+		"held = neosocksd.async(function() end, function() coroutine.yield() end)"));
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
+	lua_pushnil(L);
+	lua_setglobal(L, "held");
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+	lua_close(L);
+	ev_loop_destroy(loop);
+}
+
 /* #190: when the async coroutine dies catastrophically (here forced by
  * corrupting RIDX_IDLE_THREAD so aux_async's re-caching raises), neosocksd.async
  * returns (nil, err) with err a string, rather than raising. */
@@ -999,6 +1084,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(api_now_is_float),
 	T_CASE(api_stats_now_and_setinterval_use_ruleset_state),
 	T_CASE(api_invoke_and_async_real_paths),
+#if LUA_VERSION_NUM >= 504
+	T_CASE(api_async_replaces_caller_closed_idle_threads),
+#endif
+	T_CASE(api_async_orphan_collection_balances_thread_count),
 	T_CASE(api_async_catastrophic_returns_nil_and_error),
 	T_SUITE_END,
 };

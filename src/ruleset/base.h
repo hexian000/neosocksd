@@ -57,8 +57,10 @@ enum ruleset_ridx {
 	RIDX_AWAIT_CONTEXT,
 	/* t[thread] = true */
 	RIDX_IDLE_THREAD,
-	/* t[thread] = request state, for await.forward() */
+	/* t[thread pointer] = request state pointer, for await.forward() */
 	RIDX_FORWARD_CONTEXT,
+	/* t[thread pointer] = lifecycle userdata; weak values */
+	RIDX_THREAD_CONTEXT,
 };
 
 #define ERR_MEMORY "out of memory"
@@ -100,7 +102,12 @@ void aux_toclose(
 	lua_State *restrict L, int idx, const char *tname, lua_CFunction close);
 
 /**
- * @brief Close a to-be-closed value
+ * @brief Complete handling of a to-be-closed value
+ *
+ * On Lua 5.4+, this is a no-op: Lua closes the marked stack slot when it
+ * leaves scope. On older Lua versions, calls __close immediately and replaces
+ * the value with nil.
+ *
  * @param L Lua state
  * @param idx Stack index
  */
@@ -173,7 +180,8 @@ int aux_format_addr(lua_State *restrict L);
  *
  * @details Consumes the n values on the stack top: the address followed by
  * proxyN ... proxy1. On success pushes the built dialreq as a lightuserdata;
- * a nil address pushes a NULL one, which never means a direct connection:
+ * a nil address skips proxy validation and the value-count limit, pushing a
+ * NULL one, which never means a direct connection:
  * callers reject the request (or raise an invalid-address error) on it. A
  * direct connection is an address with no proxies, which still yields a
  * non-NULL dialreq. On failure pushes nothing. Raises only on a memory error
@@ -182,8 +190,9 @@ int aux_format_addr(lua_State *restrict L);
  *
  * @param L Lua state
  * @param n Number of arguments to convert
- * @return true on success; false on an invalid address or proxy, more than
- * 255 values, or failure to allocate the dialreq
+ * @return true on success (including a nil address); otherwise false on an
+ * invalid address or proxy, more than 255 values, or failure to allocate the
+ * dialreq
  */
 bool aux_todialreq(lua_State *restrict L, int n);
 

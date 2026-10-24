@@ -97,6 +97,53 @@ void aux_setsandboxenv(lua_State *restrict L)
 	(void)upvalue;
 }
 
+struct thread_state {
+	lua_State *co;
+	bool active;
+};
+
+static void clear_context_entry(lua_State *L, int ridx, const void *key);
+
+static struct thread_state *thread_getstate(lua_State *L, lua_State *co)
+{
+	struct thread_state *state = NULL;
+	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_THREAD_CONTEXT) ==
+	    LUA_TTABLE) {
+		lua_rawgetp(L, -1, co);
+		state = lua_touserdata(L, -1);
+		lua_pop(L, 1);
+	}
+	lua_pop(L, 1);
+	return state;
+}
+
+/* A guard belongs to the coroutine's C closure, including while it is idle.
+ * Disarming it here makes later collection independent of how the coroutine
+ * completed. A NULL guard covers a caller-supplied, unpooled coroutine. */
+static void thread_release(lua_State *L, struct thread_state *state)
+{
+	if (state != NULL) {
+		if (!state->active) {
+			return;
+		}
+		state->active = false;
+	}
+	struct ruleset *restrict r = aux_getruleset(L);
+	r->vmstats.num_thread_active--;
+}
+
+static int thread_state_gc(lua_State *L)
+{
+	struct thread_state *state = lua_touserdata(L, 1);
+	if (state->active) {
+		thread_release(L, state);
+		/* The userdata's uservalue keeps the pointer valid until this
+		 * finalizer has removed the raw forward-context association. */
+		clear_context_entry(L, RIDX_FORWARD_CONTEXT, state->co);
+	}
+	return 0;
+}
+
 static int thread_main_k(lua_State *L, int status, lua_KContext ctx);
 
 static int
@@ -132,7 +179,7 @@ thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 	 * and unwind out of lua_resume; the callers then treat the non-OK
 	 * status as "died without reaching here" and decrement themselves, so
 	 * decrementing before it would double-count. */
-	r->vmstats.num_thread_active--;
+	thread_release(L, lua_touserdata(L, lua_upvalueindex(1)));
 	lua_settop(L, 0);
 	return lua_yieldk(L, 0, ctx, thread_main_k);
 }
@@ -155,6 +202,36 @@ static int thread_main(lua_State *restrict L)
 	return lua_yieldk(L, 0, 0, thread_main_k);
 }
 
+/* Build every fallible part before the first checkout increments the active
+ * count. The guard/thread cycle is collectible; the registry's weak value is
+ * only a lookup for the resume paths, never an owner. */
+static struct thread_state *thread_new(lua_State *L)
+{
+	struct thread_state *state = lua_newuserdata(L, sizeof(*state));
+	*state = (struct thread_state){ 0 };
+	if (luaL_newmetatable(L, "ruleset_thread")) {
+		lua_pushcfunction(L, thread_state_gc);
+		lua_setfield(L, -2, "__gc");
+	}
+	lua_setmetatable(L, -2);
+	lua_State *co = lua_newthread(L);
+	state->co = co;
+	lua_pushvalue(L, -1);
+	lua_setuservalue(L, -3);
+	lua_pushvalue(L, -2);
+	lua_pushcclosure(L, thread_main, 1);
+	lua_xmove(L, co, 1);
+	const int status = aux_resume(co, L, 0);
+	ASSERT(status == LUA_YIELD);
+	(void)status;
+	aux_getregtable(L, RIDX_THREAD_CONTEXT);
+	lua_pushvalue(L, -3);
+	lua_rawsetp(L, -2, co);
+	lua_pop(L, 1);
+	lua_remove(L, -2);
+	return state;
+}
+
 /* [-0, +1, v] */
 lua_State *aux_getthread(lua_State *restrict L)
 {
@@ -162,6 +239,7 @@ lua_State *aux_getthread(lua_State *restrict L)
 	aux_getregtable(L, RIDX_IDLE_THREAD);
 	lua_pushnil(L);
 	lua_State *restrict co;
+	struct thread_state *state;
 	if (lua_next(L, -2)) {
 		lua_pop(L, 1);
 		lua_pushvalue(L, -1);
@@ -170,14 +248,22 @@ lua_State *aux_getthread(lua_State *restrict L)
 		lua_rawset(L, -4);
 		lua_replace(L, -2);
 		co = lua_tothread(L, -1);
+		state = thread_getstate(L, co);
 	} else {
 		lua_pop(L, 1);
-		co = lua_newthread(L);
-		lua_pushcfunction(co, thread_main);
-		const int status = aux_resume(co, L, 0);
-		ASSERT(status == LUA_YIELD);
-		(void)status;
+		state = thread_new(L);
+		co = state->co;
 	}
+	if (state == NULL || lua_status(co) != LUA_YIELD) {
+		/* GC can leave an idle weak key with no live guard, and a caller
+		 * can close an idle coroutine returned by neosocksd.async. Only
+		 * reuse a guarded thread still suspended at the pool's yield. */
+		lua_pop(L, 1);
+		state = thread_new(L);
+		co = state->co;
+	}
+	ASSERT(!state->active);
+	state->active = true;
 	r->vmstats.num_thread_active++;
 	if (r->vmstats.num_thread_active > r->vmstats.num_thread_peak) {
 		r->vmstats.num_thread_peak = r->vmstats.num_thread_active;
@@ -407,12 +493,13 @@ int aux_async(
 	const int finishidx)
 {
 	struct ruleset *restrict r = aux_getruleset(L);
+	struct thread_state *state = thread_getstate(from, L);
 	/* grow the coroutine stack for errfunc + finish + placeholder + func +
 	 * narg args before the lua_xmove()s below, which do not grow the target
 	 * and whose bounds assert is compiled out in release builds. narg is
 	 * caller-controlled via neosocksd.async(). */
 	if (!lua_checkstack(L, narg + 4)) {
-		r->vmstats.num_thread_active--;
+		thread_release(from, state);
 		clear_context_entry(from, RIDX_FORWARD_CONTEXT, L);
 		return luaL_error(from, "async: too many arguments");
 	}
@@ -432,7 +519,7 @@ int aux_async(
 		 * active count and remove the forward-context entry keyed by the
 		 * coroutine pointer, so a later lua_newthread() reusing that
 		 * address cannot alias a stale ruleset_state. */
-		r->vmstats.num_thread_active--;
+		thread_release(from, state);
 		clear_context_entry(from, RIDX_FORWARD_CONTEXT, L);
 	}
 	return status;
@@ -510,6 +597,7 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 		lua_pushlightuserdata(co, va_arg(args, void *));
 	}
 	va_end(args);
+	struct thread_state *state = thread_getstate(L, co);
 	const int status = aux_resume(co, NULL, narg);
 	if (status != LUA_OK && status != LUA_YIELD) {
 		lua_rawseti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
@@ -518,7 +606,7 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 		 * entries keyed by the abandoned coroutine (forward context) and
 		 * the async userdata (await context), so a reused pointer cannot
 		 * alias a stale entry. */
-		r->vmstats.num_thread_active--;
+		thread_release(L, state);
 		clear_context_entry(L, RIDX_FORWARD_CONTEXT, co);
 		clear_context_entry(L, RIDX_AWAIT_CONTEXT, ctx);
 	}

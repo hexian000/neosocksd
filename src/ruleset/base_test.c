@@ -11,8 +11,8 @@
  *   dialer.c         linked for the symbols bound by the Lua base library
  *   resolver.c       linked for the symbols bound by the Lua base library
  *   version.c        leaf
- * base.c has no stateful collaborator to mock; the mock section only holds
- * shared Lua test fixtures.
+ * The mock section supplies shared Lua fixtures and controlled readings for
+ * the clock_gettime calls behind base.c's inline monotonic clock helper.
  */
 
 #include "base.h"
@@ -20,6 +20,7 @@
 #include "dialer.h"
 
 #include "io/stream.h"
+#include "meta/arraysize.h"
 #include "utils/testing.h"
 
 #include <lauxlib.h>
@@ -33,10 +34,40 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 
 /* -------------------------------------------------------------------------
- * mock - shared Lua test fixtures (base.c has no collaborator to mock).
+ * mock - shared Lua test fixtures and monotonic clock readings.
  * ---------------------------------------------------------------------- */
+
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+static const struct timespec *event_clock;
+static size_t event_clock_calls;
+
+int test_clock_gettime(clockid_t clk_id, struct timespec *tp)
+{
+	if (clk_id == CLOCK_MONOTONIC && event_clock != NULL) {
+		const size_t i = event_clock_calls++;
+		if (i < 2) {
+			*tp = event_clock[i];
+			return 0;
+		}
+	}
+	return clock_gettime(clk_id, tp);
+}
+
+static void set_event_clock(const struct timespec readings[2])
+{
+	event_clock = readings;
+	event_clock_calls = 0;
+}
+
+T_DECLARE_SUBCASE(check_event_clock, const size_t expected)
+{
+	event_clock = NULL;
+	T_EXPECT_EQ(event_clock_calls, expected);
+}
+#endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
 
 static int g_close_called;
 static int test_close(lua_State *restrict L)
@@ -143,6 +174,8 @@ static lua_State *new_ruleset_lua(struct ruleset *restrict r)
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
 	aux_newweaktable(L, "k");
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+	aux_newweaktable(L, "v");
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_THREAD_CONTEXT);
 	return L;
 }
 
@@ -685,6 +718,40 @@ T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 	lua_close(L);
 }
 
+#if LUA_VERSION_NUM >= 504
+T_DECLARE_CASE(base_aux_getthread_replaces_closed_idle_thread)
+{
+	struct ruleset r = { 0 };
+	lua_State *const L = new_ruleset_lua(&r);
+	lua_State *const old = aux_getthread(L);
+	lua_pushcfunction(L, async_finish);
+	lua_pushcfunction(L, async_worker);
+	const int first = aux_async(old, L, 0, 2);
+	lua_settop(L, 1);
+	const int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+	const int closed = lua_resetthread(old);
+	lua_State *const fresh = aux_getthread(L);
+	const bool replaced = (fresh != old);
+	async_finish_state = (struct async_finish_record){ 0 };
+	lua_pushcfunction(L, async_finish);
+	lua_pushcfunction(L, async_worker);
+	const int second = aux_async(fresh, L, 0, 2);
+	const bool completed = async_finish_state.called &&
+			       async_finish_state.ok &&
+			       async_finish_state.result == 99;
+	const size_t active = r.vmstats.num_thread_active;
+	luaL_unref(L, LUA_REGISTRYINDEX, ref);
+	lua_close(L);
+
+	T_EXPECT_EQ(first, LUA_YIELD);
+	T_EXPECT_EQ(closed, LUA_OK);
+	T_EXPECT(replaced);
+	T_EXPECT_EQ(second, LUA_YIELD);
+	T_EXPECT(completed);
+	T_EXPECT_EQ(active, (size_t)0);
+}
+#endif /* LUA_VERSION_NUM >= 504 */
+
 /* Regression: aux_async() must grow the target coroutine's stack for the
  * caller-controlled argument count before the lua_xmove(); without the
  * lua_checkstack() a large narg overran a fresh coroutine's initial stack. */
@@ -777,6 +844,60 @@ T_DECLARE_CASE(base_ruleset_pcall_success_and_error)
 	lua_close(L);
 }
 
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+T_DECLARE_CASE(base_ruleset_pcall_event_samples_wrap)
+{
+	struct ruleset r = { 0 };
+	lua_State *const L = new_ruleset_lua(&r);
+	r.L = L;
+	const size_t n = ARRAY_SIZE(r.vmstats.event_ns);
+	r.vmstats.num_events = n - 1;
+	for (size_t i = 0; i < n; i++) {
+		r.vmstats.event_ns[i] = -1;
+	}
+
+	/* Cross a seconds boundary and retain a duration wider than int32_t. */
+	const struct timespec success[] = {
+		{ .tv_sec = 11, .tv_nsec = 950000000 },
+		{ .tv_sec = 14, .tv_nsec = 123456789 },
+	};
+	set_event_clock(success);
+	const bool ok = ruleset_pcall(&r, pcall_push_result, 0, 1);
+	T_CALL_SUBCASE(check_event_clock, (size_t)2);
+	T_EXPECT(ok);
+	T_EXPECT_EQ(lua_tointeger(L, -1), (lua_Integer)7);
+	T_EXPECT_EQ(r.vmstats.num_events, n);
+	for (size_t i = 0; i < n; i++) {
+		T_EXPECT_EQ(
+			r.vmstats.event_ns[i],
+			i == n - 1 ? INT64_C(2173456789) : -1);
+	}
+
+	/* A failed call is sampled too, overwriting the first slot on wrap. */
+	const struct timespec failure[] = {
+		{ .tv_sec = 99, .tv_nsec = 990000000 },
+		{ .tv_sec = 100, .tv_nsec = 17 },
+	};
+	set_event_clock(failure);
+	const bool failed = ruleset_pcall(&r, pcall_raise_error, 0, 0);
+	T_CALL_SUBCASE(check_event_clock, (size_t)2);
+	T_EXPECT(!failed);
+	T_EXPECT_EQ(r.vmstats.num_events, n + 1);
+	for (size_t i = 0; i < n; i++) {
+		int_least64_t expected = -1;
+		if (i == 0) {
+			expected = INT64_C(10000017);
+		} else if (i == n - 1) {
+			expected = INT64_C(2173456789);
+		}
+		T_EXPECT_EQ(r.vmstats.event_ns[i], expected);
+	}
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	T_EXPECT_STREQ(lua_tostring(L, -1), "boom");
+	lua_close(L);
+}
+#endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
+
 T_DECLARE_CASE(base_ruleset_resume_wakes_coroutine)
 {
 	struct ruleset r = { 0 };
@@ -798,7 +919,21 @@ T_DECLARE_CASE(base_ruleset_resume_wakes_coroutine)
 		1); /* drop the co reference (still kept alive by the table) */
 
 	/* ruleset_resume looks co up by ctx and drives it to completion */
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+	const struct timespec readings[] = {
+		{ .tv_sec = 3, .tv_nsec = 700000000 },
+		{ .tv_sec = 3, .tv_nsec = 700000123 },
+	};
+	set_event_clock(readings);
+#endif
 	ruleset_resume(&r, &ctx_key, 0);
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+	T_CALL_SUBCASE(check_event_clock, (size_t)2);
+	T_EXPECT_EQ(r.vmstats.event_ns[0], INT64_C(123));
+	for (size_t i = 1; i < ARRAY_SIZE(r.vmstats.event_ns); i++) {
+		T_EXPECT_EQ(r.vmstats.event_ns[i], INT64_C(0));
+	}
+#endif
 	T_EXPECT_EQ(r.vmstats.num_events, (size_t)1);
 	lua_getglobal(L, "resumed");
 	T_EXPECT(lua_toboolean(L, -1) != 0);
@@ -987,7 +1122,22 @@ T_DECLARE_CASE(base_ruleset_resume_catastrophic_failure)
 	lua_pop(L, 1); /* drop co ref (kept alive by the tables) */
 
 	r.vmstats.num_thread_active = 1;
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+	const struct timespec readings[] = {
+		{ .tv_sec = 7, .tv_nsec = 999999999 },
+		{ .tv_sec = 8, .tv_nsec = 1 },
+	};
+	set_event_clock(readings);
+#endif
 	ruleset_resume(&r, &ctx_key, 0);
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+	T_CALL_SUBCASE(check_event_clock, (size_t)2);
+	T_EXPECT_EQ(r.vmstats.event_ns[0], INT64_C(2));
+	for (size_t i = 1; i < ARRAY_SIZE(r.vmstats.event_ns); i++) {
+		T_EXPECT_EQ(r.vmstats.event_ns[i], INT64_C(0));
+	}
+#endif
+	T_EXPECT_EQ(r.vmstats.num_events, (size_t)1);
 
 	/* decremented exactly once, not double-counted (SIZE_MAX) */
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
@@ -1039,10 +1189,16 @@ static const struct testing_suite suite[] = {
 	T_CASE(base_aux_todialreq_rejects_nul_target),
 	T_CASE(base_aux_todialreq_rejects_nul_proxy),
 	T_CASE(base_aux_async_reuses_idle_thread),
+#if LUA_VERSION_NUM >= 504
+	T_CASE(base_aux_getthread_replaces_closed_idle_thread),
+#endif
 	T_CASE(base_aux_async_grows_thread_stack_for_args),
 	T_CASE(base_aux_getregtable_rejects_non_table),
 	T_CASE(base_aux_forward_context_roundtrip),
 	T_CASE(base_ruleset_pcall_success_and_error),
+#if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+	T_CASE(base_ruleset_pcall_event_samples_wrap),
+#endif
 	T_CASE(base_ruleset_resume_wakes_coroutine),
 	T_CASE(base_aux_async_catastrophic_failure_cleanup),
 	T_CASE(base_aux_load_reports_mid_stream_read_error),

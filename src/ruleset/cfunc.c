@@ -189,10 +189,8 @@ int cfunc_request(lua_State *restrict L)
 	push_credential(L, creds->password, creds->password_len);
 	/* lua stack: state finish ruleset func request username password */
 
-	/* Check out the coroutine only after the fallible stack setup above:
-	 * aux_getthread() increments num_thread_active and pulls a thread from
-	 * the idle pool, and nothing before aux_async() would return it if an
-	 * earlier step raised (e.g. LUA_ERRMEM while pushing a string). */
+	/* Prepare arguments before checking out a coroutine. Its lifecycle
+	 * guard also covers failure while registering the forward context. */
 	lua_State *restrict co = aux_getthread(L);
 	lua_insert(L, 2);
 	/* lua stack: state co finish ruleset func request username password */
@@ -498,11 +496,7 @@ int cfunc_rpcall(lua_State *restrict L)
 	/* lua stack: state finish chunk */
 	aux_setsandboxenv(L);
 
-	/* Check out the coroutine only after all fallible setup: aux_getthread()
-	 * increments num_thread_active and removes a thread from the idle pool,
-	 * but lua_load() (a client syntax error) and aux_setsandboxenv() may
-	 * raise before aux_async(), and nothing on that early-error path would
-	 * return the thread. */
+	/* Compile and prepare the sandbox before checking out a coroutine. */
 	lua_State *restrict co = aux_getthread(L);
 	lua_insert(L, 2);
 	/* lua stack: state co finish chunk */

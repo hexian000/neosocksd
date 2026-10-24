@@ -435,9 +435,11 @@ if(WITH_LUA)
         MOCK_DEFINITIONS clock_gettime=test_clock_gettime
         NO_LIBEV WITH_LUA)
     add_unit_test(base_test
-        SRCS ruleset/base_test.c ruleset/base.c proto/codec.c
+        SRCS ruleset/base_test.c proto/codec.c
              util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+        MOCK_SRCS ruleset/base.c
+        MOCK_DEFINITIONS clock_gettime=test_clock_gettime
         WITH_LUA WITH_CARES)
     add_unit_test(marshal_test
         SRCS ruleset/marshal_test.c ruleset/marshal.c ruleset/base.c

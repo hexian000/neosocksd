@@ -50,8 +50,8 @@
  * mock - luaopen_* stubs and shared fixtures.
  * ---------------------------------------------------------------------- */
 
-/* Constructor-only seams track the C object, cache, and VM allocations.
- * Ordinary cases use the unmodified allocator and real Lua constructor. */
+/* Allocation seams track constructor allocations and fail the RPC result
+ * copy. Ordinary cases use the unmodified allocator and real Lua constructor. */
 enum constructor_failure {
 	CONSTRUCTOR_OK,
 	CONSTRUCTOR_OBJECT,
@@ -70,7 +70,12 @@ static struct {
 	bool fail_vm_alloc;
 } CONSTRUCTOR;
 
+static bool g_fail_rpcall_copy;
+static size_t g_rpcall_copy_failures;
+static size_t g_rpcall_copy_size;
+
 void *test_ruleset_malloc(size_t size);
+void *test_rpcall_malloc(size_t size);
 void *test_ruleset_realloc(void *ptr, size_t size);
 void test_ruleset_free(void *ptr);
 #if LUA_VERSION_NUM >= 505
@@ -100,6 +105,16 @@ static void constructor_remember(void *ptr)
 		T_CHECK(CONSTRUCTOR.count < ARRAY_SIZE(CONSTRUCTOR.live));
 		CONSTRUCTOR.live[CONSTRUCTOR.count++] = ptr;
 	}
+}
+
+void *test_rpcall_malloc(const size_t size)
+{
+	if (g_fail_rpcall_copy) {
+		g_rpcall_copy_failures++;
+		g_rpcall_copy_size = size;
+		return NULL;
+	}
+	return malloc(size);
 }
 
 void *test_ruleset_malloc(const size_t size)
@@ -198,6 +213,7 @@ struct request_result {
 
 struct rpcall_result {
 	bool fired;
+	size_t num_calls;
 	const char *result;
 	size_t resultlen;
 	struct ruleset_callback *callback;
@@ -517,6 +533,7 @@ rpcall_finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	struct rpcall_result *const result = watcher->data;
 
 	(void)revents;
+	result->num_calls++;
 	result->result = result->callback->rpcall.result;
 	result->resultlen = result->callback->rpcall.resultlen;
 	result->fired = true;
@@ -1328,7 +1345,7 @@ T_DECLARE_CASE(ruleset_stats_discards_non_strings_and_reports_a_raise)
 
 /* Lua's own heap total counts the same nsize deltas l_alloc() sees, sizeof(LG)
  * included, so the two agree whenever every live block is Lua's own. */
-static bool vmstats_match_lua_gc_count(struct ruleset *restrict r)
+T_DECLARE_SUBCASE(vmstats_match_lua_gc_count, struct ruleset *restrict r)
 {
 	struct ruleset_vmstats stats;
 	lua_State *const L = r->L;
@@ -1336,13 +1353,7 @@ static bool vmstats_match_lua_gc_count(struct ruleset *restrict r)
 	ruleset_vmstats(r, &stats);
 	const size_t total = (size_t)lua_gc(L, LUA_GCCOUNT, 0) * 1024 +
 			     (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
-	if (stats.byt_allocated != total) {
-		(void)fprintf(
-			stderr, "byt_allocated = %zu, lua_gc = %zu\n",
-			stats.byt_allocated, total);
-		return false;
-	}
-	return true;
+	T_EXPECT_EQ(stats.byt_allocated, total);
 }
 
 /* l_alloc() feeds neosocksd.stats() and /stats. Drive allocation, growth and
@@ -1371,20 +1382,20 @@ T_DECLARE_CASE(ruleset_vmstats_track_lua_heap_allocations)
 	struct string_stream stream;
 	lua_State *const L = r->L;
 
-	T_EXPECT(vmstats_match_lua_gc_count(r));
+	T_CALL_SUBCASE(vmstats_match_lua_gc_count, r);
 	T_EXPECT(install_ruleset(r, "return {}"));
-	T_EXPECT(vmstats_match_lua_gc_count(r));
+	T_CALL_SUBCASE(vmstats_match_lua_gc_count, r);
 	T_EXPECT(ruleset_invoke(r, string_stream_open(&stream, churn_chunk)));
-	T_EXPECT(vmstats_match_lua_gc_count(r));
+	T_CALL_SUBCASE(vmstats_match_lua_gc_count, r);
 	T_EXPECT(ruleset_invoke(r, string_stream_open(&stream, buffer_chunk)));
 	T_EXPECT(ruleset_invoke(
 		r, string_stream_open(&stream, "_G.kept.s = nil")));
 	T_EXPECT(ruleset_gc(r));
-	T_EXPECT(vmstats_match_lua_gc_count(r));
+	T_CALL_SUBCASE(vmstats_match_lua_gc_count, r);
 	T_EXPECT(ruleset_invoke(
 		r, string_stream_open(&stream, "_G.kept = nil")));
 	T_EXPECT(ruleset_gc(r));
-	T_EXPECT(vmstats_match_lua_gc_count(r));
+	T_CALL_SUBCASE(vmstats_match_lua_gc_count, r);
 
 	/* one object: a table with no array or hash part is one allocation */
 	lua_settop(L, 0);
@@ -1395,13 +1406,13 @@ T_DECLARE_CASE(ruleset_vmstats_track_lua_heap_allocations)
 	lua_createtable(L, 0, 0);
 	ruleset_vmstats(r, &stats);
 	T_EXPECT_EQ(stats.num_object, num_object + 1);
-	T_EXPECT(vmstats_match_lua_gc_count(r));
+	T_CALL_SUBCASE(vmstats_match_lua_gc_count, r);
 	lua_pop(L, 1);
 	lua_gc(L, LUA_GCRESTART, 0);
 	lua_gc(L, LUA_GCCOLLECT, 0);
 	ruleset_vmstats(r, &stats);
 	T_EXPECT_EQ(stats.num_object, num_object);
-	T_EXPECT(vmstats_match_lua_gc_count(r));
+	T_CALL_SUBCASE(vmstats_match_lua_gc_count, r);
 
 	free_ruleset(loop, r);
 }
@@ -1646,12 +1657,18 @@ static struct {
 	lua_Alloc alloc;
 	void *ud;
 	bool failing;
+	bool fail_checkedout;
+	size_t failures;
 } g_alloc;
 
 static void *
 failing_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 {
-	if (g_alloc.failing && nsize > 0 && (ptr == NULL || nsize > osize)) {
+	const struct ruleset *const r = ud;
+	if ((g_alloc.failing ||
+	     (g_alloc.fail_checkedout && r->vmstats.num_thread_active > 0)) &&
+	    nsize > 0 && (ptr == NULL || nsize > osize)) {
+		g_alloc.failures++;
 		return NULL;
 	}
 	return g_alloc.alloc(ud, ptr, osize, nsize);
@@ -2508,6 +2525,72 @@ T_DECLARE_CASE(cfunc_rpcall_marshals_results_and_keeps_env_local)
 	free_ruleset(loop, r);
 }
 
+T_DECLARE_CASE(cfunc_rpcall_copy_allocation_failure_completes_once)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	static const char expected[] = "return true,7";
+	struct {
+		bool dispatched;
+		bool detached;
+		bool idle;
+		bool payload;
+		size_t calls;
+	} observed[2] = { 0 };
+	g_rpcall_copy_failures = 0;
+	g_rpcall_copy_size = 0;
+
+	for (size_t i = 0; i < ARRAY_SIZE(observed); i++) {
+		struct string_stream stream;
+		struct ruleset_callback cb = { 0 };
+		struct ruleset_state *state = NULL;
+		struct rpcall_result result = { .callback = &cb };
+		ev_init(&cb.w_finish, rpcall_finish_cb);
+		cb.w_finish.data = &result;
+		g_fail_rpcall_copy = (i == 0);
+		observed[i].dispatched = ruleset_rpcall(
+			r, &state, string_stream_open(&stream, "return 7"),
+			&cb);
+		g_fail_rpcall_copy = false;
+		observed[i].detached = (state == NULL);
+		observed[i].idle = (r->vmstats.num_thread_active == 0);
+		lua_settop(r->L, 0);
+		ev_run(loop, EVRUN_NOWAIT);
+		const char *const owned = result.result;
+		if (i == 0) {
+			observed[i].payload = result.fired && owned == NULL &&
+					      result.resultlen == 0;
+		} else {
+			observed[i].payload =
+				result.fired && owned != NULL &&
+				result.resultlen == sizeof(expected) - 1 &&
+				memcmp(owned, expected, sizeof(expected) - 1) ==
+					0;
+		}
+		lua_gc(r->L, LUA_GCCOLLECT, 0);
+		lua_gc(r->L, LUA_GCCOLLECT, 0);
+		ev_run(loop, EVRUN_NOWAIT);
+		observed[i].calls = result.num_calls;
+		observed[i].idle =
+			observed[i].idle && r->vmstats.num_thread_active == 0;
+		free((void *)owned);
+		ruleset_cancel(loop, state);
+		ev_clear_pending(loop, &cb.w_finish);
+	}
+	free_ruleset(loop, r);
+
+	T_EXPECT_EQ(g_rpcall_copy_failures, (size_t)1);
+	T_EXPECT_EQ(g_rpcall_copy_size, sizeof(expected) - 1);
+	for (size_t i = 0; i < ARRAY_SIZE(observed); i++) {
+		T_EXPECT(observed[i].dispatched);
+		T_EXPECT(observed[i].detached);
+		T_EXPECT(observed[i].idle);
+		T_EXPECT(observed[i].payload);
+		T_EXPECT_EQ(observed[i].calls, (size_t)1);
+	}
+}
+
 /*
  * Regression: rpcall_finish() used to store a raw pointer into a Lua
  * string that lived only on the coroutine's stack. thread_call_k() pops
@@ -2822,6 +2905,205 @@ T_DECLARE_CASE(cfunc_rpcall_syntax_error_does_not_leak_thread)
 	free_ruleset(loop, r);
 }
 
+/* Fail forward registration after a fresh or reused coroutine is checked out,
+ * including Lua's emergency-GC retry. Cancelling and collecting the failed
+ * startup must balance the count and remove its raw forward-context entry. */
+T_DECLARE_CASE(cfunc_request_startup_oom_releases_checkedout_thread)
+{
+	static const char chunk[] =
+		"started = false; return { route = function() "
+		"started = true; return '127.0.0.1:80' end }";
+	for (int reused = 0; reused < 2; reused++) {
+		struct config conf = make_conf();
+		struct ev_loop *loop = NULL;
+		struct ruleset *const r = new_ruleset(&loop, &conf);
+		lua_State *const L = r->L;
+		struct ruleset_callback cb = { 0 };
+		struct ruleset_state *state = NULL;
+		struct request_result result = { .callback = &cb };
+		T_CHECK(install_ruleset(r, chunk));
+		ev_init(&cb.w_finish, request_finish_cb);
+		cb.w_finish.data = &result;
+
+		if (reused) {
+			T_CHECK(ruleset_route(
+				r, &state, "127.0.0.1:80", NULL, &cb));
+			T_CHECK(wait_until(
+				loop, request_fired, &result, TEST_WAIT_SEC));
+			dialreq_free(result.req);
+			result = (struct request_result){ .callback = &cb };
+			/* Keep the sole idle coroutine alive through setup and the
+			 * injected emergency collection, so checkout must reuse it. */
+			aux_getregtable(L, RIDX_IDLE_THREAD);
+			lua_pushnil(L);
+			T_CHECK(lua_next(L, -2));
+			lua_pop(L, 1);
+			lua_pushvalue(L, -1);
+			lua_setglobal(L, "warmco");
+			lua_pop(L, 2);
+			lua_newtable(L);
+			lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+			lua_pushboolean(L, 0);
+			lua_setglobal(L, "started");
+		}
+		g_alloc.alloc = lua_getallocf(L, &g_alloc.ud);
+		g_alloc.failures = 0;
+		g_alloc.fail_checkedout = true;
+		lua_setallocf(L, failing_alloc, g_alloc.ud);
+		const bool ok =
+			ruleset_route(r, &state, "127.0.0.1:80", NULL, &cb);
+		g_alloc.fail_checkedout = false;
+		lua_setallocf(L, g_alloc.alloc, g_alloc.ud);
+		T_EXPECT(!ok);
+		T_EXPECT(g_alloc.failures > 0);
+		lua_getglobal(L, "started");
+		T_EXPECT(!lua_toboolean(L, -1));
+		lua_pop(L, 1);
+
+		ruleset_cancel(loop, state);
+		state = NULL;
+		lua_pushnil(L);
+		lua_setglobal(L, "warmco");
+		lua_settop(L, 0);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+		T_EXPECT(!ev_is_pending(&cb.w_finish));
+		T_EXPECT(!result.fired);
+		aux_getregtable(L, RIDX_FORWARD_CONTEXT);
+		lua_pushnil(L);
+		T_EXPECT(!lua_next(L, -2));
+		lua_settop(L, 0);
+
+		/* A later request must complete without a leftover active count. */
+		T_CHECK(ruleset_route(r, &state, "127.0.0.1:80", NULL, &cb));
+		T_EXPECT(wait_until(
+			loop, request_fired, &result, TEST_WAIT_SEC));
+		T_CHECK(result.req != NULL);
+		dialreq_free(result.req);
+		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+		T_EXPECT_EQ(r->vmstats.num_thread_peak, (size_t)1);
+		free_ruleset(loop, r);
+	}
+}
+
+/* Cancellation detaches the consumer while its coroutine still runs; orphan
+ * collection must balance that coroutine even when it has nobody to notify. */
+T_DECLARE_CASE(ruleset_state_gc_releases_cancelled_orphan)
+{
+	static const char chunk[] =
+		"return { route = function() coroutine.yield() end }";
+	for (int request = 0; request < 2; request++) {
+		struct config conf = make_conf();
+		struct ev_loop *loop = NULL;
+		struct ruleset *const r = new_ruleset(&loop, &conf);
+		struct ruleset_callback cb = { 0 };
+		struct ruleset_state *state = NULL;
+		struct string_stream stream;
+		struct request_result result = { .callback = &cb };
+		ev_init(&cb.w_finish, request_finish_cb);
+		cb.w_finish.data = &result;
+		T_CHECK(install_ruleset(r, chunk));
+		if (request) {
+			T_CHECK(ruleset_route(
+				r, &state, "127.0.0.1:80", NULL, &cb));
+		} else {
+			T_CHECK(ruleset_rpcall(
+				r, &state,
+				string_stream_open(&stream, "coroutine.yield()"),
+				&cb));
+		}
+		T_CHECK(state != NULL);
+		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)1);
+		ruleset_cancel(loop, state);
+		state = NULL;
+		lua_settop(r->L, 0);
+		lua_gc(r->L, LUA_GCCOLLECT, 0);
+		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+		T_EXPECT(!ev_is_pending(&cb.w_finish));
+		aux_getregtable(r->L, RIDX_FORWARD_CONTEXT);
+		lua_pushnil(r->L);
+		T_EXPECT(!lua_next(r->L, -2));
+		lua_settop(r->L, 0);
+		lua_gc(r->L, LUA_GCCOLLECT, 0);
+		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+		free_ruleset(loop, r);
+	}
+}
+
+/* A failure while returning a finished coroutine to its idle pool is handled
+ * by aux_async/ruleset_resume. Its state must not release the count again when
+ * subsequently collected, on either initial or later resume. */
+T_DECLARE_CASE(ruleset_catastrophic_resume_disarms_state_gc)
+{
+	for (int resumed = 0; resumed < 2; resumed++) {
+		struct config conf = make_conf();
+		struct ev_loop *loop = NULL;
+		struct ruleset *const r = new_ruleset(&loop, &conf);
+		struct ruleset_callback cb = { 0 };
+		struct ruleset_state *state = NULL;
+		struct request_result result = { .callback = &cb };
+		char chunk[512];
+		const int n = snprintf(
+			chunk, sizeof(chunk),
+			"hook = %s; return { route = function() "
+			"if hook then hook.co = coroutine.running(); coroutine.yield() end; "
+			"debug.getregistry()[%d] = nil; return '127.0.0.1:80' end }",
+			resumed ? "{}" : "nil", RIDX_IDLE_THREAD);
+		T_CHECK(n > 0 && (size_t)n < sizeof(chunk));
+		T_CHECK(install_ruleset(r, chunk));
+		ev_init(&cb.w_finish, request_finish_cb);
+		cb.w_finish.data = &result;
+		const bool ok =
+			ruleset_route(r, &state, "127.0.0.1:80", NULL, &cb);
+		T_EXPECT(ok == (resumed != 0));
+		if (resumed) {
+			T_CHECK(state != NULL);
+			T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)1);
+			resume_hooked_routine(r);
+		}
+		T_EXPECT_EQ(state, NULL);
+		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+		T_EXPECT(ev_is_pending(&cb.w_finish));
+		ruleset_request_cancel(loop, &cb);
+		T_EXPECT(!ev_is_pending(&cb.w_finish));
+		lua_pushnil(r->L);
+		lua_setglobal(r->L, "hook");
+		lua_settop(r->L, 0);
+		lua_gc(r->L, LUA_GCCOLLECT, 0);
+		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+		free_ruleset(loop, r);
+	}
+}
+
+/* A normal finish has direct ownership through its C closure, so removing
+ * the lookup registry must not make collection decrement the count again. */
+T_DECLARE_CASE(ruleset_finish_disarms_gc_without_thread_registry)
+{
+	struct config conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset_callback cb = { 0 };
+	struct ruleset_state *state = NULL;
+	struct request_result result = { .callback = &cb };
+	char chunk[256];
+	const int n = snprintf(
+		chunk, sizeof(chunk),
+		"return { route = function() debug.getregistry()[%d] = nil; "
+		"return '127.0.0.1:80' end }",
+		RIDX_THREAD_CONTEXT);
+	T_CHECK(n > 0 && (size_t)n < sizeof(chunk));
+	T_CHECK(install_ruleset(r, chunk));
+	ev_init(&cb.w_finish, request_finish_cb);
+	cb.w_finish.data = &result;
+	T_CHECK(ruleset_route(r, &state, "127.0.0.1:80", NULL, &cb));
+	T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+	ruleset_request_cancel(loop, &cb);
+	lua_settop(r->L, 0);
+	lua_gc(r->L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+	free_ruleset(loop, r);
+}
+
 /*
  * ruleset_state_gc() is the last-resort safety net for an asynchronous
  * operation started but never finished: collected with its callback still
@@ -2831,8 +3113,9 @@ T_DECLARE_CASE(cfunc_rpcall_syntax_error_does_not_leak_thread)
  * A routine that suspends without awaiting anything reaches it
  * deterministically. Only RIDX_AWAIT_CONTEXT stores the coroutine itself;
  * RIDX_FORWARD_CONTEXT is keyed and valued by raw pointers, which hold no
- * reference. So once the state userdata the cfunc returned is popped, nothing
- * reaches the suspended coroutine or the finish closure carrying the state.
+ * reference. The thread guard's uservalue and C-closure upvalue form a
+ * collectible cycle, and its lookup registry has weak values. Once the
+ * returned state is popped, nothing outside that cycle reaches it.
  */
 T_DECLARE_CASE(ruleset_state_gc_completes_orphaned_async_ops)
 {
@@ -2879,6 +3162,7 @@ T_DECLARE_CASE(ruleset_state_gc_completes_orphaned_async_ops)
 	 * strand the consumer; state_complete() also detaches the caller's own
 	 * storage slot synchronously */
 	lua_gc(r->L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
 	T_EXPECT_EQ(state, NULL);
 	T_EXPECT(ev_is_pending(&rpc_cb.w_finish));
 	T_EXPECT(wait_until(loop, rpcall_fired, &rpc_result, TEST_WAIT_SEC));
@@ -2904,10 +3188,15 @@ T_DECLARE_CASE(ruleset_state_gc_completes_orphaned_async_ops)
 	req_cb.request.req = seed;
 
 	lua_gc(r->L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
 	T_EXPECT_EQ(state, NULL);
 	T_EXPECT(ev_is_pending(&req_cb.w_finish));
 	T_EXPECT(wait_until(loop, request_fired, &req_result, TEST_WAIT_SEC));
 	T_EXPECT_EQ(req_result.req, NULL);
+	aux_getregtable(r->L, RIDX_FORWARD_CONTEXT);
+	lua_pushnil(r->L);
+	T_EXPECT(!lua_next(r->L, -2));
+	lua_settop(r->L, 0);
 	dialreq_free(seed);
 
 	free_ruleset(loop, r);
@@ -3335,6 +3624,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(cfunc_request_reports_lua_error_via_callback),
 	T_CASE(cfunc_request_logs_error_that_cannot_be_rendered),
 	T_CASE(cfunc_rpcall_marshals_results_and_keeps_env_local),
+	T_CASE(cfunc_rpcall_copy_allocation_failure_completes_once),
 	T_CASE(cfunc_rpcall_result_survives_gc_before_read),
 	T_CASE(cfunc_rpcall_unmarshalable_result_reports_error),
 	T_CASE(cfunc_rpcall_chunk_error_reports_failure),
@@ -3342,6 +3632,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(cfunc_request_finish_logs_error_after_cancel),
 	T_CASE(cfunc_rpcall_finish_logs_error_after_cancel),
 	T_CASE(cfunc_rpcall_syntax_error_does_not_leak_thread),
+	T_CASE(cfunc_request_startup_oom_releases_checkedout_thread),
+	T_CASE(ruleset_state_gc_releases_cancelled_orphan),
+	T_CASE(ruleset_catastrophic_resume_disarms_state_gc),
+	T_CASE(ruleset_finish_disarms_gc_without_thread_registry),
 	T_CASE(ruleset_state_gc_completes_orphaned_async_ops),
 	T_CASE(cfunc_request_malformed_dial_spec_is_rejected),
 	T_CASE(cfunc_loadconfig_extracts_ruleset_and_settings),
