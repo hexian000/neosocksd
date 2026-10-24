@@ -177,10 +177,10 @@ static size_t check_matches(lua_State *restrict L, const regex_t *restrict preg)
 	return nmatch;
 }
 
-static int
-push_matches(lua_State *restrict L, const char *restrict s, size_t nmatch)
+static int push_matches(
+	lua_State *restrict L, const char *restrict s,
+	const regmatch_t *restrict matches, size_t nmatch)
 {
-	const regmatch_t *restrict const matches = lua_touserdata(L, -1);
 	for (size_t i = 0; i < nmatch; i++) {
 		/* POSIX: rm_so is -1 when subexpression did not participate */
 		if (matches[i].rm_so < 0) {
@@ -217,7 +217,7 @@ static int regex_match(lua_State *restrict L)
 	if (err != 0) {
 		return regex_error(L, err, &reg->preg);
 	}
-	return push_matches(L, s, nmatch);
+	return push_matches(L, s, matches, nmatch);
 }
 
 /* Sentinel stored in the "next position" upvalue once the iterator has
@@ -238,12 +238,25 @@ static int gmatch_aux(lua_State *restrict L)
 	size_t len;
 	const char *restrict s = lua_tolstring(L, lua_upvalueindex(2), &len);
 	const size_t init = regex_cstrpos(pos, len);
-	const int eflags = match_eflags(reg, s, init);
+	int eflags = match_eflags(reg, s, init);
 	s += init;
 	/* the subject was NUL-checked once in regex_gmatch */
 	const size_t nmatch = check_matches(L, &reg->preg);
+	regmatch_t local_matches[16];
 	regmatch_t *restrict const matches =
-		lua_newuserdata(L, nmatch * sizeof(regmatch_t));
+		nmatch <= sizeof(local_matches) / sizeof(local_matches[0]) ?
+			local_matches :
+			lua_newuserdata(L, nmatch * sizeof(regmatch_t));
+#if WITH_REG_STARTEND
+	/* Avoid regexec's strlen of every remaining suffix. Keep the portable
+	 * path when its offset type cannot represent the whole suffix. */
+	const regoff_t end = (regoff_t)(len - init);
+	if (end >= 0 && (size_t)end == len - init) {
+		matches[0].rm_so = 0;
+		matches[0].rm_eo = end;
+		eflags |= REG_STARTEND;
+	}
+#endif /* WITH_REG_STARTEND */
 	const int err = regexec(&reg->preg, s, nmatch, matches, eflags);
 	if (err == REG_NOMATCH) {
 		lua_pushinteger(L, GMATCH_DONE);
@@ -271,7 +284,7 @@ static int gmatch_aux(lua_State *restrict L)
 		lua_pushinteger(L, (lua_Integer)next + 1);
 	}
 	lua_replace(L, lua_upvalueindex(3));
-	return push_matches(L, s, nmatch);
+	return push_matches(L, s, matches, nmatch);
 }
 
 /* regex.gmatch(reg, s [, init]) */
@@ -282,8 +295,8 @@ static int regex_gmatch(lua_State *restrict L)
 	const char *restrict const s = luaL_checklstring(L, 2, &len);
 	const size_t init = regex_cstrpos(luaL_optinteger(L, 3, 0), len);
 	/* Scan for an embedded NUL once here, not on every gmatch_aux()
-	 * iteration (the subject never changes), keeping iteration O(n). Scan
-	 * only the active suffix [init, len) -- exactly what find()/match() do --
+	 * iteration (the subject never changes), so this validation is O(n).
+	 * Scan only the active suffix [init, len) -- what find()/match() do --
 	 * since a NUL before the start offset is never seen by regexec(). */
 	check_no_nul(L, s + init, len - init);
 	lua_settop(L, 2);

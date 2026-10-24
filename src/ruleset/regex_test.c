@@ -6,8 +6,8 @@
  *
  * Linked translation units (see CMakeLists.txt):
  *   ruleset/regex.c  module under test
- * Leaf libraries: Lua. regex.c has no stateful collaborator to mock; the mock
- * section only holds shared Lua test fixtures.
+ * Leaf libraries: Lua and libc regex. regexec is observed through a compiler
+ * alias that delegates to libc unless an execution error is injected.
  */
 
 #include "regex.h"
@@ -18,13 +18,43 @@
 #include <lua.h>
 #include <lualib.h>
 
+#include <regex.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* -------------------------------------------------------------------------
- * mock - shared Lua test fixtures (regex.c has no collaborator to mock).
+ * mock - regexec observations and shared Lua test fixtures.
  * ---------------------------------------------------------------------- */
+
+static int g_regexec_error;
+static bool g_track_regexec;
+static size_t g_regexec_calls;
+static size_t g_bounded_calls;
+static bool g_bounds_ok;
+
+int test_regexec(
+	const regex_t *restrict preg, const char *restrict s, size_t nmatch,
+	regmatch_t matches[restrict], int eflags)
+{
+	if (g_track_regexec) {
+		g_regexec_calls++;
+#if WITH_REG_STARTEND
+		if (eflags & REG_STARTEND) {
+			g_bounded_calls++;
+			if (matches[0].rm_so != 0 || matches[0].rm_eo < 0 ||
+			    (size_t)matches[0].rm_eo != strlen(s)) {
+				g_bounds_ok = false;
+			}
+		}
+#endif
+	}
+	if (g_regexec_error != 0) {
+		return g_regexec_error;
+	}
+	return regexec(preg, s, nmatch, matches, eflags);
+}
 
 static lua_State *new_lua(void)
 {
@@ -179,6 +209,73 @@ T_DECLARE_CASE(regex_find_nomatch)
 	T_EXPECT_EQ(lua_gettop(L), 0);
 
 	lua_close(L);
+}
+
+/* A failed execution must raise without consuming pattern/iterator state.
+ * Disarm the seam and close Lua before asserting so a failed check cannot
+ * leave fault injection active for another case. */
+T_DECLARE_SUBCASE(
+	regex_exec_error_case, const char *setup, const char *invoke,
+	const char *recover)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	const bool setup_ok = run_chunk(L, setup);
+	lua_settop(L, 0);
+	g_regexec_calls = 0;
+	g_track_regexec = true;
+	g_regexec_error = REG_ESPACE;
+	const bool invoke_ok = run_chunk(L, invoke);
+	g_regexec_error = 0;
+	g_track_regexec = false;
+	const bool caught = lua_gettop(L) == 2 && !lua_toboolean(L, 1) &&
+			    lua_type(L, 2) == LUA_TSTRING &&
+			    lua_rawlen(L, 2) != 0;
+	lua_settop(L, 0);
+	const bool recover_ok = run_chunk(L, recover);
+	const bool reused = lua_toboolean(L, -1) != 0;
+	lua_close(L);
+
+	T_EXPECT(setup_ok);
+	T_EXPECT(invoke_ok);
+	T_EXPECT(caught);
+	T_EXPECT_EQ(g_regexec_calls, (size_t)1);
+	T_EXPECT(recover_ok);
+	T_EXPECT(reused);
+}
+
+T_DECLARE_CASE(regex_find_reports_runtime_error)
+{
+	T_CALL_SUBCASE(
+		regex_exec_error_case, "r = regex.compile('(ab+)')",
+		"return pcall(regex.find, r, 'xxabbb yyabb')",
+		"local s, e = regex.find(r, 'xxabbb yyabb') "
+		"return s == 3 and e == 6");
+}
+
+T_DECLARE_CASE(regex_match_reports_runtime_error)
+{
+	T_CALL_SUBCASE(
+		regex_exec_error_case, "r = regex.compile('(a)(b+)')",
+		"return pcall(regex.match, r, 'xxabbb yyabb')",
+		"collectgarbage('collect') "
+		"local whole, a, b = regex.match(r, 'xxabbb yyabb') "
+		"return whole == 'abbb' and a == 'a' and b == 'bbb'");
+}
+
+T_DECLARE_CASE(regex_gmatch_reports_runtime_error)
+{
+	T_CALL_SUBCASE(
+		regex_exec_error_case,
+		"r = regex.compile('(ab+)') "
+		"it = regex.gmatch(r, 'ab abb abbb') "
+		"assert(it() == 'ab')",
+		"return pcall(it)",
+		"local a, ac = it() local b, bc = it() "
+		"return a == 'abb' and ac == 'abb' "
+		"and b == 'abbb' and bc == 'abbb' "
+		"and it() == nil and it() == nil");
 }
 
 T_DECLARE_CASE(regex_find_with_init)
@@ -469,6 +566,91 @@ T_DECLARE_CASE(regex_gmatch_iterator)
 	lua_close(L);
 }
 
+T_DECLARE_CASE(regex_gmatch_supplies_suffix_bounds)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	g_regexec_calls = 0;
+	g_bounded_calls = 0;
+	g_bounds_ok = true;
+	g_track_regexec = true;
+	const bool ok = run_chunk(
+		L,
+		"local r = regex.compile('(.)', regex.EXTENDED | regex.NOSUB) "
+		"local it = regex.gmatch(r, 'abc', 2) "
+		"local a, ac = it() "
+		"local b, bc = it() "
+		"return a == 'b' and ac == 'b' and b == 'c' and bc == 'c' "
+		"and it() == nil");
+	g_track_regexec = false;
+	const bool matched = lua_toboolean(L, -1) != 0;
+	lua_close(L);
+
+	T_EXPECT(ok);
+	T_EXPECT(matched);
+	T_EXPECT_EQ(g_regexec_calls, (size_t)3);
+#if WITH_REG_STARTEND
+	T_EXPECT_EQ(g_bounded_calls, g_regexec_calls);
+#else
+	T_EXPECT_EQ(g_bounded_calls, (size_t)0);
+#endif
+	T_EXPECT(g_bounds_ok);
+}
+
+/* Interned short results and a stopped collector isolate scratch storage
+ * from result-string allocations while exercising live iterator calls. */
+T_DECLARE_CASE(regex_gmatch_common_captures_do_not_allocate_scratch)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L,
+		"for _, captures in ipairs({0, 1, 15}) do "
+		"  local r = regex.compile(string.rep('(a)', captures) .. 'a') "
+		"  local subject = string.rep('a', captures + 1) "
+		"  subject = string.rep(subject, 1001) "
+		"  local it = regex.gmatch(r, subject) "
+		"  assert(it() ~= nil) "
+		"  collectgarbage('stop') "
+		"  local before = collectgarbage('count') "
+		"  for _ = 1, 1000 do assert(it() ~= nil) end "
+		"  assert(it() == nil) "
+		"  local after = collectgarbage('count') "
+		"  assert(after <= before) "
+		"  collectgarbage('restart') "
+		"end return true"));
+	T_EXPECT(lua_toboolean(L, -1) != 0);
+
+	lua_close(L);
+}
+
+T_DECLARE_CASE(regex_gmatch_many_captures)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L,
+		"for _, captures in ipairs({15, 16, 32}) do "
+		"  local r = regex.compile(string.rep('(a)', captures) .. '(b)?') "
+		"  local word = string.rep('a', captures) "
+		"  local it = regex.gmatch(r, word .. ' ' .. word .. 'b') "
+		"  for n = 1, 2 do "
+		"    local values = table.pack(it()) "
+		"    assert(values.n == captures + 2) "
+		"    assert(values[1] == word .. (n == 2 and 'b' or '')) "
+		"    for i = 2, captures + 1 do assert(values[i] == 'a') end "
+		"    assert(values[captures + 2] == (n == 2 and 'b' or nil)) "
+		"  end "
+		"  assert(it() == nil and it() == nil) "
+		"end return true"));
+	T_EXPECT(lua_toboolean(L, -1) != 0);
+
+	lua_close(L);
+}
+
 /* Regression: once gmatch reaches the end, repeated probes must not keep
  * allocating match storage while rescanning the same suffix. */
 T_DECLARE_CASE(regex_gmatch_exhaustion_is_stable)
@@ -721,6 +903,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_compile_invalid_repeated_no_leak),
 	T_CASE(regex_find_match),
 	T_CASE(regex_find_nomatch),
+	T_CASE(regex_find_reports_runtime_error),
+	T_CASE(regex_match_reports_runtime_error),
+	T_CASE(regex_gmatch_reports_runtime_error),
 	T_CASE(regex_find_with_init),
 	T_CASE(regex_find_init_out_of_range),
 	T_CASE(regex_find_rejects_embedded_nul_subject),
@@ -735,6 +920,9 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_icase_matches_mixed_case),
 	T_CASE(regex_nosub_is_neutralized),
 	T_CASE(regex_gmatch_iterator),
+	T_CASE(regex_gmatch_supplies_suffix_bounds),
+	T_CASE(regex_gmatch_common_captures_do_not_allocate_scratch),
+	T_CASE(regex_gmatch_many_captures),
 	T_CASE(regex_gmatch_exhaustion_is_stable),
 	T_CASE(regex_gmatch_empty_match_terminates),
 	T_CASE(regex_gmatch_anchor_matches_once),

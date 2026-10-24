@@ -35,9 +35,13 @@ check_symbol_exists(TCP_KEEPIDLE "netinet/tcp.h" HAVE_TCP_KEEPIDLE)
 check_symbol_exists(TCP_KEEPINTVL "netinet/tcp.h" HAVE_TCP_KEEPINTVL)
 check_symbol_exists(TCP_KEEPCNT "netinet/tcp.h" HAVE_TCP_KEEPCNT)
 check_symbol_exists(close_range "unistd.h" HAVE_CLOSE_RANGE)
+check_symbol_exists(REG_STARTEND "regex.h" HAVE_REG_STARTEND)
 check_symbol_exists(_PATH_BSHELL "paths.h" HAVE_PATH_BSHELL)
 
 if(NOT FORCE_POSIX)
+    if(HAVE_REG_STARTEND)
+        set(WITH_REG_STARTEND TRUE)
+    endif()
     if(HAVE_PIPE2 AND HAVE_SPLICE)
         set(WITH_SPLICE TRUE)
     endif()
@@ -427,7 +431,9 @@ add_unit_test(http_client_test
 
 if(WITH_LUA)
     add_unit_test(regex_test
-        SRCS ruleset/regex_test.c ruleset/regex.c
+        SRCS ruleset/regex_test.c
+        MOCK_SRCS ruleset/regex.c
+        MOCK_DEFINITIONS regexec=test_regexec
         NO_LIBEV WITH_LUA)
     add_unit_test(time_test
         SRCS ruleset/time_test.c
