@@ -19,6 +19,7 @@
 #include <lualib.h>
 
 #include <errno.h>
+#include <math.h>
 #include <stdbool.h>
 #include <string.h>
 #include <time.h>
@@ -28,12 +29,11 @@
  * ---------------------------------------------------------------------- */
 
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
-/* clock_gettime() test stub. clock_monotonic() is
- * a static inline over it, so this is the only point a clock failure reaches
- * time.c. Only CLOCK_MONOTONIC is ever failed, and only while armed, leaving
- * the time.unix()/process()/thread() cases on the real clock. */
+/* clock_monotonic() is a static inline over this stub. Only CLOCK_MONOTONIC
+ * is controlled, leaving time.unix()/process()/thread() on the real clock. */
 static unsigned g_monotonic_calls;
 static unsigned g_fail_monotonic_call; /* 0 = disabled */
+static const struct timespec *g_monotonic_readings; /* two readings, or NULL */
 
 int test_clock_gettime(clockid_t clk_id, struct timespec *tp)
 {
@@ -42,6 +42,10 @@ int test_clock_gettime(clockid_t clk_id, struct timespec *tp)
 		if (g_monotonic_calls == g_fail_monotonic_call) {
 			errno = EINVAL;
 			return -1;
+		}
+		if (g_monotonic_readings != NULL && g_monotonic_calls <= 2) {
+			*tp = g_monotonic_readings[g_monotonic_calls - 1];
+			return 0;
 		}
 	}
 	return clock_gettime(clk_id, tp);
@@ -218,6 +222,48 @@ T_DECLARE_CASE(time_measure_propagates_error)
 }
 
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+static void close_lua(void *const ptr)
+{
+	lua_close(ptr);
+}
+
+T_DECLARE_CASE(time_measure_elapsed_from_clock_readings)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
+
+	const struct {
+		struct timespec readings[2];
+		double elapsed;
+	} cases[] = {
+		{ { { 10, 100000000 }, { 10, 225000000 } }, 0.125 },
+		/* The nanosecond field decreases across the seconds boundary. */
+		{ { { 10, 875000000 }, { 12, 125000000 } }, 1.25 },
+		{ { { 10, 123456789 }, { 10, 123456789 } }, 0.0 },
+		{ { { 10, 999999999 }, { 11, 0 } }, 1e-9 },
+	};
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		lua_settop(L, 0);
+		g_monotonic_calls = 0;
+		g_monotonic_readings = cases[i].readings;
+		const bool ok = run_chunk(
+			L, "return time.measure(function(a, b) "
+			   "return a + b, nil, a * b end, 6, 7)");
+		const unsigned nreadings = g_monotonic_calls;
+		g_monotonic_readings = NULL;
+		T_EXPECT(ok);
+		T_EXPECT_EQ(nreadings, 2u);
+		T_EXPECT_EQ(lua_gettop(L), 4);
+		T_EXPECT(lua_isnumber(L, 1));
+		T_EXPECT(lua_isinteger(L, 1) == 0);
+		T_EXPECT(fabs(lua_tonumber(L, 1) - cases[i].elapsed) < 1e-12);
+		T_EXPECT_EQ(lua_tointeger(L, 2), 13);
+		T_EXPECT(lua_isnil(L, 3));
+		T_EXPECT_EQ(lua_tointeger(L, 4), 42);
+	}
+}
+
 /*
  * Either monotonic reading failing makes time.measure() hand back its cost
  * placeholder unreplaced. That placeholder must carry the same float subtype
@@ -310,6 +356,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(time_measure_rejects_missing_function),
 	T_CASE(time_measure_propagates_error),
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+	T_CASE(time_measure_elapsed_from_clock_readings),
 	T_CASE(time_measure_start_clock_failure_cost_is_float),
 	T_CASE(time_measure_end_clock_failure_cost_is_float),
 	T_CASE(time_monotonic_clock_failure_is_float),

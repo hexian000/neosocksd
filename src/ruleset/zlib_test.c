@@ -16,6 +16,11 @@
 
 #include "zlib.h"
 
+#include "base.h"
+#include "proto/codec.h"
+
+#include "io/memory.h"
+#include "io/stream.h"
 #include "utils/testing.h"
 
 #include <lauxlib.h>
@@ -146,6 +151,169 @@ T_DECLARE_SUBCASE(
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, msg) != NULL);
 	lua_pop(L, 1);
+}
+
+/* Constructor faults are confined to zlib.c; real codec and stream cleanup
+ * still runs. A failed codec consumes its base just like the real constructor. */
+enum constructor_fault {
+	CTOR_NONE,
+	CTOR_MEMREADER,
+	CTOR_HEAPWRITER,
+	CTOR_CODEC,
+	CTOR_COUNT,
+};
+
+static struct {
+	bool active;
+	enum constructor_fault fault;
+	unsigned failures, closes, output_frees;
+	unsigned calls[CTOR_COUNT];
+	void *output;
+} constructor_probe;
+
+static bool fail_constructor(const enum constructor_fault which)
+{
+	if (!constructor_probe.active) {
+		return false;
+	}
+	constructor_probe.calls[which]++;
+	if (constructor_probe.fault != which) {
+		return false;
+	}
+	constructor_probe.failures++;
+	return true;
+}
+
+struct io_stream *test_zlib_memreader(const void *buf, const size_t len)
+{
+	return fail_constructor(CTOR_MEMREADER) ? NULL : io_memreader(buf, len);
+}
+
+struct io_stream *test_zlib_heapwriter(struct vbuffer **output)
+{
+	if (constructor_probe.active) {
+		constructor_probe.output = *output;
+	}
+	return fail_constructor(CTOR_HEAPWRITER) ? NULL : io_heapwriter(output);
+}
+
+int test_zlib_stream_close(struct io_stream *stream)
+{
+	if (constructor_probe.active) {
+		constructor_probe.closes++;
+	}
+	return io_stream_close(stream);
+}
+
+void test_zlib_free(void *ptr)
+{
+	if (constructor_probe.active && ptr != NULL &&
+	    ptr == constructor_probe.output) {
+		constructor_probe.output_frees++;
+		constructor_probe.output = NULL;
+	}
+	free(ptr);
+}
+
+static struct io_stream *test_codec(
+	struct io_stream *base, struct io_stream *(*codec)(struct io_stream *))
+{
+	if (fail_constructor(CTOR_CODEC)) {
+		T_CHECK(base != NULL);
+		(void)test_zlib_stream_close(base);
+		return NULL;
+	}
+	return codec(base);
+}
+
+struct io_stream *test_zlib_writer(struct io_stream *base)
+{
+	return test_codec(base, codec_zlib_writer);
+}
+
+struct io_stream *test_zlib_reader(struct io_stream *base)
+{
+	return test_codec(base, codec_zlib_reader);
+}
+
+struct io_stream *test_gzip_writer(struct io_stream *base)
+{
+	return test_codec(base, codec_gzip_writer);
+}
+
+struct io_stream *test_gzip_reader(struct io_stream *base)
+{
+	return test_codec(base, codec_gzip_reader);
+}
+
+static void constructor_cleanup(void *data)
+{
+	constructor_probe.fault = CTOR_NONE;
+	lua_close(data);
+	memset(&constructor_probe, 0, sizeof(constructor_probe));
+}
+
+T_DECLARE_SUBCASE(
+	expect_constructor_failure, lua_State *L, const char *chunk,
+	const enum constructor_fault fault)
+{
+	T_CHECK(luaL_loadstring(L, chunk) == LUA_OK);
+	/* Keep the previous operation's finalizers outside the observed call. */
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCSTOP, 0);
+	memset(&constructor_probe, 0, sizeof(constructor_probe));
+	constructor_probe.active = true;
+	constructor_probe.fault = fault;
+	const int status = lua_pcall(L, 0, LUA_MULTRET, 0);
+	constructor_probe.fault = CTOR_NONE;
+
+	T_EXPECT_EQ(status, LUA_ERRRUN);
+	const char *err = lua_tostring(L, -1);
+	T_EXPECT(err != NULL);
+	T_EXPECT(strstr(err, "out of memory") != NULL);
+	lua_pop(L, 1);
+	T_EXPECT_EQ(constructor_probe.failures, 1u);
+	T_EXPECT_EQ(constructor_probe.calls[CTOR_MEMREADER], 1u);
+	T_EXPECT_EQ(constructor_probe.calls[CTOR_HEAPWRITER], 1u);
+	T_EXPECT_EQ(constructor_probe.calls[CTOR_CODEC], 1u);
+	const unsigned consumed_base = fault == CTOR_CODEC ? 1u : 0u;
+#if HAVE_LUA_TOCLOSE
+	T_EXPECT_EQ(constructor_probe.closes, consumed_base + 1);
+	T_EXPECT_EQ(constructor_probe.output_frees, 1u);
+#else
+	T_EXPECT_EQ(constructor_probe.closes, consumed_base);
+	T_EXPECT_EQ(constructor_probe.output_frees, 0u);
+#endif
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(constructor_probe.closes, consumed_base + 1);
+	T_EXPECT_EQ(constructor_probe.output_frees, 1u);
+	T_EXPECT(constructor_probe.output == NULL);
+	/* A later __gc after __close must not close or free a second time. */
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(constructor_probe.closes, consumed_base + 1);
+	T_EXPECT_EQ(constructor_probe.output_frees, 1u);
+	constructor_probe.active = false;
+	lua_gc(L, LUA_GCRESTART, 0);
+
+	T_EXPECT(run_chunk(
+		L,
+		"return zlib.uncompress(zlib.compress('recovered')) == 'recovered' "
+		"and zlib.gunzip(zlib.gzip('recovered')) == 'recovered'"));
+	T_EXPECT(lua_toboolean(L, -1));
+	lua_pop(L, 1);
+	T_EXPECT_EQ(lua_gettop(L), 0);
+}
+
+T_DECLARE_SUBCASE(partial_construction_case, const char *chunk)
+{
+	lua_State *L = new_lua_isolated();
+	T_EXPECT(L != NULL);
+	T_CLEANUP(constructor_cleanup, L);
+	T_EXPECT(run_chunk(
+		L, "z = zlib.compress('payload') gz = zlib.gzip('payload')"));
+	T_CALL_SUBCASE(expect_constructor_failure, L, chunk, CTOR_MEMREADER);
+	T_CALL_SUBCASE(expect_constructor_failure, L, chunk, CTOR_HEAPWRITER);
+	T_CALL_SUBCASE(expect_constructor_failure, L, chunk, CTOR_CODEC);
 }
 
 /* -------------------------------------------------------------------------
@@ -467,6 +635,28 @@ T_DECLARE_CASE(zlib_decode_oom_on_buffer_grow)
 	lua_close(L);
 }
 
+T_DECLARE_CASE(zlib_encode_partial_construction_cleanup)
+{
+	T_CALL_SUBCASE(
+		partial_construction_case, "return zlib.compress('payload')");
+}
+
+T_DECLARE_CASE(gzip_encode_partial_construction_cleanup)
+{
+	T_CALL_SUBCASE(
+		partial_construction_case, "return zlib.gzip('payload')");
+}
+
+T_DECLARE_CASE(zlib_decode_partial_construction_cleanup)
+{
+	T_CALL_SUBCASE(partial_construction_case, "return zlib.uncompress(z)");
+}
+
+T_DECLARE_CASE(gzip_decode_partial_construction_cleanup)
+{
+	T_CALL_SUBCASE(partial_construction_case, "return zlib.gunzip(gz)");
+}
+
 /* -------------------------------------------------------------------------
  * bench - none.
  * ---------------------------------------------------------------------- */
@@ -493,6 +683,10 @@ static const struct testing_suite suite[] = {
 	T_CASE(zlib_repeated_failure_no_leak),
 	T_CASE(zlib_encode_oom_on_buffer_alloc),
 	T_CASE(zlib_decode_oom_on_buffer_grow),
+	T_CASE(zlib_encode_partial_construction_cleanup),
+	T_CASE(gzip_encode_partial_construction_cleanup),
+	T_CASE(zlib_decode_partial_construction_cleanup),
+	T_CASE(gzip_decode_partial_construction_cleanup),
 	T_SUITE_END,
 };
 

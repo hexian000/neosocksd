@@ -28,7 +28,7 @@ add_unit_test(api_test
 add_unit_test(await_test
     SRCS await_test.c base.c ../proto/codec.c
     MOCK_SRCS await.c
-    MOCK_DEFINITIONS fork=test_await_fork
+    MOCK_DEFINITIONS fork=test_await_fork kill=test_await_kill
     CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
     WITH_LUA)
 add_unit_test(ruleset_test

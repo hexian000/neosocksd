@@ -36,12 +36,16 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -124,16 +128,18 @@ static void vclock_stop(void)
 /* -------------------------------------------------------------------------
  * kill trace - record what await.execute's close handler signals, so a pass
  * that must signal nothing is distinguishable from one that signals a pid this
- * process no longer owns. Delivery is reimplemented over sigqueue(), which
- * needs no libc-internal symbol; it addresses a single process, so the
- * process-group form (-pid) is delivered to the group leader. Every child these
- * cases spawn is a single-process session, so the leader is the whole group.
+ * process no longer owns. Only await.c calls the seam; delivery goes through
+ * the real kill(), preserving its process-group semantics.
  * Delivery is switched off where the recorded pid is already reaped, so an
  * unfixed handler cannot signal whatever recycled that pid.
  * ---------------------------------------------------------------------- */
 
 static bool g_fork_fail;
 static size_t g_fork_calls;
+static pid_t g_fork_pid;
+static int g_fork_probe_fd = -1;
+static int g_fork_stdin_fd = -1;
+static int g_fork_stdout_fd = -1;
 
 pid_t test_await_fork(void);
 
@@ -144,7 +150,19 @@ pid_t test_await_fork(void)
 		errno = EAGAIN;
 		return -1;
 	}
-	return fork();
+	const pid_t pid = fork();
+	if (pid == 0 && g_fork_probe_fd >= 0) {
+		/* Only the child may replace a descriptor the parent could own. */
+		T_CHECK(dup2(g_fork_probe_fd, 9) == 9);
+	}
+	if (pid == 0 && g_fork_stdin_fd >= 0) {
+		T_CHECK(dup2(g_fork_stdin_fd, STDIN_FILENO) == STDIN_FILENO);
+		T_CHECK(dup2(g_fork_stdout_fd, STDOUT_FILENO) == STDOUT_FILENO);
+	}
+	if (pid > 0) {
+		g_fork_pid = pid;
+	}
+	return pid;
 }
 
 struct kill_call {
@@ -156,7 +174,9 @@ static struct kill_call g_kill_calls[4];
 static size_t g_kill_count = 0;
 static bool g_kill_deliver = true;
 
-int kill(pid_t pid, int sig)
+int test_await_kill(pid_t pid, int sig);
+
+int test_await_kill(pid_t pid, int sig)
 {
 	if (g_kill_count < ARRAY_SIZE(g_kill_calls)) {
 		g_kill_calls[g_kill_count] = (struct kill_call){
@@ -168,8 +188,7 @@ int kill(pid_t pid, int sig)
 	if (!g_kill_deliver) {
 		return 0;
 	}
-	const union sigval value = { .sival_int = 0 };
-	return sigqueue(pid < 0 ? -pid : pid, sig, value);
+	return kill(pid, sig);
 }
 
 static void kill_trace_reset(void)
@@ -296,6 +315,13 @@ static bool wait_until(
 	}
 	ev_timer_stop(loop, &w_timeout);
 	return predicate(data);
+}
+
+static bool child_is_reaped(void *data)
+{
+	const pid_t *const pid = data;
+	const pid_t result = waitpid(*pid, NULL, WNOHANG);
+	return result > 0 || (result < 0 && errno == ECHILD);
 }
 
 static bool global_is_non_nil(void *data)
@@ -671,6 +697,81 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 		return false;
 	}
 	return lua_pcall(L, 0, LUA_MULTRET, 0) == LUA_OK;
+}
+
+struct execute_result {
+	bool ran;
+	bool finished;
+	bool closed;
+	bool reaped;
+	bool idle;
+	bool ok;
+	int ok_type;
+	bool exited;
+	bool signalled;
+	lua_Integer code;
+};
+
+/* All observations precede teardown, and all expectations follow it. A failed
+ * wait or result check must not leave Lua-owned watchers on EV_DEFAULT. */
+static struct execute_result execute_command(const char *command)
+{
+	struct config conf = { .resolve_pf = PF_UNSPEC };
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = EV_DEFAULT;
+	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	reset_stub_state();
+	g_fork_pid = 0;
+	lua_pushstring(L, command);
+	lua_setglobal(L, "exec_command");
+	struct execute_result result = { 0 };
+	result.ran = run_chunk(
+		L,
+		"co=coroutine.create(function() "
+		"_G.exec_ok, _G.exec_kind, _G.exec_code=await.execute(exec_command) "
+		"end); assert(coroutine.resume(co))");
+	struct lua_global_pred pred = { .L = L, .name = "exec_kind" };
+	result.finished =
+		result.ran && wait_until(loop, global_is_non_nil, &pred, 1.0);
+	result.ok_type = lua_getglobal(L, "exec_ok");
+	result.ok = lua_toboolean(L, -1) != 0;
+	lua_pop(L, 1);
+	lua_getglobal(L, "exec_kind");
+	const char *const kind = lua_tostring(L, -1);
+	result.exited = kind != NULL && strcmp(kind, "exit") == 0;
+	result.signalled = kind != NULL && strcmp(kind, "signal") == 0;
+	lua_pop(L, 1);
+	lua_getglobal(L, "exec_code");
+	result.code = lua_tointeger(L, -1);
+	lua_pop(L, 1);
+#if HAVE_LUA_TOCLOSE
+	result.closed = run_chunk(L, "assert(coroutine.close(co)); co=nil");
+#else
+	result.closed = true;
+#endif
+	lua_close(L);
+	result.reaped = g_fork_pid <= 0 ||
+			wait_until(loop, child_is_reaped, &g_fork_pid, 1.0);
+	if (!result.reaped) {
+		/* Cleanup must remain effective even when the operation under test
+		 * fails to cancel its child. Only the PID this fixture forked is used. */
+		(void)kill(g_fork_pid, SIGKILL);
+		result.reaped =
+			wait_until(loop, child_is_reaped, &g_fork_pid, 1.0);
+	}
+	result.idle =
+		ev_pending_count(loop) == 0 && ev_run(loop, EVRUN_NOWAIT) == 0;
+	kill_trace_reset();
+	return result;
+}
+
+T_DECLARE_SUBCASE(expect_execute_cleanup, const struct execute_result *result)
+{
+	T_EXPECT(result->ran);
+	T_EXPECT(result->finished);
+	T_EXPECT(result->closed);
+	T_EXPECT(result->reaped);
+	T_EXPECT(result->idle);
 }
 
 static void trigger_resolve_ipv4(const char *restrict ip)
@@ -1229,95 +1330,60 @@ T_DECLARE_CASE(await_execute_fork_failure_cleans_up)
 	T_EXPECT_EQ(g_kill_count, 0);
 	g_kill_deliver = true;
 	/* The disarmed operation must still start and complete normally. */
-	T_EXPECT(run_chunk(
+	const bool recovered = run_chunk(
 		L,
 		"co=coroutine.create(function() local ok,kind,code=await.execute('exit 0') "
 		"assert(ok and kind=='exit' and code==0); _G.x_done=true end) "
-		"assert(coroutine.resume(co))"));
+		"assert(coroutine.resume(co))");
 	struct lua_global_pred pred = { .L = L, .name = "x_done" };
-	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, TEST_WAIT_SEC));
-	T_EXPECT_EQ(g_fork_calls, 2);
-	T_EXPECT_EQ(g_kill_count, 0);
+	const bool finished =
+		recovered && wait_until(loop, global_is_non_nil, &pred, 1.0);
+	const size_t kills_before_close = g_kill_count;
+#if HAVE_LUA_TOCLOSE
+	/* Expectations end the case immediately on failure. Close the recovery
+	 * routine before checking its result so a timeout cannot leave watchers
+	 * pointing at this case's ruleset on the shared default loop. */
+	const bool closed = run_chunk(L, "assert(coroutine.close(co)); co=nil");
+#endif
 	lua_close(L);
-	T_EXPECT_EQ(g_kill_count, 0);
+	const size_t kills_after_close = g_kill_count;
+	/* Cancellation stops libev's child watcher; reap only our child, with
+	 * the watchdog still bounding a failed cancellation. */
+	const bool reaped = !recovered || finished ||
+			    wait_until(loop, child_is_reaped, &g_fork_pid, 1.0);
 	kill_trace_reset();
+	T_EXPECT(reaped);
+	T_EXPECT(recovered);
+	T_EXPECT(finished);
+#if HAVE_LUA_TOCLOSE
+	T_EXPECT(closed);
+#endif
+	T_EXPECT_EQ(g_fork_calls, 2);
+	T_EXPECT_EQ(kills_before_close, 0);
+	T_EXPECT_EQ(kills_after_close, 0);
+	T_EXPECT_EQ(ev_pending_count(loop), 0);
+	T_EXPECT_EQ(ev_run(loop, EVRUN_NOWAIT), 0);
 }
 
 T_DECLARE_CASE(await_execute_reports_exit_status)
 {
-	struct config conf = {
-		.resolve_pf = PF_UNSPEC,
-	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = EV_DEFAULT;
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct lua_global_pred pred = {
-		.L = L,
-		.name = "exec_kind",
-	};
-
-	reset_stub_state();
-	T_EXPECT(run_chunk(
-		L, "co = coroutine.create(function() "
-		   "  local ok, kind, code = await.execute('exit 3') "
-		   "  _G.exec_ok = ok ~= nil "
-		   "  _G.exec_kind = kind "
-		   "  _G.exec_code = code "
-		   "end) "
-		   "return coroutine.resume(co)"));
-	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, 1.0));
-	lua_getglobal(L, "exec_ok");
-	T_EXPECT(lua_toboolean(L, -1) == 0);
-	lua_pop(L, 1);
-	lua_getglobal(L, "exec_kind");
-	T_EXPECT_STREQ(lua_tostring(L, -1), "exit");
-	lua_pop(L, 1);
-	lua_getglobal(L, "exec_code");
-	T_EXPECT_EQ(lua_tointeger(L, -1), 3);
-	lua_pop(L, 1);
-
-	lua_close(L);
+	const struct execute_result result = execute_command("exit 3");
+	T_CALL_SUBCASE(expect_execute_cleanup, &result);
+	T_EXPECT_EQ(result.ok_type, LUA_TNIL);
+	T_EXPECT(!result.ok);
+	T_EXPECT(result.exited);
+	T_EXPECT_EQ(result.code, 3);
 }
 
-/* The common case: a command exiting 0 returns true, "exit", 0. Only the
- * failure sub-branches (non-zero exit, signal) were covered, so a regression
- * flipping this boolean would have passed. */
+/* The common case returns a boolean true, not merely a truthy value. */
 T_DECLARE_CASE(await_execute_reports_success)
 {
-	struct config conf = {
-		.resolve_pf = PF_UNSPEC,
-	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = EV_DEFAULT;
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct lua_global_pred pred = {
-		.L = L,
-		.name = "exec_kind",
-	};
-
-	reset_stub_state();
-	T_EXPECT(run_chunk(
-		L, "co = coroutine.create(function() "
-		   "  local ok, kind, code = await.execute('exit 0') "
-		   "  _G.exec_ok = ok "
-		   "  _G.exec_kind = kind "
-		   "  _G.exec_code = code "
-		   "end) "
-		   "return coroutine.resume(co)"));
-	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, 1.0));
-	/* true, not merely truthy: the failure paths return nil here */
-	lua_getglobal(L, "exec_ok");
-	T_EXPECT(lua_isboolean(L, -1));
-	T_EXPECT(lua_toboolean(L, -1) != 0);
-	lua_pop(L, 1);
-	lua_getglobal(L, "exec_kind");
-	T_EXPECT_STREQ(lua_tostring(L, -1), "exit");
-	lua_pop(L, 1);
-	lua_getglobal(L, "exec_code");
-	T_EXPECT_EQ(lua_tointeger(L, -1), 0);
-	lua_pop(L, 1);
-
-	lua_close(L);
+	const struct execute_result result = execute_command("exit 0");
+	T_CALL_SUBCASE(expect_execute_cleanup, &result);
+	T_EXPECT_EQ(result.ok_type, LUA_TBOOLEAN);
+	T_EXPECT(result.ok);
+	T_EXPECT(result.exited);
+	T_EXPECT_EQ(result.code, 0);
 }
 
 T_DECLARE_CASE(await_forward_commits_on_success)
@@ -1879,39 +1945,12 @@ T_DECLARE_CASE(await_forward_reports_timeout)
 
 T_DECLARE_CASE(await_execute_reports_signal)
 {
-	struct config conf = {
-		.resolve_pf = PF_UNSPEC,
-	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = EV_DEFAULT;
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct lua_global_pred pred = {
-		.L = L,
-		.name = "exec_kind",
-	};
-
-	reset_stub_state();
-	/* a child killed by a signal reports (nil, "signal", WTERMSIG) */
-	T_EXPECT(run_chunk(
-		L, "co = coroutine.create(function() "
-		   "  local ok, kind, code = await.execute('kill -9 $$') "
-		   "  _G.exec_ok = ok ~= nil "
-		   "  _G.exec_kind = kind "
-		   "  _G.exec_code = code "
-		   "end) "
-		   "return coroutine.resume(co)"));
-	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, 1.0));
-	lua_getglobal(L, "exec_ok");
-	T_EXPECT(lua_toboolean(L, -1) == 0);
-	lua_pop(L, 1);
-	lua_getglobal(L, "exec_kind");
-	T_EXPECT_STREQ(lua_tostring(L, -1), "signal");
-	lua_pop(L, 1);
-	lua_getglobal(L, "exec_code");
-	T_EXPECT_EQ(lua_tointeger(L, -1), SIGKILL);
-	lua_pop(L, 1);
-
-	lua_close(L);
+	const struct execute_result result = execute_command("kill -9 $$");
+	T_CALL_SUBCASE(expect_execute_cleanup, &result);
+	T_EXPECT_EQ(result.ok_type, LUA_TNIL);
+	T_EXPECT(!result.ok);
+	T_EXPECT(result.signalled);
+	T_EXPECT_EQ(result.code, SIGKILL);
 }
 
 /* An embedded NUL would truncate the command handed to execv, so await.execute
@@ -1950,43 +1989,16 @@ T_DECLARE_CASE(await_execute_rejects_embedded_nul)
  * with SIGPIPE is then killed by it instead of exiting 0. */
 T_DECLARE_CASE(await_execute_restores_default_sigpipe)
 {
-	struct config conf = {
-		.resolve_pf = PF_UNSPEC,
-	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = EV_DEFAULT;
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct lua_global_pred pred = {
-		.L = L,
-		.name = "exec_kind",
-	};
 	const struct sigaction ign = { .sa_handler = SIG_IGN };
 	struct sigaction old;
-
-	reset_stub_state();
 	T_CHECK(sigaction(SIGPIPE, &ign, &old) == 0);
-	T_EXPECT(run_chunk(
-		L, "co = coroutine.create(function() "
-		   "  local ok, kind, code = await.execute('kill -PIPE $$') "
-		   "  _G.exec_ok = ok ~= nil "
-		   "  _G.exec_kind = kind "
-		   "  _G.exec_code = code "
-		   "end) "
-		   "return coroutine.resume(co)"));
-	const bool finished = wait_until(loop, global_is_non_nil, &pred, 1.0);
+	const struct execute_result result = execute_command("kill -PIPE $$");
 	T_CHECK(sigaction(SIGPIPE, &old, NULL) == 0);
-	T_EXPECT(finished);
-	lua_getglobal(L, "exec_ok");
-	T_EXPECT(lua_toboolean(L, -1) == 0);
-	lua_pop(L, 1);
-	lua_getglobal(L, "exec_kind");
-	T_EXPECT_STREQ(lua_tostring(L, -1), "signal");
-	lua_pop(L, 1);
-	lua_getglobal(L, "exec_code");
-	T_EXPECT_EQ(lua_tointeger(L, -1), SIGPIPE);
-	lua_pop(L, 1);
-
-	lua_close(L);
+	T_CALL_SUBCASE(expect_execute_cleanup, &result);
+	T_EXPECT_EQ(result.ok_type, LUA_TNIL);
+	T_EXPECT(!result.ok);
+	T_EXPECT(result.signalled);
+	T_EXPECT_EQ(result.code, SIGPIPE);
 }
 
 #if WITH_CLOSE_RANGE
@@ -2009,36 +2021,50 @@ T_DECLARE_CASE(await_execute_closes_inherited_fds)
 	reset_stub_state();
 	const int fd = open("/dev/null", O_WRONLY);
 	T_CHECK(fd > STDERR_FILENO);
-	/* the shell only portably redirects a single-digit descriptor */
-	T_CHECK(fd <= 9);
+	/* The fork seam maps this arbitrary descriptor onto fd 9 in the child,
+	 * before close_inherited_fds runs. The parent keeps all its descriptors. */
+	g_fork_probe_fd = fd;
 	T_CHECK((fcntl(fd, F_GETFD) & FD_CLOEXEC) == 0);
-	char chunk[256];
-	const int len = snprintf(
-		chunk, sizeof(chunk),
-		"co = coroutine.create(function() "
-		"  local ok, kind, code = "
-		"    await.execute('exec 2>/dev/null; : >&%d') "
-		"  _G.exec_ok = ok ~= nil "
-		"  _G.exec_kind = kind "
-		"  _G.exec_code = code "
-		"end) "
-		"return coroutine.resume(co)",
-		fd);
-	T_CHECK(len > 0 && (size_t)len < sizeof(chunk));
-	T_EXPECT(run_chunk(L, chunk));
-	T_EXPECT(wait_until(loop, global_is_non_nil, &pred, 1.0));
+	const bool ran = run_chunk(
+		L, "co = coroutine.create(function() "
+		   "  local ok, kind, code = "
+		   "    await.execute('exec 2>/dev/null; : >&9') "
+		   "  _G.exec_ok = ok ~= nil "
+		   "  _G.exec_kind = kind "
+		   "  _G.exec_code = code "
+		   "end) "
+		   "return coroutine.resume(co)");
+	g_fork_probe_fd = -1;
+	const bool finished =
+		ran && wait_until(loop, global_is_non_nil, &pred, 1.0);
 	lua_getglobal(L, "exec_ok");
-	T_EXPECT(lua_toboolean(L, -1) == 0);
+	const bool ok = lua_toboolean(L, -1) != 0;
 	lua_pop(L, 1);
 	lua_getglobal(L, "exec_kind");
-	T_EXPECT_STREQ(lua_tostring(L, -1), "exit");
+	const char *const kind = lua_tostring(L, -1);
+	const bool exited = kind != NULL && strcmp(kind, "exit") == 0;
 	lua_pop(L, 1);
 	lua_getglobal(L, "exec_code");
-	T_EXPECT(lua_tointeger(L, -1) != 0);
+	const lua_Integer code = lua_tointeger(L, -1);
 	lua_pop(L, 1);
-
+#if HAVE_LUA_TOCLOSE
+	const bool closed = run_chunk(L, "assert(coroutine.close(co)); co=nil");
+#endif
+	const int flags = fcntl(fd, F_GETFD);
 	(void)close(fd);
 	lua_close(L);
+	const bool reaped = !ran || finished ||
+			    wait_until(loop, child_is_reaped, &g_fork_pid, 1.0);
+	T_EXPECT(reaped);
+	T_EXPECT(ran);
+	T_EXPECT(finished);
+#if HAVE_LUA_TOCLOSE
+	T_EXPECT(closed);
+#endif
+	T_EXPECT(!ok);
+	T_EXPECT(exited);
+	T_EXPECT(code != 0);
+	T_EXPECT(flags >= 0 && (flags & FD_CLOEXEC) == 0);
 }
 #endif /* WITH_CLOSE_RANGE */
 
@@ -2300,63 +2326,240 @@ T_DECLARE_SUBCASE(expect_sigkill_pair, const pid_t child)
 	T_EXPECT_EQ(g_kill_calls[1].pid, child);
 }
 
-/* await.execute forks a real child, so the abandon path (await_execute_close:
- * ev_child_stop + SIGKILL) is exercised only here. Closing the suspended
- * coroutine must run that handler cleanly and leave the coroutine dead.
- * EV_DEFAULT is required for ev_child. */
-T_DECLARE_CASE(await_execute_abandoned_stops_child)
+struct child_probe {
+	ev_child watcher;
+	bool exited;
+	int status;
+};
+
+static void
+child_probe_cb(struct ev_loop *loop, ev_child *watcher, const int revents)
 {
-	struct config conf = {
-		.resolve_pf = PF_UNSPEC,
-	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = EV_DEFAULT;
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	(void)revents;
+	struct child_probe *const probe = watcher->data;
+	probe->status = watcher->rstatus;
+	probe->exited = true;
+	ev_child_stop(loop, watcher);
+}
 
-	reset_stub_state();
-	/* drain anything a prior case left unreaped, so the waitpid() below can
-	 * only see the child this case forks */
-	while (waitpid(-1, NULL, WNOHANG) > 0) {
+static void start_child_probe(
+	struct ev_loop *loop, struct child_probe *probe, const pid_t pid)
+{
+	ev_child_init(&probe->watcher, child_probe_cb, pid, 0);
+	probe->watcher.data = probe;
+	ev_child_start(loop, &probe->watcher);
+}
+
+#if defined(__linux__)
+struct child_pair {
+	struct child_probe shell;
+	struct child_probe descendant;
+};
+
+static bool children_exited(void *data)
+{
+	const struct child_pair *const pair = data;
+	return pair->shell.exited && pair->descendant.exited;
+}
+
+static bool pipe_ready(const int fd)
+{
+	struct timespec ts;
+	if (real_clock(&ts) != 0) {
+		return false;
 	}
-	/* A command that would outlive the test unless the child is killed. It
-	 * execs in place so the child's session is the single process the kill
-	 * trace's sigqueue() delivery reaches. */
-	T_EXPECT(run_chunk(
-		L, "co = coroutine.create(function() "
-		   "  await.execute('exec sleep 30') "
-		   "end) "
-		   "return coroutine.resume(co)"));
-	T_EXPECT(run_chunk(L, "return coroutine.status(co)"));
-	T_EXPECT_STREQ(lua_tostring(L, -1), "suspended");
-	lua_pop(L, 1);
-
-	/* coroutine.close runs await_execute_close */
-	T_EXPECT(run_chunk(L, "return coroutine.close(co)"));
-	T_EXPECT(lua_toboolean(L, -1));
-	lua_pop(L, 1);
-	T_EXPECT(run_chunk(L, "return coroutine.status(co)"));
-	T_EXPECT_STREQ(lua_tostring(L, -1), "dead");
-
-	/* A dead coroutine is not enough: the child must actually be gone. The
-	 * close path signals it, so reaping it is bounded by SIGKILL delivery --
-	 * the poll only covers the child not having been scheduled yet, and a
-	 * child that survives (the signal missing it while it is still between
-	 * fork() and setsid()) fails here instead of running to completion. */
-	int wstatus = 0;
-	pid_t child = 0;
-	for (int i = 0; i < 1000 && child == 0; i++) {
-		child = waitpid(-1, &wstatus, WNOHANG);
-		if (child == 0) {
-			const struct timespec delay = { .tv_nsec = 1000000 };
-			(void)nanosleep(&delay, NULL);
+	const double deadline =
+		(double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 + 1.0;
+	for (;;) {
+		if (real_clock(&ts) != 0) {
+			return false;
+		}
+		const double remaining = deadline - ((double)ts.tv_sec +
+						     (double)ts.tv_nsec * 1e-9);
+		if (remaining <= 0.0) {
+			return false;
+		}
+		struct pollfd pfd = { .fd = fd, .events = POLLIN };
+		const int result = poll(&pfd, 1, (int)(remaining * 1000.0) + 1);
+		if (result >= 0) {
+			return result > 0 &&
+			       (pfd.revents & (POLLIN | POLLHUP)) != 0;
+		}
+		if (errno != EINTR) {
+			return false;
 		}
 	}
-	T_EXPECT(child > 0);
-	T_EXPECT(WIFSIGNALED(wstatus));
-	T_EXPECT_EQ(WTERMSIG(wstatus), SIGKILL);
-	T_CALL_SUBCASE(expect_sigkill_pair, child);
+}
 
+static pid_t read_child_pid(const int fd)
+{
+	char buf[32];
+	for (size_t i = 0; i < sizeof(buf) - 1; i++) {
+		if (!pipe_ready(fd) || read(fd, &buf[i], 1) != 1) {
+			return 0;
+		}
+		if (buf[i] == '\n') {
+			buf[i] = '\0';
+			return (pid_t)strtol(buf, NULL, 10);
+		}
+	}
+	return 0;
+}
+#endif /* defined(__linux__) */
+
+static bool child_probe_exited(void *data)
+{
+	const struct child_probe *const probe = data;
+	return probe->exited;
+}
+
+/* Closing immediately also covers cancellation before the child reaches
+ * setsid(), when the direct PID signal must cover the process-group race. */
+T_DECLARE_CASE(await_execute_abandoned_stops_child)
+{
+	struct config conf = { .resolve_pf = PF_UNSPEC };
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = EV_DEFAULT;
+	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	reset_stub_state();
+	g_fork_pid = 0;
+	const bool ran = run_chunk(
+		L,
+		"co=coroutine.create(function() await.execute('exec sleep 30') end); "
+		"assert(coroutine.resume(co))");
+	const pid_t child = g_fork_pid;
+	struct child_probe probe = { 0 };
+	if (child > 0) {
+		start_child_probe(loop, &probe, child);
+	}
+	const bool closed = run_chunk(
+		L, "assert(coroutine.status(co)=='suspended'); "
+		   "assert(coroutine.close(co)); "
+		   "assert(coroutine.status(co)=='dead'); co=nil");
 	lua_close(L);
+	const size_t kill_count = g_kill_count;
+	const bool reaped =
+		child > 0 && wait_until(loop, child_probe_exited, &probe, 1.0);
+	if (!reaped && child > 0 && !ev_is_pending(&probe.watcher)) {
+		(void)kill(child, SIGKILL);
+		(void)wait_until(loop, child_probe_exited, &probe, 1.0);
+	}
+	if (child > 0) {
+		ev_child_stop(loop, &probe.watcher);
+	}
+	const bool idle =
+		ev_pending_count(loop) == 0 && ev_run(loop, EVRUN_NOWAIT) == 0;
+	T_EXPECT(ran);
+	T_EXPECT(closed);
+	T_EXPECT(reaped);
+	T_EXPECT(idle);
+	T_EXPECT(WIFSIGNALED(probe.status));
+	T_EXPECT_EQ(WTERMSIG(probe.status), SIGKILL);
+	T_EXPECT_EQ(kill_count, 2);
+	T_CALL_SUBCASE(expect_sigkill_pair, child);
+	kill_trace_reset();
+}
+
+/* The descendant reports readiness before blocking in a shell builtin read.
+ * Its inherited stdout stays open until it dies, so EOF while stdin remains
+ * open proves cancellation reached beyond the waiting parent shell. */
+T_DECLARE_CASE(await_execute_abandoned_stops_descendants)
+{
+#if defined(__linux__)
+	/* Adopt and reap the killed shell's orphan instead of leaving a zombie
+	 * for init. POSIX alone offers no way to wait for a grandchild. */
+	int old_subreaper = 0;
+	T_CHECK(prctl(PR_GET_CHILD_SUBREAPER, &old_subreaper) == 0);
+	T_CHECK(prctl(PR_SET_CHILD_SUBREAPER, 1L) == 0);
+	int input[2];
+	int output[2];
+	T_CHECK(pipe(input) == 0);
+	T_CHECK(pipe(output) == 0);
+	for (size_t i = 0; i < 2; i++) {
+		T_CHECK(fcntl(input[i], F_SETFD, FD_CLOEXEC) == 0);
+		T_CHECK(fcntl(output[i], F_SETFD, FD_CLOEXEC) == 0);
+	}
+	struct config conf = { .resolve_pf = PF_UNSPEC };
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = EV_DEFAULT;
+	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	reset_stub_state();
+	g_fork_pid = 0;
+	g_fork_stdin_fd = input[0];
+	g_fork_stdout_fd = output[1];
+	const bool ran = run_chunk(
+		L, "co=coroutine.create(function() "
+		   "await.execute([[exec 3<&0; "
+		   "sh -c 'printf \"%s\\n\" \"$$\"; read hold' <&3 & wait]]) "
+		   "end); assert(coroutine.resume(co))");
+	g_fork_stdin_fd = -1;
+	g_fork_stdout_fd = -1;
+	(void)close(input[0]);
+	(void)close(output[1]);
+	const pid_t child = g_fork_pid;
+	const pid_t descendant = ran ? read_child_pid(output[0]) : 0;
+	const bool isolated =
+		child > 0 && descendant > 0 && descendant != child &&
+		getpgid(child) == child && getsid(child) == child &&
+		getpgid(descendant) == child && getsid(descendant) == child;
+	struct child_pair pair = { 0 };
+	if (child > 0) {
+		start_child_probe(loop, &pair.shell, child);
+	}
+	if (descendant > 0) {
+		start_child_probe(loop, &pair.descendant, descendant);
+	}
+	const bool closed = run_chunk(
+		L, "assert(coroutine.status(co)=='suspended'); "
+		   "assert(coroutine.close(co)); "
+		   "assert(coroutine.status(co)=='dead'); co=nil");
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_close(L);
+	char byte;
+	const bool eof =
+		pipe_ready(output[0]) && read(output[0], &byte, 1) == 0;
+	const size_t kill_count = g_kill_count;
+	/* No event-loop reap has run yet, so these owned PIDs cannot have been
+	 * recycled. Remove survivors even when setsid or group signalling broke. */
+	if (!eof) {
+		if (descendant > 0) {
+			(void)kill(descendant, SIGKILL);
+		}
+		if (child > 0) {
+			(void)kill(child, SIGKILL);
+		}
+	}
+	(void)close(input[1]);
+	(void)close(output[0]);
+	const bool reaped = wait_until(loop, children_exited, &pair, 1.0);
+	if (child > 0) {
+		ev_child_stop(loop, &pair.shell.watcher);
+	}
+	if (descendant > 0) {
+		ev_child_stop(loop, &pair.descendant.watcher);
+	}
+	const bool idle =
+		ev_pending_count(loop) == 0 && ev_run(loop, EVRUN_NOWAIT) == 0;
+	T_CHECK(prctl(PR_SET_CHILD_SUBREAPER, (long)old_subreaper) == 0);
+	T_EXPECT(ran);
+	T_EXPECT(descendant > 0);
+	T_EXPECT(isolated);
+	T_EXPECT(closed);
+	T_EXPECT(eof);
+	T_EXPECT(reaped);
+	T_EXPECT(idle);
+	T_EXPECT(WIFSIGNALED(pair.shell.status));
+	T_EXPECT_EQ(WTERMSIG(pair.shell.status), SIGKILL);
+	T_EXPECT(WIFSIGNALED(pair.descendant.status));
+	T_EXPECT_EQ(WTERMSIG(pair.descendant.status), SIGKILL);
+	T_EXPECT_EQ(kill_count, 2);
+	T_CALL_SUBCASE(expect_sigkill_pair, child);
+	kill_trace_reset();
+#else
+	T_LOGF("requires Linux child-subreaper support to reap the orphaned descendant");
+	T_SKIP();
+#endif /* defined(__linux__) */
 }
 
 /* Abandon the coroutine from inside the window where libev has already reaped
@@ -2417,60 +2620,66 @@ run_reaped_probe(struct ev_loop *loop, ev_child *restrict w_probe, lua_State *L)
  */
 T_DECLARE_CASE(await_execute_close_is_idempotent)
 {
-	struct config conf = {
-		.resolve_pf = PF_UNSPEC,
-	};
+	struct config conf = { .resolve_pf = PF_UNSPEC };
 	struct ruleset r = { 0 };
 	struct ev_loop *const loop = EV_DEFAULT;
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
 	ev_child w_probe;
-
 	reset_stub_state();
-	/* record what would be signalled without signalling it: the pid under
-	 * test is already reaped, so delivery would reach whatever recycled it */
+	g_fork_pid = 0;
+	/* Never deliver a signal to a reaped PID, even if cleanup regresses. */
 	g_kill_deliver = false;
-	/* drain anything a prior case left unreaped, so the probe below can only
-	 * see the children this case forks */
-	while (waitpid(-1, NULL, WNOHANG) > 0) {
-	}
-
-	/* calibration: a child no await.execute watcher is waiting on */
-	const pid_t bare = fork();
+	pid_t bare = fork();
 	if (bare == 0) {
 		_exit(EXIT_SUCCESS);
 	}
 	T_CHECK(bare > 0);
 	run_reaped_probe(loop, &w_probe, NULL);
-	T_EXPECT(wait_until(loop, reaped_probe_fired, NULL, 1.0));
+	const bool calibrated = wait_until(loop, reaped_probe_fired, NULL, 1.0);
 	ev_child_stop(loop, &w_probe);
-	T_EXPECT_EQ(REAPED_PROBE.rpid, bare);
+	const pid_t calibration_pid = REAPED_PROBE.rpid;
 	const unsigned int pending_baseline = REAPED_PROBE.pending;
 
 	run_reaped_probe(loop, &w_probe, L);
-	T_EXPECT(run_chunk(
-		L, "co = coroutine.create(function() "
-		   "  await.execute('exit 0') "
-		   "end) "
-		   "return coroutine.resume(co)"));
-	T_EXPECT(wait_until(loop, reaped_probe_fired, NULL, 1.0));
+	const bool ran = run_chunk(
+		L,
+		"co=coroutine.create(function() await.execute('exit 0') end); "
+		"assert(coroutine.resume(co))");
+	const bool observed =
+		ran && wait_until(loop, reaped_probe_fired, NULL, 1.0);
 	ev_child_stop(loop, &w_probe);
-
-	T_EXPECT(REAPED_PROBE.closed);
-	T_EXPECT(REAPED_PROBE.rpid > 0);
-	/* one more watcher pending than the calibration round: await.execute's
-	 * own, still undispatched, i.e. the window really was entered */
-	T_EXPECT_EQ(REAPED_PROBE.pending, pending_baseline + 1);
-	T_EXPECT_EQ(g_kill_count, 0);
-
-	/* the __gc pass must find nothing left to signal */
-	T_EXPECT(run_chunk(L, "co = nil"));
+	const struct reaped_probe observation = REAPED_PROBE;
+	const size_t kills_before_collect = g_kill_count;
+	const bool closed = run_chunk(L, "assert(coroutine.close(co)); co=nil");
 	lua_gc(L, LUA_GCCOLLECT, 0);
 	lua_gc(L, LUA_GCCOLLECT, 0);
-	T_EXPECT_EQ(g_kill_count, 0);
-
+	const size_t kills_after_collect = g_kill_count;
 	lua_close(L);
-	T_EXPECT_EQ(g_kill_count, 0);
+	REAPED_PROBE.L = NULL;
+	const size_t kills_after_close = g_kill_count;
+	const bool bare_reaped = wait_until(loop, child_is_reaped, &bare, 1.0);
+	const bool child_reaped =
+		g_fork_pid <= 0 ||
+		wait_until(loop, child_is_reaped, &g_fork_pid, 1.0);
+	const bool idle =
+		ev_pending_count(loop) == 0 && ev_run(loop, EVRUN_NOWAIT) == 0;
 	kill_trace_reset();
+
+	T_EXPECT(calibrated);
+	T_EXPECT_EQ(calibration_pid, bare);
+	T_EXPECT(ran);
+	T_EXPECT(observed);
+	T_EXPECT(observation.closed);
+	T_EXPECT(observation.rpid > 0);
+	/* The extra pending watcher proves the reaped-but-undispatched window. */
+	T_EXPECT_EQ(observation.pending, pending_baseline + 1);
+	T_EXPECT_EQ(kills_before_collect, 0);
+	T_EXPECT_EQ(kills_after_collect, 0);
+	T_EXPECT_EQ(kills_after_close, 0);
+	T_EXPECT(closed);
+	T_EXPECT(bare_reaped);
+	T_EXPECT(child_reaped);
+	T_EXPECT(idle);
 }
 #endif /* HAVE_LUA_TOCLOSE */
 
@@ -2527,6 +2736,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_invoke_abandoned_cancels_request),
 	T_CASE(await_forward_abandoned_cancels_dial),
 	T_CASE(await_execute_abandoned_stops_child),
+	T_CASE(await_execute_abandoned_stops_descendants),
 	T_CASE(await_execute_close_is_idempotent),
 #endif /* HAVE_LUA_TOCLOSE */
 	T_SUITE_END,

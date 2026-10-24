@@ -453,13 +453,25 @@ if(WITH_LUA)
     target_compile_options(marshal_test PRIVATE
         -fno-builtin-malloc -fno-builtin-realloc)
     add_unit_test(zlib_test
-        SRCS ruleset/zlib_test.c ruleset/zlib.c ruleset/base.c
+        SRCS ruleset/zlib_test.c ruleset/base.c
              proto/codec.c util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+        MOCK_SRCS ruleset/zlib.c
+        MOCK_DEFINITIONS
+            io_memreader=test_zlib_memreader
+            io_heapwriter=test_zlib_heapwriter
+            io_stream_close=test_zlib_stream_close
+            free=test_zlib_free
+            codec_zlib_writer=test_zlib_writer
+            codec_zlib_reader=test_zlib_reader
+            codec_gzip_writer=test_gzip_writer
+            codec_gzip_reader=test_gzip_reader
         WITH_LUA WITH_CARES)
     # zlib_test's OOM cases interpose realloc() the same way; keep the
     # vbuffer's initial realloc(NULL, size) a real call, as in marshal_test.
     target_compile_options(zlib_test PRIVATE
+        -fno-builtin-malloc -fno-builtin-realloc)
+    target_compile_options(zlib_test_mock_impl PRIVATE
         -fno-builtin-malloc -fno-builtin-realloc)
 endif()
 
