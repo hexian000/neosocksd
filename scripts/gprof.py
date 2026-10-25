@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import shlex
@@ -222,6 +223,13 @@ def build_configure_command(
         command.append("-DCMAKE_C_COMPILER=%s" % compiler)
     for key, default in KNOWN_BOOL_OPTIONS.items():
         command.append("-D%s=%s" % (key, base_cache.get(key, default)))
+    # Carry both halves of each dependency selection, including NOTFOUND
+    # entries, so an existing profiling cache cannot supply a stale half.
+    for dependency in ("LUA", "LIBEV", "LIBCARES"):
+        for suffix in ("INCLUDE_DIR", "LIBRARY"):
+            key = "%s_%s" % (dependency, suffix)
+            value = base_cache.get(key, key + "-NOTFOUND")
+            command.append("-D%s=%s" % (key, value))
     return command
 
 
@@ -394,6 +402,10 @@ def run_benchmark(
                     "benchmark command timed out after %.1f seconds: %s"
                     % (timeout_seconds, quote_command(command))
                 )
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
             stdout_handle.flush()
             stderr_handle.flush()
             warning_line = find_iperf_warning_line(
@@ -716,7 +728,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="gprof executable name")
     parser.add_argument("--iperf3", default="iperf3",
                         help="iperf3 executable name")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.startup_wait):
+        parser.error("--startup-wait must be finite")
+    return args
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

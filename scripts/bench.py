@@ -765,7 +765,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--iperf3", default="iperf3",
                         help="iperf3 executable name")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.startup_wait):
+        parser.error("--startup-wait must be finite")
+    return args
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
