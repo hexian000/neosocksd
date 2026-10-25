@@ -38,6 +38,7 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
+from unittest.mock import Mock, patch
 
 
 ROOT = Path.cwd().resolve()
@@ -172,7 +173,13 @@ def socks5_connect(
             u = user.encode()
             p = (password or "").encode()
             sock.sendall(bytes([0x01, len(u)]) + u + bytes([len(p)]) + p)
-            _, status = recv_exact(sock, 2)
+            ver, status = recv_exact(sock, 2)
+            if ver != 0x01:
+                raise SocksError(
+                    "bad username/password auth reply version: %d" % ver,
+                    stage="version",
+                    code=ver,
+                )
             if status != 0x00:
                 raise SocksError(
                     "username/password auth failed",
@@ -644,8 +651,8 @@ class Daemon:
                 stderr=self._stderr,
             )
             self._wait_ready()
-        except Exception:
-            # tear down best-effort; the startup error is what matters
+        except BaseException:
+            # tear down best-effort, including interruption during startup
             try:
                 self._terminate(check=False)
             finally:
@@ -955,6 +962,31 @@ def t_cli_startup_shutdown(ctx: Context) -> None:
         assert d.proc.poll() is None, "daemon should still be running"
 
 
+@test("cli/startup-failure-cleanup")
+def t_cli_startup_failure_cleanup(ctx: Context) -> None:
+    for error in (RuntimeError("startup failed"), KeyboardInterrupt(), SystemExit(7)):
+        d = Daemon(ctx.binary, ["-l", "%s:%d" % (HOST, free_port())])
+        stderr_path = Path(d._stderr.name)
+        try:
+            with patch.object(d, "_wait_ready", side_effect=error):
+                try:
+                    with d:
+                        raise AssertionError("startup unexpectedly succeeded")
+                except BaseException as exc:
+                    assert exc is error, "startup failure was replaced: %r" % exc
+            assert d.proc is not None, "startup never created a child"
+            assert d.proc.poll() is not None, "startup left the child running"
+            assert d._stderr.closed, "startup left stderr open"
+            assert not stderr_path.exists(), "startup left the stderr file behind"
+            assert not d._stderr_cleanup.alive, "startup deferred stderr cleanup"
+        finally:
+            # Also reap the child when this regression case runs on broken code.
+            try:
+                d._terminate(check=False)
+            finally:
+                d._stderr_cleanup()
+
+
 # --------------------------------------------------------------------------- #
 # B. SOCKS proxy (no ruleset, direct connect)
 # --------------------------------------------------------------------------- #
@@ -1127,6 +1159,53 @@ def t_socks4a_hostname(ctx: Context) -> None:
 # --------------------------------------------------------------------------- #
 # C. SOCKS5 authentication
 # --------------------------------------------------------------------------- #
+
+
+@test("socks5/auth-client-reply-version")
+def t_auth_client_reply_version(ctx: Context) -> None:
+    """The smoke client must reject malformed authentication replies itself."""
+    for version, status in (
+        (0x00, 0x00), (0x05, 0x00), (0xFF, 0x00), (0xFF, 0x01),
+        (0x01, 0x01), (0x01, 0xFF), (0x01, 0x00),
+    ):
+        sock = Mock(spec=socket.socket)
+        # A successful CONNECT reply lets an unchecked version reach the
+        # success path, so rejection cannot pass due to truncated input.
+        sock.recv.side_effect = [
+            b"\x05\x02", bytes([version, status]),
+            b"\x05\x00\x00\x01", b"\x7f\x00\x00\x01", b"\x00\x50",
+        ]
+        expected_error = None
+        if version != 0x01:
+            expected_error = ("version", version)
+        elif status != 0x00:
+            expected_error = ("userpass", status)
+        with patch(__name__ + "._connect", return_value=sock):
+            try:
+                result = socks5_connect(
+                    HOST, 1080, HOST, 80,
+                    user="user", password="pass", offer_noauth=False,
+                )
+            except SocksError as exc:
+                assert (exc.stage, exc.code) == expected_error, (
+                    "auth reply %02x %02x: unexpected stage=%r code=%r"
+                    % (version, status, exc.stage, exc.code)
+                )
+            else:
+                assert result is sock
+                assert expected_error is None, (
+                    "accepted auth reply %02x %02x" % (version, status)
+                )
+                sock.close.assert_not_called()
+                result.close()
+        sock.close.assert_called_once()
+        sent = [b"\x05\x01\x02", b"\x01\x04user\x04pass"]
+        if expected_error is None:
+            sent.append(b"\x05\x01\x00\x01\x7f\x00\x00\x01\x00\x50")
+        assert [c.args[0] for c in sock.sendall.call_args_list] == sent, (
+            "unexpected request bytes after auth reply %02x %02x"
+            % (version, status)
+        )
 
 
 @test("socks5/auth-required-rejects-noauth")
@@ -1494,18 +1573,30 @@ def t_api_invoke(ctx: Context) -> None:
         assert status == 200, "invoke (read-back) returned %d: %r" % (status, body)
 
 
-def _lua_longstring(data: bytes) -> str:
-    """Quote bytes as a Lua long-bracket string literal.
+def _lua_string(data: bytes) -> str:
+    """Quote arbitrary bytes as a Lua string literal without text conversion."""
+    return '"' + "".join("\\%03d" % byte for byte in data) + '"'
 
-    The bracket level grows until it cannot terminate early, so any payload
-    embeds verbatim -- no escaping, and no dependence on how the daemon spells
-    the marshalled result.
-    """
-    text = data.decode()
-    level = ""
-    while "]%s]" % level in text:
-        level += "="
-    return "[%s[%s]%s]" % (level, text, level)
+
+@test("api/lua-string-literal")
+def t_api_lua_string_literal(ctx: Context) -> None:
+    listen = free_port()
+    api = free_port()
+    ruleset = write_ruleset(ctx.tmpdir, "literal.lua", direct_ruleset())
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, listen), "-r", str(ruleset)],
+        api_port=api,
+        loglevel=ctx.loglevel,
+    ):
+        for payload in (b"", bytes(range(256)), b"\nline\r\nline\r", b"]", b"]=]"):
+            checks = ["local s = %s" % _lua_string(payload),
+                      "assert(#s == %d)" % len(payload)]
+            checks.extend("assert(s:byte(%d) == %d)" % (i, byte)
+                          for i, byte in enumerate(payload, 1))
+            status, body = api_request(
+                api, "POST", "/ruleset/invoke", "\n".join(checks).encode())
+            assert status == 200, "Lua literal check returned %d: %r" % (status, body)
 
 
 def _check_rpcall_result(api_port: int, marshalled: bytes, expr: str) -> None:
@@ -1520,7 +1611,7 @@ def _check_rpcall_result(api_port: int, marshalled: bytes, expr: str) -> None:
     code = (
         "local ok, a, b = assert(load(%s))()\n"
         "assert(%s, 'rpcall result mismatch')\n"
-    ) % (_lua_longstring(marshalled), expr)
+    ) % (_lua_string(marshalled), expr)
     status, body = api_request(api_port, "POST", "/ruleset/invoke", code.encode())
     assert status == 200, "rpcall result check returned %d: %r" % (status, body)
 
