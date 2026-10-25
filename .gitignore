@@ -7,7 +7,6 @@
 
 /cmake-*
 /build
-/build-*
 /xbuild
 /scripts/__pycache__
 /compile_commands.json
