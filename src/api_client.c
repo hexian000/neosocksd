@@ -12,7 +12,6 @@
 #include "util.h"
 
 #include "io/io.h"
-#include "io/memory.h"
 #include "io/stream.h"
 #include "meta/class.h"
 #include "meta/intcast.h"
@@ -107,23 +106,19 @@ static void api_client_finish(
 /* Copy a completion error message into ctx-owned storage, then defer the
  * result. The message may point into the caller's stack frame (http_client.c's
  * strerror-based write-error path builds it in a stack buffer), which unwinds
- * before the deferred process_cb reads it; storing it in result.content keeps
- * it valid until then, mirroring the structured-error path. */
+ * before the deferred process_cb reads it. The stopped connection's output
+ * buffer stays alive through that callback. */
 static void api_client_finish_errmsg(
 	struct ev_loop *loop, struct api_client_ctx *restrict ctx,
 	const char *restrict errmsg, const size_t errlen)
 {
-	struct vbuffer *emsg = VBUF_NEW(errlen);
-	if (emsg != NULL) {
-		VBUF_APPEND(emsg, errmsg, errlen);
-	}
-	if (VBUF_HAS_OOM(emsg)) {
-		LOGOOM();
-		VBUF_FREE(emsg);
-		API_RETURN_ERROR(loop, ctx, "out of memory");
-	}
-	ctx->result.content = emsg;
-	api_client_finish(loop, ctx, VBUF_DATA(emsg), VBUF_LEN(emsg), NULL);
+	api_client_stop(loop, ctx);
+	ASSERT(errlen <= ctx->hctx.conn.wbuf.cap);
+	ctx->hctx.conn.wbuf.len = 0;
+	BUF_APPEND(ctx->hctx.conn.wbuf, errmsg, errlen);
+	api_client_finish(
+		loop, ctx, (const char *)ctx->hctx.conn.wbuf.data,
+		ctx->hctx.conn.wbuf.len, NULL);
 }
 
 /* Materialize a Content-Encoding'd body into a freshly allocated buffer of
@@ -139,25 +134,20 @@ static struct vbuffer *content_decode_vbuf(
 		return NULL;
 	}
 	struct vbuffer *decoded = VBUF_NEW(VBUF_LEN(content));
-	if (decoded == NULL) {
-		/* io_heapwriter validates only &decoded, and the first write
-		 * dereferences *decoded via VBUF_ASSERT_SANITY, so a NULL here
-		 * would crash instead of honoring the "returns NULL on OOM"
-		 * contract */
-		io_stream_close(r);
-		return NULL;
+	int err = 0;
+	while (!VBUF_HAS_OOM(decoded)) {
+		const void *span;
+		size_t n = IO_BUFSIZE;
+		err = io_stream_direct_read(r, &span, &n);
+		if (n > 0) {
+			VBUF_APPEND(decoded, span, n);
+		}
+		if (err != 0 || n == 0) {
+			break;
+		}
 	}
-	struct io_stream *w = io_heapwriter(&decoded);
-	if (w == NULL) {
-		VBUF_FREE(decoded);
-		io_stream_close(r);
-		return NULL;
-	}
-	unsigned char buf[IO_BUFSIZE];
-	const int cerr = io_stream_copy(w, r, buf, sizeof(buf));
-	const int werr = io_stream_close(w);
 	const int rerr = io_stream_close(r);
-	if (cerr != 0 || werr != 0 || rerr != 0 || VBUF_HAS_OOM(decoded)) {
+	if (err != 0 || rerr != 0 || VBUF_HAS_OOM(decoded)) {
 		VBUF_FREE(decoded);
 		return NULL;
 	}
@@ -253,23 +243,15 @@ static void on_http_client_done(
 			return;
 		}
 		/* Generic HTTP error response */
-		VBUF_RESERVE(content, 64);
-		if (content == NULL) {
-			LOGOOM();
-			API_RETURN_ERROR(loop, ctx, "out of memory");
-		}
-		VBUF_RESET(content);
-		VBUF_APPENDF(
-			content, "%s %s %s", msg->rsp.version, msg->rsp.code,
+		VBUF_FREE(content);
+		api_client_stop(loop, ctx);
+		conn->wbuf.len = 0;
+		BUF_APPENDF(
+			conn->wbuf, "%s %s %s", msg->rsp.version, msg->rsp.code,
 			msg->rsp.status);
-		if (VBUF_HAS_OOM(content)) {
-			LOGOOM();
-			VBUF_FREE(content);
-			API_RETURN_ERROR(loop, ctx, "out of memory");
-		}
-		ctx->result.content = content;
 		api_client_finish(
-			loop, ctx, VBUF_DATA(content), VBUF_LEN(content), NULL);
+			loop, ctx, (const char *)conn->wbuf.data,
+			conn->wbuf.len, NULL);
 		return;
 	}
 
@@ -311,28 +293,32 @@ static bool make_request(
 	if (len >= RPCALL_COMPRESS_THRESHOLD) {
 		encoding = CENCODING_DEFLATE;
 	}
-	struct io_stream *s = content_writer(&p->cbuf, len, encoding);
-	if (s == NULL) {
-		/* content_writer may have reserved p->cbuf before the stream
-		 * wrapper itself failed to allocate */
-		LOGOOM();
-		VBUF_FREE(p->cbuf);
-		return false;
-	}
-	size_t n = len;
-	const int err1 = io_stream_write(s, content, &n);
-	const int err2 = io_stream_close(s);
-	if (p->cbuf == NULL) {
-		LOGOOM();
-		return false;
-	}
-	if (err1 != 0 || err2 != 0 || n != len) {
-		/* a codec error, not necessarily an allocation failure */
-		LOGE_F("api request: cannot build content, "
-		       "write error %d, close error %d, %zu of %zu bytes",
-		       err1, err2, n, len);
-		VBUF_FREE(p->cbuf);
-		return false;
+	size_t contentlen = len;
+	if (encoding != CENCODING_NONE) {
+		struct io_stream *s = content_writer(&p->cbuf, len, encoding);
+		if (s == NULL) {
+			/* content_writer may have reserved p->cbuf before the stream
+			 * wrapper itself failed to allocate */
+			LOGOOM();
+			VBUF_FREE(p->cbuf);
+			return false;
+		}
+		size_t n = len;
+		const int err1 = io_stream_write(s, content, &n);
+		const int err2 = io_stream_close(s);
+		if (p->cbuf == NULL) {
+			LOGOOM();
+			return false;
+		}
+		if (err1 != 0 || err2 != 0 || n != len) {
+			/* a codec error, not necessarily an allocation failure */
+			LOGE_F("api request: cannot build content, "
+			       "write error %d, close error %d, %zu of %zu bytes",
+			       err1, err2, n, len);
+			VBUF_FREE(p->cbuf);
+			return false;
+		}
+		contentlen = VBUF_LEN(p->cbuf);
 	}
 	BUF_APPENDF(
 		p->wbuf,
@@ -342,7 +328,7 @@ static bool make_request(
 		"Connection: close\r\n"
 		"Content-Length: %zu\r\n"
 		"Content-Type: %s\r\n",
-		uri, authority, VBUF_LEN(p->cbuf), MIME_RPCALL);
+		uri, authority, contentlen, MIME_RPCALL);
 	const char *encoding_str = http_content_encoding_str[encoding];
 	if (encoding_str != NULL) {
 		BUF_APPENDF(p->wbuf, "Content-Encoding: %s\r\n", encoding_str);
@@ -351,9 +337,13 @@ static bool make_request(
 	LOG_TXT_F(
 		VERYVERBOSE, (const char *)p->wbuf.data, p->wbuf.len, 0,
 		"request header: %zu bytes", p->wbuf.len);
+	if (p->cbuf == NULL) {
+		ASSERT(len <= p->wbuf.cap - p->wbuf.len);
+		BUF_APPEND(p->wbuf, content, len);
+	}
 	LOG_BIN_F(
-		VERYVERBOSE, VBUF_DATA(p->cbuf), VBUF_LEN(p->cbuf), 0,
-		"request content: %zu bytes", VBUF_LEN(p->cbuf));
+		VERYVERBOSE, p->cbuf != NULL ? VBUF_DATA(p->cbuf) : content,
+		contentlen, 0, "request content: %zu bytes", contentlen);
 	return true;
 }
 

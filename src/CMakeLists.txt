@@ -331,14 +331,18 @@ if(WITH_RULESET)
         SRCS api_server_test.c api_server.c proto/http.c proto/codec.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c")
     add_unit_test(api_client_test
-        SRCS api_client_test.c api_client.c http_client.c
-             proto/http.c proto/codec.c)
+        SRCS api_client_test.c http_client.c proto/http.c proto/codec.c
+        MOCK_SRCS api_client.c
+        MOCK_DEFINITIONS malloc=test_context_malloc)
     # api_client_test's OOM case interposes realloc() to fail the error
     # vbuffer's initial realloc(NULL, size). At -O2 the compiler folds that
     # call to a malloc() builtin, bypassing the interposer and leaving the
     # out-of-memory branch unverified. Keep it a real realloc() call, as in
     # marshal_test.
+    target_link_options(api_client_test PRIVATE "-Wl,--wrap=malloc,--wrap=free")
     target_compile_options(api_client_test PRIVATE
+        -fno-builtin-malloc -fno-builtin-realloc)
+    target_compile_options(api_client_test_mock_impl PRIVATE
         -fno-builtin-malloc -fno-builtin-realloc)
 endif()
 
