@@ -575,6 +575,8 @@ static int await_forward(lua_State *restrict L)
 
 struct await_execute_userdata {
 	struct ruleset *ruleset;
+	const char *command;
+	int error;
 	ev_child w_child;
 	ev_idle w_idle;
 };
@@ -642,10 +644,15 @@ await_execute_k(lua_State *restrict L, const int status, const lua_KContext ctx)
 	/* lua stack: command ud */
 	ASSERT(lua_gettop(L) == 2);
 	const struct await_execute_userdata *restrict ud = lua_touserdata(L, 2);
-	int stat = ud->w_child.rstatus;
+	const int err = ud->error;
+	int stat = err == 0 ? ud->w_child.rstatus : 0;
 	aux_close(L, 2);
 	lua_settop(L, 0);
 
+	if (err != 0) {
+		lua_pushstring(L, strerror(err));
+		return lua_error(L);
+	}
 	if (WIFSIGNALED(stat)) {
 		lua_pushnil(L);
 		lua_pushliteral(L, "signal");
@@ -686,37 +693,24 @@ static void close_inherited_fds(void)
 #endif /* WITH_CLOSE_RANGE */
 }
 
-/* status = await.execute(command) */
-static int await_execute(lua_State *restrict L)
+/* Fork only once the loop runs: boot Lua loads before daemonization, whose
+ * double fork would otherwise orphan the command from its child watcher. */
+static void
+execute_start_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 {
-	AWAIT_CHECK_YIELDABLE(L);
-	size_t len;
-	const char *const command = luaL_checklstring(L, 1, &len);
-	/* execv hands the command to sh as a C string, so an embedded NUL would
-	 * silently run only the prefix; reject it rather than a truncated view the
-	 * caller does not know was cut (cf. regex.c). */
-	if (memchr(command, '\0', len) != NULL) {
-		return luaL_error(L, "command contains an embedded NUL byte");
-	}
-	lua_settop(L, 1);
-
-	struct ruleset *restrict r = aux_getruleset(L);
-	struct await_execute_userdata *restrict ud =
-		lua_newuserdata(L, sizeof(struct await_execute_userdata));
-	ud->ruleset = r;
-	ev_child_init(&ud->w_child, child_cb, 0, 0);
-	ud->w_child.data = ud;
-	ev_idle_init(&ud->w_idle, await_resume_cb);
-	ud->w_idle.data = ud;
-	aux_toclose(L, -1, MT_AWAIT_EXECUTE, await_execute_close);
+	CHECK_REVENTS(revents, EV_IDLE);
+	ev_idle_stop(loop, watcher);
+	struct await_execute_userdata *restrict ud = watcher->data;
+	ev_set_cb(watcher, await_resume_cb);
 
 	const pid_t pid = fork();
 	if (pid < 0) {
 		const int err = errno;
 		const char *const errmsg = strerror(err);
 		LOGW_F("fork: (%d) %s", err, errmsg);
-		lua_pushstring(L, errmsg);
-		return lua_error(L);
+		ud->error = err;
+		ev_idle_start(loop, &ud->w_idle);
+		return;
 	}
 	if (pid == 0) {
 		/* Between fork() and execv() only async-signal-safe calls are
@@ -739,7 +733,7 @@ static int await_execute(lua_State *restrict L)
 		const struct sigaction dfl = { .sa_handler = SIG_DFL };
 		(void)sigaction(SIGPIPE, &dfl, NULL);
 		close_inherited_fds();
-		const char *argv[] = { "sh", "-c", command, NULL };
+		const char *argv[] = { "sh", "-c", ud->command, NULL };
 		execv(_PATH_BSHELL, (char *const *)argv);
 		const int err = errno;
 		slog_panicf(
@@ -748,7 +742,36 @@ static int await_execute(lua_State *restrict L)
 		_exit(127);
 	}
 	ev_child_set(&ud->w_child, pid, 0);
-	ev_child_start(r->loop, &ud->w_child);
+	ev_child_start(loop, &ud->w_child);
+}
+
+/* status = await.execute(command) */
+static int await_execute(lua_State *restrict L)
+{
+	AWAIT_CHECK_YIELDABLE(L);
+	size_t len;
+	const char *const command = luaL_checklstring(L, 1, &len);
+	/* execv hands the command to sh as a C string, so an embedded NUL would
+	 * silently run only the prefix; reject it rather than a truncated view the
+	 * caller does not know was cut (cf. regex.c). */
+	if (memchr(command, '\0', len) != NULL) {
+		return luaL_error(L, "command contains an embedded NUL byte");
+	}
+	lua_settop(L, 1);
+
+	struct ruleset *restrict r = aux_getruleset(L);
+	struct await_execute_userdata *restrict ud =
+		lua_newuserdata(L, sizeof(struct await_execute_userdata));
+	ud->ruleset = r;
+	ud->command = command;
+	ud->error = 0;
+	ev_child_init(&ud->w_child, child_cb, 0, 0);
+	ud->w_child.data = ud;
+	ev_idle_init(&ud->w_idle, execute_start_cb);
+	ud->w_idle.data = ud;
+	aux_toclose(L, -1, MT_AWAIT_EXECUTE, await_execute_close);
+
+	ev_idle_start(r->loop, &ud->w_idle);
 
 	pin_context(L, ud);
 	/* lua stack: command ud */

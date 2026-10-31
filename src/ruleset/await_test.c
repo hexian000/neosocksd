@@ -225,6 +225,10 @@ static struct {
 	bool resolve_start_ok;
 	struct resolve_query *resolve_query;
 	struct resolve_cb resolve_cb;
+	struct resolver *resolve_resolver;
+	const char *resolve_name;
+	const char *resolve_service;
+	int resolve_family;
 	bool api_start_ok;
 	struct api_client_ctx *api_ctx;
 	struct api_client_cb api_cb;
@@ -235,6 +239,15 @@ static struct {
 	bool resolve_cancelled;
 	/* await.forward dialer stub state */
 	struct dialer *dial_d;
+	const struct config *dial_conf;
+	struct resolver *dial_resolver;
+	struct server *dial_server;
+	uint_least64_t *dial_byt_sent;
+	uint_least64_t *dial_byt_recv;
+	bool dial_has_req;
+	struct dialaddr dial_addr;
+	size_t dial_num_proxy;
+	struct proxyreq dial_proxy[2];
 	bool dial_pending;
 	bool dial_cancelled;
 } STUB = {
@@ -275,6 +288,10 @@ static void reset_stub_state(void)
 	}
 	STUB.resolve_start_ok = true;
 	STUB.resolve_cb = (struct resolve_cb){ 0 };
+	STUB.resolve_resolver = NULL;
+	STUB.resolve_name = NULL;
+	STUB.resolve_service = NULL;
+	STUB.resolve_family = PF_UNSPEC;
 	STUB.api_start_ok = true;
 	STUB.api_cb = (struct api_client_cb){ 0 };
 	STUB.payload[0] = '\0';
@@ -282,6 +299,13 @@ static void reset_stub_state(void)
 	STUB.api_cancelled = false;
 	STUB.resolve_cancelled = false;
 	STUB.dial_d = NULL;
+	STUB.dial_conf = NULL;
+	STUB.dial_resolver = NULL;
+	STUB.dial_server = NULL;
+	STUB.dial_byt_sent = NULL;
+	STUB.dial_byt_recv = NULL;
+	STUB.dial_has_req = false;
+	STUB.dial_num_proxy = 0;
 	STUB.dial_pending = false;
 	STUB.dial_cancelled = false;
 }
@@ -514,8 +538,8 @@ void dialer_init(
 	struct dialer *restrict d, const struct dialer_cb *callback,
 	uint_least64_t *const byt_sent, uint_least64_t *const byt_recv)
 {
-	(void)byt_sent;
-	(void)byt_recv;
+	STUB.dial_byt_sent = byt_sent;
+	STUB.dial_byt_recv = byt_recv;
 	d->finish_cb = *callback;
 	d->dialed_fd = -1;
 	d->err = DIALER_OK;
@@ -527,9 +551,19 @@ void dialer_do(
 	const struct dialreq *restrict req, const struct config *restrict conf,
 	struct resolver *restrict resolver, struct server *restrict server)
 {
-	(void)conf;
-	(void)resolver;
-	(void)server;
+	STUB.dial_conf = conf;
+	STUB.dial_resolver = resolver;
+	STUB.dial_server = server;
+	STUB.dial_has_req = req != NULL;
+	if (req != NULL) {
+		STUB.dial_addr = req->addr;
+		STUB.dial_num_proxy = req->num_proxy;
+		for (size_t i = 0;
+		     i < req->num_proxy && i < ARRAY_SIZE(STUB.dial_proxy);
+		     i++) {
+			STUB.dial_proxy[i] = req->proxy[i];
+		}
+	}
 	STUB.loop = loop;
 	STUB.dial_d = d;
 	STUB.dial_pending = true;
@@ -559,10 +593,10 @@ struct resolve_query *resolve_do(
 	const char *restrict name, const char *restrict service,
 	const int family)
 {
-	(void)r;
-	(void)name;
-	(void)service;
-	(void)family;
+	STUB.resolve_resolver = r;
+	STUB.resolve_name = name;
+	STUB.resolve_service = service;
+	STUB.resolve_family = family;
 	if (!STUB.resolve_start_ok) {
 		return NULL;
 	}
@@ -577,10 +611,10 @@ struct resolve_query *resolve_do(
 void resolve_cancel(struct resolve_query *q)
 {
 	STUB.resolve_cancelled = true;
-	free(q);
 	if (STUB.resolve_query == q) {
 		STUB.resolve_query = NULL;
 	}
+	free(q);
 }
 
 /* ---- api_client stubs (required by await.c's await_invoke) ---- */
@@ -619,10 +653,10 @@ void api_client_cancel(
 {
 	(void)loop;
 	STUB.api_cancelled = true;
-	free(ctx);
 	if (STUB.api_ctx == ctx) {
 		STUB.api_ctx = NULL;
 	}
+	free(ctx);
 }
 
 /* ---- Lua helpers ---- */
@@ -646,12 +680,87 @@ test_failing_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 	return realloc(ptr, nsize);
 }
 
-static lua_State *new_lua(void)
+/* Borrowed ruleset/config/callback storage in these cases is static: the
+ * framework runs cleanup after a failed expectation has left the case body. */
+struct await_fixture {
+	struct await_fixture *next;
+	lua_State *L;
+	struct ev_loop *loop;
+};
+
+static struct await_fixture *fixtures;
+static size_t fixture_closes;
+static bool fixture_idle;
+/* The connected fd handed to the most recent await.forward() commit. */
+static int g_committed_fd = -1;
+
+static void close_committed_fd(const int fd)
+{
+	socket_close(fd);
+	if (g_committed_fd == fd) {
+		g_committed_fd = -1;
+	}
+}
+
+static void close_fixture(struct await_fixture *f)
+{
+	g_oom_arm_on_dialreq = false;
+	g_oom_fail_count = 0;
+	if (f->L != NULL) {
+		lua_close(f->L);
+		f->L = NULL;
+		fixture_closes++;
+	}
+	if (f->loop != NULL) {
+		fixture_idle = ev_pending_count(f->loop) == 0 &&
+			       ev_run(f->loop, EVRUN_NOWAIT) == 0;
+		ev_loop_destroy(f->loop);
+		f->loop = NULL;
+	}
+}
+
+static void cleanup_fixture(void *data)
+{
+	struct await_fixture *f = data;
+	close_fixture(f);
+	if (g_committed_fd >= 0) {
+		close_committed_fd(g_committed_fd);
+	}
+	reset_stub_state();
+	STUB.loop = NULL;
+	T_CHECK(fixtures == f);
+	fixtures = f->next;
+	free(f);
+}
+
+static void
+register_fixture(struct testing_ctx *_t_, lua_State *L, struct ev_loop *loop)
+{
+	struct await_fixture *f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	*f = (struct await_fixture){ .next = fixtures, .L = L, .loop = loop };
+	fixtures = f;
+	T_CLEANUP(cleanup_fixture, f);
+}
+
+static void close_fixture_lua(lua_State *L)
+{
+	for (struct await_fixture *f = fixtures; f != NULL; f = f->next) {
+		if (f->L == L) {
+			close_fixture(f);
+			return;
+		}
+	}
+	T_CHECK(false);
+}
+
+static lua_State *new_lua(struct testing_ctx *_t_)
 {
 	lua_State *restrict L = luaL_newstate();
 	if (L == NULL) {
 		return NULL;
 	}
+	register_fixture(_t_, L, NULL);
 	luaL_openlibs(L);
 	(void)luaopen_await(L);
 	lua_setglobal(L, "await");
@@ -686,6 +795,16 @@ static lua_State *new_ruleset_lua(
 	STUB.loop = loop;
 	(void)luaopen_await(L);
 	lua_setglobal(L, "await");
+	return L;
+}
+
+static lua_State *new_fixture_lua(
+	struct testing_ctx *_t_, struct ruleset *r, struct config *conf,
+	struct ev_loop *loop)
+{
+	T_CHECK(loop != NULL);
+	lua_State *L = new_ruleset_lua(r, conf, loop);
+	register_fixture(_t_, L, loop);
 	return L;
 }
 
@@ -819,9 +938,6 @@ trigger_invoke_failure(const char *restrict errmsg, const size_t errlen)
 	STUB.api_ctx = NULL;
 }
 
-/* The connected fd handed to the most recent await.forward() commit. */
-static int g_committed_fd = -1;
-
 static void mock_forward_commit(
 	struct ev_loop *loop, struct ruleset_callback *restrict cb,
 	const int fd)
@@ -865,7 +981,7 @@ static void trigger_dial_failure(void)
 
 T_DECLARE_CASE(await_module_opens)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	lua_getglobal(L, "await");
@@ -879,12 +995,12 @@ T_DECLARE_CASE(await_module_opens)
 		lua_pop(L, 1);
 	}
 
-	lua_close(L);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_sleep_rejects_non_coroutine)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* pcall captures the error thrown by AWAIT_CHECK_YIELDABLE */
@@ -897,12 +1013,12 @@ T_DECLARE_CASE(await_sleep_rejects_non_coroutine)
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "not in asynchronous routine") != NULL);
 
-	lua_close(L);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_resolve_rejects_non_coroutine)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -914,17 +1030,19 @@ T_DECLARE_CASE(await_resolve_rejects_non_coroutine)
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "not in asynchronous routine") != NULL);
 
-	lua_close(L);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_resolve_rejects_embedded_nul)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 	T_CHECK(L != NULL);
 
 	reset_stub_state();
@@ -946,13 +1064,12 @@ T_DECLARE_CASE(await_resolve_rejects_embedded_nul)
 	lua_pop(L, 1);
 	T_EXPECT(STUB.resolve_query == NULL);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_invoke_rejects_non_coroutine)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -965,17 +1082,19 @@ T_DECLARE_CASE(await_invoke_rejects_non_coroutine)
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "not in asynchronous routine") != NULL);
 
-	lua_close(L);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_sleep_real_paths)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 	struct lua_global_pred pred = {
 		.L = L,
 		.name = "sleep_done",
@@ -1010,18 +1129,19 @@ T_DECLARE_CASE(await_sleep_real_paths)
 	T_EXPECT_STREQ(lua_tostring(L, -1), "timer");
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_resolve_real_path)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 	struct lua_global_pred pred = {
 		.L = L,
 		.name = "resolve_result",
@@ -1038,18 +1158,74 @@ T_DECLARE_CASE(await_resolve_real_path)
 	T_EXPECT_STREQ(lua_tostring(L, -1), "127.0.0.1");
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
+}
+
+T_DECLARE_CASE(await_resolve_passes_query_parameters)
+{
+	static const struct {
+		int family;
+		const char *name;
+	} cases[] = {
+		{ PF_UNSPEC, "default.example" },
+		{ PF_INET, "ipv4.example" },
+		{ PF_INET6, "ipv6.example" },
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		static struct config conf;
+		conf = (struct config){ .resolve_pf = cases[i].family };
+		static struct ruleset r;
+		r = (struct ruleset){ 0 };
+		struct ev_loop *const loop = ev_loop_new(0);
+		T_CHECK(loop != NULL);
+		lua_State *const L = new_fixture_lua(_t_, &r, &conf, loop);
+		struct lua_global_pred pred = { .L = L,
+						.name = "resolve_done" };
+
+		reset_stub_state();
+		lua_pushstring(L, cases[i].name);
+		lua_setglobal(L, "resolve_name");
+		const bool started = run_chunk(
+			L,
+			"co = coroutine.create(function() "
+			"  assert(await.resolve(resolve_name) == nil); resolve_done = true "
+			"end); return coroutine.resume(co)");
+		const bool pending = STUB.resolve_query != NULL;
+		const bool resolver_matches =
+			STUB.resolve_resolver == r.resolver;
+		const bool name_matches =
+			STUB.resolve_name != NULL &&
+			strcmp(STUB.resolve_name, cases[i].name) == 0;
+		const bool service_matches = STUB.resolve_service == NULL;
+		const int family = STUB.resolve_family;
+		bool completed = false;
+		if (pending) {
+			trigger_resolve_failure();
+			completed = wait_until(
+				loop, global_is_non_nil, &pred, TEST_WAIT_SEC);
+		}
+		close_fixture_lua(L);
+
+		T_EXPECT(started);
+		T_EXPECT(pending);
+		T_EXPECT(resolver_matches);
+		T_EXPECT(name_matches);
+		T_EXPECT(service_matches);
+		T_EXPECT_EQ(family, cases[i].family);
+		T_EXPECT(completed);
+	}
 }
 
 T_DECLARE_CASE(await_resolve_failure_returns_nil)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 	struct lua_global_pred pred = {
 		.L = L,
 		.name = "resolve_done",
@@ -1068,18 +1244,19 @@ T_DECLARE_CASE(await_resolve_failure_returns_nil)
 	T_EXPECT_STREQ(lua_tostring(L, -1), "nil");
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_invoke_real_path)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 	struct lua_global_pred pred = {
 		.L = L,
 		.name = "invoke_value",
@@ -1106,8 +1283,7 @@ T_DECLARE_CASE(await_invoke_real_path)
 	T_EXPECT_EQ(lua_tointeger(L, -1), 42);
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 	reset_stub_state();
 }
 
@@ -1121,12 +1297,14 @@ T_DECLARE_CASE(await_invoke_real_path)
  */
 T_DECLARE_CASE(await_invoke_reports_async_error)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 	struct lua_global_pred pred = {
 		.L = L,
 		.name = "invoke_err",
@@ -1154,8 +1332,7 @@ T_DECLARE_CASE(await_invoke_reports_async_error)
 	T_EXPECT_STREQ(lua_tostring(L, -1), "connection refused");
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 	reset_stub_state();
 }
 
@@ -1167,12 +1344,14 @@ T_DECLARE_CASE(await_invoke_reports_async_error)
  */
 T_DECLARE_CASE(await_invoke_reports_chunk_error)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 	struct lua_global_pred pred = {
 		.L = L,
 		.name = "invoke_err",
@@ -1202,8 +1381,7 @@ T_DECLARE_CASE(await_invoke_reports_chunk_error)
 	T_EXPECT(strstr(err, "(rpc)") != NULL);
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 	reset_stub_state();
 }
 
@@ -1215,12 +1393,14 @@ T_DECLARE_CASE(await_invoke_reports_chunk_error)
  */
 T_DECLARE_CASE(await_invoke_sandboxes_rpc_chunk)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 	struct lua_global_pred pred = {
 		.L = L,
 		.name = "invoke_leaked",
@@ -1251,8 +1431,7 @@ T_DECLARE_CASE(await_invoke_sandboxes_rpc_chunk)
 	T_EXPECT(lua_toboolean(L, -1) == 0);
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 	reset_stub_state();
 }
 
@@ -1264,12 +1443,14 @@ T_DECLARE_CASE(await_invoke_sandboxes_rpc_chunk)
  */
 T_DECLARE_CASE(await_invoke_without_address_raises_error)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	T_EXPECT(run_chunk(
@@ -1282,9 +1463,30 @@ T_DECLARE_CASE(await_invoke_without_address_raises_error)
 	T_EXPECT(lua_toboolean(L, -1) == 0);
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 	reset_stub_state();
+}
+
+T_DECLARE_CASE(await_execute_cancelled_before_loop_does_not_fork)
+{
+	struct config conf = { .resolve_pf = PF_UNSPEC };
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = EV_DEFAULT;
+	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	reset_stub_state();
+	g_fork_calls = 0;
+	const bool ran = run_chunk(
+		L,
+		"co=coroutine.create(function() await.execute('exit 0') end); "
+		"assert(coroutine.resume(co))");
+	const size_t calls_before_close = g_fork_calls;
+	lua_close(L);
+	const bool idle = ev_run(loop, EVRUN_NOWAIT) == 0;
+	T_EXPECT(ran);
+	T_EXPECT_EQ(calls_before_close, 0);
+	T_EXPECT_EQ(g_fork_calls, 0);
+	T_EXPECT_EQ(g_kill_count, 0);
+	T_EXPECT(idle);
 }
 
 T_DECLARE_CASE(await_execute_fork_failure_cleans_up)
@@ -1302,30 +1504,35 @@ T_DECLARE_CASE(await_execute_fork_failure_cleans_up)
 		L, "co = coroutine.create(function() "
 		   "_G.x_ok, _G.x_err = pcall(await.execute, 'exit 0') end) "
 		   "return coroutine.resume(co)");
+	struct lua_global_pred failed_pred = { .L = L, .name = "x_err" };
+	const bool failed = ran && wait_until(
+					   loop, global_is_non_nil,
+					   &failed_pred, TEST_WAIT_SEC);
 	g_fork_fail = false;
-	T_EXPECT(ran);
-	T_EXPECT_EQ(g_fork_calls, 1);
+	const size_t failed_calls = g_fork_calls;
 	lua_getglobal(L, "x_ok");
-	T_EXPECT(!lua_toboolean(L, -1));
+	const bool failure_reported = !lua_toboolean(L, -1);
 	lua_pop(L, 1);
 	lua_getglobal(L, "x_err");
-	T_EXPECT_STREQ(lua_tostring(L, -1), strerror(EAGAIN));
+	const char *err = lua_tostring(L, -1);
+	const bool failure_message =
+		err != NULL && strcmp(err, strerror(EAGAIN)) == 0;
 	lua_pop(L, 1);
 	aux_getregtable(L, RIDX_AWAIT_CONTEXT);
 	lua_pushnil(L);
-	T_EXPECT(lua_next(L, -2) == 0);
-	lua_pop(L, 1);
-	T_EXPECT_EQ(ev_pending_count(loop), 0);
-	T_EXPECT_EQ(ev_run(loop, EVRUN_NOWAIT), 0);
-	T_EXPECT_EQ(g_kill_count, 0);
+	const bool unpinned = lua_next(L, -2) == 0;
+	lua_settop(L, 0);
+	const bool failure_idle =
+		ev_pending_count(loop) == 0 && ev_run(loop, EVRUN_NOWAIT) == 0;
 #if HAVE_LUA_TOCLOSE
-	T_EXPECT(run_chunk(L, "assert(coroutine.close(co)); co=nil"));
+	const bool failure_closed =
+		run_chunk(L, "assert(coroutine.close(co)); co=nil");
 #else
-	T_EXPECT(run_chunk(L, "co=nil"));
+	const bool failure_closed = run_chunk(L, "co=nil");
 #endif
 	lua_gc(L, LUA_GCCOLLECT, 0);
 	lua_gc(L, LUA_GCCOLLECT, 0);
-	T_EXPECT_EQ(g_kill_count, 0);
+	const size_t failure_kills = g_kill_count;
 	g_kill_deliver = true;
 	/* The disarmed operation must still start and complete normally. */
 	const bool recovered = run_chunk(
@@ -1350,6 +1557,15 @@ T_DECLARE_CASE(await_execute_fork_failure_cleans_up)
 	const bool reaped = !recovered || finished ||
 			    wait_until(loop, child_is_reaped, &g_fork_pid, 1.0);
 	kill_trace_reset();
+	T_EXPECT(ran);
+	T_EXPECT(failed);
+	T_EXPECT_EQ(failed_calls, 1);
+	T_EXPECT(failure_reported);
+	T_EXPECT(failure_message);
+	T_EXPECT(unpinned);
+	T_EXPECT(failure_idle);
+	T_EXPECT(failure_closed);
+	T_EXPECT_EQ(failure_kills, 0);
 	T_EXPECT(reaped);
 	T_EXPECT(recovered);
 	T_EXPECT(finished);
@@ -1384,17 +1600,105 @@ T_DECLARE_CASE(await_execute_reports_success)
 	T_EXPECT_EQ(result.code, 0);
 }
 
+T_DECLARE_SUBCASE(expect_forward_arguments, const bool with_server)
+{
+	static struct config conf;
+	conf = (struct config){ .resolve_pf = PF_UNSPEC };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	static struct server server;
+	server = (struct server){ 0 };
+	struct ev_loop *const loop = ev_loop_new(0);
+	lua_State *const L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ .forward = mock_forward_commit };
+	static struct ruleset_state state;
+	state = (struct ruleset_state){ .cb = &cb };
+	r.server = with_server ? &server : NULL;
+	reset_stub_state();
+	g_committed_fd = -1;
+	const bool created = run_chunk(
+		L, "co=coroutine.create(function() "
+		   "_G.fwd_ok=await.forward('[2001:db8::42]:8443', "
+		   "'http://proxy.test:8080', 'socks5://192.0.2.7:1080') end)");
+	lua_getglobal(L, "co");
+	lua_State *const co = lua_tothread(L, -1);
+	lua_pop(L, 1);
+	T_CHECK(co != NULL);
+	aux_setforward(L, co, &state);
+	const bool resumed = run_chunk(L, "assert(coroutine.resume(co))");
+	const bool pending = STUB.dial_pending;
+	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(fd >= 0);
+	if (pending) {
+		trigger_dial_success(fd);
+	}
+	const bool committed = g_committed_fd == fd && state.cb == NULL;
+	lua_getglobal(L, "fwd_ok");
+	const bool ok = lua_toboolean(L, -1) != 0;
+	lua_pop(L, 1);
+	const bool same_loop = STUB.loop == loop;
+	close_committed_fd(fd);
+	close_fixture_lua(L);
+
+	T_EXPECT(created);
+	T_EXPECT(resumed);
+	T_EXPECT(pending);
+	T_EXPECT(committed);
+	T_EXPECT(ok);
+	T_EXPECT(same_loop);
+	T_EXPECT(STUB.dial_conf == &conf);
+	T_EXPECT(STUB.dial_resolver == r.resolver);
+	T_EXPECT(STUB.dial_server == r.server);
+	T_EXPECT(
+		STUB.dial_byt_sent ==
+		(with_server ? &server.stats.byt_dial_send : NULL));
+	T_EXPECT(
+		STUB.dial_byt_recv ==
+		(with_server ? &server.stats.byt_dial_recv : NULL));
+	T_EXPECT(STUB.dial_has_req);
+	T_EXPECT_EQ(STUB.dial_addr.type, ATYP_INET6);
+	T_EXPECT_EQ(STUB.dial_addr.port, 8443);
+	struct in6_addr target;
+	T_CHECK(inet_pton(AF_INET6, "2001:db8::42", &target) == 1);
+	T_EXPECT(memcmp(&STUB.dial_addr.in6, &target, sizeof(target)) == 0);
+	T_EXPECT_EQ(STUB.dial_num_proxy, 2);
+	T_EXPECT_EQ(STUB.dial_proxy[0].proto, PROTO_SOCKS5);
+	T_EXPECT_EQ(STUB.dial_proxy[0].addr.type, ATYP_INET);
+	T_EXPECT_EQ(STUB.dial_proxy[0].addr.port, 1080);
+	struct in_addr proxy;
+	T_CHECK(inet_pton(AF_INET, "192.0.2.7", &proxy) == 1);
+	T_EXPECT_EQ(STUB.dial_proxy[0].addr.in.s_addr, proxy.s_addr);
+	T_EXPECT_EQ(STUB.dial_proxy[1].proto, PROTO_HTTP);
+	T_EXPECT_EQ(STUB.dial_proxy[1].addr.type, ATYP_DOMAIN);
+	T_EXPECT_EQ(STUB.dial_proxy[1].addr.port, 8080);
+	T_EXPECT_EQ(STUB.dial_proxy[1].addr.domain.len, strlen("proxy.test"));
+	T_EXPECT(
+		memcmp(STUB.dial_proxy[1].addr.domain.name, "proxy.test",
+		       strlen("proxy.test")) == 0);
+}
+
+T_DECLARE_CASE(await_forward_preserves_arguments)
+{
+	T_CALL_SUBCASE(expect_forward_arguments, false);
+	T_CALL_SUBCASE(expect_forward_arguments, true);
+}
+
 T_DECLARE_CASE(await_forward_commits_on_success)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	g_committed_fd = -1;
@@ -1423,22 +1727,25 @@ T_DECLARE_CASE(await_forward_commits_on_success)
 	T_EXPECT(lua_toboolean(L, -1) != 0);
 	lua_pop(L, 1);
 
-	socket_close(fd);
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_committed_fd(fd);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_forward_reports_dial_failure)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	g_committed_fd = -1;
@@ -1465,8 +1772,7 @@ T_DECLARE_CASE(await_forward_reports_dial_failure)
 	T_CHECK(lua_tostring(L, -1) != NULL); /* error string */
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 /*
@@ -1478,15 +1784,19 @@ T_DECLARE_CASE(await_forward_reports_dial_failure)
  */
 T_DECLARE_CASE(await_forward_reports_cancelled_request)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	g_committed_fd = -1;
@@ -1523,18 +1833,19 @@ T_DECLARE_CASE(await_forward_reports_cancelled_request)
 	T_EXPECT(fdflags == -1);
 	T_EXPECT_EQ(err, EBADF);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_forward_rejects_outside_request)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	/* no forward context registered: await.forward() must raise */
@@ -1554,13 +1865,12 @@ T_DECLARE_CASE(await_forward_rejects_outside_request)
 	lua_pop(L, 1);
 	T_EXPECT(!STUB.dial_pending); /* never dialed */
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_forward_rejects_non_coroutine)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* AWAIT_CHECK_YIELDABLE rejects the call before any dial is attempted */
@@ -1573,22 +1883,26 @@ T_DECLARE_CASE(await_forward_rejects_non_coroutine)
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "not in asynchronous routine") != NULL);
 
-	lua_close(L);
+	close_fixture_lua(L);
 }
 
 /* A committed forward consumes the session callback, so a second
  * await.forward in the same request must raise instead of dialing again. */
 T_DECLARE_CASE(await_forward_rejects_after_commit)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	g_committed_fd = -1;
@@ -1626,23 +1940,26 @@ T_DECLARE_CASE(await_forward_rejects_after_commit)
 	T_EXPECT(strstr(err, "not forwardable") != NULL);
 	lua_pop(L, 1);
 
-	socket_close(fd);
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_committed_fd(fd);
+	close_fixture_lua(L);
 }
 
 /* A request context whose callback has no forward hook cannot be forwarded
  * either: the call raises before any dial. */
 T_DECLARE_CASE(await_forward_rejects_callback_without_forward)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	T_EXPECT(run_chunk(
@@ -1668,8 +1985,7 @@ T_DECLARE_CASE(await_forward_rejects_callback_without_forward)
 	T_EXPECT(strstr(err, "not forwardable") != NULL);
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 /* await.forward() and await.forward(nil) reject the request: each returns a
@@ -1677,15 +1993,19 @@ T_DECLARE_CASE(await_forward_rejects_callback_without_forward)
  * place for the handler to use. */
 T_DECLARE_CASE(await_forward_rejects_nil_address)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	g_committed_fd = -1;
@@ -1725,23 +2045,26 @@ T_DECLARE_CASE(await_forward_rejects_nil_address)
 	T_EXPECT(lua_isnil(L, -1));
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 /* An address that does not parse raises "invalid address" synchronously: no
  * dial starts, the request stays forwardable and no dialreq is left behind. */
 T_DECLARE_CASE(await_forward_raises_on_invalid_address)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	g_committed_fd = -1;
@@ -1771,13 +2094,12 @@ T_DECLARE_CASE(await_forward_raises_on_invalid_address)
 	T_EXPECT(strstr(err, ERR_INVALID_ADDR) != NULL);
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_execute_rejects_non_coroutine)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* AWAIT_CHECK_YIELDABLE rejects the call before fork() runs */
@@ -1790,17 +2112,19 @@ T_DECLARE_CASE(await_execute_rejects_non_coroutine)
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "not in asynchronous routine") != NULL);
 
-	lua_close(L);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_sleep_rejects_bad_argument)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	/* negative, non-finite and out-of-range durations fail luaL_argcheck
@@ -1829,18 +2153,19 @@ T_DECLARE_CASE(await_sleep_rejects_bad_argument)
 		lua_pop(L, 1);
 	}
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_resolve_reports_start_failure)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	STUB.resolve_start_ok = false;
@@ -1858,18 +2183,19 @@ T_DECLARE_CASE(await_resolve_reports_start_failure)
 	/* nothing was started, so nothing is cancelled */
 	T_EXPECT(!STUB.resolve_cancelled);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_invoke_reports_start_failure)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	STUB.api_start_ok = false;
@@ -1887,25 +2213,28 @@ T_DECLARE_CASE(await_invoke_reports_start_failure)
 	lua_pop(L, 1);
 	T_EXPECT(!STUB.api_cancelled);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_forward_reports_timeout)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 		/* A zero timeout arms the forward deadline to fire on the next
 		 * event-loop iteration (the dial is already issued and pending by
 		 * then), so the "timeout" result is reached without a real wait. */
 		.timeout = 0,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 	struct lua_global_pred pred = {
 		.L = L,
 		.name = "fwd_err",
@@ -1937,8 +2266,7 @@ T_DECLARE_CASE(await_forward_reports_timeout)
 	T_EXPECT_STREQ(lua_tostring(L, -1), "timeout");
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_execute_reports_signal)
@@ -1956,12 +2284,14 @@ T_DECLARE_CASE(await_execute_reports_signal)
  * (before fork), so no child runs. */
 T_DECLARE_CASE(await_execute_rejects_embedded_nul)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	T_EXPECT(run_chunk(
@@ -1978,8 +2308,7 @@ T_DECLARE_CASE(await_execute_rejects_embedded_nul)
 	T_EXPECT(strstr(err, "NUL") != NULL);
 	lua_pop(L, 1);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 /* The daemon ignores SIGPIPE, and an ignored disposition survives execv(), so
@@ -2032,9 +2361,9 @@ T_DECLARE_CASE(await_execute_closes_inherited_fds)
 		   "  _G.exec_code = code "
 		   "end) "
 		   "return coroutine.resume(co)");
-	g_fork_probe_fd = -1;
 	const bool finished =
 		ran && wait_until(loop, global_is_non_nil, &pred, 1.0);
+	g_fork_probe_fd = -1;
 	lua_getglobal(L, "exec_ok");
 	const bool ok = lua_toboolean(L, -1) != 0;
 	lua_pop(L, 1);
@@ -2080,12 +2409,14 @@ T_DECLARE_CASE(await_execute_closes_inherited_fds)
  */
 T_DECLARE_CASE(await_invoke_oom_does_not_leak_dialreq)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	g_dialreq_live = 0;
@@ -2118,22 +2449,25 @@ T_DECLARE_CASE(await_invoke_oom_does_not_leak_dialreq)
 	reset_stub_state();
 	T_EXPECT_EQ(g_dialreq_live, 0);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 	reset_stub_state();
 }
 
 T_DECLARE_CASE(await_forward_oom_does_not_leak_dialreq)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	g_dialreq_live = 0;
@@ -2169,8 +2503,7 @@ T_DECLARE_CASE(await_forward_oom_does_not_leak_dialreq)
 	T_EXPECT_EQ(g_dialreq_live, 0);
 	T_EXPECT_EQ(g_committed_fd, -1); /* never committed */
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 	reset_stub_state();
 }
 
@@ -2182,12 +2515,14 @@ T_DECLARE_CASE(await_forward_oom_does_not_leak_dialreq)
  */
 T_DECLARE_CASE(await_resolve_abandoned_cancels_query)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	T_EXPECT(run_chunk(
@@ -2201,18 +2536,19 @@ T_DECLARE_CASE(await_resolve_abandoned_cancels_query)
 	T_EXPECT(STUB.resolve_cancelled);
 	T_EXPECT(STUB.resolve_query == NULL);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_invoke_abandoned_cancels_request)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	T_EXPECT(run_chunk(
@@ -2226,21 +2562,24 @@ T_DECLARE_CASE(await_invoke_abandoned_cancels_request)
 	T_EXPECT(STUB.api_cancelled);
 	T_EXPECT(STUB.api_ctx == NULL);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 T_DECLARE_CASE(await_forward_abandoned_cancels_dial)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
-	struct ruleset_callback mock_cb = { 0 };
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
+	static struct ruleset_callback mock_cb;
+	mock_cb = (struct ruleset_callback){ 0 };
 	mock_cb.forward = mock_forward_commit;
-	struct ruleset_state mock_state = { .cb = &mock_cb };
+	static struct ruleset_state mock_state;
+	mock_state = (struct ruleset_state){ .cb = &mock_cb };
 
 	reset_stub_state();
 	g_committed_fd = -1;
@@ -2261,8 +2600,7 @@ T_DECLARE_CASE(await_forward_abandoned_cancels_dial)
 	T_EXPECT(!STUB.dial_pending);
 	T_EXPECT_EQ(g_committed_fd, -1); /* nothing committed */
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 /* await.sleep arms a Lua-owned ev_timer; closing the suspended coroutine must
@@ -2270,12 +2608,14 @@ T_DECLARE_CASE(await_forward_abandoned_cancels_dial)
  * expiry cannot fire a callback into the collected userdata. */
 T_DECLARE_CASE(await_sleep_abandoned_stops_timer)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_fixture_lua(_t_, &r, &conf, loop);
 
 	reset_stub_state();
 	/* a long sleep, so the timer is still pending when the coroutine closes */
@@ -2309,8 +2649,7 @@ T_DECLARE_CASE(await_sleep_abandoned_stops_timer)
 	ev_run(loop, EVRUN_NOWAIT);
 	vclock_stop();
 
-	lua_close(L);
-	ev_loop_destroy(loop);
+	close_fixture_lua(L);
 }
 
 /* The close handler signals the child's process group first, then the child
@@ -2411,8 +2750,53 @@ static bool child_probe_exited(void *data)
 	return probe->exited;
 }
 
-/* Closing immediately also covers cancellation before the child reaches
- * setsid(), when the direct PID signal must cover the process-group race. */
+/* A queued top-level command must become a child of the process that runs the
+ * inherited loop, just as after main's daemonization. */
+T_DECLARE_CASE(await_execute_starts_in_loop_process)
+{
+	struct config conf = { .resolve_pf = PF_UNSPEC };
+	struct ruleset r = { 0 };
+	struct ev_loop *const loop = EV_DEFAULT;
+	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	reset_stub_state();
+	g_fork_pid = 0;
+	const bool ran = run_chunk(
+		L,
+		"co=coroutine.create(function() "
+		"local ok,kind,code=await.execute('exit 0'); "
+		"assert(ok and kind=='exit' and code==0); _G.exec_done=true end); "
+		"assert(coroutine.resume(co))");
+	const pid_t child = fork();
+	T_CHECK(child >= 0);
+	if (child == 0) {
+		ev_loop_fork(loop);
+		struct lua_global_pred pred = { .L = L, .name = "exec_done" };
+		const bool finished =
+			ran && wait_until(loop, global_is_non_nil, &pred, 1.0);
+		lua_close(L);
+		_exit(finished ? EXIT_SUCCESS : EXIT_FAILURE);
+	}
+	struct child_probe probe = { 0 };
+	start_child_probe(loop, &probe, child);
+	lua_close(L);
+	const bool finished = wait_until(loop, child_probe_exited, &probe, 2.0);
+	if (!finished && !ev_is_pending(&probe.watcher)) {
+		(void)kill(child, SIGKILL);
+		(void)wait_until(loop, child_probe_exited, &probe, 1.0);
+	}
+	ev_child_stop(loop, &probe.watcher);
+	const bool reaped = g_fork_pid <= 0 ||
+			    wait_until(loop, child_is_reaped, &g_fork_pid, 1.0);
+	const bool idle = ev_run(loop, EVRUN_NOWAIT) == 0;
+	T_EXPECT(ran);
+	T_EXPECT(finished);
+	T_EXPECT(WIFEXITED(probe.status));
+	T_EXPECT_EQ(WEXITSTATUS(probe.status), EXIT_SUCCESS);
+	T_EXPECT(reaped);
+	T_EXPECT(idle);
+}
+
+/* Cancel a command just after its deferred fork starts. */
 T_DECLARE_CASE(await_execute_abandoned_stops_child)
 {
 	struct config conf = { .resolve_pf = PF_UNSPEC };
@@ -2425,6 +2809,7 @@ T_DECLARE_CASE(await_execute_abandoned_stops_child)
 		L,
 		"co=coroutine.create(function() await.execute('exec sleep 30') end); "
 		"assert(coroutine.resume(co))");
+	(void)ev_run(loop, EVRUN_NOWAIT);
 	const pid_t child = g_fork_pid;
 	struct child_probe probe = { 0 };
 	if (child > 0) {
@@ -2490,6 +2875,7 @@ T_DECLARE_CASE(await_execute_abandoned_stops_descendants)
 		   "await.execute([[exec 3<&0; "
 		   "sh -c 'printf \"%s\\n\" \"$$\"; read hold' <&3 & wait]]) "
 		   "end); assert(coroutine.resume(co))");
+	(void)ev_run(loop, EVRUN_NOWAIT);
 	g_fork_stdin_fd = -1;
 	g_fork_stdout_fd = -1;
 	(void)close(input[0]);
@@ -2689,7 +3075,97 @@ T_DECLARE_CASE(await_execute_close_is_idempotent)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+static int failure_operation;
+static int failure_fd;
+
+T_DECLARE_CASE(await_fixture_intentional_failure)
+{
+	static struct config conf;
+	static struct ruleset r;
+	static struct ruleset_callback cb;
+	static struct ruleset_state state;
+	conf = (struct config){ .resolve_pf = PF_UNSPEC };
+	r = (struct ruleset){ 0 };
+	cb = (struct ruleset_callback){ .forward = mock_forward_commit };
+	state = (struct ruleset_state){ .cb = &cb };
+	struct ev_loop *loop = ev_loop_new(0);
+	lua_State *L = new_fixture_lua(_t_, &r, &conf, loop);
+	reset_stub_state();
+	if (failure_operation == 0) {
+		T_CHECK(run_chunk(
+			L,
+			"co=coroutine.create(function() await.sleep(30) end); assert(coroutine.resume(co))"));
+	} else if (failure_operation == 1) {
+		T_CHECK(run_chunk(
+			L,
+			"co=coroutine.create(function() await.resolve('example.com') end); assert(coroutine.resume(co))"));
+		T_CHECK(STUB.resolve_query != NULL);
+	} else if (failure_operation == 2) {
+		T_CHECK(run_chunk(
+			L,
+			"co=coroutine.create(function() await.invoke('return 1', '127.0.0.1:80') end); assert(coroutine.resume(co))"));
+		T_CHECK(STUB.api_ctx != NULL);
+	} else {
+		T_CHECK(run_chunk(
+			L,
+			"co=coroutine.create(function() await.forward('127.0.0.1:80') end)"));
+		lua_getglobal(L, "co");
+		lua_State *co = lua_tothread(L, -1);
+		lua_pop(L, 1);
+		aux_setforward(L, co, &state);
+		T_CHECK(run_chunk(L, "assert(coroutine.resume(co))"));
+		T_CHECK(STUB.dial_pending);
+		if (failure_operation == 4) {
+			failure_fd = socket(AF_INET, SOCK_STREAM, 0);
+			T_CHECK(failure_fd >= 0);
+			trigger_dial_success(failure_fd);
+			T_CHECK(g_committed_fd == failure_fd);
+		}
+	}
+	g_oom_arm_on_dialreq = true;
+	g_oom_fail_count = 2;
+	vclock_freeze_now();
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(await_failed_expectation_cleans_fixture)
+{
+	for (int operation = 0; operation < 5; operation++) {
+		failure_operation = operation;
+		failure_fd = -1;
+		const size_t before = fixture_closes;
+		T_DECLARE_CTX(nested);
+		T_RUN_CASE(nested, await_fixture_intentional_failure);
+		T_EXPECT_EQ(nested.failed, 1);
+		T_EXPECT_EQ(fixture_closes, before + 1);
+		T_EXPECT(fixtures == NULL);
+		T_EXPECT(fixture_idle);
+		T_EXPECT(STUB.loop == NULL);
+		T_EXPECT(STUB.resolve_query == NULL);
+		T_EXPECT(STUB.api_ctx == NULL);
+		T_EXPECT(STUB.req == NULL);
+		T_EXPECT(STUB.dial_d == NULL);
+		T_EXPECT(!STUB.dial_pending);
+		T_EXPECT_EQ(g_dialreq_live, 0);
+		T_EXPECT_EQ(g_committed_fd, -1);
+		T_EXPECT(!g_vclock_on);
+		T_EXPECT(!g_oom_arm_on_dialreq);
+		T_EXPECT_EQ(g_oom_fail_count, 0);
+		if (failure_fd >= 0) {
+			errno = 0;
+			T_EXPECT_EQ(fcntl(failure_fd, F_GETFD), -1);
+			T_EXPECT_EQ(errno, EBADF);
+		}
+		T_RUN_CASE(nested, await_invoke_real_path);
+		T_EXPECT_EQ(nested.passed, 1);
+		T_EXPECT_EQ(nested.failed, 1);
+		T_EXPECT(fixtures == NULL);
+		T_EXPECT_EQ(g_dialreq_live, 0);
+	}
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(await_failed_expectation_cleans_fixture),
 	T_CASE(await_module_opens),
 	T_CASE(await_sleep_rejects_non_coroutine),
 	T_CASE(await_resolve_rejects_non_coroutine),
@@ -2697,12 +3173,14 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_invoke_rejects_non_coroutine),
 	T_CASE(await_sleep_real_paths),
 	T_CASE(await_resolve_real_path),
+	T_CASE(await_resolve_passes_query_parameters),
 	T_CASE(await_resolve_failure_returns_nil),
 	T_CASE(await_invoke_real_path),
 	T_CASE(await_invoke_reports_async_error),
 	T_CASE(await_invoke_reports_chunk_error),
 	T_CASE(await_invoke_sandboxes_rpc_chunk),
 	T_CASE(await_invoke_without_address_raises_error),
+	T_CASE(await_execute_cancelled_before_loop_does_not_fork),
 	T_CASE(await_execute_fork_failure_cleans_up),
 	T_CASE(await_execute_reports_success),
 	T_CASE(await_execute_reports_exit_status),
@@ -2712,6 +3190,7 @@ static const struct testing_suite suite[] = {
 #if WITH_CLOSE_RANGE
 	T_CASE(await_execute_closes_inherited_fds),
 #endif /* WITH_CLOSE_RANGE */
+	T_CASE(await_forward_preserves_arguments),
 	T_CASE(await_forward_commits_on_success),
 	T_CASE(await_forward_reports_dial_failure),
 	T_CASE(await_forward_reports_timeout),
@@ -2733,6 +3212,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(await_resolve_abandoned_cancels_query),
 	T_CASE(await_invoke_abandoned_cancels_request),
 	T_CASE(await_forward_abandoned_cancels_dial),
+	T_CASE(await_execute_starts_in_loop_process),
 	T_CASE(await_execute_abandoned_stops_child),
 	T_CASE(await_execute_abandoned_stops_descendants),
 	T_CASE(await_execute_close_is_idempotent),
