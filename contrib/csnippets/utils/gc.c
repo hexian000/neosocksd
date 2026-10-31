@@ -83,30 +83,35 @@ void gc_unref(struct gcbase *restrict obj)
 size_t gc_finalizeall(void)
 {
 	const size_t before = gc_finalized_total;
+	struct gcbase *finalized = NULL;
 	/* An object registered by a finalizer lands on the emptied list and is
 	 * torn down by the next round. */
 	while (gcroot != NULL) {
 		struct gcbase *const batch = gcroot;
+		struct gcbase *last = batch;
 		gcroot = NULL;
 		/* Mark the whole batch before running any finalizer, so one that
 		 * releases another object of the batch cannot finalize or free it
 		 * early. */
 		for (struct gcbase *obj = batch; obj != NULL; obj = obj->next) {
 			obj->refs = GC_REFS_TEARDOWN;
+			last = obj;
 		}
-		/* Every object of the batch stays allocated until each finalizer
-		 * in it has run. */
+		/* Keep earlier batches allocated too: a finalizer may register
+		 * another owner that releases one of their objects next round. */
 		for (struct gcbase *obj = batch; obj != NULL; obj = obj->next) {
 			if (obj->finalize != NULL) {
 				obj->finalize(obj);
 			}
 			gc_finalized_total++;
 		}
-		for (struct gcbase *obj = batch; obj != NULL;) {
-			struct gcbase *const next = obj->next;
-			free(obj);
-			obj = next;
-		}
+		last->next = finalized;
+		finalized = batch;
+	}
+	for (struct gcbase *obj = finalized; obj != NULL;) {
+		struct gcbase *const next = obj->next;
+		free(obj);
+		obj = next;
 	}
 	/* the delta includes any object a finalizer finalized via gc_unref */
 	return gc_finalized_total - before;

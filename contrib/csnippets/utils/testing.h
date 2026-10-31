@@ -273,6 +273,7 @@ struct testing_bench {
 	int_fast64_t round_start; /* monotonic ns at round start or last reset */
 	int_fast64_t paused_ns; /* time excluded while the timer was stopped */
 	int_fast64_t pause_at; /* monotonic ns when stopped, -1 while running */
+	bool clock_failed; /* latched until the next round */
 };
 
 /*
@@ -459,10 +460,11 @@ static inline void testing_run_case_(
  *         T_KEEP(h);                   // consume the final result
  *     }
  *
- * T_KEEP accepts any standard arithmetic type or object-pointer value; its
- * only cost is one forced store.  It dispatches on the promoted operand type
- * (see TESTING_PROMOTE_), so a bit-field or an enum - compatible with whichever
- * integer type the implementation chose for it (6.7.2.2p4) - needs no cast.
+ * T_KEEP accepts standard integer, real floating, or object-pointer values;
+ * complex values are not supported.  Its only cost is one forced store.  It
+ * dispatches on the promoted operand type (see TESTING_PROMOTE_), so a bit-field
+ * or an enum - compatible with whichever integer type the implementation chose
+ * for it (6.7.2.2p4) - needs no cast.
  * Calling it once after the loop is enough when results accumulate into a
  * single variable.  To stop the optimizer hoisting a loop-invariant input out
  * of the loop, prefer feeding the loop index or the previous result as input,
@@ -490,11 +492,11 @@ static inline void testing_keep_p_(const volatile void *v)
 /*
  * T_KEEP(value)
  *   Force `value` - and the computation that produced it - to be evaluated,
- *   defeating dead-code elimination.  Accepts any standard arithmetic type or
- *   object pointer.  The _Generic selects a sink function from the promoted
- *   operand type; only the selected branch is applied to `value`, so the
- *   unselected branches need not type-check against it, and the value reaches
- *   the sink unpromoted, exactly as written.
+ *   defeating dead-code elimination.  Accepts standard integer, real floating,
+ *   or object-pointer values; complex values are not supported.  The _Generic
+ *   selects a sink function from the promoted operand type; only the selected
+ *   branch is applied to `value`, so the unselected branches need not type-check
+ *   against it, and the value reaches the sink unpromoted, exactly as written.
  */
 #define T_KEEP(value_)                                                         \
 	(_Generic(                                                             \

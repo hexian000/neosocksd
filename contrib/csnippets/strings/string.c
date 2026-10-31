@@ -462,7 +462,11 @@ char *u8strcasestr(char *restrict haystack, const char *restrict needle)
 	if (count > SIZE_MAX / sizeof(struct match_unit)) {
 		return casestr_fallback(haystack, needle);
 	}
-	struct match_unit *const units = malloc(count * sizeof(*units));
+	struct match_unit local[32];
+	struct match_unit *const units =
+		count <= sizeof(local) / sizeof(local[0]) ?
+			local :
+			malloc(count * sizeof(*units));
 	if (units == NULL) {
 		return casestr_fallback(haystack, needle);
 	}
@@ -510,7 +514,9 @@ char *u8strcasestr(char *restrict haystack, const char *restrict needle)
 			}
 		}
 	}
-	free(units);
+	if (units != local) {
+		free(units);
+	}
 	return result;
 }
 
@@ -1361,8 +1367,11 @@ int u8vsnprintf_stored(
 		case 'o':
 		case 'x':
 		case 'X':
-			emit_int(&s, &sp, &ap);
-			continue;
+			if (sp.length != LEN_LDOUBLE) {
+				emit_int(&s, &sp, &ap);
+				continue;
+			}
+			break;
 		case 'c':
 			if (sp.length == LEN_NONE) {
 				emit_char(&s, &sp, &ap);
@@ -1376,8 +1385,11 @@ int u8vsnprintf_stored(
 			}
 			break;
 		case 'p':
-			emit_ptr(&s, &sp, &ap);
-			continue;
+			if (sp.length == LEN_NONE) {
+				emit_ptr(&s, &sp, &ap);
+				continue;
+			}
+			break;
 		case 'f':
 		case 'F':
 		case 'e':
@@ -1386,8 +1398,12 @@ int u8vsnprintf_stored(
 		case 'G':
 		case 'a':
 		case 'A':
-			emit_float(&s, &sp, &ap);
-			continue;
+			if (sp.length == LEN_NONE || sp.length == LEN_LONG ||
+			    sp.length == LEN_LDOUBLE) {
+				emit_float(&s, &sp, &ap);
+				continue;
+			}
+			break;
 		default:
 			break;
 		}
@@ -1396,7 +1412,9 @@ int u8vsnprintf_stored(
 		 * precision was already consumed by parse_spec. The spec prefix
 		 * [start, f) is ASCII; the conversion char at f may be a
 		 * multibyte lead byte, so echo it as a whole UTF-8 unit. */
-		sink_put(&s, start, (size_t)(f - start));
+		for (const char *p = start; p < f; p++) {
+			sink_putc(&s, *p);
+		}
 		if (sp.conv == '\0') {
 			/* malformed spec hit the terminator */
 			break;

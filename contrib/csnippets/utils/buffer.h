@@ -158,6 +158,10 @@ static inline struct vbuffer *vbuf_alloc(struct vbuffer *vbuf, const size_t cap)
 	if (cap > SIZE_MAX - sizeof(struct vbuffer) - 1) {
 		return vbuf;
 	}
+	if (vbuf != NULL && cap == vbuf->cap) {
+		vbuf->data[vbuf->len] = '\0';
+		return vbuf;
+	}
 	const size_t len = (vbuf != NULL) ? vbuf->len : 0;
 	/* reserve 1 byte for null terminator */
 	struct vbuffer *newbuf =

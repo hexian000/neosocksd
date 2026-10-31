@@ -90,24 +90,40 @@ static void filter_free(struct filter *f)
  * clock lives here so benchmark files need not include it.
  * ---------------------------------------------------------------------- */
 
+static int_fast64_t bench_clock(struct testing_bench *b)
+{
+	const int_fast64_t now = clock_monotonic_ns();
+	if (now == -1) {
+		b->clock_failed = true;
+	}
+	return now;
+}
+
 void testing_bench_stop_timer(struct testing_bench *b)
 {
 	if (b->pause_at < 0) { /* currently running */
-		b->pause_at = clock_monotonic_ns();
+		b->pause_at = bench_clock(b);
 	}
 }
 
 void testing_bench_start_timer(struct testing_bench *b)
 {
 	if (b->pause_at >= 0) { /* currently stopped */
-		b->paused_ns += clock_monotonic_ns() - b->pause_at;
+		const int_fast64_t now = bench_clock(b);
+		if (b->clock_failed) {
+			return;
+		}
+		b->paused_ns += now - b->pause_at;
 		b->pause_at = -1;
 	}
 }
 
 void testing_bench_reset_timer(struct testing_bench *b)
 {
-	const int_fast64_t now = clock_monotonic_ns();
+	const int_fast64_t now = bench_clock(b);
+	if (b->clock_failed) {
+		return;
+	}
 	b->round_start = now;
 	b->paused_ns = 0;
 	if (b->pause_at >= 0) { /* keep a stopped timer stopped, from now */
@@ -120,11 +136,18 @@ void testing_bench_reset_timer(struct testing_bench *b)
 static int_fast64_t
 bench_once(void (*bench)(struct testing_bench *), struct testing_bench *b)
 {
-	b->round_start = clock_monotonic_ns();
+	b->clock_failed = false;
+	b->round_start = bench_clock(b);
+	if (b->clock_failed) {
+		return -1;
+	}
 	b->paused_ns = 0;
 	b->pause_at = -1; /* running */
 	bench(b);
-	const int_fast64_t end = clock_monotonic_ns();
+	const int_fast64_t end = bench_clock(b);
+	if (b->clock_failed) {
+		return -1;
+	}
 	if (b->pause_at >= 0) { /* ended while stopped */
 		b->paused_ns += end - b->pause_at;
 		b->pause_at = -1;
@@ -176,7 +199,11 @@ void testing_bench_run(
 			uint_fast64_t n = 1;
 			for (;;) {
 				b.N = n;
-				active += bench_once(bench, &b);
+				elapsed = bench_once(bench, &b);
+				if (elapsed == -1) {
+					break;
+				}
+				active += elapsed;
 				total += n;
 				if (active >= time_ns) {
 					break;
@@ -199,8 +226,18 @@ void testing_bench_run(
 				}
 				n <<= 1u;
 			}
-			elapsed = active;
+			if (elapsed != -1) {
+				elapsed = active;
+			}
 			iters = total;
+		}
+		if (elapsed == -1) {
+			(void)fprintf(
+				t->out, "--- FAIL  %s\tclock read failed\n",
+				name);
+			(void)fflush(t->out);
+			t->failed++;
+			return;
 		}
 		const double ns_per_op = (double)elapsed / (double)iters;
 		if (rep == 0 || ns_per_op < best_ns_per_op) {

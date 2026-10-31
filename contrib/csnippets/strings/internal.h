@@ -21,9 +21,9 @@ int u8vsnprintf_stored(
 	char *restrict buf, size_t maxlen, const char *restrict format,
 	va_list args, size_t *restrict stored) FORMAT_PRINTF(3, 0);
 
-/* Bytes available for one decode: peek exactly as far as the lead byte
- * announces, stopping early at the terminator. Nothing past the unit at p is
- * read, so a bounded argument that ends on a whole unit is never read past.
+/* Bytes available for one decode: stop as soon as a byte proves the sequence
+ * invalid, including a terminator. Nothing past the unit at p is read, so a
+ * bounded argument that ends on a whole unit is never read past.
  * p[0] is known not to be the terminator. */
 static inline size_t peek_avail(const char *restrict p)
 {
@@ -32,17 +32,27 @@ static inline size_t peek_avail(const char *restrict p)
 	 * unit that needs no peek at all */
 	const unsigned char c0 = (unsigned char)p[0];
 	size_t want;
-	if ((c0 & 0xE0u) == 0xC0u) {
+	if (c0 >= 0xC2u && c0 <= 0xDFu) {
 		want = 2;
-	} else if ((c0 & 0xF0u) == 0xE0u) {
+	} else if (c0 >= 0xE0u && c0 <= 0xEFu) {
 		want = 3;
-	} else if ((c0 & 0xF8u) == 0xF0u) {
+	} else if (c0 >= 0xF0u && c0 <= 0xF4u) {
 		want = 4;
 	} else {
 		return 1;
 	}
 	size_t avail = 1;
-	while (avail < want && p[avail] != '\0') {
+	while (avail < want) {
+		const unsigned char c = (unsigned char)p[avail];
+		if (c < 0x80u || c > 0xBFu) {
+			break;
+		}
+		if (avail == 1 &&
+		    ((c0 == 0xE0u && c < 0xA0u) || (c0 == 0xEDu && c > 0x9Fu) ||
+		     (c0 == 0xF0u && c < 0x90u) ||
+		     (c0 == 0xF4u && c > 0x8Fu))) {
+			break;
+		}
 		avail++;
 	}
 	return avail;

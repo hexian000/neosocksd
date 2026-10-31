@@ -437,7 +437,8 @@ static int normalize(
 		}
 		return -1;
 	}
-	UChar *in16 = NULL, *out16 = NULL;
+	UChar in16buf[256], out16buf[256];
+	UChar *in16 = in16buf, *out16 = out16buf;
 	int ret = -1;
 
 	/* u_strFromUTF8WithSub substitutes U+FFFD for ill-formed input instead of
@@ -450,9 +451,11 @@ static int normalize(
 	    (uintmax_t)in16len >= SIZE_MAX / sizeof(UChar)) {
 		goto done;
 	}
-	in16 = malloc(((size_t)in16len + 1) * sizeof(UChar));
-	if (in16 == NULL) {
-		goto done;
+	if ((size_t)in16len >= sizeof in16buf / sizeof in16buf[0]) {
+		in16 = malloc(((size_t)in16len + 1) * sizeof(UChar));
+		if (in16 == NULL) {
+			goto done;
+		}
 	}
 	err = U_ZERO_ERROR;
 	u_strFromUTF8WithSub(
@@ -469,9 +472,11 @@ static int normalize(
 	    (uintmax_t)out16len >= SIZE_MAX / sizeof(UChar)) {
 		goto done;
 	}
-	out16 = malloc(((size_t)out16len + 1) * sizeof(UChar));
-	if (out16 == NULL) {
-		goto done;
+	if ((size_t)out16len >= sizeof out16buf / sizeof out16buf[0]) {
+		out16 = malloc(((size_t)out16len + 1) * sizeof(UChar));
+		if (out16 == NULL) {
+			goto done;
+		}
 	}
 	err = U_ZERO_ERROR;
 	unorm2_normalize(n2, in16, in16len, out16, out16len + 1, &err);
@@ -483,8 +488,12 @@ static int normalize(
 		buf, maxlen, (const char16_t *)out16, (size_t)out16len);
 
 done:
-	free(in16);
-	free(out16);
+	if (in16 != in16buf) {
+		free(in16);
+	}
+	if (out16 != out16buf) {
+		free(out16);
+	}
 	if (ret < 0 && buf != NULL && maxlen > 0) {
 		buf[0] = '\0';
 	}

@@ -191,9 +191,12 @@ unsigned char *io_readfile(const char *restrict path, size_t *restrict len)
 		free(buf);
 		return NULL;
 	}
-	unsigned char *out = realloc(buf, nread + 1);
-	if (!out) {
-		out = buf;
+	unsigned char *out = buf;
+	if (nread + 1 < *len) {
+		unsigned char *resized = realloc(buf, nread + 1);
+		if (resized != NULL) {
+			out = resized;
+		}
 	}
 	*len = nread;
 	out[nread] = '\0';

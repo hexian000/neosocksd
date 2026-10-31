@@ -344,8 +344,9 @@ int u8snprintf(
  * @param[in] str NUL-terminated UTF-8 input string.
  * @param[in] format scanf-style format string.
  * @param args Pointers receiving the converted values.
- * @return Number of input items assigned; -1 (EOF) if the input ends before the
- *         first conversion succeeds.
+ * @return Number of input items assigned; -1 (EOF) if the scan encounters input
+ *         end before assigning any item. Suppressed conversions and %% do not
+ *         assign items, so a subsequent input-end failure still returns -1.
  */
 int u8vsscanf(
 	const char *restrict str, const char *restrict format, va_list args);
