@@ -478,6 +478,7 @@ if(WITH_RULESET)
         MOCK_DEFINITIONS
             io_memreader=test_zlib_memreader
             io_heapwriter=test_zlib_heapwriter
+            io_stream_write=test_zlib_stream_write
             io_stream_close=test_zlib_stream_close
             free=test_zlib_free
             codec_zlib_writer=test_zlib_writer

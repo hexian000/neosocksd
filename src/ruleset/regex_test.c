@@ -56,12 +56,21 @@ int test_regexec(
 	return regexec(preg, s, nmatch, matches, eflags);
 }
 
-static lua_State *new_lua(void)
+static unsigned lua_close_count;
+
+static void close_lua(void *data)
+{
+	lua_close(data);
+	lua_close_count++;
+}
+
+static lua_State *new_lua(struct testing_ctx *_t_)
 {
 	lua_State *restrict L = luaL_newstate();
 	if (L == NULL) {
 		return NULL;
 	}
+	T_CLEANUP(close_lua, L);
 	luaL_openlibs(L);
 	(void)luaopen_regex(L);
 	lua_setglobal(L, "regex");
@@ -88,7 +97,7 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 
 T_DECLARE_CASE(regex_module_opens)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	lua_getglobal(L, "regex");
@@ -101,26 +110,22 @@ T_DECLARE_CASE(regex_module_opens)
 	T_EXPECT(lua_isfunction(L, -1));
 	lua_getfield(L, -4, "gmatch");
 	T_EXPECT(lua_isfunction(L, -1));
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_compile_basic)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
 		L, "local r = regex.compile('hello') return type(r)"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT_STREQ(lua_tostring(L, -1), "userdata");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_compile_invalid)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const int status_load = luaL_loadstring(
@@ -132,8 +137,6 @@ T_DECLARE_CASE(regex_compile_invalid)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 /*
@@ -144,7 +147,7 @@ T_DECLARE_CASE(regex_compile_invalid)
  */
 T_DECLARE_CASE(regex_compile_rejects_embedded_nul)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const int status_load = luaL_loadstring(
@@ -157,8 +160,6 @@ T_DECLARE_CASE(regex_compile_rejects_embedded_nul)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 /*
@@ -168,7 +169,7 @@ T_DECLARE_CASE(regex_compile_rejects_embedded_nul)
  */
 T_DECLARE_CASE(regex_compile_invalid_repeated_no_leak)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -179,13 +180,11 @@ T_DECLARE_CASE(regex_compile_invalid_repeated_no_leak)
 		   "return true"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_find_match)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -194,21 +193,17 @@ T_DECLARE_CASE(regex_find_match)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 3);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 6);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_find_nomatch)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
 		L,
 		"local r = regex.compile('ab+') return regex.find(r, 'xyz')"));
 	T_EXPECT_EQ(lua_gettop(L), 0);
-
-	lua_close(L);
 }
 
 /* A failed execution must raise without consuming pattern/iterator state.
@@ -218,7 +213,7 @@ T_DECLARE_SUBCASE(
 	regex_exec_error_case, const char *setup, const char *invoke,
 	const char *recover)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const bool setup_ok = run_chunk(L, setup);
@@ -235,7 +230,6 @@ T_DECLARE_SUBCASE(
 	lua_settop(L, 0);
 	const bool recover_ok = run_chunk(L, recover);
 	const bool reused = lua_toboolean(L, -1) != 0;
-	lua_close(L);
 
 	T_EXPECT(setup_ok);
 	T_EXPECT(invoke_ok);
@@ -264,6 +258,17 @@ T_DECLARE_CASE(regex_match_reports_runtime_error)
 		"return whole == 'abbb' and a == 'a' and b == 'bbb'");
 }
 
+T_DECLARE_CASE(regex_match_many_captures_reports_runtime_error)
+{
+	T_CALL_SUBCASE(
+		regex_exec_error_case,
+		"r = regex.compile(string.rep('(a)', 16))",
+		"return pcall(regex.match, r, string.rep('a', 16))",
+		"collectgarbage('collect') "
+		"local values = table.pack(regex.match(r, string.rep('a', 16))) "
+		"return values.n == 17 and values[17] == 'a'");
+}
+
 T_DECLARE_CASE(regex_gmatch_reports_runtime_error)
 {
 	T_CALL_SUBCASE(
@@ -280,7 +285,7 @@ T_DECLARE_CASE(regex_gmatch_reports_runtime_error)
 
 T_DECLARE_CASE(regex_find_with_init)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -296,13 +301,11 @@ T_DECLARE_CASE(regex_find_with_init)
 	T_EXPECT_EQ(lua_tointeger(L, 4), 7);
 	T_EXPECT_EQ(lua_tointeger(L, 5), 7);
 	T_EXPECT_EQ(lua_tointeger(L, 6), 8);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_find_init_out_of_range)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* init past the end clamps to end-of-string: no match, no results */
@@ -317,8 +320,6 @@ T_DECLARE_CASE(regex_find_init_out_of_range)
 		   "return (regex.find(r, 'ab abbb', 0))"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 1);
-
-	lua_close(L);
 }
 
 /*
@@ -329,7 +330,7 @@ T_DECLARE_CASE(regex_find_init_out_of_range)
  */
 T_DECLARE_CASE(regex_find_rejects_embedded_nul_subject)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const int status_load = luaL_loadstring(
@@ -343,13 +344,11 @@ T_DECLARE_CASE(regex_find_rejects_embedded_nul_subject)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_match_rejects_embedded_nul_subject)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const int status_load = luaL_loadstring(
@@ -363,13 +362,11 @@ T_DECLARE_CASE(regex_match_rejects_embedded_nul_subject)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_gmatch_rejects_embedded_nul_subject)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* the subject is NUL-checked up front by regex.gmatch (once, not per
@@ -385,8 +382,6 @@ T_DECLARE_CASE(regex_gmatch_rejects_embedded_nul_subject)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 /* Regression: gmatch's exhausted-iterator sentinel (LUA_MININTEGER) must not
@@ -394,7 +389,7 @@ T_DECLARE_CASE(regex_gmatch_rejects_embedded_nul_subject)
  * start, so iteration proceeds instead of returning nothing. */
 T_DECLARE_CASE(regex_gmatch_mininteger_init_iterates)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -406,8 +401,6 @@ T_DECLARE_CASE(regex_gmatch_mininteger_init_iterates)
 		   "return n == 3"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 /* Regression: gmatch's up-front embedded-NUL scan must cover only the active
@@ -415,7 +408,7 @@ T_DECLARE_CASE(regex_gmatch_mininteger_init_iterates)
  * offset is never seen by regexec() and must not abort iteration. */
 T_DECLARE_CASE(regex_gmatch_init_past_leading_nul_iterates)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -428,13 +421,11 @@ T_DECLARE_CASE(regex_gmatch_init_past_leading_nul_iterates)
 		   "return n == 2"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_match_captures)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -444,8 +435,6 @@ T_DECLARE_CASE(regex_match_captures)
 	T_EXPECT_STREQ(lua_tostring(L, 1), "foobar");
 	T_EXPECT_STREQ(lua_tostring(L, 2), "foo");
 	T_EXPECT_STREQ(lua_tostring(L, 3), "bar");
-
-	lua_close(L);
 }
 
 /*
@@ -457,7 +446,7 @@ T_DECLARE_CASE(regex_match_captures)
  */
 T_DECLARE_CASE(regex_match_absent_capture_is_nil)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -477,27 +466,91 @@ T_DECLARE_CASE(regex_match_absent_capture_is_nil)
 	T_EXPECT_STREQ(lua_tostring(L, 1), "b");
 	T_EXPECT(lua_isnil(L, 2));
 	T_EXPECT_STREQ(lua_tostring(L, 3), "b");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_match_nomatch)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
 		L,
 		"local r = regex.compile('foo') return regex.match(r, 'bar')"));
 	T_EXPECT_EQ(lua_gettop(L), 0);
+}
 
-	lua_close(L);
+/* Measure identical protected calls from C after warming their VM stack and
+ * interned results. A Lua loop can grow its own stack independently of regex
+ * scratch storage, even when an earlier call used the same pattern. */
+T_DECLARE_SUBCASE(regex_match_scratch_case, int captures)
+{
+	lua_State *restrict L = new_lua(_t_);
+	T_CHECK(L != NULL);
+	lua_pushinteger(L, captures);
+	lua_setglobal(L, "captures");
+	T_CHECK(run_chunk(
+		L,
+		"local r = regex.compile(string.rep('(a)', captures) .. 'a') "
+		"local subject = string.rep('a', captures + 1) "
+		"return function() "
+		"  assert(regex.match(r, subject) == subject) "
+		"  assert(regex.match(r, 'z') == nil) "
+		"end"));
+	lua_pushvalue(L, 1);
+	T_CHECK(lua_pcall(L, 0, 0, 0) == LUA_OK);
+
+	lua_gc(L, LUA_GCSTOP, 0);
+	const size_t before = (size_t)lua_gc(L, LUA_GCCOUNT, 0) * 1024 +
+			      (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
+	bool matched = true;
+	for (size_t i = 0; i < 1000; i++) {
+		lua_pushvalue(L, 1);
+		if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+			matched = false;
+			lua_pop(L, 1);
+		}
+	}
+	const size_t after = (size_t)lua_gc(L, LUA_GCCOUNT, 0) * 1024 +
+			     (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
+	lua_gc(L, LUA_GCRESTART, 0);
+	T_EXPECT(matched);
+	T_EXPECT(after <= before);
+}
+
+T_DECLARE_CASE(regex_match_common_captures_do_not_allocate_scratch)
+{
+	T_CALL_SUBCASE(regex_match_scratch_case, 0);
+	T_CALL_SUBCASE(regex_match_scratch_case, 1);
+	T_CALL_SUBCASE(regex_match_scratch_case, 15);
+}
+
+T_DECLARE_CASE(regex_match_many_captures)
+{
+	lua_State *restrict L = new_lua(_t_);
+	T_CHECK(L != NULL);
+
+	T_EXPECT(run_chunk(
+		L,
+		"for _, captures in ipairs({14, 15, 16, 32}) do "
+		"  local r = regex.compile(string.rep('(a)', captures) .. '(b)?') "
+		"  local word = string.rep('a', captures) "
+		"  for _, suffix in ipairs({'', 'b'}) do "
+		"    local subject = word .. suffix "
+		"    local values = table.pack(regex.match(r, 'xx' .. subject, 3)) "
+		"    assert(values.n == captures + 2) "
+		"    assert(values[1] == subject) "
+		"    for i = 2, captures + 1 do assert(values[i] == 'a') end "
+		"    assert(values[captures + 2] == (suffix == 'b' and 'b' or nil)) "
+		"  end "
+		"  assert(regex.match(r, 'z') == nil) "
+		"end return true"));
+	T_EXPECT(lua_toboolean(L, -1) != 0);
 }
 
 /* regex.match honors the optional init (start) argument, like regex.find. */
 T_DECLARE_CASE(regex_match_with_init)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -505,14 +558,12 @@ T_DECLARE_CASE(regex_match_with_init)
 		   "return regex.match(r, 'aaXaa', 3)"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT_STREQ(lua_tostring(L, 1), "aa");
-
-	lua_close(L);
 }
 
 /* regex.ICASE makes matching case-insensitive. */
 T_DECLARE_CASE(regex_icase_matches_mixed_case)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -520,8 +571,6 @@ T_DECLARE_CASE(regex_icase_matches_mixed_case)
 		   "return regex.match(r, 'oh HELLO there')"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT_STREQ(lua_tostring(L, 1), "HELLO");
-
-	lua_close(L);
 }
 
 /* Regression: compiling with regex.NOSUB (which makes regexec() leave pmatch
@@ -529,7 +578,7 @@ T_DECLARE_CASE(regex_icase_matches_mixed_case)
  * flag is stripped, so offsets and captures still work. */
 T_DECLARE_CASE(regex_nosub_is_neutralized)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -543,13 +592,11 @@ T_DECLARE_CASE(regex_nosub_is_neutralized)
 	T_EXPECT_EQ(lua_tointeger(L, 2), 7);
 	T_EXPECT_STREQ(lua_tostring(L, 3), "abbbc");
 	T_EXPECT_STREQ(lua_tostring(L, 4), "bbb");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_gmatch_iterator)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -562,13 +609,11 @@ T_DECLARE_CASE(regex_gmatch_iterator)
 	T_EXPECT_STREQ(lua_tostring(L, 2), "22");
 	T_EXPECT_STREQ(lua_tostring(L, 3), "333");
 	T_EXPECT(lua_isnil(L, 4));
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(regex_gmatch_supplies_suffix_bounds)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	g_regexec_calls = 0;
@@ -585,7 +630,6 @@ T_DECLARE_CASE(regex_gmatch_supplies_suffix_bounds)
 		"and it() == nil");
 	g_track_regexec = false;
 	const bool matched = lua_toboolean(L, -1) != 0;
-	lua_close(L);
 
 	T_EXPECT(ok);
 	T_EXPECT(matched);
@@ -598,37 +642,58 @@ T_DECLARE_CASE(regex_gmatch_supplies_suffix_bounds)
 	T_EXPECT(g_bounds_ok);
 }
 
-/* Interned short results and a stopped collector isolate scratch storage
- * from result-string allocations while exercising live iterator calls. */
+/* Keep the iterator alive and stop collection so any scratch userdata stays
+ * counted. Warm and repeat the same C call path as in the match regression. */
+T_DECLARE_SUBCASE(regex_gmatch_scratch_case, int captures)
+{
+	lua_State *restrict L = new_lua(_t_);
+	T_CHECK(L != NULL);
+	lua_pushinteger(L, captures);
+	lua_setglobal(L, "captures");
+	T_CHECK(run_chunk(
+		L,
+		"local r = regex.compile(string.rep('(a)', captures) .. 'a') "
+		"local subject = string.rep('a', captures + 1) "
+		"return regex.gmatch(r, string.rep(subject, 1001))"));
+	lua_pushvalue(L, 1);
+	T_CHECK(lua_pcall(L, 0, 1, 0) == LUA_OK);
+	T_CHECK(lua_isstring(L, -1));
+	lua_pop(L, 1);
+
+	lua_gc(L, LUA_GCSTOP, 0);
+	const size_t before = (size_t)lua_gc(L, LUA_GCCOUNT, 0) * 1024 +
+			      (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
+	bool matched = true;
+	for (size_t i = 0; i < 1000; i++) {
+		lua_pushvalue(L, 1);
+		const int status = lua_pcall(L, 0, 1, 0);
+		if (status != LUA_OK || !lua_isstring(L, -1)) {
+			matched = false;
+		}
+		lua_pop(L, 1);
+	}
+	lua_pushvalue(L, 1);
+	const int status = lua_pcall(L, 0, 1, 0);
+	const bool exhausted = status == LUA_OK && lua_isnil(L, -1);
+	lua_pop(L, 1);
+	const size_t after = (size_t)lua_gc(L, LUA_GCCOUNT, 0) * 1024 +
+			     (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
+	lua_gc(L, LUA_GCRESTART, 0);
+	T_EXPECT(matched);
+	T_EXPECT(exhausted);
+	T_EXPECT(after <= before);
+}
+
 T_DECLARE_CASE(regex_gmatch_common_captures_do_not_allocate_scratch)
 {
-	lua_State *restrict L = new_lua();
-	T_CHECK(L != NULL);
-
-	T_EXPECT(run_chunk(
-		L,
-		"for _, captures in ipairs({0, 1, 15}) do "
-		"  local r = regex.compile(string.rep('(a)', captures) .. 'a') "
-		"  local subject = string.rep('a', captures + 1) "
-		"  subject = string.rep(subject, 1001) "
-		"  local it = regex.gmatch(r, subject) "
-		"  assert(it() ~= nil) "
-		"  collectgarbage('stop') "
-		"  local before = collectgarbage('count') "
-		"  for _ = 1, 1000 do assert(it() ~= nil) end "
-		"  assert(it() == nil) "
-		"  local after = collectgarbage('count') "
-		"  assert(after <= before) "
-		"  collectgarbage('restart') "
-		"end return true"));
-	T_EXPECT(lua_toboolean(L, -1) != 0);
-
-	lua_close(L);
+	T_CALL_SUBCASE(regex_gmatch_scratch_case, 0);
+	T_CALL_SUBCASE(regex_gmatch_scratch_case, 1);
+	T_CALL_SUBCASE(regex_gmatch_scratch_case, 15);
 }
 
 T_DECLARE_CASE(regex_gmatch_many_captures)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -647,30 +712,46 @@ T_DECLARE_CASE(regex_gmatch_many_captures)
 		"  assert(it() == nil and it() == nil) "
 		"end return true"));
 	T_EXPECT(lua_toboolean(L, -1) != 0);
-
-	lua_close(L);
 }
 
 /* Regression: once gmatch reaches the end, repeated probes must not keep
  * allocating match storage while rescanning the same suffix. */
 T_DECLARE_CASE(regex_gmatch_exhaustion_is_stable)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
-	T_EXPECT(run_chunk(
+	T_CHECK(run_chunk(
 		L, "local r = regex.compile('z') "
-		   "local it = regex.gmatch(r, 'abc') "
-		   "it() "
-		   "collectgarbage('stop') "
-		   "local before = collectgarbage('count') "
-		   "for _ = 1, 1000 do it() end "
-		   "local after = collectgarbage('count') "
-		   "return before, after"));
-	T_EXPECT_EQ(lua_gettop(L), 2);
-	T_EXPECT(lua_tonumber(L, 2) <= lua_tonumber(L, 1));
+		   "return regex.gmatch(r, 'abc')"));
+	T_CHECK(lua_gettop(L) == 1);
+	lua_pushvalue(L, 1);
+	T_CHECK(lua_pcall(L, 0, 1, 0) == LUA_OK);
+	T_EXPECT(lua_isnil(L, -1));
+	lua_pop(L, 1);
 
-	lua_close(L);
+	/* Warm the protected-call path before measuring it from C. A Lua loop
+	 * can grow the VM stack even when the iterator allocates nothing. */
+	lua_gc(L, LUA_GCSTOP, 0);
+	const size_t before = (size_t)lua_gc(L, LUA_GCCOUNT, 0) * 1024 +
+			      (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
+	g_regexec_calls = 0;
+	g_track_regexec = true;
+	bool exhausted = true;
+	for (size_t i = 0; i < 1000; i++) {
+		lua_pushvalue(L, 1);
+		const int status = lua_pcall(L, 0, 1, 0);
+		if (status != LUA_OK || !lua_isnil(L, -1)) {
+			exhausted = false;
+		}
+		lua_pop(L, 1);
+	}
+	g_track_regexec = false;
+	const size_t after = (size_t)lua_gc(L, LUA_GCCOUNT, 0) * 1024 +
+			     (size_t)lua_gc(L, LUA_GCCOUNTB, 0);
+	T_EXPECT(exhausted);
+	T_EXPECT_EQ(g_regexec_calls, (size_t)0);
+	T_EXPECT(after <= before);
 }
 
 /*
@@ -682,7 +763,7 @@ T_DECLARE_CASE(regex_gmatch_exhaustion_is_stable)
  */
 T_DECLARE_CASE(regex_gmatch_empty_match_terminates)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -699,8 +780,6 @@ T_DECLARE_CASE(regex_gmatch_empty_match_terminates)
 	T_EXPECT(lua_toboolean(L, 1) != 0);
 	/* "abc" has 4 positions (0,1,2,3) where "x*" matches empty. */
 	T_EXPECT_EQ(lua_tointeger(L, 2), 4);
-
-	lua_close(L);
 }
 
 /*
@@ -711,7 +790,7 @@ T_DECLARE_CASE(regex_gmatch_empty_match_terminates)
  */
 T_DECLARE_CASE(regex_gmatch_anchor_matches_once)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -725,15 +804,13 @@ T_DECLARE_CASE(regex_gmatch_anchor_matches_once)
 		   "return n"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 1);
-
-	lua_close(L);
 }
 
 /* Regression: an explicit init is a start offset, not a line start -- `^` must
  * not match there either. */
 T_DECLARE_CASE(regex_find_init_does_not_reanchor)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -744,8 +821,6 @@ T_DECLARE_CASE(regex_find_init_does_not_reanchor)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 1);
 	T_EXPECT(lua_toboolean(L, 2) != 0);
-
-	lua_close(L);
 }
 
 /*
@@ -755,7 +830,7 @@ T_DECLARE_CASE(regex_find_init_does_not_reanchor)
  */
 T_DECLARE_CASE(regex_gmatch_anchor_still_matches_each_line)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -771,8 +846,6 @@ T_DECLARE_CASE(regex_gmatch_anchor_still_matches_each_line)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 3);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "aa,bb,cc");
-
-	lua_close(L);
 }
 
 /*
@@ -783,7 +856,7 @@ T_DECLARE_CASE(regex_gmatch_anchor_still_matches_each_line)
  */
 T_DECLARE_CASE(regex_gmatch_anchor_matches_consumed_newline_lines)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -799,8 +872,6 @@ T_DECLARE_CASE(regex_gmatch_anchor_matches_consumed_newline_lines)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 3);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "aa\n|bb\n|cc");
-
-	lua_close(L);
 }
 
 /*
@@ -810,7 +881,7 @@ T_DECLARE_CASE(regex_gmatch_anchor_matches_consumed_newline_lines)
  */
 T_DECLARE_CASE(regex_find_init_after_newline_anchors)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -823,8 +894,6 @@ T_DECLARE_CASE(regex_find_init_after_newline_anchors)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 4);
 	T_EXPECT(lua_toboolean(L, 2) != 0);
-
-	lua_close(L);
 }
 
 /*
@@ -895,7 +964,28 @@ T_DECLARE_CASE(regex_cstrpos_does_not_narrow_position)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+T_DECLARE_CASE(regex_fixture_intentional_failure)
+{
+	lua_State *L = new_lua(_t_);
+	T_CHECK(L != NULL);
+	T_CHECK(run_chunk(L, "return true"));
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(regex_failed_expectation_closes_lua)
+{
+	const unsigned before = lua_close_count;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, regex_fixture_intentional_failure);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(lua_close_count, before + 1);
+	T_RUN_CASE(nested, regex_module_opens);
+	T_EXPECT_EQ(nested.passed, 1);
+	T_EXPECT_EQ(lua_close_count, before + 2);
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(regex_failed_expectation_closes_lua),
 	T_CASE(regex_module_opens),
 	T_CASE(regex_compile_basic),
 	T_CASE(regex_compile_invalid),
@@ -905,6 +995,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_find_nomatch),
 	T_CASE(regex_find_reports_runtime_error),
 	T_CASE(regex_match_reports_runtime_error),
+	T_CASE(regex_match_many_captures_reports_runtime_error),
 	T_CASE(regex_gmatch_reports_runtime_error),
 	T_CASE(regex_find_with_init),
 	T_CASE(regex_find_init_out_of_range),
@@ -916,6 +1007,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(regex_match_captures),
 	T_CASE(regex_match_absent_capture_is_nil),
 	T_CASE(regex_match_nomatch),
+	T_CASE(regex_match_common_captures_do_not_allocate_scratch),
+	T_CASE(regex_match_many_captures),
 	T_CASE(regex_match_with_init),
 	T_CASE(regex_icase_matches_mixed_case),
 	T_CASE(regex_nosub_is_neutralized),

@@ -14,6 +14,7 @@
 #include <lauxlib.h>
 #include <lua.h>
 
+#include <errno.h>
 #include <stddef.h>
 
 #define MT_STREAM_CONTEXT "stream_context"
@@ -21,7 +22,6 @@
 struct stream_context {
 	struct vbuffer *out;
 	struct io_stream *r, *w;
-	unsigned char buf[IO_BUFSIZE];
 };
 
 static int stream_context_close(lua_State *restrict L)
@@ -41,7 +41,8 @@ static int stream_context_close(lua_State *restrict L)
 
 static int stream_copyall(struct stream_context *restrict s)
 {
-	int ret = io_stream_copy(s->w, s->r, s->buf, sizeof(s->buf));
+	unsigned char buf[IO_BUFSIZE];
+	int ret = io_stream_copy(s->w, s->r, buf, sizeof(buf));
 	int err = io_stream_close(s->r);
 	s->r = NULL;
 	if (ret == 0) {
@@ -74,24 +75,34 @@ static int zlib_transcode(
 
 	s->out = VBUF_NEW(IO_BUFSIZE);
 	if (s->out == NULL) {
-		/* validate the sink before wrapping it in a codec: a codec built
-		 * over a NULL-backed heapwriter derefs NULL on its
-		 * construction/close-flush write */
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
 	if (encode) {
-		s->r = io_memreader(src, len);
 		s->w = codec(io_heapwriter(&s->out));
 	} else {
 		s->r = codec(io_memreader(src, len));
 		s->w = io_heapwriter(&s->out);
 	}
-	if (s->r == NULL || s->w == NULL) {
+	if ((!encode && s->r == NULL) || s->w == NULL) {
 		lua_pushliteral(L, ERR_MEMORY);
 		return lua_error(L);
 	}
-	const int err = stream_copyall(s);
+	int err;
+	if (encode) {
+		size_t nwritten = len;
+		err = io_stream_write(s->w, src, &nwritten);
+		if (err == 0 && nwritten < len) {
+			err = ENOSPC;
+		}
+		const int close_err = io_stream_close(s->w);
+		s->w = NULL;
+		if (err == 0) {
+			err = close_err;
+		}
+	} else {
+		err = stream_copyall(s);
+	}
 	if (err != 0) {
 		return luaL_error(L, "%s error: %d", what, err);
 	}

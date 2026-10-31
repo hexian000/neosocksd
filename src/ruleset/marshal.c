@@ -215,6 +215,11 @@ marshal_table(lua_State *restrict L, struct vbuffer *restrict *restrict pvbuf)
 {
 	const int idx = 1;
 
+	if (lua_isnil(L, IDX_VISITED)) {
+		lua_createtable(L, 0, 16);
+		lua_replace(L, IDX_VISITED);
+	}
+
 	lua_pushvalue(L, idx);
 	if (lua_rawget(L, IDX_VISITED) != LUA_TNIL) {
 		lua_pushliteral(
@@ -359,8 +364,8 @@ static int api_marshal(lua_State *restrict L)
 
 	/* IDX_BUFFER: buffer userdata */
 	lua_pushvalue(L, -1);
-	/* IDX_VISITED: visited table */
-	lua_createtable(L, 0, 16);
+	/* IDX_VISITED: allocated on the first table traversal */
+	lua_pushnil(L);
 	/* IDX_MARSHAL: placeholder for self-reference */
 	lua_pushnil(L);
 	lua_pushcclosure(L, marshal_value, 3);

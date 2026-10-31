@@ -208,8 +208,11 @@ static int regex_match(lua_State *restrict L)
 	len -= init;
 	check_no_nul(L, s, len);
 	const size_t nmatch = check_matches(L, &reg->preg);
+	regmatch_t local_matches[16];
 	regmatch_t *restrict const matches =
-		lua_newuserdata(L, nmatch * sizeof(regmatch_t));
+		nmatch <= sizeof(local_matches) / sizeof(local_matches[0]) ?
+			local_matches :
+			lua_newuserdata(L, nmatch * sizeof(regmatch_t));
 	const int err = regexec(&reg->preg, s, nmatch, matches, eflags);
 	if (err == REG_NOMATCH) {
 		return 0;

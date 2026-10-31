@@ -28,6 +28,7 @@
 #include <lualib.h>
 #include <malloc.h>
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -37,12 +38,21 @@
  * mock - shared Lua test fixtures (zlib.c has no collaborator to mock).
  * ---------------------------------------------------------------------- */
 
-static lua_State *new_lua(void)
+static unsigned lua_close_count;
+
+static void close_lua(void *data)
+{
+	lua_close(data);
+	lua_close_count++;
+}
+
+static lua_State *new_lua(struct testing_ctx *_t_)
 {
 	lua_State *restrict L = luaL_newstate();
 	if (L == NULL) {
 		return NULL;
 	}
+	T_CLEANUP(close_lua, L);
 	luaL_openlibs(L);
 	(void)luaopen_zlib(L);
 	lua_setglobal(L, "zlib");
@@ -68,6 +78,7 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
  * realloc() (isolated_alloc below), so an armed failure hits only the vbuffer
  * and never a Lua-internal allocation. The passthrough is reimplemented over
  * malloc()/free() so it needs no libc-internal symbol. */
+static size_t g_userdata_alloc_size;
 static unsigned g_realloc_calls;
 static unsigned
 	g_realloc_fail_from; /* 0 = disabled; else fail call number >= N */
@@ -100,6 +111,9 @@ void *realloc(void *ptr, size_t size)
 static void *isolated_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
 	(void)ud;
+	if (ptr == NULL && osize == LUA_TUSERDATA) {
+		g_userdata_alloc_size = nsize;
+	}
 	if (nsize == 0) {
 		free(ptr);
 		return NULL;
@@ -115,7 +129,7 @@ static void *isolated_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 	return np;
 }
 
-static lua_State *new_lua_isolated(void)
+static lua_State *new_lua_isolated(struct testing_ctx *_t_)
 {
 	lua_State *restrict L =
 #if LUA_VERSION_NUM >= 505
@@ -126,6 +140,7 @@ static lua_State *new_lua_isolated(void)
 	if (L == NULL) {
 		return NULL;
 	}
+	T_CLEANUP(close_lua, L);
 	luaL_openlibs(L);
 	(void)luaopen_zlib(L);
 	lua_setglobal(L, "zlib");
@@ -169,6 +184,8 @@ static struct {
 	unsigned failures, closes, output_frees;
 	unsigned calls[CTOR_COUNT];
 	void *output;
+	bool short_write;
+	int write_error, close_error;
 } constructor_probe;
 
 static bool fail_constructor(const enum constructor_fault which)
@@ -202,7 +219,26 @@ int test_zlib_stream_close(struct io_stream *stream)
 	if (constructor_probe.active) {
 		constructor_probe.closes++;
 	}
-	return io_stream_close(stream);
+	const int err = io_stream_close(stream);
+	return constructor_probe.active && constructor_probe.close_error != 0 ?
+		       constructor_probe.close_error :
+		       err;
+}
+
+int test_zlib_stream_write(
+	struct io_stream *stream, const void *buf, size_t *len)
+{
+	if (constructor_probe.active) {
+		if (constructor_probe.write_error != 0) {
+			*len = 0;
+			return constructor_probe.write_error;
+		}
+		if (constructor_probe.short_write && *len > 0) {
+			(*len)--;
+			return 0;
+		}
+	}
+	return io_stream_write(stream, buf, len);
 }
 
 void test_zlib_free(void *ptr)
@@ -249,13 +285,24 @@ struct io_stream *test_gzip_reader(struct io_stream *base)
 static void constructor_cleanup(void *data)
 {
 	constructor_probe.fault = CTOR_NONE;
-	lua_close(data);
+	(void)data;
 	memset(&constructor_probe, 0, sizeof(constructor_probe));
+}
+
+T_DECLARE_SUBCASE(expect_codec_recovery, lua_State *L)
+{
+	T_EXPECT(run_chunk(
+		L,
+		"return zlib.uncompress(zlib.compress('recovered')) == 'recovered' "
+		"and zlib.gunzip(zlib.gzip('recovered')) == 'recovered'"));
+	T_EXPECT(lua_toboolean(L, -1));
+	lua_pop(L, 1);
+	T_EXPECT_EQ(lua_gettop(L), 0);
 }
 
 T_DECLARE_SUBCASE(
 	expect_constructor_failure, lua_State *L, const char *chunk,
-	const enum constructor_fault fault)
+	const enum constructor_fault fault, const bool encode)
 {
 	T_CHECK(luaL_loadstring(L, chunk) == LUA_OK);
 	/* Keep the previous operation's finalizers outside the observed call. */
@@ -273,47 +320,49 @@ T_DECLARE_SUBCASE(
 	T_EXPECT(strstr(err, "out of memory") != NULL);
 	lua_pop(L, 1);
 	T_EXPECT_EQ(constructor_probe.failures, 1u);
-	T_EXPECT_EQ(constructor_probe.calls[CTOR_MEMREADER], 1u);
+	T_EXPECT_EQ(constructor_probe.calls[CTOR_MEMREADER], encode ? 0u : 1u);
 	T_EXPECT_EQ(constructor_probe.calls[CTOR_HEAPWRITER], 1u);
 	T_EXPECT_EQ(constructor_probe.calls[CTOR_CODEC], 1u);
 	const unsigned consumed_base = fault == CTOR_CODEC ? 1u : 0u;
+	const unsigned pending = encode ? 0u : 1u;
 #if HAVE_LUA_TOCLOSE
-	T_EXPECT_EQ(constructor_probe.closes, consumed_base + 1);
+	T_EXPECT_EQ(constructor_probe.closes, consumed_base + pending);
 	T_EXPECT_EQ(constructor_probe.output_frees, 1u);
 #else
 	T_EXPECT_EQ(constructor_probe.closes, consumed_base);
 	T_EXPECT_EQ(constructor_probe.output_frees, 0u);
 #endif
 	lua_gc(L, LUA_GCCOLLECT, 0);
-	T_EXPECT_EQ(constructor_probe.closes, consumed_base + 1);
+	T_EXPECT_EQ(constructor_probe.closes, consumed_base + pending);
 	T_EXPECT_EQ(constructor_probe.output_frees, 1u);
 	T_EXPECT(constructor_probe.output == NULL);
 	/* A later __gc after __close must not close or free a second time. */
 	lua_gc(L, LUA_GCCOLLECT, 0);
-	T_EXPECT_EQ(constructor_probe.closes, consumed_base + 1);
+	T_EXPECT_EQ(constructor_probe.closes, consumed_base + pending);
 	T_EXPECT_EQ(constructor_probe.output_frees, 1u);
 	constructor_probe.active = false;
 	lua_gc(L, LUA_GCRESTART, 0);
 
-	T_EXPECT(run_chunk(
-		L,
-		"return zlib.uncompress(zlib.compress('recovered')) == 'recovered' "
-		"and zlib.gunzip(zlib.gzip('recovered')) == 'recovered'"));
-	T_EXPECT(lua_toboolean(L, -1));
-	lua_pop(L, 1);
-	T_EXPECT_EQ(lua_gettop(L), 0);
+	T_CALL_SUBCASE(expect_codec_recovery, L);
 }
 
-T_DECLARE_SUBCASE(partial_construction_case, const char *chunk)
+T_DECLARE_SUBCASE(
+	partial_construction_case, const char *chunk, const bool encode)
 {
-	lua_State *L = new_lua_isolated();
+	lua_State *L = new_lua_isolated(_t_);
 	T_EXPECT(L != NULL);
 	T_CLEANUP(constructor_cleanup, L);
 	T_EXPECT(run_chunk(
 		L, "z = zlib.compress('payload') gz = zlib.gzip('payload')"));
-	T_CALL_SUBCASE(expect_constructor_failure, L, chunk, CTOR_MEMREADER);
-	T_CALL_SUBCASE(expect_constructor_failure, L, chunk, CTOR_HEAPWRITER);
-	T_CALL_SUBCASE(expect_constructor_failure, L, chunk, CTOR_CODEC);
+	if (!encode) {
+		T_CALL_SUBCASE(
+			expect_constructor_failure, L, chunk, CTOR_MEMREADER,
+			encode);
+	}
+	T_CALL_SUBCASE(
+		expect_constructor_failure, L, chunk, CTOR_HEAPWRITER, encode);
+	T_CALL_SUBCASE(
+		expect_constructor_failure, L, chunk, CTOR_CODEC, encode);
 }
 
 /* -------------------------------------------------------------------------
@@ -326,7 +375,7 @@ T_DECLARE_SUBCASE(partial_construction_case, const char *chunk)
 
 T_DECLARE_CASE(zlib_module_opens)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	lua_getglobal(L, "zlib");
@@ -335,13 +384,11 @@ T_DECLARE_CASE(zlib_module_opens)
 	T_EXPECT(lua_isfunction(L, -1));
 	lua_getfield(L, -2, "uncompress");
 	T_EXPECT(lua_isfunction(L, -1));
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(zlib_roundtrip_small)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -351,13 +398,11 @@ T_DECLARE_CASE(zlib_roundtrip_small)
 		   "return s == u"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(zlib_roundtrip_large)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -370,13 +415,11 @@ T_DECLARE_CASE(zlib_roundtrip_large)
 	T_EXPECT(lua_tointeger(L, 2) > 0);
 	T_EXPECT_EQ(lua_tointeger(L, 3), 120000);
 	T_EXPECT(lua_toboolean(L, 4) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(zlib_empty_string)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -386,13 +429,11 @@ T_DECLARE_CASE(zlib_empty_string)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 0);
 	T_EXPECT(lua_toboolean(L, 2) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(zlib_uncompress_invalid)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -401,13 +442,11 @@ T_DECLARE_CASE(zlib_uncompress_invalid)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(gzip_module_has_funcs)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	lua_getglobal(L, "zlib");
@@ -416,13 +455,11 @@ T_DECLARE_CASE(gzip_module_has_funcs)
 	T_EXPECT(lua_isfunction(L, -1));
 	lua_getfield(L, -2, "gunzip");
 	T_EXPECT(lua_isfunction(L, -1));
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(gzip_roundtrip_small)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -432,13 +469,11 @@ T_DECLARE_CASE(gzip_roundtrip_small)
 		   "return s == u"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(gzip_roundtrip_large)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -451,13 +486,11 @@ T_DECLARE_CASE(gzip_roundtrip_large)
 	T_EXPECT(lua_tointeger(L, 2) > 0);
 	T_EXPECT_EQ(lua_tointeger(L, 3), 120000);
 	T_EXPECT(lua_toboolean(L, 4) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(gzip_empty_string)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -467,13 +500,11 @@ T_DECLARE_CASE(gzip_empty_string)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 0);
 	T_EXPECT(lua_toboolean(L, 2) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(gunzip_invalid)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -482,8 +513,6 @@ T_DECLARE_CASE(gunzip_invalid)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 /* #191: a valid stream cut off mid-body must be rejected. inflate ends at a
@@ -492,7 +521,7 @@ T_DECLARE_CASE(gunzip_invalid)
  * path -- a regression could silently return a partial plaintext. */
 T_DECLARE_CASE(zlib_uncompress_truncated)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -503,14 +532,12 @@ T_DECLARE_CASE(zlib_uncompress_truncated)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 /* gunzip counterpart of zlib_uncompress_truncated. */
 T_DECLARE_CASE(gunzip_truncated)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -521,8 +548,6 @@ T_DECLARE_CASE(gunzip_truncated)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 /* The zlib counterpart of gunzip_crc_mismatch: corrupt only the trailing
@@ -531,7 +556,7 @@ T_DECLARE_CASE(gunzip_truncated)
  * that path -- it fails at header parse. */
 T_DECLARE_CASE(zlib_uncompress_adler_mismatch)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -542,13 +567,11 @@ T_DECLARE_CASE(zlib_uncompress_adler_mismatch)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(gunzip_crc_mismatch)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -559,8 +582,6 @@ T_DECLARE_CASE(gunzip_crc_mismatch)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 /*
@@ -570,7 +591,7 @@ T_DECLARE_CASE(gunzip_crc_mismatch)
  */
 T_DECLARE_CASE(zlib_repeated_failure_no_leak)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -581,8 +602,6 @@ T_DECLARE_CASE(zlib_repeated_failure_no_leak)
 		   "return true"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 /* The encoders report ERR_MEMORY when the output buffer cannot be allocated,
@@ -590,7 +609,7 @@ T_DECLARE_CASE(zlib_repeated_failure_no_leak)
  * heapwriter would otherwise run its close-flush into that sink on unwind. */
 T_DECLARE_CASE(zlib_encode_oom_on_buffer_alloc)
 {
-	lua_State *restrict L = new_lua_isolated();
+	lua_State *restrict L = new_lua_isolated(_t_);
 	T_CHECK(L != NULL);
 
 	/* fail VBUF_NEW, the first vbuffer realloc */
@@ -601,8 +620,6 @@ T_DECLARE_CASE(zlib_encode_oom_on_buffer_alloc)
 		expect_realloc_failure, L, "return zlib.gzip('x')", 1,
 		"out of memory");
 	T_EXPECT_EQ(lua_gettop(L), 0);
-
-	lua_close(L);
 }
 
 /* The decoders raise an error and unwind cleanly when the output buffer fails
@@ -610,7 +627,7 @@ T_DECLARE_CASE(zlib_encode_oom_on_buffer_alloc)
  * so heap_write's append fails and stream_copyall propagates it. */
 T_DECLARE_CASE(zlib_decode_oom_on_buffer_grow)
 {
-	lua_State *restrict L = new_lua_isolated();
+	lua_State *restrict L = new_lua_isolated(_t_);
 	T_CHECK(L != NULL);
 
 	T_CHECK(run_chunk(
@@ -631,30 +648,112 @@ T_DECLARE_CASE(zlib_decode_oom_on_buffer_grow)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_EQ(lua_tointeger(L, 1), 1 << 16);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 1 << 16);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(zlib_encode_partial_construction_cleanup)
 {
 	T_CALL_SUBCASE(
-		partial_construction_case, "return zlib.compress('payload')");
+		partial_construction_case, "return zlib.compress('payload')",
+		true);
 }
 
 T_DECLARE_CASE(gzip_encode_partial_construction_cleanup)
 {
 	T_CALL_SUBCASE(
-		partial_construction_case, "return zlib.gzip('payload')");
+		partial_construction_case, "return zlib.gzip('payload')", true);
 }
 
 T_DECLARE_CASE(zlib_decode_partial_construction_cleanup)
 {
-	T_CALL_SUBCASE(partial_construction_case, "return zlib.uncompress(z)");
+	T_CALL_SUBCASE(
+		partial_construction_case, "return zlib.uncompress(z)", false);
 }
 
 T_DECLARE_CASE(gzip_decode_partial_construction_cleanup)
 {
-	T_CALL_SUBCASE(partial_construction_case, "return zlib.gunzip(gz)");
+	T_CALL_SUBCASE(
+		partial_construction_case, "return zlib.gunzip(gz)", false);
+}
+
+T_DECLARE_CASE(zlib_transforms_use_small_cleanup_userdata)
+{
+	lua_State *L = new_lua_isolated(_t_);
+	T_CHECK(L != NULL);
+	T_CLEANUP(constructor_cleanup, L);
+	T_CHECK(run_chunk(
+		L, "z = zlib.compress('payload') gz = zlib.gzip('payload')"));
+	const char *const chunks[] = {
+		"return zlib.compress('payload')",
+		"return zlib.gzip('payload')",
+		"return zlib.uncompress(z)",
+		"return zlib.gunzip(gz)",
+	};
+	for (size_t i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+		g_userdata_alloc_size = 0;
+		memset(&constructor_probe, 0, sizeof(constructor_probe));
+		constructor_probe.active = true;
+		T_EXPECT(run_chunk(L, chunks[i]));
+		T_EXPECT(g_userdata_alloc_size > 0);
+		T_EXPECT(g_userdata_alloc_size < 1024);
+		T_EXPECT_EQ(
+			constructor_probe.calls[CTOR_MEMREADER],
+			i < 2 ? 0u : 1u);
+		T_EXPECT_EQ(constructor_probe.calls[CTOR_HEAPWRITER], 1u);
+		T_EXPECT_EQ(constructor_probe.calls[CTOR_CODEC], 1u);
+		constructor_probe.active = false;
+		lua_pop(L, 1);
+	}
+}
+
+T_DECLARE_SUBCASE(
+	encode_write_failure, lua_State *L, const char *chunk,
+	const bool short_write, const int write_error, const int close_error,
+	const int expected_error)
+{
+	T_CHECK(luaL_loadstring(L, chunk) == LUA_OK);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCSTOP, 0);
+	memset(&constructor_probe, 0, sizeof(constructor_probe));
+	constructor_probe.active = true;
+	constructor_probe.short_write = short_write;
+	constructor_probe.write_error = write_error;
+	constructor_probe.close_error = close_error;
+	const int status = lua_pcall(L, 0, 1, 0);
+	constructor_probe.short_write = false;
+	constructor_probe.write_error = 0;
+	constructor_probe.close_error = 0;
+	T_EXPECT_EQ(status, LUA_ERRRUN);
+	T_CHECK(lua_isstring(L, -1));
+	lua_pushfstring(L, "error: %d", expected_error);
+	T_EXPECT(strstr(lua_tostring(L, -2), lua_tostring(L, -1)) != NULL);
+	lua_pop(L, 2);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(constructor_probe.closes, 1u);
+	T_EXPECT_EQ(constructor_probe.output_frees, 1u);
+	constructor_probe.active = false;
+	lua_gc(L, LUA_GCRESTART, 0);
+}
+
+T_DECLARE_CASE(zlib_encode_write_and_close_failures)
+{
+	lua_State *L = new_lua_isolated(_t_);
+	T_CHECK(L != NULL);
+	T_CLEANUP(constructor_cleanup, L);
+	const char *const chunks[] = {
+		"return zlib.compress('payload')",
+		"return zlib.gzip('payload')",
+	};
+	for (size_t i = 0; i < sizeof(chunks) / sizeof(chunks[0]); i++) {
+		T_CALL_SUBCASE(
+			encode_write_failure, L, chunks[i], true, 0, EIO,
+			ENOSPC);
+		T_CALL_SUBCASE(
+			encode_write_failure, L, chunks[i], false, EIO,
+			ECANCELED, EIO);
+		T_CALL_SUBCASE(
+			encode_write_failure, L, chunks[i], false, 0, EIO, EIO);
+	}
+	T_CALL_SUBCASE(expect_codec_recovery, L);
 }
 
 /* -------------------------------------------------------------------------
@@ -665,7 +764,30 @@ T_DECLARE_CASE(gzip_decode_partial_construction_cleanup)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+T_DECLARE_CASE(zlib_fixture_intentional_failure)
+{
+	lua_State *L = new_lua(_t_);
+	T_CHECK(L != NULL);
+	T_CHECK(run_chunk(L, "return true"));
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(zlib_failed_expectation_closes_lua)
+{
+	const unsigned before = lua_close_count;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, zlib_fixture_intentional_failure);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(lua_close_count, before + 1);
+	T_RUN_CASE(nested, zlib_module_opens);
+	T_EXPECT_EQ(nested.passed, 1);
+	T_EXPECT_EQ(lua_close_count, before + 2);
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(zlib_failed_expectation_closes_lua),
+	T_CASE(zlib_transforms_use_small_cleanup_userdata),
+	T_CASE(zlib_encode_write_and_close_failures),
 	T_CASE(zlib_module_opens),
 	T_CASE(zlib_roundtrip_small),
 	T_CASE(zlib_roundtrip_large),

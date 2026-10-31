@@ -44,8 +44,21 @@ static lua_State *new_lua(void)
 	return L;
 }
 
+static unsigned g_lua_close_calls;
+static bool g_fail_chunk;
+
+static void close_lua(void *const ptr)
+{
+	lua_close(ptr);
+	g_lua_close_calls++;
+}
+
 static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 {
+	if (g_fail_chunk) {
+		g_fail_chunk = false;
+		return false;
+	}
 	const int status_load = luaL_loadstring(L, chunk);
 	if (status_load != LUA_OK) {
 		return false;
@@ -88,11 +101,20 @@ void *realloc(void *ptr, size_t size)
 	return np;
 }
 
+static unsigned g_lua_table_allocations;
+static bool g_fail_lua_tables;
+
 /* A Lua allocator that never calls realloc(), so the fault injection above
  * only ever affects marshal()'s vbuffer. */
 static void *isolated_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 {
 	(void)ud;
+	if (ptr == NULL && osize == LUA_TTABLE) {
+		g_lua_table_allocations++;
+		if (g_fail_lua_tables) {
+			return NULL;
+		}
+	}
 	if (nsize == 0) {
 		free(ptr);
 		return NULL;
@@ -137,17 +159,17 @@ T_DECLARE_CASE(marshal_module_opens)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	lua_getglobal(L, "marshal");
 	T_EXPECT(lua_isfunction(L, -1));
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_nil_and_bool)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	T_EXPECT(run_chunk(
 		L, "return marshal(nil), marshal(true), marshal(false)"));
@@ -155,14 +177,141 @@ T_DECLARE_CASE(marshal_nil_and_bool)
 	T_EXPECT_STREQ(lua_tostring(L, 1), "nil");
 	T_EXPECT_STREQ(lua_tostring(L, 2), "true");
 	T_EXPECT_STREQ(lua_tostring(L, 3), "false");
+}
 
-	lua_close(L);
+T_DECLARE_CASE(marshal_failed_assertion_closes_lua)
+{
+	const unsigned before = g_lua_close_calls;
+	g_fail_chunk = true;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, marshal_nil_and_bool);
+	const unsigned after_failure = g_lua_close_calls;
+	const bool failure_consumed = !g_fail_chunk;
+	g_fail_chunk = false;
+	T_RUN_CASE(nested, marshal_nil_and_bool);
+
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(nested.passed, 1);
+	T_EXPECT(failure_consumed);
+	T_EXPECT_EQ(after_failure - before, 1u);
+	T_EXPECT_EQ(g_lua_close_calls - before, 2u);
+}
+
+T_DECLARE_CASE(marshal_empty_tuple)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
+
+	T_EXPECT(run_chunk(L, "return marshal()"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT_EQ(lua_type(L, 1), LUA_TSTRING);
+	T_EXPECT_STREQ(lua_tostring(L, 1), "");
+	lua_settop(L, 0);
+
+	T_EXPECT(run_chunk(
+		L, "local result = table.pack(load('return '..marshal())()) "
+		   "return result.n"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT_EQ(lua_tointeger(L, 1), 0);
+}
+
+T_DECLARE_CASE(marshal_nil_tuple_roundtrip)
+{
+	lua_State *restrict L = new_lua();
+	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
+
+	T_EXPECT(run_chunk(
+		L, "local tuples = { "
+		   "  table.pack(nil, 42, nil), table.pack(nil, nil), "
+		   "  table.pack(nil, 42), table.pack(42, nil), "
+		   "  table.pack(42, nil, false), "
+		   "} "
+		   "for _, tuple in ipairs(tuples) do "
+		   "  local s = marshal(table.unpack(tuple, 1, tuple.n)) "
+		   "  local result = table.pack(assert(load('return '..s))()) "
+		   "  if result.n ~= tuple.n then return false end "
+		   "  for i = 1, tuple.n do "
+		   "    if result[i] ~= tuple[i] then return false end "
+		   "  end "
+		   "end "
+		   "return true"));
+	T_EXPECT_EQ(lua_gettop(L), 1);
+	T_EXPECT(lua_toboolean(L, 1) != 0);
+}
+
+T_DECLARE_CASE(marshal_scalar_tuple_allocates_no_table)
+{
+	lua_State *restrict L = new_lua_isolated();
+	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
+
+	/* Initialize the buffer metatable before observing marshal's tables. */
+	T_CHECK(run_chunk(L, "marshal(0)"));
+	T_CHECK(luaL_loadstring(L, "return marshal(nil, true, 42, 'text')") ==
+		LUA_OK);
+	g_lua_table_allocations = 0;
+	const int status = lua_pcall(L, 0, 1, 0);
+	const unsigned tables = g_lua_table_allocations;
+
+	T_EXPECT_EQ(status, LUA_OK);
+	T_EXPECT_EQ(tables, 0u);
+	T_EXPECT_STREQ(lua_tostring(L, -1), "nil,true,42,\"text\"");
+}
+
+T_DECLARE_CASE(marshal_table_traversals_share_one_visited_table)
+{
+	lua_State *restrict L = new_lua_isolated();
+	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
+
+	T_CHECK(run_chunk(
+		L, "marshal(0); shared = {7}; root = {shared, shared}"));
+	T_CHECK(luaL_loadstring(L, "return marshal(nil, root, shared)") ==
+		LUA_OK);
+	g_lua_table_allocations = 0;
+	const int status = lua_pcall(L, 0, 1, 0);
+	const unsigned tables = g_lua_table_allocations;
+
+	T_EXPECT_EQ(status, LUA_OK);
+	T_EXPECT_EQ(tables, 1u);
+	T_EXPECT_STREQ(lua_tostring(L, -1), "nil,{{7,},{7,},},{7,}");
+	lua_settop(L, 0);
+	T_EXPECT(run_chunk(
+		L, "local a = {} local b = {a} a[1] = b "
+		   "local ok, err = pcall(marshal, 1, a) "
+		   "return not ok and err:find('circular', 1, true) ~= nil"));
+	T_EXPECT(lua_toboolean(L, -1) != 0);
+}
+
+T_DECLARE_CASE(marshal_visited_table_oom_releases_buffer)
+{
+	lua_State *restrict L = new_lua_isolated();
+	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
+
+	T_CHECK(run_chunk(L, "marshal(0); value = {1}"));
+	T_CHECK(luaL_loadstring(L, "return marshal(42, value)") == LUA_OK);
+	g_lua_table_allocations = 0;
+	g_fail_lua_tables = true;
+	const int status = lua_pcall(L, 0, 1, 0);
+	g_fail_lua_tables = false;
+	const unsigned tables = g_lua_table_allocations;
+
+	T_EXPECT_EQ(status, LUA_ERRMEM);
+	T_EXPECT(tables > 0);
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT(run_chunk(L, "return marshal(42, value)"));
+	T_EXPECT_STREQ(lua_tostring(L, -1), "42,{1,}");
 }
 
 T_DECLARE_CASE(marshal_integer_and_roundtrip)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	T_EXPECT(run_chunk(
 		L, "local s1 = marshal(0) "
@@ -176,14 +325,13 @@ T_DECLARE_CASE(marshal_integer_and_roundtrip)
 	T_EXPECT_EQ(lua_tointeger(L, 1), 0);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 42);
 	T_EXPECT_EQ(lua_tointeger(L, 3), -1);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_number_specials)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	T_EXPECT(run_chunk(
 		L, "local mnan = marshal(0/0) "
@@ -194,14 +342,13 @@ T_DECLARE_CASE(marshal_number_specials)
 	T_EXPECT_STREQ(lua_tostring(L, 1), "0/0");
 	T_EXPECT_STREQ(lua_tostring(L, 2), "1/0");
 	T_EXPECT_STREQ(lua_tostring(L, 3), "-1/0");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_float_roundtrip)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* Float zero serializes to "0"; finite floats use hex-float notation.
 	 * Each must round-trip exactly through load(). The 0.0 case also forces
@@ -216,14 +363,13 @@ T_DECLARE_CASE(marshal_float_roundtrip)
 		   "return true"));
 	T_EXPECT(lua_gettop(L) >= 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_large_integer_hex)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* These magnitudes exceed marshal_number's decimal cutoff on a 64-bit
 	 * lua_Integer, so each is serialized as hex for compactness; assert the
@@ -251,14 +397,13 @@ T_DECLARE_CASE(marshal_large_integer_hex)
 	T_EXPECT(run_chunk(L, chunk));
 	T_EXPECT(lua_gettop(L) >= 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_mininteger_uses_hex)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* math.mininteger has no positive counterpart, so marshal() drops the
 	 * sign and lets the value ride on the unsigned bit pattern, which
@@ -276,14 +421,13 @@ T_DECLARE_CASE(marshal_mininteger_uses_hex)
 		   "return true"));
 	T_EXPECT(lua_gettop(L) >= 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_float_zero)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* A genuine float zero (not the integer 0) marshals to "0". */
 	T_EXPECT(run_chunk(L, "return marshal(0.0)"));
@@ -298,8 +442,6 @@ T_DECLARE_CASE(marshal_float_zero)
 		   "return 1 / v == -math.huge"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 /* marshal_number()'s hex-float tail is reached by every non-zero finite float:
@@ -314,6 +456,7 @@ T_DECLARE_CASE(marshal_float_domain_roundtrip)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	T_EXPECT(run_chunk(
 		L, "local huge = math.huge "
@@ -362,14 +505,13 @@ T_DECLARE_CASE(marshal_float_domain_roundtrip)
 		   "return true"));
 	T_EXPECT(lua_gettop(L) >= 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_string_roundtrip)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	T_EXPECT(run_chunk(
 		L, "local s = 'A\\nB\\001\\\\\"' "
@@ -388,14 +530,13 @@ T_DECLARE_CASE(marshal_string_roundtrip)
 		   "return f() == s, marshal('plain text')"));
 	T_EXPECT(lua_toboolean(L, 1) != 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "\"plain text\"");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_string_escape_before_digit)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* Lua reads up to three decimal digits after a backslash, so a byte
 	 * escaped right before a literal digit must use all three */
@@ -414,14 +555,13 @@ T_DECLARE_CASE(marshal_string_escape_before_digit)
 		   "return f() == s"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_table_roundtrip)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	T_EXPECT(run_chunk(
 		L,
@@ -432,14 +572,13 @@ T_DECLARE_CASE(marshal_table_roundtrip)
 		"return r[1] == 1 and r[2] == 'a' and r[3] == true and r.key == 'val'"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_unsupported_type)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	T_EXPECT(run_chunk(
 		L, "local ok, err = pcall(marshal, function() end) "
@@ -447,14 +586,13 @@ T_DECLARE_CASE(marshal_unsupported_type)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_circular_table_rejected)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* A table referencing itself must raise rather than recurse forever. */
 	T_EXPECT(run_chunk(
@@ -464,14 +602,13 @@ T_DECLARE_CASE(marshal_circular_table_rejected)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT(strstr(lua_tostring(L, 2), "circular") != NULL);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_shared_table_not_rejected)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* Regression: a table referenced twice from two different places (a
 	 * DAG, not a cycle) must not be rejected as circular -- an ordinary
@@ -484,14 +621,13 @@ T_DECLARE_CASE(marshal_shared_table_not_rejected)
 		   "and r.b[1] == 1 and r.b[3] == 3"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_shared_table_across_top_level_arguments)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* Same table passed as two separate top-level arguments to marshal(). */
 	T_EXPECT(run_chunk(
@@ -502,14 +638,13 @@ T_DECLARE_CASE(marshal_shared_table_across_top_level_arguments)
 		"return a[1] == 1 and a[3] == 3 and b[1] == 1 and b[3] == 3"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(marshal_table_with_metatable_warns)
 {
 	lua_State *restrict L = new_lua();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* A metatable is not marshalled but the plain table still round-trips;
 	 * this also exercises the metatable warning path. */
@@ -521,8 +656,6 @@ T_DECLARE_CASE(marshal_table_with_metatable_warns)
 		"return r[1] == 1 and r[2] == 2 and getmetatable(r) == nil"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_toboolean(L, 1) != 0);
-
-	lua_close(L);
 }
 
 /* -------------------------------------------------------------------------
@@ -560,6 +693,7 @@ T_DECLARE_CASE(marshal_reports_oom_on_buffer_alloc)
 {
 	lua_State *restrict L = new_lua_isolated();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* precompile so the armed window contains only the marshal() call */
 	T_CHECK(luaL_loadstring(L, "return marshal('x')") == LUA_OK);
@@ -570,8 +704,6 @@ T_DECLARE_CASE(marshal_reports_oom_on_buffer_alloc)
 
 	T_EXPECT_EQ(status, LUA_ERRRUN);
 	T_EXPECT(strstr(lua_tostring(L, -1), "out of memory") != NULL);
-
-	lua_close(L);
 }
 
 /* marshal() reports ERR_MEMORY when growing the buffer fails mid-value. */
@@ -579,6 +711,7 @@ T_DECLARE_CASE(marshal_reports_oom_on_buffer_grow)
 {
 	lua_State *restrict L = new_lua_isolated();
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 
 	/* a value larger than the 1KiB initial buffer forces a grow */
 	T_CHECK(run_chunk(L, "big = string.rep('x', 4096)"));
@@ -591,8 +724,6 @@ T_DECLARE_CASE(marshal_reports_oom_on_buffer_grow)
 
 	T_EXPECT_EQ(status, LUA_ERRRUN);
 	T_EXPECT(strstr(lua_tostring(L, -1), "out of memory") != NULL);
-
-	lua_close(L);
 }
 
 /* -------------------------------------------------------------------------
@@ -602,6 +733,12 @@ T_DECLARE_CASE(marshal_reports_oom_on_buffer_grow)
 static const struct testing_suite suite[] = {
 	T_CASE(marshal_module_opens),
 	T_CASE(marshal_nil_and_bool),
+	T_CASE(marshal_failed_assertion_closes_lua),
+	T_CASE(marshal_empty_tuple),
+	T_CASE(marshal_nil_tuple_roundtrip),
+	T_CASE(marshal_scalar_tuple_allocates_no_table),
+	T_CASE(marshal_table_traversals_share_one_visited_table),
+	T_CASE(marshal_visited_table_oom_releases_buffer),
 	T_CASE(marshal_integer_and_roundtrip),
 	T_CASE(marshal_number_specials),
 	T_CASE(marshal_float_roundtrip),

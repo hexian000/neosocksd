@@ -60,12 +60,21 @@ static void fail_monotonic_at(const unsigned n)
 }
 #endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
 
-static lua_State *new_lua(void)
+static unsigned lua_close_count;
+
+static void close_lua(void *data)
+{
+	lua_close(data);
+	lua_close_count++;
+}
+
+static lua_State *new_lua(struct testing_ctx *_t_)
 {
 	lua_State *restrict L = luaL_newstate();
 	if (L == NULL) {
 		return NULL;
 	}
+	T_CLEANUP(close_lua, L);
 	luaL_openlibs(L);
 	(void)luaopen_time(L);
 	lua_setglobal(L, "time");
@@ -92,7 +101,7 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 
 T_DECLARE_CASE(time_module_opens)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	lua_getglobal(L, "time");
@@ -107,39 +116,33 @@ T_DECLARE_CASE(time_module_opens)
 	T_EXPECT(lua_isfunction(L, -1));
 	lua_getfield(L, -5, "measure");
 	T_EXPECT(lua_isfunction(L, -1));
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(time_monotonic_positive)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(L, "return time.monotonic()"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_isnumber(L, 1));
 	T_EXPECT(lua_tonumber(L, 1) > 0.0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(time_unix_sanity)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(L, "return time.unix()"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT(lua_isnumber(L, 1));
 	T_EXPECT(lua_tonumber(L, 1) > 1000000000.0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(time_process_and_thread)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(L, "return time.process(), time.thread()"));
@@ -148,13 +151,11 @@ T_DECLARE_CASE(time_process_and_thread)
 	T_EXPECT(lua_tonumber(L, 1) >= 0.0);
 	T_EXPECT(lua_isnumber(L, 2));
 	T_EXPECT(lua_tonumber(L, 2) >= -1.0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(time_measure_basic)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(L, "return time.measure(function() return 42 end)"));
@@ -162,13 +163,11 @@ T_DECLARE_CASE(time_measure_basic)
 	T_EXPECT(lua_isnumber(L, 1));
 	T_EXPECT(lua_tonumber(L, 1) >= -1.0);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 42);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(time_measure_passes_results)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -179,13 +178,26 @@ T_DECLARE_CASE(time_measure_passes_results)
 	T_EXPECT(lua_tonumber(L, 1) >= -1.0);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 13);
 	T_EXPECT_EQ(lua_tointeger(L, 3), 42);
+}
 
-	lua_close(L);
+T_DECLARE_CASE(time_measure_many_results)
+{
+	lua_State *L = new_lua(_t_);
+	T_CHECK(L != NULL);
+	T_CHECK(run_chunk(
+		L,
+		"local values = {}; for i = 1, 4096 do values[i] = i end "
+		"return time.measure(function() return table.unpack(values) end)"));
+	T_EXPECT_EQ(lua_gettop(L), 4097);
+	T_EXPECT(lua_isnumber(L, 1));
+	for (int i = 1; i <= 4096; i++) {
+		T_EXPECT_EQ(lua_tointeger(L, i + 1), i);
+	}
 }
 
 T_DECLARE_CASE(time_measure_rejects_missing_function)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* no function argument: must raise rather than call a bogus slot */
@@ -197,13 +209,11 @@ T_DECLARE_CASE(time_measure_rejects_missing_function)
 	const char *const err = lua_tostring(L, 2);
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "function expected") != NULL);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(time_measure_propagates_error)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* an error raised inside the measured function must surface unchanged,
@@ -217,21 +227,44 @@ T_DECLARE_CASE(time_measure_propagates_error)
 	const char *const err = lua_tostring(L, 2);
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "boom") != NULL);
-
-	lua_close(L);
 }
 
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
-static void close_lua(void *const ptr)
+T_DECLARE_CASE(time_monotonic_seconds_from_clock_readings)
 {
-	lua_close(ptr);
+	lua_State *restrict L = new_lua(_t_);
+	T_CHECK(L != NULL);
+
+	const struct {
+		struct timespec reading;
+		double seconds;
+	} cases[] = {
+		{ { 10, 250000000 }, 10.25 },	   { { 0, 0 }, 0.0 },
+		{ { 0, 250000000 }, 0.25 },	   { { 0, 1 }, 1e-9 },
+		{ { 0, 999999999 }, 0.999999999 }, { { 1, 0 }, 1.0 },
+	};
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		lua_settop(L, 0);
+		const struct timespec readings[2] = { cases[i].reading,
+						      cases[i].reading };
+		g_monotonic_calls = 0;
+		g_monotonic_readings = readings;
+		const bool ok = run_chunk(L, "return time.monotonic()");
+		const unsigned nreadings = g_monotonic_calls;
+		g_monotonic_readings = NULL;
+		T_EXPECT(ok);
+		T_EXPECT_EQ(nreadings, 1u);
+		T_EXPECT_EQ(lua_gettop(L), 1);
+		T_EXPECT(lua_isnumber(L, 1));
+		T_EXPECT(lua_isinteger(L, 1) == 0);
+		T_EXPECT(fabs(lua_tonumber(L, 1) - cases[i].seconds) < 1e-12);
+	}
 }
 
 T_DECLARE_CASE(time_measure_elapsed_from_clock_readings)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
-	T_CLEANUP(close_lua, L);
 
 	const struct {
 		struct timespec readings[2];
@@ -271,7 +304,7 @@ T_DECLARE_CASE(time_measure_elapsed_from_clock_readings)
  */
 T_DECLARE_CASE(time_measure_start_clock_failure_cost_is_float)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	fail_monotonic_at(1);
@@ -286,13 +319,11 @@ T_DECLARE_CASE(time_measure_start_clock_failure_cost_is_float)
 	T_EXPECT(lua_isinteger(L, 1) == 0);
 	T_EXPECT(lua_tonumber(L, 1) == -1.0);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 42);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(time_measure_end_clock_failure_cost_is_float)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	fail_monotonic_at(2);
@@ -307,8 +338,6 @@ T_DECLARE_CASE(time_measure_end_clock_failure_cost_is_float)
 	T_EXPECT(lua_isinteger(L, 1) == 0);
 	T_EXPECT(lua_tonumber(L, 1) == -1.0);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 42);
-
-	lua_close(L);
 }
 
 /*
@@ -320,7 +349,7 @@ T_DECLARE_CASE(time_measure_end_clock_failure_cost_is_float)
  */
 T_DECLARE_CASE(time_monotonic_clock_failure_is_float)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	fail_monotonic_at(1);
@@ -333,8 +362,6 @@ T_DECLARE_CASE(time_monotonic_clock_failure_is_float)
 	T_EXPECT(lua_isnumber(L, 1));
 	T_EXPECT(lua_isinteger(L, 1) == 0);
 	T_EXPECT(lua_tonumber(L, 1) == -1.0);
-
-	lua_close(L);
 }
 #endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
 
@@ -346,16 +373,39 @@ T_DECLARE_CASE(time_monotonic_clock_failure_is_float)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+T_DECLARE_CASE(time_fixture_intentional_failure)
+{
+	lua_State *L = new_lua(_t_);
+	T_CHECK(L != NULL);
+	T_CHECK(run_chunk(L, "return true"));
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(time_failed_expectation_closes_lua)
+{
+	const unsigned before = lua_close_count;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, time_fixture_intentional_failure);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(lua_close_count, before + 1);
+	T_RUN_CASE(nested, time_module_opens);
+	T_EXPECT_EQ(nested.passed, 1);
+	T_EXPECT_EQ(lua_close_count, before + 2);
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(time_failed_expectation_closes_lua),
 	T_CASE(time_module_opens),
 	T_CASE(time_monotonic_positive),
 	T_CASE(time_unix_sanity),
 	T_CASE(time_process_and_thread),
 	T_CASE(time_measure_basic),
 	T_CASE(time_measure_passes_results),
+	T_CASE(time_measure_many_results),
 	T_CASE(time_measure_rejects_missing_function),
 	T_CASE(time_measure_propagates_error),
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
+	T_CASE(time_monotonic_seconds_from_clock_readings),
 	T_CASE(time_measure_elapsed_from_clock_readings),
 	T_CASE(time_measure_start_clock_failure_cost_is_float),
 	T_CASE(time_measure_end_clock_failure_cost_is_float),
