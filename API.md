@@ -509,18 +509,20 @@ The result is taken with Lua's string conversion:
 
 ```Lua
 -- read the field where it is used, not once at load time
-if neosocksd.config().loglevel >= 6 then
+if neosocksd.config("loglevel") >= 6 then
     print("...")
 end
 ```
 
 **Description**
 
-Returns a table reflecting the effective server configuration. Fields mirror the
-corresponding command-line options.
+With no arguments, returns a table reflecting the effective server configuration.
+Fields mirror the corresponding command-line options. Each no-argument call
+builds a new snapshot, which never reflects a later change.
 
-Every call builds a new table from the configuration in effect at that moment.
-The result is a snapshot, not a view: it never reflects a later change.
+With a string key, returns that field's current value without building a table.
+Unknown keys, strings containing a NUL byte, and non-string arguments return
+`nil`. `neosocksd.config()` remains the way to obtain the complete snapshot.
 
 **Notes**
 

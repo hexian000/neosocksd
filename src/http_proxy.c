@@ -94,27 +94,12 @@ static int format_status(
 #define HTTP_CTX_LOG(level, ctx, message)                                      \
 	HTTP_CTX_LOG_F(level, ctx, "%s", message)
 
-#if WITH_RULESET
-/* Release the ruleset work the context still owes. A start that failed may
- * have published its state anyway, and a request that completed in this same
- * loop sweep leaves w_finish pending with a delivered dialreq; neither is tied
- * to a context state, so every path that stops expecting the callback releases
- * both. */
-static void cancel_ruleset(struct ev_loop *loop, struct http_ctx *restrict ctx)
-{
-	if (ctx->ruleset_state != NULL) {
-		ruleset_cancel(loop, ctx->ruleset_state);
-		ctx->ruleset_state = NULL;
-	}
-	ruleset_request_cancel(loop, &ctx->ruleset_callback);
-}
-#endif /* WITH_RULESET */
-
 static void http_ctx_stop(struct ev_loop *loop, struct http_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
 #if WITH_RULESET
-	cancel_ruleset(loop, ctx);
+	ruleset_request_cancel(
+		loop, &ctx->ruleset_state, &ctx->ruleset_callback);
 #endif
 
 	struct server_stats *restrict stats = &ctx->s->stats;
@@ -421,7 +406,8 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	if (!ok) {
 		/* the context stays alive to flush the error page, but leaves
 		 * STATE_PROCESS and no longer expects the callback */
-		cancel_ruleset(loop, ctx);
+		ruleset_request_cancel(
+			loop, &ctx->ruleset_state, &ctx->ruleset_callback);
 		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
 		return;
 	}
@@ -506,7 +492,8 @@ timeout_cb(struct ev_loop *loop, ev_timer *watcher, const int revents)
 		HTTP_CTX_LOG(WARNING, ctx, "process timeout");
 #if WITH_RULESET
 		ev_idle_stop(loop, &ctx->w_process);
-		cancel_ruleset(loop, ctx);
+		ruleset_request_cancel(
+			loop, &ctx->ruleset_state, &ctx->ruleset_callback);
 #endif /* WITH_RULESET */
 		break;
 	case STATE_CONNECT:

@@ -200,11 +200,31 @@ static int api_splithostport(lua_State *restrict L)
 	return 2;
 }
 
-/* neosocksd.config() */
+/* neosocksd.config([key]) */
 static int api_config(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
 	const struct config *restrict conf = r->conf;
+	if (lua_gettop(L) != 0) {
+		if (lua_type(L, 1) != LUA_TSTRING) {
+			lua_pushnil(L);
+			return 1;
+		}
+		size_t len;
+		const char *const key = lua_tolstring(L, 1, &len);
+		if (strlen(key) != len) {
+			lua_pushnil(L);
+		} else if (strcmp(key, "ruleset") == 0) {
+			lua_pushstring(L, conf->ruleset);
+		} else if (strcmp(key, "user_name") == 0) {
+			lua_pushstring(L, conf->user_name);
+		} else if (strcmp(key, "daemonize") == 0) {
+			lua_pushboolean(L, conf->daemonize);
+		} else {
+			conf_pushfield(L, conf, key);
+		}
+		return 1;
+	}
 	conf_pushtable(L, conf);
 	lua_pushstring(L, conf->ruleset);
 	lua_setfield(L, -2, "ruleset");

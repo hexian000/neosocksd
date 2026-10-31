@@ -263,14 +263,43 @@ void api_client_invoke(
 	G.resolver = opts->resolver;
 }
 
+/* Deferred VM finalizers retain allocator userdata, so ruleset fixtures below
+ * use static storage and reset it on every invocation. */
+
 /* ---- Lua helpers ---- */
 
-static lua_State *new_lua(void)
+static unsigned loop_destroy_count;
+
+static void destroy_loop(void *data)
+{
+	loop_destroy_count++;
+	ev_loop_destroy(data);
+}
+
+static struct ev_loop *new_loop(struct testing_ctx *_t_)
+{
+	struct ev_loop *loop = ev_loop_new(0);
+	T_CHECK(loop != NULL);
+	T_CLEANUP(destroy_loop, loop);
+	return loop;
+}
+
+static unsigned lua_close_count;
+
+static void close_lua(void *data)
+{
+	lua_close(data);
+	lua_close_count++;
+	reset_globals();
+}
+
+static lua_State *new_lua(struct testing_ctx *_t_)
 {
 	lua_State *restrict L = luaL_newstate();
 	if (L == NULL) {
 		return NULL;
 	}
+	T_CLEANUP(close_lua, L);
 	luaL_openlibs(L);
 	(void)luaopen_neosocksd(L);
 	lua_setglobal(L, "neosocksd");
@@ -278,13 +307,14 @@ static lua_State *new_lua(void)
 }
 
 static lua_State *new_ruleset_lua(
-	struct ruleset *restrict r, struct config *restrict conf,
-	struct ev_loop *loop)
+	struct testing_ctx *_t_, struct ruleset *restrict r,
+	struct config *restrict conf, struct ev_loop *loop)
 {
 	lua_State *restrict L = luaL_newstate();
 	lua_Alloc alloc;
 
 	T_CHECK(L != NULL);
+	T_CLEANUP(close_lua, L);
 	alloc = lua_getallocf(L, NULL);
 	lua_setallocf(L, alloc, r);
 	luaL_openlibs(L);
@@ -300,8 +330,6 @@ static lua_State *new_ruleset_lua(
 	r->server = NULL;
 	r->basereq = NULL;
 	r->L = L;
-	r->config.traceback = false;
-	r->config.memlimit_kb = 0;
 	r->vmstats = (struct ruleset_vmstats){
 		.num_object = 33,
 		.byt_allocated = 4096,
@@ -333,7 +361,7 @@ static bool run_chunk(lua_State *restrict L, const char *restrict chunk)
 
 T_DECLARE_CASE(api_module_opens)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	lua_getglobal(L, "neosocksd");
@@ -349,8 +377,6 @@ T_DECLARE_CASE(api_module_opens)
 		T_EXPECT(lua_isfunction(L, -1));
 		lua_pop(L, 1);
 	}
-
-	lua_close(L);
 }
 
 /*
@@ -362,50 +388,50 @@ T_DECLARE_CASE(api_module_opens)
  */
 T_DECLARE_CASE(api_resolve_valid)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
 	/* api_resolve reads r->conf->resolve_pf, so it needs a live ruleset */
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(L, "return neosocksd.resolve('127.0.0.1')"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT_STREQ(lua_tostring(L, 1), "127.0.0.1");
-
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(api_resolve_invalid)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 	T_CHECK(L != NULL);
 
 	/* sa_resolve fails -> the failure branch returns zero values */
 	T_EXPECT(
 		run_chunk(L, "return neosocksd.resolve('!!not a hostname!!')"));
 	T_EXPECT_EQ(lua_gettop(L), 0);
-
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(api_resolve_rejects_embedded_nul)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.resolve_pf = PF_UNSPEC,
 	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 	T_CHECK(L != NULL);
 
 	const int rc_load = luaL_loadstring(
@@ -420,26 +446,21 @@ T_DECLARE_CASE(api_resolve_rejects_embedded_nul)
 	const char *const err = lua_tostring(L, 2);
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "NUL") != NULL);
-
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(api_parse_ipv4_valid)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(L, "return neosocksd.parse_ipv4('127.0.0.1')"));
 	T_EXPECT_EQ(lua_gettop(L), 1);
 	T_EXPECT_EQ(lua_tointeger(L, 1), (lua_Integer)0x7f000001);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_parse_ipv4_invalid)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* each of these should return zero values */
@@ -452,13 +473,11 @@ T_DECLARE_CASE(api_parse_ipv4_invalid)
 	T_EXPECT(lua_isnil(L, 1));
 	T_EXPECT(lua_isnil(L, 2));
 	T_EXPECT(lua_isnil(L, 3));
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_parse_ipv4_rejects_embedded_nul)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const int rc_load = luaL_loadstring(
@@ -473,13 +492,11 @@ T_DECLARE_CASE(api_parse_ipv4_rejects_embedded_nul)
 	const char *const err = lua_tostring(L, 2);
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "NUL") != NULL);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_parse_ipv6_valid)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* "::1" -> all-zeros high half, 1 in low half */
@@ -495,13 +512,11 @@ T_DECLARE_CASE(api_parse_ipv6_valid)
 	T_EXPECT_EQ(lua_tointeger(L, 1), (lua_Integer)0);
 	T_EXPECT_EQ(lua_tointeger(L, 2), (lua_Integer)1);
 #endif /* LUA_32BITS */
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_parse_ipv6_invalid)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -511,13 +526,11 @@ T_DECLARE_CASE(api_parse_ipv6_invalid)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_isnil(L, 1));
 	T_EXPECT(lua_isnil(L, 2));
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_parse_ipv6_rejects_embedded_nul)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const int rc_load = luaL_loadstring(
@@ -532,13 +545,11 @@ T_DECLARE_CASE(api_parse_ipv6_rejects_embedded_nul)
 	const char *const err = lua_tostring(L, 2);
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "NUL") != NULL);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_splithostport_simple)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(
@@ -546,26 +557,22 @@ T_DECLARE_CASE(api_splithostport_simple)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_STREQ(lua_tostring(L, 1), "example.com");
 	T_EXPECT_STREQ(lua_tostring(L, 2), "80");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_splithostport_ipv6)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(L, "return neosocksd.splithostport('[::1]:443')"));
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT_STREQ(lua_tostring(L, 1), "::1");
 	T_EXPECT_STREQ(lua_tostring(L, 2), "443");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_splithostport_invalid)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* missing port – must raise a Lua error caught by pcall */
@@ -578,13 +585,11 @@ T_DECLARE_CASE(api_splithostport_invalid)
 	T_EXPECT_EQ(lua_gettop(L), 2);
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	T_EXPECT(lua_type(L, 2) == LUA_TSTRING);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_splithostport_rejects_embedded_nul)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const int rc_load = luaL_loadstring(
@@ -599,8 +604,6 @@ T_DECLARE_CASE(api_splithostport_rejects_embedded_nul)
 	const char *const err = lua_tostring(L, 2);
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "NUL") != NULL);
-
-	lua_close(L);
 }
 
 /*
@@ -612,7 +615,7 @@ T_DECLARE_CASE(api_splithostport_rejects_embedded_nul)
  */
 T_DECLARE_CASE(api_splithostport_invalid_message_omits_the_address)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	const int rc_load = luaL_loadstring(
@@ -630,13 +633,11 @@ T_DECLARE_CASE(api_splithostport_invalid_message_omits_the_address)
 	T_EXPECT(strstr(err, "forged") == NULL);
 	T_EXPECT(strchr(err, '\n') == NULL);
 	T_EXPECT(strchr(err, '\r') == NULL);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_splithostport_too_long)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* An address longer than FQDN_MAX_LENGTH + ":65535" must raise. */
@@ -656,13 +657,11 @@ T_DECLARE_CASE(api_splithostport_too_long)
 	 * implements its own limited formatter and raises "invalid option" on
 	 * printf-isms like %zu. */
 	T_EXPECT_STREQ(lua_tostring(L, 2), "address too long: 515 bytes");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_traceback_string)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_EXPECT(run_chunk(L, "return neosocksd.traceback('boom')"));
@@ -670,13 +669,12 @@ T_DECLARE_CASE(api_traceback_string)
 	const char *restrict s = lua_tostring(L, -1);
 	T_CHECK(s != NULL);
 	T_EXPECT(strstr(s, "boom") != NULL);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.listen = "127.0.0.1:1080",
 		.forward = "127.0.0.1:8080",
 		.ruleset = "rules.lua",
@@ -692,9 +690,10 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 		.workers = 3,
 #endif
 	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 
 	reset_globals();
 	T_EXPECT(run_chunk(
@@ -721,9 +720,6 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
 	T_EXPECT(run_chunk(L, "return neosocksd.config().workers"));
 	T_EXPECT_EQ(lua_tointeger(L, -1), 3);
 #endif
-
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 
 #if WITH_TCP_KEEPALIVE_PARAMS
@@ -733,7 +729,8 @@ T_DECLARE_CASE(api_config_reflects_ruleset_conf)
  */
 T_DECLARE_CASE(api_config_exports_tcp_keepalive_params)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.listen = "127.0.0.1:1080",
 		.timeout = 1.0,
 		.tcp_nodelay = true,
@@ -742,9 +739,10 @@ T_DECLARE_CASE(api_config_exports_tcp_keepalive_params)
 		.tcp_keepintvl = 15,
 		.tcp_keepcnt = 5,
 	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 
 	reset_globals();
 	T_EXPECT(run_chunk(
@@ -766,9 +764,6 @@ T_DECLARE_CASE(api_config_exports_tcp_keepalive_params)
 	T_EXPECT(lua_toboolean(L, 1) != 0);
 	T_EXPECT(lua_toboolean(L, 2) != 0);
 	T_EXPECT(lua_toboolean(L, 3) != 0);
-
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 #endif /* WITH_TCP_KEEPALIVE_PARAMS */
 
@@ -779,13 +774,15 @@ T_DECLARE_CASE(api_config_exports_tcp_keepalive_params)
  */
 T_DECLARE_CASE(api_now_is_float)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.listen = "127.0.0.1:1080",
 		.timeout = 1.0,
 	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 
 	reset_globals();
 	ev_now_update(loop);
@@ -799,32 +796,33 @@ T_DECLARE_CASE(api_now_is_float)
 
 	T_EXPECT(run_chunk(L, "return math.type(neosocksd.now())"));
 	T_EXPECT_STREQ(lua_tostring(L, 1), "float");
-
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(api_stats_now_and_setinterval_use_ruleset_state)
 {
-	struct config conf = {
+	const lua_Integer byt_up = LUA_MAXINTEGER / 2 - 11;
+	const lua_Integer byt_down = LUA_MAXINTEGER - 22;
+	static struct config conf;
+	conf = (struct config){
 		.listen = "127.0.0.1:1080",
 		.timeout = 1.0,
 		.tcp_nodelay = true,
 		.tcp_keepalive = true,
 	};
-	struct ruleset r = { 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
 	struct server server = {
 		.resolver = (struct resolver *)0x1234,
 	};
-	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	struct ev_loop *const loop = new_loop(_t_);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 
 	reset_globals();
 	r.server = &server;
 	G.stats = (struct server_stats){
 		.num_sessions = 3,
-		.byt_up = 11,
-		.byt_down = 22,
+		.byt_up = (uint_least64_t)byt_up,
+		.byt_down = (uint_least64_t)byt_down,
 		.started = 1,
 	};
 	ev_now_update(loop);
@@ -832,7 +830,7 @@ T_DECLARE_CASE(api_stats_now_and_setinterval_use_ruleset_state)
 	T_EXPECT(run_chunk(
 		L,
 		"local s = neosocksd.stats() "
-		"return s.num_sessions, s.num_dns_query, s.num_dns_success, s.bytes_allocated, s.num_object, neosocksd.now(), s.uptime"));
+		"return s.num_sessions, s.num_dns_query, s.num_dns_success, s.bytes_allocated, s.num_object, neosocksd.now(), s.uptime, s.byt_up, s.byt_down"));
 	T_EXPECT_EQ(lua_tointeger(L, 1), 3);
 	T_EXPECT_EQ(lua_tointeger(L, 2), 7);
 	T_EXPECT_EQ(lua_tointeger(L, 3), 5);
@@ -841,13 +839,23 @@ T_DECLARE_CASE(api_stats_now_and_setinterval_use_ruleset_state)
 	T_EXPECT(lua_tonumber(L, 6) > 0.0);
 	/* server started (started > 0): uptime is a real elapsed duration */
 	T_EXPECT(lua_tonumber(L, 7) > 0.0);
+	T_EXPECT(lua_isinteger(L, 8));
+	T_EXPECT_EQ(lua_tointeger(L, 8), byt_up);
+	T_EXPECT(lua_isinteger(L, 9));
+	T_EXPECT_EQ(lua_tointeger(L, 9), byt_down);
 	lua_settop(L, 0);
 
 	/* no server attached: uptime falls back to 0 instead of a raw
 	 * monotonic clock reading */
 	r.server = NULL;
-	T_EXPECT(run_chunk(L, "return neosocksd.stats().uptime"));
+	T_EXPECT(run_chunk(
+		L,
+		"local s = neosocksd.stats() return s.uptime, s.byt_up, s.byt_down"));
 	T_EXPECT(lua_tonumber(L, 1) == 0.0);
+	T_EXPECT(lua_isinteger(L, 2));
+	T_EXPECT_EQ(lua_tointeger(L, 2), 0);
+	T_EXPECT(lua_isinteger(L, 3));
+	T_EXPECT_EQ(lua_tointeger(L, 3), 0);
 	lua_settop(L, 0);
 	r.server = &server;
 
@@ -869,22 +877,21 @@ T_DECLARE_CASE(api_stats_now_and_setinterval_use_ruleset_state)
 	T_EXPECT(run_chunk(L, "return neosocksd.setinterval(0/0)"));
 	T_EXPECT(!ev_is_active(&r.w_ticker));
 	T_EXPECT(!ev_is_active(&r.w_idle));
-
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(api_invoke_and_async_real_paths)
 {
-	struct config conf = {
+	static struct config conf;
+	conf = (struct config){
 		.listen = "127.0.0.1:1080",
 		.timeout = 1.0,
 		.tcp_nodelay = true,
 		.tcp_keepalive = true,
 	};
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 
 	reset_globals();
 	T_EXPECT(run_chunk(
@@ -931,19 +938,19 @@ T_DECLARE_CASE(api_invoke_and_async_real_paths)
 	T_EXPECT(lua_toboolean(L, 1) == 0);
 	lua_settop(L, 0);
 
-	lua_close(L);
-	ev_loop_destroy(loop);
 	reset_globals();
 }
 
 #if LUA_VERSION_NUM >= 504
 T_DECLARE_CASE(api_async_replaces_caller_closed_idle_threads)
 {
-	struct ruleset r = { 0 };
-	struct config conf = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	static struct config conf;
+	conf = (struct config){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
 	T_CHECK(loop != NULL);
-	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *const L = new_ruleset_lua(_t_, &r, &conf, loop);
 	const bool ok = run_chunk(
 		L,
 		"local held, called, finished = {}, 0, 0 "
@@ -969,8 +976,6 @@ T_DECLARE_CASE(api_async_replaces_caller_closed_idle_threads)
 	lua_gc(L, LUA_GCCOLLECT, 0);
 	const size_t collected_active = r.vmstats.num_thread_active;
 	const size_t peak = r.vmstats.num_thread_peak;
-	lua_close(L);
-	ev_loop_destroy(loop);
 
 	T_EXPECT(completed);
 	T_EXPECT_EQ(active, (size_t)0);
@@ -983,11 +988,13 @@ T_DECLARE_CASE(api_async_replaces_caller_closed_idle_threads)
  * balance orphan collection while retaining genuinely reachable routines. */
 T_DECLARE_CASE(api_async_orphan_collection_balances_thread_count)
 {
-	struct ruleset r = { 0 };
-	struct config conf = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	static struct config conf;
+	conf = (struct config){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
 	T_CHECK(loop != NULL);
-	lua_State *const L = new_ruleset_lua(&r, &conf, loop);
+	lua_State *const L = new_ruleset_lua(_t_, &r, &conf, loop);
 	for (int i = 0; i < 3; i++) {
 		/* Collect an idle thread first: the finalizable guard can
 		 * transiently resurrect it after its weak lookup was cleared. */
@@ -1015,8 +1022,6 @@ T_DECLARE_CASE(api_async_orphan_collection_balances_thread_count)
 	lua_setglobal(L, "held");
 	lua_gc(L, LUA_GCCOLLECT, 0);
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 
 /* #190: when the async coroutine dies catastrophically (here forced by
@@ -1024,10 +1029,12 @@ T_DECLARE_CASE(api_async_orphan_collection_balances_thread_count)
  * returns (nil, err) with err a string, rather than raising. */
 T_DECLARE_CASE(api_async_catastrophic_returns_nil_and_error)
 {
-	struct config conf = { .timeout = 1.0 };
-	struct ruleset r = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
-	lua_State *restrict L = new_ruleset_lua(&r, &conf, loop);
+	static struct config conf;
+	conf = (struct config){ .timeout = 1.0 };
+	static struct ruleset r;
+	r = (struct ruleset){ 0 };
+	struct ev_loop *const loop = new_loop(_t_);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r, &conf, loop);
 
 	/* Expose the idle-thread registry index so the finish callback can
 	 * corrupt it after aux_getthread has already read it but before
@@ -1046,9 +1053,6 @@ T_DECLARE_CASE(api_async_catastrophic_returns_nil_and_error)
 	T_EXPECT(lua_toboolean(L, 1) != 0); /* co == nil */
 	T_EXPECT_STREQ(lua_tostring(L, 2), "string"); /* err is a string */
 	lua_settop(L, 0);
-
-	lua_close(L);
-	ev_loop_destroy(loop);
 }
 
 /* -------------------------------------------------------------------------
@@ -1059,7 +1063,39 @@ T_DECLARE_CASE(api_async_catastrophic_returns_nil_and_error)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+static struct ruleset failure_ruleset;
+static struct config failure_conf;
+
+T_DECLARE_CASE(api_fixture_intentional_failure)
+{
+	failure_ruleset = (struct ruleset){ 0 };
+	failure_conf = (struct config){ 0 };
+	struct ev_loop *loop = new_loop(_t_);
+	lua_State *L =
+		new_ruleset_lua(_t_, &failure_ruleset, &failure_conf, loop);
+	T_CHECK(run_chunk(
+		L,
+		"held = neosocksd.async(function() end, function() coroutine.yield() end)"));
+	T_CHECK(failure_ruleset.vmstats.num_thread_active == 1);
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(api_failed_expectation_closes_lua)
+{
+	const unsigned before = lua_close_count;
+	const unsigned loops_before = loop_destroy_count;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, api_fixture_intentional_failure);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(lua_close_count, before + 1);
+	T_EXPECT_EQ(loop_destroy_count, loops_before + 1);
+	T_EXPECT_EQ(failure_ruleset.vmstats.num_thread_active, (size_t)0);
+	T_RUN_CASE(nested, api_async_orphan_collection_balances_thread_count);
+	T_EXPECT_EQ(nested.passed, 1);
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(api_failed_expectation_closes_lua),
 	T_CASE(api_module_opens),
 	T_CASE(api_resolve_valid),
 	T_CASE(api_resolve_invalid),

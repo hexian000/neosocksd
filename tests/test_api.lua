@@ -39,6 +39,34 @@ return function(T)
             string.format("restapi: expected string, got %s", type(cfg.restapi)))
     end)
 
+    T:test("neosocksd.config keyed reads match snapshots without allocating tables", function()
+        local snapshot = neosocksd.config()
+        for key, value in pairs(snapshot) do
+            assert(neosocksd.config(key) == value, key)
+        end
+        for _, key in ipairs({ "ruleset", "user_name", "forward", "proxy" }) do
+            assert(neosocksd.config(key) == snapshot[key], key)
+        end
+        assert(neosocksd.config("missing") == nil)
+        assert(neosocksd.config("loglevel\0suffix") == nil)
+        assert(neosocksd.config(false) == nil)
+        assert(neosocksd.config(1) == nil)
+        assert(neosocksd.config(nil) == nil)
+        neosocksd.config("loglevel") -- warm the call before measuring
+        collectgarbage("collect")
+        collectgarbage("stop")
+        local ok, err = pcall(function()
+            local before = collectgarbage("count")
+            for _ = 1, 1000 do
+                assert(neosocksd.config("loglevel") == snapshot.loglevel)
+            end
+            assert(collectgarbage("count") - before < 1,
+                "scalar config reads allocated temporary objects")
+        end)
+        collectgarbage("restart")
+        assert(ok, err)
+    end)
+
     -- neosocksd.splithostport --
 
     T:test("neosocksd.splithostport splits host:port", function()

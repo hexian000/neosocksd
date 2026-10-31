@@ -125,6 +125,13 @@ static bool check_ranges(const struct config *restrict conf)
 		return false;
 	}
 #endif
+#if WITH_RULESET
+	if (!RANGE_CHECK(
+		    "memlimit", conf->memlimit, INT_MIN,
+		    INT_LEAST32_MAX >> 10)) {
+		return false;
+	}
+#endif
 	if (!is_valid_resolve_pf(conf->resolve_pf)) {
 		LOGE_F("resolve_pf is invalid: %d", conf->resolve_pf);
 		return false;
@@ -793,49 +800,80 @@ static const struct metaconfig conf_fields[] = {
 	{ NULL, 0, 0 },
 };
 
+static void push_field(
+	lua_State *restrict L, const struct config *restrict conf,
+	const struct metaconfig *restrict field)
+{
+	const void *value = (const char *)conf + field->offset;
+	switch (field->type) {
+	case CONF_STRING:
+		lua_pushstring(L, *(const char *const *)value);
+		break;
+	case CONF_INT:
+		lua_pushinteger(L, *(const int *)value);
+		break;
+	case CONF_DOUBLE:
+		lua_pushnumber(L, *(const double *)value);
+		break;
+	case CONF_BOOL:
+		lua_pushboolean(L, *(const bool *)value);
+		break;
+	}
+}
+
+void conf_pushfield(
+	lua_State *restrict L, const struct config *restrict conf,
+	const char *restrict key)
+{
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		if (strcmp(f->key, key) == 0) {
+			push_field(L, conf, f);
+			return;
+		}
+	}
+	lua_pushnil(L);
+}
+
 void conf_pushtable(lua_State *restrict L, const struct config *restrict conf)
 {
 	lua_createtable(L, 0, (int)ARRAY_SIZE(conf_fields) - 1);
 	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
-		const void *value = (const char *)conf + f->offset;
-		switch (f->type) {
-		case CONF_STRING:
-			lua_pushstring(L, *(const char *const *)value);
-			break;
-		case CONF_INT:
-			lua_pushinteger(L, *(const int *)value);
-			break;
-		case CONF_DOUBLE:
-			lua_pushnumber(L, *(const double *)value);
-			break;
-		case CONF_BOOL:
-			lua_pushboolean(L, *(const bool *)value);
-			break;
-		}
+		push_field(L, conf, f);
 		lua_setfield(L, -2, f->key);
 	}
 }
 
-/* Validate or apply one non-string config field from Lua stack top; not for CONF_STRING. */
+/* Validate and stage the field value on top of the stack. String values stay
+ * anchored there until load_table copies them into the config's own block. */
 static bool load_field(
 	lua_State *restrict L, const struct metaconfig *restrict f,
-	struct config *restrict conf, const bool apply)
+	struct config *restrict conf)
 {
-	lua_getfield(L, -1, f->key);
-	const bool isnil = lua_isnil(L, -1);
-	bool ok = true;
+	if (lua_isnil(L, -1)) {
+		return true;
+	}
+	void *const value = (char *)conf + f->offset;
 	switch (f->type) {
 	case CONF_STRING:
-		/* String fields are handled in conf_loadfromtable. */
+		if (lua_type(L, -1) != LUA_TSTRING) {
+			LOGE_F("boot: field `%s' must be a string", f->key);
+			return false;
+		}
+		{
+			size_t len;
+			const char *const str = lua_tolstring(L, -1, &len);
+			if (memchr(str, '\0', len) != NULL) {
+				LOGE_F("boot: field `%s' contains a NUL byte",
+				       f->key);
+				return false;
+			}
+			*(const char **)value = str;
+		}
 		break;
 	case CONF_INT:
-		if (!isnil && !lua_isinteger(L, -1)) {
+		if (!lua_isinteger(L, -1)) {
 			LOGE_F("boot: field `%s' must be an integer", f->key);
-			ok = false;
-			break;
-		}
-		if (isnil) {
-			break;
+			return false;
 		}
 		{
 			const lua_Integer v = lua_tointeger(L, -1);
@@ -843,52 +881,29 @@ static bool load_field(
 			    v > (lua_Integer)INT_MAX) {
 				LOGE_F("boot: field `%s' is out of range",
 				       f->key);
-				ok = false;
-				break;
+				return false;
 			}
-			if (apply) {
-				*(int *)((char *)conf + f->offset) = (int)v;
-			}
+			*(int *)value = (int)v;
 		}
 		break;
 	case CONF_DOUBLE:
-		/* lua_type, not lua_isnumber: the latter also accepts a numeric
-		 * string, unlike the strict CONF_INT/CONF_BOOL checks. */
-		if (!isnil && lua_type(L, -1) != LUA_TNUMBER) {
+		/* lua_isnumber also accepts numeric strings. */
+		if (lua_type(L, -1) != LUA_TNUMBER) {
 			LOGE_F("boot: field `%s' must be a number", f->key);
-			ok = false;
-			break;
+			return false;
 		}
-		if (!isnil && apply) {
-			*(double *)((char *)conf + f->offset) =
-				(double)lua_tonumber(L, -1);
-		}
+		*(double *)value = (double)lua_tonumber(L, -1);
 		break;
 	case CONF_BOOL:
-		if (!isnil && lua_type(L, -1) != LUA_TBOOLEAN) {
+		if (lua_type(L, -1) != LUA_TBOOLEAN) {
 			LOGE_F("boot: field `%s' must be a boolean", f->key);
-			ok = false;
-			break;
+			return false;
 		}
-		if (!isnil && apply) {
-			*(bool *)((char *)conf + f->offset) =
-				lua_toboolean(L, -1) != 0;
-		}
+		*(bool *)value = lua_toboolean(L, -1) != 0;
 		break;
 	}
-	lua_pop(L, 1);
-	return ok;
+	return true;
 }
-
-/* Context for conf_fill_fields, passed as a light-userdata upvalue. */
-struct conf_fill {
-	struct config *conf;
-	char *block;
-	size_t total;
-	/* the config is already live: see conf_reloadfromtable */
-	bool reload;
-	bool has_ruleset;
-};
 
 static bool str_equal(const char *restrict a, const char *restrict b)
 {
@@ -957,110 +972,6 @@ static bool check_reload(
 	return ok;
 }
 
-/* Apply the non-string fields into a staged copy and copy the string fields
- * into the pre-measured `block`, committing to the live `conf` only once the
- * whole pass reads clean. Arguments: the fill context (a light userdata), then
- * the config table. */
-static int conf_fill_fields(lua_State *restrict L)
-{
-	const struct conf_fill *restrict const fill = lua_touserdata(L, 1);
-	struct config *restrict const conf = fill->conf;
-
-	/* Stage into a copy: the whole pass below is a read of the config table,
-	 * and only the writes after it (once every read has succeeded) reach the
-	 * live config. */
-	struct config staged = *conf;
-
-	/* Every field validated on the first pass; re-read and apply the
-	 * non-string fields. A stateful __index may still return a wrong type on
-	 * this second read -- that is a failed reload, not a field to skip, so
-	 * raise rather than silently drop it. */
-	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
-		if (f->type == CONF_STRING) {
-			continue;
-		}
-		if (!load_field(L, f, &staged, true)) {
-			return luaL_error(
-				L, "field `%s' changed type on the apply pass",
-				f->key);
-		}
-	}
-
-	/* the staged values must be in range before any of them becomes live */
-	if (!check_ranges(&staged)) {
-		return luaL_error(L, "field out of range");
-	}
-
-	/* Copy string fields into the new block: a Lua-provided string replaces
-	 * the field; a nil value carries the field's current string forward so it
-	 * never dangles into the block freed on a failed load. The resulting
-	 * pointers are staged and only committed once the whole pass completes. */
-	const char *newptr[ARRAY_SIZE(conf_fields)];
-	char *pos = fill->block;
-	size_t avail = fill->total;
-	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
-		if (f->type != CONF_STRING) {
-			continue;
-		}
-		const char **fptr = (const char **)((char *)conf + f->offset);
-		newptr[f - conf_fields] = *fptr;
-		lua_getfield(L, -1, f->key);
-		const char *s;
-		size_t len = 0;
-		if (lua_type(L, -1) == LUA_TSTRING) {
-			s = lua_tolstring(L, -1, &len);
-			if (memchr(s, '\0', len) != NULL) {
-				return luaL_error(
-					L, "field `%s' contains a NUL byte",
-					f->key);
-			}
-		} else {
-			s = *fptr;
-			if (s != NULL) {
-				len = strlen(s);
-			}
-		}
-		if (s != NULL) {
-			/* clamp to the measured block: a stateful __index
-			 * could return a longer string on this second
-			 * lua_getfield, which must not overflow `block` */
-			if (avail == 0) {
-				newptr[f - conf_fields] = "";
-			} else {
-				if (len + 1 > avail) {
-					len = avail - 1;
-				}
-				memcpy(pos, s, len);
-				pos[len] = '\0';
-				newptr[f - conf_fields] = pos;
-				pos += len + 1;
-				avail -= len + 1;
-			}
-		}
-		lua_pop(L, 1);
-	}
-
-	/* Every protected read succeeded; repoint the staged string fields into
-	 * `block`, so the staged copy is the whole config to be committed. */
-	if (fill->total > 0) {
-		for (const struct metaconfig *f = conf_fields; f->key != NULL;
-		     f++) {
-			if (f->type != CONF_STRING) {
-				continue;
-			}
-			*(const char **)((char *)&staged + f->offset) =
-				newptr[f - conf_fields];
-		}
-	}
-	/* a reload must also leave a config the running server can apply */
-	if (fill->reload && !check_reload(conf, &staged, fill->has_ruleset)) {
-		return luaL_error(L, "config not applicable on reload");
-	}
-	/* commit atomically */
-	*conf = staged;
-	return 0;
-}
-
 /* Format the Lua error object on the stack top for logging. lua_tostring is
  * only safe on a string; a non-string error object (error({}), error(nil))
  * yields NULL, and passing NULL to slog's "%s" is undefined behavior. This
@@ -1093,85 +1004,69 @@ static bool load_table(
 		}
 	}
 
-	/* Validate every field first (read-only): non-string fields, then
-	 * string fields together with measuring the replacement string
-	 * block below. No field is mutated until all of them check out, so
-	 * a failure anywhere never leaves the config partially updated. */
+	/* Read each field once. Keeping its value on the Lua stack anchors strings
+	 * even if a later __index changes the source table or collects garbage.
+	 * No C allocation exists while any Lua access can still raise. */
+	const int top = lua_gettop(L);
+	luaL_checkstack(
+		L, (int)ARRAY_SIZE(conf_fields), "configuration fields");
+	struct config staged = *conf;
 	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
-		if (f->type == CONF_STRING) {
-			continue;
-		}
-		if (!load_field(L, f, conf, false)) {
+		lua_getfield(L, top, f->key);
+		if (!load_field(L, f, &staged)) {
+			lua_settop(L, top);
 			return false;
 		}
 	}
+	if (!(reload ? check_reload(conf, &staged, has_ruleset) :
+		       check_ranges(&staged))) {
+		lua_settop(L, top);
+		return false;
+	}
 
-	/* Measure the block size for string fields. A Lua-provided string
-	 * needs room for its own bytes; a nil value carries the field's
-	 * current string forward (if any) instead of leaving it pointing
-	 * into the old block this call frees below, which would dangle the
-	 * moment a later call's table nils out a field a prior call set. */
+	/* Copy both supplied and retained strings, so none refers into the old
+	 * block once it is freed. All remaining operations are non-raising. */
 	size_t total = 0;
 	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
 		if (f->type != CONF_STRING) {
 			continue;
 		}
-		lua_getfield(L, -1, f->key);
-		if (lua_isnil(L, -1)) {
-			const char *const *const fptr =
-				(const char *const *)((const char *)conf +
-						      f->offset);
-			if (*fptr != NULL) {
-				total += strlen(*fptr) + 1;
-			}
-		} else if (lua_type(L, -1) == LUA_TSTRING) {
-			size_t len;
-			const char *s = lua_tolstring(L, -1, &len);
-			if (memchr(s, '\0', len) != NULL) {
-				LOGE_F("boot: field `%s' contains a NUL byte",
-				       f->key);
-				lua_pop(L, 1);
+		const char *const str = *(
+			const char *const *)((const char *)&staged + f->offset);
+		if (str != NULL) {
+			const size_t len = strlen(str);
+			if (len >= SIZE_MAX - total) {
+				LOGE("boot: configuration strings are too large");
+				lua_settop(L, top);
 				return false;
 			}
 			total += len + 1;
-		} else {
-			LOGE_F("boot: field `%s' must be a string", f->key);
-			lua_pop(L, 1);
-			return false;
 		}
-		lua_pop(L, 1);
 	}
-
-	/* Allocate single block for all strings */
-	char *restrict block = (total > 0) ? malloc(total) : NULL;
+	char *const block = total > 0 ? malloc(total) : NULL;
 	if (total > 0 && block == NULL) {
 		LOGE("boot: out of memory");
+		lua_settop(L, top);
 		return false;
 	}
-
-	/* Apply the non-string fields and fill `block` under a protected call, so
-	 * a raising config-table __index fails the load instead of leaking
-	 * `block`. Nothing between the malloc above and lua_pcall may allocate:
-	 * the context rides in as a light userdata, not as a closure upvalue. */
-	struct conf_fill fill = {
-		.conf = conf,
-		.block = block,
-		.total = total,
-		.reload = reload,
-		.has_ruleset = has_ruleset,
-	};
-	lua_pushcfunction(L, conf_fill_fields);
-	lua_pushlightuserdata(L, &fill);
-	lua_pushvalue(L, -3); /* the config table, as the second argument */
-	if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
-		LOGE_F("boot: %s", boot_errmsg(L));
-		lua_pop(L, 1);
-		free(block);
-		return false;
+	char *pos = block;
+	for (const struct metaconfig *f = conf_fields; f->key != NULL; f++) {
+		if (f->type != CONF_STRING) {
+			continue;
+		}
+		const char **const str =
+			(const char **)((char *)&staged + f->offset);
+		if (*str != NULL) {
+			const size_t len = strlen(*str) + 1;
+			memcpy(pos, *str, len);
+			*str = pos;
+			pos += len;
+		}
 	}
-
+	lua_settop(L, top);
 	free(conf->strings);
-	conf->strings = block;
+	staged.strings = block;
+	*conf = staged;
 	return true;
 }
 
@@ -1295,6 +1190,12 @@ static int conf_apply_boot(lua_State *restrict L)
 	return 0;
 }
 
+static int boot_openlibs(lua_State *L)
+{
+	luaL_openlibs(L);
+	return 0;
+}
+
 bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 {
 	struct io_stream *restrict const s = codec_lua_reader(filename);
@@ -1307,7 +1208,13 @@ bool conf_loadboot(struct config *restrict conf, const char *restrict filename)
 		LOGE("config: out of memory");
 		return false;
 	}
-	luaL_openlibs(L);
+	lua_pushcfunction(L, boot_openlibs);
+	if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+		LOGE_F("config: %s", boot_errmsg(L));
+		io_stream_close(s);
+		lua_close(L);
+		return false;
+	}
 	struct codec_lua_stream rs = { .stream = s,
 				       .errlabel = "config: read error",
 				       .err = 0 };

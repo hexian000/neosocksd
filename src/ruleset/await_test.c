@@ -683,8 +683,6 @@ static lua_State *new_ruleset_lua(
 	r->server = NULL;
 	r->basereq = NULL;
 	r->L = L;
-	r->config.traceback = false;
-	r->config.memlimit_kb = 0;
 	STUB.loop = loop;
 	(void)luaopen_await(L);
 	lua_setglobal(L, "await");

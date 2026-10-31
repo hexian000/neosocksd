@@ -113,10 +113,15 @@ struct lua_State;
 void conf_pushtable(
 	struct lua_State *restrict L, const struct config *restrict conf);
 
+/* Push one configurable field, or nil when key is unknown. */
+void conf_pushfield(
+	struct lua_State *restrict L, const struct config *restrict conf,
+	const char *restrict key);
+
 /* Extract config fields from a Lua table at the top of L's stack, checking
- * their domains (strings must contain no embedded NUL); nil fields keep their
- * current value. Returns false on a bad
- * field, but may also raise, so call it from a protected frame. L may be the
+ * their domains (strings must contain no embedded NUL). Each field is read once,
+ * honoring __index; nil fields keep their current value. Returns false on a
+ * bad field, but may also raise, so call it from a protected frame. L may be the
  * ruleset VM (cfunc_loadconfig) or a standalone state used for a boot config
  * (conf_loadboot); this function assumes nothing about which. */
 bool conf_loadfromtable(

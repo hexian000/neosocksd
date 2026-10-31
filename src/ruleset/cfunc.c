@@ -60,11 +60,11 @@ static int ruleset_state_gc(lua_State *restrict L)
 static void check_memlimit(lua_State *restrict L)
 {
 	const struct ruleset *restrict r = aux_getruleset(L);
-	const int_fast32_t memlimit_kb = r->config.memlimit_kb;
-	if (memlimit_kb <= 0) {
+	const int memlimit = r->conf->memlimit;
+	if (memlimit <= 0) {
 		return;
 	}
-	if ((r->vmstats.byt_allocated >> 10) < (size_t)memlimit_kb) {
+	if ((r->vmstats.byt_allocated >> 20) < (size_t)memlimit) {
 		return;
 	}
 	(void)lua_gc(L, LUA_GCCOLLECT, 0);
@@ -75,10 +75,9 @@ static struct ruleset_state *new_ruleset_state(lua_State *restrict L)
 	struct ruleset_state *restrict state =
 		lua_newuserdata(L, sizeof(struct ruleset_state));
 	*state = (struct ruleset_state){ 0 };
-	if (luaL_newmetatable(L, MT_RULESET_STATE)) {
-		lua_pushcfunction(L, ruleset_state_gc);
-		lua_setfield(L, -2, "__gc");
-	}
+	(void)luaL_newmetatable(L, MT_RULESET_STATE);
+	lua_pushcfunction(L, ruleset_state_gc);
+	lua_setfield(L, -2, "__gc");
 	lua_setmetatable(L, -2);
 	return state;
 }
@@ -260,40 +259,11 @@ static int loadconfig(lua_State *restrict L, const bool reload)
 			luaL_typename(L, -1));
 	}
 
-	/* Validate everything and stage the ruleset-local settings before touching
-	 * any live state, so a bad field -- a config-field error from
-	 * conf_loadfromtable, a too-large memlimit, or a non-table ruleset --
-	 * fails the load without having replaced the global ruleset table or the
+	/* Validate everything before touching live state: a config-field error
+	 * or a non-table ruleset fails without replacing the global ruleset or the
 	 * config. The final config commit follows the fallible global installation.
 	 * The config table stays on top for conf_loadfromtable. */
 	struct ruleset *restrict r = aux_getruleset(L);
-
-	/* stage memlimit (MiB -> KiB); an absent value keeps the current one */
-	int_least32_t new_memlimit_kb = r->config.memlimit_kb;
-	lua_getfield(L, 1, "memlimit");
-	if (!lua_isnil(L, -1)) {
-		/* keep the arithmetic in lua_Integer and reject values that would
-		 * overflow the KiB field. Non-positive disables the limit. */
-		if (!lua_isinteger(L, -1)) {
-			return luaL_error(
-				L,
-				"config: field `memlimit' must be an integer");
-		}
-		const lua_Integer mb = lua_tointeger(L, -1);
-		if (mb > (INT_LEAST32_MAX >> 10)) {
-			return luaL_error(L, "config: memlimit too large");
-		}
-		new_memlimit_kb = (mb > 0) ? (int_least32_t)(mb << 10) : 0;
-	}
-	lua_pop(L, 1);
-
-	/* stage traceback */
-	bool new_traceback = r->config.traceback;
-	lua_getfield(L, 1, "traceback");
-	if (!lua_isnil(L, -1)) {
-		new_traceback = lua_toboolean(L, -1) != 0;
-	}
-	lua_pop(L, 1);
 
 	/* validate the `ruleset` table and remove it from the config table so
 	 * conf_loadfromtable never sees it; keep its value on the stack to install
@@ -349,13 +319,14 @@ static int loadconfig(lua_State *restrict L, const bool reload)
 		lua_pushcfunction(L, install_ruleset);
 		lua_insert(L, 4);
 		if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+			/* Release native ownership before rollback, which can itself
+			 * allocate when __newindex raised without storing the field. */
+			free(staged.strings);
 			/* A raising __newindex may already have stored the new
-			 * field. Restore its prior raw value without invoking it
-			 * again; removing that new field does not allocate. */
+			 * field. Restore its prior raw value without invoking it. */
 			lua_pushvalue(L, 3);
 			lua_pushvalue(L, 2);
 			lua_rawset(L, 1);
-			free(staged.strings);
 			return lua_error(L);
 		}
 	} else {
@@ -363,8 +334,6 @@ static int loadconfig(lua_State *restrict L, const bool reload)
 	}
 	free(r->conf->strings);
 	*r->conf = staged;
-	r->config.memlimit_kb = new_memlimit_kb;
-	r->config.traceback = new_traceback;
 	return 0;
 }
 
@@ -409,6 +378,8 @@ static int build_rpcall_result(lua_State *restrict L)
 	/* lua stack: "return " marshal ... */
 	lua_call(L, n, 1);
 	lua_concat(L, 2);
+	/* A __concat result can be a number; convert while still protected. */
+	(void)luaL_checklstring(L, -1, NULL);
 	return 1;
 }
 

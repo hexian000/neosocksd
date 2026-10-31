@@ -29,7 +29,7 @@ local neosocksd = {}
 
 function neosocksd.async(finish, func, ...) return coroutine.create(func), nil end
 
-function neosocksd.config() return {} end
+function neosocksd.config(...) if select("#", ...) == 0 then return {} end end
 
 function neosocksd.invoke(code, addr, ...) end
 

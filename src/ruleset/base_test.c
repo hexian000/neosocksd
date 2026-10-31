@@ -17,6 +17,7 @@
 
 #include "base.h"
 
+#include "conf.h"
 #include "dialer.h"
 
 #include "io/stream.h"
@@ -31,6 +32,7 @@
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -68,6 +70,62 @@ T_DECLARE_SUBCASE(check_event_clock, const size_t expected)
 	T_EXPECT_EQ(event_clock_calls, expected);
 }
 #endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
+
+static bool bootstrap_oom;
+static bool thread_guard_oom;
+static size_t bootstrap_failures;
+static lua_Alloc bootstrap_alloc;
+
+static void *
+bootstrap_failing_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+{
+	if (nsize > 0 && (ptr == NULL || nsize > osize)) {
+		bootstrap_failures++;
+		return NULL;
+	}
+	return bootstrap_alloc(ud, ptr, osize, nsize);
+}
+
+void test_base_setfield(lua_State *L, int idx, const char *key)
+{
+	if (thread_guard_oom && strcmp(key, "__gc") == 0) {
+		idx = lua_absindex(L, idx);
+		/* Force the finalizer insertion to grow the metatable hash. */
+		for (int i = 0; i < 31; i++) {
+			char field[32];
+			(void)snprintf(
+				field, sizeof(field), "fault_padding_%d", i);
+			lua_pushboolean(L, 1);
+			lua_setfield(L, idx, field);
+		}
+		void *ud;
+		bootstrap_alloc = lua_getallocf(L, &ud);
+		lua_setallocf(L, bootstrap_failing_alloc, ud);
+	}
+	lua_setfield(L, idx, key);
+}
+
+#if LUA_VERSION_NUM >= 504
+int test_base_resume(lua_State *L, lua_State *from, int nargs, int *nresults)
+#else
+int test_base_resume(lua_State *L, lua_State *from, int nargs)
+#endif
+{
+	void *ud = NULL;
+	if (bootstrap_oom) {
+		bootstrap_alloc = lua_getallocf(L, &ud);
+		lua_setallocf(L, bootstrap_failing_alloc, ud);
+	}
+#if LUA_VERSION_NUM >= 504
+	const int status = lua_resume(L, from, nargs, nresults);
+#else
+	const int status = lua_resume(L, from, nargs);
+#endif
+	if (bootstrap_oom) {
+		lua_setallocf(L, bootstrap_alloc, ud);
+	}
+	return status;
+}
 
 static int g_close_called;
 static int test_close(lua_State *restrict L)
@@ -152,19 +210,36 @@ static int getregtable_idle_thunk(lua_State *restrict L)
 	return 1;
 }
 
-static lua_State *new_lua(void)
+static void free_request(void *data)
+{
+	dialreq_free(data);
+}
+
+static unsigned lua_close_count;
+
+static void close_lua(void *data)
+{
+	lua_close(data);
+	lua_close_count++;
+}
+
+/* Ruleset and allocator userdata below have static storage because Lua
+ * finalizers run after a failed case has left its stack frame. */
+static lua_State *new_lua(struct testing_ctx *_t_)
 {
 	lua_State *restrict L = luaL_newstate();
 	if (L == NULL) {
 		return NULL;
 	}
+	T_CLEANUP(close_lua, L);
 	luaL_openlibs(L);
 	return L;
 }
 
-static lua_State *new_ruleset_lua(struct ruleset *restrict r)
+static lua_State *
+new_ruleset_lua(struct testing_ctx *_t_, struct ruleset *restrict r)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	lua_Alloc alloc;
 
 	T_CHECK(L != NULL);
@@ -189,7 +264,7 @@ static lua_State *new_ruleset_lua(struct ruleset *restrict r)
 
 T_DECLARE_CASE(base_aux_newweaktable_v)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	aux_newweaktable(L, "v");
@@ -197,13 +272,11 @@ T_DECLARE_CASE(base_aux_newweaktable_v)
 	T_EXPECT(lua_getmetatable(L, -1) != 0);
 	lua_getfield(L, -1, "__mode");
 	T_EXPECT_STREQ(lua_tostring(L, -1), "v");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_newweaktable_k)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	aux_newweaktable(L, "k");
@@ -211,13 +284,11 @@ T_DECLARE_CASE(base_aux_newweaktable_k)
 	T_EXPECT(lua_getmetatable(L, -1) != 0);
 	lua_getfield(L, -1, "__mode");
 	T_EXPECT_STREQ(lua_tostring(L, -1), "k");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_toclose_sets_gc)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	g_close_called = 0;
@@ -226,13 +297,156 @@ T_DECLARE_CASE(base_aux_toclose_sets_gc)
 	T_EXPECT(lua_getmetatable(L, -1) != 0);
 	lua_getfield(L, -1, "__gc");
 	T_EXPECT(lua_isfunction(L, -1));
+}
 
-	lua_close(L);
+static int getthread_thunk(lua_State *L)
+{
+	(void)aux_getthread(L);
+	return 1;
+}
+
+T_DECLARE_CASE(base_thread_bootstrap_oom_is_protected)
+{
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *L = new_ruleset_lua(_t_, &r);
+	lua_pushcfunction(L, getthread_thunk);
+	bootstrap_failures = 0;
+	bootstrap_oom = true;
+	const int status = lua_pcall(L, 0, 1, 0);
+	bootstrap_oom = false;
+	const size_t active_after_failure = r.vmstats.num_thread_active;
+	const char *error = lua_tostring(L, -1);
+	const bool memory_error =
+		error != NULL && strstr(error, "memory") != NULL;
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_pushcfunction(L, getthread_thunk);
+	const int retry = lua_pcall(L, 0, 1, 0);
+	const bool yielded =
+		retry == LUA_OK && lua_status(lua_tothread(L, -1)) == LUA_YIELD;
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT(bootstrap_failures > 0);
+	/* Lua 5.3 rethrows a moved error object as LUA_ERRRUN. */
+	T_EXPECT(status == LUA_ERRMEM || status == LUA_ERRRUN);
+	T_EXPECT(memory_error);
+	T_EXPECT_EQ(active_after_failure, (size_t)0);
+	T_EXPECT(yielded);
+	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+}
+
+T_DECLARE_CASE(base_thread_repairs_incomplete_metatable)
+{
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *L = new_ruleset_lua(_t_, &r);
+	void *ud;
+	lua_Alloc alloc = lua_getallocf(L, &ud);
+	lua_pushcfunction(L, getthread_thunk);
+	bootstrap_failures = 0;
+	thread_guard_oom = true;
+	const int first = lua_pcall(L, 0, 1, 0);
+	thread_guard_oom = false;
+	lua_setallocf(L, alloc, ud);
+	lua_settop(L, 0);
+	luaL_getmetatable(L, "ruleset_thread");
+	T_CHECK(lua_istable(L, -1));
+	lua_getfield(L, -1, "__gc");
+	const bool incomplete = lua_isnil(L, -1);
+	lua_settop(L, 0);
+	(void)aux_getthread(L);
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	const size_t active = r.vmstats.num_thread_active;
+	T_EXPECT_EQ(first, LUA_ERRMEM);
+	T_EXPECT(bootstrap_failures > 0);
+	T_EXPECT(incomplete);
+	T_EXPECT_EQ(active, (size_t)0);
+}
+
+static lua_Alloc guard_alloc;
+static size_t guard_allocations;
+static size_t guard_fail_after;
+
+static void *
+guard_failing_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
+{
+	if (nsize > 0 && (ptr == NULL || nsize > osize) &&
+	    guard_fail_after > 0 && ++guard_allocations >= guard_fail_after) {
+		return NULL;
+	}
+	return guard_alloc(ud, ptr, osize, nsize);
+}
+
+static int guard_close(lua_State *L)
+{
+	bool *closed = lua_touserdata(L, 1);
+	if (!*closed) {
+		*closed = true;
+		g_close_called++;
+	}
+	return 0;
+}
+
+static int guard_yield(lua_State *L)
+{
+	bool *closed = lua_newuserdata(L, sizeof(*closed));
+	*closed = false;
+	aux_toclose(L, -1, "test.oom.guard", guard_close);
+	return lua_yield(L, 0);
+}
+
+T_DECLARE_CASE(base_guard_oom_retry_finalizes_abandoned_coroutine)
+{
+	size_t incomplete = 0;
+	for (size_t fail = 1; fail <= 16; fail++) {
+		lua_State *L = new_lua(_t_);
+		T_CHECK(L != NULL);
+		void *ud;
+		guard_alloc = lua_getallocf(L, &ud);
+		lua_setallocf(L, guard_failing_alloc, ud);
+		lua_State *co = lua_newthread(L);
+		lua_pushcfunction(co, guard_yield);
+		guard_allocations = 0;
+		guard_fail_after = fail;
+		const int first = aux_resume(co, L, 0);
+		guard_fail_after = 0;
+		luaL_getmetatable(L, "test.oom.guard");
+		bool partial = false;
+		if (lua_istable(L, -1)) {
+			lua_getfield(L, -1, "__gc");
+			partial = lua_isnil(L, -1);
+		}
+		lua_settop(L, 0);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		g_close_called = 0;
+		co = lua_newthread(L);
+		lua_pushcfunction(co, guard_yield);
+		const int retry = aux_resume(co, L, 0);
+		lua_settop(L, 0);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		if (partial) {
+			incomplete++;
+			T_EXPECT_EQ(first, LUA_ERRMEM);
+			T_EXPECT_EQ(retry, LUA_YIELD);
+			T_EXPECT_EQ(g_close_called, 1);
+		}
+	}
+	T_EXPECT(incomplete > 0);
 }
 
 T_DECLARE_CASE(base_aux_close_behavior)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	g_close_called = 0;
@@ -244,13 +458,11 @@ T_DECLARE_CASE(base_aux_close_behavior)
 #else
 	T_EXPECT_EQ(g_close_called, 1);
 #endif
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_format_addr_ipv4)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	struct sockaddr_in sa;
@@ -260,13 +472,11 @@ T_DECLARE_CASE(base_aux_format_addr_ipv4)
 	lua_pushlightuserdata(L, &sa);
 	T_EXPECT_EQ(aux_format_addr(L), 1);
 	T_EXPECT_STREQ(lua_tostring(L, -1), "127.0.0.1");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_format_addr_ipv6)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	struct sockaddr_in6 sa;
@@ -276,24 +486,20 @@ T_DECLARE_CASE(base_aux_format_addr_ipv6)
 	lua_pushlightuserdata(L, &sa);
 	T_EXPECT_EQ(aux_format_addr(L), 1);
 	T_EXPECT_STREQ(lua_tostring(L, -1), "::1");
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_format_addr_null)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	lua_pushlightuserdata(L, NULL);
 	T_EXPECT_EQ(aux_format_addr(L), 0);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_format_addr_unknown_family)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	struct sockaddr sa = {
 		.sa_family = AF_UNIX,
 	};
@@ -303,8 +509,6 @@ T_DECLARE_CASE(base_aux_format_addr_unknown_family)
 	lua_pushlightuserdata(L, &sa);
 	T_EXPECT_EQ(lua_pcall(L, 1, 1, 0), LUA_ERRRUN);
 	T_EXPECT(strstr(lua_tostring(L, -1), "unknown af") != NULL);
-
-	lua_close(L);
 }
 
 /* Evaluate @p expr for one error object, hand the result to aux_traceback and
@@ -338,7 +542,7 @@ T_DECLARE_SUBCASE(
  */
 T_DECLARE_CASE(base_aux_traceback_renders_error_object)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_CALL_SUBCASE(
@@ -373,8 +577,6 @@ T_DECLARE_CASE(base_aux_traceback_renders_error_object)
 	T_CHECK(s != NULL);
 	T_EXPECT(strstr(s, "(no error object)") == s);
 	T_EXPECT(strstr(s, "stack traceback:") != NULL);
-
-	lua_close(L);
 }
 
 /*
@@ -387,7 +589,7 @@ T_DECLARE_CASE(base_aux_traceback_renders_error_object)
  */
 T_DECLARE_CASE(base_aux_traceback_survives_raising_tostring)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	lua_pushcfunction(L, aux_traceback);
@@ -402,8 +604,6 @@ T_DECLARE_CASE(base_aux_traceback_survives_raising_tostring)
 	T_EXPECT(strncmp(s, want, sizeof(want) - 1) == 0);
 	T_EXPECT(strstr(s, "stack traceback:") != NULL);
 	T_EXPECT(strstr(s, "error in error handling") == NULL);
-
-	lua_close(L);
 }
 
 /* Evaluate @p expr for one error object and check how aux_errmsg renders it.
@@ -428,7 +628,7 @@ T_DECLARE_SUBCASE(
 
 T_DECLARE_CASE(base_aux_errmsg_renders_every_error_object)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* a string message passes through untouched */
@@ -461,15 +661,13 @@ T_DECLARE_CASE(base_aux_errmsg_renders_every_error_object)
 		"debug.setmetatable(co, { __tostring = function() error('nested') end }) "
 		"return co",
 		"(unprintable thread: ");
-
-	lua_close(L);
 }
 
 /* aux_errmsg's last resort: with the stack full it cannot even set up the
  * protected call that renders the object. */
 T_DECLARE_CASE(base_aux_errmsg_stack_exhausted)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	T_CHECK(luaL_loadstring(
@@ -494,7 +692,6 @@ T_DECLARE_CASE(base_aux_errmsg_stack_exhausted)
 	T_EXPECT_STREQ(aux_errmsg(L, 1), "(unprintable error object)");
 
 	lua_settop(L, 0);
-	lua_close(L);
 }
 
 /* Fail every allocation, including the emergency-GC retry that follows the
@@ -519,9 +716,10 @@ failing_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
  * cannot build its result and neither can the type/address fallback. */
 T_DECLARE_CASE(base_aux_errmsg_out_of_memory)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
-	bool failing = false;
+	static bool failing;
+	failing = false;
 	lua_setallocf(L, failing_alloc, &failing);
 
 	T_CHECK(luaL_loadstring(
@@ -543,25 +741,29 @@ T_DECLARE_CASE(base_aux_errmsg_out_of_memory)
 	T_EXPECT_STREQ(s, "(unprintable error object)");
 
 	lua_settop(L, 0);
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_todialreq_builds_request)
 {
-	struct ruleset r = { 0 };
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
 	lua_State *restrict L;
 	struct dialreq *req;
 
 	r.basereq =
 		dialreq_parse("base.example:443", "socks5://127.0.0.1:1080");
 	T_CHECK(r.basereq != NULL);
-	L = new_ruleset_lua(&r);
+	T_CLEANUP(free_request, r.basereq);
+	L = new_ruleset_lua(_t_, &r);
 
 	lua_pushstring(L, "example.com:80");
 	lua_pushstring(L, "http://127.0.0.2:8080");
 	T_EXPECT(aux_todialreq(L, 2));
 	req = lua_touserdata(L, -1);
 	T_CHECK(req != NULL);
+	T_CLEANUP(free_request, req);
 	T_EXPECT_EQ(req->addr.type, ATYP_DOMAIN);
 	T_EXPECT_EQ(req->addr.port, UINT16_C(80));
 	T_EXPECT_EQ(req->num_proxy, (size_t)2);
@@ -569,22 +771,19 @@ T_DECLARE_CASE(base_aux_todialreq_builds_request)
 	T_EXPECT_EQ(req->proxy[1].proto, PROTO_HTTP);
 	T_EXPECT_EQ(req->proxy[1].addr.type, ATYP_INET);
 	T_EXPECT_EQ(req->proxy[1].addr.port, UINT16_C(8080));
-	dialreq_free(req);
-	dialreq_free(r.basereq);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_todialreq_nil_returns_null)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 
 	lua_pushnil(L);
 	T_EXPECT(aux_todialreq(L, 1));
 	T_EXPECT_EQ(lua_touserdata(L, -1), NULL);
-
-	lua_close(L);
 }
 
 /* Regression: aux_todialreq must honor its documented [-n, ...] stack effect
@@ -592,8 +791,11 @@ T_DECLARE_CASE(base_aux_todialreq_nil_returns_null)
  * failure path. */
 T_DECLARE_CASE(base_aux_todialreq_overflow_pops_stack)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 
 	const int base = lua_gettop(L);
 	const int n = 256; /* > 255 */
@@ -603,8 +805,6 @@ T_DECLARE_CASE(base_aux_todialreq_overflow_pops_stack)
 	}
 	T_EXPECT(!aux_todialreq(L, n));
 	T_EXPECT_EQ(lua_gettop(L), base); /* the n arguments must be popped */
-
-	lua_close(L);
 }
 
 /* Regression: aux_todialreq's string-content rejection branches (over-long
@@ -613,8 +813,11 @@ T_DECLARE_CASE(base_aux_todialreq_overflow_pops_stack)
  * like the n > 255 early-out. */
 T_DECLARE_CASE(base_aux_todialreq_rejects_bad_strings_pops_stack)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	const int base = lua_gettop(L);
 
 	/* an address longer than the 1024-byte cap is rejected before any
@@ -635,8 +838,6 @@ T_DECLARE_CASE(base_aux_todialreq_rejects_bad_strings_pops_stack)
 	lua_pushstring(L, "no-colon-no-port");
 	T_EXPECT(!aux_todialreq(L, 1));
 	T_EXPECT_EQ(lua_gettop(L), base);
-
-	lua_close(L);
 }
 
 T_DECLARE_SUBCASE(
@@ -644,11 +845,15 @@ T_DECLARE_SUBCASE(
 	const size_t target_len, const char *restrict proxy,
 	const size_t proxy_len)
 {
-	struct ruleset r = { 0 };
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
 	r.basereq =
 		dialreq_parse("base.example:443", "socks5://127.0.0.1:1080");
 	T_CHECK(r.basereq != NULL);
-	lua_State *restrict L = new_ruleset_lua(&r);
+	T_CLEANUP(free_request, r.basereq);
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	lua_pushstring(L, "sentinel");
 	lua_pushlstring(L, target, target_len);
 	lua_pushlstring(L, proxy, proxy_len);
@@ -658,8 +863,6 @@ T_DECLARE_SUBCASE(
 	if (accepted) {
 		dialreq_free(lua_touserdata(L, -1));
 	}
-	lua_close(L);
-	dialreq_free(r.basereq);
 
 	T_EXPECT(!accepted);
 	T_EXPECT_EQ(top, 1);
@@ -686,10 +889,11 @@ T_DECLARE_CASE(base_aux_todialreq_rejects_nul_proxy)
 
 T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 {
-	struct ruleset r = {
-		.config.traceback = false,
-	};
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	lua_State *co1, *co2;
 
 	async_finish_state = (struct async_finish_record){ 0 };
@@ -714,15 +918,16 @@ T_DECLARE_CASE(base_aux_async_reuses_idle_thread)
 	T_EXPECT_EQ(co2, co1);
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)1);
 	T_EXPECT_EQ(r.vmstats.num_thread_peak, (size_t)1);
-
-	lua_close(L);
 }
 
 #if LUA_VERSION_NUM >= 504
 T_DECLARE_CASE(base_aux_getthread_replaces_closed_idle_thread)
 {
-	struct ruleset r = { 0 };
-	lua_State *const L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *const L = new_ruleset_lua(_t_, &r);
 	lua_State *const old = aux_getthread(L);
 	lua_pushcfunction(L, async_finish);
 	lua_pushcfunction(L, async_worker);
@@ -741,7 +946,6 @@ T_DECLARE_CASE(base_aux_getthread_replaces_closed_idle_thread)
 			       async_finish_state.result == 99;
 	const size_t active = r.vmstats.num_thread_active;
 	luaL_unref(L, LUA_REGISTRYINDEX, ref);
-	lua_close(L);
 
 	T_EXPECT_EQ(first, LUA_YIELD);
 	T_EXPECT_EQ(closed, LUA_OK);
@@ -757,10 +961,11 @@ T_DECLARE_CASE(base_aux_getthread_replaces_closed_idle_thread)
  * lua_checkstack() a large narg overran a fresh coroutine's initial stack. */
 T_DECLARE_CASE(base_aux_async_grows_thread_stack_for_args)
 {
-	struct ruleset r = {
-		.config.traceback = false,
-	};
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 
 	/* large enough that, without the checkstack, the xmove runs off the end
 	 * of a fresh coroutine's stack into unmapped memory (a smaller overrun
@@ -768,7 +973,8 @@ T_DECLARE_CASE(base_aux_async_grows_thread_stack_for_args)
 	enum { NARG = 20000 };
 	async_finish_state = (struct async_finish_record){ 0 };
 	lua_State *const co = aux_getthread(L);
-	T_CHECK(lua_checkstack(L, NARG + 2));
+	/* Leave two extra slots for aux_async's lifecycle registry lookup. */
+	T_CHECK(lua_checkstack(L, NARG + 4));
 	lua_pushcfunction(L, async_finish);
 	lua_pushcfunction(L, async_worker);
 	for (int i = 0; i < NARG; i++) {
@@ -779,14 +985,15 @@ T_DECLARE_CASE(base_aux_async_grows_thread_stack_for_args)
 	T_EXPECT(async_finish_state.called);
 	T_EXPECT(async_finish_state.ok);
 	T_EXPECT_EQ(async_finish_state.result, (lua_Integer)99);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_getregtable_rejects_non_table)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 
 	/* a non-table registry slot must raise ERR_BAD_REGISTRY */
 	lua_pushboolean(L, 1);
@@ -795,14 +1002,15 @@ T_DECLARE_CASE(base_aux_getregtable_rejects_non_table)
 	lua_pushcfunction(L, getregtable_idle_thunk);
 	T_EXPECT_EQ(lua_pcall(L, 0, 1, 0), LUA_ERRRUN);
 	T_EXPECT(strstr(lua_tostring(L, -1), "registry is corrupted") != NULL);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_aux_forward_context_roundtrip)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	lua_newtable(L);
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
 
@@ -817,14 +1025,15 @@ T_DECLARE_CASE(base_aux_forward_context_roundtrip)
 	/* set NULL -> get returns NULL */
 	aux_setforward(L, L, NULL);
 	T_EXPECT(aux_getforward(L) == NULL);
-
-	lua_close(L);
 }
 
 T_DECLARE_CASE(base_ruleset_pcall_success_and_error)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	r.L = L;
 
 	/* success path returns true and records one event */
@@ -840,15 +1049,16 @@ T_DECLARE_CASE(base_ruleset_pcall_success_and_error)
 	T_CHECK(err != NULL);
 	T_EXPECT(strstr(err, "boom") != NULL);
 	lua_pop(L, 1);
-
-	lua_close(L);
 }
 
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
 T_DECLARE_CASE(base_ruleset_pcall_event_samples_wrap)
 {
-	struct ruleset r = { 0 };
-	lua_State *const L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *const L = new_ruleset_lua(_t_, &r);
 	r.L = L;
 	const size_t n = ARRAY_SIZE(r.vmstats.event_ns);
 	r.vmstats.num_events = n - 1;
@@ -894,14 +1104,16 @@ T_DECLARE_CASE(base_ruleset_pcall_event_samples_wrap)
 	}
 	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	T_EXPECT_STREQ(lua_tostring(L, -1), "boom");
-	lua_close(L);
 }
 #endif /* HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC) */
 
 T_DECLARE_CASE(base_ruleset_resume_wakes_coroutine)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	r.L = L;
 
 	/* create a coroutine that yields and pin it in the await context */
@@ -938,8 +1150,6 @@ T_DECLARE_CASE(base_ruleset_resume_wakes_coroutine)
 	lua_getglobal(L, "resumed");
 	T_EXPECT(lua_toboolean(L, -1) != 0);
 	lua_pop(L, 1);
-
-	lua_close(L);
 }
 
 /*
@@ -950,10 +1160,11 @@ T_DECLARE_CASE(base_ruleset_resume_wakes_coroutine)
  */
 T_DECLARE_CASE(base_aux_async_catastrophic_failure_cleanup)
 {
-	struct ruleset r = {
-		.config.traceback = false,
-	};
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	lua_newtable(L);
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
 
@@ -986,8 +1197,6 @@ T_DECLARE_CASE(base_aux_async_catastrophic_failure_cleanup)
 	lua_rawgetp(L, -1, co);
 	T_EXPECT(lua_isnil(L, -1));
 	lua_pop(L, 2);
-
-	lua_close(L);
 }
 
 /* A stream that yields a chunk on its first direct_read and then either EOF or
@@ -1022,7 +1231,7 @@ static const struct io_stream_vftable fault_stream_vftable = {
  * compile the (valid-prefix) partial chunk. */
 T_DECLARE_CASE(base_aux_load_reports_mid_stream_read_error)
 {
-	lua_State *restrict L = new_lua();
+	lua_State *restrict L = new_lua(_t_);
 	T_CHECK(L != NULL);
 
 	/* control: a complete chunk with a clean EOF loads successfully */
@@ -1046,8 +1255,6 @@ T_DECLARE_CASE(base_aux_load_reports_mid_stream_read_error)
 	};
 	T_EXPECT(aux_load(L, &bad.stream, "=bad") != LUA_OK);
 	lua_settop(L, 0);
-
-	lua_close(L);
 }
 
 /* ruleset_resume with a corrupted RIDX_AWAIT_CONTEXT (not a table) stores
@@ -1055,8 +1262,11 @@ T_DECLARE_CASE(base_aux_load_reports_mid_stream_read_error)
  * bookkeeping. */
 T_DECLARE_CASE(base_ruleset_resume_bad_await_context)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	r.L = L;
 
 	/* corrupt the await-context slot to a non-table */
@@ -1073,16 +1283,17 @@ T_DECLARE_CASE(base_ruleset_resume_bad_await_context)
 	T_EXPECT(lua_isstring(L, -1));
 	T_EXPECT(strstr(lua_tostring(L, -1), "registry is corrupted") != NULL);
 	lua_pop(L, 1);
-
-	lua_close(L);
 }
 
 /* ruleset_resume for a ctx with no await-context entry (co == NULL) returns
  * early ("async context lost") without decrementing the active count. */
 T_DECLARE_CASE(base_ruleset_resume_context_lost)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
+	static struct config conf;
+	conf = (struct config){ 0 };
+	static struct ruleset r;
+	r = (struct ruleset){ .conf = &conf };
+	lua_State *restrict L = new_ruleset_lua(_t_, &r);
 	r.L = L;
 
 	int ctx_key = 0; /* never registered in the await context */
@@ -1090,18 +1301,28 @@ T_DECLARE_CASE(base_ruleset_resume_context_lost)
 	ruleset_resume(&r, &ctx_key, 0);
 
 	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)3);
-	lua_close(L);
 }
 
-/* A coroutine that dies on resume (error status, not OK/YIELD) drives the
- * catastrophic-resume path: RIDX_LASTERROR is stored, num_thread_active is
- * decremented exactly once, and both the forward and await context entries for
- * the abandoned coroutine are cleared. */
-T_DECLARE_CASE(base_ruleset_resume_catastrophic_failure)
+struct resume_fixture {
+	struct config conf;
+	struct ruleset ruleset;
+};
+
+static void cleanup_resume_fixture(void *data)
 {
-	struct ruleset r = { 0 };
-	lua_State *restrict L = new_ruleset_lua(&r);
-	r.L = L;
+	struct resume_fixture *f = data;
+	free(f);
+}
+
+T_DECLARE_CASE(base_ruleset_resume_unpooled_failure)
+{
+	struct resume_fixture *f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	struct ruleset *r = &f->ruleset;
+	r->conf = &f->conf;
+	T_CLEANUP(cleanup_resume_fixture, f);
+	lua_State *restrict L = new_ruleset_lua(_t_, r);
+	r->L = L;
 	lua_newtable(L);
 	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
 
@@ -1121,7 +1342,7 @@ T_DECLARE_CASE(base_ruleset_resume_catastrophic_failure)
 	T_CHECK(aux_resume(co, L, 0) == LUA_YIELD);
 	lua_pop(L, 1); /* drop co ref (kept alive by the tables) */
 
-	r.vmstats.num_thread_active = 1;
+	T_EXPECT_EQ(r->vmstats.num_thread_active, 0);
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
 	const struct timespec readings[] = {
 		{ .tv_sec = 7, .tv_nsec = 999999999 },
@@ -1129,18 +1350,18 @@ T_DECLARE_CASE(base_ruleset_resume_catastrophic_failure)
 	};
 	set_event_clock(readings);
 #endif
-	ruleset_resume(&r, &ctx_key, 0);
+	ruleset_resume(r, &ctx_key, 0);
 #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
 	T_CALL_SUBCASE(check_event_clock, (size_t)2);
-	T_EXPECT_EQ(r.vmstats.event_ns[0], INT64_C(2));
-	for (size_t i = 1; i < ARRAY_SIZE(r.vmstats.event_ns); i++) {
-		T_EXPECT_EQ(r.vmstats.event_ns[i], INT64_C(0));
+	T_EXPECT_EQ(r->vmstats.event_ns[0], INT64_C(2));
+	for (size_t i = 1; i < ARRAY_SIZE(r->vmstats.event_ns); i++) {
+		T_EXPECT_EQ(r->vmstats.event_ns[i], INT64_C(0));
 	}
 #endif
-	T_EXPECT_EQ(r.vmstats.num_events, (size_t)1);
+	T_EXPECT_EQ(r->vmstats.num_events, (size_t)1);
 
-	/* decremented exactly once, not double-counted (SIZE_MAX) */
-	T_EXPECT_EQ(r.vmstats.num_thread_active, (size_t)0);
+	/* A raw coroutine never acquired an active pool slot. */
+	T_EXPECT_EQ(r->vmstats.num_thread_active, 0);
 
 	lua_settop(L, 0);
 	/* forward-context entry for co cleared */
@@ -1156,8 +1377,59 @@ T_DECLARE_CASE(base_ruleset_resume_catastrophic_failure)
 	/* the error was stored in the coroutine's RIDX_LASTERROR */
 	lua_rawgeti(co, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 	T_EXPECT(!lua_isnil(co, -1));
+}
 
-	lua_close(L);
+T_DECLARE_CASE(base_ruleset_resume_catastrophic_failure)
+{
+	struct resume_fixture *f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	struct ruleset *r = &f->ruleset;
+	r->conf = &f->conf;
+	T_CLEANUP(cleanup_resume_fixture, f);
+	lua_State *restrict L = new_ruleset_lua(_t_, r);
+	r->L = L;
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+
+	lua_State *const co = aux_getthread(L);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, 1);
+	int ctx_key = 0;
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+	lua_pushvalue(L, -2);
+	lua_rawsetp(L, -2, &ctx_key);
+	lua_pop(L, 1);
+	int fwd_state = 0;
+	aux_setforward(L, co, &fwd_state);
+
+	async_finish_state = (struct async_finish_record){ 0 };
+	lua_pushcfunction(L, async_finish);
+	lua_pushcfunction(L, resume_yield);
+	T_EXPECT_EQ(aux_async(co, L, 0, 2), LUA_YIELD);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, 1);
+	lua_settop(L, 0);
+
+	/* The worker returns normally, then the pool cache raises before release. */
+	lua_pushboolean(L, 1);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+	ruleset_resume(r, &ctx_key, 0);
+	T_EXPECT(async_finish_state.called);
+	T_EXPECT(async_finish_state.ok);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, 0);
+
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+	lua_rawgetp(L, -1, co);
+	T_EXPECT(lua_isnil(L, -1));
+	lua_pop(L, 2);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+	lua_rawgetp(L, -1, &ctx_key);
+	T_EXPECT(lua_isnil(L, -1));
+	lua_pop(L, 2);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
+	T_EXPECT_STREQ(lua_tostring(L, -1), ERR_BAD_REGISTRY);
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, 0);
 }
 
 /* -------------------------------------------------------------------------
@@ -1168,11 +1440,37 @@ T_DECLARE_CASE(base_ruleset_resume_catastrophic_failure)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+static struct ruleset failure_ruleset;
+static struct config failure_conf;
+
+T_DECLARE_CASE(base_fixture_intentional_failure)
+{
+	failure_ruleset = (struct ruleset){ .conf = &failure_conf };
+	lua_State *L = new_ruleset_lua(_t_, &failure_ruleset);
+	(void)aux_getthread(L);
+	T_CHECK(failure_ruleset.vmstats.num_thread_active == 1);
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(base_failed_expectation_closes_lua)
+{
+	const unsigned before = lua_close_count;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, base_fixture_intentional_failure);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(lua_close_count, before + 1);
+	T_EXPECT_EQ(failure_ruleset.vmstats.num_thread_active, (size_t)0);
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(base_failed_expectation_closes_lua),
 	T_CASE(base_aux_newweaktable_v),
 	T_CASE(base_aux_newweaktable_k),
 	T_CASE(base_aux_toclose_sets_gc),
 	T_CASE(base_aux_close_behavior),
+	T_CASE(base_thread_bootstrap_oom_is_protected),
+	T_CASE(base_thread_repairs_incomplete_metatable),
+	T_CASE(base_guard_oom_retry_finalizes_abandoned_coroutine),
 	T_CASE(base_aux_format_addr_ipv4),
 	T_CASE(base_aux_format_addr_ipv6),
 	T_CASE(base_aux_format_addr_null),
@@ -1204,6 +1502,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(base_aux_load_reports_mid_stream_read_error),
 	T_CASE(base_ruleset_resume_bad_await_context),
 	T_CASE(base_ruleset_resume_context_lost),
+	T_CASE(base_ruleset_resume_unpooled_failure),
 	T_CASE(base_ruleset_resume_catastrophic_failure),
 	T_SUITE_END,
 };

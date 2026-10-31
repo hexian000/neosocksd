@@ -36,10 +36,6 @@ struct ruleset {
 #if WITH_ALLOC_CACHE
 	struct mmcache *vmcache;
 #endif
-	struct {
-		int_least32_t memlimit_kb;
-		bool traceback;
-	} config;
 	struct config *conf;
 	struct resolver *resolver;
 	struct server *server;

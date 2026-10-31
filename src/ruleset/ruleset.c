@@ -203,16 +203,6 @@ struct ruleset *ruleset_new(
 	}
 	r->loop = loop;
 	r->vmstats = (struct ruleset_vmstats){ 0 };
-	int memlimit_mb = conf->memlimit;
-	if (memlimit_mb > (INT_LEAST32_MAX >> 10)) {
-		/* clamp to avoid signed overflow in the MiB->KiB shift: conf.c and
-		 * cfunc_loadconfig reject such values, but conf_loadfromtable's
-		 * generic validator does not, so a poisoned conf could reach here */
-		memlimit_mb = INT_LEAST32_MAX >> 10;
-	}
-	r->config.memlimit_kb =
-		(memlimit_mb > 0) ? (int_least32_t)(memlimit_mb << 10) : 0;
-	r->config.traceback = !!conf->traceback;
 	r->conf = conf;
 	r->resolver = resolver;
 	r->server = NULL;
@@ -353,8 +343,11 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
 }
 
 void ruleset_request_cancel(
-	struct ev_loop *loop, struct ruleset_callback *restrict cb)
+	struct ev_loop *loop, struct ruleset_state **restrict state,
+	struct ruleset_callback *restrict cb)
 {
+	ruleset_cancel(loop, *state);
+	*state = NULL;
 	/* Only the completed-but-undispatched window has a pending w_finish (and
 	 * a request.req already delivered); a still-pending or already-dispatched
 	 * callback leaves it clear, so this stays a no-op there. */

@@ -70,6 +70,43 @@ static struct {
 	bool fail_vm_alloc;
 } CONSTRUCTOR;
 
+static bool config_capture;
+static void *config_staged;
+static size_t config_frees;
+static bool config_rollback_oom;
+static size_t config_rollbacks;
+static bool guard_field_oom;
+
+void *test_staged_malloc(size_t size)
+{
+	void *ptr = malloc(size);
+	if (config_capture) {
+		T_CHECK(config_staged == NULL);
+		config_staged = ptr;
+	}
+	return ptr;
+}
+
+static struct dialreq *live_requests[8];
+static size_t num_live_requests;
+static void *live_results[8];
+static size_t num_live_results;
+
+static void free_rpc_result(void *ptr)
+{
+	if (ptr == NULL) {
+		return;
+	}
+	for (size_t i = 0; i < num_live_results; i++) {
+		if (live_results[i] == ptr) {
+			live_results[i] = live_results[--num_live_results];
+			free(ptr);
+			return;
+		}
+	}
+	T_CHECK(false);
+}
+
 static bool g_fail_rpcall_copy;
 static size_t g_rpcall_copy_failures;
 static size_t g_rpcall_copy_size;
@@ -114,7 +151,12 @@ void *test_rpcall_malloc(const size_t size)
 		g_rpcall_copy_size = size;
 		return NULL;
 	}
-	return malloc(size);
+	void *ptr = malloc(size);
+	if (ptr != NULL) {
+		T_CHECK(num_live_results < ARRAY_SIZE(live_results));
+		live_results[num_live_results++] = ptr;
+	}
+	return ptr;
 }
 
 void *test_ruleset_malloc(const size_t size)
@@ -156,6 +198,9 @@ void *test_ruleset_realloc(void *ptr, const size_t size)
 
 void test_ruleset_free(void *ptr)
 {
+	if (config_capture && ptr != NULL && ptr == config_staged) {
+		config_frees++;
+	}
 	constructor_forget(ptr);
 	free(ptr);
 }
@@ -301,7 +346,18 @@ string_stream_open(struct string_stream *restrict s, const char *restrict text)
 	return &s->stream;
 }
 
-static int write_tempfile(char *restrict tmpl, const char *restrict content)
+static size_t num_tempfiles;
+
+static void cleanup_tempfile(void *data)
+{
+	(void)unlink(data);
+	free(data);
+	num_tempfiles--;
+}
+
+static int write_tempfile(
+	struct testing_ctx *_t_, char *restrict tmpl,
+	const char *restrict content)
 {
 	const int fd = mkstemp(tmpl);
 	const size_t len = strlen(content);
@@ -314,7 +370,12 @@ static int write_tempfile(char *restrict tmpl, const char *restrict content)
 		(void)unlink(tmpl);
 		return -1;
 	}
-	return close(fd);
+	const int result = close(fd);
+	char *path = strdup(tmpl);
+	T_CHECK(path != NULL);
+	num_tempfiles++;
+	T_CLEANUP(cleanup_tempfile, path);
+	return result;
 }
 
 /* A config a running daemon could actually hold: conf_loadfromtable rechecks
@@ -456,6 +517,8 @@ dialreq_new(const struct dialreq *restrict base, const size_t num_proxy)
 	if (req == NULL) {
 		return NULL;
 	}
+	T_CHECK(num_live_requests < ARRAY_SIZE(live_requests));
+	live_requests[num_live_requests++] = req;
 	req->num_proxy = num_proxy;
 	g_last_req = req;
 	g_num_proxy_added = 0;
@@ -509,6 +572,18 @@ bool dialaddr_parse(
 
 void dialreq_free(struct dialreq *req)
 {
+	if (req != NULL) {
+		bool found = false;
+		for (size_t i = 0; i < num_live_requests; i++) {
+			if (live_requests[i] == req) {
+				live_requests[i] =
+					live_requests[--num_live_requests];
+				found = true;
+				break;
+			}
+		}
+		T_CHECK(found);
+	}
 	if (g_last_req == req) {
 		g_last_req = NULL;
 		g_num_proxy_added = 0;
@@ -540,22 +615,77 @@ rpcall_finish_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	ev_break(loop, EVBREAK_ONE);
 }
 
-static struct ruleset *
-new_ruleset(struct ev_loop **restrict loop_out, struct config *restrict conf)
-{
-	struct ev_loop *const loop = ev_loop_new(0);
-	struct ruleset *const r = ruleset_new(loop, conf, NULL, NULL);
+/* Borrowed config/callback/caller-slot storage in the cases is static so
+ * Lua finalization can use it after an expectation longjmps out of the body. */
+struct ruleset_fixture {
+	struct ruleset_fixture *next;
+	struct ev_loop *loop;
+	struct ruleset *r;
+	struct config *conf;
+};
 
-	T_CHECK(loop != NULL);
-	T_CHECK(r != NULL);
-	*loop_out = loop;
-	return r;
+static struct ruleset_fixture *fixtures;
+static size_t fixture_closes;
+static void reset_fixture_state(void);
+
+static void close_fixture(struct ruleset_fixture *f)
+{
+	if (f->r == NULL) {
+		return;
+	}
+	ruleset_free(f->r);
+	f->r = NULL;
+	while (num_live_requests > 0) {
+		dialreq_free(live_requests[num_live_requests - 1]);
+	}
+	while (num_live_results > 0) {
+		free_rpc_result(live_results[num_live_results - 1]);
+	}
+	free(f->conf->strings);
+	f->conf->strings = NULL;
+	ev_loop_destroy(f->loop);
+	f->loop = NULL;
+	fixture_closes++;
+}
+
+static void cleanup_fixture(void *data)
+{
+	struct ruleset_fixture *f = data;
+	reset_fixture_state();
+	close_fixture(f);
+	T_CHECK(fixtures == f);
+	fixtures = f->next;
+	free(f);
+}
+
+static struct ruleset *new_ruleset(
+	struct testing_ctx *_t_, struct ev_loop **restrict loop_out,
+	struct config *restrict conf)
+{
+	struct ruleset_fixture *f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	f->loop = ev_loop_new(0);
+	T_CHECK(f->loop != NULL);
+	f->r = ruleset_new(f->loop, conf, NULL, NULL);
+	T_CHECK(f->r != NULL);
+	f->conf = conf;
+	f->next = fixtures;
+	fixtures = f;
+	T_CLEANUP(cleanup_fixture, f);
+	*loop_out = f->loop;
+	return f->r;
 }
 
 static void free_ruleset(struct ev_loop *loop, struct ruleset *restrict r)
 {
-	ruleset_free(r);
-	ev_loop_destroy(loop);
+	for (struct ruleset_fixture *f = fixtures; f != NULL; f = f->next) {
+		if (f->r == r) {
+			T_CHECK(f->loop == loop);
+			close_fixture(f);
+			return;
+		}
+	}
+	T_CHECK(false);
 }
 
 static bool
@@ -565,7 +695,7 @@ install_ruleset(struct ruleset *restrict r, const char *restrict chunk)
 
 	return ruleset_pcall(
 		r, cfunc_update, 3, 0, NULL, NULL,
-		string_stream_open(&stream, chunk));
+		(void *)string_stream_open(&stream, chunk));
 }
 
 /* Log capture: the async error paths report to the log and nowhere else --
@@ -589,8 +719,11 @@ static void logcap_write(void *ud, const unsigned char *buf, size_t len)
 	g_logcap.buf[g_logcap.len] = '\0';
 }
 
+static bool logcap_active;
+
 static void logcap_start(const int level)
 {
+	logcap_active = true;
 	g_logcap.len = 0;
 	g_logcap.buf[0] = '\0';
 	slog_setoutput(SLOG_OUTPUT_WRITER, logcap_write, NULL);
@@ -601,6 +734,7 @@ static void logcap_start(const int level)
  * cannot leave the writer sink installed for the next one. */
 static void logcap_stop(void)
 {
+	logcap_active = false;
 	slog_setlevel(LOG_LEVEL_SILENCE);
 	slog_setoutput(SLOG_OUTPUT_DISCARD);
 }
@@ -626,6 +760,11 @@ static void seed_global_module(lua_State *restrict L, const char *restrict name)
  * regression - ruleset load/update/dispatch lifecycle cases.
  * ---------------------------------------------------------------------- */
 
+static void cleanup_loop(void *data)
+{
+	ev_loop_destroy(data);
+}
+
 T_DECLARE_CASE(ruleset_new_failure_cleanup)
 {
 	static const enum constructor_failure failures[] = {
@@ -636,9 +775,11 @@ T_DECLARE_CASE(ruleset_new_failure_cleanup)
 		CONSTRUCTOR_VM,
 		CONSTRUCTOR_INIT,
 	};
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = ev_loop_new(0);
 	T_CHECK(loop != NULL);
+	T_CLEANUP(cleanup_loop, loop);
 	for (size_t i = 0; i < ARRAY_SIZE(failures); i++) {
 		CONSTRUCTOR.tracking = true;
 		CONSTRUCTOR.failure = failures[i];
@@ -666,34 +807,34 @@ T_DECLARE_CASE(ruleset_new_failure_cleanup)
 	CONSTRUCTOR.tracking = false;
 	T_EXPECT_EQ(live, 0);
 	T_EXPECT_EQ(ev_run(loop, EVRUN_NOWAIT), 0);
-	ev_loop_destroy(loop);
 }
 
 T_DECLARE_CASE(cfunc_config_global_install_failure_is_atomic)
 {
 	for (int mode = 0; mode < 4; mode++) {
 		const bool reload = (mode & 1) != 0;
-		struct config conf = make_conf();
+		static struct config conf;
+		conf = make_conf();
 		conf.max_sessions = 7;
 		struct ev_loop *loop = NULL;
-		struct ruleset *r = new_ruleset(&loop, &conf);
+		struct ruleset *r = new_ruleset(_t_, &loop, &conf);
 		struct string_stream stream;
 		/* Seed an owned string block so a failed replacement must preserve
 		 * both field values and their original backing allocation. */
 		T_CHECK(ruleset_pcall(
 			r, cfunc_loadconfig, 1, 0,
-			string_stream_open(
+			(void *)string_stream_open(
 				&stream,
 				"return {proxy = 'socks5://old:80'}")));
 		char *old_strings = conf.strings;
 		const char *old_proxy = conf.proxy;
-		const int_least32_t old_limit = r->config.memlimit_kb;
-		const bool old_traceback = r->config.traceback;
+		const int old_limit = conf.memlimit;
+		const bool old_traceback = conf.traceback;
 		lua_pushboolean(r->L, mode >= 2);
 		lua_setglobal(r->L, "store_before_error");
 		T_EXPECT(!ruleset_pcall(
 			r, reload ? cfunc_reloadconfig : cfunc_loadconfig, 1, 0,
-			string_stream_open(
+			(void *)string_stream_open(
 				&stream,
 				"setmetatable(_G, {__newindex = function(t,k,v) "
 				"if k == 'ruleset' then "
@@ -710,22 +851,21 @@ T_DECLARE_CASE(cfunc_config_global_install_failure_is_atomic)
 		T_EXPECT_EQ(conf.strings, old_strings);
 		T_EXPECT_EQ(conf.proxy, old_proxy);
 		T_EXPECT_STREQ(conf.proxy, "socks5://old:80");
-		T_EXPECT_EQ(r->config.memlimit_kb, old_limit);
-		T_EXPECT_EQ(r->config.traceback, old_traceback);
+		T_EXPECT_EQ(conf.memlimit, old_limit);
+		T_EXPECT_EQ(conf.traceback, old_traceback);
 		T_EXPECT(!ruleset_isvalid(r));
 		T_CHECK(luaL_dostring(r->L, "setmetatable(_G,nil)") == LUA_OK);
 		T_EXPECT(ruleset_pcall(
 			r, reload ? cfunc_reloadconfig : cfunc_loadconfig, 1, 0,
-			string_stream_open(
+			(void *)string_stream_open(
 				&stream,
 				"return {max_sessions=9, auth_required=true, memlimit=8, traceback=true, ruleset={}}")));
 		T_EXPECT_EQ(conf.max_sessions, 9);
 		T_EXPECT(conf.auth_required);
-		T_EXPECT_EQ(r->config.memlimit_kb, 8192);
-		T_EXPECT(r->config.traceback);
+		T_EXPECT_EQ(conf.memlimit, 8);
+		T_EXPECT(conf.traceback);
 		T_EXPECT(ruleset_isvalid(r));
 		free_ruleset(loop, r);
-		free(conf.strings);
 	}
 }
 
@@ -747,17 +887,21 @@ T_DECLARE_CASE(ruleset_loadfile_dispatches_requests)
 		"  function ruleset.tick() end "
 		"  return ruleset "
 		"";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	char path[] = TEST_TMPDIR "/ruleset_test_XXXXXX";
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
-	T_CHECK(write_tempfile(path, script) == 0);
+	T_CHECK(write_tempfile(_t_, path, script) == 0);
 	T_EXPECT(ruleset_loadfile(r, path));
 
 	ev_init(&cb.w_finish, request_finish_cb);
@@ -801,7 +945,7 @@ T_DECLARE_CASE(ruleset_loadfile_dispatches_requests)
 
 	ruleset_setserver(r, (struct server *)0x1);
 	T_EXPECT(r->server == (struct server *)0x1);
-	(void)unlink(path);
+
 	free_ruleset(loop, r);
 }
 
@@ -817,17 +961,21 @@ T_DECLARE_CASE(ruleset_dispatch_routes_by_address_type)
 		"  function ruleset.route6() return '[2001:db8::1]:3' end "
 		"  return ruleset "
 		"";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	char path[] = TEST_TMPDIR "/ruleset_test_XXXXXX";
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
-	T_CHECK(write_tempfile(path, script) == 0);
+	T_CHECK(write_tempfile(_t_, path, script) == 0);
 	T_EXPECT(ruleset_loadfile(r, path));
 	ev_init(&cb.w_finish, request_finish_cb);
 	cb.w_finish.data = &result;
@@ -862,7 +1010,6 @@ T_DECLARE_CASE(ruleset_dispatch_routes_by_address_type)
 	T_EXPECT_EQ(result.req->addr.port, UINT16_C(3));
 	dialreq_free(result.req);
 
-	(void)unlink(path);
 	free_ruleset(loop, r);
 }
 
@@ -886,16 +1033,20 @@ T_DECLARE_CASE(ruleset_update_invoke_rpcall_stats_and_tick)
 		"  function ruleset.tick() _G.tick_count = (_G.tick_count or 0) + 1 end "
 		"  return ruleset "
 		"";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream update_stream;
 	struct string_stream invoke_stream;
 	struct string_stream error_stream;
 	struct string_stream rpc_stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result rpc_result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result rpc_result;
+	rpc_result = (struct rpcall_result){
 		.callback = &cb,
 	};
 	struct ruleset_vmstats stats = { 0 };
@@ -929,7 +1080,7 @@ T_DECLARE_CASE(ruleset_update_invoke_rpcall_stats_and_tick)
 	T_EXPECT(strstr(rbuf, "return ") == rbuf);
 	T_EXPECT(strstr(rbuf, "42") != NULL);
 	T_EXPECT(strstr(rbuf, "done") != NULL);
-	free((void *)rpc_result.result);
+	free_rpc_result((void *)rpc_result.result);
 
 	s = ruleset_stats(r, 1.5, "alpha", &len);
 	T_CHECK(s != NULL);
@@ -986,9 +1137,10 @@ T_DECLARE_CASE(ruleset_metrics_returns_string_when_defined_and_null_when_absent)
 		"  function ruleset.tick() end "
 		"  return ruleset "
 		"";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 	size_t len = 0;
 	const char *s;
@@ -1038,9 +1190,10 @@ T_DECLARE_CASE(ruleset_healthy_reports_unhealthy_string_and_null_when_ok)
 	static const char without_chunk[] = HEALTHY_CHUNK("");
 #undef HEALTHY_CHUNK
 #undef HEALTHY_PRELUDE
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 	size_t len = 0;
 	const char *s;
@@ -1096,9 +1249,10 @@ T_DECLARE_CASE(ruleset_healthy_reports_a_raised_error_object)
 		"    function(self) return 'down: code=' .. self.code end })) "
 		"end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	size_t len = 0;
 
 	T_EXPECT(install_ruleset(r, chunk));
@@ -1141,9 +1295,10 @@ T_DECLARE_CASE(cfunc_hooks_are_absent_when_ruleset_global_is_not_a_table)
 		"_G.ruleset = 42",
 		"_G.ruleset = 'not a table'",
 	};
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 	size_t len = 0;
 	const char *s;
@@ -1203,9 +1358,10 @@ T_DECLARE_CASE(ruleset_idle_cb_ticks_once_per_interval_and_always_when_idle)
 		"  _G.tick_count = (_G.tick_count or 0) + 1 "
 		"end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 
 	T_EXPECT(install_ruleset(r, chunk));
 
@@ -1241,9 +1397,10 @@ T_DECLARE_CASE(ruleset_idle_cb_logs_a_raising_tick_and_keeps_ticking)
 		"  error('tick boom ' .. _G.tick_count) "
 		"end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 
 	T_EXPECT(install_ruleset(r, chunk));
 
@@ -1293,9 +1450,10 @@ T_DECLARE_CASE(ruleset_stats_discards_non_strings_and_reports_a_raise)
 	static const char raise_chunk[] =
 		STATS_CHUNK("error('stats boom ' .. query)");
 #undef STATS_CHUNK
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	size_t len = 0;
 	const char *s;
 
@@ -1375,9 +1533,10 @@ T_DECLARE_CASE(ruleset_vmstats_track_lua_heap_allocations)
 		"local t = {} "
 		"for i = 1, 2000 do t[i] = ('x'):rep(i % 300) .. i end "
 		"_G.kept.s = table.concat(t)";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct ruleset_vmstats stats;
 	struct string_stream stream;
 	lua_State *const L = r->L;
@@ -1435,13 +1594,17 @@ T_DECLARE_CASE(ruleset_cancel_pending_request_clears_callback)
 		"  function ruleset.tick() end "
 		"  return ruleset "
 		"";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream update_stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -1471,9 +1634,8 @@ T_DECLARE_CASE(ruleset_cancel_pending_request_clears_callback)
  * detached the state, so the callback alone still holds the delivered dialreq.
  * A consumer tearing its context down there must both drop the event and free
  * that request -- without the first the event fires into freed memory, without
- * the second the request leaks. The two windows on either side must stay
- * no-ops: nothing is delivered yet while the routine runs, and the consumer
- * already owns the request once the event has been dispatched.
+ * the second the request leaks. A pending operation must also be cancelled and
+ * its slot cleared, while a dispatched request remains consumer-owned.
  */
 T_DECLARE_CASE(ruleset_request_cancel_drops_completed_undispatched_request)
 {
@@ -1485,12 +1647,16 @@ T_DECLARE_CASE(ruleset_request_cancel_drops_completed_undispatched_request)
 		"local ruleset = {} "
 		"function ruleset.route(request, username, password) coroutine.yield() end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -1507,7 +1673,7 @@ T_DECLARE_CASE(ruleset_request_cancel_drops_completed_undispatched_request)
 	T_CHECK(cb.request.req != NULL);
 	T_EXPECT_EQ(g_last_req, cb.request.req);
 
-	ruleset_request_cancel(loop, &cb);
+	ruleset_request_cancel(loop, &state, &cb);
 	T_EXPECT(!ev_is_pending(&cb.w_finish));
 	T_EXPECT_EQ(cb.request.req, NULL);
 	/* the mock dialreq_free() clears g_last_req, so the delivered request
@@ -1518,9 +1684,8 @@ T_DECLARE_CASE(ruleset_request_cancel_drops_completed_undispatched_request)
 	ev_run(loop, EVRUN_NOWAIT);
 	T_EXPECT(!result.fired);
 
-	/* still pending: the routine has not finished, so nothing was delivered
-	 * and w_finish never went pending -- a no-op that must not disturb the
-	 * live operation */
+	/* still pending: cancellation detaches the live operation and clears
+	 * the caller slot even though no completion event has been fed */
 	T_EXPECT(install_ruleset(r, yield_chunk));
 	result = (struct request_result){
 		.callback = &cb,
@@ -1529,12 +1694,16 @@ T_DECLARE_CASE(ruleset_request_cancel_drops_completed_undispatched_request)
 	T_CHECK(state != NULL);
 	T_EXPECT_EQ(state->cb, &cb);
 	T_EXPECT(!ev_is_pending(&cb.w_finish));
-	ruleset_request_cancel(loop, &cb);
-	T_EXPECT_EQ(state->cb, &cb);
+	struct ruleset_state *const pending = state;
+	ruleset_request_cancel(loop, &state, &cb);
+	T_EXPECT_EQ(state, NULL);
+	T_EXPECT_EQ(pending->cb, NULL);
 	T_EXPECT_EQ(cb.request.req, NULL);
 	T_EXPECT(!ev_is_pending(&cb.w_finish));
-	ruleset_cancel(loop, state);
-	T_EXPECT_EQ(state->cb, NULL);
+	/* teardown can run twice before the orphaned coroutine is collected */
+	ruleset_request_cancel(loop, &state, &cb);
+	T_EXPECT_EQ(state, NULL);
+	T_EXPECT_EQ(pending->cb, NULL);
 
 	/* already dispatched: the consumer has taken the event and owns the
 	 * request, so cancelling must not free it out from under them */
@@ -1546,7 +1715,7 @@ T_DECLARE_CASE(ruleset_request_cancel_drops_completed_undispatched_request)
 	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
 	T_CHECK(result.req != NULL);
 	T_EXPECT(!ev_is_pending(&cb.w_finish));
-	ruleset_request_cancel(loop, &cb);
+	ruleset_request_cancel(loop, &state, &cb);
 	T_EXPECT_EQ(cb.request.req, result.req);
 	T_EXPECT_EQ(g_last_req, result.req);
 	dialreq_free(result.req);
@@ -1581,13 +1750,17 @@ T_DECLARE_CASE(ruleset_state_detached_synchronously_on_completion)
 		"  function ruleset.tick() end "
 		"  return ruleset "
 		"";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream update_stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -1674,6 +1847,249 @@ failing_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
 	return g_alloc.alloc(ud, ptr, osize, nsize);
 }
 
+static int arm_lua_oom(lua_State *L)
+{
+	(void)L;
+	g_alloc.failing = true;
+	return 0;
+}
+
+T_DECLARE_CASE(ruleset_resume_corrupt_registry_survives_oom)
+{
+	for (int oom = 0; oom < 2; oom++) {
+		static struct config conf;
+		conf = make_conf();
+		struct ev_loop *loop = NULL;
+		struct ruleset *r = new_ruleset(_t_, &loop, &conf);
+		lua_State *L = r->L;
+		lua_pushnil(L);
+		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		g_alloc.alloc = lua_getallocf(L, &g_alloc.ud);
+		g_alloc.failures = 0;
+		lua_setallocf(L, failing_alloc, g_alloc.ud);
+		g_alloc.failing = (oom != 0);
+		ruleset_resume(r, NULL, 0);
+		g_alloc.failing = false;
+		lua_setallocf(L, g_alloc.alloc, g_alloc.ud);
+		const char *err = ruleset_geterror(r, NULL);
+		T_CHECK(err != NULL);
+		if (oom) {
+			T_EXPECT(g_alloc.failures > 0);
+			T_EXPECT(strstr(err, "memory") != NULL);
+		} else {
+			T_EXPECT_STREQ(err, ERR_BAD_REGISTRY);
+		}
+		free_ruleset(loop, r);
+	}
+}
+
+T_DECLARE_CASE(cfunc_rpcall_numeric_concat_conversion_completes_once)
+{
+	for (int oom = 0; oom < 2; oom++) {
+		static struct config conf;
+		conf = make_conf();
+		struct ev_loop *loop = NULL;
+		struct ruleset *r = new_ruleset(_t_, &loop, &conf);
+		lua_State *L = r->L;
+		lua_pushcfunction(L, arm_lua_oom);
+		lua_setglobal(L, "arm_lua_oom");
+		T_CHECK(install_ruleset(
+			r,
+			"marshal = function() return setmetatable({}, {"
+			"__concat = function() if fail_conversion then arm_lua_oom() end; "
+			"return 1234567.25 end}) end; return {}"));
+		lua_pushboolean(L, oom);
+		lua_setglobal(L, "fail_conversion");
+		g_alloc.alloc = lua_getallocf(L, &g_alloc.ud);
+		g_alloc.failures = 0;
+		lua_setallocf(L, failing_alloc, g_alloc.ud);
+		static struct ruleset_callback cb;
+		cb = (struct ruleset_callback){ 0 };
+		static struct ruleset_state *state;
+		state = NULL;
+		static struct rpcall_result result;
+		result = (struct rpcall_result){ .callback = &cb };
+		ev_init(&cb.w_finish, rpcall_finish_cb);
+		cb.w_finish.data = &result;
+		struct string_stream stream;
+		(void)ruleset_rpcall(
+			r, &state, string_stream_open(&stream, "return 7"),
+			&cb);
+		g_alloc.failing = false;
+		lua_setallocf(L, g_alloc.alloc, g_alloc.ud);
+		/* Completion must precede collection of the operation userdata. */
+		const bool detached = state == NULL;
+		const bool pending = ev_is_pending(&cb.w_finish);
+		ev_run(loop, EVRUN_NOWAIT);
+		T_EXPECT(detached);
+		T_EXPECT(pending);
+		T_EXPECT(result.fired);
+		if (oom) {
+			T_EXPECT(g_alloc.failures > 0);
+			T_EXPECT_EQ(result.result, NULL);
+			T_EXPECT_EQ(result.resultlen, (size_t)0);
+		} else {
+			static const char expected[] = "1234567.25";
+			T_CHECK(result.result != NULL);
+			T_EXPECT_EQ(result.resultlen, sizeof(expected) - 1);
+			T_EXPECT_MEMEQ(
+				result.result, expected, sizeof(expected) - 1);
+		}
+		free_rpc_result((void *)result.result);
+		lua_settop(L, 0);
+		lua_gc(L, LUA_GCCOLLECT, 0);
+		ev_run(loop, EVRUN_NOWAIT);
+		T_EXPECT_EQ(result.num_calls, (size_t)1);
+		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+		free_ruleset(loop, r);
+	}
+}
+
+void test_config_rawset(lua_State *L, int idx)
+{
+	if (config_rollback_oom) {
+		config_rollbacks++;
+		g_alloc.failing = true;
+	}
+	lua_rawset(L, idx);
+}
+
+void test_guard_setfield(lua_State *L, int idx, const char *key)
+{
+	if (guard_field_oom && strcmp(key, "__gc") == 0) {
+		idx = lua_absindex(L, idx);
+		/* Fill the hash alongside luaL_newmetatable's __name so this
+		 * field insertion needs a real allocation on every Lua version. */
+		for (int i = 0; i < 31; i++) {
+			char field[32];
+			(void)snprintf(
+				field, sizeof(field), "fault_padding_%d", i);
+			lua_pushboolean(L, 1);
+			lua_setfield(L, idx, field);
+		}
+		g_alloc.failing = true;
+	}
+	lua_setfield(L, idx, key);
+}
+
+T_DECLARE_CASE(cfunc_guard_oom_retry_finalizes_orphan)
+{
+	static struct config conf;
+	conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *r = new_ruleset(_t_, &loop, &conf);
+	lua_State *L = r->L;
+	T_CHECK(install_ruleset(
+		r, "return {route=function() coroutine.yield() end}"));
+	g_alloc.alloc = lua_getallocf(L, &g_alloc.ud);
+	g_alloc.failures = 0;
+	lua_setallocf(L, failing_alloc, g_alloc.ud);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct request_result result;
+	result = (struct request_result){ .callback = &cb };
+	ev_init(&cb.w_finish, request_finish_cb);
+	cb.w_finish.data = &result;
+	static struct ruleset_state *state;
+	state = NULL;
+	guard_field_oom = true;
+	const bool first = ruleset_route(r, &state, "127.0.0.1:80", NULL, &cb);
+	guard_field_oom = false;
+	g_alloc.failing = false;
+	lua_setallocf(L, g_alloc.alloc, g_alloc.ud);
+	luaL_getmetatable(L, "ruleset_state");
+	const bool cached = lua_istable(L, -1);
+	T_CHECK(cached);
+	lua_getfield(L, -1, "__gc");
+	const bool incomplete = lua_isnil(L, -1);
+	lua_settop(L, 0);
+	const bool retry = ruleset_route(r, &state, "127.0.0.1:80", NULL, &cb);
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	const bool completed = state == NULL && ev_is_pending(&cb.w_finish);
+	const size_t active = r->vmstats.num_thread_active;
+	ev_clear_pending(loop, &cb.w_finish);
+	free_ruleset(loop, r);
+	T_EXPECT(!first);
+	T_EXPECT(g_alloc.failures > 0);
+	T_EXPECT(incomplete);
+	T_EXPECT(retry);
+	T_EXPECT(completed);
+	T_EXPECT_EQ(active, (size_t)0);
+}
+
+static void reset_fixture_state(void)
+{
+	g_alloc.failing = false;
+	g_fail_rpcall_copy = false;
+	guard_field_oom = false;
+	config_capture = false;
+	config_rollback_oom = false;
+	CONSTRUCTOR.fail_vm_alloc = false;
+	logcap_stop();
+}
+
+#if LUA_VERSION_NUM == 503
+static int reject_ruleset_install(lua_State *L)
+{
+	lua_pushliteral(L, "refuse ruleset install");
+	return lua_error(L);
+}
+
+T_DECLARE_CASE(cfunc_config_rollback_oom_releases_staged_strings)
+{
+	for (int reload = 0; reload < 2; reload++) {
+		static struct config conf;
+		conf = make_conf();
+		struct ev_loop *loop = NULL;
+		struct ruleset *r = new_ruleset(_t_, &loop, &conf);
+		lua_State *L = r->L;
+		/* An empty globals hash forces Lua 5.3's absent-key rawset to
+		 * allocate even though the value being restored is nil. */
+		lua_newtable(L);
+		lua_newtable(L);
+		lua_pushcfunction(L, reject_ruleset_install);
+		lua_setfield(L, -2, "__newindex");
+		lua_setmetatable(L, -2);
+		lua_rawseti(L, LUA_REGISTRYINDEX, LUA_RIDX_GLOBALS);
+		g_alloc.alloc = lua_getallocf(L, &g_alloc.ud);
+		g_alloc.failures = 0;
+		lua_setallocf(L, failing_alloc, g_alloc.ud);
+		config_staged = NULL;
+		config_frees = 0;
+		config_rollbacks = 0;
+		config_capture = true;
+		config_rollback_oom = true;
+		struct string_stream stream;
+		const bool ok = ruleset_pcall(
+			r, reload ? cfunc_reloadconfig : cfunc_loadconfig, 1, 0,
+			(void *)string_stream_open(
+				&stream,
+				"return {proxy='socks5://new:81', ruleset={}}"));
+		config_rollback_oom = false;
+		config_capture = false;
+		g_alloc.failing = false;
+		lua_setallocf(L, g_alloc.alloc, g_alloc.ud);
+		const bool untouched =
+			conf.strings == NULL && conf.proxy == NULL;
+		const bool staged = config_staged != NULL;
+		/* Keep the negative-control run leak-free when old code skips free. */
+		if (config_frees == 0) {
+			free(config_staged);
+		}
+		free_ruleset(loop, r);
+		T_EXPECT(!ok);
+		T_EXPECT(staged);
+		T_EXPECT(untouched);
+		T_EXPECT_EQ(config_rollbacks, (size_t)1);
+		T_EXPECT(g_alloc.failures > 0);
+		T_EXPECT_EQ(config_frees, (size_t)1);
+	}
+}
+#endif /* LUA_VERSION_NUM == 503 */
+
 /*
  * ruleset_geterror() is the single funnel every consumer of a failed ruleset
  * operation reads -- the tick and request logs, ruleset load, the SIGHUP
@@ -1684,9 +2100,10 @@ failing_alloc(void *ud, void *ptr, const size_t osize, const size_t nsize)
  */
 T_DECLARE_CASE(ruleset_geterror_variants)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	lua_State *restrict const L = r->L;
 	size_t len = 0;
 	const char *err;
@@ -1772,18 +2189,22 @@ T_DECLARE_CASE(ruleset_traceback_config_reports_stack_traceback)
 	static const bool traceback[] = { false, true };
 
 	for (size_t i = 0; i < ARRAY_SIZE(traceback); i++) {
-		struct config conf = make_conf();
-		conf.traceback = traceback[i];
+		static struct config conf;
+		conf = make_conf();
 		struct ev_loop *loop = NULL;
-		struct ruleset *const r = new_ruleset(&loop, &conf);
+		struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 		struct string_stream stream;
-		struct ruleset_callback cb = { 0 };
-		struct ruleset_state *state = NULL;
-		struct request_result result = {
+		static struct ruleset_callback cb;
+		cb = (struct ruleset_callback){ 0 };
+		static struct ruleset_state *state;
+		state = NULL;
+		static struct request_result result;
+		result = (struct request_result){
 			.callback = &cb,
 		};
 
-		T_EXPECT_EQ(r->config.traceback, traceback[i]);
+		/* A change after construction must affect both traceback paths. */
+		conf.traceback = traceback[i];
 
 		/* the synchronous path: ruleset_pcallv()'s own errfunc, whose
 		 * result is stored as the last error */
@@ -1844,14 +2265,18 @@ T_DECLARE_CASE(ruleset_traceback_keeps_the_error_message)
 		"    function() error('tostring boom') end })) "
 		"end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	conf.traceback = true;
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -1902,20 +2327,20 @@ T_DECLARE_CASE(ruleset_isvalid_tracks_loaded_table)
 		"  function ruleset.route(request) return request end "
 		"  return ruleset "
 		"";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	char path[] = TEST_TMPDIR "/ruleset_test_XXXXXX";
 
 	/* a fresh ruleset has no `ruleset' global yet */
 	T_EXPECT(!ruleset_isvalid(r));
 
-	T_CHECK(write_tempfile(path, script) == 0);
+	T_CHECK(write_tempfile(_t_, path, script) == 0);
 	T_EXPECT(ruleset_loadfile(r, path));
 	/* after loading a table-returning script it is valid */
 	T_EXPECT(ruleset_isvalid(r));
 
-	(void)unlink(path);
 	free_ruleset(loop, r);
 }
 
@@ -1928,14 +2353,15 @@ T_DECLARE_CASE(ruleset_isvalid_tracks_loaded_table)
  */
 T_DECLARE_CASE(ruleset_isvalid_survives_raising_global_lookup)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_loadconfig, 1, 0,
-		string_stream_open(
+		(void *)string_stream_open(
 			&stream,
 			"setmetatable(_G, { __index = function(_, k) "
 			"  error('undefined global ' .. tostring(k), 2) "
@@ -1949,7 +2375,7 @@ T_DECLARE_CASE(ruleset_isvalid_survives_raising_global_lookup)
 	/* an __index that supplies the table makes it valid */
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_loadconfig, 1, 0,
-		string_stream_open(
+		(void *)string_stream_open(
 			&stream, "local proxy = {} "
 				 "setmetatable(_G, { __index = function(_, k) "
 				 "  if k == 'ruleset' then return proxy end "
@@ -1958,7 +2384,6 @@ T_DECLARE_CASE(ruleset_isvalid_survives_raising_global_lookup)
 	T_EXPECT(ruleset_isvalid(r));
 
 	free_ruleset(loop, r);
-	free(conf.strings);
 }
 
 /*
@@ -1980,9 +2405,10 @@ T_DECLARE_CASE(ruleset_api_results_survive_oom)
 		"ruleset.metrics = next "
 		"ruleset.healthy = next "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	lua_State *restrict const L = r->L;
 	size_t len = 0;
 	const char *s;
@@ -2027,9 +2453,10 @@ T_DECLARE_CASE(ruleset_api_results_survive_oom)
 
 T_DECLARE_CASE(ruleset_load_missing_file_returns_false)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 
 	/* codec_lua_reader() returns NULL for a nonexistent path; both loaders
 	 * must early-return false rather than crash, and record a "cannot open"
@@ -2043,18 +2470,23 @@ T_DECLARE_CASE(ruleset_load_missing_file_returns_false)
 	free_ruleset(loop, r);
 }
 
-T_DECLARE_CASE(ruleset_new_clamps_oversized_memlimit)
+T_DECLARE_CASE(ruleset_config_reads_each_field_once)
 {
-	struct config conf = make_conf();
-	/* the largest MiB value whose KiB form fits the int_least32_t field */
-	conf.memlimit = (INT_LEAST32_MAX >> 10) + 1;
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
-
-	T_EXPECT_EQ(
-		r->config.memlimit_kb,
-		(int_least32_t)((INT_LEAST32_MAX >> 10) << 10));
-
+	struct ruleset *r = new_ruleset(_t_, &loop, &conf);
+	struct string_stream stream;
+	T_EXPECT(ruleset_pcall(
+		r, cfunc_loadconfig, 1, 0,
+		(void *)string_stream_open(
+			&stream,
+			"local reads={} return setmetatable({}, {__index=function(_,k) "
+			"reads[k]=(reads[k] or 0)+1 assert(reads[k]==1, k..' read twice') "
+			"if k=='memlimit' then return 4 end "
+			"if k=='traceback' then return true end end})")));
+	T_EXPECT_EQ(conf.memlimit, 4);
+	T_EXPECT(conf.traceback);
 	free_ruleset(loop, r);
 }
 
@@ -2067,10 +2499,11 @@ T_DECLARE_CASE(ruleset_new_clamps_oversized_memlimit)
  */
 T_DECLARE_CASE(ruleset_loadconfig_late_memlimit_failure_is_atomic)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	conf.max_sessions = 7;
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 
 	/* no ruleset is installed to start with */
 	T_EXPECT(!ruleset_isvalid(r));
@@ -2086,7 +2519,7 @@ T_DECLARE_CASE(ruleset_loadconfig_late_memlimit_failure_is_atomic)
 		huge);
 	T_CHECK(n > 0 && (size_t)n < sizeof(src));
 	char path[] = TEST_TMPDIR "/ruleset_test_cfg_XXXXXX";
-	T_CHECK(write_tempfile(path, src) == 0);
+	T_CHECK(write_tempfile(_t_, path, src) == 0);
 
 	T_EXPECT(!ruleset_loadconfig(r, path));
 	/* the config fields were not committed before the memlimit failure */
@@ -2094,7 +2527,6 @@ T_DECLARE_CASE(ruleset_loadconfig_late_memlimit_failure_is_atomic)
 	/* nor was the new ruleset table installed */
 	T_EXPECT(!ruleset_isvalid(r));
 
-	(void)unlink(path);
 	free_ruleset(loop, r);
 }
 
@@ -2109,22 +2541,23 @@ T_DECLARE_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed)
 		"function ruleset.stats(dt, query) return string.format('%s:%s', modname, query or '') end "
 		"function ruleset.tick() _G.tick_calls = (_G.tick_calls or 0) + 1 end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	char path[] = TEST_TMPDIR "/cfunc_test_XXXXXX";
 	struct string_stream invoke_stream;
 	double dt = 0.5;
 	size_t len;
 	const char *s;
 
-	T_CHECK(write_tempfile(path, file_chunk) == 0);
+	T_CHECK(write_tempfile(_t_, path, file_chunk) == 0);
 	struct io_stream *restrict code = codec_lua_reader(path);
 	T_CHECK(code != NULL);
-	T_EXPECT(ruleset_pcall(r, cfunc_loadfile, 1, 0, code));
+	T_EXPECT(ruleset_pcall(r, cfunc_loadfile, 1, 0, (void *)code));
 	io_stream_close(code);
 
-	T_EXPECT(ruleset_pcall(r, cfunc_stats, 2, 1, &dt, "alpha"));
+	T_EXPECT(ruleset_pcall(r, cfunc_stats, 2, 1, (void *)&dt, "alpha"));
 	s = lua_tolstring(r->L, -1, &len);
 	T_CHECK(s != NULL);
 	T_EXPECT_EQ(len, strlen("ruleset:alpha"));
@@ -2138,14 +2571,14 @@ T_DECLARE_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed)
 
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_invoke, 1, 0,
-		string_stream_open(
+		(void *)string_stream_open(
 			&invoke_stream, "shadow = 1; local hidden = 2")));
 	lua_getglobal(r->L, "shadow");
 	T_EXPECT(lua_isnil(r->L, -1));
 	lua_pop(r->L, 1);
 
 	T_EXPECT(ruleset_pcall(r, cfunc_gc, 0, 0));
-	(void)unlink(path);
+
 	free_ruleset(loop, r);
 }
 
@@ -2170,9 +2603,10 @@ T_DECLARE_CASE(cfunc_metrics_returns_string_when_defined_and_nil_when_absent)
 		"function ruleset.stats(dt, query) return '' end "
 		"function ruleset.tick() end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 	size_t len;
 	const char *s;
@@ -2180,7 +2614,7 @@ T_DECLARE_CASE(cfunc_metrics_returns_string_when_defined_and_nil_when_absent)
 	/* with ruleset.metrics defined: returns the string */
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_update, 3, 0, NULL, "=test",
-		string_stream_open(&stream, with_metrics_chunk)));
+		(void *)string_stream_open(&stream, with_metrics_chunk)));
 	T_EXPECT(ruleset_pcall(r, cfunc_metrics, 0, 1));
 	T_EXPECT_EQ(lua_gettop(r->L), 1);
 	s = lua_tolstring(r->L, -1, &len);
@@ -2192,7 +2626,7 @@ T_DECLARE_CASE(cfunc_metrics_returns_string_when_defined_and_nil_when_absent)
 	/* without ruleset.metrics defined: stack has nil (nresults=1 pads) */
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_update, 3, 0, NULL, "=test",
-		string_stream_open(&stream, without_metrics_chunk)));
+		(void *)string_stream_open(&stream, without_metrics_chunk)));
 	T_EXPECT(ruleset_pcall(r, cfunc_metrics, 0, 1));
 	T_EXPECT_EQ(lua_gettop(r->L), 1);
 	T_EXPECT(lua_isnil(r->L, -1));
@@ -2206,15 +2640,16 @@ T_DECLARE_CASE(cfunc_update_replaces_loaded_module)
 	static const char mod_chunk[] =
 		"local modname = ... "
 		"return { value = 42, modname = modname }";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	seed_global_module(r->L, "demo");
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_update, 3, 0, "demo", "=(demo)",
-		string_stream_open(&stream, mod_chunk)));
+		(void *)string_stream_open(&stream, mod_chunk)));
 
 	lua_getglobal(r->L, "demo");
 	T_CHECK(lua_istable(r->L, -1));
@@ -2235,15 +2670,16 @@ T_DECLARE_CASE(cfunc_update_replaces_loaded_module)
 T_DECLARE_CASE(cfunc_update_nil_module_sets_true_everywhere)
 {
 	static const char mod_chunk[] = "local x = 1";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	seed_global_module(r->L, "demo");
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_update, 3, 0, "demo", "=(demo)",
-		string_stream_open(&stream, mod_chunk)));
+		(void *)string_stream_open(&stream, mod_chunk)));
 
 	luaL_getsubtable(r->L, LUA_REGISTRYINDEX, "_LOADED");
 	T_EXPECT_EQ(lua_getfield(r->L, -1, "demo"), LUA_TBOOLEAN);
@@ -2269,12 +2705,16 @@ T_DECLARE_CASE(cfunc_request_accepts_and_rejects)
 		"function ruleset.stats(dt, query) return '' end "
 		"function ruleset.tick() end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -2288,8 +2728,8 @@ T_DECLARE_CASE(cfunc_request_accepts_and_rejects)
 		.password_len = sizeof("pw") - 1,
 	};
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_request, 5, 1, &state, "route", "127.0.0.1:80", &allow,
-		&cb));
+		r, cfunc_request, 5, 1, (void *)&state, "route", "127.0.0.1:80",
+		(void *)&allow, (void *)&cb));
 	lua_pop(r->L, 1);
 	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
 	T_CHECK(result.req != NULL);
@@ -2306,8 +2746,8 @@ T_DECLARE_CASE(cfunc_request_accepts_and_rejects)
 		.password_len = sizeof("pw") - 1,
 	};
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_request, 5, 1, &state, "route", "127.0.0.1:80", &deny,
-		&cb));
+		r, cfunc_request, 5, 1, (void *)&state, "route", "127.0.0.1:80",
+		(void *)&deny, (void *)&cb));
 	lua_pop(r->L, 1);
 	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
 	T_EXPECT_EQ(result.req, NULL);
@@ -2350,16 +2790,20 @@ T_DECLARE_CASE(cfunc_request_credentials_carry_null_bytes)
 			.password_len = 4,
 		},
 	};
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
 
 	T_EXPECT(install_ruleset(r, ruleset_chunk));
 	ev_init(&cb.w_finish, request_finish_cb);
 	for (size_t i = 0; i < ARRAY_SIZE(creds); i++) {
-		struct request_result result = {
+		static struct request_result result;
+		result = (struct request_result){
 			.callback = &cb,
 		};
 		cb.w_finish.data = &result;
@@ -2390,12 +2834,16 @@ T_DECLARE_CASE(cfunc_request_reports_lua_error_via_callback)
 		"function ruleset.stats(dt, query) return '' end "
 		"function ruleset.tick() end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -2403,8 +2851,8 @@ T_DECLARE_CASE(cfunc_request_reports_lua_error_via_callback)
 	ev_init(&cb.w_finish, request_finish_cb);
 	cb.w_finish.data = &result;
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_request, 5, 1, &state, "route", "127.0.0.1:80", NULL,
-		&cb));
+		r, cfunc_request, 5, 1, (void *)&state, "route", "127.0.0.1:80",
+		NULL, (void *)&cb));
 	lua_pop(r->L, 1);
 	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
 	T_EXPECT_EQ(result.req, NULL);
@@ -2441,12 +2889,16 @@ T_DECLARE_CASE(cfunc_request_logs_error_that_cannot_be_rendered)
 		"        return 'denied code=' .. self.code end })) "
 		"end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -2455,8 +2907,8 @@ T_DECLARE_CASE(cfunc_request_logs_error_that_cannot_be_rendered)
 	cb.w_finish.data = &result;
 	logcap_start(LOG_LEVEL_ERROR);
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_request, 5, 1, &state, "route", "127.0.0.1:80", NULL,
-		&cb));
+		r, cfunc_request, 5, 1, (void *)&state, "route", "127.0.0.1:80",
+		NULL, (void *)&cb));
 	lua_pop(r->L, 1);
 	const bool fired =
 		wait_until(loop, request_fired, &result, TEST_WAIT_SEC);
@@ -2474,8 +2926,8 @@ T_DECLARE_CASE(cfunc_request_logs_error_that_cannot_be_rendered)
 	};
 	logcap_start(LOG_LEVEL_ERROR);
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_request, 5, 1, &state, "route", "127.0.0.1:80", NULL,
-		&cb));
+		r, cfunc_request, 5, 1, (void *)&state, "route", "127.0.0.1:80",
+		NULL, (void *)&cb));
 	lua_pop(r->L, 1);
 	const bool fired_again =
 		wait_until(loop, request_fired, &result, TEST_WAIT_SEC);
@@ -2489,22 +2941,27 @@ T_DECLARE_CASE(cfunc_request_logs_error_that_cannot_be_rendered)
 
 T_DECLARE_CASE(cfunc_rpcall_marshals_results_and_keeps_env_local)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result result;
+	result = (struct rpcall_result){
 		.callback = &cb,
 	};
 
 	ev_init(&cb.w_finish, rpcall_finish_cb);
 	cb.w_finish.data = &result;
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_rpcall, 3, 1, &state,
-		string_stream_open(&stream, "shadow = 1; return 7, 'ok', false"),
-		&cb));
+		r, cfunc_rpcall, 3, 1, (void *)&state,
+		(void *)string_stream_open(
+			&stream, "shadow = 1; return 7, 'ok', false"),
+		(void *)&cb));
 	lua_pop(r->L, 1);
 	T_EXPECT(wait_until(loop, rpcall_fired, &result, TEST_WAIT_SEC));
 	T_EXPECT(result.result != NULL);
@@ -2516,7 +2973,7 @@ T_DECLARE_CASE(cfunc_rpcall_marshals_results_and_keeps_env_local)
 	static const char expect[] = "return true,7,\"ok\",false";
 	T_CHECK(result.resultlen == sizeof(expect) - 1);
 	T_EXPECT_MEMEQ(result.result, expect, sizeof(expect) - 1);
-	free((void *)result.result);
+	free_rpc_result((void *)result.result);
 
 	lua_getglobal(r->L, "shadow");
 	T_EXPECT(lua_isnil(r->L, -1));
@@ -2527,9 +2984,10 @@ T_DECLARE_CASE(cfunc_rpcall_marshals_results_and_keeps_env_local)
 
 T_DECLARE_CASE(cfunc_rpcall_copy_allocation_failure_completes_once)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	static const char expected[] = "return true,7";
 	struct {
 		bool dispatched;
@@ -2543,9 +3001,12 @@ T_DECLARE_CASE(cfunc_rpcall_copy_allocation_failure_completes_once)
 
 	for (size_t i = 0; i < ARRAY_SIZE(observed); i++) {
 		struct string_stream stream;
-		struct ruleset_callback cb = { 0 };
-		struct ruleset_state *state = NULL;
-		struct rpcall_result result = { .callback = &cb };
+		static struct ruleset_callback cb;
+		cb = (struct ruleset_callback){ 0 };
+		static struct ruleset_state *state;
+		state = NULL;
+		static struct rpcall_result result;
+		result = (struct rpcall_result){ .callback = &cb };
 		ev_init(&cb.w_finish, rpcall_finish_cb);
 		cb.w_finish.data = &result;
 		g_fail_rpcall_copy = (i == 0);
@@ -2574,7 +3035,7 @@ T_DECLARE_CASE(cfunc_rpcall_copy_allocation_failure_completes_once)
 		observed[i].calls = result.num_calls;
 		observed[i].idle =
 			observed[i].idle && r->vmstats.num_thread_active == 0;
-		free((void *)owned);
+		free_rpc_result((void *)owned);
 		ruleset_cancel(loop, state);
 		ev_clear_pending(loop, &cb.w_finish);
 	}
@@ -2604,22 +3065,27 @@ T_DECLARE_CASE(cfunc_rpcall_copy_allocation_failure_completes_once)
  */
 T_DECLARE_CASE(cfunc_rpcall_result_survives_gc_before_read)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result result;
+	result = (struct rpcall_result){
 		.callback = &cb,
 	};
 
 	ev_init(&cb.w_finish, rpcall_finish_cb);
 	cb.w_finish.data = &result;
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_rpcall, 3, 1, &state,
-		string_stream_open(&stream, "return string.rep('x', 1000)"),
-		&cb));
+		r, cfunc_rpcall, 3, 1, (void *)&state,
+		(void *)string_stream_open(
+			&stream, "return string.rep('x', 1000)"),
+		(void *)&cb));
 	lua_pop(r->L, 1);
 	T_EXPECT(wait_until(loop, rpcall_fired, &result, TEST_WAIT_SEC));
 	T_EXPECT(result.result != NULL);
@@ -2641,7 +3107,7 @@ T_DECLARE_CASE(cfunc_rpcall_result_survives_gc_before_read)
 		}
 	}
 	T_EXPECT_EQ(x_count, 1000);
-	free((void *)result.result);
+	free_rpc_result((void *)result.result);
 
 	free_ruleset(loop, r);
 }
@@ -2656,21 +3122,26 @@ T_DECLARE_CASE(cfunc_rpcall_result_survives_gc_before_read)
  */
 T_DECLARE_CASE(cfunc_rpcall_unmarshalable_result_reports_error)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result result;
+	result = (struct rpcall_result){
 		.callback = &cb,
 	};
 
 	ev_init(&cb.w_finish, rpcall_finish_cb);
 	cb.w_finish.data = &result;
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_rpcall, 3, 1, &state,
-		string_stream_open(&stream, "return function() end"), &cb));
+		r, cfunc_rpcall, 3, 1, (void *)&state,
+		(void *)string_stream_open(&stream, "return function() end"),
+		(void *)&cb));
 	lua_pop(r->L, 1);
 	/* Must complete within the short timeout, not hang. */
 	T_EXPECT(wait_until(loop, rpcall_fired, &result, TEST_WAIT_SEC));
@@ -2682,13 +3153,17 @@ T_DECLARE_CASE(cfunc_rpcall_unmarshalable_result_reports_error)
 
 T_DECLARE_CASE(cfunc_rpcall_chunk_error_reports_failure)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result result;
+	result = (struct rpcall_result){
 		.callback = &cb,
 	};
 
@@ -2697,8 +3172,9 @@ T_DECLARE_CASE(cfunc_rpcall_chunk_error_reports_failure)
 	/* a chunk that raises must surface as an rpcall failure, not a
 	 * marshalled (false, "boom") "successful" result */
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_rpcall, 3, 1, &state,
-		string_stream_open(&stream, "error('boom')"), &cb));
+		r, cfunc_rpcall, 3, 1, (void *)&state,
+		(void *)string_stream_open(&stream, "error('boom')"),
+		(void *)&cb));
 	lua_pop(r->L, 1);
 	T_EXPECT(wait_until(loop, rpcall_fired, &result, TEST_WAIT_SEC));
 	T_EXPECT_EQ(result.result, NULL);
@@ -2711,13 +3187,17 @@ T_DECLARE_CASE(cfunc_rpcall_chunk_error_reports_failure)
  * NULL result and the `ruleset rpcall:` line is the only account of why. */
 T_DECLARE_CASE(cfunc_rpcall_logs_error_that_cannot_be_rendered)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result result;
+	result = (struct rpcall_result){
 		.callback = &cb,
 	};
 
@@ -2725,12 +3205,12 @@ T_DECLARE_CASE(cfunc_rpcall_logs_error_that_cannot_be_rendered)
 	cb.w_finish.data = &result;
 	logcap_start(LOG_LEVEL_ERROR);
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_rpcall, 3, 1, &state,
-		string_stream_open(
+		r, cfunc_rpcall, 3, 1, (void *)&state,
+		(void *)string_stream_open(
 			&stream,
 			"error(setmetatable({}, "
 			"{ __tostring = function() error('tostring boom') end }))"),
-		&cb));
+		(void *)&cb));
 	lua_pop(r->L, 1);
 	const bool fired =
 		wait_until(loop, rpcall_fired, &result, TEST_WAIT_SEC);
@@ -2766,6 +3246,98 @@ static void resume_hooked_routine(struct ruleset *restrict r)
 	lua_settop(L, 0);
 }
 
+static int start_async(lua_State *L)
+{
+	lua_rotate(L, 1, 1);
+	lua_State *co = aux_getthread(L);
+	lua_insert(L, 1);
+	const int status = aux_async(co, L, 0, 2);
+	if (status != LUA_OK && status != LUA_YIELD) {
+		lua_xmove(co, L, 1);
+		return lua_error(L);
+	}
+	lua_settop(L, 1);
+	return 1;
+}
+
+T_DECLARE_CASE(ruleset_async_many_results)
+{
+	for (int traceback = 0; traceback < 2; traceback++) {
+		for (int yielded = 0; yielded < 2; yielded++) {
+			static struct config conf;
+			conf = make_conf();
+			conf.traceback = (traceback != 0);
+			struct ev_loop *loop = NULL;
+			struct ruleset *r = new_ruleset(_t_, &loop, &conf);
+			lua_pushcfunction(r->L, start_async);
+			lua_setglobal(r->L, "start_async");
+			lua_pushboolean(r->L, yielded);
+			lua_setglobal(r->L, "yield_results");
+			T_CHECK(install_ruleset(
+				r,
+				"hook = {finished = false}; local values = {}; "
+				"for i = 1, 4096 do values[i] = i end; "
+				"hook.co = start_async(function() "
+				"if yield_results then coroutine.yield() end; "
+				"return table.unpack(values) end, function(ok, ...) "
+				"assert(ok); assert(select('#', ...) == 4096); "
+				"local got = {...}; for i = 1, 4096 do assert(got[i] == i) end; "
+				"hook.finished = true end); return {}"));
+			if (yielded) {
+				resume_hooked_routine(r);
+			}
+			lua_getglobal(r->L, "hook");
+			lua_getfield(r->L, -1, "finished");
+			T_EXPECT(lua_toboolean(r->L, -1));
+			T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+			free_ruleset(loop, r);
+		}
+	}
+}
+
+T_DECLARE_CASE(ruleset_resume_idle_pool_oom_without_forward_context)
+{
+	static struct config conf;
+	conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *r = new_ruleset(_t_, &loop, &conf);
+	lua_State *L = r->L;
+	lua_pushcfunction(L, start_async);
+	lua_setglobal(L, "start_async");
+	T_CHECK(install_ruleset(
+		r, "hook = {}; hook.co = start_async(function() "
+		   "coroutine.yield() end, nil); return {}"));
+	static char ctx;
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+	lua_getglobal(L, "hook");
+	lua_getfield(L, -1, "co");
+	T_CHECK(lua_isthread(L, -1));
+	lua_rawsetp(L, -3, &ctx);
+	lua_settop(L, 0);
+	/* Both tables are empty: idle insertion must grow, and failure cleanup
+	 * must leave the absent forward-context key absent without allocating. */
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_IDLE_THREAD);
+	lua_newtable(L);
+	lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_FORWARD_CONTEXT);
+	g_alloc.alloc = lua_getallocf(L, &g_alloc.ud);
+	g_alloc.failures = 0;
+	lua_setallocf(L, failing_alloc, g_alloc.ud);
+	g_alloc.failing = true;
+	ruleset_resume(r, &ctx, 0);
+	g_alloc.failing = false;
+	lua_setallocf(L, g_alloc.alloc, g_alloc.ud);
+	T_EXPECT(g_alloc.failures > 0);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT);
+	lua_rawgetp(L, -1, &ctx);
+	T_EXPECT(lua_isnil(L, -1));
+	lua_settop(L, 0);
+	lua_gc(L, LUA_GCCOLLECT, 0);
+	T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
+	free_ruleset(loop, r);
+}
+
 /*
  * Regression: the finish closures skipped everything once the consumer was
  * gone -- the client cancelled, or await.forward() committed the request --
@@ -2788,12 +3360,15 @@ T_DECLARE_CASE(cfunc_request_finish_logs_error_after_cancel)
 		"end "
 		"return ruleset";
 	static const bool fail[] = { false, true };
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	lua_State *restrict const L = r->L;
-	struct ruleset_callback cb = { 0 };
-	struct request_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -2807,7 +3382,8 @@ T_DECLARE_CASE(cfunc_request_finish_logs_error_after_cancel)
 		lua_pushboolean(L, fail[i]);
 		lua_setfield(L, -2, "fail");
 		lua_pop(L, 1);
-		struct ruleset_state *state = NULL;
+		static struct ruleset_state *state;
+		state = NULL;
 		T_EXPECT(ruleset_route(r, &state, "127.0.0.1:80", NULL, &cb));
 		T_CHECK(state != NULL);
 		/* the client goes away while the handler waits */
@@ -2840,14 +3416,18 @@ T_DECLARE_CASE(cfunc_rpcall_finish_logs_error_after_cancel)
 	static const char rpcall_chunk[] = "hook.co = coroutine.running() "
 					   "coroutine.yield() "
 					   "error('late rpcall boom')";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	lua_State *restrict const L = r->L;
 	struct string_stream stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result result;
+	result = (struct rpcall_result){
 		.callback = &cb,
 	};
 
@@ -2880,13 +3460,17 @@ T_DECLARE_CASE(cfunc_rpcall_finish_logs_error_after_cancel)
  */
 T_DECLARE_CASE(cfunc_rpcall_syntax_error_does_not_leak_thread)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result result = {
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result result;
+	result = (struct rpcall_result){
 		.callback = &cb,
 	};
 
@@ -2896,8 +3480,8 @@ T_DECLARE_CASE(cfunc_rpcall_syntax_error_does_not_leak_thread)
 	/* "return (" fails to compile: cfunc_rpcall must raise (pcall reports
 	 * failure) without having checked out a coroutine */
 	T_EXPECT(!ruleset_pcall(
-		r, cfunc_rpcall, 3, 1, &state,
-		string_stream_open(&stream, "return ("), &cb));
+		r, cfunc_rpcall, 3, 1, (void *)&state,
+		(void *)string_stream_open(&stream, "return ("), (void *)&cb));
 	T_EXPECT_EQ(r->vmstats.num_thread_active, 0);
 	/* the callback must never fire for a chunk that did not load */
 	T_EXPECT(!result.fired);
@@ -2914,13 +3498,17 @@ T_DECLARE_CASE(cfunc_request_startup_oom_releases_checkedout_thread)
 		"started = false; return { route = function() "
 		"started = true; return '127.0.0.1:80' end }";
 	for (int reused = 0; reused < 2; reused++) {
-		struct config conf = make_conf();
+		static struct config conf;
+		conf = make_conf();
 		struct ev_loop *loop = NULL;
-		struct ruleset *const r = new_ruleset(&loop, &conf);
+		struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 		lua_State *const L = r->L;
-		struct ruleset_callback cb = { 0 };
-		struct ruleset_state *state = NULL;
-		struct request_result result = { .callback = &cb };
+		static struct ruleset_callback cb;
+		cb = (struct ruleset_callback){ 0 };
+		static struct ruleset_state *state;
+		state = NULL;
+		static struct request_result result;
+		result = (struct request_result){ .callback = &cb };
 		T_CHECK(install_ruleset(r, chunk));
 		ev_init(&cb.w_finish, request_finish_cb);
 		cb.w_finish.data = &result;
@@ -2993,13 +3581,17 @@ T_DECLARE_CASE(ruleset_state_gc_releases_cancelled_orphan)
 	static const char chunk[] =
 		"return { route = function() coroutine.yield() end }";
 	for (int request = 0; request < 2; request++) {
-		struct config conf = make_conf();
+		static struct config conf;
+		conf = make_conf();
 		struct ev_loop *loop = NULL;
-		struct ruleset *const r = new_ruleset(&loop, &conf);
-		struct ruleset_callback cb = { 0 };
-		struct ruleset_state *state = NULL;
+		struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+		static struct ruleset_callback cb;
+		cb = (struct ruleset_callback){ 0 };
+		static struct ruleset_state *state;
+		state = NULL;
 		struct string_stream stream;
-		struct request_result result = { .callback = &cb };
+		static struct request_result result;
+		result = (struct request_result){ .callback = &cb };
 		ev_init(&cb.w_finish, request_finish_cb);
 		cb.w_finish.data = &result;
 		T_CHECK(install_ruleset(r, chunk));
@@ -3036,12 +3628,16 @@ T_DECLARE_CASE(ruleset_state_gc_releases_cancelled_orphan)
 T_DECLARE_CASE(ruleset_catastrophic_resume_disarms_state_gc)
 {
 	for (int resumed = 0; resumed < 2; resumed++) {
-		struct config conf = make_conf();
+		static struct config conf;
+		conf = make_conf();
 		struct ev_loop *loop = NULL;
-		struct ruleset *const r = new_ruleset(&loop, &conf);
-		struct ruleset_callback cb = { 0 };
-		struct ruleset_state *state = NULL;
-		struct request_result result = { .callback = &cb };
+		struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+		static struct ruleset_callback cb;
+		cb = (struct ruleset_callback){ 0 };
+		static struct ruleset_state *state;
+		state = NULL;
+		static struct request_result result;
+		result = (struct request_result){ .callback = &cb };
 		char chunk[512];
 		const int n = snprintf(
 			chunk, sizeof(chunk),
@@ -3064,7 +3660,7 @@ T_DECLARE_CASE(ruleset_catastrophic_resume_disarms_state_gc)
 		T_EXPECT_EQ(state, NULL);
 		T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
 		T_EXPECT(ev_is_pending(&cb.w_finish));
-		ruleset_request_cancel(loop, &cb);
+		ruleset_request_cancel(loop, &state, &cb);
 		T_EXPECT(!ev_is_pending(&cb.w_finish));
 		lua_pushnil(r->L);
 		lua_setglobal(r->L, "hook");
@@ -3079,12 +3675,16 @@ T_DECLARE_CASE(ruleset_catastrophic_resume_disarms_state_gc)
  * the lookup registry must not make collection decrement the count again. */
 T_DECLARE_CASE(ruleset_finish_disarms_gc_without_thread_registry)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = { .callback = &cb };
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){ .callback = &cb };
 	char chunk[256];
 	const int n = snprintf(
 		chunk, sizeof(chunk),
@@ -3097,7 +3697,7 @@ T_DECLARE_CASE(ruleset_finish_disarms_gc_without_thread_registry)
 	cb.w_finish.data = &result;
 	T_CHECK(ruleset_route(r, &state, "127.0.0.1:80", NULL, &cb));
 	T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
-	ruleset_request_cancel(loop, &cb);
+	ruleset_request_cancel(loop, &state, &cb);
 	lua_settop(r->L, 0);
 	lua_gc(r->L, LUA_GCCOLLECT, 0);
 	T_EXPECT_EQ(r->vmstats.num_thread_active, (size_t)0);
@@ -3123,17 +3723,23 @@ T_DECLARE_CASE(ruleset_state_gc_completes_orphaned_async_ops)
 		"local ruleset = {} "
 		"function ruleset.route(request, username, password) coroutine.yield() end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
-	struct ruleset_callback rpc_cb = { 0 };
-	struct ruleset_callback req_cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct rpcall_result rpc_result = {
+	static struct ruleset_callback rpc_cb;
+	rpc_cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_callback req_cb;
+	req_cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct rpcall_result rpc_result;
+	rpc_result = (struct rpcall_result){
 		.callback = &rpc_cb,
 	};
-	struct request_result req_result = {
+	static struct request_result req_result;
+	req_result = (struct request_result){
 		.callback = &req_cb,
 	};
 
@@ -3141,8 +3747,9 @@ T_DECLARE_CASE(ruleset_state_gc_completes_orphaned_async_ops)
 	ev_init(&rpc_cb.w_finish, rpcall_finish_cb);
 	rpc_cb.w_finish.data = &rpc_result;
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_rpcall, 3, 1, &state,
-		string_stream_open(&stream, "coroutine.yield()"), &rpc_cb));
+		r, cfunc_rpcall, 3, 1, (void *)&state,
+		(void *)string_stream_open(&stream, "coroutine.yield()"),
+		(void *)&rpc_cb));
 	T_EXPECT_EQ(lua_gettop(r->L), 1);
 	lua_pop(r->L, 1);
 	T_CHECK(state != NULL);
@@ -3210,12 +3817,16 @@ T_DECLARE_CASE(cfunc_request_malformed_dial_spec_is_rejected)
 		"function ruleset.route(request, username, password) return 'bogus' end "
 		"function ruleset.route6(request, username, password) return request end "
 		"return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
-	struct ruleset_callback cb = { 0 };
-	struct ruleset_state *state = NULL;
-	struct request_result result = {
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
+	static struct ruleset_callback cb;
+	cb = (struct ruleset_callback){ 0 };
+	static struct ruleset_state *state;
+	state = NULL;
+	static struct request_result result;
+	result = (struct request_result){
 		.callback = &cb,
 	};
 
@@ -3225,8 +3836,8 @@ T_DECLARE_CASE(cfunc_request_malformed_dial_spec_is_rejected)
 	/* route() returns an address aux_todialreq cannot parse: the request
 	 * must degrade to "rejected" (req == NULL) rather than misbehave */
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_request, 5, 1, &state, "route", "127.0.0.1:80", NULL,
-		&cb));
+		r, cfunc_request, 5, 1, (void *)&state, "route", "127.0.0.1:80",
+		NULL, (void *)&cb));
 	lua_pop(r->L, 1);
 	T_EXPECT(wait_until(loop, request_fired, &result, TEST_WAIT_SEC));
 	T_EXPECT_EQ(result.req, NULL);
@@ -3236,26 +3847,26 @@ T_DECLARE_CASE(cfunc_request_malformed_dial_spec_is_rejected)
 
 T_DECLARE_CASE(cfunc_loadconfig_extracts_ruleset_and_settings)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_loadconfig, 1, 0,
-		string_stream_open(
+		(void *)string_stream_open(
 			&stream,
 			"return { ruleset = { tag = 1 }, memlimit = 4, traceback = true }")));
 	/* the `ruleset' table is promoted to the global and removed from the
-	 * config table; memlimit (MiB) and traceback land in r->config */
+	 * config table; memlimit (MiB) and traceback land in conf */
 	lua_getglobal(r->L, "ruleset");
 	T_EXPECT(lua_istable(r->L, -1));
 	lua_pop(r->L, 1);
-	T_EXPECT_EQ(r->config.memlimit_kb, (int_least32_t)(4 << 10));
-	T_EXPECT(r->config.traceback);
+	T_EXPECT_EQ(conf.memlimit, 4);
+	T_EXPECT(conf.traceback);
 
 	free_ruleset(loop, r);
-	free(conf.strings);
 }
 
 /* The integer `tag' of the installed global ruleset table, or -1 when none. */
@@ -3280,16 +3891,17 @@ static lua_Integer ruleset_tag(lua_State *restrict L)
  */
 T_DECLARE_CASE(cfunc_reloadconfig_refuses_before_commit)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	conf.max_sessions = 7;
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	/* no ruleset installed, and the table brings none */
 	T_EXPECT(!ruleset_pcall(
 		r, cfunc_reloadconfig, 1, 0,
-		string_stream_open(
+		(void *)string_stream_open(
 			&stream,
 			"return { auth_required = true, max_sessions = 9 }")));
 	T_EXPECT(!conf.auth_required);
@@ -3299,7 +3911,7 @@ T_DECLARE_CASE(cfunc_reloadconfig_refuses_before_commit)
 	/* the table installs one */
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_reloadconfig, 1, 0,
-		string_stream_open(
+		(void *)string_stream_open(
 			&stream,
 			"return { auth_required = true, ruleset = { tag = 1 } }")));
 	T_EXPECT(conf.auth_required);
@@ -3308,7 +3920,8 @@ T_DECLARE_CASE(cfunc_reloadconfig_refuses_before_commit)
 	/* the ruleset already installed stays in place */
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_reloadconfig, 1, 0,
-		string_stream_open(&stream, "return { max_sessions = 9 }")));
+		(void *)string_stream_open(
+			&stream, "return { max_sessions = 9 }")));
 	T_EXPECT(conf.auth_required);
 	T_EXPECT_EQ(conf.max_sessions, 9);
 	T_EXPECT_EQ(ruleset_tag(r->L), 1);
@@ -3316,7 +3929,7 @@ T_DECLARE_CASE(cfunc_reloadconfig_refuses_before_commit)
 	/* a listener change is refused along with the ruleset it carries */
 	T_EXPECT(!ruleset_pcall(
 		r, cfunc_reloadconfig, 1, 0,
-		string_stream_open(
+		(void *)string_stream_open(
 			&stream,
 			"return { listen = '127.0.0.1:1081', max_sessions = 11, "
 			"ruleset = { tag = 2 } }")));
@@ -3325,23 +3938,22 @@ T_DECLARE_CASE(cfunc_reloadconfig_refuses_before_commit)
 	T_EXPECT_EQ(ruleset_tag(r->L), 1);
 
 	free_ruleset(loop, r);
-	free(conf.strings);
 }
 
 T_DECLARE_CASE(cfunc_loadconfig_rejects_non_table)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	T_EXPECT(!ruleset_pcall(
 		r, cfunc_loadconfig, 1, 0,
-		string_stream_open(&stream, "return 42")));
+		(void *)string_stream_open(&stream, "return 42")));
 	T_EXPECT(strstr(ruleset_geterror(r, NULL), "expected table") != NULL);
 
 	free_ruleset(loop, r);
-	free(conf.strings);
 }
 
 /*
@@ -3353,15 +3965,16 @@ T_DECLARE_CASE(cfunc_loadconfig_rejects_non_table)
  */
 T_DECLARE_CASE(cfunc_loadconfig_traceback_reaches_the_chunk)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	conf.traceback = true;
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	T_EXPECT(!ruleset_pcall(
 		r, cfunc_loadconfig, 1, 0,
-		string_stream_open(
+		(void *)string_stream_open(
 			&stream,
 			"local function inner() error('config boom') end\n"
 			"local function outer() inner() end\n"
@@ -3376,60 +3989,60 @@ T_DECLARE_CASE(cfunc_loadconfig_traceback_reaches_the_chunk)
 	T_EXPECT(strstr(tb, "in main chunk") != NULL);
 
 	free_ruleset(loop, r);
-	free(conf.strings);
 }
 
 /* Regression: cfunc_loadfile must reject a chunk that returns a non-table
  * rather than installing a broken global ruleset (like cfunc_loadconfig). */
 T_DECLARE_CASE(cfunc_loadfile_rejects_non_table)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	T_EXPECT(!ruleset_pcall(
 		r, cfunc_loadfile, 1, 0,
-		string_stream_open(&stream, "return 42")));
+		(void *)string_stream_open(&stream, "return 42")));
 	T_EXPECT(strstr(ruleset_geterror(r, NULL), "expected table") != NULL);
 
 	free_ruleset(loop, r);
-	free(conf.strings);
 }
 
 T_DECLARE_CASE(cfunc_loadconfig_rejects_wrong_type_ruleset)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	T_EXPECT(!ruleset_pcall(
 		r, cfunc_loadconfig, 1, 0,
-		string_stream_open(&stream, "return { ruleset = 5 }")));
+		(void *)string_stream_open(&stream, "return { ruleset = 5 }")));
 	T_EXPECT(strstr(ruleset_geterror(r, NULL), "must be a table") != NULL);
 
 	free_ruleset(loop, r);
-	free(conf.strings);
 }
 
 T_DECLARE_CASE(cfunc_loadconfig_rejects_memlimit_overflow)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
-	/* memlimit is MiB; a value above INT_LEAST32_MAX>>10 would overflow
-	 * the int_least32_t KiB field and must be rejected */
+	/* Preserve the accepted MiB range formerly bounded by the KiB cache. */
 	char chunk[64];
 	(void)snprintf(
 		chunk, sizeof(chunk), "return { memlimit = %jd }",
 		(intmax_t)(INT_LEAST32_MAX >> 10) + 1);
 	T_EXPECT(!ruleset_pcall(
-		r, cfunc_loadconfig, 1, 0, string_stream_open(&stream, chunk)));
+		r, cfunc_loadconfig, 1, 0,
+		(void *)string_stream_open(&stream, chunk)));
 	T_EXPECT(
-		strstr(ruleset_geterror(r, NULL), "memlimit too large") !=
+		strstr(ruleset_geterror(r, NULL), "failed to load fields") !=
 		NULL);
 
 	/* a non-integer memlimit is rejected by field name, including the float
@@ -3442,29 +4055,25 @@ T_DECLARE_CASE(cfunc_loadconfig_rejects_memlimit_overflow)
 	for (size_t i = 0; i < ARRAY_SIZE(non_integer); i++) {
 		T_EXPECT(!ruleset_pcall(
 			r, cfunc_loadconfig, 1, 0,
-			string_stream_open(&stream, non_integer[i])));
+			(void *)string_stream_open(&stream, non_integer[i])));
 		const char *const err = ruleset_geterror(r, NULL);
-		if (strstr(err,
-			   "config: field `memlimit' must be an integer") ==
-		    NULL) {
+		if (strstr(err, "failed to load fields") == NULL) {
 			T_LOGF("%s: %s", non_integer[i], err);
 			T_FAIL();
 		}
 	}
-	T_EXPECT_EQ(r->config.memlimit_kb, (int_least32_t)0);
+	T_EXPECT_EQ(conf.memlimit, 0);
 
 	/* the boundary value itself is accepted */
 	(void)snprintf(
 		chunk, sizeof(chunk), "return { memlimit = %jd }",
 		(intmax_t)(INT_LEAST32_MAX >> 10));
 	T_EXPECT(ruleset_pcall(
-		r, cfunc_loadconfig, 1, 0, string_stream_open(&stream, chunk)));
-	T_EXPECT_EQ(
-		r->config.memlimit_kb,
-		(int_least32_t)((INT_LEAST32_MAX >> 10) << 10));
+		r, cfunc_loadconfig, 1, 0,
+		(void *)string_stream_open(&stream, chunk)));
+	T_EXPECT_EQ(conf.memlimit, (INT_LEAST32_MAX >> 10));
 
 	free_ruleset(loop, r);
-	free(conf.strings);
 }
 
 T_DECLARE_CASE(cfunc_healthy_returns_hook_result_and_nil_when_absent)
@@ -3475,15 +4084,16 @@ T_DECLARE_CASE(cfunc_healthy_returns_hook_result_and_nil_when_absent)
 		"return ruleset";
 	static const char without_healthy_chunk[] = "local ruleset = {} "
 						    "return ruleset";
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 
 	/* hook present: cfunc_healthy calls it and returns its result */
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_update, 3, 0, NULL, "=test",
-		string_stream_open(&stream, with_healthy_chunk)));
+		(void *)string_stream_open(&stream, with_healthy_chunk)));
 	T_EXPECT(ruleset_pcall(r, cfunc_healthy, 0, 1));
 	T_EXPECT_EQ(lua_gettop(r->L), 1);
 	T_EXPECT(lua_toboolean(r->L, -1));
@@ -3492,7 +4102,7 @@ T_DECLARE_CASE(cfunc_healthy_returns_hook_result_and_nil_when_absent)
 	/* hook absent: cfunc_healthy returns nothing (nresults=1 pads to nil) */
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_update, 3, 0, NULL, "=test",
-		string_stream_open(&stream, without_healthy_chunk)));
+		(void *)string_stream_open(&stream, without_healthy_chunk)));
 	T_EXPECT(ruleset_pcall(r, cfunc_healthy, 0, 1));
 	T_EXPECT_EQ(lua_gettop(r->L), 1);
 	T_EXPECT(lua_isnil(r->L, -1));
@@ -3503,9 +4113,10 @@ T_DECLARE_CASE(cfunc_healthy_returns_hook_result_and_nil_when_absent)
 
 T_DECLARE_CASE(cfunc_check_memlimit_collects_when_over_limit)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 	lua_State *const L = r->L;
 
@@ -3513,7 +4124,7 @@ T_DECLARE_CASE(cfunc_check_memlimit_collects_when_over_limit)
 	 * not index a nil global; cfunc_metrics runs check_memlimit first */
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_update, 3, 0, NULL, "=test",
-		string_stream_open(&stream, "return {}")));
+		(void *)string_stream_open(&stream, "return {}")));
 
 	/* accumulate collectable garbage with the collector stopped so the live
 	 * count sits well above a small limit */
@@ -3523,9 +4134,20 @@ T_DECLARE_CASE(cfunc_check_memlimit_collects_when_over_limit)
 		LUA_OK);
 	const int before_kb = lua_gc(L, LUA_GCCOUNT, 0);
 
-	/* a 1 KiB limit is far below current usage, so the next cfunc entry
+	/* Non-positive limits disable collection; a positive limit above usage
+	 * leaves the stopped collector alone too. */
+	const int limits[] = { -1, 0,
+			       (int)(r->vmstats.byt_allocated >> 20) + 1 };
+	for (size_t i = 0; i < ARRAY_SIZE(limits); i++) {
+		conf.memlimit = limits[i];
+		T_EXPECT(ruleset_pcall(r, cfunc_metrics, 0, 1));
+		lua_pop(L, 1);
+		T_EXPECT_EQ(lua_gc(L, LUA_GCCOUNT, 0), before_kb);
+	}
+
+	/* a 1 MiB limit is far below current usage, so the next cfunc entry
 	 * point must take check_memlimit's enforcement branch (LUA_GCCOLLECT) */
-	r->config.memlimit_kb = 1;
+	conf.memlimit = 1;
 	T_EXPECT(ruleset_pcall(r, cfunc_metrics, 0, 1));
 	lua_pop(L, 1); /* metrics hook absent: padded nil */
 	const int after_kb = lua_gc(L, LUA_GCCOUNT, 0);
@@ -3543,17 +4165,18 @@ T_DECLARE_CASE(cfunc_check_memlimit_collects_when_over_limit)
  */
 T_DECLARE_CASE(cfunc_check_memlimit_counts_buffer_built_strings)
 {
-	struct config conf = make_conf();
+	static struct config conf;
+	conf = make_conf();
 	struct ev_loop *loop = NULL;
-	struct ruleset *const r = new_ruleset(&loop, &conf);
+	struct ruleset *const r = new_ruleset(_t_, &loop, &conf);
 	struct string_stream stream;
 	lua_State *const L = r->L;
 
 	T_EXPECT(ruleset_pcall(
 		r, cfunc_update, 3, 0, NULL, "=test",
-		string_stream_open(&stream, "return {}")));
+		(void *)string_stream_open(&stream, "return {}")));
 
-	/* build 64 strings of 8 KiB through table.concat's buffer, then drop
+	/* build 256 strings of 8 KiB through table.concat's buffer, then drop
 	 * them all at once, leaving them as garbage the collector has not seen */
 	lua_gc(L, LUA_GCCOLLECT, 0);
 	lua_gc(L, LUA_GCSTOP, 0);
@@ -3561,22 +4184,23 @@ T_DECLARE_CASE(cfunc_check_memlimit_counts_buffer_built_strings)
 			L, "local t = {} "
 			   "for i = 1, 8192 do t[i] = 'x' end "
 			   "built = {} "
-			   "for i = 1, 64 do built[i] = table.concat(t) end "
+			   "for i = 1, 256 do built[i] = table.concat(t) end "
 			   "built = nil") == LUA_OK);
 	const size_t before = r->vmstats.byt_allocated;
-	const int_least32_t limit_kb = (int_least32_t)(before >> 10);
+	const int limit_mb = (int)(before >> 20);
+	T_CHECK(limit_mb > 0);
 #if LUA_VERSION_NUM >= 505
 	/* the built strings are outside Lua's count, so it sits below the limit */
-	T_EXPECT(lua_gc(L, LUA_GCCOUNT, 0) < limit_kb);
+	T_EXPECT(lua_gc(L, LUA_GCCOUNT, 0) < limit_mb * 1024);
 #endif
 
 	/* the allocator's total has reached the limit: the next cfunc entry
 	 * point must collect, returning the built strings to the allocator */
-	r->config.memlimit_kb = limit_kb;
+	conf.memlimit = limit_mb;
 	T_EXPECT(ruleset_pcall(r, cfunc_metrics, 0, 1));
 	lua_pop(L, 1); /* metrics hook absent: padded nil */
 	const size_t after = r->vmstats.byt_allocated;
-	T_EXPECT(after + (size_t)64 * 8192 < before);
+	T_EXPECT(after + (size_t)256 * 8192 < before);
 
 	lua_gc(L, LUA_GCRESTART, 0);
 	free_ruleset(loop, r);
@@ -3590,9 +4214,104 @@ T_DECLARE_CASE(cfunc_check_memlimit_counts_buffer_built_strings)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+static int failure_operation;
+static char failure_path[sizeof(TEST_TMPDIR "/ruleset_failure_XXXXXX")];
+static struct config failure_conf;
+static struct ruleset_state *failure_state;
+
+T_DECLARE_CASE(ruleset_fixture_intentional_failure)
+{
+	failure_conf = make_conf();
+	struct ev_loop *loop = NULL;
+	struct ruleset *r = new_ruleset(_t_, &loop, &failure_conf);
+	static struct ruleset_callback cb;
+	static struct request_result request;
+	static struct rpcall_result rpc;
+	cb = (struct ruleset_callback){ 0 };
+	request = (struct request_result){ .callback = &cb };
+	rpc = (struct rpcall_result){ .callback = &cb };
+	failure_state = NULL;
+	if (failure_operation == 0 || failure_operation == 1) {
+		T_CHECK(install_ruleset(
+			r,
+			failure_operation == 0 ?
+				"return {route=function() coroutine.yield() end}" :
+				"return {route=function(request) return request end}"));
+		ev_init(&cb.w_finish, request_finish_cb);
+		cb.w_finish.data = &request;
+		T_CHECK(ruleset_route(
+			r, &failure_state, "127.0.0.1:80", NULL, &cb));
+		if (failure_operation == 1) {
+			T_CHECK(wait_until(
+				loop, request_fired, &request, TEST_WAIT_SEC));
+			T_CHECK(request.req != NULL);
+		} else {
+			T_CHECK(failure_state != NULL);
+		}
+	} else if (failure_operation == 2) {
+		struct string_stream stream;
+		ev_init(&cb.w_finish, rpcall_finish_cb);
+		cb.w_finish.data = &rpc;
+		T_CHECK(ruleset_rpcall(
+			r, &failure_state,
+			string_stream_open(&stream, "return 42"), &cb));
+		T_CHECK(wait_until(loop, rpcall_fired, &rpc, TEST_WAIT_SEC));
+		T_CHECK(rpc.result != NULL);
+	} else {
+		struct string_stream stream;
+		T_CHECK(ruleset_pcall(
+			r, cfunc_loadconfig, 1, 0,
+			(void *)string_stream_open(
+				&stream, "return {proxy='socks5://old:80'}")));
+		T_CHECK(failure_conf.strings != NULL);
+		strcpy(failure_path, TEST_TMPDIR "/ruleset_failure_XXXXXX");
+		T_CHECK(write_tempfile(_t_, failure_path, "return {}") == 0);
+		logcap_start(LOG_LEVEL_ERROR);
+	}
+	g_fail_rpcall_copy = true;
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(ruleset_failed_expectation_cleans_fixture)
+{
+	for (int operation = 0; operation < 4; operation++) {
+		failure_operation = operation;
+		const size_t before = fixture_closes;
+		T_DECLARE_CTX(nested);
+		T_RUN_CASE(nested, ruleset_fixture_intentional_failure);
+		T_EXPECT_EQ(nested.failed, 1);
+		T_EXPECT_EQ(fixture_closes, before + 1);
+		T_EXPECT(fixtures == NULL);
+		T_EXPECT(failure_conf.strings == NULL);
+		T_EXPECT(failure_state == NULL);
+		T_EXPECT_EQ(num_live_requests, (size_t)0);
+		T_EXPECT_EQ(num_live_results, (size_t)0);
+		T_EXPECT_EQ(num_tempfiles, (size_t)0);
+		T_EXPECT(!logcap_active);
+		T_EXPECT(!g_fail_rpcall_copy);
+		if (operation == 3) {
+			T_EXPECT(access(failure_path, F_OK) != 0);
+		}
+		T_RUN_CASE(nested, ruleset_loadfile_dispatches_requests);
+		T_EXPECT_EQ(nested.passed, 1);
+		T_EXPECT_EQ(nested.failed, 1);
+		T_EXPECT(fixtures == NULL);
+		T_EXPECT_EQ(num_live_requests, (size_t)0);
+	}
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(ruleset_failed_expectation_cleans_fixture),
 	T_CASE(ruleset_new_failure_cleanup),
 	T_CASE(cfunc_config_global_install_failure_is_atomic),
+	T_CASE(cfunc_guard_oom_retry_finalizes_orphan),
+	T_CASE(ruleset_resume_corrupt_registry_survives_oom),
+	T_CASE(cfunc_rpcall_numeric_concat_conversion_completes_once),
+	T_CASE(ruleset_async_many_results),
+	T_CASE(ruleset_resume_idle_pool_oom_without_forward_context),
+#if LUA_VERSION_NUM == 503
+	T_CASE(cfunc_config_rollback_oom_releases_staged_strings),
+#endif
 	T_CASE(ruleset_loadfile_dispatches_requests),
 	T_CASE(ruleset_dispatch_routes_by_address_type),
 	T_CASE(ruleset_update_invoke_rpcall_stats_and_tick),
@@ -3613,7 +4332,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_isvalid_survives_raising_global_lookup),
 	T_CASE(ruleset_api_results_survive_oom),
 	T_CASE(ruleset_load_missing_file_returns_false),
-	T_CASE(ruleset_new_clamps_oversized_memlimit),
+	T_CASE(ruleset_config_reads_each_field_once),
 	T_CASE(ruleset_loadconfig_late_memlimit_failure_is_atomic),
 	T_CASE(cfunc_loadfile_stats_tick_and_invoke_are_sandboxed),
 	T_CASE(cfunc_metrics_returns_string_when_defined_and_nil_when_absent),

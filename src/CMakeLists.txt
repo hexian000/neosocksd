@@ -317,13 +317,16 @@ if(WITH_RULESET)
         MOCK_SRCS socks.c
         MOCK_DEFINITIONS
             socket_set_cloexec=test_socket_set_cloexec
-            socket_set_nonblock=test_socket_set_nonblock)
+            socket_set_nonblock=test_socket_set_nonblock
+            malloc=test_context_malloc)
     # A compiler alias renames glibc's GNU transparent-union declaration,
     # which GCC rejects at call sites under -pedantic. Wrap only this test
     # executable; its fixture injections call __real_sendto directly.
     target_link_options(socks_test PRIVATE "-Wl,--wrap=sendto")
     add_unit_test(http_proxy_test
-        SRCS http_proxy_test.c http_proxy.c proto/http.c proto/codec.c)
+        SRCS http_proxy_test.c proto/http.c proto/codec.c
+        MOCK_SRCS http_proxy.c
+        MOCK_DEFINITIONS malloc=test_context_malloc)
     add_unit_test(api_server_test
         SRCS api_server_test.c api_server.c proto/http.c proto/codec.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c")
@@ -342,10 +345,15 @@ endif()
 add_unit_test(forward_test
     SRCS forward_test.c
     MOCK_SRCS forward.c
-    MOCK_DEFINITIONS ev_timer_start=test_ev_timer_start)
+    MOCK_DEFINITIONS ev_timer_start=test_ev_timer_start
+        malloc=test_context_malloc)
 set_tests_properties(forward_test PROPERTIES TIMEOUT 10)
 add_unit_test(conf_test
-    SRCS conf_test.c conf.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    SRCS conf_test.c proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+    MOCK_SRCS conf.c
+    MOCK_DEFINITIONS strlen=test_conf_strlen malloc=test_conf_malloc
+        luaL_newstate=test_conf_newstate lua_close=test_conf_close
+        io_stream_close=test_conf_stream_close
     WITH_LUA)
 file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/tmp")
 target_compile_definitions(conf_test PRIVATE
@@ -440,12 +448,16 @@ if(WITH_LUA)
         MOCK_SRCS ruleset/time.c
         MOCK_DEFINITIONS clock_gettime=test_clock_gettime
         NO_LIBEV WITH_LUA)
+endif()
+
+if(WITH_RULESET)
     add_unit_test(base_test
         SRCS ruleset/base_test.c proto/codec.c
              util.c dialer.c resolver.c
              "${CMAKE_CURRENT_BINARY_DIR}/version.c"
         MOCK_SRCS ruleset/base.c
         MOCK_DEFINITIONS clock_gettime=test_clock_gettime
+            lua_resume=test_base_resume lua_setfield=test_base_setfield
         WITH_LUA WITH_CARES)
     add_unit_test(marshal_test
         SRCS ruleset/marshal_test.c ruleset/marshal.c ruleset/base.c

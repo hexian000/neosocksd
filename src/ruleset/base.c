@@ -3,6 +3,7 @@
 
 #include "base.h"
 
+#include "conf.h"
 #include "dialer.h"
 #include "proto/codec.h"
 
@@ -45,12 +46,12 @@ void aux_toclose(
 	const lua_CFunction close)
 {
 	idx = lua_absindex(L, idx);
-	if (luaL_newmetatable(L, tname)) {
-		lua_pushcfunction(L, close);
-		lua_setfield(L, -2, "__close");
-		lua_pushcfunction(L, close);
-		lua_setfield(L, -2, "__gc");
-	}
+	(void)luaL_newmetatable(L, tname);
+	/* A previous allocation failure may have left this table incomplete. */
+	lua_pushcfunction(L, close);
+	lua_setfield(L, -2, "__close");
+	lua_pushcfunction(L, close);
+	lua_setfield(L, -2, "__gc");
 	lua_setmetatable(L, idx);
 #if HAVE_LUA_TOCLOSE
 	lua_toclose(L, idx);
@@ -119,15 +120,13 @@ static struct thread_state *thread_getstate(lua_State *L, lua_State *co)
 
 /* A guard belongs to the coroutine's C closure, including while it is idle.
  * Disarming it here makes later collection independent of how the coroutine
- * completed. A NULL guard covers a caller-supplied, unpooled coroutine. */
+ * completed. A caller-supplied, unpooled coroutine has no guard or active slot. */
 static void thread_release(lua_State *L, struct thread_state *state)
 {
-	if (state != NULL) {
-		if (!state->active) {
-			return;
-		}
-		state->active = false;
+	if (state == NULL || !state->active) {
+		return;
 	}
+	state->active = false;
 	struct ruleset *restrict r = aux_getruleset(L);
 	r->vmstats.num_thread_active--;
 }
@@ -150,9 +149,11 @@ static int
 thread_call_k(lua_State *restrict L, int status, const lua_KContext ctx)
 {
 	/* lua stack: errfunc? finish ? ... */
+	/* LUA_MULTRET only reserves space for the returned values. */
+	luaL_checkstack(L, 3, "async completion");
 	int errfunc = 0;
 	struct ruleset *restrict r = aux_getruleset(L);
-	if (r->config.traceback) {
+	if (r->conf->traceback) {
 		lua_pushcfunction(L, aux_traceback);
 		lua_replace(L, 1);
 		errfunc = 1;
@@ -209,10 +210,9 @@ static struct thread_state *thread_new(lua_State *L)
 {
 	struct thread_state *state = lua_newuserdata(L, sizeof(*state));
 	*state = (struct thread_state){ 0 };
-	if (luaL_newmetatable(L, "ruleset_thread")) {
-		lua_pushcfunction(L, thread_state_gc);
-		lua_setfield(L, -2, "__gc");
-	}
+	(void)luaL_newmetatable(L, "ruleset_thread");
+	lua_pushcfunction(L, thread_state_gc);
+	lua_setfield(L, -2, "__gc");
 	lua_setmetatable(L, -2);
 	lua_State *co = lua_newthread(L);
 	state->co = co;
@@ -222,8 +222,10 @@ static struct thread_state *thread_new(lua_State *L)
 	lua_pushcclosure(L, thread_main, 1);
 	lua_xmove(L, co, 1);
 	const int status = aux_resume(co, L, 0);
-	ASSERT(status == LUA_YIELD);
-	(void)status;
+	if (status != LUA_YIELD) {
+		lua_xmove(co, L, 1);
+		lua_error(L);
+	}
 	aux_getregtable(L, RIDX_THREAD_CONTEXT);
 	lua_pushvalue(L, -3);
 	lua_rawsetp(L, -2, co);
@@ -482,8 +484,13 @@ static void
 clear_context_entry(lua_State *restrict L, const int ridx, const void *key)
 {
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, ridx) == LUA_TTABLE) {
-		lua_pushnil(L);
-		lua_rawsetp(L, -2, key);
+		/* Lua 5.3 can allocate even when assigning nil to an absent key. */
+		const bool present = lua_rawgetp(L, -1, key) != LUA_TNIL;
+		lua_pop(L, 1);
+		if (present) {
+			lua_pushnil(L);
+			lua_rawsetp(L, -2, key);
+		}
 	}
 	lua_pop(L, 1);
 }
@@ -503,7 +510,7 @@ int aux_async(
 		clear_context_entry(from, RIDX_FORWARD_CONTEXT, L);
 		return luaL_error(from, "async: too many arguments");
 	}
-	if (r->config.traceback) {
+	if (r->conf->traceback) {
 		lua_pushcfunction(L, aux_traceback);
 	} else {
 		lua_pushnil(L);
@@ -540,7 +547,7 @@ static bool ruleset_pcallv(
 	lua_State *restrict const L = r->L;
 	lua_settop(L, 0);
 	int errfunc = 0;
-	if (r->config.traceback) {
+	if (r->conf->traceback) {
 		lua_pushcfunction(L, aux_traceback);
 		errfunc = 1;
 	}
@@ -569,6 +576,12 @@ bool ruleset_pcall(
 	return result;
 }
 
+static int push_bad_registry(lua_State *L)
+{
+	lua_pushliteral(L, ERR_BAD_REGISTRY);
+	return 1;
+}
+
 void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 {
 	const int_fast64_t time_begin = clock_monotonic_ns();
@@ -579,7 +592,9 @@ void ruleset_resume(struct ruleset *restrict r, void *ctx, const int narg, ...)
 	if (lua_rawgeti(L, LUA_REGISTRYINDEX, RIDX_AWAIT_CONTEXT) !=
 	    LUA_TTABLE) {
 		lua_pop(L, 1);
-		lua_pushliteral(L, ERR_BAD_REGISTRY);
+		lua_pushcfunction(L, push_bad_registry);
+		/* On OOM the protected call supplies its preallocated error. */
+		(void)lua_pcall(L, 0, 1, 0);
 		lua_rawseti(L, LUA_REGISTRYINDEX, RIDX_LASTERROR);
 		va_end(args);
 		return;

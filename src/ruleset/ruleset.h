@@ -143,7 +143,7 @@ struct ruleset_state;
  * no-op and cannot undo the pending event. A consumer that tears down a context
  * embedding the ruleset_callback must therefore also clear that pending event
  * and dispose of the delivered payload -- for the request flow use
- * ruleset_request_cancel().
+ * ruleset_request_cancel(), which handles both windows and resets the slot.
  */
 void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state);
 
@@ -177,16 +177,21 @@ struct ruleset_callback {
 };
 
 /**
- * @brief Finalize a request-flow ruleset_callback on consumer teardown.
+ * @brief Cancel request-flow work on consumer teardown. Idempotent.
  *
- * Handles the completed-but-undispatched window ruleset_cancel() cannot: if the
- * request completed and its w_finish event is still pending, drop that event so
- * it cannot fire into the context being destroyed, and dialreq_free() the
- * delivered request that the consumer will now never take ownership of. A no-op
- * while the operation is still pending or already dispatched.
+ * Cancels any pending operation, including one published by a failed start,
+ * and resets the caller-owned state slot to NULL. If the request has already
+ * completed and its w_finish event is still pending, drops that event and frees
+ * the delivered request the consumer will never take ownership of. An already
+ * dispatched callback and its payload are left alone.
+ *
+ * @param loop Event loop
+ * @param state Caller-owned operation state slot
+ * @param cb Request-flow callback, valid even if the state slot is NULL
  */
 void ruleset_request_cancel(
-	struct ev_loop *loop, struct ruleset_callback *restrict cb);
+	struct ev_loop *loop, struct ruleset_state **restrict state,
+	struct ruleset_callback *restrict cb);
 
 /**
  * @brief Execute remote procedure call asynchronously.

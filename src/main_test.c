@@ -26,6 +26,7 @@
 
 #include <ev.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -131,8 +132,15 @@ static void close_if_open(int *restrict fd)
 	}
 }
 
+static bool fail_nonblock;
+static int failed_nonblock_fd = -1;
+
 static bool fd_set_nonblock(const int fd)
 {
+	if (fail_nonblock) {
+		failed_nonblock_fd = fd;
+		return false;
+	}
 	const int flags = fcntl(fd, F_GETFL, 0);
 	if (flags < 0) {
 		return false;
@@ -331,9 +339,11 @@ void ruleset_cancel(struct ev_loop *loop, struct ruleset_state *restrict state)
  * rather than keep a second copy of the production body, which ruleset_test
  * covers directly. */
 void ruleset_request_cancel(
-	struct ev_loop *loop, struct ruleset_callback *restrict cb)
+	struct ev_loop *loop, struct ruleset_state **restrict state,
+	struct ruleset_callback *restrict cb)
 {
 	(void)loop;
+	T_CHECK(*state == NULL);
 	T_CHECK(!ev_is_pending(&cb->w_finish));
 }
 
@@ -1186,6 +1196,7 @@ static bool multi_accept_step(void *data)
 			break;
 		}
 		if (!fd_set_nonblock(fd)) {
+			(void)close(fd);
 			return false;
 		}
 		ctx->relays[ctx->nrelays++] = (struct multi_relay){
@@ -1194,6 +1205,58 @@ static bool multi_accept_step(void *data)
 		};
 	}
 	return true;
+}
+
+T_DECLARE_CASE(multi_accept_closes_fd_on_nonblock_failure)
+{
+	uint_fast16_t port;
+	static struct multi_ctx ctx;
+	ctx = (struct multi_ctx){ .listener_fd = make_listener(&port) };
+	const struct sockaddr_in addr = {
+		.sin_family = AF_INET,
+		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
+		.sin_port = htons(port),
+	};
+	int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(client_fd >= 0);
+	T_CHECK(connect(client_fd, (const struct sockaddr *)&addr,
+			sizeof(addr)) == 0);
+
+	fail_nonblock = true;
+	const bool failed_step = multi_accept_step(&ctx);
+	fail_nonblock = false;
+	const int failed_fd = failed_nonblock_fd;
+	failed_nonblock_fd = -1;
+	T_CHECK(failed_fd >= 0);
+	const bool closed = fcntl(failed_fd, F_GETFD) == -1 && errno == EBADF;
+	if (!closed) {
+		T_CHECK(close(failed_fd) == 0);
+	}
+	const size_t failed_nrelays = ctx.nrelays;
+	close_if_open(&client_fd);
+
+	client_fd = socket(AF_INET, SOCK_STREAM, 0);
+	T_CHECK(client_fd >= 0);
+	T_CHECK(connect(client_fd, (const struct sockaddr *)&addr,
+			sizeof(addr)) == 0);
+	const bool retried = multi_accept_step(&ctx);
+	const size_t nrelays = ctx.nrelays;
+	const int flags = nrelays == 1 ? fcntl(ctx.relays[0].fd, F_GETFL) : -1;
+	const bool nonblock = flags >= 0 && (flags & O_NONBLOCK) != 0;
+	const bool empty_queue = multi_accept_step(&ctx);
+	for (size_t i = 0; i < ctx.nrelays; i++) {
+		close_if_open(&ctx.relays[i].fd);
+	}
+	close_if_open(&client_fd);
+	close_if_open(&ctx.listener_fd);
+
+	T_EXPECT(!failed_step);
+	T_EXPECT_EQ(failed_nrelays, (size_t)0);
+	T_EXPECT(closed);
+	T_EXPECT(retried);
+	T_EXPECT_EQ(nrelays, (size_t)1);
+	T_EXPECT(nonblock);
+	T_EXPECT(empty_queue);
 }
 
 static bool multi_dialed_predicate(void *data)
@@ -1585,11 +1648,74 @@ static uint64_t read_seed(void)
 
 static size_t read_iterations(void)
 {
+	const char *text = getenv("FUZZ_ITER");
+	if (text != NULL) {
+		while ((isspace)((unsigned char)*text)) {
+			text++;
+		}
+		if (*text == '-') {
+			return FUZZ_DEFAULT_ITERATIONS;
+		}
+	}
 	uintmax_t value;
 	if (!read_uintmax_env("FUZZ_ITER", &value) || value > SIZE_MAX) {
 		return FUZZ_DEFAULT_ITERATIONS;
 	}
 	return (size_t)value;
+}
+
+static char *saved_fuzz_iter;
+
+static void restore_fuzz_iter(void *data)
+{
+	(void)data;
+	if (saved_fuzz_iter != NULL) {
+		T_CHECK(setenv("FUZZ_ITER", saved_fuzz_iter, 1) == 0);
+		free(saved_fuzz_iter);
+		saved_fuzz_iter = NULL;
+	} else {
+		T_CHECK(unsetenv("FUZZ_ITER") == 0);
+	}
+}
+
+T_DECLARE_CASE(fuzz_iteration_count_parsing)
+{
+	const char *const prior = getenv("FUZZ_ITER");
+	if (prior != NULL) {
+		saved_fuzz_iter = strdup(prior);
+		T_CHECK(saved_fuzz_iter != NULL);
+	}
+	T_CLEANUP(restore_fuzz_iter, NULL);
+	static const struct {
+		const char *text;
+		size_t expected;
+	} cases[] = {
+		{ "-1", FUZZ_DEFAULT_ITERATIONS },
+		{ "-0", FUZZ_DEFAULT_ITERATIONS },
+		{ " \t\n\r\f\v-1", FUZZ_DEFAULT_ITERATIONS },
+		{ "-0x2", FUZZ_DEFAULT_ITERATIONS },
+		{ "", FUZZ_DEFAULT_ITERATIONS },
+		{ " \t", FUZZ_DEFAULT_ITERATIONS },
+		{ "invalid", FUZZ_DEFAULT_ITERATIONS },
+		{ "12tail", FUZZ_DEFAULT_ITERATIONS },
+		{ "0", 0 },
+		{ "17", 17 },
+		{ " \t+0x20", 32 },
+		{ "010", 8 },
+	};
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		T_CHECK(setenv("FUZZ_ITER", cases[i].text, 1) == 0);
+		T_EXPECT_EQ(read_iterations(), cases[i].expected);
+	}
+	char limit[64];
+	(void)snprintf(limit, sizeof(limit), "%zu", SIZE_MAX);
+	T_CHECK(setenv("FUZZ_ITER", limit, 1) == 0);
+	T_EXPECT_EQ(read_iterations(), SIZE_MAX);
+	(void)snprintf(limit, sizeof(limit), "%ju0", UINTMAX_MAX);
+	T_CHECK(setenv("FUZZ_ITER", limit, 1) == 0);
+	T_EXPECT_EQ(read_iterations(), FUZZ_DEFAULT_ITERATIONS);
+	T_CHECK(unsetenv("FUZZ_ITER") == 0);
+	T_EXPECT_EQ(read_iterations(), FUZZ_DEFAULT_ITERATIONS);
 }
 
 static uint64_t fuzz_case_seed(const uint64_t tag)
@@ -1856,6 +1982,7 @@ T_DECLARE_CASE(fuzz_parsehdr)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(fuzz_iteration_count_parsing),
 	T_CASE(socks5_connect_success_via_real_proxy),
 	T_CASE(socks5_connrefused_proxied_correctly),
 	T_CASE(socks5_noauth_rejected_when_auth_required),
@@ -1869,6 +1996,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(chain_socks5_to_http_connect_success),
 	T_CASE(chain_http_to_socks5_connect_success),
 	T_CASE(chain_socks5_to_socks5_connect_success),
+	T_CASE(multi_accept_closes_fd_on_nonblock_failure),
 	T_CASE(multi_worker_relays_concurrent_sessions),
 	T_CASE(socks5_connect_domain_target_via_real_proxy),
 	T_CASE(socks4a_connect_ipv6_target_via_real_proxy),

@@ -32,12 +32,14 @@ add_unit_test(await_test
     CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
     WITH_LUA)
 add_unit_test(ruleset_test
-    SRCS ruleset_test.c base.c ../conf.c ../proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/../version.c"
-    MOCK_SRCS ruleset.c cfunc.c
+    SRCS ruleset_test.c base.c ../proto/codec.c "${CMAKE_CURRENT_BINARY_DIR}/../version.c"
+    MOCK_SRCS ruleset.c cfunc.c ../conf.c
     MOCK_DEFINITIONS
         realloc=test_ruleset_realloc
         free=test_ruleset_free
         lua_newstate=test_ruleset_newstate
+        lua_rawset=test_config_rawset
+        lua_setfield=test_guard_setfield
     CONFIG_H "${CMAKE_CURRENT_BINARY_DIR}/../config.h"
     WITH_LUA)
 
@@ -50,3 +52,7 @@ set_property(SOURCE cfunc.c APPEND PROPERTY COMPILE_DEFINITIONS
 file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/tmp")
 target_compile_definitions(ruleset_test PRIVATE
     TEST_TMPDIR="${PROJECT_BINARY_DIR}/tmp")
+
+# Track the native string block staged by the configuration loader.
+set_property(SOURCE ../conf.c APPEND PROPERTY COMPILE_DEFINITIONS
+    "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,ruleset_test_mock_impl>:malloc=test_staged_malloc>")

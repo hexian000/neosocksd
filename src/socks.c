@@ -2019,21 +2019,6 @@ process_cb(struct ev_loop *restrict loop, ev_idle *watcher, const int revents)
 		return;
 	}
 }
-
-/* Release the ruleset work the context still owes. A start that failed may
- * have published its state anyway, and a request that completed in this same
- * loop sweep leaves w_finish pending with a delivered dialreq; neither is tied
- * to a context state, so every path that stops expecting the callback releases
- * both. */
-static void
-cancel_ruleset(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
-{
-	if (ctx->ruleset_state != NULL) {
-		ruleset_cancel(loop, ctx->ruleset_state);
-		ctx->ruleset_state = NULL;
-	}
-	ruleset_request_cancel(loop, &ctx->ruleset_callback);
-}
 #endif /* WITH_RULESET */
 
 static void
@@ -2043,7 +2028,8 @@ socks_ctx_stop(struct ev_loop *restrict loop, struct socks_ctx *restrict ctx)
 #if WITH_RULESET
 	/* the union arm holding the ruleset fields is live only here */
 	if (ctx->state < STATE_BIDIRECTIONAL) {
-		cancel_ruleset(loop, ctx);
+		ruleset_request_cancel(
+			loop, &ctx->ruleset_state, &ctx->ruleset_callback);
 	}
 #endif /* WITH_RULESET */
 

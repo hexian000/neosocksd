@@ -74,29 +74,13 @@ ASSERT_SUPER(struct gcbase, struct forward_ctx, gcbase);
 	FW_FD_LOG_F(level, ctx, (ctx)->accepted_fd, format, __VA_ARGS__)
 #define FW_CTX_LOG(level, ctx, message) FW_CTX_LOG_F(level, ctx, "%s", message)
 
-#if WITH_RULESET
-/* Release the ruleset work the context still owes. A start that failed may
- * have published its state anyway, and a request that completed in this same
- * loop sweep leaves w_finish pending with a delivered dialreq; neither is tied
- * to a context state, so every path that stops expecting the callback releases
- * both. */
-static void
-cancel_ruleset(struct ev_loop *loop, struct forward_ctx *restrict ctx)
-{
-	if (ctx->ruleset_state != NULL) {
-		ruleset_cancel(loop, ctx->ruleset_state);
-		ctx->ruleset_state = NULL;
-	}
-	ruleset_request_cancel(loop, &ctx->ruleset_callback);
-}
-#endif /* WITH_RULESET */
-
 static void
 forward_ctx_stop(struct ev_loop *loop, struct forward_ctx *restrict ctx)
 {
 	ev_timer_stop(loop, &ctx->w_timeout);
 #if WITH_RULESET
-	cancel_ruleset(loop, ctx);
+	ruleset_request_cancel(
+		loop, &ctx->ruleset_state, &ctx->ruleset_callback);
 #endif
 
 	struct server_stats *restrict stats = &ctx->s->stats;
