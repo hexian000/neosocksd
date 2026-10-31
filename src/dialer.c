@@ -487,11 +487,8 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 			LOGE_F("proxy chain too long: %zu bytes", len);
 			return NULL;
 		}
-		if (len > 0) {
-			n = 1;
-		}
 		for (size_t i = 0; i < len; i++) {
-			if (csv[i] == ',') {
+			if (csv[i] != ',' && (i == 0 || csv[i - 1] == ',')) {
 				++n;
 			}
 		}

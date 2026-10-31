@@ -74,6 +74,10 @@ struct test_watchdog {
 	bool fired;
 };
 
+/* Model watchdog expiry before the loop can complete the dial. */
+static bool g_expire_wait;
+static int g_expired_socket = -1;
+
 struct proxy_server {
 	int listener_fd;
 	int peer_fd;
@@ -140,6 +144,10 @@ static bool test_wait_until(
 	struct ev_loop *loop, bool (*predicate)(void *), void *predicate_data,
 	const ev_tstamp timeout_sec, bool (*step)(void *), void *step_data)
 {
+	if (g_expire_wait) {
+		g_expire_wait = false;
+		return false;
+	}
 	struct test_watchdog watchdog = { 0 };
 	struct ev_timer w_timeout, w_tick;
 	bool ok = true;
@@ -186,6 +194,9 @@ static bool g_force_connect_fail = false;
 
 int test_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
 {
+	if (g_expire_wait) {
+		g_expired_socket = fd;
+	}
 	if (g_force_connect_fail) {
 		(void)fd, (void)addr, (void)addrlen;
 		errno = ECONNREFUSED;
@@ -203,9 +214,9 @@ int test_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
 }
 
 /* malloc() test stub. dialreq_parse() sizes
- * proxy[] from the comma count of an operator-supplied string, so a case has to
- * observe the size it asks for -- not merely that an over-long chain is
- * rejected. Only the calling thread runs while tracking is armed. */
+ * proxy[] from the nonempty tokens of an operator-supplied string, so a case
+ * has to observe the size it asks for -- not merely that an over-long chain
+ * is rejected. Only the calling thread runs while tracking is armed. */
 static size_t g_malloc_peak;
 static bool g_malloc_track;
 /* When set, the next malloc() fails and the flag clears itself, so exactly one
@@ -706,8 +717,41 @@ T_DECLARE_CASE(dialaddr_parse_rejects_embedded_nul)
 	T_EXPECT_EQ(addr.domain.len, 1);
 }
 
+struct parser_fixture {
+	struct dialreq *req;
+	struct dialreq *base;
+	struct dialreq *copy;
+	struct dialreq *parsed;
+};
+
+static size_t g_parser_fixtures_cleaned;
+static size_t g_parser_requests_cleaned;
+
+static void parser_request_clear(struct dialreq **req)
+{
+	if (*req != NULL) {
+		g_parser_requests_cleaned++;
+		dialreq_free(*req);
+		*req = NULL;
+	}
+}
+
+static void parser_fixture_cleanup(void *data)
+{
+	struct parser_fixture *const f = data;
+	parser_request_clear(&f->req);
+	parser_request_clear(&f->base);
+	parser_request_clear(&f->copy);
+	parser_request_clear(&f->parsed);
+	g_parser_fixtures_cleaned++;
+	free(f);
+}
+
 T_DECLARE_CASE(dialreq_addproxy_rejects_embedded_nul)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	static const struct {
 		const char *text;
 		size_t len;
@@ -722,22 +766,22 @@ T_DECLARE_CASE(dialreq_addproxy_rejects_embedded_nul)
 		  sizeof("socks4a://example.com:1080") },
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
-		struct dialreq *const req = dialreq_new(NULL, 1);
-		T_CHECK(req != NULL);
+		f->req = dialreq_new(NULL, 1);
+		T_CHECK(f->req != NULL);
 		const bool accepted =
-			dialreq_addproxy(req, bad[i].text, bad[i].len);
-		const size_t count = req->num_proxy;
-		dialreq_free(req);
+			dialreq_addproxy(f->req, bad[i].text, bad[i].len);
+		const size_t count = f->req->num_proxy;
+		parser_request_clear(&f->req);
 		T_EXPECT(!accepted);
 		T_EXPECT_EQ(count, (size_t)0);
 	}
-	struct dialreq *const req = dialreq_new(NULL, 1);
-	T_CHECK(req != NULL);
+	f->req = dialreq_new(NULL, 1);
+	T_CHECK(f->req != NULL);
 	T_EXPECT(dialreq_addproxy(
-		req, bad[0].text, CONSTSTRLEN("http://127.0.0.1:8080")));
-	T_EXPECT_EQ(req->num_proxy, (size_t)1);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(8080));
-	dialreq_free(req);
+		f->req, bad[0].text, CONSTSTRLEN("http://127.0.0.1:8080")));
+	T_EXPECT_EQ(f->req->num_proxy, (size_t)1);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(8080));
+	parser_request_clear(&f->req);
 }
 
 T_DECLARE_SUBCASE(expect_bad_address, const char *restrict s)
@@ -890,6 +934,9 @@ T_DECLARE_CASE(dialaddr_parse_requires_a_port_a_connection_reaches)
 
 T_DECLARE_CASE(format_max_length_domain_fits_buffers)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	/* The longest dialaddr is a max-length (FQDN_MAX_LENGTH) domain with a
 	 * 5-digit port: it must format to exactly DIALADDR_STRLEN, and as a
 	 * socks4a proxy to exactly PROXYREQ_STRLEN. Every formatted-address log
@@ -916,17 +963,17 @@ T_DECLARE_CASE(format_max_length_domain_fits_buffers)
 	T_CHECK(snprintf(
 			proxy_uri, sizeof(proxy_uri), "socks4a://%s:65535",
 			domain) > 0);
-	struct dialreq *req = dialreq_parse("127.0.0.1:80", proxy_uri);
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, (size_t)1);
+	f->req = dialreq_parse("127.0.0.1:80", proxy_uri);
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, (size_t)1);
 
 	char pbuf[512];
-	T_EXPECT(dialreq_format(pbuf, sizeof(pbuf), req) > 0);
+	T_EXPECT(dialreq_format(pbuf, sizeof(pbuf), f->req) > 0);
 	const char *arrow = strstr(pbuf, "->");
 	T_CHECK(arrow != NULL);
 	/* the proxy URI portion is exactly PROXYREQ_STRLEN, not truncated */
 	T_EXPECT_EQ((size_t)(arrow - pbuf), PROXYREQ_STRLEN);
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 }
 
 T_DECLARE_CASE(dialaddr_set_and_copy)
@@ -969,26 +1016,29 @@ T_DECLARE_CASE(dialaddr_set_and_copy)
 
 T_DECLARE_CASE(dialreq_parse_and_format_proxy_chain)
 {
-	struct dialreq *req = dialreq_parse(
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
+	f->req = dialreq_parse(
 		"example.com:443",
 		"http://user:pass@127.0.0.1:8080,socks5://127.0.0.2");
 	char buf[256];
 
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, 2);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_HTTP);
-	T_EXPECT_EQ(req->proxy[0].addr.type, ATYP_INET);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(8080));
-	T_EXPECT_STREQ(req->proxy[0].username, "user");
-	T_EXPECT_STREQ(req->proxy[0].password, "pass");
-	T_EXPECT_EQ(req->proxy[1].proto, PROTO_SOCKS5);
-	T_EXPECT_EQ(req->proxy[1].addr.port, UINT16_C(1080));
-	T_EXPECT_EQ(req->proxy[1].username, NULL);
-	T_EXPECT_EQ(dialreq_format(buf, sizeof(buf), req), 63);
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, 2);
+	T_EXPECT_EQ(f->req->proxy[0].proto, PROTO_HTTP);
+	T_EXPECT_EQ(f->req->proxy[0].addr.type, ATYP_INET);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(8080));
+	T_EXPECT_STREQ(f->req->proxy[0].username, "user");
+	T_EXPECT_STREQ(f->req->proxy[0].password, "pass");
+	T_EXPECT_EQ(f->req->proxy[1].proto, PROTO_SOCKS5);
+	T_EXPECT_EQ(f->req->proxy[1].addr.port, UINT16_C(1080));
+	T_EXPECT_EQ(f->req->proxy[1].username, NULL);
+	T_EXPECT_EQ(dialreq_format(buf, sizeof(buf), f->req), 63);
 	T_EXPECT_STREQ(
 		buf,
 		"http://127.0.0.1:8080->socks5://127.0.0.2:1080->example.com:443");
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 }
 
 /*
@@ -1001,30 +1051,33 @@ T_DECLARE_CASE(dialreq_parse_and_format_proxy_chain)
  */
 T_DECLARE_CASE(dialreq_parse_accepts_the_forward_placeholder)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	char buf[64];
-	struct dialreq *req = dialreq_parse(CONF_FORWARD_ANY, NULL);
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, 0);
-	T_EXPECT_EQ(req->addr.type, ATYP_INET);
-	T_EXPECT_EQ(req->addr.port, UINT16_C(0));
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	f->req = dialreq_parse(CONF_FORWARD_ANY, NULL);
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, 0);
+	T_EXPECT_EQ(f->req->addr.type, ATYP_INET);
+	T_EXPECT_EQ(f->req->addr.port, UINT16_C(0));
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "0.0.0.0:0");
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 
 	/* the wildcard a missing address makes, spelled out */
-	req = dialreq_parse(NULL, NULL);
-	T_CHECK(req != NULL);
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	f->req = dialreq_parse(NULL, NULL);
+	T_CHECK(f->req != NULL);
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "0.0.0.0:0");
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 
 	/* the `-x' hops in front of it are still parsed */
-	req = dialreq_parse(CONF_FORWARD_ANY, "socks5://127.0.0.1:1080");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, 1);
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	f->req = dialreq_parse(CONF_FORWARD_ANY, "socks5://127.0.0.1:1080");
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, 1);
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "socks5://127.0.0.1:1080->0.0.0.0:0");
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 
 	/* no address a peer supplies spells the placeholder */
 	T_CALL_SUBCASE(expect_bad_address, CONF_FORWARD_ANY);
@@ -1034,20 +1087,22 @@ T_DECLARE_CASE(dialreq_parse_accepts_the_forward_placeholder)
 
 T_DECLARE_CASE(dialreq_parse_scheme_default_ports)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	/* http defaults to port 80, socks4a/socks5 to 1080 when omitted. */
-	struct dialreq *req =
-		dialreq_parse("example.com:443", "http://127.0.0.1");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, 1);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_HTTP);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(80));
-	dialreq_free(req);
+	f->req = dialreq_parse("example.com:443", "http://127.0.0.1");
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, 1);
+	T_EXPECT_EQ(f->req->proxy[0].proto, PROTO_HTTP);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(80));
+	parser_request_clear(&f->req);
 
-	req = dialreq_parse("example.com:443", "socks4a://127.0.0.1");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_SOCKS4A);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(1080));
-	dialreq_free(req);
+	f->req = dialreq_parse("example.com:443", "socks4a://127.0.0.1");
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->proxy[0].proto, PROTO_SOCKS4A);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(1080));
+	parser_request_clear(&f->req);
 }
 
 /*
@@ -1061,32 +1116,34 @@ T_DECLARE_CASE(dialreq_parse_scheme_default_ports)
  */
 T_DECLARE_CASE(dialreq_parse_empty_proxy_port_is_the_scheme_default)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	char buf[128];
-	struct dialreq *req =
-		dialreq_parse("example.com:443", "http://127.0.0.1:");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, (size_t)1);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_HTTP);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(80));
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	f->req = dialreq_parse("example.com:443", "http://127.0.0.1:");
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, (size_t)1);
+	T_EXPECT_EQ(f->req->proxy[0].proto, PROTO_HTTP);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(80));
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "http://127.0.0.1:80->example.com:443");
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 
-	req = dialreq_parse("example.com:443", "socks4a://127.0.0.1:");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_SOCKS4A);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(1080));
-	dialreq_free(req);
+	f->req = dialreq_parse("example.com:443", "socks4a://127.0.0.1:");
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->proxy[0].proto, PROTO_SOCKS4A);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(1080));
+	parser_request_clear(&f->req);
 
 	/* the bracketed authority splits its port the same way */
-	req = dialreq_parse("example.com:443", "socks5://[::1]:");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_SOCKS5);
-	T_EXPECT_EQ(req->proxy[0].addr.type, ATYP_INET6);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(1080));
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	f->req = dialreq_parse("example.com:443", "socks5://[::1]:");
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->proxy[0].proto, PROTO_SOCKS5);
+	T_EXPECT_EQ(f->req->proxy[0].addr.type, ATYP_INET6);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(1080));
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "socks5://[::1]:1080->example.com:443");
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 }
 
 /*
@@ -1099,32 +1156,35 @@ T_DECLARE_CASE(dialreq_parse_empty_proxy_port_is_the_scheme_default)
  */
 T_DECLARE_CASE(dialreq_parse_bracketed_ipv6_proxy_authority)
 {
-	struct dialreq *req =
-		dialreq_parse("example.com:443", "socks5://[::1]");
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
+	f->req = dialreq_parse("example.com:443", "socks5://[::1]");
 	char buf[128];
 
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, (size_t)1);
-	T_EXPECT_EQ(req->proxy[0].proto, PROTO_SOCKS5);
-	T_EXPECT_EQ(req->proxy[0].addr.type, ATYP_INET6);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(1080));
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, (size_t)1);
+	T_EXPECT_EQ(f->req->proxy[0].proto, PROTO_SOCKS5);
+	T_EXPECT_EQ(f->req->proxy[0].addr.type, ATYP_INET6);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(1080));
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "socks5://[::1]:1080->example.com:443");
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 
-	req = dialreq_parse("example.com:443", "http://[::1]");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->proxy[0].addr.type, ATYP_INET6);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(80));
-	dialreq_free(req);
+	f->req = dialreq_parse("example.com:443", "http://[::1]");
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->proxy[0].addr.type, ATYP_INET6);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(80));
+	parser_request_clear(&f->req);
 
-	req = dialreq_parse("example.com:443", "socks5://[2001:db8::1]:9999");
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->proxy[0].addr.type, ATYP_INET6);
-	T_EXPECT_EQ(req->proxy[0].addr.port, UINT16_C(9999));
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	f->req =
+		dialreq_parse("example.com:443", "socks5://[2001:db8::1]:9999");
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->proxy[0].addr.type, ATYP_INET6);
+	T_EXPECT_EQ(f->req->proxy[0].addr.port, UINT16_C(9999));
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "socks5://[2001:db8::1]:9999->example.com:443");
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 }
 
 /*
@@ -1171,21 +1231,16 @@ T_DECLARE_CASE(dialreq_parse_rejects_bracketed_non_ipv6_proxy_authority)
 T_DECLARE_CASE(dialreq_parse_rejects_bad_proxy_uris)
 {
 	/* unknown scheme */
-	T_EXPECT_EQ(
-		dialreq_parse("example.com:443", "ftp://127.0.0.1:21"), NULL);
+	T_CALL_SUBCASE(expect_bad_proxy_uri, "ftp://127.0.0.1:21");
 	/* missing scheme / unparseable */
-	T_EXPECT_EQ(dialreq_parse("example.com:443", "127.0.0.1:1080"), NULL);
+	T_CALL_SUBCASE(expect_bad_proxy_uri, "127.0.0.1:1080");
 	/* the reserved port, which no default ever names (RFC 6335 6) */
-	T_EXPECT_EQ(
-		dialreq_parse("example.com:443", "http://127.0.0.1:0"), NULL);
-	T_EXPECT_EQ(dialreq_parse("example.com:443", "socks5://[::1]:0"), NULL);
+	T_CALL_SUBCASE(expect_bad_proxy_uri, "http://127.0.0.1:0");
+	T_CALL_SUBCASE(expect_bad_proxy_uri, "socks5://[::1]:0");
 	/* port out of range */
-	T_EXPECT_EQ(
-		dialreq_parse("example.com:443", "http://127.0.0.1:99999"),
-		NULL);
+	T_CALL_SUBCASE(expect_bad_proxy_uri, "http://127.0.0.1:99999");
 	/* non-numeric port */
-	T_EXPECT_EQ(
-		dialreq_parse("example.com:443", "http://127.0.0.1:abc"), NULL);
+	T_CALL_SUBCASE(expect_bad_proxy_uri, "http://127.0.0.1:abc");
 }
 
 T_DECLARE_CASE(dialreq_parse_rejects_overlong_proxy_uri)
@@ -1194,12 +1249,12 @@ T_DECLARE_CASE(dialreq_parse_rejects_overlong_proxy_uri)
 	const int n = snprintf(uri, sizeof(uri), "socks5://");
 	memset(uri + n, 'a', sizeof(uri) - 1 - (size_t)n);
 	uri[sizeof(uri) - 1] = '\0';
-	T_EXPECT_EQ(dialreq_parse("example.com:443", uri), NULL);
+	T_CALL_SUBCASE(expect_bad_proxy_uri, uri);
 }
 
 /*
  * The "proxy chain too long" guard exists to bound the proxy[] allocation
- * dialreq_parse() sizes from the comma count, so it has to run before that
+ * dialreq_parse() sizes from the token count, so it has to run before that
  * allocation -- an over-long chain reached it only after ~800 bytes per comma
  * had already been requested. The result is NULL either way; what this pins is
  * the size the parse asks for.
@@ -1218,10 +1273,108 @@ T_DECLARE_CASE(dialreq_parse_bounds_chain_before_allocating)
 	g_malloc_track = false;
 	const size_t peak = g_malloc_peak;
 	free(csv);
+	const bool rejected = req == NULL;
 	dialreq_free(req);
 
-	T_EXPECT_EQ(req, NULL);
+	T_EXPECT(rejected);
 	T_EXPECT(peak < sizeof(struct proxyreq) * 256);
+}
+
+T_DECLARE_CASE(dialreq_parse_reserves_only_nonempty_tokens)
+{
+	static const struct {
+		const char *csv;
+		size_t count;
+	} cases[] = {
+		{ NULL, 0 },
+		{ "", 0 },
+		{ ",", 0 },
+		{ ",,,", 0 },
+		{ "http://127.0.0.1", 1 },
+		{ ",http://127.0.0.1", 1 },
+		{ "http://127.0.0.1,", 1 },
+		{ ",,http://127.0.0.1,,,socks5://127.0.0.2,,", 2 },
+	};
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		g_malloc_peak = 0;
+		g_malloc_track = true;
+		f->req = dialreq_parse("example.com:443", cases[i].csv);
+		g_malloc_track = false;
+		T_EXPECT(f->req != NULL);
+		T_EXPECT_EQ(f->req->num_proxy, cases[i].count);
+		T_EXPECT_EQ(f->req->num_proxy_max, cases[i].count);
+		T_EXPECT_EQ(
+			g_malloc_peak,
+			sizeof(struct dialreq) +
+				cases[i].count * sizeof(struct proxyreq));
+		if (cases[i].count > 0) {
+			T_EXPECT_EQ(f->req->proxy[0].proto, PROTO_HTTP);
+		}
+		if (cases[i].count > 1) {
+			T_EXPECT_EQ(f->req->proxy[1].proto, PROTO_SOCKS5);
+		}
+		parser_request_clear(&f->req);
+	}
+
+	char *const csv = malloc((size_t)UINT16_MAX + 1);
+	T_CHECK(csv != NULL);
+	T_CLEANUP(free, csv);
+	memset(csv, ',', UINT16_MAX);
+	csv[UINT16_MAX] = '\0';
+	g_malloc_peak = 0;
+	g_malloc_track = true;
+	f->req = dialreq_parse(NULL, csv);
+	g_malloc_track = false;
+	T_EXPECT(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, (size_t)0);
+	T_EXPECT_EQ(f->req->num_proxy_max, (size_t)0);
+	T_EXPECT_EQ(g_malloc_peak, sizeof(struct dialreq));
+}
+
+T_DECLARE_CASE(parser_fixture_failure_with_base_and_copy)
+{
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
+	f->req = dialreq_parse("example.com:443", NULL);
+	T_CHECK(f->req != NULL);
+	f->base = dialreq_parse("example.com:443", "http://u:p@127.0.0.1");
+	T_CHECK(f->base != NULL);
+	f->copy = dialreq_new(f->base, 1);
+	T_CHECK(f->copy != NULL);
+	T_FAILNOW();
+}
+
+T_DECLARE_CASE(parser_fixture_failure_after_replacement)
+{
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
+	f->req = dialreq_parse("example.com:443", NULL);
+	T_CHECK(f->req != NULL);
+	T_EXPECT(dialreq_replace(&f->req, "example.org:80", NULL));
+	T_FAILNOW();
+}
+
+T_DECLARE_CASE(parser_fixtures_cleanup_after_failed_expectations)
+{
+	T_DECLARE_CTX(nested);
+	size_t fixtures = g_parser_fixtures_cleaned;
+	size_t requests = g_parser_requests_cleaned;
+	T_RUN_CASE(nested, parser_fixture_failure_with_base_and_copy);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(g_parser_fixtures_cleaned, fixtures + 1);
+	T_EXPECT_EQ(g_parser_requests_cleaned, requests + 3);
+
+	fixtures = g_parser_fixtures_cleaned;
+	requests = g_parser_requests_cleaned;
+	T_RUN_CASE(nested, parser_fixture_failure_after_replacement);
+	T_EXPECT_EQ(nested.failed, 2);
+	T_EXPECT_EQ(g_parser_fixtures_cleaned, fixtures + 1);
+	T_EXPECT_EQ(g_parser_requests_cleaned, requests + 1);
 }
 
 /*
@@ -1232,16 +1385,19 @@ T_DECLARE_CASE(dialreq_parse_bounds_chain_before_allocating)
  */
 T_DECLARE_CASE(dialreq_addproxy_rejects_a_full_chain)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	static const char uri[] = "socks5://127.0.0.1:1080";
-	struct dialreq *const req = dialreq_new(NULL, 1);
+	f->req = dialreq_new(NULL, 1);
 
-	T_CHECK(req != NULL);
-	T_EXPECT_EQ(req->num_proxy, (size_t)0);
-	T_EXPECT(dialreq_addproxy(req, uri, strlen(uri)));
-	T_EXPECT_EQ(req->num_proxy, (size_t)1);
-	T_EXPECT(!dialreq_addproxy(req, uri, strlen(uri)));
-	T_EXPECT_EQ(req->num_proxy, (size_t)1);
-	dialreq_free(req);
+	T_CHECK(f->req != NULL);
+	T_EXPECT_EQ(f->req->num_proxy, (size_t)0);
+	T_EXPECT(dialreq_addproxy(f->req, uri, strlen(uri)));
+	T_EXPECT_EQ(f->req->num_proxy, (size_t)1);
+	T_EXPECT(!dialreq_addproxy(f->req, uri, strlen(uri)));
+	T_EXPECT_EQ(f->req->num_proxy, (size_t)1);
+	parser_request_clear(&f->req);
 }
 
 /*
@@ -1252,28 +1408,30 @@ T_DECLARE_CASE(dialreq_addproxy_rejects_a_full_chain)
  */
 T_DECLARE_CASE(dialreq_new_rejects_an_oversized_credential)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	char cred[300];
 	memset(cred, 'c', sizeof(cred) - 1);
 	cred[sizeof(cred) - 1] = '\0';
 
-	struct dialreq *const base =
-		malloc(sizeof(struct dialreq) + sizeof(struct proxyreq));
-	T_CHECK(base != NULL);
-	base->addr = (struct dialaddr){
+	f->base = malloc(sizeof(struct dialreq) + sizeof(struct proxyreq));
+	T_CHECK(f->base != NULL);
+	f->base->addr = (struct dialaddr){
 		.type = ATYP_INET,
 		.port = UINT16_C(443),
 		.in = { htonl(INADDR_LOOPBACK) },
 	};
-	base->num_proxy = 1;
-	base->proxy[0].proto = PROTO_SOCKS5;
-	dialaddr_copy(&base->proxy[0].addr, &base->addr);
-	base->proxy[0].username = cred;
-	base->proxy[0].password = cred;
+	f->base->num_proxy = 1;
+	f->base->proxy[0].proto = PROTO_SOCKS5;
+	dialaddr_copy(&f->base->proxy[0].addr, &f->base->addr);
+	f->base->proxy[0].username = cred;
+	f->base->proxy[0].password = cred;
 
-	struct dialreq *const copy = dialreq_new(base, 0);
-	T_EXPECT_EQ(copy, NULL);
-	dialreq_free(copy);
-	free(base);
+	f->copy = dialreq_new(f->base, 0);
+	T_EXPECT_EQ(f->copy, NULL);
+	parser_request_clear(&f->copy);
+	parser_request_clear(&f->base);
 }
 
 /*
@@ -1283,6 +1441,9 @@ T_DECLARE_CASE(dialreq_new_rejects_an_oversized_credential)
  */
 T_DECLARE_CASE(dialreq_copies_a_max_length_credential)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	char user[256], pass[256], uri[768];
 	memset(user, 'u', sizeof(user) - 1);
 	user[sizeof(user) - 1] = '\0';
@@ -1293,48 +1454,52 @@ T_DECLARE_CASE(dialreq_copies_a_max_length_credential)
 	T_CHECK(snprintf(
 			uri, sizeof(uri), "socks5://%s:%s@127.0.0.1:1080", user,
 			pass) > 0);
-	struct dialreq *const base = dialreq_parse("example.com:443", uri);
-	T_CHECK(base != NULL);
-	struct dialreq *const copy = dialreq_new(base, 0);
-	T_CHECK(copy != NULL);
-	T_EXPECT_EQ(copy->num_proxy, (size_t)1);
-	T_EXPECT_EQ(copy->proxy[0].username, copy->proxy[0].credential);
+	f->base = dialreq_parse("example.com:443", uri);
+	T_CHECK(f->base != NULL);
+	f->copy = dialreq_new(f->base, 0);
+	T_CHECK(f->copy != NULL);
+	T_EXPECT_EQ(f->copy->num_proxy, (size_t)1);
+	T_EXPECT_EQ(f->copy->proxy[0].username, f->copy->proxy[0].credential);
 	T_EXPECT_EQ(
-		copy->proxy[0].password,
-		copy->proxy[0].credential + sizeof(user));
-	memset(base->proxy[0].credential, 0, sizeof(base->proxy[0].credential));
-	dialreq_free(base);
+		f->copy->proxy[0].password,
+		f->copy->proxy[0].credential + sizeof(user));
+	memset(f->base->proxy[0].credential, 0,
+	       sizeof(f->base->proxy[0].credential));
+	parser_request_clear(&f->base);
 
-	T_EXPECT_STREQ(copy->proxy[0].username, user);
-	T_EXPECT_STREQ(copy->proxy[0].password, pass);
+	T_EXPECT_STREQ(f->copy->proxy[0].username, user);
+	T_EXPECT_STREQ(f->copy->proxy[0].password, pass);
 	char buf[256];
-	T_EXPECT_EQ(dialreq_format(buf, sizeof(buf), copy), 40);
+	T_EXPECT_EQ(dialreq_format(buf, sizeof(buf), f->copy), 40);
 	T_EXPECT_STREQ(buf, "socks5://127.0.0.1:1080->example.com:443");
-	dialreq_free(copy);
+	parser_request_clear(&f->copy);
 
 	T_CHECK(snprintf(
 			uri, sizeof(uri), "socks5://%sx:%s@127.0.0.1:1080",
 			user, pass) > 0);
-	T_EXPECT_EQ(dialreq_parse("example.com:443", uri), NULL);
+	T_CALL_SUBCASE(expect_bad_proxy_uri, uri);
 }
 
 /* Decoded SOCKS5 credentials each occupy 1-255 octets, independent of
  * HTTP and SOCKS4 userinfo rules and of the shared credential buffer size. */
 T_DECLARE_CASE(dialreq_checks_socks5_credential_lengths)
 {
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
 	const char *const invalid[] = {
 		"socks5://:pass@127.0.0.1", "socks5://user:@127.0.0.1",
 		"socks5://user@127.0.0.1",  "socks5://@127.0.0.1",
 		"socks5://:@127.0.0.1",
 	};
-	struct dialreq *const req = dialreq_new(NULL, 1);
-	T_CHECK(req != NULL);
+	f->req = dialreq_new(NULL, 1);
+	T_CHECK(f->req != NULL);
 	for (size_t i = 0; i < ARRAY_SIZE(invalid); i++) {
-		T_EXPECT(
-			!dialreq_addproxy(req, invalid[i], strlen(invalid[i])));
-		T_EXPECT_EQ(req->num_proxy, (size_t)0);
+		T_EXPECT(!dialreq_addproxy(
+			f->req, invalid[i], strlen(invalid[i])));
+		T_EXPECT_EQ(f->req->num_proxy, (size_t)0);
 	}
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 
 	const char *const valid[] = {
 		"socks5://u:p@127.0.0.1",   "socks5://%75:%70@127.0.0.1",
@@ -1343,9 +1508,9 @@ T_DECLARE_CASE(dialreq_checks_socks5_credential_lengths)
 		"socks4a://user@127.0.0.1", "socks4a://:@127.0.0.1",
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(valid); i++) {
-		struct dialreq *const parsed = dialreq_parse(NULL, valid[i]);
-		T_EXPECT(parsed != NULL);
-		dialreq_free(parsed);
+		f->parsed = dialreq_parse(NULL, valid[i]);
+		T_EXPECT(f->parsed != NULL);
+		parser_request_clear(&f->parsed);
 	}
 
 	char credential[257], uri[320];
@@ -1357,68 +1522,78 @@ T_DECLARE_CASE(dialreq_checks_socks5_credential_lengths)
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(formats); i++) {
 		T_CHECK(snprintf(uri, sizeof(uri), formats[i], credential) > 0);
-		struct dialreq *const parsed = dialreq_parse(NULL, uri);
-		T_EXPECT_EQ(parsed, NULL);
-		dialreq_free(parsed);
+		f->parsed = dialreq_parse(NULL, uri);
+		T_EXPECT_EQ(f->parsed, NULL);
+		parser_request_clear(&f->parsed);
 	}
 }
 
 T_DECLARE_CASE(dialreq_replace_swaps_on_success)
 {
-	struct dialreq *req = dialreq_parse("example.com:443", NULL);
-	T_CHECK(req != NULL);
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
+	f->req = dialreq_parse("example.com:443", NULL);
+	T_CHECK(f->req != NULL);
 
-	T_EXPECT(dialreq_replace(&req, "example.org:80", NULL));
-	T_CHECK(req != NULL);
+	T_EXPECT(dialreq_replace(&f->req, "example.org:80", NULL));
+	T_CHECK(f->req != NULL);
 	char buf[64];
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "example.org:80");
 
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 }
 
 T_DECLARE_CASE(dialreq_replace_keeps_old_on_failure)
 {
-	struct dialreq *req = dialreq_parse("example.com:443", NULL);
-	T_CHECK(req != NULL);
-	struct dialreq *const original = req;
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
+	f->req = dialreq_parse("example.com:443", NULL);
+	T_CHECK(f->req != NULL);
+	struct dialreq *const original = f->req;
 
 	/* unknown scheme: dialreq_parse fails, so req must be left untouched */
 	T_EXPECT(!dialreq_replace(
-		&req, "example.com:443", "ftp://127.0.0.1:21"));
-	T_EXPECT_EQ(req, original);
+		&f->req, "example.com:443", "ftp://127.0.0.1:21"));
+	T_EXPECT_EQ(f->req, original);
 	char buf[64];
-	T_EXPECT(dialreq_format(buf, sizeof(buf), req) > 0);
+	T_EXPECT(dialreq_format(buf, sizeof(buf), f->req) > 0);
 	T_EXPECT_STREQ(buf, "example.com:443");
 
-	dialreq_free(req);
+	parser_request_clear(&f->req);
 }
 
 T_DECLARE_CASE(dialreq_new_copies_base_request)
 {
-	struct dialreq *base = dialreq_parse(
+	struct parser_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	T_CLEANUP(parser_fixture_cleanup, f);
+	f->base = dialreq_parse(
 		"example.com:443", "socks5://alice:secret@127.0.0.1");
-	struct dialreq *copy;
+
 	char buf[256];
 
-	T_CHECK(base != NULL);
-	copy = dialreq_new(base, 1);
-	T_CHECK(copy != NULL);
-	T_EXPECT_EQ(copy->num_proxy, 1);
-	T_EXPECT_EQ(copy->proxy[0].proto, PROTO_SOCKS5);
-	T_EXPECT_EQ(copy->proxy[0].username, copy->proxy[0].credential);
+	T_CHECK(f->base != NULL);
+	f->copy = dialreq_new(f->base, 1);
+	T_CHECK(f->copy != NULL);
+	T_EXPECT_EQ(f->copy->num_proxy, 1);
+	T_EXPECT_EQ(f->copy->proxy[0].proto, PROTO_SOCKS5);
+	T_EXPECT_EQ(f->copy->proxy[0].username, f->copy->proxy[0].credential);
 	T_EXPECT_EQ(
-		copy->proxy[0].password,
-		copy->proxy[0].credential + sizeof("alice"));
-	memset(base->proxy[0].credential, 0, sizeof(base->proxy[0].credential));
-	dialreq_free(base);
+		f->copy->proxy[0].password,
+		f->copy->proxy[0].credential + sizeof("alice"));
+	memset(f->base->proxy[0].credential, 0,
+	       sizeof(f->base->proxy[0].credential));
+	parser_request_clear(&f->base);
 
-	T_EXPECT_STREQ(copy->proxy[0].username, "alice");
-	T_EXPECT_STREQ(copy->proxy[0].password, "secret");
-	T_EXPECT_EQ(copy->proxy[0].addr.port, UINT16_C(1080));
-	T_EXPECT_EQ(dialreq_format(buf, sizeof(buf), copy), 40);
+	T_EXPECT_STREQ(f->copy->proxy[0].username, "alice");
+	T_EXPECT_STREQ(f->copy->proxy[0].password, "secret");
+	T_EXPECT_EQ(f->copy->proxy[0].addr.port, UINT16_C(1080));
+	T_EXPECT_EQ(dialreq_format(buf, sizeof(buf), f->copy), 40);
 	T_EXPECT_STREQ(buf, "socks5://127.0.0.1:1080->example.com:443");
-	dialreq_free(copy);
+	parser_request_clear(&f->copy);
 }
 
 T_DECLARE_CASE(dialer_strerror_known_and_unknown)
@@ -1475,6 +1650,7 @@ T_DECLARE_CASE(direct_connect_reports_success)
 	const enum dialer_error err = d.err;
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	T_CHECK(close(listener_fd) == 0);
@@ -1609,6 +1785,7 @@ T_DECLARE_CASE(local_address_blocked_by_egress_policy)
 		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
 		NULL);
 	const enum dialer_error err = d.err;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 
@@ -1648,6 +1825,7 @@ T_DECLARE_CASE(v4_mapped_local_address_blocked_by_egress_policy)
 		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
 		NULL);
 	const enum dialer_error err = d.err;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 
@@ -1684,6 +1862,7 @@ T_DECLARE_CASE(v4_mapped_loopback_address_blocked_by_egress_policy)
 		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
 		NULL);
 	const enum dialer_error err = d.err;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 
@@ -1725,6 +1904,7 @@ T_DECLARE_CASE(shared_cgnat_address_is_dialable_by_default)
 		NULL);
 	const enum dialer_error err = d.err;
 	g_force_connect_fail = false;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 
@@ -1767,6 +1947,7 @@ T_DECLARE_CASE(connect_failure_reports_errno)
 	const int syserr = d.syserr;
 	const char *const errstr = dialer_errorstr(buf, sizeof(buf), &d);
 	g_force_connect_fail = false;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 
@@ -1810,6 +1991,7 @@ T_DECLARE_SUBCASE(socket_setup_failure_case, int *const arm, const int want)
 	const int syserr = d.syserr;
 	const int armed = *arm;
 	*arm = 0;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 
@@ -1855,6 +2037,7 @@ T_DECLARE_CASE(reserved_address_blocked_by_egress_policy)
 		loop, dialer_called_predicate, &result, TEST_WAIT_SEC, NULL,
 		NULL);
 	const enum dialer_error err = d.err;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 
@@ -1900,6 +2083,7 @@ T_DECLARE_CASE(http_connect_success_sends_expected_request)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -1994,6 +2178,7 @@ T_DECLARE_SUBCASE(
 	const int syserr = d.syserr;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2109,6 +2294,7 @@ T_DECLARE_SUBCASE(
 		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2186,6 +2372,7 @@ T_DECLARE_CASE(sync_connect_success_into_http_handshake)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2254,6 +2441,7 @@ T_DECLARE_CASE(http_connect_success_with_byte_at_a_time_response)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2417,6 +2605,7 @@ T_DECLARE_CASE(http_connect_split_response_reports_success)
 	const int syserr = d.syserr;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2490,6 +2679,7 @@ T_DECLARE_CASE(http_connect_success_with_large_response_headers)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2562,6 +2752,7 @@ T_DECLARE_CASE(http_connect_success_with_fragmented_large_header_line)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2609,6 +2800,7 @@ T_DECLARE_CASE(http_connect_407_maps_to_proxy_auth)
 		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2656,6 +2848,7 @@ T_DECLARE_CASE(http_connect_403_maps_to_proxy_reject)
 		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2703,6 +2896,7 @@ T_DECLARE_CASE(http_connect_502_maps_to_proxy_refused)
 		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2750,6 +2944,7 @@ T_DECLARE_CASE(http_connect_non_200_maps_to_proxy_proto)
 		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2805,6 +3000,7 @@ T_DECLARE_CASE(http_connect_malformed_header_maps_to_proxy_proto)
 	const enum dialer_error err = d.err;
 	close_if_open(&result.fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2855,6 +3051,7 @@ T_DECLARE_CASE(http_connect_unsupported_version_maps_to_proxy_proto)
 		proxy_server_wait_sec(&server), proxy_server_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -2912,6 +3109,7 @@ T_DECLARE_SUBCASE(
 	const int syserr = d.syserr;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -3122,6 +3320,7 @@ T_DECLARE_SUBCASE(
 			-1;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&listener_fd);
@@ -3349,6 +3548,7 @@ T_DECLARE_CASE(socks4a_rejected_maps_to_proxy_refused)
 		socks4_raw_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -3401,6 +3601,7 @@ T_DECLARE_SUBCASE(
 	const int syserr = d.syserr;
 	const int client_fd = result.fd;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -3470,6 +3671,7 @@ T_DECLARE_CASE(socks4a_granted_reports_success)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -3529,6 +3731,7 @@ T_DECLARE_CASE(socks4a_granted_leaves_tunnel_bytes_on_the_socket)
 					   -1;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -3583,6 +3786,7 @@ T_DECLARE_CASE(socks4a_sends_userid)
 	memcpy(reqbuf, server.buf, buf_len);
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -3640,6 +3844,7 @@ T_DECLARE_CASE(socks4a_ipv6_target_encodes_hostname)
 		       "2001:db8::1") == 0;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -3864,6 +4069,7 @@ T_DECLARE_CASE(socks5_noallowed_maps_to_proxy_reject)
 		socks5_raw_pump, &server);
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -3912,6 +4118,7 @@ T_DECLARE_CASE(socks5_connect_success)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -3962,6 +4169,7 @@ T_DECLARE_CASE(socks5_connect_ipv4_target_encoding)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4013,6 +4221,7 @@ T_DECLARE_CASE(socks5_connect_ipv6_target_encoding)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4083,6 +4292,7 @@ T_DECLARE_CASE(socks5_connect_success_domain_bnd_addr)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4145,6 +4355,7 @@ T_DECLARE_SUBCASE(expect_socks5_tunnel, const bool bnd_domain)
 					   -1;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4215,6 +4426,7 @@ T_DECLARE_SUBCASE(
 	const enum dialer_error err = d.err;
 	const bool called = result.called;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4278,6 +4490,7 @@ T_DECLARE_CASE(socks5_chain_two_hops_success)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4331,6 +4544,7 @@ T_DECLARE_CASE(socks5_userpass_auth_success)
 	const enum dialer_error err = d.err;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4385,6 +4599,7 @@ T_DECLARE_CASE(socks5_unoffered_userpass_maps_to_proxy_proto)
 	const enum dialer_error err = d.err;
 	const bool called = result.called;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4432,6 +4647,7 @@ T_DECLARE_CASE(socks5_no_acceptable_method_maps_to_proxy_auth)
 	const enum dialer_error err = d.err;
 	const bool called = result.called;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -4578,6 +4794,7 @@ T_DECLARE_SUBCASE(
 	const int syserr = d.syserr;
 	close_if_open(&client_fd);
 	close_if_open(&peer.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&peer.listener_fd);
@@ -4822,10 +5039,10 @@ T_DECLARE_CASE(socks5_redial_after_success_resets_state)
 		loop, dialer_called_predicate, &result, TEST_WAIT_SEC,
 		socks5_raw_pump, &server);
 	int client_fd1 = result.fd;
-	T_EXPECT(completed1);
-	T_EXPECT(!server.failed);
-	T_EXPECT(result.fd >= 0);
-	T_EXPECT_EQ(d.err, DIALER_OK);
+	const bool first_has_client = client_fd1 >= 0;
+	const bool first_failed = server.failed;
+	const enum dialer_error err1 = d.err;
+	dialer_cancel(&d, loop);
 	close_if_open(&client_fd1);
 
 	/* reset the mock to service a fresh connection for the second dial */
@@ -4845,10 +5062,15 @@ T_DECLARE_CASE(socks5_redial_after_success_resets_state)
 	const enum dialer_error err2 = d.err;
 	close_if_open(&client_fd2);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
 
+	T_EXPECT(completed1);
+	T_EXPECT(!first_failed);
+	T_EXPECT(first_has_client);
+	T_EXPECT_EQ(err1, DIALER_OK);
 	T_EXPECT(completed2);
 	T_EXPECT(!server.failed);
 	T_EXPECT(result.fd >= 0);
@@ -4955,6 +5177,7 @@ T_DECLARE_SUBCASE(
 	int client_fd = result.fd;
 	close_if_open(&client_fd);
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -5271,6 +5494,7 @@ T_DECLARE_CASE(direct_connect_ipv6_reports_success)
 	const enum dialer_error err = d.err;
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	T_CHECK(close(listener_fd) == 0);
@@ -5310,6 +5534,7 @@ T_DECLARE_SUBCASE(
 	const int syserr = d.syserr;
 	int accepted_fd = wait_for_accept(loop, final_fd, TEST_WAIT_SEC);
 	const bool has_accepted = accepted_fd >= 0;
+	dialer_cancel(&d, loop);
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
 
@@ -5640,6 +5865,7 @@ T_DECLARE_CASE(connect_advances_past_a_blocked_address)
 	const bool blocked_logged =
 		logcap_toplevel_has("blocked loopback address: 127.0.0.1");
 
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	resolver_free(resolver);
 	ev_io_stop(loop, &w_dns);
@@ -5716,6 +5942,7 @@ T_DECLARE_CASE(connect_reports_blocked_after_every_address_is_blocked)
 	const bool blocked_second =
 		logcap_toplevel_has("blocked reserved address: 240.0.0.2");
 
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	resolver_free(resolver);
 	ev_io_stop(loop, &w_dns);
@@ -5860,17 +6087,9 @@ T_DECLARE_CASE(connect_advances_past_an_address_that_stalls)
 				   -1;
 	close_if_open(&accepted_fd);
 	close_if_open(&client_fd);
+	const enum dialer_error err = d.err;
 
-	T_EXPECT(completed);
-	T_EXPECT_EQ(d.err, DIALER_OK);
-	T_EXPECT_EQ(result.fd, winner_fd);
-	T_EXPECT(torn_down);
-	T_EXPECT(sent);
-	T_EXPECT_EQ(nread, (ssize_t)sizeof(payload));
-	if (nread == (ssize_t)sizeof(payload)) {
-		T_EXPECT_MEMEQ(received, payload, sizeof(payload));
-	}
-
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	resolver_free(resolver);
 	ev_io_stop(loop, &w_dns);
@@ -5879,6 +6098,16 @@ T_DECLARE_CASE(connect_advances_past_an_address_that_stalls)
 	T_CHECK(close(filler_fd) == 0);
 	T_CHECK(close(stalled_fd) == 0);
 	T_CHECK(close(final_fd) == 0);
+
+	T_EXPECT(completed);
+	T_EXPECT_EQ(err, DIALER_OK);
+	T_EXPECT_EQ(result.fd, winner_fd);
+	T_EXPECT(torn_down);
+	T_EXPECT(sent);
+	T_EXPECT_EQ(nread, (ssize_t)sizeof(payload));
+	if (nread == (ssize_t)sizeof(payload)) {
+		T_EXPECT_MEMEQ(received, payload, sizeof(payload));
+	}
 }
 
 /*
@@ -6017,6 +6246,7 @@ T_DECLARE_CASE(resolve_failure_reports_resolve_error)
 		NULL);
 	const enum dialer_error err = d.err;
 	const int syserr = d.syserr;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	resolver_free(resolver);
 	ev_loop_destroy(loop);
@@ -6063,6 +6293,7 @@ T_DECLARE_CASE(resolve_alloc_failure_reports_system_error)
 		NULL);
 	const enum dialer_error err = d.err;
 	const int syserr = d.syserr;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	resolver_free(resolver);
 	ev_loop_destroy(loop);
@@ -6247,6 +6478,7 @@ T_DECLARE_CASE(dial_log_keeps_client_name_off_the_line)
 	logcap_stop();
 
 	const enum dialer_error err = d.err;
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	resolver_free(resolver);
 	ev_loop_destroy(loop);
@@ -6327,6 +6559,7 @@ T_DECLARE_SUBCASE(expect_dial_status_log_escaped, const enum logcap_sink sink)
 
 	const enum dialer_error err = d.err;
 	close_if_open(&server.peer_fd);
+	dialer_cancel(&d, loop);
 	dialreq_free(req);
 	ev_loop_destroy(loop);
 	close_if_open(&server.listener_fd);
@@ -6344,6 +6577,58 @@ T_DECLARE_CASE(dial_status_log_keeps_client_name_on_one_line)
 {
 	T_CALL_SUBCASE(expect_dial_status_log_escaped, LOGCAP_STREAM);
 	T_CALL_SUBCASE(expect_dial_status_log_escaped, LOGCAP_WRITER);
+}
+
+static void reset_expired_wait(void *data)
+{
+	(void)data;
+	g_expire_wait = false;
+	g_force_sync_connect = false;
+	if (g_expired_socket >= 0 && fcntl(g_expired_socket, F_GETFD) >= 0) {
+		close_if_open(&g_expired_socket);
+	}
+	g_expired_socket = -1;
+}
+
+/* Run the fixtures themselves, so this checks their ordinary timeout teardown
+ * rather than a second implementation of it. No wall-clock timeout is needed. */
+T_DECLARE_CASE(dialer_watchdog_expiry_cleans_pending_socket)
+{
+	static const struct {
+		const char *name;
+		void (*run)(struct testing_ctx *);
+		bool synchronous;
+	} cases[] = {
+		{ "direct", testcase_direct_connect_reports_success_, false },
+		{ "http", testcase_http_connect_success_sends_expected_request_,
+		  false },
+		{ "http_sync",
+		  testcase_http_connect_success_sends_expected_request_, true },
+		{ "http_large",
+		  testcase_http_connect_success_with_large_response_headers_,
+		  false },
+		{ "http_fragmented",
+		  testcase_http_connect_success_with_byte_at_a_time_response_,
+		  true },
+		{ "socks4a", testcase_socks4a_granted_reports_success_, true },
+		{ "socks5", testcase_socks5_connect_success_, true },
+	};
+	T_CLEANUP(reset_expired_wait, NULL);
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		T_DECLARE_CTX(nested);
+		g_force_sync_connect = cases[i].synchronous;
+		g_expire_wait = true;
+		testing_run_case_(&nested, cases[i].name, cases[i].run);
+		g_force_sync_connect = false;
+		T_EXPECT(!g_expire_wait);
+		T_EXPECT_EQ(nested.failed, 1);
+		T_EXPECT(g_expired_socket >= 0);
+		T_EXPECT_EQ(fcntl(g_expired_socket, F_GETFD), -1);
+		T_EXPECT_EQ(errno, EBADF);
+		g_expired_socket = -1;
+		testing_run_case_(&nested, cases[i].name, cases[i].run);
+		T_EXPECT_EQ(nested.passed, 1);
+	}
 }
 
 /* -------------------------------------------------------------------------
@@ -6374,6 +6659,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(dialreq_parse_rejects_bad_proxy_uris),
 	T_CASE(dialreq_parse_rejects_overlong_proxy_uri),
 	T_CASE(dialreq_parse_bounds_chain_before_allocating),
+	T_CASE(dialreq_parse_reserves_only_nonempty_tokens),
+	T_CASE(parser_fixtures_cleanup_after_failed_expectations),
 	T_CASE(dialreq_addproxy_rejects_a_full_chain),
 	T_CASE(dialreq_new_rejects_an_oversized_credential),
 	T_CASE(dialreq_copies_a_max_length_credential),
@@ -6383,6 +6670,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(dialreq_new_copies_base_request),
 	T_CASE(dialer_strerror_known_and_unknown),
 	T_CASE(direct_connect_reports_success),
+	T_CASE(dialer_watchdog_expiry_cleans_pending_socket),
 	T_CASE(dialer_latency_samples_wrap_and_exclude_unsuccessful_dials),
 	T_CASE(direct_connect_ipv6_reports_success),
 	T_CASE(local_address_blocked_by_egress_policy),
