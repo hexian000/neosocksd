@@ -7,8 +7,8 @@
  * Linked translation units (see CMakeLists.txt):
  *   transfer.c       module under test
  * Leaf libraries: csnippets (io, os).
- * transfer.c moves bytes between socket pairs and has no stateful collaborator
- * module to mock; the mock section only holds shared test fixtures.
+ * transfer.c moves bytes between socket pairs; its constructor and I/O calls
+ * are redirected to failure-injection and resource-observation helpers.
  */
 
 #include "transfer.h"
@@ -28,6 +28,11 @@
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#if WITH_THREADS
+#include <semaphore.h>
+#include <threads.h>
+#include <time.h>
+#endif
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -39,8 +44,210 @@
 #include <unistd.h>
 
 /* -------------------------------------------------------------------------
- * mock - shared test fixtures (transfer.c has no collaborator to mock).
+ * mock - constructor failures, resource ownership and shared test fixtures.
  * ---------------------------------------------------------------------- */
+
+enum constructor_failure {
+	CONSTRUCTOR_OK,
+	CONSTRUCTOR_ALLOC,
+#if WITH_THREADS
+	CONSTRUCTOR_DISPATCHER,
+	CONSTRUCTOR_LOOP,
+	CONSTRUCTOR_THREAD,
+#endif
+};
+
+#if WITH_THREADS
+enum { CONSTRUCTOR_WORKERS = 3 };
+
+struct constructor_worker {
+	struct dispatcher *dispatcher;
+	struct ev_loop *loop;
+	thrd_t thread;
+	bool started, joined;
+	thrd_start_t func;
+	void *arg;
+};
+#endif /* WITH_THREADS */
+
+/* Only transfer.c is redirected. Leaf allocators and the fixture's own loop
+ * remain real, so each observed resource belongs to this constructor. */
+struct constructor_probe {
+	bool enabled;
+	enum constructor_failure failure;
+	unsigned int fail_call, allocations, frees;
+	struct transfer *engine;
+#if WITH_THREADS
+	unsigned int dispatcher_calls, loop_calls, thread_calls;
+	unsigned int dispatchers, loops, threads, destroyed_dispatchers;
+	unsigned int destroyed_loops, joined_threads;
+	atomic_uint exited_threads;
+	sem_t entered;
+	struct constructor_worker workers[CONSTRUCTOR_WORKERS];
+#endif
+};
+
+static struct constructor_probe constructor;
+static bool session_alloc_fail;
+
+void *test_transfer_malloc(const size_t size)
+{
+	if (session_alloc_fail) {
+		session_alloc_fail = false;
+		return NULL;
+	}
+	if (!constructor.enabled) {
+		return malloc(size);
+	}
+	constructor.allocations++;
+	if (constructor.failure == CONSTRUCTOR_ALLOC) {
+		return NULL;
+	}
+	void *ptr = malloc(size);
+	constructor.engine = ptr;
+	return ptr;
+}
+
+void test_transfer_free(void *ptr)
+{
+	if (constructor.enabled && ptr != NULL && ptr == constructor.engine) {
+		constructor.frees++;
+		constructor.engine = NULL;
+	}
+	free(ptr);
+}
+
+#if WITH_THREADS
+struct dispatcher *test_dispatcher_create(const size_t capacity)
+{
+	if (!constructor.enabled) {
+		return dispatcher_create(capacity);
+	}
+	const unsigned int i = constructor.dispatcher_calls++;
+	T_CHECK(i < CONSTRUCTOR_WORKERS);
+	if (constructor.failure == CONSTRUCTOR_DISPATCHER &&
+	    i + 1 == constructor.fail_call) {
+		return NULL;
+	}
+	struct dispatcher *d = dispatcher_create(capacity);
+	T_CHECK(d != NULL);
+	constructor.workers[i].dispatcher = d;
+	constructor.dispatchers++;
+	return d;
+}
+
+void test_dispatcher_destroy(struct dispatcher *d)
+{
+	if (constructor.enabled) {
+		unsigned int i = 0;
+		while (i < CONSTRUCTOR_WORKERS &&
+		       constructor.workers[i].dispatcher != d) {
+			i++;
+		}
+		T_CHECK(i < CONSTRUCTOR_WORKERS);
+		T_CHECK(constructor.workers[i].loop == NULL);
+		constructor.workers[i].dispatcher = NULL;
+		constructor.destroyed_dispatchers++;
+	}
+	dispatcher_destroy(d);
+}
+
+struct ev_loop *test_ev_loop_new(const unsigned int flags)
+{
+	if (!constructor.enabled) {
+		return ev_loop_new(flags);
+	}
+	const unsigned int i = constructor.loop_calls++;
+	T_CHECK(i < CONSTRUCTOR_WORKERS);
+	if (constructor.failure == CONSTRUCTOR_LOOP &&
+	    i + 1 == constructor.fail_call) {
+		return NULL;
+	}
+	struct ev_loop *loop = ev_loop_new(flags);
+	T_CHECK(loop != NULL);
+	constructor.workers[i].loop = loop;
+	constructor.loops++;
+	return loop;
+}
+
+void test_ev_loop_destroy(struct ev_loop *loop)
+{
+	if (constructor.enabled) {
+		unsigned int i = 0;
+		while (i < CONSTRUCTOR_WORKERS &&
+		       constructor.workers[i].loop != loop) {
+			i++;
+		}
+		T_CHECK(i < CONSTRUCTOR_WORKERS);
+		T_CHECK(!constructor.workers[i].started ||
+			constructor.workers[i].joined);
+		constructor.workers[i].loop = NULL;
+		constructor.destroyed_loops++;
+	}
+	ev_loop_destroy(loop);
+}
+
+static int constructor_thread(void *arg)
+{
+	const struct constructor_worker *worker = arg;
+	T_CHECK(sem_post(&constructor.entered) == 0);
+	const int result = worker->func(worker->arg);
+	atomic_fetch_add(&constructor.exited_threads, 1u);
+	return result;
+}
+
+int test_thrd_create(thrd_t *thread, thrd_start_t func, void *arg)
+{
+	if (!constructor.enabled) {
+		return thrd_create(thread, func, arg);
+	}
+	const unsigned int i = constructor.thread_calls++;
+	T_CHECK(i < CONSTRUCTOR_WORKERS);
+	if (constructor.failure == CONSTRUCTOR_THREAD &&
+	    i + 1 == constructor.fail_call) {
+		return thrd_error;
+	}
+	struct constructor_worker *worker = &constructor.workers[i];
+	worker->func = func;
+	worker->arg = arg;
+	const int result = thrd_create(thread, constructor_thread, worker);
+	T_CHECK(result == thrd_success);
+	worker->thread = *thread;
+	worker->started = true;
+	constructor.threads++;
+	/* The previous worker has really entered before a later constructor
+	 * can fail; the timeout is only a watchdog, never a successful wait. */
+	struct timespec deadline;
+	T_CHECK(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 2;
+	int err;
+	do {
+		err = sem_timedwait(&constructor.entered, &deadline);
+	} while (err != 0 && errno == EINTR);
+	T_CHECK(err == 0);
+	return result;
+}
+
+int test_thrd_join(const thrd_t thread, int *result)
+{
+	if (!constructor.enabled) {
+		return thrd_join(thread, result);
+	}
+	unsigned int i = 0;
+	while (i < CONSTRUCTOR_WORKERS &&
+	       (!constructor.workers[i].started ||
+		constructor.workers[i].joined ||
+		!thrd_equal(constructor.workers[i].thread, thread))) {
+		i++;
+	}
+	T_CHECK(i < CONSTRUCTOR_WORKERS);
+	const int err = thrd_join(thread, result);
+	T_CHECK(err == thrd_success);
+	constructor.workers[i].joined = true;
+	constructor.joined_threads++;
+	return err;
+}
+#endif /* WITH_THREADS */
 
 struct test_xfer_state {
 	xfer_session_counter num_sessions;
@@ -216,6 +423,8 @@ struct io_probe_state {
 	atomic_bool blocked, write_watcher, full_buffer;
 #if WITH_SPLICE
 	atomic_size_t splice_pending;
+	bool splice_recv_error, splice_send_error;
+	atomic_bool splice_error_seen, splice_drain_allowed;
 #endif
 };
 
@@ -270,8 +479,33 @@ ssize_t test_splice(
 	const int fd_in, off_t *off_in, const int fd_out, off_t *off_out,
 	const size_t len, const unsigned int flags)
 {
+	if (fd_in == io_probe.src_fd && io_probe.splice_recv_error &&
+	    io_probe.received > 0) {
+		atomic_store(&io_probe.splice_error_seen, true);
+		errno = EIO;
+		return -1;
+	}
+	if (fd_out == io_probe.dst_fd &&
+	    (io_probe.splice_recv_error || io_probe.splice_send_error)) {
+		atomic_store(&io_probe.splice_pending, len);
+		if (io_probe.splice_send_error) {
+			atomic_store(&io_probe.splice_error_seen, true);
+			errno = EIO;
+			return -1;
+		}
+		if (!atomic_load(&io_probe.splice_drain_allowed)) {
+			if (atomic_load(&io_probe.splice_error_seen)) {
+				atomic_store(&io_probe.blocked, true);
+			}
+			errno = EAGAIN;
+			return -1;
+		}
+	}
 	const ssize_t n = splice(fd_in, off_in, fd_out, off_out, len, flags);
 	const int err = errno;
+	if (fd_in == io_probe.src_fd && n > 0) {
+		io_probe.received += (size_t)n;
+	}
 	if (fd_out == io_probe.dst_fd && n < 0 &&
 	    (err == EAGAIN || err == EWOULDBLOCK)) {
 		/* splice_pump passes its retained pipe length to the syscall. */
@@ -320,6 +554,7 @@ struct cleanup_observation {
 static struct cleanup_observation *cleanup_observer;
 
 struct test_fixture {
+	bool probes_constructor;
 	struct ev_loop *loop;
 	struct transfer *xfer;
 	struct test_xfer_state state;
@@ -366,9 +601,20 @@ static int take_pending(const int signo);
 
 static void fixture_finish(struct test_fixture *fixture)
 {
+	session_alloc_fail = false;
 	/* Join before releasing the heap counters or resetting a worker's
 	 * injector. The same order holds after a failed expectation. */
+	if (fixture->probes_constructor && fixture->xfer == NULL) {
+		fixture->xfer = constructor.engine;
+	}
 	fixture_join(fixture);
+	if (fixture->probes_constructor) {
+#if WITH_THREADS
+		T_CHECK(sem_destroy(&constructor.entered) == 0);
+#endif
+		constructor.enabled = false;
+		fixture->probes_constructor = false;
+	}
 	io_probe = (struct io_probe_state){ .src_fd = -1, .dst_fd = -1 };
 #if WITH_THREADS
 	atomic_store(&skip_tick, false);
@@ -567,6 +813,144 @@ T_DECLARE_CASE(fixture_intentional_failure)
 #endif
 	T_FATAL("intentional failure to verify fixture cleanup");
 }
+
+T_DECLARE_SUBCASE(
+	constructor_setup, struct test_fixture **out,
+	const enum constructor_failure failure, const unsigned int fail_call)
+{
+	T_CALL_SUBCASE(fixture_setup, out);
+	constructor = (struct constructor_probe){ .enabled = true,
+						  .failure = failure,
+						  .fail_call = fail_call };
+#if WITH_THREADS
+	atomic_init(&constructor.exited_threads, 0);
+	T_CHECK(sem_init(&constructor.entered, 0, 0) == 0);
+#endif
+	(*out)->probes_constructor = true;
+}
+
+T_DECLARE_SUBCASE(constructor_resources_released, const unsigned int nthreads)
+{
+	T_EXPECT_EQ(constructor.frees, 1u);
+#if WITH_THREADS
+	T_EXPECT_EQ(constructor.threads, nthreads);
+#else
+	(void)nthreads;
+#endif
+	T_EXPECT(constructor.engine == NULL);
+#if WITH_THREADS
+	T_EXPECT_EQ(constructor.destroyed_dispatchers, constructor.dispatchers);
+	T_EXPECT_EQ(constructor.destroyed_loops, constructor.loops);
+	T_EXPECT_EQ(constructor.joined_threads, constructor.threads);
+	T_EXPECT_EQ(
+		atomic_load(&constructor.exited_threads), constructor.threads);
+#endif
+}
+
+T_DECLARE_SUBCASE(constructor_recovers, const unsigned int nworkers)
+{
+	struct test_fixture *fixture = NULL;
+	T_CALL_SUBCASE(constructor_setup, &fixture, CONSTRUCTOR_OK, 0);
+	fixture->xfer = transfer_create(fixture->loop, nworkers);
+	T_EXPECT(fixture->xfer != NULL);
+	fixture_join(fixture);
+	T_EXPECT_EQ(constructor.allocations, 1u);
+#if WITH_THREADS
+	T_EXPECT_EQ(constructor.dispatchers, nworkers);
+	T_EXPECT_EQ(constructor.loops, nworkers);
+	T_EXPECT_EQ(constructor.threads, nworkers);
+#endif
+	T_CALL_SUBCASE(constructor_resources_released, nworkers);
+	fixture_finish(fixture);
+}
+
+T_DECLARE_CASE(transfer_create_allocation_failure_recovers)
+{
+	struct test_fixture *fixture = NULL;
+	T_CALL_SUBCASE(constructor_setup, &fixture, CONSTRUCTOR_ALLOC, 1);
+	fixture->xfer = transfer_create(fixture->loop, 3);
+	T_EXPECT(fixture->xfer == NULL);
+	T_EXPECT_EQ(constructor.allocations, 1u);
+	T_EXPECT_EQ(constructor.frees, 0u);
+#if WITH_THREADS
+	T_EXPECT_EQ(constructor.dispatcher_calls, 0u);
+	T_EXPECT_EQ(constructor.loop_calls, 0u);
+	T_EXPECT_EQ(constructor.thread_calls, 0u);
+#endif
+	fixture_finish(fixture);
+	T_CALL_SUBCASE(constructor_recovers, 3);
+}
+
+#if WITH_THREADS
+T_DECLARE_CASE(transfer_create_partial_workers_rollback)
+{
+	for (enum constructor_failure failure = CONSTRUCTOR_DISPATCHER;
+	     failure <= CONSTRUCTOR_THREAD; failure++) {
+		for (unsigned int fail_call = 1; fail_call <= 2; fail_call++) {
+			T_LOGF("failure=%d worker=%u", failure, fail_call);
+			struct test_fixture *fixture = NULL;
+			T_CALL_SUBCASE(
+				constructor_setup, &fixture, failure,
+				fail_call);
+			sigset_t expected, actual;
+			T_CHECK(pthread_sigmask(SIG_SETMASK, NULL, &expected) ==
+				0);
+			fixture->oldmask = expected;
+			fixture->has_mask = true;
+			T_CHECK(sigaddset(&expected, SIGUSR1) == 0);
+			T_CHECK(sigdelset(&expected, SIGUSR2) == 0);
+			T_CHECK(pthread_sigmask(SIG_SETMASK, &expected, NULL) ==
+				0);
+
+			fixture->xfer = transfer_create(fixture->loop, 3);
+			T_CHECK(pthread_sigmask(SIG_SETMASK, NULL, &actual) ==
+				0);
+			T_EXPECT(fixture->xfer == NULL);
+			T_EXPECT_EQ(constructor.allocations, 1u);
+			const unsigned int completed = fail_call - 1;
+			T_EXPECT_EQ(constructor.dispatcher_calls, fail_call);
+			T_EXPECT_EQ(
+				constructor.dispatchers,
+				completed +
+					(failure != CONSTRUCTOR_DISPATCHER));
+			T_EXPECT_EQ(
+				constructor.loop_calls,
+				constructor.dispatchers);
+			T_EXPECT_EQ(
+				constructor.loops,
+				completed + (failure == CONSTRUCTOR_THREAD));
+			T_EXPECT_EQ(
+				constructor.thread_calls, constructor.loops);
+			T_EXPECT_EQ(constructor.threads, completed);
+			T_CALL_SUBCASE(
+				constructor_resources_released, completed);
+			static const int signals[] = {
+				SIGHUP,	   SIGINT,  SIGQUIT, SIGILL,  SIGTRAP,
+				SIGABRT,   SIGBUS,  SIGFPE,  SIGKILL, SIGSEGV,
+				SIGPIPE,   SIGALRM, SIGTERM, SIGUSR1, SIGUSR2,
+				SIGCHLD,   SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN,
+				SIGTTOU,   SIGSYS,  SIGURG,  SIGXCPU, SIGXFSZ,
+				SIGVTALRM, SIGPROF,
+			};
+			for (size_t i = 0;
+			     i < sizeof(signals) / sizeof(signals[0]); i++) {
+				T_EXPECT_EQ(
+					sigismember(&actual, signals[i]),
+					sigismember(&expected, signals[i]));
+			}
+#if defined(SIGRTMIN) && defined(SIGRTMAX)
+			for (int signo = SIGRTMIN; signo <= SIGRTMAX; signo++) {
+				T_EXPECT_EQ(
+					sigismember(&actual, signo),
+					sigismember(&expected, signo));
+			}
+#endif
+			fixture_finish(fixture);
+			T_CALL_SUBCASE(constructor_recovers, 3);
+		}
+	}
+}
+#endif /* WITH_THREADS */
 
 T_DECLARE_CASE(transfer_failed_expectation_cleans_fixture)
 {
@@ -1225,6 +1609,92 @@ T_DECLARE_CASE(transfer_backpressure_completes)
 }
 
 #if WITH_SPLICE
+static bool splice_error_observed(void *data)
+{
+	(void)data;
+	return atomic_load(&io_probe.splice_error_seen) && send_blocked(NULL);
+}
+
+T_DECLARE_SUBCASE(transfer_splice_error_case, const bool source_error)
+{
+	const int fds_before = count_open_fds();
+	static const unsigned char payload[] = "queued splice data";
+	unsigned char received[sizeof(payload) + 1];
+	struct test_fixture *fixture = NULL;
+	T_CALL_SUBCASE(fixture_setup, &fixture);
+	struct test_xfer_state *state = &fixture->state;
+	int acc_peer, acc_fd, dial_fd, dial_peer;
+	fixture_socketpair(fixture, &acc_peer, &acc_fd);
+	fixture_socketpair(fixture, &dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+	io_probe.src_fd = acc_fd;
+	io_probe.dst_fd = dial_fd;
+	io_probe.splice_recv_error = source_error;
+	io_probe.splice_send_error = !source_error;
+	T_EXPECT_EQ(
+		send(acc_peer, payload, sizeof(payload), 0),
+		(ssize_t)sizeof(payload));
+	T_EXPECT(shutdown(dial_peer, SHUT_WR) == 0);
+	state->num_sessions = 1;
+	fixture->xfer = transfer_create(fixture->loop, 1);
+	T_EXPECT(fixture->xfer != NULL);
+	T_EXPECT(fixture_serve(
+		fixture, fixture->xfer, acc_fd, dial_fd,
+		&(struct transfer_opts){
+			.byt_up = &state->byt_up,
+			.byt_down = &state->byt_down,
+			.use_splice = true,
+			.num_sessions = &state->num_sessions,
+		}));
+
+	if (source_error) {
+		/* Keep the queued bytes blocked until the source error has
+		 * selected LINGER and rearmed the destination watcher. */
+		T_EXPECT(test_wait_until(
+			fixture->loop, splice_error_observed, NULL, 1.0));
+		T_EXPECT(!xfer_finished(state));
+		T_EXPECT_EQ((uintmax_t)state->byt_up, (uintmax_t)0);
+		atomic_store(&io_probe.splice_drain_allowed, true);
+	}
+	T_EXPECT(test_wait_until(fixture->loop, xfer_finished, state, 1.0));
+	fixture_join(fixture);
+	T_EXPECT(atomic_load(&io_probe.splice_error_seen));
+	T_EXPECT_EQ(atomic_load(&io_probe.splice_pending), sizeof(payload));
+	T_EXPECT_EQ(io_probe.received, sizeof(payload));
+	T_EXPECT_EQ(io_probe.recv_calls, (size_t)0);
+	T_EXPECT_EQ((size_t)state->num_sessions, (size_t)0);
+	T_EXPECT_EQ((uintmax_t)state->byt_down, (uintmax_t)0);
+	T_EXPECT_EQ(
+		(uintmax_t)state->byt_up,
+		source_error ? (uintmax_t)sizeof(payload) : (uintmax_t)0);
+	T_EXPECT(fcntl(acc_fd, F_GETFD) == -1 && errno == EBADF);
+	T_EXPECT(fcntl(dial_fd, F_GETFD) == -1 && errno == EBADF);
+	struct test_relay_sink sink = {
+		.fd = dial_peer,
+		.data = received,
+		.cap = sizeof(received),
+	};
+	T_EXPECT(sink_reached_eof(&sink));
+	T_EXPECT_EQ(sink.len, source_error ? sizeof(payload) : (size_t)0);
+	if (source_error) {
+		T_EXPECT_MEMEQ(received, payload, sizeof(payload));
+	}
+	fixture_finish(fixture);
+	T_EXPECT_EQ((size_t)state->num_sessions, (size_t)0);
+	T_EXPECT_EQ(count_open_fds(), fds_before);
+}
+
+T_DECLARE_CASE(transfer_splice_source_error_drains_before_finish)
+{
+	T_CALL_SUBCASE(transfer_splice_error_case, true);
+}
+
+T_DECLARE_CASE(transfer_splice_destination_error_discards_queued_data)
+{
+	T_CALL_SUBCASE(transfer_splice_error_case, false);
+}
+
 /* A socket that rejects send can still accept splice data. Fill through
  * splice itself so the next pipe-to-socket attempt must encounter EAGAIN. */
 static size_t fill_splice_socket(struct splice_pipe *pipe, const int fd)
@@ -1926,6 +2396,47 @@ bench_transfer_impl(struct testing_bench *restrict _b_, const bool use_splice)
 	ev_loop_destroy(loop);
 }
 
+T_DECLARE_CASE(transfer_session_allocation_failure_recovers)
+{
+	struct test_fixture *f = NULL;
+	T_CALL_SUBCASE(fixture_setup, &f);
+	f->xfer = transfer_create(f->loop, 1);
+	T_CHECK(f->xfer != NULL);
+	int acc_peer, acc_fd, dial_fd, dial_peer;
+	fixture_socketpair(f, &acc_peer, &acc_fd);
+	fixture_socketpair(f, &dial_fd, &dial_peer);
+	set_nonblock(acc_fd);
+	set_nonblock(dial_fd);
+	f->state.num_sessions = 1;
+	const struct transfer_opts opts = {
+		.byt_up = &f->state.byt_up,
+		.byt_down = &f->state.byt_down,
+		.num_sessions = &f->state.num_sessions,
+	};
+	session_alloc_fail = true;
+	T_EXPECT(!fixture_serve(f, f->xfer, acc_fd, dial_fd, &opts));
+	T_EXPECT(!session_alloc_fail);
+	T_EXPECT(fcntl(acc_fd, F_GETFD) != -1);
+	T_EXPECT(fcntl(dial_fd, F_GETFD) != -1);
+	T_EXPECT_EQ((size_t)f->state.num_sessions, 1);
+	T_EXPECT_EQ((size_t)f->state.byt_up, 0);
+	T_EXPECT_EQ((size_t)f->state.byt_down, 0);
+	T_EXPECT_EQ(ev_run(f->loop, EVRUN_NOWAIT), 0);
+	T_CHECK(send(acc_peer, "ok", 2, 0) == 2);
+	T_CHECK(shutdown(acc_peer, SHUT_WR) == 0);
+	T_CHECK(shutdown(dial_peer, SHUT_WR) == 0);
+	T_CHECK(fixture_serve(f, f->xfer, acc_fd, dial_fd, &opts));
+	T_EXPECT(test_wait_until(f->loop, xfer_finished, &f->state, 1.0));
+	unsigned char bytes[3];
+	struct test_relay_sink sink = { .fd = dial_peer,
+					.data = bytes,
+					.cap = sizeof(bytes) };
+	T_EXPECT(sink_reached_eof(&sink));
+	T_EXPECT_EQ(sink.len, 2);
+	T_EXPECT_MEMEQ(bytes, "ok", 2);
+	fixture_finish(f);
+}
+
 /* -------------------------------------------------------------------------
  * bench - throughput of the recv/send fast path.
  * ---------------------------------------------------------------------- */
@@ -1947,7 +2458,12 @@ T_DECLARE_BENCH(bench_transfer_splice)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(transfer_session_allocation_failure_recovers),
 	T_CASE(transfer_failed_expectation_cleans_fixture),
+	T_CASE(transfer_create_allocation_failure_recovers),
+#if WITH_THREADS
+	T_CASE(transfer_create_partial_workers_rollback),
+#endif
 	T_CASE(transfer_moves_payload),
 #if WITH_SPLICE
 	T_CASE(transfer_pipe_new_close),
@@ -1964,6 +2480,8 @@ static const struct testing_suite suite[] = {
 	T_CASE(transfer_backpressure_completes),
 #if WITH_SPLICE
 	T_CASE(transfer_splice_backpressure_completes),
+	T_CASE(transfer_splice_source_error_drains_before_finish),
+	T_CASE(transfer_splice_destination_error_discards_queued_data),
 #endif
 	T_CASE(transfer_recv_buffer_saturates_completes),
 	T_CASE(transfer_multi_worker_all_complete),

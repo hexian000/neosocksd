@@ -369,6 +369,14 @@ add_unit_test(transfer_test
     SRCS transfer_test.c
     MOCK_SRCS transfer.c
     MOCK_DEFINITIONS
+        malloc=test_transfer_malloc
+        free=test_transfer_free
+        dispatcher_create=test_dispatcher_create
+        dispatcher_destroy=test_dispatcher_destroy
+        ev_loop_new=test_ev_loop_new
+        ev_loop_destroy=test_ev_loop_destroy
+        thrd_create=test_thrd_create
+        thrd_join=test_thrd_join
         dispatcher_invoke=test_dispatcher_invoke
         dispatcher_tick=test_dispatcher_tick
         ev_break=test_ev_break
@@ -439,6 +447,11 @@ add_unit_test(resolver_test
     SRCS resolver_test.c
     MOCK_SRCS resolver.c
     MOCK_DEFINITIONS
+        malloc=test_resolver_malloc
+        free=test_resolver_free
+        ares_init_options=test_ares_init_options
+        ares_destroy=test_ares_destroy
+        ares_set_servers_ports_csv=test_ares_set_servers_ports_csv
         ares_timeout=test_ares_timeout
         ev_timer_again=test_ev_timer_again
     WITH_CARES)

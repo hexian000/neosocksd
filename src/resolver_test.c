@@ -7,7 +7,8 @@
  * Linked translation units (see CMakeLists.txt):
  *   resolver.c       module under test
  * Leaf libraries: c-ares.
- * Test-only aliases control c-ares deadlines and observe timer rearming;
+ * Test-only aliases inject allocation/channel failures, control c-ares
+ * deadlines and observe timer rearming;
  * socket processing and libev timer operations still use the real libraries.
  */
 
@@ -23,11 +24,14 @@
 
 #include <ev.h>
 
+#include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #if WITH_CARES
@@ -43,6 +47,80 @@
 /* -------------------------------------------------------------------------
  * mock - deadline control and shared test fixtures.
  * ---------------------------------------------------------------------- */
+
+static bool g_fail_malloc;
+static bool g_fail_wait;
+static size_t g_resolver_allocations;
+static size_t g_fixtures_cleaned;
+
+void *test_resolver_malloc(const size_t size)
+{
+	if (g_fail_malloc) {
+		g_fail_malloc = false;
+		return NULL;
+	}
+	void *const p = malloc(size);
+	if (p != NULL) {
+		g_resolver_allocations++;
+	}
+	return p;
+}
+
+void test_resolver_free(void *const p)
+{
+	if (p != NULL) {
+		T_CHECK(g_resolver_allocations > 0);
+		g_resolver_allocations--;
+	}
+	free(p);
+}
+
+/* The cleanup runs after the case frame has been unwound. Keep the resolver,
+ * loop and any active DNS watcher in storage that survives that jump. */
+struct resolver_fixture {
+	struct ev_loop *loop;
+	struct resolver *resolver;
+	int dns_fd;
+#if WITH_CARES
+	ev_io dns_watcher;
+	bool dns_watcher_initialized;
+	char nameserver[32];
+#endif
+};
+
+static void fixture_free_resolver(struct resolver_fixture *fixture)
+{
+	resolver_free(fixture->resolver);
+	fixture->resolver = NULL;
+}
+
+static void fixture_cleanup(void *data)
+{
+	struct resolver_fixture *fixture = data;
+	fixture_free_resolver(fixture);
+#if WITH_CARES
+	if (fixture->dns_watcher_initialized) {
+		ev_io_stop(fixture->loop, &fixture->dns_watcher);
+	}
+#endif
+	if (fixture->dns_fd >= 0) {
+		(void)close(fixture->dns_fd);
+	}
+	ev_loop_destroy(fixture->loop);
+	free(fixture);
+	g_fixtures_cleaned++;
+}
+
+static struct resolver_fixture *fixture_new(struct testing_ctx *_t_)
+{
+	struct resolver_fixture *fixture = calloc(1, sizeof(*fixture));
+	T_CHECK(fixture != NULL);
+	fixture->dns_fd = -1;
+	fixture->loop = ev_loop_new(0);
+	T_CHECK(fixture->loop != NULL);
+	T_CLEANUP(fixture_cleanup, fixture);
+	return fixture;
+}
 
 /* Failsafe watchdog for the event-driven waits in wait_for_result(): each
  * resolution breaks the loop the instant its completion event fires, so a
@@ -113,6 +191,10 @@ static void resolve_capture_cb(
 
 static bool wait_for_result(struct ev_loop *loop, struct resolve_result *result)
 {
+	if (g_fail_wait) {
+		g_fail_wait = false;
+		return false;
+	}
 	struct test_watchdog watchdog = { 0 };
 	struct ev_timer w_timeout;
 
@@ -137,26 +219,46 @@ static void drain_pending(struct ev_loop *loop)
 	}
 }
 
-static struct resolver *new_test_resolver(struct ev_loop **loop_out)
+static struct resolver_fixture *new_test_resolver(struct testing_ctx *_t_)
 {
 	struct config conf = { 0 };
-	struct ev_loop *const loop = ev_loop_new(0);
-	struct resolver *resolver;
-
-	T_CHECK(loop != NULL);
-	resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
-	*loop_out = loop;
-	return resolver;
-}
-
-static void free_test_resolver(struct resolver *resolver, struct ev_loop *loop)
-{
-	resolver_free(resolver);
-	ev_loop_destroy(loop);
+	struct resolver_fixture *fixture = fixture_new(_t_);
+	fixture->resolver = resolver_new(fixture->loop, &conf);
+	T_CHECK(fixture->resolver != NULL);
+	return fixture;
 }
 
 #if WITH_CARES
+static bool g_fail_ares_init;
+static size_t g_ares_init_calls;
+static size_t g_ares_destroy_calls;
+static size_t g_ares_set_servers_calls;
+static int g_last_dns_fd = -1;
+
+int test_ares_init_options(
+	ares_channel *channel, const struct ares_options *options,
+	const int optmask)
+{
+	g_ares_init_calls++;
+	if (g_fail_ares_init) {
+		g_fail_ares_init = false;
+		return ARES_ENOMEM;
+	}
+	return ares_init_options(channel, options, optmask);
+}
+
+void test_ares_destroy(ares_channel channel)
+{
+	g_ares_destroy_calls++;
+	ares_destroy(channel);
+}
+
+int test_ares_set_servers_ports_csv(ares_channel channel, const char *servers)
+{
+	g_ares_set_servers_calls++;
+	return ares_set_servers_ports_csv(channel, servers);
+}
+
 static struct {
 	bool enabled;
 	struct timeval next;
@@ -261,10 +363,77 @@ static bool logcap_toplevel_has(const char *restrict needle)
  * regression - name resolution success/failure and lifecycle cases.
  * ---------------------------------------------------------------------- */
 
+T_DECLARE_CASE(resolver_new_allocation_failure)
+{
+	struct resolver_fixture *fixture = fixture_new(_t_);
+	struct config conf = { 0 };
+	const size_t before = g_resolver_allocations;
+#if WITH_CARES
+	const size_t init_before = g_ares_init_calls;
+#endif
+	g_fail_malloc = true;
+	fixture->resolver = resolver_new(fixture->loop, &conf);
+	T_EXPECT(!g_fail_malloc);
+	T_EXPECT(fixture->resolver == NULL);
+	T_EXPECT_EQ(g_resolver_allocations, before);
+	T_EXPECT_EQ(ev_run(fixture->loop, EVRUN_NOWAIT), 0);
+#if WITH_CARES
+	T_EXPECT_EQ(g_ares_init_calls, init_before);
+#endif
+	/* The one-shot failure leaves the next construction usable. */
+	fixture->resolver = resolver_new(fixture->loop, &conf);
+	T_EXPECT(fixture->resolver != NULL);
+}
+
+#if WITH_CARES
+T_DECLARE_CASE(resolver_channel_failure_uses_synchronous_fallback)
+{
+	struct resolver_fixture *fixture = fixture_new(_t_);
+	struct config conf = { .nameserver = "127.0.0.1:9" };
+	const size_t before = g_resolver_allocations;
+	const size_t init_before = g_ares_init_calls;
+	const size_t destroy_before = g_ares_destroy_calls;
+	const size_t servers_before = g_ares_set_servers_calls;
+	g_fail_ares_init = true;
+	fixture->resolver = resolver_new(fixture->loop, &conf);
+	T_CHECK(fixture->resolver != NULL);
+	T_EXPECT(!g_fail_ares_init);
+	T_EXPECT_EQ(g_ares_init_calls, init_before + 1);
+	T_EXPECT_EQ(g_resolver_allocations, before + 1);
+	resolver_setnameserver(fixture->resolver, &conf);
+	T_EXPECT_EQ(g_ares_set_servers_calls, servers_before);
+
+	struct resolve_result result = { 0 };
+	T_CHECK(resolve_do(
+			fixture->resolver,
+			(struct resolve_cb){ .func = resolve_capture_cb,
+					     .data = &result },
+			"127.0.0.1", "443", AF_INET) != NULL);
+	T_EXPECT(!result.called);
+	T_EXPECT(ev_pending_count(fixture->loop) > 0);
+	T_EXPECT(wait_for_result(fixture->loop, &result));
+	T_EXPECT(result.ok);
+	T_EXPECT_EQ(result.num_addr, 1);
+	T_EXPECT_EQ(result.family, AF_INET);
+	T_EXPECT_EQ(result.port, 443);
+	T_EXPECT_EQ(result.addr[0].in.sin_addr.s_addr, htonl(INADDR_LOOPBACK));
+	const struct resolver_stats *stats = resolver_stats(fixture->resolver);
+	T_EXPECT_EQ(stats->num_query, 1);
+	T_EXPECT_EQ(stats->num_success, 1);
+
+	fixture_free_resolver(fixture);
+	T_EXPECT_EQ(g_resolver_allocations, before);
+	T_EXPECT_EQ(g_ares_destroy_calls, destroy_before);
+	T_EXPECT_EQ(g_ares_set_servers_calls, servers_before);
+	T_EXPECT_EQ(ev_run(fixture->loop, EVRUN_NOWAIT), 0);
+}
+#endif /* WITH_CARES */
+
 T_DECLARE_CASE(resolve_success_ipv4)
 {
-	struct ev_loop *loop = NULL;
-	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolver_fixture *fixture = new_test_resolver(_t_);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 	const struct resolver_stats *stats;
 
@@ -283,14 +452,13 @@ T_DECLARE_CASE(resolve_success_ipv4)
 	stats = resolver_stats(resolver);
 	T_EXPECT_EQ(stats->num_query, 1);
 	T_EXPECT_EQ(stats->num_success, 1);
-
-	free_test_resolver(resolver, loop);
 }
 
 T_DECLARE_CASE(resolve_failure_family_mismatch)
 {
-	struct ev_loop *loop = NULL;
-	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolver_fixture *fixture = new_test_resolver(_t_);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 	const struct resolver_stats *stats;
 
@@ -315,14 +483,13 @@ T_DECLARE_CASE(resolve_failure_family_mismatch)
 	stats = resolver_stats(resolver);
 	T_EXPECT_EQ(stats->num_query, 1);
 	T_EXPECT_EQ(stats->num_success, 0);
-
-	free_test_resolver(resolver, loop);
 }
 
 T_DECLARE_CASE(resolve_cancel_suppresses_callback)
 {
-	struct ev_loop *loop = NULL;
-	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolver_fixture *fixture = new_test_resolver(_t_);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 	struct resolve_query *query;
 	const struct resolver_stats *stats;
@@ -350,14 +517,13 @@ T_DECLARE_CASE(resolve_cancel_suppresses_callback)
 	stats = resolver_stats(resolver);
 	T_EXPECT_EQ(stats->num_query, 1);
 	T_EXPECT_EQ(stats->num_success, 1);
-
-	free_test_resolver(resolver, loop);
 }
 
 T_DECLARE_CASE(resolve_success_ipv6)
 {
-	struct ev_loop *loop = NULL;
-	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolver_fixture *fixture = new_test_resolver(_t_);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 	const struct resolver_stats *stats;
 
@@ -376,14 +542,13 @@ T_DECLARE_CASE(resolve_success_ipv6)
 	stats = resolver_stats(resolver);
 	T_EXPECT_EQ(stats->num_query, 1);
 	T_EXPECT_EQ(stats->num_success, 1);
-
-	free_test_resolver(resolver, loop);
 }
 
 T_DECLARE_CASE(resolve_success_unspec)
 {
-	struct ev_loop *loop = NULL;
-	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolver_fixture *fixture = new_test_resolver(_t_);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 	const struct resolver_stats *stats;
 
@@ -402,14 +567,13 @@ T_DECLARE_CASE(resolve_success_unspec)
 	stats = resolver_stats(resolver);
 	T_EXPECT_EQ(stats->num_query, 1);
 	T_EXPECT_EQ(stats->num_success, 1);
-
-	free_test_resolver(resolver, loop);
 }
 
 T_DECLARE_CASE(resolve_success_null_service)
 {
-	struct ev_loop *loop = NULL;
-	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolver_fixture *fixture = new_test_resolver(_t_);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 	const struct resolver_stats *stats;
 
@@ -431,8 +595,6 @@ T_DECLARE_CASE(resolve_success_null_service)
 	stats = resolver_stats(resolver);
 	T_EXPECT_EQ(stats->num_query, 1);
 	T_EXPECT_EQ(stats->num_success, 1);
-
-	free_test_resolver(resolver, loop);
 }
 
 /*
@@ -444,8 +606,8 @@ T_DECLARE_CASE(resolve_success_null_service)
  */
 T_DECLARE_CASE(resolver_free_reclaims_completed_query)
 {
-	struct ev_loop *loop = NULL;
-	struct resolver *const resolver = new_test_resolver(&loop);
+	struct resolver_fixture *fixture = new_test_resolver(_t_);
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 
 	T_CHECK(resolve_do(
@@ -456,7 +618,7 @@ T_DECLARE_CASE(resolver_free_reclaims_completed_query)
 			},
 			"127.0.0.1", "443", AF_INET) != NULL);
 	/* free without dispatching the deferred finish event */
-	free_test_resolver(resolver, loop);
+	fixture_free_resolver(fixture);
 	T_EXPECT(!result.called);
 }
 
@@ -580,25 +742,33 @@ static int make_fake_nameserver(char *restrict ns, const size_t nslen)
 	T_CHECK(getsockname(fd, (struct sockaddr *)&addr, &addrlen) == 0);
 	(void)snprintf(
 		ns, nslen, "127.0.0.1:%u", (unsigned)ntohs(addr.sin_port));
+	g_last_dns_fd = fd;
 	return fd;
 }
 
-/* A resolver pointed at a nameserver that never answers, so a lookup of a host
- * name stays in flight without a query ever leaving the host. The caller
- * closes *dns_fd_out after freeing the resolver. */
-static struct resolver *
-new_unanswered_resolver(struct ev_loop **loop_out, int *dns_fd_out)
+/* A bound loopback UDP socket keeps unanswered queries hermetic. */
+static struct resolver_fixture *
+new_dns_resolver(struct testing_ctx *_t_, const bool configure_nameserver)
 {
-	char nameserver[32];
-	const int dns_fd = make_fake_nameserver(nameserver, sizeof(nameserver));
-	struct config conf = { .nameserver = nameserver };
-	struct ev_loop *const loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-	struct resolver *const resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
-	*loop_out = loop;
-	*dns_fd_out = dns_fd;
-	return resolver;
+	struct resolver_fixture *fixture = fixture_new(_t_);
+	fixture->dns_fd = make_fake_nameserver(
+		fixture->nameserver, sizeof(fixture->nameserver));
+	struct config conf = {
+		.nameserver = configure_nameserver ? fixture->nameserver : NULL,
+	};
+	fixture->resolver = resolver_new(fixture->loop, &conf);
+	T_CHECK(fixture->resolver != NULL);
+	return fixture;
+}
+
+static ev_io *
+fixture_dns_watcher(struct resolver_fixture *fixture, struct fake_dns *dns)
+{
+	ev_io *watcher = &fixture->dns_watcher;
+	ev_io_init(watcher, fake_dns_cb, fixture->dns_fd, EV_READ);
+	watcher->data = dns;
+	fixture->dns_watcher_initialized = true;
+	return watcher;
 }
 
 static struct resolve_query *start_unanswered_query(
@@ -616,10 +786,9 @@ static struct resolve_query *start_unanswered_query(
  * or waiting for c-ares' real retry interval. */
 T_DECLARE_CASE(resolve_zero_timeout_keeps_timer_active)
 {
-	struct ev_loop *loop = NULL;
-	int dns_fd = -1;
-	struct resolver *const resolver =
-		new_unanswered_resolver(&loop, &dns_fd);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	g_timeout.enabled = true;
 	T_CLEANUP(reset_timeout, NULL);
 	struct resolve_result result[3] = { 0 };
@@ -641,17 +810,13 @@ T_DECLARE_CASE(resolve_zero_timeout_keeps_timer_active)
 	T_EXPECT(ev_is_active(g_timeout.watcher));
 	T_EXPECT(ev_timer_remaining(loop, g_timeout.watcher) > 0.0);
 	T_EXPECT(ev_timer_remaining(loop, g_timeout.watcher) <= 0.001001);
-
-	free_test_resolver(resolver, loop);
-	(void)close(dns_fd);
 }
 
 T_DECLARE_CASE(resolve_new_query_advances_active_deadline)
 {
-	struct ev_loop *loop = NULL;
-	int dns_fd = -1;
-	struct resolver *const resolver =
-		new_unanswered_resolver(&loop, &dns_fd);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	g_timeout.enabled = true;
 	g_timeout.next.tv_sec = 60;
 	T_CLEANUP(reset_timeout, NULL);
@@ -669,17 +834,14 @@ T_DECLARE_CASE(resolve_new_query_advances_active_deadline)
 	const ev_tstamp remaining = ev_timer_remaining(loop, g_timeout.watcher);
 	T_EXPECT(remaining > 2.499 && remaining < 2.501);
 	T_EXPECT(!result[0].called && !result[1].called);
-
-	free_test_resolver(resolver, loop);
-	(void)close(dns_fd);
 }
 
 T_DECLARE_CASE(resolve_socket_event_advances_active_deadline)
 {
-	struct ev_loop *loop = NULL;
-	int dns_fd = -1;
-	struct resolver *const resolver =
-		new_unanswered_resolver(&loop, &dns_fd);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
+	const int dns_fd = fixture->dns_fd;
 	g_timeout.enabled = true;
 	g_timeout.next.tv_sec = 60;
 	T_CLEANUP(reset_timeout, NULL);
@@ -694,21 +856,16 @@ T_DECLARE_CASE(resolve_socket_event_advances_active_deadline)
 	/* Reply to only one query. The other remains in flight when socket_cb
 	 * must replace the active timer's later deadline. */
 	struct fake_dns dns = make_fake_dns();
-	ev_io w_dns;
-	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
-	w_dns.data = &dns;
+	ev_io *w_dns = fixture_dns_watcher(fixture, &dns);
 	struct pollfd pending = { .fd = dns_fd, .events = POLLIN };
 	T_CHECK(poll(&pending, 1, 0) == 1);
-	ev_invoke(loop, &w_dns, EV_READ);
+	ev_invoke(loop, w_dns, EV_READ);
 	g_timeout.next.tv_sec = 5;
 	ev_run(loop, EVRUN_NOWAIT);
 	T_EXPECT_EQ(resolver_stats(resolver)->num_success, 1);
 	T_EXPECT(ev_is_active(g_timeout.watcher));
 	const ev_tstamp remaining = ev_timer_remaining(loop, g_timeout.watcher);
 	T_EXPECT(remaining > 4.999 && remaining < 5.001);
-
-	free_test_resolver(resolver, loop);
-	(void)close(dns_fd);
 }
 
 /*
@@ -723,10 +880,8 @@ T_DECLARE_CASE(resolve_log_keeps_client_name_off_the_line)
 {
 	/* a newline that ends the line, plus a CR and a control byte */
 	static const char hostile[] = "evil.example\nE forged\rentry\x01";
-	struct ev_loop *loop = NULL;
-	int dns_fd = -1;
-	struct resolver *const resolver =
-		new_unanswered_resolver(&loop, &dns_fd);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 
 	logcap_start(LOG_LEVEL_DEBUG);
@@ -750,18 +905,13 @@ T_DECLARE_CASE(resolve_log_keeps_client_name_off_the_line)
 	/* and the bytes that would drive a terminal or a log parser are gone */
 	T_EXPECT(memchr(g_logcap.buf, '\r', g_logcap.len) == NULL);
 	T_EXPECT(memchr(g_logcap.buf, '\x01', g_logcap.len) == NULL);
-
-	free_test_resolver(resolver, loop);
-	(void)close(dns_fd);
 }
 
 /* The counterpart: an ordinary name must still read as it always did. */
 T_DECLARE_CASE(resolve_log_keeps_an_ordinary_name_legible)
 {
-	struct ev_loop *loop = NULL;
-	int dns_fd = -1;
-	struct resolver *const resolver =
-		new_unanswered_resolver(&loop, &dns_fd);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct resolver *resolver = fixture->resolver;
 	struct resolve_result result = { 0 };
 
 	logcap_start(LOG_LEVEL_DEBUG);
@@ -780,27 +930,17 @@ T_DECLARE_CASE(resolve_log_keeps_an_ordinary_name_legible)
 	T_EXPECT(strstr(g_logcap.buf, "resolve `:': cancel") != NULL);
 	/* rendered whole, on the extra's first line */
 	T_EXPECT(strstr(g_logcap.buf, "1 ok.example\n") != NULL);
-
-	free_test_resolver(resolver, loop);
-	(void)close(dns_fd);
 }
 
 T_DECLARE_CASE(resolve_via_fake_nameserver)
 {
-	struct ev_loop *const loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-
-	char nameserver[32];
-	const int dns_fd = make_fake_nameserver(nameserver, sizeof(nameserver));
-	struct config conf = { .nameserver = nameserver };
-	struct resolver *const resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 
 	struct fake_dns dns = make_fake_dns();
-	ev_io w_dns;
-	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
-	w_dns.data = &dns;
-	ev_io_start(loop, &w_dns);
+	ev_io *w_dns = fixture_dns_watcher(fixture, &dns);
+	ev_io_start(loop, w_dns);
 
 	struct resolve_result result = { 0 };
 	T_CHECK(resolve_do(
@@ -819,10 +959,7 @@ T_DECLARE_CASE(resolve_via_fake_nameserver)
 	T_EXPECT_EQ(stats->num_query, 1);
 	T_EXPECT_EQ(stats->num_success, 1);
 
-	ev_io_stop(loop, &w_dns);
-	(void)close(dns_fd);
-	resolver_free(resolver);
-	ev_loop_destroy(loop);
+	ev_io_stop(loop, w_dns);
 }
 
 /* Resolve `test.invalid' in one family and hand back what the answer carried. */
@@ -852,24 +989,17 @@ T_DECLARE_SUBCASE(
  */
 T_DECLARE_CASE(resolve_unpinned_query_carries_every_address)
 {
-	struct ev_loop *const loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-
-	char nameserver[32];
-	const int dns_fd = make_fake_nameserver(nameserver, sizeof(nameserver));
-	struct config conf = { .nameserver = nameserver };
-	struct resolver *const resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 
 	/* two addresses for one name, the everyday shape of a CDN record set
 	 * and of a dual-stack host alike */
 	struct fake_dns dns = { .num_addr = 2 };
 	dns.addr[0].s_addr = htonl(0x5DB8D822); /* 93.184.216.34 */
 	dns.addr[1].s_addr = htonl(0x5DB8D823); /* 93.184.216.35 */
-	ev_io w_dns;
-	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
-	w_dns.data = &dns;
-	ev_io_start(loop, &w_dns);
+	ev_io *w_dns = fixture_dns_watcher(fixture, &dns);
+	ev_io_start(loop, w_dns);
 
 	struct resolve_result unpinned = { 0 };
 	T_CALL_SUBCASE(expect_resolve, loop, resolver, AF_UNSPEC, &unpinned);
@@ -889,10 +1019,7 @@ T_DECLARE_CASE(resolve_unpinned_query_carries_every_address)
 	T_CALL_SUBCASE(expect_resolve, loop, resolver, AF_INET, &pinned);
 	T_EXPECT_EQ(pinned.num_addr, 1);
 
-	ev_io_stop(loop, &w_dns);
-	(void)close(dns_fd);
-	resolver_free(resolver);
-	ev_loop_destroy(loop);
+	ev_io_stop(loop, w_dns);
 }
 
 /* Serve @p num4 A records (192.0.2.1, ...) and @p num6 AAAA records
@@ -949,21 +1076,14 @@ static bool all_ports_are(
  */
 T_DECLARE_CASE(resolve_unpinned_query_interleaves_families)
 {
-	struct ev_loop *const loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-
-	char nameserver[32];
-	const int dns_fd = make_fake_nameserver(nameserver, sizeof(nameserver));
-	struct config conf = { .nameserver = nameserver };
-	struct resolver *const resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 
 	struct fake_dns dns;
 	fake_dns_serve(&dns, 3, 3);
-	ev_io w_dns;
-	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
-	w_dns.data = &dns;
-	ev_io_start(loop, &w_dns);
+	ev_io *w_dns = fixture_dns_watcher(fixture, &dns);
+	ev_io_start(loop, w_dns);
 
 	struct resolve_result result = { 0 };
 	T_CALL_SUBCASE(expect_resolve, loop, resolver, AF_UNSPEC, &result);
@@ -977,10 +1097,7 @@ T_DECLARE_CASE(resolve_unpinned_query_interleaves_families)
 	T_EXPECT_EQ(count_family(&result, AF_INET6), RESOLVE_MAX_ADDR / 2);
 	T_EXPECT(all_ports_are(&result, 443));
 
-	ev_io_stop(loop, &w_dns);
-	(void)close(dns_fd);
-	resolver_free(resolver);
-	ev_loop_destroy(loop);
+	ev_io_stop(loop, w_dns);
 }
 
 /* Serve @p num4 A and @p num6 AAAA records, one of the two a single record, and
@@ -1015,21 +1132,14 @@ T_DECLARE_SUBCASE(
  */
 T_DECLARE_CASE(resolve_unpinned_query_keeps_the_minority_family)
 {
-	struct ev_loop *const loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-
-	char nameserver[32];
-	const int dns_fd = make_fake_nameserver(nameserver, sizeof(nameserver));
-	struct config conf = { .nameserver = nameserver };
-	struct resolver *const resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 
 	struct fake_dns dns;
 	fake_dns_serve(&dns, 0, 0);
-	ev_io w_dns;
-	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
-	w_dns.data = &dns;
-	ev_io_start(loop, &w_dns);
+	ev_io *w_dns = fixture_dns_watcher(fixture, &dns);
+	ev_io_start(loop, w_dns);
 
 	T_CALL_SUBCASE(
 		expect_minority_family, loop, resolver, &dns, FAKE_DNS_MAX_ADDR,
@@ -1048,10 +1158,7 @@ T_DECLARE_CASE(resolve_unpinned_query_keeps_the_minority_family)
 	T_EXPECT_EQ(pinned6.num_addr, 1);
 	T_EXPECT_EQ(pinned6.family, AF_INET6);
 
-	ev_io_stop(loop, &w_dns);
-	(void)close(dns_fd);
-	resolver_free(resolver);
-	ev_loop_destroy(loop);
+	ev_io_stop(loop, w_dns);
 }
 
 /*
@@ -1065,14 +1172,9 @@ T_DECLARE_CASE(resolve_unpinned_query_keeps_the_minority_family)
  */
 T_DECLARE_CASE(resolver_free_does_not_leak_inflight_query)
 {
-	struct ev_loop *const loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-
-	char nameserver[32];
-	const int dns_fd = make_fake_nameserver(nameserver, sizeof(nameserver));
-	struct config conf = { .nameserver = nameserver };
-	struct resolver *const resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 
 	struct resolve_result result = { 0 };
 	T_CHECK(resolve_do(
@@ -1086,16 +1188,13 @@ T_DECLARE_CASE(resolver_free_does_not_leak_inflight_query)
 	/* let the query reach the wire without ever answering it, then
 	 * destroy the resolver while it is still in flight */
 	ev_run(loop, EVRUN_NOWAIT);
-	resolver_free(resolver);
+	fixture_free_resolver(fixture);
 	T_EXPECT(!result.called);
 	/* resolver_free() must also leave the loop holding no watcher of the
 	 * freed resolver -- an armed w_timeout would fire timeout_cb on freed
 	 * storage on any later iteration. Nothing else in this case is started
 	 * in the loop, so ev_run's active-watcher count is exactly that check. */
 	T_EXPECT_EQ(ev_run(loop, EVRUN_NOWAIT), 0);
-
-	(void)close(dns_fd);
-	ev_loop_destroy(loop);
 }
 
 /*
@@ -1107,20 +1206,13 @@ T_DECLARE_CASE(resolver_free_does_not_leak_inflight_query)
  */
 T_DECLARE_CASE(resolve_cancel_inflight_suppresses_callback)
 {
-	struct ev_loop *const loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-
-	char nameserver[32];
-	const int dns_fd = make_fake_nameserver(nameserver, sizeof(nameserver));
-	struct config conf = { .nameserver = nameserver };
-	struct resolver *const resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, true);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 
 	struct fake_dns dns = make_fake_dns();
-	ev_io w_dns;
-	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
-	w_dns.data = &dns;
-	ev_io_start(loop, &w_dns);
+	ev_io *w_dns = fixture_dns_watcher(fixture, &dns);
+	ev_io_start(loop, w_dns);
 
 	struct resolve_result result = { 0 };
 	struct resolve_query *const query = resolve_do(
@@ -1141,13 +1233,13 @@ T_DECLARE_CASE(resolve_cancel_inflight_suppresses_callback)
 	ev_timer_init(&w_timeout, test_watchdog_cb, TEST_WAIT_SEC, 0.0);
 	w_timeout.data = &watchdog;
 	ev_timer_start(loop, &w_timeout);
-	while (!watchdog.fired && ev_is_active(&w_dns)) {
+	while (!watchdog.fired && ev_is_active(w_dns)) {
 		ev_run(loop, EVRUN_ONCE);
 	}
 	ev_timer_stop(loop, &w_timeout);
 	/* fake_dns_cb stops itself once it has answered: the reply for the
 	 * cancelled query is now queued on the c-ares socket */
-	T_CHECK(!ev_is_active(&w_dns));
+	T_CHECK(!ev_is_active(w_dns));
 
 	/* Anchor the negative assertion on an observable event instead of a
 	 * fixed number of sweeps: a second, uncancelled query answered by the
@@ -1155,7 +1247,7 @@ T_DECLARE_CASE(resolve_cancel_inflight_suppresses_callback)
 	 * again, while the cancelled query's reply is already waiting, so
 	 * c-ares processes the cancelled query -- addrinfo_cb, finish_defer,
 	 * finish_cb -- strictly before the tracer's callback breaks the wait. */
-	ev_io_start(loop, &w_dns);
+	ev_io_start(loop, w_dns);
 	struct resolve_result tracer = { 0 };
 	T_CHECK(resolve_do(
 			resolver,
@@ -1174,10 +1266,7 @@ T_DECLARE_CASE(resolve_cancel_inflight_suppresses_callback)
 	T_EXPECT_EQ(stats->num_query, 2);
 	T_EXPECT_EQ(stats->num_success, 2);
 
-	ev_io_stop(loop, &w_dns);
-	(void)close(dns_fd);
-	resolver_free(resolver);
-	ev_loop_destroy(loop);
+	ev_io_stop(loop, w_dns);
 }
 
 /*
@@ -1190,25 +1279,17 @@ T_DECLARE_CASE(resolve_cancel_inflight_suppresses_callback)
  */
 T_DECLARE_CASE(resolver_setnameserver_applies_after_new)
 {
-	struct ev_loop *const loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-
-	char nameserver[32];
-	const int dns_fd = make_fake_nameserver(nameserver, sizeof(nameserver));
-
 	/* resolver_new sees no nameserver, as it does before a boot config loads */
-	struct config conf = { .nameserver = NULL };
-	struct resolver *const resolver = resolver_new(loop, &conf);
-	T_CHECK(resolver != NULL);
+	struct resolver_fixture *fixture = new_dns_resolver(_t_, false);
+	struct ev_loop *loop = fixture->loop;
+	struct resolver *resolver = fixture->resolver;
 	/* the nameserver becomes known only now, e.g. from a boot config */
-	conf.nameserver = nameserver;
+	struct config conf = { .nameserver = fixture->nameserver };
 	resolver_setnameserver(resolver, &conf);
 
 	struct fake_dns dns = make_fake_dns();
-	ev_io w_dns;
-	ev_io_init(&w_dns, fake_dns_cb, dns_fd, EV_READ);
-	w_dns.data = &dns;
-	ev_io_start(loop, &w_dns);
+	ev_io *w_dns = fixture_dns_watcher(fixture, &dns);
+	ev_io_start(loop, w_dns);
 
 	struct resolve_result result = { 0 };
 	T_CHECK(resolve_do(
@@ -1227,12 +1308,93 @@ T_DECLARE_CASE(resolver_setnameserver_applies_after_new)
 	T_EXPECT_EQ(stats->num_query, 1);
 	T_EXPECT_EQ(stats->num_success, 1);
 
-	ev_io_stop(loop, &w_dns);
-	(void)close(dns_fd);
-	resolver_free(resolver);
-	ev_loop_destroy(loop);
+	ev_io_stop(loop, w_dns);
 }
 #endif /* WITH_CARES */
+
+/* Fail an existing result expectation while its query is still owned by the
+ * resolver, then rerun the same case successfully in a fresh fixture. */
+T_DECLARE_CASE(resolver_failed_expectation_cleans_fixture)
+{
+	const size_t allocations_before = g_resolver_allocations;
+	const size_t cleaned_before = g_fixtures_cleaned;
+	T_DECLARE_CTX(nested);
+	g_fail_wait = true;
+	T_RUN_CASE(nested, resolve_success_ipv4);
+	T_EXPECT(!g_fail_wait);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(g_fixtures_cleaned, cleaned_before + 1);
+	T_EXPECT_EQ(g_resolver_allocations, allocations_before);
+	T_RUN_CASE(nested, resolve_success_ipv4);
+	T_EXPECT_EQ(nested.passed, 1);
+	T_EXPECT_EQ(g_fixtures_cleaned, cleaned_before + 2);
+	T_EXPECT_EQ(g_resolver_allocations, allocations_before);
+#if WITH_CARES
+	/* Both the direct expectation and expect_resolve's subcase must unwind
+	 * through their caller's registered fixture cleanup. */
+	for (int i = 0; i < 2; i++) {
+		const size_t cleaned = g_fixtures_cleaned;
+		g_fail_wait = true;
+		if (i == 0) {
+			T_RUN_CASE(nested, resolve_via_fake_nameserver);
+		} else {
+			T_RUN_CASE(
+				nested,
+				resolve_unpinned_query_carries_every_address);
+		}
+		T_EXPECT(!g_fail_wait);
+		T_EXPECT_EQ(nested.failed, (size_t)i + 2);
+		T_EXPECT_EQ(g_fixtures_cleaned, cleaned + 1);
+		T_EXPECT_EQ(g_resolver_allocations, allocations_before);
+		errno = 0;
+		T_EXPECT_EQ(fcntl(g_last_dns_fd, F_GETFD), -1);
+		T_EXPECT_EQ(errno, EBADF);
+		if (i == 0) {
+			T_RUN_CASE(nested, resolve_via_fake_nameserver);
+		} else {
+			T_RUN_CASE(
+				nested,
+				resolve_unpinned_query_carries_every_address);
+		}
+		T_EXPECT_EQ(nested.passed, (size_t)i + 2);
+		T_EXPECT_EQ(g_fixtures_cleaned, cleaned + 2);
+		T_EXPECT_EQ(g_resolver_allocations, allocations_before);
+	}
+#endif /* WITH_CARES */
+}
+
+T_DECLARE_CASE(resolve_query_allocation_failure_recovers)
+{
+	struct resolver_fixture *f = fixture_new(_t_);
+	struct config conf = { 0 };
+	f->resolver = resolver_new(f->loop, &conf);
+	T_CHECK(f->resolver != NULL);
+	const size_t before = g_resolver_allocations;
+	const struct resolver_stats stats_before = *resolver_stats(f->resolver);
+	struct resolve_result result = { 0 };
+	const struct resolve_cb cb = { .func = resolve_capture_cb,
+				       .data = &result };
+	g_fail_malloc = true;
+	struct resolve_query *query =
+		resolve_do(f->resolver, cb, "127.0.0.1", "443", AF_INET);
+	T_EXPECT(!g_fail_malloc);
+	T_EXPECT(query == NULL);
+	T_EXPECT(!result.called);
+	T_EXPECT_EQ(g_resolver_allocations, before);
+	T_EXPECT_EQ(
+		resolver_stats(f->resolver)->num_query, stats_before.num_query);
+	T_EXPECT_EQ(ev_pending_count(f->loop), 0);
+	T_EXPECT_EQ(ev_run(f->loop, EVRUN_NOWAIT), 0);
+	T_CHECK(resolve_do(f->resolver, cb, "127.0.0.1", "443", AF_INET) !=
+		NULL);
+	T_EXPECT(wait_for_result(f->loop, &result));
+	T_EXPECT(result.ok);
+	T_EXPECT_EQ(result.port, 443);
+	T_EXPECT_EQ(g_resolver_allocations, before);
+	T_EXPECT_EQ(
+		resolver_stats(f->resolver)->num_query,
+		stats_before.num_query + 1);
+}
 
 /* -------------------------------------------------------------------------
  * bench - none.
@@ -1243,6 +1405,12 @@ T_DECLARE_CASE(resolver_setnameserver_applies_after_new)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(resolve_query_allocation_failure_recovers),
+	T_CASE(resolver_new_allocation_failure),
+	T_CASE(resolver_failed_expectation_cleans_fixture),
+#if WITH_CARES
+	T_CASE(resolver_channel_failure_uses_synchronous_fallback),
+#endif
 	T_CASE(resolve_success_ipv4),
 	T_CASE(resolve_failure_family_mismatch),
 	T_CASE(resolve_cancel_suppresses_callback),

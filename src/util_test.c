@@ -14,6 +14,7 @@
 
 #include <ev.h>
 
+#include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
 #include <netinet/in.h>
@@ -48,6 +49,45 @@ void resolver_cleanup(void)
  * regression - io-event helpers and formatting cases.
  * ---------------------------------------------------------------------- */
 
+struct util_fixture {
+	struct ev_loop *loop;
+	int sv[2];
+	ev_io io;
+	ev_periodic periodic;
+};
+
+static unsigned fixture_cleanup_count;
+
+static void cleanup_fixture(void *data)
+{
+	struct util_fixture *f = data;
+	if (f->loop != NULL) {
+		ev_io_stop(f->loop, &f->io);
+		if (ev_is_active(&f->periodic)) {
+			ev_ref(f->loop);
+			ev_periodic_stop(f->loop, &f->periodic);
+		}
+		ev_loop_destroy(f->loop);
+	}
+	for (size_t i = 0; i < ARRAY_SIZE(f->sv); i++) {
+		if (f->sv[i] != -1) {
+			T_CHECK(close(f->sv[i]) == 0);
+		}
+	}
+	free(f);
+	fixture_cleanup_count++;
+}
+
+static struct util_fixture *new_fixture(struct testing_ctx *_t_)
+{
+	struct util_fixture *f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	f->sv[0] = -1;
+	f->sv[1] = -1;
+	T_CLEANUP(cleanup_fixture, f);
+	return f;
+}
+
 static void dummy_io_cb(struct ev_loop *loop, ev_io *w, const int revents)
 {
 	(void)loop;
@@ -57,45 +97,41 @@ static void dummy_io_cb(struct ev_loop *loop, ev_io *w, const int revents)
 
 T_DECLARE_CASE(util_modify_io_events_stop)
 {
-	int sv[2] = { -1, -1 };
+	struct util_fixture *fixture = new_fixture(_t_);
+	int *sv = fixture->sv;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	struct ev_loop *loop = ev_loop_new(0);
+	fixture->loop = loop;
 	T_CHECK(loop != NULL);
 
-	ev_io w;
-	ev_io_init(&w, dummy_io_cb, sv[0], EV_READ);
-	ev_io_start(loop, &w);
-	T_EXPECT(ev_is_active(&w));
+	ev_io *w = &fixture->io;
+	ev_io_init(w, dummy_io_cb, sv[0], EV_READ);
+	ev_io_start(loop, w);
+	T_EXPECT(ev_is_active(w));
 
-	modify_io_events(loop, &w, EV_NONE);
-	T_EXPECT(!ev_is_active(&w));
-
-	ev_loop_destroy(loop);
-	(void)close(sv[0]);
-	(void)close(sv[1]);
+	modify_io_events(loop, w, EV_NONE);
+	T_EXPECT(!ev_is_active(w));
 }
 
 T_DECLARE_CASE(util_modify_io_events_change)
 {
-	int sv[2] = { -1, -1 };
+	struct util_fixture *fixture = new_fixture(_t_);
+	int *sv = fixture->sv;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	struct ev_loop *loop = ev_loop_new(0);
+	fixture->loop = loop;
 	T_CHECK(loop != NULL);
 
-	ev_io w;
-	ev_io_init(&w, dummy_io_cb, sv[0], EV_READ);
-	ev_io_start(loop, &w);
+	ev_io *w = &fixture->io;
+	ev_io_init(w, dummy_io_cb, sv[0], EV_READ);
+	ev_io_start(loop, w);
 
-	modify_io_events(loop, &w, EV_WRITE);
-	T_EXPECT(ev_is_active(&w));
-	T_EXPECT_EQ(w.events & (EV_READ | EV_WRITE), EV_WRITE);
+	modify_io_events(loop, w, EV_WRITE);
+	T_EXPECT(ev_is_active(w));
+	T_EXPECT_EQ(w->events & (EV_READ | EV_WRITE), EV_WRITE);
 
-	modify_io_events(loop, &w, EV_NONE);
-	T_EXPECT(!ev_is_active(&w));
-
-	ev_loop_destroy(loop);
-	(void)close(sv[0]);
-	(void)close(sv[1]);
+	modify_io_events(loop, w, EV_NONE);
+	T_EXPECT(!ev_is_active(w));
 }
 
 /* Switch LC_NUMERIC to the first installed locale that spells the decimal point
@@ -288,65 +324,61 @@ T_DECLARE_CASE(util_modify_io_events_no_op_stop)
 {
 	/* Calling modify_io_events with EV_NONE on an inactive watcher
 	 * is a no-op: the watcher must remain inactive. */
-	int sv[2] = { -1, -1 };
+	struct util_fixture *fixture = new_fixture(_t_);
+	int *sv = fixture->sv;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	struct ev_loop *loop = ev_loop_new(0);
+	fixture->loop = loop;
 	T_CHECK(loop != NULL);
 
-	ev_io w;
-	ev_io_init(&w, dummy_io_cb, sv[0], EV_READ);
+	ev_io *w = &fixture->io;
+	ev_io_init(w, dummy_io_cb, sv[0], EV_READ);
 	/* watcher is inactive; do NOT call ev_io_start */
-	T_EXPECT(!ev_is_active(&w));
+	T_EXPECT(!ev_is_active(w));
 
-	modify_io_events(loop, &w, EV_NONE);
-	T_EXPECT(!ev_is_active(&w));
-
-	ev_loop_destroy(loop);
-	(void)close(sv[0]);
-	(void)close(sv[1]);
+	modify_io_events(loop, w, EV_NONE);
+	T_EXPECT(!ev_is_active(w));
 }
 
 T_DECLARE_CASE(util_modify_io_events_start_inactive)
 {
-	int sv[2] = { -1, -1 };
+	struct util_fixture *fixture = new_fixture(_t_);
+	int *sv = fixture->sv;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	struct ev_loop *loop = ev_loop_new(0);
+	fixture->loop = loop;
 	T_CHECK(loop != NULL);
 
-	ev_io w;
-	ev_io_init(&w, dummy_io_cb, sv[0], EV_READ);
+	ev_io *w = &fixture->io;
+	ev_io_init(w, dummy_io_cb, sv[0], EV_READ);
 
-	modify_io_events(loop, &w, EV_READ);
-	T_EXPECT(ev_is_active(&w));
-	T_EXPECT_EQ(w.events & (EV_READ | EV_WRITE), EV_READ);
+	modify_io_events(loop, w, EV_READ);
+	T_EXPECT(ev_is_active(w));
+	T_EXPECT_EQ(w->events & (EV_READ | EV_WRITE), EV_READ);
 
-	ev_io_stop(loop, &w);
-	ev_loop_destroy(loop);
-	(void)close(sv[0]);
-	(void)close(sv[1]);
+	ev_io_stop(loop, w);
 }
 
 T_DECLARE_CASE(util_modify_io_events_same_events_noop)
 {
 	/* Setting the same events on an active watcher must not stop/restart it. */
-	int sv[2] = { -1, -1 };
+	struct util_fixture *fixture = new_fixture(_t_);
+	int *sv = fixture->sv;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	struct ev_loop *loop = ev_loop_new(0);
+	fixture->loop = loop;
 	T_CHECK(loop != NULL);
 
-	ev_io w;
-	ev_io_init(&w, dummy_io_cb, sv[0], EV_READ);
-	ev_io_start(loop, &w);
-	T_EXPECT(ev_is_active(&w));
+	ev_io *w = &fixture->io;
+	ev_io_init(w, dummy_io_cb, sv[0], EV_READ);
+	ev_io_start(loop, w);
+	T_EXPECT(ev_is_active(w));
 
-	modify_io_events(loop, &w, EV_READ);
-	T_EXPECT(ev_is_active(&w));
-	T_EXPECT_EQ(w.events & (EV_READ | EV_WRITE), EV_READ);
+	modify_io_events(loop, w, EV_READ);
+	T_EXPECT(ev_is_active(w));
+	T_EXPECT_EQ(w->events & (EV_READ | EV_WRITE), EV_READ);
 
-	ev_io_stop(loop, &w);
-	ev_loop_destroy(loop);
-	(void)close(sv[0]);
-	(void)close(sv[1]);
+	ev_io_stop(loop, w);
 }
 
 /* Calibrate the kernel's rounding/clamping for the requested size, then leave
@@ -463,22 +495,23 @@ T_DECLARE_CASE(util_socket_set_transparent_invalid_fd_aborts)
  * become pending -- its callback is a hard failure if it ever runs. */
 T_DECLARE_CASE(util_loop_watch_timejump_never_pending)
 {
+	struct util_fixture *fixture = new_fixture(_t_);
 	struct ev_loop *loop = ev_loop_new(0);
+	fixture->loop = loop;
 	T_CHECK(loop != NULL);
 
-	ev_periodic w;
-	loop_watch_timejump(loop, &w);
-	T_EXPECT(ev_is_active(&w));
-	T_EXPECT(ev_periodic_at(&w) > (ev_tstamp)TIMEJUMP_SENTINEL_AT / 2.0);
+	ev_periodic *w = &fixture->periodic;
+	loop_watch_timejump(loop, w);
+	T_EXPECT(ev_is_active(w));
+	T_EXPECT(ev_periodic_at(w) > (ev_tstamp)TIMEJUMP_SENTINEL_AT / 2.0);
 
 	/* an iteration that would dispatch it aborts in timejump_cb */
 	ev_run(loop, EVRUN_NOWAIT);
-	T_EXPECT(!ev_is_pending(&w));
+	T_EXPECT(!ev_is_pending(w));
 
 	/* the sentinel is unref'd, so re-ref before stopping it */
 	ev_ref(loop);
-	ev_periodic_stop(loop, &w);
-	ev_loop_destroy(loop);
+	ev_periodic_stop(loop, w);
 }
 
 /* The sentinel is unref'd, so it must not keep an otherwise-empty loop alive:
@@ -517,21 +550,23 @@ static int getsockopt_int(const int fd, const int optname)
 
 T_DECLARE_CASE(util_socket_set_keepalive_applies_each_param)
 {
+	struct util_fixture *fixture = new_fixture(_t_);
 	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	fixture->sv[0] = fd;
 	T_CHECK(fd >= 0);
 
 	socket_set_keepalive(fd, 300, 30, 5);
 	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPIDLE), 300);
 	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPINTVL), 30);
 	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPCNT), 5);
-
-	(void)close(fd);
 }
 
 /* A non-positive value leaves that parameter at the system default. */
 T_DECLARE_CASE(util_socket_set_keepalive_keeps_defaults)
 {
+	struct util_fixture *fixture = new_fixture(_t_);
 	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	fixture->sv[0] = fd;
 	T_CHECK(fd >= 0);
 
 	const int idle = getsockopt_int(fd, TCP_KEEPIDLE);
@@ -541,8 +576,6 @@ T_DECLARE_CASE(util_socket_set_keepalive_keeps_defaults)
 	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPIDLE), idle);
 	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPINTVL), intvl);
 	T_EXPECT_EQ(getsockopt_int(fd, TCP_KEEPCNT), 7);
-
-	(void)close(fd);
 }
 #endif /* WITH_TCP_KEEPALIVE_PARAMS */
 
@@ -551,7 +584,8 @@ T_DECLARE_CASE(util_socket_set_keepalive_keeps_defaults)
  * relay, so this call site is the only place they can be counted. */
 T_DECLARE_CASE(util_forward_readahead_full_delivery)
 {
-	int sv[2] = { -1, -1 };
+	struct util_fixture *fixture = new_fixture(_t_);
+	int *sv = fixture->sv;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 
 	static const char msg[] = "hello upstream";
@@ -563,22 +597,17 @@ T_DECLARE_CASE(util_forward_readahead_full_delivery)
 	const ssize_t n = recv(sv[1], buf, sizeof(msg) - 1, 0);
 	T_EXPECT_EQ(n, (ssize_t)(sizeof(msg) - 1));
 	T_EXPECT(memcmp(buf, msg, sizeof(msg) - 1) == 0);
-
-	(void)close(sv[0]);
-	(void)close(sv[1]);
 }
 
 /* A NULL counter is accepted: the caller may not have one to feed. */
 T_DECLARE_CASE(util_forward_readahead_null_counter)
 {
-	int sv[2] = { -1, -1 };
+	struct util_fixture *fixture = new_fixture(_t_);
+	int *sv = fixture->sv;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 
 	static const char msg[] = "no counter";
 	T_EXPECT(forward_readahead(sv[0], msg, sizeof(msg) - 1, NULL));
-
-	(void)close(sv[0]);
-	(void)close(sv[1]);
 }
 
 /* A send error (here EBADF on an invalid fd) makes forward_readahead return
@@ -597,7 +626,8 @@ T_DECLARE_CASE(util_forward_readahead_send_error_fails)
  * further progress. The remaining bytes are not queued. */
 T_DECLARE_CASE(util_forward_readahead_backpressure_fails)
 {
-	int sv[2] = { -1, -1 };
+	struct util_fixture *fixture = new_fixture(_t_);
+	int *sv = fixture->sv;
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
 	/* shrink both ends and make the sender non-blocking so the send returns
 	 * EAGAIN instead of blocking once the buffers fill */
@@ -615,9 +645,6 @@ T_DECLARE_CASE(util_forward_readahead_backpressure_fails)
 	 * partial delivery is neither dropped from nor rounded up in the total */
 	T_EXPECT((uintmax_t)byt > 0);
 	T_EXPECT((uintmax_t)byt < (uintmax_t)sizeof(big));
-
-	(void)close(sv[0]);
-	(void)close(sv[1]);
 }
 
 /* -------------------------------------------------------------------------
@@ -628,7 +655,38 @@ T_DECLARE_CASE(util_forward_readahead_backpressure_fails)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+static int failure_sockets[2];
+
+T_DECLARE_CASE(util_fixture_intentional_failure)
+{
+	struct util_fixture *f = new_fixture(_t_);
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, f->sv) == 0);
+	memcpy(failure_sockets, f->sv, sizeof(failure_sockets));
+	f->loop = ev_loop_new(0);
+	T_CHECK(f->loop != NULL);
+	ev_io_init(&f->io, dummy_io_cb, f->sv[0], EV_READ);
+	ev_io_start(f->loop, &f->io);
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(util_failed_expectation_cleans_fixture)
+{
+	const unsigned before = fixture_cleanup_count;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, util_fixture_intentional_failure);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(fixture_cleanup_count, before + 1);
+	for (size_t i = 0; i < ARRAY_SIZE(failure_sockets); i++) {
+		T_EXPECT_EQ(fcntl(failure_sockets[i], F_GETFD), -1);
+		T_EXPECT_EQ(errno, EBADF);
+	}
+	T_RUN_CASE(nested, util_modify_io_events_start_inactive);
+	T_RUN_CASE(nested, util_forward_readahead_full_delivery);
+	T_EXPECT_EQ(nested.passed, 2);
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(util_failed_expectation_cleans_fixture),
 	T_CASE(util_modify_io_events_stop),
 	T_CASE(util_modify_io_events_change),
 	T_CASE(util_modify_io_events_no_op_stop),
