@@ -35,10 +35,12 @@
 #include <ev.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -66,6 +68,7 @@ static struct {
 	int nonblock_fail_errno;
 	bool dialreq_parse_ok;
 	int dialreq_replace_calls;
+	int dialreq_free_calls;
 #if WITH_RULESET
 	bool ruleset_new_ok;
 	bool ruleset_load_ok;
@@ -74,6 +77,7 @@ static struct {
 	int ruleset_setserver_calls;
 	int ruleset_setbasereq_calls;
 	int ruleset_free_calls;
+	int dialreq_frees_at_ruleset_free;
 	int resolver_setnameserver_calls;
 #endif /* WITH_RULESET */
 } CONTROL;
@@ -262,11 +266,6 @@ static void vclock_cleanup(void *data)
 	vclock_stop();
 }
 
-static void loop_cleanup(void *data)
-{
-	ev_loop_destroy(data);
-}
-
 /* Advance virtual time by @p step and pump the loop once, so libev fires any
  * deadline the advance crossed. A step of 0 observes what the loop does with
  * no time passing at all. */
@@ -321,7 +320,9 @@ dialreq_parse(const char *restrict addr, const char *restrict csv)
 
 void dialreq_free(struct dialreq *req)
 {
-	(void)req;
+	if (req != NULL) {
+		CONTROL.dialreq_free_calls++;
+	}
 }
 
 bool dialreq_replace(
@@ -435,6 +436,7 @@ void ruleset_free(struct ruleset *restrict r)
 {
 	(void)r;
 	CONTROL.ruleset_free_calls++;
+	CONTROL.dialreq_frees_at_ruleset_free = CONTROL.dialreq_free_calls;
 }
 
 bool ruleset_loadfile(struct ruleset *restrict r, const char *restrict filename)
@@ -514,6 +516,75 @@ static bool test_wait_until(
 	return predicate(data);
 }
 
+/* The runner invokes cleanups after the case has returned or longjmped, so
+ * the server and descriptor registry must outlive the case's stack frame. */
+struct server_fixture {
+	struct server server;
+	struct ev_loop *loop;
+	int fds[8];
+	size_t num_fds;
+};
+
+static void fixture_finish(struct server_fixture *fixture)
+{
+	if (fixture->loop == NULL) {
+		return;
+	}
+	server_stop(&fixture->server);
+	for (size_t i = 0; i < fixture->num_fds; i++) {
+		if (fixture->fds[i] >= 0) {
+			socket_close(fixture->fds[i]);
+			fixture->fds[i] = -1;
+		}
+	}
+	ev_loop_destroy(fixture->loop);
+	fixture->loop = NULL;
+}
+
+static void fixture_cleanup(void *data)
+{
+	struct server_fixture *fixture = data;
+	fixture_finish(fixture);
+	control_reset();
+	free(fixture);
+}
+
+static struct server_fixture *fixture_new(struct testing_ctx *_t_)
+{
+	struct server_fixture *fixture = calloc(1, sizeof(*fixture));
+	T_CHECK(fixture != NULL);
+	fixture->server.stats.started = -1;
+	T_CLEANUP(fixture_cleanup, fixture);
+	fixture->loop = ev_loop_new(0);
+	T_EXPECT(fixture->loop != NULL);
+	return fixture;
+}
+
+static void fixture_track_fd(struct server_fixture *fixture, const int fd)
+{
+	T_CHECK(fixture->num_fds < ARRAY_SIZE(fixture->fds));
+	fixture->fds[fixture->num_fds++] = fd;
+}
+
+static void fixture_pipe(struct server_fixture *fixture, int pipefd[static 2])
+{
+	T_CHECK(pipe(pipefd) == 0);
+	fixture_track_fd(fixture, pipefd[0]);
+	fixture_track_fd(fixture, pipefd[1]);
+}
+
+static void fixture_close(struct server_fixture *fixture, const int fd)
+{
+	for (size_t i = 0; i < fixture->num_fds; i++) {
+		if (fixture->fds[i] == fd) {
+			fixture->fds[i] = -1;
+			socket_close(fd);
+			return;
+		}
+	}
+	T_CHECK(false);
+}
+
 static uint_fast16_t bound_port(const int fd)
 {
 	struct sockaddr_in addr = { 0 };
@@ -523,12 +594,14 @@ static uint_fast16_t bound_port(const int fd)
 	return ntohs(addr.sin_port);
 }
 
-static int connect_loopback(const uint_fast16_t port)
+static int
+connect_loopback(struct server_fixture *fixture, const uint_fast16_t port)
 {
 	const int fd = socket(AF_INET, SOCK_STREAM, 0);
 	struct sockaddr_in addr;
 
 	T_CHECK(fd >= 0);
+	fixture_track_fd(fixture, fd);
 	addr = (struct sockaddr_in){
 		.sin_family = AF_INET,
 		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
@@ -564,52 +637,104 @@ static bool listener_backing_off(void *data)
  * regression - listener lifecycle, accept dispatch and reload cases.
  * ---------------------------------------------------------------------- */
 
+static struct {
+	bool partial_init;
+	int fds[4];
+} failure_probe;
+
+T_DECLARE_CASE(server_fixture_intentional_failure)
+{
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
+	struct server *s = &fixture->server;
+	struct config conf = make_conf("127.0.0.1:0");
+	if (failure_probe.partial_init) {
+		conf.http_listen = "not a valid address";
+	}
+	const bool started =
+		server_init(s, loop, &conf, NULL, NULL, NULL, NULL);
+	T_EXPECT_EQ(started, !failure_probe.partial_init);
+	failure_probe.fds[0] = s->listeners[0].w_accept.fd;
+	failure_probe.fds[1] =
+		connect_loopback(fixture, bound_port(failure_probe.fds[0]));
+	fixture_pipe(fixture, &failure_probe.fds[2]);
+	if (started) {
+		CONTROL.accept_fail_errno = EMFILE;
+		CONTROL.accept_fail_sticky = true;
+		ev_run(loop, EVRUN_NOWAIT);
+		T_EXPECT(listener_backing_off(&s->listeners[0]));
+	}
+	T_EXPECT(false);
+}
+
 T_DECLARE_CASE(server_start_accept_and_stop)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
-	T_EXPECT(s.stats.started != -1);
+	T_EXPECT(test_wait_until(loop, served_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 1);
+	T_EXPECT(s->stats.started != -1);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	T_EXPECT_EQ(s.stats.started, -1);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	T_EXPECT_EQ(s->stats.started, -1);
+	fixture_finish(fixture);
+}
+
+/* Both a running server in accept backoff and an incompletely bound server
+ * must release their descriptors before the next case starts another loop. */
+T_DECLARE_CASE(server_failed_expectation_cleans_fixture)
+{
+	for (int i = 0; i < 2; i++) {
+		control_reset();
+		failure_probe.partial_init = i != 0;
+		T_DECLARE_CTX(nested);
+		T_RUN_CASE(nested, server_fixture_intentional_failure);
+		T_EXPECT_EQ(nested.failed, 1);
+		T_EXPECT_EQ(CONTROL.accept_fail_errno, 0);
+		T_EXPECT(!CONTROL.accept_fail_sticky);
+		for (size_t j = 0; j < ARRAY_SIZE(failure_probe.fds); j++) {
+			T_EXPECT_EQ(fcntl(failure_probe.fds[j], F_GETFD), -1);
+			T_EXPECT_EQ(errno, EBADF);
+		}
+		T_RUN_CASE(nested, server_start_accept_and_stop);
+		T_EXPECT_EQ(nested.passed, 1);
+		T_EXPECT_EQ(nested.failed, 1);
+	}
 }
 
 T_DECLARE_CASE(server_rejects_when_session_limit_exceeded)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.max_sessions = 1;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	s.num_sessions = 2;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	s->num_sessions = 2;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(test_wait_until(loop, accepted_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -623,79 +748,79 @@ T_DECLARE_CASE(server_rejects_when_session_limit_exceeded)
  */
 T_DECLARE_CASE(server_accept_cb_drains_backlog_in_one_invocation)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd[3] = { -1, -1, -1 };
 
 	conf.max_sessions = 1;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	s.num_sessions = 1;
-	port = bound_port(s.listeners[0].w_accept.fd);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	s->num_sessions = 1;
+	port = bound_port(s->listeners[0].w_accept.fd);
 	for (size_t i = 0; i < 3; i++) {
-		client_fd[i] = connect_loopback(port);
+		client_fd[i] = connect_loopback(fixture, port);
 	}
 
 	ev_run(loop, EVRUN_NOWAIT);
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 3);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 3);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 
 	for (size_t i = 0; i < 3; i++) {
-		socket_close(client_fd[i]);
+		fixture_close(fixture, client_fd[i]);
 	}
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(server_rejects_when_full_startup_limit_exceeded)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.startup_limit_full = 1;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	s.stats.num_halfopen = 2;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	s->stats.num_halfopen = 2;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(test_wait_until(loop, accepted_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(server_rejects_when_probabilistic_startup_limit_hits)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.startup_limit_start = 1;
 	conf.startup_limit_rate = 100;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	s.stats.num_halfopen = 2;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	s->stats.num_halfopen = 2;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(test_wait_until(loop, accepted_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(server_accept_error_restarts_listener)
@@ -703,22 +828,21 @@ T_DECLARE_CASE(server_accept_error_restarts_listener)
 	enum { BACKOFF_STEPS = 16 };
 	vclock_start();
 	T_CLEANUP(vclock_cleanup, NULL);
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-	T_CLEANUP(loop_cleanup, loop);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	struct listener *l;
 	uint_fast16_t port;
 	int pipefd[2] = { -1, -1 };
 	int client_fd = -1;
 	int listener_fd;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	l = &s.listeners[0];
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	l = &s->listeners[0];
 	listener_fd = l->w_accept.fd;
 	port = bound_port(listener_fd);
-	T_CHECK(pipe(pipefd) == 0);
+	fixture_pipe(fixture, pipefd);
 
 	ev_io_stop(loop, &l->w_accept);
 	ev_io_set(&l->w_accept, pipefd[0], EV_READ);
@@ -730,22 +854,22 @@ T_DECLARE_CASE(server_accept_error_restarts_listener)
 	const ev_tstamp backoff = ev_timer_remaining(loop, &l->w_timer);
 
 	ev_io_set(&l->w_accept, listener_fd, EV_READ);
-	socket_close(pipefd[0]);
-	socket_close(pipefd[1]);
-	client_fd = connect_loopback(port);
+	fixture_close(fixture, pipefd[0]);
+	fixture_close(fixture, pipefd[1]);
+	client_fd = connect_loopback(fixture, port);
 	/* A queued connection cannot restart the listener before its timer. */
 	const bool served_early =
-		vclock_step_until(loop, served_once, &s, 0.0, BACKOFF_STEPS);
+		vclock_step_until(loop, served_once, s, 0.0, BACKOFF_STEPS);
 	const bool still_backing_off = listener_backing_off(l);
 	const bool recovered = vclock_step_until(
-		loop, served_once, &s, backoff / BACKOFF_STEPS,
+		loop, served_once, s, backoff / BACKOFF_STEPS,
 		2 * BACKOFF_STEPS);
 	const struct listener_stats stats = l->stats;
 	const bool accepting = ev_is_active(&l->w_accept);
 	const bool timer_active = ev_is_active(&l->w_timer);
 
-	socket_close(client_fd);
-	server_stop(&s);
+	fixture_close(fixture, client_fd);
+	fixture_finish(fixture);
 	vclock_stop();
 
 	T_EXPECT(armed);
@@ -785,30 +909,30 @@ T_DECLARE_CASE(server_failed_setup_restores_virtual_clock)
  */
 T_DECLARE_SUBCASE(server_accept_pending_error_case, const int err)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 	CONTROL.accept_fail_errno = err;
 
 	ev_run(loop, EVRUN_NOWAIT);
 
 	/* the armed failure was consumed, so the retry is what served */
 	T_EXPECT_EQ(CONTROL.accept_fail_errno, 0);
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
-	T_EXPECT(ev_is_active(&s.listeners[0].w_accept));
-	T_EXPECT(!ev_is_active(&s.listeners[0].w_timer));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 1);
+	T_EXPECT(ev_is_active(&s->listeners[0].w_accept));
+	T_EXPECT(!ev_is_active(&s->listeners[0].w_timer));
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(server_accept_retries_pending_network_errors)
@@ -835,29 +959,29 @@ T_DECLARE_CASE(server_accept_retries_pending_network_errors)
  */
 T_DECLARE_CASE(server_accept_listener_error_backs_off)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 	CONTROL.accept_fail_errno = EMFILE;
 
 	ev_run(loop, EVRUN_NOWAIT);
 
 	T_EXPECT_EQ(CONTROL.accept_fail_errno, 0);
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 0);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
-	T_EXPECT(!ev_is_active(&s.listeners[0].w_accept));
-	T_EXPECT(ev_is_active(&s.listeners[0].w_timer));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 0);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
+	T_EXPECT(!ev_is_active(&s->listeners[0].w_accept));
+	T_EXPECT(ev_is_active(&s->listeners[0].w_timer));
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -880,16 +1004,15 @@ T_DECLARE_CASE(server_accept_error_backoff_delays_every_retry)
 
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
-
 	vclock_start();
 	T_CLEANUP(vclock_cleanup, NULL);
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
-	T_CLEANUP(loop_cleanup, loop);
-	T_CHECK(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	struct listener *const l = &s.listeners[0];
-	const int client_fd = connect_loopback(bound_port(l->w_accept.fd));
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
+	struct server *s = &fixture->server;
+	T_CHECK(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	struct listener *const l = &s->listeners[0];
+	const int client_fd =
+		connect_loopback(fixture, bound_port(l->w_accept.fd));
 
 	/* the interposed accept() never consumes the pending connection, so the
 	 * listener stays readable for as long as the failure is armed */
@@ -914,10 +1037,10 @@ T_DECLARE_CASE(server_accept_error_backoff_delays_every_retry)
 	CONTROL.accept_fail_sticky = false;
 	CONTROL.accept_fail_errno = 0;
 	const bool recovered = vclock_step_until(
-		loop, served_once, &s, step, 2 * BACKOFF_STEPS);
+		loop, served_once, s, step, 2 * BACKOFF_STEPS);
 
-	socket_close(client_fd);
-	server_stop(&s);
+	fixture_close(fixture, client_fd);
+	fixture_finish(fixture);
 	vclock_stop();
 
 	T_EXPECT(armed);
@@ -936,27 +1059,27 @@ T_DECLARE_CASE(server_accept_error_backoff_delays_every_retry)
  */
 T_DECLARE_CASE(server_rejects_when_at_max_sessions)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.max_sessions = 1;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 	/* Exactly at the limit — the next connection must be rejected. */
-	s.num_sessions = 1;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	s->num_sessions = 1;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(test_wait_until(loop, accepted_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -965,26 +1088,26 @@ T_DECLARE_CASE(server_rejects_when_at_max_sessions)
  */
 T_DECLARE_CASE(server_allows_when_below_max_sessions)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.max_sessions = 2;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	s.num_sessions = 1;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	s->num_sessions = 1;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
+	T_EXPECT(test_wait_until(loop, served_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 1);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -995,28 +1118,28 @@ T_DECLARE_CASE(server_allows_when_below_max_sessions)
  */
 T_DECLARE_CASE(server_rejects_when_halfopen_reaches_max_sessions)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.max_sessions = 1;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 	/* No committed sessions yet, but one connection is already mid-dial. */
-	s.num_sessions = 0;
-	s.stats.num_halfopen = 1;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	s->num_sessions = 0;
+	s->stats.num_halfopen = 1;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(test_wait_until(loop, accepted_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1025,26 +1148,26 @@ T_DECLARE_CASE(server_rejects_when_halfopen_reaches_max_sessions)
  */
 T_DECLARE_CASE(server_rejects_when_at_full_startup_limit)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.startup_limit_full = 1;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	s.stats.num_halfopen = 1;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	s->stats.num_halfopen = 1;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(test_wait_until(loop, accepted_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1053,27 +1176,27 @@ T_DECLARE_CASE(server_rejects_when_at_full_startup_limit)
  */
 T_DECLARE_CASE(server_rejects_when_at_probabilistic_startup_limit)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	conf.startup_limit_start = 1;
 	conf.startup_limit_rate = 100;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	s.stats.num_halfopen = 1;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	s->stats.num_halfopen = 1;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, accepted_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT(test_wait_until(loop, accepted_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1081,27 +1204,27 @@ T_DECLARE_CASE(server_rejects_when_at_probabilistic_startup_limit)
  */
 T_DECLARE_CASE(server_zero_max_sessions_allows_unlimited)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
 	/* max_sessions=0: no limit.  Use a large num_sessions to
 	 * confirm the guard is not triggered. */
 	conf.max_sessions = 0;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	s.num_sessions = (size_t)999999;
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	s->num_sessions = (size_t)999999;
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 
-	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
+	T_EXPECT(test_wait_until(loop, served_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 1);
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1109,49 +1232,49 @@ T_DECLARE_CASE(server_zero_max_sessions_allows_unlimited)
  */
 T_DECLARE_CASE(server_dual_listener_independent_accepts)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port_a, port_b;
 	int client_fd = -1;
 
 	conf.http_listen = "127.0.0.1:0";
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 	/* Two listeners must have been created (proxy + http). */
-	T_EXPECT_EQ(s.num_listeners, (size_t)2);
+	T_EXPECT_EQ(s->num_listeners, (size_t)2);
 
-	port_a = bound_port(s.listeners[0].w_accept.fd);
-	port_b = bound_port(s.listeners[1].w_accept.fd);
+	port_a = bound_port(s->listeners[0].w_accept.fd);
+	port_b = bound_port(s->listeners[1].w_accept.fd);
 	T_EXPECT(port_a != port_b);
 
 	/* Connect to the first listener. */
-	client_fd = connect_loopback(port_a);
-	T_EXPECT(test_wait_until(loop, served_once, &s, 0.5));
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 1);
-	T_EXPECT_EQ(s.listeners[1].stats.num_serve, 0);
-	socket_close(client_fd);
+	client_fd = connect_loopback(fixture, port_a);
+	T_EXPECT(test_wait_until(loop, served_once, s, 0.5));
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 1);
+	T_EXPECT_EQ(s->listeners[1].stats.num_serve, 0);
+	fixture_close(fixture, client_fd);
 
 	/* Connect to the second listener. */
-	client_fd = connect_loopback(port_b);
+	client_fd = connect_loopback(fixture, port_b);
 	{
-		const size_t num_serve = s.listeners[0].stats.num_serve;
+		const size_t num_serve = s->listeners[0].stats.num_serve;
 		struct test_watchdog wd = { 0 };
 		ev_timer w;
 		ev_timer_init(&w, watchdog_cb, 0.5, 0.0);
 		w.data = &wd;
 		ev_timer_start(loop, &w);
-		while (!wd.fired && s.listeners[1].stats.num_serve == 0) {
+		while (!wd.fired && s->listeners[1].stats.num_serve == 0) {
 			ev_run(loop, EVRUN_ONCE);
 		}
 		ev_timer_stop(loop, &w);
-		T_EXPECT_EQ(s.listeners[0].stats.num_serve, num_serve);
-		T_EXPECT_EQ(s.listeners[1].stats.num_serve, 1);
+		T_EXPECT_EQ(s->listeners[0].stats.num_serve, num_serve);
+		T_EXPECT_EQ(s->listeners[1].stats.num_serve, 1);
 	}
-	socket_close(client_fd);
+	fixture_close(fixture, client_fd);
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1160,47 +1283,47 @@ T_DECLARE_CASE(server_dual_listener_independent_accepts)
  */
 T_DECLARE_CASE(server_init_multi_mode_listeners)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.forward = "127.0.0.1:8080";
 	conf.http_listen = "127.0.0.1:0";
 	conf.restapi = "127.0.0.1:0";
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 	/* proxy (forward) + http + api */
-	T_EXPECT_EQ(s.num_listeners, (size_t)3);
+	T_EXPECT_EQ(s->num_listeners, (size_t)3);
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /* resolve_addr() rejects malformed listen addresses. */
 T_DECLARE_CASE(server_init_rejects_bad_addresses)
 {
 	{
-		struct ev_loop *loop = ev_loop_new(0);
-		T_CHECK(loop != NULL);
+		struct server_fixture *fixture = fixture_new(_t_);
+		struct ev_loop *loop = fixture->loop;
 		control_reset();
 		/* longer than FQDN_MAX_LENGTH + ":65535" */
 		char addr[600];
 		memset(addr, 'a', sizeof(addr) - 1);
 		addr[sizeof(addr) - 1] = '\0';
 		struct config conf = make_conf(addr);
-		struct server s;
-		T_EXPECT(!server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-		ev_loop_destroy(loop);
+		struct server *s = &fixture->server;
+		T_EXPECT(!server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+		fixture_finish(fixture);
 	}
 	{
-		struct ev_loop *loop = ev_loop_new(0);
-		T_CHECK(loop != NULL);
+		struct server_fixture *fixture = fixture_new(_t_);
+		struct ev_loop *loop = fixture->loop;
 		control_reset();
 		struct config conf = make_conf("not a valid address");
-		struct server s;
-		T_EXPECT(!server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-		ev_loop_destroy(loop);
+		struct server *s = &fixture->server;
+		T_EXPECT(!server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+		fixture_finish(fixture);
 	}
 }
 
@@ -1210,24 +1333,24 @@ T_DECLARE_CASE(server_init_rejects_bad_addresses)
  */
 T_DECLARE_CASE(server_init_partial_failure_cleanup)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	/* the proxy listener resolves and binds, but the HTTP listener address
 	 * is malformed, so server_init() aborts with one listener already up */
 	conf.http_listen = "not a valid address";
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(!server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	T_EXPECT_EQ(s.num_listeners, (size_t)1);
+	T_EXPECT(!server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT_EQ(s->num_listeners, (size_t)1);
 
 	/* server_stop() must release the already-opened listener socket; it also
 	 * stops the signal watchers, which server_bind() initialized but never
 	 * started, so those stops are safe no-ops and nothing leaks on the
 	 * partial-init path */
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1239,43 +1362,43 @@ T_DECLARE_CASE(server_init_partial_failure_cleanup)
  */
 T_DECLARE_CASE(server_listener_setup_failure_reports_setter_errno)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 
 	logcap_start(LOG_LEVEL_ERROR);
 	CONTROL.cloexec_fail_errno = EMFILE;
-	const bool ok = server_init(&s, loop, &conf, NULL, NULL, NULL, NULL);
+	const bool ok = server_init(s, loop, &conf, NULL, NULL, NULL, NULL);
 	logcap_stop();
 
 	T_EXPECT(!ok);
 	/* the armed failure was consumed, so the listener is what tripped it */
 	T_EXPECT_EQ(CONTROL.cloexec_fail_errno, 0);
-	T_EXPECT_EQ(s.num_listeners, (size_t)0);
+	T_EXPECT_EQ(s->num_listeners, (size_t)0);
 	T_EXPECT(logcap_has_errno("socket setup", EMFILE));
 	T_EXPECT(!logcap_has_errno("socket setup", STALE_ERRNO));
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /* The same for an accepted connection, whose setup runs the second setter:
  * the connection is dropped and the returned errno reported. */
 T_DECLARE_CASE(server_accepted_setup_failure_reports_setter_errno)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 	uint_fast16_t port;
 	int client_fd = -1;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	port = bound_port(s.listeners[0].w_accept.fd);
-	client_fd = connect_loopback(port);
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	port = bound_port(s->listeners[0].w_accept.fd);
+	client_fd = connect_loopback(fixture, port);
 	logcap_start(LOG_LEVEL_ERROR);
 	CONTROL.nonblock_fail_errno = ENFILE;
 
@@ -1283,49 +1406,49 @@ T_DECLARE_CASE(server_accepted_setup_failure_reports_setter_errno)
 	logcap_stop();
 
 	T_EXPECT_EQ(CONTROL.nonblock_fail_errno, 0);
-	T_EXPECT_EQ(s.listeners[0].stats.num_accept, 1);
-	T_EXPECT_EQ(s.listeners[0].stats.num_serve, 0);
+	T_EXPECT_EQ(s->listeners[0].stats.num_accept, 1);
+	T_EXPECT_EQ(s->listeners[0].stats.num_serve, 0);
 	T_EXPECT(logcap_has_errno("socket setup", ENFILE));
 	T_EXPECT(!logcap_has_errno("socket setup", STALE_ERRNO));
 
-	socket_close(client_fd);
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	fixture_close(fixture, client_fd);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /* server_stats() aggregates per-listener accept/serve counters. */
 T_DECLARE_CASE(server_stats_aggregates_listeners)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.http_listen = "127.0.0.1:0";
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
-	T_EXPECT_EQ(s.num_listeners, (size_t)2);
-	s.listeners[0].stats.num_accept = 3;
-	s.listeners[0].stats.num_serve = 2;
-	s.listeners[1].stats.num_accept = 5;
-	s.listeners[1].stats.num_serve = 4;
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT_EQ(s->num_listeners, (size_t)2);
+	s->listeners[0].stats.num_accept = 3;
+	s->listeners[0].stats.num_serve = 2;
+	s->listeners[1].stats.num_accept = 5;
+	s->listeners[1].stats.num_serve = 4;
 	/* the authoritative num_sessions/byt_up/byt_down live in the top-level
 	 * atomic fields; server_stats must copy those into out (the identically
 	 * named s->stats members stay zero) */
-	s.num_sessions = 7;
-	s.byt_up = 1111;
-	s.byt_down = 2222;
+	s->num_sessions = 7;
+	s->byt_up = 1111;
+	s->byt_down = 2222;
 
 	struct server_stats out;
-	server_stats(&s, &out);
+	server_stats(s, &out);
 	T_EXPECT_EQ(out.num_accept, (uint_least64_t)8);
 	T_EXPECT_EQ(out.num_serve, (uint_least64_t)6);
 	T_EXPECT_EQ(out.num_sessions, (size_t)7);
 	T_EXPECT_EQ(out.byt_up, (uint_least64_t)1111);
 	T_EXPECT_EQ(out.byt_down, (uint_least64_t)2222);
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1336,22 +1459,22 @@ T_DECLARE_CASE(server_stats_aggregates_listeners)
  */
 T_DECLARE_CASE(server_bind_defers_accept_watcher_until_start)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_bind(&s, loop, &conf, NULL, NULL, NULL));
-	T_EXPECT_EQ(s.num_listeners, (size_t)1);
+	T_EXPECT(server_bind(s, loop, &conf, NULL, NULL, NULL));
+	T_EXPECT_EQ(s->num_listeners, (size_t)1);
 	/* bound and listening, but the accept watcher is not registered yet */
-	T_EXPECT(!ev_is_active(&s.listeners[0].w_accept));
+	T_EXPECT(!ev_is_active(&s->listeners[0].w_accept));
 
-	server_start(&s, NULL);
-	T_EXPECT(ev_is_active(&s.listeners[0].w_accept));
+	server_start(s, NULL);
+	T_EXPECT(ev_is_active(&s->listeners[0].w_accept));
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 #if WITH_RULESET
@@ -1361,36 +1484,36 @@ T_DECLARE_CASE(server_bind_defers_accept_watcher_until_start)
  */
 T_DECLARE_CASE(server_signal_reload_ruleset)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.ruleset = "ruleset.lua";
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 
 	/* engine creation fails -> reload aborts, ruleset stays unset */
 	CONTROL.ruleset_new_ok = false;
-	ev_feed_event(loop, &s.w_sighup, EV_SIGNAL);
+	ev_feed_event(loop, &s->w_sighup, EV_SIGNAL);
 	ev_run(loop, EVRUN_NOWAIT);
-	T_EXPECT(s.ruleset == NULL);
+	T_EXPECT(s->ruleset == NULL);
 
 	/* engine creation + load succeed -> ruleset installed */
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = true;
 	CONTROL.ruleset_valid = true;
-	ev_feed_event(loop, &s.w_sighup, EV_SIGNAL);
+	ev_feed_event(loop, &s->w_sighup, EV_SIGNAL);
 	ev_run(loop, EVRUN_NOWAIT);
-	T_EXPECT(s.ruleset != NULL);
+	T_EXPECT(s->ruleset != NULL);
 	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 1);
 
-	server_stop(&s);
+	server_stop(s);
 	/* the server owns the reload-created ruleset: server_stop frees it
 	 * exactly once. It was previously leaked -- main's local stayed NULL
 	 * across the reload, so shutdown never freed s->ruleset. */
 	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1400,22 +1523,45 @@ T_DECLARE_CASE(server_signal_reload_ruleset)
  */
 T_DECLARE_CASE(server_stop_frees_ruleset_installed_at_init)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 
 	T_EXPECT(server_init(
-		&s, loop, &conf, NULL, NULL, NULL,
+		s, loop, &conf, NULL, NULL, NULL,
 		(struct ruleset *)&ruleset_dummy_tag));
-	T_EXPECT(s.ruleset == (struct ruleset *)&ruleset_dummy_tag);
+	T_EXPECT(s->ruleset == (struct ruleset *)&ruleset_dummy_tag);
 
-	server_stop(&s);
+	server_stop(s);
 	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
-	T_EXPECT(s.ruleset == NULL);
+	T_EXPECT(s->ruleset == NULL);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
+}
+
+T_DECLARE_CASE(server_stop_keeps_basereq_until_ruleset_is_freed)
+{
+	struct server_fixture *fixture = fixture_new(_t_);
+	control_reset();
+	struct config conf = make_conf(NULL);
+	struct server *s = &fixture->server;
+
+	T_EXPECT(server_init(
+		s, fixture->loop, &conf, NULL, NULL,
+		(struct dialreq *)&dialreq_dummy_tag,
+		(struct ruleset *)&ruleset_dummy_tag));
+	server_stop(s);
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
+	T_EXPECT_EQ(CONTROL.dialreq_frees_at_ruleset_free, 0);
+	T_EXPECT_EQ(CONTROL.dialreq_free_calls, 1);
+	T_EXPECT(s->basereq == NULL);
+	T_EXPECT(s->ruleset == NULL);
+	server_stop(s);
+	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
+	T_EXPECT_EQ(CONTROL.dialreq_free_calls, 1);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1424,30 +1570,30 @@ T_DECLARE_CASE(server_stop_frees_ruleset_installed_at_init)
  */
 T_DECLARE_CASE(server_signal_reload_boot_basereq)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.boot = "boot.lua";
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = true;
 	CONTROL.ruleset_valid = true;
 	CONTROL.dialreq_parse_ok = true;
-	ev_feed_event(loop, &s.w_sighup, EV_SIGNAL);
+	ev_feed_event(loop, &s->w_sighup, EV_SIGNAL);
 	ev_run(loop, EVRUN_NOWAIT);
 
-	T_EXPECT(s.ruleset != NULL);
+	T_EXPECT(s->ruleset != NULL);
 	/* the boot config path rebuilds and re-applies the base request */
 	T_EXPECT_EQ(CONTROL.ruleset_setbasereq_calls, 1);
 	/* a boot config may change the nameserver, so it is re-applied too */
 	T_EXPECT_EQ(CONTROL.resolver_setnameserver_calls, 1);
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1457,29 +1603,29 @@ T_DECLARE_CASE(server_signal_reload_boot_basereq)
  */
 T_DECLARE_CASE(server_signal_reload_boot_basereq_parse_failure)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.boot = "boot.lua";
-	struct server s;
+	struct server *s = &fixture->server;
 	struct dialreq *const original = (struct dialreq *)&dialreq_dummy_tag;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, original, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, original, NULL));
 
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = true;
 	CONTROL.ruleset_valid = true;
 	CONTROL.dialreq_parse_ok = false;
-	ev_feed_event(loop, &s.w_sighup, EV_SIGNAL);
+	ev_feed_event(loop, &s->w_sighup, EV_SIGNAL);
 	ev_run(loop, EVRUN_NOWAIT);
 
-	T_EXPECT(s.ruleset != NULL);
+	T_EXPECT(s->ruleset != NULL);
 	T_EXPECT_EQ(CONTROL.ruleset_setbasereq_calls, 0);
-	T_EXPECT_EQ(s.basereq, original);
+	T_EXPECT_EQ(s->basereq, original);
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /* Deliver `w`'s signal to the server and run the handler. */
@@ -1496,38 +1642,38 @@ static void feed_signal(struct ev_loop *loop, ev_signal *w)
  */
 T_DECLARE_CASE(server_signal_reload_load_failure_keeps_previous)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.ruleset = "ruleset.lua";
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = false;
 	CONTROL.ruleset_valid = true;
-	feed_signal(loop, &s.w_sighup);
+	feed_signal(loop, &s->w_sighup);
 	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 1);
 	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
 	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 0);
-	T_EXPECT(s.ruleset == NULL);
-	server_stop(&s);
+	T_EXPECT(s->ruleset == NULL);
+	server_stop(s);
 
 	control_reset();
 	struct ruleset *const installed = (struct ruleset *)&ruleset_dummy_tag;
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, installed));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, installed));
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = false;
 	CONTROL.ruleset_valid = true;
-	feed_signal(loop, &s.w_sighup);
+	feed_signal(loop, &s->w_sighup);
 	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 0);
 	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 0);
 	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 0);
-	T_EXPECT(s.ruleset == installed);
-	server_stop(&s);
+	T_EXPECT(s->ruleset == installed);
+	server_stop(s);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1536,38 +1682,38 @@ T_DECLARE_CASE(server_signal_reload_load_failure_keeps_previous)
  */
 T_DECLARE_CASE(server_signal_reload_without_ruleset_drops_engine)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.ruleset = "ruleset.lua";
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = true;
 	CONTROL.ruleset_valid = false;
-	feed_signal(loop, &s.w_sighup);
+	feed_signal(loop, &s->w_sighup);
 	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
 	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 0);
-	T_EXPECT(s.ruleset == NULL);
-	server_stop(&s);
+	T_EXPECT(s->ruleset == NULL);
+	server_stop(s);
 
 	control_reset();
 	T_EXPECT(server_init(
-		&s, loop, &conf, NULL, NULL, NULL,
+		s, loop, &conf, NULL, NULL, NULL,
 		(struct ruleset *)&ruleset_dummy_tag));
 	CONTROL.ruleset_load_ok = true;
 	CONTROL.ruleset_valid = false;
-	feed_signal(loop, &s.w_sighup);
+	feed_signal(loop, &s->w_sighup);
 	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 0);
 	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
-	T_EXPECT(s.ruleset == NULL);
-	server_stop(&s);
+	T_EXPECT(s->ruleset == NULL);
+	server_stop(s);
 	/* server_stop does not free the dropped engine a second time */
 	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 1);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1577,27 +1723,27 @@ T_DECLARE_CASE(server_signal_reload_without_ruleset_drops_engine)
  */
 T_DECLARE_CASE(server_signal_reload_in_place)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.ruleset = "ruleset.lua";
-	struct server s;
+	struct server *s = &fixture->server;
 	struct ruleset *const installed = (struct ruleset *)&ruleset_dummy_tag;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, installed));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, installed));
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = true;
 	CONTROL.ruleset_valid = true;
-	feed_signal(loop, &s.w_sighup);
-	feed_signal(loop, &s.w_sighup);
+	feed_signal(loop, &s->w_sighup);
+	feed_signal(loop, &s->w_sighup);
 	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 0);
 	T_EXPECT_EQ(CONTROL.ruleset_setserver_calls, 0);
 	T_EXPECT_EQ(CONTROL.ruleset_free_calls, 0);
-	T_EXPECT(s.ruleset == installed);
+	T_EXPECT(s->ruleset == installed);
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1606,55 +1752,55 @@ T_DECLARE_CASE(server_signal_reload_in_place)
  */
 T_DECLARE_CASE(server_signal_reload_boot_failure_skips_reapply)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
 	conf.boot = "boot.lua";
 	conf.loglevel = LOG_LEVEL_VERBOSE;
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = false;
 	CONTROL.ruleset_valid = true;
 	CONTROL.dialreq_parse_ok = true;
 	slog_setlevel(LOG_LEVEL_SILENCE);
-	feed_signal(loop, &s.w_sighup);
+	feed_signal(loop, &s->w_sighup);
 	const bool level_applied = LOGLEVEL(FATAL);
 	slog_setlevel(LOG_LEVEL_SILENCE);
 	T_EXPECT(!level_applied);
 	T_EXPECT_EQ(CONTROL.dialreq_replace_calls, 0);
 	T_EXPECT_EQ(CONTROL.ruleset_setbasereq_calls, 0);
 	T_EXPECT_EQ(CONTROL.resolver_setnameserver_calls, 0);
-	T_EXPECT(s.ruleset == NULL);
+	T_EXPECT(s->ruleset == NULL);
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 
 /* SIGHUP with neither a boot config nor a ruleset file reloads nothing. */
 T_DECLARE_CASE(server_signal_reload_nothing_reloadable)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	T_CHECK(loop != NULL);
+	struct server_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	control_reset();
 	struct config conf = make_conf("127.0.0.1:0");
-	struct server s;
+	struct server *s = &fixture->server;
 
-	T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+	T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 	CONTROL.ruleset_new_ok = true;
 	CONTROL.ruleset_load_ok = true;
 	CONTROL.ruleset_valid = true;
 	CONTROL.dialreq_parse_ok = true;
-	feed_signal(loop, &s.w_sighup);
+	feed_signal(loop, &s->w_sighup);
 	T_EXPECT_EQ(CONTROL.ruleset_new_calls, 0);
 	T_EXPECT_EQ(CONTROL.dialreq_replace_calls, 0);
 	T_EXPECT_EQ(CONTROL.resolver_setnameserver_calls, 0);
-	T_EXPECT(s.ruleset == NULL);
+	T_EXPECT(s->ruleset == NULL);
 
-	server_stop(&s);
-	ev_loop_destroy(loop);
+	server_stop(s);
+	fixture_finish(fixture);
 }
 #endif /* WITH_RULESET */
 
@@ -1665,13 +1811,13 @@ T_DECLARE_CASE(server_signal_reload_nothing_reloadable)
 T_DECLARE_CASE(server_signal_int_term_break_loop)
 {
 	for (int i = 0; i < 2; i++) {
-		struct ev_loop *loop = ev_loop_new(0);
-		T_CHECK(loop != NULL);
+		struct server_fixture *fixture = fixture_new(_t_);
+		struct ev_loop *loop = fixture->loop;
 		control_reset();
 		struct config conf = make_conf("127.0.0.1:0");
-		struct server s;
+		struct server *s = &fixture->server;
 
-		T_EXPECT(server_init(&s, loop, &conf, NULL, NULL, NULL, NULL));
+		T_EXPECT(server_init(s, loop, &conf, NULL, NULL, NULL, NULL));
 		struct test_watchdog watchdog = { 0 };
 		ev_timer w_timeout;
 		ev_timer_init(&w_timeout, watchdog_cb, 5.0, 0.0);
@@ -1679,13 +1825,14 @@ T_DECLARE_CASE(server_signal_int_term_break_loop)
 		ev_timer_start(loop, &w_timeout);
 
 		ev_feed_event(
-			loop, (i == 0) ? &s.w_sigint : &s.w_sigterm, EV_SIGNAL);
+			loop, (i == 0) ? &s->w_sigint : &s->w_sigterm,
+			EV_SIGNAL);
 		ev_run(loop, 0);
 		T_EXPECT(!watchdog.fired);
 
 		ev_timer_stop(loop, &w_timeout);
-		server_stop(&s);
-		ev_loop_destroy(loop);
+		server_stop(s);
+		fixture_finish(fixture);
 	}
 }
 
@@ -1699,6 +1846,7 @@ T_DECLARE_CASE(server_signal_int_term_break_loop)
 
 static const struct testing_suite suite[] = {
 	T_CASE(server_start_accept_and_stop),
+	T_CASE(server_failed_expectation_cleans_fixture),
 	T_CASE(server_rejects_when_session_limit_exceeded),
 	T_CASE(server_accept_cb_drains_backlog_in_one_invocation),
 	T_CASE(server_rejects_when_at_max_sessions),
@@ -1725,6 +1873,7 @@ static const struct testing_suite suite[] = {
 #if WITH_RULESET
 	T_CASE(server_signal_reload_ruleset),
 	T_CASE(server_stop_frees_ruleset_installed_at_init),
+	T_CASE(server_stop_keeps_basereq_until_ruleset_is_freed),
 	T_CASE(server_signal_reload_boot_basereq),
 	T_CASE(server_signal_reload_boot_basereq_parse_failure),
 	T_CASE(server_signal_reload_load_failure_keeps_previous),

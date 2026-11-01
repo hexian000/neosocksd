@@ -439,7 +439,6 @@ bool server_bind(
 #endif
 		.stats = { .started = -1 },
 	};
-	s->data = s;
 	server_init_signals(s);
 	/* mark the server started before adding listeners so server_stop()
 	 * always tears down (signal watchers, basereq) even with zero
@@ -551,17 +550,18 @@ void server_stop(struct server *restrict s)
 		ev_timer_stop(loop, &l->w_timer);
 	}
 
-	dialreq_free(s->basereq);
-	s->basereq = NULL;
 #if WITH_RULESET
 	/* the server owns the ruleset (installed by server_init, replaced/cleared
 	 * by SIGHUP reload); free it here so ownership stays with the server across
-	 * reloads rather than split with main */
+	 * reloads rather than split with main. Its Lua finalizers can still use the
+	 * base request through the invoke API. */
 	if (s->ruleset != NULL) {
 		ruleset_free(s->ruleset);
 		s->ruleset = NULL;
 	}
 #endif /* WITH_RULESET */
+	dialreq_free(s->basereq);
+	s->basereq = NULL;
 	s->stats.started = -1;
 }
 

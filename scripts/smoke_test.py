@@ -50,6 +50,7 @@ HOST6 = "::1"
 READY_TIMEOUT = 5.0
 IO_TIMEOUT = 5.0
 SHUTDOWN_TIMEOUT = 5.0
+STARTUP_COMPLETE = "starting the main event loop"
 
 # the /ruleset/rpcall wire contract, mirroring MIME_RPCALL and
 # RPCALL_COMPRESS_THRESHOLD in src/proto/http.h
@@ -596,7 +597,12 @@ class Daemon:
         argv += self.extra_args
         if self.api_port is not None:
             argv += ["--api", "%s:%d" % (HOST, self.api_port)]
-        argv += ["-t", "%.1f" % self.timeout, "--loglevel", str(self.loglevel)]
+        # Listen sockets accept TCP handshakes before signal registration.
+        # Keep the startup-complete debug message visible for that readiness path.
+        loglevel = self.loglevel
+        if self.api_port is None and self.listen_port is not None:
+            loglevel = max(loglevel, 6)
+        argv += ["-t", "%.1f" % self.timeout, "--loglevel", str(loglevel)]
         return argv
 
     def _wait_ready(self) -> None:
@@ -613,9 +619,7 @@ class Daemon:
                     if status == 200:
                         return
                 elif self.listen_port is not None:
-                    with socket.create_connection(
-                        (HOST, self.listen_port), timeout=0.5
-                    ):
+                    if STARTUP_COMPLETE in self.stderr_all():
                         return
                 else:
                     return
@@ -893,9 +897,8 @@ def t_cli_missing_listen(ctx: Context) -> None:
     assert_rejected(proc, "configuration check failed")
 
 
-# The startup notice cases below pin loglevel 4 rather than taking ctx.loglevel:
-# the notice is logged at NOTICE, so a run with --loglevel 3 would silence it and
-# the assertions would pass vacuously.
+# The startup notice cases below pin loglevel 6 rather than taking ctx.loglevel:
+# this keeps both the notice and the startup-complete debug message visible.
 PROXY_CHAIN_NOTICE = "extends the `-x' proxy chain"
 
 
@@ -917,7 +920,7 @@ def t_cli_ruleset_proxy_notice(ctx: Context) -> None:
          "-x", "socks5://%s:%d" % (HOST, free_port()),
          "-r", str(ruleset)],
         listen_port=listen,
-        loglevel=4,
+        loglevel=6,
     ) as d:
         log = d.stderr_all()
     hits = proxy_chain_notices(log)
@@ -939,7 +942,7 @@ def t_cli_no_ruleset_no_proxy_notice(ctx: Context) -> None:
         ["-l", "%s:%d" % (HOST, listen),
          "-x", "socks5://%s:%d" % (HOST, free_port())],
         listen_port=listen,
-        loglevel=4,
+        loglevel=6,
     ) as d:
         log = d.stderr_all()
     assert not proxy_chain_notices(log), (
@@ -960,6 +963,91 @@ def t_cli_startup_shutdown(ctx: Context) -> None:
         # driven and now verified (exit status 0) by Daemon.__exit__ on the way
         # out of this block.
         assert d.proc.poll() is None, "daemon should still be running"
+
+
+@test("cli/startup-readiness")
+def t_cli_startup_readiness(ctx: Context) -> None:
+    """A listening socket alone must not release the readiness wait."""
+    d = Daemon(ctx.binary, [], listen_port=free_port(), loglevel=0)
+    control, child = socket.socketpair()
+    control.settimeout(READY_TIMEOUT)
+    program = """
+import signal
+import socket
+import sys
+
+control = socket.socket(fileno=int(sys.argv[1]))
+control.settimeout(float(sys.argv[3]))
+listener = socket.socket()
+listener.bind(("127.0.0.1", int(sys.argv[2])))
+listener.listen()
+control.sendall(b"L")
+assert control.recv(1) == b"S"
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+print("starting the main event loop", file=sys.stderr, flush=True)
+control.sendall(b"R")
+control.recv(1)
+"""
+
+    def finish_startup(_delay: float) -> None:
+        control.sendall(b"S")
+        assert control.recv(1) == b"R", "fixture did not finish startup"
+
+    try:
+        d.proc = subprocess.Popen(
+            [sys.executable, "-c", program, str(child.fileno()),
+             str(d.listen_port), str(READY_TIMEOUT)],
+            pass_fds=(child.fileno(),),
+            stderr=d._stderr,
+        )
+        child.close()
+        assert control.recv(1) == b"L", "fixture did not start listening"
+        # Prove that a TCP connect succeeds while SIGTERM still has its default
+        # disposition. Only the readiness retry may release the startup barrier.
+        with socket.create_connection((HOST, d.listen_port), timeout=IO_TIMEOUT):
+            pass
+        with patch.object(time, "sleep", side_effect=finish_startup) as retry:
+            d._wait_ready()
+        assert retry.call_count == 1, (
+            "readiness returned before signal registration"
+        )
+        argv = d._argv()
+        assert int(argv[argv.index("--loglevel") + 1]) >= 6, (
+            "listen readiness requires the startup-complete debug message"
+        )
+        d._terminate()
+    finally:
+        try:
+            d._terminate(check=False)
+        finally:
+            control.close()
+            child.close()
+            d._stderr_cleanup()
+
+
+@test("cli/shutdown-ruleset-finalizer")
+def t_cli_shutdown_ruleset_finalizer(ctx: Context) -> None:
+    marker = ctx.tmpdir / "shutdown-finalizer.txt"
+    ruleset = write_ruleset(
+        ctx.tmpdir,
+        "shutdown-finalizer.lua",
+        "shutdown_guard = setmetatable({}, {__gc = function()\n"
+        "    neosocksd.invoke('', '127.0.0.1:1')\n"
+        "    local file = assert(io.open(%r, 'w'))\n"
+        "    assert(file:write('finalized'))\n"
+        "    assert(file:close())\n"
+        "end})\n"
+        "return {}\n" % str(marker),
+    )
+    port = free_port()
+    with Daemon(
+        ctx.binary,
+        ["-l", "%s:%d" % (HOST, port), "-r", str(ruleset)],
+        listen_port=port,
+        loglevel=ctx.loglevel,
+    ):
+        assert not marker.exists(), "reachable guard finalized before shutdown"
+    assert marker.read_text() == "finalized", "shutdown finalizer did not finish"
 
 
 @test("cli/startup-failure-cleanup")
@@ -1928,7 +2016,7 @@ def t_config_boot_proxy_notice(ctx: Context) -> None:
         "return {\n"
         "    listen = %r,\n"
         "    proxy = %r,\n"
-        "    loglevel = 4,\n"
+        "    loglevel = 6,\n"
         "    ruleset = ruleset,\n"
         "}\n"
     ) % (
@@ -1937,7 +2025,7 @@ def t_config_boot_proxy_notice(ctx: Context) -> None:
     )
     cfg = write_ruleset(ctx.tmpdir, "boot_proxy.lua", config)
     with Daemon(
-        ctx.binary, ["-c", str(cfg)], listen_port=listen, loglevel=4
+        ctx.binary, ["-c", str(cfg)], listen_port=listen, loglevel=6
     ) as d:
         log = d.stderr_all()
     hits = proxy_chain_notices(log)
@@ -2049,8 +2137,10 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         "--build", default=str(DEFAULT_BUILD_DIR), help="build dir")
     parser.add_argument("--binary", default=None,
                         help="path to neosocksd binary")
-    parser.add_argument("--loglevel", type=int,
-                        default=4, help="daemon loglevel")
+    parser.add_argument(
+        "--loglevel", type=int, default=4,
+        help="daemon loglevel (at least 6 for listen-port readiness)",
+    )
     parser.add_argument("--filter", default=None,
                         help="run tests matching SUBSTR")
     parser.add_argument("--list", action="store_true",

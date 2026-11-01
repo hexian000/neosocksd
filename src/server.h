@@ -123,13 +123,6 @@ struct listener {
 struct server {
 	struct ev_loop *loop;
 	struct server_stats stats;
-	/* Back-pointer to the "core" proxy server whose stats should be
-	 * reported. In production every server is its own core, so this is
-	 * self-referential (server_init sets s->data = s). It only differs when
-	 * an API server and the core proxy server are separate instances (as in
-	 * api_server_test.c); api_server.c reads ctx->s->data expecting the core
-	 * server, so it must never be NULL. */
-	void *data;
 
 	/* Transfer-thread counters; atomic in multi-threaded builds. */
 	xfer_session_counter num_sessions;

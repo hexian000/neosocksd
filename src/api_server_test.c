@@ -1,7 +1,7 @@
 /* neosocksd (c) 2023-2026 He Xian <hexian000@outlook.com>
  * This code is licensed under MIT license (see LICENSE for details) */
 
-/* Unit tests for api_server.c; mocked: server, ruleset, resolver. */
+/* Unit tests for api_server.c; mocked: server, ruleset, resolver, content_writer. */
 
 #include "api_server.h"
 
@@ -15,6 +15,7 @@
 #include "meta/arraysize.h"
 #include "os/clock.h"
 #include "os/socket.h"
+#include "utils/buffer.h"
 #include "utils/gc.h"
 #include "utils/slog.h"
 #include "utils/testing.h"
@@ -23,6 +24,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <locale.h>
 #include <math.h>
 #include <netinet/in.h>
@@ -38,6 +40,17 @@
 #include <time.h>
 #include <unistd.h>
 
+static bool context_alloc_fail;
+
+void *test_context_malloc(const size_t size)
+{
+	if (context_alloc_fail) {
+		context_alloc_fail = false;
+		return NULL;
+	}
+	return malloc(size);
+}
+
 /* -------------------------------------------------------------------------
  * virtual clock - fire the request timeout (an ev_timer inside a production ctx
  * the test cannot reach) deterministically, with no wall-clock wait. The
@@ -50,8 +63,6 @@ static bool g_vclock_on = false;
 static double g_vclock_sec = 0.0;
 
 enum { TEST_MAX_STEPS = 1024 };
-
-static int g_accepted_fd = -1;
 
 /* Read the real clock for the pass-through path. Both clock_gettime() and
  * gettimeofday() are interposed here, so the underlying clock has to be reached
@@ -266,6 +277,86 @@ static struct {
 	.stats_call_count = 0,
 	.loop = NULL,
 };
+
+enum writer_failure {
+	WRITER_OK,
+	WRITER_NEW_ERROR,
+	WRITER_WRITE_ERROR,
+	WRITER_CLOSE_ERROR,
+};
+
+static struct writer_stub_state {
+	enum writer_failure failure;
+	struct ruleset_callback *callback;
+	size_t new_count;
+	size_t write_count;
+	size_t close_count;
+	size_t active_count;
+	size_t partial_len;
+	enum content_encodings encoding;
+	bool result_cleared;
+} writer_stub;
+
+static int test_content_write(void *stream, const void *buf, size_t *len)
+{
+	struct io_stream *const s = stream;
+	writer_stub.write_count++;
+	if (writer_stub.failure == WRITER_WRITE_ERROR) {
+		*len /= 2;
+		const int err = io_stream_write(s->data, buf, len);
+		writer_stub.partial_len = *len;
+		return err != 0 ? err : EIO;
+	}
+	return io_stream_write(s->data, buf, len);
+}
+
+static int test_content_close(void *stream)
+{
+	struct io_stream *const s = stream;
+	writer_stub.close_count++;
+	writer_stub.active_count--;
+	const int err = io_stream_close(s->data);
+	free(s);
+	return writer_stub.failure == WRITER_CLOSE_ERROR ? EIO : err;
+}
+
+struct io_stream *test_content_writer(
+	struct vbuffer **restrict pvbuf, const size_t bufsize,
+	const enum content_encodings encoding)
+{
+	if (writer_stub.failure == WRITER_OK) {
+		return content_writer(pvbuf, bufsize, encoding);
+	}
+	writer_stub.new_count++;
+	writer_stub.encoding = encoding;
+	writer_stub.result_cleared =
+		writer_stub.callback == NULL ||
+		writer_stub.callback->rpcall.result == NULL;
+	if (writer_stub.failure == WRITER_NEW_ERROR) {
+		return NULL;
+	}
+	struct io_stream *const base = content_writer(pvbuf, bufsize, encoding);
+	T_CHECK(base != NULL);
+	struct io_stream *const s = malloc(sizeof(*s));
+	T_CHECK(s != NULL);
+	static const struct io_stream_vftable vftable = {
+		.write = test_content_write,
+		.close = test_content_close,
+	};
+	*s = (struct io_stream){
+		.vftable = &vftable,
+		.data = base,
+	};
+	writer_stub.active_count++;
+	return s;
+}
+
+static void reset_writer_stub(void *data)
+{
+	(void)data;
+	writer_stub.failure = WRITER_OK;
+	writer_stub.callback = NULL;
+}
 
 static int ruleset_state_tag = 0;
 
@@ -754,21 +845,91 @@ T_DECLARE_CASE(wait_tick_allows_idle_progress)
 	T_EXPECT(observed);
 }
 
-/* Run peer EOF and all deferred completion work before the fixture's server
- * leaves scope. Successful teardown must need no forced GC finalization. */
-static void fixture_destroy(struct ev_loop *loop)
+/* The runner cleans up after returning or longjmping out of the case, so the
+ * server, loop and descriptors must outlive the case's stack frame. One fixture
+ * is reused by looped scenarios instead of accumulating per-iteration cleanups. */
+struct api_fixture {
+	struct server server;
+	struct config saved_conf;
+	struct ev_loop *loop;
+	int accepted_fd;
+	int peer_fd;
+};
+
+static void fixture_close_peer(struct api_fixture *fixture)
 {
+	if (fixture->peer_fd != -1) {
+		T_CHECK(close(fixture->peer_fd) == 0);
+		fixture->peer_fd = -1;
+	}
+}
+
+static void fixture_check_closed(struct api_fixture *fixture)
+{
+	if (fixture->accepted_fd != -1) {
+		errno = 0;
+		T_CHECK(fcntl(fixture->accepted_fd, F_GETFD) == -1 &&
+			errno == EBADF);
+		fixture->accepted_fd = -1;
+	}
+}
+
+/* Successful teardown must drain peer EOF and deferred completion work without
+ * needing forced GC finalization. Failure cleanup below can force teardown. */
+static void fixture_finish(struct api_fixture *fixture)
+{
+	struct ev_loop *loop = fixture->loop;
+	fixture_close_peer(fixture);
 	unsigned int steps = 0;
 	while (ev_run(loop, EVRUN_NOWAIT) && steps++ < TEST_MAX_STEPS) {
 	}
 	T_CHECK(gc_finalizeall() == 0);
 	T_CHECK(!ev_run(loop, EVRUN_NOWAIT));
-	if (g_accepted_fd != -1) {
-		errno = 0;
-		T_CHECK(fcntl(g_accepted_fd, F_GETFD) == -1 && errno == EBADF);
-		g_accepted_fd = -1;
-	}
+	fixture_check_closed(fixture);
 	ev_loop_destroy(loop);
+	fixture->loop = NULL;
+}
+
+static void fixture_cleanup(void *data)
+{
+	context_alloc_fail = false;
+	struct api_fixture *fixture = data;
+	fixture_close_peer(fixture);
+	if (fixture->loop != NULL) {
+		/* Do not dispatch callbacks holding case-local test data after the
+		 * case has unwound. Finalizers stop watchers and cancel pending RPCs. */
+		(void)gc_finalizeall();
+		fixture_check_closed(fixture);
+		ev_loop_destroy(fixture->loop);
+	}
+	vclock_stop();
+	test_conf = fixture->saved_conf;
+#if WITH_RULESET
+	RS.pending_rpcall = NULL;
+	RS.rpcstate = NULL;
+	RS.rpcstate_out = NULL;
+	RS.loop = NULL;
+#endif
+	free(fixture);
+}
+
+static struct api_fixture *fixture_new(struct testing_ctx *_t_)
+{
+	struct api_fixture *fixture = calloc(1, sizeof(*fixture));
+	T_CHECK(fixture != NULL);
+	fixture->saved_conf = test_conf;
+	fixture->accepted_fd = -1;
+	fixture->peer_fd = -1;
+	T_CLEANUP(fixture_cleanup, fixture);
+	return fixture;
+}
+
+static struct ev_loop *fixture_start(struct api_fixture *fixture)
+{
+	T_CHECK(fixture->loop == NULL);
+	fixture->loop = ev_loop_new(0);
+	T_CHECK(fixture->loop != NULL);
+	return fixture->loop;
 }
 
 static bool ruleset_rpcall_pending(void *data)
@@ -777,38 +938,11 @@ static bool ruleset_rpcall_pending(void *data)
 	return RS.pending_rpcall != NULL;
 }
 
-static void init_server_pair(
-	struct server *restrict api, struct server *restrict core,
-	struct ev_loop *loop)
-{
-	*api = (struct server){ 0 };
-	*core = (struct server){ 0 };
-	api->loop = loop;
-	api->conf = &test_conf;
-	api->data = core;
-	api->stats.started = clock_monotonic_ns() - 500000000;
-	core->conf = &test_conf;
-	core->resolver = (struct resolver *)&resolver_stub_stats;
-	core->stats.started = api->stats.started;
-	core->num_listeners = 1;
-	core->listeners[0].stats.num_accept = 9;
-	core->listeners[0].stats.num_serve = 8;
-	core->stats.num_request = 13;
-	core->stats.num_success = 11;
-	core->byt_up = 4096;
-	core->byt_down = 8192;
-#if WITH_RULESET
-	api->ruleset = NULL;
-	core->ruleset = NULL;
-#endif
-}
-
-static void init_unified_server(struct server *restrict s, struct ev_loop *loop)
+static void init_server(struct server *restrict s, struct ev_loop *loop)
 {
 	*s = (struct server){ 0 };
 	s->loop = loop;
 	s->conf = &test_conf;
-	s->data = s;
 	s->resolver = (struct resolver *)&resolver_stub_stats;
 	s->stats.started = clock_monotonic_ns() - 500000000;
 	s->num_listeners = 1;
@@ -823,21 +957,22 @@ static void init_unified_server(struct server *restrict s, struct ev_loop *loop)
 #endif
 }
 
-static void start_api(
-	struct server *restrict api, struct ev_loop *loop,
-	int *restrict peer_fd)
+static void start_api(struct api_fixture *fixture, int *restrict peer_fd)
 {
 	int sv[2] = { -1, -1 };
 	struct sockaddr_in sa = { .sin_family = AF_INET };
 
+	T_CHECK(fixture->accepted_fd == -1);
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->accepted_fd = sv[0];
+	fixture->peer_fd = sv[1];
 	T_CHECK(socket_set_cloexec(sv[0]) == 0);
 	T_CHECK(socket_set_nonblock(sv[0]) == 0);
 	T_CHECK(socket_set_cloexec(sv[1]) == 0);
 	T_CHECK(socket_set_nonblock(sv[1]) == 0);
-	T_CHECK(g_accepted_fd == -1);
-	g_accepted_fd = sv[0];
-	api_serve(api, loop, sv[0], (const struct sockaddr *)&sa);
+	api_serve(
+		&fixture->server, fixture->loop, sv[0],
+		(const struct sockaddr *)&sa);
 	*peer_fd = sv[1];
 }
 
@@ -973,6 +1108,7 @@ static bool assert_status(
 /* Host validation must finish before endpoint dispatch or body handling. */
 T_DECLARE_CASE(host_validation_before_api_dispatch)
 {
+	struct api_fixture *fixture = fixture_new(_t_);
 	static const struct {
 		const char *headers;
 		const char *version;
@@ -991,14 +1127,14 @@ T_DECLARE_CASE(host_validation_before_api_dispatch)
 		{ "Host:\r\n", "HTTP/1.1", " 200 " },
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
-		struct ev_loop *loop = ev_loop_new(0);
-		struct server api, core;
+		struct ev_loop *loop = fixture_start(fixture);
+		struct server *api = &fixture->server;
 		int peer_fd = -1;
 		char req[256];
 		unsigned char rsp[4096];
 		T_CHECK(loop != NULL);
-		init_server_pair(&api, &core, loop);
-		start_api(&api, loop, &peer_fd);
+		init_server(api, loop);
+		start_api(fixture, &peer_fd);
 		const int n = snprintf(
 			req, sizeof(req),
 			"GET /healthy %s\r\n%sConnection: close\r\n\r\n",
@@ -1010,9 +1146,8 @@ T_DECLARE_CASE(host_validation_before_api_dispatch)
 		const bool ok =
 			received > 0 &&
 			assert_status(rsp, (size_t)received, cases[i].status);
-		const uintmax_t dispatched = api.stats.num_api_request;
-		T_CHECK(close(peer_fd) == 0);
-		fixture_destroy(loop);
+		const uintmax_t dispatched = api->stats.num_api_request;
+		fixture_finish(fixture);
 		T_EXPECT(ok);
 		T_EXPECT_EQ(
 			dispatched,
@@ -1022,14 +1157,15 @@ T_DECLARE_CASE(host_validation_before_api_dispatch)
 
 T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1051,8 +1187,7 @@ T_DECLARE_CASE(healthy_keepalive_reuse_connection)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Collect responses until `want` status lines have arrived or the reads stop
@@ -1086,22 +1221,105 @@ static size_t recv_responses(
  */
 T_DECLARE_CASE(pipelined_requests_both_answered)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"
 			 "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	T_EXPECT_EQ(recv_responses(loop, peer_fd, rsp, sizeof(rsp), 2), 2);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
+}
+
+static struct {
+	int stage;
+	int accepted_fd;
+	int peer_fd;
+} failure_probe;
+
+T_DECLARE_CASE(api_fixture_intentional_failure)
+{
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
+	int peer_fd = -1;
+	unsigned char rsp[2048];
+	init_server(api, loop);
+#if WITH_RULESET
+	reset_ruleset_stub();
+	RS.loop = loop;
+	if (failure_probe.stage >= 2) {
+		api->ruleset = (struct ruleset *)api;
+	}
+#endif
+	start_api(fixture, &peer_fd);
+	failure_probe.accepted_fd = fixture->accepted_fd;
+	failure_probe.peer_fd = peer_fd;
+	if (failure_probe.stage == 1) {
+		T_CHECK(send_request(
+			peer_fd,
+			"GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		T_EXPECT(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+	}
+#if WITH_RULESET
+	if (failure_probe.stage >= 2) {
+		T_CHECK(send_request(
+			peer_fd,
+			"POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
+			"Content-Length: 1\r\nContent-Type: " MIME_RPCALL
+			"\r\n\r\nx"));
+		T_CHECK(test_wait_until(
+			loop, ruleset_rpcall_pending, NULL,
+			TEST_WAIT_RECV_SEC));
+		if (failure_probe.stage == 3) {
+			finish_rpcall(loop);
+		}
+	}
+#endif /* WITH_RULESET */
+	vclock_freeze_now();
+	test_conf.timeout = 123.0;
+	T_EXPECT(false);
+}
+
+/* The intentional failure returns through the real framework cleanup. Check
+ * both socket lifetimes and GC, then run an ordinary API case in that process. */
+T_DECLARE_CASE(api_failed_expectation_cleans_fixture)
+{
+	const double timeout_before = test_conf.timeout;
+	const int stages = WITH_RULESET ? 4 : 2;
+	for (int i = 0; i < stages; i++) {
+		failure_probe.stage = i;
+		T_DECLARE_CTX(nested);
+		T_RUN_CASE(nested, api_fixture_intentional_failure);
+		T_EXPECT_EQ(nested.failed, 1);
+		T_EXPECT_EQ(fcntl(failure_probe.accepted_fd, F_GETFD), -1);
+		T_EXPECT_EQ(errno, EBADF);
+		T_EXPECT_EQ(fcntl(failure_probe.peer_fd, F_GETFD), -1);
+		T_EXPECT_EQ(errno, EBADF);
+		T_EXPECT_EQ(gc_finalizeall(), (size_t)0);
+		T_EXPECT(!g_vclock_on);
+		T_EXPECT_EQ(test_conf.timeout, timeout_before);
+#if WITH_RULESET
+		T_EXPECT(RS.pending_rpcall == NULL);
+		T_EXPECT(RS.rpcstate_out == NULL);
+		T_EXPECT_EQ(RS.cancel_count, i == 2 ? (size_t)1 : (size_t)0);
+#endif
+		T_RUN_CASE(nested, healthy_keepalive_reuse_connection);
+		T_RUN_CASE(nested, pipelined_requests_both_answered);
+		T_EXPECT_EQ(nested.passed, 2);
+		T_EXPECT_EQ(nested.failed, 1);
+	}
 }
 
 /*
@@ -1111,14 +1329,15 @@ T_DECLARE_CASE(pipelined_requests_both_answered)
  */
 T_DECLARE_CASE(pipelined_after_body_request_both_answered)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /stats?nobanner=1 HTTP/1.1\r\nHost: test\r\n"
@@ -1127,8 +1346,7 @@ T_DECLARE_CASE(pipelined_after_body_request_both_answered)
 			 "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
 	T_EXPECT_EQ(recv_responses(loop, peer_fd, rsp, sizeof(rsp), 2), 2);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1139,14 +1357,15 @@ T_DECLARE_CASE(pipelined_after_body_request_both_answered)
  */
 T_DECLARE_CASE(healthy_request_body_is_not_echoed)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n"
@@ -1175,8 +1394,7 @@ T_DECLARE_CASE(healthy_request_body_is_not_echoed)
 			(size_t)0);
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 struct fd_closed_ctx {
@@ -1208,14 +1426,15 @@ static bool fd_closed_predicate(void *data)
  */
 T_DECLARE_CASE(healthy_connection_close_header)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n"
@@ -1235,20 +1454,20 @@ T_DECLARE_CASE(healthy_connection_close_header)
 			TEST_WAIT_CLOSE_SEC));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server s;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *s = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_unified_server(&s, loop);
-	start_api(&s, loop, &peer_fd);
+	init_server(s, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1259,25 +1478,25 @@ T_DECLARE_CASE(api_stats_do_not_pollute_proxy_stats_in_unified_server)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
-	T_EXPECT_EQ(s.stats.num_request, 13);
-	T_EXPECT_EQ(s.stats.num_success, 11);
-	T_EXPECT_EQ(s.stats.num_api_request, 1);
-	T_EXPECT_EQ(s.stats.num_api_success, 1);
+	T_EXPECT_EQ(s->stats.num_request, 13);
+	T_EXPECT_EQ(s->stats.num_success, 11);
+	T_EXPECT_EQ(s->stats.num_api_request, 1);
+	T_EXPECT_EQ(s->stats.num_api_success, 1);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(metrics_unsupported_accept_encoding_and_te_returns_200)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server s;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *s = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_unified_server(&s, loop);
-	start_api(&s, loop, &peer_fd);
+	init_server(s, loop);
+	start_api(fixture, &peer_fd);
 
 	/* Prometheus sends Accept-Encoding: gzip and TE: trailers — both
 	 * are valid headers whose values the server simply does not support.
@@ -1294,20 +1513,20 @@ T_DECLARE_CASE(metrics_unsupported_accept_encoding_and_te_returns_200)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server s;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *s = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_unified_server(&s, loop);
-	start_api(&s, loop, &peer_fd);
+	init_server(s, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1354,25 +1573,25 @@ T_DECLARE_CASE(metrics_keep_proxy_and_api_request_totals_separate)
 #endif /* WITH_RULESET */
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server s;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *s = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_unified_server(&s, loop);
+	init_server(s, loop);
 #if WITH_RULESET
 	reset_ruleset_stub();
-	s.ruleset = (struct ruleset *)&s;
+	s->ruleset = (struct ruleset *)s;
 	RS.metrics_ok = true;
 #endif
-	start_api(&s, loop, &peer_fd);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1387,8 +1606,7 @@ T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
 #endif
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1398,8 +1616,9 @@ T_DECLARE_CASE(metrics_appends_ruleset_metrics_when_defined)
  */
 T_DECLARE_CASE(metrics_float_sample_keeps_full_precision)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server s;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *s = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 	/* about 39 years, far enough out that 6 significant digits quantize it
@@ -1407,9 +1626,9 @@ T_DECLARE_CASE(metrics_float_sample_keeps_full_precision)
 	static const int_least64_t uptime_ns = 1234567890123456789;
 
 	T_CHECK(loop != NULL);
-	init_unified_server(&s, loop);
-	s.stats.started = (int_least64_t)clock_monotonic_ns() - uptime_ns;
-	start_api(&s, loop, &peer_fd);
+	init_server(s, loop);
+	s->stats.started = (int_least64_t)clock_monotonic_ns() - uptime_ns;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1420,7 +1639,7 @@ T_DECLARE_CASE(metrics_float_sample_keeps_full_precision)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		const double expect =
 			(double)((int_least64_t)clock_monotonic_ns() -
-				 s.stats.started) *
+				 s->stats.started) *
 			1e-9;
 		double uptime = 0.0;
 		T_CHECK(parse_metric_value(
@@ -1429,8 +1648,7 @@ T_DECLARE_CASE(metrics_float_sample_keeps_full_precision)
 		T_EXPECT(fabs(uptime - expect) < 1.0);
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Switch LC_NUMERIC to the first installed locale that spells the decimal point
@@ -1462,8 +1680,9 @@ static const char *set_comma_locale(void)
  */
 T_DECLARE_CASE(metrics_float_sample_ignores_lc_numeric)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server s;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *s = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 	char value[64];
@@ -1474,16 +1693,16 @@ T_DECLARE_CASE(metrics_float_sample_ignores_lc_numeric)
 	T_CHECK(loop != NULL);
 	const char *const numeric = set_comma_locale();
 	if (numeric == NULL) {
-		fixture_destroy(loop);
+		fixture_finish(fixture);
 		T_LOG("no installed locale uses a non-'.' decimal point");
 		T_SKIPNOW();
 	}
 	T_LOGF("LC_NUMERIC=%s decimal_point=\"%s\"", numeric,
 	       localeconv()->decimal_point);
 
-	init_unified_server(&s, loop);
-	s.stats.started = (int_least64_t)clock_monotonic_ns() - uptime_ns;
-	start_api(&s, loop, &peer_fd);
+	init_server(s, loop);
+	s->stats.started = (int_least64_t)clock_monotonic_ns() - uptime_ns;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1503,20 +1722,20 @@ T_DECLARE_CASE(metrics_float_sample_ignores_lc_numeric)
 	T_EXPECT(value[strspn(value, "0123456789.eE+-")] == '\0');
 	T_EXPECT(strtod(value, NULL) > 1.0e9);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(stats_get_ok_with_nocache)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1533,20 +1752,20 @@ T_DECLARE_CASE(stats_get_ok_with_nocache)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Server Time"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(stats_output_format_has_no_raw_specifiers)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1572,20 +1791,20 @@ T_DECLARE_CASE(stats_output_format_has_no_raw_specifiers)
 		T_EXPECT(!find_bytes(rsp, (size_t)n, "%s"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(stats_post_ok_without_nocache)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd,
@@ -1599,8 +1818,7 @@ T_DECLARE_CASE(stats_post_ok_without_nocache)
 			rsp, (size_t)n, "Cache-Control: no-store\r\n"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -1611,14 +1829,15 @@ T_DECLARE_CASE(stats_post_ok_without_nocache)
  */
 T_DECLARE_CASE(stats_post_without_server_advances_rate_baselines)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	/* the window statics outlive each case, so this request only takes this
 	 * case's own baselines */
@@ -1633,8 +1852,8 @@ T_DECLARE_CASE(stats_post_without_server_advances_rate_baselines)
 	}
 
 	/* traffic that belongs to the window the next request closes */
-	core.listeners[0].stats.num_accept += 100;
-	core.listeners[0].stats.num_serve += 100;
+	api->listeners[0].stats.num_accept += 100;
+	api->listeners[0].stats.num_serve += 100;
 	T_CHECK(send_request(
 		peer_fd,
 		"POST /stats?nobanner=1&server=0 HTTP/1.1\r\nHost: test\r\n"
@@ -1664,20 +1883,20 @@ T_DECLARE_CASE(stats_post_without_server_advances_rate_baselines)
 			"Reject Rate         : ruleset=0.0/s, timeout=0.0/s, upstream=0.0/s\n"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(stats_bad_method_405)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "PUT /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1690,21 +1909,21 @@ T_DECLARE_CASE(stats_bad_method_405)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Allow: GET, POST\r\n"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* /metrics rejects a non-GET method with 405 + Allow (http_handle_metrics). */
 T_DECLARE_CASE(metrics_bad_method_405)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server s;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *s = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_unified_server(&s, loop);
-	start_api(&s, loop, &peer_fd);
+	init_server(s, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "PUT /metrics HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1716,21 +1935,21 @@ T_DECLARE_CASE(metrics_bad_method_405)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Allow: GET\r\n"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* /healthy is read-only: a non-GET method is 405 + Allow (restapi_check). */
 T_DECLARE_CASE(healthy_bad_method_405)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd,
@@ -1743,21 +1962,21 @@ T_DECLARE_CASE(healthy_bad_method_405)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Allow: GET\r\n"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* A trailing path segment on a leaf endpoint is 404 (restapi_check). */
 T_DECLARE_CASE(stats_trailing_path_404)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /stats/extra HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1768,20 +1987,20 @@ T_DECLARE_CASE(stats_trailing_path_404)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 404 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(chunked_request_rejected_501)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	/* http_conn frames only Content-Length bodies, so a chunked request body
 	 * is left unconsumed in rbuf. A keep-alive reset would preserve it and
@@ -1799,20 +2018,20 @@ T_DECLARE_CASE(chunked_request_rejected_501)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Connection: close\r\n"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(stats_bad_query_400)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /stats?% HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1823,12 +2042,12 @@ T_DECLARE_CASE(stats_bad_query_400)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 400 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(stats_key_only_query_options)
 {
+	struct api_fixture *fixture = fixture_new(_t_);
 	static const char *const requests[] = {
 		"GET /stats?nobanner HTTP/1.1\r\nHost: test\r\n\r\n",
 		"GET /stats?server HTTP/1.1\r\nHost: test\r\n\r\n",
@@ -1836,14 +2055,14 @@ T_DECLARE_CASE(stats_key_only_query_options)
 		"GET /stats?nobanner&server&runtime HTTP/1.1\r\nHost: test\r\n\r\n",
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(requests); i++) {
-		struct ev_loop *loop = ev_loop_new(0);
-		struct server api, core;
+		struct ev_loop *loop = fixture_start(fixture);
+		struct server *api = &fixture->server;
 		int peer_fd = -1;
 		unsigned char rsp[8192];
 
 		T_CHECK(loop != NULL);
-		init_server_pair(&api, &core, loop);
-		start_api(&api, loop, &peer_fd);
+		init_server(api, loop);
+		start_api(fixture, &peer_fd);
 
 		/* A key-only query component has a NULL value; it must be
 		 * treated as false rather than dereferenced. */
@@ -1858,21 +2077,21 @@ T_DECLARE_CASE(stats_key_only_query_options)
 			T_EXPECT(find_bytes(rsp, (size_t)n, "neosocksd "));
 		}
 
-		T_CHECK(close(peer_fd) == 0);
-		fixture_destroy(loop);
+		fixture_finish(fixture);
 	}
 }
 
 T_DECLARE_CASE(stats_deflate_response_header)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n"
@@ -1892,20 +2111,20 @@ T_DECLARE_CASE(stats_deflate_response_header)
 		T_EXPECT(find_bytes(body, len, "Accept"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(not_found_404)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /notfound HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1916,22 +2135,22 @@ T_DECLARE_CASE(not_found_404)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 404 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* api_handle()'s url_parse() failure path: invalid percent-encoding in the
  * authority makes url_parse reject the request target -> 400. */
 T_DECLARE_CASE(malformed_url_400)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET http://%zz/ HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -1942,14 +2161,14 @@ T_DECLARE_CASE(malformed_url_400)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 400 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Exercise the endpoint consumers, with unused ring slots poisoned and then a
  * full ring whose initial large samples have been overwritten. */
 T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
 {
+	struct api_fixture *fixture = fixture_new(_t_);
 	static const struct {
 		bool wrapped;
 		const char *percentiles;
@@ -1961,15 +2180,15 @@ T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
 		  0.129, 0.231, 0.254 },
 	};
 	for (size_t c = 0; c < ARRAY_SIZE(cases); c++) {
-		struct ev_loop *loop = ev_loop_new(0);
-		struct server api, core;
+		struct ev_loop *loop = fixture_start(fixture);
+		struct server *api = &fixture->server;
 		int peer_fd = -1;
 		unsigned char rsp[16384];
 		T_CHECK(loop != NULL);
-		init_server_pair(&api, &core, loop);
-		const size_t cap = ARRAY_SIZE(core.stats.connect_ns);
+		init_server(api, loop);
+		const size_t cap = ARRAY_SIZE(api->stats.connect_ns);
 		for (size_t i = 0; i < cap; i++) {
-			core.stats.connect_ns[i] = 9000000000;
+			api->stats.connect_ns[i] = 9000000000;
 		}
 		const size_t n = cases[c].wrapped ? cap : 20;
 		const size_t count = cases[c].wrapped ? cap + 17 : n;
@@ -1979,11 +2198,11 @@ T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
 			const size_t value = cases[c].wrapped ?
 						     (i * 73) % cap + 1 :
 						     (i * 7) % n + 1;
-			core.stats.connect_ns[(count - n + i) % cap] =
+			api->stats.connect_ns[(count - n + i) % cap] =
 				(int_least64_t)value * 1000000;
 		}
-		core.stats.num_connects = count;
-		start_api(&api, loop, &peer_fd);
+		api->stats.num_connects = count;
+		start_api(fixture, &peer_fd);
 		T_CHECK(send_request(
 			peer_fd, "GET /stats HTTP/1.1\r\nHost: test\r\n\r\n"));
 		ssize_t received = recv_all_with_timeout(
@@ -2019,8 +2238,7 @@ T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
 			metrics_match = metrics_match &&
 					fabs(value - expected[i]) < 1e-12;
 		}
-		T_CHECK(close(peer_fd) == 0);
-		fixture_destroy(loop);
+		fixture_finish(fixture);
 		T_EXPECT(stats_match);
 		T_EXPECT(metrics_match);
 	}
@@ -2028,6 +2246,7 @@ T_DECLARE_CASE(stats_connect_latency_shows_percentiles)
 
 T_DECLARE_CASE(head_errors_have_no_wire_payload)
 {
+	struct api_fixture *fixture = fixture_new(_t_);
 	static const struct {
 		const char *request;
 		const char *status;
@@ -2044,13 +2263,13 @@ T_DECLARE_CASE(head_errors_have_no_wire_payload)
 		  " 405 ", "Allow: GET\r\n" },
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
-		struct ev_loop *loop = ev_loop_new(0);
-		struct server api, core;
+		struct ev_loop *loop = fixture_start(fixture);
+		struct server *api = &fixture->server;
 		int peer_fd = -1;
 		unsigned char rsp[2048];
 		T_CHECK(loop != NULL);
-		init_server_pair(&api, &core, loop);
-		start_api(&api, loop, &peer_fd);
+		init_server(api, loop);
+		start_api(fixture, &peer_fd);
 		T_CHECK(send_request(peer_fd, cases[i].request));
 		const ssize_t n = recv_all_with_timeout(
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
@@ -2067,8 +2286,7 @@ T_DECLARE_CASE(head_errors_have_no_wire_payload)
 		T_EXPECT(find_bytes(rsp, body_offset, "Connection: close\r\n"));
 		unsigned char byte;
 		T_EXPECT_EQ(recv(peer_fd, &byte, 1, MSG_DONTWAIT), 0);
-		T_CHECK(close(peer_fd) == 0);
-		fixture_destroy(loop);
+		fixture_finish(fixture);
 		T_EXPECT(no_payload);
 		T_EXPECT(no_content_length);
 	}
@@ -2076,14 +2294,15 @@ T_DECLARE_CASE(head_errors_have_no_wire_payload)
 
 T_DECLARE_CASE(stats_nobanner_option_suppresses_banner)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 
 	T_CHECK(loop != NULL);
-	init_server_pair(&api, &core, loop);
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd,
@@ -2097,22 +2316,22 @@ T_DECLARE_CASE(stats_nobanner_option_suppresses_banner)
 		T_EXPECT(!find_bytes(rsp, (size_t)n, "neosocksd "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 #if WITH_RULESET
 T_DECLARE_CASE(stats_ruleset_event_percentile_values)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 	int ruleset_tag = 0;
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	init_server_pair(&api, &core, loop);
-	core.ruleset = (struct ruleset *)&ruleset_tag;
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
 	RS.vmstats_before.num_events = 20;
 	for (size_t i = 0; i < ARRAY_SIZE(RS.vmstats_before.event_ns); i++) {
 		RS.vmstats_before.event_ns[i] = 9000000000;
@@ -2121,7 +2340,7 @@ T_DECLARE_CASE(stats_ruleset_event_percentile_values)
 		RS.vmstats_before.event_ns[i] =
 			(int_least64_t)((i * 7) % 20 + 1) * 1000000;
 	}
-	start_api(&api, loop, &peer_fd);
+	start_api(fixture, &peer_fd);
 	T_CHECK(send_request(
 		peer_fd,
 		"GET /stats?runtime=1 HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -2129,8 +2348,7 @@ T_DECLARE_CASE(stats_ruleset_event_percentile_values)
 		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
 	T_CHECK(n > 0);
 	T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 	T_EXPECT(find_bytes(
 		rsp, (size_t)n,
 		"Ruleset Events      : P50=11.00ms P90=19.00ms P99=20.00ms MAX=20.00ms"));
@@ -2139,8 +2357,9 @@ T_DECLARE_CASE(stats_ruleset_event_percentile_values)
 
 T_DECLARE_CASE(stats_post_with_ruleset_q)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 	int ruleset_tag = 0;
@@ -2149,10 +2368,9 @@ T_DECLARE_CASE(stats_post_with_ruleset_q)
 	reset_ruleset_stub();
 	RS.stats_str = "q stats\n";
 	RS.stats_len = sizeof("q stats\n") - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd,
@@ -2171,26 +2389,25 @@ T_DECLARE_CASE(stats_post_with_ruleset_q)
 	T_EXPECT(RS.stats_query.present);
 	T_EXPECT_STREQ(RS.stats_query.str, "a b");
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* ruleset.stats gets the same window the server rates are taken over: the time
  * since the previous stateful request, in seconds; with no q it gets no filter. */
 T_DECLARE_CASE(stats_post_ruleset_dt_is_rate_window)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 	int ruleset_tag = 0;
 
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	/* the window is measured on the virtual clock from here on; the advance
 	 * below stays short of test_conf.timeout, armed on real time before the
@@ -2226,16 +2443,16 @@ T_DECLARE_CASE(stats_post_ruleset_dt_is_rate_window)
 	T_EXPECT(!RS.stats_query.present);
 	vclock_stop();
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* A failing ruleset.stats does not fail the request: its error text takes the
  * place of the ruleset section in the 200 body. */
 T_DECLARE_CASE(stats_post_ruleset_error_in_body)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[8192];
 	int ruleset_tag = 0;
@@ -2245,10 +2462,9 @@ T_DECLARE_CASE(stats_post_ruleset_error_in_body)
 	RS.stats_ok = false;
 	RS.errstr = "stats failed";
 	RS.errlen = sizeof("stats failed") - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd,
@@ -2267,14 +2483,14 @@ T_DECLARE_CASE(stats_post_ruleset_error_in_body)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "stats failed"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(healthy_unhealthy_returns_503)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 	int ruleset_tag = 0;
@@ -2283,10 +2499,9 @@ T_DECLARE_CASE(healthy_unhealthy_returns_503)
 	reset_ruleset_stub();
 	RS.healthy_str = "db down";
 	RS.healthy_len = sizeof("db down") - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "GET /healthy HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -2299,22 +2514,22 @@ T_DECLARE_CASE(healthy_unhealthy_returns_503)
 		T_EXPECT(RS.healthy_call_count > 0);
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(ruleset_disabled_returns_500)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	init_server_pair(&api, &core, loop);
-	core.ruleset = NULL;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = NULL;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\nHost: test\r\n"
@@ -2330,25 +2545,24 @@ T_DECLARE_CASE(ruleset_disabled_returns_500)
 			"ruleset is not enabled on the server"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* process_cb()'s fallback 404 for an unrecognized /ruleset/<action>. */
 T_DECLARE_CASE(ruleset_unknown_action_404)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 	int ruleset_tag = 0;
 
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/bogus HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -2359,13 +2573,13 @@ T_DECLARE_CASE(ruleset_unknown_action_404)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 404 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Each endpoint receives the decoded bytes before the API closes its reader. */
 T_DECLARE_CASE(ruleset_request_body_integrity)
 {
+	struct api_fixture *fixture = fixture_new(_t_);
 	static const unsigned char identity[] = "return 'request body'\n";
 	static const unsigned char deflate[] = {
 		0x78, 0x9c, 0x2b, 0x4a, 0x2d, 0x29, 0x2d, 0xca, 0x53, 0x50,
@@ -2401,8 +2615,8 @@ T_DECLARE_CASE(ruleset_request_body_integrity)
 	};
 	for (size_t a = 0; a < ARRAY_SIZE(actions); a++) {
 		for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
-			struct ev_loop *loop = ev_loop_new(0);
-			struct server api, core;
+			struct ev_loop *loop = fixture_start(fixture);
+			struct server *api = &fixture->server;
 			int peer_fd = -1;
 			int ruleset_tag = 0;
 			unsigned char rsp[4096];
@@ -2410,9 +2624,9 @@ T_DECLARE_CASE(ruleset_request_body_integrity)
 			reset_ruleset_stub();
 			RS.loop = loop;
 			RS.rpcall_auto_finish = true;
-			init_server_pair(&api, &core, loop);
-			core.ruleset = (struct ruleset *)&ruleset_tag;
-			start_api(&api, loop, &peer_fd);
+			init_server(api, loop);
+			api->ruleset = (struct ruleset *)&ruleset_tag;
+			start_api(fixture, &peer_fd);
 			char header[512];
 			const int hn = snprintf(
 				header, sizeof(header),
@@ -2441,16 +2655,16 @@ T_DECLARE_CASE(ruleset_request_body_integrity)
 			T_EXPECT(
 				memcmp(RS.body, identity,
 				       cases[i].decoded_len) == 0);
-			T_CHECK(close(peer_fd) == 0);
-			fixture_destroy(loop);
+			fixture_finish(fixture);
 		}
 	}
 }
 
 T_DECLARE_CASE(ruleset_invoke_ok_200)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -2458,10 +2672,9 @@ T_DECLARE_CASE(ruleset_invoke_ok_200)
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
 	RS.invoke_ok = true;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\nHost: test\r\n"
@@ -2474,14 +2687,14 @@ T_DECLARE_CASE(ruleset_invoke_ok_200)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -2489,10 +2702,9 @@ T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
 	RS.invoke_ok = true;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	/* Regression: Content-Length: 0 leaves conn.cbuf unallocated (NULL);
 	 * this must not crash the server. */
@@ -2506,8 +2718,7 @@ T_DECLARE_CASE(ruleset_invoke_empty_body_ok_200)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -2533,8 +2744,9 @@ static void count_warning(void *data, const unsigned char *buf, size_t len)
 
 T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	int ruleset_tag = 0;
 	static unsigned char rsp[16384];
@@ -2554,10 +2766,9 @@ T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
 	RS.invoke_ok = false;
 	RS.errstr = big_err;
 	RS.errlen = sizeof(big_err) - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/invoke HTTP/1.1\r\nHost: test\r\n"
@@ -2583,24 +2794,23 @@ T_DECLARE_CASE(errmsg_content_length_matches_truncated_body)
 
 	reset_warning_log(NULL);
 	T_EXPECT_EQ(warnings, 1);
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(ruleset_invoke_length_required_411)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
 
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd,
@@ -2612,14 +2822,14 @@ T_DECLARE_CASE(ruleset_invoke_length_required_411)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 411 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -2627,10 +2837,9 @@ T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
 	RS.update_ok = true;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd,
@@ -2651,16 +2860,16 @@ T_DECLARE_CASE(ruleset_update_ok_contains_time_cost)
 	T_EXPECT(RS.update_chunkname.present);
 	T_EXPECT_STREQ(RS.update_chunkname.str, "@x.lua");
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* A failed update answers 500 with the ruleset's error text; with no query the
  * ruleset is asked to update the main ruleset with no chunk name (both NULL). */
 T_DECLARE_CASE(ruleset_update_fail_500)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -2670,10 +2879,9 @@ T_DECLARE_CASE(ruleset_update_fail_500)
 	RS.update_ok = false;
 	RS.errstr = "update failed";
 	RS.errlen = sizeof("update failed") - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/update HTTP/1.1\r\nHost: test\r\n"
@@ -2691,25 +2899,24 @@ T_DECLARE_CASE(ruleset_update_fail_500)
 	T_EXPECT(!RS.update_modname.present);
 	T_EXPECT(!RS.update_chunkname.present);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* A malformed /ruleset/update query is refused before the ruleset runs. */
 T_DECLARE_CASE(ruleset_update_bad_query_400)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
 
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd,
@@ -2724,14 +2931,14 @@ T_DECLARE_CASE(ruleset_update_bad_query_400)
 	}
 	T_EXPECT_EQ(RS.update_call_count, (size_t)0);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -2739,10 +2946,9 @@ T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
 	RS.update_ok = true;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	/* Regression: Content-Length: 0 leaves conn.cbuf unallocated (NULL);
 	 * this must not crash the server. */
@@ -2757,41 +2963,41 @@ T_DECLARE_CASE(ruleset_update_empty_body_ok_200)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(ruleset_removed_before_processing)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[2048];
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	init_server_pair(&api, &core, loop);
-	core.ruleset = (struct ruleset *)&test_conf;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&test_conf;
+	start_api(fixture, &peer_fd);
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/gc HTTP/1.1\r\nHost: test\r\n"
 			 "Connection: close\r\n\r\n"));
 	ev_run(loop, EVRUN_NOWAIT);
-	T_CHECK(api.stats.num_api_request == 1);
-	core.ruleset = NULL;
+	T_CHECK(api->stats.num_api_request == 1);
+	api->ruleset = NULL;
 	const ssize_t n = recv_all_with_timeout(
 		loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
 	T_EXPECT(n > 0);
 	T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
 	T_EXPECT(find_bytes(
 		rsp, (size_t)n, "ruleset is not enabled on the server"));
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
-T_DECLARE_CASE(ruleset_gc_ok_contains_report)
+T_DECLARE_SUBCASE(check_gc_report, const bool extreme)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -2799,11 +3005,24 @@ T_DECLARE_CASE(ruleset_gc_ok_contains_report)
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
 	RS.gc_ok = true;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	if (extreme) {
+		test_conf.memlimit = INT_MAX;
+		RS.vmstats_before = (struct ruleset_vmstats){ 0 };
+		RS.vmstats_after = (struct ruleset_vmstats){
+			.byt_allocated = SIZE_MAX,
+			.num_object = SIZE_MAX,
+			.num_thread_active = SIZE_MAX,
+			.num_thread_peak = SIZE_MAX,
+			.num_events = 1,
+			.event_ns = { INT64_MAX },
+		};
+	}
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
+	T_CLEANUP(reset_writer_stub, NULL);
+	writer_stub = (struct writer_stub_state){ .failure = WRITER_NEW_ERROR };
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/gc HTTP/1.1\r\nHost: test\r\n\r\n"));
 	{
@@ -2813,18 +3032,31 @@ T_DECLARE_CASE(ruleset_gc_ok_contains_report)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Difference"));
 		T_EXPECT(find_bytes(rsp, (size_t)n, "Time Cost"));
+		size_t offset, clen;
+		T_CHECK(find_body_offset(rsp, (size_t)n, &offset));
+		T_CHECK(parse_content_length(rsp, offset, &clen));
+		T_EXPECT_EQ(clen, (size_t)n - offset);
+		T_EXPECT(clen < 512);
+		T_EXPECT_EQ(writer_stub.new_count, (size_t)0);
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	test_conf.memlimit = 0;
+	fixture_finish(fixture);
+}
+
+T_DECLARE_CASE(ruleset_gc_ok_contains_report)
+{
+	T_CALL_SUBCASE(check_gc_report, false);
+	T_CALL_SUBCASE(check_gc_report, true);
 }
 
 /* A failed collection answers 500 with the ruleset's error text instead of the
  * report. */
 T_DECLARE_CASE(ruleset_gc_fail_500)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -2834,10 +3066,9 @@ T_DECLARE_CASE(ruleset_gc_fail_500)
 	RS.gc_ok = false;
 	RS.errstr = "gc failed";
 	RS.errlen = sizeof("gc failed") - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/gc HTTP/1.1\r\nHost: test\r\n\r\n"));
@@ -2850,24 +3081,23 @@ T_DECLARE_CASE(ruleset_gc_fail_500)
 		T_EXPECT(!find_bytes(rsp, (size_t)n, "Difference"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(ruleset_rpcall_bad_mime_400)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
 
 	T_CHECK(loop != NULL);
 	reset_ruleset_stub();
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -2881,8 +3111,7 @@ T_DECLARE_CASE(ruleset_rpcall_bad_mime_400)
 		T_EXPECT(assert_status(rsp, (size_t)n, " 400 "));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -2899,8 +3128,9 @@ static bool ruleset_cancelled_once(void *data)
 
 T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	int ruleset_tag = 0;
 
@@ -2914,10 +3144,9 @@ T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
 	 * real elapsed reach, or slow setup fires the timer on its own and the
 	 * cancel this case asserts is no longer the one the advance caused */
 	test_conf.timeout = 10.0;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -2936,8 +3165,7 @@ T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
 		loop, ruleset_cancelled_once, NULL, TEST_WAIT_RECV_SEC));
 	T_EXPECT_EQ(RS.cancel_count, (size_t)1);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 	vclock_stop();
 	test_conf.timeout = 1.0;
 }
@@ -2949,8 +3177,9 @@ T_DECLARE_CASE(ruleset_rpcall_pending_torn_down_by_timeout)
  */
 T_DECLARE_CASE(ruleset_rpcall_sync_finish_ok_200)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -2960,10 +3189,9 @@ T_DECLARE_CASE(ruleset_rpcall_sync_finish_ok_200)
 	RS.loop = loop;
 	RS.rpcall_ok = true;
 	RS.rpcall_auto_finish = true;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -2982,8 +3210,7 @@ T_DECLARE_CASE(ruleset_rpcall_sync_finish_ok_200)
 	T_EXPECT(RS.pending_rpcall == NULL);
 	T_EXPECT_EQ(RS.cancel_count, (size_t)0);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Complete the pending rpcall from inside the loop's dispatch, so the finish
@@ -3005,8 +3232,9 @@ finish_rpcall_cb(struct ev_loop *loop, struct ev_timer *w, const int revents)
  */
 T_DECLARE_CASE(ruleset_rpcall_finished_torn_down_before_dispatch)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	int ruleset_tag = 0;
 	struct ev_timer w_finish_race;
@@ -3020,10 +3248,9 @@ T_DECLARE_CASE(ruleset_rpcall_finished_torn_down_before_dispatch)
 	/* both deadlines below must stay out of real elapsed reach until the
 	 * advance crosses them, or slow setup fires one on its own */
 	test_conf.timeout = 10.0;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -3053,16 +3280,16 @@ T_DECLARE_CASE(ruleset_rpcall_finished_torn_down_before_dispatch)
 	closed_ctx.fd = peer_fd;
 	T_EXPECT(fd_closed_predicate(&closed_ctx));
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 	vclock_stop();
 	test_conf.timeout = 1.0;
 }
 
 T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[16384];
 	int ruleset_tag = 0;
@@ -3076,10 +3303,9 @@ T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 	RS.rpcall_auto_finish = false;
 	RS.rpcall_result = large_result;
 	RS.rpcall_resultlen = sizeof(large_result);
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -3106,16 +3332,20 @@ T_DECLARE_CASE(ruleset_rpcall_ok_deflate_response)
 		T_EXPECT(memcmp(body, large_result, sizeof(large_result)) == 0);
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
-T_DECLARE_CASE(ruleset_rpcall_empty_body_ok)
+T_DECLARE_SUBCASE(check_plain_rpcall_body, const size_t resultlen)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
+	unsigned char result[RPCALL_COMPRESS_THRESHOLD + 1];
+	for (size_t i = 0; i < sizeof(result); i++) {
+		result[i] = (unsigned char)i;
+	}
 	int ruleset_tag = 0;
 
 	T_CHECK(loop != NULL);
@@ -3123,10 +3353,13 @@ T_DECLARE_CASE(ruleset_rpcall_empty_body_ok)
 	RS.loop = loop;
 	RS.rpcall_ok = true;
 	RS.rpcall_auto_finish = false;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	RS.rpcall_result = (const char *)result;
+	RS.rpcall_resultlen = resultlen;
+	T_CLEANUP(reset_writer_stub, NULL);
+	writer_stub = (struct writer_stub_state){ .failure = WRITER_NEW_ERROR };
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	/* Regression: Content-Length: 0 leaves conn.cbuf unallocated (NULL);
 	 * this must not crash the server. */
@@ -3142,16 +3375,37 @@ T_DECLARE_CASE(ruleset_rpcall_empty_body_ok)
 			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
 		T_EXPECT(n > 0);
 		T_EXPECT(assert_status(rsp, (size_t)n, " 200 "));
+		size_t offset, clen;
+		T_CHECK(find_body_offset(rsp, (size_t)n, &offset));
+		T_CHECK(parse_content_length(rsp, offset, &clen));
+		T_EXPECT_EQ(clen, resultlen);
+		T_EXPECT_EQ(clen, (size_t)n - offset);
+		T_EXPECT_MEMEQ(rsp + offset, result, resultlen);
+		T_EXPECT_EQ(writer_stub.new_count, (size_t)0);
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
+}
+
+T_DECLARE_CASE(ruleset_rpcall_plain_body_boundaries)
+{
+	static const size_t lengths[] = {
+		0,
+		1,
+		RPCALL_COMPRESS_THRESHOLD - 1,
+		RPCALL_COMPRESS_THRESHOLD,
+		RPCALL_COMPRESS_THRESHOLD + 1,
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(lengths); i++) {
+		T_CALL_SUBCASE(check_plain_rpcall_body, lengths[i]);
+	}
 }
 
 T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -3161,10 +3415,9 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 	RS.rpcall_ok = false;
 	RS.errstr = "rpcall failed";
 	RS.errlen = sizeof("rpcall failed") - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -3179,8 +3432,109 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "rpcall failed"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
+}
+
+T_DECLARE_SUBCASE(check_rpcall_writer_failure, const enum writer_failure failure)
+{
+	struct api_fixture *fixture = fixture_new(_t_);
+	static const char *const accept[] = { "deflate" };
+	static const enum content_encodings encodings[] = {
+		CENCODING_DEFLATE,
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(accept); i++) {
+		struct ev_loop *loop = fixture_start(fixture);
+		struct server *api = &fixture->server;
+		int peer_fd = -1;
+		int ruleset_tag = 0;
+		unsigned char rsp[4096];
+		char result[300];
+		char request[256];
+		T_CHECK(loop != NULL);
+		memset(result, 'R', sizeof(result));
+		reset_ruleset_stub();
+		RS.loop = loop;
+		RS.rpcall_result = result;
+		RS.rpcall_resultlen = sizeof(result);
+		init_server(api, loop);
+		api->ruleset = (struct ruleset *)&ruleset_tag;
+		start_api(fixture, &peer_fd);
+		const int requestlen = snprintf(
+			request, sizeof(request),
+			"POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
+			"Accept-Encoding: %s\r\nContent-Length: 1\r\n"
+			"Content-Type: " MIME_RPCALL "\r\n\r\nx",
+			accept[i]);
+		T_CHECK(requestlen > 0 && (size_t)requestlen < sizeof(request));
+		T_CHECK(send_request(peer_fd, request));
+		T_CHECK(test_wait_until(
+			loop, ruleset_rpcall_pending, NULL,
+			TEST_WAIT_RECV_SEC));
+		struct ruleset_callback *const callback = RS.pending_rpcall;
+		finish_rpcall(loop);
+		T_CHECK(callback->rpcall.result != NULL);
+		T_CHECK(callback->rpcall.resultlen == sizeof(result));
+		T_CHECK(*RS.rpcstate_out == NULL);
+		writer_stub = (struct writer_stub_state){
+			.failure = failure,
+			.callback = callback,
+		};
+		const ssize_t n = recv_all_with_timeout(
+			loop, peer_fd, rsp, sizeof(rsp), TEST_WAIT_RECV_SEC);
+		struct fd_closed_ctx closed = { .fd = peer_fd };
+		const bool eof = test_wait_until(
+			loop, fd_closed_predicate, &closed,
+			TEST_WAIT_CLOSE_SEC);
+		reset_writer_stub(NULL);
+		fixture_finish(fixture);
+
+		T_CHECK(n > 0);
+		T_EXPECT(assert_status(rsp, (size_t)n, " 500 "));
+		T_EXPECT(find_bytes(rsp, (size_t)n, "Connection: close\r\n"));
+		T_EXPECT(!find_bytes(rsp, (size_t)n, "Content-Encoding:"));
+		size_t offset = 0, clen = 0;
+		T_CHECK(find_body_offset(rsp, (size_t)n, &offset));
+		T_EXPECT(!parse_content_length(rsp, offset, &clen));
+		T_EXPECT(!find_bytes(rsp, offset, "Transfer-Encoding:"));
+		T_EXPECT(find_bytes(
+			rsp + offset, (size_t)n - offset,
+			"<H1>500 Internal Server Error</H1>"));
+		T_EXPECT(find_bytes(
+			rsp + offset, (size_t)n - offset, "</BODY></HTML>\n"));
+		T_EXPECT(!find_bytes(rsp + offset, (size_t)n - offset, "RRRR"));
+		T_EXPECT(eof);
+		T_EXPECT(RS.pending_rpcall == NULL);
+		T_EXPECT_EQ(RS.cancel_count, (size_t)0);
+		T_EXPECT(writer_stub.result_cleared);
+		T_EXPECT_EQ(writer_stub.encoding, encodings[i]);
+		T_EXPECT_EQ(writer_stub.new_count, (size_t)1);
+		const size_t used = failure == WRITER_NEW_ERROR ? 0 : 1;
+		T_EXPECT_EQ(writer_stub.write_count, used);
+		T_EXPECT_EQ(writer_stub.close_count, used);
+		T_EXPECT_EQ(writer_stub.active_count, (size_t)0);
+		if (failure == WRITER_WRITE_ERROR) {
+			T_EXPECT_EQ(
+				writer_stub.partial_len, sizeof(result) / 2);
+		}
+	}
+}
+
+T_DECLARE_CASE(ruleset_rpcall_writer_allocation_failure)
+{
+	T_CLEANUP(reset_writer_stub, NULL);
+	T_CALL_SUBCASE(check_rpcall_writer_failure, WRITER_NEW_ERROR);
+}
+
+T_DECLARE_CASE(ruleset_rpcall_writer_write_failure)
+{
+	T_CLEANUP(reset_writer_stub, NULL);
+	T_CALL_SUBCASE(check_rpcall_writer_failure, WRITER_WRITE_ERROR);
+}
+
+T_DECLARE_CASE(ruleset_rpcall_writer_close_failure)
+{
+	T_CLEANUP(reset_writer_stub, NULL);
+	T_CALL_SUBCASE(check_rpcall_writer_failure, WRITER_CLOSE_ERROR);
 }
 
 /*
@@ -3189,8 +3543,9 @@ T_DECLARE_CASE(ruleset_rpcall_sync_fail_500)
  */
 T_DECLARE_CASE(ruleset_rpcall_null_result_500)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -3201,10 +3556,9 @@ T_DECLARE_CASE(ruleset_rpcall_null_result_500)
 	RS.rpcall_ok = true;
 	RS.rpcall_auto_finish = false;
 	RS.rpcall_null_result = true;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -3222,8 +3576,7 @@ T_DECLARE_CASE(ruleset_rpcall_null_result_500)
 		T_EXPECT(find_bytes(rsp, (size_t)n, "rpcall did not return"));
 	}
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -3233,8 +3586,9 @@ T_DECLARE_CASE(ruleset_rpcall_null_result_500)
  */
 T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -3245,10 +3599,9 @@ T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
 	RS.rpcall_publish_then_fail = true;
 	RS.errstr = "rpcall failed";
 	RS.errlen = sizeof("rpcall failed") - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -3264,8 +3617,7 @@ T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
 	/* the orphaned state was cancelled exactly once */
 	T_EXPECT_EQ(RS.cancel_count, (size_t)1);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -3279,8 +3631,9 @@ T_DECLARE_CASE(ruleset_rpcall_orphaned_state_cancelled)
  */
 T_DECLARE_CASE(ruleset_rpcall_completed_then_failed_drops_finish)
 {
-	struct ev_loop *loop = ev_loop_new(0);
-	struct server api, core;
+	struct api_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(fixture);
+	struct server *api = &fixture->server;
 	int peer_fd = -1;
 	unsigned char rsp[4096];
 	int ruleset_tag = 0;
@@ -3294,10 +3647,9 @@ T_DECLARE_CASE(ruleset_rpcall_completed_then_failed_drops_finish)
 	RS.errlen = sizeof("rpcall failed") - 1;
 	RS.rpcall_result = "rpcall-result-marker";
 	RS.rpcall_resultlen = sizeof("rpcall-result-marker") - 1;
-	init_server_pair(&api, &core, loop);
-	/* the ruleset lives on the core server; api_server reads it there */
-	core.ruleset = (struct ruleset *)&ruleset_tag;
-	start_api(&api, loop, &peer_fd);
+	init_server(api, loop);
+	api->ruleset = (struct ruleset *)&ruleset_tag;
+	start_api(fixture, &peer_fd);
 
 	T_CHECK(send_request(
 		peer_fd, "POST /ruleset/rpcall HTTP/1.1\r\nHost: test\r\n"
@@ -3316,10 +3668,9 @@ T_DECLARE_CASE(ruleset_rpcall_completed_then_failed_drops_finish)
 	}
 	/* the completed call detached its own state; nothing was left to cancel */
 	T_EXPECT_EQ(RS.cancel_count, (size_t)0);
-	T_EXPECT_EQ(api.stats.num_api_success, (uint_least64_t)0);
+	T_EXPECT_EQ(api->stats.num_api_success, (uint_least64_t)0);
 
-	T_CHECK(close(peer_fd) == 0);
-	fixture_destroy(loop);
+	fixture_finish(fixture);
 }
 #endif /* WITH_RULESET */
 
@@ -3341,9 +3692,38 @@ T_DECLARE_CASE(frozen_clock_waits_are_bounded)
 	vclock_stop();
 	T_CHECK(close(sv[0]) == 0);
 	T_CHECK(close(sv[1]) == 0);
-	fixture_destroy(loop);
+	ev_loop_destroy(loop);
 	T_EXPECT_EQ(n, (ssize_t)0);
 	T_EXPECT(!ready);
+}
+
+T_DECLARE_CASE(context_allocation_failure)
+{
+	struct api_fixture *f = fixture_new(_t_);
+	struct ev_loop *loop = fixture_start(f);
+	init_server(&f->server, loop);
+	const struct server_stats before = f->server.stats;
+	int peer_fd;
+	context_alloc_fail = true;
+	start_api(f, &peer_fd);
+	T_EXPECT(!context_alloc_fail);
+	T_EXPECT_EQ(fcntl(f->accepted_fd, F_GETFD), -1);
+	T_EXPECT_EQ(errno, EBADF);
+	T_EXPECT_EQ(f->server.stats.num_halfopen, before.num_halfopen);
+	T_EXPECT_EQ(f->server.stats.num_api_request, before.num_api_request);
+	T_EXPECT_EQ(f->server.num_sessions, 0);
+	T_EXPECT_EQ(gc_finalizeall(), 0);
+	T_EXPECT_EQ(ev_run(loop, EVRUN_NOWAIT), 0);
+}
+
+T_DECLARE_CASE(context_allocation_failure_recovers)
+{
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, context_allocation_failure);
+	T_EXPECT_EQ(nested.failed, 0);
+	T_RUN_CASE(nested, healthy_keepalive_reuse_connection);
+	T_EXPECT_EQ(nested.failed, 0);
+	T_EXPECT_EQ(nested.passed, 2);
 }
 
 /* -------------------------------------------------------------------------
@@ -3355,10 +3735,12 @@ T_DECLARE_CASE(frozen_clock_waits_are_bounded)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(context_allocation_failure_recovers),
 	T_CASE(wait_tick_allows_idle_progress),
 	T_CASE(frozen_clock_waits_are_bounded),
 	T_CASE(host_validation_before_api_dispatch),
 	T_CASE(healthy_keepalive_reuse_connection),
+	T_CASE(api_failed_expectation_cleans_fixture),
 	T_CASE(pipelined_requests_both_answered),
 	T_CASE(pipelined_after_body_request_both_answered),
 	T_CASE(healthy_request_body_is_not_echoed),
@@ -3411,9 +3793,12 @@ static const struct testing_suite suite[] = {
 	T_CASE(ruleset_rpcall_sync_finish_ok_200),
 	T_CASE(ruleset_rpcall_finished_torn_down_before_dispatch),
 	T_CASE(ruleset_rpcall_ok_deflate_response),
-	T_CASE(ruleset_rpcall_empty_body_ok),
+	T_CASE(ruleset_rpcall_plain_body_boundaries),
 	T_CASE(ruleset_rpcall_sync_fail_500),
 	T_CASE(ruleset_rpcall_null_result_500),
+	T_CASE(ruleset_rpcall_writer_allocation_failure),
+	T_CASE(ruleset_rpcall_writer_write_failure),
+	T_CASE(ruleset_rpcall_writer_close_failure),
 	T_CASE(ruleset_rpcall_orphaned_state_cancelled),
 	T_CASE(ruleset_rpcall_completed_then_failed_drops_finish),
 #endif /* WITH_RULESET */

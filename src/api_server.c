@@ -174,10 +174,9 @@ static double process_load(void)
  * re-samples without reporting: every stateful request consumes the window, so
  * one that skips the report must still advance the baselines with it. */
 static void server_stats_stateful(
-	struct io_stream *restrict w, const struct server *restrict api,
+	struct io_stream *restrict w, const struct server *restrict s,
 	const double dt)
 {
-	const struct server *restrict s = api->data;
 	struct server_stats agg;
 	server_stats(s, &agg);
 
@@ -204,8 +203,7 @@ static void server_stats_stateful(
 	const double request_rate =
 		(double)(agg.num_request - last.num_request) / dt;
 	const double api_request_rate =
-		(double)(api->stats.num_api_request - last.num_api_request) /
-		dt;
+		(double)(agg.num_api_request - last.num_api_request) / dt;
 	const double reject_ruleset_rate =
 		(double)(agg.num_reject_ruleset - last.num_reject_ruleset) / dt;
 	const double reject_timeout_rate =
@@ -241,15 +239,20 @@ static void server_stats_stateful(
 	last.num_accept = agg.num_accept;
 	last.num_reject = num_reject;
 	last.num_request = agg.num_request;
-	last.num_api_request = api->stats.num_api_request;
+	last.num_api_request = agg.num_api_request;
 	last.num_reject_ruleset = agg.num_reject_ruleset;
 	last.num_reject_timeout = agg.num_reject_timeout;
 	last.num_reject_upstream = agg.num_reject_upstream;
 }
 
 #if WITH_RULESET
+struct vmstats_buffer {
+	BUFFER_HDR;
+	unsigned char data[384];
+};
+
 static void append_vmstats(
-	struct io_stream *restrict w, const struct ruleset_vmstats *vm,
+	struct vmstats_buffer *restrict w, const struct ruleset_vmstats *vm,
 	const struct config *restrict conf)
 {
 	FORMAT_BYTES(allocated, (double)vm->byt_allocated);
@@ -258,21 +261,21 @@ static void append_vmstats(
 	const int memlimit_mb = conf->memlimit;
 	if (memlimit_mb > 0) {
 		FORMAT_BYTES(memlimit, ((double)memlimit_mb) * 0x1p20);
-		(void)io_bufprintf(
-			w, "%-20s: %s < %s (%s objects)\n", "Ruleset Allocated",
-			allocated, memlimit, objects);
+		(void)BUF_APPENDF(
+			*w, "%-20s: %s < %s (%s objects)\n",
+			"Ruleset Allocated", allocated, memlimit, objects);
 	} else {
-		(void)io_bufprintf(
-			w, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
+		(void)BUF_APPENDF(
+			*w, "%-20s: %s (%s objects)\n", "Ruleset Allocated",
 			allocated, objects);
 	}
-	(void)io_bufprintf(
-		w, "%-20s: %zu (peak %zu)\n", "Ruleset Threads",
+	(void)BUF_APPENDF(
+		*w, "%-20s: %zu (peak %zu)\n", "Ruleset Threads",
 		vm->num_thread_active, vm->num_thread_peak);
 
 	if (vm->num_events == 0) {
-		(void)io_bufprintf(
-			w, "%-20s: %s\n", "Ruleset Events", "(never)");
+		(void)BUF_APPENDF(
+			*w, "%-20s: %s\n", "Ruleset Events", "(never)");
 		return;
 	}
 
@@ -282,18 +285,16 @@ static void append_vmstats(
 	FORMAT_DURATION(p90_str, make_duration_nanos(p.p90));
 	FORMAT_DURATION(p99_str, make_duration_nanos(p.p99));
 	FORMAT_DURATION(pmax_str, make_duration_nanos(p.pmax));
-	(void)io_bufprintf(
-		w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Ruleset Events",
+	(void)BUF_APPENDF(
+		*w, "%-20s: P50=%s P90=%s P99=%s MAX=%s\n", "Ruleset Events",
 		p50_str, p90_str, p99_str, pmax_str);
 }
 #endif /* WITH_RULESET */
 
 static void append_server_stats(
-	struct io_stream *restrict w, const struct server *restrict api,
+	struct io_stream *restrict w, const struct server *restrict s,
 	const int_fast64_t uptime, const bool runtime)
 {
-	const struct server_stats *restrict apistats = &api->stats;
-	const struct server *restrict s = api->data;
 	struct server_stats agg;
 	server_stats(s, &agg);
 	const struct resolver_stats *restrict resolv_stats =
@@ -315,8 +316,8 @@ static void append_server_stats(
 	FORMAT_BYTES(client_tx, (double)agg.byt_client_send);
 	FORMAT_BYTES(upstream_rx, (double)agg.byt_dial_recv);
 	FORMAT_BYTES(upstream_tx, (double)agg.byt_dial_send);
-	FORMAT_BYTES(api_recv, (double)apistats->api_byt_recv);
-	FORMAT_BYTES(api_send, (double)apistats->api_byt_send);
+	FORMAT_BYTES(api_recv, (double)agg.api_byt_recv);
+	FORMAT_BYTES(api_send, (double)agg.api_byt_send);
 
 	(void)io_bufprintf(
 		w,
@@ -349,9 +350,8 @@ static void append_server_stats(
 		agg.num_success, agg.num_request - agg.num_success, client_rx,
 		client_tx,
 		/* API Requests */
-		apistats->num_api_success,
-		apistats->num_api_request - apistats->num_api_success, api_recv,
-		api_send,
+		agg.num_api_success, agg.num_api_request - agg.num_api_success,
+		api_recv, api_send,
 		/* Upstream Setup */
 		upstream_rx, upstream_tx,
 		/* Traffic */
@@ -374,7 +374,11 @@ static void append_server_stats(
 	if (ruleset != NULL && runtime) {
 		struct ruleset_vmstats vmstats;
 		ruleset_vmstats(ruleset, &vmstats);
-		append_vmstats(w, &vmstats, s->conf);
+		struct vmstats_buffer text;
+		BUF_INIT(text, 0);
+		append_vmstats(&text, &vmstats, s->conf);
+		size_t n = text.len;
+		(void)io_stream_write(w, text.data, &n);
 	}
 #else /* WITH_RULESET */
 	(void)runtime;
@@ -479,18 +483,6 @@ static enum content_encodings negotiate_encoding(
 	return CENCODING_DEFLATE;
 }
 
-#if WITH_RULESET
-/* The ruleset is owned by the core proxy server (ctx->s->data), the same
- * instance server_stats aggregates from, so every endpoint reads it there. The
- * API server instance's own ruleset field coincides only in the single-server
- * production layout, not in a split api/core setup. */
-static struct ruleset *ctx_ruleset(const struct api_ctx *restrict ctx)
-{
-	const struct server *restrict core = ctx->s->data;
-	return core->ruleset;
-}
-#endif /* WITH_RULESET */
-
 static void
 http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
@@ -577,7 +569,7 @@ http_handle_stats(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	}
 
 #if WITH_RULESET
-	struct ruleset *ruleset = ctx_ruleset(ctx);
+	struct ruleset *ruleset = ctx->s->ruleset;
 	if (!stateless && ruleset != NULL) {
 		size_t len;
 		const char *s = ruleset_stats(ruleset, dt, query, &len);
@@ -849,13 +841,11 @@ static void handle_ruleset_gc(
 	struct ruleset_vmstats vmstats;
 	ruleset_vmstats(ruleset, &vmstats);
 
-	struct io_stream *w = io_bufwriter(
-		content_writer(&ctx->conn.cbuf, IO_BUFSIZE, CENCODING_NONE),
-		IO_BUFSIZE);
-	if (w == NULL) {
-		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
+	struct {
+		BUFFER_HDR;
+		unsigned char data[512];
+	} body;
+	BUF_INIT(body, 0);
 	{
 		FORMAT_BYTES(
 			freed_bytes,
@@ -865,28 +855,25 @@ static void handle_ruleset_gc(
 			freed_objects,
 			(double)((int_fast64_t)vmstats.num_object -
 				 (int_fast64_t)before.num_object));
-		(void)io_bufprintf(
-			w, "%-20s: %s (%s objects)\n", "Difference",
+		(void)BUF_APPENDF(
+			body, "%-20s: %s (%s objects)\n", "Difference",
 			freed_bytes, freed_objects);
 	}
-	append_vmstats(w, &vmstats, ctx->s->conf);
+	struct vmstats_buffer text;
+	BUF_INIT(text, 0);
+	append_vmstats(&text, &vmstats, ctx->s->conf);
+	BUF_APPEND(body, text.data, text.len);
 	{
 		FORMAT_DURATION(timecost, make_duration_nanos(end - start));
-		(void)io_bufprintf(w, "Time Cost           : %s\n", timecost);
+		(void)BUF_APPENDF(body, "Time Cost           : %s\n", timecost);
 	}
-	{
-		const int err = io_stream_close(w);
-		if (err != 0) {
-			LOGE_F("io_stream_close: error %d", err);
-			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-			return;
-		}
-	}
+	VBUF_FREE(ctx->conn.cbuf);
 	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 	resphdr_conn(ctx);
 	RESPHDR_CPLAINTEXT(ctx->conn.wbuf);
-	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
+	RESPHDR_CLENGTH(ctx->conn.wbuf, body.len);
 	RESPHDR_FINISH(ctx->conn.wbuf);
+	BUF_APPEND(ctx->conn.wbuf, body.data, body.len);
 	send_response(loop, ctx, true);
 }
 
@@ -897,7 +884,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 	ev_idle_stop(loop, watcher);
 	struct api_ctx *restrict ctx = watcher->data;
 	ASSERT(ctx->state == STATE_PROCESS);
-	struct ruleset *ruleset = ctx_ruleset(ctx);
+	struct ruleset *ruleset = ctx->s->ruleset;
 	if (ruleset == NULL) {
 		SEND_ERRSTR(loop, ctx, "ruleset is not enabled on the server");
 		return;
@@ -957,7 +944,7 @@ process_cb(struct ev_loop *loop, ev_idle *watcher, const int revents)
 static void
 http_handle_ruleset(struct ev_loop *loop, struct api_ctx *restrict ctx)
 {
-	if (ctx_ruleset(ctx) == NULL) {
+	if (ctx->s->ruleset == NULL) {
 		SEND_ERRSTR(loop, ctx, "ruleset is not enabled on the server");
 		return;
 	}
@@ -1017,8 +1004,7 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		return;
 	}
 
-	const struct server_stats *restrict apistats = &ctx->s->stats;
-	const struct server *restrict s = ctx->s->data;
+	const struct server *restrict s = ctx->s;
 	struct server_stats agg;
 	server_stats(s, &agg);
 	const struct resolver_stats *restrict resolv_stats =
@@ -1140,14 +1126,13 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 	APPEND_METRIC_HDR(
 		"api_requests_total", "counter", "API requests received.");
 	APPEND_METRIC(
-		"api_requests_total", "%" PRIuLEAST64,
-		apistats->num_api_request);
+		"api_requests_total", "%" PRIuLEAST64, agg.num_api_request);
 	APPEND_METRIC_HDR(
 		"api_requests_success_total", "counter",
 		"API requests completed successfully.");
 	APPEND_METRIC(
 		"api_requests_success_total", "%" PRIuLEAST64,
-		apistats->num_api_success);
+		agg.num_api_success);
 	APPEND_METRIC_HDR(
 		"uplink_bytes_total", "counter",
 		"Total bytes of proxied payload sent to upstream.");
@@ -1162,10 +1147,10 @@ http_handle_metrics(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		"Bytes exchanged during proxy setup and API HTTP messages, by direction and module; may include relayed payload.");
 	APPEND_METRIC_L(
 		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
-		"%" PRIuLEAST64, "rx", "api_server", apistats->api_byt_recv);
+		"%" PRIuLEAST64, "rx", "api_server", agg.api_byt_recv);
 	APPEND_METRIC_L(
 		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
-		"%" PRIuLEAST64, "tx", "api_server", apistats->api_byt_send);
+		"%" PRIuLEAST64, "tx", "api_server", agg.api_byt_send);
 	APPEND_METRIC_L(
 		"protocol_bytes_total", "direction=\"%s\",module=\"%s\"",
 		"%" PRIuLEAST64, "rx", "proxy_server", agg.byt_client_recv);
@@ -1319,7 +1304,7 @@ static void api_handle(struct ev_loop *loop, struct api_ctx *restrict ctx)
 			return;
 		}
 #if WITH_RULESET
-		struct ruleset *ruleset = ctx_ruleset(ctx);
+		struct ruleset *ruleset = ctx->s->ruleset;
 		if (ruleset != NULL) {
 			size_t len;
 			const char *unhealthy = ruleset_healthy(ruleset, &len);
@@ -1387,7 +1372,7 @@ static void api_ctx_stop(struct ev_loop *loop, struct api_ctx *restrict ctx)
 		/* The live session count is the atomic top-level field, not the
 		 * dead embedded stats copy; read it through server_stats(). */
 		struct server_stats agg;
-		server_stats(ctx->s->data, &agg);
+		server_stats(ctx->s, &agg);
 		API_CTX_LOG_F(
 			VERYVERBOSE, ctx, "closed, %zu active",
 			agg.num_sessions);
@@ -1605,28 +1590,50 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	const enum content_encodings encoding = negotiate_encoding(
 		ctx->conn.hdr.accept_encoding, resultlen,
 		RPCALL_COMPRESS_THRESHOLD);
-	struct io_stream *writer =
-		content_writer(&ctx->conn.cbuf, resultlen, encoding);
-	if (writer == NULL) {
-		free(result);
-		LOGOOM();
-		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-		return;
+	size_t contentlen = resultlen;
+	const bool inline_body = resultlen < RPCALL_COMPRESS_THRESHOLD;
+	if (inline_body) {
+		VBUF_FREE(ctx->conn.cbuf);
 	}
-	size_t n = resultlen;
-	int err = io_stream_write(writer, result, &n);
-	free(result);
-	if (err != 0) {
-		LOGW_F("io_stream_write: error %d, %zu/%zu", err, n, resultlen);
-		(void)io_stream_close(writer);
-		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-		return;
-	}
-	err = io_stream_close(writer);
-	if (err != 0) {
-		LOGW_F("io_stream_close: error %d", err);
-		send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
-		return;
+	if (!inline_body && encoding == CENCODING_NONE) {
+		VBUF_RESERVE(ctx->conn.cbuf, resultlen);
+		if (ctx->conn.cbuf != NULL) {
+			VBUF_RESET(ctx->conn.cbuf);
+		}
+		VBUF_APPEND(ctx->conn.cbuf, result, resultlen);
+		if (VBUF_HAS_OOM(ctx->conn.cbuf)) {
+			free(result);
+			LOGOOM();
+			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+	} else if (!inline_body) {
+		struct io_stream *writer =
+			content_writer(&ctx->conn.cbuf, resultlen, encoding);
+		if (writer == NULL) {
+			free(result);
+			LOGOOM();
+			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+		size_t n = resultlen;
+		int err = io_stream_write(writer, result, &n);
+		if (err != 0 || n != resultlen) {
+			free(result);
+			LOGW_F("io_stream_write: error %d, %zu/%zu", err, n,
+			       resultlen);
+			(void)io_stream_close(writer);
+			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+		err = io_stream_close(writer);
+		if (err != 0) {
+			free(result);
+			LOGW_F("io_stream_close: error %d", err);
+			send_errpage(loop, ctx, HTTP_INTERNAL_SERVER_ERROR);
+			return;
+		}
+		contentlen = VBUF_LEN(ctx->conn.cbuf);
 	}
 	RESPHDR_BEGIN(ctx->conn.wbuf, HTTP_OK);
 	resphdr_conn(ctx);
@@ -1635,8 +1642,13 @@ rpcall_cb(struct ev_loop *loop, ev_watcher *watcher, const int revents)
 	if (encoding_str != NULL) {
 		RESPHDR_CENCODING(ctx->conn.wbuf, encoding_str);
 	}
-	RESPHDR_CLENGTH(ctx->conn.wbuf, VBUF_LEN(ctx->conn.cbuf));
+	RESPHDR_CLENGTH(ctx->conn.wbuf, contentlen);
 	RESPHDR_FINISH(ctx->conn.wbuf);
+	if (inline_body) {
+		ASSERT(resultlen <= ctx->conn.wbuf.cap - ctx->conn.wbuf.len);
+		BUF_APPEND(ctx->conn.wbuf, result, resultlen);
+	}
+	free(result);
 	send_response(loop, ctx, true);
 }
 #endif /* WITH_RULESET */

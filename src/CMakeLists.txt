@@ -328,8 +328,11 @@ if(WITH_RULESET)
         MOCK_SRCS http_proxy.c
         MOCK_DEFINITIONS malloc=test_context_malloc)
     add_unit_test(api_server_test
-        SRCS api_server_test.c api_server.c proto/http.c proto/codec.c
-             "${CMAKE_CURRENT_BINARY_DIR}/version.c")
+        SRCS api_server_test.c proto/http.c proto/codec.c
+             "${CMAKE_CURRENT_BINARY_DIR}/version.c"
+        MOCK_SRCS api_server.c
+        MOCK_DEFINITIONS content_writer=test_content_writer
+            malloc=test_context_malloc)
     add_unit_test(api_client_test
         SRCS api_client_test.c http_client.c proto/http.c proto/codec.c
         MOCK_SRCS api_client.c
