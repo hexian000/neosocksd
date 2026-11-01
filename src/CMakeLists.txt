@@ -401,11 +401,15 @@ add_unit_test(codec_test
     SRCS proto/codec_test.c
     MOCK_SRCS proto/codec.c
     MOCK_DEFINITIONS mz_crc32=test_mz_crc32)
+# Reach the real io_bufreader allocation as well as codec allocations without
+# recompiling the vendored memory module with test substitutions.
+target_link_options(codec_test PRIVATE "-Wl,--wrap=malloc" "-Wl,--wrap=free")
 # Drive the decompression-bomb cap at a small size instead of the 2 GiB
 # production default, so the abort is reachable without producing gigabytes.
 # Kept above the largest legitimate round-trip case (100000 bytes) so only the
 # bomb case trips it.
-target_compile_definitions(codec_test PRIVATE CODEC_MAX_INFLATE=1048576)
+target_compile_definitions(codec_test PRIVATE CODEC_MAX_INFLATE=1048576
+    TEST_TMPDIR="${PROJECT_BINARY_DIR}/tmp")
 target_compile_definitions(codec_test_mock_impl PRIVATE CODEC_MAX_INFLATE=1048576)
 # main_test: black-box / integration tests against the real modules, plus the
 # project fuzz suite. This is the only test executable that links several real

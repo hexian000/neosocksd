@@ -188,6 +188,57 @@ static void capture_cb(
 	}
 }
 
+struct client_fixture {
+	struct http_client_ctx ctx;
+	struct cb_result result;
+	struct ev_loop *loop;
+	int peer_fd;
+};
+
+static unsigned fixture_cleanup_count;
+
+static void fixture_close_peer(struct client_fixture *f)
+{
+	if (f->peer_fd != -1) {
+		T_CHECK(close(f->peer_fd) == 0);
+		f->peer_fd = -1;
+	}
+}
+
+static void fixture_finish(struct client_fixture *f)
+{
+	if (f->loop != NULL) {
+		if (f->ctx.loop != NULL &&
+		    (f->ctx.state != STATE_CLIENT_INIT ||
+		     f->ctx.conn.cbuf != NULL || f->ctx.dialreq != NULL)) {
+			http_client_cancel(&f->ctx, f->loop);
+		}
+		fixture_close_peer(f);
+		ev_loop_destroy(f->loop);
+		f->loop = NULL;
+	}
+}
+
+static void fixture_cleanup(void *data)
+{
+	struct client_fixture *f = data;
+	fixture_finish(f);
+	stub_reset();
+	free(f);
+	fixture_cleanup_count++;
+}
+
+static struct client_fixture *fixture_new(struct testing_ctx *_t_)
+{
+	struct client_fixture *f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	f->peer_fd = -1;
+	f->loop = ev_loop_new(0);
+	T_CHECK(f->loop != NULL);
+	T_CLEANUP(fixture_cleanup, f);
+	return f;
+}
+
 /* whether the callback reported exactly the error message msg */
 static bool
 result_errmsg_is(const struct cb_result *restrict r, const char *msg)
@@ -234,77 +285,80 @@ static bool record_header_cb(void *data, const char *key, char *value)
 
 T_DECLARE_CASE(http_client_init_state)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
 
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
-	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
-	T_EXPECT(ctx.cb.func == capture_cb);
-	T_EXPECT(ctx.cb.data == &result);
-	T_EXPECT(ctx.conf == &test_conf);
-	T_EXPECT(!result.called);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
+	T_EXPECT_EQ(ctx->state, STATE_CLIENT_INIT);
+	T_EXPECT(ctx->cb.func == capture_cb);
+	T_EXPECT(ctx->cb.data == result);
+	T_EXPECT(ctx->conf == &test_conf);
+	T_EXPECT(!result->called);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(http_client_cancel_noop)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
 
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
-	http_client_cancel(&ctx, loop);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_cancel(ctx, loop);
 	/* cancel should not invoke the user callback */
-	T_EXPECT(!result.called);
-	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
+	T_EXPECT(!result->called);
+	T_EXPECT_EQ(ctx->state, STATE_CLIENT_INIT);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 	S.dialer_result_fd = -1;
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
 
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
 	/* dialer_do stub immediately fires finish_cb with fd=-1 */
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 
-	T_EXPECT(result.called);
-	T_EXPECT(result.has_errmsg);
-	T_EXPECT(result.errlen > 0);
+	T_EXPECT(result->called);
+	T_EXPECT(result->has_errmsg);
+	T_EXPECT(result->errlen > 0);
 	T_EXPECT_EQ(S.dialer_do_calls, 1);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -315,50 +369,52 @@ T_DECLARE_CASE(http_client_dialer_fail_calls_cb)
  */
 T_DECLARE_CASE(http_client_timeout_finishes_with_error)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
 	S.dialer_result_fd = sv[0];
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
 
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 	static const char header[] = "GET /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 
 	/* the request goes out but the peer never responds: no callback yet */
 	ev_run(loop, EVRUN_NOWAIT);
-	T_EXPECT(!result.called);
+	T_EXPECT(!result->called);
 
 	/* fire the request timeout deterministically instead of waiting out
 	 * test_conf.timeout */
-	ev_feed_event(loop, &ctx.w_timeout, EV_TIMER);
+	ev_feed_event(loop, &ctx->w_timeout, EV_TIMER);
 	ev_run(loop, EVRUN_NOWAIT);
 
-	T_EXPECT(result.called);
-	T_CHECK(result.has_errmsg);
-	T_EXPECT_EQ(result.errlen, sizeof("timeout") - 1);
-	T_EXPECT_MEMEQ(result.errmsg, "timeout", sizeof("timeout") - 1);
+	T_EXPECT(result->called);
+	T_CHECK(result->has_errmsg);
+	T_EXPECT_EQ(result->errlen, sizeof("timeout") - 1);
+	T_EXPECT_MEMEQ(result->errmsg, "timeout", sizeof("timeout") - 1);
 	/* an error finish delivers no connection */
-	T_EXPECT(!result.has_conn);
+	T_EXPECT(!result->has_conn);
 
 	/* the connection fd and dialreq are owned and released by http_client */
-	(void)close(sv[1]);
-	ev_loop_destroy(loop);
+	fixture_close_peer(fixture);
+	fixture_finish(fixture);
 }
 
 /*
@@ -372,39 +428,41 @@ T_DECLARE_CASE(http_client_timeout_finishes_with_error)
  */
 T_DECLARE_CASE(http_client_reset_mid_request_reports_error)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
 	S.dialer_result_fd = sv[0];
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
 
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
 
 	static unsigned char body[2 * 1024 * 1024];
 	for (size_t i = 0; i < sizeof(body); i++) {
 		body[i] = (unsigned char)(i & 0xff);
 	}
-	ctx.conn.cbuf = VBUF_NEW(sizeof(body));
-	T_CHECK(ctx.conn.cbuf != NULL);
-	VBUF_APPEND(ctx.conn.cbuf, body, sizeof(body));
+	ctx->conn.cbuf = VBUF_NEW(sizeof(body));
+	T_CHECK(ctx->conn.cbuf != NULL);
+	VBUF_APPEND(ctx->conn.cbuf, body, sizeof(body));
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 
 	/* This case exercises the write error, not the request deadline, but
 	 * http_client_do just armed it: were it left running, a stall longer
@@ -412,107 +470,111 @@ T_DECLARE_CASE(http_client_reset_mid_request_reports_error)
 	 * that the assertions below must not mistake for the write error. Drop
 	 * it; http_client_timeout_finishes_with_error covers the deadline. Every
 	 * loop below is bounded by its own iteration cap instead. */
-	ev_timer_stop(loop, &ctx.w_timeout);
+	ev_timer_stop(loop, &ctx->w_timeout);
 
 	/* Drive sends until the header is fully out and the body is genuinely
 	 * (not artificially) partial. EVRUN_NOWAIT, never EVRUN_ONCE: with the
 	 * deadline stopped a blocking iteration would have nothing left to wake
 	 * it if the socket were not ready, and the cap is the failing bound. */
 	for (int i = 0;
-	     i < 50 && !(ctx.conn.wpos == sizeof(header) - 1 &&
-			 ctx.conn.cpos > 0 && ctx.conn.cpos < sizeof(body));
+	     i < 50 && !(ctx->conn.wpos == sizeof(header) - 1 &&
+			 ctx->conn.cpos > 0 && ctx->conn.cpos < sizeof(body));
 	     i++) {
 		ev_run(loop, EVRUN_NOWAIT);
 	}
-	T_EXPECT_EQ(ctx.conn.wpos, sizeof(header) - 1);
-	T_CHECK(ctx.conn.cpos > 0);
-	T_CHECK(ctx.conn.cpos < sizeof(body));
+	T_EXPECT_EQ(ctx->conn.wpos, sizeof(header) - 1);
+	T_CHECK(ctx->conn.cpos > 0);
+	T_CHECK(ctx->conn.cpos < sizeof(body));
 
 	/* the peer disappears mid-transfer */
-	T_CHECK(close(sv[1]) == 0);
+	fixture_close_peer(fixture);
 
 	/* the next write hits the dead peer and finishes the request */
-	for (int i = 0; i < 20 && !result.called; i++) {
+	for (int i = 0; i < 20 && !result->called; i++) {
 		ev_run(loop, EVRUN_NOWAIT);
 	}
-	T_EXPECT(result.called);
-	T_EXPECT(result_errmsg_is(&result, strerror(EPIPE)));
-	T_EXPECT(!result.has_conn);
+	T_EXPECT(result->called);
+	T_EXPECT(result_errmsg_is(result, strerror(EPIPE)));
+	T_EXPECT(!result->has_conn);
 	T_EXPECT_EQ(S.dialer_do_calls, 1);
-	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
+	T_EXPECT_EQ(ctx->state, STATE_CLIENT_INIT);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Drive a request through to a complete, parsed response and observe recv_cb's
  * success path (previously untested at this module's level). */
 T_DECLARE_CASE(http_client_full_request_response)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
 	T_CHECK(fd_set_nonblock(sv[1]));
 	S.dialer_result_fd = sv[0];
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 
 	/* drive the request out, then reply with a complete response */
-	for (int i = 0; i < 20 && ctx.state == STATE_CLIENT_REQUEST; i++) {
+	for (int i = 0; i < 20 && ctx->state == STATE_CLIENT_REQUEST; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
 	static const char resp[] = "HTTP/1.1 200 OK\r\nServer: test\r\n\r\n";
 	T_CHECK(write(sv[1], resp, sizeof(resp) - 1) ==
 		(ssize_t)(sizeof(resp) - 1));
 
-	for (int i = 0; i < 50 && !result.called; i++) {
+	for (int i = 0; i < 50 && !result->called; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
-	T_EXPECT(result.called);
-	T_EXPECT(!result.has_errmsg);
-	T_EXPECT(result.has_conn);
-	T_EXPECT_STREQ(result.rsp_code, "200");
+	T_EXPECT(result->called);
+	T_EXPECT(!result->has_errmsg);
+	T_EXPECT(result->has_conn);
+	T_EXPECT_STREQ(result->rsp_code, "200");
 
-	(void)close(sv[1]);
-	ev_loop_destroy(loop);
+	fixture_close_peer(fixture);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_SUBCASE(interim_responses, const bool split)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
 	S.dialer_result_fd = sv[0];
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
-	struct hdr_capture hdrs = { .client = &ctx };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
+	struct hdr_capture hdrs = { .client = ctx };
 	const struct http_parsehdr_cb on_header = {
 		.func = record_header_cb,
 		.ctx = &hdrs,
 	};
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
 	uint_least64_t received = 0, sent = 0;
 	const struct http_client_opts opts = {
@@ -520,16 +582,16 @@ T_DECLARE_SUBCASE(interim_responses, const bool split)
 		.byt_recv = &received,
 		.byt_sent = &sent,
 	};
-	http_client_init(&ctx, loop, on_header, &cb, &opts);
+	http_client_init(ctx, loop, on_header, &cb, &opts);
 	static const char request[] = "GET /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, request, sizeof(request) - 1);
+	BUF_APPEND(ctx->conn.wbuf, request, sizeof(request) - 1);
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
-	for (int i = 0; i < 20 && ctx.state == STATE_CLIENT_REQUEST; i++) {
+	http_client_do(ctx, loop, req);
+	for (int i = 0; i < 20 && ctx->state == STATE_CLIENT_REQUEST; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
-	T_CHECK(ctx.state == STATE_CLIENT_RESPONSE);
+	T_CHECK(ctx->state == STATE_CLIENT_RESPONSE);
 	static const char interim[] =
 		"HTTP/1.1 100 Continue\r\n\r\n"
 		"HTTP/1.1 103 Early Hints\r\n"
@@ -542,43 +604,43 @@ T_DECLARE_SUBCASE(interim_responses, const bool split)
 	if (split) {
 		T_CHECK(write(sv[1], interim, sizeof(interim) - 1) ==
 			(ssize_t)(sizeof(interim) - 1));
-		for (int i = 0;
-		     i < 20 && received < sizeof(interim) - 1 && !result.called;
+		for (int i = 0; i < 20 && received < sizeof(interim) - 1 &&
+				!result->called;
 		     i++) {
 			ev_run(loop, EVRUN_ONCE);
 		}
 		T_CHECK(received == sizeof(interim) - 1);
-		T_CHECK(!result.called);
+		T_CHECK(!result->called);
 		T_EXPECT_EQ(hdrs.count, 0);
 		/* Split the final status line too: compaction must preserve
 		 * a partial next message as well as a complete one. */
 		T_CHECK(write(sv[1], final, 8) == 8);
 		for (int i = 0; i < 20 && received < sizeof(interim) - 1 + 8 &&
-				!result.called;
+				!result->called;
 		     i++) {
 			ev_run(loop, EVRUN_ONCE);
 		}
-		T_CHECK(!result.called);
+		T_CHECK(!result->called);
 		T_CHECK(write(sv[1], final + 8, sizeof(final) - 1 - 8) ==
 			(ssize_t)(sizeof(final) - 1 - 8));
 	} else {
 		const size_t total = sizeof(interim) + sizeof(final) - 2;
 		T_CHECK(write(sv[1], response, total) == (ssize_t)total);
 	}
-	for (int i = 0; i < 20 && !result.called; i++) {
+	for (int i = 0; i < 20 && !result->called; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
-	T_CHECK(result.called);
-	T_EXPECT(!result.has_errmsg);
-	T_EXPECT_STREQ(result.rsp_code, "200");
-	T_EXPECT_EQ(result.body_len, 5);
-	T_EXPECT_MEMEQ(result.body, "hello", 5);
+	T_CHECK(result->called);
+	T_EXPECT(!result->has_errmsg);
+	T_EXPECT_STREQ(result->rsp_code, "200");
+	T_EXPECT_EQ(result->body_len, 5);
+	T_EXPECT_MEMEQ(result->body, "hello", 5);
 	T_EXPECT_EQ(hdrs.count, 2);
 	T_EXPECT(hdrs.saw_server);
 	T_EXPECT_EQ(received, sizeof(interim) + sizeof(final) - 2);
 	T_EXPECT_EQ(sent, sizeof(request) - 1);
-	T_CHECK(close(sv[1]) == 0);
-	ev_loop_destroy(loop);
+	fixture_close_peer(fixture);
+	fixture_finish(fixture);
 }
 
 T_DECLARE_CASE(http_client_coalesced_interim_responses)
@@ -594,37 +656,39 @@ T_DECLARE_CASE(http_client_split_interim_responses)
 /* A user on_header callback must receive each final response header. */
 T_DECLARE_CASE(http_client_forwards_response_headers)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
 	T_CHECK(fd_set_nonblock(sv[1]));
 	S.dialer_result_fd = sv[0];
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
-	struct hdr_capture hdrs = { .client = &ctx };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
+	struct hdr_capture hdrs = { .client = ctx };
 	const struct http_parsehdr_cb on_header = {
 		.func = record_header_cb,
 		.ctx = &hdrs,
 	};
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
-	http_client_init(&ctx, loop, on_header, &cb, &test_opts);
+	http_client_init(ctx, loop, on_header, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 
-	for (int i = 0; i < 20 && ctx.state == STATE_CLIENT_REQUEST; i++) {
+	for (int i = 0; i < 20 && ctx->state == STATE_CLIENT_REQUEST; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
 	static const char resp[] = "HTTP/1.1 200 OK\r\n"
@@ -633,17 +697,17 @@ T_DECLARE_CASE(http_client_forwards_response_headers)
 	T_CHECK(write(sv[1], resp, sizeof(resp) - 1) ==
 		(ssize_t)(sizeof(resp) - 1));
 
-	for (int i = 0; i < 50 && !result.called; i++) {
+	for (int i = 0; i < 50 && !result->called; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
-	T_EXPECT(result.called);
-	T_EXPECT(result.has_conn);
+	T_EXPECT(result->called);
+	T_EXPECT(result->has_conn);
 	T_EXPECT(hdrs.count >= 2);
 	T_EXPECT(hdrs.saw_server);
 	T_EXPECT(hdrs.saw_custom);
 
-	(void)close(sv[1]);
-	ev_loop_destroy(loop);
+	fixture_close_peer(fixture);
+	fixture_finish(fixture);
 }
 
 /* A response body must be parsed into conn->cbuf and be readable from the
@@ -651,37 +715,39 @@ T_DECLARE_CASE(http_client_forwards_response_headers)
  * previously untested (every prior case used a bodiless 200). */
 T_DECLARE_CASE(http_client_delivers_response_body)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
 	T_CHECK(fd_set_nonblock(sv[1]));
 	S.dialer_result_fd = sv[0];
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
-	struct hdr_capture hdrs = { .client = &ctx };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
+	struct hdr_capture hdrs = { .client = ctx };
 	const struct http_parsehdr_cb on_header = {
 		.func = record_header_cb,
 		.ctx = &hdrs,
 	};
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
-	http_client_init(&ctx, loop, on_header, &cb, &test_opts);
+	http_client_init(ctx, loop, on_header, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 
-	for (int i = 0; i < 20 && ctx.state == STATE_CLIENT_REQUEST; i++) {
+	for (int i = 0; i < 20 && ctx->state == STATE_CLIENT_REQUEST; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
 	static const char resp[] = "HTTP/1.1 200 OK\r\n"
@@ -690,66 +756,68 @@ T_DECLARE_CASE(http_client_delivers_response_body)
 	T_CHECK(write(sv[1], resp, sizeof(resp) - 1) ==
 		(ssize_t)(sizeof(resp) - 1));
 
-	for (int i = 0; i < 50 && !result.called; i++) {
+	for (int i = 0; i < 50 && !result->called; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
-	T_EXPECT(result.called);
-	T_EXPECT(!result.has_errmsg);
-	T_EXPECT(result.has_conn);
-	T_EXPECT_STREQ(result.rsp_code, "200");
-	T_EXPECT(result.has_body);
-	T_EXPECT_EQ(result.body_len, 5);
-	T_EXPECT_MEMEQ(result.body, "hello", 5);
+	T_EXPECT(result->called);
+	T_EXPECT(!result->has_errmsg);
+	T_EXPECT(result->has_conn);
+	T_EXPECT_STREQ(result->rsp_code, "200");
+	T_EXPECT(result->has_body);
+	T_EXPECT_EQ(result->body_len, 5);
+	T_EXPECT_MEMEQ(result->body, "hello", 5);
 
-	(void)close(sv[1]);
-	ev_loop_destroy(loop);
+	fixture_close_peer(fixture);
+	fixture_finish(fixture);
 }
 
 /* recv_cb's hard receive-error path: the peer closes before sending any
  * response, so recv() reports early EOF and the callback gets an error. */
 T_DECLARE_CASE(http_client_recv_eof_reports_error)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
 	S.dialer_result_fd = sv[0];
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 
-	for (int i = 0; i < 20 && ctx.state == STATE_CLIENT_REQUEST; i++) {
+	for (int i = 0; i < 20 && ctx->state == STATE_CLIENT_REQUEST; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
 	/* peer closes without responding */
-	T_CHECK(close(sv[1]) == 0);
+	fixture_close_peer(fixture);
 
-	for (int i = 0; i < 50 && !result.called; i++) {
+	for (int i = 0; i < 50 && !result->called; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
-	T_EXPECT(result.called);
+	T_EXPECT(result->called);
 	/* the exact message tells the EOF path from the request deadline, which
 	 * would also finish a stalled request with an error */
-	T_EXPECT(result_errmsg_is(&result, "error receiving response"));
-	T_EXPECT(!result.has_conn);
+	T_EXPECT(result_errmsg_is(result, "error receiving response"));
+	T_EXPECT(!result->has_conn);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /*
@@ -760,42 +828,44 @@ T_DECLARE_CASE(http_client_recv_eof_reports_error)
  */
 T_DECLARE_CASE(http_client_write_error_reports_strerror)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
-	T_CHECK(close(sv[1]) == 0);
+	fixture_close_peer(fixture);
 	S.dialer_result_fd = sv[0];
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "POST /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 
-	for (int i = 0; i < 50 && !result.called; i++) {
+	for (int i = 0; i < 50 && !result->called; i++) {
 		ev_run(loop, EVRUN_ONCE);
 	}
-	T_EXPECT(result.called);
+	T_EXPECT(result->called);
 	/* the exact message tells the write error from the request deadline */
-	T_EXPECT(result_errmsg_is(&result, strerror(EPIPE)));
-	T_EXPECT(!result.has_conn);
+	T_EXPECT(result_errmsg_is(result, strerror(EPIPE)));
+	T_EXPECT(!result->has_conn);
 	T_EXPECT_EQ(S.dialer_do_calls, 1);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Drive one request to a peer that answers with resp, then run the loop until
@@ -842,13 +912,14 @@ static void run_request_with_response(
  * no connection. */
 T_DECLARE_CASE(http_client_oversized_content_reports_parse_error)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
-	struct hdr_capture hdrs = { .client = &ctx };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
+	struct hdr_capture hdrs = { .client = ctx };
 	const struct http_parsehdr_cb on_header = {
 		.func = record_header_cb,
 		.ctx = &hdrs,
@@ -858,61 +929,63 @@ T_DECLARE_CASE(http_client_oversized_content_reports_parse_error)
 			resp, sizeof(resp),
 			"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n",
 			HTTP_MAX_CONTENT + 1) > 0);
-	run_request_with_response(loop, on_header, &ctx, &result, resp);
+	run_request_with_response(loop, on_header, ctx, result, resp);
 
-	T_EXPECT(result.called);
-	T_EXPECT(result_errmsg_is(&result, "error parsing response"));
-	T_EXPECT(!result.has_conn);
+	T_EXPECT(result->called);
+	T_EXPECT(result_errmsg_is(result, "error parsing response"));
+	T_EXPECT(!result->has_conn);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* recv_cb's parse-error branch reached through the user header callback: a
  * header it rejects must finish with a parse error and no connection. */
 T_DECLARE_CASE(http_client_rejected_header_reports_parse_error)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
-	struct hdr_capture hdrs = { .client = &ctx };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
+	struct hdr_capture hdrs = { .client = ctx };
 	const struct http_parsehdr_cb on_header = {
 		.func = record_header_cb,
 		.ctx = &hdrs,
 	};
 	/* parsehdr_content_length rejects a non-numeric length */
 	run_request_with_response(
-		loop, on_header, &ctx, &result,
+		loop, on_header, ctx, result,
 		"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n");
 
-	T_EXPECT(result.called);
-	T_EXPECT(result_errmsg_is(&result, "error parsing response"));
-	T_EXPECT(!result.has_conn);
+	T_EXPECT(result->called);
+	T_EXPECT(result_errmsg_is(result, "error parsing response"));
+	T_EXPECT(!result->has_conn);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* A status line that is not HTTP/1.x is a receive error (http_conn_recv < 0),
  * not a parse error: the response parser gives up on the message outright. */
 T_DECLARE_CASE(http_client_non_http1_status_reports_error)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	run_request_with_response(
-		loop, no_hdr, &ctx, &result, "SPDY/3 200 OK\r\n\r\n");
+		loop, no_hdr, ctx, result, "SPDY/3 200 OK\r\n\r\n");
 
-	T_EXPECT(result.called);
-	T_EXPECT(result_errmsg_is(&result, "error receiving response"));
-	T_EXPECT(!result.has_conn);
+	T_EXPECT(result->called);
+	T_EXPECT(result_errmsg_is(result, "error receiving response"));
+	T_EXPECT(!result->has_conn);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Cancelling while the dial is still in flight (STATE_CLIENT_CONNECT) must
@@ -920,69 +993,71 @@ T_DECLARE_CASE(http_client_non_http1_status_reports_error)
  * branch, unreachable with a synchronously-completing dialer stub. */
 T_DECLARE_CASE(http_client_cancel_during_connect_cancels_dialer)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 	S.dialer_pending = true;
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
+	http_client_do(ctx, loop, req);
 	/* the dial is in-flight: the client is parked in CONNECT */
-	T_EXPECT_EQ(ctx.state, STATE_CLIENT_CONNECT);
-	T_EXPECT(!result.called);
+	T_EXPECT_EQ(ctx->state, STATE_CLIENT_CONNECT);
+	T_EXPECT(!result->called);
 
-	http_client_cancel(&ctx, loop);
+	http_client_cancel(ctx, loop);
 	T_EXPECT_EQ(S.dialer_cancel_calls, 1);
-	T_EXPECT(!result.called);
-	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
+	T_EXPECT(!result->called);
+	T_EXPECT_EQ(ctx->state, STATE_CLIENT_INIT);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* The request timeout firing while the dial is still in flight must cancel the
  * dialer and finish with a "timeout" error. */
 T_DECLARE_CASE(http_client_timeout_during_connect_cancels_dialer)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 	S.dialer_pending = true;
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
-	http_client_do(&ctx, loop, req);
-	T_EXPECT_EQ(ctx.state, STATE_CLIENT_CONNECT);
+	http_client_do(ctx, loop, req);
+	T_EXPECT_EQ(ctx->state, STATE_CLIENT_CONNECT);
 
 	/* fire the request timeout deterministically */
-	ev_feed_event(loop, &ctx.w_timeout, EV_TIMER);
+	ev_feed_event(loop, &ctx->w_timeout, EV_TIMER);
 	ev_run(loop, EVRUN_NOWAIT);
 
-	T_EXPECT(result.called);
-	T_EXPECT(result.has_errmsg);
-	T_EXPECT_MEMEQ(result.errmsg, "timeout", sizeof("timeout") - 1);
-	T_EXPECT(!result.has_conn);
+	T_EXPECT(result->called);
+	T_EXPECT(result->has_errmsg);
+	T_EXPECT_MEMEQ(result->errmsg, "timeout", sizeof("timeout") - 1);
+	T_EXPECT(!result->has_conn);
 	T_EXPECT_EQ(S.dialer_cancel_calls, 1);
 
-	ev_loop_destroy(loop);
+	fixture_finish(fixture);
 }
 
 /* Cancelling while the request write watcher is active (STATE_CLIENT_REQUEST)
@@ -990,42 +1065,44 @@ T_DECLARE_CASE(http_client_timeout_during_connect_cancels_dialer)
  * STATE_CLIENT_REQUEST/RESPONSE branch of http_client_stop. */
 T_DECLARE_CASE(http_client_cancel_during_request_stops_io)
 {
-	struct ev_loop *loop = ev_loop_new(0);
+	struct client_fixture *fixture = fixture_new(_t_);
+	struct ev_loop *loop = fixture->loop;
 	T_CHECK(loop != NULL);
 	stub_reset();
 
 	int sv[2] = { -1, -1 };
 	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	fixture->peer_fd = sv[1];
 	T_CHECK(fd_set_nonblock(sv[0]));
 	S.dialer_result_fd = sv[0];
 
-	struct http_client_ctx ctx = { 0 };
-	struct cb_result result = { 0 };
+	struct http_client_ctx *ctx = &fixture->ctx;
+	struct cb_result *result = &fixture->result;
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	const struct http_client_cb cb = {
 		.func = capture_cb,
-		.data = &result,
+		.data = result,
 	};
-	http_client_init(&ctx, loop, no_hdr, &cb, &test_opts);
+	http_client_init(ctx, loop, no_hdr, &cb, &test_opts);
 
 	static const char header[] = "GET /x HTTP/1.1\r\n\r\n";
-	BUF_APPEND(ctx.conn.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(ctx->conn.wbuf, header, sizeof(header) - 1);
 
 	struct dialreq *req = calloc(1, sizeof(struct dialreq));
 	T_CHECK(req != NULL);
 	/* synchronous dial: the client transitions to REQUEST with its write
 	 * watcher active (the send happens on the next loop iteration) */
-	http_client_do(&ctx, loop, req);
-	T_EXPECT_EQ(ctx.state, STATE_CLIENT_REQUEST);
-	T_EXPECT(ev_is_active(&ctx.w_socket));
+	http_client_do(ctx, loop, req);
+	T_EXPECT_EQ(ctx->state, STATE_CLIENT_REQUEST);
+	T_EXPECT(ev_is_active(&ctx->w_socket));
 
-	http_client_cancel(&ctx, loop);
-	T_EXPECT(!result.called);
-	T_EXPECT_EQ(ctx.state, STATE_CLIENT_INIT);
-	T_EXPECT(!ev_is_active(&ctx.w_socket));
+	http_client_cancel(ctx, loop);
+	T_EXPECT(!result->called);
+	T_EXPECT_EQ(ctx->state, STATE_CLIENT_INIT);
+	T_EXPECT(!ev_is_active(&ctx->w_socket));
 
-	(void)close(sv[1]);
-	ev_loop_destroy(loop);
+	fixture_close_peer(fixture);
+	fixture_finish(fixture);
 }
 
 /* -------------------------------------------------------------------------
@@ -1036,7 +1113,49 @@ T_DECLARE_CASE(http_client_cancel_during_request_stops_io)
  * main - test runner.
  * ---------------------------------------------------------------------- */
 
+static int failure_peer, failure_socket;
+
+T_DECLARE_CASE(http_client_fixture_intentional_failure)
+{
+	struct client_fixture *f = fixture_new(_t_);
+	stub_reset();
+	int sv[2];
+	T_CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+	f->peer_fd = sv[1];
+	failure_peer = sv[1];
+	failure_socket = sv[0];
+	S.dialer_result_fd = sv[0];
+	T_CHECK(fd_set_nonblock(sv[0]));
+	const struct http_parsehdr_cb no_hdr = { 0 };
+	const struct http_client_cb cb = { .func = capture_cb,
+					   .data = &f->result };
+	http_client_init(&f->ctx, f->loop, no_hdr, &cb, &test_opts);
+	BUF_APPEND(f->ctx.conn.wbuf, "POST / HTTP/1.1\r\n\r\n", 19);
+	f->ctx.conn.cbuf = VBUF_NEW(2 * 1024 * 1024);
+	T_CHECK(f->ctx.conn.cbuf != NULL);
+	struct dialreq *req = calloc(1, sizeof(*req));
+	T_CHECK(req != NULL);
+	http_client_do(&f->ctx, f->loop, req);
+	T_EXPECT(false);
+}
+
+T_DECLARE_CASE(http_client_failed_expectation_cleans_fixture)
+{
+	const unsigned before = fixture_cleanup_count;
+	T_DECLARE_CTX(nested);
+	T_RUN_CASE(nested, http_client_fixture_intentional_failure);
+	T_EXPECT_EQ(nested.failed, 1);
+	T_EXPECT_EQ(fixture_cleanup_count, before + 1);
+	T_EXPECT_EQ(fcntl(failure_peer, F_GETFD), -1);
+	T_EXPECT_EQ(errno, EBADF);
+	T_EXPECT_EQ(fcntl(failure_socket, F_GETFD), -1);
+	T_EXPECT_EQ(errno, EBADF);
+	T_RUN_CASE(nested, http_client_reset_mid_request_reports_error);
+	T_EXPECT_EQ(nested.passed, 1);
+}
+
 static const struct testing_suite suite[] = {
+	T_CASE(http_client_failed_expectation_cleans_fixture),
 	T_CASE(http_client_init_state),
 	T_CASE(http_client_cancel_noop),
 	T_CASE(http_client_dialer_fail_calls_cb),

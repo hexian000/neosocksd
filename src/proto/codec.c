@@ -1092,6 +1092,10 @@ static int
 gzip_direct_read(void *p, const void **restrict buf, size_t *restrict len)
 {
 	struct gzip_rstream *restrict z = p;
+	if (z->rderr != 0) {
+		*len = 0;
+		return z->rderr;
+	}
 	for (;;) {
 		if (z->srclen == 0 && !z->srceof) {
 			const void *srcbuf;

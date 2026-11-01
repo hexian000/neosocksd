@@ -87,6 +87,59 @@ struct conn_test_ctx {
 	uint_least64_t byt_recv, byt_sent;
 };
 
+/* The runner invokes cleanup after a failed case has left its stack. Keep
+ * connection callbacks and writer buffer slots with the resources they own. */
+struct http_test_fixture {
+	int sv[2];
+	struct http_conn p;
+	struct conn_test_ctx cb;
+	struct io_stream *reader, *writer;
+	struct vbuffer *vbuf;
+};
+
+static size_t g_live_fixtures;
+
+static int close_stream(struct io_stream **stream)
+{
+	struct io_stream *const owned = *stream;
+	*stream = NULL;
+	return owned != NULL ? io_stream_close(owned) : 0;
+}
+
+static void fixture_release(struct http_test_fixture *f)
+{
+	(void)close_stream(&f->reader);
+	(void)close_stream(&f->writer);
+	VBUF_FREE(f->vbuf);
+	VBUF_FREE(f->p.cbuf);
+	for (size_t i = 0; i < ARRAY_SIZE(f->sv); i++) {
+		if (f->sv[i] >= 0) {
+			T_CHECK(close(f->sv[i]) == 0);
+			f->sv[i] = -1;
+		}
+	}
+	g_http_date_fail = false;
+}
+
+static void fixture_destroy(void *data)
+{
+	struct http_test_fixture *const f = data;
+	fixture_release(f);
+	T_CHECK(g_live_fixtures > 0);
+	g_live_fixtures--;
+	free(f);
+}
+
+static struct http_test_fixture *new_fixture(struct testing_ctx *_t_)
+{
+	struct http_test_fixture *const f = calloc(1, sizeof(*f));
+	T_CHECK(f != NULL);
+	f->sv[0] = f->sv[1] = -1;
+	g_live_fixtures++;
+	T_CLEANUP(fixture_destroy, f);
+	return f;
+}
+
 static bool write_all(const int fd, const void *buf, size_t len)
 {
 	const unsigned char *p = buf;
@@ -758,19 +811,20 @@ T_DECLARE_CASE(parsehdr_expect_cases)
 
 T_DECLARE_CASE(content_reader_none)
 {
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const unsigned char input[] = "hello";
 	unsigned char output[sizeof(input)] = { 0 };
-	struct io_stream *r =
-		content_reader(input, sizeof(input), CENCODING_NONE);
+	f->reader = content_reader(input, sizeof(input), CENCODING_NONE);
 
-	T_CHECK(r != NULL);
-	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
+	T_CHECK(f->reader != NULL);
+	T_EXPECT(stream_read_exact(f->reader, output, sizeof(output)));
 	T_EXPECT_MEMEQ(output, input, sizeof(input));
-	T_EXPECT_EQ(io_stream_close(r), 0);
+	T_EXPECT_EQ(close_stream(&f->reader), 0);
 }
 
 T_DECLARE_CASE(content_reader_gzip)
 {
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const unsigned char gzip_data[] = {
 		0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x03, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x86,
@@ -778,14 +832,14 @@ T_DECLARE_CASE(content_reader_gzip)
 	};
 	static const unsigned char expected[] = { 'h', 'e', 'l', 'l', 'o' };
 	unsigned char output[sizeof(expected)] = { 0 };
-	struct io_stream *r =
+	f->reader =
 		content_reader(gzip_data, sizeof(gzip_data), CENCODING_GZIP);
 	bool ok = false;
 	int rc = -1;
 
-	T_CHECK(r != NULL);
-	ok = stream_read_exact(r, output, sizeof(output));
-	rc = io_stream_close(r);
+	T_CHECK(f->reader != NULL);
+	ok = stream_read_exact(f->reader, output, sizeof(output));
+	rc = close_stream(&f->reader);
 	T_EXPECT(ok);
 	T_EXPECT_MEMEQ(output, expected, sizeof(expected));
 	T_EXPECT_EQ(rc, 0);
@@ -799,6 +853,7 @@ T_DECLARE_CASE(content_reader_gzip)
  */
 T_DECLARE_CASE(content_reader_supports_direct_read)
 {
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const enum content_encodings encodings[] = {
 		CENCODING_NONE,
 		CENCODING_DEFLATE,
@@ -806,144 +861,148 @@ T_DECLARE_CASE(content_reader_supports_direct_read)
 	};
 	static const unsigned char input[] = "hello";
 	for (size_t i = 0; i < ARRAY_SIZE(encodings); i++) {
-		struct io_stream *r =
-			content_reader(input, sizeof(input), encodings[i]);
-		T_CHECK(r != NULL);
-		T_EXPECT(r->vftable->direct_read != NULL);
-		(void)io_stream_close(r);
+		f->reader = content_reader(input, sizeof(input), encodings[i]);
+		T_CHECK(f->reader != NULL);
+		T_EXPECT(f->reader->vftable->direct_read != NULL);
+		(void)close_stream(&f->reader);
 	}
 }
 
 T_DECLARE_CASE(content_reader_vbuf_cases)
 {
+	struct http_test_fixture *const f = new_fixture(_t_);
 	/* NULL cbuf is the documented empty-body case (Content-Length: 0 leaves
 	 * the content vbuffer unallocated): it must read as "" rather than fault
 	 * on the NULL that io_memreader() would otherwise reject. */
 	{
-		struct io_stream *r = content_reader_vbuf(NULL, CENCODING_NONE);
-		T_CHECK(r != NULL);
+		f->reader = content_reader_vbuf(NULL, CENCODING_NONE);
+		T_CHECK(f->reader != NULL);
 		unsigned char buf[8];
 		size_t n = sizeof(buf);
-		T_EXPECT_EQ(io_stream_read(r, buf, &n), 0);
+		T_EXPECT_EQ(io_stream_read(f->reader, buf, &n), 0);
 		T_EXPECT_EQ(n, 0); /* immediate EOF: the stream is empty */
-		T_EXPECT_EQ(io_stream_close(r), 0);
+		T_EXPECT_EQ(close_stream(&f->reader), 0);
 	}
 	/* a populated cbuf reads back its bytes */
 	{
-		struct vbuffer *cbuf = VBUF_NEW(16);
-		T_CHECK(cbuf != NULL);
-		VBUF_APPENDSTR(cbuf, "hello");
-		struct io_stream *r = content_reader_vbuf(cbuf, CENCODING_NONE);
-		T_CHECK(r != NULL);
+		f->vbuf = VBUF_NEW(16);
+		T_CHECK(f->vbuf != NULL);
+		VBUF_APPENDSTR(f->vbuf, "hello");
+		f->reader = content_reader_vbuf(f->vbuf, CENCODING_NONE);
+		T_CHECK(f->reader != NULL);
 		unsigned char out[5] = { 0 };
-		T_EXPECT(stream_read_exact(r, out, sizeof(out)));
+		T_EXPECT(stream_read_exact(f->reader, out, sizeof(out)));
 		T_EXPECT_MEMEQ(out, "hello", sizeof(out));
-		T_EXPECT_EQ(io_stream_close(r), 0);
-		VBUF_FREE(cbuf);
+		T_EXPECT_EQ(close_stream(&f->reader), 0);
+		VBUF_FREE(f->vbuf);
 	}
 }
 
 T_DECLARE_CASE(content_writer_roundtrip_none)
 {
-	struct vbuffer *vbuf = NULL;
+	struct http_test_fixture *const f = new_fixture(_t_);
+
 	static const unsigned char input[] = "roundtrip-none";
 	unsigned char output[sizeof(input)] = { 0 };
 
-	struct io_stream *w = content_writer(&vbuf, 64, CENCODING_NONE);
-	T_CHECK(w != NULL);
-	T_EXPECT(stream_write_all(w, input, sizeof(input)));
-	T_EXPECT_EQ(io_stream_close(w), 0);
-	T_CHECK(vbuf != NULL);
-	T_EXPECT(VBUF_LEN(vbuf) >= sizeof(input));
+	f->writer = content_writer(&f->vbuf, 64, CENCODING_NONE);
+	T_CHECK(f->writer != NULL);
+	T_EXPECT(stream_write_all(f->writer, input, sizeof(input)));
+	T_EXPECT_EQ(close_stream(&f->writer), 0);
+	T_CHECK(f->vbuf != NULL);
+	T_EXPECT(VBUF_LEN(f->vbuf) >= sizeof(input));
 
-	struct io_stream *r =
-		content_reader(VBUF_DATA(vbuf), VBUF_LEN(vbuf), CENCODING_NONE);
-	T_CHECK(r != NULL);
-	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
+	f->reader = content_reader(
+		VBUF_DATA(f->vbuf), VBUF_LEN(f->vbuf), CENCODING_NONE);
+	T_CHECK(f->reader != NULL);
+	T_EXPECT(stream_read_exact(f->reader, output, sizeof(output)));
 	T_EXPECT_MEMEQ(output, input, sizeof(input));
-	T_EXPECT_EQ(io_stream_close(r), 0);
+	T_EXPECT_EQ(close_stream(&f->reader), 0);
 
-	VBUF_FREE(vbuf);
+	VBUF_FREE(f->vbuf);
 }
 
 T_DECLARE_CASE(content_writer_roundtrip_deflate)
 {
-	struct vbuffer *vbuf = NULL;
+	struct http_test_fixture *const f = new_fixture(_t_);
+
 	static const unsigned char input[] = "roundtrip-deflate";
 	unsigned char output[sizeof(input)] = { 0 };
 
-	struct io_stream *w = content_writer(&vbuf, 64, CENCODING_DEFLATE);
-	T_CHECK(w != NULL);
-	T_EXPECT(stream_write_all(w, input, sizeof(input)));
-	T_EXPECT_EQ(io_stream_close(w), 0);
-	T_CHECK(vbuf != NULL);
+	f->writer = content_writer(&f->vbuf, 64, CENCODING_DEFLATE);
+	T_CHECK(f->writer != NULL);
+	T_EXPECT(stream_write_all(f->writer, input, sizeof(input)));
+	T_EXPECT_EQ(close_stream(&f->writer), 0);
+	T_CHECK(f->vbuf != NULL);
 
-	struct io_stream *r = content_reader(
-		VBUF_DATA(vbuf), VBUF_LEN(vbuf), CENCODING_DEFLATE);
-	T_CHECK(r != NULL);
-	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
+	f->reader = content_reader(
+		VBUF_DATA(f->vbuf), VBUF_LEN(f->vbuf), CENCODING_DEFLATE);
+	T_CHECK(f->reader != NULL);
+	T_EXPECT(stream_read_exact(f->reader, output, sizeof(output)));
 	T_EXPECT_MEMEQ(output, input, sizeof(input));
-	T_EXPECT_EQ(io_stream_close(r), 0);
+	T_EXPECT_EQ(close_stream(&f->reader), 0);
 
-	VBUF_FREE(vbuf);
+	VBUF_FREE(f->vbuf);
 }
 
 /* Regression: content_writer must support gzip symmetrically with
  * content_reader, not abort (FAILMSGF) on CENCODING_GZIP. */
 T_DECLARE_CASE(content_writer_roundtrip_gzip)
 {
-	struct vbuffer *vbuf = NULL;
+	struct http_test_fixture *const f = new_fixture(_t_);
+
 	static const unsigned char input[] = "roundtrip-gzip";
 	unsigned char output[sizeof(input)] = { 0 };
 
-	struct io_stream *w = content_writer(&vbuf, 64, CENCODING_GZIP);
-	T_CHECK(w != NULL);
-	T_EXPECT(stream_write_all(w, input, sizeof(input)));
-	T_EXPECT_EQ(io_stream_close(w), 0);
-	T_CHECK(vbuf != NULL);
+	f->writer = content_writer(&f->vbuf, 64, CENCODING_GZIP);
+	T_CHECK(f->writer != NULL);
+	T_EXPECT(stream_write_all(f->writer, input, sizeof(input)));
+	T_EXPECT_EQ(close_stream(&f->writer), 0);
+	T_CHECK(f->vbuf != NULL);
 
-	struct io_stream *r =
-		content_reader(VBUF_DATA(vbuf), VBUF_LEN(vbuf), CENCODING_GZIP);
-	T_CHECK(r != NULL);
-	T_EXPECT(stream_read_exact(r, output, sizeof(output)));
+	f->reader = content_reader(
+		VBUF_DATA(f->vbuf), VBUF_LEN(f->vbuf), CENCODING_GZIP);
+	T_CHECK(f->reader != NULL);
+	T_EXPECT(stream_read_exact(f->reader, output, sizeof(output)));
 	T_EXPECT_MEMEQ(output, input, sizeof(input));
-	T_EXPECT_EQ(io_stream_close(r), 0);
+	T_EXPECT_EQ(close_stream(&f->reader), 0);
 
-	VBUF_FREE(vbuf);
+	VBUF_FREE(f->vbuf);
 }
 
 T_DECLARE_CASE(http_resp_errpage_normal_and_fallback)
 {
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 
-	conn_init_for_test(&p, -1, STATE_PARSE_REQUEST, &cb);
-	p.cbuf = VBUF_NEW(16);
-	T_CHECK(p.cbuf != NULL);
-	VBUF_APPENDSTR(p.cbuf, "dummy");
+	conn_init_for_test(&f->p, -1, STATE_PARSE_REQUEST, &f->cb);
+	f->p.cbuf = VBUF_NEW(16);
+	T_CHECK(f->p.cbuf != NULL);
+	VBUF_APPENDSTR(f->p.cbuf, "dummy");
 
-	http_resp_errpage(&p, HTTP_BAD_REQUEST);
-	T_EXPECT(p.cbuf == NULL);
-	T_EXPECT(p.wbuf.len > 0);
-	T_EXPECT(memmem(p.wbuf.data, p.wbuf.len, "HTTP/1.1 400", 12) != NULL);
+	http_resp_errpage(&f->p, HTTP_BAD_REQUEST);
+	T_EXPECT(f->p.cbuf == NULL);
+	T_EXPECT(f->p.wbuf.len > 0);
+	T_EXPECT(
+		memmem(f->p.wbuf.data, f->p.wbuf.len, "HTTP/1.1 400", 12) !=
+		NULL);
 
 	/* A too-small write buffer truncates the page but must never let
 	 * wbuf.len exceed wbuf.cap (regression: the length was added
 	 * unclamped, so wbuf.len could run past what was actually written). */
-	p.wbuf.len = 0;
-	p.wbuf.cap = 32;
-	http_resp_errpage(&p, HTTP_BAD_REQUEST);
-	T_EXPECT(p.wbuf.len > 0);
-	T_EXPECT(p.wbuf.len <= p.wbuf.cap);
+	f->p.wbuf.len = 0;
+	f->p.wbuf.cap = 32;
+	http_resp_errpage(&f->p, HTTP_BAD_REQUEST);
+	T_EXPECT(f->p.wbuf.len > 0);
+	T_EXPECT(f->p.wbuf.len <= f->p.wbuf.cap);
 
 	/* An unknown status code makes http_error() return 0, exercising the
 	 * code-only fallback that still emits Connection: close. */
-	p.wbuf.len = 0;
-	p.wbuf.cap = sizeof(p.wbuf.data);
-	http_resp_errpage(&p, 599);
+	f->p.wbuf.len = 0;
+	f->p.wbuf.cap = sizeof(f->p.wbuf.data);
+	http_resp_errpage(&f->p, 599);
 	T_EXPECT(
-		memmem(p.wbuf.data, p.wbuf.len, "Connection: close", 17) !=
-		NULL);
+		memmem(f->p.wbuf.data, f->p.wbuf.len, "Connection: close",
+		       17) != NULL);
 }
 
 T_DECLARE_CASE(http_resp_errpage_fallback_omits_date_without_clock)
@@ -1029,26 +1088,23 @@ T_DECLARE_CASE(http_conn_host_syntax)
 
 T_DECLARE_CASE(http_conn_recv_request_ok)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char req[] = "GET /hello HTTP/1.1\r\n"
 				  "Host: test\r\n"
 				  "\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	const int ret = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], req, sizeof(req) - 1));
+	const int ret = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
-	T_EXPECT_STREQ(p.msg.req.method, "GET");
-	T_EXPECT_STREQ(p.msg.req.url, "/hello");
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
+	T_EXPECT_STREQ(f->p.msg.req.method, "GET");
+	T_EXPECT_STREQ(f->p.msg.req.url, "/hello");
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /*
@@ -1062,31 +1118,27 @@ T_DECLARE_CASE(http_conn_recv_request_ok)
  */
 T_DECLARE_CASE(http_conn_recv_chunked_body_is_not_framed)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char req[] = "POST /hello HTTP/1.1\r\n"
 				  "Host: test\r\n"
 				  "Transfer-Encoding: chunked\r\n"
 				  "\r\n"
 				  "5\r\nhello\r\n0\r\n\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	const int ret = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], req, sizeof(req) - 1));
+	const int ret = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
-	T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(f->p.hdr.transfer.encoding, TENCODING_CHUNKED);
 	/* the headers parsed, but the body was not framed */
-	T_EXPECT(p.cbuf == NULL);
-	T_EXPECT(!p.hdr.content.has_length);
+	T_EXPECT(f->p.cbuf == NULL);
+	T_EXPECT(!f->p.hdr.content.has_length);
 
-	VBUF_FREE(p.cbuf);
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /* A second, empty Transfer-Encoding line must not downgrade the chunked framing
@@ -1095,9 +1147,7 @@ T_DECLARE_CASE(http_conn_recv_chunked_body_is_not_framed)
  * coding to NONE and the chunked body desyncs into the next message. */
 T_DECLARE_CASE(http_conn_recv_empty_te_does_not_downgrade_chunked)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char req[] = "POST /hello HTTP/1.1\r\n"
 				  "Host: test\r\n"
 				  "Transfer-Encoding: chunked\r\n"
@@ -1105,53 +1155,49 @@ T_DECLARE_CASE(http_conn_recv_empty_te_does_not_downgrade_chunked)
 				  "\r\n"
 				  "5\r\nhello\r\n0\r\n\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	const int ret = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], req, sizeof(req) - 1));
+	const int ret = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
 	/* the chunked coding survives the empty second line */
-	T_EXPECT_EQ(p.hdr.transfer.encoding, TENCODING_CHUNKED);
-	T_EXPECT(p.cbuf == NULL);
-	T_EXPECT(!p.hdr.content.has_length);
+	T_EXPECT_EQ(f->p.hdr.transfer.encoding, TENCODING_CHUNKED);
+	T_EXPECT(f->p.cbuf == NULL);
+	T_EXPECT(!f->p.hdr.content.has_length);
 
-	VBUF_FREE(p.cbuf);
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_conn_recv_response_ok)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char rsp[] = "HTTP/1.1 204 No Content\r\n"
 				  "Date: Wed, 01 Jan 2025 00:00:00 GMT\r\n"
 				  "\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_RESPONSE, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_RESPONSE, &f->cb);
 
-	T_CHECK(write_all(sv[1], rsp, sizeof(rsp) - 1));
-	const int ret = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], rsp, sizeof(rsp) - 1));
+	const int ret = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
-	T_EXPECT_STREQ(p.msg.rsp.version, "HTTP/1.1");
-	T_EXPECT_STREQ(p.msg.rsp.code, "204");
-	T_EXPECT_STREQ(p.msg.rsp.status, "No Content");
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
+	T_EXPECT_STREQ(f->p.msg.rsp.version, "HTTP/1.1");
+	T_EXPECT_STREQ(f->p.msg.rsp.code, "204");
+	T_EXPECT_STREQ(f->p.msg.rsp.status, "No Content");
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /* Reject the entire malformed field before headers or content are consumed.
  * An unrecognized three-digit code and an empty reason phrase remain valid. */
 T_DECLARE_CASE(http_conn_recv_response_status_code_syntax)
 {
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const struct {
 		const char *code;
 		bool valid;
@@ -1163,26 +1209,22 @@ T_DECLARE_CASE(http_conn_recv_response_status_code_syntax)
 		{ "299", true },      { "599", true },
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
-		int sv[2] = { -1, -1 };
-		struct http_conn p = { 0 };
-		struct conn_test_ctx cb = { 0 };
 		char response[256];
 		const int n = snprintf(
 			response, sizeof(response),
 			"HTTP/1.1 %s \r\nContent-Length: 2\r\n\r\nok",
 			cases[i].code);
 		T_CHECK(n > 0 && (size_t)n < sizeof(response));
-		make_socketpair(sv);
-		T_CHECK(fd_set_nonblock(sv[0]));
-		conn_init_for_test(&p, sv[0], STATE_PARSE_RESPONSE, &cb);
-		T_CHECK(write_all(sv[1], response, (size_t)n));
-		const int result = http_recv_until_done(&p);
-		const bool headers_parsed = p.hdr.content.has_length;
+		make_socketpair(f->sv);
+		T_CHECK(fd_set_nonblock(f->sv[0]));
+		conn_init_for_test(
+			&f->p, f->sv[0], STATE_PARSE_RESPONSE, &f->cb);
+		T_CHECK(write_all(f->sv[1], response, (size_t)n));
+		const int result = http_recv_until_done(&f->p);
+		const bool headers_parsed = f->p.hdr.content.has_length;
 		const bool content_read =
-			p.cbuf != NULL && VBUF_LEN(p.cbuf) == 2;
-		VBUF_FREE(p.cbuf);
-		T_CHECK(close(sv[0]) == 0);
-		T_CHECK(close(sv[1]) == 0);
+			f->p.cbuf != NULL && VBUF_LEN(f->p.cbuf) == 2;
+		fixture_release(f);
 		T_EXPECT_EQ(result, cases[i].valid ? 0 : -1);
 		T_EXPECT_EQ(headers_parsed, cases[i].valid);
 		T_EXPECT_EQ(content_read, cases[i].valid);
@@ -1193,66 +1235,57 @@ T_DECLARE_CASE(http_conn_recv_response_status_code_syntax)
  * request mode's graceful STATE_PARSE_ERROR: unsupported response version. */
 T_DECLARE_CASE(http_conn_recv_response_unsupported_version)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char rsp[] = "HTTP/2 200 OK\r\n\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_RESPONSE, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_RESPONSE, &f->cb);
 
-	T_CHECK(write_all(sv[1], rsp, sizeof(rsp) - 1));
-	T_EXPECT_EQ(http_recv_until_done(&p), -1);
+	T_CHECK(write_all(f->sv[1], rsp, sizeof(rsp) - 1));
+	T_EXPECT_EQ(http_recv_until_done(&f->p), -1);
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /* Response mode: a malformed header line also returns a hard -1. */
 T_DECLARE_CASE(http_conn_recv_response_malformed_header)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char rsp[] = "HTTP/1.1 200 OK\r\n"
 				  "no-colon-here\r\n"
 				  "\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_RESPONSE, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_RESPONSE, &f->cb);
 
-	T_CHECK(write_all(sv[1], rsp, sizeof(rsp) - 1));
-	T_EXPECT_EQ(http_recv_until_done(&p), -1);
+	T_CHECK(write_all(f->sv[1], rsp, sizeof(rsp) - 1));
+	T_EXPECT_EQ(http_recv_until_done(&f->p), -1);
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /* A Content-Length beyond HTTP_MAX_CONTENT must be rejected with
  * ENTITY_TOO_LARGE (bounds the VBUF_NEW allocation). */
 T_DECLARE_CASE(http_conn_recv_content_length_too_large)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	/* HTTP_MAX_CONTENT is 4194304 */
 	static const char req[] = "POST / HTTP/1.1\r\nHost: test\r\n"
 				  "Content-Length: 4194305\r\n"
 				  "\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	T_EXPECT_EQ(http_recv_until_done(&p), 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
-	T_EXPECT_EQ(p.http_status, HTTP_ENTITY_TOO_LARGE);
+	T_CHECK(write_all(f->sv[1], req, sizeof(req) - 1));
+	T_EXPECT_EQ(http_recv_until_done(&f->p), 0);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_ERROR);
+	T_EXPECT_EQ(f->p.http_status, HTTP_ENTITY_TOO_LARGE);
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /* Feed `msg` to a fresh connection in `mode` and check its HTTP-version is
@@ -1262,26 +1295,23 @@ T_DECLARE_SUBCASE(
 	expect_bad_version, const enum http_conn_state mode,
 	const char *restrict msg)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], mode, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], mode, &f->cb);
 
-	T_CHECK(write_all(sv[1], msg, strlen(msg)));
-	const int ret = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], msg, strlen(msg)));
+	const int ret = http_recv_until_done(&f->p);
 	if (mode == STATE_PARSE_REQUEST) {
 		T_EXPECT_EQ(ret, 0);
-		T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
-		T_EXPECT_EQ(p.http_status, HTTP_BAD_REQUEST);
+		T_EXPECT_EQ(f->p.state, STATE_PARSE_ERROR);
+		T_EXPECT_EQ(f->p.http_status, HTTP_BAD_REQUEST);
 	} else {
 		T_EXPECT_EQ(ret, -1);
 	}
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /*
@@ -1319,27 +1349,24 @@ T_DECLARE_CASE(http_conn_recv_bad_version)
  * requires 414, not the 413 reserved for request content. */
 T_DECLARE_CASE(http_conn_recv_request_line_too_long)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char reqline[] = "GET /";
 	unsigned char filler[HTTP_MAX_ENTITY];
 	memset(filler, 'a', sizeof(filler));
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], reqline, sizeof(reqline) - 1));
-	T_CHECK(write_all(sv[1], filler, sizeof(filler)));
+	T_CHECK(write_all(f->sv[1], reqline, sizeof(reqline) - 1));
+	T_CHECK(write_all(f->sv[1], filler, sizeof(filler)));
 
-	const int ret = http_recv_until_done(&p);
+	const int ret = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
-	T_EXPECT_EQ(p.http_status, HTTP_URI_TOO_LONG);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_ERROR);
+	T_EXPECT_EQ(f->p.http_status, HTTP_URI_TOO_LONG);
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /*
@@ -1351,129 +1378,114 @@ T_DECLARE_CASE(http_conn_recv_request_line_too_long)
  */
 T_DECLARE_CASE(http_conn_recv_header_line_too_long)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char reqline[] =
 		"GET / HTTP/1.1\r\nHost: test\r\nX-Long: ";
 	unsigned char filler[HTTP_MAX_ENTITY];
 	memset(filler, 'a', sizeof(filler));
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], reqline, sizeof(reqline) - 1));
-	T_CHECK(write_all(sv[1], filler, sizeof(filler)));
+	T_CHECK(write_all(f->sv[1], reqline, sizeof(reqline) - 1));
+	T_CHECK(write_all(f->sv[1], filler, sizeof(filler)));
 
-	const int ret = http_recv_until_done(&p);
+	const int ret = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
-	T_EXPECT_EQ(p.http_status, HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_ERROR);
+	T_EXPECT_EQ(f->p.http_status, HTTP_REQUEST_HEADER_FIELDS_TOO_LARGE);
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_conn_recv_incremental)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char req1[] = "GET / HTTP/1.1\r\n"
 				   "Host: a\r\n";
 	static const char req2[] = "\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	const int ret1 = http_recv_nbytes(&p, sizeof(req1) - 1);
+	T_CHECK(write_all(f->sv[1], req1, sizeof(req1) - 1));
+	const int ret1 = http_recv_nbytes(&f->p, sizeof(req1) - 1);
 	T_EXPECT_EQ(ret1, 1);
-	T_EXPECT_EQ(p.state, STATE_PARSE_HEADER);
-	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
-	const int ret2 = http_recv_until_done(&p);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_HEADER);
+	T_CHECK(write_all(f->sv[1], req2, sizeof(req2) - 1));
+	const int ret2 = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret2, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_conn_recv_content_incomplete_then_complete)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char req1[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
 				   "Content-Length: 5\r\n"
 				   "\r\n"
 				   "he";
 	static const char req2[] = "llo";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	const int ret1 = http_recv_nbytes(&p, sizeof(req1) - 1);
+	T_CHECK(write_all(f->sv[1], req1, sizeof(req1) - 1));
+	const int ret1 = http_recv_nbytes(&f->p, sizeof(req1) - 1);
 	T_EXPECT_EQ(ret1, 1);
-	T_CHECK(p.cbuf != NULL);
-	T_EXPECT_EQ(VBUF_LEN(p.cbuf), 2);
+	T_CHECK(f->p.cbuf != NULL);
+	T_EXPECT_EQ(VBUF_LEN(f->p.cbuf), 2);
 
-	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
-	const int ret2 = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], req2, sizeof(req2) - 1));
+	const int ret2 = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret2, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
-	T_EXPECT_EQ(VBUF_LEN(p.cbuf), 5);
-	T_EXPECT_MEMEQ(VBUF_DATA(p.cbuf), "hello", 5);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(VBUF_LEN(f->p.cbuf), 5);
+	T_EXPECT_MEMEQ(VBUF_DATA(f->p.cbuf), "hello", 5);
 
-	VBUF_FREE(p.cbuf);
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_conn_recv_content_later_read_keeps_nul_terminator)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char req1[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
 				   "Content-Length: 5\r\n"
 				   "\r\n"
 				   "he";
 	static const char req2[] = "llo";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	T_EXPECT_EQ(http_recv_nbytes(&p, sizeof(req1) - 1), 1);
-	T_CHECK(p.cbuf != NULL);
-	T_CHECK(VBUF_LEN(p.cbuf) == 2);
+	T_CHECK(write_all(f->sv[1], req1, sizeof(req1) - 1));
+	T_EXPECT_EQ(http_recv_nbytes(&f->p, sizeof(req1) - 1), 1);
+	T_CHECK(f->p.cbuf != NULL);
+	T_CHECK(VBUF_LEN(f->p.cbuf) == 2);
 	/* poison the spare room, so a terminator can only come from the
 	 * bytes read directly into it */
-	memset(p.cbuf->data + p.cbuf->len, 'X', p.cbuf->cap + 1 - p.cbuf->len);
+	memset(f->p.cbuf->data + f->p.cbuf->len, 'X',
+	       f->p.cbuf->cap + 1 - f->p.cbuf->len);
 
-	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
-	T_EXPECT_EQ(http_recv_until_done(&p), 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
-	T_EXPECT_EQ(VBUF_LEN(p.cbuf), 5);
-	T_EXPECT_EQ(p.cbuf->data[p.cbuf->len], '\0');
-	T_EXPECT_STREQ((const char *)VBUF_DATA(p.cbuf), "hello");
+	T_CHECK(write_all(f->sv[1], req2, sizeof(req2) - 1));
+	T_EXPECT_EQ(http_recv_until_done(&f->p), 0);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(VBUF_LEN(f->p.cbuf), 5);
+	T_EXPECT_EQ(f->p.cbuf->data[f->p.cbuf->len], '\0');
+	T_EXPECT_STREQ((const char *)VBUF_DATA(f->p.cbuf), "hello");
 
-	VBUF_FREE(p.cbuf);
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_conn_recv_content_clamped_to_content_length)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	/* Content-Length: 5 declared, but 8 body bytes arrive in the same
 	 * write as the headers; the extra 3 bytes must not be copied into
 	 * the content buffer (they belong to a later message, if anything). */
@@ -1482,29 +1494,25 @@ T_DECLARE_CASE(http_conn_recv_content_clamped_to_content_length)
 				  "\r\n"
 				  "hello!!!";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
-	const int ret = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], req, sizeof(req) - 1));
+	const int ret = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
-	T_CHECK(p.cbuf != NULL);
-	T_EXPECT_EQ(VBUF_LEN(p.cbuf), 5);
-	T_EXPECT_MEMEQ(VBUF_DATA(p.cbuf), "hello", 5);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
+	T_CHECK(f->p.cbuf != NULL);
+	T_EXPECT_EQ(VBUF_LEN(f->p.cbuf), 5);
+	T_EXPECT_MEMEQ(VBUF_DATA(f->p.cbuf), "hello", 5);
 
-	VBUF_FREE(p.cbuf);
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_conn_recv_expect_continue)
 {
-	int sv[2] = { -1, -1 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	unsigned char rsp[128] = { 0 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
 	static const char req1[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
 				   "Expect: 100-continue\r\n"
 				   "Content-Length: 5\r\n"
@@ -1514,22 +1522,22 @@ T_DECLARE_CASE(http_conn_recv_expect_continue)
 	static const char rsp_expect[] = "HTTP/1.1 100 Continue\r\n\r\n";
 	const size_t rsp_want = sizeof(rsp_expect) - 1;
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	const int ret1 = http_recv_nbytes(&p, sizeof(req1) - 1);
+	T_CHECK(write_all(f->sv[1], req1, sizeof(req1) - 1));
+	const int ret1 = http_recv_nbytes(&f->p, sizeof(req1) - 1);
 	T_EXPECT_EQ(ret1, 1);
-	T_EXPECT(p.expect_continue);
+	T_EXPECT(f->p.expect_continue);
 
 	/* read the interim response, tolerating fragmented delivery */
 	size_t rsplen = 0;
 	const int_fast64_t deadline =
 		clock_monotonic_ns() + TEST_RECV_BUDGET_NS;
-	while (rsplen < rsp_want && wait_readable(sv[1], deadline)) {
-		const ssize_t n =
-			recv_nowait(sv[1], rsp + rsplen, sizeof(rsp) - rsplen);
+	while (rsplen < rsp_want && wait_readable(f->sv[1], deadline)) {
+		const ssize_t n = recv_nowait(
+			f->sv[1], rsp + rsplen, sizeof(rsp) - rsplen);
 		if (n < 0) {
 			const int err = errno;
 			T_CHECK(err == EAGAIN || err == EWOULDBLOCK);
@@ -1543,113 +1551,100 @@ T_DECLARE_CASE(http_conn_recv_expect_continue)
 	T_EXPECT_EQ(rsplen, rsp_want);
 	T_EXPECT_MEMEQ(rsp, rsp_expect, rsp_want);
 	/* the interim response is accounted like every other write */
-	T_EXPECT_EQ((uintmax_t)cb.byt_sent, (uintmax_t)rsp_want);
+	T_EXPECT_EQ((uintmax_t)f->cb.byt_sent, (uintmax_t)rsp_want);
 
-	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
-	const int ret2 = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], req2, sizeof(req2) - 1));
+	const int ret2 = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret2, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
 	T_EXPECT_EQ(
-		(uintmax_t)cb.byt_recv,
+		(uintmax_t)f->cb.byt_recv,
 		(uintmax_t)((sizeof(req1) - 1) + (sizeof(req2) - 1)));
 
-	VBUF_FREE(p.cbuf);
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 /* Regression: RFC 9110 §10.1.1 and §15.2 -- an HTTP/1.0 request's
  * 100-continue is ignored, so no interim response reaches the peer. */
 T_DECLARE_CASE(http_conn_recv_expect_continue_http10)
 {
-	int sv[2] = { -1, -1 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	unsigned char rsp[128];
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
 	static const char req1[] = "POST /x HTTP/1.0\r\n"
 				   "Expect: 100-continue\r\n"
 				   "Content-Length: 5\r\n"
 				   "\r\n";
 	static const char req2[] = "hello";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req1, sizeof(req1) - 1));
-	const int ret1 = http_recv_nbytes(&p, sizeof(req1) - 1);
+	T_CHECK(write_all(f->sv[1], req1, sizeof(req1) - 1));
+	const int ret1 = http_recv_nbytes(&f->p, sizeof(req1) - 1);
 	T_EXPECT_EQ(ret1, 1);
-	T_EXPECT_EQ(p.state, STATE_PARSE_CONTENT);
-	T_EXPECT(!p.expect_continue);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_CONTENT);
+	T_EXPECT(!f->p.expect_continue);
 	/* the interim reply is written synchronously when the body starts, so
 	 * nothing pending now means nothing was sent */
-	T_EXPECT_EQ((uintmax_t)cb.byt_sent, 0);
-	const ssize_t n = recv_nowait(sv[1], rsp, sizeof(rsp));
+	T_EXPECT_EQ((uintmax_t)f->cb.byt_sent, 0);
+	const ssize_t n = recv_nowait(f->sv[1], rsp, sizeof(rsp));
 	const int err = errno;
 	T_EXPECT_EQ(n, -1);
 	T_EXPECT(err == EAGAIN || err == EWOULDBLOCK);
 
-	T_CHECK(write_all(sv[1], req2, sizeof(req2) - 1));
-	const int ret2 = http_recv_until_done(&p);
+	T_CHECK(write_all(f->sv[1], req2, sizeof(req2) - 1));
+	const int ret2 = http_recv_until_done(&f->p);
 	T_EXPECT_EQ(ret2, 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_OK);
-	T_CHECK(p.cbuf != NULL);
-	T_EXPECT_MEMEQ(VBUF_DATA(p.cbuf), "hello", 5);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_OK);
+	T_CHECK(f->p.cbuf != NULL);
+	T_EXPECT_MEMEQ(VBUF_DATA(f->p.cbuf), "hello", 5);
 
-	VBUF_FREE(p.cbuf);
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_conn_recv_content_early_eof)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char req[] = "POST /x HTTP/1.1\r\nHost: test\r\n"
 				  "Content-Length: 5\r\n"
 				  "\r\n"
 				  "he";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
 
-	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
+	T_CHECK(write_all(f->sv[1], req, sizeof(req) - 1));
 	/* take in the partial body (parser still needs more) in a
 	 * fragmentation-safe way, then signal EOF and recv to the terminal
 	 * error -- a single recv per phase can race delayed fragments */
-	T_EXPECT_EQ(http_recv_nbytes(&p, sizeof(req) - 1), 1);
-	T_CHECK(shutdown(sv[1], SHUT_WR) == 0);
-	T_EXPECT_EQ(http_recv_until_done(&p), -1);
+	T_EXPECT_EQ(http_recv_nbytes(&f->p, sizeof(req) - 1), 1);
+	T_CHECK(shutdown(f->sv[1], SHUT_WR) == 0);
+	T_EXPECT_EQ(http_recv_until_done(&f->p), -1);
 
-	VBUF_FREE(p.cbuf);
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_conn_recv_header_callback_reject)
 {
-	int sv[2] = { -1, -1 };
-	struct http_conn p = { 0 };
-	struct conn_test_ctx cb = { 0 };
+	struct http_test_fixture *const f = new_fixture(_t_);
 	static const char req[] = "GET /x HTTP/1.1\r\n"
 				  "Host: reject\r\n"
 				  "\r\n";
 
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-	conn_init_for_test(&p, sv[0], STATE_PARSE_REQUEST, &cb);
-	cb.reject = true;
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	conn_init_for_test(&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
+	f->cb.reject = true;
 
-	T_CHECK(write_all(sv[1], req, sizeof(req) - 1));
+	T_CHECK(write_all(f->sv[1], req, sizeof(req) - 1));
 	/* recv to the terminal result: a single recv can see only the request
 	 * line before the header callback that rejects has run */
-	T_EXPECT_EQ(http_recv_until_done(&p), 0);
-	T_EXPECT_EQ(p.state, STATE_PARSE_ERROR);
+	T_EXPECT_EQ(http_recv_until_done(&f->p), 0);
+	T_EXPECT_EQ(f->p.state, STATE_PARSE_ERROR);
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
 }
 
 T_DECLARE_CASE(http_connection_lists_cases)
@@ -1981,6 +1976,41 @@ T_DECLARE_CASE(parsehdr_representation_dispatches_by_key)
 	}
 }
 
+T_DECLARE_CASE(http_conn_send_resumes_inside_inline_body)
+{
+	struct http_test_fixture *const f = new_fixture(_t_);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
+	const struct http_parsehdr_cb no_hdr = { 0 };
+	http_conn_init(
+		&f->p, f->sv[0], STATE_PARSE_RESPONSE, no_hdr, NULL,
+		&f->cb.byt_sent);
+	static const char header[] =
+		"HTTP/1.1 200 OK\r\nContent-Length: 255\r\n\r\n";
+	unsigned char body[255];
+	for (size_t i = 0; i < sizeof(body); i++) {
+		body[i] = (unsigned char)i;
+	}
+	BUF_APPEND(f->p.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(f->p.wbuf, body, sizeof(body));
+	/* Resume at an already-sent prefix inside the inline body. */
+	f->p.wpos = sizeof(header) - 1 + 37;
+	f->cb.byt_sent = (uint_least64_t)f->p.wpos;
+	const size_t remaining = f->p.wbuf.len - f->p.wpos;
+	int err = -1;
+	T_EXPECT_EQ(http_conn_send(&f->p, f->sv[0], &err), 0);
+	T_EXPECT_EQ(err, 0);
+	T_EXPECT_EQ(f->p.wpos, f->p.wbuf.len);
+	T_EXPECT_EQ(f->cb.byt_sent, (uint_least64_t)f->p.wbuf.len);
+	T_EXPECT(f->p.cbuf == NULL);
+	unsigned char received[sizeof(body)];
+	const ssize_t n =
+		recv(f->sv[1], received, sizeof(received), MSG_DONTWAIT);
+	T_CHECK(n >= 0);
+	T_EXPECT_EQ((size_t)n, remaining);
+	T_EXPECT_MEMEQ(received, body + 37, remaining);
+}
+
 /*
  * http_conn_send() (used by api_server.c, http_proxy.c, http_client.c) drains
  * wbuf then cbuf to the socket, returns 1 on backpressure/partial send, 0 on
@@ -1990,18 +2020,16 @@ T_DECLARE_CASE(parsehdr_representation_dispatches_by_key)
  */
 T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 {
-	int sv[2] = { -1, -1 };
-	make_socketpair(sv);
-	T_CHECK(fd_set_nonblock(sv[0]));
-
-	struct http_conn p = { 0 };
-	uint_least64_t byt_sent = 0;
+	struct http_test_fixture *const f = new_fixture(_t_);
+	make_socketpair(f->sv);
+	T_CHECK(fd_set_nonblock(f->sv[0]));
 	const struct http_parsehdr_cb no_hdr = { 0 };
 	http_conn_init(
-		&p, sv[0], STATE_PARSE_RESPONSE, no_hdr, NULL, &byt_sent);
+		&f->p, f->sv[0], STATE_PARSE_RESPONSE, no_hdr, NULL,
+		&f->cb.byt_sent);
 
 	static const char header[] = "HTTP/1.1 200 OK\r\n\r\n";
-	BUF_APPEND(p.wbuf, header, sizeof(header) - 1);
+	BUF_APPEND(f->p.wbuf, header, sizeof(header) - 1);
 
 	/* larger than any socket send buffer, so the first send is partial */
 	const size_t body_len = (size_t)2 * 1024 * 1024;
@@ -2011,17 +2039,18 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 	for (size_t i = 0; i < body_len; i++) {
 		body[i] = (unsigned char)(i ^ (i >> 8) ^ (i >> 16));
 	}
-	p.cbuf = VBUF_NEW(body_len);
-	T_CHECK(p.cbuf != NULL);
-	VBUF_APPEND(p.cbuf, body, body_len);
+	f->p.cbuf = VBUF_NEW(body_len);
+	T_CHECK(f->p.cbuf != NULL);
+	VBUF_APPEND(f->p.cbuf, body, body_len);
 
 	/* first send: wbuf drains fully, cbuf partially, then backpressure (1) */
 	int err = -1;
-	T_EXPECT_EQ(http_conn_send(&p, sv[0], &err), 1);
+	T_EXPECT_EQ(http_conn_send(&f->p, f->sv[0], &err), 1);
 	T_EXPECT_EQ(err, 0);
-	T_EXPECT_EQ(p.wpos, sizeof(header) - 1);
-	T_CHECK(p.cpos > 0 && p.cpos < body_len);
-	T_EXPECT_EQ((uintmax_t)byt_sent, (uintmax_t)(p.wpos + p.cpos));
+	T_EXPECT_EQ(f->p.wpos, sizeof(header) - 1);
+	T_CHECK(f->p.cpos > 0 && f->p.cpos < body_len);
+	T_EXPECT_EQ(
+		(uintmax_t)f->cb.byt_sent, (uintmax_t)(f->p.wpos + f->p.cpos));
 
 	/* drain the receiver and re-send until the whole body is out. Each
 	 * drained round frees at least the socket buffer (>= 1 KiB on any real
@@ -2034,8 +2063,8 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 	while (r != 0) {
 		T_CHECK(rounds++ < max_rounds);
 		for (;;) {
-			const ssize_t n =
-				recv(sv[1], drain, sizeof(drain), MSG_DONTWAIT);
+			const ssize_t n = recv(
+				f->sv[1], drain, sizeof(drain), MSG_DONTWAIT);
 			if (n <= 0) {
 				break;
 			}
@@ -2043,13 +2072,13 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 			T_EXPECT_MEMEQ(drain, wire + total_recv, (size_t)n);
 			total_recv += (size_t)n;
 		}
-		r = http_conn_send(&p, sv[0], &err);
+		r = http_conn_send(&f->p, f->sv[0], &err);
 		T_EXPECT_EQ(err, 0);
 	}
 	/* drain what the final send left in the socket */
 	for (;;) {
 		const ssize_t n =
-			recv(sv[1], drain, sizeof(drain), MSG_DONTWAIT);
+			recv(f->sv[1], drain, sizeof(drain), MSG_DONTWAIT);
 		if (n <= 0) {
 			break;
 		}
@@ -2058,16 +2087,125 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
 		total_recv += (size_t)n;
 	}
 
-	T_EXPECT_EQ(p.wpos, sizeof(header) - 1);
-	T_EXPECT_EQ((uintmax_t)p.cpos, (uintmax_t)body_len);
-	T_EXPECT(p.cbuf == NULL); /* cbuf freed on completion */
+	T_EXPECT_EQ(f->p.wpos, sizeof(header) - 1);
+	T_EXPECT_EQ((uintmax_t)f->p.cpos, (uintmax_t)body_len);
+	T_EXPECT(f->p.cbuf == NULL); /* cbuf freed on completion */
 	T_EXPECT_EQ(
-		(uintmax_t)byt_sent,
+		(uintmax_t)f->cb.byt_sent,
 		(uintmax_t)((sizeof(header) - 1) + body_len));
-	T_EXPECT_EQ((uintmax_t)total_recv, (uintmax_t)byt_sent);
+	T_EXPECT_EQ((uintmax_t)total_recv, (uintmax_t)f->cb.byt_sent);
 
-	T_CHECK(close(sv[0]) == 0);
-	T_CHECK(close(sv[1]) == 0);
+	fixture_release(f);
+}
+
+static unsigned g_failure_stage;
+static int g_failure_fds[2] = { -1, -1 };
+
+static void reset_failure_probe(void *unused)
+{
+	(void)unused;
+	g_failure_stage = 0;
+	g_failure_fds[0] = g_failure_fds[1] = -1;
+}
+
+T_DECLARE_CASE(abandon_http_fixture)
+{
+	struct http_test_fixture *const f = new_fixture(_t_);
+	static const char request[] =
+		"POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 5\r\n\r\nhe";
+	static const char input[] = "content";
+	if (g_failure_stage < 2) {
+		make_socketpair(f->sv);
+		T_CHECK(fd_set_nonblock(f->sv[0]));
+		g_failure_fds[0] = f->sv[0];
+		g_failure_fds[1] = f->sv[1];
+		conn_init_for_test(
+			&f->p, f->sv[0], STATE_PARSE_REQUEST, &f->cb);
+		if (g_failure_stage == 0) {
+			T_CHECK(write_all(
+				f->sv[1], request, sizeof(request) - 1));
+			T_CHECK(http_recv_nbytes(&f->p, sizeof(request) - 1) ==
+				1);
+			T_CHECK(f->p.cbuf != NULL && VBUF_LEN(f->p.cbuf) == 2);
+		} else {
+			const size_t len = (size_t)2 * 1024 * 1024;
+			f->p.cbuf = VBUF_NEW(len);
+			T_CHECK(f->p.cbuf != NULL);
+			memset(f->p.cbuf->data, 'x', len);
+			f->p.cbuf->len = len;
+			int err = -1;
+			T_CHECK(http_conn_send(&f->p, f->sv[0], &err) == 1);
+			T_CHECK(err == 0 && f->p.cbuf != NULL);
+		}
+	} else if (g_failure_stage == 2) {
+		f->vbuf = VBUF_NEW(sizeof(input));
+		T_CHECK(f->vbuf != NULL);
+		VBUF_APPEND(f->vbuf, input, sizeof(input));
+		f->reader = content_reader_vbuf(f->vbuf, CENCODING_NONE);
+		T_CHECK(f->reader != NULL);
+	} else {
+		static const enum content_encodings encodings[] = {
+			CENCODING_NONE,
+			CENCODING_DEFLATE,
+			CENCODING_GZIP,
+			CENCODING_GZIP,
+		};
+		const enum content_encodings encoding =
+			encodings[g_failure_stage - 3];
+		f->writer = content_writer(&f->vbuf, 16, encoding);
+		T_CHECK(f->writer != NULL);
+		T_CHECK(stream_write_all(f->writer, input, sizeof(input)));
+		if (g_failure_stage == 6) {
+			T_CHECK(close_stream(&f->writer) == 0);
+			f->reader = content_reader_vbuf(f->vbuf, encoding);
+			T_CHECK(f->reader != NULL);
+			unsigned char output[sizeof(input)];
+			T_CHECK(stream_read_exact(
+				f->reader, output, sizeof(output)));
+		}
+	}
+	g_http_date_fail = true;
+	T_EXPECT(false); /* intentionally leave live resources to the runner */
+}
+
+T_DECLARE_CASE(http_failed_expectation_cleans_fixture)
+{
+	T_CLEANUP(reset_failure_probe, NULL);
+	T_CHECK(g_live_fixtures == 0);
+	static void (*const followup[])(struct testing_ctx *) = {
+		testcase_http_conn_recv_content_incomplete_then_complete_,
+		testcase_http_conn_send_drains_wbuf_then_cbuf_with_backpressure_,
+		testcase_content_reader_vbuf_cases_,
+		testcase_content_writer_roundtrip_none_,
+		testcase_content_writer_roundtrip_deflate_,
+		testcase_content_writer_roundtrip_gzip_,
+		testcase_content_writer_roundtrip_gzip_,
+	};
+	T_LOG("Seven nested cases deliberately fail before fixture teardown.");
+	for (size_t i = 0; i < ARRAY_SIZE(followup); i++) {
+		g_failure_stage = (unsigned)i;
+		g_failure_fds[0] = g_failure_fds[1] = -1;
+		struct testing_ctx inner = { .out = _t_->out };
+		T_RUN_CASE(inner, abandon_http_fixture);
+		T_EXPECT_EQ(inner.failed, 1);
+		T_EXPECT_EQ(inner.cleanup_count, 0);
+		for (size_t j = 0; j < ARRAY_SIZE(g_failure_fds); j++) {
+			if (g_failure_fds[j] >= 0) {
+				errno = 0;
+				T_EXPECT_EQ(
+					fcntl(g_failure_fds[j], F_GETFD), -1);
+				T_EXPECT_EQ(errno, EBADF);
+			}
+		}
+		T_EXPECT_EQ(g_live_fixtures, 0);
+		T_EXPECT(!g_http_date_fail);
+		testing_run_case_(
+			&inner, "normal HTTP fixture after failure",
+			followup[i]);
+		T_EXPECT_EQ(inner.passed, 1);
+		T_EXPECT_EQ(inner.failed, 1);
+		T_EXPECT_EQ(g_live_fixtures, 0);
+	}
 }
 
 /* -------------------------------------------------------------------------
@@ -2075,6 +2213,7 @@ T_DECLARE_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure)
  * ---------------------------------------------------------------------- */
 
 static const struct testing_suite suite[] = {
+	T_CASE(http_failed_expectation_cleans_fixture),
 	T_CASE(http_conn_init_request),
 	T_CASE(http_conn_init_response),
 	T_CASE(parsehdr_transfer_encoding_cases),
@@ -2086,6 +2225,7 @@ static const struct testing_suite suite[] = {
 	T_CASE(parsehdr_content_length_cases),
 	T_CASE(parsehdr_representation_dispatches_by_key),
 	T_CASE(http_conn_send_drains_wbuf_then_cbuf_with_backpressure),
+	T_CASE(http_conn_send_resumes_inside_inline_body),
 	T_CASE(parsehdr_content_length_rejects_duplicate),
 	T_CASE(parsehdr_content_length_rejects_te_chunked_conflict),
 	T_CASE(parsehdr_content_encoding_cases),
