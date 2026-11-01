@@ -847,7 +847,7 @@ return function(T)
             'expected "peer2"->"peer3"->"peer4"->"peer5" path\n' .. stats)
     end)
 
-    T:atest("resolve_internal: 3-hop relay address encoding", function()
+    T:atest("resolve_internal: copies paths only for relay addresses", function()
         reset()
         ag.conns = { [1] = { "socks4a://peer2.internal:1080" } }
         t_clock = 1000
@@ -871,12 +871,30 @@ return function(T)
         }, function()
             ag.maintenance()
         end)
-        -- path: self→peer2→peer3→peer4, firstHop=peer2, destHost=peer4-host
-        -- encoding: "peer4-host.peer3.relay.neosocksd.internal:80"
-        local addr, conn = ag._resolve_internal("peer4-host", "80")
-        assert(addr == "peer4-host.peer3.relay.neosocksd.internal:80",
-            "expected relay addr encoding, got: " .. tostring(addr))
-        assert(conn ~= nil, "must return a conn for the first hop")
+        local before = ag.stats(0)
+        local cases = {
+            { "PEER2-HOST.", "peer2-host.internal:80", 0 },
+            { "peer3-host", "peer3-host.relay.neosocksd.internal:80", 1 },
+            { "peer4-host", "peer4-host.peer3.relay.neosocksd.internal:80", 1 },
+        }
+        for _, case in ipairs(cases) do
+            for _ = 1, 2 do
+                local orig_new = list.new
+                local copies = 0
+                list.new = function(self, ...)
+                    copies = copies + 1
+                    return orig_new(self, ...)
+                end
+                local ok, addr, conn = pcall(ag._resolve_internal, case[1], "80")
+                list.new = orig_new
+                assert(ok, tostring(addr))
+                assert(addr == case[2], "unexpected address: " .. tostring(addr))
+                assert(conn == ag.conns[1], "must return the first-hop connection")
+                assert(copies == case[3], string.format(
+                    "%s must copy %d paths, got %d", case[1], case[3], copies))
+                assert(ag.stats(0) == before, "resolution must preserve route paths")
+            end
+        end
     end)
 
     -- ------------------------------------------------------------------ --

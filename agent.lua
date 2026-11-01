@@ -376,14 +376,14 @@ local function resolve_internal(host, port)
         agent.wake()
         return ERR_NOT_REACHABLE
     end
-    local t = list:new():append(route.path)
-    peername = t[#t]
+    peername = route.path[#route.path]
     local conn = route.conn
-    t[1], t[#t] = host, nil
     local addr
     if peername == hosts[host] then
         addr = string.format("%s%s:%s", host, agent.INTERNAL_DOMAIN, port)
     else
+        local t = list:new():append(route.path)
+        t[1], t[#t] = host, nil
         addr = string.format("%s%s:%s", t:concat("."), agent.RELAY_DOMAIN, port)
     end
     active = true

@@ -274,6 +274,26 @@ return function(T)
         assert(not m(neosocksd.parse_ipv4("172.16.0.1")))
     end)
 
+    T:test("inet.subnet integer tables preserve IPv4 boundaries without stringifying", function()
+        local saved = tostring
+        local calls = 0
+        local ok, err = pcall(function()
+            _G.tostring = function(value)
+                calls = calls + 1
+                return saved(value)
+            end
+            local all = inet.subnet({ "0.0.0.0/0" })
+            assert(all(0) and all(0xFFFFFFFF))
+            local mixed = inet.subnet({ "0.0.0.0/32", "128.0.0.0/1", "10.0.0.0/8" })
+            assert(mixed(0) and mixed(0xFFFFFFFF) and mixed(0x80000000))
+            assert(mixed(0x0AFFFFFF) and not mixed(1) and not mixed(0x7FFFFFFF))
+            assert(not inet.subnet({})(0))
+        end)
+        _G.tostring = saved
+        assert(ok, err)
+        assert(calls == 0, "IPv4 subnet tables converted integer keys to strings")
+    end)
+
     -- [[ inet6.subnet ]] --
 
     T:test("inet6.subnet single CIDR match and no-match (shift <= 64)", function()
@@ -1171,10 +1191,18 @@ return function(T)
         local env, forwarded, printed = {}, { n = 0 }, { n = 0 }
         local overrides = { auth_required = auth_required, loglevel = 4 }
         local config_error
+        local reads = { keyed = 0, snapshots = 0 }
         env._G = env
         env.neosocksd = setmetatable({
-            config = function()
+            config = function(...)
                 if config_error then error(config_error, 0) end
+                if select("#", ...) ~= 0 then
+                    reads.keyed = reads.keyed + 1
+                    local key = ...
+                    if overrides[key] ~= nil then return overrides[key] end
+                    return neosocksd.config(key)
+                end
+                reads.snapshots = reads.snapshots + 1
                 local cfg = {}
                 for k, v in pairs(neosocksd.config()) do cfg[k] = v end
                 for k, v in pairs(overrides) do cfg[k] = v end
@@ -1214,7 +1242,7 @@ return function(T)
             end
             overrides[key] = value
         end
-        return chunk("libruleset"), env, forwarded, setconfig, printed
+        return chunk("libruleset"), env, forwarded, setconfig, printed, reads
     end
 
     -- counters formats the per-instance request accounting for a message
@@ -1370,6 +1398,48 @@ return function(T)
                 forwarded.n))
         assert(env.num_requests == 4 and env.num_authorized == 2,
             string.format("expected 4 requests and 2 authorized: %s", counters(env)))
+    end)
+
+    T:test("config scalar view uses keyed reads and pairs uses a snapshot", function()
+        local _, env, _, setconfig, _, reads = newruleset(false)
+        local before = reads.snapshots
+        assert(env.config.auth_required == false)
+        setconfig("auth_required", true)
+        assert(env.config.auth_required == true)
+        assert(reads.keyed >= 2 and reads.snapshots == before)
+        local found = false
+        for key, value in pairs(env.config) do
+            if key == "auth_required" then found = value end
+        end
+        assert(found and reads.snapshots == before + 1)
+    end)
+
+    T:test("suppressed logs skip metadata and plain message construction", function()
+        local _, env, _, setconfig, printed = newruleset(false)
+        env.debug = { getinfo = function() error("metadata collected") end }
+        local value = setmetatable({}, {
+            __tostring = function() error("message constructed") end,
+        })
+        env.log(value)
+        env.logf("%d", value)
+        env.evlog("kept event")
+        env.evlogf("kept event %d", 2)
+        assert(printed.n == 0)
+        assert(env.recent_events:get(1).msg == "kept event 2")
+        assert(env.recent_events:get(2).msg == "kept event")
+        env.debug = debug
+        setconfig("loglevel", 6)
+        local line = debug.getinfo(1, "l").currentline + 1
+        env.log("visible message")
+        assert(printed.n == 1)
+        assert(printed[1]:find("test_libruleset.lua:" .. line .. " visible message", 1, true))
+        env.evlogf("visible event %d", 3)
+        assert(printed.n == 2 and env.recent_events:get(1).msg == "visible event 3")
+        env.evlog("visible plain event")
+        assert(printed.n == 3 and env.recent_events:get(1).msg == "visible plain event")
+        setconfig("loglevel", 4)
+        env.log("suppressed again")
+        assert(printed.n == 3)
     end)
 
     -- [[ configuration applied after the module loads ]] --

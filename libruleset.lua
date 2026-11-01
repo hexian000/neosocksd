@@ -15,7 +15,7 @@ local getconfig = neosocksd.config
 local config = setmetatable({}, {
     __name = "config",
     __index = function(_, key)
-        return getconfig()[key]
+        return getconfig(key)
     end,
     __newindex = function()
         error("config is a read-only view of neosocksd.config()", 2)
@@ -234,9 +234,6 @@ local function evlog_(now, msg)
 end
 
 local function log_(now, info, msg)
-    if config.loglevel < 6 then
-        return
-    end
     local timestamp = format_timestamp(now)
     local source    = info.source:match("^@.-([^/]+)$") or info.short_src
     local line      = info.currentline
@@ -244,6 +241,9 @@ local function log_(now, info, msg)
 end
 
 local function log(...)
+    if config.loglevel < 6 then
+        return
+    end
     local now  = os.time()
     local info = debug.getinfo(2, "Sl")
     local msg  = list:new({ ... }):map(tostring):concat("\t")
@@ -252,6 +252,9 @@ end
 _G.log = log
 
 local function logf(s, ...)
+    if config.loglevel < 6 then
+        return
+    end
     local now  = os.time()
     local info = debug.getinfo(2, "Sl")
     local msg  = strformat(s, ...)
@@ -261,19 +264,23 @@ _G.logf = logf
 
 local function evlog(...)
     local now  = os.time()
-    local info = debug.getinfo(2, "Sl")
     local msg  = list:new({ ... }):map(tostring):concat("\t")
     evlog_(now, msg)
-    return log_(now, info, msg)
+    if config.loglevel >= 6 then
+        local info = debug.getinfo(2, "Sl")
+        return log_(now, info, msg)
+    end
 end
 _G.evlog = evlog
 
 local function evlogf(s, ...)
     local now  = os.time()
-    local info = debug.getinfo(2, "Sl")
     local msg  = strformat(s, ...)
     evlog_(now, msg)
-    return log_(now, info, msg)
+    if config.loglevel >= 6 then
+        local info = debug.getinfo(2, "Sl")
+        return log_(now, info, msg)
+    end
 end
 _G.evlogf = evlogf
 
@@ -450,13 +457,13 @@ function inet.subnet(s)
         local subnet, shift = parse_cidr(v)
         local mask = ~((1 << (32 - shift)) - 1)
         local t = prefix[shift] or {}
-        t[tostring(subnet & mask)] = true
+        t[subnet & mask] = true
         prefix[shift] = t
     end
     return function(ip)
         for shift, t in pairs(prefix) do
             local mask = ~((1 << (32 - shift)) - 1)
-            if t[tostring(ip & mask)] then
+            if t[ip & mask] then
                 return true
             end
         end
