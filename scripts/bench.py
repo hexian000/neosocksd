@@ -11,7 +11,6 @@ import os
 import shlex
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -173,14 +172,15 @@ def wait_until_listening(
         port: int,
         processes: Sequence[Tuple[subprocess.Popen[str], str]],
         *,
+        ss: str,
         timeout_seconds: float,
 ) -> None:
-    """Block until *port* accepts a connection, failing fast if a service died.
+    """Wait for a TCP listener without creating an iperf3 control session.
 
-    A fixed sleep is not a readiness signal: on a loaded machine the first
-    scenario can start before the services are listening and fail with
-    connection-refused, and a service that exited immediately (a port conflict,
-    say) is otherwise only noticed indirectly, through the client's error.
+    Connecting and immediately closing is not a harmless readiness probe:
+    iperf3 accepts it as a control connection, and a proxy can still be
+    forwarding that incomplete session when the benchmark client starts.
+    Query listening sockets with ss, retaining process and deadline checks.
     """
     deadline = time.monotonic() + timeout_seconds
     while True:
@@ -190,17 +190,31 @@ def wait_until_listening(
                     "%s exited with status %d before the benchmark started"
                     % (name, proc.returncode)
                 )
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                return
-        except OSError:
-            pass
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise SystemExit(
                 "nothing is listening on port %d after %.1f s"
                 % (port, timeout_seconds)
             )
-        time.sleep(0.02)
+        try:
+            result = subprocess.run(
+                [ss, "-H", "-ltn", "sport = :%d" % port],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired:
+            raise SystemExit(
+                "socket readiness query timed out on port %d" % port)
+        except subprocess.CalledProcessError as exc:
+            raise SystemExit(
+                "socket readiness query failed with status %d: %s"
+                % (exc.returncode, exc.stderr.strip())
+            )
+        if result.stdout.strip():
+            return
+        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
 
 
 def terminate_process(
@@ -776,6 +790,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ensure_project_root(ROOT)
     maybe_reexec_in_netns(args.netem_delay)
     iperf3 = ensure_tool(args.iperf3)
+    ss = ensure_tool("ss")
     build_dir = resolve_path(ROOT, args.build_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
     binary_path = build_dir / "bin" / "neosocksd"
@@ -839,9 +854,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             (proxy_proc, "neosocksd"),
         ]
         wait_until_listening(
-            SERVER_PORT, services, timeout_seconds=startup_wait)
+            SERVER_PORT, services, ss=ss, timeout_seconds=startup_wait)
         wait_until_listening(
-            PROXY_PORT, services, timeout_seconds=startup_wait)
+            PROXY_PORT, services, ss=ss, timeout_seconds=startup_wait)
 
         for scenario in SCENARIOS:
             commands = build_scenario_commands(
