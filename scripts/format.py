@@ -449,8 +449,12 @@ def _extract_include_dirs(tokens, directory):
                 dirs.append((flags[tok], _norm(os.path.join(directory,
                                                             tokens[i + 1]))))
                 i += 1
-        elif tok.startswith("-I") and len(tok) > 2:
-            dirs.append(("I", _norm(os.path.join(directory, tok[2:]))))
+        else:
+            for flag, kind in flags.items():
+                if tok.startswith(flag):
+                    dirs.append((kind, _norm(os.path.join(
+                        directory, tok[len(flag):]))))
+                    break
         i += 1
     return dirs
 
@@ -744,8 +748,10 @@ def _reorder_includes(lines, includer_abs, cfg):
     masked = _block_comment_mask(lines)
     # Keep every physical part of a spliced logical line in place. Sorting its
     # first include separately could detach a continued comment or directive.
+    # Keep a multiline comment's opening line with its masked continuation.
     masked = [hidden or bool(_LINE_SPLICE_RE.search(line))
-              for line, hidden in zip(lines, masked)]
+              or (i + 1 < len(masked) and masked[i + 1])
+              for i, (line, hidden) in enumerate(zip(lines, masked))]
     start, end = _find_include_range(lines, masked)
     if start is None:
         return lines
@@ -855,7 +861,8 @@ def _has_trailing_comment(stripped):
 
 
 def _append_annotation(line, cond):
-    if not cond:
+    # Appending after a splice would separate its backslash from the newline.
+    if not cond or _LINE_SPLICE_RE.search(line):
         return line
     newline = ""
     body = line

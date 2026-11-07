@@ -675,27 +675,71 @@ _STATIC_PROVIDERS: tuple[_Provider, ...] = (
         prefixes=None,
         note="declared in <sys/syslog.h>, which <syslog.h> wraps",
     ),
-    # ICU rewrites every C symbol through <unicode/urename.h> — u_tolower
-    # becomes u_tolower_77 — so the decl clang sees never sits in the documented
-    # <unicode/uchar.h>, <unicode/unorm2.h>, ... that callers must include. Any
-    # <unicode/*.h> include proves the file is an ICU translation unit; the
-    # prefixes are ICU's own C-module naming (u_* core, plus the modules this
-    # tree uses), and the types are listed exactly because a bare "U" prefix
-    # would swallow unrelated names such as UINT8_C. Extending either as more
-    # ICU modules come into use is the fail-safe direction: an unlisted symbol
-    # keeps its finding rather than losing it. unused_basename is None because
-    # an ICU header that really is redundant (a leftover <unicode/utypes.h>) is
-    # a genuine cleanup worth reporting.
+    # ICU renames C symbols through <unicode/urename.h>. Credit only the
+    # documented API header for each family; they are not interchangeable
+    # umbrellas. In particular, u_* spans several APIs and needs exact names.
+    # Unlisted symbols keep their findings. unused_basename stays None because
+    # a redundant ICU include can still be a genuine cleanup.
     _Provider(
-        name="<unicode/*.h>",
-        include=_include_re(r"unicode/\w+\.h"),
+        name="<unicode/umachine.h>",
+        include=_include_re(r"unicode/umachine\.h"),
+        unused_basename=None,
+        symbols=frozenset({"UChar", "UChar32", "UBool"}),
+        prefixes=None,
+        note="ICU fundamental character types",
+    ),
+    _Provider(
+        name="<unicode/utypes.h>",
+        include=_include_re(r"unicode/utypes\.h"),
+        unused_basename=None,
+        symbols=frozenset({"UErrorCode", "u_errorName"}),
+        prefixes=None,
+        note="ICU error API",
+    ),
+    _Provider(
+        name="<unicode/uversion.h>",
+        include=_include_re(r"unicode/uversion\.h"),
         unused_basename=None,
         symbols=frozenset({
-            "UChar", "UChar32", "UBool", "UErrorCode", "UNormalizer2",
-            "UDateFormat", "UDateFormatStyle", "UCharCategory", "UProperty",
-            "UVersionInfo",
+            "UVersionInfo", "u_getVersion", "u_versionFromString",
+            "u_versionFromUString", "u_versionToString",
         }),
-        prefixes=("u_", "unorm2_", "udat_"),
+        prefixes=None,
+        note="ICU version API",
+    ),
+    _Provider(
+        name="<unicode/uchar.h>",
+        include=_include_re(r"unicode/uchar\.h"),
+        unused_basename=None,
+        symbols=frozenset({
+            "UCharCategory", "UProperty", "u_charType", "u_hasBinaryProperty",
+            "u_getIntPropertyValue", "u_tolower", "u_toupper",
+        }),
+        prefixes=None,
+        note="ICU character properties API",
+    ),
+    _Provider(
+        name="<unicode/ustring.h>",
+        include=_include_re(r"unicode/ustring\.h"),
+        unused_basename=None,
+        symbols=frozenset({"u_strFromUTF8", "u_strFromUTF8WithSub"}),
+        prefixes=None,
+        note="ICU string conversion API",
+    ),
+    _Provider(
+        name="<unicode/unorm2.h>",
+        include=_include_re(r"unicode/unorm2\.h"),
+        unused_basename=None,
+        symbols=frozenset({"UNormalizer2"}),
+        prefixes=("unorm2_",),
+        note="ICU normalization API",
+    ),
+    _Provider(
+        name="<unicode/udat.h>",
+        include=_include_re(r"unicode/udat\.h"),
+        unused_basename=None,
+        symbols=frozenset({"UDateFormat", "UDateFormatStyle"}),
+        prefixes=("udat_",),
         note="ICU symbol renamed through <unicode/urename.h>",
     ),
     # libsodium exposes its whole API — crypto_*, sodium_*, randombytes_* — only

@@ -64,7 +64,8 @@ CACHE_LINE_RE = re.compile(r"^([^\s:=]+):([^=]+)=(.*)$")
 _MAP_GATE = "Linker script and memory map"
 # An input section is indented one space and carries an origin object; ld wraps
 # the origin onto the next line when the section name is too long, so also match
-# a bare indented name followed by a continuation line.
+# a bare indented name followed by a continuation line. The origin occupies
+# the rest of the line and can contain spaces in object or archive paths.
 _IN_SEC_RE = re.compile(
     r"^ (\.\S+)\s+0x[0-9a-fA-F]+\s+0x([0-9a-fA-F]+)\s+(\S.*)$")
 _IN_NAME_RE = re.compile(r"^ (\.\S+)\s*$")
@@ -284,7 +285,7 @@ def build_object_index(db: list[dict]) -> ObjectIndex:
 
 
 def attribute_module(origin: str, index: ObjectIndex, link_dir: Path) -> str:
-    """Map a map-file *origin* token to a source file or a library label.
+    """Map a map-file *origin* field to a source file or a library label.
 
     In-tree objects resolve to their repo-relative source; a linked archive
     with no source mapping (e.g. a prebuilt ``liblua.a``) is labeled by the
@@ -405,6 +406,9 @@ def configure(
         log(f"Removing existing build directory {_display_path(build_dir)} ...")
         shutil.rmtree(build_dir)
     build_dir.mkdir(parents=True)
+    # Quote the path inside the flag: CMake strips surrounding single
+    # quotes from cache values before the generated link command parses them.
+    map_flag = f"-Wl,-Map={shlex.quote(str(map_path))}"
     command = [
         cmake,
         "-S", str(ROOT),
@@ -418,7 +422,7 @@ def configure(
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         "-DENABLE_SANITIZERS=OFF",
         "-DENABLE_TSAN=OFF",
-        f"-DCMAKE_EXE_LINKER_FLAGS=-Wl,-Map={map_path}",
+        f"-DCMAKE_EXE_LINKER_FLAGS={map_flag}",
     ]
     if lto == "on":
         command.append("-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON")
@@ -507,14 +511,14 @@ def parse_map(map_path: Path) -> list[InputSection]:
             m = _IN_CONT_RE.match(raw)
             if m is not None:
                 sections.append(InputSection(
-                    pending, int(m.group(1), 16), m.group(2).split()[0]))
+                    pending, int(m.group(1), 16), m.group(2)))
             pending = None
             if m is not None:
                 continue
         m = _IN_SEC_RE.match(raw)
         if m is not None:
             sections.append(InputSection(
-                m.group(1), int(m.group(2), 16), m.group(3).split()[0]))
+                m.group(1), int(m.group(2), 16), m.group(3)))
             continue
         m = _IN_NAME_RE.match(raw)
         if m is not None:
