@@ -164,7 +164,8 @@ See [API.md](API.md#restful-api) for every endpoint.
 ### Deployment Notes
 
 A single instance is the normal deployment: one core with `--pipe` relays more
-than most links carry. The notes below cover two specific situations.
+than most links carry. The notes below cover scaling and resource-constrained
+deployments.
 
 - **Scaling out.** The accept loop, both handshakes, the ruleset and outbound
   dialing run on one thread; only relayed payload is offloaded. In a build with
@@ -175,8 +176,8 @@ than most links carry. The notes below cover two specific situations.
   Instances share nothing — each has its own Lua state, limits and counters,
   and `--api` reaches whichever one the kernel picks — so give each its own
   `--api` address and update or scrape them individually.
-- **Low-power hosts.** An idle neosocksd performs no periodic work: an
-  established relay carries no timer, and with no ruleset tick armed the event
+- **Power-Constrained Deployment.** An idle neosocksd performs no periodic work:
+  an established relay carries no timer, and with no ruleset tick armed the event
   loop blocks indefinitely. What still wakes it is configured by you: a
   `neosocksd.setinterval(n)` tick (every shipped example ruleset arms one at
   60 s; leave it out if your ruleset has no periodic work), `agent.lua`'s peer
@@ -184,7 +185,14 @@ than most links carry. The notes below cover two specific situations.
   `tcp_keepintvl` and `tcp_keepcnt` in the boot config, or set
   `tcp_keepalive = false`). The default single-threaded build is the right one
   here; at runtime, omit `--api` unless you use it and pass `-4` where IPv6 is
-  not needed so each name costs one DNS round trip instead of two.
+  not needed to avoid IPv6 DNS lookups.
+- **Memory-Constrained Deployment.** Keep a single instance and the default
+  single-threaded build. Set `max_sessions` in the boot config to bound concurrent
+  sessions (`0` means unlimited), choosing a limit that fits the host's memory
+  budget under representative traffic. If you use Lua rulesets, set `memlimit`
+  in MiB to trigger full garbage collection when Lua object memory reaches that
+  soft limit; it does not cap total process memory or kernel socket buffers.
+  If you do not need scripting, build with `-DENABLE_RULESET=OFF`.
 
 
 ## Distributed Virtual Network
